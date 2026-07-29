@@ -20,9 +20,9 @@
 | Module constitution | valid | seven v1.0 contracts created and validator exit 0 | validator command plus `docs/modules/*/MODULE_CONSTITUTION.md` | documented-only until project check invokes it |
 | Tickets | valid | TASK-001 through TASK-007; one ready | `docs/tickets/*.md` | documented-only |
 | Branch/worktree plan | valid | governance baseline committed to `main`; feature branch checked out; disposable test worktrees planned | `d856cf7`, `feature/phase1-controlled-swarm` | machine-enforced by local Git state |
-| TDD implementation | partial | TASK-001 has four observed RED/GREEN cycles; later tickets pending | `docs/tickets/TASK-001-task-domain.md` | machine-enforced by focused tests |
-| Focused verification | valid | TASK-001 domain tests 6 passed | `node --test test/task-domain.test.js` exit 0 | machine-enforced |
-| Full verification | partial | all currently implemented tests 6 passed; later tickets pending | `npm test` exit 0 | machine-enforced for current tree only |
+| TDD implementation | partial | TASK-001 and TASK-002 complete with observed RED/GREEN evidence; later tickets pending | completed ticket evidence | machine-enforced by focused tests |
+| Focused verification | valid | domain 6 passed; ledger 5 passed | focused Node test commands | machine-enforced |
+| Full verification | partial | all currently implemented tests 11 passed; later tickets pending | `npm test` exit 0 | machine-enforced for current tree only |
 | Code review | missing | implementation not started | planned independent review | unverified |
 | Architecture review | partial | pre-implementation boundary review completed; exact diff review pending | ADRs and module constitutions | documented-only |
 | Integration verification | missing | no Git branches yet | planned after review | unverified |
@@ -46,6 +46,11 @@ Allowed status values: `valid`, `stale`, `partial`, `missing`, `blocked`,
 | TASK-001 focused tests | 0 | 6 passed | later tickets pending |
 | current project check | 0 | `check=ok files=41 constitutions=7` | CI not run remotely |
 | current full tests | 0 | 6 passed | later tickets pending |
+| TASK-002 first RED | 1 | missing Task Ledger module | resolved by implementation |
+| TASK-002 replay RED | 1 | missing `readTaskPacket` | resolved by implementation |
+| TASK-002 focused tests | 0 | 5 passed | later tickets pending |
+| current project check after TASK-002 | 0 | `check=ok files=46 constitutions=7` | CI not run remotely |
+| current full tests after TASK-002 | 0 | 11 passed | later tickets pending |
 
 ## Review And Integration
 

@@ -3,7 +3,7 @@ ticket_id: TASK-002
 spec_id: SPEC-001
 module_id: task-ledger
 constitution_version: 1.0
-status: ready
+status: complete
 parallel_safe: false
 depends_on:
   - TASK-001
@@ -13,6 +13,7 @@ allowed_paths:
   - test/task-ledger.test.js
   - PLANS.md
   - docs/tickets/TASK-002-task-ledger.md
+  - docs/tickets/TASK-003-policy-engine.md
   - docs/workflow/WORKFLOW_LEDGER.md
 likely_files:
   - src/ledger/task-ledger.js
@@ -29,9 +30,9 @@ storing secrets.
 
 ## Acceptance Criteria
 
-- [ ] SPEC-001 AC-07.
-- [ ] Sequence conflict and changed duplicate command fail closed.
-- [ ] Restart replay produces the same Task Packet projection.
+- [x] SPEC-001 AC-07.
+- [x] Sequence conflict and changed duplicate command fail closed.
+- [x] Restart replay produces the same Task Packet projection.
 
 ## Non-Goals
 
@@ -67,3 +68,20 @@ updates shared public exports and becomes Orchestrator state authority.
 ## Human Gate
 
 none
+
+## TDD Evidence
+
+| Behavior | RED evidence | GREEN evidence |
+|---|---|---|
+| First durable hash-chained event | focused test exit 1, missing `task-ledger.js` | focused test exit 0 |
+| Sequence/idempotency | passed on first focused run because the first safe append already serialized and fingerprinted commands | focused test exit 0; no fabricated RED |
+| Restart Task Packet replay | focused test exit 1, missing `readTaskPacket` | focused test exit 0 |
+| Tamper/tail detection | passed on first focused run as regression coverage of event/head verification | focused test exit 0; no fabricated RED |
+| Secret redaction | passed on first focused run as regression coverage of the append sanitizer | focused test exit 0; no fabricated RED |
+
+Final ticket evidence:
+
+- `node --test test/task-ledger.test.js`: 5 passed, exit 0.
+- `npm test`: 11 passed, exit 0.
+- `npm run check`: `check=ok files=46 constitutions=7`, exit 0.
+- `git diff --check`: exit 0.

@@ -3,7 +3,7 @@ ticket_id: TASK-003
 spec_id: SPEC-001
 module_id: policy-engine
 constitution_version: 1.0
-status: blocked
+status: ready
 parallel_safe: false
 depends_on:
   - TASK-001
@@ -69,4 +69,3 @@ Workspace public contracts depend on its reason/permission model.
 ## Human Gate
 
 Live owner/channel authentication is deferred to Phase 3; no Phase 1 blocker.
-
