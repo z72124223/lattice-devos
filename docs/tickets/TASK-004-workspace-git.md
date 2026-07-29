@@ -3,7 +3,7 @@ ticket_id: TASK-004
 spec_id: SPEC-001
 module_id: workspace-git
 constitution_version: 1.0
-status: blocked
+status: ready
 parallel_safe: false
 depends_on:
   - TASK-001
@@ -74,4 +74,3 @@ parallel-safe because its lease contract is consumed by orchestration.
 ## Human Gate
 
 none
-

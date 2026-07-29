@@ -3,7 +3,7 @@ ticket_id: TASK-003
 spec_id: SPEC-001
 module_id: policy-engine
 constitution_version: 1.0
-status: ready
+status: complete
 parallel_safe: false
 depends_on:
   - TASK-001
@@ -13,6 +13,7 @@ allowed_paths:
   - test/policy-engine.test.js
   - PLANS.md
   - docs/tickets/TASK-003-policy-engine.md
+  - docs/tickets/TASK-004-workspace-git.md
   - docs/workflow/WORKFLOW_LEDGER.md
 likely_files:
   - src/policy/roles.js
@@ -29,11 +30,11 @@ execution/merge approval validation for the Phase 1 envelope.
 
 ## Acceptance Criteria
 
-- [ ] SPEC-001 AC-03.
-- [ ] SPEC-001 AC-04.
-- [ ] Unknown inputs and every protected Phase 1 action deny with stable
+- [x] SPEC-001 AC-03.
+- [x] SPEC-001 AC-04.
+- [x] Unknown inputs and every protected Phase 1 action deny with stable
   reasons.
-- [ ] More than four active workers and any non-Implementer code write deny.
+- [x] More than four active workers and any non-Implementer code write deny.
 
 ## Non-Goals
 
@@ -69,3 +70,20 @@ Workspace public contracts depend on its reason/permission model.
 ## Human Gate
 
 Live owner/channel authentication is deferred to Phase 3; no Phase 1 blocker.
+
+## TDD Evidence
+
+| Behavior | RED evidence | GREEN evidence |
+|---|---|---|
+| Role/action/default-deny matrix | focused test exit 1, missing Policy Engine module | focused test exit 0 |
+| Protected actions | passed on first focused run using the initial fail-closed ordering | complete all-role table passed; no fabricated RED |
+| Execution approval | focused test exit 1, missing `verifyExecutionApproval` | focused test exit 0 |
+| Merge approval | focused test exit 1, missing `verifyMergeApproval` | focused test exit 0 |
+| Worker limit | focused test exit 1, missing `admitWorkers` | focused test exit 0 |
+| Full matrix and stale lease | passed as regression coverage of documented matrix/fencing checks | focused test exit 0 |
+
+Final ticket evidence:
+
+- `node --test test/policy-engine.test.js`: 7 passed, exit 0.
+- Exact role/non-protected-action matrix traversed.
+- Every protected action tested against every role.
