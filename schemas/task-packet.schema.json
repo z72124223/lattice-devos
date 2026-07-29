@@ -1,0 +1,512 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lattice.local/schemas/task-packet-1.0.json",
+  "title": "LATTICE Task Packet 1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "project_id",
+    "risk_class",
+    "status",
+    "spec",
+    "record",
+    "approvals",
+    "evidence"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "task_id": {
+      "$ref": "#/$defs/taskId"
+    },
+    "project_id": {
+      "$ref": "#/$defs/projectId"
+    },
+    "risk_class": {
+      "$ref": "#/$defs/riskClass"
+    },
+    "status": {
+      "$ref": "#/$defs/taskState"
+    },
+    "spec": {
+      "$ref": "#/$defs/taskSpec"
+    },
+    "record": {
+      "$ref": "#/$defs/taskRecord"
+    },
+    "approvals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/approvalRecord"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/evidenceRecord"
+      }
+    }
+  },
+  "$defs": {
+    "taskId": {
+      "type": "string",
+      "pattern": "^TASK-[A-Z0-9][A-Z0-9_-]{2,63}$"
+    },
+    "projectId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+    },
+    "riskClass": {
+      "enum": [
+        "R0",
+        "R1",
+        "R2",
+        "R3"
+      ]
+    },
+    "taskState": {
+      "enum": [
+        "DRAFT",
+        "AWAITING_EXECUTION_APPROVAL",
+        "PREPARING",
+        "EXECUTING",
+        "VERIFYING",
+        "REVIEWING",
+        "AWAITING_MERGE_APPROVAL",
+        "MERGING",
+        "COMPLETED",
+        "REJECTED",
+        "BLOCKED",
+        "FAILED",
+        "STOPPING",
+        "CANCELLED"
+      ]
+    },
+    "scopePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+    },
+    "taskSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "task_id",
+        "revision",
+        "created_at",
+        "created_by",
+        "project_id",
+        "base_ref",
+        "base_commit_sha",
+        "goal",
+        "non_goals",
+        "risk_class",
+        "depends_on",
+        "scope",
+        "acceptance_criteria",
+        "verification_commands",
+        "required_checks",
+        "requested_capabilities",
+        "budget",
+        "runtime_profile",
+        "network_policy",
+        "deployment_policy",
+        "execution_approval_required",
+        "merge_approval_required",
+        "spec_hash"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "1.0"
+        },
+        "task_id": {
+          "$ref": "#/$defs/taskId"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "created_by": {
+          "type": "string",
+          "minLength": 1
+        },
+        "project_id": {
+          "$ref": "#/$defs/projectId"
+        },
+        "base_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "base_commit_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40,64}$"
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1
+        },
+        "non_goals": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "risk_class": {
+          "$ref": "#/$defs/riskClass"
+        },
+        "depends_on": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/taskId"
+          }
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "allowed_paths",
+            "forbidden_paths",
+            "allowed_operations"
+          ],
+          "properties": {
+            "allowed_paths": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/scopePath"
+              }
+            },
+            "forbidden_paths": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "contains": {
+                "const": ".git/**"
+              },
+              "items": {
+                "$ref": "#/$defs/scopePath"
+              }
+            },
+            "allowed_operations": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "create",
+                  "modify",
+                  "delete",
+                  "rename",
+                  "typechange"
+                ]
+              }
+            }
+          }
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "description",
+              "evidence_type",
+              "expected_result"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence_type": {
+                "enum": [
+                  "test",
+                  "command",
+                  "artifact",
+                  "manual"
+                ]
+              },
+              "expected_result": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "verification_commands": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required_checks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "build",
+              "test",
+              "scope",
+              "security",
+              "architecture",
+              "lint",
+              "typecheck"
+            ]
+          }
+        },
+        "requested_capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "READ_REPOSITORY",
+              "MAP_CODE",
+              "PLAN_TASK",
+              "WRITE_PRODUCT_CODE",
+              "RUN_TESTS",
+              "GIT_WORKTREE",
+              "GIT_INTEGRATE",
+              "READ_REVIEW",
+              "STOP_RUNTIME"
+            ]
+          }
+        },
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_agents",
+            "max_duration_seconds",
+            "max_attempts",
+            "max_model_calls",
+            "max_external_cost"
+          ],
+          "properties": {
+            "max_agents": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4
+            },
+            "max_duration_seconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_attempts": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_model_calls": {
+              "const": 0
+            },
+            "max_external_cost": {
+              "const": 0
+            }
+          }
+        },
+        "runtime_profile": {
+          "const": "fake"
+        },
+        "network_policy": {
+          "const": "deny"
+        },
+        "deployment_policy": {
+          "const": "deny"
+        },
+        "execution_approval_required": {
+          "const": true
+        },
+        "merge_approval_required": {
+          "const": true
+        },
+        "spec_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "taskRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "current_revision",
+        "attempt_id",
+        "active_lease_id",
+        "worktree_id",
+        "result_artifact_hash",
+        "last_error"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "attempt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "active_lease_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worktree_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result_artifact_hash": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          ]
+        },
+        "last_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "approvalRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approval_id",
+        "kind",
+        "task_id",
+        "task_revision",
+        "subject_hash",
+        "approver_id",
+        "authority",
+        "issued_at",
+        "expires_at",
+        "nonce",
+        "channel"
+      ],
+      "properties": {
+        "approval_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "execution",
+            "merge"
+          ]
+        },
+        "task_id": {
+          "$ref": "#/$defs/taskId"
+        },
+        "task_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "subject_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "approver_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "authority": {
+          "const": "HUMAN_OWNER"
+        },
+        "issued_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "nonce": {
+          "type": "string",
+          "minLength": 1
+        },
+        "channel": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "evidenceRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence_id",
+        "type",
+        "subject_hash",
+        "outcome",
+        "recorded_at"
+      ],
+      "properties": {
+        "evidence_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "subject_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "outcome": {
+          "enum": [
+            "allow",
+            "deny",
+            "pass",
+            "fail",
+            "blocked",
+            "cancelled"
+          ]
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

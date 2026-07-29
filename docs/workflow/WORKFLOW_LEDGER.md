@@ -6,9 +6,9 @@
   security-sensitive local control system
 - Repository:
   `C:\Users\f7212\Documents\Codex\2026-07-29\files-mentioned-by-the-user-2026\outputs\lattice-devos`
-- Base branch: `main` (planned; repository not initialized at ledger creation)
-- Target branch: `feature/phase1-controlled-swarm` (planned)
-- Current branch: none at ledger creation
+- Base branch: `main` at `d856cf7`
+- Target branch: `feature/phase1-controlled-swarm`
+- Current branch: `feature/phase1-controlled-swarm`
 
 ## Stage Status
 
@@ -19,10 +19,10 @@
 | Specification | valid | observable AC-01 through AC-12 | `docs/specs/SPEC-001-controlled-swarm-core.md` | documented-only |
 | Module constitution | valid | seven v1.0 contracts created and validator exit 0 | validator command plus `docs/modules/*/MODULE_CONSTITUTION.md` | documented-only until project check invokes it |
 | Tickets | valid | TASK-001 through TASK-007; one ready | `docs/tickets/*.md` | documented-only |
-| Branch/worktree plan | valid | sequential feature branch; disposable test worktrees | `docs/plans/BRANCH_WORKTREE_PLAN.md` | documented-only |
-| TDD implementation | missing | no product code yet | TASK-001 current | unverified |
-| Focused verification | missing | no product code yet | ticket commands | unverified |
-| Full verification | missing | no product code yet | planned `npm run verify` | unverified |
+| Branch/worktree plan | valid | governance baseline committed to `main`; feature branch checked out; disposable test worktrees planned | `d856cf7`, `feature/phase1-controlled-swarm` | machine-enforced by local Git state |
+| TDD implementation | partial | TASK-001 has four observed RED/GREEN cycles; later tickets pending | `docs/tickets/TASK-001-task-domain.md` | machine-enforced by focused tests |
+| Focused verification | valid | TASK-001 domain tests 6 passed | `node --test test/task-domain.test.js` exit 0 | machine-enforced |
+| Full verification | partial | all currently implemented tests 6 passed; later tickets pending | `npm test` exit 0 | machine-enforced for current tree only |
 | Code review | missing | implementation not started | planned independent review | unverified |
 | Architecture review | partial | pre-implementation boundary review completed; exact diff review pending | ADRs and module constitutions | documented-only |
 | Integration verification | missing | no Git branches yet | planned after review | unverified |
@@ -39,6 +39,13 @@ Allowed status values: `valid`, `stale`, `partial`, `missing`, `blocked`,
 | exact artifact search | complete | referenced blueprint/repository not found | later recovered blueprint requires comparison |
 | official OpenClaw docs review | complete | current native plugin contract confirmed | target host/runtime not installed |
 | module constitution validator | 0 | seven constitutions valid; zero warnings | must be wired into `npm run check` |
+| TASK-001 first RED | 1 | missing Task Domain module | resolved by implementation |
+| TASK-001 DAG RED | 1 | missing DAG export | resolved by implementation |
+| TASK-001 state RED | 1 | missing state exports | resolved by implementation |
+| TASK-001 packet RED | 1 | missing packet export | resolved by implementation |
+| TASK-001 focused tests | 0 | 6 passed | later tickets pending |
+| current project check | 0 | `check=ok files=41 constitutions=7` | CI not run remotely |
+| current full tests | 0 | 6 passed | later tickets pending |
 
 ## Review And Integration
 

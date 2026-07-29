@@ -131,12 +131,13 @@ Neither open question changes the explicit offline Phase 1 safety boundary.
   references, and audit the starting workspace.
 - [x] Step 2: Create the workflow ledger, behavior specification,
   ADRs, module constitutions, and dependency-aware tickets.
-- [ ] **CURRENT — Step 3:** Initialize Git and establish the documented
+- [x] Step 3: Initialize Git and establish the documented
   feature-branch plan.
-- [ ] Step 4: Implement Task Packet and deterministic state transitions using
+- [x] Step 4: Implement Task Packet and deterministic state
+  transitions using ticket-scoped RED/GREEN cycles.
+- [ ] **CURRENT — Step 5:** Implement the remaining core tickets:
+  Task Ledger, permissions/approvals, project lock/Git, and Scope Check using
   ticket-scoped RED/GREEN cycles.
-- [ ] Step 5: Implement permissions, approvals, scope checks, and the exclusive
-  project lock using ticket-scoped RED/GREEN cycles.
 - [ ] Step 6: Implement the Git worktree adapter and validate it against a
   disposable repository.
 - [ ] Step 7: Implement the hash-chained audit log and deterministic

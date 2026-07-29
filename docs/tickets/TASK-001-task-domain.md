@@ -3,7 +3,7 @@ ticket_id: TASK-001
 spec_id: SPEC-001
 module_id: task-domain
 constitution_version: 1.0
-status: ready
+status: complete
 parallel_safe: false
 depends_on: []
 allowed_paths:
@@ -20,6 +20,7 @@ allowed_paths:
   - test/task-domain.test.js
   - PLANS.md
   - docs/tickets/TASK-001-task-domain.md
+  - docs/tickets/TASK-002-task-ledger.md
   - docs/workflow/WORKFLOW_LEDGER.md
 likely_files:
   - src/domain/task-spec.js
@@ -37,11 +38,11 @@ cycles, hashes immutable approval subjects, and enforces the transition graph.
 
 ## Acceptance Criteria
 
-- [ ] SPEC-001 AC-01.
-- [ ] SPEC-001 AC-02.
-- [ ] Same normalized spec yields the same hash; any approval-relevant change
+- [x] SPEC-001 AC-01.
+- [x] SPEC-001 AC-02.
+- [x] Same normalized spec yields the same hash; any approval-relevant change
   changes it.
-- [ ] Unsafe Phase 1 budgets, runtime/network/deployment settings, paths, and
+- [x] Unsafe Phase 1 budgets, runtime/network/deployment settings, paths, and
   dependency cycles fail with stable reason codes.
 
 ## Non-Goals
@@ -78,3 +79,18 @@ test/check scripts, and contracts used by every later ticket.
 
 none
 
+## TDD Evidence
+
+| Behavior | RED evidence | GREEN evidence |
+|---|---|---|
+| Safe/unsafe Phase 1 Task Spec | `node --test test/task-domain.test.js`, exit 1, missing `task-spec.js` | focused test exit 0 |
+| Dependency DAG | focused test exit 1, missing `assertAcyclicTaskGraph` export | focused test exit 0 |
+| Complete transition graph | focused test exit 1, missing state exports | focused test exit 0 |
+| Task Packet and schema | focused test exit 1, missing `createTaskPacket` export | focused test exit 0 |
+| Hash regression | test passed on first run because the first Task Spec cycle already required the hash | focused test exit 0; no fabricated RED |
+
+Final ticket evidence:
+
+- `node --test test/task-domain.test.js`: 6 passed, exit 0.
+- `npm run check`: `check=ok`, exit 0.
+- `npm test`: 6 passed, exit 0.

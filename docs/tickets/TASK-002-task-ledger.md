@@ -3,7 +3,7 @@ ticket_id: TASK-002
 spec_id: SPEC-001
 module_id: task-ledger
 constitution_version: 1.0
-status: blocked
+status: ready
 parallel_safe: false
 depends_on:
   - TASK-001
@@ -67,4 +67,3 @@ updates shared public exports and becomes Orchestrator state authority.
 ## Human Gate
 
 none
-
