@@ -3,7 +3,7 @@ ticket_id: TASK-005
 spec_id: SPEC-001
 module_id: scope-check
 constitution_version: 1.0
-status: blocked
+status: ready
 parallel_safe: false
 depends_on:
   - TASK-001
@@ -66,4 +66,3 @@ parallel-safe because Orchestrator verification depends on the report format.
 ## Human Gate
 
 Real Runtime sandbox/containment remains Phase 3; no Phase 1 blocker.
-

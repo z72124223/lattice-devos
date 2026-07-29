@@ -19,3 +19,11 @@ export {
   PolicyEngine,
 } from "./policy/policy-engine.js";
 export { createMergeApprovalSubject } from "./policy/approval.js";
+export {
+  ProjectLock,
+  WorkspaceError,
+} from "./workspace/project-lock.js";
+export {
+  GitWorkspace,
+  defaultGitExecutor,
+} from "./workspace/git-workspace.js";

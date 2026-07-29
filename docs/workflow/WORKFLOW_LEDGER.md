@@ -20,12 +20,12 @@
 | Module constitution | valid | seven v1.0 contracts created and validator exit 0 | validator command plus `docs/modules/*/MODULE_CONSTITUTION.md` | documented-only until project check invokes it |
 | Tickets | valid | TASK-001 through TASK-007; one ready | `docs/tickets/*.md` | documented-only |
 | Branch/worktree plan | valid | governance baseline committed to `main`; feature branch checked out; disposable test worktrees planned | `d856cf7`, `feature/phase1-controlled-swarm` | machine-enforced by local Git state |
-| TDD implementation | partial | TASK-001 through TASK-003 complete with observed RED/GREEN evidence; later tickets pending | completed ticket evidence | machine-enforced by focused tests |
-| Focused verification | valid | domain 6; ledger 5; policy 7 passed | focused Node test commands | machine-enforced |
-| Full verification | partial | all currently implemented tests 18 passed; later tickets pending | `npm run verify` exit 0 | machine-enforced for current tree only |
-| Code review | missing | implementation not started | planned independent review | unverified |
+| TDD implementation | partial | TASK-001 through TASK-004 complete with observed RED/GREEN evidence; later tickets pending | completed ticket evidence | machine-enforced by focused tests |
+| Focused verification | valid | domain 6; ledger 5; policy 7; lock 9; disposable Git 11 passed | focused Node test commands | machine-enforced |
+| Full verification | partial | all currently implemented tests 38 passed; later tickets pending | `npm.cmd run verify` exit 0 | machine-enforced for current tree only |
+| Code review | partial | independent TASK-004 probes found actionable gaps that were reproduced and repaired; full feature review pending | read-only review plus regression tests | documented-only plus machine-tested fixes |
 | Architecture review | partial | pre-implementation boundary review completed; exact diff review pending | ADRs and module constitutions | documented-only |
-| Integration verification | missing | no Git branches yet | planned after review | unverified |
+| Integration verification | partial | disposable clean/conflict/cleanup verification passed; feature-to-main integration remains unauthorized | Git integration tests | machine-enforced locally |
 | CI and merge authorization | blocked | no remote/branch protection; no merge approval | no external service action | missing |
 
 Allowed status values: `valid`, `stale`, `partial`, `missing`, `blocked`,
@@ -58,21 +58,34 @@ Allowed status values: `valid`, `stale`, `partial`, `missing`, `blocked`,
 | TASK-003 focused tests | 0 | 7 passed including full role/action matrix | later tickets pending |
 | current project check after TASK-003 | 0 | `check=ok files=50 constitutions=7` | CI not run remotely |
 | current full tests after TASK-003 | 0 | 18 passed | later tickets pending |
+| TASK-004 lock/Git initial REDs | 1 | missing modules and integration API | resolved by implementation |
+| TASK-004 evidence/ownership REDs | 1 | absent stage state; forged marker and junction escape reproduced | resolved by canonical ownership checks |
+| TASK-004 fail-before-side-effect REDs | 1 | junction roots created external directories before denial | resolved by ancestor-first validation |
+| TASK-004 lock-integrity REDs | 1 | malformed record, invalid clock, lost counter, and race reason reproduced | resolved by complete validation and serialized fencing initialization |
+| TASK-004 Git-safety REDs | 1 | hook execution, external driver acceptance, and failed cleanup reproduced | resolved by hook/driver gates and owned cleanup |
+| TASK-004 lock focused tests | 0 | 9 passed | later tickets pending |
+| TASK-004 Git focused tests | 0 | 11 passed in disposable repositories | later tickets pending |
+| TASK-004 concurrent-lock repetition | 0 | 20 of 20 trials passed | remote/platform matrix absent |
+| current project check after TASK-004 | 0 | `check=ok files=55 constitutions=7` | CI not run remotely |
+| current full tests after TASK-004 | 0 | 38 passed | later tickets pending |
+| current diff whitespace check | 0 | zero errors | later tickets pending |
 
 ## Review And Integration
 
 - Highest unresolved finding: static Git Scope Check cannot prove hostile-process
   containment; Real Runtime remains blocked until a later sandbox preflight.
 - Architecture decision required: none blocking the Fake Runtime Phase 1.
-- Conflict status: not yet applicable.
-- Combined-result verification: not yet run.
+- Conflict status: disposable conflict correctly blocked without resolution.
+- Combined-result verification: current feature tree passed all 38 implemented
+  tests; primary-branch integration was not attempted.
 - Merge status: not authorized and not performed.
 - Authorization source: explicit user approval is required for a future primary
   merge.
 
 ## Completion
 
-- Files changed: governance artifacts only at this stage.
+- Files changed through TASK-004: Task Domain, Task Ledger, Policy Engine,
+  ProjectLock, GitWorkspace, tests, schemas, checks, and governance evidence.
 - Stages skipped and justification: `grill-me` interactive questioning skipped
   because direct request evidence plus fail-closed ADRs resolved every material
   offline Phase 1 decision; live deployment questions remain explicitly

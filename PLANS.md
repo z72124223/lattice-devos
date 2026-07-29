@@ -77,6 +77,9 @@ Expected repository root:
 - The supplied attachment directory contains only `pasted-text.txt`; the
   referenced 17-file ZIP and two linked Markdown deliverables are not present in
   that supplied directory.
+- A read-only search of the supplied attachments, relevant Documents,
+  Downloads, OneDrive locations, Git configs, and the contents of 17 discovered
+  ZIP files found no LATTICE blueprint/archive or prior repository.
 - The starting workspace was empty and was not a Git repository when audited on
   2026-07-29.
 - Local commands currently available include Git 2.54.0, Node.js 24.16.0,
@@ -107,13 +110,11 @@ Expected repository root:
 
 ## Open Questions
 
-- Whether the referenced ZIP exists elsewhere on the local machine is still
-  being checked. This is an evidence gap, not permission to invent its content.
 - The exact Hostinger runtime and installed OpenClaw version are intentionally
   unknown until the later capability preflight; live plugin validation is
   therefore not part of Phase 1 acceptance.
 
-Neither open question changes the explicit offline Phase 1 safety boundary.
+This open question does not change the explicit offline Phase 1 safety boundary.
 
 ## Acceptance Ownership
 
@@ -135,13 +136,12 @@ Neither open question changes the explicit offline Phase 1 safety boundary.
   feature-branch plan.
 - [x] Step 4: Implement Task Packet and deterministic state
   transitions using ticket-scoped RED/GREEN cycles.
-- [ ] **CURRENT — Step 5:** Implement the remaining core tickets:
-  Task Ledger, permissions/approvals, project lock/Git, and Scope Check using
-  ticket-scoped RED/GREEN cycles.
-- [ ] Step 6: Implement the Git worktree adapter and validate it against a
-  disposable repository.
-- [ ] Step 7: Implement the hash-chained audit log and deterministic
-  orchestrator/Fake Runtime vertical slice.
+- [x] Step 5: Implement the exclusive project lock and Git
+  worktree/integration adapter in TASK-004, including disposable-repository
+  validation.
+- [ ] **CURRENT — Step 6:** Implement detection-only Scope Check in TASK-005.
+- [ ] Step 7: Implement the deterministic Orchestrator/Fake Runtime vertical
+  slice in TASK-006 using the completed Task Ledger.
 - [ ] Step 8: Add and statically verify the OpenClaw `/lattice` plugin scaffold.
 - [ ] Step 9: Run focused and full verification, independent code review,
   architecture review, and integration-readiness checks.
@@ -194,3 +194,9 @@ Neither open question changes the explicit offline Phase 1 safety boundary.
 - 2026-07-29: Read-only architecture review selected an event-sourced Task
   Ledger as the single truth and made merge conflicts fail closed. This
   tightened, rather than changed, the original One Truth/One Writer direction.
+- 2026-07-29: Removed duplicated Git work from Steps 5/6 after TASK-003. Step 5
+  now maps exactly to TASK-004, Step 6 to TASK-005, and Step 7 to TASK-006.
+- 2026-07-29: TASK-004 review probes exposed Windows junction, lock
+  initialization, Git hook/driver, ownership-marker, and failure-cleanup gaps.
+  The plan did not change; fail-closed tests and implementation were tightened
+  before unlocking TASK-005.
