@@ -23,6 +23,7 @@ pub struct TurnOutcome {
 /// Fail-closed protocol parsing failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProtocolError {
+    UnexpectedThread,
     UnexpectedTurn,
     MalformedTerminal,
 }
@@ -63,7 +64,7 @@ impl AppServerProtocol {
     /// Builds the required acknowledgement after initialization succeeds.
     #[must_use]
     pub fn initialized_notification(&self) -> Value {
-        json!({"method": "initialized", "params": {}})
+        json!({"method": "initialized"})
     }
 
     /// Starts one non-interactive workspace-write thread in the bounded root.
@@ -76,7 +77,7 @@ impl AppServerProtocol {
             "params": {
                 "cwd": cwd,
                 "approvalPolicy": "never",
-                "sandbox": "workspaceWrite",
+                "sandbox": "workspace-write",
                 "serviceName": self.client_name
             }
         })
@@ -117,21 +118,27 @@ impl AppServerProtocol {
     /// # Errors
     ///
     /// Returns [`ProtocolError::MalformedTerminal`] when terminal evidence is
-    /// incomplete and [`ProtocolError::UnexpectedTurn`] when it is not bound
-    /// to the requested turn.
+    /// incomplete, or an unexpected thread/turn error when it is not bound to
+    /// the requested execution.
     pub fn parse_turn_completed(
         message: &Value,
+        expected_thread_id: &str,
         expected_turn_id: &str,
     ) -> Result<Option<TurnOutcome>, ProtocolError> {
         if message.get("method").and_then(Value::as_str) != Some("turn/completed") {
             return Ok(None);
         }
 
-        let Some(turn) = message
-            .get("params")
-            .and_then(|params| params.get("turn"))
-            .and_then(Value::as_object)
-        else {
+        let Some(params) = message.get("params") else {
+            return Err(ProtocolError::MalformedTerminal);
+        };
+        let Some(thread_id) = params.get("threadId").and_then(Value::as_str) else {
+            return Err(ProtocolError::MalformedTerminal);
+        };
+        if thread_id != expected_thread_id {
+            return Err(ProtocolError::UnexpectedThread);
+        }
+        let Some(turn) = params.get("turn").and_then(Value::as_object) else {
             return Err(ProtocolError::MalformedTerminal);
         };
         let Some(turn_id) = turn.get("id").and_then(Value::as_str) else {

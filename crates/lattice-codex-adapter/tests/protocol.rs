@@ -23,7 +23,7 @@ fn builds_the_stable_initialize_thread_and_turn_sequence() {
     );
     assert_eq!(
         protocol.initialized_notification(),
-        json!({"method": "initialized", "params": {}})
+        json!({"method": "initialized"})
     );
     assert_eq!(
         protocol.thread_start_request(1, Path::new(r"C:\work\fixture")),
@@ -33,7 +33,7 @@ fn builds_the_stable_initialize_thread_and_turn_sequence() {
             "params": {
                 "cwd": r"C:\work\fixture",
                 "approvalPolicy": "never",
-                "sandbox": "workspaceWrite",
+                "sandbox": "workspace-write",
                 "serviceName": "lattice_devos"
             }
         })
@@ -69,9 +69,11 @@ fn accepts_only_a_completed_terminal_for_the_bound_turn() {
         &json!({
             "method": "turn/completed",
             "params": {
+                "threadId": "thr_123",
                 "turn": {"id": "turn_456", "status": "completed", "items": [], "error": null}
             }
         }),
+        "thr_123",
         "turn_456",
     )
     .expect("the exact completed turn should be accepted");
@@ -89,11 +91,30 @@ fn accepts_only_a_completed_terminal_for_the_bound_turn() {
         AppServerProtocol::parse_turn_completed(
             &json!({
                 "method": "turn/completed",
-                "params": {"turn": {"id": "other", "status": "completed"}}
+                "params": {
+                    "threadId": "thr_123",
+                    "turn": {"id": "other", "status": "completed"}
+                }
             }),
+            "thr_123",
             "turn_456"
         ),
         Err(ProtocolError::UnexpectedTurn)
+    );
+
+    assert_eq!(
+        AppServerProtocol::parse_turn_completed(
+            &json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "other",
+                    "turn": {"id": "turn_456", "status": "completed"}
+                }
+            }),
+            "thr_123",
+            "turn_456"
+        ),
+        Err(ProtocolError::UnexpectedThread)
     );
 }
 
@@ -103,6 +124,7 @@ fn preserves_failed_and_interrupted_terminal_outcomes() {
         &json!({
             "method": "turn/completed",
             "params": {
+                "threadId": "thr_123",
                 "turn": {
                     "id": "turn_1",
                     "status": "failed",
@@ -110,6 +132,7 @@ fn preserves_failed_and_interrupted_terminal_outcomes() {
                 }
             }
         }),
+        "thr_123",
         "turn_1",
     )
     .expect("a typed failed terminal remains observable")
@@ -120,8 +143,12 @@ fn preserves_failed_and_interrupted_terminal_outcomes() {
     let interrupted = AppServerProtocol::parse_turn_completed(
         &json!({
             "method": "turn/completed",
-            "params": {"turn": {"id": "turn_2", "status": "interrupted"}}
+            "params": {
+                "threadId": "thr_123",
+                "turn": {"id": "turn_2", "status": "interrupted"}
+            }
         }),
+        "thr_123",
         "turn_2",
     )
     .expect("a typed interrupted terminal remains observable")
@@ -134,6 +161,7 @@ fn ignores_non_terminal_notifications_and_rejects_malformed_terminals() {
     assert_eq!(
         AppServerProtocol::parse_turn_completed(
             &json!({"method": "item/completed", "params": {"item": {"id": "item_1"}}}),
+            "thr_123",
             "turn_1"
         )
         .expect("unrelated valid notifications are ignored"),
@@ -142,7 +170,11 @@ fn ignores_non_terminal_notifications_and_rejects_malformed_terminals() {
 
     assert_eq!(
         AppServerProtocol::parse_turn_completed(
-            &json!({"method": "turn/completed", "params": {"turn": {"id": "turn_1"}}}),
+            &json!({
+                "method": "turn/completed",
+                "params": {"threadId": "thr_123", "turn": {"id": "turn_1"}}
+            }),
+            "thr_123",
             "turn_1"
         ),
         Err(ProtocolError::MalformedTerminal)
