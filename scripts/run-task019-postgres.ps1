@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param()
+param(
+    [switch]$RunLatticeDeliveryHook
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -81,6 +83,34 @@ function Assert-NoReparseAncestor {
         }
         $current = $parent
     }
+}
+
+function Get-LatticeDeliveryHookPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptDirectory,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot
+    )
+
+    $canonicalScriptDirectory = Get-CanonicalPath -Path $ScriptDirectory
+    $expectedPath = Get-CanonicalPath -Path (Join-Path $canonicalScriptDirectory 'run-lattice-delivery.ps1')
+    if (-not (Test-ExactPath -Actual (Split-Path -Parent $expectedPath) -Expected $canonicalScriptDirectory)) {
+        throw 'TASK019_DELIVERY_HOOK_NOT_EXACT_SIBLING'
+    }
+
+    Assert-NoReparseAncestor -Path $expectedPath -Boundary $RepositoryRoot
+    $item = Get-Item -LiteralPath $expectedPath -Force -ErrorAction SilentlyContinue
+    if (
+        $null -eq $item -or
+        $item.PSIsContainer -or
+        -not ($item -is [System.IO.FileInfo]) -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
+        -not (Test-Path -LiteralPath $expectedPath -PathType Leaf) -or
+        -not (Test-ExactPath -Actual $item.FullName -Expected $expectedPath)
+    ) {
+        throw 'TASK019_DELIVERY_HOOK_NOT_REGULAR_LEAF'
+    }
+
+    return $expectedPath
 }
 
 function Test-PgCtlStatusCodeIsStopped {
@@ -522,6 +552,11 @@ $harnessCompleted = $false
 $installedBefore = $null
 $installedAfter = $null
 $originalEnvironment = @{}
+$deliveryHookPath = $null
+
+if ($RunLatticeDeliveryHook) {
+    $deliveryHookPath = Get-LatticeDeliveryHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+}
 
 Invoke-HarnessSelfTest
 Assert-NoReparseAncestor -Path $clusterRoot -Boundary $repositoryRoot
@@ -641,6 +676,33 @@ try {
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_UUID', $restartEvidence.DatabaseId, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_MANIFEST', $restartEvidence.ManifestHash, 'Process')
     $null = Invoke-LiveTest -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'restart'
+
+    if ($RunLatticeDeliveryHook) {
+        $deliveryHookPath = Get-LatticeDeliveryHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+        & $deliveryHookPath -InternalPhase 'DeliveryRun'
+
+        if (-not (Stop-TestCluster -PgCtl $pgCtl -DataDirectory $dataDirectory)) {
+            throw 'Could not prove the disposable PostgreSQL cluster stopped after the delivery-run phase.'
+        }
+        $clusterStarted = $false
+        Remove-HarnessOutputFiles -Root $clusterRoot
+        Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword
+
+        $clusterStarted = $true
+        $null = Invoke-NativeChecked -Executable $pgCtl -Arguments @(
+            '-D', $dataDirectory,
+            '-l', $serverLog,
+            '-w',
+            '-t', '30',
+            'start'
+        ) -Operation 'PostgreSQL test-cluster delivery restart'
+        Set-HarnessEnvironment -Phase 'restart' -HostName '127.0.0.1' -Port $port -Password $oneTimePassword -RunId $runId
+        [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_UUID', $restartEvidence.DatabaseId, 'Process')
+        [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_MANIFEST', $restartEvidence.ManifestHash, 'Process')
+
+        $deliveryHookPath = Get-LatticeDeliveryHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+        & $deliveryHookPath -InternalPhase 'DeliveryStatus'
+    }
     $harnessCompleted = $true
 }
 finally {

@@ -106,3 +106,85 @@ fn rejects_missing_duplicate_unknown_and_malformed_preflight_arguments() {
         Err(RuntimeError::InvalidDigest)
     );
 }
+
+#[test]
+fn parses_only_the_marker_owned_delivery_status_binding() {
+    let arguments = vec![
+        "delivery-status".to_owned(),
+        "--postgres-host".to_owned(),
+        "127.0.0.1".to_owned(),
+        "--postgres-port".to_owned(),
+        "55432".to_owned(),
+        "--postgres-run-id".to_owned(),
+        "a".repeat(32),
+    ];
+    let expected = lattice_runtime::delivery_ledger::DeliveryDatabaseBinding::new(
+        "127.0.0.1",
+        55432,
+        "a".repeat(32),
+    )
+    .expect("binding");
+    assert_eq!(
+        parse_command(&arguments),
+        Ok(RuntimeCommand::DeliveryStatus { database: expected })
+    );
+
+    let mut default_port = arguments;
+    let port = default_port
+        .iter()
+        .position(|value| value == "55432")
+        .expect("port");
+    default_port[port] = "5432".to_owned();
+    assert!(matches!(
+        parse_command(&default_port),
+        Err(RuntimeError::DeliveryLedger(_))
+    ));
+}
+
+#[test]
+fn parses_the_bounded_delivery_run_without_a_password_argument() {
+    let arguments = vec![
+        "delivery-run".to_owned(),
+        "--launcher".to_owned(),
+        r"C:\tools\codex.exe".to_owned(),
+        "--version".to_owned(),
+        "codex-cli 0.144.6".to_owned(),
+        "--sha256".to_owned(),
+        "a".repeat(64),
+        "--schema-dir".to_owned(),
+        r"C:\temp\schema".to_owned(),
+        "--codex-home".to_owned(),
+        r"C:\lattice\codex-home".to_owned(),
+        "--delivery-root".to_owned(),
+        r"C:\temp\delivery".to_owned(),
+        "--git-exe".to_owned(),
+        r"C:\tools\git.exe".to_owned(),
+        "--timeout-seconds".to_owned(),
+        "600".to_owned(),
+        "--postgres-host".to_owned(),
+        "127.0.0.1".to_owned(),
+        "--postgres-port".to_owned(),
+        "55432".to_owned(),
+        "--postgres-run-id".to_owned(),
+        "b".repeat(32),
+    ];
+    assert!(matches!(
+        parse_command(&arguments),
+        Ok(RuntimeCommand::DeliveryRun {
+            timeout_seconds: 600,
+            ..
+        })
+    ));
+
+    let mut with_password = arguments;
+    with_password.extend(["--password".to_owned(), "secret".to_owned()]);
+    assert_eq!(parse_command(&with_password), Err(RuntimeError::Usage));
+
+    let mut relative_root = with_password[..with_password.len() - 2].to_vec();
+    let root = relative_root
+        .iter()
+        .position(|value| value == r"C:\temp\delivery")
+        .expect("delivery root");
+    relative_root[root] = "relative-delivery".to_owned();
+    assert_eq!(parse_command(&relative_root), Err(RuntimeError::Usage));
+}

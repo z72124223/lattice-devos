@@ -234,7 +234,9 @@ pub fn run_codex_app_server(
             AppServerRunErrorKind::LauncherDigestMismatch,
         ));
     }
-    let mut child = Command::new(config.launcher())
+    let mut command = Command::new(config.launcher());
+    crate::scrub_protected_environment(&mut command);
+    let mut child = command
         .args(["app-server", "--listen", "stdio://"])
         .current_dir(config.working_directory())
         .env("CODEX_HOME", config.codex_home())
@@ -726,7 +728,9 @@ fn terminate_owned_process_tree(child: &mut Child) -> Result<(), AppServerRunErr
     let tree_stopped = taskkill
         .filter(|path| path.is_file())
         .and_then(|path| {
-            Command::new(path)
+            let mut command = Command::new(path);
+            crate::scrub_protected_environment(&mut command);
+            command
                 .args(["/PID", pid.as_str(), "/T", "/F"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())

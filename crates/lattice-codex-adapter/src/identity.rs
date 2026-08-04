@@ -276,7 +276,9 @@ fn run_version_command(
     launcher: &Path,
     deadline: Instant,
 ) -> Result<(ExitStatus, Vec<u8>), CodexIdentityError> {
-    let mut child = Command::new(launcher)
+    let mut command = Command::new(launcher);
+    crate::scrub_protected_environment(&mut command);
+    let mut child = command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -318,7 +320,9 @@ fn run_schema_command(
     schema_output_dir: &Path,
     deadline: Instant,
 ) -> Result<ExitStatus, CodexIdentityError> {
-    let mut child = Command::new(launcher)
+    let mut command = Command::new(launcher);
+    crate::scrub_protected_environment(&mut command);
+    let mut child = command
         .args(["app-server", "generate-json-schema", "--out"])
         .arg(schema_output_dir)
         .stdin(Stdio::null())
@@ -377,7 +381,9 @@ fn terminate_owned_process_tree(child: &mut Child) {
         .map(|root| root.join("System32").join("taskkill.exe"))
         .filter(|path| path.is_file())
         .and_then(|taskkill| {
-            Command::new(taskkill)
+            let mut command = Command::new(taskkill);
+            crate::scrub_protected_environment(&mut command);
+            command
                 .args(["/PID", pid.as_str(), "/T", "/F"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())

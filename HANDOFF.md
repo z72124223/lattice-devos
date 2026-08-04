@@ -1,4 +1,119 @@
-# LATTICE DevOS TASK-021 Handoff
+# LATTICE DevOS TASK-032 Delivery Checkpoint Handoff
+
+## Status
+
+`NEEDS_REVIEW` for TASK-032 completion; the deterministic local delivery
+checkpoint is verified and ready for its authorized local commit.
+
+## Objective And Alignment
+
+This checkpoint advances the active delivery-first path:
+
+> Rust LATTICE -> PostgreSQL intent -> bounded Codex app-server protocol ->
+> isolated Git modification/test/commit -> PostgreSQL outcome -> restarted
+> status replay
+
+It remains part of the general local AI development platform. It adds no
+playmate/companion website, payment, deployment, publication, or unrelated
+governance work. OpenClaw, MCP stdio registration, official-Codex live
+acceptance, Graphify, Hermes, and Codebase Memory remain incomplete and are not
+claimed by this checkpoint.
+
+## Completed Work
+
+- Added `delivery-run` and `delivery-status` runtime commands with PostgreSQL
+  intent-before-effect ordering, canonical intent/outcome digests, and a full
+  durable receipt reloaded after PostgreSQL restart.
+- Added one isolated Git delivery fixture that permits only `answer.txt`, runs
+  the fixed verification, rejects filesystem/Git ambiguity, and creates one
+  local commit only after the check passes.
+- Hardened the Codex child boundary by removing ambient credential and database
+  password variables and retaining exact launcher/schema identity evidence.
+- Added a repeatable PowerShell harness joining the marker-owned PostgreSQL 17
+  lifecycle to the runtime delivery path.
+- Removed the exact stopped disposable failure root
+  `target/task019-postgres/be9400ccb8504058bc87cf06f2eae309` after verifying
+  its ownership marker and zero matching PostgreSQL processes.
+
+## Files Changed
+
+| Path | Purpose | Verification |
+|---|---|---|
+| `Cargo.lock` | Lock new runtime dependencies | locked workspace test |
+| `apps/lattice-runtime/Cargo.toml` | Wire required local crates | strict Clippy |
+| `apps/lattice-runtime/src/lib.rs` | Compose delivery run/status | runtime tests and acceptance |
+| `apps/lattice-runtime/src/delivery_ledger.rs` | Durable intent/outcome/receipt | unit tests and restart replay |
+| `apps/lattice-runtime/src/git_delivery.rs` | Isolated verify-and-commit effect | unit tests and fixture audit |
+| `apps/lattice-runtime/tests/dispatch.rs` | CLI surface regressions | dispatch tests |
+| `crates/lattice-codex-adapter/src/{identity,lib,process}.rs` | Identity and credential-boundary hardening | adapter tests and review |
+| `scripts/run-task019-postgres.ps1` | Optional delivery hook | AST parse and live harness |
+| `scripts/run-lattice-delivery.ps1` | Repeatable end-to-end acceptance | `LATTICE_DELIVERY_HARNESS=PASS` |
+| `docs/tickets/TASK-032-executable-codex-postgres-delivery.md` | Add the harness path to the ticket scope | project check |
+| `HANDOFF.md` | Durable checkpoint ledger | re-read and scope check |
+
+## Workflow Ledger
+
+| Stage | Status | Evidence |
+|---|---|---|
+| Repository and Git inspection | valid | branch/status/allowlist inspected; no remote |
+| Specification and ticket | valid/partial | TASK-032 remains `in-progress`; MCP/live acceptance open |
+| Module governance | blocked for final TASK-032 | runtime direct dependencies conflict with orchestrator-runtime 2.0 |
+| TDD implementation | valid for checkpoint | adapter, ledger, Git and dispatch regressions pass |
+| Focused verification | valid | adapter/runtime focused suites and strict Clippy pass |
+| Full verification | valid | locked Rust workspace and 44 Node tests pass |
+| Runtime acceptance | valid for scripted checkpoint | durable PostgreSQL restart plus real Git commit evidence |
+| Code review | pass | independent read-only review: no P0/P1/P2 finding |
+| Architecture review | blocked for final TASK-032 | port-boundary refactor or approved versioned amendment required |
+| Integration/CI/merge | blocked | no remote, CI/branch protection evidence, or merge authorization |
+
+## Verification
+
+- `cargo fmt --check`: exit 0.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
+- `cargo test --workspace --locked`: exit 0; all workspace tests pass.
+- `npm.cmd run verify`: exit 0; project check passes and 44/44 tests pass.
+- PowerShell parser for both delivery scripts: pass.
+- `git diff --check`: exit 0; only a non-failing LF/CRLF notice.
+- Latest acceptance fixture:
+  `target/lattice-delivery/c410418a93ef4508b1e681be1aaea3b2`.
+  It reports `SCRIPTED_ACCEPTANCE`, `COMPLETED`, restart replay, and commit
+  `f2bb5a61a16e4c503c96f74a34d9d10b29bac111`; the commit changes only
+  `answer.txt` to the exact 20 bytes `LATTICE_DELIVERY_OK\n`.
+- Independent evidence audit recomputed launcher/schema/file digests, compared
+  run/status/final evidence, confirmed a clean fixture repository, found zero
+  secret/URI candidates, and found zero ticket-allowlist violations.
+
+## Risks And Open Decisions
+
+- The acceptance is scripted protocol acceptance, not a successful official
+  Codex live turn. A fourth retry with the previously failing dedicated Codex
+  home was intentionally not attempted.
+- `postgres_run_id` is present in final harness evidence but not duplicated in
+  run/status JSON; cleanup was independently verified using the final ID.
+- Exact Git executable pinning, deeper process containment, per-operation
+  PostgreSQL deadlines, and other non-blocking hardening remain deferred.
+- No push, branch merge, publication, deployment, payment, account, or
+  production mutation was performed.
+
+## Next Action
+
+1. Commit this verified deterministic checkpoint locally.
+2. Refactor runtime effects behind approved ports (or obtain explicit approval
+   for a versioned orchestrator-runtime constitution amendment).
+3. Finish the MCP/official-Codex entry on the same executable path, then attach
+   OpenClaw, Graphify, Hermes, and Codebase Memory as subsequent runnable nodes.
+
+## Restart Context
+
+- Branch: `feature/v2-rust-postgres-bootstrap`.
+- Checkpoint base: `80c88eafc2bcaab2b95b80a9479c97c294bb6c08`.
+- Active plan: `PLANS.md`, `CURRENT TASK-032`.
+- First commands: `git status --short --branch`; `cargo test --workspace --locked`.
+- Overall goal remains active; do not mark MVP-1 or TASK-032 complete.
+
+---
+
+# Archived LATTICE DevOS TASK-021 Handoff
 
 ## Outcome
 

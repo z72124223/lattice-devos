@@ -16,9 +16,54 @@ pub use session::{
     AppServerSession, InitializeEvidence, SessionError, SessionPhase, SessionRequest,
 };
 
+use std::ffi::OsStr;
 use std::path::Path;
+use std::process::Command;
 
 use serde_json::{Value, json};
+
+fn protected_environment_name(name: &OsStr) -> bool {
+    let name = name.to_string_lossy().to_ascii_uppercase();
+    matches!(
+        name.as_str(),
+        "DATABASE_URL"
+            | "PGPASSWORD"
+            | "PGPASSFILE"
+            | "GIT_ASKPASS"
+            | "SSH_ASKPASS"
+            | "LATTICE_TASK019_PASSWORD"
+    ) || [
+        "_PASSWORD",
+        "_TOKEN",
+        "_SECRET",
+        "_API_KEY",
+        "_PRIVATE_KEY",
+        "_ACCESS_KEY",
+        "_CREDENTIAL",
+        "_CREDENTIALS",
+        "_CONNECTION_STRING",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
+}
+
+pub(crate) fn scrub_protected_environment(command: &mut Command) {
+    for name in [
+        "DATABASE_URL",
+        "PGPASSWORD",
+        "PGPASSFILE",
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+        "LATTICE_TASK019_PASSWORD",
+    ] {
+        command.env_remove(name);
+    }
+    for (name, _) in std::env::vars_os() {
+        if protected_environment_name(&name) {
+            command.env_remove(name);
+        }
+    }
+}
 
 /// Stable terminal states emitted by `turn/completed`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,5 +238,48 @@ impl AppServerProtocol {
             status,
             error_message,
         }))
+    }
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+
+    #[test]
+    fn database_and_ambient_credential_names_are_protected() {
+        for name in [
+            "LATTICE_TASK019_PASSWORD",
+            "PGPASSWORD",
+            "DATABASE_URL",
+            "OPENAI_API_KEY",
+            "GH_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "AZURE_CLIENT_SECRET",
+        ] {
+            assert!(protected_environment_name(OsStr::new(name)), "{name}");
+        }
+        for name in ["CODEX_HOME", "PATH", "SystemRoot", "LATTICE_TASK019_PORT"] {
+            assert!(!protected_environment_name(OsStr::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn scrub_marks_the_database_password_removed_from_a_child() {
+        let mut command = Command::new("unused");
+        command
+            .env("LATTICE_TASK019_PASSWORD", "must-not-leak")
+            .env("LATTICE_SAFE_VALUE", "retained");
+        scrub_protected_environment(&mut command);
+
+        let password = command
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new("LATTICE_TASK019_PASSWORD"))
+            .expect("password removal is explicit");
+        let safe = command
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new("LATTICE_SAFE_VALUE"))
+            .expect("safe value remains explicit");
+        assert!(password.1.is_none());
+        assert_eq!(safe.1, Some(OsStr::new("retained")));
     }
 }

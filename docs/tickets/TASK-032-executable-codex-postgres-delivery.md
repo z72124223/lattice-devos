@@ -24,6 +24,7 @@ allowed_paths:
   - crates/lattice-task-domain/**
   - crates/lattice-postgres-store/**
   - scripts/run-lattice-delivery.ps1
+  - scripts/run-task019-postgres.ps1
   - PLANS.md
   - HANDOFF.md
   - docs/modules/codex-adapter/**

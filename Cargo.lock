@@ -326,8 +326,14 @@ dependencies = [
 name = "lattice-runtime"
 version = "0.1.0"
 dependencies = [
+ "lattice-cjson",
  "lattice-codex-adapter",
+ "lattice-contracts",
+ "lattice-postgres-store",
+ "lattice-task-ledger",
+ "postgres",
  "serde_json",
+ "time",
 ]
 
 [[package]]
