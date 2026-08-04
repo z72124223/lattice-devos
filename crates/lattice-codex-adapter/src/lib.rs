@@ -1,5 +1,14 @@
 //! Supervised Codex app-server adapter.
 
+mod identity;
+mod session;
+
+pub use identity::{
+    CodexIdentityError, CodexIdentityErrorKind, CodexIdentityEvidence, CodexIdentityExpectation,
+    preflight_codex_identity,
+};
+pub use session::{AppServerSession, InitializeEvidence, SessionError, SessionPhase};
+
 use std::path::Path;
 
 use serde_json::{Value, json};
