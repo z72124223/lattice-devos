@@ -3,11 +3,19 @@ use std::fmt::{self, Write as _};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::process::OwnedProcessTree;
+
 const SCHEMA_BUNDLE_DOMAIN: &[u8] = b"lattice.codex-app-server.schema-bundle.v1\0";
+const DEFAULT_IDENTITY_PREFLIGHT_TIMEOUT: Duration = Duration::from_mins(2);
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_VERSION_OUTPUT_BYTES: u64 = 4 * 1024;
 
 /// Pinned identity that a configured Codex launcher must match exactly.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,6 +56,25 @@ impl CodexIdentityExpectation {
     #[must_use]
     pub fn launcher_sha256(&self) -> &str {
         &self.launcher_sha256
+    }
+
+    /// Runs one identity preflight under a caller-owned absolute deadline.
+    ///
+    /// The same deadline bounds both the version command and schema
+    /// generation. A timed-out owned launcher process is terminated before
+    /// this method returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodexIdentityErrorKind::Timeout`] if either command cannot
+    /// finish before `deadline`, or another typed identity rejection.
+    pub fn preflight_with_deadline(
+        &self,
+        configured_launcher: &Path,
+        schema_output_dir: &Path,
+        deadline: Instant,
+    ) -> Result<CodexIdentityEvidence, CodexIdentityError> {
+        preflight_codex_identity_until(configured_launcher, self, schema_output_dir, deadline)
     }
 }
 
@@ -109,6 +136,8 @@ pub enum CodexIdentityErrorKind {
     SchemaBundleInvalid,
     SchemaBundleEmpty,
     SchemaReadFailed,
+    Timeout,
+    ProcessContainmentFailed,
 }
 
 /// Payload-free Codex identity preflight error.
@@ -145,6 +174,10 @@ impl fmt::Display for CodexIdentityError {
             CodexIdentityErrorKind::SchemaBundleInvalid => "CODEX_SCHEMA_BUNDLE_INVALID",
             CodexIdentityErrorKind::SchemaBundleEmpty => "CODEX_SCHEMA_BUNDLE_EMPTY",
             CodexIdentityErrorKind::SchemaReadFailed => "CODEX_SCHEMA_READ_FAILED",
+            CodexIdentityErrorKind::Timeout => "CODEX_IDENTITY_TIMEOUT",
+            CodexIdentityErrorKind::ProcessContainmentFailed => {
+                "CODEX_IDENTITY_PROCESS_CONTAINMENT_FAILED"
+            }
         })
     }
 }
@@ -165,6 +198,19 @@ pub fn preflight_codex_identity(
     configured_launcher: &Path,
     expectation: &CodexIdentityExpectation,
     schema_output_dir: &Path,
+) -> Result<CodexIdentityEvidence, CodexIdentityError> {
+    expectation.preflight_with_deadline(
+        configured_launcher,
+        schema_output_dir,
+        Instant::now() + DEFAULT_IDENTITY_PREFLIGHT_TIMEOUT,
+    )
+}
+
+fn preflight_codex_identity_until(
+    configured_launcher: &Path,
+    expectation: &CodexIdentityExpectation,
+    schema_output_dir: &Path,
+    deadline: Instant,
 ) -> Result<CodexIdentityEvidence, CodexIdentityError> {
     if configured_launcher != expectation.launcher_path() {
         return Err(error(CodexIdentityErrorKind::LauncherPathMismatch));
@@ -190,26 +236,21 @@ pub fn preflight_codex_identity(
         return Err(error(CodexIdentityErrorKind::LauncherDigestMismatch));
     }
 
-    let version_output = Command::new(configured_launcher)
-        .arg("--version")
-        .output()
-        .map_err(|_| error(CodexIdentityErrorKind::VersionCommandFailed))?;
-    if !version_output.status.success() {
+    ensure_before_deadline(deadline)?;
+    let (version_status, version_stdout) = run_version_command(configured_launcher, deadline)?;
+    if !version_status.success() {
         return Err(error(CodexIdentityErrorKind::VersionCommandFailed));
     }
-    let version = String::from_utf8(version_output.stdout)
+    let version = String::from_utf8(version_stdout)
         .map_err(|_| error(CodexIdentityErrorKind::VersionOutputInvalid))?;
     let version = version.trim_end_matches(['\r', '\n']).to_owned();
     if version != expectation.version() {
         return Err(error(CodexIdentityErrorKind::VersionMismatch));
     }
 
-    let schema_output = Command::new(configured_launcher)
-        .args(["app-server", "generate-json-schema", "--out"])
-        .arg(schema_output_dir)
-        .output()
-        .map_err(|_| error(CodexIdentityErrorKind::SchemaGenerationFailed))?;
-    if !schema_output.status.success() {
+    ensure_before_deadline(deadline)?;
+    let schema_status = run_schema_command(configured_launcher, schema_output_dir, deadline)?;
+    if !schema_status.success() {
         return Err(error(CodexIdentityErrorKind::SchemaGenerationFailed));
     }
 
@@ -229,6 +270,134 @@ pub fn preflight_codex_identity(
         schema_bundle_sha256,
         schema_file_count,
     })
+}
+
+fn run_version_command(
+    launcher: &Path,
+    deadline: Instant,
+) -> Result<(ExitStatus, Vec<u8>), CodexIdentityError> {
+    let mut child = Command::new(launcher)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| error(CodexIdentityErrorKind::VersionCommandFailed))?;
+    let Ok(_process_tree) = OwnedProcessTree::attach(&child) else {
+        terminate_owned_process_tree(&mut child);
+        return Err(error(CodexIdentityErrorKind::ProcessContainmentFailed));
+    };
+    let Some(stdout) = child.stdout.take() else {
+        terminate_owned_process_tree(&mut child);
+        return Err(error(CodexIdentityErrorKind::VersionCommandFailed));
+    };
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .take(MAX_VERSION_OUTPUT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let status = wait_for_owned_child(
+        &mut child,
+        deadline,
+        CodexIdentityErrorKind::VersionCommandFailed,
+    )?;
+    let stdout = reader
+        .join()
+        .map_err(|_| error(CodexIdentityErrorKind::VersionOutputInvalid))?
+        .map_err(|_| error(CodexIdentityErrorKind::VersionOutputInvalid))?;
+    if u64::try_from(stdout.len()).unwrap_or(u64::MAX) > MAX_VERSION_OUTPUT_BYTES {
+        return Err(error(CodexIdentityErrorKind::VersionOutputInvalid));
+    }
+    Ok((status, stdout))
+}
+
+fn run_schema_command(
+    launcher: &Path,
+    schema_output_dir: &Path,
+    deadline: Instant,
+) -> Result<ExitStatus, CodexIdentityError> {
+    let mut child = Command::new(launcher)
+        .args(["app-server", "generate-json-schema", "--out"])
+        .arg(schema_output_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| error(CodexIdentityErrorKind::SchemaGenerationFailed))?;
+    let Ok(_process_tree) = OwnedProcessTree::attach(&child) else {
+        terminate_owned_process_tree(&mut child);
+        return Err(error(CodexIdentityErrorKind::ProcessContainmentFailed));
+    };
+    wait_for_owned_child(
+        &mut child,
+        deadline,
+        CodexIdentityErrorKind::SchemaGenerationFailed,
+    )
+}
+
+fn ensure_before_deadline(deadline: Instant) -> Result<(), CodexIdentityError> {
+    if Instant::now() >= deadline {
+        Err(error(CodexIdentityErrorKind::Timeout))
+    } else {
+        Ok(())
+    }
+}
+
+fn wait_for_owned_child(
+    child: &mut Child,
+    deadline: Instant,
+    command_failure: CodexIdentityErrorKind,
+) -> Result<ExitStatus, CodexIdentityError> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(_) => {
+                terminate_owned_process_tree(child);
+                return Err(error(command_failure));
+            }
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            terminate_owned_process_tree(child);
+            return Err(error(CodexIdentityErrorKind::Timeout));
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL.min(deadline.duration_since(now)));
+    }
+}
+
+#[cfg(windows)]
+fn terminate_owned_process_tree(child: &mut Child) {
+    let pid = child.id().to_string();
+    let terminated_tree = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .map(|root| root.join("System32").join("taskkill.exe"))
+        .filter(|path| path.is_file())
+        .and_then(|taskkill| {
+            Command::new(taskkill)
+                .args(["/PID", pid.as_str(), "/T", "/F"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .ok()
+        })
+        .is_some_and(|status| status.success());
+    if !terminated_tree && child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+#[cfg(not(windows))]
+fn terminate_owned_process_tree(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 fn schema_bundle_digest(root: &Path) -> Result<(String, usize), CodexIdentityError> {
@@ -256,8 +425,11 @@ fn schema_bundle_digest(root: &Path) -> Result<(String, usize), CodexIdentityErr
 
         let metadata =
             fs::metadata(path).map_err(|_| error(CodexIdentityErrorKind::SchemaReadFailed))?;
-        hasher.update(metadata.len().to_be_bytes());
-        hash_file_contents(path, metadata.len(), &mut hasher)?;
+        let canonical = canonical_json_file(path, metadata.len())?;
+        let canonical_len = u64::try_from(canonical.len())
+            .map_err(|_| error(CodexIdentityErrorKind::SchemaBundleInvalid))?;
+        hasher.update(canonical_len.to_be_bytes());
+        hasher.update(&canonical);
     }
 
     Ok((hex_digest(hasher.finalize().as_ref()), files.len()))
@@ -330,33 +502,37 @@ fn file_sha256(path: &Path, failure: CodexIdentityErrorKind) -> Result<String, C
     Ok(hex_digest(hasher.finalize().as_ref()))
 }
 
-fn hash_file_contents(
-    path: &Path,
-    expected_len: u64,
-    hasher: &mut Sha256,
-) -> Result<(), CodexIdentityError> {
-    let mut file = File::open(path).map_err(|_| error(CodexIdentityErrorKind::SchemaReadFailed))?;
-    let mut observed_len = 0_u64;
-    let mut buffer = [0_u8; 16 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|_| error(CodexIdentityErrorKind::SchemaReadFailed))?;
-        if read == 0 {
-            break;
-        }
-        observed_len = observed_len
-            .checked_add(
-                u64::try_from(read)
-                    .map_err(|_| error(CodexIdentityErrorKind::SchemaBundleInvalid))?,
-            )
-            .ok_or_else(|| error(CodexIdentityErrorKind::SchemaBundleInvalid))?;
-        hasher.update(&buffer[..read]);
-    }
-    if observed_len != expected_len {
+fn canonical_json_file(path: &Path, expected_len: u64) -> Result<Vec<u8>, CodexIdentityError> {
+    let bytes = fs::read(path).map_err(|_| error(CodexIdentityErrorKind::SchemaReadFailed))?;
+    if u64::try_from(bytes.len()).map_err(|_| error(CodexIdentityErrorKind::SchemaBundleInvalid))?
+        != expected_len
+    {
         return Err(error(CodexIdentityErrorKind::SchemaReadFailed));
     }
-    Ok(())
+    canonical_json_bytes(&bytes)
+}
+
+fn canonical_json_bytes(bytes: &[u8]) -> Result<Vec<u8>, CodexIdentityError> {
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|_| error(CodexIdentityErrorKind::SchemaBundleInvalid))?;
+    serde_json::to_vec(&normalize_json(value))
+        .map_err(|_| error(CodexIdentityErrorKind::SchemaBundleInvalid))
+}
+
+fn normalize_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(normalize_json).collect()),
+        Value::Object(values) => {
+            let mut entries: Vec<_> = values.into_iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            let mut normalized = Map::new();
+            for (key, value) in entries {
+                normalized.insert(key, normalize_json(value));
+            }
+            Value::Object(normalized)
+        }
+        scalar => scalar,
+    }
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -369,4 +545,22 @@ fn hex_digest(bytes: &[u8]) -> String {
 
 const fn error(kind: CodexIdentityErrorKind) -> CodexIdentityError {
     CodexIdentityError::new(kind)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_json_bytes;
+
+    #[test]
+    fn schema_identity_ignores_json_object_member_order() {
+        let first =
+            br#"{"definitions":{"z":{"type":"string"},"a":{"type":"number"}},"title":"schema"}"#;
+        let second =
+            br#"{"title":"schema","definitions":{"a":{"type":"number"},"z":{"type":"string"}}}"#;
+
+        assert_eq!(
+            canonical_json_bytes(first).expect("first schema is valid"),
+            canonical_json_bytes(second).expect("second schema is valid")
+        );
+    }
 }

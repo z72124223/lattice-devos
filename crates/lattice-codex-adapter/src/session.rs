@@ -29,6 +29,24 @@ pub enum SessionPhase {
     Complete,
 }
 
+/// One client request whose response may be admitted by the session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionRequest {
+    Initialize,
+    ThreadStart,
+    TurnStart,
+}
+
+impl SessionRequest {
+    const fn index(self) -> usize {
+        match self {
+            Self::Initialize => 0,
+            Self::ThreadStart => 1,
+            Self::TurnStart => 2,
+        }
+    }
+}
+
 /// Fail-closed errors emitted while correlating one app-server session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionError {
@@ -37,6 +55,8 @@ pub enum SessionError {
     NonIntegerResponseId,
     UnexpectedResponseId(i64),
     DuplicateResponseId(i64),
+    ResponseBeforeRequest(i64),
+    DuplicateRequest(SessionRequest),
     Rpc {
         request_id: i64,
         code: i64,
@@ -48,6 +68,7 @@ pub enum SessionError {
     },
     CodexHomeNotAbsolute(String),
     DuplicateTerminal,
+    TerminalBeforeTurnStart,
     Terminal(ProtocolError),
     UnexpectedEof(SessionPhase),
 }
@@ -65,6 +86,7 @@ pub struct AppServerSession {
     pending_terminal: Option<Value>,
     validated_terminal: Option<TurnOutcome>,
     seen_responses: [bool; 3],
+    sent_requests: [bool; 3],
     completion_emitted: bool,
     failure: Option<SessionError>,
 }
@@ -74,6 +96,23 @@ impl AppServerSession {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Admits only the response corresponding to a request the client has sent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a latched error if the same request is marked twice.
+    pub fn mark_request_sent(&mut self, request: SessionRequest) -> Result<(), SessionError> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        let index = request.index();
+        if self.sent_requests[index] {
+            return self.fail(SessionError::DuplicateRequest(request));
+        }
+        self.sent_requests[index] = true;
+        Ok(())
     }
 
     /// Accepts one decoded app-server message.
@@ -215,6 +254,9 @@ impl AppServerSession {
             TURN_START_RESPONSE_ID => 2,
             other => return Err(SessionError::UnexpectedResponseId(other)),
         };
+        if !self.sent_requests[response_index] {
+            return Err(SessionError::ResponseBeforeRequest(request_id));
+        }
         if self.seen_responses[response_index] {
             return Err(SessionError::DuplicateResponseId(request_id));
         }
@@ -267,6 +309,9 @@ impl AppServerSession {
                 ))?;
 
         if method == "turn/completed" {
+            if !self.sent_requests[SessionRequest::TurnStart.index()] {
+                return Err(SessionError::TerminalBeforeTurnStart);
+            }
             if self.pending_terminal.is_some() || self.validated_terminal.is_some() {
                 return Err(SessionError::DuplicateTerminal);
             }
@@ -456,14 +501,43 @@ mod tests {
             "method": "turn/completed",
             "params": {
                 "threadId": "thr_123",
-                "turn": {"id": "turn_456", "status": status, "error": null}
+                "turn": {"id": "turn_456", "items": [], "status": status, "error": null}
             }
         })
     }
 
+    fn sent_session() -> AppServerSession {
+        let mut session = AppServerSession::new();
+        for request in [
+            SessionRequest::Initialize,
+            SessionRequest::ThreadStart,
+            SessionRequest::TurnStart,
+        ] {
+            session
+                .mark_request_sent(request)
+                .expect("each lifecycle request is sent exactly once");
+        }
+        session
+    }
+
+    #[test]
+    fn rejects_lifecycle_evidence_before_the_corresponding_request_is_sent() {
+        let mut response = AppServerSession::new();
+        assert_eq!(
+            response.ingest(thread_response()),
+            Err(SessionError::ResponseBeforeRequest(1))
+        );
+
+        let mut terminal_session = AppServerSession::new();
+        assert_eq!(
+            terminal_session.ingest(terminal("completed")),
+            Err(SessionError::TerminalBeforeTurnStart)
+        );
+    }
+
     #[test]
     fn demultiplexes_responses_and_notifications_in_any_order() {
-        let mut session = AppServerSession::new();
+        let mut session = sent_session();
 
         assert_eq!(session.ingest(terminal("completed")), Ok(None));
         assert_eq!(session.ingest(turn_response()), Ok(None));
@@ -499,7 +573,7 @@ mod tests {
 
     #[test]
     fn validates_all_initialize_strings_and_absolute_codex_home() {
-        let mut missing_string = AppServerSession::new();
+        let mut missing_string = sent_session();
         let mut response = initialize_response();
         response["result"]["platformOs"] = Value::Null;
         assert_eq!(
@@ -510,7 +584,7 @@ mod tests {
             })
         );
 
-        let mut relative_home = AppServerSession::new();
+        let mut relative_home = sent_session();
         let mut response = initialize_response();
         response["result"]["codexHome"] = json!(r"relative\codex-home");
         assert_eq!(
@@ -523,19 +597,19 @@ mod tests {
 
     #[test]
     fn rejects_non_integer_unknown_and_duplicate_response_ids() {
-        let mut non_integer = AppServerSession::new();
+        let mut non_integer = sent_session();
         assert_eq!(
             non_integer.ingest(json!({"id": "1", "result": {}})),
             Err(SessionError::NonIntegerResponseId)
         );
 
-        let mut unknown = AppServerSession::new();
+        let mut unknown = sent_session();
         assert_eq!(
             unknown.ingest(json!({"id": 7, "result": {}})),
             Err(SessionError::UnexpectedResponseId(7))
         );
 
-        let mut duplicate = AppServerSession::new();
+        let mut duplicate = sent_session();
         assert_eq!(duplicate.ingest(thread_response()), Ok(None));
         assert_eq!(
             duplicate.ingest(thread_response()),
@@ -545,7 +619,7 @@ mod tests {
 
     #[test]
     fn accepts_only_the_terminal_bound_to_captured_thread_and_turn() {
-        let mut session = AppServerSession::new();
+        let mut session = sent_session();
         assert_eq!(session.ingest(thread_response()), Ok(None));
         assert_eq!(session.ingest(turn_response()), Ok(None));
 
@@ -563,7 +637,7 @@ mod tests {
             ("failed", TurnStatus::Failed),
             ("interrupted", TurnStatus::Interrupted),
         ] {
-            let mut session = AppServerSession::new();
+            let mut session = sent_session();
             session
                 .ingest(initialize_response())
                 .expect("initialize response is valid");
@@ -583,7 +657,7 @@ mod tests {
 
     #[test]
     fn rpc_errors_and_malformed_json_are_typed_and_latched() {
-        let mut rpc = AppServerSession::new();
+        let mut rpc = sent_session();
         let expected = SessionError::Rpc {
             request_id: 1,
             code: -32_000,
@@ -598,7 +672,7 @@ mod tests {
         );
         assert_eq!(rpc.ingest(thread_response()), Err(expected));
 
-        let mut malformed = AppServerSession::new();
+        let mut malformed = sent_session();
         assert_eq!(
             malformed.ingest_json_line("{not json}"),
             Err(SessionError::MalformedJson)
@@ -611,7 +685,7 @@ mod tests {
 
     #[test]
     fn eof_fails_closed_until_the_complete_terminal_is_proven() {
-        let mut incomplete = AppServerSession::new();
+        let mut incomplete = sent_session();
         incomplete
             .ingest(initialize_response())
             .expect("initialize response is valid");
@@ -626,7 +700,7 @@ mod tests {
             Err(SessionError::UnexpectedEof(SessionPhase::Terminal))
         );
 
-        let mut complete = AppServerSession::new();
+        let mut complete = sent_session();
         complete
             .ingest(initialize_response())
             .expect("initialize response is valid");

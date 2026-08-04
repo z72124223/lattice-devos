@@ -1,13 +1,20 @@
 //! Supervised Codex app-server adapter.
 
 mod identity;
+mod process;
 mod session;
 
 pub use identity::{
     CodexIdentityError, CodexIdentityErrorKind, CodexIdentityEvidence, CodexIdentityExpectation,
     preflight_codex_identity,
 };
-pub use session::{AppServerSession, InitializeEvidence, SessionError, SessionPhase};
+pub use process::{
+    AppServerRunConfig, AppServerRunError, AppServerRunErrorKind, AppServerRunEvidence,
+    CODEX_HOME_OWNERSHIP_MARKER_BYTES, CODEX_HOME_OWNERSHIP_MARKER_NAME, run_codex_app_server,
+};
+pub use session::{
+    AppServerSession, InitializeEvidence, SessionError, SessionPhase, SessionRequest,
+};
 
 use std::path::Path;
 
@@ -150,6 +157,9 @@ impl AppServerProtocol {
         let Some(turn) = params.get("turn").and_then(Value::as_object) else {
             return Err(ProtocolError::MalformedTerminal);
         };
+        if turn.get("items").and_then(Value::as_array).is_none() {
+            return Err(ProtocolError::MalformedTerminal);
+        }
         let Some(turn_id) = turn.get("id").and_then(Value::as_str) else {
             return Err(ProtocolError::MalformedTerminal);
         };
@@ -162,12 +172,21 @@ impl AppServerProtocol {
             Some("interrupted") => TurnStatus::Interrupted,
             _ => return Err(ProtocolError::MalformedTerminal),
         };
-        let error_message = turn
-            .get("error")
-            .filter(|error| !error.is_null())
-            .and_then(|error| error.get("message"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
+        let error = turn.get("error").filter(|error| !error.is_null());
+        let error_message = match (status, error) {
+            (_, None) => None,
+            (TurnStatus::Completed | TurnStatus::Interrupted, Some(_)) => {
+                return Err(ProtocolError::MalformedTerminal);
+            }
+            (TurnStatus::Failed, Some(error)) => {
+                let message = error
+                    .as_object()
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                    .ok_or(ProtocolError::MalformedTerminal)?;
+                Some(message.to_owned())
+            }
+        };
 
         Ok(Some(TurnOutcome {
             turn_id: turn_id.to_owned(),

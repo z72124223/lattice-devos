@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use lattice_codex_adapter::{
     CodexIdentityErrorKind, CodexIdentityExpectation, preflight_codex_identity,
@@ -13,7 +14,9 @@ static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 enum FakeMode {
     Success,
     VersionFailure,
+    VersionHang,
     SchemaFailure,
+    SchemaHang,
     EmptySchema,
 }
 
@@ -186,6 +189,34 @@ fn schema_output_must_be_caller_selected_and_absent() {
     );
 }
 
+#[test]
+fn version_and_schema_generation_share_one_bounded_deadline() {
+    for (mode, output_name) in [
+        (FakeMode::VersionHang, "version-hang"),
+        (FakeMode::SchemaHang, "schema-hang"),
+    ] {
+        let fixture = Fixture::new(mode);
+        let digest = sha256_bytes(&fs::read(&fixture.launcher).expect("read launcher"));
+        let expectation =
+            CodexIdentityExpectation::new(fixture.launcher.clone(), "codex-cli 0.144.6", digest);
+        let started = Instant::now();
+
+        assert_error(
+            expectation.preflight_with_deadline(
+                &fixture.launcher,
+                &fixture.output(output_name),
+                Instant::now() + Duration::from_millis(250),
+            ),
+            CodexIdentityErrorKind::Timeout,
+        );
+
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "timed preflight must terminate its owned launcher promptly"
+        );
+    }
+}
+
 fn preflight_with_actual_digest(
     fixture: &Fixture,
     output_name: &str,
@@ -228,12 +259,36 @@ fn expected_schema_bundle_digest(files: &[(String, Vec<u8>)]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"lattice.codex-app-server.schema-bundle.v1\0");
     for (relative, bytes) in ordered {
+        let canonical = canonical_json(bytes);
         hasher.update((relative.len() as u64).to_be_bytes());
         hasher.update(relative.as_bytes());
-        hasher.update((bytes.len() as u64).to_be_bytes());
-        hasher.update(bytes);
+        hasher.update((canonical.len() as u64).to_be_bytes());
+        hasher.update(canonical);
     }
     hex_digest(hasher.finalize().as_ref())
+}
+
+fn canonical_json(bytes: &[u8]) -> Vec<u8> {
+    fn normalize(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.into_iter().map(normalize).collect())
+            }
+            serde_json::Value::Object(values) => {
+                let mut entries: Vec<_> = values.into_iter().collect();
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                let mut normalized = serde_json::Map::new();
+                for (key, value) in entries {
+                    normalized.insert(key, normalize(value));
+                }
+                serde_json::Value::Object(normalized)
+            }
+            scalar => scalar,
+        }
+    }
+
+    let value = serde_json::from_slice(bytes).expect("fixture schema is valid JSON");
+    serde_json::to_vec(&normalize(value)).expect("canonical fixture JSON serializes")
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -249,15 +304,21 @@ fn hex_digest(bytes: &[u8]) -> String {
 #[cfg(windows)]
 fn write_fake_launcher(root: &Path, source: &Path, mode: FakeMode) -> PathBuf {
     let launcher = root.join("fake-codex.cmd");
-    let version_action = if matches!(mode, FakeMode::VersionFailure) {
-        "exit /b 7".to_owned()
-    } else {
-        "echo codex-cli 0.144.6\r\nexit /b 0".to_owned()
+    let version_action = match mode {
+        FakeMode::VersionFailure => "exit /b 7".to_owned(),
+        FakeMode::VersionHang => "ping -n 60 127.0.0.1 >nul\r\nexit /b 0".to_owned(),
+        FakeMode::Success
+        | FakeMode::SchemaFailure
+        | FakeMode::SchemaHang
+        | FakeMode::EmptySchema => "echo codex-cli 0.144.6\r\nexit /b 0".to_owned(),
     };
     let schema_action = match mode {
         FakeMode::SchemaFailure => "exit /b 9".to_owned(),
+        FakeMode::SchemaHang => {
+            "mkdir \"%~4\"\r\nping -n 60 127.0.0.1 >nul\r\nexit /b 0".to_owned()
+        }
         FakeMode::EmptySchema => "mkdir \"%~4\"\r\nexit /b 0".to_owned(),
-        FakeMode::Success | FakeMode::VersionFailure => format!(
+        FakeMode::Success | FakeMode::VersionFailure | FakeMode::VersionHang => format!(
             "mkdir \"%~4\"\r\nmkdir \"%~4\\v2\"\r\ncopy /y /b \"{}\" \"%~4\\z-last.json\" >nul\r\ncopy /y /b \"{}\" \"%~4\\v2\\a-first.json\" >nul\r\nexit /b 0",
             source.join("z-last.json").display(),
             source.join("v2").join("a-first.json").display(),
@@ -275,15 +336,19 @@ fn write_fake_launcher(root: &Path, source: &Path, mode: FakeMode) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
     let launcher = root.join("fake-codex");
-    let version_action = if matches!(mode, FakeMode::VersionFailure) {
-        "exit 7".to_owned()
-    } else {
-        "printf 'codex-cli 0.144.6\\n'\nexit 0".to_owned()
+    let version_action = match mode {
+        FakeMode::VersionFailure => "exit 7".to_owned(),
+        FakeMode::VersionHang => "while :; do :; done".to_owned(),
+        FakeMode::Success
+        | FakeMode::SchemaFailure
+        | FakeMode::SchemaHang
+        | FakeMode::EmptySchema => "printf 'codex-cli 0.144.6\\n'\nexit 0".to_owned(),
     };
     let schema_action = match mode {
         FakeMode::SchemaFailure => "exit 9".to_owned(),
+        FakeMode::SchemaHang => "mkdir \"$4\"\nwhile :; do :; done".to_owned(),
         FakeMode::EmptySchema => "mkdir \"$4\"\nexit 0".to_owned(),
-        FakeMode::Success | FakeMode::VersionFailure => format!(
+        FakeMode::Success | FakeMode::VersionFailure | FakeMode::VersionHang => format!(
             "mkdir -p \"$4/v2\"\ncp \"{}\" \"$4/z-last.json\"\ncp \"{}\" \"$4/v2/a-first.json\"\nexit 0",
             source.join("z-last.json").display(),
             source.join("v2").join("a-first.json").display(),
