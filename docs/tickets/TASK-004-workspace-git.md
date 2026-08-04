@@ -3,7 +3,7 @@ ticket_id: TASK-004
 spec_id: SPEC-001
 module_id: workspace-git
 constitution_version: 1.0
-status: complete
+status: partial
 parallel_safe: false
 depends_on:
   - TASK-001
@@ -80,28 +80,40 @@ Every implementation group began with an observed failing focused test:
 |---|---|
 | Project lock and Git adapter | missing modules / missing `verifyIntegration` |
 | Staged/unstaged evidence | `states` was absent |
+| Endpoint-diff opacity | a staged change disappeared when the worktree copy returned to base |
 | Ownership and containment | forged marker removed another worktree; junction inspection escaped |
 | Fail-before-side-effect roots | external lock/ownership directories were created before rejection |
-| Lock integrity | malformed stored record, invalid clock, and missing counter were accepted |
+| Lock integrity | malformed record, invalid clock, missing counter, and rolled-back lease were accepted |
 | Concurrent first acquire | loser was misclassified `LOCK_UNKNOWN_STATE` |
 | Git/lock interoperability | exact lock metadata caused `REPOSITORY_DIRTY` |
-| Git execution safety | `post-checkout` ran; repo-local external driver was accepted |
-| Integration recovery | injected evidence failure left a conflicted worktree and marker |
+| Git execution safety | hooks and local/global/env/include/worktree filter configurations executed external marker programs |
+| Ignored write evidence | ignored files were absent from changed-path evidence and could be removed silently |
+| Creation/integration recovery | injected post-create/evidence failures left worktrees, markers, or branches |
+| Branch provenance | failed creation could delete a pre-existing task branch |
 | Root input safety | empty/NUL root reached path resolution |
 
 GREEN evidence on 2026-07-29:
 
-- `node --test test/workspace-lock.test.js`: 9 passed.
-- `node --test test/git-workspace.integration.test.js`: 11 passed.
+- `node --test test/workspace-lock.test.js`: 10 passed.
+- `node --test test/git-workspace.integration.test.js`: 25 passed.
 - 20 repeated concurrent-acquire trials: 20 passed.
 - `npm.cmd run verify`: exit 0, `check=ok files=55 constitutions=7`,
-  38 tests passed.
+  53 tests passed.
 - `git diff --check`: exit 0.
 
-The adapter disables repository hooks, disables `core.fsmonitor`, rejects
-repo-local external filter/merge/diff drivers, validates canonical
-ownership/common-directory evidence, and never uses shell interpolation,
-`force`, `reset`, `clean`, or ours/theirs conflict selection.
+These results belong to an earlier TASK-004 snapshot. Later uncommitted review
+changes have not received a complete current verification result: the V2
+replanning pass timed out while running `npm.cmd run verify`, and fencing-token
+increment still needs a safe-integer/overflow fail-closed regression. This
+ticket is therefore `partial`, not current-tree complete.
+
+The adapter disables repository hooks and `core.fsmonitor`; isolates
+system/global Git config and attributes; removes inherited Git configuration
+injection; rejects local/worktree includes and external filter/merge/diff
+drivers; rechecks every driver-sensitive command; and reports ignored files as
+scope evidence. It validates canonical ownership/common-directory evidence and
+never uses shell interpolation, `force`, `reset`, `clean`, or ours/theirs
+conflict selection.
 
 ## Human Gate
 

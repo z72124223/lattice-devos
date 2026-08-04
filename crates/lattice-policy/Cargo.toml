@@ -1,0 +1,18 @@
+[package]
+name = "lattice-policy"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lattice-contracts = { path = "../lattice-contracts" }
+lattice-task-domain = { path = "../lattice-task-domain" }
+
+[dev-dependencies]
+lattice-approval-verifier = { path = "../lattice-approval-verifier" }
+lattice-task-ledger = { path = "../lattice-task-ledger" }
+lattice-writer-lease = { path = "../lattice-writer-lease" }
+
+[lints]
+workspace = true

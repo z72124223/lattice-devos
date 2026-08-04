@@ -1,202 +1,771 @@
-# LATTICE DevOS v1.0 Plan
+# LATTICE DevOS V2 Plan
 
 ## Goal
 
-Build a local, offline-first Phase 1 MVP for **LATTICE DevOS v1.0 — Controlled
-Swarm** that enforces:
+Build **LATTICE DevOS — 織網 AI 開發中樞** as a general-purpose,
+local-first autonomous AI development platform that can improve its own
+development workflows safely over time.
 
-> One Gateway. One Truth. One Writer.
+The target composition is:
 
-The MVP must make planning, execution approval, single-writer implementation,
-verification, read-only review, merge approval, scope control, and audit
-evidence observable and testable without using a real model, external API,
-cloud deployment, Hostinger account, or the playmate website.
+> OpenClaw + Rust LATTICE Core + PostgreSQL + Codex + Graphify + Hermes +
+> Codebase Memory
+
+The governing invariant remains:
+
+> **One Gateway. One Truth. One Writer.**
+
+## User Execution Preference — 2026-07-29
+
+The user changed the project workflow preference to direct execution without
+routine human review prompts: project changes may be submitted automatically,
+and the user will report problems for correction. The same preference applies
+to installation, credential setup, database connections, and external-component
+activation from the user's project perspective.
+
+This preference changes the interaction policy, not the platform safety
+boundary. System-enforced restrictions on credentials, accounts, payment,
+public exposure, irreversible deletion, legal commitments, and other protected
+operations remain fail-closed. Such actions must be reported as blocked or
+gated rather than silently performed.
 
 ## Global Strategy
 
-1. Preserve the user-provided request as the authoritative product boundary.
-2. Define behavior, module constitutions, and dependency direction before code.
-3. Use a dependency-light Node.js core with injected ports so all orchestration
-   can be exercised through a deterministic Fake Runtime.
-4. Use a hash-chained Task Ledger as the only durable control-plane truth;
-   derive task status by replay instead of maintaining a second mutable task
-   record.
-5. Enforce the single writer twice: by role permissions and by an exclusive
-   repository/project lock with a fencing token.
-6. Treat execution and merge as separate, digest-bound human approvals.
-7. Make integration fail closed on conflicts; the Integrator may mutate Git
-   metadata but may never edit product code to resolve a conflict.
-8. Treat Git-based Scope Check as a detection gate, not an operating-system
-   sandbox or proof of hostile-process containment.
-9. Keep the OpenClaw integration as a current-format scaffold with static local
-   checks; live OpenClaw validation remains a later capability-preflight gate.
-10. Implement one ticket at a time with recorded RED/GREEN evidence.
+1. Use OpenClaw as the only normal human command, status, task-approval, and
+   stop gateway. Keep protected core-release approval on a guardian-owned
+   OS-authenticated administrative surface.
+2. Put orchestration, policy, task state transitions, capability verification,
+   scope enforcement, and adapter supervision in a Rust control core.
+3. Use PostgreSQL as the only durable control-plane truth for task events,
+   approvals, writer leases, evidence, capability observations, memory
+   promotion, and release state.
+4. Let Codex app-server be the only product-code Implementer, operating in one
+   LATTICE-owned Git worktree while holding a current lease and fencing token.
+5. Keep Graphify's product-source input read-only and route its required output
+   to a separate LATTICE artifact root. Treat graph output as a versioned,
+   content-addressed derived snapshot whose `EXTRACTED` edges are evidence and
+   whose inferred edges remain leads until confirmed.
+6. Keep Hermes' product input read-only and enforce whole-process OS
+   containment. It may research, reflect, summarize failures, and propose
+   memory/skill/improvement candidates, but arbitrary output crosses the
+   boundary only through schema/provenance validation and never becomes
+   authoritative by itself.
+7. Make Codebase Memory a LATTICE-owned PostgreSQL subsystem with provenance,
+   fact/observation/inference labels, review status, revision history, project
+   isolation, and conservative retrieval.
+8. Implement self-improvement as an evidence loop: observe -> propose -> test
+   in isolation -> review -> stage -> activate through an independent guardian
+   -> monitor -> rollback. LATTICE may never silently approve and overwrite
+   itself.
+9. Preserve the existing Node.js implementation as a prototype and
+   characterization suite. Port proven behavior incrementally; do not reset,
+   delete, or bulk-rewrite the current dirty worktree.
+10. Build one verified vertical slice at a time. Do not pause for routine
+    project review prompts; preserve verification evidence and automatically
+    submit safe local changes. Protected system actions remain fail-closed.
 
 ## Non-Goals
 
-- Purchase, configure, or deploy Hostinger Managed OpenClaw.
-- Authenticate OpenAI, Codex, Telegram, GitHub, or any other account.
-- Use a real model, paid credit, API key, OAuth token, or external inference.
-- Read or modify the playmate website repository.
-- Add Graphify or Hermes to the Phase 1 execution path.
-- Merge to the primary branch, publish a package, push a repository, or deploy.
-- Claim that local scaffold checks prove Hostinger or OpenClaw runtime support.
+- Build or modify any particular website or unrelated user project.
+- Make a website, managed cloud service, messaging bot, or cloud deployment a
+  prerequisite for the local platform.
+- Create an unconstrained self-modifying agent.
+- Allow OpenClaw, Hermes, Graphify, generated files, or a second database to
+  become an independent truth source.
+- Allow Hermes, Graphify, reviewers, the Integrator, or the upgrade controller
+  to write product code.
+- Let OpenClaw and the Rust core concurrently own or resume the same writable
+  Codex native thread.
+- Install OpenClaw, Graphify, Hermes, `uv`, crates, or database extensions
+  during the planning gate.
+- Create PostgreSQL roles/databases, use credentials, call a model, pay, publish,
+  push, merge, or deploy before its explicit execution gate.
+- Claim full autonomy, safety, or live compatibility from plans, static files,
+  local unit tests, or fake adapters alone.
 
 ## Scope
 
-In scope:
+Current V2 replan scope:
 
-- Task state machine and Task Packet JSON Schema.
-- Event-sourced Task Ledger, deterministic replay, command idempotency, and
-  optimistic sequence checks.
-- Agent roles, capabilities, maximum-agent policy, and single-writer invariant.
-- Policy Engine for approvals, protected actions, and scope checks.
-- Exclusive project lock.
-- Git branch/worktree adapter with an injectable command executor.
-- Hash-chained append-only audit log with secret redaction.
-- Deterministic Fake Runtime and end-to-end orchestration tests.
-- Native OpenClaw plugin scaffold for the authenticated `/lattice` command.
-- Local verification scripts, CI definition, documentation, and handoff.
+- Record the user-authoritative direction change.
+- Replace the active Node-first plan and product charter.
+- Draft a behavior-focused V2 specification.
+- Draft architecture decisions for Rust/polyglot boundaries, PostgreSQL truth,
+  adapter topology, and self-upgrade safety.
+- Propose versioned amendments for existing modules and constitutions for new
+  modules without activating them.
+- Classify old tickets and the Node prototype as preserved legacy evidence.
+- Update the workflow ledger and durable handoff.
 
-Expected repository root:
+Implementation after approval:
+
+- Rust workspace and local service/CLI.
+- Typed fake OpenClaw IPC contract in the first vertical slice; CLI remains a
+  test/recovery client over the same IPC rather than a second normal gateway.
+- PostgreSQL schema migrations and transactional repositories.
+- V2 Task Packet and compatibility reader for V1 evidence.
+- Policy, project registry, event ledger, writer leases/daemon epochs, approval
+  verification, artifact store, Git worktrees, and exact scope checks.
+- Fake adapters followed by capability-gated Codex, Graphify, Hermes, and
+  OpenClaw adapters.
+- Codebase Memory and a guarded self-upgrade controller.
+
+Governance/source worktree:
 
 `C:\Users\f7212\Documents\Codex\2026-07-29\files-mentioned-by-the-user-2026\outputs\lattice-devos`
 
+Active V2 implementation worktree:
+
+`C:\Users\f7212\Documents\Codex\2026-07-29\files-mentioned-by-the-user-2026\outputs\lattice-devos-v2`
+
+## MVP Definitions And Current Status
+
+An MVP is complete only when its named exit evidence is recorded in the
+workflow ledger and handoff. Static design, a fake adapter, a passing unit test,
+and an exact-version live preflight are separate evidence levels and are never
+substituted for one another.
+
+| MVP | Status | Required outcome | Exit evidence | Explicitly not claimed |
+|---|---|---|---|---|
+| MVP-0 — Rust foundation | **COMPLETE — 2026-07-29** | TASK-008 workspace/bootstrap plus TASK-009 versioned contracts and ports; four active V2 module constitutions; no provider I/O | local format, Clippy, 14 Rust tests, 38 preserved Node tests, independent code/architecture review | no PostgreSQL durability, live provider, autonomous execution, release, merge, or deployment |
+| MVP-1 — Offline control core | **CURRENT — TASK-021 complete; 12/22 tickets (54.5%)** | Rust Task Domain, Policy, Ledger, Registry, Writer Lease, approvals, artifacts, PostgreSQL repositories, workspace/scope enforcement, fake gateway/Codex/reviewer, and one offline end-to-end task flow | focused/full tests, disposable PostgreSQL transaction/concurrency/restart evidence, fake adapter contracts, scope isolation, review and integration ledger | no claim that OpenClaw, Codex, Graphify, or Hermes is live-compatible |
+| MVP-2 — Local component integration | **PLANNED** | exact-version local OpenClaw, Codex, Graphify, and Hermes adapters plus project-isolated Codebase Memory, all behind MVP-1 authority boundaries | fake-to-live contract comparison, binary/schema/capability identity, OS boundary evidence, fault/cancel/reconciliation tests, memory benchmark | no unconstrained agent, second writer/truth, public service, or self-release authority |
+| MVP-3 — Guardian-protected autonomy | **PLANNED** | outcomes can propose normal improvement tasks; immutable A/B candidates pass independent review, protected guardian claim, drain/canary/health, restart reconciliation, and rollback | fault-injected activation saga, nonce/epoch/admission enforcement, complete-drain proof, write canary, power-loss and rollback drill | no silent policy/constitution/credential/public-exposure change and no in-place self-overwrite |
+
+Planned dependency sequence:
+
+- MVP-1: TASK-010 through TASK-031, decomposed one bounded ticket at a time.
+  TASK-018 through TASK-025 cover typed PostgreSQL boundaries, disposable
+  PostgreSQL durability, and the owned-root Artifact filesystem adapter;
+  TASK-026 through TASK-027 cover Workspace Git and Scope Check; TASK-028
+  through TASK-031 cover Review Runtime, fake Codex, one offline end-to-end
+  flow, retained V1 compatibility, and the MVP-1 exit gate. The expanded range
+  replaces the earlier under-scoped TASK-019 endpoint; it does not broaden any
+  individual ticket.
+- MVP-2: exact-version adapter and memory tickets created only after the MVP-1
+  exit gate passes.
+- MVP-3: improvement-loop and guardian tickets created only after the MVP-2
+  authority and containment evidence is current.
+
+MVP-0 completion is a foundation milestone, not a claim that the full platform
+already runs. MVP-1 through MVP-3 remain incomplete until their direct exit
+evidence exists.
+
 ## Confirmed Facts
 
-- The user explicitly named the repository `lattice-devos`, the primary OpenClaw
-  agent `lattice-pm`, and the command `/lattice`.
-- The user explicitly limited v1 to at most four agents and exactly one
-  code-writing Implementer; reviewers and planning/mapping roles are read-only.
-- Execution, merge, and production deployment are separate approval boundaries.
-- Phase 1 must include a task state machine, Task Packet Schema, agent
-  permissions, Policy Engine, Git branch/worktree handling, Scope Check, Audit
-  Log, Fake Runtime tests, and an OpenClaw plugin scaffold.
-- Phase 1 must not use real model credit, modify the playmate website, sign in to
-  Hostinger, or deploy to cloud.
-- The supplied attachment directory contains only `pasted-text.txt`; the
-  referenced 17-file ZIP and two linked Markdown deliverables are not present in
-  that supplied directory.
-- A read-only search of the supplied attachments, relevant Documents,
-  Downloads, OneDrive locations, Git configs, and the contents of 17 discovered
-  ZIP files found no LATTICE blueprint/archive or prior repository.
-- The starting workspace was empty and was not a Git repository when audited on
-  2026-07-29.
-- Local commands currently available include Git 2.54.0, Node.js 24.16.0,
-  npm 11.13.0, and pnpm 11.9.0.
-- Current official OpenClaw documentation requires a native plugin to include
-  `openclaw.plugin.json`, package entry metadata, and a runtime module; custom
-  slash commands use `api.registerCommand(...)`.
+- The user explicitly defined LATTICE as a separate, general AI development
+  platform for their computer and explicitly excluded the unrelated website
+  project from the product.
+- The user explicitly requested Rust, PostgreSQL, OpenClaw, Codex, Graphify,
+  Hermes, Codebase Memory, and continuous improvement/iteration.
+- The existing repository is a Node.js Phase 1 prototype on
+  `feature/phase1-controlled-swarm`.
+- The current worktree contains eight pre-existing modified paths from TASK-004
+  security work; no reset, clean, branch switch, or broad move is safe.
+- Existing V1 contracts preserve valuable invariants: immutable task specs,
+  digest-bound approvals, event replay, default deny, one Implementer, fencing,
+  isolated worktrees, fail-closed conflicts, detection-only scope checks, and a
+  deterministic Fake Runtime.
+- Existing V1 contracts also conflict with the new direction by making Node.js
+  and a file ledger the core while excluding Graphify, Hermes, long-term
+  memory, PostgreSQL, and real Codex execution.
+- No SQLite implementation exists in this repository. This is not a
+  SQLite-to-PostgreSQL migration.
+- Local evidence on 2026-07-29 confirms `rustc 1.97.1`, `cargo 1.97.1`,
+  PostgreSQL client 17.10, a running `postgresql-x64-17` service, and
+  `127.0.0.1:5432` accepting connections.
+- `psql.exe` exists under `C:\Program Files\PostgreSQL\17\bin` but is not on the
+  current PATH. Database identity, credentials, roles, and migration permission
+  have not been tested.
+- `codex-cli 0.144.6` is available. OpenClaw, Graphify, Hermes, and `uv` are not
+  currently found on PATH.
+- TASK-012 baseline verification on 2026-07-29 passes 94 Rust tests and 38
+  preserved Node tests. No Project Registry crate or active Project Registry
+  constitution existed before the TASK-012 governance pass.
+- TASK-012 completion verification on 2026-07-29 passes Contracts 11, Project
+  Registry 16, Policy 70, full Rust workspace 118, and preserved Node 38
+  tests; independent code, security, architecture, and governance reviews all
+  pass.
+- Official OpenClaw documents a Codex app-server harness and a
+  TypeScript/ESM plugin boundary. The current official Codex manual describes
+  app-server as experimental and documents bidirectional JSON-RPC-shaped
+  messages over stdio JSONL.
+- Official Graphify documentation describes code extraction and distinguishes
+  extracted from inferred graph relationships; it also writes graph artifacts,
+  so only its source boundary—not the whole process—is read-only.
+- Official Hermes documentation exposes programmatic integration and an
+  optional Codex app-server runtime.
+- The dated, tag-pinned research snapshot and adapter caveats are recorded in
+  `docs/reviews/COMPONENT_CONTRACT_EVIDENCE_2026-07-29.md`.
 
 ## Assumptions
 
-- Node.js ESM is the smallest coherent core implementation because the target
-  OpenClaw plugin is a Node/TypeScript ESM package and the verified local
-  runtime already satisfies OpenClaw's documented Node 24 floor.
-- The core can avoid third-party runtime dependencies; the OpenClaw scaffold
-  can declare OpenClaw only as a peer dependency and defer live package
-  resolution to Phase 3.
-- The pasted request contains enough Phase 1 behavior to proceed even if the
-  referenced ZIP is unavailable. Any later recovered blueprint must be compared
-  against this plan before code is changed.
-- A local feature branch is sufficient for building this new repository. The
-  product's own worktree behavior will be tested in disposable repositories.
-- `max_agents` counts concurrently scheduled worker-agent roles; the
-  deterministic Orchestrator is control-plane code, not an additional model
-  agent.
-- Phase 1 approval authentication is an injected verifier exercised with fake
-  owner evidence. Telegram/OpenClaw channel authentication remains a later
-  live preflight and cannot be inferred by the core.
+- "For my computer" means the first supported deployment is one Windows machine
+  with loopback-only services; WSL/Linux packaging may follow after the local
+  vertical slice.
+- Rust-first does not mean every dependency is rewritten in Rust. OpenClaw's
+  thin plugin remains TypeScript/ESM, while Graphify and Hermes remain
+  separately supervised Python processes.
+- Hermes' sessions, memory, skills, tools, and optional Codex runtime overlap
+  LATTICE responsibilities; the proposed adapter therefore isolates them and
+  accepts only candidate output. This is an architecture inference, not an
+  upstream guarantee.
+- PostgreSQL full-text search is the zero-extension retrieval baseline to
+  benchmark. It is not assumed sufficient for Traditional Chinese,
+  mixed-language, symbol/path, error-code, or exact-filename queries. Vector or
+  other indexing remains optional and requires measured need plus approval.
+- The Node prototype remains executable only as characterization evidence until
+  equivalent Rust behavior is verified. It is not merge-ready or a production
+  fallback.
+- Self-improvement may automatically collect local evidence and prepare
+  proposals. Promotion of a LATTICE core release remains human-approved in the
+  first hardened version.
 
-## Open Questions
+## Resolved Architecture Decision
 
-- The exact Hostinger runtime and installed OpenClaw version are intentionally
-  unknown until the later capability preflight; live plugin validation is
-  therefore not part of Phase 1 acceptance.
+The Rust core owns the single writable Codex app-server process/thread and
+OpenClaw remains the thin normal gateway. The user approved this topology and
+the V2 module direction on 2026-07-29. This removes the former planning blocker;
+each implementation ticket must still prove its own scope, capability, and
+safety gates.
 
-This open question does not change the explicit offline Phase 1 safety boundary.
+TASK-012 resolves Registry/Policy ownership without a dependency cycle:
+`lattice-contracts` 1.2 owns only neutral Project ID/class/lifecycle,
+physical-Git-ref, fixed-producer receipt, and full authority-head
+representations; Project Registry 1.1 owns the complete identity/lifecycle
+aggregate, accepted/pending reservations, defensive blocking, and receipt
+issuance; Policy 2.3 owns only Task-Spec-bound receipt sufficiency and compares
+an independent current owner head. Registry and Policy do not depend on one
+another. Future Orchestrator/PostgreSQL performs authenticated, serialized
+current-head composition.
+
+TASK-013 resolves Ledger/Policy resource ownership by the same acyclic pattern:
+Contracts 1.3 owns neutral immutable full Ledger head/resource receipt
+representation; Task Ledger 2.0 owns event/request/receipt hashes, replay,
+resource projection, and fake issuance; Policy 2.4 owns only Task-Spec-bound
+receipt/current-head sufficiency. Task Ledger and Policy do not depend on one
+another, and Task Ledger does not duplicate Task Domain transition legality.
+Authenticated durable currentness plus the atomic resource/effect/outbox claim
+remain future Orchestrator/PostgreSQL responsibilities.
 
 ## Acceptance Ownership
 
 | Acceptance | Direct evidence Codex can produce | Final owner |
 |---|---|---|
-| State, approval, scope, lock, Git, and audit behavior | Automated local tests and command exit codes | Codex |
-| OpenClaw scaffold file/manifest consistency | Static local checks against current official format | Codex |
-| Live OpenClaw plugin loading and `/lattice` routing | Requires a managed/local OpenClaw runtime in Phase 3 | User capability-preflight gate |
-| Hostinger purchase, account, OAuth, tokens | Not authorized in Phase 1 | User |
-| Merge to primary branch | Requires explicit approval after evidence review | User |
+| Plan/spec/ADR consistency and project isolation | Local file inspection and deterministic checks | Codex |
+| Rust behavior and module contracts | Unit, property, integration, and characterization tests | Codex |
+| PostgreSQL transaction, replay, lease, and migration behavior | Disposable local test database evidence | Codex under an exact bounded ticket |
+| Codex/Graphify/Hermes/OpenClaw adapter compatibility | Exact-version capability preflight with fake-to-live comparison | Codex when the required local capability is available |
+| Quality of learned preferences or improvement proposals | Samples, provenance, counterexamples, rollback evidence | Evidence gate; user may override or report corrections |
+| Self-upgrade promotion and recovery acceptance | A/B activation, health window, rollback drill | Independent guardian plus protected OS-authenticated release gate |
+| Installation and local component setup | Exact package/source/version plus post-install verification | Codex under a bounded ticket |
+| Credentials, account/payment actions, public exposure, irreversible actions | Authenticated protected-action evidence | User/protected system surface |
+| Primary-branch merge | Current checks, review, synchronization, explicit authorization | User |
 
 ## Implementation Steps
 
-- [x] Step 1: Read the request, active workflow rules, official OpenClaw
-  references, and audit the starting workspace.
-- [x] Step 2: Create the workflow ledger, behavior specification,
-  ADRs, module constitutions, and dependency-aware tickets.
-- [x] Step 3: Initialize Git and establish the documented
-  feature-branch plan.
-- [x] Step 4: Implement Task Packet and deterministic state
-  transitions using ticket-scoped RED/GREEN cycles.
-- [x] Step 5: Implement the exclusive project lock and Git
-  worktree/integration adapter in TASK-004, including disposable-repository
-  validation.
-- [ ] **CURRENT — Step 6:** Implement detection-only Scope Check in TASK-005.
-- [ ] Step 7: Implement the deterministic Orchestrator/Fake Runtime vertical
-  slice in TASK-006 using the completed Task Ledger.
-- [ ] Step 8: Add and statically verify the OpenClaw `/lattice` plugin scaffold.
-- [ ] Step 9: Run focused and full verification, independent code review,
-  architecture review, and integration-readiness checks.
-- [ ] Step 10: Write `HANDOFF.md` with the complete workflow ledger and exact
-  human gates.
+- [x] Step 1: Audit the repository, dirty Git state, original attachment,
+  current local toolchain, and official component contracts.
+- [x] Step 2: Complete the V2 plan, charter, draft specification,
+  proposed ADRs, module-amendment proposal, workflow ledger, architecture
+  review, and handoff.
+- [x] Step 3: Obtain explicit user approval for the proposed Codex ownership
+  topology and versioned module amendments. Approved by the user on
+  2026-07-29 with `好 開始執行`.
+- [x] Step 4: Create dependency-aware V2 tickets and a branch/worktree plan that
+  preserves the dirty Node prototype.
+- [x] Step 5: Build Rust contracts/ports plus fake PostgreSQL, Artifact Store,
+  Approval Verifier, and fake OpenClaw IPC adapters; port approved Task
+  Domain/Policy/canonical-byte fixtures. The CLI is test/recovery-only and
+  calls the same IPC.
+  - TASK-008 bootstrap slice: implemented and locally verified on 2026-07-29;
+    Step 5 remains current because production contracts, ports, fake adapters,
+    and retained fixtures are not implemented yet.
+  - TASK-009 established dependency-only `lattice-contracts` and
+    `lattice-ports` crates. OpenClaw is modeled as the inbound
+    `GatewayService`, while PostgreSQL, Codex, Graphify, and Hermes remain
+    abstract outbound boundaries. This slice defines no orchestration or
+    domain transition, activates no fake/live provider module, and performs no
+    I/O. Provider fakes remain separate sequential tickets aligned with Steps
+    5, 8, 9, and 10.
+    - Completed and locally verified on 2026-07-29. Independent code review's
+      component/boundary cross-label P1 was fixed with lane-specific evidence
+      return types; final code review has no findings and architecture review
+      has no blocker.
+    - Step 5 remains current because Task Domain/Policy/canonical bytes and the
+      fake PostgreSQL, Artifact Store, Approval Verifier, and OpenClaw IPC
+      slices were not all implemented at that point.
+  - TASK-010 activated Task Domain V2 and the pure `lattice-cjson-1` mechanism.
+    It freezes Task Spec hashing, strict scalar/path validation, the V1
+    transition characterization, and deterministic DAG evidence.
+    - Completed and locally verified on 2026-07-29: canonical 8, Task Domain 6,
+      Rust workspace 28, and preserved Node 38 tests pass; independent code
+      review has no findings and architecture review has no blocker.
+    - No database, filesystem, process, network, provider, credential, or
+      product-repository I/O was added.
+  - **COMPLETED TASK-011:** activate Policy Engine V2 and bind the immutable Task
+    Spec, role/action/state, project/snapshot, runtime admission,
+    capability/provider identity, network/deployment/cost, risk/approval,
+    writer/fencing, resources, memory, and upgrade facts to deterministic
+    default-deny decisions.
+    - ADR-009 makes the approved pure dependency edge explicit:
+      `lattice-policy -> lattice-task-domain + lattice-contracts`.
+    - Policy evaluates typed authority facts but neither produces nor persists
+      them. TASK-011 performs no database, filesystem, process, network,
+      provider, credential, payment, publication, deployment, or
+      product-repository I/O.
+    - Independent review RED (2026-07-29): generic-gate bypass and unbound
+      merge/cost/writer/memory/protected-release subjects were reproduced.
+    - Independent re-review was initially `BLOCKED` on seven exact-subject
+      gaps, all closed with RED/GREEN evidence: protected-release approval
+      binds the Guardian runtime identity; merge conflict/readiness is a fresh
+      `workspace-git` fact bound to the reviewed subject and target head;
+      resource usage must be a fresh Task-Ledger-owned fact bound to the same
+      Task Spec and one accounting currency; runtime reconciliation must use a
+      dedicated typed normal/guardian recovery subject; primary-branch Git refs
+      must be fully qualified local `refs/heads/*` Registry identities;
+      rollback reverses the failed activation slots with a strictly newer
+      epoch; and writer
+      release must bind the requesting actor.
+    - Security/code re-review RED (2026-07-29): Git revision pseudo-ref `HEAD`
+      could masquerade as a feature branch; a same-Task-Spec Resource Fact
+      could be replayed for another effect claim; rollback carried an unused
+      activation digest instead of the exact typed protected-release receipt;
+      and Task Domain admitted decimal budgets longer than Policy can parse.
+      The active repair rejects ambiguous Git namespaces, gives each resource
+      gate an independent exact Ledger observation subject, uses the typed
+      protected-release receipt for rollback, and shares one 256-byte canonical
+      decimal contract with 127 integer digits and 128 fractional digits, so
+      mixed-scale checked arithmetic also remains representable.
+    - Final Windows adversarial RED (2026-07-29): case-insensitive Git storage
+      can resolve `refs/heads/Main` and `refs/heads/main` to the same physical
+      ref while Policy string comparison classifies them differently. Registry
+      and Workspace Git must therefore supply the same owner-produced physical
+      ref-identity digest; Policy classifies primary by that identity, never by
+      platform case guessing.
+    - Architecture re-review RED (2026-07-29): a typed recovery target alone
+      did not prove that an unknown effect, dead holder, replaced leadership,
+      or interrupted guardian saga had actually been reconciled. Normal
+      supervisor recovery may only move to `STOPPED`; restoring `ACTIVE`
+      requires the exact Guardian lane plus owner-produced durable
+      DB/boot/saga resolution evidence.
+    - The fixed decision precedence also applies to Worker Admission and Merge:
+      a requested external-cost effect is rejected before approval or resource
+      budget failures are reported.
+    - Completed and locally verified on 2026-07-29: Policy 66, Task Domain 6,
+      Rust workspace 94, and preserved Node 38 tests pass. Code, security, and
+      architecture re-reviews all return `PASS`; local combined integration
+      passes. Remote CI and merge readiness remain separately unavailable.
+  - **COMPLETED TASK-012:** activate the Project Registry owner contract and its
+    deterministic fake evidence boundary. Freeze registered project/snapshot
+    identity, fully qualified primary ref, physical `GitRefIdentity`,
+    repository drift/reconciliation, and exact owner receipt semantics before
+    PostgreSQL persistence or real Workspace Git consumes them.
+    - This directly supplies the owner side of TASK-011 project/merge facts and
+      records the future exact Scope Check receipt composition gate.
+    - It remains pure/fake and local: no live repository mutation, database,
+      credential, network, provider, publication, deployment, or protected
+      action.
+    - **Evidence/design pass complete:** baseline Rust 94 and Node 38 tests
+      pass; two independent read-only audits reject either
+      `policy -> registry` or `registry -> policy`.
+    - **Governance activated before code and review-amended:** ADR-010,
+      SPEC-002 v8, Project Registry 1.1, Contracts 1.2, Policy 2.3, and
+      TASK-012 freeze shared values, fixed-producer full-head receipts,
+      accepted/pending identity reservation, idempotent command receipts,
+      snapshot rotation, defensive blocking, and exact reconciliation.
+    - **Implementation RED/GREEN complete:** the pure fake Registry registers,
+      resolves, observes drift, suspends, reconciles, reserves pending
+      identities, rejects NFC/hash aliases, distinguishes zero-mutation
+      `Denied` from state-changing `Blocked`, exposes a fake current-head
+      lookup, and composes with Policy through the shared full-head contract.
+    - **Review RED/GREEN complete:** producer substitution, receipt security
+      field substitution, pending-identity front-running, authoritative
+      cross-project collision, Unicode normalization collision, and overbroad
+      uppercase pseudo-ref rejection were reproduced and repaired. Governance
+      was synchronized before final full verification and re-review.
+    - **Completion evidence:** Contracts 11, Registry 16, Policy 70, Rust
+      workspace 118, and Node 38 tests pass; format, Clippy, dependency,
+      forbidden-I/O, constitution, project, and diff checks pass. Final code,
+      security, architecture, and governance reviews return `PASS`; local
+      combined integration passes. Remote CI and merge readiness remain
+      separately unavailable.
+  - **COMPLETED TASK-013:** freeze the Rust Task Ledger V2 owner
+    boundary and deterministic fake append/replay/command-receipt/resource
+    behavior before PostgreSQL supplies durable event, outbox, and
+    resource-claim transactions.
+    - TASK-012 completion, V1 characterization, active Rust contracts, dirty
+      worktree, and Rust 118/Node 38 baselines were re-audited.
+    - SPEC-002 v9, ADR-011, Task Ledger 2.0, Contracts 1.3, Policy 2.4, and one
+      bounded TASK-013 ticket freeze the owner/dependency/current-head
+      contract before code.
+    - Task Ledger owns chain and resource replay only; Task Domain retains legal
+      task transitions and future Orchestrator composes both.
+    - Preserve One Truth: the fake is characterization/composition evidence,
+      never a second durable truth, restart proof, or permission to bypass the
+      PostgreSQL atomic resource/effect claim.
+    - Implementation and review RED/GREEN close complete raw snapshot/replay,
+      appended and denied receipt verification, cross-identity poisoning,
+      corrupt exact retry, uncreated-stream terminal-denial export, Task ID
+      parity, diagnostic bounds/secret leakage, full Policy substitution
+      matrices, and actual fake-owner current-head composition.
+    - Completion evidence: Contracts 13, Task Ledger 20, Policy 75, Rust
+      workspace 145, and preserved Node 38 tests pass. Format, Clippy,
+      dependency, no-I/O, constitution, project, and diff checks pass. Final
+      code/security and architecture reviews return `PASS`; local combined
+      integration passes.
+    - AC-27 is complete. PostgreSQL atomicity/durability/restart, authenticated
+      current heads, and live append planning remain explicitly open.
+  - **COMPLETED TASK-014:** freeze Writer Lease 1.0 as the next pure semantic
+    owner before PostgreSQL persists leases and fencing.
+    - Audit complete: V1 retains exact one-writer/holder/lease/fence intent but
+      its writable file counter can roll back/reuse a fence and issue a value
+      beyond JavaScript's safe integer range while validation still passes.
+    - Governance frozen before code: SPEC-002 v10, ADR-012, Writer Lease 1.0,
+      Contracts 1.4, Policy 2.5, TASK-014, and the workflow audit define one
+      reusable public planner/verifier plus deterministic fake.
+    - Remove Policy's remaining caller-owned lease active/current/role/epoch/
+      fence/count fields through a fixed-producer receipt plus independent
+      current owner head, following the Registry and Ledger pattern.
+    - Bound holder, worktree, process-start, task/spec, daemon epoch, positive
+      signed-BIGINT fencing/revision, heartbeat/expiry, suspect/revoke
+      evidence, exact command idempotency, and runtime-admission behavior.
+    - `DRAINING` denies heartbeats but permits exact release/recovery;
+      `CANARY` and `STOPPED` deny all user-project lease transitions;
+      `RECONCILIATION_REQUIRED` permits only typed recovery.
+    - Keep the fake I/O-free with injected time/process/admission evidence.
+      Concurrent acquisition, restart, database time, authenticated process
+      death, and old-connection fencing remain Step 6 PostgreSQL evidence, not
+      TASK-014 claims. AC-05 therefore stays open while new pure AC-28 is the
+      TASK-014 closure criterion.
+    - Implementation and review RED/GREEN close raw ingress, complete semantic
+      replay, rollback/overwrite, fake/live history, heartbeat expiry
+      regression, daemon-bound holder death, suspect/admission behavior, exact
+      Policy release composition, and denial-only receipt-tail truncation.
+    - Completion evidence: Writer Lease 24, Policy 81, Rust workspace 180, and
+      preserved Node 38 tests pass. Strict Clippy, format, dependency, no-I/O,
+      project/governance, V1 lock characterization, and diff checks pass.
+      Independent final code/security and architecture reviews return `PASS`
+      with zero remaining P0 through P3 finding; local combined integration
+      passes.
+    - AC-28 is complete. AC-05 remains open for PostgreSQL concurrency,
+      database time, atomic trusted-checkpoint persistence, restart,
+      authenticated recovery evidence, and stale live connection fencing.
+  - **COMPLETED TASK-015:** freeze Approval Verifier 1.0 before
+    PostgreSQL, OpenClaw approval IPC, or Guardian activation consumes approval
+    authority.
+    - The next slice removes Policy's remaining caller-owned approval
+      verification/currentness booleans using a fixed-producer receipt plus an
+      independently queried owner head, following Registry, Ledger, and Writer
+      Lease.
+    - The bounded first implementation is pure/fake: exact approval subject,
+      actor/authority/channel/session, target/spec, nonce, issue/expiry,
+      challenge/receipt, exact retry/reuse denial, and protected-versus-normal
+      authority separation.
+    - True OS authentication, trust-root/key access, database persistence,
+      clock/randomness, durable nonce consumption, IPC, activation, and product
+      effects remain later owner/adaptor tickets. In particular, protected
+      release nonce consumption remains exclusive to the future
+      Guardian/PostgreSQL atomic activation claim.
+    - Audit found a P1: Policy 2.5 accepts an unused caller subject digest,
+      five caller verification/currentness/self-approval Booleans, and two R3
+      review Booleans while only checking time strings for non-empty text.
+    - Governance is frozen before code in SPEC-002 v11, ADR-013, Approval
+      Verifier 1.0, Contracts 1.5, Policy 2.6, TASK-015, and the workflow audit.
+      Complete typed approval subjects move to Contracts representation so
+      Policy can compare the owner receipt without depending on Verifier/cjson.
+    - Approval Verifier cannot manufacture Review Runtime authority. R3 and
+      every independent-review-required allow path must fail closed until a
+      later bounded Review Runtime owner ticket supplies receipt/current-head
+      evidence.
+    - Implementation and review RED/GREEN closed Policy's independent-review
+      early-return and fact-memory bypasses, public challenge substitution,
+      incomplete golden/subject/trust/retry/rollback matrices, missing typed
+      revocation, and revocation-governance drift.
+    - Completion evidence: Contracts 25, Approval Verifier 28, Policy 84, Rust
+      workspace 218, and preserved Node 38 tests pass. Strict Clippy, format,
+      dependency, no-I/O, legacy-Boolean, project/governance, and diff checks
+      pass. Independent final code/security and architecture reviews return
+      `PASS` with zero remaining P0 through P3 finding; local combined
+      integration passes.
+    - AC-29 is complete. Live authentication, PostgreSQL uniqueness/database
+      time/durability/restart/atomic claim, OpenClaw approval IPC, Review
+      Runtime, Guardian activation, and product effects remain explicitly
+      open.
+  - **COMPLETED TASK-016:** freeze and implement Artifact Store 1.0 before
+    Graphify, Hermes, Codebase Memory, PostgreSQL, or provider adapters can
+    retain or reference generated evidence.
+    - Repository/task-boundary audit confirms TASK-015 still serves the
+      platform-wide MVP-1 goal; the configured local project-router entry point
+      is absent, so PLANS/HANDOFF/Git state provide the direct route.
+    - Governance is frozen before code through SPEC-002 v12, ADR-014,
+      Artifact Store 1.0, Contracts 1.6, TASK-016, and its workflow audit.
+    - Contracts 1.6 and one atomic public `FakeArtifactStore` owner now bind
+      lifecycle mutation, complete typed authority, command/history quota,
+      terminal receipts, exact applied/denied retry, current heads, byte
+      verification, and delete/reconciliation behavior. The lower mechanisms
+      remain crate-private and cannot become a second writer.
+    - Object identity is project-scoped `(project_id, sha256)` with positive
+      generation; immutable per-use references bind complete task/provenance
+      metadata, Registry/effect/daemon/admission/capability owner evidence, and
+      limit snapshot without granting provider trust.
+    - The pure owner verifies byte/manifest/object/reference/task/project/
+      staging bounds, atomic quota projections, typed fixed-owner reference
+      authority, exact retry, currentness, replay/checkpoint, and safe
+      delete-claim preconditions through a visibly non-durable fake.
+    - Task object/active-byte attribution is active-reference-only. Holder IDs,
+      complete persisted lifecycle strings, and the domain-separated 64-byte
+      delete claim token are included in `FieldBytes` quota; exact boundary and
+      plus-one cases deny without partial mutation.
+    - The compact checkpoint contains identity, limit, snapshot, replay-bound,
+      and rollback-sensitive trust-anchor commitments only. It retains neither
+      payload bytes nor a second metadata owner. Replay preflights exact encoded
+      canonical size, reconstructs lifecycle/history/quota/staging/command/
+      terminal rows from untrusted raw data without context, validates every
+      join/digest, and then compares the independent trusted commitments.
+    - Independent governance review caught and closed pre-code P1 gaps:
+      caller opaque digests cannot authorize initial/retain/release/read/sweep;
+      provenance binds live owner/effect/daemon evidence; deletion uses an
+      exact durable claim token plus unknown-outcome reconciliation; aggregate
+      quotas bound small-object/reference/metadata exhaustion; and
+      delete-claimed/reconciliation/orphan state retains worst-case capacity
+      until verified terminal evidence.
+    - Implementation review additionally found and closed payload-copying
+      checkpoint construction, post-allocation canonical byte limits,
+      checkpoint-clone replay, incomplete terminal receipt restoration, and
+      holder/claim-token `FieldBytes` gaps. Each accepted finding received a
+      direct regression before repair.
+    - Completion evidence: Contracts 32, Artifact Store 97, locked Rust
+      workspace 322, and preserved Node 38 tests pass. Format, strict workspace
+      Clippy, dependency, forbidden-I/O/provider/product/unrelated-website,
+      raw-byte containment, project/governance, and diff checks pass.
+      Independent final code/security and architecture reviews return `PASS`
+      with zero remaining P0 through P3 findings; local combined integration
+      passes.
+    - AC-30 is complete. PostgreSQL reference transactions/durability/restart,
+      real filesystem containment/staging/delete, and live owner authority
+      remain explicitly open under AC-19 and later tickets.
+    - PostgreSQL remains future durable metadata/reference truth; a separate
+      owned-root filesystem adapter later performs staging/flush/atomic rename/
+      verified read/link containment/exact unlink. The pure crate exposes no
+      real deletion and no provider/product alternate authority.
+  - TASK-017 is complete. Gateway IPC 1.1/wire protocol 1.0, Contracts 1.7,
+    and Ports 1.2 implement the bounded canonical pure/fake boundary. Seventy
+    focused tests, 358 full Rust tests, 41 Node tests, dependency/I/O scans,
+    machine-enforced unique-ticket/current-marker governance, independent
+    code/security and architecture reviews, and local integration pass. AC-31
+    is complete; live OpenClaw/transport/authentication AC-07 remains open.
+  - TASK-018 is complete. Postgres Store 1.0, Contracts 1.8, and Ports 1.3
+    are implemented and locally complete for the typed zero-I/O fake.
+    Focused package suites pass 61 tests, the full Rust workspace passes 380,
+    and preserved Node verification passes 44. Strict format/Clippy,
+    dependency/I/O/SQL/driver/migration/provider/product scans, independent
+    code/security and architecture reviews, and local integration pass. AC-32
+    is complete; no PostgreSQL connection, migration execution, driver, or
+    durability claim occurred.
+  - TASK-019 is complete. Postgres Store 1.1.5 adds the exact manifest,
+    administrative runner, repeatable-read verifier, STOPPED/no-leader schema,
+    real LOGIN capability separation, catalog/ACL/ownership/protected-function
+    closure, and marker-owned PostgreSQL 17.10 restart harness. Thirty-five
+    Store tests, 401 full Rust tests, 44 Node tests, two clean live harness
+    trials, strict format/Clippy, independent code/security and architecture
+    reviews, and local integration pass. AC-33 is complete; no live
+    `ControlStore`, domain repository, production target, or activation path
+    was claimed.
+  - TASK-020 is complete. Contracts 1.9, Ports 1.4, and Postgres Store 1.2 add
+    the exact schema-v2 expansion and the narrow live durable physical
+    `ControlStore`. The marker-owned PostgreSQL 17.10 harness passes fresh and
+    exact-v1-prefix upgrades, live apply/stale/replay/substitution,
+    concurrency, bounded retries, overflow, corruption, commit-response-loss
+    reconciliation, and restart. The full Rust workspace passes 409 tests,
+    preserved Node verification passes 44 tests, strict format/Clippy and
+    `cargo audit` pass, and independent code/security, architecture, and local
+    integration reviews pass. AC-34 is complete; no domain repository,
+    activation, production target, provider/product, or release path was
+    claimed.
+- [ ] **IN PROGRESS — Step 6:** Complete TASK-018 through TASK-025: first freeze a typed,
+  zero-I/O Postgres Store fake, then add checksum migrations/runtime admission,
+  durable Ledger/outbox, Registry, Lease, Approval, and Artifact repositories
+  using only a disposable PostgreSQL database; finally add the disposable
+  owned-root Artifact filesystem adapter.
+  - TASK-021 is complete. SPEC-002 v23 AC-03, AC-04, and AC-35 have direct
+    durable evidence; final code/security and architecture findings are all
+    zero, and the marker-owned PostgreSQL 17.10 initial/restart harness plus
+    432 Rust and 44 Node tests pass. MVP-1 remains 12/22 tickets (54.5%).
+  - **CURRENT TASK-022 TDD:** Implement the first durable Project Registry
+    repository one verified behavior at a time. Project Registry 1.2 remains pure
+    and add one runtime-aware verified global state, command plan/apply,
+    immutable global checkpoint, ordered command replay, and projection/
+    reservation verification shared by Fake and PostgreSQL. Postgres Store 1.4
+    will add exact schema v4 and a Registry-specific global transaction because
+    registration denial can have no authority snapshot and cross-project
+    accepted/pending identity collisions require one serialization point.
+    TASK-022 must not forge a `ProjectSnapshotId`, reinterpret a per-project
+    `StoreScope`, change Store-v2 receipt hashes, or move identity legality into
+    SQL. Contracts and Ports remain unchanged. SPEC-002 v24, ADR-020, both
+    versioned constitutions, TASK-022, and its workflow audit now agree.
+    The first independent governance review correctly returned CHANGES
+    REQUIRED (P0=0, P1=5, P2=4): the corrected set now freezes an acyclic hash
+    construction order, canonical logical-byte accounting, an independent
+    retained-checkpoint comparison, vacant high-water 0 with a seeded Live
+    singleton, exact `15/28/17/11-ungranted` catalog totals, scalar Registry
+    signatures capped at 73 inputs, and bounded idle/total transaction time.
+    The fresh independent governance re-review passed with P0=P1=P2=P3=0 and
+    released only the governance blocker. The current bounded code action is
+    Registry 1.1 golden characterization followed by focused Registry 1.2 TDD;
+    the first RED/GREEN is complete: both Fake/Live vacant checkpoints,
+    independently recomputed 103-byte logical state, retained-checkpoint
+    reconstruction, and all four Registry 1.1 literal vectors pass in the
+    19-test Project Registry package. The second RED/GREEN is also complete:
+    opaque vacant snapshot export, plain self-consistency verification, and
+    independent retained-checkpoint currentness are distinct and the package
+    now passes 20 tests plus strict crate Clippy. The next bounded RED covers
+    first-registration planning without mutating its verified vacant base; no
+    implementation-complete claim is implied.
+    Read-only schema reconnaissance also found that ADR-020 freezes the leading
+    global-profile pair only for the nine Registry functions, not for the eight
+    Store-v4/Task-Ledger-v2 successors. Pure Registry TDD may continue, but
+    schema-v4 RED/SQL work is blocked until ADR-020, the Postgres Store
+    constitution, and TASK-022 freeze that pair as positions 1-2 plus the exact
+    successor input counts and pass a bounded governance check.
+    AC-06 remains open for real Windows/Git inspection, Workspace Git, and
+    Scope Check. Writer Lease, Approval, Artifact, external components,
+    production/release/deployment, and the unrelated website remain excluded.
+- [ ] Step 7: Complete TASK-026 and TASK-027 for Workspace Git 2.0 and exact
+  Scope Check 1.1 behavior in disposable repositories; retain the local
+  filesystem lock only as defense in depth.
+- [ ] Step 8: Complete TASK-028 through TASK-031: independent Review Runtime
+  authority and fake, fake Codex protocol adapter, one offline end-to-end flow,
+  retained V1 compatibility, and the MVP-1 exit ledger. Live Codex remains
+  MVP-2.
+- [ ] Step 9: Complete MVP-2 local IPC/ACL plus exact-version live OpenClaw,
+  Codex, and independent read-only Review Runtime compatibility evidence.
+- [ ] Step 10: Complete MVP-2 Codebase Memory ownership, PostgreSQL retrieval
+  audit, quantified multilingual benchmark, and project-isolation evidence.
+- [ ] Step 11: Complete MVP-2 Graphify code-only and OS-contained Hermes
+  fake-to-live lanes, then run the full local component fault/restart/
+  reconciliation exit gate.
+- [ ] Step 12: Implement the MVP-3 independent self-upgrade Guardian with protected
+  approval verification, atomic claim/nonce/admission transition, durable
+  activation saga, daemon epochs, database-enforced drain/canary admission,
+  system-stream write canary, stop control, restart reconciliation, and
+  rollback. The first A/B MVP performs no schema migration.
+- [ ] Step 13: Run the disposable A/B process/filesystem, power-loss, canary,
+  health-disagreement, higher-epoch rollback, and complete improvement-to-
+  protected-activation integration drills. A real active-slot promotion or
+  service replacement remains a protected action.
+- [ ] Step 14: Run full local verification, independent code review,
+  architecture review, integration readiness, and user acceptance; do not merge
+  or deploy without authorization.
+
+## Delivery Forecast
+
+These are engineering estimates after V2 architecture approval, not promises:
+
+- First Rust/PostgreSQL vertical slice with fake adapters: **3-5 working days**.
+- Verifiable offline Rust/PostgreSQL control core: **8-14 working days**.
+- Integrated local MVP with all five component adapters: **3-6 weeks**.
+- Hardened self-improvement and A/B self-upgrade loop with rollback drills:
+  **5-8 weeks**.
+
+The fastest safe route is to make the first vertical slice small, then add one
+external adapter at a time behind the same contracts.
 
 ## Verification
 
-- Every behavior ticket must record a failing focused test before its
-  implementation and a passing focused test after it.
-- `npm run check` must validate syntax, JSON artifacts, manifest/package
-  alignment, module constitutions, and repository scope.
-- `npm test` must exercise state transitions, stale/wrong approvals, protected
-  actions, traversal and out-of-scope paths, concurrent lock attempts, audit
-  tampering/redaction, Git worktree commands, reviewer read-only behavior,
-  maximum-agent policy, stop/failure handling, and the full Fake Runtime flow.
-- `npm run verify` must run all local checks and tests with exit code 0.
-- The complete Git diff must stay within the active tickets' `allowed_paths`.
-- Independent review must report findings before integration readiness is
-  classified.
+- Planning gate:
+  - every active product document names the general platform scope;
+  - V1 is clearly historical/characterization evidence;
+  - no new document claims an install, account, database, live adapter, or
+    deployment exists;
+  - document links, frontmatter, module references, and exactly one current step
+    are checked locally.
+- Rust gates after approval:
+  - `cargo fmt --check`;
+  - `cargo clippy --workspace --all-targets --all-features -- -D warnings`;
+  - focused crate tests followed by `cargo test --workspace`;
+  - compatibility tests replaying V1 characterization fixtures.
+- PostgreSQL gates after approval:
+  - reversible migrations test up/down; forward-only migrations test
+    restore/compatibility rather than pretending destructive downgrade;
+  - concurrent append, receipt races, unknown commit, at-least-once outbox,
+    hash-chain, transaction-failure, daemon epoch/admission across every
+    durable repository mutation, lease, fencing, suspect holder, and restart
+    tests;
+  - no credential or raw secret persistence.
+- Adapter gates:
+  - fake contract tests first;
+  - exact binary/version/schema/capability evidence;
+  - timeouts, cancellation, malformed output, duplicate events, and unavailable
+    dependency fail closed;
+  - Graphify/Hermes cannot mutate a product worktree.
+- Self-upgrade gates:
+  - candidate build and verification never run in the active installation;
+  - staged activation has exact-subject approval, a separate guardian, durable
+    saga states, atomic nonce claim, database-enforced drain/canary admission,
+    epoch enforcement, complete drain proof, health/write canary, rollback
+    target, and power-loss evidence;
+  - promotion policy and user-owned acceptance remain distinct.
+- Existing Node verification:
+  - the V2 planning pass does not claim the dirty prototype is newly verified;
+  - an earlier V2 planning attempt timed out and produced no valid success
+    result; the newer TASK-016 closure run on 2026-08-01 completed successfully
+    with `check=ok` and all 38 preserved Node tests passing.
 
 ## Risks
 
-- The missing ZIP may contain additional requirements not present in the pasted
-  request. Mitigation: preserve this source boundary and require a blueprint
-  comparison before adopting later material.
-- A static OpenClaw scaffold can drift from the installed managed version.
-  Mitigation: pin/document the verified official contract and keep live
-  validation as a separate fail-closed preflight.
-- Path matching and Git command construction are security-sensitive.
-  Mitigation: reject traversal/absolute paths, avoid shell interpolation, and
-  test disposable repositories.
-- A passing Git Scope Check cannot prevent a hostile child process from writing
-  elsewhere. Mitigation: label it detection-only and keep OS sandbox/process
-  containment as a required Real Runtime gate.
-- A role table alone cannot guarantee one writer.
-  Mitigation: combine permission checks with an exclusive filesystem lock and
-  audit every acquire/release attempt.
-- Local CI files are documented automation until a remote repository actually
-  runs them; branch protection and required reviews will remain missing.
+- Running OpenClaw's Codex harness and a Rust-owned Codex client against the
+  same native thread could violate One Writer. Mitigation: approve one writable
+  execution owner and use fork/read-only lanes for any secondary view.
+- PostgreSQL can become a nominal truth while files or external memory silently
+  act as another truth. Mitigation: label generated files and external stores
+  as caches/candidates and require PostgreSQL event references plus hashes.
+- Autonomous improvement can optimize for its own tests or promote unsafe
+  changes. Mitigation: immutable acceptance sets, independent review, staged
+  activation, health windows, rollback, and no self-approval.
+- Hermes and Graphify are external Python supply-chain/runtime surfaces.
+  Mitigation: pin exact versions only after approval, run them with least
+  privilege, capture capabilities, and reject unknown schemas.
+- PostgreSQL credentials and role configuration are not verified. Mitigation:
+  use a disposable least-privilege database in a later explicit gate and never
+  print or persist credentials.
+- The current Node worktree contains unfinished security changes and a known
+  fencing-counter safe-integer risk. Mitigation: preserve it untouched and use
+  its behavior/tests only as fallible characterization evidence.
+- Plans and local tests cannot prove production containment or live adapter
+  behavior. Mitigation: keep static, fake, live preflight, human acceptance,
+  and machine enforcement statuses separate.
+- A fake physical Git-ref digest could accidentally be mistaken for a real
+  loose/packed-ref identity algorithm. Mitigation: receipts carry
+  `RuntimeKind::Fake`; Policy requires runtime agreement; Workspace Git must
+  separately prove a stable physical algorithm with disposable repositories.
 
 ## Drift Log
 
-- 2026-07-29: The requested linked ZIP and Markdown files were not present in
-  the supplied attachment directory. Planning proceeds from the actual pasted
-  request and records live OpenClaw/Hostinger verification as a later gate.
-- 2026-07-29: Current official OpenClaw plugin documentation was checked because
-  the external plugin contract is version-sensitive. No OpenClaw installation
-  or authentication was performed.
-- 2026-07-29: Read-only architecture review selected an event-sourced Task
-  Ledger as the single truth and made merge conflicts fail closed. This
-  tightened, rather than changed, the original One Truth/One Writer direction.
-- 2026-07-29: Removed duplicated Git work from Steps 5/6 after TASK-003. Step 5
-  now maps exactly to TASK-004, Step 6 to TASK-005, and Step 7 to TASK-006.
-- 2026-07-29: TASK-004 review probes exposed Windows junction, lock
-  initialization, Git hook/driver, ownership-marker, and failure-cleanup gaps.
-  The plan did not change; fail-closed tests and implementation were tightened
-  before unlocking TASK-005.
+- 2026-07-29: The original attachment used one unrelated website as an example
+  and proposed a Node-first, managed-cloud-oriented sequence. Direct user
+  clarification superseded that interpretation: LATTICE is a separate,
+  general-purpose platform for the user's computer.
+- 2026-07-29: The requested core changed from dependency-light Node.js plus a
+  file ledger to Rust plus PostgreSQL. Existing code is preserved as a
+  prototype rather than rewritten in place.
+- 2026-07-29: Graphify, Hermes, real Codex execution, and long-term Codebase
+  Memory moved from deferred/non-goals to required V2 lanes.
+- 2026-07-29: The old TASK-005 is no longer current. The user approved the V2
+  topology and module direction; TASK-008 established an inert Rust workspace
+  in a separate worktree without activating live components.
+- 2026-07-29: Existing TASK-004 adversarial changes remain uncommitted. This
+  replan does not discard them or repeat their prior verification claims.
+- 2026-07-29: TASK-012 moved neutral Project ID/class/lifecycle and physical
+  Git-ref/authority-receipt representation from Policy-local shapes into
+  contracts 1.1, while keeping mutable project truth solely in Project
+  Registry and Task-Spec-specific sufficiency solely in Policy 2.2. This
+  prevents a Registry/Policy dependency cycle and removes contradictory
+  project-status booleans.
+- 2026-07-29: TASK-012 independent review required a versioned hardening to
+  SPEC-002 v8, Project Registry 1.1, Contracts 1.2, and Policy 2.3. Ordinary
+  duplicate registration/reconciliation remains `Denied` with no mutation,
+  while an authoritative observation collision returns `Blocked` and rotates
+  the observed project to `SUSPENDED`; pending identities are reserved, hash
+  subjects must already be NFC, authority heads mirror every security field,
+  and currentness requires an independent Registry-owner lookup.

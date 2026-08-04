@@ -1,7 +1,12 @@
 # ADR-003: Dependency-Light Node Core and Inert OpenClaw Scaffold
 
-- Status: accepted for Phase 1
+- Status: superseded for V2 core; retained as V1/plugin evidence
 - Date: 2026-07-29
+
+> ADR-004 proposes the V2 Rust/polyglot boundary. The Node-core decision and
+> inert-scaffold end state are not active for new work. The verified OpenClaw
+> package-contract evidence remains useful until a live V2 preflight replaces
+> it.
 
 ## Context
 
@@ -40,8 +45,11 @@ Verified on 2026-07-29:
 The OpenClaw source snapshot independently inspected for these contracts was
 commit
 [`5578d01777ef354bd459bc6ee0c04716ab6b0eaa`](https://github.com/openclaw/openclaw/tree/5578d01777ef354bd459bc6ee0c04716ab6b0eaa).
-LATTICE will use the official `@openclaw/codex` harness rather than implement a
-second Codex app-server harness.
+For V1, LATTICE planned to use the official `@openclaw/codex` harness rather
+than implement a second Codex app-server harness. Proposed ADR-006 supersedes
+that ownership choice for V2 by recommending that the Rust core own the single
+writable Codex process while OpenClaw remains the gateway. Neither live path
+has been verified in this repository.
 
 ## Consequences
 

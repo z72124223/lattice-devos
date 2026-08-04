@@ -3,7 +3,8 @@ ticket_id: TASK-007
 spec_id: SPEC-001
 module_id: openclaw-adapter
 constitution_version: 1.0
-status: blocked
+status: superseded
+superseded_by: SPEC-002
 parallel_safe: false
 depends_on:
   - TASK-006
@@ -23,6 +24,9 @@ likely_files:
   - test/openclaw-scaffold.test.js
 branch: feature/phase1-controlled-swarm
 ---
+
+> Do not execute. The V2 direction replaces the inert Node.js scaffold ticket;
+> retained as historical characterization scope only.
 
 ## Objective
 
@@ -71,4 +75,3 @@ Not parallel-safe because root project checks gain plugin consistency rules.
 ## Human Gate
 
 Target OpenClaw/Hostinger live validation is required before deployment.
-

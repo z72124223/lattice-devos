@@ -1,8 +1,8 @@
 node_modules/
 coverage/
+target/
 .lattice/
 *.log
 *.tmp
 .DS_Store
 Thumbs.db
-
