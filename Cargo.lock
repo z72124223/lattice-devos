@@ -322,6 +322,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-runtime"
+version = "0.1.0"
+dependencies = [
+ "lattice-codex-adapter",
+ "serde_json",
+]
+
+[[package]]
 name = "lattice-task-domain"
 version = "0.1.0"
 dependencies = [
