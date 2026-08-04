@@ -255,6 +255,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-codex-adapter"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "lattice-contracts"
 version = "0.1.0"
 

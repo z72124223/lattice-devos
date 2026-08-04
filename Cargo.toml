@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/lattice-cli",
+    "crates/lattice-codex-adapter",
     "crates/lattice-cjson",
     "crates/lattice-contracts",
     "crates/lattice-core",
