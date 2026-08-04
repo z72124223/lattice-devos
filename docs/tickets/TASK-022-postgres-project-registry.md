@@ -4,7 +4,7 @@ spec_id: SPEC-002
 spec_version: 24
 module_id: postgres-store
 constitution_version: 1.4
-status: in-progress
+status: paused
 parallel_safe: false
 depends_on:
   - TASK-021

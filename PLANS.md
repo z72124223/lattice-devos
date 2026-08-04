@@ -29,6 +29,23 @@ public exposure, irreversible deletion, legal commitments, and other protected
 operations remain fail-closed. Such actions must be reported as blocked or
 gated rather than silently performed.
 
+## Delivery-First Target Mode — 2026-08-05
+
+The active objective is a runnable local product path, not completion of the
+remaining governance backlog. The required product path is:
+
+> Codex App or OpenClaw -> Rust LATTICE -> PostgreSQL -> Codex app-server
+> modifies/tests/commits -> Graphify -> Hermes -> Codebase Memory -> queryable
+> result
+
+Work proceeds in executable nodes. At every node boundary, verify that the
+node produced runnable progress toward this path, used real components where
+claimed, avoided unrelated documentation/review expansion, passed its bounded
+checks, and was committed. A node that does not advance this path is stopped
+and replanned. Non-blocking polish and exhaustive edge-case work are deferred;
+startup failure, a broken core path, corrupt durable state, credential leakage,
+or inability to create a recoverable local commit remains blocking.
+
 ## Global Strategy
 
 1. Use OpenClaw as the only normal human command, status, task-approval, and
@@ -128,24 +145,20 @@ substituted for one another.
 | MVP | Status | Required outcome | Exit evidence | Explicitly not claimed |
 |---|---|---|---|---|
 | MVP-0 — Rust foundation | **COMPLETE — 2026-07-29** | TASK-008 workspace/bootstrap plus TASK-009 versioned contracts and ports; four active V2 module constitutions; no provider I/O | local format, Clippy, 14 Rust tests, 38 preserved Node tests, independent code/architecture review | no PostgreSQL durability, live provider, autonomous execution, release, merge, or deployment |
-| MVP-1 — Offline control core | **CURRENT — TASK-021 complete; 12/22 tickets (54.5%)** | Rust Task Domain, Policy, Ledger, Registry, Writer Lease, approvals, artifacts, PostgreSQL repositories, workspace/scope enforcement, fake gateway/Codex/reviewer, and one offline end-to-end task flow | focused/full tests, disposable PostgreSQL transaction/concurrency/restart evidence, fake adapter contracts, scope isolation, review and integration ledger | no claim that OpenClaw, Codex, Graphify, or Hermes is live-compatible |
-| MVP-2 — Local component integration | **PLANNED** | exact-version local OpenClaw, Codex, Graphify, and Hermes adapters plus project-isolated Codebase Memory, all behind MVP-1 authority boundaries | fake-to-live contract comparison, binary/schema/capability identity, OS boundary evidence, fault/cancel/reconciliation tests, memory benchmark | no unconstrained agent, second writer/truth, public service, or self-release authority |
+| MVP-1 — Deliverable local alpha | **CURRENT — TASK-032; 12 foundation tickets complete** | one thin real chain from Codex App or OpenClaw through Rust/PostgreSQL to Codex modification, test and commit, followed by real Graphify, Hermes, and project-isolated Codebase Memory retrieval | a repeatable local acceptance run records exact component identities, durable task/result state, changed paths, test result, commit, graph/reflection artifacts, and memory query | no production hardening, public service, silent self-release, or claim from fake adapters |
+| MVP-2 — Isolation and recovery | **PLANNED** | harden the MVP-1 chain with durable leases, exact scope enforcement, cancellation, reconciliation, component isolation, restart recovery, and measured retrieval quality | fault/cancel/restart/reconciliation tests, OS-boundary evidence, scope isolation, compatibility matrix, memory benchmark | no unconstrained agent, second writer/truth, public service, or self-release authority |
 | MVP-3 — Guardian-protected autonomy | **PLANNED** | outcomes can propose normal improvement tasks; immutable A/B candidates pass independent review, protected guardian claim, drain/canary/health, restart reconciliation, and rollback | fault-injected activation saga, nonce/epoch/admission enforcement, complete-drain proof, write canary, power-loss and rollback drill | no silent policy/constitution/credential/public-exposure change and no in-place self-overwrite |
 
-Planned dependency sequence:
+Delivery dependency sequence:
 
-- MVP-1: TASK-010 through TASK-031, decomposed one bounded ticket at a time.
-  TASK-018 through TASK-025 cover typed PostgreSQL boundaries, disposable
-  PostgreSQL durability, and the owned-root Artifact filesystem adapter;
-  TASK-026 through TASK-027 cover Workspace Git and Scope Check; TASK-028
-  through TASK-031 cover Review Runtime, fake Codex, one offline end-to-end
-  flow, retained V1 compatibility, and the MVP-1 exit gate. The expanded range
-  replaces the earlier under-scoped TASK-019 endpoint; it does not broaden any
-  individual ticket.
-- MVP-2: exact-version adapter and memory tickets created only after the MVP-1
-  exit gate passes.
-- MVP-3: improvement-loop and guardian tickets created only after the MVP-2
-  authority and containment evidence is current.
+- MVP-1 now follows runnable vertical nodes rather than waiting for every old
+  foundation ticket. TASK-032 first proves real Codex app-server, PostgreSQL,
+  bounded Git modification, tests, and a local commit. Subsequent nodes add
+  OpenClaw, Graphify, Hermes, and Codebase Memory to that same executable path.
+- Unfinished TASK-022 through TASK-031 work is preserved as hardening backlog;
+  it is pulled forward only when a missing control blocks the runnable path.
+- MVP-2 closes isolation, recovery, and edge-case gaps observed in the working
+  MVP-1 chain. MVP-3 begins only after that hardened chain has current evidence.
 
 MVP-0 completion is a foundation milestone, not a claim that the full platform
 already runs. MVP-1 through MVP-3 remain incomplete until their direct exit
@@ -583,7 +596,7 @@ remain future Orchestrator/PostgreSQL responsibilities.
     integration reviews pass. AC-34 is complete; no domain repository,
     activation, production target, provider/product, or release path was
     claimed.
-- [ ] **IN PROGRESS — Step 6:** Complete TASK-018 through TASK-025: first freeze a typed,
+- [ ] **PAUSED — Step 6:** Complete TASK-018 through TASK-025: first freeze a typed,
   zero-I/O Postgres Store fake, then add checksum migrations/runtime admission,
   durable Ledger/outbox, Registry, Lease, Approval, and Artifact repositories
   using only a disposable PostgreSQL database; finally add the disposable
@@ -592,7 +605,7 @@ remain future Orchestrator/PostgreSQL responsibilities.
     durable evidence; final code/security and architecture findings are all
     zero, and the marker-owned PostgreSQL 17.10 initial/restart harness plus
     432 Rust and 44 Node tests pass. MVP-1 remains 12/22 tickets (54.5%).
-  - **CURRENT TASK-022 TDD:** Implement the first durable Project Registry
+  - **PAUSED TASK-022:** Implement the first durable Project Registry
     repository one verified behavior at a time. Project Registry 1.2 remains pure
     and add one runtime-aware verified global state, command plan/apply,
     immutable global checkpoint, ordered command replay, and projection/
@@ -631,6 +644,12 @@ remain future Orchestrator/PostgreSQL responsibilities.
     AC-06 remains open for real Windows/Git inspection, Workspace Git, and
     Scope Check. Writer Lease, Approval, Artifact, external components,
     production/release/deployment, and the unrelated website remain excluded.
+- [ ] **CURRENT TASK-032 — executable Codex/PostgreSQL delivery node:** add a
+  Rust composition entry and a concrete Codex app-server adapter, then prove a
+  bounded repository modification, test, Git commit, durable PostgreSQL result,
+  and status replay. This is the first real segment of the delivery path; it
+  does not claim OpenClaw, Graphify, Hermes, or Codebase Memory until those real
+  components are attached by the following nodes.
 - [ ] Step 7: Complete TASK-026 and TASK-027 for Workspace Git 2.0 and exact
   Scope Check 1.1 behavior in disposable repositories; retain the local
   filesystem lock only as defense in depth.
