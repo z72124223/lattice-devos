@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lattice_contracts::{
     AttemptId, CONTRACT_VERSION, ContentDigest, HermesResearchRequest, Invocation,
-    ProjectSnapshotId, RequestId, TaskId,
+    ProjectSnapshotId, RequestId, RuntimeKind, TaskId,
 };
 use crate::{
     CodexProxyInvocation, HERMES_CPYTHON_ARCHIVE_BYTES, HERMES_CPYTHON_ARCHIVE_SHA256,
@@ -849,27 +849,66 @@ fn bwrap_plan_and_private_frame_are_fixed_bounded_and_cross_bound() {
     );
     assert!(!rendered.iter().any(|value| value == "/broker-input"));
 
-    let digests = (*b"abcdef").map(|byte| vec![byte; 64]);
+    let digests = (*b"abcdef012").map(|byte| vec![byte; 64]);
     let reflection = br#"{"schema_version":"lattice.hermes.reflection.v1"}"#;
-    let mut frame = b"LATTICE_HERMES_CONTAINED_V1\n".to_vec();
+    let endpoint = b"127.0.0.1:48642";
+    let namespace_pid = b"7";
+    let mode = b"scripted_fixture";
+    let mut frame = b"LATTICE_HERMES_CONTAINED_V2\n".to_vec();
     for field in digests
         .iter()
         .map(Vec::as_slice)
+        .chain([endpoint.as_slice(), namespace_pid.as_slice(), mode.as_slice()])
         .chain(std::iter::once(reflection.as_slice()))
     {
-        frame.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        frame.extend_from_slice(
+            &u32::try_from(field.len())
+                .expect("bounded field length")
+                .to_be_bytes(),
+        );
         frame.extend_from_slice(field);
     }
     let parsed = parse_containment_frame(&frame, HermesContainmentFrameLimits::default())
         .expect("one complete strict frame");
     assert_eq!(parsed.runtime_manifest_sha256(), digests[0]);
     assert_eq!(parsed.request_sha256(), digests[2]);
+    assert_eq!(parsed.broker_receipt_sha256(), digests[3]);
+    assert_eq!(parsed.bwrap_sha256(), digests[4]);
+    assert_eq!(parsed.socketpair_binding_sha256(), digests[5]);
+    assert_eq!(parsed.api_key_sha256(), digests[6]);
+    assert_eq!(parsed.nonce_sha256(), digests[7]);
+    assert_eq!(parsed.transcript_sha256(), digests[8]);
+    assert_eq!(parsed.endpoint(), "127.0.0.1:48642".parse().expect("endpoint"));
+    assert_eq!(parsed.namespace_pid(), 7);
+    assert_eq!(parsed.mode(), "scripted_fixture");
     assert_eq!(parsed.reflection(), reflection);
 
     frame.push(0);
     let failure = parse_containment_frame(&frame, HermesContainmentFrameLimits::default())
         .expect_err("trailing bytes fail closed");
     assert_eq!(failure.code(), "HERMES_CONTAINMENT_FRAME_TRAILING_BYTES");
+
+    let mut external = b"LATTICE_HERMES_CONTAINED_V2\n".to_vec();
+    for field in digests
+        .iter()
+        .map(Vec::as_slice)
+        .chain([
+            b"192.0.2.10:48642".as_slice(),
+            namespace_pid.as_slice(),
+            mode.as_slice(),
+        ])
+        .chain(std::iter::once(reflection.as_slice()))
+    {
+        external.extend_from_slice(
+            &u32::try_from(field.len())
+                .expect("bounded field length")
+                .to_be_bytes(),
+        );
+        external.extend_from_slice(field);
+    }
+    let failure = parse_containment_frame(&external, HermesContainmentFrameLimits::default())
+        .expect_err("an endpoint outside the contained loopback binding fails closed");
+    assert_eq!(failure.code(), "HERMES_CONTAINMENT_FRAME_ENDPOINT_REJECTED");
 }
 
 #[test]
@@ -903,6 +942,148 @@ fn wsl_bwrap_socketpair_inherited_fd_canary_is_live_verified() {
     assert_eq!(receipt.bwrap_sha256().len(), 64);
     assert!(receipt.descendants_reaped());
     assert_eq!(receipt.receipt_digest().as_str().len(), 64);
+}
+
+#[test]
+#[ignore = "requires WSL2, bubblewrap, and the staged Linux CPython runtime"]
+#[allow(clippy::too_many_lines)]
+fn production_runner_owns_attests_binds_and_invalidates_one_contained_fixture() {
+    let request = request();
+    let reflection_job = job(request.clone());
+    let expected = bound_output(&reflection_job);
+    let fixture_reflection = serde_json::to_string(
+        &serde_json::from_str::<serde_json::Value>(&expected).expect("reflection JSON"),
+    )
+    .expect("canonical fixture reflection");
+    let isolation_root = unique_temp_root("lattice-hermes-production-fixture");
+    let containment = production_containment(isolation_root.clone());
+    let config = crate::HermesProductionRunnerConfig::scripted_fixture(
+        containment,
+        &test_runtime_manifest(),
+        &digest("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+        request.clone(),
+        "production-fixture-key",
+        "hermes-agent",
+        Duration::from_secs(20),
+        Duration::from_secs(5),
+        Duration::from_millis(1),
+        fixture_reflection.clone(),
+    )
+    .expect("bounded fixture config");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut runner = config.launch(deadline).expect("contained runner starts");
+    runner.verify_live().expect("same owner remains live");
+    assert!(runner.windows_launcher_pid() > 0);
+    assert!(runner.outer_pid() > 0);
+    assert!(runner.bwrap_pid() > 0);
+
+    let receipt = runner.containment_receipt().clone();
+    assert!(receipt.endpoint().ip().is_loopback());
+    assert_ne!(receipt.endpoint().port(), 0);
+    assert!(receipt.contained_pid() > 0);
+    for binding in [
+        receipt.runner_nonce_sha256(),
+        receipt.runtime_manifest_sha256(),
+        receipt.bwrap_sha256(),
+        receipt.socketpair_binding_sha256(),
+        receipt.broker_receipt_sha256(),
+        receipt.containment_frame_sha256(),
+        receipt.receipt_digest().as_str(),
+    ] {
+        assert_eq!(binding.len(), 64);
+    }
+
+    let mut wrong_key = HermesAdapterConfig::new(
+        receipt.endpoint(),
+        "wrong-key",
+        Duration::from_secs(1),
+        Duration::from_millis(1),
+    )
+    .expect("loopback config");
+    let failure = wrong_key
+        .install_containment_receipt(receipt.clone())
+        .expect_err("wrong endpoint/key binding cannot reuse the receipt");
+    assert_eq!(failure.code(), "HERMES_CONTAINMENT_ENDPOINT_BINDING_REJECTED");
+
+    let mut contained_probe = TcpStream::connect(receipt.endpoint()).expect("attested endpoint");
+    contained_probe
+        .write_all(
+            format!(
+                "GET /v1/capabilities HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer production-fixture-key\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                receipt.endpoint()
+            )
+            .as_bytes(),
+        )
+        .expect("write contained probe");
+    let mut contained_response = Vec::new();
+    contained_probe
+        .read_to_end(&mut contained_response)
+        .expect("read contained probe");
+    assert!(contained_response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+
+    let mut port = runner.bind(reflection_job).expect("single job binding");
+    let result = port
+        .run_reflection_evidence(&request)
+        .expect("contained fixture reflection");
+    assert_eq!(
+        result.reflection().canonical_bytes(),
+        fixture_reflection.as_bytes()
+    );
+    assert_eq!(
+        result.reflection().output_digest(),
+        result.evidence().output_digest()
+    );
+    assert_eq!(result.evidence().runtime(), RuntimeKind::Live);
+
+    let replay = port.containment_receipt().clone();
+    port.terminate_child_for_test().expect("kill exact Job tree");
+    let failure = port
+        .run_reflection_evidence(&request)
+        .expect_err("child death fails before endpoint I/O");
+    assert_eq!(failure.code(), "HERMES_PRODUCTION_CHILD_EXITED");
+    drop(port);
+
+    let mut replay_config = HermesAdapterConfig::new(
+        replay.endpoint(),
+        "production-fixture-key",
+        Duration::from_secs(1),
+        Duration::from_millis(1),
+    )
+    .expect("loopback config");
+    let failure = replay_config
+        .install_containment_receipt(replay)
+        .expect_err("receipt cannot outlive its sole runner owner");
+    assert_eq!(failure.code(), "HERMES_CONTAINMENT_RECEIPT_REPLAYED");
+    std::fs::remove_dir_all(&isolation_root).expect("remove exact fixture root");
+}
+
+#[test]
+#[ignore = "requires WSL2, bubblewrap, and the staged Linux CPython runtime"]
+fn production_official_mode_blocks_stably_when_frozen_hermes_is_not_staged() {
+    let isolation_root = unique_temp_root("lattice-hermes-production-official");
+    let config = crate::HermesProductionRunnerConfig::official_with_broker_digest(
+        production_containment(isolation_root.clone()),
+        &test_runtime_manifest(),
+        &digest("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+        request(),
+        "production-official-key",
+        "hermes-agent",
+        Duration::from_secs(20),
+        Duration::from_secs(5),
+        Duration::from_millis(1),
+    )
+    .expect("bounded official config");
+    let failure = match config.launch(Instant::now() + Duration::from_secs(30)) {
+        Ok(runner) => {
+            runner
+                .terminate()
+                .expect("unexpected official runner still reaps exactly");
+            panic!("the current frozen closure has CPython but no Hermes executable");
+        }
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.code(), "HERMES_OFFICIAL_SERVER_NOT_STAGED");
+    std::fs::remove_dir_all(&isolation_root).expect("remove exact official root");
 }
 
 #[test]
@@ -1684,13 +1865,11 @@ fn contained_config_with_timing(
         poll_interval,
     )
     .expect("loopback config");
-    config.containment_receipt = Some(crate::HermesContainmentReceipt {
-        endpoint: server.address(),
-        api_key_sha256: crate::sha256_text("test-only-loopback-key"),
-        receipt_digest: digest(
+    config
+        .install_test_containment_receipt(digest(
             "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-        ),
-    });
+        ))
+        .expect("test-only sealed receipt");
     config
 }
 
@@ -1792,6 +1971,62 @@ fn request() -> HermesResearchRequest {
 
 fn digest(value: &str) -> ContentDigest {
     ContentDigest::from_sha256(value.to_owned()).expect("sha256")
+}
+
+fn unique_temp_root(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "{label}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ))
+}
+
+fn production_containment(isolation_root: std::path::PathBuf) -> HermesWslContainmentConfig {
+    HermesWslContainmentConfig::new(
+        r"C:\Windows\System32\wsl.exe",
+        "/var/tmp/lattice-runtime-targets/hermes-v2026.8.3-cpython-3.12.13-pbs-20260804",
+        isolation_root,
+        std::fs::canonicalize(std::env::current_dir().expect("cwd"))
+            .expect("canonical product root"),
+    )
+    .expect("exact WSL production containment")
+}
+
+fn test_runtime_manifest() -> HermesOfflineRuntimeManifest {
+    let bytes = format!(
+        concat!(
+            "{{\"cpython_archive_bytes\":{},",
+            "\"cpython_archive_sha256\":\"{}\",",
+            "\"cpython_build_release\":\"{}\",",
+            "\"cpython_provenance\":\"{}\",",
+            "\"cpython_sha256sums_sha256\":\"{}\",",
+            "\"cpython_version\":\"3.12.13\",",
+            "\"hermes_archive_sha256\":\"{}\",",
+            "\"hermes_commit\":\"{}\",",
+            "\"hermes_release\":\"v2026.8.3\",",
+            "\"payload_byte_count\":1,\"payload_file_count\":1,",
+            "\"payload_manifest_sha256\":\"{}\",",
+            "\"platform\":\"x86_64-unknown-linux-gnu\",",
+            "\"pyproject_sha256\":\"{}\",",
+            "\"schema\":\"lattice.hermes.offline-runtime.v1\",",
+            "\"uv_lock_sha256\":\"{}\"}}"
+        ),
+        HERMES_CPYTHON_ARCHIVE_BYTES,
+        HERMES_CPYTHON_ARCHIVE_SHA256,
+        HERMES_CPYTHON_BUILD_RELEASE,
+        HERMES_CPYTHON_PROVENANCE,
+        HERMES_CPYTHON_SHA256SUMS_SHA256,
+        HERMES_RUNTIME_ARCHIVE_SHA256,
+        HERMES_UPSTREAM_COMMIT,
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        HERMES_PYPROJECT_SHA256,
+        HERMES_UV_LOCK_SHA256,
+    );
+    HermesOfflineRuntimeManifest::from_canonical_json(bytes.as_bytes())
+        .expect("exact test runtime manifest")
 }
 
 struct Response {
