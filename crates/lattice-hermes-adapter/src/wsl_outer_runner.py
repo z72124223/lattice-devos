@@ -116,6 +116,38 @@ class ProxyRelay:
             worker.join(0.5)
 
 
+def emit_bounded_startup_proxy_evidence(connection):
+    digest = hashlib.sha256()
+    byte_count = 0
+    try:
+        connection.setblocking(False)
+        while byte_count < MAX_DIAGNOSTIC_BYTES:
+            try:
+                payload = connection.recv(
+                    min(MAX_PROXY_COPY_BYTES, MAX_DIAGNOSTIC_BYTES - byte_count)
+                )
+            except BlockingIOError:
+                break
+            except OSError:
+                break
+            if not payload:
+                break
+            digest.update(payload)
+            byte_count += len(payload)
+    except OSError:
+        pass
+    try:
+        os.write(
+            2,
+            (
+                "HERMES_OUTER_PROXY_EVIDENCE:%d:%s\n"
+                % (byte_count, digest.hexdigest())
+            ).encode("ascii"),
+        )
+    except OSError:
+        pass
+
+
 def checked_nonce(value):
     if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
         fail(64)
@@ -626,8 +658,6 @@ def production(runtime_root, nonce, secret_path, runner_path, runner_sha256):
         proxy_child_endpoint.close()
         if proxy_relay is not None:
             proxy_relay.close()
-        else:
-            proxy_peer.close()
         if runner_fd >= 0:
             os.close(runner_fd)
         if process is not None:
@@ -638,6 +668,9 @@ def production(runtime_root, nonce, secret_path, runner_path, runner_sha256):
             except subprocess.SubprocessError:
                 process.kill()
                 process.wait()
+        if proxy_relay is None:
+            emit_bounded_startup_proxy_evidence(proxy_peer)
+            proxy_peer.close()
 
 
 def socketpair_canary(runtime_root, nonce):
