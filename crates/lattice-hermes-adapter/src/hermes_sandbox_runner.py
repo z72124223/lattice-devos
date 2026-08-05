@@ -17,8 +17,13 @@ import json
 import os
 import pathlib
 import re
+import select
 import socket
+import stat
+import struct
+import subprocess
 import sys
+import threading
 import time
 
 
@@ -26,11 +31,121 @@ INIT_MAGIC = b"LATTICE_HERMES_PRODUCTION_INIT_V1\n"
 HTTP_REQUEST_MAGIC = b"LATTICE_HERMES_HTTP_REQUEST_V1\n"
 HTTP_RESPONSE_MAGIC = b"LATTICE_HERMES_HTTP_RESPONSE_V1\n"
 CONTAINMENT_MAGIC = b"LATTICE_HERMES_CONTAINED_V2\n"
+CODEX_PROXY_MAGIC = b"LATTICE_HERMES_CODEX_PROXY_V1\n"
+CODEX_SHIM_MAGIC = b"LATTICE_HERMES_CODEX_SHIM_V1\n"
 MAX_CONTROL_BYTES = 2 * 1024 * 1024
 MAX_REFLECTION_BYTES = 64 * 1024
 MAX_EXECUTABLE_BYTES = 32 * 1024 * 1024
+MAX_CODEX_PROXY_DATA_BYTES = 64 * 1024
+CODEX_PROXY_HEADER_BYTES = 41
+CODEX_PROXY_STREAM_ID = 1
+CODEX_PROXY_OPEN = 1
+CODEX_PROXY_DATA = 2
+CODEX_PROXY_CLOSE = 3
+CODEX_PROXY_ERROR = 4
+PROXY_ERROR_PROTOCOL = 1
+PROXY_ERROR_BINDING = 2
+PROXY_ERROR_SEQUENCE = 3
+PROXY_ERROR_SIZE = 4
+PROXY_ERROR_STATE = 5
+PROXY_ERROR_DEADLINE = 6
+PROXY_ERROR_IO = 7
 EXPECTED_BWRAP_SHA256 = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b"
 OFFICIAL_HERMES_CANDIDATE = "/runtime-input/python/bin/hermes"
+CODEX_PROXY_SOCKET_PATH = "/state/codex-proxy.sock"
+CODEX_SHIM_PATH = "/state/bin/codex"
+FIXTURE_CODEX_REQUEST = (
+    b'{"id":0,"method":"initialize","params":{}}\n'
+    b'{"id":1,"method":"thread/start","params":{}}\n'
+    b'{"id":2,"method":"turn/start","params":{}}\n'
+)
+FIXTURE_CODEX_RESPONSE = (
+    b'{"id":0,"result":{"ok":true}}\n'
+    b'{"id":1,"result":{"ok":true}}\n'
+    b'{"id":2,"result":{"ok":true}}\n'
+)
+CODEX_SHIM_SOURCE = r'''#!/runtime-input/python/bin/python3.12
+import os
+import socket
+import sys
+import threading
+
+MAGIC = b"LATTICE_HERMES_CODEX_SHIM_V1\n"
+MAX_CHUNK = 65536
+
+
+def abort():
+    os._exit(70)
+
+
+def write_all(descriptor, payload):
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            abort()
+        offset += written
+
+
+def main():
+    if sys.argv[1:] != ["app-server"]:
+        return 70
+    path = os.environ.get("LATTICE_HERMES_CODEX_PROXY_SOCKET")
+    binding_text = os.environ.get("LATTICE_HERMES_CODEX_PROXY_BINDING", "")
+    timeout_text = os.environ.get("LATTICE_HERMES_CODEX_PROXY_TIMEOUT_MILLIS", "")
+    try:
+        binding = bytes.fromhex(binding_text)
+        timeout = int(timeout_text) / 1000.0
+    except (ValueError, TypeError):
+        return 70
+    if path != "/state/codex-proxy.sock" or len(binding) != 32 or timeout <= 0:
+        return 70
+    channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    channel.settimeout(timeout)
+    try:
+        channel.connect(path)
+        channel.sendall(MAGIC + binding)
+    except OSError:
+        channel.close()
+        return 70
+    failed = []
+
+    def copy_input():
+        try:
+            while True:
+                chunk = os.read(0, MAX_CHUNK)
+                if not chunk:
+                    channel.shutdown(socket.SHUT_WR)
+                    return
+                channel.sendall(chunk)
+        except OSError:
+            failed.append(True)
+
+    input_thread = threading.Thread(target=copy_input, daemon=True)
+    input_thread.start()
+    try:
+        while True:
+            chunk = channel.recv(MAX_CHUNK)
+            if not chunk:
+                break
+            write_all(1, chunk)
+    except OSError:
+        failed.append(True)
+    finally:
+        channel.close()
+    input_thread.join(timeout)
+    if input_thread.is_alive() or failed:
+        return 70
+    return 0
+
+
+try:
+    raise SystemExit(main())
+except SystemExit:
+    raise
+except BaseException:
+    raise SystemExit(70)
+'''
 
 
 def fail(code):
@@ -45,6 +160,12 @@ def is_digest(value):
     return isinstance(value, str) and len(value) == 64 and all(
         char in "0123456789abcdef" for char in value
     )
+
+
+class CodexProxyViolation(Exception):
+    def __init__(self, error_code):
+        super().__init__(error_code)
+        self.error_code = error_code
 
 
 def canonical_json(value):
@@ -215,6 +336,27 @@ def verify_broker_socket():
         fail(71)
 
 
+def verify_codex_proxy_socket():
+    if os.environ.get("LATTICE_HERMES_CODEX_PROXY_FD") != "2":
+        fail(71)
+    try:
+        proxy_stat = os.fstat(2)
+        for descriptor in (0, 1):
+            control_stat = os.fstat(descriptor)
+            if (proxy_stat.st_dev, proxy_stat.st_ino) == (
+                control_stat.st_dev,
+                control_stat.st_ino,
+            ):
+                fail(71)
+        proxy = socket.fromfd(2, socket.AF_UNIX, socket.SOCK_STREAM)
+        if proxy.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM:
+            fail(71)
+        proxy.getpeername()
+        return proxy
+    except OSError:
+        fail(71)
+
+
 def parse_init_payload(encoded):
     try:
         value = json.loads(encoded.decode("ascii"))
@@ -296,6 +438,464 @@ def config_digest(init):
         "schema": "lattice.hermes.production-config.v1",
     }
     return sha256_bytes(canonical_json(value))
+
+
+def codex_proxy_binding(init):
+    if not is_digest(init.get("nonce")) or not is_digest(init.get("broker_receipt_sha256")):
+        raise CodexProxyViolation(PROXY_ERROR_BINDING)
+    return hashlib.sha256(
+        bytes.fromhex(init["nonce"])
+        + bytes.fromhex(init["broker_receipt_sha256"])
+        + b"LATTICE_HERMES_CODEX_PROXY_V1"
+    ).digest()
+
+
+def validate_codex_proxy_payload(kind, payload):
+    if kind in (CODEX_PROXY_OPEN, CODEX_PROXY_CLOSE):
+        if payload:
+            raise CodexProxyViolation(PROXY_ERROR_SIZE)
+    elif kind == CODEX_PROXY_DATA:
+        if not payload or len(payload) > MAX_CODEX_PROXY_DATA_BYTES:
+            raise CodexProxyViolation(PROXY_ERROR_SIZE)
+    elif kind == CODEX_PROXY_ERROR:
+        if len(payload) != 2 or int.from_bytes(payload, "big") not in range(1, 8):
+            raise CodexProxyViolation(PROXY_ERROR_SIZE)
+    else:
+        raise CodexProxyViolation(PROXY_ERROR_PROTOCOL)
+
+
+def encode_codex_proxy_frame(kind, sequence, binding, payload):
+    if (
+        not isinstance(sequence, int)
+        or isinstance(sequence, bool)
+        or sequence < 0
+        or sequence > 0xFFFFFFFF
+        or not isinstance(binding, bytes)
+        or len(binding) != 32
+        or not isinstance(payload, bytes)
+    ):
+        raise CodexProxyViolation(PROXY_ERROR_STATE)
+    validate_codex_proxy_payload(kind, payload)
+    body = (
+        bytes((kind,))
+        + CODEX_PROXY_STREAM_ID.to_bytes(4, "big")
+        + sequence.to_bytes(4, "big")
+        + binding
+        + payload
+    )
+    return CODEX_PROXY_MAGIC + len(body).to_bytes(4, "big") + body
+
+
+def decode_codex_proxy_body(body, expected_sequence, expected_binding):
+    if (
+        not isinstance(body, bytes)
+        or len(body) < CODEX_PROXY_HEADER_BYTES
+        or len(body) > CODEX_PROXY_HEADER_BYTES + MAX_CODEX_PROXY_DATA_BYTES
+    ):
+        raise CodexProxyViolation(PROXY_ERROR_SIZE)
+    kind = body[0]
+    stream_id = int.from_bytes(body[1:5], "big")
+    sequence = int.from_bytes(body[5:9], "big")
+    binding = body[9:41]
+    payload = body[41:]
+    if kind not in (CODEX_PROXY_OPEN, CODEX_PROXY_DATA, CODEX_PROXY_CLOSE, CODEX_PROXY_ERROR):
+        raise CodexProxyViolation(PROXY_ERROR_PROTOCOL)
+    if stream_id != CODEX_PROXY_STREAM_ID:
+        raise CodexProxyViolation(PROXY_ERROR_STATE)
+    if sequence != expected_sequence:
+        raise CodexProxyViolation(PROXY_ERROR_SEQUENCE)
+    if binding != expected_binding:
+        raise CodexProxyViolation(PROXY_ERROR_BINDING)
+    validate_codex_proxy_payload(kind, payload)
+    return kind, payload
+
+
+def codex_proxy_timeout(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise CodexProxyViolation(PROXY_ERROR_DEADLINE)
+    return max(0.001, remaining)
+
+
+def codex_proxy_read_exact(connection, length, deadline):
+    output = bytearray()
+    while len(output) < length:
+        connection.settimeout(codex_proxy_timeout(deadline))
+        try:
+            chunk = connection.recv(length - len(output))
+        except socket.timeout as failure:
+            raise CodexProxyViolation(PROXY_ERROR_DEADLINE) from failure
+        except OSError as failure:
+            raise CodexProxyViolation(PROXY_ERROR_IO) from failure
+        if not chunk:
+            raise CodexProxyViolation(PROXY_ERROR_IO)
+        output.extend(chunk)
+    return bytes(output)
+
+
+def send_codex_proxy_frame(connection, kind, sequence, binding, payload, deadline):
+    frame = encode_codex_proxy_frame(kind, sequence, binding, payload)
+    connection.settimeout(codex_proxy_timeout(deadline))
+    try:
+        connection.sendall(frame)
+    except socket.timeout as failure:
+        raise CodexProxyViolation(PROXY_ERROR_DEADLINE) from failure
+    except OSError as failure:
+        raise CodexProxyViolation(PROXY_ERROR_IO) from failure
+
+
+def receive_codex_proxy_frame(connection, expected_sequence, binding, deadline):
+    magic = codex_proxy_read_exact(connection, len(CODEX_PROXY_MAGIC), deadline)
+    if magic != CODEX_PROXY_MAGIC:
+        raise CodexProxyViolation(PROXY_ERROR_PROTOCOL)
+    length = int.from_bytes(codex_proxy_read_exact(connection, 4, deadline), "big")
+    if length < CODEX_PROXY_HEADER_BYTES or length > (
+        CODEX_PROXY_HEADER_BYTES + MAX_CODEX_PROXY_DATA_BYTES
+    ):
+        raise CodexProxyViolation(PROXY_ERROR_SIZE)
+    body = codex_proxy_read_exact(connection, length, deadline)
+    return decode_codex_proxy_body(body, expected_sequence, binding)
+
+
+def install_codex_shim():
+    source = CODEX_SHIM_SOURCE.encode("utf-8")
+    if (
+        not source.startswith(b"#!/runtime-input/python/bin/python3.12\n")
+        or len(source) > MAX_REFLECTION_BYTES
+    ):
+        fail(80)
+    try:
+        bin_path = pathlib.Path("/state/bin")
+        bin_path.mkdir(mode=0o700)
+        bin_metadata = os.lstat(bin_path)
+        descriptor = os.open(
+            CODEX_SHIM_PATH,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o700,
+        )
+        try:
+            offset = 0
+            while offset < len(source):
+                written = os.write(descriptor, source[offset:])
+                if written <= 0:
+                    fail(80)
+                offset += written
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.chmod(CODEX_SHIM_PATH, 0o700)
+        metadata = os.lstat(CODEX_SHIM_PATH)
+        with open(CODEX_SHIM_PATH, "rb", buffering=0) as installed:
+            observed = installed.read(len(source) + 1)
+    except OSError:
+        fail(80)
+    if (
+        observed != source
+        or not stat.S_ISDIR(bin_metadata.st_mode)
+        or bin_metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(bin_metadata.st_mode) != 0o700
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or sha256_bytes(observed) != sha256_bytes(source)
+    ):
+        fail(80)
+    return sha256_bytes(source)
+
+
+def create_codex_proxy_listener():
+    path = pathlib.Path(CODEX_PROXY_SOCKET_PATH)
+    if os.path.lexists(path):
+        fail(80)
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    previous_umask = os.umask(0o077)
+    try:
+        listener.bind(CODEX_PROXY_SOCKET_PATH)
+    except OSError:
+        listener.close()
+        fail(80)
+    finally:
+        os.umask(previous_umask)
+    try:
+        os.chmod(CODEX_PROXY_SOCKET_PATH, 0o600)
+        metadata = os.lstat(CODEX_PROXY_SOCKET_PATH)
+    except OSError:
+        listener.close()
+        fail(80)
+    if (
+        not stat.S_ISSOCK(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        listener.close()
+        fail(80)
+    listener.listen(1)
+    return listener
+
+
+class CodexProxyBridge:
+    def __init__(self, host_connection, binding, deadline):
+        self.host_connection = host_connection
+        self.binding = binding
+        self.deadline = deadline
+        self.listener = create_codex_proxy_listener()
+        self.shim_sha256 = install_codex_shim()
+        self.send_sequence = 0
+        self.receive_sequence = 0
+        self.failure_code = None
+        self.cancelled = False
+        self.done = threading.Event()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def emit_error(self, error_code):
+        try:
+            send_codex_proxy_frame(
+                self.host_connection,
+                CODEX_PROXY_ERROR,
+                self.send_sequence,
+                self.binding,
+                error_code.to_bytes(2, "big"),
+                self.deadline,
+            )
+            self.send_sequence += 1
+        except (CodexProxyViolation, OSError):
+            pass
+
+    def close_listener(self):
+        try:
+            self.listener.close()
+        except OSError:
+            pass
+        try:
+            os.unlink(CODEX_PROXY_SOCKET_PATH)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            if not self.cancelled:
+                self.failure_code = 80
+
+    def accept_shim(self):
+        self.listener.settimeout(codex_proxy_timeout(self.deadline))
+        try:
+            local, _ = self.listener.accept()
+        except socket.timeout as failure:
+            raise CodexProxyViolation(PROXY_ERROR_DEADLINE) from failure
+        except OSError as failure:
+            if self.cancelled:
+                return None
+            raise CodexProxyViolation(PROXY_ERROR_IO) from failure
+        self.close_listener()
+        try:
+            credentials = local.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+            _pid, uid, _gid = struct.unpack("3i", credentials)
+        except (OSError, struct.error) as failure:
+            local.close()
+            raise CodexProxyViolation(PROXY_ERROR_BINDING) from failure
+        if uid != os.geteuid():
+            local.close()
+            raise CodexProxyViolation(PROXY_ERROR_BINDING)
+        handshake = codex_proxy_read_exact(
+            local,
+            len(CODEX_SHIM_MAGIC) + len(self.binding),
+            self.deadline,
+        )
+        if handshake != CODEX_SHIM_MAGIC + self.binding:
+            local.close()
+            raise CodexProxyViolation(PROXY_ERROR_BINDING)
+        return local
+
+    def relay(self, local):
+        send_codex_proxy_frame(
+            self.host_connection,
+            CODEX_PROXY_OPEN,
+            self.send_sequence,
+            self.binding,
+            b"",
+            self.deadline,
+        )
+        self.send_sequence += 1
+        kind, payload = receive_codex_proxy_frame(
+            self.host_connection,
+            self.receive_sequence,
+            self.binding,
+            self.deadline,
+        )
+        self.receive_sequence += 1
+        if kind != CODEX_PROXY_OPEN or payload:
+            raise CodexProxyViolation(PROXY_ERROR_STATE)
+        local_closed = False
+        host_closed = False
+        while not (local_closed and host_closed):
+            readable = []
+            if not local_closed:
+                readable.append(local)
+            if not host_closed:
+                readable.append(self.host_connection)
+            try:
+                ready, _, _ = select.select(
+                    readable,
+                    [],
+                    [],
+                    codex_proxy_timeout(self.deadline),
+                )
+            except OSError as failure:
+                raise CodexProxyViolation(PROXY_ERROR_IO) from failure
+            if not ready:
+                raise CodexProxyViolation(PROXY_ERROR_DEADLINE)
+            if local in ready:
+                try:
+                    payload = local.recv(MAX_CODEX_PROXY_DATA_BYTES)
+                except OSError as failure:
+                    raise CodexProxyViolation(PROXY_ERROR_IO) from failure
+                kind = CODEX_PROXY_DATA if payload else CODEX_PROXY_CLOSE
+                send_codex_proxy_frame(
+                    self.host_connection,
+                    kind,
+                    self.send_sequence,
+                    self.binding,
+                    payload,
+                    self.deadline,
+                )
+                self.send_sequence += 1
+                if not payload:
+                    local_closed = True
+            if self.host_connection in ready:
+                kind, payload = receive_codex_proxy_frame(
+                    self.host_connection,
+                    self.receive_sequence,
+                    self.binding,
+                    self.deadline,
+                )
+                self.receive_sequence += 1
+                if kind == CODEX_PROXY_DATA:
+                    if host_closed:
+                        raise CodexProxyViolation(PROXY_ERROR_STATE)
+                    local.settimeout(codex_proxy_timeout(self.deadline))
+                    try:
+                        local.sendall(payload)
+                    except OSError as failure:
+                        raise CodexProxyViolation(PROXY_ERROR_IO) from failure
+                elif kind == CODEX_PROXY_CLOSE:
+                    try:
+                        local.shutdown(socket.SHUT_WR)
+                    except OSError as failure:
+                        raise CodexProxyViolation(PROXY_ERROR_IO) from failure
+                    host_closed = True
+                elif kind == CODEX_PROXY_ERROR:
+                    raise CodexProxyViolation(PROXY_ERROR_STATE)
+                else:
+                    raise CodexProxyViolation(PROXY_ERROR_STATE)
+
+    def run(self):
+        local = None
+        try:
+            local = self.accept_shim()
+            if local is not None:
+                self.relay(local)
+        except CodexProxyViolation as violation:
+            if not self.cancelled:
+                self.failure_code = 79 if violation.error_code == PROXY_ERROR_DEADLINE else 80
+                self.emit_error(violation.error_code)
+        except BaseException:
+            if not self.cancelled:
+                self.failure_code = 80
+                self.emit_error(PROXY_ERROR_IO)
+        finally:
+            if local is not None:
+                local.close()
+            self.close_listener()
+            self.done.set()
+
+    def environment(self):
+        timeout_millis = max(1, int((self.deadline - time.monotonic()) * 1000))
+        return {
+            "CODEX_HOME": "/state/codex-unavailable",
+            "HOME": "/state/hermes",
+            "HERMES_HOME": "/state/hermes",
+            "LANG": "C.UTF-8",
+            "LATTICE_HERMES_CODEX_PROXY_BINDING": self.binding.hex(),
+            "LATTICE_HERMES_CODEX_PROXY_SOCKET": CODEX_PROXY_SOCKET_PATH,
+            "LATTICE_HERMES_CODEX_PROXY_TIMEOUT_MILLIS": str(timeout_millis),
+            "LC_ALL": "C.UTF-8",
+            "NO_COLOR": "1",
+            "PATH": "/state/bin:/runtime-input/python/bin:/usr/bin:/bin",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONHASHSEED": "0",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONSAFEPATH": "1",
+            "PYTHONUTF8": "1",
+            "TMPDIR": "/tmp",
+        }
+
+    def wait(self):
+        timeout = max(0.001, self.deadline - time.monotonic())
+        if not self.done.wait(timeout):
+            fail(79)
+        if self.failure_code is not None:
+            fail(self.failure_code)
+
+    def close(self):
+        if not self.done.is_set():
+            self.cancelled = True
+            self.close_listener()
+            self.done.wait(0.5)
+
+
+def exercise_fixture_codex_proxy(bridge):
+    process = None
+    try:
+        process = subprocess.Popen(
+            ["codex", "app-server"],
+            cwd="/work",
+            env=bridge.environment(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+        )
+        timeout = codex_proxy_timeout(bridge.deadline)
+        output, stderr = process.communicate(FIXTURE_CODEX_REQUEST, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if process is not None:
+            process.kill()
+            process.communicate()
+        bridge.wait()
+        fail(79)
+    except CodexProxyViolation as violation:
+        if process is not None:
+            process.kill()
+            process.communicate()
+        fail(79 if violation.error_code == PROXY_ERROR_DEADLINE else 80)
+    except OSError:
+        if process is not None:
+            process.kill()
+            process.communicate()
+        fail(80)
+    bridge.wait()
+    if process.returncode != 0 or stderr or output != FIXTURE_CODEX_RESPONSE:
+        fail(80)
+    try:
+        second = subprocess.Popen(
+            ["codex", "app-server"],
+            cwd="/work",
+            env=bridge.environment(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+        )
+        second_output, second_stderr = second.communicate(
+            b"",
+            timeout=codex_proxy_timeout(bridge.deadline),
+        )
+    except (OSError, subprocess.TimeoutExpired, CodexProxyViolation):
+        if "second" in locals():
+            second.kill()
+            second.communicate()
+        fail(80)
+    if second.returncode == 0 or second_output or second_stderr:
+        fail(80)
 
 
 def digest_file(path, limit):
@@ -437,7 +1037,7 @@ def parse_http_request(request):
     return method, path, headers, body
 
 
-def fixture_response(init, request, state):
+def fixture_response(init, request, state, codex_bridge):
     method, path, headers, body = parse_http_request(request)
     if headers.get("authorization") != "Bearer " + init["api_key"]:
         return http_response(401, "application/json", b"{}")
@@ -476,6 +1076,10 @@ def fixture_response(init, request, state):
             or not submitted["session_id"]
         ):
             fail(77)
+        if state.get("codex_proxy_used"):
+            fail(80)
+        state["codex_proxy_used"] = True
+        exercise_fixture_codex_proxy(codex_bridge)
         state["session_id"] = submitted["session_id"]
         return http_response(
             202,
@@ -532,9 +1136,10 @@ def read_socket_to_eof(connection, deadline):
 
 
 class ScriptedFixtureEndpoint:
-    def __init__(self, init, deadline):
+    def __init__(self, init, deadline, codex_bridge):
         host, port_text = init["endpoint"].rsplit(":", 1)
         self.init = init
+        self.codex_bridge = codex_bridge
         self.state = {}
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -562,7 +1167,12 @@ class ScriptedFixtureEndpoint:
             client.sendall(request)
             client.shutdown(socket.SHUT_WR)
             observed = read_socket_to_eof(accepted, deadline)
-            response = fixture_response(self.init, observed, self.state)
+            response = fixture_response(
+                self.init,
+                observed,
+                self.state,
+                self.codex_bridge,
+            )
             if not response or len(response) > MAX_CONTROL_BYTES:
                 fail(78)
             accepted.settimeout(remaining_seconds(deadline))
@@ -590,13 +1200,24 @@ def reject_unstaged_official_server():
     fail(74)
 
 
-def serve_contained_reflection(connection, bwrap_sha256, net_namespace, namespace_pid):
+def serve_contained_reflection(
+    connection,
+    codex_proxy_connection,
+    bwrap_sha256,
+    net_namespace,
+    namespace_pid,
+):
     init = parse_init(connection)
     bindings = verified_bindings(init, bwrap_sha256, net_namespace, namespace_pid)
     if init["mode"] == "official":
         reject_unstaged_official_server()
     deadline = time.monotonic() + init["deadline_millis"] / 1000.0
-    fixture = ScriptedFixtureEndpoint(init, deadline)
+    codex_bridge = CodexProxyBridge(
+        codex_proxy_connection,
+        codex_proxy_binding(init),
+        deadline,
+    )
+    fixture = ScriptedFixtureEndpoint(init, deadline, codex_bridge)
     try:
         connection.settimeout(remaining_seconds(deadline))
         try:
@@ -618,6 +1239,7 @@ def serve_contained_reflection(connection, bwrap_sha256, net_namespace, namespac
             send_frame(connection, HTTP_RESPONSE_MAGIC, response, deadline)
     finally:
         fixture.close()
+        codex_bridge.close()
 
 
 def main(arguments):
@@ -628,15 +1250,23 @@ def main(arguments):
     verify_write_boundaries()
     verify_network_is_private()
     broker = verify_broker_socket()
+    codex_proxy = verify_codex_proxy_socket()
     try:
         bwrap_sha256 = digest_file("/usr/bin/bwrap", MAX_EXECUTABLE_BYTES)
         try:
             net_namespace = os.readlink("/proc/self/ns/net")
         except OSError:
             fail(73)
-        serve_contained_reflection(broker, bwrap_sha256, net_namespace, os.getpid())
+        serve_contained_reflection(
+            broker,
+            codex_proxy,
+            bwrap_sha256,
+            net_namespace,
+            os.getpid(),
+        )
     finally:
         broker.close()
+        codex_proxy.close()
 
 
 if __name__ == "__main__":
