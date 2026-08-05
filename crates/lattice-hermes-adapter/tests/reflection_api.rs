@@ -1669,7 +1669,22 @@ fn codex_proxy_fd2_host_wire_is_bound_sequenced_and_fail_closed() {
             .code(),
         "HERMES_CODEX_PROXY_STATE_REJECTED"
     );
+}
 
+#[cfg(windows)]
+#[test]
+fn codex_proxy_fd2_host_wire_rejects_binding_sequence_and_diagnostics() {
+    use crate::production::{CodexProxyHostSession, encode_codex_proxy_test_frame};
+
+    let nonce = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let broker = digest("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    let binding = CodexProxyHostSession::new(
+        nonce,
+        &broker,
+        Instant::now() + Duration::from_secs(2),
+    )
+    .expect("bound source session")
+    .binding();
     let mut wrong_binding = CodexProxyHostSession::new(
         nonce,
         &broker,
