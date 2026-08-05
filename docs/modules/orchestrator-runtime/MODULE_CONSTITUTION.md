@@ -1,7 +1,7 @@
 ---
 module_id: orchestrator-runtime
 name: Orchestrator and Runtime Port
-version: 2.1
+version: 2.2
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-05
@@ -50,6 +50,10 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
   unreachable before workspace evidence, and Git is unreachable unless scope
   and test evidence pass.
 - Load delivery status only through the injected delivery-ledger port.
+- For graph memory, call only injected ports in this order: exact tracked
+  snapshot, Graphify analysis, pure graph validation/normalization, durable
+  analysis/record persistence, exact-snapshot deterministic retrieval/audit,
+  and typed receipt/status projection.
 - Stop on the first failed gate; ambiguous effects enter reconciliation.
 - Revoke writer authority before verification/review and require a separate
   exact merge approval before integration.
@@ -72,11 +76,17 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
    reconciliation cannot become success.
 10. A compatibility caller reaches the same coordinator and cannot introduce a
     second call order or durable status source.
+11. Graphify is unreachable until exact commit/tree/source-manifest evidence
+    exists. Persistence is unreachable until complete output validates, and
+    retrieval is unreachable until the same analysis is durably complete.
+12. Timeout, malformed/partial output, provenance mismatch, ranking failure,
+    database ambiguity, or changed binding stops later calls and never becomes
+    a graph-memory success.
 
 ## Allowed Dependencies
 
-- `lattice-contracts`, `lattice-task-domain`, `lattice-policy`, and
-  `lattice-ports` public APIs.
+- `lattice-contracts`, `lattice-task-domain`, `lattice-policy`,
+  `lattice-codebase-memory`, and `lattice-ports` public APIs.
 - Injected Registry, Ledger, approval, workspace, runtime, verification,
   review, integration, clock, and ID ports.
 

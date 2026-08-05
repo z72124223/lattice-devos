@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 26
+version: 27
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -21,9 +21,9 @@ modules:
   - module_id: scope-check
     constitution_version: 1.1
   - module_id: orchestrator-runtime
-    constitution_version: 2.1
+    constitution_version: 2.2
   - module_id: latticed
-    constitution_version: 1.0
+    constitution_version: 1.1
   - module_id: openclaw-adapter
     constitution_version: 2.0
   - module_id: gateway-ipc
@@ -39,7 +39,7 @@ modules:
   - module_id: review-runtime
     constitution_version: 1.0
   - module_id: graphify-adapter
-    constitution_version: 1.0
+    constitution_version: 1.1
   - module_id: hermes-adapter
     constitution_version: 1.0
   - module_id: codebase-memory
@@ -51,9 +51,9 @@ modules:
   - module_id: lattice-cli
     constitution_version: 1.0
   - module_id: lattice-contracts
-    constitution_version: 1.10
+    constitution_version: 1.11
   - module_id: lattice-ports
-    constitution_version: 1.6
+    constitution_version: 1.7
 ---
 
 # Autonomous Development Platform
@@ -512,6 +512,28 @@ creating duplicate authorities or an unconstrained self-modifying agent.
   or code changes.
 - If the exact version cannot place output outside the source root, preflight
   rejects it.
+- TASK-033 pins official package `graphifyy==0.9.33`, tag/commit
+  `v0.9.33`/`4e7e6b1f7e0df10ed07d5f28f9189bbde42940f1`, Apache-2.0, and wheel
+  SHA-256 `c32b5792c783a6e66b1100b35bc65df3538e3f69b9df45fb098c9634c1b8eb01`.
+  Runtime configuration binds a complete 2,184-file dependency payload plus
+  the reviewed WSL/Python/bubblewrap execution boundary; it never follows
+  `latest` automatically.
+- The only permitted production invocation shape is equivalent to
+  `graphify extract <immutable-snapshot> --code-only --no-cluster
+  --max-workers 1 --out <owned-staging>` inside fixed `wsl.exe --exec` and
+  bubblewrap user/mount/network namespaces. Runtime/source are read-only, only
+  staging is writable, nested user namespaces are disabled, and unbound host
+  paths/network are unavailable. LATTICE clears provider/backend environment,
+  sets `GRAPHIFY_QUERY_LOG_DISABLE=1`, and rejects every install, hook, query,
+  watch, global, live-PostgreSQL, semantic-backend, or in-source output path.
+- LATTICE materializes the snapshot from tracked Git objects, records the exact
+  commit/tree plus a sorted path/content-digest manifest, and excludes
+  untracked or secret material before Graphify starts. Every returned
+  `source_file` must resolve to that manifest.
+- Graphify success is accepted only when the child exits successfully and a
+  complete strict `graph.json` validates. Timeout, malformed JSON, unknown
+  provenance, missing/partial output, or changed source binding rejects the
+  run before durable graph-memory mutation.
 
 ### Hermes research lane
 
@@ -549,6 +571,18 @@ creating duplicate authorities or an unconstrained self-modifying agent.
   project identity, or release activation.
 - `PREFERENCE` becomes accepted only from authenticated user evidence;
   model-inferred preferences remain `INFERENCE/CANDIDATE`.
+- TASK-033 stores only normalized structural `OBSERVATION/CANDIDATE` records
+  from the exact graph snapshot. It stores identifiers, labels, relation,
+  confidence/provenance, source location and digests, but no raw source text,
+  credentials, untracked content, or inferred authority.
+- The first retrieval algorithm is LATTICE-owned, bounded, versioned, and
+  deterministic: exact identifier/path/token matches outrank partial matches;
+  ties use stable record identity. Each query binds exact project and commit,
+  records query/algorithm/result digests and ordered record IDs, and returns no
+  cross-snapshot result.
+- Durable insertion, changed-source invalidation, retrieval audit, and status
+  replay occur only through fixed PostgreSQL functions in the single LATTICE
+  database. Rejection before final persistence has zero memory side effects.
 
 ### Approval authority
 
@@ -692,12 +726,12 @@ acceptance criteria below.
 | MVP-3 — Guardian-protected autonomy | normal improvement Task Packets plus immutable A/B candidates, protected guardian activation, health/canary, reconciliation and rollback | fault injection, nonce/epoch/admission enforcement, complete-drain proof, power-loss recovery and rollback drill | no silent protected change or in-place self-overwrite |
 
 MVP-0 is complete from TASK-008 and TASK-009 evidence. MVP-1 is current under
-TASK-032. TASK-010 through TASK-021 supplied the pure and PostgreSQL
+TASK-033 while TASK-032 official live remains `FAILED_DIAGNOSTIC`. TASK-010 through TASK-021 supplied the pure and PostgreSQL
 foundations; TASK-022 through TASK-031 remain hardening backlog unless a gap
 blocks the runnable path. TASK-032 first proves the official Codex app-server,
 PostgreSQL restart replay, bounded workspace/test/Git commit, `latticed` MCP
-entry, and compatibility wrapper. Later MVP-1 nodes attach real OpenClaw,
-Graphify, Hermes, and Codebase Memory to that same executable path. MVP-1,
+entry, and compatibility wrapper. TASK-033 attaches real Graphify and Codebase
+Memory; later MVP-1 nodes attach Hermes and then OpenClaw. MVP-1,
 MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 
 ## Non-Goals
@@ -740,23 +774,23 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | writer-lease | 1.0 | New lease/fencing/daemon-epoch domain owner |
 | workspace-git | 2.0 | Worktree/Git/filesystem evidence only; consumes lease authority |
 | scope-check | 1.1 | Language-neutral contract; mission remains detection-only |
-| orchestrator-runtime | 2.1 | Pure injected-port ordering for intent -> workspace prepare -> Codex -> workspace/test/Git -> outcome/receipt; no concrete adapter or transport dependency |
-| latticed | 1.0 | Sole normal composition root in the existing `apps/lattice-runtime` package; concrete adapter selection, bounded MCP stdio, and one `lattice-runtime` compatibility wrapper |
+| orchestrator-runtime | 2.2 | Preserve delivery ordering and add pure injected-port snapshot -> Graphify -> validate -> memory persist/retrieve ordering; no concrete adapter or transport dependency |
+| latticed | 1.1 | Sole normal composition root; existing two zero-parameter MCP tools expose the preconfigured delivery plus graph-memory run and durable status without a third tool or new arguments |
 | openclaw-adapter | 2.0 | Inert scaffold becomes a thin local IPC gateway |
 | gateway-ipc | 1.1 | Bounded canonical six-action protocol, NFC-preserving encoder, truthful core-service errors, and deterministic fake loopback; live transport and OS authentication remain deferred |
 | approval-verifier | 1.0 | Pure typed-subject/challenge/proof/nonce/time/current-head owner and deterministic fake; live trust/claim remains deferred |
-| postgres-store | 1.4 | Preserved Store/Task-Ledger evidence plus exact global schema-v4 migration, five fixed-column Registry tables, nine fixed Registry-v1 runtime functions, and one Registry-specific global `SERIALIZABLE` transaction/persistence receipt; later domain repositories remain TASK-023 through TASK-025 |
+| postgres-store | 1.4 | Preserved Store/Task-Ledger evidence plus the approved global schema-v4 Project Registry design; TASK-033 does not alter its `0005` reservation or current constitution |
 | artifact-store | 1.0 | Pure project-scoped object/reference/provenance/quota/delete-claim semantic owner and deterministic fake; PostgreSQL/filesystem I/O remains deferred |
 | codex-adapter | 1.1 | One writable app-server process/thread implementing the typed `DeliveryCodexPort`; generic `CodexPort` is not a second production path |
 | review-runtime | 1.0 | New independent read-only review boundary |
-| graphify-adapter | 1.0 | New read-only-source graph/artifact boundary |
+| graphify-adapter | 1.1 | Exact Graphify v0.9.33 code-only child over a tracked immutable snapshot; verified private tmpfs copies, Landlock ABI 3, strict framed capture, and typed output/provenance validation |
 | hermes-adapter | 1.0 | New contained research/candidate boundary |
-| codebase-memory | 1.0 | New provenance/review/retrieval domain |
+| codebase-memory | 1.0 | Pure canonical structural observation, candidate-state, deterministic ranking and persistence-plan owner; PostgreSQL I/O remains in Postgres Store |
 | self-upgrade-guardian | 1.0 | New A/B activation, health, and rollback boundary |
 | lattice-core-bootstrap | 1.0 | Inert compile-time component manifest for the first Rust slice |
 | lattice-cli | 1.0 | Read-only bootstrap inspection/recovery command; no runtime authority |
-| lattice-contracts | 1.10 | Preserve 1.9 values and add immutable typed delivery request, stage evidence, terminal outcome/status, and receipt representations without I/O or authority |
-| lattice-ports | 1.6 | Preserve legacy signatures, add typed delivery-ledger/Codex/workspace/Git/fixed-test ports for the pure orchestrator, and freeze generic `CodexPort` outside the production delivery composition |
+| lattice-contracts | 1.11 | Preserve delivery values and add immutable snapshot-manifest, Graphify analysis, graph-memory record/query/status and terminal receipt representations without I/O or authority |
+| lattice-ports | 1.7 | Preserve delivery ports and add exact snapshot, typed Graphify analysis and Codebase Memory repository ports; generic GraphifyPort remains frozen outside production composition |
 
 The user approved this module direction, the local bootstrap slice, and
 continued local work on 2026-07-29. TASK-010 adds the pure technical
@@ -1270,6 +1304,21 @@ packaging modules do not activate functional provider modules.
   requires an official Codex app-server turn, isolated changed-path/fixed-test/
   local-commit evidence, PostgreSQL restart replay from a separate status
   invocation, and fail-closed timeout/protocol/test/Git/database ambiguity.
+- [ ] AC-38: TASK-033 pins and actually invokes Graphify v0.9.33 against a
+  LATTICE-materialized exact tracked commit snapshot, strictly validates and
+  canonicalizes complete code-only graph output, stores project/commit/tree/
+  manifest/tool/config/content-digest-bound structural candidates plus a
+  deterministic exact-snapshot retrieval audit in a separately versioned,
+  independently hashed same-database Memory extension profile, and replays the
+  same typed analysis/memory status after process and database restart. The
+  extension must not alter global Store v3 state or the Registry-reserved
+  global `0005`/schema-v4 profile, and its PostgreSQL implementation requires
+  an explicitly approved versioned owning-module amendment first. Changed
+  source invalidates the old current snapshot; untracked and
+  secret files never enter the snapshot; timeout, malformed/partial output,
+  unknown source provenance, or persistence ambiguity fails closed with zero
+  false success. `latticed` retains exactly its two zero-parameter MCP tools
+  and accepts no new caller-controlled query/path/shell/SQL/credential input.
 
 ## Verification Plan
 

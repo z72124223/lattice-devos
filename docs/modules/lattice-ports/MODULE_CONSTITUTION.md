@@ -1,7 +1,7 @@
 ---
 module_id: lattice-ports
 name: LATTICE I/O Ports
-version: 1.6
+version: 1.7
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-05
@@ -42,6 +42,12 @@ lane, and fixed-test lane.
   only for pre-delivery consumers; it is frozen and cannot be wired as a
   second production writer beside the typed delivery lane.
 - `GraphifyPort` returns derived read-only evidence.
+- The generic `GraphifyPort` is frozen for pre-TASK-033 compatibility.
+  Production graph-memory composition uses `CodeSnapshotPort` to materialize
+  one exact tracked commit, `GraphifyAnalysisPort` to run and strictly parse
+  the pinned code-only child, and `CodebaseMemoryPort` to persist/load exact
+  analysis and bounded retrieval audit. None exposes a caller-selected path,
+  command, environment, query, SQL, or credential.
 - `HermesPort` returns untrusted candidate evidence.
 - `DeliveryLedgerPort` records typed intent before an effect, records typed
   terminal outcome/receipt after it, and loads exact status without exposing a
@@ -88,6 +94,11 @@ lane, and fixed-test lane.
     process, filesystem handle, command line, SQL, credential, or MCP type.
 13. Port methods do not own effect order. Only the injected orchestrator may
     sequence intent, Codex, workspace/test/Git, and terminal persistence.
+14. Graph-memory ports expose no concrete Git, process, filesystem, JSON,
+    database, driver, transaction, staging-directory, or Graphify CLI type.
+15. Snapshot materialization, analysis, persistence, and retrieval are
+    distinct effects. A failed or uncertain earlier port cannot be represented
+    as a later success.
 14. The workspace/Git port cannot commit before receiving request-bound passing
     scope and fixed-test evidence.
 15. Unknown ledger, Codex, workspace, test, or Git outcome never becomes a

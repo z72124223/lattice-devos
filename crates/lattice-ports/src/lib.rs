@@ -4,12 +4,14 @@ use std::error::Error;
 use std::fmt;
 
 use lattice_contracts::{
-    CodexDeliveryEvidence, CodexDeliveryRequest, CodexEvidence, CodexRunRequest, Component,
-    DeliveryOutcomeEvidence, DeliveryOutcomeRequest, DeliveryReceipt, DeliveryRunRequest,
-    DeliveryStage, DeliveryStatusRequest, DurableIntentEvidence, FixedTestEvidence,
-    GatewayPeerContext, GatewayReply, GatewayRequest, GitCommitEvidence, GraphifyBuildRequest,
-    GraphifyEvidence, HermesEvidence, HermesResearchRequest, PreparedWorkspaceEvidence, RequestId,
-    StorePhysicalHead, StoreScope, StoreTransactionReceipt, StoreTransactionRequest,
+    CodeSnapshotEvidence, CodexDeliveryEvidence, CodexDeliveryRequest, CodexEvidence,
+    CodexRunRequest, Component, DeliveryOutcomeEvidence, DeliveryOutcomeRequest, DeliveryReceipt,
+    DeliveryRunRequest, DeliveryStage, DeliveryStatusRequest, DurableIntentEvidence,
+    FixedTestEvidence, GatewayPeerContext, GatewayReply, GatewayRequest, GitCommitEvidence,
+    GraphMemoryPersistenceEvidence, GraphMemoryReceipt, GraphMemoryRunRequest,
+    GraphifyBuildRequest, GraphifyEvidence, GraphifyRawEvidence, HermesEvidence,
+    HermesResearchRequest, MemoryRetrievalPlan, NormalizedGraphAnalysis, PreparedWorkspaceEvidence,
+    RequestId, StorePhysicalHead, StoreScope, StoreTransactionReceipt, StoreTransactionRequest,
     WorkspaceChangeEvidence,
 };
 
@@ -28,6 +30,9 @@ pub type ControlStoreResult<T> = Result<T, ControlStoreError>;
 
 /// Result returned by each typed delivery effect port.
 pub type DeliveryPortResult<T> = Result<T, DeliveryPortError>;
+
+/// Result returned by each exact graph-memory effect port.
+pub type GraphMemoryPortResult<T> = Result<T, GraphMemoryPortError>;
 
 /// Stable fail-closed categories shared across port and inbound-service boundaries.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -158,6 +163,89 @@ impl fmt::Display for DeliveryPortError {
 }
 
 impl Error for DeliveryPortError {}
+
+/// Ordered effect stages for the executable graph-memory node.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GraphMemoryStage {
+    /// Exact tracked-only Git snapshot materialization.
+    Snapshot,
+    /// Pinned Graphify child execution and strict output parsing.
+    Graphify,
+    /// Atomic analysis/record persistence.
+    Persistence,
+    /// Exact-snapshot deterministic retrieval and audit persistence.
+    Retrieval,
+    /// Restart-safe terminal receipt readback.
+    Receipt,
+}
+
+/// Whether a failed graph-memory effect is known not to have completed.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GraphMemoryFailureCertainty {
+    /// The effect is proved not to have completed successfully.
+    Known,
+    /// The effect outcome cannot safely be inferred and requires reconciliation.
+    Ambiguous,
+}
+
+/// Typed graph-memory failure with exact stage and outcome certainty.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphMemoryPortError {
+    stage: GraphMemoryStage,
+    kind: PortErrorKind,
+    certainty: GraphMemoryFailureCertainty,
+    code: String,
+}
+
+impl GraphMemoryPortError {
+    /// Constructs one stage-specific graph-memory failure.
+    #[must_use]
+    pub fn new(
+        stage: GraphMemoryStage,
+        kind: PortErrorKind,
+        certainty: GraphMemoryFailureCertainty,
+        code: impl Into<String>,
+    ) -> Self {
+        Self {
+            stage,
+            kind,
+            certainty,
+            code: code.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn stage(&self) -> GraphMemoryStage {
+        self.stage
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> PortErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn certainty(&self) -> GraphMemoryFailureCertainty {
+        self.certainty
+    }
+
+    #[must_use]
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+}
+
+impl fmt::Display for GraphMemoryPortError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "GraphMemory {:?} {:?}/{:?}: {}",
+            self.stage, self.kind, self.certainty, self.code
+        )
+    }
+}
+
+impl Error for GraphMemoryPortError {}
 
 /// A typed Rust-core gateway-service failure with no external component label.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -435,6 +523,82 @@ pub trait CodexPort {
     ///
     /// Returns a typed failure when interruption or final outcome is unknown.
     fn interrupt(&mut self, request_id: &RequestId) -> PortResult<()>;
+}
+
+/// Exact tracked-only snapshot boundary for the production graph-memory node.
+///
+/// The implementation owns its process-configured repository and staging
+/// location; callers can select neither a path nor a Git command.
+pub trait CodeSnapshotPort {
+    /// Materializes one immutable tracked snapshot for the exact request commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed known or ambiguous failure for missing/substituted Git
+    /// objects, unsafe tracked paths, secret/untracked leakage, or teardown.
+    fn materialize_snapshot(
+        &mut self,
+        request: &GraphMemoryRunRequest,
+    ) -> GraphMemoryPortResult<CodeSnapshotEvidence>;
+}
+
+/// Pinned Graphify analysis boundary for production graph-memory work.
+///
+/// This interface is separate from the frozen generic [`GraphifyPort`] and
+/// accepts no command, environment, path, credential, or backend selection.
+pub trait GraphifyAnalysisPort {
+    /// Runs the fixed headless code-only analysis over one exact snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed known or ambiguous failure for identity/capability
+    /// mismatch, timeout, malformed/partial output, or unsafe provenance.
+    fn analyze(
+        &mut self,
+        request: &GraphMemoryRunRequest,
+        snapshot: &CodeSnapshotEvidence,
+    ) -> GraphMemoryPortResult<GraphifyRawEvidence>;
+}
+
+/// Sole Codebase Memory repository boundary.
+///
+/// Implementations persist only typed analysis/plan values through fixed
+/// repository operations and never expose SQL, credentials, or a database
+/// client. Effect ordering remains owned by the orchestrator.
+pub trait CodebaseMemoryPort {
+    /// Atomically writes one complete normalized analysis and candidate set.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when exact persistence is rejected or unknown.
+    fn persist_analysis(
+        &mut self,
+        analysis: &NormalizedGraphAnalysis,
+    ) -> GraphMemoryPortResult<GraphMemoryPersistenceEvidence>;
+
+    /// Executes and audits one precomputed deterministic retrieval plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure for missing/substituted analysis, invalidation,
+    /// corrupt ordering, unavailable storage, or ambiguous commit outcome.
+    fn retrieve(
+        &mut self,
+        persistence: &GraphMemoryPersistenceEvidence,
+        plan: MemoryRetrievalPlan,
+    ) -> GraphMemoryPortResult<GraphMemoryReceipt>;
+
+    /// Replays one exact terminal receipt without invoking earlier effects.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure for missing, incomplete, cross-bound, corrupt,
+    /// or unavailable repository state. This receipt alone is not live
+    /// database-identity or restart-replay proof.
+    fn load_receipt(
+        &mut self,
+        request: &GraphMemoryRunRequest,
+    ) -> GraphMemoryPortResult<GraphMemoryReceipt>;
 }
 
 /// Read-only derived-knowledge boundary implemented by the `Graphify` adapter.

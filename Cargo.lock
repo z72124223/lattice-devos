@@ -255,6 +255,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-codebase-memory"
+version = "0.1.0"
+dependencies = [
+ "lattice-cjson",
+ "lattice-contracts",
+]
+
+[[package]]
 name = "lattice-codex-adapter"
 version = "0.1.0"
 dependencies = [
@@ -286,9 +294,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-graphify-adapter"
+version = "0.1.0"
+dependencies = [
+ "lattice-contracts",
+ "lattice-ports",
+ "serde_json",
+ "sha2",
+ "windows-sys",
+]
+
+[[package]]
 name = "lattice-orchestrator"
 version = "0.1.0"
 dependencies = [
+ "lattice-codebase-memory",
  "lattice-contracts",
  "lattice-ports",
 ]

@@ -86,6 +86,44 @@ unelevated/no-sandbox. Scripted acceptance, code fixes, tests, review, and
 durable handoff work may continue, but cannot close TASK-032's official-live
 acceptance criterion.
 
+TASK-032 therefore remains `FAILED_DIAGNOSTIC` for official live, but it no
+longer blocks independently safe downstream executable nodes. The user
+explicitly directed the next bounded node to attach real Graphify and
+PostgreSQL Codebase Memory to the already verified scripted delivery fixture.
+This does not waive or reinterpret the official-live criterion.
+
+## Current TASK-033 Graphify/Memory Slice — 2026-08-05
+
+The current executable node is intentionally narrow:
+
+1. Pin the current official Graphify stable release and invoke only its
+   headless, local, code-only extraction against a LATTICE-materialized exact
+   Git commit snapshot. The source snapshot is read-only and output is confined
+   to separate LATTICE staging. On this Windows host, the fixed production
+   boundary is direct `wsl.exe --exec` plus bubblewrap user/mount/network
+   namespaces; it exposes no shell or unbound host path.
+2. Preserve project/commit/tree/source-manifest provenance and content digests
+   in typed Contracts 1.11 evidence. Graphify output is derived evidence, not
+   task, policy, scope, or release authority.
+3. Codebase Memory 1.0 normalizes structural graph facts, deterministically
+   ranks a fixed process-owned query, and plans candidate observations only.
+   Its planned durable adapter is a same-database, independently hashed Memory
+   extension profile; it is not part of the global Store migration manifest.
+4. Orchestrator 2.2 owns `snapshot -> Graphify -> validate -> persist ->
+   retrieve` effect order through Ports 1.7. The first failure stops later
+   effects; partial or malformed output is never committed.
+5. `latticed` 1.1 keeps exactly the existing two zero-parameter MCP tools. The
+   run tool extends the preconfigured scripted acceptance chain; status reads
+   the exact project/commit analysis and memory evidence from PostgreSQL. No
+   shell, SQL, path, credential, query, or provider input is added to MCP.
+6. ADR-020, Postgres Store 1.4, Project Registry's reserved global `0005`, and
+   global schema v4 remain authoritative and unchanged. The proposed Memory
+   extension path is `db/extensions/codebase-memory/v1.sql`, with its own exact
+   hash, identity, ledger, explicit admin runner, and V3+Memory verifier.
+   Implementing that PostgreSQL boundary is blocked until a precise versioned
+   module amendment is explicitly approved; the pure and adapter layers may
+   continue independently.
+
 The trusted scripted checkpoint is now complete: fixture
 `c9bf2939ad5844e9973ee0af0a84b756` persisted typed intent/outcome/receipt
 evidence through a PostgreSQL 17.10 restart and produced clean fixture commit
@@ -193,7 +231,7 @@ substituted for one another.
 | MVP | Status | Required outcome | Exit evidence | Explicitly not claimed |
 |---|---|---|---|---|
 | MVP-0 — Rust foundation | **COMPLETE — 2026-07-29** | TASK-008 workspace/bootstrap plus TASK-009 versioned contracts and ports; four active V2 module constitutions; no provider I/O | local format, Clippy, 14 Rust tests, 38 preserved Node tests, independent code/architecture review | no PostgreSQL durability, live provider, autonomous execution, release, merge, or deployment |
-| MVP-1 — Deliverable local alpha | **CURRENT — TASK-032; 12 foundation tickets complete** | one thin real chain from Codex App or OpenClaw through Rust/PostgreSQL to Codex modification, test and commit, followed by real Graphify, Hermes, and project-isolated Codebase Memory retrieval | a repeatable local acceptance run records exact component identities, durable task/result state, changed paths, test result, commit, graph/reflection artifacts, and memory query | no production hardening, public service, silent self-release, or claim from fake adapters |
+| MVP-1 — Deliverable local alpha | **CURRENT — TASK-033; 12 foundation tickets plus scripted delivery checkpoint complete** | one thin real chain from Codex App or OpenClaw through Rust/PostgreSQL to Codex modification, test and commit, followed by real Graphify, Hermes, and project-isolated Codebase Memory retrieval | a repeatable local acceptance run records exact component identities, durable task/result state, changed paths, test result, commit, graph/reflection artifacts, and memory query | no production hardening, public service, silent self-release, or claim from fake adapters |
 | MVP-2 — Isolation and recovery | **PLANNED** | harden the MVP-1 chain with durable leases, exact scope enforcement, cancellation, reconciliation, component isolation, restart recovery, and measured retrieval quality | fault/cancel/restart/reconciliation tests, OS-boundary evidence, scope isolation, compatibility matrix, memory benchmark | no unconstrained agent, second writer/truth, public service, or self-release authority |
 | MVP-3 — Guardian-protected autonomy | **PLANNED** | outcomes can propose normal improvement tasks; immutable A/B candidates pass independent review, protected guardian claim, drain/canary/health, restart reconciliation, and rollback | fault-injected activation saga, nonce/epoch/admission enforcement, complete-drain proof, write canary, power-loss and rollback drill | no silent policy/constitution/credential/public-exposure change and no in-place self-overwrite |
 
@@ -202,7 +240,8 @@ Delivery dependency sequence:
 - MVP-1 now follows runnable vertical nodes rather than waiting for every old
   foundation ticket. TASK-032 first proves real Codex app-server, PostgreSQL,
   bounded Git modification, tests, and a local commit. Subsequent nodes add
-  OpenClaw, Graphify, Hermes, and Codebase Memory to that same executable path.
+  Graphify/Codebase Memory, then Hermes, then OpenClaw to that same executable
+  path. TASK-032 official live stays diagnostic-blocked independently.
 - Unfinished TASK-022 through TASK-031 work is preserved as hardening backlog;
   it is pulled forward only when a missing control blocks the runnable path.
 - MVP-2 closes isolation, recovery, and edge-case gaps observed in the working
@@ -658,7 +697,8 @@ remain future Orchestrator/PostgreSQL responsibilities.
     and add one runtime-aware verified global state, command plan/apply,
     immutable global checkpoint, ordered command replay, and projection/
     reservation verification shared by Fake and PostgreSQL. Postgres Store 1.4
-    will add exact schema v4 and a Registry-specific global transaction because
+    will add exact schema v4 through migration `0005` and a Registry-specific
+    global transaction because
     registration denial can have no authority snapshot and cross-project
     accepted/pending identity collisions require one serialization point.
     TASK-022 must not forge a `ProjectSnapshotId`, reinterpret a per-project
@@ -692,7 +732,7 @@ remain future Orchestrator/PostgreSQL responsibilities.
     AC-06 remains open for real Windows/Git inspection, Workspace Git, and
     Scope Check. Writer Lease, Approval, Artifact, external components,
     production/release/deployment, and the unrelated website remain excluded.
-- [ ] **CURRENT TASK-032 — executable Codex/PostgreSQL delivery node:** first
+- [ ] **BLOCKED TASK-032 — executable Codex/PostgreSQL delivery node:** first
   record the approved versioned contract/port/orchestrator/`latticed` boundary,
   then implement it with TDD and prove an official Codex app-server repository
   modification, fixed verification, Git commit, durable PostgreSQL result, and
@@ -703,20 +743,34 @@ remain future Orchestrator/PostgreSQL responsibilities.
   scripted subpath, fail-closed repair, full verification, and durable incident
   handoff are complete. The official-live acceptance substep remains blocked by
   the incident gate above and must not be retried in this window; TASK-032 stays
-  `in-progress`, so the later OpenClaw/Graphify/Hermes/Memory nodes do not start.
+  `in-progress` with official acceptance `FAILED_DIAGNOSTIC`.
+- [ ] **CURRENT TASK-033 — real Graphify/PostgreSQL Codebase Memory node:** pin
+  Graphify v0.9.33 at commit
+  `4e7e6b1f7e0df10ed07d5f28f9189bbde42940f1`, analyze only an exact tracked
+  Git snapshot and validate/canonicalize typed graph evidence. Pure contracts,
+  ports, Codebase Memory, Graphify adapter, and orchestrator work may continue.
+  PostgreSQL persistence/restart replay will use an independent same-database
+  Memory extension profile, not global schema v4, and is
+  `BLOCKED_PENDING_VERSIONED_AMENDMENT` until its owning module boundary is
+  explicitly approved. This node uses the scripted delivery fixture and makes
+  no official-Codex-live claim. The pure/Graphify checkpoint is complete:
+  typed contracts/ports, pure memory and orchestration, exact Git snapshots,
+  the pinned Graphify adapter, private tmpfs copy/verification, strict framed
+  capture, and Landlock ABI 3 enforcement have passed focused/full local gates
+  and independent P0/P1 review. PostgreSQL composition, restart replay, and
+  status exposure remain the next blocked substep; TASK-033 stays current.
 - [ ] Step 7: Complete TASK-026 and TASK-027 for Workspace Git 2.0 and exact
   Scope Check 1.1 behavior in disposable repositories; retain the local
   filesystem lock only as defense in depth.
 - [ ] Step 8: Preserve unfinished TASK-028 through TASK-031 controls as
   hardening backlog and pull forward only a control that blocks the executable
   delivery path; do not let the older fake-adapter sequence override TASK-032.
-- [ ] Step 9: After TASK-032 passes, attach and verify the bounded OpenClaw
+- [ ] Step 9: After TASK-033 passes, attach the OS-contained Hermes reflection
+  lane to the same exact graph/memory receipt.
+- [ ] Step 10: After Hermes passes, attach and verify the bounded OpenClaw
   gateway against the same durable delivery request and receipt.
-- [ ] Step 10: Complete MVP-2 Codebase Memory ownership, PostgreSQL retrieval
-  audit, quantified multilingual benchmark, and project-isolation evidence.
-- [ ] Step 11: Complete MVP-2 Graphify code-only and OS-contained Hermes
-  fake-to-live lanes, then run the full local component fault/restart/
-  reconciliation exit gate.
+- [ ] Step 11: Harden Codebase Memory retrieval quality/project isolation and
+  run the full local component fault/restart/reconciliation exit gate.
 - [ ] Step 12: Implement the MVP-3 independent self-upgrade Guardian with protected
   approval verification, atomic claim/nonce/admission transition, durable
   activation saga, daemon epochs, database-enforced drain/canary admission,

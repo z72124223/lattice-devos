@@ -1,3 +1,92 @@
+# LATTICE DevOS TASK-033 Pure Graphify Checkpoint Handoff
+
+## Status And Alignment
+
+`DONE` for the bounded pure Rust/Graphify checkpoint. TASK-033 remains
+`in-progress`: PostgreSQL persistence/restart replay and `latticed` status
+composition are `BLOCKED_PENDING_VERSIONED_AMENDMENT`. Hermes and OpenClaw were
+not started. TASK-032 official Codex live remains `FAILED_DIAGNOSTIC`; no
+official live, sandbox setup, unelevated/no-sandbox mode, deployment, push, or
+merge was attempted.
+
+## Delivered
+
+- Added typed graph-memory requests/evidence, ports, pure Codebase Memory
+  normalization/retrieval, and pure orchestrator ordering with fail-closed
+  zero-later-effect behavior.
+- Added an exact tracked-Git snapshot materializer that excludes untracked and
+  secret-shaped paths, binds the commit/tree/manifest, and rejects drift.
+- Pinned `graphifyy` 0.9.33, upstream commit
+  `4e7e6b1f7e0df10ed07d5f28f9189bbde42940f1`, Apache-2.0, wheel SHA-256
+  `c32b5792c783a6e66b1100b35bc65df3538e3f69b9df45fb098c9634c1b8eb01`,
+  and the complete reviewed dependency payload.
+- Added the Windows/WSL Graphify adapter: fixed headless arguments, cleared
+  provider environment, private tmpfs runtime/source/output, exact copy
+  verification, strict seven-field framed copy-out, exclusive parent capture
+  handles, bounded teardown, and Landlock ABI 3 truncate enforcement before
+  any Graphify command.
+- Preserved the Store 1.4/ADR-020 Project Registry reservation. No PostgreSQL
+  extension, global migration, runtime composition, third MCP tool, Hermes, or
+  OpenClaw code is present in this checkpoint.
+
+## Material Files
+
+| Files | Reason |
+|---|---|
+| `crates/lattice-contracts`, `crates/lattice-ports` | typed graph, memory, analysis, persistence, and retrieval boundaries |
+| `crates/lattice-codebase-memory` | deterministic untrusted structural record normalization and retrieval |
+| `crates/lattice-orchestrator` | pure snapshot -> analyze -> validate -> persist -> retrieve effect order |
+| `crates/lattice-graphify-adapter` | exact Git snapshot plus pinned, contained, fail-closed Graphify execution |
+| `Cargo.toml`, `Cargo.lock` | register the two new Rust crates and locked dependencies |
+| SPEC-002, ADR-022, affected constitutions, TASK-033, `PLANS.md` | minimal approved boundary and current blocked database substep |
+| `HANDOFF.md`, `docs/workflow/WORKFLOW_LEDGER.md` | durable checkpoint truth and continuation evidence |
+
+## Verification And Review
+
+- Private typed Graphify live: exit 0, 1 passed/0 failed, test time 112.92 s
+  (115.8 s wall); exact Git fixture produced deterministic typed evidence. This
+  run proved the private-copy/framed-capture revision before the final ABI-3
+  gate was added; the full Graphify live was not rerun after that review repair.
+- Final containment repair: embedded runner SHA-256
+  `98d0411709927a5687315f64efc6673a77f2241e2db6df8bd17c34886e3c2ad9`;
+  execution identity
+  `f270004749c7f4fc260dfc09925b52f3b7071bcc64ba5f7cbd9bd37ae1400dd5`.
+  A bounded bubblewrap tmpfs probe exited 0 with
+  `abi=7 truncate_denied=1 allowed_write=1`; no target Windows or WSL process
+  remained.
+- `cargo test -p lattice-graphify-adapter --lib --tests --locked`: exit 0;
+  18 unit tests passed/2 ignored, 2 Git tests passed/2 ignored, and one static
+  containment test passed/3 ignored.
+- `cargo fmt --all -- --check`, strict adapter Clippy, locked full workspace
+  tests, strict full workspace Clippy, and `npm.cmd run verify`: exit 0; Node
+  tests 44/44. The first full run observed one pre-existing scripted Codex EOF
+  timing mismatch; its exact test and the complete workspace rerun both passed.
+- Three independent final read-only reviews: code P0=0/P1=0, security
+  P0=0/P1=0, architecture P0=0/P1=0. Graphify Adapter 1.1 now matches the
+  user-directed private tmpfs/Landlock/framed-capture implementation.
+
+## Remaining Boundary
+
+- The two declined-cleanup diagnostic directories still exist and are
+  non-blocking; cleanup was not retried:
+  `C:\Users\f7212\AppData\Local\Temp\lattice-graphify-live-typed-ports-7788-1`
+  and
+  `C:\Users\f7212\AppData\Local\Temp\lattice-graphify-live-typed-ports-16628-1`.
+- Required approval wording for the next node:
+  "Approve a versioned owning-module amendment for an independent
+  same-database Codebase Memory extension profile at
+  `db/extensions/codebase-memory/v1.sql`, with exact embedded SQL/hash, Memory
+  schema identity/extension ledger, explicit admin runner, four domain tables,
+  fixed SECURITY DEFINER functions, V3+Memory catalog/ACL verifier, typed
+  database/extension identity evidence, and no change to global Store v3 or
+  Registry-reserved global `0005`/schema-v4."
+- Branch: `feature/v2-rust-postgres-bootstrap`; checkpoint parent:
+  `61cca93150878fe4c6854cd3be73e3171e9fa6c0`; checkpoint is this commit. The
+  repository has no remote, so remote synchronization, CI, branch protection,
+  push, and merge remain unavailable/not performed.
+
+---
+
 # LATTICE DevOS TASK-032 Executable Delivery Handoff
 
 ## Status

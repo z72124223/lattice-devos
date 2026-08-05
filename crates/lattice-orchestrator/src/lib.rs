@@ -3,15 +3,160 @@
 use std::error::Error;
 use std::fmt;
 
+use lattice_codebase_memory::{CodebaseMemoryError, normalize_analysis, plan_retrieval};
 use lattice_contracts::{
     CodexDeliveryRequest, CompletedDeliveryEvidence, DeliveryContractError, DeliveryOutcomeRequest,
     DeliveryReceipt, DeliveryRunRequest, DeliveryStage, DeliveryStatusRequest,
-    DeliveryTerminalStatus, DurableIntentEvidence,
+    DeliveryTerminalStatus, DurableIntentEvidence, GraphMemoryReceipt, GraphMemoryRunRequest,
+    MemoryQuery,
 };
 use lattice_ports::{
-    DeliveryCodexPort, DeliveryFailureCertainty, DeliveryLedgerPort, DeliveryPortError,
-    PortErrorKind, TestRunnerPort, WorkspaceGitPort,
+    CodeSnapshotPort, CodebaseMemoryPort, DeliveryCodexPort, DeliveryFailureCertainty,
+    DeliveryLedgerPort, DeliveryPortError, GraphMemoryPortError, GraphMemoryStage,
+    GraphifyAnalysisPort, PortErrorKind, TestRunnerPort, WorkspaceGitPort,
 };
+
+/// Pure graph-memory coordinator failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GraphMemoryOrchestratorError {
+    /// Exact tracked snapshot materialization failed.
+    Snapshot(GraphMemoryPortError),
+    /// Pinned Graphify execution or strict output validation failed.
+    Graphify(GraphMemoryPortError),
+    /// Pure normalization, binding, or deterministic ranking failed.
+    Normalize(CodebaseMemoryError),
+    /// Repository analysis/record persistence failed or became ambiguous.
+    Persistence(GraphMemoryPortError),
+    /// Exact retrieval/audit persistence failed or became ambiguous.
+    Retrieval(GraphMemoryPortError),
+    /// Independent repository receipt readback failed.
+    Receipt(GraphMemoryPortError),
+    /// A port returned evidence belonging to another request or analysis.
+    EvidenceMismatch(GraphMemoryStage),
+}
+
+impl fmt::Display for GraphMemoryOrchestratorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Snapshot(error) => write!(formatter, "graph snapshot rejected: {error}"),
+            Self::Graphify(error) => write!(formatter, "Graphify analysis rejected: {error}"),
+            Self::Normalize(error) => write!(formatter, "graph normalization rejected: {error}"),
+            Self::Persistence(error) => write!(formatter, "graph persistence rejected: {error}"),
+            Self::Retrieval(error) => write!(formatter, "memory retrieval rejected: {error}"),
+            Self::Receipt(error) => write!(formatter, "graph-memory receipt rejected: {error}"),
+            Self::EvidenceMismatch(stage) => {
+                write!(formatter, "graph-memory evidence mismatch at {stage:?}")
+            }
+        }
+    }
+}
+
+impl Error for GraphMemoryOrchestratorError {}
+
+/// Runs one exact graph-memory node using only injected effects and pure logic.
+///
+/// Effect order is fixed to snapshot -> Graphify -> normalize/rank -> persist
+/// -> retrieve/audit -> independent repository receipt readback. The function
+/// returns at the first failure; no later port is called.
+///
+/// # Errors
+///
+/// Returns a stage-specific error for the first failed/ambiguous effect, a
+/// pure normalization/ranking error, or a cross-bound evidence mismatch.
+pub fn run_graph_memory<S, G, M>(
+    request: &GraphMemoryRunRequest,
+    query: &MemoryQuery,
+    snapshot_port: &mut S,
+    graphify_port: &mut G,
+    memory_port: &mut M,
+) -> Result<GraphMemoryReceipt, GraphMemoryOrchestratorError>
+where
+    S: CodeSnapshotPort,
+    G: GraphifyAnalysisPort,
+    M: CodebaseMemoryPort,
+{
+    let snapshot = snapshot_port
+        .materialize_snapshot(request)
+        .map_err(GraphMemoryOrchestratorError::Snapshot)?;
+    if snapshot.request() != request {
+        return Err(GraphMemoryOrchestratorError::EvidenceMismatch(
+            GraphMemoryStage::Snapshot,
+        ));
+    }
+
+    let raw = graphify_port
+        .analyze(request, &snapshot)
+        .map_err(GraphMemoryOrchestratorError::Graphify)?;
+    let analysis = normalize_analysis(request, &snapshot, &raw)
+        .map_err(GraphMemoryOrchestratorError::Normalize)?;
+    let retrieval_plan =
+        plan_retrieval(&analysis, query).map_err(GraphMemoryOrchestratorError::Normalize)?;
+    let expected_retrieval = retrieval_plan.clone();
+
+    let persistence = memory_port
+        .persist_analysis(&analysis)
+        .map_err(GraphMemoryOrchestratorError::Persistence)?;
+    if persistence.request() != request
+        || persistence.analysis_digest() != analysis.analysis_digest()
+        || persistence.record_set_digest() != analysis.record_set_digest()
+        || usize::try_from(persistence.record_count()).ok() != Some(analysis.records().len())
+    {
+        return Err(GraphMemoryOrchestratorError::EvidenceMismatch(
+            GraphMemoryStage::Persistence,
+        ));
+    }
+
+    let retrieval_receipt = memory_port
+        .retrieve(&persistence, retrieval_plan)
+        .map_err(GraphMemoryOrchestratorError::Retrieval)?;
+    let observed_retrieval = retrieval_receipt.retrieval();
+    if !retrieval_receipt.matches_request(request)
+        || retrieval_receipt.persistence() != &persistence
+        || observed_retrieval.request() != expected_retrieval.request()
+        || observed_retrieval.analysis_digest() != expected_retrieval.analysis_digest()
+        || observed_retrieval.persistence_digest() != persistence.persistence_digest()
+        || observed_retrieval.query_digest() != expected_retrieval.query_digest()
+        || observed_retrieval.algorithm() != expected_retrieval.algorithm()
+        || observed_retrieval.limit() != expected_retrieval.limit()
+        || observed_retrieval.disposition() != expected_retrieval.disposition()
+        || observed_retrieval.results() != expected_retrieval.results()
+        || observed_retrieval.result_set_digest() != expected_retrieval.result_set_digest()
+    {
+        return Err(GraphMemoryOrchestratorError::EvidenceMismatch(
+            GraphMemoryStage::Retrieval,
+        ));
+    }
+
+    let receipt = memory_port
+        .load_receipt(request)
+        .map_err(GraphMemoryOrchestratorError::Receipt)?;
+    if receipt != retrieval_receipt || !receipt.matches_request(request) {
+        return Err(GraphMemoryOrchestratorError::EvidenceMismatch(
+            GraphMemoryStage::Receipt,
+        ));
+    }
+    Ok(receipt)
+}
+
+/// Loads one exact graph-memory receipt without invoking earlier effects.
+///
+/// # Errors
+///
+/// Returns a receipt-port failure or cross-binding mismatch.
+pub fn graph_memory_status<M: CodebaseMemoryPort>(
+    request: &GraphMemoryRunRequest,
+    memory_port: &mut M,
+) -> Result<GraphMemoryReceipt, GraphMemoryOrchestratorError> {
+    let receipt = memory_port
+        .load_receipt(request)
+        .map_err(GraphMemoryOrchestratorError::Receipt)?;
+    if !receipt.matches_request(request) {
+        return Err(GraphMemoryOrchestratorError::EvidenceMismatch(
+            GraphMemoryStage::Receipt,
+        ));
+    }
+    Ok(receipt)
+}
 
 /// Pure coordinator failure. A terminal stage failure may still carry its
 /// independently reloaded durable receipt.

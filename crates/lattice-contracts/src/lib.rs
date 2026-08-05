@@ -1,8 +1,10 @@
 //! Versioned, I/O-free shared contracts for LATTICE ports and adapters.
 
 mod delivery;
+mod graph_memory;
 
 pub use delivery::*;
+pub use graph_memory::*;
 
 use std::error::Error;
 use std::fmt;

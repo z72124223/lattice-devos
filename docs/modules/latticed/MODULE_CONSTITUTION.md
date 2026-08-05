@@ -1,7 +1,7 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 1.0
+version: 1.1
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-05
@@ -35,8 +35,9 @@ module.
 
 ## Public Contracts
 
-- Construct one Orchestrator 2.1 instance with typed Contracts 1.10 / Ports 1.6
-  implementations for the bounded TASK-032 delivery path.
+- Construct one Orchestrator 2.2 instance with typed Contracts 1.11 / Ports 1.7
+  implementations for the bounded TASK-032 delivery and TASK-033 graph-memory
+  path.
 - Expose exactly two MCP tools: `lattice_delivery_run` and
   `lattice_delivery_status`.
 - Give each tool a zero-parameter object input schema with no properties and
@@ -46,6 +47,10 @@ module.
   process input and never enter tool schemas, diagnostics, or results.
 - Map `lattice_delivery_run` to the one typed delivery coordinator and map
   `lattice_delivery_status` to the same durable ledger/status projection.
+- After the preconfigured scripted delivery receipt, the run tool invokes the
+  same coordinator's exact-snapshot Graphify/memory node. The status tool loads
+  delivery plus exact analysis/retrieval evidence from PostgreSQL; neither tool
+  gains an argument or a third sibling tool.
 - Retain `lattice-runtime` as a compatibility wrapper that invokes the
   identical composition and returns equivalent typed evidence. It cannot
   select a different adapter, order, workspace, test, or truth source.
@@ -72,14 +77,21 @@ module.
    closed and never reports success.
 9. Scripted protocol evidence remains visibly distinct from an official Codex
    app-server live turn.
+10. Graphify executable, source repository, commit, staging root, fixed memory
+    query, timeout, and database configuration are process-owned and digest-
+    bound. They never enter MCP schemas or echo secrets.
 
 ## Allowed Dependencies
 
-- `lattice-contracts` 1.10, `lattice-ports` 1.6, and
-  `orchestrator-runtime` 2.1 public APIs.
+- `lattice-contracts` 1.11, `lattice-ports` 1.7, and
+  `orchestrator-runtime` 2.2 public APIs.
 - Concrete Codex, PostgreSQL Task Ledger, bounded workspace/Git, and fixed-test
   adapters required by TASK-032, only for construction and port
   implementation.
+- Concrete exact-snapshot, Graphify 1.0, and pure Codebase Memory 1.0 adapters
+  required by TASK-033, only for construction and port implementation. The
+  proposed independent PostgreSQL Memory extension adapter cannot be composed
+  until its owning module receives an explicitly approved versioned amendment.
 - Bounded stdio/JSON/MCP framing, process configuration, hashing, timeout, and
   diagnostics libraries required at the application edge.
 

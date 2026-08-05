@@ -1,7 +1,7 @@
 ---
 module_id: lattice-contracts
 name: LATTICE Shared Contracts
-version: 1.10
+version: 1.11
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-05
@@ -42,6 +42,10 @@ their mutable domain state.
 - Immutable typed delivery request, ordered stage evidence, terminal
   outcome/status, and receipt representations built from trusted composition
   bindings rather than caller-supplied commands, paths, or credentials.
+- Immutable tracked-source manifest, Graphify execution/analysis, normalized
+  graph record, memory persistence/retrieval, graph-memory status, and terminal
+  receipt representations. These values carry provenance and digests only;
+  they grant no source, database, task, policy, or release authority.
 - Neutral bounded gateway peer, request/action payload, reply/disposition,
   stable denial, and redacted Task Spec document representations.
 - Neutral bounded Store transaction/daemon identifiers, closed repository
@@ -76,6 +80,13 @@ their mutable domain state.
 - Bind terminal delivery evidence to the originating request and exact prior
   stage commitments. Scripted and official-live Codex runtime evidence remain
   structurally distinguishable.
+- Bind every graph analysis to one project, snapshot, exact commit/tree,
+  sorted tracked-source manifest digest, pinned Graphify identity, fixed
+  configuration/capability/exclusion digests, complete graph/record-set
+  digests, and terminal disposition.
+- Represent memory records and ranked retrieval results with bounded closed
+  enums, strict ordinals/ranks, exact digests, and no raw source, SQL, path
+  selection, credential, provider configuration, or caller-selected MCP query.
 - Construct task-agnostic Project Registry authority receipts only for the
   fixed `lattice-project-registry` producer ID and supported semantic producer
   version.

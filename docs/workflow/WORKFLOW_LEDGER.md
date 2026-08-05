@@ -1,5 +1,37 @@
 # Workflow Ledger
 
+## TASK-033 Pure Graphify Checkpoint
+
+- Scope: typed contracts/ports, pure Codebase Memory and orchestration, exact
+  tracked-Git snapshots, and the pinned contained Graphify adapter.
+- Branch/base: `feature/v2-rust-postgres-bootstrap` at
+  `61cca93150878fe4c6854cd3be73e3171e9fa6c0`; no remote.
+- Overall ticket: `in-progress`; PostgreSQL extension/restart/status remains
+  `BLOCKED_PENDING_VERSIONED_AMENDMENT` and was not implemented.
+
+| Stage | Status | Evidence | Enforcement |
+|---|---|---|---|
+| Repository/rules/state | pass | AGENTS, plan, handoff, spec, ticket, constitutions, ADR, branch/base/no-remote inspected | machine-observed + documented |
+| Spec/module/ticket | pass for checkpoint | SPEC-002 v27, ADR-022, Graphify Adapter 1.1, Codebase Memory 1.0, TASK-033 | project check + documented approval |
+| TDD | pass | contract, port, memory, ordering, exact Git, parser, timeout/failure, capture and identity RED/GREEN tests | machine-executed |
+| Graphify supply chain | pass | v0.9.33, commit `4e7e6b1...`, Apache-2.0, exact wheel/payload/help/version identities | immutable hashes + live capability evidence |
+| Private typed live | pass for pre-ABI repair revision | exit 0, 1/1, 112.92 s; deterministic typed result; no official Codex claim | machine-executed local fixture |
+| ABI-3 containment repair | pass | runner `98d041...`, execution identity `f270004...`; direct tmpfs probe exit 0, ABI 7, truncate denied, allowed output write | production runtime probe + unit identity gates |
+| Focused verification | pass | Graphify adapter 18 pass/2 ignored plus Git/static containment suites; format and strict adapter Clippy pass | machine-enforced locally |
+| Full verification | pass after one retry | exact scripted Codex test passed after one timing mismatch; complete locked workspace tests, strict Clippy, and Node 44/44 rerun passed | machine-enforced locally |
+| Independent review | pass | three final read-only reviews, P0=0/P1=0 | independent agent review |
+| Architecture boundary | pass | no changed runtime/Postgres/db paths; no DB/Hermes/OpenClaw/MCP integration | diff + dependency/review evidence |
+| Official Codex live | failed diagnostic/blocked | TASK-032 incident gate unchanged; helper not started | fail-closed machine gate |
+| PostgreSQL/restart/status | blocked/not implemented | exact versioned owning-module approval still required | documented human gate |
+| Integration/CI/merge | local-only/not performed | full local combined result passes; no remote/CI/merge authorization | remote controls missing/unverified |
+| Handoff/checkpoint | complete | `HANDOFF.md`, this ledger, and the local checkpoint commit | documented + Git |
+
+Two exact `%TEMP%` diagnostic fixtures remain after cleanup was declined; no
+retry or permission expansion occurred. See `HANDOFF.md` for paths, live
+evidence, the exact next-approval wording, and continuation boundaries.
+
+---
+
 ## TASK-032 Executable Codex/PostgreSQL Delivery Node
 
 - Classification: approved typed contract/port expansion, pure orchestrator,
