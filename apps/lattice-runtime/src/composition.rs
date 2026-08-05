@@ -10,16 +10,25 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
+use lattice_codebase_memory::digest_query_text;
 use lattice_codex_adapter::{
     CodexDeliveryAdapter, CodexDeliveryAdapterConfig, CodexIdentityExpectation,
 };
 use lattice_contracts::{
     AttemptId, CONTRACT_VERSION, CompletedDeliveryEvidence, ContentDigest, DeliveryProfile,
     DeliveryReceipt, DeliveryRunRequest, DeliveryRuntime, DeliveryStage, DeliveryTerminalStatus,
-    Invocation, ProjectSnapshotId, RequestId, TaskId,
+    GitObjectId, GraphMemoryReceipt, GraphMemoryRunRequest, Invocation, MemoryQuery, ProjectId,
+    ProjectSnapshotId, RequestId, TaskId,
 };
-use lattice_orchestrator::{DeliveryOrchestratorError, delivery_status, run_delivery};
+use lattice_graphify_adapter::{
+    ExactGitSnapshotMaterializer, GitSnapshotConfig, GraphOutputLimits, GraphifyRuntimeConfig,
+    PinnedGraphifyAdapter, SnapshotBridge, SnapshotLimits,
+};
+use lattice_orchestrator::{
+    DeliveryOrchestratorError, delivery_status, graph_memory_status, run_delivery, run_graph_memory,
+};
 use lattice_ports::{DeliveryFailureCertainty, PortErrorKind};
+use lattice_postgres_codebase_memory::{ExtensionTarget, PostgresCodebaseMemory};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -27,6 +36,7 @@ use crate::DELIVERY_PROMPT;
 use crate::delivery_ledger::{
     DeliveryDatabaseBinding, DeliveryLedger, DeliveryReceipt as LegacyDeliveryReceipt,
     LEGACY_RECEIPT_FORMAT, PostgresDeliveryLedgerAdapter, PostgresDeliveryStatusReplay,
+    connect_fixed_runtime_client,
 };
 use crate::git_delivery::{DeliveryWorkspaceGitAdapter, DeliveryWorkspaceGitAdapterConfig};
 use crate::mcp::{self, DeliveryToolService, ToolExecutionError};
@@ -40,6 +50,14 @@ const SCRIPTED_FIXTURE_KIND: &str = "LATTICE_DELIVERY_SCRIPTED_ACCEPTANCE_V1";
 const MAX_SCRIPTED_MARKER_BYTES: u64 = 4 * 1024;
 const MAX_SCRIPTED_LAUNCHER_BYTES: u64 = 64 * 1024;
 const MAX_SCRIPTED_SERVER_BYTES: u64 = 64 * 1024;
+const MAX_GIT_EXECUTABLE_BYTES: u64 = 64 * 1024 * 1024;
+const GRAPH_TASK_ID: &str = "TASK-033";
+const GRAPH_PROJECT_ID: &str = "task032-delivery";
+const GRAPH_PROJECT_SNAPSHOT_ID: &str = "task032-delivery:graph-snapshot:1";
+const GRAPH_QUERY: &str = "lattice_delivery_fixture";
+const GRAPH_RETRIEVAL_LIMIT: u16 = 10;
+const GRAPH_MEMORY_ROOT_NAME: &str = "graph-memory";
+const GRAPHIFY_RUNTIME_RELATIVE_PATH: &str = "target/supply-chain/graphify-v0.9.33/wsl-runtime";
 const SCRIPTED_SERVER_BYTES: &[u8] = include_bytes!("fixtures/task032-scripted-codex.ps1");
 
 /// Static, secret-free composition failure classification.
@@ -60,6 +78,9 @@ pub enum LatticedErrorKind {
     ReconciliationRequired,
     OfficialLiveBlocked,
     ScriptedFixtureRejected,
+    GraphConfiguration,
+    GraphExecution,
+    GraphReceiptRead,
     Transport,
 }
 
@@ -82,6 +103,9 @@ impl LatticedErrorKind {
             Self::ReconciliationRequired => "LATTICE_DELIVERY_RECONCILIATION_REQUIRED",
             Self::OfficialLiveBlocked => "LATTICE_OFFICIAL_CODEX_FAILED_DIAGNOSTIC",
             Self::ScriptedFixtureRejected => "LATTICE_SCRIPTED_FIXTURE_REJECTED",
+            Self::GraphConfiguration => "LATTICE_GRAPH_MEMORY_CONFIGURATION_REJECTED",
+            Self::GraphExecution => "LATTICE_GRAPH_MEMORY_RUN_REJECTED",
+            Self::GraphReceiptRead => "LATTICE_GRAPH_MEMORY_RECEIPT_REJECTED",
             Self::Transport => "LATTICED_STDIO_REJECTED",
         }
     }
@@ -317,7 +341,7 @@ impl LatticedDeliveryService {
             // is resolved or the user explicitly authorizes a safety posture.
             return Err(LatticedError::new(LatticedErrorKind::OfficialLiveBlocked));
         }
-        validate_scripted_fixture(config)?;
+        let fixture = validate_scripted_fixture(config)?;
         let deadline = deadline(self.timeout)?;
         let ledger = DeliveryLedger::connect(&self.database, &self.password, deadline)
             .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
@@ -357,7 +381,17 @@ impl LatticedDeliveryService {
         .map_err(|_| LatticedError::new(LatticedErrorKind::CodexConfiguration))?;
         let mut codex = CodexDeliveryAdapter::with_deadline(codex_config, deadline);
         match run_delivery(request, &mut ledger, &mut workspace_git, &mut codex) {
-            Ok(receipt) => receipt_json(&receipt, "lattice-delivery"),
+            Ok(receipt) => {
+                let graph_receipt = run_delivery_graph_memory(
+                    &self.database,
+                    &self.password,
+                    config,
+                    &fixture,
+                    deadline,
+                    &receipt,
+                )?;
+                composed_receipt_json(&receipt, "lattice-delivery", &graph_receipt)
+            }
             Err(DeliveryOrchestratorError::Terminal { receipt, .. }) => Err(LatticedError::new(
                 terminal_run_error_kind(receipt.status()),
             )),
@@ -388,7 +422,15 @@ impl LatticedDeliveryService {
                 let status_request = ledger.request().status_request();
                 let receipt = delivery_status(&status_request, ledger.as_mut())
                     .map_err(|error| map_orchestrator_error(&error))?;
-                receipt_json(&receipt, "delivery-ledger")
+                let graph_request =
+                    graph_request_for_delivery_receipt(self.database.run_id(), &receipt)?;
+                let graph_receipt = load_delivery_graph_receipt(
+                    &self.database,
+                    &self.password,
+                    deadline(self.timeout)?,
+                    &graph_request,
+                )?;
+                composed_receipt_json(&receipt, "delivery-ledger", &graph_receipt)
             }
         }
     }
@@ -529,7 +571,15 @@ fn request_for_delivery(
     .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))
 }
 
-fn validate_scripted_fixture(config: &LatticedDeliveryConfig) -> Result<(), LatticedError> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ScriptedFixturePaths {
+    root: PathBuf,
+    repository_root: PathBuf,
+}
+
+fn validate_scripted_fixture(
+    config: &LatticedDeliveryConfig,
+) -> Result<ScriptedFixturePaths, LatticedError> {
     let rejected = || LatticedError::new(LatticedErrorKind::ScriptedFixtureRejected);
     if config.runtime != DeliveryRuntime::ScriptedAcceptance
         || config.delivery_root.file_name() != Some(OsStr::new("delivery"))
@@ -618,7 +668,132 @@ fn validate_scripted_fixture(config: &LatticedDeliveryConfig) -> Result<(), Latt
     {
         return Err(rejected());
     }
-    Ok(())
+    Ok(ScriptedFixturePaths {
+        root: fixture_root,
+        repository_root,
+    })
+}
+
+fn graph_request_for_delivery_receipt(
+    run_id: &str,
+    receipt: &DeliveryReceipt,
+) -> Result<GraphMemoryRunRequest, LatticedError> {
+    if receipt.status() != DeliveryTerminalStatus::Completed {
+        return Err(LatticedError::new(LatticedErrorKind::ReceiptMismatch));
+    }
+    let delivery_request = receipt.outcome().request();
+    let completed = delivery_request
+        .completed_evidence()
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
+    let invocation = Invocation::new(
+        CONTRACT_VERSION,
+        RequestId::new(format!("task033-graph-request-{run_id}"))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        TaskId::new(GRAPH_TASK_ID).map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        AttemptId::new(format!("task033-graph-attempt-{run_id}"))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        ProjectSnapshotId::new(GRAPH_PROJECT_SNAPSHOT_ID)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        receipt.receipt_digest().clone(),
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
+    let query_digest = digest_query_text(GRAPH_QUERY)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
+    GraphMemoryRunRequest::new(
+        invocation,
+        ProjectId::new(GRAPH_PROJECT_ID)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        GitObjectId::new(completed.git().commit())
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        query_digest,
+        delivery_request.binding().configuration_digest().clone(),
+        GRAPH_RETRIEVAL_LIMIT,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))
+}
+
+fn run_delivery_graph_memory(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    config: &LatticedDeliveryConfig,
+    fixture: &ScriptedFixturePaths,
+    deadline: Instant,
+    delivery_receipt: &DeliveryReceipt,
+) -> Result<GraphMemoryReceipt, LatticedError> {
+    let request = graph_request_for_delivery_receipt(database.run_id(), delivery_receipt)?;
+    let query = MemoryQuery::new(&request, GRAPH_QUERY, GRAPH_RETRIEVAL_LIMIT)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphExecution))?;
+    let graph_root = fixture.root.join(GRAPH_MEMORY_ROOT_NAME);
+    let bridge = SnapshotBridge::new();
+    let snapshot_config = GitSnapshotConfig::new(
+        config.git_executable.clone(),
+        graph_executable_sha256(&config.git_executable)?,
+        config.delivery_root.join("repo"),
+        graph_root.join("snapshots"),
+        SnapshotLimits::default(),
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let mut snapshot = ExactGitSnapshotMaterializer::with_bridge(snapshot_config, bridge.clone());
+
+    let system_root = env::var_os("SystemRoot")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let graphify_config = GraphifyRuntimeConfig::new(
+        PathBuf::from(system_root).join("System32/wsl.exe"),
+        fixture.repository_root.join(GRAPHIFY_RUNTIME_RELATIVE_PATH),
+        graph_root.join("staging"),
+        remaining,
+        GraphOutputLimits::default(),
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let mut graphify = PinnedGraphifyAdapter::new(graphify_config, bridge);
+    let client = connect_fixed_runtime_client(database, password, deadline)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+    let target = ExtensionTarget::new(database.database_name(), database.run_id())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let mut memory = PostgresCodebaseMemory::new(client, target)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+
+    run_graph_memory(&request, &query, &mut snapshot, &mut graphify, &mut memory)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphExecution))
+}
+
+fn load_delivery_graph_receipt(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    deadline: Instant,
+    request: &GraphMemoryRunRequest,
+) -> Result<GraphMemoryReceipt, LatticedError> {
+    let client = connect_fixed_runtime_client(database, password, deadline)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+    let target = ExtensionTarget::new(database.database_name(), database.run_id())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let mut memory = PostgresCodebaseMemory::new(client, target)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    graph_memory_status(request, &mut memory)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphReceiptRead))
+}
+
+fn graph_executable_sha256(path: &Path) -> Result<String, LatticedError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_GIT_EXECUTABLE_BYTES {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    }
+    let bytes =
+        fs::read(path).map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}")
+            .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    }
+    Ok(output)
 }
 
 fn marker_string<'a>(object: &'a Map<String, Value>, key: &str) -> Result<&'a str, LatticedError> {
@@ -707,6 +882,110 @@ fn digest(schema_id: &str, value: &CanonicalValue) -> Result<ContentDigest, Latt
         .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
     ContentDigest::from_sha256(digest.to_hex())
         .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))
+}
+
+struct GraphReceiptJsonFields<'a> {
+    project_id: &'a str,
+    commit_sha: &'a str,
+    query_digest: &'a str,
+    analysis_digest: &'a str,
+    record_count: u64,
+    persistence_digest: &'a str,
+    retrieval_digest: &'a str,
+    result_count: u64,
+    receipt_digest: &'a str,
+    database_identity_digest: &'a str,
+    extension_manifest_digest: &'a str,
+}
+
+fn composed_receipt_json(
+    delivery_receipt: &DeliveryReceipt,
+    component: &'static str,
+    graph_receipt: &GraphMemoryReceipt,
+) -> Result<Value, LatticedError> {
+    let request = graph_receipt.persistence().request();
+    let persistence = graph_receipt.persistence();
+    let retrieval = graph_receipt.retrieval();
+    let identity = persistence.identity();
+    let fields = GraphReceiptJsonFields {
+        project_id: request.project_id().as_str(),
+        commit_sha: request.commit_id().as_str(),
+        query_digest: request.query_digest().as_str(),
+        analysis_digest: persistence.analysis_digest().as_str(),
+        record_count: u64::from(persistence.record_count()),
+        persistence_digest: persistence.persistence_digest().as_str(),
+        retrieval_digest: retrieval.retrieval_digest().as_str(),
+        result_count: u64::try_from(retrieval.results().len())
+            .map_err(|_| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?,
+        receipt_digest: graph_receipt.receipt_digest().as_str(),
+        database_identity_digest: identity.database_identity_digest().as_str(),
+        extension_manifest_digest: identity.extension_manifest_digest().as_str(),
+    };
+    append_graph_receipt_fields(receipt_json(delivery_receipt, component)?, &fields)
+}
+
+fn append_graph_receipt_fields(
+    mut value: Value,
+    fields: &GraphReceiptJsonFields<'_>,
+) -> Result<Value, LatticedError> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
+    let additions = Map::from_iter([
+        (
+            "graph_status".to_owned(),
+            Value::String("COMPLETED".to_owned()),
+        ),
+        (
+            "graph_project_id".to_owned(),
+            Value::String(fields.project_id.to_owned()),
+        ),
+        (
+            "graph_commit_sha".to_owned(),
+            Value::String(fields.commit_sha.to_owned()),
+        ),
+        (
+            "graph_query_digest".to_owned(),
+            Value::String(fields.query_digest.to_owned()),
+        ),
+        (
+            "graph_analysis_digest".to_owned(),
+            Value::String(fields.analysis_digest.to_owned()),
+        ),
+        (
+            "graph_record_count".to_owned(),
+            Value::from(fields.record_count),
+        ),
+        (
+            "graph_persistence_digest".to_owned(),
+            Value::String(fields.persistence_digest.to_owned()),
+        ),
+        (
+            "graph_retrieval_digest".to_owned(),
+            Value::String(fields.retrieval_digest.to_owned()),
+        ),
+        (
+            "graph_result_count".to_owned(),
+            Value::from(fields.result_count),
+        ),
+        (
+            "graph_receipt_digest".to_owned(),
+            Value::String(fields.receipt_digest.to_owned()),
+        ),
+        (
+            "graph_database_identity_digest".to_owned(),
+            Value::String(fields.database_identity_digest.to_owned()),
+        ),
+        (
+            "graph_extension_manifest_digest".to_owned(),
+            Value::String(fields.extension_manifest_digest.to_owned()),
+        ),
+    ]);
+    if additions.keys().any(|key| object.contains_key(key)) {
+        return Err(LatticedError::new(LatticedErrorKind::ReceiptMismatch));
+    }
+    object.extend(additions);
+    Ok(value)
 }
 
 fn receipt_json(
@@ -1097,6 +1376,61 @@ mod tests {
             assert!(
                 !object.contains_key(unavailable),
                 "legacy replay must not synthesize {unavailable}"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_receipt_fields_are_flat_and_fixed() {
+        let value = append_graph_receipt_fields(
+            json!({"status": "COMPLETED"}),
+            &GraphReceiptJsonFields {
+                project_id: "task032-delivery",
+                commit_sha: &"a".repeat(40),
+                query_digest: &"b".repeat(64),
+                analysis_digest: &"c".repeat(64),
+                record_count: 7,
+                persistence_digest: &"d".repeat(64),
+                retrieval_digest: &"e".repeat(64),
+                result_count: 2,
+                receipt_digest: &"f".repeat(64),
+                database_identity_digest: &"1".repeat(64),
+                extension_manifest_digest: &"2".repeat(64),
+            },
+        )
+        .expect("append fixed graph receipt fields");
+        let object = value.as_object().expect("receipt object");
+
+        assert_eq!(object.len(), 13);
+        assert_eq!(
+            object.get("graph_status").and_then(Value::as_str),
+            Some("COMPLETED")
+        );
+        assert_eq!(
+            object.get("graph_project_id").and_then(Value::as_str),
+            Some("task032-delivery")
+        );
+        assert_eq!(
+            object.get("graph_record_count").and_then(Value::as_u64),
+            Some(7)
+        );
+        assert_eq!(
+            object.get("graph_result_count").and_then(Value::as_u64),
+            Some(2)
+        );
+        for name in [
+            "graph_commit_sha",
+            "graph_query_digest",
+            "graph_analysis_digest",
+            "graph_persistence_digest",
+            "graph_retrieval_digest",
+            "graph_receipt_digest",
+            "graph_database_identity_digest",
+            "graph_extension_manifest_digest",
+        ] {
+            assert_eq!(
+                object.get(name).and_then(Value::as_str).map(str::len),
+                Some(if name == "graph_commit_sha" { 40 } else { 64 })
             );
         }
     }

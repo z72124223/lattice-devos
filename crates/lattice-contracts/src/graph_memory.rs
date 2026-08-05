@@ -28,6 +28,12 @@ pub const GRAPH_MEMORY_RETRIEVAL_ALGORITHM: &str = "lattice-structural-retrieval
 pub const GRAPH_MEMORY_MAX_RECORDS: usize = 100_000;
 /// Maximum results returned and audited for one process-owned query.
 pub const GRAPH_MEMORY_MAX_RESULTS: u16 = 100;
+/// Fixed identity of the independent same-database Memory extension.
+pub const CODEBASE_MEMORY_EXTENSION_ID: &str = "lattice-codebase-memory";
+/// First and only supported Memory extension schema version.
+pub const CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION: u16 = 1;
+/// Global Store schema profile required by the first Memory extension.
+pub const CODEBASE_MEMORY_REQUIRED_GLOBAL_SCHEMA_VERSION: u16 = 3;
 
 /// Structural construction failures for graph-memory boundary values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1030,6 +1036,33 @@ impl RankedMemoryRecord {
         })
     }
 
+    /// Reconstructs one ranked result after a fixed repository function has
+    /// proved its binding to the persisted analysis.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero digests, rank, or score.
+    pub fn replay(
+        record_id: ContentDigest,
+        record_digest: ContentDigest,
+        rank: u16,
+        score: u32,
+    ) -> Result<Self, GraphMemoryContractError> {
+        require_digest(&record_id, "memory_result_record_id")?;
+        require_digest(&record_digest, "memory_result_record_digest")?;
+        if rank == 0 || score == 0 {
+            return Err(GraphMemoryContractError::InvalidValue {
+                field: "memory_result_rank_score",
+            });
+        }
+        Ok(Self {
+            record_id,
+            record_digest,
+            rank,
+            score,
+        })
+    }
+
     #[must_use]
     pub const fn record_id(&self) -> &ContentDigest {
         &self.record_id
@@ -1079,6 +1112,88 @@ pub struct MemoryRetrievalPlan {
     disposition: MemoryRetrievalDisposition,
     results: Vec<RankedMemoryRecord>,
     result_set_digest: ContentDigest,
+}
+
+/// Typed database and extension identity required by durable Memory evidence.
+///
+/// This value is representation only. It performs no I/O and grants no
+/// migration, database, memory, policy, or release authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodebaseMemoryPersistenceIdentity {
+    database_identity_digest: ContentDigest,
+    global_schema_version: u16,
+    global_manifest_digest: ContentDigest,
+    extension_id: &'static str,
+    extension_schema_version: u16,
+    extension_sql_digest: ContentDigest,
+    extension_manifest_digest: ContentDigest,
+}
+
+impl CodebaseMemoryPersistenceIdentity {
+    /// Constructs the exact v1 same-database extension identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any zero database, global-manifest, SQL, or extension-manifest
+    /// commitment.
+    pub fn v1(
+        database_identity_digest: ContentDigest,
+        global_manifest_digest: ContentDigest,
+        extension_sql_digest: ContentDigest,
+        extension_manifest_digest: ContentDigest,
+    ) -> Result<Self, GraphMemoryContractError> {
+        require_digest(&database_identity_digest, "memory_database_identity_digest")?;
+        require_digest(&global_manifest_digest, "memory_global_manifest_digest")?;
+        require_digest(&extension_sql_digest, "memory_extension_sql_digest")?;
+        require_digest(
+            &extension_manifest_digest,
+            "memory_extension_manifest_digest",
+        )?;
+        Ok(Self {
+            database_identity_digest,
+            global_schema_version: CODEBASE_MEMORY_REQUIRED_GLOBAL_SCHEMA_VERSION,
+            global_manifest_digest,
+            extension_id: CODEBASE_MEMORY_EXTENSION_ID,
+            extension_schema_version: CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION,
+            extension_sql_digest,
+            extension_manifest_digest,
+        })
+    }
+
+    #[must_use]
+    pub const fn database_identity_digest(&self) -> &ContentDigest {
+        &self.database_identity_digest
+    }
+
+    #[must_use]
+    pub const fn global_schema_version(&self) -> u16 {
+        self.global_schema_version
+    }
+
+    #[must_use]
+    pub const fn global_manifest_digest(&self) -> &ContentDigest {
+        &self.global_manifest_digest
+    }
+
+    #[must_use]
+    pub const fn extension_id(&self) -> &'static str {
+        self.extension_id
+    }
+
+    #[must_use]
+    pub const fn extension_schema_version(&self) -> u16 {
+        self.extension_schema_version
+    }
+
+    #[must_use]
+    pub const fn extension_sql_digest(&self) -> &ContentDigest {
+        &self.extension_sql_digest
+    }
+
+    #[must_use]
+    pub const fn extension_manifest_digest(&self) -> &ContentDigest {
+        &self.extension_manifest_digest
+    }
 }
 
 impl MemoryRetrievalPlan {
@@ -1192,14 +1307,11 @@ impl MemoryRetrievalPlan {
     }
 }
 
-/// Repository persistence evidence for one exact analysis and record set.
-///
-/// This value does not by itself prove live `PostgreSQL` durability. Database
-/// identity and extension-profile catalog proof require a separately versioned
-/// contract before a live durability or restart-replay claim is valid.
+/// Durable repository evidence for one exact analysis and record set.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphMemoryPersistenceEvidence {
     request: GraphMemoryRunRequest,
+    identity: CodebaseMemoryPersistenceIdentity,
     analysis_digest: ContentDigest,
     record_set_digest: ContentDigest,
     record_count: u32,
@@ -1214,6 +1326,7 @@ impl GraphMemoryPersistenceEvidence {
     /// Rejects count overflow or a zero persistence commitment.
     pub fn new(
         analysis: &NormalizedGraphAnalysis,
+        identity: CodebaseMemoryPersistenceIdentity,
         persistence_digest: ContentDigest,
     ) -> Result<Self, GraphMemoryContractError> {
         require_digest(&persistence_digest, "memory_persistence_digest")?;
@@ -1224,8 +1337,44 @@ impl GraphMemoryPersistenceEvidence {
         })?;
         Ok(Self {
             request: analysis.request.clone(),
+            identity,
             analysis_digest: analysis.analysis_digest.clone(),
             record_set_digest: analysis.record_set_digest.clone(),
+            record_count,
+            persistence_digest,
+        })
+    }
+
+    /// Reconstructs exact persistence evidence returned by the fixed
+    /// same-database repository profile.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty/overflowed record set or any zero commitment.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replay(
+        request: GraphMemoryRunRequest,
+        identity: CodebaseMemoryPersistenceIdentity,
+        analysis_digest: ContentDigest,
+        record_set_digest: ContentDigest,
+        record_count: u32,
+        persistence_digest: ContentDigest,
+    ) -> Result<Self, GraphMemoryContractError> {
+        require_digest(&analysis_digest, "graph_analysis_digest")?;
+        require_digest(&record_set_digest, "memory_record_set_digest")?;
+        require_digest(&persistence_digest, "memory_persistence_digest")?;
+        if record_count == 0
+            || usize::try_from(record_count).map_or(true, |count| count > GRAPH_MEMORY_MAX_RECORDS)
+        {
+            return Err(GraphMemoryContractError::InvalidValue {
+                field: "memory_record_count",
+            });
+        }
+        Ok(Self {
+            request,
+            identity,
+            analysis_digest,
+            record_set_digest,
             record_count,
             persistence_digest,
         })
@@ -1234,6 +1383,11 @@ impl GraphMemoryPersistenceEvidence {
     #[must_use]
     pub const fn request(&self) -> &GraphMemoryRunRequest {
         &self.request
+    }
+
+    #[must_use]
+    pub const fn identity(&self) -> &CodebaseMemoryPersistenceIdentity {
+        &self.identity
     }
 
     #[must_use]
@@ -1257,13 +1411,11 @@ impl GraphMemoryPersistenceEvidence {
     }
 }
 
-/// Repository evidence for one exact-query retrieval/audit operation.
-///
-/// This value binds repository results but does not independently prove live
-/// database durability or restart replay.
+/// Durable repository evidence for one exact-query retrieval/audit operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemoryRetrievalEvidence {
     request: GraphMemoryRunRequest,
+    identity: CodebaseMemoryPersistenceIdentity,
     analysis_digest: ContentDigest,
     persistence_digest: ContentDigest,
     limit: u16,
@@ -1294,6 +1446,7 @@ impl MemoryRetrievalEvidence {
         require_digest(&retrieval_digest, "memory_retrieval_digest")?;
         Ok(Self {
             request: plan.request,
+            identity: persisted.identity.clone(),
             analysis_digest: plan.analysis_digest,
             persistence_digest: persisted.persistence_digest.clone(),
             limit: plan.limit,
@@ -1304,9 +1457,75 @@ impl MemoryRetrievalEvidence {
         })
     }
 
+    /// Reconstructs exact retrieval evidence returned by the fixed repository
+    /// receipt loader.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a changed request limit, inconsistent disposition, duplicate or
+    /// non-canonical ranked results, overflow, or zero commitments.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replay(
+        persisted: &GraphMemoryPersistenceEvidence,
+        limit: u16,
+        disposition: MemoryRetrievalDisposition,
+        results: Vec<RankedMemoryRecord>,
+        result_set_digest: ContentDigest,
+        retrieval_digest: ContentDigest,
+    ) -> Result<Self, GraphMemoryContractError> {
+        if limit != persisted.request().retrieval_limit()
+            || results.len() > usize::from(limit)
+            || results.len() > usize::try_from(persisted.record_count()).unwrap_or(usize::MAX)
+            || matches!(disposition, MemoryRetrievalDisposition::NoAnswer) != results.is_empty()
+        {
+            return Err(GraphMemoryContractError::InvalidValue {
+                field: "memory_retrieval_replay",
+            });
+        }
+        require_digest(&result_set_digest, "memory_result_set_digest")?;
+        require_digest(&retrieval_digest, "memory_retrieval_digest")?;
+        let mut seen = BTreeSet::new();
+        for (index, result) in results.iter().enumerate() {
+            let expected =
+                u16::try_from(index + 1).map_err(|_| GraphMemoryContractError::InvalidValue {
+                    field: "memory_result_rank",
+                })?;
+            if result.rank() != expected || !seen.insert(result.record_id().as_str()) {
+                return Err(GraphMemoryContractError::InvalidValue {
+                    field: "memory_result_order",
+                });
+            }
+        }
+        if results.windows(2).any(|pair| {
+            pair[0].score() < pair[1].score()
+                || (pair[0].score() == pair[1].score()
+                    && pair[0].record_id().as_str() > pair[1].record_id().as_str())
+        }) {
+            return Err(GraphMemoryContractError::InvalidValue {
+                field: "memory_result_score_order",
+            });
+        }
+        Ok(Self {
+            request: persisted.request.clone(),
+            identity: persisted.identity.clone(),
+            analysis_digest: persisted.analysis_digest.clone(),
+            persistence_digest: persisted.persistence_digest.clone(),
+            limit,
+            disposition,
+            results,
+            result_set_digest,
+            retrieval_digest,
+        })
+    }
+
     #[must_use]
     pub const fn request(&self) -> &GraphMemoryRunRequest {
         &self.request
+    }
+
+    #[must_use]
+    pub const fn identity(&self) -> &CodebaseMemoryPersistenceIdentity {
+        &self.identity
     }
 
     #[must_use]
@@ -1375,6 +1594,7 @@ impl GraphMemoryReceipt {
         receipt_digest: ContentDigest,
     ) -> Result<Self, GraphMemoryContractError> {
         if persistence.request() != retrieval.request()
+            || persistence.identity() != retrieval.identity()
             || persistence.analysis_digest() != retrieval.analysis_digest()
             || persistence.persistence_digest() != retrieval.persistence_digest()
         {

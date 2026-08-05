@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$RunLatticeDeliveryHook
+    [switch]$RunLatticeDeliveryHook,
+    [switch]$MemoryOnly
 )
 
 Set-StrictMode -Version Latest
@@ -263,66 +264,86 @@ function Invoke-LiveTest {
         [Parameter(Mandatory = $true)][string]$Phase
     )
 
-    $stdoutPath = Join-Path $clusterRoot ".cargo-$Phase-stdout.log"
-    $stderrPath = Join-Path $clusterRoot ".cargo-$Phase-stderr.log"
-    $process = $null
-    $testExitCode = $null
     $testOutput = @()
-    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
-    try {
-        $process = Start-Process -FilePath $Cargo -ArgumentList @(
-            'test',
-            '-p', 'lattice-postgres-store',
-            '--test', 'postgres_live',
-            '--locked',
-            '--',
-            '--nocapture',
-            '--test-threads=1'
-        ) -WorkingDirectory $RepositoryRoot -RedirectStandardOutput $stdoutPath `
-            -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru
-        $null = $process.Handle
-        $process.WaitForExit()
-        $testExitCode = $process.ExitCode
-        if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
-            $testOutput += @(Get-Content -LiteralPath $stdoutPath -Encoding utf8)
-        }
-        if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
-            $testOutput += @(Get-Content -LiteralPath $stderrPath -Encoding utf8)
-        }
+    $liveSuites = if ($MemoryOnly -and $Phase -eq 'restart') {
+        @([pscustomobject]@{ Name = 'memory'; Package = 'lattice-postgres-codebase-memory' })
     }
-    finally {
-        if ($null -ne $process) {
-            $process.Dispose()
-        }
-        foreach ($path in @($stdoutPath, $stderrPath)) {
-            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-            if (Test-Path -LiteralPath $path) {
-                throw 'TASK019_CARGO_OUTPUT_DELETE_FAILED'
-            }
-        }
-    }
-
-    if ($testExitCode -ne 0) {
-        $safeTokens = @(
-            $testOutput | ForEach-Object {
-                foreach ($match in [regex]::Matches(
-                    [string]$_,
-                    '(?<![A-Z0-9_])(?:TASK019|STORE|POSTGRES_TASK_LEDGER)_[A-Z0-9_]{1,63}(?![A-Z0-9_])'
-                )) {
-                    $match.Value
-                }
-            }
+    else {
+        @(
+            [pscustomobject]@{ Name = 'store'; Package = 'lattice-postgres-store' },
+            [pscustomobject]@{ Name = 'memory'; Package = 'lattice-postgres-codebase-memory' }
         )
-        $safeTokens = @($safeTokens | Sort-Object -Unique)
-        $safeSummary = if ($safeTokens.Count -eq 0) {
-            'No allowlisted static diagnostic was emitted.'
+    }
+    foreach ($suite in $liveSuites) {
+        $suitePhase = if ($MemoryOnly -and $suite.Name -eq 'store') {
+            'memory_setup'
         }
         else {
-            $safeTokens -join ' | '
+            $Phase
         }
-        throw "postgres_live $Phase phase failed with exit code $testExitCode. Allowlisted diagnostics: $safeSummary"
+        [Environment]::SetEnvironmentVariable('LATTICE_TASK019_PHASE', $suitePhase, 'Process')
+        $stdoutPath = Join-Path $clusterRoot ".cargo-$Phase-$($suite.Name)-stdout.log"
+        $stderrPath = Join-Path $clusterRoot ".cargo-$Phase-$($suite.Name)-stderr.log"
+        $process = $null
+        $testExitCode = $null
+        $suiteOutput = @()
+        Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+        try {
+            $process = Start-Process -FilePath $Cargo -ArgumentList @(
+                'test',
+                '-p', [string]$suite.Package,
+                '--test', 'postgres_live',
+                '--locked',
+                '--',
+                '--nocapture',
+                '--test-threads=1'
+            ) -WorkingDirectory $RepositoryRoot -RedirectStandardOutput $stdoutPath `
+                -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru
+            $null = $process.Handle
+            $process.WaitForExit()
+            $testExitCode = $process.ExitCode
+            if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+                $suiteOutput += @(Get-Content -LiteralPath $stdoutPath -Encoding utf8)
+            }
+            if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+                $suiteOutput += @(Get-Content -LiteralPath $stderrPath -Encoding utf8)
+            }
+        }
+        finally {
+            if ($null -ne $process) {
+                $process.Dispose()
+            }
+            foreach ($path in @($stdoutPath, $stderrPath)) {
+                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $path) {
+                    throw 'TASK019_CARGO_OUTPUT_DELETE_FAILED'
+                }
+            }
+        }
+        if ($testExitCode -ne 0) {
+            $safeTokens = @(
+                $suiteOutput | ForEach-Object {
+                    foreach ($match in [regex]::Matches(
+                        [string]$_,
+                        '(?<![A-Z0-9_])(?:TASK019|STORE|POSTGRES_TASK_LEDGER|MEMORY)_[A-Z0-9_]{1,63}(?![A-Z0-9_])'
+                    )) {
+                        $match.Value
+                    }
+                }
+            )
+            $safeTokens = @($safeTokens | Sort-Object -Unique)
+            $safeSummary = if ($safeTokens.Count -eq 0) {
+                'No allowlisted static diagnostic was emitted.'
+            }
+            else {
+                $safeTokens -join ' | '
+            }
+            throw "$($suite.Name) postgres_live $Phase phase failed with exit code $testExitCode. Allowlisted diagnostics: $safeSummary"
+        }
+        $testOutput += $suiteOutput
     }
+    [Environment]::SetEnvironmentVariable('LATTICE_TASK019_PHASE', $Phase, 'Process')
     return ,$testOutput
 }
 

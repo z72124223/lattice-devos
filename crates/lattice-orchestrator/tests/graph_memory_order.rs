@@ -3,11 +3,12 @@ use std::rc::Rc;
 
 use lattice_codebase_memory::digest_query_text;
 use lattice_contracts::{
-    AttemptId, CONTRACT_VERSION, CodeSnapshotEvidence, ContentDigest, GitObjectId, GraphConfidence,
-    GraphMemoryPersistenceEvidence, GraphMemoryReceipt, GraphMemoryRunRequest,
-    GraphSourceProvenance, GraphifyIdentity, GraphifyRawEdge, GraphifyRawEvidence, GraphifyRawNode,
-    Invocation, MemoryQuery, MemoryRetrievalEvidence, MemoryRetrievalPlan, NormalizedGraphAnalysis,
-    ProjectId, ProjectSnapshotId, RequestId, TaskId, TrackedSource,
+    AttemptId, CONTRACT_VERSION, CodeSnapshotEvidence, CodebaseMemoryPersistenceIdentity,
+    ContentDigest, GitObjectId, GraphConfidence, GraphMemoryPersistenceEvidence,
+    GraphMemoryReceipt, GraphMemoryRunRequest, GraphSourceProvenance, GraphifyIdentity,
+    GraphifyRawEdge, GraphifyRawEvidence, GraphifyRawNode, Invocation, MemoryQuery,
+    MemoryRetrievalEvidence, MemoryRetrievalPlan, NormalizedGraphAnalysis, ProjectId,
+    ProjectSnapshotId, RequestId, TaskId, TrackedSource,
 };
 use lattice_orchestrator::{GraphMemoryOrchestratorError, graph_memory_status, run_graph_memory};
 use lattice_ports::{
@@ -17,6 +18,11 @@ use lattice_ports::{
 
 fn digest(byte: char) -> ContentDigest {
     ContentDigest::from_sha256(byte.to_string().repeat(64)).expect("valid digest")
+}
+
+fn persistence_identity() -> CodebaseMemoryPersistenceIdentity {
+    CodebaseMemoryPersistenceIdentity::v1(digest('a'), digest('b'), digest('c'), digest('d'))
+        .expect("persistence identity")
 }
 
 fn request(query: &str) -> GraphMemoryRunRequest {
@@ -171,14 +177,15 @@ impl CodebaseMemoryPort for MemoryFake {
             Err(failure(GraphMemoryStage::Persistence))
         } else {
             self.analysis = Some(analysis.clone());
-            GraphMemoryPersistenceEvidence::new(analysis, digest('6')).map_err(|_| {
-                GraphMemoryPortError::new(
-                    GraphMemoryStage::Persistence,
-                    PortErrorKind::Malformed,
-                    GraphMemoryFailureCertainty::Known,
-                    "FAKE_PERSISTENCE_CONTRACT",
-                )
-            })
+            GraphMemoryPersistenceEvidence::new(analysis, persistence_identity(), digest('6'))
+                .map_err(|_| {
+                    GraphMemoryPortError::new(
+                        GraphMemoryStage::Persistence,
+                        PortErrorKind::Malformed,
+                        GraphMemoryFailureCertainty::Known,
+                        "FAKE_PERSISTENCE_CONTRACT",
+                    )
+                })
         }
     }
 

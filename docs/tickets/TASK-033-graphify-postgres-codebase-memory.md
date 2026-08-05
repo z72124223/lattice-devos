@@ -17,7 +17,9 @@ additional_modules:
     constitution_version: 1.1
   - module_id: postgres-store
     constitution_version: 1.4
-status: in-progress
+  - module_id: postgres-codebase-memory
+    constitution_version: 1.0
+status: complete
 parallel_safe: false
 depends_on:
   - TASK-021
@@ -33,8 +35,10 @@ allowed_paths:
   - crates/lattice-graphify-adapter/**
   - crates/lattice-codebase-memory/**
   - crates/lattice-postgres-store/**
+  - crates/lattice-postgres-codebase-memory/**
   - db/extensions/codebase-memory/v1.sql
   - scripts/run-lattice-graph-memory.ps1
+  - scripts/run-lattice-delivery.ps1
   - scripts/run-task019-postgres.ps1
   - PLANS.md
   - HANDOFF.md
@@ -48,6 +52,7 @@ allowed_paths:
   - docs/modules/orchestrator-runtime/**
   - docs/modules/latticed/**
   - docs/modules/postgres-store/**
+  - docs/modules/postgres-codebase-memory/**
   - docs/tickets/TASK-022-postgres-project-registry.md
   - docs/tickets/TASK-033-graphify-postgres-codebase-memory.md
   - docs/workflow/WORKFLOW_LEDGER.md
@@ -67,12 +72,10 @@ single PostgreSQL truth, and replay exact status after restart through the
 existing two zero-parameter `latticed` tools. Use the scripted TASK-032 fixture;
 official Codex live stays `FAILED_DIAGNOSTIC` and is not retried.
 
-The PostgreSQL substep is `BLOCKED_PENDING_VERSIONED_AMENDMENT`: HEAD's
-Postgres Store 1.4 and ADR-020 retain the Project Registry's global
-`0005`/schema-v4 authority. TASK-033 may continue through pure Codebase Memory,
-Graphify adapter, ports, and orchestrator; it may not wire the proposed
-same-database extension until its owning module constitution is explicitly
-versioned and approved.
+The approved PostgreSQL substep is complete: `postgres-codebase-memory` owns
+the independent same-database extension, while Postgres Store admits only its
+exact V3+Memory catalog/ACL profile. Global migrations and the Project
+Registry's reserved `0005`/schema-v4 authority remain unchanged.
 
 ## Acceptance Criteria
 
@@ -97,15 +100,15 @@ versioned and approved.
 - [x] Pure Codebase Memory stores only `OBSERVATION/CANDIDATE`,
   `trusted_context=false` structural records; exact identifier/path/token
   relevance is deterministic and irrelevant queries return no answer.
-- [ ] After the required amendment is approved, the independent
+- [x] The independent
   `db/extensions/codebase-memory/v1.sql` profile uses exact embedded bytes/hash,
-  a Memory identity/extension ledger, explicit admin runner, four domain
-  tables, fixed `SECURITY DEFINER` functions, and a V3+Memory catalog/ACL
+  a Memory identity/extension ledger, explicit admin runner, six owned tables,
+  fixed `SECURITY DEFINER` functions, and a V3+Memory catalog/ACL
   verifier. It preserves global v3 and the Registry-reserved global
   `0005`/schema-v4 profile, atomically persists complete analyses/records/
   retrieval audit, and replays exact project/commit/query evidence after
   PostgreSQL stop/start.
-- [ ] `latticed` still exposes exactly `lattice_delivery_run` and
+- [x] `latticed` still exposes exactly `lattice_delivery_run` and
   `lattice_delivery_status`, both closed zero-parameter schemas; no third tool
   or shell/SQL/path/query/credential/provider input exists.
 - [x] Focused/full tests, strict format/Clippy, independent code/architecture

@@ -30,6 +30,8 @@ use lattice_ports::{
 pub const EXPECTED_ANSWER_BYTES: &[u8] = b"LATTICE_DELIVERY_OK\n";
 
 const ANSWER_FILE_NAME: &str = "answer.txt";
+const GRAPHIFY_BASELINE_SOURCE_BYTES: &[u8] =
+    b"pub fn lattice_delivery_fixture() -> &'static str {\n    \"LATTICE_DELIVERY_OK\"\n}\n";
 const INITIAL_COMMIT_MESSAGE: &str = "chore: initialize LATTICE delivery fixture";
 const DELIVERY_COMMIT_MESSAGE: &str = "feat: complete LATTICE delivery fixture";
 
@@ -194,11 +196,30 @@ impl IsolatedGitDelivery {
         require_success(runner.output(&init_args), "GIT_INIT_FAILED")?;
         ensure_canonical_directory(&git_directory)?;
 
+        let source_directory = repository_path.join("src");
+        fs::create_dir(&source_directory).map_err(|_| {
+            failure(
+                GitDeliveryErrorKind::UnsafePath,
+                "BASELINE_SOURCE_DIRECTORY_CREATE_FAILED",
+            )
+        })?;
+        ensure_canonical_directory(&source_directory)?;
+        create_new_file(
+            &source_directory.join("lib.rs"),
+            GRAPHIFY_BASELINE_SOURCE_BYTES,
+        )?;
+        require_success(
+            runner.output(&repository_args(
+                &repository_path,
+                &["add", "--", "src/lib.rs"],
+            )),
+            "INITIAL_SOURCE_STAGE_FAILED",
+        )?;
+
         let initial_commit_args = repository_args(
             &repository_path,
             &[
                 "commit",
-                "--allow-empty",
                 "--no-verify",
                 "--no-gpg-sign",
                 "-m",
@@ -482,6 +503,7 @@ impl IsolatedGitDelivery {
     fn verify_exact_scope(&self) -> Result<(), GitDeliveryError> {
         let mut saw_git_pointer = false;
         let mut saw_answer = false;
+        let mut saw_graphify_source = false;
         for entry in fs::read_dir(&self.repository_path)
             .map_err(|_| failure(GitDeliveryErrorKind::ScopeDrift, "REPOSITORY_SCAN_FAILED"))?
         {
@@ -490,6 +512,17 @@ impl IsolatedGitDelivery {
             let name = entry.file_name();
             let metadata = fs::symlink_metadata(entry.path())
                 .map_err(|_| failure(GitDeliveryErrorKind::ScopeDrift, "REPOSITORY_SCAN_FAILED"))?;
+            if name == OsStr::new("src") {
+                if saw_graphify_source || unsafe_file_type(&metadata) || !metadata.is_dir() {
+                    return Err(failure(
+                        GitDeliveryErrorKind::ScopeDrift,
+                        "BASELINE_SOURCE_BOUNDARY_DRIFT",
+                    ));
+                }
+                Self::verify_graphify_baseline_source(&entry.path())?;
+                saw_graphify_source = true;
+                continue;
+            }
             if unsafe_file_type(&metadata) || !metadata.is_file() {
                 return Err(failure(
                     GitDeliveryErrorKind::ScopeDrift,
@@ -525,6 +558,12 @@ impl IsolatedGitDelivery {
         if !saw_answer {
             return Err(failure(GitDeliveryErrorKind::TestFailed, "ANSWER_MISSING"));
         }
+        if !saw_graphify_source {
+            return Err(failure(
+                GitDeliveryErrorKind::ScopeDrift,
+                "BASELINE_SOURCE_MISSING",
+            ));
+        }
 
         #[cfg(windows)]
         self.verify_windows_answer_file_boundary()?;
@@ -543,6 +582,53 @@ impl IsolatedGitDelivery {
             ));
         }
         Ok(())
+    }
+
+    fn verify_graphify_baseline_source(source_directory: &Path) -> Result<(), GitDeliveryError> {
+        ensure_canonical_directory(source_directory).map_err(|_| {
+            failure(
+                GitDeliveryErrorKind::ScopeDrift,
+                "BASELINE_SOURCE_BOUNDARY_DRIFT",
+            )
+        })?;
+        let mut entries = fs::read_dir(source_directory)
+            .map_err(|_| {
+                failure(
+                    GitDeliveryErrorKind::ScopeDrift,
+                    "BASELINE_SOURCE_INSPECTION_FAILED",
+                )
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| {
+                failure(
+                    GitDeliveryErrorKind::ScopeDrift,
+                    "BASELINE_SOURCE_INSPECTION_FAILED",
+                )
+            })?;
+        if entries.len() != 1 {
+            return Err(failure(
+                GitDeliveryErrorKind::ScopeDrift,
+                "BASELINE_SOURCE_BOUNDARY_DRIFT",
+            ));
+        }
+        let entry = entries.pop().expect("one source entry");
+        if entry.file_name() != OsStr::new("lib.rs") {
+            return Err(failure(
+                GitDeliveryErrorKind::ScopeDrift,
+                "BASELINE_SOURCE_BOUNDARY_DRIFT",
+            ));
+        }
+        assert_regular_file_bytes(
+            &entry.path(),
+            GRAPHIFY_BASELINE_SOURCE_BYTES,
+            "BASELINE_SOURCE_BYTES_DRIFT",
+        )
+        .map_err(|_| {
+            failure(
+                GitDeliveryErrorKind::ScopeDrift,
+                "BASELINE_SOURCE_BYTES_DRIFT",
+            )
+        })
     }
 
     /// Removes only the observed empty Codex runtime metadata directory from
@@ -1808,6 +1894,33 @@ mod tests {
             evidence.test_command_id,
             "git-diff-no-index-exact-answer-v1"
         );
+    }
+
+    #[test]
+    fn fixture_baseline_contains_exact_graphify_rust_source() {
+        let Some((_root, delivery)) = fixture("graphify-baseline") else {
+            return;
+        };
+
+        let paths = require_success(
+            delivery.runner.output(&repository_args(
+                delivery.repo_path(),
+                &["ls-tree", "-r", "--name-only", &delivery.baseline_commit],
+            )),
+            "BASELINE_TREE_INSPECTION_FAILED",
+        )
+        .expect("baseline tree should be inspectable");
+        assert_eq!(paths.stdout, b"src/lib.rs\n");
+
+        let source = require_success(
+            delivery.runner.output(&repository_args(
+                delivery.repo_path(),
+                &["show", "HEAD:src/lib.rs"],
+            )),
+            "BASELINE_SOURCE_INSPECTION_FAILED",
+        )
+        .expect("baseline source should be inspectable");
+        assert_eq!(source.stdout, GRAPHIFY_BASELINE_SOURCE_BYTES);
     }
 
     #[test]

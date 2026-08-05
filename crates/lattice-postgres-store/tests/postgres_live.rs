@@ -61,7 +61,10 @@ impl LiveConfig {
         assert!(port != 0 && port != 5432, "TASK019_LIVE_PORT_INVALID");
         assert!(!password.is_empty(), "TASK019_LIVE_PASSWORD_MISSING");
         assert!(is_lower_hex(&run_id, 32), "TASK019_LIVE_RUN_ID_INVALID");
-        assert!(matches!(phase.as_str(), "initial" | "restart"));
+        assert!(matches!(
+            phase.as_str(),
+            "initial" | "restart" | "memory_setup"
+        ));
         Some(Self {
             host,
             port,
@@ -123,9 +126,24 @@ fn marker_owned_postgres_17_foundation() {
     };
     if config.phase == "initial" {
         run_initial_phase(&config);
-    } else {
+    } else if config.phase == "restart" {
         run_restart_phase(&config);
+    } else {
+        run_memory_setup_phase(&config);
     }
+}
+
+fn run_memory_setup_phase(config: &LiveConfig) {
+    let mut admin = config.connect("postgres", "lattice-devos-memory-setup");
+    create_fixed_roles(&mut admin, &config.password);
+    let (base, evidence) = prove_first_apply_and_reconciliation(config, &mut admin);
+    set_exact_database_access(&mut admin, base.database_name());
+    println!(
+        "TASK019_EVIDENCE database_uuid={} manifest_sha256={}",
+        evidence.database_uuid(),
+        evidence.manifest_sha256().as_str()
+    );
+    println!("TASK019_MEMORY_SETUP_OK");
 }
 
 fn run_initial_phase(config: &LiveConfig) {

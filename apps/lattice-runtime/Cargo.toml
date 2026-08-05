@@ -6,11 +6,14 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+lattice-codebase-memory = { path = "../../crates/lattice-codebase-memory" }
 lattice-codex-adapter = { path = "../../crates/lattice-codex-adapter" }
 lattice-cjson = { path = "../../crates/lattice-cjson" }
 lattice-contracts = { path = "../../crates/lattice-contracts" }
+lattice-graphify-adapter = { path = "../../crates/lattice-graphify-adapter" }
 lattice-orchestrator = { path = "../../crates/lattice-orchestrator" }
 lattice-ports = { path = "../../crates/lattice-ports" }
+lattice-postgres-codebase-memory = { path = "../../crates/lattice-postgres-codebase-memory" }
 lattice-postgres-store = { path = "../../crates/lattice-postgres-store" }
 lattice-task-ledger = { path = "../../crates/lattice-task-ledger" }
 postgres = { version = "=0.19.14", default-features = false }

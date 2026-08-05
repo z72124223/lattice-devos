@@ -43,6 +43,37 @@ $deliveryEnvironmentNames = @(
     'LATTICE_DELIVERY_STATUS_EVIDENCE',
     'LATTICE_DELIVERY_FINAL_EVIDENCE'
 )
+$graphEvidenceProperties = @(
+    'graph_status',
+    'graph_project_id',
+    'graph_commit_sha',
+    'graph_query_digest',
+    'graph_analysis_digest',
+    'graph_record_count',
+    'graph_persistence_digest',
+    'graph_retrieval_digest',
+    'graph_result_count',
+    'graph_receipt_digest',
+    'graph_database_identity_digest',
+    'graph_extension_manifest_digest'
+)
+$deliveryEvidenceProperties = @(
+    'status', 'component', 'launcher_path', 'version', 'launcher_sha256',
+    'schema_bundle_sha256', 'schema_file_count', 'repository_path',
+    'changed_paths', 'test', 'test_command_id', 'baseline_commit', 'parent_sha',
+    'commit_sha', 'thread_id', 'turn_id', 'codex_runtime', 'intent_digest',
+    'outcome_digest', 'profile', 'request_id', 'configuration_digest',
+    'receipt_digest'
+) + $graphEvidenceProperties
+$finalEvidenceProperties = @(
+    'status', 'component', 'codex_mode', 'postgres_restarted_before_status',
+    'fixture_id', 'postgres_run_id', 'repository_path', 'changed_paths',
+    'test_command_id', 'baseline_commit', 'commit_sha', 'codex_runtime', 'profile',
+    'request_id', 'configuration_digest', 'launcher_sha256',
+    'schema_bundle_sha256', 'intent_digest', 'outcome_digest', 'receipt_digest',
+    'graph_execution_footprint_unchanged_during_status',
+    'graph_execution_footprint_digest', 'answer_sha256'
+) + $graphEvidenceProperties
 
 function Get-CanonicalPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -154,6 +185,143 @@ function Read-JsonEvidence {
     }
     catch {
         throw 'LATTICE_DELIVERY_EVIDENCE_INVALID'
+    }
+}
+
+function Assert-ExactEvidenceProperties {
+    param(
+        [Parameter(Mandatory = $true)]$Evidence,
+        [Parameter(Mandatory = $true)][string[]]$Allowed,
+        [Parameter(Mandatory = $true)][string]$RejectionCode
+    )
+
+    $actual = @($Evidence.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+    $expected = @($Allowed | Sort-Object -CaseSensitive)
+    if ($actual.Count -ne $expected.Count) {
+        throw $RejectionCode
+    }
+    for ($index = 0; $index -lt $expected.Count; $index++) {
+        if (-not [string]::Equals(
+            [string]$actual[$index],
+            [string]$expected[$index],
+            [System.StringComparison]::Ordinal
+        )) {
+            throw $RejectionCode
+        }
+    }
+}
+
+function Assert-GraphEvidence {
+    param(
+        [Parameter(Mandatory = $true)]$Evidence,
+        [Parameter(Mandatory = $true)][string]$RejectionCode
+    )
+
+    [uint32]$recordCount = 0
+    [uint32]$resultCount = 0
+    $recordCountValid = [uint32]::TryParse(
+        [string]$Evidence.graph_record_count,
+        [System.Globalization.NumberStyles]::None,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$recordCount
+    )
+    $resultCountValid = [uint32]::TryParse(
+        [string]$Evidence.graph_result_count,
+        [System.Globalization.NumberStyles]::None,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$resultCount
+    )
+    if (
+        [string]$Evidence.graph_status -ne 'COMPLETED' -or
+        [string]$Evidence.graph_project_id -ne 'task032-delivery' -or
+        [string]$Evidence.graph_commit_sha -ne [string]$Evidence.commit_sha -or
+        [string]$Evidence.graph_commit_sha -notmatch '^[0-9a-f]{40}([0-9a-f]{24})?$' -or
+        [string]$Evidence.graph_query_digest -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Evidence.graph_analysis_digest -notmatch '^[0-9a-f]{64}$' -or
+        -not $recordCountValid -or
+        $recordCount -eq 0 -or
+        [string]$Evidence.graph_persistence_digest -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Evidence.graph_retrieval_digest -notmatch '^[0-9a-f]{64}$' -or
+        -not $resultCountValid -or
+        $resultCount -eq 0 -or
+        $resultCount -gt $recordCount -or
+        [string]$Evidence.graph_receipt_digest -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Evidence.graph_database_identity_digest -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Evidence.graph_extension_manifest_digest -notmatch '^[0-9a-f]{64}$'
+    ) {
+        throw $RejectionCode
+    }
+}
+
+function Get-GraphExecutionFootprintDigest {
+    param([Parameter(Mandatory = $true)][string]$FixtureRoot)
+
+    $canonicalFixture = Get-CanonicalPath -Path $FixtureRoot
+    $entries = [System.Collections.Generic.List[string]]::new()
+    foreach ($relativeRoot in @('graph-memory\snapshots', 'graph-memory\staging')) {
+        $root = Get-CanonicalPath -Path (Join-Path $canonicalFixture $relativeRoot)
+        Assert-NoReparseAncestor -Path $root -Boundary $canonicalFixture
+        $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue
+        if (
+            $null -eq $rootItem -or
+            -not $rootItem.PSIsContainer -or
+            ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+        ) {
+            throw 'LATTICE_GRAPH_EXECUTION_FOOTPRINT_REJECTED'
+        }
+        $normalizedRoot = $relativeRoot.Replace('\', '/')
+        $entries.Add(('D|{0}|{1}' -f $normalizedRoot, $rootItem.LastWriteTimeUtc.Ticks))
+
+        $pending = [System.Collections.Generic.Stack[string]]::new()
+        $pending.Push($root)
+        while ($pending.Count -gt 0) {
+            $directory = $pending.Pop()
+            foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force)) {
+                if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    throw 'LATTICE_GRAPH_EXECUTION_FOOTPRINT_REJECTED'
+                }
+                $fullPath = Get-CanonicalPath -Path $item.FullName
+                $fixturePrefix = $canonicalFixture + [System.IO.Path]::DirectorySeparatorChar
+                if (-not $fullPath.StartsWith(
+                    $fixturePrefix,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )) {
+                    throw 'LATTICE_GRAPH_EXECUTION_FOOTPRINT_REJECTED'
+                }
+                $relativePath = $fullPath.Substring($fixturePrefix.Length).Replace('\', '/')
+                if ($item.PSIsContainer) {
+                    $entries.Add(('D|{0}|{1}' -f $relativePath, $item.LastWriteTimeUtc.Ticks))
+                    $pending.Push($fullPath)
+                    continue
+                }
+                if (
+                    -not ($item -is [System.IO.FileInfo]) -or
+                    -not (Test-Path -LiteralPath $fullPath -PathType Leaf)
+                ) {
+                    throw 'LATTICE_GRAPH_EXECUTION_FOOTPRINT_REJECTED'
+                }
+                $sha256 = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                $entries.Add((
+                    'F|{0}|{1}|{2}|{3}' -f
+                        $relativePath,
+                        $item.Length,
+                        $item.LastWriteTimeUtc.Ticks,
+                        $sha256
+                ))
+            }
+        }
+    }
+
+    $entries.Sort([System.StringComparer]::Ordinal)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($entries -join "`n") + "`n")
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return [System.BitConverter]::ToString(
+            $hasher.ComputeHash($bytes)
+        ).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $hasher.Dispose()
     }
 }
 
@@ -332,19 +500,10 @@ function Assert-DeliveryRunEvidence {
         [string]$CodexMode
     )
 
-    $required = @(
-        'status', 'component', 'launcher_path', 'version', 'launcher_sha256',
-        'schema_bundle_sha256', 'schema_file_count', 'repository_path',
-        'changed_paths', 'test', 'test_command_id', 'baseline_commit', 'parent_sha',
-        'commit_sha', 'thread_id', 'turn_id', 'codex_runtime', 'intent_digest',
-        'outcome_digest', 'profile', 'request_id', 'configuration_digest',
-        'receipt_digest'
-    )
-    foreach ($name in $required) {
-        if ($name -notin $Evidence.PSObject.Properties.Name) {
-            throw 'LATTICE_DELIVERY_RUN_EVIDENCE_INCOMPLETE'
-        }
-    }
+    Assert-ExactEvidenceProperties `
+        -Evidence $Evidence `
+        -Allowed $deliveryEvidenceProperties `
+        -RejectionCode 'LATTICE_DELIVERY_RUN_EVIDENCE_ALLOWLIST_REJECTED'
 
     $changedPaths = @($Evidence.changed_paths)
     if (
@@ -376,6 +535,9 @@ function Assert-DeliveryRunEvidence {
         -Evidence $Evidence `
         -CodexMode $CodexMode `
         -RejectionCode 'LATTICE_DELIVERY_RUN_EVIDENCE_REJECTED'
+    Assert-GraphEvidence `
+        -Evidence $Evidence `
+        -RejectionCode 'LATTICE_DELIVERY_RUN_GRAPH_EVIDENCE_REJECTED'
 }
 
 function Assert-DurableStatusEvidence {
@@ -389,19 +551,10 @@ function Assert-DurableStatusEvidence {
         [string]$CodexMode
     )
 
-    $required = @(
-        'status', 'component', 'repository_path', 'changed_paths', 'test',
-        'test_command_id', 'commit_sha', 'parent_sha', 'baseline_commit',
-        'launcher_path', 'version', 'launcher_sha256', 'schema_bundle_sha256',
-        'schema_file_count', 'thread_id', 'turn_id', 'codex_runtime',
-        'intent_digest', 'outcome_digest', 'profile', 'request_id',
-        'configuration_digest', 'receipt_digest'
-    )
-    foreach ($name in $required) {
-        if ($name -notin $Evidence.PSObject.Properties.Name) {
-            throw 'LATTICE_DELIVERY_STATUS_EVIDENCE_INCOMPLETE'
-        }
-    }
+    Assert-ExactEvidenceProperties `
+        -Evidence $Evidence `
+        -Allowed $deliveryEvidenceProperties `
+        -RejectionCode 'LATTICE_DELIVERY_STATUS_EVIDENCE_ALLOWLIST_REJECTED'
     $changedPaths = @($Evidence.changed_paths)
     if (
         [string]$Evidence.status -ne 'COMPLETED' -or
@@ -432,6 +585,9 @@ function Assert-DurableStatusEvidence {
         -Evidence $Evidence `
         -CodexMode $CodexMode `
         -RejectionCode 'LATTICE_DELIVERY_STATUS_EVIDENCE_REJECTED'
+    Assert-GraphEvidence `
+        -Evidence $Evidence `
+        -RejectionCode 'LATTICE_DELIVERY_STATUS_GRAPH_EVIDENCE_REJECTED'
 }
 
 function Assert-InternalEnvironment {
@@ -466,8 +622,12 @@ function Invoke-DeliveryRunPhase {
     $deliveryRoot = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_ROOT')
     $gitExe = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_GIT_EXE')
     $runEvidencePath = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_RUN_EVIDENCE')
+    $graphFootprintEvidencePath = Get-CanonicalPath -Path (Join-Path (Split-Path -Parent $runEvidencePath) 'graph-execution-footprint.json')
 
-    $repositoryOwnedPaths = @($fixtureRoot, $runtime, $schemaDirectory, $codexHome, $deliveryRoot, $runEvidencePath)
+    $repositoryOwnedPaths = @(
+        $fixtureRoot, $runtime, $schemaDirectory, $codexHome, $deliveryRoot,
+        $runEvidencePath, $graphFootprintEvidencePath
+    )
     if ($codexMode -eq 'SCRIPTED_ACCEPTANCE') {
         $repositoryOwnedPaths += $launcher
     }
@@ -477,7 +637,12 @@ function Invoke-DeliveryRunPhase {
     Assert-RegularFile -Path $runtime
     Assert-RegularFile -Path $launcher
     Assert-RegularFile -Path $gitExe
-    if ((Test-Path -LiteralPath $schemaDirectory) -or (Test-Path -LiteralPath $deliveryRoot) -or (Test-Path -LiteralPath $runEvidencePath)) {
+    if (
+        (Test-Path -LiteralPath $schemaDirectory) -or
+        (Test-Path -LiteralPath $deliveryRoot) -or
+        (Test-Path -LiteralPath $runEvidencePath) -or
+        (Test-Path -LiteralPath $graphFootprintEvidencePath)
+    ) {
         throw 'LATTICE_DELIVERY_RUN_TARGET_NOT_FRESH'
     }
     if ($launcherSha256 -notmatch '^[0-9a-f]{64}$') {
@@ -513,12 +678,19 @@ function Invoke-DeliveryRunPhase {
     if ([Convert]::ToBase64String($answer) -ne [Convert]::ToBase64String($expectedAnswer)) {
         throw 'LATTICE_DELIVERY_ANSWER_BYTES_REJECTED'
     }
+    $graphExecutionFootprintDigest = Get-GraphExecutionFootprintDigest -FixtureRoot $fixtureRoot
+    Write-JsonEvidence -Path $graphFootprintEvidencePath -Value ([ordered]@{
+        kind = 'LATTICE_GRAPH_EXECUTION_FOOTPRINT_V1'
+        graph_receipt_digest = [string]$evidence.graph_receipt_digest
+        graph_execution_footprint_digest = $graphExecutionFootprintDigest
+    })
     Write-JsonEvidence -Path $runEvidencePath -Value $evidence
 }
 
 function Invoke-DeliveryStatusPhase {
     Assert-InternalEnvironment
     $repositoryRoot = Get-CanonicalPath -Path (Join-Path $PSScriptRoot '..')
+    $fixtureRoot = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_FIXTURE_ROOT')
     $runtime = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_RUNTIME_EXE')
     $launcher = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_LAUNCHER')
     $launcherSha256 = Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_LAUNCHER_SHA256'
@@ -527,8 +699,12 @@ function Invoke-DeliveryStatusPhase {
     $runEvidencePath = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_RUN_EVIDENCE')
     $statusEvidencePath = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_STATUS_EVIDENCE')
     $finalEvidencePath = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_FINAL_EVIDENCE')
+    $graphFootprintEvidencePath = Get-CanonicalPath -Path (Join-Path (Split-Path -Parent $runEvidencePath) 'graph-execution-footprint.json')
 
-    $repositoryOwnedPaths = @($runtime, $deliveryRoot, $runEvidencePath, $statusEvidencePath, $finalEvidencePath)
+    $repositoryOwnedPaths = @(
+        $fixtureRoot, $runtime, $deliveryRoot, $runEvidencePath, $statusEvidencePath,
+        $finalEvidencePath, $graphFootprintEvidencePath
+    )
     if ($codexMode -eq 'SCRIPTED_ACCEPTANCE') {
         $repositoryOwnedPaths += $launcher
     }
@@ -548,12 +724,32 @@ function Invoke-DeliveryStatusPhase {
         -LauncherSha256 $launcherSha256 `
         -DeliveryRoot $deliveryRoot `
         -CodexMode $codexMode
+    $graphFootprintEvidence = Read-JsonEvidence -Path $graphFootprintEvidencePath
+    Assert-ExactEvidenceProperties `
+        -Evidence $graphFootprintEvidence `
+        -Allowed @('kind', 'graph_receipt_digest', 'graph_execution_footprint_digest') `
+        -RejectionCode 'LATTICE_GRAPH_EXECUTION_FOOTPRINT_MARKER_REJECTED'
+    if (
+        [string]$graphFootprintEvidence.kind -ne 'LATTICE_GRAPH_EXECUTION_FOOTPRINT_V1' -or
+        [string]$graphFootprintEvidence.graph_receipt_digest -ne [string]$runEvidence.graph_receipt_digest -or
+        [string]$graphFootprintEvidence.graph_execution_footprint_digest -notmatch '^[0-9a-f]{64}$'
+    ) {
+        throw 'LATTICE_GRAPH_EXECUTION_FOOTPRINT_MARKER_REJECTED'
+    }
+    $graphFootprintBeforeStatus = Get-GraphExecutionFootprintDigest -FixtureRoot $fixtureRoot
+    if ($graphFootprintBeforeStatus -ne [string]$graphFootprintEvidence.graph_execution_footprint_digest) {
+        throw 'LATTICE_GRAPH_EXECUTION_FOOTPRINT_CHANGED_BEFORE_STATUS'
+    }
     $status = Invoke-RuntimeJson -Executable $runtime -Arguments @(
         'delivery-status',
         '--postgres-host', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_HOST'),
         '--postgres-port', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_PORT'),
         '--postgres-run-id', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_RUN_ID')
     )
+    $graphFootprintAfterStatus = Get-GraphExecutionFootprintDigest -FixtureRoot $fixtureRoot
+    if ($graphFootprintAfterStatus -ne $graphFootprintBeforeStatus) {
+        throw 'LATTICE_GRAPHIFY_REEXECUTED_DURING_FRESH_STATUS'
+    }
     Assert-DurableStatusEvidence `
         -Evidence $status `
         -Launcher $launcher `
@@ -561,14 +757,14 @@ function Invoke-DeliveryStatusPhase {
         -DeliveryRoot $deliveryRoot `
         -CodexMode $codexMode
 
-    foreach ($name in @(
+    foreach ($name in (@(
         'repository_path', 'test', 'test_command_id', 'commit_sha', 'parent_sha',
         'baseline_commit',
         'launcher_path', 'version', 'launcher_sha256', 'schema_bundle_sha256',
         'schema_file_count', 'thread_id', 'turn_id', 'codex_runtime',
         'intent_digest', 'outcome_digest', 'profile', 'request_id',
         'configuration_digest', 'receipt_digest'
-    )) {
+    ) + $graphEvidenceProperties)) {
         if ([string]$status.$name -ne [string]$runEvidence.$name) {
             throw 'LATTICE_DELIVERY_RESTART_CROSS_BINDING_REJECTED'
         }
@@ -614,6 +810,20 @@ function Invoke-DeliveryStatusPhase {
         intent_digest = [string]$status.intent_digest
         outcome_digest = [string]$status.outcome_digest
         receipt_digest = [string]$status.receipt_digest
+        graph_status = [string]$status.graph_status
+        graph_project_id = [string]$status.graph_project_id
+        graph_commit_sha = [string]$status.graph_commit_sha
+        graph_query_digest = [string]$status.graph_query_digest
+        graph_analysis_digest = [string]$status.graph_analysis_digest
+        graph_record_count = [uint32]$status.graph_record_count
+        graph_persistence_digest = [string]$status.graph_persistence_digest
+        graph_retrieval_digest = [string]$status.graph_retrieval_digest
+        graph_result_count = [uint32]$status.graph_result_count
+        graph_receipt_digest = [string]$status.graph_receipt_digest
+        graph_database_identity_digest = [string]$status.graph_database_identity_digest
+        graph_extension_manifest_digest = [string]$status.graph_extension_manifest_digest
+        graph_execution_footprint_unchanged_during_status = $true
+        graph_execution_footprint_digest = $graphFootprintAfterStatus
         answer_sha256 = (Get-FileHash -LiteralPath $answerPath -Algorithm SHA256).Hash.ToLowerInvariant()
     }
     Write-JsonEvidence -Path $finalEvidencePath -Value $final
@@ -768,12 +978,21 @@ function Invoke-DefaultAcceptance {
         & $postgresHarness -RunLatticeDeliveryHook
 
         $final = Read-JsonEvidence -Path $finalEvidencePath
+        Assert-ExactEvidenceProperties `
+            -Evidence $final `
+            -Allowed $finalEvidenceProperties `
+            -RejectionCode 'LATTICE_DELIVERY_FINAL_EVIDENCE_ALLOWLIST_REJECTED'
+        Assert-GraphEvidence `
+            -Evidence $final `
+            -RejectionCode 'LATTICE_DELIVERY_FINAL_GRAPH_EVIDENCE_REJECTED'
         if (
             [string]$final.status -ne 'COMPLETED' -or
             [string]$final.component -ne 'lattice-delivery-acceptance' -or
             [string]$final.codex_mode -ne $codexMode -or
             [bool]$final.postgres_restarted_before_status -ne $true -or
-            [string]$final.fixture_id -ne $fixtureId
+            [string]$final.fixture_id -ne $fixtureId -or
+            [bool]$final.graph_execution_footprint_unchanged_during_status -ne $true -or
+            [string]$final.graph_execution_footprint_digest -notmatch '^[0-9a-f]{64}$'
         ) {
             throw 'LATTICE_DELIVERY_FINAL_EVIDENCE_REJECTED'
         }
@@ -787,6 +1006,7 @@ function Invoke-DefaultAcceptance {
             evidence_path = $finalEvidencePath
             commit_sha = [string]$final.commit_sha
             outcome_digest = [string]$final.outcome_digest
+            graph_receipt_digest = [string]$final.graph_receipt_digest
         }) | ConvertTo-Json -Compress)
     }
     finally {

@@ -106,9 +106,9 @@ The current executable node is intentionally narrow:
    in typed Contracts 1.11 evidence. Graphify output is derived evidence, not
    task, policy, scope, or release authority.
 3. Codebase Memory 1.0 normalizes structural graph facts, deterministically
-   ranks a fixed process-owned query, and plans candidate observations only.
-   Its planned durable adapter is a same-database, independently hashed Memory
-   extension profile; it is not part of the global Store migration manifest.
+   ranks a fixed process-owned query, and persists candidate observations only
+   through the independent same-database PostgreSQL Memory adapter. The exact
+   extension profile is not part of the global Store migration manifest.
 4. Orchestrator 2.2 owns `snapshot -> Graphify -> validate -> persist ->
    retrieve` effect order through Ports 1.7. The first failure stops later
    effects; partial or malformed output is never committed.
@@ -120,9 +120,15 @@ The current executable node is intentionally narrow:
    global schema v4 remain authoritative and unchanged. The proposed Memory
    extension path is `db/extensions/codebase-memory/v1.sql`, with its own exact
    hash, identity, ledger, explicit admin runner, and V3+Memory verifier.
-   Implementing that PostgreSQL boundary is blocked until a precise versioned
-   module amendment is explicitly approved; the pure and adapter layers may
-   continue independently.
+   The user has now approved the precise bounded amendment: new
+   `postgres-codebase-memory` 1.0 is the sole persistence owner. A newly
+   discovered compatibility constraint requires Postgres Store's read-only
+   verifier to recognize one exact V3+Memory catalog/ACL profile because its
+   current closure hashes the `control`, `memory`, and `readmodel` schemas.
+   That compatibility amendment may neither depend on Codebase Memory nor
+   install/write Memory state, and it may not change `migrations.rs`,
+   migrations `0001` through `0004`, the global manifest, or Registry-reserved
+   `0005`/schema-v4.
 
 The trusted scripted checkpoint is now complete: fixture
 `c9bf2939ad5844e9973ee0af0a84b756` persisted typed intent/outcome/receipt
@@ -131,6 +137,19 @@ evidence through a PostgreSQL 17.10 restart and produced clean fixture commit
 Focused/full verification and final architecture review pass with only deferred
 non-blocking deadline/initialization hardening. This evidence does not replace
 the blocked official-live criterion.
+
+The TASK-033 production checkpoint is also complete. The fixed
+`lattice_delivery_run` composition now binds the durable delivery receipt to
+project `task032-delivery`, TASK-033, and the exact fixture commit before
+Graphify persistence; `lattice_delivery_status` opens a fresh runtime-role
+connection and replays only the exact PostgreSQL Memory receipt. The single
+combined command `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+.\scripts\run-lattice-delivery.ps1` exited 0 in 254 seconds on PostgreSQL
+17.10, including Store+Memory initial/restart, Graphify persistence, a second
+database stop/start, exact run/status equality, and an unchanged Graphify
+execution footprint during fresh-process status. No global migration,
+Registry reservation, MCP input/tool, official Codex, Hermes, or OpenClaw
+boundary changed.
 
 ## Global Strategy
 
@@ -750,15 +769,23 @@ remain future Orchestrator/PostgreSQL responsibilities.
   Git snapshot and validate/canonicalize typed graph evidence. Pure contracts,
   ports, Codebase Memory, Graphify adapter, and orchestrator work may continue.
   PostgreSQL persistence/restart replay will use an independent same-database
-  Memory extension profile, not global schema v4, and is
-  `BLOCKED_PENDING_VERSIONED_AMENDMENT` until its owning module boundary is
-  explicitly approved. This node uses the scripted delivery fixture and makes
+  Memory extension profile owned only by `postgres-codebase-memory` 1.0, not
+  global schema v4. The exact bounded versioned amendment is approved and the
+  database substep is now current. Postgres Store changes are limited to a
+  read-only exact V3+Memory verifier compatibility profile; its migrations,
+  manifest, domain dependencies, and write paths remain unchanged. This node
+  uses the scripted delivery fixture and makes
   no official-Codex-live claim. The pure/Graphify checkpoint is complete:
   typed contracts/ports, pure memory and orchestration, exact Git snapshots,
   the pinned Graphify adapter, private tmpfs copy/verification, strict framed
   capture, and Landlock ABI 3 enforcement have passed focused/full local gates
-  and independent P0/P1 review. PostgreSQL composition, restart replay, and
-  status exposure remain the next blocked substep; TASK-033 stays current.
+  and independent P0/P1 review. The independent extension's exact manifest,
+  admin runner, pre-state rejection, transaction rollback, catalog/ACL closure,
+  production `CodebaseMemoryPort`, runtime direct-table denial, exact
+  persist/retrieve/load retry, and PostgreSQL 17.10 stop/start fresh-process
+  replay now pass the disposable `-MemoryOnly` harness. The exact Store
+  V3+Memory compatibility verifier and `latticed` status composition remain the
+  active substeps; TASK-033 stays current.
 - [ ] Step 7: Complete TASK-026 and TASK-027 for Workspace Git 2.0 and exact
   Scope Check 1.1 behavior in disposable repositories; retain the local
   filesystem lock only as defense in depth.
@@ -867,6 +894,17 @@ external adapter at a time behind the same contracts.
   separately prove a stable physical algorithm with disposable repositories.
 
 ## Drift Log
+
+- 2026-08-05: TASK-033's independent extension initially assumed that keeping
+  Postgres Store source byte-identical was sufficient. Current code evidence
+  disproved that assumption: the Store verifier closes catalog and ACL hashes
+  across `control`, `memory`, and `readmodel`, so independent Memory objects
+  would make existing Store/Ledger construction fail. The plan now keeps
+  `postgres-codebase-memory` as the sole Memory persistence owner while allowing
+  only an exact read-only Postgres Store V3+Memory verifier profile. Global
+  migration bytes/manifest and Registry `0005` remain forbidden. The first
+  compile-time RED exited 1 for the intentionally missing typed database/
+  extension identity and exact embedded-manifest APIs.
 
 - 2026-07-29: The original attachment used one unrelated website as an example
   and proposed a Node-first, managed-cloud-oriented sequence. Direct user

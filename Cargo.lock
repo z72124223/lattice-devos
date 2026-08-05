@@ -332,6 +332,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-postgres-codebase-memory"
+version = "0.1.0"
+dependencies = [
+ "lattice-cjson",
+ "lattice-codebase-memory",
+ "lattice-contracts",
+ "lattice-ports",
+ "postgres",
+ "sha2",
+]
+
+[[package]]
 name = "lattice-postgres-store"
 version = "0.1.0"
 dependencies = [
@@ -357,10 +369,13 @@ name = "lattice-runtime"
 version = "0.1.0"
 dependencies = [
  "lattice-cjson",
+ "lattice-codebase-memory",
  "lattice-codex-adapter",
  "lattice-contracts",
+ "lattice-graphify-adapter",
  "lattice-orchestrator",
  "lattice-ports",
+ "lattice-postgres-codebase-memory",
  "lattice-postgres-store",
  "lattice-task-ledger",
  "postgres",

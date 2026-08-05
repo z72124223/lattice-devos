@@ -1,13 +1,15 @@
 # Workflow Ledger
 
-## TASK-033 Pure Graphify Checkpoint
+## TASK-033 Graphify/PostgreSQL Memory Production Checkpoint
 
 - Scope: typed contracts/ports, pure Codebase Memory and orchestration, exact
-  tracked-Git snapshots, and the pinned contained Graphify adapter.
+  tracked-Git snapshots, the pinned contained Graphify adapter, and the
+  independent same-database PostgreSQL Memory extension/production adapter.
 - Branch/base: `feature/v2-rust-postgres-bootstrap` at
-  `61cca93150878fe4c6854cd3be73e3171e9fa6c0`; no remote.
-- Overall ticket: `in-progress`; PostgreSQL extension/restart/status remains
-  `BLOCKED_PENDING_VERSIONED_AMENDMENT` and was not implemented.
+  `79096b6b5f184a47d44bbbd20a575bad79a5e393`; no remote.
+- Overall ticket: bounded production checkpoint complete; the independent
+  Memory extension, exact Store V3+Memory compatibility, run composition, and
+  fresh-process status replay pass together.
 
 | Stage | Status | Evidence | Enforcement |
 |---|---|---|---|
@@ -20,9 +22,12 @@
 | Focused verification | pass | Graphify adapter 18 pass/2 ignored plus Git/static containment suites; format and strict adapter Clippy pass | machine-enforced locally |
 | Full verification | pass after one retry | exact scripted Codex test passed after one timing mismatch; complete locked workspace tests, strict Clippy, and Node 44/44 rerun passed | machine-enforced locally |
 | Independent review | pass | three final read-only reviews, P0=0/P1=0 | independent agent review |
-| Architecture boundary | pass | no changed runtime/Postgres/db paths; no DB/Hermes/OpenClaw/MCP integration | diff + dependency/review evidence |
+| Architecture boundary | pass | independent Memory owner; Store verifier remains read-only; no global migration/Registry change, third MCP tool, Hermes, or OpenClaw | diff + focused machine evidence |
 | Official Codex live | failed diagnostic/blocked | TASK-032 incident gate unchanged; helper not started | fail-closed machine gate |
-| PostgreSQL/restart/status | blocked/not implemented | exact versioned owning-module approval still required | documented human gate |
+| PostgreSQL extension TDD | pass | compile RED for missing production adapter/replay APIs; GREEN adapter 1/1 and contract replay 5/5 | machine-executed locally |
+| PostgreSQL Memory live/restart | pass | disposable PG 17.10 `-MemoryOnly`, exit 0 in 19.1 s; install/no-op/rejection/rollback/ACL, real persist/retrieve/load, stop/start fresh-process replay | machine-executed marker-owned cluster |
+| Store V3+Memory/status | pass | combined command exit 0 in 254 s; PG 17.10 initial/restart plus second restart, exact graph run/status equality, graph receipt `b118e01d...021a88`, unchanged Graphify footprint during fresh status | machine-executed marker-owned cluster |
+| Production composition | pass | runtime all-target: 30 unit + 7 composition + 5 dispatch + 11 MCP; strict runtime Clippy and format pass | machine-enforced locally |
 | Integration/CI/merge | local-only/not performed | full local combined result passes; no remote/CI/merge authorization | remote controls missing/unverified |
 | Handoff/checkpoint | complete | `HANDOFF.md`, this ledger, and the local checkpoint commit | documented + Git |
 

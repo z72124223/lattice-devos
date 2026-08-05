@@ -1,13 +1,57 @@
-# LATTICE DevOS TASK-033 Pure Graphify Checkpoint Handoff
+# LATTICE DevOS TASK-033 Graphify/PostgreSQL Memory Checkpoint Handoff
 
 ## Status And Alignment
 
-`DONE` for the bounded pure Rust/Graphify checkpoint. TASK-033 remains
-`in-progress`: PostgreSQL persistence/restart replay and `latticed` status
-composition are `BLOCKED_PENDING_VERSIONED_AMENDMENT`. Hermes and OpenClaw were
-not started. TASK-032 official Codex live remains `FAILED_DIAGNOSTIC`; no
-official live, sandbox setup, unelevated/no-sandbox mode, deployment, push, or
-merge was attempted.
+`DONE` for the bounded TASK-033 Graphify -> same-database PostgreSQL Codebase
+Memory -> database restart -> exact query/receipt replay -> `latticed`
+composition checkpoint. Hermes and OpenClaw were not started. TASK-032 official
+Codex live remains `FAILED_DIAGNOSTIC`; no official live retry, sandbox setup,
+unelevated/no-sandbox mode, deployment, push, or merge was attempted.
+
+## Combined Production Checkpoint — 2026-08-05
+
+- `lattice_delivery_run` now executes the pinned Graphify adapter against the
+  exact committed scripted fixture, binds the durable delivery receipt to
+  project/TASK/commit, and persists only through `PostgresCodebaseMemory` fixed
+  functions. `lattice_delivery_status` reconstructs the same typed request and
+  calls PostgreSQL receipt replay through a fresh runtime-role connection; it
+  does not invoke Graphify.
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+  .\scripts\run-lattice-delivery.ps1` exited 0 in 254 seconds. It emitted
+  `TASK019_POSTGRES_HARNESS=PASS` and `LATTICE_DELIVERY_HARNESS=PASS` on
+  PostgreSQL 17.10 at an ephemeral non-5432 endpoint.
+- The combined run proved Store+Memory initial/restart, exact V3+Memory
+  catalog/ACL admission, real non-empty Graphify persistence/retrieval, a
+  second PostgreSQL stop/start, exact run/status graph-field equality, and an
+  unchanged snapshot/staging footprint during fresh-process status. The final
+  graph receipt digest was
+  `b118e01deeab76c65c2a19a2dfb44c2f67723c7b39652fa2414cdaaeaa021a88`.
+- Focused production verification passed: runtime all-target tests (30 unit,
+  7 composition, 5 dispatch, 11 MCP), strict runtime Clippy, format, and the
+  combined live gate. Broader non-P0/P1 review and redundant full matrices are
+  intentionally deferred to the integration window.
+
+## PostgreSQL Memory Checkpoint — 2026-08-05
+
+- Added the independent `postgres-codebase-memory` crate and exact embedded
+  `db/extensions/codebase-memory/v1.sql` profile: six owned tables, identity
+  ledger, explicit admin runner, and three fixed `SECURITY DEFINER` functions.
+- Added typed database/extension identity to durable contracts, validated
+  restart replay constructors, and the production `PostgresCodebaseMemory`
+  adapter. It accepts no SQL, path, schema, DSN, credential, or MCP input.
+- RED evidence: the adapter and three replay constructors were absent and the
+  focused tests failed to compile. GREEN evidence: adapter API 1/1, normalized
+  contract replay 5/5, package all-target tests, and strict focused Clippy pass.
+- Live evidence:
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+  .\scripts\run-task019-postgres.ps1 -MemoryOnly` exited 0 in 19.1 s on
+  PostgreSQL 17.10 at an ephemeral non-5432 endpoint. It proved partial and
+  collision rejection, transactional rollback, exact install/no-op,
+  catalog/ACL verification, runtime direct-table denial, real analysis and
+  retrieval persistence, exact retries, changed-request rejection, stop/start,
+  and fresh-process exact receipt replay.
+- The full Store restart matrix and `lattice_delivery_status` composition now
+  pass in the combined checkpoint above.
 
 ## Delivered
 
@@ -25,9 +69,9 @@ merge was attempted.
   verification, strict seven-field framed copy-out, exclusive parent capture
   handles, bounded teardown, and Landlock ABI 3 truncate enforcement before
   any Graphify command.
-- Preserved the Store 1.4/ADR-020 Project Registry reservation. No PostgreSQL
-  extension, global migration, runtime composition, third MCP tool, Hermes, or
-  OpenClaw code is present in this checkpoint.
+- Preserved Store/ADR-020 Project Registry ownership and the global migration
+  bytes/manifest. The independent Memory extension and runtime composition add
+  no third MCP tool; Hermes and OpenClaw remain absent from this checkpoint.
 
 ## Material Files
 
@@ -37,8 +81,10 @@ merge was attempted.
 | `crates/lattice-codebase-memory` | deterministic untrusted structural record normalization and retrieval |
 | `crates/lattice-orchestrator` | pure snapshot -> analyze -> validate -> persist -> retrieve effect order |
 | `crates/lattice-graphify-adapter` | exact Git snapshot plus pinned, contained, fail-closed Graphify execution |
-| `Cargo.toml`, `Cargo.lock` | register the two new Rust crates and locked dependencies |
-| SPEC-002, ADR-022, affected constitutions, TASK-033, `PLANS.md` | minimal approved boundary and current blocked database substep |
+| `crates/lattice-postgres-codebase-memory`, `db/extensions/codebase-memory/v1.sql` | sole same-database Memory persistence owner and exact extension bytes |
+| `apps/lattice-runtime`, `scripts/run-lattice-delivery.ps1`, `scripts/run-task019-postgres.ps1` | production run/status composition and restart acceptance |
+| `Cargo.toml`, `Cargo.lock` | register the new Rust crates and locked dependencies |
+| SPEC-002, ADR-022, affected constitutions, TASK-033, `PLANS.md` | approved boundary and completed database/composition checkpoint |
 | `HANDOFF.md`, `docs/workflow/WORKFLOW_LEDGER.md` | durable checkpoint truth and continuation evidence |
 
 ## Verification And Review
@@ -72,16 +118,11 @@ merge was attempted.
   `C:\Users\f7212\AppData\Local\Temp\lattice-graphify-live-typed-ports-7788-1`
   and
   `C:\Users\f7212\AppData\Local\Temp\lattice-graphify-live-typed-ports-16628-1`.
-- Required approval wording for the next node:
-  "Approve a versioned owning-module amendment for an independent
-  same-database Codebase Memory extension profile at
-  `db/extensions/codebase-memory/v1.sql`, with exact embedded SQL/hash, Memory
-  schema identity/extension ledger, explicit admin runner, four domain tables,
-  fixed SECURITY DEFINER functions, V3+Memory catalog/ACL verifier, typed
-  database/extension identity evidence, and no change to global Store v3 or
-  Registry-reserved global `0005`/schema-v4."
+- The next executable node is a separately bounded Hermes candidate/reflection
+  integration; it receives no authority from this checkpoint and was not
+  started here.
 - Branch: `feature/v2-rust-postgres-bootstrap`; checkpoint parent:
-  `61cca93150878fe4c6854cd3be73e3171e9fa6c0`; checkpoint is this commit. The
+  `79096b6b5f184a47d44bbbd20a575bad79a5e393`; checkpoint is this commit. The
   repository has no remote, so remote synchronization, CI, branch protection,
   push, and merge remain unavailable/not performed.
 

@@ -27,7 +27,7 @@ use lattice_task_ledger::{
     LedgerEvent, LedgerEventKind, LedgerOutcome, ReasonCode, VerifiedStream,
 };
 use postgres::config::SslMode;
-use postgres::{Config, NoTls};
+use postgres::{Client, Config, NoTls};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const PROJECT_ID: &str = "task032-delivery";
@@ -149,7 +149,7 @@ impl DeliveryDatabaseBinding {
         Ok(Self { host, port, run_id })
     }
 
-    fn database_name(&self) -> String {
+    pub(crate) fn database_name(&self) -> String {
         format!("lattice_task019_{}_base", &self.run_id[..8])
     }
 
@@ -158,6 +158,58 @@ impl DeliveryDatabaseBinding {
     pub fn run_id(&self) -> &str {
         &self.run_id
     }
+}
+
+fn fixed_runtime_config(
+    binding: &DeliveryDatabaseBinding,
+    password: &str,
+    deadline: Instant,
+) -> Result<Config, DeliveryLedgerError> {
+    if password.is_empty() {
+        return Err(delivery_error(DeliveryLedgerErrorKind::InvalidBinding));
+    }
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(deadline_error)?;
+    let statement_timeout_ms = u64::try_from(remaining.as_millis())
+        .unwrap_or(u64::MAX)
+        .clamp(1, u64::from(u32::MAX));
+    let database_timeouts = format!(
+        "-c statement_timeout={statement_timeout_ms} -c lock_timeout={statement_timeout_ms} -c idle_in_transaction_session_timeout={statement_timeout_ms}"
+    );
+    let mut config = Config::new();
+    config
+        .host(&binding.host)
+        .port(binding.port)
+        .user("lattice_runtime_login")
+        .password(password)
+        .dbname(&binding.database_name())
+        .application_name(APPLICATION_NAME)
+        .connect_timeout(remaining)
+        .options(&database_timeouts)
+        .ssl_mode(SslMode::Disable);
+    Ok(config)
+}
+
+/// Opens the sole fixed runtime-role connection admitted by this process.
+///
+/// The caller supplies the already-validated marker binding, the service's
+/// existing secret, and its absolute deadline. No DSN, role, schema, SQL, or
+/// caller-selected connection option is accepted.
+pub(crate) fn connect_fixed_runtime_client(
+    binding: &DeliveryDatabaseBinding,
+    password: &str,
+    deadline: Instant,
+) -> Result<Client, DeliveryLedgerError> {
+    let mut client = fixed_runtime_config(binding, password, deadline)?
+        .connect(NoTls)
+        .map_err(|_| delivery_error(DeliveryLedgerErrorKind::ConnectFailed))?;
+    client
+        .batch_execute("SET ROLE lattice_runtime")
+        .map_err(|_| delivery_error(DeliveryLedgerErrorKind::ConnectFailed))?;
+    ensure_before_deadline(deadline)?;
+    Ok(client)
 }
 
 /// One verified durable task stream connection.
@@ -681,39 +733,10 @@ impl DeliveryLedger {
         password: &str,
         deadline: Instant,
     ) -> Result<Self, DeliveryLedgerError> {
-        if password.is_empty() {
-            return Err(delivery_error(DeliveryLedgerErrorKind::InvalidBinding));
-        }
         let database_name = binding.database_name();
         let target = MigrationTarget::new(database_name.clone(), binding.run_id.clone())
             .map_err(|_| delivery_error(DeliveryLedgerErrorKind::InvalidBinding))?;
-        let mut config = Config::new();
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .filter(|remaining| !remaining.is_zero())
-            .ok_or_else(deadline_error)?;
-        let statement_timeout_ms = u64::try_from(remaining.as_millis())
-            .unwrap_or(u64::MAX)
-            .clamp(1, u64::from(u32::MAX));
-        let database_timeouts = format!(
-            "-c statement_timeout={statement_timeout_ms} -c lock_timeout={statement_timeout_ms} -c idle_in_transaction_session_timeout={statement_timeout_ms}"
-        );
-        config
-            .host(&binding.host)
-            .port(binding.port)
-            .user("lattice_runtime_login")
-            .password(password)
-            .dbname(&database_name)
-            .application_name(APPLICATION_NAME)
-            .connect_timeout(remaining)
-            .options(&database_timeouts)
-            .ssl_mode(SslMode::Disable);
-        let mut client = config
-            .connect(NoTls)
-            .map_err(|_| delivery_error(DeliveryLedgerErrorKind::ConnectFailed))?;
-        client
-            .batch_execute("SET ROLE lattice_runtime")
-            .map_err(|_| delivery_error(DeliveryLedgerErrorKind::ConnectFailed))?;
+        let client = connect_fixed_runtime_client(binding, password, deadline)?;
         let ledger = PostgresTaskLedger::new(client, &target).map_err(map_ledger_error)?;
         ensure_before_deadline(deadline)?;
         Ok(Self {
@@ -2852,6 +2875,44 @@ mod tests {
     #[test]
     fn task019_application_name_is_used_for_schema_compatibility() {
         assert_eq!(APPLICATION_NAME, "lattice-devos-task019");
+    }
+
+    #[test]
+    fn fixed_runtime_connection_factory_binds_one_validated_target() {
+        use postgres::config::Host;
+
+        let binding =
+            DeliveryDatabaseBinding::new("127.0.0.1", 55_432, "0123456789abcdef0123456789abcdef")
+                .expect("fixed database binding");
+        let deadline = Instant::now()
+            .checked_add(std::time::Duration::from_secs(30))
+            .expect("deadline");
+
+        let config = fixed_runtime_config(&binding, "test-password", deadline)
+            .expect("fixed runtime config");
+
+        assert!(matches!(
+            config.get_hosts(),
+            [Host::Tcp(host)] if host == "127.0.0.1"
+        ));
+        assert_eq!(config.get_ports(), [55_432]);
+        assert_eq!(config.get_user(), Some("lattice_runtime_login"));
+        assert_eq!(config.get_dbname(), Some("lattice_task019_01234567_base"));
+        assert_eq!(config.get_application_name(), Some(APPLICATION_NAME));
+        assert_eq!(config.get_ssl_mode(), SslMode::Disable);
+        let options = config.get_options().expect("fixed timeout options");
+        for option in [
+            "statement_timeout=",
+            "lock_timeout=",
+            "idle_in_transaction_session_timeout=",
+        ] {
+            assert!(options.contains(option), "missing {option}");
+        }
+        let _: fn(
+            &DeliveryDatabaseBinding,
+            &str,
+            Instant,
+        ) -> Result<postgres::Client, DeliveryLedgerError> = connect_fixed_runtime_client;
     }
 
     #[test]

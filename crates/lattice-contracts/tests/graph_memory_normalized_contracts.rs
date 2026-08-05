@@ -1,14 +1,20 @@
 use lattice_contracts::{
-    AttemptId, CONTRACT_VERSION, CodeSnapshotEvidence, ContentDigest, GitObjectId, GraphConfidence,
-    GraphMemoryPersistenceEvidence, GraphMemoryReceipt, GraphMemoryRecord, GraphMemoryRunRequest,
-    GraphRecordKind, GraphSourceProvenance, GraphifyIdentity, GraphifyRawEvidence, GraphifyRawNode,
-    Invocation, MemoryQuery, MemoryRecordKind, MemoryRetrievalDisposition, MemoryRetrievalEvidence,
+    AttemptId, CONTRACT_VERSION, CodeSnapshotEvidence, CodebaseMemoryPersistenceIdentity,
+    ContentDigest, GitObjectId, GraphConfidence, GraphMemoryPersistenceEvidence,
+    GraphMemoryReceipt, GraphMemoryRecord, GraphMemoryRunRequest, GraphRecordKind,
+    GraphSourceProvenance, GraphifyIdentity, GraphifyRawEvidence, GraphifyRawNode, Invocation,
+    MemoryQuery, MemoryRecordKind, MemoryRetrievalDisposition, MemoryRetrievalEvidence,
     MemoryRetrievalPlan, MemoryReviewState, NormalizedGraphAnalysis, ProjectId, ProjectSnapshotId,
     RankedMemoryRecord, RequestId, TaskId, TrackedSource,
 };
 
 fn digest(byte: char) -> ContentDigest {
     ContentDigest::from_sha256(byte.to_string().repeat(64)).expect("valid digest")
+}
+
+fn persistence_identity() -> CodebaseMemoryPersistenceIdentity {
+    CodebaseMemoryPersistenceIdentity::v1(digest('2'), digest('3'), digest('4'), digest('5'))
+        .expect("persistence identity")
 }
 
 fn fixture() -> (
@@ -245,13 +251,15 @@ fn retrieval_plan_and_receipt_preserve_exact_binding_and_no_answer() {
     let ranked = RankedMemoryRecord::new(&analysis.records()[0], 1, 1_000).expect("ranked");
     let plan = MemoryRetrievalPlan::new(&analysis, &query, vec![ranked], digest('d'))
         .expect("result plan");
-    let persisted =
-        GraphMemoryPersistenceEvidence::new(&analysis, digest('e')).expect("persistence evidence");
+    let identity = persistence_identity();
+    let persisted = GraphMemoryPersistenceEvidence::new(&analysis, identity.clone(), digest('e'))
+        .expect("persistence evidence");
     let retrieval =
         MemoryRetrievalEvidence::new(&persisted, plan, digest('f')).expect("retrieval evidence");
     let receipt = GraphMemoryReceipt::new(persisted, retrieval, digest('1')).expect("receipt");
 
     assert!(receipt.matches_request(analysis.request()));
+    assert_eq!(receipt.persistence().identity(), &identity);
     let different_limit = GraphMemoryRunRequest::new(
         analysis.request().invocation().clone(),
         analysis.request().project_id().clone(),
@@ -267,4 +275,44 @@ fn retrieval_plan_and_receipt_preserve_exact_binding_and_no_answer() {
         receipt.retrieval().disposition(),
         MemoryRetrievalDisposition::Results
     );
+}
+
+#[test]
+fn durable_receipt_can_be_reconstructed_from_exact_typed_rows() {
+    let analysis = analysis();
+    let query = MemoryQuery::new(analysis.request(), "CodebaseMemoryPort", 5).expect("query");
+    let ranked = RankedMemoryRecord::new(&analysis.records()[0], 1, 1_000).expect("ranked");
+    let plan = MemoryRetrievalPlan::new(&analysis, &query, vec![ranked], digest('d'))
+        .expect("result plan");
+    let identity = persistence_identity();
+    let persisted = GraphMemoryPersistenceEvidence::replay(
+        analysis.request().clone(),
+        identity,
+        analysis.analysis_digest().clone(),
+        analysis.record_set_digest().clone(),
+        1,
+        digest('e'),
+    )
+    .expect("replayed persistence");
+    let replayed_result = RankedMemoryRecord::replay(
+        analysis.records()[0].record_id().clone(),
+        analysis.records()[0].content_digest().clone(),
+        1,
+        1_000,
+    )
+    .expect("replayed result");
+    let retrieval = MemoryRetrievalEvidence::replay(
+        &persisted,
+        plan.limit(),
+        plan.disposition(),
+        vec![replayed_result],
+        plan.result_set_digest().clone(),
+        digest('f'),
+    )
+    .expect("replayed retrieval");
+    let receipt = GraphMemoryReceipt::new(persisted, retrieval, digest('1')).expect("receipt");
+
+    assert!(receipt.matches_request(analysis.request()));
+    assert_eq!(receipt.retrieval().results()[0].rank(), 1);
+    assert_eq!(receipt.retrieval().results()[0].score(), 1_000);
 }
