@@ -957,6 +957,7 @@ impl HermesEnvironmentConfig {
         let runner = HermesProductionRunnerConfig::new(
             self.containment,
             &self.runtime_manifest,
+            self.broker,
             &broker_receipt,
             self.api_key,
             FULL_CHAIN_HERMES_MODEL,

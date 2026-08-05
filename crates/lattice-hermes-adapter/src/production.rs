@@ -16,7 +16,7 @@ use lattice_ports::{HermesPort, PortError, PortResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::broker::CodexBrokerReceipt;
+use crate::broker::{CodexBrokerReceipt, CodexReflectionBrokerConfig};
 use crate::codex_proxy::{
     ProductionCodexProxyControl, ProductionCodexProxyDuplex, ProductionCodexProxyProvider,
 };
@@ -907,6 +907,7 @@ impl HermesProductionRunnerConfig {
     pub fn new(
         containment: HermesWslContainmentConfig,
         runtime_manifest: &HermesOfflineRuntimeManifest,
+        broker: CodexReflectionBrokerConfig,
         broker_receipt: &CodexBrokerReceipt,
         api_key: impl Into<String>,
         model: impl Into<String>,
@@ -915,17 +916,21 @@ impl HermesProductionRunnerConfig {
         poll_interval: Duration,
     ) -> HermesAdapterResult<Self> {
         broker_receipt.validate_for_containment()?;
-        Self::validated(
+        let model = model.into();
+        let codex_provider = broker.into_production_proxy_provider(broker_receipt, &model)?;
+        let mut config = Self::validated(
             containment,
             runtime_manifest,
             broker_receipt.receipt_digest().as_str().to_owned(),
             api_key.into(),
-            model.into(),
+            model,
             startup_timeout,
             operation_timeout,
             poll_interval,
             RunnerMode::Official,
-        )
+        )?;
+        config.codex_provider = Some(codex_provider);
+        Ok(config)
     }
 
     #[cfg(test)]
@@ -1544,7 +1549,7 @@ impl ProductionHermesPort {
         if let Err(teardown) = proxy_result {
             return map_port_error(&teardown);
         }
-        map_port_error(&failure)
+        map_port_error(failure)
     }
 
     #[cfg(test)]
