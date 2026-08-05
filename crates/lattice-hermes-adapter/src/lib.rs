@@ -16,7 +16,7 @@ mod windows_job;
 
 pub use broker::CodexProxyInvocation;
 #[cfg(windows)]
-pub use broker::{CodexBrokerReceipt, CodexReflectionBrokerConfig};
+pub use broker::{CodexBrokerPreflightReceipt, CodexReflectionBrokerConfig};
 pub use containment::{
     HermesContainmentFrame, HermesContainmentFrameLimits, HermesSandboxProfile,
     build_hermes_bwrap_arguments, parse_containment_frame,
@@ -754,7 +754,7 @@ impl HermesContainmentPrerequisites {
     pub fn verify(
         runtime: &HermesOfflineRuntimeManifest,
         socketpair: &HermesSocketpairReceipt,
-        broker: &CodexBrokerReceipt,
+        broker: &CodexBrokerPreflightReceipt,
     ) -> HermesAdapterResult<Self> {
         socketpair.validate_for_containment()?;
         broker.validate_for_containment()?;

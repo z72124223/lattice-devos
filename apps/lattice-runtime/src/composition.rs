@@ -982,7 +982,7 @@ impl HermesEnvironmentConfig {
             .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
         let broker_receipt = self
             .broker
-            .run_no_marker_canary(absolute_deadline)
+            .run_zero_model_preflight(absolute_deadline)
             .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
         let runner = HermesProductionRunnerConfig::new(
             self.containment,

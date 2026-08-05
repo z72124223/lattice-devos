@@ -750,8 +750,8 @@ fn official_codex_0146_four_file_bundle_identity_is_live_verified() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "requires the built broker helper, official Codex 0.146.0 bundle, and daily subscription login"]
-fn official_codex_0146_no_marker_broker_canary_is_live_verified() {
+#[ignore = "requires the built broker helper and staged official Codex 0.146.0 bundle"]
+fn official_codex_0146_zero_model_preflight_is_live_verified() {
     let launcher = std::path::PathBuf::from(
         std::env::var_os("LATTICE_HERMES_CODEX_0146_LAUNCHER")
             .expect("set exact staged launcher path"),
@@ -761,8 +761,8 @@ fn official_codex_0146_no_marker_broker_canary_is_live_verified() {
             .expect("set built broker helper path"),
     );
     let codex_home = std::path::PathBuf::from(
-        std::env::var_os("LATTICE_HERMES_DAILY_CODEX_HOME")
-            .expect("set daily logged-in CODEX_HOME"),
+        std::env::var_os("LATTICE_HERMES_ISOLATED_CODEX_HOME")
+            .expect("set isolated logged-in CODEX_HOME"),
     );
     let product_root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR"))
         .expect("crate product root");
@@ -771,7 +771,7 @@ fn official_codex_0146_no_marker_broker_canary_is_live_verified() {
         .expect("monotonic wall clock seed")
         .as_nanos();
     let isolation_root = std::env::temp_dir().join(format!(
-        "lattice-hermes-codex-broker-live-{}-{sequence}",
+        "lattice-hermes-codex-preflight-{}-{sequence}",
         std::process::id()
     ));
     let helper_sha256 = crate::sha256_file(&helper).expect("broker helper digest");
@@ -786,8 +786,8 @@ fn official_codex_0146_no_marker_broker_canary_is_live_verified() {
     )
     .expect("sealed broker config");
     let receipt = config
-        .run_no_marker_canary(Instant::now() + Duration::from_mins(4))
-        .expect("real no-marker broker canary");
+        .run_zero_model_preflight(Instant::now() + Duration::from_secs(30))
+        .expect("zero-model broker preflight");
     assert_eq!(receipt.helper_sha256(), helper_sha256);
     assert_eq!(
         receipt.launcher_sha256(),
@@ -795,10 +795,8 @@ fn official_codex_0146_no_marker_broker_canary_is_live_verified() {
     );
     for digest in [
         receipt.receipt_digest().as_str(),
-        receipt.canary_receipt_digest().as_str(),
         receipt.config_lock_sha256(),
         receipt.child_environment_sha256(),
-        receipt.transcript_sha256(),
     ] {
         assert_eq!(digest.len(), 64);
     }

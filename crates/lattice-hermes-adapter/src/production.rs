@@ -1,5 +1,6 @@
 //! Unique owned Windows -> WSL2 -> bubblewrap Hermes construction chain.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -13,10 +14,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lattice_contracts::{ContentDigest, HermesEvidence, HermesResearchRequest, RequestId};
 use lattice_ports::{HermesPort, PortError, PortResult};
+use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::broker::{CodexBrokerReceipt, CodexReflectionBrokerConfig};
+use crate::broker::{CodexBrokerPreflightReceipt, CodexReflectionBrokerConfig};
 use crate::codex_proxy::{
     ProductionCodexProxyControl, ProductionCodexProxyDuplex, ProductionCodexProxyProvider,
 };
@@ -67,6 +69,8 @@ const CODEX_PROXY_BINDING_DOMAIN: &[u8] = b"LATTICE_HERMES_CODEX_PROXY_V1";
 const CODEX_PROXY_STREAM_ID: u32 = 1;
 const CODEX_PROXY_HEADER_BYTES: usize = 41;
 const MAX_CODEX_PROXY_DATA_BYTES: usize = 65_536;
+const MAX_CODEX_PROXY_JSONL_LINE_BYTES: usize = MAX_CODEX_PROXY_DATA_BYTES;
+const MAX_CODEX_PROXY_JSONL_BATCH_BYTES: usize = MAX_CODEX_PROXY_DATA_BYTES * 2;
 const MAX_CODEX_PROXY_BODY_BYTES: usize = CODEX_PROXY_HEADER_BYTES + MAX_CODEX_PROXY_DATA_BYTES;
 const MAX_CODEX_PROXY_WIRE_BYTES: usize = CODEX_PROXY_MAGIC.len() + 4 + MAX_CODEX_PROXY_BODY_BYTES;
 const MAX_CODEX_PROXY_BUFFER_BYTES: usize = MAX_CODEX_PROXY_WIRE_BYTES + 8192;
@@ -380,11 +384,151 @@ enum ProviderStreamEvent {
 }
 
 #[derive(Default)]
+struct CodexProxyOneTurnGate {
+    pending: Vec<u8>,
+    turn_start_count: u8,
+}
+
+struct CodexProxyJsonLine {
+    method: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CodexProxyJsonLine {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct JsonLineVisitor;
+
+        impl<'de> Visitor<'de> for JsonLineVisitor {
+            type Value = CodexProxyJsonLine;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("one complete JSON object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut keys = HashSet::new();
+                let mut method = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    let is_method = key == "method";
+                    if !keys.insert(key) {
+                        return Err(serde::de::Error::custom("duplicate JSON object key"));
+                    }
+                    if is_method {
+                        let value = map.next_value::<serde_json::Value>()?;
+                        method = Some(
+                            value
+                                .as_str()
+                                .ok_or_else(|| {
+                                    serde::de::Error::custom("JSON-RPC method is not a string")
+                                })?
+                                .to_owned(),
+                        );
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                Ok(CodexProxyJsonLine { method })
+            }
+        }
+
+        deserializer.deserialize_map(JsonLineVisitor)
+    }
+}
+
+impl CodexProxyOneTurnGate {
+    fn ingest(&mut self, payload: &[u8]) -> HermesAdapterResult<Vec<u8>> {
+        if payload.is_empty() || payload.len() > MAX_CODEX_PROXY_DATA_BYTES {
+            return Err(malformed("HERMES_CODEX_PROXY_JSONL_SIZE_REJECTED"));
+        }
+        let admitted_capacity = self
+            .pending
+            .len()
+            .checked_add(payload.len())
+            .filter(|length| *length <= MAX_CODEX_PROXY_JSONL_BATCH_BYTES)
+            .ok_or_else(|| malformed("HERMES_CODEX_PROXY_JSONL_SIZE_REJECTED"))?;
+        let mut admitted = Vec::with_capacity(admitted_capacity);
+        let mut cursor = 0;
+        while cursor < payload.len() {
+            let remaining = &payload[cursor..];
+            let Some(newline_offset) = remaining.iter().position(|byte| *byte == b'\n') else {
+                self.extend_pending(remaining)?;
+                break;
+            };
+            let line_fragment = &remaining[..newline_offset];
+            self.extend_pending(line_fragment)?;
+            self.validate_complete_line()?;
+            admitted.extend_from_slice(&self.pending);
+            admitted.push(b'\n');
+            self.pending.clear();
+            cursor = cursor
+                .checked_add(newline_offset + 1)
+                .ok_or_else(|| malformed("HERMES_CODEX_PROXY_JSONL_SIZE_REJECTED"))?;
+        }
+        Ok(admitted)
+    }
+
+    fn extend_pending(&mut self, fragment: &[u8]) -> HermesAdapterResult<()> {
+        let line_length = self
+            .pending
+            .len()
+            .checked_add(fragment.len())
+            .filter(|length| *length <= MAX_CODEX_PROXY_JSONL_LINE_BYTES)
+            .ok_or_else(|| malformed("HERMES_CODEX_PROXY_JSONL_SIZE_REJECTED"))?;
+        self.pending.reserve(line_length - self.pending.len());
+        self.pending.extend_from_slice(fragment);
+        Ok(())
+    }
+
+    fn validate_complete_line(&mut self) -> HermesAdapterResult<()> {
+        let line = self.pending.strip_suffix(b"\r").unwrap_or(&self.pending);
+        let value: CodexProxyJsonLine = serde_json::from_slice(line)
+            .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?;
+        if value.method.as_deref() == Some("turn/start") {
+            if self.turn_start_count != 0 {
+                return Err(malformed("HERMES_CODEX_PROXY_TURN_REPLAY_REJECTED"));
+            }
+            self.turn_start_count = 1;
+        }
+        Ok(())
+    }
+
+    fn finish_input(&self) -> HermesAdapterResult<()> {
+        if self.pending.is_empty() {
+            Ok(())
+        } else {
+            Err(malformed("HERMES_CODEX_PROXY_JSONL_PARTIAL_REJECTED"))
+        }
+    }
+
+    fn ensure_single_turn(&self) -> HermesAdapterResult<()> {
+        if self.turn_start_count == 1 {
+            Ok(())
+        } else {
+            Err(malformed("HERMES_CODEX_PROXY_TURN_COUNT_REJECTED"))
+        }
+    }
+
+    const fn turn_start_count(&self) -> u8 {
+        self.turn_start_count
+    }
+
+    fn pending(&self) -> &[u8] {
+        &self.pending
+    }
+}
+
+#[derive(Default)]
 struct CodexProxyHostStatus {
     failure: Option<HermesAdapterError>,
     failure_evidence: Option<CodexProxyFailureEvidence>,
     authenticated_open: bool,
     clean_terminal: bool,
+    turn_start_count: u8,
 }
 
 struct ProductionCodexProxyHost {
@@ -500,7 +644,10 @@ impl ProductionCodexProxyHost {
                 if let Some(failure) = observed.failure.clone() {
                     return Err(failure);
                 }
-                if observed.authenticated_open && observed.clean_terminal {
+                if observed.authenticated_open
+                    && observed.clean_terminal
+                    && observed.turn_start_count == 1
+                {
                     return Ok(());
                 }
             }
@@ -595,6 +742,7 @@ fn run_codex_proxy_host(
     let mut duplex: Option<ProductionCodexProxyDuplex> = None;
     let mut provider_stream: Option<Receiver<ProviderStreamEvent>> = None;
     let mut buffer = initial_bytes;
+    let mut one_turn_gate = CodexProxyOneTurnGate::default();
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -634,12 +782,20 @@ fn run_codex_proxy_host(
                         .as_mut()
                         .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_STATE_REJECTED"))?;
                     control.ensure_running()?;
-                    opened.write_all(&payload)?;
+                    let admitted = one_turn_gate.ingest(&payload).inspect_err(|_| {
+                        session.record_failure(&payload);
+                    })?;
+                    if !admitted.is_empty() {
+                        opened.write_all(&admitted)?;
+                    }
                 }
                 CodexProxyHostEvent::Close => {
                     let opened = duplex
                         .as_mut()
                         .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_STATE_REJECTED"))?;
+                    one_turn_gate.finish_input().inspect_err(|_| {
+                        session.record_failure(one_turn_gate.pending());
+                    })?;
                     opened.close_input();
                 }
                 CodexProxyHostEvent::Error(_) => {
@@ -649,15 +805,15 @@ fn run_codex_proxy_host(
                     ));
                 }
                 CodexProxyHostEvent::Terminal => {
-                    status
-                        .lock()
-                        .map_err(|_| {
-                            error(
-                                HermesAdapterErrorKind::Ambiguous,
-                                "HERMES_CODEX_PROXY_HOST_STATE_UNKNOWN",
-                            )
-                        })?
-                        .clean_terminal = true;
+                    one_turn_gate.ensure_single_turn()?;
+                    let mut observed = status.lock().map_err(|_| {
+                        error(
+                            HermesAdapterErrorKind::Ambiguous,
+                            "HERMES_CODEX_PROXY_HOST_STATE_UNKNOWN",
+                        )
+                    })?;
+                    observed.turn_start_count = one_turn_gate.turn_start_count();
+                    observed.clean_terminal = true;
                 }
             }
         }
@@ -707,6 +863,9 @@ fn run_codex_proxy_host(
                 }
             }
             Ok(OuterStreamEvent::Eof) => {
+                one_turn_gate.finish_input().inspect_err(|_| {
+                    session.record_failure(one_turn_gate.pending());
+                })?;
                 return Err(error(
                     HermesAdapterErrorKind::Failed,
                     "HERMES_CODEX_PROXY_OUTER_EOF",
@@ -944,7 +1103,7 @@ impl HermesProductionRunnerConfig {
         containment: HermesWslContainmentConfig,
         runtime_manifest: &HermesOfflineRuntimeManifest,
         broker: CodexReflectionBrokerConfig,
-        broker_receipt: &CodexBrokerReceipt,
+        broker_receipt: &CodexBrokerPreflightReceipt,
         api_key: impl Into<String>,
         model: impl Into<String>,
         startup_timeout: Duration,
@@ -955,7 +1114,7 @@ impl HermesProductionRunnerConfig {
         broker_receipt.validate_for_containment()?;
         let model = model.into();
         let codex_provider =
-            broker.into_production_proxy_provider(broker_receipt, "gpt-5.6-sol")?;
+            broker.into_production_proxy_provider_from_preflight(broker_receipt, "gpt-5.6-sol")?;
         Self::validated(
             containment,
             runtime_manifest,
@@ -2133,6 +2292,103 @@ mod proxy_host_tests {
     use super::*;
 
     #[test]
+    fn one_turn_gate_forwards_only_complete_valid_jsonl() {
+        let mut gate = CodexProxyOneTurnGate::default();
+        assert_eq!(
+            gate.ingest(
+                b"{\"id\":0,\"method\":\"initialize\",\"params\":{}}\n{\"id\":1,\"method\":\"turn/"
+            )
+            .expect("valid complete line and partial request"),
+            b"{\"id\":0,\"method\":\"initialize\",\"params\":{}}\n"
+        );
+        assert_eq!(gate.turn_start_count(), 0);
+        assert_eq!(
+            gate.ingest(b"start\",\"params\":{}}\n")
+                .expect("completed split turn request"),
+            b"{\"id\":1,\"method\":\"turn/start\",\"params\":{}}\n"
+        );
+        assert_eq!(gate.turn_start_count(), 1);
+        gate.finish_input().expect("no partial JSON line");
+        gate.ensure_single_turn()
+            .expect("exactly one turn reaches the barrier");
+    }
+
+    #[test]
+    fn one_turn_gate_rejects_second_turn_and_malformed_jsonl() {
+        let mut second = CodexProxyOneTurnGate::default();
+        second
+            .ingest(b"{\"id\":1,\"method\":\"turn/start\",\"params\":{}}\n")
+            .expect("first turn admitted");
+        assert_eq!(
+            second
+                .ingest(b"{\"id\":2,\"method\":\"turn/start\",\"params\":{}}\n")
+                .expect_err("second turn is rejected before forwarding")
+                .code(),
+            "HERMES_CODEX_PROXY_TURN_REPLAY_REJECTED"
+        );
+
+        let mut malformed = CodexProxyOneTurnGate::default();
+        assert_eq!(
+            malformed
+                .ingest(b"{\"id\":0,\"method\":\"initialize\",\"params\":{}}\nnot-json\n")
+                .expect_err("malformed JSON line is rejected before forwarding")
+                .code(),
+            "HERMES_CODEX_PROXY_JSONL_REJECTED"
+        );
+
+        let mut duplicate = CodexProxyOneTurnGate::default();
+        assert_eq!(
+            duplicate
+                .ingest(b"{\"method\":\"turn/start\",\"method\":\"turn/start\"}\n")
+                .expect_err("duplicate JSON-RPC keys are rejected")
+                .code(),
+            "HERMES_CODEX_PROXY_JSONL_REJECTED"
+        );
+    }
+
+    #[test]
+    fn one_turn_gate_rejects_oversize_and_partial_eof() {
+        let mut oversize = CodexProxyOneTurnGate::default();
+        assert!(
+            oversize
+                .ingest(&vec![b' '; MAX_CODEX_PROXY_JSONL_LINE_BYTES])
+                .expect("bounded partial line is held")
+                .is_empty()
+        );
+        assert_eq!(
+            oversize
+                .ingest(b"x\n")
+                .expect_err("oversize line is rejected before forwarding")
+                .code(),
+            "HERMES_CODEX_PROXY_JSONL_SIZE_REJECTED"
+        );
+
+        let mut partial = CodexProxyOneTurnGate::default();
+        assert!(
+            partial
+                .ingest(br#"{"id":1,"method":"turn/start""#)
+                .expect("bounded partial JSON is held")
+                .is_empty()
+        );
+        assert_eq!(
+            partial
+                .finish_input()
+                .expect_err("EOF with a partial JSON line is rejected")
+                .code(),
+            "HERMES_CODEX_PROXY_JSONL_PARTIAL_REJECTED"
+        );
+
+        let empty = CodexProxyOneTurnGate::default();
+        assert_eq!(
+            empty
+                .ensure_single_turn()
+                .expect_err("zero turns cannot cross the terminal barrier")
+                .code(),
+            "HERMES_CODEX_PROXY_TURN_COUNT_REJECTED"
+        );
+    }
+
+    #[test]
     fn official_hermes_config_bytes_are_exact_and_cross_bound() {
         let config_text = std::str::from_utf8(OFFICIAL_HERMES_CONFIG).expect("ASCII YAML");
         assert_eq!(OFFICIAL_HERMES_CONFIG.len(), 246);
@@ -2265,6 +2521,54 @@ mod proxy_host_tests {
     struct BlockingIoProvider {
         state: Arc<BlockingProxyState>,
         control: Arc<BlockingProxyControl>,
+    }
+
+    struct RecordingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, payload: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("recording writer lock")
+                .extend_from_slice(payload);
+            Ok(payload.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct RecordingIoProvider {
+        state: Arc<BlockingProxyState>,
+        control: Arc<BlockingProxyControl>,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl RecordingIoProvider {
+        fn new(state: Arc<BlockingProxyState>, written: Arc<Mutex<Vec<u8>>>) -> Self {
+            Self {
+                control: Arc::new(BlockingProxyControl(Arc::clone(&state))),
+                state,
+                written,
+            }
+        }
+    }
+
+    impl ProductionCodexProxyProvider for RecordingIoProvider {
+        fn control(&self) -> Arc<dyn ProductionCodexProxyControl> {
+            self.control.clone()
+        }
+
+        fn open(
+            self: Box<Self>,
+            _absolute_deadline: Instant,
+        ) -> HermesAdapterResult<ProductionCodexProxyDuplex> {
+            Ok(ProductionCodexProxyDuplex::new(
+                Box::new(BlockingReader(Arc::clone(&self.state))),
+                Box::new(RecordingWriter(Arc::clone(&self.written))),
+            ))
+        }
     }
 
     impl BlockingIoProvider {
@@ -2535,7 +2839,7 @@ mod proxy_host_tests {
                 2,
                 1,
                 binding,
-                b"blocked input",
+                b"{\"id\":0,\"method\":\"initialize\",\"params\":{}}\n",
             )))
             .expect("send provider input");
         wait_until(
@@ -2552,6 +2856,129 @@ mod proxy_host_tests {
             || state.read_exited.load(Ordering::Acquire),
             "provider read did not exit after cancellation",
         );
+        drop(host);
+        fs::remove_file(path).expect("remove exact test sink");
+    }
+
+    #[test]
+    fn second_turn_is_not_forwarded_and_cancels_the_owned_provider() {
+        let (outer_input, path) = test_sink("proxy-second-turn");
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let state = Arc::new(BlockingProxyState::default());
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let nonce = "22".repeat(32);
+        let receipt = ContentDigest::from_sha256("33".repeat(32)).expect("digest");
+        let binding = test_binding(&nonce, &receipt);
+        let mut host = ProductionCodexProxyHost::start(
+            Box::new(RecordingIoProvider::new(
+                Arc::clone(&state),
+                Arc::clone(&written),
+            )),
+            &nonce,
+            &receipt,
+            Instant::now() + Duration::from_secs(2),
+            outer_input,
+            receiver,
+            Vec::new(),
+            Arc::new(ContainmentOwnerState::new("11".repeat(32))),
+        )
+        .expect("start proxy host");
+        sender
+            .send(OuterStreamEvent::Data(encode_codex_proxy_test_frame(
+                1,
+                0,
+                binding,
+                &[],
+            )))
+            .expect("send open");
+        wait_until(
+            || host.status.lock().expect("host status").authenticated_open,
+            "provider did not authenticate open",
+        );
+        let first = b"{\"id\":1,\"method\":\"turn/start\",\"params\":{}}\n";
+        sender
+            .send(OuterStreamEvent::Data(encode_codex_proxy_test_frame(
+                2, 1, binding, first,
+            )))
+            .expect("send first turn");
+        wait_until(
+            || written.lock().expect("written input").as_slice() == first,
+            "first turn was not forwarded",
+        );
+        sender
+            .send(OuterStreamEvent::Data(encode_codex_proxy_test_frame(
+                2,
+                2,
+                binding,
+                b"{\"id\":2,\"method\":\"turn/start\",\"params\":{}}\n",
+            )))
+            .expect("send rejected second turn");
+        wait_until(
+            || host.ensure_live().is_err(),
+            "second turn was not rejected",
+        );
+        let failure = host.ensure_live().expect_err("second turn remains failed");
+        assert_eq!(failure.code(), "HERMES_CODEX_PROXY_TURN_REPLAY_REJECTED");
+        assert_eq!(written.lock().expect("written input").as_slice(), first);
+        assert!(*state.cancelled.lock().expect("cancelled provider"));
+        wait_until(
+            || state.read_exited.load(Ordering::Acquire),
+            "provider reader was not reaped after cancellation",
+        );
+        let _ = host.terminate();
+        drop(host);
+        fs::remove_file(path).expect("remove exact test sink");
+    }
+
+    #[test]
+    fn partial_jsonl_eof_is_not_forwarded_and_cancels_the_owned_provider() {
+        let (outer_input, path) = test_sink("proxy-partial-jsonl");
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let state = Arc::new(BlockingProxyState::default());
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let nonce = "22".repeat(32);
+        let receipt = ContentDigest::from_sha256("33".repeat(32)).expect("digest");
+        let binding = test_binding(&nonce, &receipt);
+        let mut host = ProductionCodexProxyHost::start(
+            Box::new(RecordingIoProvider::new(
+                Arc::clone(&state),
+                Arc::clone(&written),
+            )),
+            &nonce,
+            &receipt,
+            Instant::now() + Duration::from_secs(2),
+            outer_input,
+            receiver,
+            Vec::new(),
+            Arc::new(ContainmentOwnerState::new("11".repeat(32))),
+        )
+        .expect("start proxy host");
+        let mut frames = encode_codex_proxy_test_frame(1, 0, binding, &[]);
+        frames.extend_from_slice(&encode_codex_proxy_test_frame(
+            2,
+            1,
+            binding,
+            br#"{"id":1,"method":"turn/start""#,
+        ));
+        sender
+            .send(OuterStreamEvent::Data(frames))
+            .expect("send partial JSONL");
+        sender.send(OuterStreamEvent::Eof).expect("send outer EOF");
+        wait_until(
+            || host.ensure_live().is_err(),
+            "partial JSONL was not rejected",
+        );
+        let failure = host
+            .ensure_live()
+            .expect_err("partial JSONL remains failed");
+        assert_eq!(failure.code(), "HERMES_CODEX_PROXY_JSONL_PARTIAL_REJECTED");
+        assert!(written.lock().expect("written input").is_empty());
+        assert!(*state.cancelled.lock().expect("cancelled provider"));
+        wait_until(
+            || state.read_exited.load(Ordering::Acquire),
+            "provider reader was not reaped after cancellation",
+        );
+        let _ = host.terminate();
         drop(host);
         fs::remove_file(path).expect("remove exact test sink");
     }

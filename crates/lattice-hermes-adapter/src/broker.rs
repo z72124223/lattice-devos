@@ -22,7 +22,9 @@ use std::sync::{Arc, Mutex};
 #[cfg(windows)]
 use std::thread::{self, JoinHandle};
 #[cfg(windows)]
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -46,6 +48,9 @@ const CODEX_COMMAND_RUNNER_SHA256: &str =
     "0102fa1820ecd03bb03a991fd2303a1a484118f7da8a71864f88ec94bca61d6d";
 const CODEX_PACKAGE_MANIFEST_SHA256: &str =
     "aaa0646d6b615da94187b51efd50c69621a00867761161ae55cc16cfd545bec7";
+const CODEX_HOME_OWNERSHIP_MARKER_NAME: &str = ".lattice-codex-home-v1";
+const CODEX_HOME_OWNERSHIP_MARKER_BYTES: &[u8] = b"lattice.codex-home.v1\n";
+const MAX_CODEX_AUTH_BYTES: u64 = 4 * 1024 * 1024;
 const CODEX_CONFIG_LOCK: &str = r#"approval_policy = "never"
 sandbox_mode = "read-only"
 web_search = "disabled"
@@ -473,16 +478,69 @@ impl CodexReflectionBrokerConfig {
         })
     }
 
-    /// Consumes the canary configuration into the only production Codex
-    /// provider admitted by the Hermes relay.
+    /// Seals the exact official bundle, helper, isolated home, config lock,
+    /// and scrubbed child environment without starting Codex or a model turn.
+    ///
+    /// The returned receipt is only a configuration/identity prerequisite.
+    /// The production provider revalidates the complete binding immediately
+    /// before it opens the one permitted app-server relay.
     ///
     /// # Errors
     ///
-    /// Rejects a substituted model or receipt, or any identity/path/config
-    /// drift observed since the sealed canary completed.
-    pub(crate) fn into_production_proxy_provider(
+    /// Fails closed on deadline, identity, path, home, config, or environment
+    /// drift. No child process is started by this method.
+    pub fn run_zero_model_preflight(
+        &self,
+        deadline: Instant,
+    ) -> HermesAdapterResult<CodexBrokerPreflightReceipt> {
+        if deadline <= Instant::now() {
+            return Err(timeout("HERMES_CODEX_BROKER_DEADLINE_EXCEEDED"));
+        }
+        let policy = CodexBrokerPolicy::official();
+        policy.verify_model_visible_tools(std::iter::empty::<&str>())?;
+        let reviewed = verify_official_codex_bundle(&self.launcher)?;
+        if reviewed.version() != policy.codex_version() {
+            return Err(identity("HERMES_CODEX_BUNDLE_IDENTITY_REJECTED"));
+        }
+        let helper = fs::canonicalize(&self.broker_helper)
+            .map_err(|_| identity("HERMES_CODEX_BROKER_HELPER_IDENTITY_REJECTED"))?;
+        reject_reparse_to_boundary(&helper, &helper)?;
+        let helper_sha256 = bounded_file_sha256(&helper, MAX_CODEX_LAUNCHER_BYTES)?;
+        if helper_sha256 != self.broker_helper_sha256 {
+            return Err(identity("HERMES_CODEX_BROKER_HELPER_IDENTITY_REJECTED"));
+        }
+        let codex_home = fs::canonicalize(&self.codex_home)
+            .map_err(|_| configuration("HERMES_CODEX_HOME_REJECTED"))?;
+        validate_broker_codex_home(&codex_home, &self.product_root)?;
+        let (isolation_root, _) =
+            crate::validate_isolation_boundary(&self.isolation_root, &self.product_root)?;
+        fs::create_dir(&isolation_root)
+            .map_err(|_| spawn("HERMES_CODEX_BROKER_ROOT_CREATE_FAILED"))?;
+        create_owned_directory(&isolation_root, "empty-work")?;
+        create_owned_directory(&isolation_root, "temp")?;
+        let config_lock = isolation_root.join("codex-reflection.lock.toml");
+        write_new_file(&config_lock, policy.config_lock_toml().as_bytes())?;
+        if deadline <= Instant::now()
+            || bounded_file_sha256(&helper, MAX_CODEX_LAUNCHER_BYTES)? != helper_sha256
+        {
+            return Err(identity("HERMES_CODEX_BROKER_HELPER_IDENTITY_REJECTED"));
+        }
+        let verified = VerifiedCodexProxyConfig::from_config(self.clone())?;
+        let receipt_digest = verified.preflight_receipt_digest(&reviewed)?;
+        Ok(CodexBrokerPreflightReceipt {
+            child_environment_sha256: verified.child_environment_sha256,
+            config_lock_sha256: verified.config_lock_sha256,
+            helper_sha256: verified.helper_sha256,
+            launcher_sha256: reviewed.launcher_sha256().to_owned(),
+            receipt_digest,
+            #[cfg(test)]
+            test_only: false,
+        })
+    }
+
+    pub(crate) fn into_production_proxy_provider_from_preflight(
         self,
-        receipt: &CodexBrokerReceipt,
+        receipt: &CodexBrokerPreflightReceipt,
         expected_model: &str,
     ) -> HermesAdapterResult<Box<dyn ProductionCodexProxyProvider>> {
         let binding_rejected = || {
@@ -508,176 +566,24 @@ impl CodexReflectionBrokerConfig {
         {
             return Err(binding_rejected());
         }
+        #[cfg(test)]
+        if !receipt.test_only {
+            let reviewed = verified.reverify_open()?;
+            if verified.preflight_receipt_digest(&reviewed)? != receipt.receipt_digest {
+                return Err(binding_rejected());
+            }
+        }
+        #[cfg(not(test))]
+        {
+            let reviewed = verified.reverify_open()?;
+            if verified.preflight_receipt_digest(&reviewed)? != receipt.receipt_digest {
+                return Err(binding_rejected());
+            }
+        }
         Ok(Box::new(OfficialCodexProxyProvider {
             verified,
             control: Arc::new(OwnedCodexProxyControl::new(MAX_CODEX_PROXY_STDERR_BYTES)),
         }))
-    }
-
-    /// Runs the official four-file bundle inside one kill-on-close Job and
-    /// returns a sealed joint identity/config/environment/no-marker receipt.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on identity, path, config, protocol, deadline, canary, or
-    /// descendant-reap ambiguity.
-    #[allow(clippy::too_many_lines)]
-    pub fn run_no_marker_canary(
-        &self,
-        deadline: Instant,
-    ) -> HermesAdapterResult<CodexBrokerReceipt> {
-        if deadline <= Instant::now() {
-            return Err(timeout("HERMES_CODEX_BROKER_DEADLINE_EXCEEDED"));
-        }
-        let policy = CodexBrokerPolicy::official();
-        policy.verify_model_visible_tools(std::iter::empty::<&str>())?;
-        let reviewed = verify_official_codex_bundle(&self.launcher)?;
-        if reviewed.version() != policy.codex_version() {
-            return Err(identity("HERMES_CODEX_BUNDLE_IDENTITY_REJECTED"));
-        }
-        let helper = fs::canonicalize(&self.broker_helper)
-            .map_err(|_| identity("HERMES_CODEX_BROKER_HELPER_IDENTITY_REJECTED"))?;
-        reject_reparse_to_boundary(&helper, &helper)?;
-        let helper_sha256 = bounded_file_sha256(&helper, MAX_CODEX_LAUNCHER_BYTES)?;
-        if helper_sha256 != self.broker_helper_sha256 {
-            return Err(identity("HERMES_CODEX_BROKER_HELPER_IDENTITY_REJECTED"));
-        }
-        let codex_home = fs::canonicalize(&self.codex_home)
-            .map_err(|_| configuration("HERMES_CODEX_HOME_REJECTED"))?;
-        crate::reject_link_or_reparse_ancestors(&codex_home)?;
-        if !codex_home.is_dir()
-            || crate::path_is_within(&codex_home, &self.product_root)
-            || crate::path_is_within(&self.product_root, &codex_home)
-        {
-            return Err(configuration("HERMES_CODEX_HOME_REJECTED"));
-        }
-        match fs::symlink_metadata(codex_home.join("environments.toml")) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            _ => return Err(configuration("HERMES_CODEX_ENVIRONMENTS_REJECTED")),
-        }
-        let (isolation_root, _) =
-            crate::validate_isolation_boundary(&self.isolation_root, &self.product_root)?;
-        fs::create_dir(&isolation_root)
-            .map_err(|_| spawn("HERMES_CODEX_BROKER_ROOT_CREATE_FAILED"))?;
-        let capture_root = create_owned_directory(&isolation_root, "capture")?;
-        let cwd = create_owned_directory(&isolation_root, "empty-work")?;
-        let temp = create_owned_directory(&isolation_root, "temp")?;
-        let config_lock = isolation_root.join("codex-reflection.lock.toml");
-        write_new_file(&config_lock, policy.config_lock_toml().as_bytes())?;
-        let nonce = broker_nonce(&isolation_root)?;
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or_else(|| timeout("HERMES_CODEX_BROKER_DEADLINE_EXCEEDED"))?;
-        let deadline_millis = u64::try_from(remaining.as_millis())
-            .unwrap_or(u64::MAX)
-            .min(300_000);
-        if deadline_millis == 0 {
-            return Err(timeout("HERMES_CODEX_BROKER_DEADLINE_EXCEEDED"));
-        }
-        let request = CodexBrokerHelperRequest {
-            codex_home: path_text(&codex_home)?,
-            config_lock: path_text(&config_lock)?,
-            cwd: path_text(&cwd)?,
-            deadline_millis,
-            launcher: path_text(reviewed.launcher())?,
-            model: self.model.clone(),
-            nonce: nonce.clone(),
-            schema: BROKER_HELPER_SCHEMA.to_owned(),
-            temp: path_text(&temp)?,
-        };
-        let request_bytes = serde_json::to_vec(&request)
-            .map_err(|_| malformed_error("HERMES_CODEX_BROKER_REQUEST_REJECTED"))?;
-        let request_path = isolation_root.join("broker-request.json");
-        write_new_file(&request_path, &request_bytes)?;
-        let arguments = [
-            OsString::from("broker-helper"),
-            request_path.as_os_str().to_owned(),
-        ]
-        .into_iter()
-        .collect::<Vec<_>>();
-        let plan = crate::windows_job::WindowsJobCommandPlan {
-            executable: helper.clone(),
-            arguments,
-            current_dir: isolation_root.clone(),
-            environment: minimal_helper_environment(&helper)?,
-            run_root: isolation_root.clone(),
-            stdout_path: capture_root.join("broker.stdout"),
-            stderr_path: capture_root.join("broker.stderr"),
-            stdout_limit: MAX_BROKER_WIRE_BYTES as u64,
-            stderr_limit: 4096,
-            deadline,
-            teardown_timeout: Duration::from_secs(3),
-        };
-        let outcome = crate::windows_job::run(&plan)?;
-        if outcome.exit_code != 0 || !outcome.stderr.is_empty() {
-            return Err(HermesAdapterError::new(
-                HermesAdapterErrorKind::Failed,
-                broker_helper_exit_code(outcome.exit_code),
-            ));
-        }
-        if bounded_file_sha256(&helper, MAX_CODEX_LAUNCHER_BYTES)? != helper_sha256 {
-            return Err(identity("HERMES_CODEX_BROKER_HELPER_IDENTITY_REJECTED"));
-        }
-        let candidate = parse_broker_candidate(&outcome.stdout, &nonce)?;
-        let observation = CodexNoMarkerCanaryObservation::new(
-            &candidate.nonce,
-            &candidate.tree_sha256_before,
-            candidate.tree_file_count_before,
-            &candidate.tree_sha256_after,
-            candidate.tree_file_count_after,
-            candidate.marker_existed_before,
-            candidate.marker_exists_after,
-            &candidate.terminal_status,
-            candidate.agent_message_count,
-            candidate.forbidden_event_count,
-            candidate.environment_connection_count,
-            candidate.output.as_bytes(),
-            &candidate.transcript_sha256,
-            true,
-        )?;
-        let canary = verify_codex_no_marker_canary(&observation)?;
-        let expected_environment =
-            codex_child_environment(reviewed.launcher(), &codex_home, &temp)?;
-        let environment_sha256 = digest_environment(&expected_environment)?;
-        if candidate.child_environment_sha256 != environment_sha256 {
-            return Err(HermesAdapterError::new(
-                HermesAdapterErrorKind::CrossBinding,
-                "HERMES_CODEX_BROKER_ENVIRONMENT_BINDING_REJECTED",
-            ));
-        }
-        let config_lock_sha256 = sha256_bytes(policy.config_lock_toml().as_bytes());
-        if canary.transcript_sha256() != candidate.transcript_sha256 {
-            return Err(HermesAdapterError::new(
-                HermesAdapterErrorKind::CrossBinding,
-                "HERMES_CODEX_BROKER_TRANSCRIPT_BINDING_REJECTED",
-            ));
-        }
-        let mut sealed = Sha256::new();
-        sealed.update(b"lattice.hermes.codex-broker-receipt.v1\0");
-        for field in [
-            reviewed.launcher_sha256(),
-            reviewed.package_manifest_sha256(),
-            reviewed.version(),
-            helper_sha256.as_str(),
-            config_lock_sha256.as_str(),
-            environment_sha256.as_str(),
-            canary.receipt_digest().as_str(),
-            candidate.stderr_sha256.as_str(),
-        ] {
-            sealed.update((field.len() as u64).to_be_bytes());
-            sealed.update(field.as_bytes());
-        }
-        let receipt_digest = ContentDigest::from_sha256(encode_digest(&sealed.finalize()))
-            .map_err(|_| malformed_error("HERMES_CODEX_BROKER_RECEIPT_REJECTED"))?;
-        Ok(CodexBrokerReceipt {
-            canary_receipt_digest: canary.receipt_digest().clone(),
-            child_environment_sha256: environment_sha256,
-            config_lock_sha256,
-            helper_sha256,
-            launcher_sha256: reviewed.launcher_sha256().to_owned(),
-            receipt_digest,
-            transcript_sha256: candidate.transcript_sha256,
-        })
     }
 }
 
@@ -757,10 +663,7 @@ impl VerifiedCodexProxyConfig {
         {
             return Err(identity_rejected());
         }
-        match fs::symlink_metadata(codex_home.join("environments.toml")) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            _ => return Err(identity_rejected()),
-        }
+        validate_broker_codex_home(&codex_home, &product_root).map_err(|_| identity_rejected())?;
         let lock_bytes = bounded_file_bytes(&config_lock, MAX_BROKER_WIRE_BYTES as u64)
             .map_err(|_| identity_rejected())?;
         if lock_bytes != CODEX_CONFIG_LOCK.as_bytes() {
@@ -790,6 +693,47 @@ impl VerifiedCodexProxyConfig {
             product_root,
             temp,
         })
+    }
+
+    fn preflight_receipt_digest(
+        &self,
+        reviewed: &ReviewedCodexBundle,
+    ) -> HermesAdapterResult<ContentDigest> {
+        if reviewed.version() != CODEX_VERSION
+            || reviewed.launcher() != self.launcher
+            || reviewed.launcher_sha256() != CODEX_LAUNCHER_SHA256
+            || reviewed.package_manifest_sha256() != CODEX_PACKAGE_MANIFEST_SHA256
+            || self.model != "gpt-5.6-sol"
+        {
+            return Err(identity("HERMES_CODEX_BUNDLE_IDENTITY_REJECTED"));
+        }
+        let fields = [
+            reviewed.launcher_sha256().to_owned(),
+            reviewed.package_manifest_sha256().to_owned(),
+            reviewed.version().to_owned(),
+            CODEX_SANDBOX_SETUP_SHA256.to_owned(),
+            CODEX_COMMAND_RUNNER_SHA256.to_owned(),
+            self.helper_sha256.clone(),
+            self.config_lock_sha256.clone(),
+            self.child_environment_sha256.clone(),
+            path_text(&self.broker_helper)?,
+            path_text(&self.codex_home)?,
+            path_text(&self.config_lock)?,
+            path_text(&self.cwd)?,
+            path_text(&self.isolation_root)?,
+            path_text(&self.launcher)?,
+            path_text(&self.product_root)?,
+            path_text(&self.temp)?,
+            self.model.clone(),
+        ];
+        let mut sealed = Sha256::new();
+        sealed.update(b"lattice.hermes.codex-broker-zero-model-preflight.v1\0");
+        for field in fields {
+            sealed.update((field.len() as u64).to_be_bytes());
+            sealed.update(field.as_bytes());
+        }
+        ContentDigest::from_sha256(encode_digest(&sealed.finalize()))
+            .map_err(|_| malformed_error("HERMES_CODEX_BROKER_PREFLIGHT_RECEIPT_REJECTED"))
     }
 
     fn command_plan(
@@ -1306,28 +1250,40 @@ impl ProductionCodexProxyProvider for FixtureCodexProxyProvider {
 
 #[cfg(windows)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CodexBrokerReceipt {
-    canary_receipt_digest: ContentDigest,
+pub struct CodexBrokerPreflightReceipt {
     child_environment_sha256: String,
     config_lock_sha256: String,
     helper_sha256: String,
     launcher_sha256: String,
     receipt_digest: ContentDigest,
-    transcript_sha256: String,
+    #[cfg(test)]
+    test_only: bool,
 }
 
 #[cfg(windows)]
-impl CodexBrokerReceipt {
-    /// Digest of the complete sealed broker receipt.
+impl CodexBrokerPreflightReceipt {
+    #[cfg(test)]
+    fn test_only(
+        child_environment_sha256: String,
+        config_lock_sha256: String,
+        helper_sha256: String,
+        launcher_sha256: String,
+    ) -> Self {
+        Self {
+            child_environment_sha256,
+            config_lock_sha256,
+            helper_sha256,
+            launcher_sha256,
+            receipt_digest: ContentDigest::from_sha256("b".repeat(64))
+                .expect("test-only receipt digest"),
+            test_only: true,
+        }
+    }
+
+    /// Digest of the exact zero-model configuration and path binding.
     #[must_use]
     pub const fn receipt_digest(&self) -> &ContentDigest {
         &self.receipt_digest
-    }
-
-    /// Digest of the strict no-marker canary sub-receipt.
-    #[must_use]
-    pub const fn canary_receipt_digest(&self) -> &ContentDigest {
-        &self.canary_receipt_digest
     }
 
     /// Digest of the exact strict no-tools config lock.
@@ -1354,22 +1310,16 @@ impl CodexBrokerReceipt {
         &self.launcher_sha256
     }
 
-    /// Digest-only record of the complete JSONL exchange.
-    #[must_use]
-    pub fn transcript_sha256(&self) -> &str {
-        &self.transcript_sha256
-    }
-
     pub(crate) fn validate_for_containment(&self) -> HermesAdapterResult<()> {
         if self.launcher_sha256 != CODEX_LAUNCHER_SHA256
             || self.config_lock_sha256 != sha256_bytes(CODEX_CONFIG_LOCK.as_bytes())
             || !is_lowercase_sha256(&self.child_environment_sha256)
             || !is_lowercase_sha256(&self.helper_sha256)
-            || !is_lowercase_sha256(&self.transcript_sha256)
+            || self.receipt_digest.as_str().len() != 64
         {
             return Err(HermesAdapterError::new(
                 HermesAdapterErrorKind::CrossBinding,
-                "HERMES_CODEX_BROKER_RECEIPT_BINDING_REJECTED",
+                "HERMES_CODEX_BROKER_PREFLIGHT_BINDING_REJECTED",
             ));
         }
         Ok(())
@@ -1411,44 +1361,6 @@ struct CodexBrokerCandidate {
     tree_file_count_before: u64,
     tree_sha256_after: String,
     tree_sha256_before: String,
-}
-
-#[cfg(windows)]
-fn parse_broker_candidate(
-    bytes: &[u8],
-    expected_nonce: &str,
-) -> HermesAdapterResult<CodexBrokerCandidate> {
-    let payload = bytes
-        .strip_prefix(BROKER_HELPER_MAGIC)
-        .ok_or_else(|| malformed_error("HERMES_CODEX_BROKER_CANDIDATE_MAGIC_REJECTED"))?;
-    let length_bytes: [u8; 8] = payload
-        .get(..8)
-        .and_then(|value| value.try_into().ok())
-        .ok_or_else(|| malformed_error("HERMES_CODEX_BROKER_CANDIDATE_TRUNCATED"))?;
-    let length = usize::try_from(u64::from_be_bytes(length_bytes))
-        .map_err(|_| malformed_error("HERMES_CODEX_BROKER_CANDIDATE_LENGTH_REJECTED"))?;
-    if length == 0 || length > MAX_BROKER_WIRE_BYTES || payload.len() != length + 8 {
-        return Err(malformed_error(
-            "HERMES_CODEX_BROKER_CANDIDATE_LENGTH_REJECTED",
-        ));
-    }
-    let encoded = &payload[8..];
-    let candidate: CodexBrokerCandidate = serde_json::from_slice(encoded)
-        .map_err(|_| malformed_error("HERMES_CODEX_BROKER_CANDIDATE_REJECTED"))?;
-    if serde_json::to_vec(&candidate)
-        .map_err(|_| malformed_error("HERMES_CODEX_BROKER_CANDIDATE_REJECTED"))?
-        != encoded
-        || candidate.schema != BROKER_CANDIDATE_SCHEMA
-        || candidate.nonce != expected_nonce
-        || !is_lowercase_sha256(&candidate.child_environment_sha256)
-        || !is_lowercase_sha256(&candidate.stderr_sha256)
-    {
-        return Err(HermesAdapterError::new(
-            HermesAdapterErrorKind::CrossBinding,
-            "HERMES_CODEX_BROKER_CANDIDATE_BINDING_REJECTED",
-        ));
-    }
-    Ok(candidate)
 }
 
 /// Executes the private broker-helper mode. Direct execution is fail-closed:
@@ -2691,18 +2603,51 @@ fn codex_child_environment(
 }
 
 #[cfg(windows)]
-fn minimal_helper_environment(helper: &Path) -> HermesAdapterResult<BTreeMap<OsString, OsString>> {
-    let mut environment = BTreeMap::new();
-    for name in ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT"] {
-        if let Some(value) = std::env::var_os(name) {
-            environment.insert(OsString::from(name), value);
+fn validate_broker_codex_home(codex_home: &Path, product_root: &Path) -> HermesAdapterResult<()> {
+    crate::reject_link_or_reparse_ancestors(codex_home)?;
+    let home_metadata = fs::symlink_metadata(codex_home)
+        .map_err(|_| configuration("HERMES_CODEX_HOME_REJECTED"))?;
+    if !home_metadata.file_type().is_dir()
+        || metadata_is_reparse(&home_metadata)
+        || crate::path_is_within(codex_home, product_root)
+        || crate::path_is_within(product_root, codex_home)
+    {
+        return Err(configuration("HERMES_CODEX_HOME_REJECTED"));
+    }
+    let ambient_home_matches = [
+        std::env::var_os("CODEX_HOME").map(PathBuf::from),
+        std::env::var_os("USERPROFILE").map(|root| PathBuf::from(root).join(".codex")),
+        std::env::var_os("HOME").map(|root| PathBuf::from(root).join(".codex")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|path| fs::canonicalize(path).ok())
+    .any(|ambient| ambient == codex_home);
+    if ambient_home_matches {
+        return Err(configuration("HERMES_CODEX_HOME_AMBIENT_REJECTED"));
+    }
+    let marker = codex_home.join(CODEX_HOME_OWNERSHIP_MARKER_NAME);
+    reject_reparse_to_boundary(&marker, codex_home)?;
+    if bounded_file_bytes(&marker, 128)? != CODEX_HOME_OWNERSHIP_MARKER_BYTES {
+        return Err(configuration("HERMES_CODEX_HOME_OWNERSHIP_REJECTED"));
+    }
+    let auth = codex_home.join("auth.json");
+    reject_reparse_to_boundary(&auth, codex_home)?;
+    let auth_metadata =
+        fs::metadata(&auth).map_err(|_| configuration("HERMES_CODEX_HOME_AUTH_REJECTED"))?;
+    if !auth_metadata.is_file()
+        || auth_metadata.len() == 0
+        || auth_metadata.len() > MAX_CODEX_AUTH_BYTES
+    {
+        return Err(configuration("HERMES_CODEX_HOME_AUTH_REJECTED"));
+    }
+    for forbidden in ["config.toml", "environments.toml"] {
+        match fs::symlink_metadata(codex_home.join(forbidden)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(configuration("HERMES_CODEX_HOME_CONFIG_REJECTED")),
         }
     }
-    let parent = helper
-        .parent()
-        .ok_or_else(|| configuration("HERMES_CODEX_BROKER_HELPER_PARENT_REJECTED"))?;
-    environment.insert(OsString::from("PATH"), parent.as_os_str().to_owned());
-    Ok(environment)
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -2749,51 +2694,6 @@ fn path_text(path: &Path) -> HermesAdapterResult<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .ok_or_else(|| configuration("HERMES_CODEX_BROKER_PATH_REJECTED"))
-}
-
-#[cfg(windows)]
-fn broker_nonce(root: &Path) -> HermesAdapterResult<String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| malformed_error("HERMES_CODEX_BROKER_NONCE_REJECTED"))?;
-    let mut digest = Sha256::new();
-    digest.update(b"lattice.hermes.codex-broker-nonce.v1\0");
-    digest.update(std::process::id().to_be_bytes());
-    digest.update(now.as_nanos().to_be_bytes());
-    digest.update(root.as_os_str().to_string_lossy().as_bytes());
-    Ok(encode_digest(&digest.finalize()))
-}
-
-#[cfg(windows)]
-const fn broker_helper_exit_code(code: u32) -> &'static str {
-    match code {
-        64 => "HERMES_CODEX_BROKER_HELPER_REQUEST_REJECTED",
-        65 => "HERMES_CODEX_BROKER_IDENTITY_REJECTED",
-        66 => "HERMES_CODEX_BROKER_POLICY_REJECTED",
-        67 => "HERMES_CODEX_BROKER_PROCESS_REJECTED",
-        68 => "HERMES_CODEX_BROKER_PROTOCOL_REJECTED",
-        69 => "HERMES_CODEX_BROKER_DEADLINE_EXCEEDED",
-        70 => "HERMES_CODEX_BROKER_CANARY_REJECTED",
-        71 => "HERMES_CODEX_BROKER_INITIALIZE_REJECTED",
-        72 => "HERMES_CODEX_BROKER_THREAD_REJECTED",
-        73 => "HERMES_CODEX_BROKER_TURN_REJECTED",
-        74 => "HERMES_CODEX_BROKER_SERVER_REQUEST_DENIED",
-        75 => "HERMES_CODEX_BROKER_CONTROL_FRAME_REJECTED",
-        76 => "HERMES_CODEX_BROKER_LIFECYCLE_BINDING_REJECTED",
-        77 => "HERMES_CODEX_BROKER_TERMINAL_REJECTED",
-        78 => "HERMES_CODEX_BROKER_STDERR_LIMIT_REJECTED",
-        79 => "HERMES_CODEX_BROKER_UNEXPECTED_EOF",
-        80 => "HERMES_CODEX_BROKER_STDOUT_REJECTED",
-        81 => "HERMES_CODEX_BROKER_FRAME_LIMIT_REJECTED",
-        82 => "HERMES_CODEX_BROKER_JSON_REJECTED",
-        83 => "HERMES_CODEX_BROKER_INITIALIZE_WRITE_REJECTED",
-        84 => "HERMES_CODEX_BROKER_THREAD_WRITE_REJECTED",
-        85 => "HERMES_CODEX_BROKER_TURN_WRITE_REJECTED",
-        86 => "HERMES_CODEX_BROKER_DUPLICATE_TURN_RESPONSE",
-        87 => "HERMES_CODEX_BROKER_UNEXPECTED_RESPONSE",
-        88 => "HERMES_CODEX_BROKER_DUPLICATE_TERMINAL",
-        _ => "HERMES_CODEX_BROKER_HELPER_FAILED",
-    }
 }
 
 fn configuration(code: &'static str) -> HermesAdapterError {
@@ -2912,6 +2812,7 @@ impl CodexNoMarkerCanaryPlan {
 
 /// Typed host observation for the no-marker canary. Raw transcript content is
 /// never retained; only its digest crosses this constructor.
+#[cfg(test)]
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct CodexNoMarkerCanaryObservation {
     nonce: String,
@@ -2930,6 +2831,7 @@ pub(crate) struct CodexNoMarkerCanaryObservation {
     descendants_reaped: bool,
 }
 
+#[cfg(test)]
 impl std::fmt::Debug for CodexNoMarkerCanaryObservation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -2951,6 +2853,7 @@ impl std::fmt::Debug for CodexNoMarkerCanaryObservation {
     }
 }
 
+#[cfg(test)]
 impl CodexNoMarkerCanaryObservation {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -3001,12 +2904,14 @@ impl CodexNoMarkerCanaryObservation {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CodexNoMarkerCanaryReceipt {
     receipt_digest: ContentDigest,
     transcript_sha256: String,
 }
 
+#[cfg(test)]
 impl CodexNoMarkerCanaryReceipt {
     pub(crate) const fn receipt_digest(&self) -> &ContentDigest {
         &self.receipt_digest
@@ -3017,6 +2922,7 @@ impl CodexNoMarkerCanaryReceipt {
     }
 }
 
+#[cfg(test)]
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CanaryOutput {
@@ -3025,6 +2931,7 @@ struct CanaryOutput {
     nonce: String,
 }
 
+#[cfg(test)]
 pub(crate) fn verify_codex_no_marker_canary(
     observation: &CodexNoMarkerCanaryObservation,
 ) -> HermesAdapterResult<CodexNoMarkerCanaryReceipt> {
@@ -3536,7 +3443,7 @@ mod production_provider_tests {
     struct ProviderFixture {
         config: CodexReflectionBrokerConfig,
         config_lock: PathBuf,
-        receipt: CodexBrokerReceipt,
+        receipt: CodexBrokerPreflightReceipt,
         root: PathBuf,
     }
 
@@ -3570,6 +3477,12 @@ mod production_provider_tests {
             }
             fs::write(&launcher, b"fixture launcher").expect("fixture launcher");
             fs::write(&helper, b"fixture helper").expect("fixture helper");
+            fs::write(
+                codex_home.join(CODEX_HOME_OWNERSHIP_MARKER_NAME),
+                CODEX_HOME_OWNERSHIP_MARKER_BYTES,
+            )
+            .expect("fixture ownership marker");
+            fs::write(codex_home.join("auth.json"), b"{}").expect("fixture isolated auth state");
             fs::write(&config_lock, CODEX_CONFIG_LOCK.as_bytes()).expect("fixture config lock");
 
             let launcher = fs::canonicalize(launcher).expect("canonical fixture launcher");
@@ -3595,17 +3508,12 @@ mod production_provider_tests {
                 "gpt-5.6-sol",
             )
             .expect("fixture broker config");
-            let receipt = CodexBrokerReceipt {
-                canary_receipt_digest: ContentDigest::from_sha256("a".repeat(64))
-                    .expect("fixture canary digest"),
+            let receipt = CodexBrokerPreflightReceipt::test_only(
                 child_environment_sha256,
-                config_lock_sha256: sha256_bytes(CODEX_CONFIG_LOCK.as_bytes()),
+                sha256_bytes(CODEX_CONFIG_LOCK.as_bytes()),
                 helper_sha256,
-                launcher_sha256: CODEX_LAUNCHER_SHA256.to_owned(),
-                receipt_digest: ContentDigest::from_sha256("b".repeat(64))
-                    .expect("fixture receipt digest"),
-                transcript_sha256: "c".repeat(64),
-            };
+                CODEX_LAUNCHER_SHA256.to_owned(),
+            );
             Self {
                 config,
                 config_lock,
@@ -3747,13 +3655,13 @@ mod production_provider_tests {
         fixture
             .config
             .clone()
-            .into_production_proxy_provider(&fixture.receipt, "gpt-5.6-sol")
+            .into_production_proxy_provider_from_preflight(&fixture.receipt, "gpt-5.6-sol")
             .expect("one receipt-bound official provider");
 
         let failure = fixture
             .config
             .clone()
-            .into_production_proxy_provider(&fixture.receipt, "gpt-5.6-terra")
+            .into_production_proxy_provider_from_preflight(&fixture.receipt, "gpt-5.6-terra")
             .err()
             .expect("model substitution fails before process launch");
         assert_eq!(failure.kind(), HermesAdapterErrorKind::CrossBinding);
@@ -3767,7 +3675,7 @@ mod production_provider_tests {
         let failure = fixture
             .config
             .clone()
-            .into_production_proxy_provider(&wrong_receipt, "gpt-5.6-sol")
+            .into_production_proxy_provider_from_preflight(&wrong_receipt, "gpt-5.6-sol")
             .err()
             .expect("receipt substitution fails before process launch");
         assert_eq!(failure.kind(), HermesAdapterErrorKind::CrossBinding);
@@ -3780,7 +3688,7 @@ mod production_provider_tests {
         let failure = fixture
             .config
             .clone()
-            .into_production_proxy_provider(&fixture.receipt, "gpt-5.6-sol")
+            .into_production_proxy_provider_from_preflight(&fixture.receipt, "gpt-5.6-sol")
             .err()
             .expect("config-lock drift fails before process launch");
         assert_eq!(failure.kind(), HermesAdapterErrorKind::Identity);
