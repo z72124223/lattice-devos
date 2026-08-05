@@ -1083,6 +1083,21 @@ fn production_official_mode_blocks_stably_when_frozen_hermes_is_not_staged() {
         Err(failure) => failure,
     };
     assert_eq!(failure.code(), "HERMES_OFFICIAL_SERVER_NOT_STAGED");
+    let stderr = read_text_with_retry(&isolation_root.join("capture/production.stderr"));
+    let evidence = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("HERMES_OUTER_PROXY_EVIDENCE:"))
+        .expect("startup proxy evidence line");
+    let (byte_count, sha256) = evidence
+        .split_once(':')
+        .expect("count and digest only");
+    assert!(byte_count.parse::<usize>().expect("bounded byte count") <= 4096);
+    assert_eq!(sha256.len(), 64);
+    assert!(
+        sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
     remove_temp_root_with_retry(&isolation_root);
 }
 
@@ -1991,6 +2006,17 @@ fn remove_temp_root_with_retry(path: &std::path::Path) {
             Ok(()) => return,
             Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
             Err(error) => panic!("remove exact temporary root {path:?}: {error}"),
+        }
+    }
+}
+
+fn read_text_with_retry(path: &std::path::Path) -> String {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match std::fs::read_to_string(path) {
+            Ok(text) => return text,
+            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Err(error) => panic!("read exact temporary evidence {path:?}: {error}"),
         }
     }
 }
