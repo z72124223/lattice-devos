@@ -26,7 +26,7 @@ fn parses_only_the_exact_codex_preflight_surface() {
 }
 
 #[test]
-fn parses_one_bounded_codex_turn_surface() {
+fn rejects_the_retired_direct_codex_writer_surface() {
     let arguments = vec![
         "codex-turn".to_owned(),
         "--launcher".to_owned(),
@@ -47,19 +47,7 @@ fn parses_one_bounded_codex_turn_surface() {
         "600".to_owned(),
     ];
 
-    assert_eq!(
-        parse_command(&arguments),
-        Ok(RuntimeCommand::CodexTurn {
-            launcher: r"C:\tools\codex.exe".into(),
-            version: "codex-cli 0.144.6".to_owned(),
-            sha256: "a".repeat(64),
-            schema_dir: r"C:\temp\schema".into(),
-            codex_home: r"C:\lattice\codex-home".into(),
-            working_directory: r"C:\work\fixture".into(),
-            prompt: "Create answer.txt".to_owned(),
-            timeout_seconds: 600,
-        })
-    );
+    assert_eq!(parse_command(&arguments), Err(RuntimeError::Usage));
 }
 
 #[test]

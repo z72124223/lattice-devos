@@ -1,7 +1,7 @@
 ---
 module_id: codex-adapter
 name: Codex App Server Adapter
-version: 1.0
+version: 1.1
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-05
@@ -10,7 +10,8 @@ last_reviewed: 2026-08-05
 ## Mission
 
 Own one supervised Codex app-server child process and translate the typed
-`CodexPort` contract to its version-pinned stdio protocol.
+`DeliveryCodexPort` contract to its version-pinned stdio protocol for the
+bounded delivery composition.
 
 ## Non-Goals
 
@@ -30,7 +31,10 @@ Own one supervised Codex app-server child process and translate the typed
 
 ## Public Contracts
 
-- Implement `CodexPort::run` and `CodexPort::interrupt` with typed evidence.
+- Implement `DeliveryCodexPort::run_delivery` and
+  `DeliveryCodexPort::interrupt_delivery` with request-bound typed evidence.
+- Do not implement or activate the frozen generic `CodexPort` as an alternate
+  production writer path.
 - Spawn the configured Codex binary with `app-server --listen stdio://`,
   initialize it, and bind every run to one exact working directory and request.
 - Normalize protocol events without treating unknown notifications as task
@@ -86,3 +90,4 @@ amendment and architecture review.
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
 | 1.0 | 2026-08-05 | SPEC-002 v24, TASK-032 | First supervised Codex app-server boundary | Current user delivery-first directive |
+| 1.1 | 2026-08-05 | SPEC-002 v26, ADR-021 clarification, TASK-032 | Bind the production adapter explicitly to the approved typed `DeliveryCodexPort`; generic writer port remains frozen | User approval of typed delivery contracts/ports in preceding implementation window |

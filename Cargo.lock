@@ -339,10 +339,13 @@ dependencies = [
  "lattice-cjson",
  "lattice-codex-adapter",
  "lattice-contracts",
+ "lattice-orchestrator",
+ "lattice-ports",
  "lattice-postgres-store",
  "lattice-task-ledger",
  "postgres",
  "serde_json",
+ "sha2",
  "time",
 ]
 

@@ -1,5 +1,132 @@
 # Workflow Ledger
 
+## TASK-032 Executable Codex/PostgreSQL Delivery Node
+
+- Classification: approved typed contract/port expansion, pure orchestrator,
+  canonical `latticed` composition, bounded two-tool MCP stdio, concrete
+  Codex/workspace/test/Git/PostgreSQL adapters, compatibility wrapper, and
+  restart acceptance
+- Repository:
+  `C:\Users\f7212\Documents\Codex\2026-07-29\files-mentioned-by-the-user-2026\outputs\lattice-devos-v2`
+- Branch/base: `feature/v2-rust-postgres-bootstrap` at
+  `4cf98cf3f9e3b53d0e819139cdfd96ff457e587a`; cumulative candidate preserved;
+  no remote
+- Specification/ticket: SPEC-002 v26; TASK-032 remains `in-progress` because
+  official Codex live is `FAILED_DIAGNOSTIC`
+- Active module contracts: Contracts 1.10, Ports 1.6, Orchestrator Runtime 2.1,
+  Codex Adapter 1.1, `latticed` 1.0, Postgres Store 1.4, ADR-021
+- Authorization: reversible local implementation, marker-owned PostgreSQL,
+  isolated fixture repositories, scripted acceptance, and local checkpoint
+  commit. No official retry after the user stop, unsafe sandbox posture change,
+  system installation, push, merge, publication, deployment, payment, public
+  exposure, production mutation, or unrelated website work.
+
+### Stage Status
+
+| Stage | Status | Evidence | Gate strength |
+|---|---|---|---|
+| Repository and Git inspection | valid | rules, plans, handoff, spec, ticket, constitutions, ADR, branch, HEAD, dirty scope and no remote checked | machine-observed plus documented baseline |
+| Automatic project routing | blocked/non-product | configured router script returned `MODULE_NOT_FOUND`; explicit repository path and handoff were available | global control missing in this environment |
+| Requirements clarification | valid | prior user approval fixes contract/port/orchestrator/composition/MCP/compatibility decisions | documented user authorization |
+| Specification | valid/current | minimal SPEC-002 v26 and ADR-021 amendment; official incident explicitly separated from scripted evidence | documented plus tests |
+| Module constitutions | valid | all changed public boundaries have approved versioned constitutions; no silent amendment | documented plus dependency scan |
+| Ticket decomposition | valid/current | one non-parallel TASK-032 with exact allowlist; official substep remains open | project checker plus documented scope |
+| Branch/worktree plan | valid | existing branch and cumulative changes preserved; no reset/clean/switch | machine-observed |
+| TDD implementation | valid | red/green regressions cover stage order, post-commit reconciliation, absolute Codex deadline, PostgreSQL ambiguity, scripted trust, MCP, scope/test/Git and replay | machine-executed locally |
+| Focused verification | pass | related package suites passed during repairs; final full suite subsumes the focused set | machine-enforced locally |
+| Full verification | pass | locked all-target/all-feature Rust tests, strict Clippy, format, Node 44/44, AST, diff and dependency checks | machine-enforced locally |
+| Scripted acceptance | pass | trusted scripted protocol plus PostgreSQL 17.10 initial/restart and real isolated Git commit | machine evidence; not official Codex live |
+| Official live acceptance | failed diagnostic/blocked | upstream Windows sandbox helper modal; preserved incomplete fixture; hard-disabled before later effects | fail-closed machine gate plus external issue evidence |
+| Independent code review | pass | final P0=0/P1=0; non-blocking debt retained below | independent read-only review |
+| Architecture review | pass with debt | pure ports ordering, canonical composition, compatibility delegation and exactly two zero-arg MCP tools confirmed | independent read-only review plus dependency/tests |
+| Integration/synchronization | partial | local combined result passes; no remote/upstream or remote CI to compare | local machine evidence only |
+| CI/merge | blocked/not performed | no remote CI, branch protection, required-review service, push or merge authorization | missing/unverified |
+| Durable handoff | complete for checkpoint | current HANDOFF and this ledger preserve success, failure, debt and next boundary | documented-only |
+
+### Verification Evidence
+
+| Command or evidence | Exit/status | Result | Remaining gap |
+|---|---:|---|---|
+| `cargo fmt --all -- --check` | 0 | formatting clean | none for this slice |
+| `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | 0 | full workspace, zero warnings | none for this slice |
+| `cargo test --workspace --all-targets --all-features --locked` | 0 | every workspace test binary passed, including 7 composition and 11 MCP tests | official helper not invoked |
+| `npm.cmd run verify` | 0 | project check passes; Node 44/44 | local only |
+| PowerShell AST parse | PASS | acceptance harness and trusted fixture parse cleanly | execution evidence listed separately |
+| `git diff --check` | 0 | no whitespace error; one non-failing LF/CRLF notice | none |
+| `cargo tree -p lattice-orchestrator --depth 1` | 0 | only `lattice-contracts` and `lattice-ports` | none |
+| trusted scripted harness | PASS | fixture `c9bf2939ad5844e9973ee0af0a84b756`; PostgreSQL 17.10 initial/restart; run/status evidence agrees | explicitly not official live |
+| isolated fixture Git | clean | baseline `770e69d7...`; delivery commit `ed408cc4...`; only `answer.txt` changed | disposable fixture only |
+| typed restart evidence | exact | request/profile/configuration/intent/outcome/receipt digests match after restart | none for scripted lane |
+| process safety check | observed | no sandbox helper or `latticed` child remained; only current desktop Codex host and existing PostgreSQL were present | point-in-time local observation |
+
+### Review Findings And Repairs
+
+- The first independent review found seven P1 integration blockers: terminal
+  failures reported as success, a second arbitrary Codex writer path, three
+  fixed-test executions, an official/scripted validator mismatch, split
+  deadlines, unsafe `.agents` handling, and legacy replay promotion. Each was
+  repaired with regression coverage before final verification.
+- Additional repairs bind all non-secret execution configuration, preserve
+  database ambiguity, accept legal MCP `_meta`, restrict request IDs, bound
+  frames and calls, persist post-Git cross-boundary reconciliation, and reject
+  untrusted scripted launchers before any database/process effect.
+- The final code review initially found one P1: a post-commit Git child could
+  cross the absolute deadline, then lose reconciliation semantics when the
+  outcome write failed before mutation. RED/GREEN repair checks the deadline
+  after child exit, after output reads, and before commit evidence returns;
+  every outcome-persistence failure after durable intent is now Ambiguous and
+  maps to reconciliation-required. The exact ambiguous-commit plus known-DB-
+  timeout regression passes.
+- Independent final code review: PASS, P0=0/P1=0/P2=4/P3=1. Architecture
+  review: PASS WITH NONBLOCKING FINDINGS, P0=0/P1=0. Deferred P2 debt is
+  per-operation PostgreSQL deadline latency, unbounded Windows Codex cleanup,
+  unbounded Codex stdout framing/channel, and incomplete ambient credential
+  scrubbing; P3 is incomplete MCP `clientInfo` validation. The pinned scripted
+  lane cannot exploit these; all must be reconsidered before official mode is
+  enabled.
+
+### Scripted Acceptance Evidence
+
+- Final evidence:
+  `target/lattice-delivery/c9bf2939ad5844e9973ee0af0a84b756/evidence/final.json`
+- Status/runtime: `COMPLETED` / `SCRIPTED_ACCEPTANCE`
+- Request: `task032-request-7d6011557de6459795db5d82c242fe73`
+- Configuration digest:
+  `c32487fd7d6db2654d1a98d062178b60d50f745eb1982c878523f17685207a38`
+- Intent/outcome/receipt digests:
+  `81a0fa2f34461457567798301c5fa3d2bf2b78e468665dabe4ecdd8b62193a6b`,
+  `93982c5a7bce467b3d07d022a9f0068288c6854ca4c110f6d91ff4bad57b6b73`,
+  `49fce71682936905afe588cd9158176a7353ad57c7bd208bd5a9677dc4d9fca8`
+- Launcher/schema/answer SHA-256: `9d54097e...1264`, `e9ffb5ec...b9c0`,
+  `1dab4dcc...30ae`
+- PostgreSQL restart is explicit in final evidence; the clean fixture commit
+  `ed408cc4373519f57950a66660148df39f9d5f82` changes only `answer.txt`.
+
+### Official Live Failed Diagnostic And Completion Truth
+
+- Preserved official fixture:
+  `target/lattice-delivery/1b1e1661d9e843e2b9e4774b93bf0dc9`; initial
+  commit `94ba7385b81dd607c8a271a3c988e0f9bc82fac1`; untracked
+  `answer.txt`; no delivery commit.
+- OpenAI-signed x64 helper SHA-256:
+  `7191d24f6fb4a26cbbce0d2aecd6deb71fa074a8cb5f24a45d2fa2164473885f`.
+  Direct imports resolve, but Windows reports "The specified module could not
+  be found". Open issues [#29952](https://github.com/openai/codex/issues/29952)
+  and [#29200](https://github.com/openai/codex/issues/29200) record the same
+  sandbox-helper regression/compatibility failure.
+- Read-only package evidence: `@openai/codex` 0.144.6; signed native
+  `bin/codex.exe` SHA-256 `4b76ded0...6a7`; exact helper path is
+  `C:\Users\f7212\AppData\Roaming\npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex-resources\codex-windows-sandbox-setup.exe`.
+- No exact missing DLL, helper stderr, or exit code was captured. No official
+  live/sandbox retry, unelevated/no-sandbox switch, system-component change, or
+  deeper low-value PE investigation followed the stop instruction.
+- Local scripted behavior and all repository tests are verified, but official
+  modify/test/commit/restart acceptance is not. TASK-032 and MVP-1 remain open;
+  OpenClaw, Graphify, Hermes, and Codebase Memory are not started. Merge status
+  is blocked/not performed.
+
+---
+
 ## TASK-021 Durable PostgreSQL Task Ledger And Outbox Admission
 
 - Classification: Task Ledger public semantic expansion, exact schema-v3

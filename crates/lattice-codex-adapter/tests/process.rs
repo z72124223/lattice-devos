@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 #[cfg(windows)]
-use lattice_codex_adapter::run_codex_app_server;
+use lattice_codex_adapter::{run_codex_app_server, run_codex_app_server_until};
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
 
@@ -241,6 +241,19 @@ fn scripted_app_server_completes_one_exact_dedicated_home_turn() {
     assert_eq!(evidence.turn_id(), "turn-scripted");
     assert_eq!(evidence.outcome().status, TurnStatus::Completed);
     assert_eq!(evidence.initialize().codex_home, fixture.codex_home);
+}
+
+#[cfg(windows)]
+#[test]
+fn expired_absolute_deadline_rejects_before_spawning_the_child() {
+    let fixture = ProcessFixture::new(FakeMode::Success);
+    let deadline = Instant::now();
+
+    let error = run_codex_app_server_until(&fixture.config(Duration::from_secs(30)), deadline)
+        .expect_err("an expired composition deadline must reject before spawn");
+
+    assert_eq!(error.kind(), AppServerRunErrorKind::Timeout);
+    assert!(!fixture.effect_log.exists());
 }
 
 #[cfg(windows)]

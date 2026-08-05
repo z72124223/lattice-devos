@@ -340,8 +340,9 @@ pub trait DeliveryLedgerPort {
     ) -> DeliveryPortResult<DeliveryReceipt>;
 }
 
-/// Full typed Codex lane for delivery; the legacy generic [`CodexPort`]
-/// remains source compatible for earlier consumers.
+/// Sole production Codex writer boundary for typed delivery. The legacy
+/// generic [`CodexPort`] remains source compatible for earlier consumers but
+/// is frozen outside the production delivery composition.
 pub trait DeliveryCodexPort {
     /// Runs one request bound to durable intent and a prepared workspace.
     ///
@@ -416,7 +417,9 @@ pub trait TestRunnerPort {
     ) -> DeliveryPortResult<FixedTestEvidence>;
 }
 
-/// Sole product-code writer boundary implemented by the `Codex` adapter.
+/// Frozen generic product-code writer boundary retained for pre-delivery
+/// consumers. Production delivery uses [`DeliveryCodexPort`] and must not wire
+/// both interfaces as separate runtime writers.
 pub trait CodexPort {
     /// Runs one approved implementation request.
     ///

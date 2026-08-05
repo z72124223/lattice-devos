@@ -1,115 +1,162 @@
-# LATTICE DevOS TASK-032 Delivery Checkpoint Handoff
+# LATTICE DevOS TASK-032 Executable Delivery Handoff
 
 ## Status
 
-`NEEDS_REVIEW` for TASK-032 completion; the deterministic local delivery
-checkpoint is verified and ready for its authorized local commit.
+`NEEDS_REVIEW` for TASK-032 completion. The trusted scripted delivery node is
+implemented and fully verified, but official Codex live remains
+`FAILED_DIAGNOSTIC`; TASK-032 and MVP-1 must remain open.
 
 ## Objective And Alignment
 
-This checkpoint advances the active delivery-first path:
+This checkpoint implements the approved bounded chain:
 
-> Rust LATTICE -> PostgreSQL intent -> bounded Codex app-server protocol ->
-> isolated Git modification/test/commit -> PostgreSQL outcome -> restarted
-> status replay
+> fixed delivery intent -> Rust `latticed` -> PostgreSQL -> Codex app-server
+> protocol -> isolated workspace -> one fixed test -> local Git commit ->
+> PostgreSQL outcome/receipt -> restart status replay
 
-It remains part of the general local AI development platform. It adds no
-playmate/companion website, payment, deployment, publication, or unrelated
-governance work. OpenClaw, MCP stdio registration, official-Codex live
-acceptance, Graphify, Hermes, and Codebase Memory remain incomplete and are not
-claimed by this checkpoint.
+It remains a general autonomous AI development platform. No playmate website,
+deployment, publication, payment, public exposure, or protected release work
+was added. OpenClaw, Graphify, Hermes, and Codebase Memory were not started
+because the official-Codex prerequisite is still blocked.
 
-## Completed Work
+## Completed And Confirmed
 
-- Added `delivery-run` and `delivery-status` runtime commands with PostgreSQL
-  intent-before-effect ordering, canonical intent/outcome digests, and a full
-  durable receipt reloaded after PostgreSQL restart.
-- Added one isolated Git delivery fixture that permits only `answer.txt`, runs
-  the fixed verification, rejects filesystem/Git ambiguity, and creates one
-  local commit only after the check passes.
-- Hardened the Codex child boundary by removing ambient credential and database
-  password variables and retaining exact launcher/schema identity evidence.
-- Added a repeatable PowerShell harness joining the marker-owned PostgreSQL 17
-  lifecycle to the runtime delivery path.
-- Removed the exact stopped disposable failure root
-  `target/task019-postgres/be9400ccb8504058bc87cf06f2eae309` after verifying
-  its ownership marker and zero matching PostgreSQL processes.
+- Recorded the user-approved Contracts 1.10, Ports 1.6, pure Orchestrator 2.1,
+  `latticed` 1.0, two-tool MCP, compatibility, and allowlist amendment in the
+  existing spec, ADR, module constitutions, ticket, and plan.
+- Added typed delivery request/evidence/receipt contracts and ports. The pure
+  orchestrator depends only on `lattice-contracts` and `lattice-ports` and
+  orders intent -> workspace -> Codex -> scope -> fixed test -> Git -> outcome
+  -> receipt, stopping on every known or ambiguous failure.
+- Added the canonical `latticed` composition root, concrete PostgreSQL,
+  workspace/test/Git, and Codex adapters, plus the compatibility command that
+  delegates to the same composition.
+- Exposed exactly `lattice_delivery_run` and `lattice_delivery_status` over
+  bounded MCP stdio. Both tools have closed zero-argument schemas; arbitrary
+  shell, SQL, path, credential, provider, and task inputs are absent.
+- Added typed PostgreSQL v2 restart reconstruction, complete non-secret
+  configuration binding, post-mutation ambiguity handling, shared delivery
+  deadlines, one fixed verification before commit, and safe empty `.agents`
+  handling.
+- Closed the final review blocker by checking the absolute deadline after Git
+  child completion/output reads and before commit evidence returns. After a
+  durable intent, every outcome-persistence failure now remains
+  reconciliation-required, including ambiguous commit plus known DB timeout.
+- Bound `SCRIPTED_ACCEPTANCE` to the checked-in fixture bytes, canonical paths,
+  launcher/server hashes, exact wrapper, and marker before any database or
+  process effect. A self-consistent tampered server cannot claim that mode.
+- Added PowerShell and Rust fail-closed incident gates that reject official mode
+  before build, database, or child-process effects.
 
-## Files Changed
+## Material Files Changed
 
-| Path | Purpose | Verification |
-|---|---|---|
-| `Cargo.lock` | Lock new runtime dependencies | locked workspace test |
-| `apps/lattice-runtime/Cargo.toml` | Wire required local crates | strict Clippy |
-| `apps/lattice-runtime/src/lib.rs` | Compose delivery run/status | runtime tests and acceptance |
-| `apps/lattice-runtime/src/delivery_ledger.rs` | Durable intent/outcome/receipt | unit tests and restart replay |
-| `apps/lattice-runtime/src/git_delivery.rs` | Isolated verify-and-commit effect | unit tests and fixture audit |
-| `apps/lattice-runtime/tests/dispatch.rs` | CLI surface regressions | dispatch tests |
-| `crates/lattice-codex-adapter/src/{identity,lib,process}.rs` | Identity and credential-boundary hardening | adapter tests and review |
-| `scripts/run-task019-postgres.ps1` | Optional delivery hook | AST parse and live harness |
-| `scripts/run-lattice-delivery.ps1` | Repeatable end-to-end acceptance | `LATTICE_DELIVERY_HARNESS=PASS` |
-| `docs/tickets/TASK-032-executable-codex-postgres-delivery.md` | Add the harness path to the ticket scope | project check |
-| `HANDOFF.md` | Durable checkpoint ledger | re-read and scope check |
+| Files | Reason |
+|---|---|
+| `Cargo.lock`, `apps/lattice-runtime/Cargo.toml`, `crates/lattice-codex-adapter/Cargo.toml` | lock and declare the concrete composition dependencies |
+| `crates/lattice-ports/src/lib.rs` | add typed delivery effect ports |
+| `crates/lattice-orchestrator/src/lib.rs`, `crates/lattice-orchestrator/tests/delivery_order.rs` | pure effect ordering and failure/ambiguity regressions |
+| `crates/lattice-codex-adapter/src/{lib,delivery,process}.rs`, adapter tests | bounded identity/protocol/process adapter with one absolute deadline |
+| `apps/lattice-runtime/src/{lib,composition,delivery_ledger,git_delivery,mcp}.rs` | canonical composition, durable replay, fixed test/Git adapter, and two-tool MCP |
+| `apps/lattice-runtime/src/bin/latticed.rs`, runtime tests | canonical executable and composition/CLI/MCP regressions |
+| `apps/lattice-runtime/src/fixtures/task032-scripted-codex.ps1` | immutable trusted scripted app-server fixture |
+| `scripts/run-lattice-delivery.ps1`, `package.json` | bounded acceptance harness, official incident gate, and project-only Node test discovery |
+| `PLANS.md`, SPEC-002, ADR-021, affected module constitutions, TASK-032 | minimal approved architecture and current incident/acceptance state |
+| `docs/workflow/WORKFLOW_LEDGER.md`, `HANDOFF.md` | durable evidence and continuation boundary |
 
-## Workflow Ledger
+## Verification Evidence
+
+- `cargo fmt --all -- --check`: exit 0.
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`:
+  exit 0, zero warnings.
+- `cargo test --workspace --all-targets --all-features --locked`: exit 0; all
+  workspace test binaries pass, including 7 composition and 11 MCP tests.
+- `npm.cmd run verify`: exit 0; project check passes and Node tests are 44/44.
+- `git diff --check`: exit 0; one non-failing LF-to-CRLF notice only.
+- PowerShell AST parse for the harness and checked-in fixture: pass.
+- `cargo tree -p lattice-orchestrator --depth 1`: only Contracts and Ports.
+- Trusted scripted fixture
+  `target/lattice-delivery/c9bf2939ad5844e9973ee0af0a84b756`:
+  PostgreSQL 17.10 initial/restart pass, status `COMPLETED`, runtime
+  `SCRIPTED_ACCEPTANCE`, clean fixture repository, and commit
+  `ed408cc4373519f57950a66660148df39f9d5f82` changing only `answer.txt`.
+- The run/status evidence agrees on request, profile, configuration, intent,
+  outcome, and receipt digests; final evidence is
+  `target/lattice-delivery/c9bf2939ad5844e9973ee0af0a84b756/evidence/final.json`.
+
+## Official Live Failed Diagnostic
+
+- The official attempt is not acceptance evidence. Windows displayed
+  `codex-windows-sandbox-setup.exe` with "The specified module could not be
+  found" while the isolated fixture contained an uncommitted `answer.txt`.
+- The OpenAI-signed x64 helper SHA-256 is
+  `7191d24f6fb4a26cbbce0d2aecd6deb71fa074a8cb5f24a45d2fa2164473885f`;
+  its direct system imports were resolvable. OpenAI issues
+  [#29952](https://github.com/openai/codex/issues/29952) and
+  [#29200](https://github.com/openai/codex/issues/29200) report the same open
+  Windows sandbox-helper regression/compatibility failure.
+- Read-only package evidence identifies `@openai/codex` 0.144.6 and signed
+  native `bin/codex.exe` SHA-256
+  `4b76ded066d0239115ca97473d010c92072bc5c5550a45dd7cbebe1e9eb956a7`.
+  The helper's exact path is
+  `C:\Users\f7212\AppData\Roaming\npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex-resources\codex-windows-sandbox-setup.exe`.
+- No exact missing DLL, helper stderr, or helper exit code was captured; none is
+  claimed. The preserved diagnostic fixture is
+  `target/lattice-delivery/1b1e1661d9e843e2b9e4774b93bf0dc9` at initial
+  commit `94ba7385b81dd607c8a271a3c988e0f9bc82fac1`, with untracked
+  `answer.txt` and no delivery commit.
+- No official live or sandbox setup was retried after the user stop, no
+  unelevated/no-sandbox mode was selected, and no system component was changed.
+
+## Workflow And Review Ledger
 
 | Stage | Status | Evidence |
 |---|---|---|
-| Repository and Git inspection | valid | branch/status/allowlist inspected; no remote |
-| Specification and ticket | valid/partial | TASK-032 remains `in-progress`; MCP/live acceptance open |
-| Module governance | blocked for final TASK-032 | runtime direct dependencies conflict with orchestrator-runtime 2.0 |
-| TDD implementation | valid for checkpoint | adapter, ledger, Git and dispatch regressions pass |
-| Focused verification | valid | adapter/runtime focused suites and strict Clippy pass |
-| Full verification | valid | locked Rust workspace and 44 Node tests pass |
-| Runtime acceptance | valid for scripted checkpoint | durable PostgreSQL restart plus real Git commit evidence |
-| Code review | pass | independent read-only review: no P0/P1/P2 finding |
-| Architecture review | blocked for final TASK-032 | port-boundary refactor or approved versioned amendment required |
-| Integration/CI/merge | blocked | no remote, CI/branch protection evidence, or merge authorization |
+| Repository/Git inspection | valid | feature branch, base `4cf98cf`, dirty candidate preserved, no remote |
+| Clarification/spec/ticket | valid | prior explicit approval reused; SPEC-002 v26 and TASK-032 remain current |
+| Module governance | valid | approved versioned constitutions and ADR-021; no silent boundary change |
+| TDD implementation | valid | observable red/green coverage for ordering, deadlines, replay, protocol, Git, and fixture trust |
+| Focused/full verification | pass | Rust format/Clippy/tests, Node 44/44, AST, diff and dependency checks |
+| Scripted runtime acceptance | pass | real PostgreSQL restart plus real isolated Git commit; explicitly not official live |
+| Independent code review | pass | final P0=0/P1=0/P2=4/P3=1; non-blocking findings recorded below |
+| Architecture review | pass with debt | pure ports boundary and two-tool surface preserved; P0=0/P1=0 |
+| Integration/CI/merge | partial/blocked | local combined checks pass; no remote, CI/branch protection, push, or merge authorization |
+| Handoff | complete for checkpoint | this file plus `docs/workflow/WORKFLOW_LEDGER.md` |
 
-## Verification
+## Remaining Gaps And Next Step
 
-- `cargo fmt --check`: exit 0.
-- `cargo clippy --workspace --all-targets --locked -- -D warnings`: exit 0.
-- `cargo test --workspace --locked`: exit 0; all workspace tests pass.
-- `npm.cmd run verify`: exit 0; project check passes and 44/44 tests pass.
-- PowerShell parser for both delivery scripts: pass.
-- `git diff --check`: exit 0; only a non-failing LF/CRLF notice.
-- Latest acceptance fixture:
-  `target/lattice-delivery/c410418a93ef4508b1e681be1aaea3b2`.
-  It reports `SCRIPTED_ACCEPTANCE`, `COMPLETED`, restart replay, and commit
-  `f2bb5a61a16e4c503c96f74a34d9d10b29bac111`; the commit changes only
-  `answer.txt` to the exact 20 bytes `LATTICE_DELIVERY_OK\n`.
-- Independent evidence audit recomputed launcher/schema/file digests, compared
-  run/status/final evidence, confirmed a clean fixture repository, found zero
-  secret/URI candidates, and found zero ticket-allowlist violations.
-
-## Risks And Open Decisions
-
-- The acceptance is scripted protocol acceptance, not a successful official
-  Codex live turn. A fourth retry with the previously failing dedicated Codex
-  home was intentionally not attempted.
-- `postgres_run_id` is present in final harness evidence but not duplicated in
-  run/status JSON; cleanup was independently verified using the final ID.
-- Exact Git executable pinning, deeper process containment, per-operation
-  PostgreSQL deadlines, and other non-blocking hardening remain deferred.
-- No push, branch merge, publication, deployment, payment, account, or
-  production mutation was performed.
-
-## Next Action
-
-1. Commit this verified deterministic checkpoint locally.
-2. Refactor runtime effects behind approved ports (or obtain explicit approval
-   for a versioned orchestrator-runtime constitution amendment).
-3. Finish the MCP/official-Codex entry on the same executable path, then attach
-   OpenClaw, Graphify, Hermes, and Codebase Memory as subsequent runnable nodes.
+- P2: PostgreSQL sets remaining session timeouts at connection, but lower-level
+  transactions can replace them with fixed 5s/30s values. A return after the
+  absolute deadline is safely `Ambiguous`, yet latency can exceed the caller
+  deadline.
+- P2: Windows Codex cleanup uses unbounded `taskkill.exe.status()`/`child.wait()`
+  after protocol completion; it cannot falsely report success but could delay
+  terminal persistence.
+- P2: Codex stdout uses an unbounded channel and `read_line` allocates before
+  the 8 MiB line check. The trusted fixture cannot exploit this, but bounded
+  framing/backpressure is required before removing the official incident gate.
+- P2: the child-environment denylist misses exact generic names such as
+  `API_KEY`, `TOKEN`, `SECRET`, and `PASSWORD`. No leak was observed and the
+  pinned fixture does not inspect them, but official mode should use a narrow
+  environment allowlist before its gate is removed.
+- P3: MCP `initialize` accepts an empty `clientInfo` object instead of requiring
+  non-empty `name` and `version`.
+- The global project-memory router path was missing (`MODULE_NOT_FOUND`), so
+  that documented global routing gate is unavailable in this environment.
+- Wait for an upstream helper correction or an explicit user decision on a new
+  safety posture before any official live retry. Only after official
+  modify/test/commit/restart evidence passes may TASK-032 close and the bounded
+  OpenClaw, Graphify, Hermes, and Codebase Memory nodes begin.
+- No push, merge, publication, deployment, payment, account/credential change,
+  or production mutation was performed.
 
 ## Restart Context
 
-- Branch: `feature/v2-rust-postgres-bootstrap`.
-- Checkpoint base: `80c88eafc2bcaab2b95b80a9479c97c294bb6c08`.
-- Active plan: `PLANS.md`, `CURRENT TASK-032`.
-- First commands: `git status --short --branch`; `cargo test --workspace --locked`.
-- Overall goal remains active; do not mark MVP-1 or TASK-032 complete.
+- Branch: `feature/v2-rust-postgres-bootstrap`; checkpoint base:
+  `4cf98cf3f9e3b53d0e819139cdfd96ff457e587a`; no remote.
+- Active ticket: TASK-032 (`in-progress`); active plan marker remains CURRENT.
+- Begin with `git status --short --branch`, then read this section, PLANS.md,
+  TASK-032, and the active incident gate. Do not retry official/sandbox setup.
+- Overall goal remains active; do not mark TASK-032 or MVP-1 complete.
 
 ---
 

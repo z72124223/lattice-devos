@@ -66,6 +66,34 @@ an implementation input, not a pending review gate:
    its executable acceptance path. Deployment, payment, publication, and the
    unrelated website remain excluded.
 
+## Current TASK-032 Incident Gate — 2026-08-05
+
+The first official-Codex live attempt is `FAILED_DIAGNOSTIC`, not acceptance
+evidence. Windows displayed `codex-windows-sandbox-setup.exe` with "The
+specified module could not be found" while the official turn was editing the
+isolated fixture. The exact npm-package helper is OpenAI-signed, x64, SHA-256
+`7191d24f6fb4a26cbbce0d2aecd6deb71fa074a8cb5f24a45d2fa2164473885f`;
+its direct imports resolve to installed Windows system DLLs or an API-set.
+OpenAI issues [#29952](https://github.com/openai/codex/issues/29952) and
+[#29200](https://github.com/openai/codex/issues/29200) remain open with the same
+modal failure and no linked repair branch or pull request.
+
+Until that upstream Windows sandbox-helper regression/compatibility failure is
+resolved or the user explicitly authorizes a new safety posture, all official
+Codex live and sandbox-setup launches are fail-closed before process or database
+effects. Do not retry, install/modify system components, or switch to
+unelevated/no-sandbox. Scripted acceptance, code fixes, tests, review, and
+durable handoff work may continue, but cannot close TASK-032's official-live
+acceptance criterion.
+
+The trusted scripted checkpoint is now complete: fixture
+`c9bf2939ad5844e9973ee0af0a84b756` persisted typed intent/outcome/receipt
+evidence through a PostgreSQL 17.10 restart and produced clean fixture commit
+`ed408cc4373519f57950a66660148df39f9d5f82`, changing only `answer.txt`.
+Focused/full verification and final architecture review pass with only deferred
+non-blocking deadline/initialization hardening. This evidence does not replace
+the blocked official-live criterion.
+
 ## Global Strategy
 
 1. Use OpenClaw as the only normal human command, status, task-approval, and
@@ -671,7 +699,11 @@ remain future Orchestrator/PostgreSQL responsibilities.
   restart status replay. The existing scripted checkpoint remains a test
   harness and is not live-Codex evidence. This first real segment does not
   claim OpenClaw, Graphify, Hermes, or Codebase Memory until each real component
-  is attached and verified by a following executable node.
+  is attached and verified by a following executable node. Current bounded
+  scripted subpath, fail-closed repair, full verification, and durable incident
+  handoff are complete. The official-live acceptance substep remains blocked by
+  the incident gate above and must not be retried in this window; TASK-032 stays
+  `in-progress`, so the later OpenClaw/Graphify/Hermes/Memory nodes do not start.
 - [ ] Step 7: Complete TASK-026 and TASK-027 for Workspace Git 2.0 and exact
   Scope Check 1.1 behavior in disposable repositories; retain the local
   filesystem lock only as defense in depth.

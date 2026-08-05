@@ -16,6 +16,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
+use lattice_contracts::{
+    CodexDeliveryEvidence, ContentDigest, DeliveryRunRequest, DeliveryStage, DurableIntentEvidence,
+    FixedTestEvidence, GitCommitEvidence, PreparedWorkspaceEvidence, WorkspaceChangeEvidence,
+};
+use lattice_ports::{
+    DeliveryFailureCertainty, DeliveryPortError, DeliveryPortResult, PortErrorKind, TestRunnerPort,
+    WorkspaceGitPort,
+};
+
 /// Exact product output accepted by the TASK-032 delivery fixture.
 pub const EXPECTED_ANSWER_BYTES: &[u8] = b"LATTICE_DELIVERY_OK\n";
 
@@ -89,6 +99,7 @@ pub struct IsolatedGitDelivery {
     baseline_refs: Vec<u8>,
     baseline_commit: String,
     runner: GitRunner,
+    fixed_test_runs: AtomicU64,
 }
 
 impl IsolatedGitDelivery {
@@ -118,6 +129,7 @@ impl IsolatedGitDelivery {
     ///
     /// Rejects the same unsafe inputs as [`Self::provision`] and fails closed
     /// if any owned Git subprocess cannot finish before `deadline`.
+    #[allow(clippy::too_many_lines)]
     pub fn provision_until(
         root: impl AsRef<Path>,
         git_exe: impl AsRef<Path>,
@@ -227,6 +239,7 @@ impl IsolatedGitDelivery {
             baseline_refs,
             baseline_commit,
             runner,
+            fixed_test_runs: AtomicU64::new(0),
         };
         delivery.verify_static_metadata()?;
         delivery.assert_no_unsafe_local_config()?;
@@ -254,10 +267,23 @@ impl IsolatedGitDelivery {
         self.verify_exact_scope()?;
         self.run_fixed_test()?;
 
+        self.commit_after_verified_test()
+    }
+
+    /// Creates the commit after the typed test port has already emitted the
+    /// exact fixed-test evidence. This primitive deliberately does not invoke
+    /// the fixed test again; it only revalidates current scope/state and the
+    /// bytes that will be staged.
+    fn commit_after_verified_test(&self) -> Result<GitDeliveryEvidence, GitDeliveryError> {
         // Recheck the complete pre-commit boundary immediately before the
         // first Git mutation owned by this method.
         self.verify_precommit_state()?;
         self.verify_exact_scope()?;
+        assert_regular_file_bytes(
+            &self.repository_path.join(ANSWER_FILE_NAME),
+            EXPECTED_ANSWER_BYTES,
+            "ANSWER_BYTES_DRIFT_BEFORE_STAGE",
+        )?;
 
         require_success(
             self.runner.output(&repository_args(
@@ -267,7 +293,6 @@ impl IsolatedGitDelivery {
             "GIT_ADD_FAILED",
         )?;
         self.assert_exact_staged_answer()?;
-        self.run_fixed_test()?;
 
         let commit_args = repository_args(
             &self.repository_path,
@@ -311,6 +336,12 @@ impl IsolatedGitDelivery {
             ));
         }
         self.verify_committed_result(&commit_sha)?;
+        ensure_observed_before_deadline(self.runner.deadline, Instant::now()).map_err(|_| {
+            failure(
+                GitDeliveryErrorKind::CommitOutcomeUnknown,
+                "POST_COMMIT_DEADLINE_UNKNOWN",
+            )
+        })?;
 
         Ok(GitDeliveryEvidence {
             repository_path: self.repository_path.clone(),
@@ -514,7 +545,55 @@ impl IsolatedGitDelivery {
         Ok(())
     }
 
+    /// Removes only the observed empty Codex runtime metadata directory from
+    /// this freshly provisioned, LATTICE-owned repository. A non-empty,
+    /// reparse, file, or otherwise unsafe `.agents` entry remains a hard scope
+    /// failure and is never removed.
+    fn normalize_empty_codex_metadata_directory(&self) -> Result<(), GitDeliveryError> {
+        let metadata_path = self.repository_path.join(".agents");
+        let metadata = match fs::symlink_metadata(&metadata_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => {
+                return Err(failure(
+                    GitDeliveryErrorKind::ScopeDrift,
+                    "CODEX_METADATA_INSPECTION_FAILED",
+                ));
+            }
+        };
+        if unsafe_file_type(&metadata) || !metadata.is_dir() {
+            return Err(failure(
+                GitDeliveryErrorKind::ScopeDrift,
+                "CODEX_METADATA_UNSAFE",
+            ));
+        }
+        ensure_canonical_directory(&metadata_path)
+            .map_err(|_| failure(GitDeliveryErrorKind::ScopeDrift, "CODEX_METADATA_UNSAFE"))?;
+        if fs::read_dir(&metadata_path)
+            .map_err(|_| {
+                failure(
+                    GitDeliveryErrorKind::ScopeDrift,
+                    "CODEX_METADATA_INSPECTION_FAILED",
+                )
+            })?
+            .next()
+            .is_some()
+        {
+            return Err(failure(
+                GitDeliveryErrorKind::ScopeDrift,
+                "CODEX_METADATA_NOT_EMPTY",
+            ));
+        }
+        fs::remove_dir(&metadata_path).map_err(|_| {
+            failure(
+                GitDeliveryErrorKind::ScopeDrift,
+                "CODEX_METADATA_REMOVE_FAILED",
+            )
+        })
+    }
+
     fn run_fixed_test(&self) -> Result<(), GitDeliveryError> {
+        self.fixed_test_runs.fetch_add(1, Ordering::SeqCst);
         #[cfg(windows)]
         self.verify_windows_answer_file_boundary()?;
 
@@ -661,6 +740,19 @@ impl IsolatedGitDelivery {
                 "STAGED_SCOPE_DRIFT",
             ));
         }
+        let staged_blob = require_success(
+            self.runner.output(&repository_args(
+                &self.repository_path,
+                &["show", ":answer.txt"],
+            )),
+            "STAGED_BLOB_READ_FAILED",
+        )?;
+        if staged_blob.stdout != EXPECTED_ANSWER_BYTES {
+            return Err(failure(
+                GitDeliveryErrorKind::MetadataDrift,
+                "STAGED_ANSWER_BYTES_DRIFT",
+            ));
+        }
         let status = require_success(
             self.runner.output(&repository_args(
                 &self.repository_path,
@@ -750,6 +842,443 @@ impl IsolatedGitDelivery {
         }
         Ok(())
     }
+}
+
+/// Fixed composition-time inputs for the stateful TASK-032 workspace lane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliveryWorkspaceGitAdapterConfig {
+    root: PathBuf,
+    git_executable: PathBuf,
+    timeout: Duration,
+}
+
+impl DeliveryWorkspaceGitAdapterConfig {
+    /// Validates LATTICE-owned workspace and executable configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a known preparation error for relative paths or a zero timeout.
+    pub fn new(
+        root: PathBuf,
+        git_executable: PathBuf,
+        timeout: Duration,
+    ) -> DeliveryPortResult<Self> {
+        if !root.is_absolute() || !git_executable.is_absolute() {
+            return Err(delivery_error(
+                DeliveryStage::WorkspacePrepare,
+                PortErrorKind::Malformed,
+                DeliveryFailureCertainty::Known,
+                "GIT_DELIVERY_CONFIG_PATH_NOT_ABSOLUTE",
+            ));
+        }
+        if timeout.is_zero() {
+            return Err(delivery_error(
+                DeliveryStage::WorkspacePrepare,
+                PortErrorKind::Malformed,
+                DeliveryFailureCertainty::Known,
+                "GIT_DELIVERY_CONFIG_TIMEOUT_ZERO",
+            ));
+        }
+        Ok(Self {
+            root,
+            git_executable,
+            timeout,
+        })
+    }
+}
+
+struct DeliveryWorkspaceGitState {
+    request: DeliveryRunRequest,
+    intent: DurableIntentEvidence,
+    workspace: PreparedWorkspaceEvidence,
+    delivery: IsolatedGitDelivery,
+    changes: Option<WorkspaceChangeEvidence>,
+    test: Option<FixedTestEvidence>,
+    committed: bool,
+}
+
+/// Stateful adapter that implements the fixed workspace, test, and Git ports.
+///
+/// Its port methods accept no shell text, test command, or caller-selected
+/// path. The only filesystem and Git inputs are fixed when the composition
+/// root constructs [`DeliveryWorkspaceGitAdapterConfig`].
+pub struct DeliveryWorkspaceGitAdapter {
+    config: DeliveryWorkspaceGitAdapterConfig,
+    deadline: Option<Instant>,
+    state: Option<DeliveryWorkspaceGitState>,
+}
+
+impl DeliveryWorkspaceGitAdapter {
+    /// Creates an unprepared adapter bound to immutable fixed configuration.
+    #[must_use]
+    pub const fn new(config: DeliveryWorkspaceGitAdapterConfig) -> Self {
+        Self {
+            config,
+            deadline: None,
+            state: None,
+        }
+    }
+
+    /// Binds every workspace, test, and Git effect to one composition-owned
+    /// absolute deadline instead of restarting the timeout at `prepare`.
+    #[must_use]
+    pub const fn with_deadline(
+        config: DeliveryWorkspaceGitAdapterConfig,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            config,
+            deadline: Some(deadline),
+            state: None,
+        }
+    }
+}
+
+impl WorkspaceGitPort for DeliveryWorkspaceGitAdapter {
+    fn prepare(
+        &mut self,
+        request: &DeliveryRunRequest,
+        intent: &DurableIntentEvidence,
+    ) -> DeliveryPortResult<PreparedWorkspaceEvidence> {
+        if self.state.is_some() {
+            return Err(delivery_error(
+                DeliveryStage::WorkspacePrepare,
+                PortErrorKind::Denied,
+                DeliveryFailureCertainty::Known,
+                "GIT_DELIVERY_ALREADY_PREPARED",
+            ));
+        }
+        if !intent.matches_run(request) {
+            return Err(binding_error(DeliveryStage::WorkspacePrepare));
+        }
+        let deadline = match self.deadline {
+            Some(deadline) => deadline,
+            None => Instant::now()
+                .checked_add(self.config.timeout)
+                .ok_or_else(|| {
+                    delivery_error(
+                        DeliveryStage::WorkspacePrepare,
+                        PortErrorKind::Malformed,
+                        DeliveryFailureCertainty::Known,
+                        "GIT_DELIVERY_DEADLINE_INVALID",
+                    )
+                })?,
+        };
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| {
+                delivery_error(
+                    DeliveryStage::WorkspacePrepare,
+                    PortErrorKind::Timeout,
+                    DeliveryFailureCertainty::Known,
+                    "GIT_DELIVERY_DEADLINE_EXPIRED",
+                )
+            })?;
+        if remaining > self.config.timeout {
+            return Err(delivery_error(
+                DeliveryStage::WorkspacePrepare,
+                PortErrorKind::Malformed,
+                DeliveryFailureCertainty::Known,
+                "GIT_DELIVERY_DEADLINE_INVALID",
+            ));
+        }
+        let delivery = IsolatedGitDelivery::provision_until(
+            &self.config.root,
+            &self.config.git_executable,
+            deadline,
+        )
+        .map_err(|error| map_git_error(DeliveryStage::WorkspacePrepare, &error))?;
+        let locator = delivery.repo_path().to_str().ok_or_else(|| {
+            delivery_error(
+                DeliveryStage::WorkspacePrepare,
+                PortErrorKind::Malformed,
+                DeliveryFailureCertainty::Known,
+                "GIT_DELIVERY_WORKSPACE_LOCATOR_INVALID",
+            )
+        })?;
+        let evidence_digest = typed_digest(
+            "lattice.task032.prepared-workspace",
+            &[
+                (
+                    "configuration_digest",
+                    request.configuration_digest().as_str(),
+                ),
+                ("intent_digest", intent.intent_digest().as_str()),
+                ("workspace_id", "task032-isolated-git-v1"),
+                ("workspace_locator", locator),
+                ("baseline_commit", &delivery.baseline_commit),
+            ],
+            DeliveryStage::WorkspacePrepare,
+        )?;
+        let workspace = PreparedWorkspaceEvidence::new(
+            request,
+            intent,
+            "task032-isolated-git-v1",
+            locator,
+            delivery.baseline_commit.clone(),
+            evidence_digest,
+        )
+        .map_err(|_| binding_error(DeliveryStage::WorkspacePrepare))?;
+        self.state = Some(DeliveryWorkspaceGitState {
+            request: request.clone(),
+            intent: intent.clone(),
+            workspace: workspace.clone(),
+            delivery,
+            changes: None,
+            test: None,
+            committed: false,
+        });
+        Ok(workspace)
+    }
+
+    fn inspect_changes(
+        &mut self,
+        request: &DeliveryRunRequest,
+        intent: &DurableIntentEvidence,
+        workspace: &PreparedWorkspaceEvidence,
+        codex: &CodexDeliveryEvidence,
+    ) -> DeliveryPortResult<WorkspaceChangeEvidence> {
+        let state = self
+            .state
+            .as_mut()
+            .ok_or_else(|| order_error(DeliveryStage::ScopeVerification))?;
+        if state.committed
+            || state.request != *request
+            || state.intent != *intent
+            || state.workspace != *workspace
+            || !codex.matches(request, intent, workspace)
+        {
+            return Err(binding_error(DeliveryStage::ScopeVerification));
+        }
+        state
+            .delivery
+            .normalize_empty_codex_metadata_directory()
+            .and_then(|()| state.delivery.verify_precommit_state())
+            .and_then(|()| state.delivery.verify_exact_scope())
+            .map_err(|error| map_git_error(DeliveryStage::ScopeVerification, &error))?;
+        let changed_paths_digest = typed_digest(
+            "lattice.task032.changed-paths",
+            &[("path", ANSWER_FILE_NAME)],
+            DeliveryStage::ScopeVerification,
+        )?;
+        let evidence_digest = typed_digest(
+            "lattice.task032.scope-evidence",
+            &[
+                ("workspace_digest", workspace.evidence_digest().as_str()),
+                ("codex_output_digest", codex.output_digest().as_str()),
+                ("changed_paths_digest", changed_paths_digest.as_str()),
+            ],
+            DeliveryStage::ScopeVerification,
+        )?;
+        let changes = WorkspaceChangeEvidence::new(
+            request,
+            intent,
+            workspace,
+            codex,
+            changed_paths_digest,
+            evidence_digest,
+        )
+        .map_err(|_| binding_error(DeliveryStage::ScopeVerification))?;
+        state.changes = Some(changes.clone());
+        state.test = None;
+        Ok(changes)
+    }
+
+    fn commit(
+        &mut self,
+        request: &DeliveryRunRequest,
+        workspace: &PreparedWorkspaceEvidence,
+        changes: &WorkspaceChangeEvidence,
+        test: &FixedTestEvidence,
+    ) -> DeliveryPortResult<GitCommitEvidence> {
+        let state = self
+            .state
+            .as_mut()
+            .ok_or_else(|| order_error(DeliveryStage::GitCommit))?;
+        if state.committed
+            || state.request != *request
+            || state.workspace != *workspace
+            || state.changes.as_ref() != Some(changes)
+            || state.test.as_ref() != Some(test)
+            || !test.matches(request, changes)
+        {
+            return Err(binding_error(DeliveryStage::GitCommit));
+        }
+
+        // The typed test evidence is the sole fixed-test execution. The commit
+        // primitive repeats only current scope/state checks and verifies the
+        // exact bytes that Git will commit.
+        let legacy = state
+            .delivery
+            .commit_after_verified_test()
+            .map_err(|error| map_git_error(DeliveryStage::GitCommit, &error))?;
+        if legacy.repository_path != state.delivery.repository_path
+            || legacy.baseline_commit != state.delivery.baseline_commit
+            || legacy.changed_paths != [ANSWER_FILE_NAME]
+        {
+            return Err(delivery_error(
+                DeliveryStage::GitCommit,
+                PortErrorKind::Ambiguous,
+                DeliveryFailureCertainty::Ambiguous,
+                "GIT_DELIVERY_COMMIT_EVIDENCE_DRIFT",
+            ));
+        }
+        let evidence_digest = typed_digest(
+            "lattice.task032.git-commit-evidence",
+            &[
+                ("workspace_digest", workspace.evidence_digest().as_str()),
+                ("change_evidence_digest", changes.evidence_digest().as_str()),
+                ("test_evidence_digest", test.evidence_digest().as_str()),
+                ("parent_commit", &legacy.baseline_commit),
+                ("commit", &legacy.commit_sha),
+            ],
+            DeliveryStage::GitCommit,
+        )?;
+        let typed = GitCommitEvidence::new(
+            request,
+            changes,
+            test,
+            legacy.baseline_commit,
+            legacy.commit_sha,
+            evidence_digest,
+        )
+        .map_err(|_| {
+            delivery_error(
+                DeliveryStage::GitCommit,
+                PortErrorKind::Ambiguous,
+                DeliveryFailureCertainty::Ambiguous,
+                "GIT_DELIVERY_TYPED_COMMIT_EVIDENCE_INVALID",
+            )
+        })?;
+        state.committed = true;
+        Ok(typed)
+    }
+}
+
+impl TestRunnerPort for DeliveryWorkspaceGitAdapter {
+    fn run_fixed(
+        &mut self,
+        request: &DeliveryRunRequest,
+        workspace: &PreparedWorkspaceEvidence,
+        changes: &WorkspaceChangeEvidence,
+    ) -> DeliveryPortResult<FixedTestEvidence> {
+        let state = self
+            .state
+            .as_mut()
+            .ok_or_else(|| order_error(DeliveryStage::FixedTest))?;
+        if state.committed
+            || state.request != *request
+            || state.workspace != *workspace
+            || state.changes.as_ref() != Some(changes)
+        {
+            return Err(binding_error(DeliveryStage::FixedTest));
+        }
+        state
+            .delivery
+            .run_fixed_test()
+            .map_err(|error| map_git_error(DeliveryStage::FixedTest, &error))?;
+        let evidence_digest = typed_digest(
+            "lattice.task032.fixed-test-evidence",
+            &[
+                ("workspace_digest", workspace.evidence_digest().as_str()),
+                ("change_evidence_digest", changes.evidence_digest().as_str()),
+                ("test_profile", "git-diff-no-index-exact-answer-v1"),
+            ],
+            DeliveryStage::FixedTest,
+        )?;
+        let test = FixedTestEvidence::new(request, changes, evidence_digest)
+            .map_err(|_| binding_error(DeliveryStage::FixedTest))?;
+        state.test = Some(test.clone());
+        Ok(test)
+    }
+}
+
+fn typed_digest(
+    schema_id: &str,
+    fields: &[(&str, &str)],
+    stage: DeliveryStage,
+) -> DeliveryPortResult<ContentDigest> {
+    let domain = HashDomain::new(schema_id, "1.0").map_err(|_| {
+        delivery_error(
+            stage,
+            PortErrorKind::Malformed,
+            DeliveryFailureCertainty::Known,
+            "GIT_DELIVERY_DIGEST_DOMAIN_INVALID",
+        )
+    })?;
+    let value = CanonicalValue::Object(
+        fields
+            .iter()
+            .map(|(key, value)| {
+                (
+                    (*key).to_owned(),
+                    CanonicalValue::String((*value).to_owned()),
+                )
+            })
+            .collect(),
+    );
+    let digest = canonical_sha256(&domain, &value).map_err(|_| {
+        delivery_error(
+            stage,
+            PortErrorKind::Malformed,
+            DeliveryFailureCertainty::Known,
+            "GIT_DELIVERY_DIGEST_FAILED",
+        )
+    })?;
+    ContentDigest::from_sha256(digest.to_hex()).map_err(|_| {
+        delivery_error(
+            stage,
+            PortErrorKind::Malformed,
+            DeliveryFailureCertainty::Known,
+            "GIT_DELIVERY_DIGEST_INVALID",
+        )
+    })
+}
+
+fn map_git_error(stage: DeliveryStage, error: &GitDeliveryError) -> DeliveryPortError {
+    let certainty = if error.kind() == GitDeliveryErrorKind::CommitOutcomeUnknown {
+        DeliveryFailureCertainty::Ambiguous
+    } else {
+        DeliveryFailureCertainty::Known
+    };
+    let kind = match error.kind() {
+        GitDeliveryErrorKind::InvalidPath => PortErrorKind::Malformed,
+        GitDeliveryErrorKind::UnsafePath => PortErrorKind::Denied,
+        GitDeliveryErrorKind::GitFailed => PortErrorKind::Unavailable,
+        GitDeliveryErrorKind::ScopeDrift
+        | GitDeliveryErrorKind::MetadataDrift
+        | GitDeliveryErrorKind::TestFailed => PortErrorKind::CapabilityMismatch,
+        GitDeliveryErrorKind::CommitOutcomeUnknown => PortErrorKind::Ambiguous,
+    };
+    delivery_error(stage, kind, certainty, error.code())
+}
+
+fn binding_error(stage: DeliveryStage) -> DeliveryPortError {
+    delivery_error(
+        stage,
+        PortErrorKind::Denied,
+        DeliveryFailureCertainty::Known,
+        "GIT_DELIVERY_BINDING_MISMATCH",
+    )
+}
+
+fn order_error(stage: DeliveryStage) -> DeliveryPortError {
+    delivery_error(
+        stage,
+        PortErrorKind::Denied,
+        DeliveryFailureCertainty::Known,
+        "GIT_DELIVERY_STAGE_OUT_OF_ORDER",
+    )
+}
+
+fn delivery_error(
+    stage: DeliveryStage,
+    kind: PortErrorKind,
+    certainty: DeliveryFailureCertainty,
+    code: impl Into<String>,
+) -> DeliveryPortError {
+    DeliveryPortError::new(stage, kind, certainty, code)
 }
 
 struct GitRunner {
@@ -849,12 +1378,7 @@ impl GitRunner {
     }
 
     fn capture_output(&self, command: &mut Command, label: &str) -> io::Result<Output> {
-        if Instant::now() >= self.deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Git delivery deadline expired",
-            ));
-        }
+        ensure_observed_before_deadline(self.deadline, Instant::now())?;
         let output_id = self.next_output.fetch_add(1, Ordering::Relaxed);
         let stdout_path = self
             .temp_directory
@@ -888,6 +1412,7 @@ impl GitRunner {
         let mut child = command.spawn()?;
         let status = loop {
             if let Some(status) = child.try_wait()? {
+                ensure_observed_before_deadline(self.deadline, Instant::now())?;
                 break status;
             }
             let now = Instant::now();
@@ -901,11 +1426,25 @@ impl GitRunner {
             }
             thread::sleep(Duration::from_millis(10).min(self.deadline.duration_since(now)));
         };
+        let stdout = fs::read(stdout_path)?;
+        let stderr = fs::read(stderr_path)?;
+        ensure_observed_before_deadline(self.deadline, Instant::now())?;
         Ok(Output {
             status,
-            stdout: fs::read(stdout_path)?,
-            stderr: fs::read(stderr_path)?,
+            stdout,
+            stderr,
         })
+    }
+}
+
+fn ensure_observed_before_deadline(deadline: Instant, observed_at: Instant) -> io::Result<()> {
+    if observed_at < deadline {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Git delivery deadline expired",
+        ))
     }
 }
 
@@ -1263,11 +1802,21 @@ mod tests {
         let evidence = delivery.verify_and_commit().expect("delivery commit");
 
         assert_ne!(evidence.commit_sha, evidence.baseline_commit);
+        assert_eq!(delivery.fixed_test_runs.load(Ordering::SeqCst), 1);
         assert_eq!(evidence.changed_paths, [ANSWER_FILE_NAME]);
         assert_eq!(
             evidence.test_command_id,
             "git-diff-no-index-exact-answer-v1"
         );
+    }
+
+    #[test]
+    fn child_completion_observed_at_the_deadline_is_not_accepted() {
+        let deadline = Instant::now();
+        let error = ensure_observed_before_deadline(deadline, deadline)
+            .expect_err("a child observed at the deadline must be timed out");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 
     #[test]
@@ -1325,6 +1874,99 @@ mod tests {
             read_head(&delivery.runner, delivery.repo_path()).expect("read head"),
             delivery.baseline_commit
         );
+    }
+
+    #[test]
+    fn typed_delivery_ports_prepare_inspect_test_and_commit_in_order() {
+        use lattice_contracts::{
+            AttemptId, CONTRACT_VERSION, CodexDeliveryEvidence, CodexDeliveryRequest,
+            ContentDigest, DeliveryProfile, DeliveryRunRequest, DeliveryRuntime,
+            DurableIntentEvidence, Invocation, ProjectSnapshotId, RequestId, TaskId,
+        };
+        use lattice_ports::{TestRunnerPort, WorkspaceGitPort};
+
+        fn digest(byte: char) -> ContentDigest {
+            ContentDigest::from_sha256(byte.to_string().repeat(64)).expect("valid digest")
+        }
+
+        let Some(git) = git_executable() else {
+            return;
+        };
+        let root = TestRoot::new("typed-ports");
+        let invocation = Invocation::new(
+            CONTRACT_VERSION,
+            RequestId::new("typed-git-delivery").expect("request id"),
+            TaskId::new("TASK-032").expect("task id"),
+            AttemptId::new("attempt-1").expect("attempt id"),
+            ProjectSnapshotId::new("snapshot-1").expect("snapshot id"),
+            digest('a'),
+        )
+        .expect("invocation");
+        let request = DeliveryRunRequest::new(
+            invocation,
+            DeliveryProfile::Task032CodexPostgres,
+            digest('b'),
+        )
+        .expect("request");
+        let intent = DurableIntentEvidence::new(&request, digest('c')).expect("intent");
+        let config =
+            DeliveryWorkspaceGitAdapterConfig::new(root.0.clone(), git, Duration::from_mins(1))
+                .expect("adapter config");
+        let mut adapter = DeliveryWorkspaceGitAdapter::new(config);
+
+        let workspace = adapter.prepare(&request, &intent).expect("prepare");
+        let repository = PathBuf::from(workspace.workspace_locator());
+        fs::write(repository.join(ANSWER_FILE_NAME), EXPECTED_ANSWER_BYTES)
+            .expect("write exact Codex output");
+        fs::create_dir(repository.join(".agents")).expect("create empty Codex metadata");
+        let codex_request =
+            CodexDeliveryRequest::new(request.clone(), intent.clone(), workspace.clone())
+                .expect("codex request");
+        let codex = CodexDeliveryEvidence::new(
+            &codex_request,
+            DeliveryRuntime::ScriptedAcceptance,
+            "scripted-codex-fixture",
+            "codex-cli test",
+            digest('d'),
+            digest('e'),
+            1,
+            "thread-1",
+            "turn-1",
+            digest('f'),
+        )
+        .expect("codex evidence");
+
+        let changes = adapter
+            .inspect_changes(&request, &intent, &workspace, &codex)
+            .expect("scope evidence");
+        assert!(!repository.join(".agents").exists());
+        let test = adapter
+            .run_fixed(&request, &workspace, &changes)
+            .expect("fixed test evidence");
+        let commit = adapter
+            .commit(&request, &workspace, &changes, &test)
+            .expect("commit evidence");
+        assert_eq!(
+            adapter
+                .state
+                .as_ref()
+                .expect("adapter state")
+                .delivery
+                .fixed_test_runs
+                .load(Ordering::SeqCst),
+            1
+        );
+
+        assert_ne!(commit.parent_commit(), commit.commit());
+        for evidence in [
+            workspace.evidence_digest(),
+            changes.changed_paths_digest(),
+            changes.evidence_digest(),
+            test.evidence_digest(),
+            commit.evidence_digest(),
+        ] {
+            assert!(!evidence.as_str().bytes().all(|byte| byte == b'0'));
+        }
     }
 
     #[cfg(windows)]

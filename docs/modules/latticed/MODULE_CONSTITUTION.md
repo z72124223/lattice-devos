@@ -35,7 +35,7 @@ module.
 
 ## Public Contracts
 
-- Construct one Orchestrator 2.1 instance with typed Contracts 1.10 / Ports 1.5
+- Construct one Orchestrator 2.1 instance with typed Contracts 1.10 / Ports 1.6
   implementations for the bounded TASK-032 delivery path.
 - Expose exactly two MCP tools: `lattice_delivery_run` and
   `lattice_delivery_status`.
@@ -75,7 +75,7 @@ module.
 
 ## Allowed Dependencies
 
-- `lattice-contracts` 1.10, `lattice-ports` 1.5, and
+- `lattice-contracts` 1.10, `lattice-ports` 1.6, and
   `orchestrator-runtime` 2.1 public APIs.
 - Concrete Codex, PostgreSQL Task Ledger, bounded workspace/Git, and fixed-test
   adapters required by TASK-032, only for construction and port

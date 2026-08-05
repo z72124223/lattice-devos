@@ -227,22 +227,43 @@ enum ReaderEvent {
 pub fn run_codex_app_server(
     config: &AppServerRunConfig,
 ) -> Result<AppServerRunEvidence, AppServerRunError> {
+    let deadline = Instant::now()
+        .checked_add(config.timeout())
+        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::InvalidTimeout))?;
+    run_codex_app_server_until(config, deadline)
+}
+
+/// Runs one supervised app-server child under a caller-owned absolute deadline.
+///
+/// # Errors
+///
+/// Fails before spawn when the deadline has expired and preserves that same
+/// deadline through validation, process setup, protocol driving, and teardown.
+pub fn run_codex_app_server_until(
+    config: &AppServerRunConfig,
+    deadline: Instant,
+) -> Result<AppServerRunEvidence, AppServerRunError> {
+    ensure_before_deadline(deadline)?;
     validate_live_paths(config)?;
+    ensure_before_deadline(deadline)?;
     let before_spawn = launcher_sha256(config.launcher())?;
     if before_spawn != config.expected_launcher_sha256() {
         return Err(AppServerRunError::new(
             AppServerRunErrorKind::LauncherDigestMismatch,
         ));
     }
+    ensure_before_deadline(deadline)?;
     let mut command = Command::new(config.launcher());
     crate::scrub_protected_environment(&mut command);
-    let mut child = command
+    command
         .args(["app-server", "--listen", "stdio://"])
         .current_dir(config.working_directory())
         .env("CODEX_HOME", config.codex_home())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    ensure_before_deadline(deadline)?;
+    let mut child = command
         .spawn()
         .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::SpawnFailed))?;
     let Ok(process_tree) = OwnedProcessTree::attach(&child) else {
@@ -251,6 +272,10 @@ pub fn run_codex_app_server(
             AppServerRunErrorKind::JobObjectFailed,
         ));
     };
+    if let Err(error) = ensure_before_deadline(deadline) {
+        stop_owned_child(&mut child)?;
+        return Err(error);
+    }
 
     let after_spawn = match launcher_sha256(config.launcher()) {
         Ok(digest) => digest,
@@ -265,8 +290,12 @@ pub fn run_codex_app_server(
             AppServerRunErrorKind::LauncherChanged,
         ));
     }
+    if let Err(error) = ensure_before_deadline(deadline) {
+        stop_owned_child(&mut child)?;
+        return Err(error);
+    }
 
-    let result = drive_child(&mut child, config);
+    let result = drive_child(&mut child, config, deadline);
     let cleanup = stop_owned_child(&mut child);
     drop(process_tree);
     cleanup?;
@@ -303,6 +332,7 @@ impl OwnedProcessTree {
 fn drive_child(
     child: &mut Child,
     config: &AppServerRunConfig,
+    deadline: Instant,
 ) -> Result<AppServerRunEvidence, AppServerRunError> {
     let mut stdin = child
         .stdin
@@ -320,11 +350,9 @@ fn drive_child(
     let receiver = start_readers(stdout, stderr);
 
     let protocol = AppServerProtocol::new("lattice_devos", "0.1.0");
-    let deadline = Instant::now()
-        .checked_add(config.timeout())
-        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::InvalidTimeout))?;
     let mut session = AppServerSession::new();
 
+    ensure_before_deadline(deadline)?;
     session
         .mark_request_sent(SessionRequest::Initialize)
         .map_err(map_session_error)?;
@@ -335,6 +363,7 @@ fn drive_child(
     let initialize = require_matching_codex_home(&session, config)?;
     drain_available(&receiver, deadline, &mut session)?;
 
+    ensure_before_deadline(deadline)?;
     send_json(&mut stdin, &protocol.initialized_notification())?;
     session
         .mark_request_sent(SessionRequest::ThreadStart)
@@ -352,6 +381,7 @@ fn drive_child(
         .thread_id()
         .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::ProtocolFailed))?
         .to_owned();
+    ensure_before_deadline(deadline)?;
     session
         .mark_request_sent(SessionRequest::TurnStart)
         .map_err(map_session_error)?;
@@ -366,12 +396,13 @@ fn drive_child(
         session.outcome().is_some()
     }) {
         if error.kind() == AppServerRunErrorKind::Timeout {
-            interrupt_timed_out_turn(&mut stdin, &receiver, &mut session, &thread_id)?;
+            interrupt_timed_out_turn(&mut stdin, &receiver, &mut session, &thread_id, deadline)?;
             return Err(error);
         }
         return Err(error);
     }
     drain_available(&receiver, deadline, &mut session)?;
+    ensure_before_deadline(deadline)?;
 
     build_run_evidence(&session, initialize, thread_id)
 }
@@ -525,6 +556,7 @@ fn interrupt_timed_out_turn(
     receiver: &Receiver<ReaderEvent>,
     session: &mut AppServerSession,
     thread_id: &str,
+    delivery_deadline: Instant,
 ) -> Result<(), AppServerRunError> {
     let Some(turn_id) = session.turn_id().map(ToOwned::to_owned) else {
         return Ok(());
@@ -540,6 +572,7 @@ fn interrupt_timed_out_turn(
 
     let grace_deadline = Instant::now()
         .checked_add(INTERRUPT_GRACE)
+        .map(|grace| grace.min(delivery_deadline))
         .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::Timeout))?;
     while session.outcome().is_none() {
         let Some(remaining) = grace_deadline.checked_duration_since(Instant::now()) else {
@@ -672,6 +705,14 @@ fn same_existing_directory(left: &Path, right: &Path) -> bool {
         return false;
     };
     left == right
+}
+
+fn ensure_before_deadline(deadline: Instant) -> Result<(), AppServerRunError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .map(|_| ())
+        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::Timeout))
 }
 
 fn launcher_sha256(path: &Path) -> Result<String, AppServerRunError> {

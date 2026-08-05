@@ -1,0 +1,96 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][string]$ExpectedSelfSha256,
+    [Parameter(Mandatory = $true)][ValidateSet('Schema', 'Server')][string]$Mode,
+    [string]$SchemaRoot
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$selfHash = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($ExpectedSelfSha256 -notmatch '^[0-9a-f]{64}$' -or $selfHash -ne $ExpectedSelfSha256) { exit 90 }
+if ($env:LATTICE_DELIVERY_CODEX_MODE -ne 'SCRIPTED_ACCEPTANCE') { exit 91 }
+
+if ($Mode -eq 'Schema') {
+    if ([string]::IsNullOrWhiteSpace($SchemaRoot)) { exit 12 }
+    $schemaRoot = [System.IO.Path]::GetFullPath($SchemaRoot)
+    if (Test-Path -LiteralPath $schemaRoot) { exit 20 }
+    New-Item -ItemType Directory -Path $schemaRoot -Force:$false | Out-Null
+    [System.IO.File]::WriteAllText(
+        (Join-Path $schemaRoot 'lattice-scripted-app-server.json'),
+        '{"title":"LATTICE scripted app-server","type":"object"}',
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    exit 0
+}
+
+if ($Mode -ne 'Server' -or -not [string]::IsNullOrEmpty($SchemaRoot)) { exit 11 }
+if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME) -or [string]::IsNullOrWhiteSpace($env:LATTICE_DELIVERY_CODEX_HOME)) { exit 30 }
+$actualHome = [System.IO.Path]::GetFullPath($env:CODEX_HOME)
+$expectedHome = [System.IO.Path]::GetFullPath($env:LATTICE_DELIVERY_CODEX_HOME)
+if (-not [string]::Equals($actualHome, $expectedHome, [System.StringComparison]::OrdinalIgnoreCase)) { exit 31 }
+$markerPath = Join-Path $actualHome '.lattice-codex-home-v1'
+if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { exit 32 }
+$marker = [System.IO.File]::ReadAllBytes($markerPath)
+$expectedMarker = [System.Text.Encoding]::UTF8.GetBytes("lattice.codex-home.v1`n")
+if ([Convert]::ToBase64String($marker) -ne [Convert]::ToBase64String($expectedMarker)) { exit 33 }
+
+function Read-Request {
+    $line = [Console]::In.ReadLine()
+    if ($null -eq $line) { exit 40 }
+    try { return $line | ConvertFrom-Json -ErrorAction Stop } catch { exit 41 }
+}
+
+$initialize = Read-Request
+if ([string]$initialize.method -ne 'initialize' -or [int]$initialize.id -ne 0) { exit 42 }
+[Console]::Out.WriteLine((([ordered]@{
+    id = 0
+    result = [ordered]@{
+        userAgent = 'codex_cli_rs/0.144.6'
+        platformFamily = 'windows'
+        platformOs = 'windows'
+        codexHome = $actualHome
+    }
+}) | ConvertTo-Json -Depth 8 -Compress))
+
+$initialized = Read-Request
+if ([string]$initialized.method -ne 'initialized') { exit 43 }
+$thread = Read-Request
+$currentDirectory = [System.IO.Path]::GetFullPath((Get-Location).Path)
+$threadDirectory = [System.IO.Path]::GetFullPath([string]$thread.params.cwd)
+if (
+    [string]$thread.method -ne 'thread/start' -or
+    [int]$thread.id -ne 1 -or
+    [string]$thread.params.approvalPolicy -ne 'never' -or
+    [string]$thread.params.sandbox -ne 'workspace-write' -or
+    -not [string]::Equals($threadDirectory, $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase)
+) { exit 44 }
+[Console]::Out.WriteLine('{"id":1,"result":{"thread":{"id":"thread-task032-scripted"}}}')
+
+$turn = Read-Request
+$turnDirectory = [System.IO.Path]::GetFullPath([string]$turn.params.cwd)
+$inputs = @($turn.params.input)
+$roots = @($turn.params.sandboxPolicy.writableRoots)
+if (
+    [string]$turn.method -ne 'turn/start' -or
+    [int]$turn.id -ne 2 -or
+    [string]$turn.params.threadId -ne 'thread-task032-scripted' -or
+    [string]$turn.params.approvalPolicy -ne 'never' -or
+    [string]$turn.params.sandboxPolicy.type -ne 'workspaceWrite' -or
+    [bool]$turn.params.sandboxPolicy.networkAccess -ne $false -or
+    $inputs.Count -ne 1 -or
+    [string]$inputs[0].type -ne 'text' -or
+    [string]$inputs[0].text -ne 'Create answer.txt in the current repository with exactly the bytes LATTICE_DELIVERY_OK followed by one newline. Do not modify any other path. Do not stage or commit files and do not run Git commands.' -or
+    $roots.Count -ne 1 -or
+    -not [string]::Equals([System.IO.Path]::GetFullPath([string]$roots[0]), $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals($turnDirectory, $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase)
+) { exit 45 }
+
+[System.IO.File]::WriteAllBytes(
+    (Join-Path $currentDirectory 'answer.txt'),
+    [System.Text.Encoding]::ASCII.GetBytes("LATTICE_DELIVERY_OK`n")
+)
+[Console]::Out.WriteLine('{"id":2,"result":{"turn":{"id":"turn-task032-scripted"}}}')
+[Console]::Out.WriteLine('{"method":"turn/completed","params":{"threadId":"thread-task032-scripted","turn":{"id":"turn-task032-scripted","items":[],"status":"completed","error":null}}}')
+Start-Sleep -Seconds 60

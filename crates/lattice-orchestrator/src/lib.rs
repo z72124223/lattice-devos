@@ -112,7 +112,7 @@ where
         Err(error) => return finish_failure(ledger, request, &intent, error),
     };
 
-    let completed = CompletedDeliveryEvidence::new(
+    let completed = match CompletedDeliveryEvidence::new(
         request.clone(),
         intent.clone(),
         workspace,
@@ -120,13 +120,21 @@ where
         changes,
         test,
         git,
-    )
-    .map_err(DeliveryOrchestratorError::Contract)?;
-    let outcome_request = DeliveryOutcomeRequest::completed(request, completed)
-        .map_err(DeliveryOrchestratorError::Contract)?;
+    ) {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return finish_post_commit_contract_failure(ledger, request, &intent, error);
+        }
+    };
+    let outcome_request = match DeliveryOutcomeRequest::completed(request, completed) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return finish_post_commit_contract_failure(ledger, request, &intent, error);
+        }
+    };
     let outcome = ledger
         .record_outcome(&outcome_request)
-        .map_err(DeliveryOrchestratorError::OutcomePersistence)?;
+        .map_err(outcome_persistence_after_durable_intent)?;
     let receipt = ledger
         .load_receipt(&request.status_request())
         .map_err(DeliveryOrchestratorError::ReceiptRead)?;
@@ -177,6 +185,21 @@ fn finish_contract_failure<L: DeliveryLedgerPort>(
     })
 }
 
+fn finish_post_commit_contract_failure<L: DeliveryLedgerPort>(
+    ledger: &mut L,
+    request: &DeliveryRunRequest,
+    intent: &DurableIntentEvidence,
+    _error: DeliveryContractError,
+) -> Result<DeliveryReceipt, DeliveryOrchestratorError> {
+    let port_error = DeliveryPortError::new(
+        DeliveryStage::GitCommit,
+        PortErrorKind::Ambiguous,
+        DeliveryFailureCertainty::Ambiguous,
+        "POST_COMMIT_EVIDENCE_REJECTED",
+    );
+    finish_failure(ledger, request, intent, port_error)
+}
+
 fn finish_failure<L: DeliveryLedgerPort>(
     ledger: &mut L,
     request: &DeliveryRunRequest,
@@ -199,7 +222,7 @@ fn finish_failure<L: DeliveryLedgerPort>(
     let expected_status = outcome_request.status();
     let outcome = ledger
         .record_outcome(&outcome_request)
-        .map_err(DeliveryOrchestratorError::OutcomePersistence)?;
+        .map_err(outcome_persistence_after_durable_intent)?;
     let receipt = ledger
         .load_receipt(&request.status_request())
         .map_err(DeliveryOrchestratorError::ReceiptRead)?;
@@ -213,4 +236,15 @@ fn finish_failure<L: DeliveryLedgerPort>(
         cause,
         receipt: Box::new(receipt),
     })
+}
+
+fn outcome_persistence_after_durable_intent(
+    _error: DeliveryPortError,
+) -> DeliveryOrchestratorError {
+    DeliveryOrchestratorError::OutcomePersistence(DeliveryPortError::new(
+        DeliveryStage::Outcome,
+        PortErrorKind::Ambiguous,
+        DeliveryFailureCertainty::Ambiguous,
+        "OUTCOME_PERSISTENCE_AFTER_DURABLE_INTENT_UNKNOWN",
+    ))
 }

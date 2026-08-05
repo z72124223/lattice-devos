@@ -32,6 +32,8 @@ enum FailAt {
 struct FakeLedger {
     calls: Calls,
     fail: Option<FailAt>,
+    fail_outcome: bool,
+    outcome_failure_certainty: DeliveryFailureCertainty,
     last_outcome: Option<DeliveryOutcomeEvidence>,
     wrong_receipt: bool,
 }
@@ -53,8 +55,12 @@ impl DeliveryLedgerPort for FakeLedger {
         request: &DeliveryOutcomeRequest,
     ) -> DeliveryPortResult<DeliveryOutcomeEvidence> {
         self.calls.borrow_mut().push("outcome");
-        if self.fail == Some(FailAt::Outcome) {
-            return Err(ambiguous(DeliveryStage::Outcome, "OUTCOME_COMMIT_UNKNOWN"));
+        if self.fail_outcome {
+            return Err(stage_error(
+                DeliveryStage::Outcome,
+                self.outcome_failure_certainty,
+                "OUTCOME_DEADLINE_EXPIRED",
+            ));
         }
         let evidence = DeliveryOutcomeEvidence::new(request.clone(), digest('a')).expect("outcome");
         self.last_outcome = Some(evidence.clone());
@@ -84,6 +90,7 @@ struct FakeWorkspaceGit {
     calls: Calls,
     fail: Option<FailAt>,
     certainty: DeliveryFailureCertainty,
+    wrong_git_evidence: bool,
 }
 
 impl WorkspaceGitPort for FakeWorkspaceGit {
@@ -144,6 +151,9 @@ impl WorkspaceGitPort for FakeWorkspaceGit {
                 self.certainty,
                 "COMMIT_REJECTED",
             ));
+        }
+        if self.wrong_git_evidence {
+            return Ok(other_request_git_evidence());
         }
         GitCommitEvidence::new(
             request,
@@ -231,6 +241,8 @@ impl Scenario {
             ledger: FakeLedger {
                 calls: calls.clone(),
                 fail,
+                fail_outcome: fail == Some(FailAt::Outcome),
+                outcome_failure_certainty: certainty,
                 last_outcome: None,
                 wrong_receipt: false,
             },
@@ -238,6 +250,7 @@ impl Scenario {
                 calls: calls.clone(),
                 fail,
                 certainty,
+                wrong_git_evidence: false,
             },
             codex: FakeCodex {
                 calls,
@@ -349,13 +362,55 @@ fn ambiguous_commit_is_never_reported_as_failed_or_completed() {
 }
 
 #[test]
-fn outcome_write_ambiguity_does_not_attempt_receipt_or_report_success() {
+fn cross_bound_post_commit_evidence_is_persisted_as_reconciliation_required() {
+    let mut scenario = Scenario::new(None, DeliveryFailureCertainty::Known);
+    scenario.workspace.wrong_git_evidence = true;
+
+    let Err(DeliveryOrchestratorError::Terminal { receipt, .. }) = scenario.run() else {
+        panic!("expected terminal reconciliation result");
+    };
+
+    assert_eq!(
+        receipt.status(),
+        DeliveryTerminalStatus::ReconciliationRequired
+    );
+    assert_eq!(
+        scenario.call_log(),
+        [
+            "intent", "prepare", "codex", "scope", "test", "commit", "outcome", "receipt"
+        ]
+    );
+}
+
+#[test]
+fn known_outcome_write_failure_after_commit_requires_reconciliation() {
     let mut scenario = Scenario::new(Some(FailAt::Outcome), DeliveryFailureCertainty::Known);
 
-    assert!(matches!(
-        scenario.run(),
-        Err(DeliveryOrchestratorError::OutcomePersistence(_))
-    ));
+    let Err(DeliveryOrchestratorError::OutcomePersistence(error)) = scenario.run() else {
+        panic!("expected outcome persistence failure");
+    };
+    assert_eq!(error.kind(), PortErrorKind::Ambiguous);
+    assert_eq!(error.certainty(), DeliveryFailureCertainty::Ambiguous);
+    assert_eq!(
+        scenario.call_log(),
+        [
+            "intent", "prepare", "codex", "scope", "test", "commit", "outcome"
+        ]
+    );
+}
+
+#[test]
+fn ambiguous_commit_plus_known_outcome_deadline_remains_reconciliation_required() {
+    let mut scenario = Scenario::new(Some(FailAt::Commit), DeliveryFailureCertainty::Ambiguous);
+    scenario.ledger.fail_outcome = true;
+    scenario.ledger.outcome_failure_certainty = DeliveryFailureCertainty::Known;
+
+    let Err(DeliveryOrchestratorError::OutcomePersistence(error)) = scenario.run() else {
+        panic!("expected outcome persistence failure");
+    };
+
+    assert_eq!(error.kind(), PortErrorKind::Ambiguous);
+    assert_eq!(error.certainty(), DeliveryFailureCertainty::Ambiguous);
     assert_eq!(
         scenario.call_log(),
         [
@@ -387,6 +442,8 @@ fn status_path_calls_only_the_durable_receipt_port() {
     let mut ledger = FakeLedger {
         calls: calls.clone(),
         fail: None,
+        fail_outcome: false,
+        outcome_failure_certainty: DeliveryFailureCertainty::Known,
         last_outcome: Some(outcome),
         wrong_receipt: false,
     };
@@ -425,16 +482,54 @@ fn other_request_receipt() -> DeliveryReceipt {
     DeliveryReceipt::new(outcome, digest('b')).expect("receipt")
 }
 
+fn other_request_git_evidence() -> GitCommitEvidence {
+    let run = request("other-request");
+    let intent = DurableIntentEvidence::new(&run, digest('1')).expect("intent");
+    let workspace = PreparedWorkspaceEvidence::new(
+        &run,
+        &intent,
+        "other-workspace",
+        r"C:\bounded\other-repo",
+        "3".repeat(40),
+        digest('2'),
+    )
+    .expect("workspace");
+    let codex_request = CodexDeliveryRequest::new(run.clone(), intent.clone(), workspace.clone())
+        .expect("codex request");
+    let codex = CodexDeliveryEvidence::new(
+        &codex_request,
+        DeliveryRuntime::OfficialCodexAppServer,
+        r"C:\tools\codex.exe",
+        "codex-cli 0.144.6",
+        digest('3'),
+        digest('4'),
+        3,
+        "other-thread",
+        "other-turn",
+        digest('5'),
+    )
+    .expect("codex evidence");
+    let changes =
+        WorkspaceChangeEvidence::new(&run, &intent, &workspace, &codex, digest('6'), digest('7'))
+            .expect("changes");
+    let test = FixedTestEvidence::new(&run, &changes, digest('8')).expect("test");
+    GitCommitEvidence::new(
+        &run,
+        &changes,
+        &test,
+        "3".repeat(40),
+        "4".repeat(40),
+        digest('9'),
+    )
+    .expect("git evidence")
+}
+
 fn digest(byte: char) -> ContentDigest {
     ContentDigest::from_sha256(byte.to_string().repeat(64)).expect("digest")
 }
 
 fn known(stage: DeliveryStage, code: &'static str) -> DeliveryPortError {
     stage_error(stage, DeliveryFailureCertainty::Known, code)
-}
-
-fn ambiguous(stage: DeliveryStage, code: &'static str) -> DeliveryPortError {
-    stage_error(stage, DeliveryFailureCertainty::Ambiguous, code)
 }
 
 fn stage_error(

@@ -1,7 +1,7 @@
 ---
 module_id: lattice-ports
 name: LATTICE I/O Ports
-version: 1.5
+version: 1.6
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-05
@@ -37,7 +37,10 @@ lane, and fixed-test lane.
   service call.
 - `GatewayService` returns `GatewayServiceResult`: Rust-core routing or
   reply-binding failures cannot be attributed to an external component.
-- `CodexPort` is the only product-code mutation lane contract.
+- `DeliveryCodexPort` is the sole typed product-code mutation contract used by
+  Orchestrator 2.1. The earlier generic `CodexPort` remains source-compatible
+  only for pre-delivery consumers; it is frozen and cannot be wired as a
+  second production writer beside the typed delivery lane.
 - `GraphifyPort` returns derived read-only evidence.
 - `HermesPort` returns untrusted candidate evidence.
 - `DeliveryLedgerPort` records typed intent before an effect, records typed
@@ -102,9 +105,13 @@ lane, and fixed-test lane.
 
 ## Failure, Compatibility, And Migration
 
-Rejected calls and exhausted/unknown outcomes return typed errors. Version 1.5
-preserves every 1.4 signature and adds typed delivery-ledger, workspace/Git,
-and fixed-test traits for Orchestrator 2.1. Version 1.4
+Rejected calls and exhausted/unknown outcomes return typed errors. Version 1.6
+explicitly records the already-approved `DeliveryCodexPort` specialization
+used by Orchestrator 2.1 and freezes the earlier generic `CodexPort` outside
+the production delivery composition. This is one logical writer lane with two
+versioned interface shapes, never two runtime writers. Version 1.5 preserves
+every 1.4 signature and adds typed delivery-ledger, workspace/Git, and
+fixed-test traits for Orchestrator 2.1. Version 1.4
 makes `current_head` explicitly mutable for synchronous adapters and permits
 the unchanged typed receipt to carry its Contracts-owned live/durability
 classification; no driver or concrete connection enters the trait. Version 1.3
@@ -145,3 +152,4 @@ approval.
 | 1.3 | 2026-08-01 | SPEC-002 v15, ADR-016, TASK-018 | Complete typed Store transaction/current-head boundary and Store-specific failure semantics | User MVP-3 execution directive |
 | 1.4 | 2026-08-02 | SPEC-002 v22, ADR-018, TASK-020 | Explicit mutable current-head query and live physical receipt semantics without exposing a driver | User MVP-3 execution directive |
 | 1.5 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Typed delivery-ledger, bounded workspace/Git, and fixed-test traits while retaining contracts-only dependency direction | User approval in preceding implementation window |
+| 1.6 | 2026-08-05 | SPEC-002 v26, ADR-021 clarification, TASK-032 | Record the approved typed `DeliveryCodexPort` specialization; freeze generic `CodexPort` outside the production delivery composition | User approval of typed delivery contracts/ports in preceding implementation window |

@@ -6,6 +6,8 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+lattice-contracts = { path = "../lattice-contracts" }
+lattice-ports = { path = "../lattice-ports" }
 serde_json = "=1.0.151"
 sha2 = "=0.11.0"
 

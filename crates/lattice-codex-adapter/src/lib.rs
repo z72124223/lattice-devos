@@ -1,9 +1,11 @@
 //! Supervised Codex app-server adapter.
 
+mod delivery;
 mod identity;
 mod process;
 mod session;
 
+pub use delivery::{CodexDeliveryAdapter, CodexDeliveryAdapterConfig};
 pub use identity::{
     CodexIdentityError, CodexIdentityErrorKind, CodexIdentityEvidence, CodexIdentityExpectation,
     preflight_codex_identity,
@@ -11,6 +13,7 @@ pub use identity::{
 pub use process::{
     AppServerRunConfig, AppServerRunError, AppServerRunErrorKind, AppServerRunEvidence,
     CODEX_HOME_OWNERSHIP_MARKER_BYTES, CODEX_HOME_OWNERSHIP_MARKER_NAME, run_codex_app_server,
+    run_codex_app_server_until,
 };
 pub use session::{
     AppServerSession, InitializeEvidence, SessionError, SessionPhase, SessionRequest,

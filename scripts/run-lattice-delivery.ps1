@@ -1,14 +1,31 @@
 [CmdletBinding()]
 param(
     [ValidateSet('DeliveryRun', 'DeliveryStatus')]
-    [string]$InternalPhase
+    [string]$InternalPhase,
+    [switch]$OfficialCodex,
+    [string]$OfficialLauncherPath,
+    [string]$OfficialCodexHomePath
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$codexMode = 'SCRIPTED_ACCEPTANCE'
+$codexMode = if (-not [string]::IsNullOrEmpty($InternalPhase)) {
+    [Environment]::GetEnvironmentVariable('LATTICE_DELIVERY_CODEX_MODE', 'Process')
+} elseif ($OfficialCodex) {
+    'OFFICIAL_CODEX_APP_SERVER'
+} else {
+    'SCRIPTED_ACCEPTANCE'
+}
+if ($codexMode -notin @('SCRIPTED_ACCEPTANCE', 'OFFICIAL_CODEX_APP_SERVER')) {
+    throw 'LATTICE_DELIVERY_CODEX_MODE_REJECTED'
+}
+$officialCodexLiveEnabled = $false
+$officialCodexBlockedDiagnostic = 'FAILED_DIAGNOSTIC: OFFICIAL_CODEX_DISABLED_UPSTREAM_WINDOWS_SANDBOX_HELPER_REGRESSION; https://github.com/openai/codex/issues/29952; https://github.com/openai/codex/issues/29200'
+if ($codexMode -eq 'OFFICIAL_CODEX_APP_SERVER' -and -not $officialCodexLiveEnabled) {
+    throw $officialCodexBlockedDiagnostic
+}
 $launcherVersion = 'codex-cli 0.144.6'
 $deliveryEnvironmentNames = @(
     'LATTICE_DELIVERY_CODEX_MODE',
@@ -261,19 +278,67 @@ function Invoke-BoundedSecretFreeGitHead {
     }
 }
 
+function Assert-CodexModeEvidence {
+    param(
+        [Parameter(Mandatory = $true)]$Evidence,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('SCRIPTED_ACCEPTANCE', 'OFFICIAL_CODEX_APP_SERVER')]
+        [string]$CodexMode,
+        [Parameter(Mandatory = $true)][string]$RejectionCode
+    )
+
+    [int]$schemaFileCount = 0
+    $schemaCountValid = [int]::TryParse(
+        [string]$Evidence.schema_file_count,
+        [System.Globalization.NumberStyles]::None,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$schemaFileCount
+    )
+    if (-not $schemaCountValid) {
+        throw $RejectionCode
+    }
+
+    if ($CodexMode -eq 'SCRIPTED_ACCEPTANCE') {
+        if (
+            [string]$Evidence.codex_runtime -ne 'SCRIPTED_ACCEPTANCE' -or
+            $schemaFileCount -ne 1 -or
+            [string]$Evidence.thread_id -ne 'thread-task032-scripted' -or
+            [string]$Evidence.turn_id -ne 'turn-task032-scripted'
+        ) {
+            throw $RejectionCode
+        }
+        return
+    }
+
+    if (
+        [string]$Evidence.codex_runtime -ne 'OFFICIAL_CODEX_APP_SERVER' -or
+        $schemaFileCount -lt 1 -or
+        $schemaFileCount -gt 4096 -or
+        [string]$Evidence.thread_id -notmatch '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$' -or
+        [string]$Evidence.turn_id -notmatch '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$'
+    ) {
+        throw $RejectionCode
+    }
+}
+
 function Assert-DeliveryRunEvidence {
     param(
         [Parameter(Mandatory = $true)]$Evidence,
         [Parameter(Mandatory = $true)][string]$Launcher,
         [Parameter(Mandatory = $true)][string]$LauncherSha256,
-        [Parameter(Mandatory = $true)][string]$DeliveryRoot
+        [Parameter(Mandatory = $true)][string]$DeliveryRoot,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('SCRIPTED_ACCEPTANCE', 'OFFICIAL_CODEX_APP_SERVER')]
+        [string]$CodexMode
     )
 
     $required = @(
         'status', 'component', 'launcher_path', 'version', 'launcher_sha256',
         'schema_bundle_sha256', 'schema_file_count', 'repository_path',
         'changed_paths', 'test', 'test_command_id', 'baseline_commit', 'parent_sha',
-        'commit_sha', 'thread_id', 'turn_id', 'intent_digest', 'outcome_digest'
+        'commit_sha', 'thread_id', 'turn_id', 'codex_runtime', 'intent_digest',
+        'outcome_digest', 'profile', 'request_id', 'configuration_digest',
+        'receipt_digest'
     )
     foreach ($name in $required) {
         if ($name -notin $Evidence.PSObject.Properties.Name) {
@@ -289,7 +354,6 @@ function Assert-DeliveryRunEvidence {
         [string]$Evidence.version -ne $launcherVersion -or
         [string]$Evidence.launcher_sha256 -ne $LauncherSha256 -or
         [string]$Evidence.schema_bundle_sha256 -notmatch '^[0-9a-f]{64}$' -or
-        [int]$Evidence.schema_file_count -ne 1 -or
         -not (Test-ExactPath -Actual ([string]$Evidence.repository_path) -Expected (Join-Path $DeliveryRoot 'repo')) -or
         $changedPaths.Count -ne 1 -or
         [string]$changedPaths[0] -ne 'answer.txt' -or
@@ -299,13 +363,19 @@ function Assert-DeliveryRunEvidence {
         [string]$Evidence.parent_sha -ne [string]$Evidence.baseline_commit -or
         [string]$Evidence.commit_sha -notmatch '^[0-9a-f]{40}([0-9a-f]{24})?$' -or
         [string]$Evidence.commit_sha -eq [string]$Evidence.baseline_commit -or
-        [string]$Evidence.thread_id -ne 'thread-task032-scripted' -or
-        [string]$Evidence.turn_id -ne 'turn-task032-scripted' -or
+        [string]$Evidence.profile -ne 'task032-codex-postgres-v1' -or
+        [string]$Evidence.request_id -notmatch '^task032-request-[0-9a-f]{32}$' -or
+        [string]$Evidence.configuration_digest -notmatch '^[0-9a-f]{64}$' -or
         [string]$Evidence.intent_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.outcome_digest -notmatch '^[0-9a-f]{64}$'
+        [string]$Evidence.outcome_digest -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Evidence.receipt_digest -notmatch '^[0-9a-f]{64}$'
     ) {
         throw 'LATTICE_DELIVERY_RUN_EVIDENCE_REJECTED'
     }
+    Assert-CodexModeEvidence `
+        -Evidence $Evidence `
+        -CodexMode $CodexMode `
+        -RejectionCode 'LATTICE_DELIVERY_RUN_EVIDENCE_REJECTED'
 }
 
 function Assert-DurableStatusEvidence {
@@ -313,14 +383,19 @@ function Assert-DurableStatusEvidence {
         [Parameter(Mandatory = $true)]$Evidence,
         [Parameter(Mandatory = $true)][string]$Launcher,
         [Parameter(Mandatory = $true)][string]$LauncherSha256,
-        [Parameter(Mandatory = $true)][string]$DeliveryRoot
+        [Parameter(Mandatory = $true)][string]$DeliveryRoot,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('SCRIPTED_ACCEPTANCE', 'OFFICIAL_CODEX_APP_SERVER')]
+        [string]$CodexMode
     )
 
     $required = @(
         'status', 'component', 'repository_path', 'changed_paths', 'test',
         'test_command_id', 'commit_sha', 'parent_sha', 'baseline_commit',
         'launcher_path', 'version', 'launcher_sha256', 'schema_bundle_sha256',
-        'schema_file_count', 'thread_id', 'turn_id', 'intent_digest', 'outcome_digest'
+        'schema_file_count', 'thread_id', 'turn_id', 'codex_runtime',
+        'intent_digest', 'outcome_digest', 'profile', 'request_id',
+        'configuration_digest', 'receipt_digest'
     )
     foreach ($name in $required) {
         if ($name -notin $Evidence.PSObject.Properties.Name) {
@@ -344,14 +419,19 @@ function Assert-DurableStatusEvidence {
         [string]$Evidence.version -ne $launcherVersion -or
         [string]$Evidence.launcher_sha256 -ne $LauncherSha256 -or
         [string]$Evidence.schema_bundle_sha256 -notmatch '^[0-9a-f]{64}$' -or
-        [int]$Evidence.schema_file_count -ne 1 -or
-        [string]$Evidence.thread_id -ne 'thread-task032-scripted' -or
-        [string]$Evidence.turn_id -ne 'turn-task032-scripted' -or
+        [string]$Evidence.profile -ne 'task032-codex-postgres-v1' -or
+        [string]$Evidence.request_id -notmatch '^task032-request-[0-9a-f]{32}$' -or
+        [string]$Evidence.configuration_digest -notmatch '^[0-9a-f]{64}$' -or
         [string]$Evidence.intent_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.outcome_digest -notmatch '^[0-9a-f]{64}$'
+        [string]$Evidence.outcome_digest -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Evidence.receipt_digest -notmatch '^[0-9a-f]{64}$'
     ) {
         throw 'LATTICE_DELIVERY_STATUS_EVIDENCE_REJECTED'
     }
+    Assert-CodexModeEvidence `
+        -Evidence $Evidence `
+        -CodexMode $CodexMode `
+        -RejectionCode 'LATTICE_DELIVERY_STATUS_EVIDENCE_REJECTED'
 }
 
 function Assert-InternalEnvironment {
@@ -387,7 +467,11 @@ function Invoke-DeliveryRunPhase {
     $gitExe = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_GIT_EXE')
     $runEvidencePath = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_RUN_EVIDENCE')
 
-    foreach ($path in @($fixtureRoot, $runtime, $launcher, $schemaDirectory, $codexHome, $deliveryRoot, $runEvidencePath)) {
+    $repositoryOwnedPaths = @($fixtureRoot, $runtime, $schemaDirectory, $codexHome, $deliveryRoot, $runEvidencePath)
+    if ($codexMode -eq 'SCRIPTED_ACCEPTANCE') {
+        $repositoryOwnedPaths += $launcher
+    }
+    foreach ($path in $repositoryOwnedPaths) {
         Assert-NoReparseAncestor -Path $path -Boundary $repositoryRoot
     }
     Assert-RegularFile -Path $runtime
@@ -415,7 +499,12 @@ function Invoke-DeliveryRunPhase {
         '--postgres-run-id', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_RUN_ID')
     )
     $evidence = Invoke-RuntimeJson -Executable $runtime -Arguments $arguments
-    Assert-DeliveryRunEvidence -Evidence $evidence -Launcher $launcher -LauncherSha256 $launcherSha256 -DeliveryRoot $deliveryRoot
+    Assert-DeliveryRunEvidence `
+        -Evidence $evidence `
+        -Launcher $launcher `
+        -LauncherSha256 $launcherSha256 `
+        -DeliveryRoot $deliveryRoot `
+        -CodexMode $codexMode
 
     $answerPath = Join-Path ([string]$evidence.repository_path) 'answer.txt'
     Assert-RegularFile -Path $answerPath
@@ -439,7 +528,11 @@ function Invoke-DeliveryStatusPhase {
     $statusEvidencePath = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_STATUS_EVIDENCE')
     $finalEvidencePath = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_FINAL_EVIDENCE')
 
-    foreach ($path in @($runtime, $launcher, $deliveryRoot, $runEvidencePath, $statusEvidencePath, $finalEvidencePath)) {
+    $repositoryOwnedPaths = @($runtime, $deliveryRoot, $runEvidencePath, $statusEvidencePath, $finalEvidencePath)
+    if ($codexMode -eq 'SCRIPTED_ACCEPTANCE') {
+        $repositoryOwnedPaths += $launcher
+    }
+    foreach ($path in $repositoryOwnedPaths) {
         Assert-NoReparseAncestor -Path $path -Boundary $repositoryRoot
     }
     Assert-RegularFile -Path $runtime
@@ -449,20 +542,32 @@ function Invoke-DeliveryStatusPhase {
     }
 
     $runEvidence = Read-JsonEvidence -Path $runEvidencePath
-    Assert-DeliveryRunEvidence -Evidence $runEvidence -Launcher $launcher -LauncherSha256 $launcherSha256 -DeliveryRoot $deliveryRoot
+    Assert-DeliveryRunEvidence `
+        -Evidence $runEvidence `
+        -Launcher $launcher `
+        -LauncherSha256 $launcherSha256 `
+        -DeliveryRoot $deliveryRoot `
+        -CodexMode $codexMode
     $status = Invoke-RuntimeJson -Executable $runtime -Arguments @(
         'delivery-status',
         '--postgres-host', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_HOST'),
         '--postgres-port', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_PORT'),
         '--postgres-run-id', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_RUN_ID')
     )
-    Assert-DurableStatusEvidence -Evidence $status -Launcher $launcher -LauncherSha256 $launcherSha256 -DeliveryRoot $deliveryRoot
+    Assert-DurableStatusEvidence `
+        -Evidence $status `
+        -Launcher $launcher `
+        -LauncherSha256 $launcherSha256 `
+        -DeliveryRoot $deliveryRoot `
+        -CodexMode $codexMode
 
     foreach ($name in @(
         'repository_path', 'test', 'test_command_id', 'commit_sha', 'parent_sha',
         'baseline_commit',
         'launcher_path', 'version', 'launcher_sha256', 'schema_bundle_sha256',
-        'schema_file_count', 'thread_id', 'turn_id', 'intent_digest', 'outcome_digest'
+        'schema_file_count', 'thread_id', 'turn_id', 'codex_runtime',
+        'intent_digest', 'outcome_digest', 'profile', 'request_id',
+        'configuration_digest', 'receipt_digest'
     )) {
         if ([string]$status.$name -ne [string]$runEvidence.$name) {
             throw 'LATTICE_DELIVERY_RESTART_CROSS_BINDING_REJECTED'
@@ -500,16 +605,33 @@ function Invoke-DeliveryStatusPhase {
         test_command_id = [string]$status.test_command_id
         baseline_commit = [string]$status.baseline_commit
         commit_sha = [string]$status.commit_sha
+        codex_runtime = [string]$status.codex_runtime
+        profile = [string]$status.profile
+        request_id = [string]$status.request_id
+        configuration_digest = [string]$status.configuration_digest
         launcher_sha256 = [string]$status.launcher_sha256
         schema_bundle_sha256 = [string]$status.schema_bundle_sha256
         intent_digest = [string]$status.intent_digest
         outcome_digest = [string]$status.outcome_digest
+        receipt_digest = [string]$status.receipt_digest
         answer_sha256 = (Get-FileHash -LiteralPath $answerPath -Algorithm SHA256).Hash.ToLowerInvariant()
     }
     Write-JsonEvidence -Path $finalEvidencePath -Value $final
 }
 
 function Invoke-DefaultAcceptance {
+    if ($OfficialCodex -and (
+        [string]::IsNullOrWhiteSpace($OfficialLauncherPath) -or
+        [string]::IsNullOrWhiteSpace($OfficialCodexHomePath)
+    )) {
+        throw 'LATTICE_DELIVERY_OFFICIAL_CONFIGURATION_MISSING'
+    }
+    if (-not $OfficialCodex -and (
+        -not [string]::IsNullOrEmpty($OfficialLauncherPath) -or
+        -not [string]::IsNullOrEmpty($OfficialCodexHomePath)
+    )) {
+        throw 'LATTICE_DELIVERY_UNUSED_OFFICIAL_CONFIGURATION'
+    }
     $repositoryRoot = Get-CanonicalPath -Path (Join-Path $PSScriptRoot '..')
     $repositoryTarget = Get-CanonicalPath -Path (Join-Path $repositoryRoot 'target')
     $fixtureParent = Get-CanonicalPath -Path (Join-Path $repositoryTarget 'lattice-delivery')
@@ -540,118 +662,19 @@ function Invoke-DefaultAcceptance {
     New-Item -ItemType Directory -Path $codexHome -Force:$false | Out-Null
     New-Item -ItemType Directory -Path $evidenceRoot -Force:$false | Out-Null
     $fixtureMarker = Join-Path $fixtureRoot '.lattice-delivery-fixture-v1.json'
-    Write-JsonEvidence -Path $fixtureMarker -Value ([ordered]@{
-        kind = 'LATTICE_DELIVERY_SCRIPTED_ACCEPTANCE_V1'
-        fixture_id = $fixtureId
-        root = $fixtureRoot
-        repository_root = $repositoryRoot
-        codex_mode = $codexMode
-    })
     [System.IO.File]::WriteAllBytes(
         (Join-Path $codexHome '.lattice-codex-home-v1'),
         [System.Text.Encoding]::UTF8.GetBytes("lattice.codex-home.v1`n")
     )
 
     $serverPath = Join-Path $fixtureRoot 'scripted-codex.ps1'
-    $serverSource = @'
-[CmdletBinding()]
-param(
-    [Parameter(Mandatory = $true)][string]$ExpectedSelfSha256,
-    [Parameter(Mandatory = $true)][ValidateSet('Schema', 'Server')][string]$Mode,
-    [string]$SchemaRoot
-)
-
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-
-$selfHash = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($ExpectedSelfSha256 -notmatch '^[0-9a-f]{64}$' -or $selfHash -ne $ExpectedSelfSha256) { exit 90 }
-if ($env:LATTICE_DELIVERY_CODEX_MODE -ne 'SCRIPTED_ACCEPTANCE') { exit 91 }
-
-if ($Mode -eq 'Schema') {
-    if ([string]::IsNullOrWhiteSpace($SchemaRoot)) { exit 12 }
-    $schemaRoot = [System.IO.Path]::GetFullPath($SchemaRoot)
-    if (Test-Path -LiteralPath $schemaRoot) { exit 20 }
-    New-Item -ItemType Directory -Path $schemaRoot -Force:$false | Out-Null
-    [System.IO.File]::WriteAllText(
-        (Join-Path $schemaRoot 'lattice-scripted-app-server.json'),
-        '{"title":"LATTICE scripted app-server","type":"object"}',
-        [System.Text.UTF8Encoding]::new($false)
+    $serverTemplatePath = Get-CanonicalPath -Path (Join-Path $repositoryRoot 'apps\lattice-runtime\src\fixtures\task032-scripted-codex.ps1')
+    Assert-NoReparseAncestor -Path $serverTemplatePath -Boundary $repositoryRoot
+    Assert-RegularFile -Path $serverTemplatePath
+    [System.IO.File]::WriteAllBytes(
+        $serverPath,
+        [System.IO.File]::ReadAllBytes($serverTemplatePath)
     )
-    exit 0
-}
-
-if ($Mode -ne 'Server' -or -not [string]::IsNullOrEmpty($SchemaRoot)) { exit 11 }
-if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME) -or [string]::IsNullOrWhiteSpace($env:LATTICE_DELIVERY_CODEX_HOME)) { exit 30 }
-$actualHome = [System.IO.Path]::GetFullPath($env:CODEX_HOME)
-$expectedHome = [System.IO.Path]::GetFullPath($env:LATTICE_DELIVERY_CODEX_HOME)
-if (-not [string]::Equals($actualHome, $expectedHome, [System.StringComparison]::OrdinalIgnoreCase)) { exit 31 }
-$markerPath = Join-Path $actualHome '.lattice-codex-home-v1'
-if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { exit 32 }
-$marker = [System.IO.File]::ReadAllBytes($markerPath)
-$expectedMarker = [System.Text.Encoding]::UTF8.GetBytes("lattice.codex-home.v1`n")
-if ([Convert]::ToBase64String($marker) -ne [Convert]::ToBase64String($expectedMarker)) { exit 33 }
-
-function Read-Request {
-    $line = [Console]::In.ReadLine()
-    if ($null -eq $line) { exit 40 }
-    try { return $line | ConvertFrom-Json -ErrorAction Stop } catch { exit 41 }
-}
-
-$initialize = Read-Request
-if ([string]$initialize.method -ne 'initialize' -or [int]$initialize.id -ne 0) { exit 42 }
-[Console]::Out.WriteLine((([ordered]@{
-    id = 0
-    result = [ordered]@{
-        userAgent = 'codex_cli_rs/0.144.6'
-        platformFamily = 'windows'
-        platformOs = 'windows'
-        codexHome = $actualHome
-    }
-}) | ConvertTo-Json -Depth 8 -Compress))
-
-$initialized = Read-Request
-if ([string]$initialized.method -ne 'initialized') { exit 43 }
-$thread = Read-Request
-$currentDirectory = [System.IO.Path]::GetFullPath((Get-Location).Path)
-$threadDirectory = [System.IO.Path]::GetFullPath([string]$thread.params.cwd)
-if (
-    [string]$thread.method -ne 'thread/start' -or
-    [int]$thread.id -ne 1 -or
-    [string]$thread.params.approvalPolicy -ne 'never' -or
-    [string]$thread.params.sandbox -ne 'workspace-write' -or
-    -not [string]::Equals($threadDirectory, $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase)
-) { exit 44 }
-[Console]::Out.WriteLine('{"id":1,"result":{"thread":{"id":"thread-task032-scripted"}}}')
-
-$turn = Read-Request
-$turnDirectory = [System.IO.Path]::GetFullPath([string]$turn.params.cwd)
-$inputs = @($turn.params.input)
-$roots = @($turn.params.sandboxPolicy.writableRoots)
-if (
-    [string]$turn.method -ne 'turn/start' -or
-    [int]$turn.id -ne 2 -or
-    [string]$turn.params.threadId -ne 'thread-task032-scripted' -or
-    [string]$turn.params.approvalPolicy -ne 'never' -or
-    [string]$turn.params.sandboxPolicy.type -ne 'workspaceWrite' -or
-    [bool]$turn.params.sandboxPolicy.networkAccess -ne $false -or
-    $inputs.Count -ne 1 -or
-    [string]$inputs[0].type -ne 'text' -or
-    [string]$inputs[0].text -ne 'Create answer.txt in the current repository with exactly the bytes LATTICE_DELIVERY_OK followed by one newline. Do not modify any other path. Do not stage or commit files and do not run Git commands.' -or
-    $roots.Count -ne 1 -or
-    -not [string]::Equals([System.IO.Path]::GetFullPath([string]$roots[0]), $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase) -or
-    -not [string]::Equals($turnDirectory, $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase)
-) { exit 45 }
-
-[System.IO.File]::WriteAllBytes(
-    (Join-Path $currentDirectory 'answer.txt'),
-    [System.Text.Encoding]::ASCII.GetBytes("LATTICE_DELIVERY_OK`n")
-)
-[Console]::Out.WriteLine('{"id":2,"result":{"turn":{"id":"turn-task032-scripted"}}}')
-[Console]::Out.WriteLine('{"method":"turn/completed","params":{"threadId":"thread-task032-scripted","turn":{"id":"turn-task032-scripted","items":[],"status":"completed","error":null}}}')
-Start-Sleep -Seconds 60
-'@
-    Write-Utf8NoBom -Path $serverPath -Content $serverSource
     Assert-RegularFile -Path $serverPath
     $serverSha256 = (Get-FileHash -LiteralPath $serverPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $launcherPath = Join-Path $fixtureRoot 'scripted-codex.cmd'
@@ -674,6 +697,40 @@ Start-Sleep -Seconds 60
     [System.IO.File]::WriteAllText($launcherPath, $launcherSource, [System.Text.Encoding]::ASCII)
     Assert-RegularFile -Path $launcherPath
     $launcherSha256 = (Get-FileHash -LiteralPath $launcherPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-JsonEvidence -Path $fixtureMarker -Value ([ordered]@{
+        kind = 'LATTICE_DELIVERY_SCRIPTED_ACCEPTANCE_V1'
+        fixture_id = $fixtureId
+        root = $fixtureRoot
+        repository_root = $repositoryRoot
+        codex_mode = 'SCRIPTED_ACCEPTANCE'
+        launcher_path = (Get-CanonicalPath -Path $launcherPath)
+        launcher_sha256 = $launcherSha256
+        server_path = (Get-CanonicalPath -Path $serverPath)
+        server_sha256 = $serverSha256
+    })
+
+    if ($OfficialCodex) {
+        $launcherPath = Get-CanonicalPath -Path $OfficialLauncherPath
+        $codexHome = Get-CanonicalPath -Path $OfficialCodexHomePath
+        Assert-RegularFile -Path $launcherPath
+        $launcherItem = Get-Item -LiteralPath $launcherPath -Force
+        if ($launcherItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw 'LATTICE_DELIVERY_OFFICIAL_LAUNCHER_REPARSE_REJECTED'
+        }
+        Assert-NoReparseAncestor -Path $codexHome -Boundary $repositoryRoot
+        $homeItem = Get-Item -LiteralPath $codexHome -Force
+        if (-not $homeItem.PSIsContainer -or ($homeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            throw 'LATTICE_DELIVERY_OFFICIAL_CODEX_HOME_REJECTED'
+        }
+        $ownershipMarker = Join-Path $codexHome '.lattice-codex-home-v1'
+        Assert-RegularFile -Path $ownershipMarker
+        $expectedOwnershipMarker = [System.Text.Encoding]::UTF8.GetBytes("lattice.codex-home.v1`n")
+        $actualOwnershipMarker = [System.IO.File]::ReadAllBytes($ownershipMarker)
+        if ([Convert]::ToBase64String($actualOwnershipMarker) -ne [Convert]::ToBase64String($expectedOwnershipMarker)) {
+            throw 'LATTICE_DELIVERY_OFFICIAL_CODEX_HOME_MARKER_REJECTED'
+        }
+        $launcherSha256 = (Get-FileHash -LiteralPath $launcherPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
 
     $schemaDirectory = Join-Path $fixtureRoot 'schema'
     $deliveryRoot = Join-Path $fixtureRoot 'delivery'
@@ -722,7 +779,7 @@ Start-Sleep -Seconds 60
         }
 
         Write-Output 'LATTICE_DELIVERY_HARNESS=PASS'
-        Write-Output 'CODEX_MODE=SCRIPTED_ACCEPTANCE'
+        Write-Output ("CODEX_MODE=$codexMode")
         Write-Output (([ordered]@{
             status = 'PASS'
             component = 'lattice-delivery-harness'

@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 25
+version: 26
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -35,7 +35,7 @@ modules:
   - module_id: artifact-store
     constitution_version: 1.0
   - module_id: codex-adapter
-    constitution_version: 1.0
+    constitution_version: 1.1
   - module_id: review-runtime
     constitution_version: 1.0
   - module_id: graphify-adapter
@@ -53,7 +53,7 @@ modules:
   - module_id: lattice-contracts
     constitution_version: 1.10
   - module_id: lattice-ports
-    constitution_version: 1.5
+    constitution_version: 1.6
 ---
 
 # Autonomous Development Platform
@@ -747,7 +747,7 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | approval-verifier | 1.0 | Pure typed-subject/challenge/proof/nonce/time/current-head owner and deterministic fake; live trust/claim remains deferred |
 | postgres-store | 1.4 | Preserved Store/Task-Ledger evidence plus exact global schema-v4 migration, five fixed-column Registry tables, nine fixed Registry-v1 runtime functions, and one Registry-specific global `SERIALIZABLE` transaction/persistence receipt; later domain repositories remain TASK-023 through TASK-025 |
 | artifact-store | 1.0 | Pure project-scoped object/reference/provenance/quota/delete-claim semantic owner and deterministic fake; PostgreSQL/filesystem I/O remains deferred |
-| codex-adapter | 1.0 | New owner of one writable app-server process/thread contract |
+| codex-adapter | 1.1 | One writable app-server process/thread implementing the typed `DeliveryCodexPort`; generic `CodexPort` is not a second production path |
 | review-runtime | 1.0 | New independent read-only review boundary |
 | graphify-adapter | 1.0 | New read-only-source graph/artifact boundary |
 | hermes-adapter | 1.0 | New contained research/candidate boundary |
@@ -756,7 +756,7 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | lattice-core-bootstrap | 1.0 | Inert compile-time component manifest for the first Rust slice |
 | lattice-cli | 1.0 | Read-only bootstrap inspection/recovery command; no runtime authority |
 | lattice-contracts | 1.10 | Preserve 1.9 values and add immutable typed delivery request, stage evidence, terminal outcome/status, and receipt representations without I/O or authority |
-| lattice-ports | 1.5 | Preserve 1.4 traits and add abstract delivery-ledger, workspace/Git, and fixed-test ports used by the pure orchestrator |
+| lattice-ports | 1.6 | Preserve legacy signatures, add typed delivery-ledger/Codex/workspace/Git/fixed-test ports for the pure orchestrator, and freeze generic `CodexPort` outside the production delivery composition |
 
 The user approved this module direction, the local bootstrap slice, and
 continued local work on 2026-07-29. TASK-010 adds the pure technical
@@ -1310,8 +1310,9 @@ packaging modules do not activate functional provider modules.
 - The Rust-owned writable Codex topology and the V2 amendment direction are
   already approved.
 - The responsible user explicitly approved the SPEC-002 v25 / ADR-021
-  delivery-composition amendment before this implementation window: Contracts
-  1.10, Ports 1.5, pure Orchestrator 2.1, `latticed` 1.0, its two fixed
+  delivery-composition amendment before this implementation window; v26
+  records its typed-Codex-port clarification: Contracts 1.10, Ports 1.6, pure
+  Orchestrator 2.1, `latticed` 1.0, its two fixed
   zero-parameter MCP tools, and the `lattice-runtime` compatibility wrapper may
   proceed without another routine review prompt.
 - Routine bounded local implementation, dependency setup, disposable database

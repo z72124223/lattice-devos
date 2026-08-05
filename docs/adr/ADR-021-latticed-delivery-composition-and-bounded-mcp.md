@@ -4,7 +4,7 @@
   implementation window
 - Date: 2026-08-05
 - Decision owner: user
-- Related: SPEC-002 v25, ADR-004, ADR-005, ADR-006, ADR-015, TASK-032
+- Related: SPEC-002 v26, ADR-004, ADR-005, ADR-006, ADR-015, TASK-032
 
 ## Context
 
@@ -24,10 +24,13 @@ OpenClaw boundary.
 1. `lattice-contracts` 1.10 owns immutable typed delivery request, stage
    evidence, terminal outcome/status, and receipt representations. These values
    grant no policy, persistence, workspace, Git, test, or provider authority.
-2. `lattice-ports` 1.5 owns abstract `DeliveryLedgerPort`,
-   `WorkspaceGitPort`, and `TestRunnerPort` traits in addition to the existing
-   `CodexPort`. No port exposes a concrete driver, process, repository, command
-   line, SQL statement, path supplied by an MCP caller, or credential.
+2. `lattice-ports` 1.6 owns abstract `DeliveryLedgerPort`,
+   `DeliveryCodexPort`, `WorkspaceGitPort`, and `TestRunnerPort` traits. The
+   typed Codex specialization is the sole production writer boundary for this
+   delivery composition. The earlier generic `CodexPort` remains frozen for
+   source compatibility and cannot form a second writer path. No port exposes
+   a concrete driver, process, repository, command line, SQL statement, path
+   supplied by an MCP caller, or credential.
 3. `orchestrator-runtime` 2.1 is pure Rust effect coordination. With all
    dependencies injected, it may only order:
    - durable intent;
@@ -114,3 +117,7 @@ in the preceding task window, including the contract/port expansion, pure
 orchestrator, `latticed` 1.0 composition root, fixed zero-parameter MCP tools,
 and TASK-032 allowlist update. No additional routine approval gate remains for
 this bounded local implementation.
+
+The 1.6 wording clarification records a trait that was already introduced by
+that approved typed-delivery expansion; it does not add a second writer or a
+new approval decision.

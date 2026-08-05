@@ -9,7 +9,7 @@
   },
   "scripts": {
     "check": "node scripts/check-project.mjs",
-    "test": "node --test",
+    "test": "node --test \"test/*.test.js\"",
     "test:domain": "node --test test/task-domain.test.js",
     "verify": "npm run check && npm test"
   }
