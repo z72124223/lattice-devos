@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use lattice_codex_adapter::{AppServerProtocol, ProtocolError, TurnOutcome, TurnStatus};
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[test]
 fn builds_the_stable_initialize_thread_and_turn_sequence() {
@@ -70,7 +70,30 @@ fn accepts_only_a_completed_terminal_for_the_bound_turn() {
             "method": "turn/completed",
             "params": {
                 "threadId": "thr_123",
-                "turn": {"id": "turn_456", "status": "completed", "items": [], "error": null}
+                "turn": {
+                    "id": "turn_456",
+                    "status": "completed",
+                    "itemsView": "full",
+                    "items": [
+                        {
+                            "id": "tool_apply",
+                            "type": "dynamicToolCall",
+                            "tool": "exec",
+                            "arguments": {},
+                            "status": "completed",
+                            "success": true
+                        },
+                        {
+                            "id": "tool_verify",
+                            "type": "dynamicToolCall",
+                            "tool": "exec",
+                            "arguments": {},
+                            "status": "completed",
+                            "success": true
+                        }
+                    ],
+                    "error": null
+                }
             }
         }),
         "thr_123",
@@ -375,6 +398,56 @@ fn rejects_yielded_or_unfinished_tools_as_completed_delivery_evidence() {
 }
 
 #[test]
+fn rejects_truncated_or_missing_separate_delivery_tool_evidence() {
+    let completed_exec = |id: &str| {
+        json!({
+            "id": id,
+            "type": "dynamicToolCall",
+            "tool": "exec",
+            "arguments": {},
+            "status": "completed",
+            "success": true,
+            "contentItems": [{
+                "type": "inputText",
+                "text": "Script completed\nExit code: 0"
+            }]
+        })
+    };
+    let terminal = |items: Value, items_view: Option<&str>| {
+        let mut terminal = json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thr_123",
+                "turn": {
+                    "id": "turn_1",
+                    "items": items,
+                    "status": "completed",
+                    "error": null
+                }
+            }
+        });
+        if let Some(items_view) = items_view {
+            terminal["params"]["turn"]["itemsView"] = json!(items_view);
+        }
+        terminal
+    };
+
+    for terminal in [
+        terminal(json!([]), Some("full")),
+        terminal(json!([completed_exec("tool_apply")]), Some("full")),
+        terminal(
+            json!([completed_exec("tool_apply"), completed_exec("tool_verify")]),
+            None,
+        ),
+    ] {
+        assert_eq!(
+            AppServerProtocol::parse_turn_completed(&terminal, "thr_123", "turn_1"),
+            Err(ProtocolError::IncompleteToolExecution)
+        );
+    }
+}
+
+#[test]
 fn accepts_a_yielded_exec_only_after_wait_observes_completed_success() {
     let outcome = AppServerProtocol::parse_turn_completed(
         &json!({
@@ -410,6 +483,18 @@ fn accepts_a_yielded_exec_only_after_wait_observes_completed_success() {
                             "contentItems": [{
                                 "type": "inputText",
                                 "text": "Script completed\nWall time: 0.2 seconds\nExit code: 0"
+                            }]
+                        },
+                        {
+                            "id": "tool_verify",
+                            "type": "dynamicToolCall",
+                            "tool": "exec",
+                            "arguments": {},
+                            "status": "completed",
+                            "success": true,
+                            "contentItems": [{
+                                "type": "inputText",
+                                "text": "Script completed\nExit code: 0"
                             }]
                         }
                     ],

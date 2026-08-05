@@ -497,13 +497,39 @@ mod tests {
     }
 
     fn terminal(status: &str) -> Value {
-        json!({
+        let items = if status == "completed" {
+            json!([
+                {
+                    "id": "tool_apply",
+                    "type": "dynamicToolCall",
+                    "tool": "exec",
+                    "arguments": {},
+                    "status": "completed",
+                    "success": true
+                },
+                {
+                    "id": "tool_verify",
+                    "type": "dynamicToolCall",
+                    "tool": "exec",
+                    "arguments": {},
+                    "status": "completed",
+                    "success": true
+                }
+            ])
+        } else {
+            json!([])
+        };
+        let mut terminal = json!({
             "method": "turn/completed",
             "params": {
                 "threadId": "thr_123",
-                "turn": {"id": "turn_456", "items": [], "status": status, "error": null}
+                "turn": {"id": "turn_456", "items": items, "status": status, "error": null}
             }
-        })
+        });
+        if status == "completed" {
+            terminal["params"]["turn"]["itemsView"] = json!("full");
+        }
+        terminal
     }
 
     fn sent_session() -> AppServerSession {

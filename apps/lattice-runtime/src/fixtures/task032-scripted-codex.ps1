@@ -100,7 +100,7 @@ if (
     [bool]$turn.params.sandboxPolicy.networkAccess -ne $false -or
     $inputs.Count -ne 1 -or
     [string]$inputs[0].type -ne 'text' -or
-    [string]$inputs[0].text -ne 'Create answer.txt in the current repository with exactly the bytes LATTICE_DELIVERY_OK followed by one newline. Do not modify any other path. Do not stage or commit files and do not run Git commands.' -or
+    [string]$inputs[0].text -ne 'Create answer.txt in the current repository with exactly the bytes LATTICE_DELIVERY_OK followed by one newline. Use one standalone apply_patch operation in an exec call that performs no verification or other tool work. Confirm that call has completed, then use a separate verification call to read and validate the exact bytes. Do not combine file creation and verification in the same exec call. If any exec result says Script running with cell ID, call functions.wait with that exact cell_id until Script completed is received, and require exit code 0 before reporting success. Never terminate a yielded cell or claim completion from a running marker. Do not modify any other path. Do not stage or commit files and do not run Git commands.' -or
     $roots.Count -ne 1 -or
     -not [string]::Equals([System.IO.Path]::GetFullPath([string]$roots[0]), $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase) -or
     -not [string]::Equals($turnDirectory, $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase)
@@ -113,5 +113,5 @@ if ($deadlineRegression) { Start-Sleep -Milliseconds 20000 }
     [System.Text.Encoding]::ASCII.GetBytes("LATTICE_DELIVERY_OK`n")
 )
 [Console]::Out.WriteLine('{"id":2,"result":{"turn":{"id":"turn-task032-scripted"}}}')
-[Console]::Out.WriteLine('{"method":"turn/completed","params":{"threadId":"thread-task032-scripted","turn":{"id":"turn-task032-scripted","items":[],"status":"completed","error":null}}}')
+[Console]::Out.WriteLine('{"method":"turn/completed","params":{"threadId":"thread-task032-scripted","turn":{"id":"turn-task032-scripted","items":[{"id":"tool-apply-patch","type":"dynamicToolCall","tool":"exec","arguments":{"command":"apply_patch fixture"},"status":"completed","success":true,"contentItems":[{"type":"inputText","text":"Script completed\nExit code: 0"}]},{"id":"tool-verify","type":"dynamicToolCall","tool":"exec","arguments":{"command":"verify fixture"},"status":"completed","success":true,"contentItems":[{"type":"inputText","text":"Script completed\nExit code: 0"}]}],"itemsView":"full","status":"completed","error":null}}}')
 Start-Sleep -Seconds 60

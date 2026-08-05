@@ -267,13 +267,12 @@ fn validate_completed_tool_evidence(
     turn: &serde_json::Map<String, Value>,
     items: &[Value],
 ) -> Result<(), ProtocolError> {
-    if let Some(items_view) = turn.get("itemsView")
-        && items_view.as_str() != Some("full")
-    {
+    if turn.get("itemsView").and_then(Value::as_str) != Some("full") {
         return Err(ProtocolError::IncompleteToolExecution);
     }
 
     let mut pending_cells = BTreeSet::new();
+    let mut completed_delivery_tools = 0_usize;
     for item in items {
         let Some(object) = item.as_object() else {
             return Err(ProtocolError::MalformedTerminal);
@@ -292,6 +291,9 @@ fn validate_completed_tool_evidence(
                     .get("tool")
                     .and_then(Value::as_str)
                     .ok_or(ProtocolError::MalformedTerminal)?;
+                if tool != "wait" {
+                    completed_delivery_tools += 1;
+                }
                 let output = dynamic_tool_output(object)?;
                 for cell_id in yielded_cell_ids(&output)? {
                     pending_cells.insert(cell_id);
@@ -315,7 +317,7 @@ fn validate_completed_tool_evidence(
             _ => {}
         }
     }
-    if pending_cells.is_empty() {
+    if pending_cells.is_empty() && completed_delivery_tools >= 2 {
         Ok(())
     } else {
         Err(ProtocolError::IncompleteToolExecution)

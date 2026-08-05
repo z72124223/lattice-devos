@@ -366,4 +366,26 @@ mod tests {
         assert!(DELIVERY_PROMPT.contains("Script completed"));
         assert!(DELIVERY_PROMPT.contains("Do not combine"));
     }
+
+    #[test]
+    fn scripted_fixture_tracks_prompt_and_completed_tool_evidence() {
+        let fixture = include_str!("fixtures/task032-scripted-codex.ps1");
+        assert!(fixture.contains(&format!("[string]$inputs[0].text -ne '{DELIVERY_PROMPT}'")));
+        let terminal = fixture
+            .lines()
+            .find(|line| line.contains(r#""method":"turn/completed""#))
+            .and_then(|line| line.strip_prefix("[Console]::Out.WriteLine('"))
+            .and_then(|line| line.strip_suffix("')"))
+            .expect("scripted terminal JSON line");
+        let terminal = serde_json::from_str::<serde_json::Value>(terminal)
+            .expect("scripted terminal is valid JSON");
+        let outcome = lattice_codex_adapter::AppServerProtocol::parse_turn_completed(
+            &terminal,
+            "thread-task032-scripted",
+            "turn-task032-scripted",
+        )
+        .expect("scripted terminal satisfies the production parser")
+        .expect("scripted terminal is terminal evidence");
+        assert_eq!(outcome.status, lattice_codex_adapter::TurnStatus::Completed);
+    }
 }
