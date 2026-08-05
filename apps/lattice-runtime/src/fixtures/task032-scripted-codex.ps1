@@ -36,6 +36,25 @@ $marker = [System.IO.File]::ReadAllBytes($markerPath)
 $expectedMarker = [System.Text.Encoding]::UTF8.GetBytes("lattice.codex-home.v1`n")
 if ([Convert]::ToBase64String($marker) -ne [Convert]::ToBase64String($expectedMarker)) { exit 33 }
 
+$deadlineRegression = $env:LATTICE_DELIVERY_DEADLINE_REGRESSION -eq '1'
+if ($deadlineRegression) {
+    if ($env:LATTICE_DELIVERY_SCRIPTED_DELAY_MILLISECONDS -ne '20000') { exit 34 }
+    if ([string]::IsNullOrWhiteSpace($env:LATTICE_DELIVERY_FIXTURE_ROOT) -or [string]::IsNullOrWhiteSpace($env:LATTICE_DELIVERY_SCRIPTED_INVOCATION_LOG)) { exit 35 }
+    $fixtureRoot = [System.IO.Path]::GetFullPath($env:LATTICE_DELIVERY_FIXTURE_ROOT)
+    $invocationLog = [System.IO.Path]::GetFullPath($env:LATTICE_DELIVERY_SCRIPTED_INVOCATION_LOG)
+    $expectedInvocationLog = [System.IO.Path]::GetFullPath((Join-Path $fixtureRoot 'scripted-server-invocations.log'))
+    if (-not [string]::Equals($invocationLog, $expectedInvocationLog, [System.StringComparison]::OrdinalIgnoreCase)) { exit 36 }
+    if (Test-Path -LiteralPath $invocationLog) {
+        $logItem = Get-Item -LiteralPath $invocationLog -Force
+        if ($logItem.PSIsContainer -or ($logItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { exit 37 }
+    }
+    [System.IO.File]::AppendAllText($invocationLog, "server`n", [System.Text.Encoding]::ASCII)
+}
+elseif (
+    -not [string]::IsNullOrWhiteSpace($env:LATTICE_DELIVERY_SCRIPTED_DELAY_MILLISECONDS) -or
+    -not [string]::IsNullOrWhiteSpace($env:LATTICE_DELIVERY_SCRIPTED_INVOCATION_LOG)
+) { exit 38 }
+
 function Read-Request {
     $line = [Console]::In.ReadLine()
     if ($null -eq $line) { exit 40 }
@@ -86,6 +105,8 @@ if (
     -not [string]::Equals([System.IO.Path]::GetFullPath([string]$roots[0]), $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase) -or
     -not [string]::Equals($turnDirectory, $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase)
 ) { exit 45 }
+
+if ($deadlineRegression) { Start-Sleep -Milliseconds 20000 }
 
 [System.IO.File]::WriteAllBytes(
     (Join-Path $currentDirectory 'answer.txt'),

@@ -35,19 +35,30 @@ fn protected_environment_name(name: &OsStr) -> bool {
             | "GIT_ASKPASS"
             | "SSH_ASKPASS"
             | "LATTICE_TASK019_PASSWORD"
-    ) || [
-        "_PASSWORD",
-        "_TOKEN",
-        "_SECRET",
-        "_API_KEY",
-        "_PRIVATE_KEY",
-        "_ACCESS_KEY",
-        "_CREDENTIAL",
-        "_CREDENTIALS",
-        "_CONNECTION_STRING",
-    ]
-    .iter()
-    .any(|suffix| name.ends_with(suffix))
+            | "API_KEY"
+            | "TOKEN"
+            | "SECRET"
+            | "PASSWORD"
+    ) || name.starts_with("CODEX_")
+        || name.starts_with("OPENAI_")
+        || name.starts_with("AZURE_OPENAI_")
+        || matches!(
+            name.as_str(),
+            "HTTP_PROXY" | "HTTPS_PROXY" | "ALL_PROXY" | "NO_PROXY"
+        )
+        || [
+            "_PASSWORD",
+            "_TOKEN",
+            "_SECRET",
+            "_API_KEY",
+            "_PRIVATE_KEY",
+            "_ACCESS_KEY",
+            "_CREDENTIAL",
+            "_CREDENTIALS",
+            "_CONNECTION_STRING",
+        ]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
 }
 
 pub(crate) fn scrub_protected_environment(command: &mut Command) {
@@ -254,6 +265,10 @@ mod environment_tests {
             "LATTICE_TASK019_PASSWORD",
             "PGPASSWORD",
             "DATABASE_URL",
+            "API_KEY",
+            "TOKEN",
+            "SECRET",
+            "PASSWORD",
             "OPENAI_API_KEY",
             "GH_TOKEN",
             "AWS_SECRET_ACCESS_KEY",
@@ -261,7 +276,17 @@ mod environment_tests {
         ] {
             assert!(protected_environment_name(OsStr::new(name)), "{name}");
         }
-        for name in ["CODEX_HOME", "PATH", "SystemRoot", "LATTICE_TASK019_PORT"] {
+        for name in [
+            "CODEX_HOME",
+            "CODEX_SQLITE_HOME",
+            "CODEX_PERMISSION_PROFILE",
+            "CODEX_EXEC_SERVER_URL",
+            "OPENAI_BASE_URL",
+            "HTTPS_PROXY",
+        ] {
+            assert!(protected_environment_name(OsStr::new(name)), "{name}");
+        }
+        for name in ["PATH", "SystemRoot", "LATTICE_TASK019_PORT"] {
             assert!(!protected_environment_name(OsStr::new(name)), "{name}");
         }
     }

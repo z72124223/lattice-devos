@@ -172,6 +172,21 @@ impl ProcessFixture {
             CODEX_HOME_OWNERSHIP_MARKER_BYTES,
         )
         .expect("mark dedicated Codex home as LATTICE-owned");
+        fs::write(codex_home.join("auth.json"), b"{}\n")
+            .expect("write inert fixture auth presence");
+        fs::write(
+            codex_home.join("config.toml"),
+            concat!(
+                "approval_policy = \"never\"\n",
+                "sandbox_mode = \"workspace-write\"\n",
+                "model = \"gpt-5.6-sol\"\n",
+                "model_reasoning_effort = \"low\"\n",
+                "\n",
+                "[windows]\n",
+                "sandbox = \"elevated\"\n",
+            ),
+        )
+        .expect("write safe fixture configuration");
         let interrupt_log = root.join("interrupt.jsonl");
         let effect_log = root.join("thread-started.txt");
         let descendant_pid_log = root.join("descendant.pid");
@@ -287,6 +302,21 @@ fn rejects_unowned_or_worktree_overlapping_codex_home_before_spawn() {
     let error = run_codex_app_server(&config)
         .expect_err("Codex home must not overlap the writable worktree");
     assert_eq!(error.kind(), AppServerRunErrorKind::CodexHomeOverlap);
+}
+
+#[cfg(windows)]
+#[test]
+fn rejects_unsafe_isolated_home_config_before_spawn() {
+    let unsafe_config = ProcessFixture::new(FakeMode::Success);
+    fs::write(
+        unsafe_config.codex_home.join("config.toml"),
+        "approval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\n",
+    )
+    .expect("replace fixture config");
+    let error = run_codex_app_server(&unsafe_config.config(Duration::from_secs(5)))
+        .expect_err("unsafe config must fail before spawn");
+    assert_eq!(error.kind(), AppServerRunErrorKind::InvalidCodexHome);
+    assert!(!unsafe_config.effect_log.exists());
 }
 
 #[cfg(windows)]

@@ -13,6 +13,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+#[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
 #[cfg(windows)]
 use win32job::{ExtendedLimitInfo, Job};
@@ -23,6 +25,7 @@ use crate::{
 };
 
 const MAX_STDOUT_LINE_BYTES: usize = 8 * 1024 * 1024;
+const CHILD_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 const INTERRUPT_REQUEST_ID: i64 = 3;
 const PROTOCOL_QUIET_WINDOW: Duration = Duration::from_millis(10);
@@ -30,6 +33,13 @@ const PROTOCOL_QUIET_WINDOW: Duration = Duration::from_millis(10);
 pub const CODEX_HOME_OWNERSHIP_MARKER_NAME: &str = ".lattice-codex-home-v1";
 /// Exact marker contents written only by LATTICE workspace provisioning.
 pub const CODEX_HOME_OWNERSHIP_MARKER_BYTES: &[u8] = b"lattice.codex-home.v1\n";
+const CODEX_HOME_CONFIG_BYTES: &[u8] = b"approval_policy = \"never\"\n\
+sandbox_mode = \"workspace-write\"\n\
+model = \"gpt-5.6-sol\"\n\
+model_reasoning_effort = \"low\"\n\
+\n\
+[windows]\n\
+sandbox = \"elevated\"\n";
 
 /// Exact inputs for one supervised app-server turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -238,7 +248,8 @@ pub fn run_codex_app_server(
 /// # Errors
 ///
 /// Fails before spawn when the deadline has expired and preserves that same
-/// deadline through validation, process setup, protocol driving, and teardown.
+/// deadline through validation, process setup, and protocol driving. Timeout
+/// interruption and owned-process teardown use their own fixed cleanup bounds.
 pub fn run_codex_app_server_until(
     config: &AppServerRunConfig,
     deadline: Instant,
@@ -267,37 +278,36 @@ pub fn run_codex_app_server_until(
         .spawn()
         .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::SpawnFailed))?;
     let Ok(process_tree) = OwnedProcessTree::attach(&child) else {
-        let _ = terminate_owned_process_tree(&mut child);
+        let _ = terminate_uncontained_process_tree_bounded(&mut child);
         return Err(AppServerRunError::new(
             AppServerRunErrorKind::JobObjectFailed,
         ));
     };
     if let Err(error) = ensure_before_deadline(deadline) {
-        stop_owned_child(&mut child)?;
+        stop_owned_child(&mut child, process_tree)?;
         return Err(error);
     }
 
     let after_spawn = match launcher_sha256(config.launcher()) {
         Ok(digest) => digest,
         Err(error) => {
-            stop_owned_child(&mut child)?;
+            stop_owned_child(&mut child, process_tree)?;
             return Err(error);
         }
     };
     if after_spawn != before_spawn {
-        stop_owned_child(&mut child)?;
+        stop_owned_child(&mut child, process_tree)?;
         return Err(AppServerRunError::new(
             AppServerRunErrorKind::LauncherChanged,
         ));
     }
     if let Err(error) = ensure_before_deadline(deadline) {
-        stop_owned_child(&mut child)?;
+        stop_owned_child(&mut child, process_tree)?;
         return Err(error);
     }
 
     let result = drive_child(&mut child, config, deadline);
-    let cleanup = stop_owned_child(&mut child);
-    drop(process_tree);
+    let cleanup = stop_owned_child(&mut child, process_tree);
     cleanup?;
     result
 }
@@ -396,7 +406,7 @@ fn drive_child(
         session.outcome().is_some()
     }) {
         if error.kind() == AppServerRunErrorKind::Timeout {
-            interrupt_timed_out_turn(&mut stdin, &receiver, &mut session, &thread_id, deadline)?;
+            interrupt_timed_out_turn(&mut stdin, &receiver, &mut session, &thread_id)?;
             return Err(error);
         }
         return Err(error);
@@ -416,7 +426,10 @@ fn start_readers(
         let mut reader = BufReader::new(stdout);
         loop {
             let mut line = String::new();
-            match reader.read_line(&mut line) {
+            let mut bounded_line = reader
+                .by_ref()
+                .take(u64::try_from(MAX_STDOUT_LINE_BYTES + 1).unwrap_or(u64::MAX));
+            match bounded_line.read_line(&mut line) {
                 Ok(0) => {
                     let _ = sender.send(ReaderEvent::Eof);
                     break;
@@ -556,7 +569,6 @@ fn interrupt_timed_out_turn(
     receiver: &Receiver<ReaderEvent>,
     session: &mut AppServerSession,
     thread_id: &str,
-    delivery_deadline: Instant,
 ) -> Result<(), AppServerRunError> {
     let Some(turn_id) = session.turn_id().map(ToOwned::to_owned) else {
         return Ok(());
@@ -572,7 +584,6 @@ fn interrupt_timed_out_turn(
 
     let grace_deadline = Instant::now()
         .checked_add(INTERRUPT_GRACE)
-        .map(|grace| grace.min(delivery_deadline))
         .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::Timeout))?;
     while session.outcome().is_none() {
         let Some(remaining) = grace_deadline.checked_duration_since(Instant::now()) else {
@@ -628,7 +639,7 @@ fn send_json(writer: &mut impl Write, message: &Value) -> Result<(), AppServerRu
         .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::WriteFailed))
 }
 
-fn validate_live_paths(config: &AppServerRunConfig) -> Result<(), AppServerRunError> {
+pub(crate) fn validate_live_paths(config: &AppServerRunConfig) -> Result<(), AppServerRunError> {
     let launcher = std::fs::symlink_metadata(config.launcher())
         .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::InvalidLauncher))?;
     if !launcher.file_type().is_file() {
@@ -654,18 +665,9 @@ fn validate_live_paths(config: &AppServerRunConfig) -> Result<(), AppServerRunEr
     Ok(())
 }
 
-fn validate_owned_codex_home(config: &AppServerRunConfig) -> Result<(), AppServerRunError> {
-    let marker = config.codex_home().join(CODEX_HOME_OWNERSHIP_MARKER_NAME);
-    let marker_metadata = std::fs::symlink_metadata(&marker)
-        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::CodexHomeOwnershipMissing))?;
-    if !marker_metadata.file_type().is_file()
-        || std::fs::read(&marker).ok().as_deref() != Some(CODEX_HOME_OWNERSHIP_MARKER_BYTES)
-    {
-        return Err(AppServerRunError::new(
-            AppServerRunErrorKind::CodexHomeOwnershipMissing,
-        ));
-    }
-
+pub(crate) fn validate_owned_codex_home(
+    config: &AppServerRunConfig,
+) -> Result<(), AppServerRunError> {
     let codex_home = std::fs::canonicalize(config.codex_home())
         .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::InvalidCodexHome))?;
     let working_directory = std::fs::canonicalize(config.working_directory())
@@ -673,6 +675,28 @@ fn validate_owned_codex_home(config: &AppServerRunConfig) -> Result<(), AppServe
     if codex_home.starts_with(&working_directory) || working_directory.starts_with(&codex_home) {
         return Err(AppServerRunError::new(
             AppServerRunErrorKind::CodexHomeOverlap,
+        ));
+    }
+
+    let marker = config.codex_home().join(CODEX_HOME_OWNERSHIP_MARKER_NAME);
+    validate_isolated_home_file(&marker, AppServerRunErrorKind::CodexHomeOwnershipMissing)?;
+    if std::fs::read(&marker).ok().as_deref() != Some(CODEX_HOME_OWNERSHIP_MARKER_BYTES) {
+        return Err(AppServerRunError::new(
+            AppServerRunErrorKind::CodexHomeOwnershipMissing,
+        ));
+    }
+
+    let auth_state = config.codex_home().join("auth.json");
+    validate_isolated_home_file(&auth_state, AppServerRunErrorKind::InvalidCodexHome)?;
+    let config_path = config.codex_home().join("config.toml");
+    validate_isolated_home_file(&config_path, AppServerRunErrorKind::InvalidCodexHome)?;
+    let config_metadata = std::fs::metadata(&config_path)
+        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::InvalidCodexHome))?;
+    if config_metadata.len() != u64::try_from(CODEX_HOME_CONFIG_BYTES.len()).unwrap_or(u64::MAX)
+        || std::fs::read(&config_path).ok().as_deref() != Some(CODEX_HOME_CONFIG_BYTES)
+    {
+        return Err(AppServerRunError::new(
+            AppServerRunErrorKind::InvalidCodexHome,
         ));
     }
 
@@ -695,6 +719,29 @@ fn validate_owned_codex_home(config: &AppServerRunConfig) -> Result<(), AppServe
     }
 
     Ok(())
+}
+
+fn validate_isolated_home_file(
+    path: &Path,
+    error_kind: AppServerRunErrorKind,
+) -> Result<(), AppServerRunError> {
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|_| AppServerRunError::new(error_kind))?;
+    if !metadata.file_type().is_file() || metadata_is_reparse(&metadata) {
+        return Err(AppServerRunError::new(error_kind));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse(metadata: &std::fs::Metadata) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 fn same_existing_directory(left: &Path, right: &Path) -> bool {
@@ -750,54 +797,105 @@ fn map_session_error(_: SessionError) -> AppServerRunError {
     AppServerRunError::new(AppServerRunErrorKind::ProtocolFailed)
 }
 
-fn stop_owned_child(child: &mut Child) -> Result<(), AppServerRunError> {
+pub(crate) fn stop_owned_child(
+    child: &mut Child,
+    process_tree: OwnedProcessTree,
+) -> Result<(), AppServerRunError> {
+    // Closing a Windows Job Object configured with KILL_ON_JOB_CLOSE is the
+    // primary, tree-wide termination mechanism. Do this before waiting on any
+    // external cleanup command so teardown cannot deadlock behind the child.
+    drop(process_tree);
+    terminate_child_bounded(child)
+}
+
+pub(crate) fn terminate_child_bounded(child: &mut Child) -> Result<(), AppServerRunError> {
     match child.try_wait() {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => terminate_owned_process_tree(child),
-        Err(_) => Err(AppServerRunError::new(
-            AppServerRunErrorKind::ChildCleanupFailed,
-        )),
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => {}
+        Err(_) => {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::ChildCleanupFailed,
+            ));
+        }
+    }
+
+    // The Job Object close above normally wins this race on Windows. The
+    // direct kill is a bounded fallback and is also the non-Windows path.
+    let _ = child.kill();
+    let deadline = Instant::now()
+        .checked_add(CHILD_CLEANUP_TIMEOUT)
+        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::ChildCleanupFailed))?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {}
+            Err(_) => {
+                return Err(AppServerRunError::new(
+                    AppServerRunErrorKind::ChildCleanupFailed,
+                ));
+            }
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::ChildCleanupFailed,
+            ));
+        };
+        std::thread::sleep(Duration::from_millis(10).min(remaining));
     }
 }
 
 #[cfg(windows)]
-fn terminate_owned_process_tree(child: &mut Child) -> Result<(), AppServerRunError> {
+pub(crate) fn terminate_uncontained_process_tree_bounded(
+    child: &mut Child,
+) -> Result<(), AppServerRunError> {
     let pid = child.id().to_string();
-    let taskkill = std::env::var_os("SystemRoot")
+    let mut tree_stopped = false;
+    if let Some(taskkill) = std::env::var_os("SystemRoot")
         .map(PathBuf::from)
-        .map(|root| root.join("System32").join("taskkill.exe"));
-    let tree_stopped = taskkill
+        .map(|root| root.join("System32").join("taskkill.exe"))
         .filter(|path| path.is_file())
-        .and_then(|path| {
-            let mut command = Command::new(path);
-            crate::scrub_protected_environment(&mut command);
-            command
-                .args(["/PID", pid.as_str(), "/T", "/F"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .ok()
-        })
-        .is_some_and(|status| status.success());
-    if !tree_stopped && child.try_wait().ok().flatten().is_none() {
-        child
-            .kill()
-            .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::ChildCleanupFailed))?;
+    {
+        let mut command = Command::new(taskkill);
+        crate::scrub_protected_environment(&mut command);
+        command
+            .args(["/PID", pid.as_str(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Ok(mut taskkill_child) = command.spawn() {
+            let deadline = Instant::now()
+                .checked_add(CHILD_CLEANUP_TIMEOUT)
+                .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::ChildCleanupFailed))?;
+            loop {
+                match taskkill_child.try_wait() {
+                    Ok(Some(status)) => {
+                        tree_stopped = status.success();
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(_) => break,
+                }
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    let _ = terminate_child_bounded(&mut taskkill_child);
+                    break;
+                };
+                std::thread::sleep(Duration::from_millis(10).min(remaining));
+            }
+        }
     }
-    child
-        .wait()
-        .map(|_| ())
-        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::ChildCleanupFailed))
+    let direct_cleanup = terminate_child_bounded(child);
+    if tree_stopped {
+        direct_cleanup
+    } else {
+        Err(AppServerRunError::new(
+            AppServerRunErrorKind::ChildCleanupFailed,
+        ))
+    }
 }
 
 #[cfg(not(windows))]
-fn terminate_owned_process_tree(child: &mut Child) -> Result<(), AppServerRunError> {
-    child
-        .kill()
-        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::ChildCleanupFailed))?;
-    child
-        .wait()
-        .map(|_| ())
-        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::ChildCleanupFailed))
+pub(crate) fn terminate_uncontained_process_tree_bounded(
+    child: &mut Child,
+) -> Result<(), AppServerRunError> {
+    terminate_child_bounded(child)
 }

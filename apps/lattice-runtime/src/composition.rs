@@ -5,9 +5,12 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
 use lattice_codebase_memory::digest_query_text;
@@ -43,6 +46,7 @@ use crate::mcp::{self, DeliveryToolService, ToolExecutionError};
 
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 3_600;
+const FINALIZATION_RESERVE: Duration = Duration::from_secs(30);
 const TASK_ID: &str = "TASK-032";
 const PROJECT_SNAPSHOT_ID: &str = "task032-delivery:snapshot:1";
 const SCRIPTED_FIXTURE_MARKER_NAME: &str = ".lattice-delivery-fixture-v1.json";
@@ -59,6 +63,18 @@ const GRAPH_RETRIEVAL_LIMIT: u16 = 10;
 const GRAPH_MEMORY_ROOT_NAME: &str = "graph-memory";
 const GRAPHIFY_RUNTIME_RELATIVE_PATH: &str = "target/supply-chain/graphify-v0.9.33/wsl-runtime";
 const SCRIPTED_SERVER_BYTES: &[u8] = include_bytes!("fixtures/task032-scripted-codex.ps1");
+const OFFICIAL_CODEX_VERSION: &str = "codex-cli 0.146.0";
+const OFFICIAL_CODEX_LAUNCHER_SHA256: &str =
+    "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb";
+const OFFICIAL_SANDBOX_SETUP_SHA256: &str =
+    "c12d225b34e7f82cdab6bbc714797abed661f40e158104694953889750121cef";
+const OFFICIAL_COMMAND_RUNNER_SHA256: &str =
+    "0102fa1820ecd03bb03a991fd2303a1a484118f7da8a71864f88ec94bca61d6d";
+const OFFICIAL_PACKAGE_MANIFEST_SHA256: &str =
+    "aaa0646d6b615da94187b51efd50c69621a00867761161ae55cc16cfd545bec7";
+const MAX_OFFICIAL_LAUNCHER_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_OFFICIAL_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_OFFICIAL_MANIFEST_BYTES: u64 = 64 * 1024;
 
 /// Static, secret-free composition failure classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,7 +117,7 @@ impl LatticedErrorKind {
             Self::ReceiptMismatch => "LATTICE_DELIVERY_RECEIPT_MISMATCH",
             Self::DeliveryFailed => "LATTICE_DELIVERY_FAILED",
             Self::ReconciliationRequired => "LATTICE_DELIVERY_RECONCILIATION_REQUIRED",
-            Self::OfficialLiveBlocked => "LATTICE_OFFICIAL_CODEX_FAILED_DIAGNOSTIC",
+            Self::OfficialLiveBlocked => "LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED",
             Self::ScriptedFixtureRejected => "LATTICE_SCRIPTED_FIXTURE_REJECTED",
             Self::GraphConfiguration => "LATTICE_GRAPH_MEMORY_CONFIGURATION_REJECTED",
             Self::GraphExecution => "LATTICE_GRAPH_MEMORY_RUN_REJECTED",
@@ -179,6 +195,14 @@ impl LatticedDeliveryConfig {
         }
         let version = version.into();
         let launcher_sha256 = launcher_sha256.into();
+        if runtime == DeliveryRuntime::OfficialCodexAppServer {
+            validate_official_codex_identity(
+                &launcher,
+                &version,
+                &launcher_sha256,
+                &delivery_root,
+            )?;
+        }
         let identity = CodexIdentityExpectation::new(
             launcher.clone(),
             version.clone(),
@@ -211,6 +235,146 @@ impl LatticedDeliveryConfig {
             runtime,
         })
     }
+}
+
+fn validate_official_codex_identity(
+    launcher: &Path,
+    version: &str,
+    launcher_sha256: &str,
+    delivery_root: &Path,
+) -> Result<(), LatticedError> {
+    let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
+    if version != OFFICIAL_CODEX_VERSION
+        || launcher_sha256 != OFFICIAL_CODEX_LAUNCHER_SHA256
+        || delivery_root.file_name() != Some(OsStr::new("delivery"))
+    {
+        return Err(rejected());
+    }
+    let fixture_root = delivery_root.parent().ok_or_else(rejected)?;
+    let fixture_id = fixture_root
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(rejected)?;
+    if !is_lower_hex(fixture_id, 32) {
+        return Err(rejected());
+    }
+    let lattice_delivery_root = fixture_root.parent().ok_or_else(rejected)?;
+    if lattice_delivery_root.file_name() != Some(OsStr::new("lattice-delivery")) {
+        return Err(rejected());
+    }
+    let target_root = lattice_delivery_root.parent().ok_or_else(rejected)?;
+    if target_root.file_name() != Some(OsStr::new("target")) {
+        return Err(rejected());
+    }
+    let install_root = target_root.join("codex-official").join("0.146.0");
+    let expected_launcher = install_root
+        .join("node_modules")
+        .join("@openai")
+        .join("codex-win32-x64")
+        .join("vendor")
+        .join("x86_64-pc-windows-msvc")
+        .join("bin")
+        .join("codex.exe");
+    let bundle_root = expected_launcher
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(rejected)?;
+    let sandbox_setup = bundle_root
+        .join("codex-resources")
+        .join("codex-windows-sandbox-setup.exe");
+    let command_runner = bundle_root
+        .join("codex-resources")
+        .join("codex-command-runner.exe");
+    let package_manifest = bundle_root.join("codex-package.json");
+    if !same_declared_path(launcher, &expected_launcher) {
+        return Err(rejected());
+    }
+    for path in [
+        expected_launcher.as_path(),
+        sandbox_setup.as_path(),
+        command_runner.as_path(),
+        package_manifest.as_path(),
+    ] {
+        reject_reparse_path(path, target_root)?;
+    }
+    let canonical_expected = fs::canonicalize(&expected_launcher).map_err(|_| rejected())?;
+    let canonical_launcher = fs::canonicalize(launcher).map_err(|_| rejected())?;
+    if canonical_launcher != canonical_expected
+        || official_file_sha256(&canonical_launcher, MAX_OFFICIAL_LAUNCHER_BYTES)?
+            != OFFICIAL_CODEX_LAUNCHER_SHA256
+        || official_file_sha256(&sandbox_setup, MAX_OFFICIAL_RESOURCE_BYTES)?
+            != OFFICIAL_SANDBOX_SETUP_SHA256
+        || official_file_sha256(&command_runner, MAX_OFFICIAL_RESOURCE_BYTES)?
+            != OFFICIAL_COMMAND_RUNNER_SHA256
+        || official_file_sha256(&package_manifest, MAX_OFFICIAL_MANIFEST_BYTES)?
+            != OFFICIAL_PACKAGE_MANIFEST_SHA256
+    {
+        return Err(rejected());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn same_declared_path(actual: &Path, expected: &Path) -> bool {
+    actual
+        .as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&expected.as_os_str().to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn same_declared_path(actual: &Path, expected: &Path) -> bool {
+    actual == expected
+}
+
+fn reject_reparse_path(path: &Path, boundary: &Path) -> Result<(), LatticedError> {
+    let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
+    let mut current = path;
+    loop {
+        let metadata = fs::symlink_metadata(current).map_err(|_| rejected())?;
+        if metadata_is_reparse(&metadata) {
+            return Err(rejected());
+        }
+        if current == boundary {
+            return Ok(());
+        }
+        current = current.parent().ok_or_else(rejected)?;
+    }
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+fn official_file_sha256(path: &Path, max_bytes: u64) -> Result<String, LatticedError> {
+    let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
+    let metadata = fs::symlink_metadata(path).map_err(|_| rejected())?;
+    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
+        return Err(rejected());
+    }
+    let mut file = fs::File::open(path).map_err(|_| rejected())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|_| rejected())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let mut output = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}").map_err(|_| rejected())?;
+    }
+    Ok(output)
 }
 
 /// One shared service used by the canonical `latticed` MCP process and the
@@ -335,15 +499,14 @@ impl LatticedDeliveryService {
             .request
             .as_ref()
             .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?;
-        if config.runtime == DeliveryRuntime::OfficialCodexAppServer {
-            // Temporary fail-closed incident gate. The official Windows
-            // sandbox helper must not be retried until its upstream regression
-            // is resolved or the user explicitly authorizes a safety posture.
-            return Err(LatticedError::new(LatticedErrorKind::OfficialLiveBlocked));
-        }
-        let fixture = validate_scripted_fixture(config)?;
-        let deadline = deadline(self.timeout)?;
-        let ledger = DeliveryLedger::connect(&self.database, &self.password, deadline)
+        let scripted_graph_paths = if config.runtime == DeliveryRuntime::ScriptedAcceptance {
+            Some(validate_scripted_fixture(config)?)
+        } else {
+            None
+        };
+        let finalization_deadline = deadline(self.timeout)?;
+        let effect_deadline = effect_deadline(finalization_deadline)?;
+        let ledger = DeliveryLedger::connect(&self.database, &self.password, finalization_deadline)
             .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
         let repository = config.delivery_root.join("repo");
         let mut ledger = PostgresDeliveryLedgerAdapter::for_delivery(
@@ -364,7 +527,7 @@ impl LatticedDeliveryService {
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::WorkspaceConfiguration))?;
         let mut workspace_git =
-            DeliveryWorkspaceGitAdapter::with_deadline(workspace_config, deadline);
+            DeliveryWorkspaceGitAdapter::with_deadline(workspace_config, effect_deadline);
         let identity = CodexIdentityExpectation::new(
             config.launcher.clone(),
             config.version.clone(),
@@ -379,15 +542,19 @@ impl LatticedDeliveryService {
             config.runtime,
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::CodexConfiguration))?;
-        let mut codex = CodexDeliveryAdapter::with_deadline(codex_config, deadline);
+        let mut codex = CodexDeliveryAdapter::with_deadline(codex_config, effect_deadline);
         match run_delivery(request, &mut ledger, &mut workspace_git, &mut codex) {
             Ok(receipt) => {
+                let graph_paths = match scripted_graph_paths {
+                    Some(paths) => paths,
+                    None => official_graph_paths(config)?,
+                };
                 let graph_receipt = run_delivery_graph_memory(
                     &self.database,
                     &self.password,
                     config,
-                    &fixture,
-                    deadline,
+                    &graph_paths,
+                    finalization_deadline,
                     &receipt,
                 )?;
                 composed_receipt_json(&receipt, "lattice-delivery", &graph_receipt)
@@ -572,14 +739,14 @@ fn request_for_delivery(
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ScriptedFixturePaths {
+struct DeliveryGraphPaths {
     root: PathBuf,
     repository_root: PathBuf,
 }
 
 fn validate_scripted_fixture(
     config: &LatticedDeliveryConfig,
-) -> Result<ScriptedFixturePaths, LatticedError> {
+) -> Result<DeliveryGraphPaths, LatticedError> {
     let rejected = || LatticedError::new(LatticedErrorKind::ScriptedFixtureRejected);
     if config.runtime != DeliveryRuntime::ScriptedAcceptance
         || config.delivery_root.file_name() != Some(OsStr::new("delivery"))
@@ -668,8 +835,28 @@ fn validate_scripted_fixture(
     {
         return Err(rejected());
     }
-    Ok(ScriptedFixturePaths {
+    Ok(DeliveryGraphPaths {
         root: fixture_root,
+        repository_root,
+    })
+}
+
+fn official_graph_paths(config: &LatticedDeliveryConfig) -> Result<DeliveryGraphPaths, LatticedError> {
+    let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
+    if config.runtime != DeliveryRuntime::OfficialCodexAppServer {
+        return Err(rejected());
+    }
+    let fixture_root = config.delivery_root.parent().ok_or_else(rejected)?;
+    let lattice_delivery_root = fixture_root.parent().ok_or_else(rejected)?;
+    let target_root = lattice_delivery_root.parent().ok_or_else(rejected)?;
+    reject_reparse_path(&config.delivery_root, target_root)?;
+
+    let delivery_root = fs::canonicalize(&config.delivery_root).map_err(|_| rejected())?;
+    let canonical_fixture_root = delivery_root.parent().ok_or_else(rejected)?.to_path_buf();
+    let repository_root = fs::canonicalize(target_root.parent().ok_or_else(rejected)?)
+        .map_err(|_| rejected())?;
+    Ok(DeliveryGraphPaths {
+        root: canonical_fixture_root,
         repository_root,
     })
 }
@@ -716,7 +903,7 @@ fn run_delivery_graph_memory(
     database: &DeliveryDatabaseBinding,
     password: &str,
     config: &LatticedDeliveryConfig,
-    fixture: &ScriptedFixturePaths,
+    fixture: &DeliveryGraphPaths,
     deadline: Instant,
     delivery_receipt: &DeliveryReceipt,
 ) -> Result<GraphMemoryReceipt, LatticedError> {
@@ -1283,6 +1470,16 @@ fn deadline(timeout: Duration) -> Result<Instant, LatticedError> {
         .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))
 }
 
+fn effect_deadline(finalization_deadline: Instant) -> Result<Instant, LatticedError> {
+    let effect = finalization_deadline
+        .checked_sub(FINALIZATION_RESERVE)
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?;
+    if effect <= Instant::now() {
+        return Err(LatticedError::new(LatticedErrorKind::Configuration));
+    }
+    Ok(effect)
+}
+
 fn path_text(path: &Path) -> Result<String, LatticedError> {
     path.to_str()
         .map(str::to_owned)
@@ -1293,6 +1490,15 @@ fn path_text(path: &Path) -> Result<String, LatticedError> {
 mod tests {
     use super::*;
     use lattice_ports::{DeliveryFailureCertainty, DeliveryPortError};
+
+    #[test]
+    fn effect_deadline_reserves_time_for_cleanup_and_terminal_ledger_finalization() {
+        let finalization = deadline(Duration::from_secs(120)).expect("finalization deadline");
+        let effect = effect_deadline(finalization).expect("effect deadline");
+
+        assert_eq!(finalization.duration_since(effect), FINALIZATION_RESERVE);
+        assert!(effect > Instant::now());
+    }
 
     #[test]
     fn terminal_delivery_receipts_are_never_run_success() {
