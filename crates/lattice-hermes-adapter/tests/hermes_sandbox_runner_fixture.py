@@ -613,7 +613,20 @@ class HermesSandboxRunnerFixtureTests(unittest.TestCase):
                     "official gateway closed before containment frame "
                     "(exit %s)" % runner.exit_code
                 )
+            self.assertEqual(fields[1], RUNNER.config_digest(init).encode("ascii"))
             self.assertEqual(fields[11], b"official")
+
+            health_response = self.relay(
+                runner,
+                request("GET", "/health/detailed", init["api_key"]),
+            )
+            self.assertTrue(health_response.startswith(b"HTTP/1.1 200"))
+            health = json.loads(health_response.split(b"\r\n\r\n", 1)[1])
+            self.assertEqual(health["status"], "ok")
+            self.assertEqual(health["readiness"]["checks"]["config"], {"status": "ok"})
+            self.assertEqual(health["readiness"]["checks"]["model"], {"status": "ok"})
+            self.assertEqual(health["active_agents"], 0)
+            self.assertIs(health["gateway_busy"], False)
 
             response = self.relay(
                 runner,

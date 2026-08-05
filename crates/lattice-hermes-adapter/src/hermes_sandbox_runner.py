@@ -55,8 +55,23 @@ PROXY_ERROR_DEADLINE = 6
 PROXY_ERROR_IO = 7
 EXPECTED_BWRAP_SHA256 = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b"
 OFFICIAL_HERMES_CANDIDATE = "/runtime-input/python/bin/hermes"
+OFFICIAL_HERMES_CONFIG_PATH = "/state/hermes/config.yaml"
+OFFICIAL_OPENAI_SENTINEL = "lattice-codex-app-server-only"
 CODEX_PROXY_SOCKET_PATH = "/state/codex-proxy.sock"
 CODEX_SHIM_PATH = "/state/bin/codex"
+OFFICIAL_HERMES_CONFIG = b"""_config_version: 33
+model:
+  provider: openai-api
+  default: gpt-5.6-sol
+  openai_runtime: codex_app_server
+  api_mode: codex_app_server
+  base_url: http://127.0.0.1:9/v1
+platform_toolsets:
+  api_server: []
+plugins:
+  enabled: []
+mcp_servers: {}
+"""
 FIXTURE_CODEX_REQUEST = (
     b'{"id":0,"method":"initialize","params":{}}\n'
     b'{"id":1,"method":"thread/start","params":{}}\n'
@@ -423,8 +438,14 @@ def parse_init_payload(encoded):
             fail(72)
         if not isinstance(parsed_reflection, dict) or canonical_json(parsed_reflection) != encoded_reflection:
             fail(72)
-    elif value["fixture_reflection"] is not None:
-        fail(72)
+    else:
+        if (
+            value["fixture_reflection"] is not None
+            or value["model"] != "hermes-agent"
+            or len(value["api_key"]) < 16
+            or not value["api_key"].isascii()
+        ):
+            fail(72)
     return value
 
 
@@ -436,9 +457,12 @@ def config_digest(init):
     value = {
         "api_key_sha256": sha256_bytes(init["api_key"].encode("utf-8")),
         "endpoint": init["endpoint"],
+        "hermes_config_sha256": (
+            sha256_bytes(OFFICIAL_HERMES_CONFIG) if init["mode"] == "official" else None
+        ),
         "model": init["model"],
         "nonce": init["nonce"],
-        "schema": "lattice.hermes.production-config.v1",
+        "schema": "lattice.hermes.production-config.v2",
     }
     return sha256_bytes(canonical_json(value))
 
@@ -610,6 +634,54 @@ def install_codex_shim():
     ):
         fail(80)
     return sha256_bytes(source)
+
+
+def install_official_hermes_config():
+    source = OFFICIAL_HERMES_CONFIG
+    if not source or len(source) > MAX_REFLECTION_BYTES:
+        fail(80)
+    try:
+        home = pathlib.Path("/state/hermes")
+        home.mkdir(mode=0o700)
+        home_metadata = os.lstat(home)
+        descriptor = os.open(
+            OFFICIAL_HERMES_CONFIG_PATH,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            offset = 0
+            while offset < len(source):
+                written = os.write(descriptor, source[offset:])
+                if written <= 0:
+                    fail(80)
+                offset += written
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.chmod(OFFICIAL_HERMES_CONFIG_PATH, 0o600)
+        metadata = os.lstat(OFFICIAL_HERMES_CONFIG_PATH)
+        descriptor = os.open(
+            OFFICIAL_HERMES_CONFIG_PATH,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        try:
+            observed = os.read(descriptor, len(source) + 1)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        fail(80)
+    if (
+        observed != source
+        or not stat.S_ISDIR(home_metadata.st_mode)
+        or home_metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(home_metadata.st_mode) != 0o700
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        fail(80)
+    return sha256_bytes(observed)
 
 
 def create_codex_proxy_listener():
@@ -1282,9 +1354,8 @@ class OfficialHermesEndpoint:
             fail(74)
         if not stat.S_ISREG(metadata.st_mode) or not os.access(executable, os.X_OK):
             fail(74)
-        try:
-            pathlib.Path("/state/hermes").mkdir(mode=0o700)
-        except OSError:
+        config_sha256 = install_official_hermes_config()
+        if config_sha256 != sha256_bytes(OFFICIAL_HERMES_CONFIG):
             fail(80)
         host, port_text = init["endpoint"].rsplit(":", 1)
         environment = codex_bridge.environment()
@@ -1296,6 +1367,9 @@ class OfficialHermesEndpoint:
                 "API_SERVER_MODEL_NAME": init["model"],
                 "API_SERVER_PORT": port_text,
                 "CI": "1",
+                "HERMES_SAFE_MODE": "1",
+                "OPENAI_API_KEY": OFFICIAL_OPENAI_SENTINEL,
+                "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
                 "TZ": "UTC",
             }
         )

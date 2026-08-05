@@ -27,6 +27,19 @@ CONTAINMENT_MAGIC = b"LATTICE_HERMES_CONTAINED_V2\n"
 EXPECTED_BWRAP_SHA256 = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b"
 EXPECTED_PYTHON_VERSION = (3, 12, 13)
 MAX_DIAGNOSTIC_BYTES = 4096
+OFFICIAL_HERMES_CONFIG = b"""_config_version: 33
+model:
+  provider: openai-api
+  default: gpt-5.6-sol
+  openai_runtime: codex_app_server
+  api_mode: codex_app_server
+  base_url: http://127.0.0.1:9/v1
+platform_toolsets:
+  api_server: []
+plugins:
+  enabled: []
+mcp_servers: {}
+"""
 MAX_CONTROL_BYTES = 2 * 1024 * 1024
 MAX_PROXY_COPY_BYTES = 64 * 1024
 
@@ -282,9 +295,14 @@ def config_digest(init):
     value = {
         "api_key_sha256": hashlib.sha256(init["api_key"].encode("utf-8")).hexdigest(),
         "endpoint": init["endpoint"],
+        "hermes_config_sha256": (
+            hashlib.sha256(OFFICIAL_HERMES_CONFIG).hexdigest()
+            if init["mode"] == "official"
+            else None
+        ),
         "model": init["model"],
         "nonce": init["nonce"],
-        "schema": "lattice.hermes.production-config.v1",
+        "schema": "lattice.hermes.production-config.v2",
     }
     return hashlib.sha256(canonical_json(value)).hexdigest()
 

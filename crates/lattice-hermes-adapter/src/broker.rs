@@ -1044,12 +1044,9 @@ impl OwnedCodexProxyControl {
     }
 
     fn bind(&self, mut lifecycle: OwnedCodexProxyLifecycle) -> HermesAdapterResult<()> {
-        let mut state = match self.state.lock() {
-            Ok(state) => state,
-            Err(_) => {
-                lifecycle.terminate()?;
-                return Err(Self::state_unknown());
-            }
+        let Ok(mut state) = self.state.lock() else {
+            lifecycle.terminate()?;
+            return Err(Self::state_unknown());
         };
         let rejection = if state.cancelled {
             Some(Self::cancelled())
@@ -3677,7 +3674,7 @@ mod production_provider_tests {
             (
                 FixtureCodexProxyProvider {
                     control: Arc::new(OwnedCodexProxyControl::new()),
-                    executable_sha256: bounded_file_sha256(&executable, MAX_CODEX_LAUNCHER_BYTES)
+                    executable_sha256: bounded_file_sha256(executable, MAX_CODEX_LAUNCHER_BYTES)
                         .expect("fixture executable identity"),
                     plan,
                     process_id: Arc::clone(&process_id),
