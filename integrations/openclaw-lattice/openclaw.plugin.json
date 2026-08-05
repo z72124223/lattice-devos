@@ -1,0 +1,23 @@
+{
+  "id": "lattice-devos",
+  "name": "LATTICE",
+  "description": "Routes a closed set of authenticated commands to a local LATTICE Rust gateway.",
+  "version": "0.1.0",
+  "commandAliases": [
+    {
+      "name": "lattice",
+      "kind": "runtime-slash"
+    }
+  ],
+  "activation": {
+    "onStartup": false,
+    "onCommands": [
+      "lattice"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

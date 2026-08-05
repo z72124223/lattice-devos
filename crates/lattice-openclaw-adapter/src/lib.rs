@@ -3,8 +3,9 @@
 mod wire;
 
 pub use wire::{
-    OpenClawSubmitReply, OpenClawSubmitReplyBody, OpenClawSubmitRequest,
-    encode_openclaw_submit_request,
+    OpenClawStatusRequest, OpenClawStopRequest, OpenClawSubmitReply, OpenClawSubmitReplyBody,
+    OpenClawSubmitRequest, encode_openclaw_client_hello, encode_openclaw_status_request,
+    encode_openclaw_stop_request, encode_openclaw_submit_request,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,7 +24,7 @@ use lattice_contracts::{
 };
 use lattice_gateway_ipc::{
     MAX_FRAME_BYTES, build_reply, build_request, decode_reply, decode_request, encode_reply,
-    encode_request, verify_task_spec_document,
+    verify_task_spec_document,
 };
 use lattice_ports::{GatewayService, PortErrorKind};
 pub use lattice_ports::{
@@ -32,9 +33,55 @@ pub use lattice_ports::{
 };
 use sha2::{Digest, Sha256};
 
-const REQUEST_MAGIC: [u8; 8] = *b"LATGW001";
-const RESPONSE_MAGIC: [u8; 8] = *b"LATGR001";
-const SESSION_MAGIC: [u8; 8] = *b"LATSN001";
+/// Authenticated request-packet magic for wire protocol version 1.
+pub const OPENCLAW_WIRE_REQUEST_MAGIC: [u8; 8] = *b"LATGW001";
+/// Authenticated response-packet magic for wire protocol version 1.
+pub const OPENCLAW_WIRE_RESPONSE_MAGIC: [u8; 8] = *b"LATGR001";
+/// Server session-greeting magic for wire protocol version 1.
+pub const OPENCLAW_WIRE_SESSION_MAGIC: [u8; 8] = *b"LATSN001";
+
+/// Deterministic root key used only by the cross-language parity fixture.
+pub const OPENCLAW_PARITY_ROOT_KEY_HEX: &str =
+    "1111111111111111111111111111111111111111111111111111111111111111";
+/// Deterministic session epoch used only by the cross-language parity fixture.
+pub const OPENCLAW_PARITY_SESSION_EPOCH_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+/// Deterministic packet nonce used only by the cross-language parity fixture.
+pub const OPENCLAW_PARITY_NONCE_HEX: &str = "101112131415161718191a1b1c1d1e1f";
+/// Complete session greeting golden bytes, encoded as lowercase hex.
+pub const OPENCLAW_PARITY_SESSION_GREETING_HEX: &str =
+    "4c4154534e303031000102030405060708090a0b0c0d0e0f";
+/// Canonical status-command request payload used by the packet golden.
+pub const OPENCLAW_PARITY_STATUS_COMMAND_REQUEST_JSON: &str = "{\"action\":\"status\",\"body\":{\"kind\":\"command\",\"project_id\":\"project-a\",\"target_command_id\":\"target-command-a\"},\"command_id\":\"command-status-a\",\"correlation_id\":\"correlation-status-a\",\"protocol\":\"lattice-openclaw-inbound\",\"version\":\"1\"}";
+/// Complete authenticated request packet golden, encoded as lowercase hex.
+pub const OPENCLAW_PARITY_REQUEST_PACKET_HEX: &str = "4c41544757303031000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000000e98008e8f0a4240aa68620878b3dfd255d5f707d855e9eb0027d7ce3ce921374317b22616374696f6e223a22737461747573222c22626f6479223a7b226b696e64223a22636f6d6d616e64222c2270726f6a6563745f6964223a2270726f6a6563742d61222c227461726765745f636f6d6d616e645f6964223a227461726765742d636f6d6d616e642d61227d2c22636f6d6d616e645f6964223a22636f6d6d616e642d7374617475732d61222c22636f7272656c6174696f6e5f6964223a22636f7272656c6174696f6e2d7374617475732d61222c2270726f746f636f6c223a226c6174746963652d6f70656e636c61772d696e626f756e64222c2276657273696f6e223a2231227d";
+/// Canonical status-command response payload used by the packet golden.
+pub const OPENCLAW_PARITY_STATUS_COMMAND_RESPONSE_JSON: &str = "{\"action\":\"status\",\"body\":{\"code\":\"DOWNSTREAM_DENIED\",\"kind\":\"denied\"},\"command_id\":\"command-status-a\",\"correlation_id\":\"correlation-status-a\",\"protocol\":\"lattice-gateway-ipc\",\"reply_digest\":\"433253c474608f0d74306dc23042636c44de19d070016b8537467a305b071d89\",\"request_digest\":\"b23c60531600afa1fc45996a5e810231dba0a90b20b7bf90d5fc98ab4de05bb6\",\"version\":\"1\"}";
+/// Complete authenticated response packet golden, encoded as lowercase hex.
+pub const OPENCLAW_PARITY_RESPONSE_PACKET_HEX: &str = "4c41544752303031000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000016467d8a3a47e3b2e9f128b7ec8e42fda071d0405d66e5e82b01f756466bfec6eb77b22616374696f6e223a22737461747573222c22626f6479223a7b22636f6465223a22444f574e53545245414d5f44454e494544222c226b696e64223a2264656e696564227d2c22636f6d6d616e645f6964223a22636f6d6d616e642d7374617475732d61222c22636f7272656c6174696f6e5f6964223a22636f7272656c6174696f6e2d7374617475732d61222c2270726f746f636f6c223a226c6174746963652d676174657761792d697063222c227265706c795f646967657374223a2234333332353363343734363038663064373433303664633233303432363336633434646531396430373030313662383533373436376133303562303731643839222c22726571756573745f646967657374223a2262323363363035333136303061666131666334353939366135653831303233316462613061393062323062376266393064356663393861623464653035626236222c2276657273696f6e223a2231227d";
+/// JSON copy of all parity inputs and goldens for non-Rust consumers.
+pub const OPENCLAW_WIRE_PARITY_GOLDEN_JSON: &str =
+    include_str!("../tests/fixtures/openclaw_wire_parity.json");
+
+/// Official stable package name pinned by the LATTICE launcher.
+pub const OPENCLAW_OFFICIAL_PACKAGE_NAME: &str = "openclaw";
+/// Official stable package version pinned by the LATTICE launcher.
+pub const OPENCLAW_OFFICIAL_PACKAGE_VERSION: &str = "2026.7.1-2";
+/// Verified official source commit pinned by the LATTICE launcher.
+pub const OPENCLAW_OFFICIAL_SOURCE_COMMIT: &str = "0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c";
+/// Verified official package license pinned by the LATTICE launcher.
+pub const OPENCLAW_OFFICIAL_PACKAGE_LICENSE: &str = "MIT";
+/// Registry integrity pinned by the LATTICE launcher for the official package.
+pub const OPENCLAW_OFFICIAL_PACKAGE_INTEGRITY: &str = "sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g==";
+/// Official package CLI entrypoint pinned by the LATTICE launcher.
+pub const OPENCLAW_OFFICIAL_ENTRYPOINT: &str = "openclaw.mjs";
+/// Domain prefix for the LATTICE-owned official-launch HMAC.
+pub const OPENCLAW_LAUNCH_ATTESTATION_DOMAIN: &str = "lattice-openclaw-launch-attestation-v1";
+/// Closed protocol identifier for the first authenticated official-mode frame.
+pub const OPENCLAW_CLIENT_HELLO_PROTOCOL: &str = "lattice-openclaw-client-hello";
+
+const REQUEST_MAGIC: [u8; 8] = OPENCLAW_WIRE_REQUEST_MAGIC;
+const RESPONSE_MAGIC: [u8; 8] = OPENCLAW_WIRE_RESPONSE_MAGIC;
+const SESSION_MAGIC: [u8; 8] = OPENCLAW_WIRE_SESSION_MAGIC;
 const SESSION_EPOCH_BYTES: usize = 16;
 const NONCE_BYTES: usize = 16;
 const TAG_BYTES: usize = 32;
@@ -44,6 +91,398 @@ const HEADER_BYTES: usize =
 const SESSION_GREETING_BYTES: usize = SESSION_MAGIC.len() + SESSION_EPOCH_BYTES;
 const HMAC_BLOCK_BYTES: usize = 64;
 const MAX_TIMEOUT: Duration = Duration::from_secs(30);
+const PROCESS_START_NONCE_BYTES: usize = 16;
+const MAX_LAUNCH_RECORD_ID_BYTES: usize = 128;
+
+/// Independent 256-bit key held only by the LATTICE-owned launcher and verifier.
+///
+/// This key is deliberately a distinct type from [`AuthenticationKey`], which
+/// prevents a plugin transport key from satisfying the launch-evidence gate.
+#[derive(Eq, PartialEq)]
+pub struct OpenClawLaunchAttestationKey([u8; TAG_BYTES]);
+
+impl OpenClawLaunchAttestationKey {
+    /// Constructs a non-zero launch-attestation key.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the all-zero sentinel.
+    pub fn new(bytes: [u8; TAG_BYTES]) -> Result<Self, GatewayTransportError> {
+        if bytes.iter().all(|byte| *byte == 0) {
+            return Err(GatewayTransportError::new(
+                GatewayTransportErrorKind::Configuration,
+            ));
+        }
+        Ok(Self(bytes))
+    }
+
+    fn bytes(&self) -> &[u8; TAG_BYTES] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for OpenClawLaunchAttestationKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("OpenClawLaunchAttestationKey([REDACTED])")
+    }
+}
+
+/// LATTICE launcher HMAC over one exact official-process evidence record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OpenClawLaunchAttestationTag([u8; TAG_BYTES]);
+
+impl OpenClawLaunchAttestationTag {
+    /// Wraps a non-zero HMAC produced by the LATTICE-owned launcher.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the all-zero sentinel.
+    pub fn new(bytes: [u8; TAG_BYTES]) -> Result<Self, GatewayTransportError> {
+        if bytes.iter().all(|byte| *byte == 0) {
+            return Err(GatewayTransportError::new(
+                GatewayTransportErrorKind::Configuration,
+            ));
+        }
+        Ok(Self(bytes))
+    }
+}
+
+/// Per-process nonce issued by the LATTICE-owned launcher, not by the plugin.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OpenClawProcessStartNonce([u8; PROCESS_START_NONCE_BYTES]);
+
+impl OpenClawProcessStartNonce {
+    /// Constructs a non-zero process-start nonce.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the all-zero sentinel.
+    pub fn new(bytes: [u8; PROCESS_START_NONCE_BYTES]) -> Result<Self, GatewayTransportError> {
+        if bytes.iter().all(|byte| *byte == 0) {
+            return Err(GatewayTransportError::new(
+                GatewayTransportErrorKind::Configuration,
+            ));
+        }
+        Ok(Self(bytes))
+    }
+
+    fn bytes(self) -> [u8; PROCESS_START_NONCE_BYTES] {
+        self.0
+    }
+}
+
+/// Closed authenticated hello. It carries no caller-supplied package or runtime claim.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenClawClientHello {
+    launch_record_id: String,
+    process_start_nonce: OpenClawProcessStartNonce,
+}
+
+impl OpenClawClientHello {
+    /// Returns the LATTICE-issued launch-record identity.
+    #[must_use]
+    pub fn launch_record_id(&self) -> &str {
+        &self.launch_record_id
+    }
+
+    /// Returns the LATTICE-issued process-start nonce.
+    #[must_use]
+    pub const fn process_start_nonce(&self) -> OpenClawProcessStartNonce {
+        self.process_start_nonce
+    }
+}
+
+/// Untrusted observed fields for one isolated official package launch.
+///
+/// Constructing this value does not attest or promote the process. It becomes
+/// trusted only after [`OpenClawOfficialLaunchRecord::verify_lattice_attestation`]
+/// authenticates every field with the launcher-owned key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenClawOfficialLaunchEvidence {
+    launch_record_id: String,
+    process_id: u32,
+    process_start_nonce: OpenClawProcessStartNonce,
+    package_tarball_digest: ContentDigest,
+    entrypoint_digest: ContentDigest,
+    isolated_profile_digest: ContentDigest,
+}
+
+impl OpenClawOfficialLaunchEvidence {
+    /// Parses bounded observed fields without claiming launcher provenance.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unsafe record IDs, zero process IDs, and sentinel digests.
+    pub fn new(
+        launch_record_id: impl Into<String>,
+        process_id: u32,
+        process_start_nonce: OpenClawProcessStartNonce,
+        package_tarball_digest: ContentDigest,
+        entrypoint_digest: ContentDigest,
+        isolated_profile_digest: ContentDigest,
+    ) -> Result<Self, GatewayTransportError> {
+        let launch_record_id = launch_record_id.into();
+        validate_launch_record_fields(
+            &launch_record_id,
+            process_id,
+            &package_tarball_digest,
+            &entrypoint_digest,
+            &isolated_profile_digest,
+        )?;
+        Ok(Self {
+            launch_record_id,
+            process_id,
+            process_start_nonce,
+            package_tarball_digest,
+            entrypoint_digest,
+            isolated_profile_digest,
+        })
+    }
+}
+
+/// LATTICE-owned evidence for one isolated official package launch.
+///
+/// Package identity, version, registry integrity, and entrypoint are compile-time
+/// pins. The plugin can only prove possession of this record's ID and start nonce;
+/// it cannot self-assert package or `RuntimeKind::Live` evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenClawOfficialLaunchRecord {
+    evidence: OpenClawOfficialLaunchEvidence,
+}
+
+impl OpenClawOfficialLaunchRecord {
+    /// Verifies and creates one launcher-owned official process record.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid evidence fields or an HMAC that does not bind every field
+    /// and immutable official package pin. The transport authentication key is
+    /// not accepted by this API.
+    pub fn verify_lattice_attestation(
+        evidence: OpenClawOfficialLaunchEvidence,
+        attestation_key: &OpenClawLaunchAttestationKey,
+        attestation_tag: OpenClawLaunchAttestationTag,
+    ) -> Result<Self, GatewayTransportError> {
+        let expected_tag = launch_attestation_tag(attestation_key, &evidence)?;
+        if !constant_time_eq(&expected_tag, &attestation_tag.0) {
+            return Err(GatewayTransportError::new(
+                GatewayTransportErrorKind::Authentication,
+            ));
+        }
+        Ok(Self { evidence })
+    }
+
+    /// Returns the launcher-issued record identity.
+    #[must_use]
+    pub fn launch_record_id(&self) -> &str {
+        &self.evidence.launch_record_id
+    }
+
+    /// Returns the observed official process ID.
+    #[must_use]
+    pub const fn process_id(&self) -> u32 {
+        self.evidence.process_id
+    }
+
+    /// Returns the verified package tarball digest.
+    #[must_use]
+    pub const fn package_tarball_digest(&self) -> &ContentDigest {
+        &self.evidence.package_tarball_digest
+    }
+
+    /// Returns the verified entrypoint digest.
+    #[must_use]
+    pub const fn entrypoint_digest(&self) -> &ContentDigest {
+        &self.evidence.entrypoint_digest
+    }
+
+    /// Returns the verified isolated-profile configuration digest.
+    #[must_use]
+    pub const fn isolated_profile_digest(&self) -> &ContentDigest {
+        &self.evidence.isolated_profile_digest
+    }
+
+    /// Returns the immutable official package name pin.
+    #[must_use]
+    pub const fn package_name(&self) -> &'static str {
+        OPENCLAW_OFFICIAL_PACKAGE_NAME
+    }
+
+    /// Returns the immutable official package version pin.
+    #[must_use]
+    pub const fn package_version(&self) -> &'static str {
+        OPENCLAW_OFFICIAL_PACKAGE_VERSION
+    }
+
+    /// Returns the immutable verified source commit pin.
+    #[must_use]
+    pub const fn source_commit(&self) -> &'static str {
+        OPENCLAW_OFFICIAL_SOURCE_COMMIT
+    }
+
+    /// Returns the immutable verified package license pin.
+    #[must_use]
+    pub const fn package_license(&self) -> &'static str {
+        OPENCLAW_OFFICIAL_PACKAGE_LICENSE
+    }
+
+    /// Returns the immutable registry integrity pin.
+    #[must_use]
+    pub const fn package_integrity(&self) -> &'static str {
+        OPENCLAW_OFFICIAL_PACKAGE_INTEGRITY
+    }
+
+    /// Returns the immutable package entrypoint pin.
+    #[must_use]
+    pub const fn entrypoint(&self) -> &'static str {
+        OPENCLAW_OFFICIAL_ENTRYPOINT
+    }
+
+    /// Builds the only `ClientHello` accepted for this launch record.
+    #[must_use]
+    pub fn client_hello(&self) -> OpenClawClientHello {
+        OpenClawClientHello {
+            launch_record_id: self.evidence.launch_record_id.clone(),
+            process_start_nonce: self.evidence.process_start_nonce,
+        }
+    }
+}
+
+fn validate_launch_record_fields(
+    launch_record_id: &str,
+    process_id: u32,
+    package_tarball_digest: &ContentDigest,
+    entrypoint_digest: &ContentDigest,
+    isolated_profile_digest: &ContentDigest,
+) -> Result<(), GatewayTransportError> {
+    if launch_record_id.is_empty()
+        || launch_record_id.len() > MAX_LAUNCH_RECORD_ID_BYTES
+        || !launch_record_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        || matches!(launch_record_id, "." | "..")
+        || process_id == 0
+        || [
+            package_tarball_digest,
+            entrypoint_digest,
+            isolated_profile_digest,
+        ]
+        .into_iter()
+        .any(|digest| digest.as_str().bytes().all(|byte| byte == b'0'))
+    {
+        return Err(GatewayTransportError::new(
+            GatewayTransportErrorKind::Configuration,
+        ));
+    }
+    Ok(())
+}
+
+fn append_launch_attestation_field(
+    payload: &mut Vec<u8>,
+    name: &str,
+    value: &[u8],
+) -> Result<(), GatewayTransportError> {
+    let name_length = u32::try_from(name.len())
+        .map_err(|_| GatewayTransportError::new(GatewayTransportErrorKind::Configuration))?;
+    let value_length = u32::try_from(value.len())
+        .map_err(|_| GatewayTransportError::new(GatewayTransportErrorKind::Configuration))?;
+    payload.extend_from_slice(&name_length.to_be_bytes());
+    payload.extend_from_slice(name.as_bytes());
+    payload.extend_from_slice(&value_length.to_be_bytes());
+    payload.extend_from_slice(value);
+    Ok(())
+}
+
+fn launch_attestation_tag(
+    key: &OpenClawLaunchAttestationKey,
+    evidence: &OpenClawOfficialLaunchEvidence,
+) -> Result<[u8; TAG_BYTES], GatewayTransportError> {
+    let mut payload = Vec::with_capacity(768);
+    payload.extend_from_slice(OPENCLAW_LAUNCH_ATTESTATION_DOMAIN.as_bytes());
+    payload.push(0);
+    append_launch_attestation_field(
+        &mut payload,
+        "launch_record_id",
+        evidence.launch_record_id.as_bytes(),
+    )?;
+    append_launch_attestation_field(
+        &mut payload,
+        "process_id",
+        &evidence.process_id.to_be_bytes(),
+    )?;
+    append_launch_attestation_field(
+        &mut payload,
+        "process_start_nonce",
+        &evidence.process_start_nonce.bytes(),
+    )?;
+    append_launch_attestation_field(
+        &mut payload,
+        "package_name",
+        OPENCLAW_OFFICIAL_PACKAGE_NAME.as_bytes(),
+    )?;
+    append_launch_attestation_field(
+        &mut payload,
+        "package_version",
+        OPENCLAW_OFFICIAL_PACKAGE_VERSION.as_bytes(),
+    )?;
+    append_launch_attestation_field(
+        &mut payload,
+        "source_commit",
+        OPENCLAW_OFFICIAL_SOURCE_COMMIT.as_bytes(),
+    )?;
+    append_launch_attestation_field(
+        &mut payload,
+        "package_license",
+        OPENCLAW_OFFICIAL_PACKAGE_LICENSE.as_bytes(),
+    )?;
+    append_launch_attestation_field(
+        &mut payload,
+        "package_integrity",
+        OPENCLAW_OFFICIAL_PACKAGE_INTEGRITY.as_bytes(),
+    )?;
+    append_launch_attestation_field(
+        &mut payload,
+        "entrypoint",
+        OPENCLAW_OFFICIAL_ENTRYPOINT.as_bytes(),
+    )?;
+    append_launch_attestation_field(
+        &mut payload,
+        "package_tarball_digest",
+        evidence.package_tarball_digest.as_str().as_bytes(),
+    )?;
+    append_launch_attestation_field(
+        &mut payload,
+        "entrypoint_digest",
+        evidence.entrypoint_digest.as_str().as_bytes(),
+    )?;
+    append_launch_attestation_field(
+        &mut payload,
+        "isolated_profile_digest",
+        evidence.isolated_profile_digest.as_str().as_bytes(),
+    )?;
+    Ok(hmac_sha256(key.bytes(), &payload))
+}
+
+fn hmac_sha256(key: &[u8; TAG_BYTES], payload: &[u8]) -> [u8; TAG_BYTES] {
+    let mut inner_pad = [0x36_u8; HMAC_BLOCK_BYTES];
+    let mut outer_pad = [0x5c_u8; HMAC_BLOCK_BYTES];
+    for (index, byte) in key.iter().copied().enumerate() {
+        inner_pad[index] ^= byte;
+        outer_pad[index] ^= byte;
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(payload);
+    let inner_digest = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner_digest);
+    let digest = outer.finalize();
+    let mut tag = [0_u8; TAG_BYTES];
+    tag.copy_from_slice(&digest);
+    tag
+}
 
 /// Maximum authenticated transport nonces retained for one server process.
 pub const MAX_AUTH_REPLAY_ENTRIES: usize = 4_096;
@@ -156,6 +595,7 @@ struct TransportSessionEpoch([u8; SESSION_EPOCH_BYTES]);
 
 struct PreparedConnection {
     stream: TcpStream,
+    hello_nonce: Option<[u8; NONCE_BYTES]>,
     nonce: [u8; NONCE_BYTES],
     frame: Vec<u8>,
     deadline: Instant,
@@ -406,6 +846,7 @@ pub struct OpenClawGatewayServer<S> {
     peer: GatewayPeerContext,
     session_epoch: TransportSessionEpoch,
     authentication_key: AuthenticationKey,
+    official_launch_record: Option<OpenClawOfficialLaunchRecord>,
     frozen_submissions: BTreeMap<String, TaskSpecSubmission>,
     seen_nonces: BTreeSet<[u8; NONCE_BYTES]>,
     idempotency_store: Box<dyn OpenClawIdempotencyStore>,
@@ -434,6 +875,30 @@ where
             config,
             service,
             Box::<ProcessMemoryOpenClawIdempotencyStore>::default(),
+            None,
+        )
+    }
+
+    /// Binds a transport with a LATTICE-owned official-package launch gate.
+    ///
+    /// Every accepted connection must send an authenticated closed `ClientHello`
+    /// matching `launch_record` before its command frame. This records official
+    /// process evidence but does not by itself claim durable or live runtime
+    /// acceptance.
+    ///
+    /// # Errors
+    ///
+    /// Returns a static unavailable or non-local failure when binding is unsafe.
+    pub fn bind_official_launch(
+        config: OpenClawGatewayConfig,
+        service: S,
+        launch_record: OpenClawOfficialLaunchRecord,
+    ) -> Result<Self, GatewayTransportError> {
+        Self::bind_with_store(
+            config,
+            service,
+            Box::<ProcessMemoryOpenClawIdempotencyStore>::default(),
+            Some(launch_record),
         )
     }
 
@@ -460,13 +925,36 @@ where
                 GatewayTransportErrorKind::Configuration,
             ));
         }
-        Self::bind_with_store(config, service, Box::new(store))
+        Self::bind_with_store(config, service, Box::new(store), None)
+    }
+
+    /// Binds an official-package launch gate with durable command reconciliation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a provider that identifies itself as process-memory-only.
+    pub fn bind_official_launch_with_durable_idempotency<I>(
+        config: OpenClawGatewayConfig,
+        service: S,
+        launch_record: OpenClawOfficialLaunchRecord,
+        store: I,
+    ) -> Result<Self, GatewayTransportError>
+    where
+        I: OpenClawIdempotencyStore + 'static,
+    {
+        if store.durability() != OpenClawIdempotencyDurability::DurableTerminalReceipts {
+            return Err(GatewayTransportError::new(
+                GatewayTransportErrorKind::Configuration,
+            ));
+        }
+        Self::bind_with_store(config, service, Box::new(store), Some(launch_record))
     }
 
     fn bind_with_store(
         config: OpenClawGatewayConfig,
         service: S,
         idempotency_store: Box<dyn OpenClawIdempotencyStore>,
+        official_launch_record: Option<OpenClawOfficialLaunchRecord>,
     ) -> Result<Self, GatewayTransportError> {
         let listener = TcpListener::bind(config.bind_address)
             .map_err(|_| GatewayTransportError::new(GatewayTransportErrorKind::Unavailable))?;
@@ -492,6 +980,7 @@ where
             peer: config.peer,
             session_epoch,
             authentication_key,
+            official_launch_record,
             frozen_submissions: config.frozen_submissions,
             seen_nonces: BTreeSet::new(),
             idempotency_store,
@@ -530,19 +1019,32 @@ where
     pub fn serve_once(&mut self) -> Result<(), GatewayTransportError> {
         let PreparedConnection {
             mut stream,
+            hello_nonce,
             nonce,
             frame,
             deadline: connection_deadline,
         } = self.accept_authenticated_connection()?;
-        if self.seen_nonces.contains(&nonce) {
+        if hello_nonce == Some(nonce)
+            || hello_nonce.is_some_and(|value| self.seen_nonces.contains(&value))
+            || self.seen_nonces.contains(&nonce)
+        {
             return Err(GatewayTransportError::new(
                 GatewayTransportErrorKind::Replay,
             ));
         }
-        if self.seen_nonces.len() >= MAX_AUTH_REPLAY_ENTRIES {
+        let new_nonce_count = usize::from(hello_nonce.is_some()) + 1;
+        if self
+            .seen_nonces
+            .len()
+            .checked_add(new_nonce_count)
+            .is_none_or(|count| count > MAX_AUTH_REPLAY_ENTRIES)
+        {
             return Err(GatewayTransportError::new(
                 GatewayTransportErrorKind::Capacity,
             ));
+        }
+        if let Some(value) = hello_nonce {
+            self.seen_nonces.insert(value);
         }
         self.seen_nonces.insert(nonce);
 
@@ -618,29 +1120,33 @@ where
         &self,
         frame: &[u8],
     ) -> Result<(GatewayRequest, ReplyEncoding), GatewayTransportError> {
-        if let Ok(request) = decode_request(frame) {
-            if matches!(request.body(), GatewayRequestBody::Submit(_)) {
-                return Err(GatewayTransportError::new(
-                    GatewayTransportErrorKind::ForbiddenPayload,
-                ));
-            }
+        if let Ok(request) = wire::decode_openclaw_control_request(frame) {
             return Ok((request, ReplyEncoding::Gateway));
         }
-        let selector = wire::decode_openclaw_submit_request(frame)?;
-        let submission = self
-            .frozen_submissions
-            .get(selector.task_spec_digest.as_str())
-            .cloned()
-            .ok_or_else(|| {
-                GatewayTransportError::new(GatewayTransportErrorKind::ForbiddenPayload)
-            })?;
-        let request = build_request(
-            selector.command_id,
-            selector.correlation_id,
-            GatewayRequestBody::Submit(submission),
-        )
-        .map_err(|_| GatewayTransportError::new(GatewayTransportErrorKind::Codec))?;
-        Ok((request, ReplyEncoding::OpenClawSubmit))
+        if let Ok(selector) = wire::decode_openclaw_submit_request(frame) {
+            let submission = self
+                .frozen_submissions
+                .get(selector.task_spec_digest.as_str())
+                .cloned()
+                .ok_or_else(|| {
+                    GatewayTransportError::new(GatewayTransportErrorKind::ForbiddenPayload)
+                })?;
+            let request = build_request(
+                selector.command_id,
+                selector.correlation_id,
+                GatewayRequestBody::Submit(submission),
+            )
+            .map_err(|_| GatewayTransportError::new(GatewayTransportErrorKind::Codec))?;
+            return Ok((request, ReplyEncoding::OpenClawSubmit));
+        }
+        if decode_request(frame)
+            .is_ok_and(|request| matches!(request.body(), GatewayRequestBody::Submit(_)))
+        {
+            return Err(GatewayTransportError::new(
+                GatewayTransportErrorKind::ForbiddenPayload,
+            ));
+        }
+        Err(GatewayTransportError::new(GatewayTransportErrorKind::Codec))
     }
 
     fn accept_authenticated_connection(
@@ -661,6 +1167,7 @@ where
                 let key = self.authentication_key.clone();
                 let session_epoch = self.session_epoch;
                 let timeout = self.timeout;
+                let official_launch_record = self.official_launch_record.clone();
                 thread::Builder::new()
                     .name("lattice-openclaw-gateway-auth".to_owned())
                     .spawn(move || {
@@ -670,6 +1177,7 @@ where
                             timeout,
                             session_epoch,
                             &key,
+                            official_launch_record.as_ref(),
                         );
                         let _ignored = sender.send(result);
                     })
@@ -870,13 +1378,71 @@ impl OpenClawGatewayClient {
         request: &GatewayRequest,
         nonce: TransportNonce,
     ) -> Result<GatewayReply, GatewayTransportError> {
-        if matches!(request.body(), GatewayRequestBody::Submit(_)) {
-            return Err(GatewayTransportError::new(
-                GatewayTransportErrorKind::ForbiddenPayload,
-            ));
-        }
-        let request_frame = encode_request(request)
-            .map_err(|_| GatewayTransportError::new(GatewayTransportErrorKind::Codec))?;
+        let request_frame = match request.body() {
+            GatewayRequestBody::Status(target) => {
+                wire::encode_openclaw_status_request(&OpenClawStatusRequest::from_target(
+                    request.command_id().clone(),
+                    request.correlation_id().clone(),
+                    target.clone(),
+                ))?
+            }
+            GatewayRequestBody::Stop(target) => {
+                wire::encode_openclaw_stop_request(&OpenClawStopRequest::new(
+                    request.command_id().clone(),
+                    request.correlation_id().clone(),
+                    target.clone(),
+                ))?
+            }
+            GatewayRequestBody::Submit(_) => {
+                return Err(GatewayTransportError::new(
+                    GatewayTransportErrorKind::ForbiddenPayload,
+                ));
+            }
+            GatewayRequestBody::Plan(_)
+            | GatewayRequestBody::Approve(_)
+            | GatewayRequestBody::Reject(_) => {
+                return Err(GatewayTransportError::new(GatewayTransportErrorKind::Codec));
+            }
+        };
+        self.send_control_frame(request, &request_frame, nonce)
+    }
+
+    /// Sends one closed typed status request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded transport, authentication, codec, or reply failure.
+    pub fn send_status(
+        &self,
+        request: &OpenClawStatusRequest,
+        nonce: TransportNonce,
+    ) -> Result<GatewayReply, GatewayTransportError> {
+        let gateway_request = request.gateway_request()?;
+        let frame = encode_openclaw_status_request(request)?;
+        self.send_control_frame(&gateway_request, &frame, nonce)
+    }
+
+    /// Sends one closed typed stop request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded transport, authentication, codec, or reply failure.
+    pub fn send_stop(
+        &self,
+        request: &OpenClawStopRequest,
+        nonce: TransportNonce,
+    ) -> Result<GatewayReply, GatewayTransportError> {
+        let gateway_request = request.gateway_request()?;
+        let frame = encode_openclaw_stop_request(request)?;
+        self.send_control_frame(&gateway_request, &frame, nonce)
+    }
+
+    fn send_control_frame(
+        &self,
+        request: &GatewayRequest,
+        request_frame: &[u8],
+        nonce: TransportNonce,
+    ) -> Result<GatewayReply, GatewayTransportError> {
         let mut stream = TcpStream::connect_timeout(&self.endpoint, self.timeout)
             .map_err(|error| map_connect_error(&error))?;
         configure_stream(&stream, self.timeout)?;
@@ -892,7 +1458,7 @@ impl OpenClawGatewayClient {
             REQUEST_MAGIC,
             session_epoch,
             nonce_bytes,
-            &request_frame,
+            request_frame,
             &session_key,
             connection_deadline,
         )?;
@@ -969,6 +1535,7 @@ fn prepare_authenticated_connection(
     timeout: Duration,
     session_epoch: TransportSessionEpoch,
     key: &AuthenticationKey,
+    official_launch_record: Option<&OpenClawOfficialLaunchRecord>,
 ) -> ConnectionResult {
     if !remote_address.ip().is_loopback() {
         return Err(GatewayTransportError::new(
@@ -981,10 +1548,25 @@ fn prepare_authenticated_connection(
     configure_stream(&stream, timeout)?;
     let deadline = connection_deadline(timeout)?;
     write_transport_session_greeting(&mut stream, session_epoch, deadline)?;
+    let hello_nonce = if let Some(record) = official_launch_record {
+        let (nonce, hello_frame) =
+            read_authenticated_packet(&mut stream, REQUEST_MAGIC, session_epoch, key, deadline)?;
+        let hello = wire::decode_openclaw_client_hello(&hello_frame)
+            .map_err(|_| GatewayTransportError::new(GatewayTransportErrorKind::Authentication))?;
+        if hello != record.client_hello() {
+            return Err(GatewayTransportError::new(
+                GatewayTransportErrorKind::Authentication,
+            ));
+        }
+        Some(nonce)
+    } else {
+        None
+    };
     let (nonce, frame) =
         read_authenticated_packet(&mut stream, REQUEST_MAGIC, session_epoch, key, deadline)?;
     Ok(PreparedConnection {
         stream,
+        hello_nonce,
         nonce,
         frame,
         deadline,
@@ -1030,10 +1612,15 @@ fn write_transport_session_greeting(
     epoch: TransportSessionEpoch,
     deadline: Instant,
 ) -> Result<(), GatewayTransportError> {
+    let greeting = transport_session_greeting(epoch);
+    write_all_until(stream, &greeting, deadline)
+}
+
+fn transport_session_greeting(epoch: TransportSessionEpoch) -> [u8; SESSION_GREETING_BYTES] {
     let mut greeting = [0_u8; SESSION_GREETING_BYTES];
     greeting[..SESSION_MAGIC.len()].copy_from_slice(&SESSION_MAGIC);
     greeting[SESSION_MAGIC.len()..].copy_from_slice(&epoch.0);
-    write_all_until(stream, &greeting, deadline)
+    greeting
 }
 
 fn read_transport_session_greeting(
@@ -1251,6 +1838,17 @@ fn write_authenticated_packet(
     key: &AuthenticationKey,
     deadline: Instant,
 ) -> Result<(), GatewayTransportError> {
+    let packet = authenticated_packet(magic, epoch, nonce, payload, key)?;
+    write_all_until(stream, &packet, deadline)
+}
+
+fn authenticated_packet(
+    magic: [u8; REQUEST_MAGIC.len()],
+    epoch: TransportSessionEpoch,
+    nonce: [u8; NONCE_BYTES],
+    payload: &[u8],
+    key: &AuthenticationKey,
+) -> Result<Vec<u8>, GatewayTransportError> {
     if payload.is_empty() || payload.len() > MAX_FRAME_BYTES {
         return Err(GatewayTransportError::new(
             GatewayTransportErrorKind::Malformed,
@@ -1267,7 +1865,7 @@ fn write_authenticated_packet(
     packet.extend_from_slice(&length_bytes);
     packet.extend_from_slice(&tag);
     packet.extend_from_slice(payload);
-    write_all_until(stream, &packet, deadline)
+    Ok(packet)
 }
 
 fn authenticate(
@@ -1325,6 +1923,7 @@ mod tests {
         GatewayRequestBody, GatewaySessionId, GatewayStatusTarget, ProjectSnapshotId,
         SubjectBinding, TaskId,
     };
+    use lattice_gateway_ipc::encode_request;
     use lattice_ports::{GatewayServiceError, GatewayServiceResult};
 
     use super::*;
@@ -1392,6 +1991,386 @@ mod tests {
             ),
         )
         .expect("request")
+    }
+
+    fn lowercase_hex(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+
+        let mut output = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        output
+    }
+
+    #[test]
+    fn exported_parity_goldens_match_production_greeting_request_and_response_bytes() {
+        assert_eq!(OPENCLAW_WIRE_REQUEST_MAGIC, *b"LATGW001");
+        assert_eq!(OPENCLAW_WIRE_RESPONSE_MAGIC, *b"LATGR001");
+        assert_eq!(OPENCLAW_WIRE_SESSION_MAGIC, *b"LATSN001");
+
+        let root_key = AuthenticationKey::new([0x11; TAG_BYTES]).expect("root key");
+        let session_epoch = TransportSessionEpoch([
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f,
+        ]);
+        let nonce = [
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+            0x1e, 0x1f,
+        ];
+        assert_eq!(
+            lowercase_hex(root_key.bytes()),
+            OPENCLAW_PARITY_ROOT_KEY_HEX
+        );
+        assert_eq!(
+            lowercase_hex(&session_epoch.0),
+            OPENCLAW_PARITY_SESSION_EPOCH_HEX
+        );
+        assert_eq!(lowercase_hex(&nonce), OPENCLAW_PARITY_NONCE_HEX);
+        assert_eq!(
+            lowercase_hex(&transport_session_greeting(session_epoch)),
+            OPENCLAW_PARITY_SESSION_GREETING_HEX
+        );
+
+        let request = OpenClawStatusRequest::command(
+            GatewayCommandId::new("command-status-a").expect("command"),
+            GatewayCorrelationId::new("correlation-status-a").expect("correlation"),
+            ProjectId::new("project-a").expect("project"),
+            GatewayCommandId::new("target-command-a").expect("target command"),
+        );
+        let request_payload = encode_openclaw_status_request(&request).expect("request payload");
+        assert_eq!(
+            std::str::from_utf8(&request_payload).expect("request utf8"),
+            OPENCLAW_PARITY_STATUS_COMMAND_REQUEST_JSON
+        );
+        let session_key =
+            derive_transport_session_key(&root_key, session_epoch).expect("session key");
+        let request_packet = authenticated_packet(
+            OPENCLAW_WIRE_REQUEST_MAGIC,
+            session_epoch,
+            nonce,
+            &request_payload,
+            &session_key,
+        )
+        .expect("request packet");
+        assert_eq!(
+            lowercase_hex(&request_packet),
+            OPENCLAW_PARITY_REQUEST_PACKET_HEX
+        );
+
+        let gateway_request = request.gateway_request().expect("gateway request");
+        let reply = build_reply(
+            &gateway_request,
+            GatewayReplyBody::Denied(GatewayDenialCode::DownstreamDenied),
+        )
+        .expect("reply");
+        let response_payload = encode_reply(&reply).expect("response payload");
+        assert_eq!(
+            std::str::from_utf8(&response_payload).expect("response utf8"),
+            OPENCLAW_PARITY_STATUS_COMMAND_RESPONSE_JSON
+        );
+        let response_packet = authenticated_packet(
+            OPENCLAW_WIRE_RESPONSE_MAGIC,
+            session_epoch,
+            nonce,
+            &response_payload,
+            &session_key,
+        )
+        .expect("response packet");
+        assert_eq!(
+            lowercase_hex(&response_packet),
+            OPENCLAW_PARITY_RESPONSE_PACKET_HEX
+        );
+
+        let fixture: serde_json::Value =
+            serde_json::from_str(OPENCLAW_WIRE_PARITY_GOLDEN_JSON).expect("fixture JSON");
+        assert_eq!(
+            fixture["session_greeting"]["bytes_hex"],
+            OPENCLAW_PARITY_SESSION_GREETING_HEX
+        );
+        assert_eq!(
+            fixture["request_packet"]["bytes_hex"],
+            OPENCLAW_PARITY_REQUEST_PACKET_HEX
+        );
+        assert_eq!(
+            fixture["response_packet"]["bytes_hex"],
+            OPENCLAW_PARITY_RESPONSE_PACKET_HEX
+        );
+    }
+
+    #[test]
+    fn official_client_hello_contains_only_lattice_owned_record_id_and_start_nonce() {
+        let record = official_launch_record_with_id("launch-record-a");
+        assert_eq!(record.package_name(), OPENCLAW_OFFICIAL_PACKAGE_NAME);
+        assert_eq!(record.package_version(), OPENCLAW_OFFICIAL_PACKAGE_VERSION);
+        assert_eq!(
+            record.package_integrity(),
+            OPENCLAW_OFFICIAL_PACKAGE_INTEGRITY
+        );
+        assert_eq!(record.entrypoint(), OPENCLAW_OFFICIAL_ENTRYPOINT);
+
+        let hello = record.client_hello();
+        let frame = encode_openclaw_client_hello(&hello).expect("hello frame");
+        let text = std::str::from_utf8(&frame).expect("utf8");
+        assert!(text.contains("\"launch_record_id\":\"launch-record-a\""));
+        assert!(text.contains("\"process_start_nonce\":\"21212121212121212121212121212121\""));
+        for forbidden in [
+            "package_name",
+            "package_version",
+            "package_integrity",
+            "entrypoint",
+            "path",
+            "credential",
+            "runtime",
+        ] {
+            assert!(!text.contains(forbidden));
+        }
+        assert_eq!(
+            wire::decode_openclaw_client_hello(&frame).expect("decode hello"),
+            hello
+        );
+        let self_reported = br#"{"launch_record_id":"launch-record-a","package_version":"2026.7.1-2","process_start_nonce":"21212121212121212121212121212121","protocol":"lattice-openclaw-client-hello","version":"1"}"#;
+        assert_eq!(
+            wire::decode_openclaw_client_hello(self_reported)
+                .expect_err("plugin package self-report must fail")
+                .kind(),
+            GatewayTransportErrorKind::Codec
+        );
+    }
+
+    fn official_launch_record() -> OpenClawOfficialLaunchRecord {
+        official_launch_record_with_id("launch-record-unit")
+    }
+
+    fn official_launch_record_with_id(launch_record_id: &str) -> OpenClawOfficialLaunchRecord {
+        let process_start_nonce =
+            OpenClawProcessStartNonce::new([0x21; 16]).expect("process nonce");
+        let package_tarball_digest = digest('d');
+        let entrypoint_digest = digest('e');
+        let isolated_profile_digest = digest('f');
+        let attestation_key =
+            OpenClawLaunchAttestationKey::new([0x41; 32]).expect("attestation key");
+        let evidence = OpenClawOfficialLaunchEvidence::new(
+            launch_record_id,
+            4242,
+            process_start_nonce,
+            package_tarball_digest,
+            entrypoint_digest,
+            isolated_profile_digest,
+        )
+        .expect("launch evidence");
+        let attestation_tag = OpenClawLaunchAttestationTag::new(
+            launch_attestation_tag(&attestation_key, &evidence).expect("attestation bytes"),
+        )
+        .expect("attestation tag");
+        OpenClawOfficialLaunchRecord::verify_lattice_attestation(
+            evidence,
+            &attestation_key,
+            attestation_tag,
+        )
+        .expect("launch record")
+    }
+
+    #[test]
+    fn official_launch_record_requires_exact_lattice_attestation() {
+        let launch_record_id = "launch-record-attested";
+        let process_start_nonce =
+            OpenClawProcessStartNonce::new([0x42; 16]).expect("process nonce");
+        let package_tarball_digest = digest('a');
+        let entrypoint_digest = digest('b');
+        let isolated_profile_digest = digest('c');
+        let attestation_key =
+            OpenClawLaunchAttestationKey::new([0x43; 32]).expect("attestation key");
+        let exact_evidence = OpenClawOfficialLaunchEvidence::new(
+            launch_record_id,
+            9001,
+            process_start_nonce,
+            package_tarball_digest.clone(),
+            entrypoint_digest.clone(),
+            isolated_profile_digest.clone(),
+        )
+        .expect("exact evidence");
+        let attestation_tag = OpenClawLaunchAttestationTag::new(
+            launch_attestation_tag(&attestation_key, &exact_evidence).expect("attestation bytes"),
+        )
+        .expect("attestation tag");
+
+        let record = OpenClawOfficialLaunchRecord::verify_lattice_attestation(
+            exact_evidence.clone(),
+            &attestation_key,
+            attestation_tag,
+        )
+        .expect("exact attestation");
+        assert_eq!(record.process_id(), 9001);
+
+        let wrong_tag = OpenClawLaunchAttestationTag::new([0x44; 32]).expect("wrong tag");
+        assert_eq!(
+            OpenClawOfficialLaunchRecord::verify_lattice_attestation(
+                exact_evidence,
+                &attestation_key,
+                wrong_tag,
+            )
+            .expect_err("wrong tag must fail")
+            .kind(),
+            GatewayTransportErrorKind::Authentication
+        );
+
+        let substituted_evidence = OpenClawOfficialLaunchEvidence::new(
+            launch_record_id,
+            9002,
+            process_start_nonce,
+            package_tarball_digest,
+            entrypoint_digest,
+            isolated_profile_digest,
+        )
+        .expect("substituted evidence shape");
+        assert_eq!(
+            OpenClawOfficialLaunchRecord::verify_lattice_attestation(
+                substituted_evidence,
+                &attestation_key,
+                attestation_tag,
+            )
+            .expect_err("PID substitution must fail")
+            .kind(),
+            GatewayTransportErrorKind::Authentication
+        );
+    }
+
+    #[test]
+    fn official_launch_gate_requires_authenticated_hello_before_command_dispatch() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let root_key = AuthenticationKey::new([0x31; TAG_BYTES]).expect("root key");
+        let config = OpenClawGatewayConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            Duration::from_secs(2),
+            ProjectId::new("project-a").expect("project"),
+            transport_peer(),
+            root_key.clone(),
+        )
+        .expect("config");
+        let record = official_launch_record();
+        let server = OpenClawGatewayServer::bind_official_launch(
+            config,
+            CountingRejectService(calls.clone()),
+            record.clone(),
+        )
+        .expect("official-gated server");
+        let endpoint = server.local_addr().expect("endpoint");
+        let server_thread = thread::spawn(move || {
+            let mut server = server;
+            server.serve_once().expect("serve official command");
+            server
+        });
+
+        let mut stream = TcpStream::connect(endpoint).expect("connect");
+        configure_stream(&stream, Duration::from_secs(2)).expect("configure");
+        let deadline = connection_deadline(Duration::from_secs(2)).expect("deadline");
+        let (epoch, session_key) =
+            read_transport_session_greeting(&mut stream, &root_key, deadline).expect("greeting");
+        let hello = encode_openclaw_client_hello(&record.client_hello()).expect("hello");
+        write_authenticated_packet(
+            &mut stream,
+            REQUEST_MAGIC,
+            epoch,
+            [0x32; NONCE_BYTES],
+            &hello,
+            &session_key,
+            deadline,
+        )
+        .expect("write hello");
+
+        let gateway_request = status_request();
+        let GatewayRequestBody::Status(target) = gateway_request.body() else {
+            panic!("status request");
+        };
+        let request = OpenClawStatusRequest::from_target(
+            gateway_request.command_id().clone(),
+            gateway_request.correlation_id().clone(),
+            target.clone(),
+        );
+        let frame = encode_openclaw_status_request(&request).expect("status frame");
+        write_authenticated_packet(
+            &mut stream,
+            REQUEST_MAGIC,
+            epoch,
+            [0x33; NONCE_BYTES],
+            &frame,
+            &session_key,
+            deadline,
+        )
+        .expect("write command");
+        let (reply_nonce, reply_frame) =
+            read_authenticated_packet(&mut stream, RESPONSE_MAGIC, epoch, &session_key, deadline)
+                .expect("read reply");
+        assert_eq!(reply_nonce, [0x33; NONCE_BYTES]);
+        decode_reply(&gateway_request, &reply_frame).expect("typed reply");
+
+        let server = server_thread.join().expect("server thread");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            server.service().expect("service").0.load(Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[test]
+    fn official_launch_gate_rejects_a_command_frame_used_as_client_hello() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let root_key = AuthenticationKey::new([0x34; TAG_BYTES]).expect("root key");
+        let config = OpenClawGatewayConfig::new(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            Duration::from_secs(2),
+            ProjectId::new("project-a").expect("project"),
+            transport_peer(),
+            root_key.clone(),
+        )
+        .expect("config");
+        let server = OpenClawGatewayServer::bind_official_launch(
+            config,
+            CountingRejectService(calls.clone()),
+            official_launch_record(),
+        )
+        .expect("official-gated server");
+        let endpoint = server.local_addr().expect("endpoint");
+        let server_thread = thread::spawn(move || {
+            let mut server = server;
+            server
+                .serve_once()
+                .expect_err("missing hello must fail")
+                .kind()
+        });
+
+        let mut stream = TcpStream::connect(endpoint).expect("connect");
+        configure_stream(&stream, Duration::from_secs(2)).expect("configure");
+        let deadline = connection_deadline(Duration::from_secs(2)).expect("deadline");
+        let (epoch, session_key) =
+            read_transport_session_greeting(&mut stream, &root_key, deadline).expect("greeting");
+        let gateway_request = status_request();
+        let GatewayRequestBody::Status(target) = gateway_request.body() else {
+            panic!("status request");
+        };
+        let request = OpenClawStatusRequest::from_target(
+            gateway_request.command_id().clone(),
+            gateway_request.correlation_id().clone(),
+            target.clone(),
+        );
+        let frame = encode_openclaw_status_request(&request).expect("status frame");
+        write_authenticated_packet(
+            &mut stream,
+            REQUEST_MAGIC,
+            epoch,
+            [0x35; NONCE_BYTES],
+            &frame,
+            &session_key,
+            deadline,
+        )
+        .expect("write command in hello slot");
+
+        assert_eq!(
+            server_thread.join().expect("server thread"),
+            GatewayTransportErrorKind::Authentication
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     struct CountingRejectService(Arc<AtomicUsize>);
@@ -1953,6 +2932,7 @@ mod tests {
             config,
             CountingRejectService(calls.clone()),
             Box::new(store),
+            None,
         )
         .expect("server");
         let endpoint = server.local_addr().expect("endpoint");
