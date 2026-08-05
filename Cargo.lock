@@ -258,6 +258,8 @@ dependencies = [
 name = "lattice-codex-adapter"
 version = "0.1.0"
 dependencies = [
+ "lattice-contracts",
+ "lattice-ports",
  "serde_json",
  "sha2",
  "win32job",
@@ -281,6 +283,14 @@ dependencies = [
  "serde",
  "serde_json",
  "unicode-normalization",
+]
+
+[[package]]
+name = "lattice-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "lattice-contracts",
+ "lattice-ports",
 ]
 
 [[package]]

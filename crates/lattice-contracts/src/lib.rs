@@ -1,5 +1,9 @@
 //! Versioned, I/O-free shared contracts for LATTICE ports and adapters.
 
+mod delivery;
+
+pub use delivery::*;
+
 use std::error::Error;
 use std::fmt;
 

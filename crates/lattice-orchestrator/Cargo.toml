@@ -1,0 +1,13 @@
+[package]
+name = "lattice-orchestrator"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lattice-contracts = { path = "../lattice-contracts" }
+lattice-ports = { path = "../lattice-ports" }
+
+[lints]
+workspace = true

@@ -1,10 +1,10 @@
 ---
 module_id: lattice-contracts
 name: LATTICE Shared Contracts
-version: 1.9
+version: 1.10
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-02
+last_reviewed: 2026-08-05
 ---
 
 ## Mission
@@ -39,6 +39,9 @@ their mutable domain state.
   initial/reference/read-owner and sweep authority receipt/current-head
   representations.
 - Component, boundary, runtime, invocation, and normalized evidence types.
+- Immutable typed delivery request, ordered stage evidence, terminal
+  outcome/status, and receipt representations built from trusted composition
+  bindings rather than caller-supplied commands, paths, or credentials.
 - Neutral bounded gateway peer, request/action payload, reply/disposition,
   stable denial, and redacted Task Spec document representations.
 - Neutral bounded Store transaction/daemon identifiers, closed repository
@@ -62,6 +65,17 @@ their mutable domain state.
 - Distinguish component, authority boundary, and fake/live runtime identity.
 - Expose only lane-specific evidence constructors with fixed
   component/boundary pairs.
+- Represent a delivery request with exact task/attempt/invocation identity,
+  bounded declared-change and fixed-test commitments, and non-zero binding
+  digests. It contains no shell, SQL, credential, provider configuration, or
+  arbitrary MCP argument field.
+- Keep delivery stage evidence closed and distinguish durable intent, Codex,
+  workspace inspection, fixed test, Git commit, durable outcome, and terminal
+  receipt. Absence or uncertainty at one stage cannot be represented as later
+  success.
+- Bind terminal delivery evidence to the originating request and exact prior
+  stage commitments. Scripted and official-live Codex runtime evidence remain
+  structurally distinguishable.
 - Construct task-agnostic Project Registry authority receipts only for the
   fixed `lattice-project-registry` producer ID and supported semantic producer
   version.
@@ -223,6 +237,14 @@ their mutable domain state.
     physical transaction row committed under the bound database/schema
     evidence. It never proves domain legality, domain currentness, provider
     effect delivery, Guardian activation, or protected release authority.
+36. Delivery representation performs no I/O and grants no orchestration,
+    policy, persistence, workspace, test, Git, provider, or MCP authority.
+37. A delivery request cannot encode shell, SQL, credentials, provider
+    configuration, arbitrary paths supplied by a tool caller, or a caller
+    Boolean that grants success or admission.
+38. Delivery stage and terminal evidence remain request-bound and ordered;
+    scripted evidence cannot be substituted for official-live evidence, and
+    reconciliation cannot be represented as completion.
 
 ## Allowed Dependencies
 
@@ -235,7 +257,9 @@ their mutable domain state.
 
 ## Failure, Compatibility, And Migration
 
-Invalid values return typed construction errors. Version 1.9 preserves v1
+Invalid values return typed construction errors. Version 1.10 preserves every
+1.9 contract and adds typed delivery request/stage/outcome/status/receipt
+representation without I/O or authority. Version 1.9 preserves v1
 fake-only request/receipt compatibility and adds v2 live/durable PostgreSQL
 receipt representation with complete persistence evidence. It still performs
 no hashing, I/O, current-state query, durability verification, or domain
@@ -272,6 +296,7 @@ constitution amendment plus compatibility evidence.
 | Artifact object/reference/authority substitution | project/generation/bounds, fixed producer/runtime/full-head, owner action/scope, and sweep claim matrix | Security review | yes |
 | Gateway boundary/substitution matrix | identifier and digest bounds, request/reply variant binding, page limit, role-before-replay, and fake replay capacity | Security review | yes |
 | Store transaction/substitution matrix | identifier/scope/digest/revision/runtime/durability and complete receipt-field checks | Security review | yes |
+| Delivery request/evidence matrix | binding/digest/stage/order/runtime/status substitution plus prohibited-input construction tests | Security review | yes |
 | Dependency inspection | Cargo metadata shows no dependencies | Architecture review | yes |
 | Full Rust verification | workspace format, lint, and tests | Engineering | yes |
 
@@ -294,3 +319,4 @@ a versioned amendment, SPEC-002 trace, architecture review, and user approval.
 | 1.7 | 2026-08-01 | SPEC-002 v13, ADR-015, TASK-017 | Bounded typed gateway peer/request/reply representation with protected and stop separation | User MVP-3 execution directive |
 | 1.8 | 2026-08-01 | SPEC-002 v15, ADR-016, TASK-018 | Neutral typed Store transaction, daemon authority, physical head, commitments, terminal receipt, and explicit non-durable fake representation | User MVP-3 execution directive |
 | 1.9 | 2026-08-02 | SPEC-002 v22, ADR-018, TASK-020 | Preserve Store v1 fake-only compatibility and add v2 live PostgreSQL durability plus database/schema persistence evidence | User MVP-3 execution directive |
+| 1.10 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Immutable typed delivery request, ordered stage evidence, terminal status/outcome, and receipt representations without caller command/path/credential escape hatches | User approval in preceding implementation window |

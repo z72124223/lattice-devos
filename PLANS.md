@@ -46,6 +46,26 @@ and replanned. Non-blocking polish and exhaustive edge-case work are deferred;
 startup failure, a broken core path, corrupt durable state, credential leakage,
 or inability to create a recoverable local commit remains blocking.
 
+## Approved TASK-032 Architecture Amendment — 2026-08-05
+
+The user approved this versioned amendment in the preceding task window; it is
+an implementation input, not a pending review gate:
+
+1. `lattice-contracts` and `lattice-ports` gain typed delivery requests,
+   evidence, and PostgreSQL-ledger/workspace/verification/Git ports.
+2. `orchestrator-runtime` remains pure Rust effect ordering and may reach
+   Codex, PostgreSQL, verification, or Git only through those ports.
+3. `latticed` 1.0 is the composition root implemented by the existing
+   `apps/lattice-runtime` package; the `lattice-runtime` binary remains a
+   compatibility wrapper, not a second orchestrator.
+4. The bounded MCP stdio surface exposes exactly two zero-argument tools:
+   `lattice_delivery_run` and `lattice_delivery_status`. Tool callers cannot
+   supply shell commands, SQL, filesystem paths, or credentials. OpenClaw
+   remains the normal human gateway.
+5. TASK-032's exact-path allowlist is expanded only for this architecture and
+   its executable acceptance path. Deployment, payment, publication, and the
+   unrelated website remain excluded.
+
 ## Global Strategy
 
 1. Use OpenClaw as the only normal human command, status, task-approval, and
@@ -644,21 +664,22 @@ remain future Orchestrator/PostgreSQL responsibilities.
     AC-06 remains open for real Windows/Git inspection, Workspace Git, and
     Scope Check. Writer Lease, Approval, Artifact, external components,
     production/release/deployment, and the unrelated website remain excluded.
-- [ ] **CURRENT TASK-032 — executable Codex/PostgreSQL delivery node:** add a
-  Rust composition entry and a concrete Codex app-server adapter, then prove a
-  bounded repository modification, test, Git commit, durable PostgreSQL result,
-  and status replay. This is the first real segment of the delivery path; it
-  does not claim OpenClaw, Graphify, Hermes, or Codebase Memory until those real
-  components are attached by the following nodes.
+- [ ] **CURRENT TASK-032 — executable Codex/PostgreSQL delivery node:** first
+  record the approved versioned contract/port/orchestrator/`latticed` boundary,
+  then implement it with TDD and prove an official Codex app-server repository
+  modification, fixed verification, Git commit, durable PostgreSQL result, and
+  restart status replay. The existing scripted checkpoint remains a test
+  harness and is not live-Codex evidence. This first real segment does not
+  claim OpenClaw, Graphify, Hermes, or Codebase Memory until each real component
+  is attached and verified by a following executable node.
 - [ ] Step 7: Complete TASK-026 and TASK-027 for Workspace Git 2.0 and exact
   Scope Check 1.1 behavior in disposable repositories; retain the local
   filesystem lock only as defense in depth.
-- [ ] Step 8: Complete TASK-028 through TASK-031: independent Review Runtime
-  authority and fake, fake Codex protocol adapter, one offline end-to-end flow,
-  retained V1 compatibility, and the MVP-1 exit ledger. Live Codex remains
-  MVP-2.
-- [ ] Step 9: Complete MVP-2 local IPC/ACL plus exact-version live OpenClaw,
-  Codex, and independent read-only Review Runtime compatibility evidence.
+- [ ] Step 8: Preserve unfinished TASK-028 through TASK-031 controls as
+  hardening backlog and pull forward only a control that blocks the executable
+  delivery path; do not let the older fake-adapter sequence override TASK-032.
+- [ ] Step 9: After TASK-032 passes, attach and verify the bounded OpenClaw
+  gateway against the same durable delivery request and receipt.
 - [ ] Step 10: Complete MVP-2 Codebase Memory ownership, PostgreSQL retrieval
   audit, quantified multilingual benchmark, and project-isolation evidence.
 - [ ] Step 11: Complete MVP-2 Graphify code-only and OS-contained Hermes

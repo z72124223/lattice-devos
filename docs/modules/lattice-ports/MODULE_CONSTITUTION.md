@@ -1,22 +1,25 @@
 ---
 module_id: lattice-ports
 name: LATTICE I/O Ports
-version: 1.4
+version: 1.5
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-02
+last_reviewed: 2026-08-05
 ---
 
 ## Mission
 
 Define the abstract Rust traits through which orchestration reaches the gateway,
 sole product-code writer, read-only knowledge lane, untrusted research lane,
-and typed physical control store.
+typed physical control store, durable delivery ledger, bounded workspace/Git
+lane, and fixed-test lane.
 
 ## Non-Goals
 
 - Select or start OpenClaw, Codex, Graphify, Hermes, or PostgreSQL.
 - Perform I/O, decide policy, own workflow order, or define domain transitions.
+- Select a workspace, construct a command line, choose a test, create a Git
+  commit, or interpret an MCP call.
 - Manufacture PostgreSQL durability or external component compatibility; a
   concrete Store may return a structurally classified physical receipt whose
   durability still requires its own implementation evidence.
@@ -37,6 +40,14 @@ and typed physical control store.
 - `CodexPort` is the only product-code mutation lane contract.
 - `GraphifyPort` returns derived read-only evidence.
 - `HermesPort` returns untrusted candidate evidence.
+- `DeliveryLedgerPort` records typed intent before an effect, records typed
+  terminal outcome/receipt after it, and loads exact status without exposing a
+  database client, SQL, credential, or schema detail.
+- `WorkspaceGitPort` prepares/inspects the preconfigured bounded workspace and
+  creates a local commit only from typed passing scope/test evidence. It
+  exposes no arbitrary command or caller-selected path.
+- `TestRunnerPort` runs only the fixed test bound into the delivery request and
+  returns typed test evidence; it accepts no shell text or command arguments.
 - `ControlStore::transact` accepts one complete typed physical transaction and
   returns a typed terminal receipt or Store-specific error without defining
   domain legality.
@@ -70,6 +81,14 @@ and typed physical control store.
 11. A terminal physical receipt may classify its own fake or PostgreSQL
     durability, but the port never upgrades that evidence into domain legality,
     freshness, effect delivery, Guardian authority, or release authority.
+12. Delivery, workspace/Git, and test traits expose no concrete driver,
+    process, filesystem handle, command line, SQL, credential, or MCP type.
+13. Port methods do not own effect order. Only the injected orchestrator may
+    sequence intent, Codex, workspace/test/Git, and terminal persistence.
+14. The workspace/Git port cannot commit before receiving request-bound passing
+    scope and fixed-test evidence.
+15. Unknown ledger, Codex, workspace, test, or Git outcome never becomes a
+    successful port result.
 
 ## Allowed Dependencies
 
@@ -83,7 +102,9 @@ and typed physical control store.
 
 ## Failure, Compatibility, And Migration
 
-Rejected calls and exhausted/unknown outcomes return typed errors. Version 1.4
+Rejected calls and exhausted/unknown outcomes return typed errors. Version 1.5
+preserves every 1.4 signature and adds typed delivery-ledger, workspace/Git,
+and fixed-test traits for Orchestrator 2.1. Version 1.4
 makes `current_head` explicitly mutable for synchronous adapters and permits
 the unchanged typed receipt to carry its Contracts-owned live/durability
 classification; no driver or concrete connection enters the trait. Version 1.3
@@ -104,6 +125,7 @@ require a versioned amendment and coordinated consumer migration.
 |---|---|---|---|
 | Port contract tests | `cargo test -p lattice-ports` | Engineering | yes |
 | Store error/trait shape | complete transaction/current-head compile and failure matrix | Security review | yes |
+| Delivery effect traits | compile-time lane separation plus intent/outcome, fixed-test, scope-before-commit, and unknown-outcome matrices | Engineering | yes |
 | Dependency direction | Cargo metadata inspection | Architecture review | yes |
 | Full Rust verification | workspace format, lint, and tests | Engineering | yes |
 
@@ -122,3 +144,4 @@ approval.
 | 1.2 | 2026-08-01 | SPEC-002 v14, ADR-015 review amendment, TASK-017 | Component-free Rust-core Gateway service error; external port attribution retained only for adapters/store | User MVP-3 execution directive |
 | 1.3 | 2026-08-01 | SPEC-002 v15, ADR-016, TASK-018 | Complete typed Store transaction/current-head boundary and Store-specific failure semantics | User MVP-3 execution directive |
 | 1.4 | 2026-08-02 | SPEC-002 v22, ADR-018, TASK-020 | Explicit mutable current-head query and live physical receipt semantics without exposing a driver | User MVP-3 execution directive |
+| 1.5 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Typed delivery-ledger, bounded workspace/Git, and fixed-test traits while retaining contracts-only dependency direction | User approval in preceding implementation window |

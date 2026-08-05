@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 24
+version: 25
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -21,7 +21,9 @@ modules:
   - module_id: scope-check
     constitution_version: 1.1
   - module_id: orchestrator-runtime
-    constitution_version: 2.0
+    constitution_version: 2.1
+  - module_id: latticed
+    constitution_version: 1.0
   - module_id: openclaw-adapter
     constitution_version: 2.0
   - module_id: gateway-ipc
@@ -49,9 +51,9 @@ modules:
   - module_id: lattice-cli
     constitution_version: 1.0
   - module_id: lattice-contracts
-    constitution_version: 1.9
+    constitution_version: 1.10
   - module_id: lattice-ports
-    constitution_version: 1.4
+    constitution_version: 1.5
 ---
 
 # Autonomous Development Platform
@@ -185,6 +187,20 @@ creating duplicate authorities or an unconstrained self-modifying agent.
   store ports, scope rules, process supervision, timeouts, cancellation,
   adapter capability verification, and normalized evidence.
 - Pure domain/policy modules perform no I/O.
+- `orchestrator-runtime` is a pure Rust effect coordinator. It receives typed
+  delivery ports and can only order durable intent, bounded workspace
+  preparation, Codex execution, workspace/test/Git verification, and durable
+  outcome/receipt recording; it selects no concrete adapter and performs no
+  direct I/O.
+- `latticed` 1.0 is the sole normal composition root. The existing
+  `apps/lattice-runtime` package implements it, selects concrete adapters, and
+  retains `lattice-runtime` only as a compatibility wrapper over the same
+  composition and state.
+- The Codex App MCP stdio surface exposes exactly two zero-parameter tools,
+  `lattice_delivery_run` and `lattice_delivery_status`. Their tool schemas
+  accept no shell, SQL, path, credential, provider, or arbitrary task input.
+  This surface is not a second general gateway; OpenClaw remains the normal
+  human gateway.
 - Provider-specific behavior remains behind versioned ports. External adapters
   never receive general PostgreSQL credentials.
 - Project Registry, Writer Lease, Task Ledger, Codebase Memory, Artifact Store,
@@ -671,22 +687,18 @@ acceptance criteria below.
 | MVP | Included behavior | Required evidence level | Excluded claim |
 |---|---|---|---|
 | MVP-0 — Rust foundation | buildable Rust workspace, inert CLI/bootstrap, versioned shared contracts and abstract ports | local machine checks plus independent code and architecture review | no durable store, provider execution, or autonomy |
-| MVP-1 — Offline control core | pure domains/policy, PostgreSQL truth and leases, artifact/workspace/scope enforcement, fake gateway/Codex/reviewer, one end-to-end offline task | unit/property tests, disposable PostgreSQL concurrency/restart tests, fake contract tests, full local review ledger | no live OpenClaw/Codex/Graphify/Hermes compatibility |
-| MVP-2 — Local component integration | exact-version local OpenClaw, Codex, Graphify, Hermes and Codebase Memory behind MVP-1 boundaries | fake-to-live comparison, binary/schema/capability identity, OS containment, fault/cancel/reconciliation and retrieval benchmark | no second truth/writer, public service, or self-release authority |
+| MVP-1 — Deliverable local alpha | one thin real chain from Codex App or OpenClaw through Rust/PostgreSQL to Codex modification, fixed test and local commit, followed by Graphify, Hermes and project-isolated Codebase Memory retrieval | exact component identity, durable intent/result and restart replay, changed-path/test/commit evidence, graph/reflection artifacts and a recorded memory query | no production hardening, public service, silent self-release, or claim from scripted/fake adapters |
+| MVP-2 — Isolation and recovery | harden the MVP-1 chain with durable leases, exact scope enforcement, cancellation, reconciliation, component isolation and restart recovery | fault/cancel/restart/reconciliation tests, OS-boundary evidence, scope isolation, compatibility matrix and measured retrieval quality | no unconstrained agent, second writer/truth, public service, or self-release authority |
 | MVP-3 — Guardian-protected autonomy | normal improvement Task Packets plus immutable A/B candidates, protected guardian activation, health/canary, reconciliation and rollback | fault injection, nonce/epoch/admission enforcement, complete-drain proof, power-loss recovery and rollback drill | no silent protected change or in-place self-overwrite |
 
-MVP-0 is complete from TASK-008 and TASK-009 evidence. MVP-1 is current;
-TASK-010 through TASK-016 completed the pure Task Domain, Policy, Registry,
-Ledger, Writer Lease, Approval Verifier, and Artifact Store foundations.
-TASK-017 completed the pure/fake gateway protocol slice; durability, remaining
-fake adapters, workspace/scope behavior, and offline end-to-end exit evidence
-remain.
-TASK-018 through TASK-021 completed the fake Store, PostgreSQL foundation,
-durable physical Store, and durable Task Ledger slices. TASK-022 governance
-defines the durable global Project Registry slice, but its Rust/PostgreSQL
-implementation and direct evidence are not yet complete. MVP-1, MVP-2, and
-MVP-3 therefore remain incomplete until exact evidence for every applicable
-row exists.
+MVP-0 is complete from TASK-008 and TASK-009 evidence. MVP-1 is current under
+TASK-032. TASK-010 through TASK-021 supplied the pure and PostgreSQL
+foundations; TASK-022 through TASK-031 remain hardening backlog unless a gap
+blocks the runnable path. TASK-032 first proves the official Codex app-server,
+PostgreSQL restart replay, bounded workspace/test/Git commit, `latticed` MCP
+entry, and compatibility wrapper. Later MVP-1 nodes attach real OpenClaw,
+Graphify, Hermes, and Codebase Memory to that same executable path. MVP-1,
+MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 
 ## Non-Goals
 
@@ -728,7 +740,8 @@ row exists.
 | writer-lease | 1.0 | New lease/fencing/daemon-epoch domain owner |
 | workspace-git | 2.0 | Worktree/Git/filesystem evidence only; consumes lease authority |
 | scope-check | 1.1 | Language-neutral contract; mission remains detection-only |
-| orchestrator-runtime | 2.0 | Real adapter supervision and transactional effect outbox |
+| orchestrator-runtime | 2.1 | Pure injected-port ordering for intent -> workspace prepare -> Codex -> workspace/test/Git -> outcome/receipt; no concrete adapter or transport dependency |
+| latticed | 1.0 | Sole normal composition root in the existing `apps/lattice-runtime` package; concrete adapter selection, bounded MCP stdio, and one `lattice-runtime` compatibility wrapper |
 | openclaw-adapter | 2.0 | Inert scaffold becomes a thin local IPC gateway |
 | gateway-ipc | 1.1 | Bounded canonical six-action protocol, NFC-preserving encoder, truthful core-service errors, and deterministic fake loopback; live transport and OS authentication remain deferred |
 | approval-verifier | 1.0 | Pure typed-subject/challenge/proof/nonce/time/current-head owner and deterministic fake; live trust/claim remains deferred |
@@ -742,8 +755,8 @@ row exists.
 | self-upgrade-guardian | 1.0 | New A/B activation, health, and rollback boundary |
 | lattice-core-bootstrap | 1.0 | Inert compile-time component manifest for the first Rust slice |
 | lattice-cli | 1.0 | Read-only bootstrap inspection/recovery command; no runtime authority |
-| lattice-contracts | 1.9 | Versioned, I/O-free invocation/evidence plus typed Gateway IPC, approval, artifact, and Store v1-fake/v2-live transaction, persistence, durability, physical-head, and receipt values |
-| lattice-ports | 1.4 | Typed inbound Gateway service with component-free core errors plus abstract external writer, knowledge, research, and mutable complete Store transaction/current-head traits |
+| lattice-contracts | 1.10 | Preserve 1.9 values and add immutable typed delivery request, stage evidence, terminal outcome/status, and receipt representations without I/O or authority |
+| lattice-ports | 1.5 | Preserve 1.4 traits and add abstract delivery-ledger, workspace/Git, and fixed-test ports used by the pure orchestrator |
 
 The user approved this module direction, the local bootstrap slice, and
 continued local work on 2026-07-29. TASK-010 adds the pure technical
@@ -1243,6 +1256,20 @@ packaging modules do not activate functional provider modules.
   criterion closes only TASK-022 durable Registry evidence: AC-26 remains the
   completed pure Registry criterion, while AC-06 and MVP-1 through MVP-3 remain
   open.
+- [ ] AC-37: TASK-032 provides one pure Rust delivery coordinator that can
+  reach effects only through typed ports and orders durable intent before the
+  Codex effect, bounded changed-path inspection and fixed test before Git
+  commit, and durable outcome/receipt after the terminal effect. The sole
+  normal `latticed` composition root is implemented by the existing
+  `apps/lattice-runtime` package and exposes exactly the zero-parameter MCP
+  tools `lattice_delivery_run` and `lattice_delivery_status`; their schemas
+  accept no shell, SQL, path, credential, provider, or arbitrary task input.
+  The `lattice-runtime` compatibility wrapper reaches the identical
+  composition rather than a second orchestrator or truth source. Scripted
+  protocol acceptance remains labeled as such; completion additionally
+  requires an official Codex app-server turn, isolated changed-path/fixed-test/
+  local-commit evidence, PostgreSQL restart replay from a separate status
+  invocation, and fail-closed timeout/protocol/test/Git/database ambiguity.
 
 ## Verification Plan
 
@@ -1276,11 +1303,17 @@ packaging modules do not activate functional provider modules.
 | AC-34 | Store v1/v2 contract matrices, exact-prefix migration upgrade tests, and marker-owned PostgreSQL 17.10 live transaction/concurrency/retry/restart/permission harness | durable physical receipt and head evidence only; no domain repository, Guardian activation, production target, provider/product, or release claim |
 | AC-35 | Task Ledger pure planner/checkpoint parity plus exact schema-v3 migration and marker-owned PostgreSQL 17.10 Ledger append/outbox/concurrency/fault/restart/corruption harness | durable atomic command/event/projection/outbox and byte-identical historical Store replay; no effect delivery, live resource observation, other repository, production, or release claim |
 | AC-36 | Project Registry 1.1 observation/request/authority-receipt/command-result golden vectors; 1.2 vacant `0` and strict `1..N` planner/checkpoint/record-set vectors; exact 103-byte logical-state/Fake-Live digest fixtures; self-consistency-versus-retained-checkpoint rollback tests; schema-v4 PostgreSQL 17.10 global transaction/concurrency/fault/restart/corruption harness | acyclic command-core -> logical bytes -> result checkpoint -> record-set -> transaction/persistence commitments; complete bounded durable history and independently retained current checkpoint; serialized identity ownership and byte-identical Store/Ledger compatibility; no live Windows/Git inspection, Workspace Git, Scope Check, production, or release claim |
+| AC-37 | contracts/ports/orchestrator call-order tests, exact MCP tool-list/schema tests, compatibility-wrapper parity, official Codex app-server acceptance, isolated Git fixture, fixed test, local commit and separate PostgreSQL restart/status replay | typed intent-before-effect and outcome-after-effect evidence; exactly two zero-parameter MCP tools; no caller shell/SQL/path/credential input; one verified commit and replayed terminal receipt; scripted evidence remains distinguishable from official live evidence |
 
 ## Human Decisions
 
 - The Rust-owned writable Codex topology and the V2 amendment direction are
   already approved.
+- The responsible user explicitly approved the SPEC-002 v25 / ADR-021
+  delivery-composition amendment before this implementation window: Contracts
+  1.10, Ports 1.5, pure Orchestrator 2.1, `latticed` 1.0, its two fixed
+  zero-parameter MCP tools, and the `lattice-runtime` compatibility wrapper may
+  proceed without another routine review prompt.
 - Routine bounded local implementation, dependency setup, disposable database
   verification, and exact-version capability preflights proceed without
   repeated chat approval when their ticket contains the safety boundary and
@@ -1299,5 +1332,5 @@ Resolved on 2026-07-29:
 - The user approved ADR-004 through ADR-007 and the V2 module direction by
   replying `好 開始執行`.
 
-No material question blocks TASK-021 or later safe, bounded local work.
+No material question blocks TASK-032 or later safe, bounded local work.
 Protected actions listed above remain fail-closed.

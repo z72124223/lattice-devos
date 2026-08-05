@@ -5,6 +5,7 @@ members = [
     "crates/lattice-codex-adapter",
     "crates/lattice-cjson",
     "crates/lattice-contracts",
+    "crates/lattice-orchestrator",
     "crates/lattice-core",
     "crates/lattice-gateway-ipc",
     "crates/lattice-approval-verifier",

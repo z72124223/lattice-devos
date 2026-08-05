@@ -4,9 +4,13 @@ use std::error::Error;
 use std::fmt;
 
 use lattice_contracts::{
-    CodexEvidence, CodexRunRequest, Component, GatewayPeerContext, GatewayReply, GatewayRequest,
-    GraphifyBuildRequest, GraphifyEvidence, HermesEvidence, HermesResearchRequest, RequestId,
+    CodexDeliveryEvidence, CodexDeliveryRequest, CodexEvidence, CodexRunRequest, Component,
+    DeliveryOutcomeEvidence, DeliveryOutcomeRequest, DeliveryReceipt, DeliveryRunRequest,
+    DeliveryStage, DeliveryStatusRequest, DurableIntentEvidence, FixedTestEvidence,
+    GatewayPeerContext, GatewayReply, GatewayRequest, GitCommitEvidence, GraphifyBuildRequest,
+    GraphifyEvidence, HermesEvidence, HermesResearchRequest, PreparedWorkspaceEvidence, RequestId,
     StorePhysicalHead, StoreScope, StoreTransactionReceipt, StoreTransactionRequest,
+    WorkspaceChangeEvidence,
 };
 
 /// Result type returned by every LATTICE port.
@@ -21,6 +25,9 @@ pub type GatewayServiceResult<T> = Result<T, GatewayServiceError>;
 
 /// Result returned by the typed physical control-store boundary.
 pub type ControlStoreResult<T> = Result<T, ControlStoreError>;
+
+/// Result returned by each typed delivery effect port.
+pub type DeliveryPortResult<T> = Result<T, DeliveryPortError>;
 
 /// Stable fail-closed categories shared across port and inbound-service boundaries.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -84,6 +91,73 @@ impl fmt::Display for PortError {
 }
 
 impl Error for PortError {}
+
+/// Whether a failed delivery call is known not to have completed or has an
+/// outcome that must be reconciled before retry.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DeliveryFailureCertainty {
+    Known,
+    Ambiguous,
+}
+
+/// Typed delivery failure with exact stage and effect certainty.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliveryPortError {
+    stage: DeliveryStage,
+    kind: PortErrorKind,
+    certainty: DeliveryFailureCertainty,
+    code: String,
+}
+
+impl DeliveryPortError {
+    /// Constructs one stage-specific delivery failure.
+    #[must_use]
+    pub fn new(
+        stage: DeliveryStage,
+        kind: PortErrorKind,
+        certainty: DeliveryFailureCertainty,
+        code: impl Into<String>,
+    ) -> Self {
+        Self {
+            stage,
+            kind,
+            certainty,
+            code: code.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn stage(&self) -> DeliveryStage {
+        self.stage
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> PortErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn certainty(&self) -> DeliveryFailureCertainty {
+        self.certainty
+    }
+
+    #[must_use]
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+}
+
+impl fmt::Display for DeliveryPortError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Delivery {:?} {:?}/{:?}: {}",
+            self.stage, self.kind, self.certainty, self.code
+        )
+    }
+}
+
+impl Error for DeliveryPortError {}
 
 /// A typed Rust-core gateway-service failure with no external component label.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -228,6 +302,118 @@ pub trait ControlStore {
     /// Returns a Store-specific failure when the head cannot be safely
     /// observed. The result is not a domain-owner current head.
     fn current_head(&mut self, scope: &StoreScope) -> ControlStoreResult<StorePhysicalHead>;
+}
+
+/// Durable delivery-ledger boundary. Implementations own persistence and
+/// canonical receipt reconstruction; callers never receive a database client.
+pub trait DeliveryLedgerPort {
+    /// Commits intent before any workspace or provider effect.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when durability cannot be proved.
+    fn record_intent(
+        &mut self,
+        request: &DeliveryRunRequest,
+    ) -> DeliveryPortResult<DurableIntentEvidence>;
+
+    /// Records one completed, failed, or reconciliation-required outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when terminal persistence is rejected or
+    /// unknown.
+    fn record_outcome(
+        &mut self,
+        request: &DeliveryOutcomeRequest,
+    ) -> DeliveryPortResult<DeliveryOutcomeEvidence>;
+
+    /// Reconstructs the terminal receipt from durable state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure for missing, incomplete, corrupt, or ambiguous
+    /// durable state.
+    fn load_receipt(
+        &mut self,
+        request: &DeliveryStatusRequest,
+    ) -> DeliveryPortResult<DeliveryReceipt>;
+}
+
+/// Full typed Codex lane for delivery; the legacy generic [`CodexPort`]
+/// remains source compatible for earlier consumers.
+pub trait DeliveryCodexPort {
+    /// Runs one request bound to durable intent and a prepared workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed known or ambiguous Codex-stage failure.
+    fn run_delivery(
+        &mut self,
+        request: CodexDeliveryRequest,
+    ) -> DeliveryPortResult<CodexDeliveryEvidence>;
+
+    /// Interrupts the delivery associated with one request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when interruption or final outcome is unknown.
+    fn interrupt_delivery(&mut self, request_id: &RequestId) -> DeliveryPortResult<()>;
+}
+
+/// Bounded workspace and Git lane. It exposes no command text or caller path.
+pub trait WorkspaceGitPort {
+    /// Prepares the fixed delivery workspace after durable intent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure for unsafe or ambiguous preparation.
+    fn prepare(
+        &mut self,
+        request: &DeliveryRunRequest,
+        intent: &DurableIntentEvidence,
+    ) -> DeliveryPortResult<PreparedWorkspaceEvidence>;
+
+    /// Inspects the fixed changed-path scope after Codex completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure when scope does not match or cannot be proved.
+    fn inspect_changes(
+        &mut self,
+        request: &DeliveryRunRequest,
+        intent: &DurableIntentEvidence,
+        workspace: &PreparedWorkspaceEvidence,
+        codex: &CodexDeliveryEvidence,
+    ) -> DeliveryPortResult<WorkspaceChangeEvidence>;
+
+    /// Creates one local commit after passing scope and fixed-test evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed known or ambiguous Git-stage failure.
+    fn commit(
+        &mut self,
+        request: &DeliveryRunRequest,
+        workspace: &PreparedWorkspaceEvidence,
+        changes: &WorkspaceChangeEvidence,
+        test: &FixedTestEvidence,
+    ) -> DeliveryPortResult<GitCommitEvidence>;
+}
+
+/// Sole fixed verification profile used by the bounded delivery node.
+pub trait TestRunnerPort {
+    /// Runs the profile-selected fixed test; no command text is accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure for a failed or unobservable test.
+    fn run_fixed(
+        &mut self,
+        request: &DeliveryRunRequest,
+        workspace: &PreparedWorkspaceEvidence,
+        changes: &WorkspaceChangeEvidence,
+    ) -> DeliveryPortResult<FixedTestEvidence>;
 }
 
 /// Sole product-code writer boundary implemented by the `Codex` adapter.
