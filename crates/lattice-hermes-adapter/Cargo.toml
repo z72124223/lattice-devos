@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 rust-version.workspace = true
+autotests = false
 
 [dependencies]
 lattice-cjson = { path = "../lattice-cjson" }
@@ -11,6 +12,7 @@ lattice-contracts = { path = "../lattice-contracts" }
 lattice-ports = { path = "../lattice-ports" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
+sha2 = "=0.11.0"
 
 [lints]
 workspace = true

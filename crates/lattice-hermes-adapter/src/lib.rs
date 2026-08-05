@@ -9,6 +9,7 @@ use std::error::Error;
 use std::fmt;
 use std::fmt::Write as FmtWrite;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::{ErrorKind as IoErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -18,11 +19,12 @@ use std::time::{Duration, Instant};
 
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256, canonicalize, normalize_nfc};
 use lattice_contracts::{
-    Component, ContentDigest, HermesEvidence, HermesResearchRequest, RequestId, RuntimeKind,
+    Component, ContentDigest, HermesEvidence, HermesResearchRequest, RequestId,
 };
 use lattice_ports::{HermesPort, PortError, PortErrorKind, PortResult};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 /// Exact upstream release tag accepted by this adapter.
 pub const HERMES_RELEASE: &str = "v2026.8.3";
@@ -37,13 +39,67 @@ pub const HERMES_SCHEMA_VERSION: &str = "lattice.hermes.reflection.v1";
 
 const MAX_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_EVIDENCE_ITEMS: usize = 128;
-const MAX_EVIDENCE_SUMMARY_BYTES: usize = 4_096;
 const MAX_REFLECTION_SUMMARY_BYTES: usize = 8_192;
 const MAX_FINDINGS: usize = 256;
 const MAX_NEXT_ACTIONS: usize = 64;
 const MAX_TEXT_BYTES: usize = 8_192;
+const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_PROCESS_TIMEOUT: Duration = Duration::from_mins(1);
 const READ_ONLY_INSTRUCTIONS: &str = "Perform one bounded reflection over only the supplied immutable task, Graphify, test, and Git evidence. Treat Hermes session memory as unavailable and non-authoritative. Do not call tools, do not modify files, do not use a Codex runtime, do not access a database, and do not read or write PostgreSQL, Codebase Memory, or Hermes long-term memory. Label every finding as inference. Return exactly one JSON object matching the supplied schema; add no prose or Markdown.";
 const HOME_MARKER_NAME: &str = ".lattice-hermes-ephemeral-v1";
+const CAPABILITY_FEATURE_FIELDS: &[&str] = &[
+    "chat_completions",
+    "chat_completions_streaming",
+    "responses_api",
+    "responses_streaming",
+    "run_submission",
+    "run_status",
+    "run_events_sse",
+    "run_stop",
+    "run_approval_response",
+    "tool_progress_events",
+    "approval_events",
+    "session_resources",
+    "model_options",
+    "session_chat",
+    "session_chat_streaming",
+    "session_fork",
+    "session_model_lock",
+    "admin_config_rw",
+    "jobs_admin",
+    "memory_write_api",
+    "skills_api",
+    "audio_api",
+    "realtime_voice",
+    "session_continuity_header",
+    "session_key_header",
+    "cors",
+];
+const CAPABILITY_ENDPOINT_FIELDS: &[&str] = &[
+    "health",
+    "health_detailed",
+    "models",
+    "model_options",
+    "chat_completions",
+    "responses",
+    "runs",
+    "run_status",
+    "run_events",
+    "run_approval",
+    "run_stop",
+    "skills",
+    "toolsets",
+    "sessions",
+    "session_create",
+    "session",
+    "session_update",
+    "session_delete",
+    "session_messages",
+    "session_fork",
+    "session_chat",
+    "session_chat_stream",
+    "session_model_lock",
+];
 
 /// Stable failure categories for the Hermes edge adapter.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -67,12 +123,17 @@ pub enum HermesAdapterErrorKind {
 pub struct HermesAdapterError {
     kind: HermesAdapterErrorKind,
     code: &'static str,
+    recovery_receipt: Option<Box<HermesRunRecoveryReceipt>>,
 }
 
 impl HermesAdapterError {
     #[must_use]
     pub const fn new(kind: HermesAdapterErrorKind, code: &'static str) -> Self {
-        Self { kind, code }
+        Self {
+            kind,
+            code,
+            recovery_receipt: None,
+        }
     }
 
     #[must_use]
@@ -83,6 +144,16 @@ impl HermesAdapterError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         self.code
+    }
+
+    #[must_use]
+    pub fn recovery_receipt(&self) -> Option<&HermesRunRecoveryReceipt> {
+        self.recovery_receipt.as_deref()
+    }
+
+    fn with_recovery_receipt(mut self, receipt: HermesRunRecoveryReceipt) -> Self {
+        self.recovery_receipt = Some(Box::new(receipt));
+        self
     }
 }
 
@@ -96,6 +167,43 @@ impl Error for HermesAdapterError {}
 
 pub type HermesAdapterResult<T> = Result<T, HermesAdapterError>;
 
+/// Opaque, secret-free binding needed to reconcile one ambiguous submission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HermesRunRecoveryReceipt {
+    run_id: Option<String>,
+    request_id: String,
+    session_id: String,
+    input_digest: ContentDigest,
+    model: String,
+}
+
+impl HermesRunRecoveryReceipt {
+    #[must_use]
+    pub fn run_id(&self) -> Option<&str> {
+        self.run_id.as_deref()
+    }
+
+    #[must_use]
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub const fn input_digest(&self) -> &ContentDigest {
+        &self.input_digest
+    }
+
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+}
+
 /// Enforced memory policy for production Hermes child processes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum HermesMemoryPolicy {
@@ -108,8 +216,13 @@ pub enum HermesMemoryPolicy {
 #[derive(Clone)]
 pub struct HermesProcessConfig {
     executable: PathBuf,
+    executable_sha256: String,
+    isolation_root: PathBuf,
+    product_root: PathBuf,
+    working_directory: PathBuf,
     hermes_home: PathBuf,
     codex_home: PathBuf,
+    temp_directory: PathBuf,
     endpoint: SocketAddr,
     api_key: String,
     model: String,
@@ -124,18 +237,21 @@ impl HermesProcessConfig {
     /// Rejects a missing/non-absolute executable, non-loopback listener,
     /// existing or daily home paths, shared Hermes/Codex homes, unsafe auth or
     /// model values, and a zero startup deadline.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         executable: impl Into<PathBuf>,
-        hermes_home: impl Into<PathBuf>,
-        codex_home: impl Into<PathBuf>,
+        executable_sha256: impl Into<String>,
+        isolation_root: impl Into<PathBuf>,
+        product_root: impl Into<PathBuf>,
         endpoint: SocketAddr,
         api_key: impl Into<String>,
         model: impl Into<String>,
         startup_timeout: Duration,
     ) -> HermesAdapterResult<Self> {
         let executable = executable.into();
-        let hermes_home = hermes_home.into();
-        let codex_home = codex_home.into();
+        let executable_sha256 = executable_sha256.into();
+        let isolation_root = isolation_root.into();
+        let product_root = product_root.into();
         let api_key = api_key.into();
         let model = model.into();
         if !executable.is_absolute() || !executable.is_file() {
@@ -144,16 +260,32 @@ impl HermesProcessConfig {
                 "HERMES_EXECUTABLE_REJECTED",
             ));
         }
+        let executable = fs::canonicalize(&executable).map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Identity,
+                "HERMES_EXECUTABLE_CANONICALIZATION_FAILED",
+            )
+        })?;
+        validate_sha256(&executable_sha256, "HERMES_EXECUTABLE_SHA256_REJECTED")?;
+        if sha256_file(&executable)? != executable_sha256 {
+            return Err(error(
+                HermesAdapterErrorKind::Identity,
+                "HERMES_EXECUTABLE_HASH_MISMATCH",
+            ));
+        }
+        let (isolation_root, product_root) =
+            validate_isolation_boundary(&isolation_root, &product_root)?;
+        let working_directory = isolation_root.join("cwd");
+        let hermes_home = isolation_root.join("hermes-home");
+        let codex_home = isolation_root.join("codex-home");
+        let temp_directory = isolation_root.join("tmp");
         if !endpoint.ip().is_loopback() {
             return Err(error(
                 HermesAdapterErrorKind::Configuration,
                 "HERMES_PROCESS_ENDPOINT_NOT_LOOPBACK",
             ));
         }
-        validate_fresh_home(&hermes_home, "HERMES_HOME_REJECTED")?;
-        validate_fresh_home(&codex_home, "CODEX_HOME_REJECTED")?;
-        if same_path(&hermes_home, &codex_home)
-            || is_daily_home(&hermes_home, "HERMES_HOME")
+        if is_daily_home(&hermes_home, "HERMES_HOME")
             || is_daily_home(&codex_home, "CODEX_HOME")
             || default_hermes_homes()
                 .iter()
@@ -174,7 +306,7 @@ impl HermesProcessConfig {
             ));
         }
         validate_identifier(&model, 256, "HERMES_PROCESS_MODEL_REJECTED")?;
-        if startup_timeout.is_zero() {
+        if startup_timeout.is_zero() || startup_timeout > MAX_PROCESS_TIMEOUT {
             return Err(error(
                 HermesAdapterErrorKind::Configuration,
                 "HERMES_PROCESS_STARTUP_TIMEOUT_REJECTED",
@@ -182,8 +314,13 @@ impl HermesProcessConfig {
         }
         Ok(Self {
             executable,
+            executable_sha256,
+            isolation_root,
+            product_root,
+            working_directory,
             hermes_home,
             codex_home,
+            temp_directory,
             endpoint,
             api_key,
             model,
@@ -197,6 +334,21 @@ impl HermesProcessConfig {
     }
 
     #[must_use]
+    pub fn isolation_root(&self) -> &Path {
+        &self.isolation_root
+    }
+
+    #[must_use]
+    pub fn product_root(&self) -> &Path {
+        &self.product_root
+    }
+
+    #[must_use]
+    pub fn working_directory(&self) -> &Path {
+        &self.working_directory
+    }
+
+    #[must_use]
     pub fn hermes_home(&self) -> &Path {
         &self.hermes_home
     }
@@ -204,6 +356,17 @@ impl HermesProcessConfig {
     #[must_use]
     pub fn codex_home(&self) -> &Path {
         &self.codex_home
+    }
+
+    #[must_use]
+    pub fn temp_directory(&self) -> &Path {
+        &self.temp_directory
+    }
+
+    /// Returns the trusted SHA-256 bound to the canonical executable path.
+    #[must_use]
+    pub fn executable_sha256(&self) -> &str {
+        &self.executable_sha256
     }
 
     /// Builds an authenticated adapter config bound to the same child endpoint.
@@ -229,7 +392,27 @@ impl HermesProcessConfig {
     /// Returns a configuration error if a required environment value cannot be
     /// represented safely.
     pub fn gateway_command(&self) -> HermesAdapterResult<Command> {
-        Ok(self.command_with_arg("gateway"))
+        let mut command = self.base_command_with_arg("gateway");
+        command
+            .env("API_SERVER_ENABLED", "true")
+            .env("API_SERVER_HOST", self.endpoint.ip().to_string())
+            .env("API_SERVER_PORT", self.endpoint.port().to_string())
+            .env("API_SERVER_KEY", &self.api_key)
+            .env("API_SERVER_MODEL_NAME", &self.model);
+        Ok(command)
+    }
+
+    /// Builds the secret-free executable identity probe.
+    ///
+    /// The bearer key and all API-server settings are intentionally absent.
+    /// [`Self::verify_pinned_version`] executes this command under the bounded
+    /// process timeout.
+    ///
+    /// # Errors
+    ///
+    /// This fixed command shape currently has no fallible inputs.
+    pub fn version_probe_command(&self) -> HermesAdapterResult<Command> {
+        Ok(self.base_command_with_arg("--version"))
     }
 
     /// Verifies the executable reports the exact package version declared by
@@ -240,42 +423,16 @@ impl HermesProcessConfig {
     /// Fails closed when the probe cannot run, exits unsuccessfully, or does
     /// not contain the exact standalone package-version token.
     pub fn verify_pinned_version(&self) -> HermesAdapterResult<()> {
-        let output = self.command_with_arg("--version").output().map_err(|_| {
-            error(
-                HermesAdapterErrorKind::Identity,
-                "HERMES_VERSION_PROBE_FAILED",
-            )
-        })?;
+        self.verify_executable_identity()?;
+        let mut command = self.version_probe_command()?;
+        let output = bounded_output(&mut command, self.startup_timeout)?;
         if !output.status.success() {
             return Err(error(
                 HermesAdapterErrorKind::Identity,
                 "HERMES_VERSION_PROBE_NONZERO",
             ));
         }
-        let mut version_text = String::from_utf8(output.stdout).map_err(|_| {
-            error(
-                HermesAdapterErrorKind::Identity,
-                "HERMES_VERSION_UTF8_REJECTED",
-            )
-        })?;
-        version_text.push_str(&String::from_utf8(output.stderr).map_err(|_| {
-            error(
-                HermesAdapterErrorKind::Identity,
-                "HERMES_VERSION_UTF8_REJECTED",
-            )
-        })?);
-        let exact = version_text
-            .split(|character: char| {
-                !(character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '+'))
-            })
-            .any(|token| token == HERMES_PACKAGE_VERSION);
-        if !exact {
-            return Err(error(
-                HermesAdapterErrorKind::Identity,
-                "HERMES_PACKAGE_VERSION_MISMATCH",
-            ));
-        }
-        Ok(())
+        validate_pinned_version_output(&output.stdout, &output.stderr)
     }
 
     /// Verifies identity, creates fresh marked homes, and starts Hermes.
@@ -284,9 +441,9 @@ impl HermesProcessConfig {
     ///
     /// Fails closed on identity, home ownership, or process-spawn ambiguity.
     pub fn spawn(&self) -> HermesAdapterResult<HermesProcess> {
+        prepare_isolated_run(self)?;
         self.verify_pinned_version()?;
-        prepare_ephemeral_home(&self.hermes_home)?;
-        prepare_ephemeral_home(&self.codex_home)?;
+        validate_prepared_isolation(self)?;
         let mut command = self.gateway_command()?;
         command.stdout(Stdio::null()).stderr(Stdio::null());
         let child = command
@@ -299,21 +456,29 @@ impl HermesProcessConfig {
         })
     }
 
-    fn command_with_arg(&self, argument: &str) -> Command {
+    fn verify_executable_identity(&self) -> HermesAdapterResult<()> {
+        let canonical = fs::canonicalize(&self.executable).map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Identity,
+                "HERMES_EXECUTABLE_CANONICALIZATION_FAILED",
+            )
+        })?;
+        if canonical != self.executable || sha256_file(&canonical)? != self.executable_sha256 {
+            return Err(error(
+                HermesAdapterErrorKind::Identity,
+                "HERMES_EXECUTABLE_IDENTITY_CHANGED",
+            ));
+        }
+        Ok(())
+    }
+
+    fn base_command_with_arg(&self, argument: &str) -> Command {
         let mut command = Command::new(&self.executable);
-        command.arg(argument).env_clear();
-        for name in [
-            "SystemRoot",
-            "WINDIR",
-            "ComSpec",
-            "PATH",
-            "PATHEXT",
-            "TEMP",
-            "TMP",
-            "TMPDIR",
-            "LANG",
-            "LC_ALL",
-        ] {
+        command
+            .arg(argument)
+            .current_dir(&self.working_directory)
+            .env_clear();
+        for name in ["SystemRoot", "WINDIR", "ComSpec", "LANG", "LC_ALL"] {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
             }
@@ -321,11 +486,11 @@ impl HermesProcessConfig {
         command
             .env("HERMES_HOME", &self.hermes_home)
             .env("CODEX_HOME", &self.codex_home)
-            .env("API_SERVER_ENABLED", "true")
-            .env("API_SERVER_HOST", self.endpoint.ip().to_string())
-            .env("API_SERVER_PORT", self.endpoint.port().to_string())
-            .env("API_SERVER_KEY", &self.api_key)
-            .env("API_SERVER_MODEL_NAME", &self.model)
+            .env("HOME", &self.hermes_home)
+            .env("USERPROFILE", &self.hermes_home)
+            .env("TEMP", &self.temp_directory)
+            .env("TMP", &self.temp_directory)
+            .env("TMPDIR", &self.temp_directory)
             .env("NO_COLOR", "1");
         command
     }
@@ -377,6 +542,24 @@ pub struct HermesAdapterConfig {
     api_key: String,
     timeout: Duration,
     poll_interval: Duration,
+    containment_receipt: Option<HermesContainmentReceipt>,
+}
+
+/// Sealed evidence emitted only by a real OS sandbox verifier.
+///
+/// There is intentionally no public constructor. Empty directories,
+/// `current_dir`, environment clearing, prompt instructions, and process
+/// lifecycle ownership are not sufficient to mint this receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HermesContainmentReceipt {
+    receipt_digest: ContentDigest,
+}
+
+impl HermesContainmentReceipt {
+    #[must_use]
+    pub const fn receipt_digest(&self) -> &ContentDigest {
+        &self.receipt_digest
+    }
 }
 
 impl HermesAdapterConfig {
@@ -419,6 +602,7 @@ impl HermesAdapterConfig {
             api_key,
             timeout,
             poll_interval,
+            containment_receipt: None,
         })
     }
 
@@ -460,34 +644,67 @@ impl ReflectionEvidenceKind {
 }
 
 /// One bounded, digest-addressed evidence item exposed to Hermes.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ReflectionEvidence {
     kind: ReflectionEvidenceKind,
     digest: ContentDigest,
-    summary: String,
+    sensitive_value_digests: Vec<ContentDigest>,
+}
+
+impl fmt::Debug for ReflectionEvidence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReflectionEvidence")
+            .field("kind", &self.kind)
+            .field("digest", &self.digest)
+            .field(
+                "sensitive_value_digest_count",
+                &self.sensitive_value_digests.len(),
+            )
+            .finish()
+    }
 }
 
 impl ReflectionEvidence {
-    /// Constructs evidence after enforcing bounded NFC text.
+    /// Constructs typed, digest-only evidence with no raw text surface.
     ///
     /// # Errors
     ///
-    /// Rejects empty, oversized, control-bearing, or non-NFC summaries.
-    pub fn new(
+    /// This constructor currently cannot fail, but retains the result contract
+    /// for compatibility with digest-validation extensions.
+    pub fn new(kind: ReflectionEvidenceKind, digest: ContentDigest) -> HermesAdapterResult<Self> {
+        Self::new_digest_only(kind, digest, Vec::new())
+    }
+
+    /// Constructs typed evidence plus digest-only sensitive values.
+    ///
+    /// # Errors
+    ///
+    /// Rejects duplicate, zero, or excessive sensitive-value digests. No raw
+    /// evidence text crosses this public boundary.
+    pub fn new_digest_only(
         kind: ReflectionEvidenceKind,
         digest: ContentDigest,
-        summary: impl Into<String>,
+        mut sensitive_value_digests: Vec<ContentDigest>,
     ) -> HermesAdapterResult<Self> {
-        let summary = summary.into();
-        validate_text(
-            &summary,
-            MAX_EVIDENCE_SUMMARY_BYTES,
-            "HERMES_EVIDENCE_SUMMARY_REJECTED",
-        )?;
+        if sensitive_value_digests.len() > MAX_EVIDENCE_ITEMS
+            || sensitive_value_digests
+                .iter()
+                .any(|digest| digest.as_str().bytes().all(|byte| byte == b'0'))
+        {
+            return Err(malformed("HERMES_SENSITIVE_DIGEST_REJECTED"));
+        }
+        sensitive_value_digests.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        if sensitive_value_digests
+            .windows(2)
+            .any(|pair| pair[0] == pair[1])
+        {
+            return Err(malformed("HERMES_SENSITIVE_DIGEST_REJECTED"));
+        }
         Ok(Self {
             kind,
             digest,
-            summary,
+            sensitive_value_digests,
         })
     }
 
@@ -502,8 +719,8 @@ impl ReflectionEvidence {
     }
 
     #[must_use]
-    pub fn summary(&self) -> &str {
-        &self.summary
+    pub fn sensitive_value_digests(&self) -> &[ContentDigest] {
+        &self.sensitive_value_digests
     }
 }
 
@@ -740,7 +957,7 @@ impl CanonicalReflection {
 pub struct HermesReflectionAdapter {
     config: HermesAdapterConfig,
     job: HermesReflectionJob,
-    active_run_id: Option<String>,
+    active_run: Option<HermesRunRecoveryReceipt>,
 }
 
 impl HermesReflectionAdapter {
@@ -758,7 +975,7 @@ impl HermesReflectionAdapter {
         Ok(Self {
             config,
             job,
-            active_run_id: None,
+            active_run: None,
         })
     }
 
@@ -774,10 +991,32 @@ impl HermesReflectionAdapter {
         request: &HermesResearchRequest,
     ) -> HermesAdapterResult<CanonicalReflection> {
         self.verify_request(request)?;
-        self.verify_capabilities()?;
-        let run_id = self.submit_run()?;
-        self.active_run_id = Some(run_id.clone());
-        let event_output = match self.read_events(&run_id) {
+        if let Some(receipt) = &self.active_run {
+            return Err(error(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_RUN_RECONCILIATION_REQUIRED",
+            )
+            .with_recovery_receipt(receipt.clone()));
+        }
+        let deadline = self.operation_deadline()?;
+        self.verify_capabilities(deadline)?;
+        let run_id = match self.submit_run(deadline) {
+            Ok(run_id) => run_id,
+            Err(failure)
+                if matches!(
+                    failure.kind(),
+                    HermesAdapterErrorKind::Timeout | HermesAdapterErrorKind::Transport
+                ) =>
+            {
+                let receipt = recovery_receipt(&self.job, None);
+                self.active_run = Some(receipt.clone());
+                return Err(failure.with_recovery_receipt(receipt));
+            }
+            Err(failure) => return Err(failure),
+        };
+        let receipt = recovery_receipt(&self.job, Some(run_id.clone()));
+        self.active_run = Some(receipt.clone());
+        let event_output = match self.read_events(&run_id, deadline) {
             Ok(output) => output,
             Err(failure)
                 if matches!(
@@ -787,33 +1026,71 @@ impl HermesReflectionAdapter {
             {
                 None
             }
-            Err(failure) => return Err(failure),
+            Err(failure) => return Err(failure.with_recovery_receipt(receipt.clone())),
         };
-        let status_output = self.poll_terminal(&run_id)?;
+        let status_output = match self.poll_terminal(&run_id, deadline) {
+            Ok(output) => output,
+            Err(failure) => {
+                if matches!(
+                    failure.kind(),
+                    HermesAdapterErrorKind::Failed | HermesAdapterErrorKind::Cancelled
+                ) {
+                    self.active_run = None;
+                    return Err(failure);
+                }
+                return Err(failure.with_recovery_receipt(receipt));
+            }
+        };
         if event_output
             .as_ref()
             .is_some_and(|output| output != &status_output)
         {
-            return Err(cross_binding("HERMES_EVENT_STATUS_OUTPUT_MISMATCH"));
+            return Err(
+                cross_binding("HERMES_EVENT_STATUS_OUTPUT_MISMATCH").with_recovery_receipt(receipt)
+            );
         }
-        parse_reflection(&status_output, &self.job)
+        let reflection = parse_reflection(&status_output, &self.job)
+            .map_err(|failure| failure.with_recovery_receipt(receipt))?;
+        self.active_run = None;
+        Ok(reflection)
     }
 
-    /// Recovers one known run through the durable pollable status surface.
+    /// Reconciles one known run against the same Hermes server process.
     ///
     /// # Errors
     ///
     /// Rejects unsafe run IDs and every cross-bound or malformed terminal.
-    pub fn recover_reflection(
+    pub fn reconcile_reflection(
         &mut self,
         request: &HermesResearchRequest,
-        run_id: &str,
+        receipt: &HermesRunRecoveryReceipt,
     ) -> HermesAdapterResult<CanonicalReflection> {
         self.verify_request(request)?;
+        if self.active_run.as_ref() != Some(receipt) {
+            return Err(cross_binding("HERMES_RECOVERY_RECEIPT_BINDING_REJECTED"));
+        }
+        let run_id = receipt.run_id().ok_or_else(|| {
+            error(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_SUBMISSION_OUTCOME_UNKNOWN",
+            )
+            .with_recovery_receipt(receipt.clone())
+        })?;
         validate_run_id(run_id)?;
-        self.verify_capabilities()?;
-        let output = self.poll_terminal(run_id)?;
-        parse_reflection(&output, &self.job)
+        let deadline = self.operation_deadline()?;
+        self.verify_capabilities(deadline)?;
+        let output = self
+            .poll_terminal(run_id, deadline)
+            .map_err(|failure| failure.with_recovery_receipt(receipt.clone()))?;
+        let reflection = parse_reflection(&output, &self.job)
+            .map_err(|failure| failure.with_recovery_receipt(receipt.clone()))?;
+        self.active_run = None;
+        Ok(reflection)
+    }
+
+    #[must_use]
+    pub const fn active_recovery_receipt(&self) -> Option<&HermesRunRecoveryReceipt> {
+        self.active_run.as_ref()
     }
 
     fn verify_request(&self, request: &HermesResearchRequest) -> HermesAdapterResult<()> {
@@ -823,69 +1100,37 @@ impl HermesReflectionAdapter {
         Ok(())
     }
 
-    fn verify_capabilities(&self) -> HermesAdapterResult<()> {
-        let response = self.http("GET", "/v1/capabilities", "application/json", None)?;
+    fn operation_deadline(&self) -> HermesAdapterResult<Instant> {
+        Instant::now()
+            .checked_add(self.config.timeout())
+            .ok_or_else(|| {
+                error(
+                    HermesAdapterErrorKind::Timeout,
+                    "HERMES_OPERATION_DEADLINE_REJECTED",
+                )
+            })
+    }
+
+    fn verify_capabilities(&self, deadline: Instant) -> HermesAdapterResult<()> {
+        let response = self.http(
+            "GET",
+            "/v1/capabilities",
+            "application/json",
+            None,
+            deadline,
+        )?;
         require_status(&response, 200, "HERMES_CAPABILITIES_HTTP_REJECTED")?;
         let value = parse_json_body(&response, "HERMES_CAPABILITIES_MALFORMED")?;
         let object = value
             .as_object()
             .ok_or_else(|| malformed("HERMES_CAPABILITIES_MALFORMED"))?;
-        require_string(object, "object", "HERMES_CAPABILITIES_MALFORMED").and_then(|value| {
-            require_equal(
-                value,
-                "hermes.api_server.capabilities",
-                "HERMES_CAPABILITY_OBJECT_REJECTED",
-            )
-        })?;
-        require_string(object, "platform", "HERMES_CAPABILITIES_MALFORMED").and_then(|value| {
-            require_equal(value, "hermes-agent", "HERMES_CAPABILITY_PLATFORM_REJECTED")
-        })?;
-        let model = require_string(object, "model", "HERMES_CAPABILITIES_MALFORMED")?;
-        if model != self.job.model() {
-            return Err(cross_binding("HERMES_CAPABILITY_MODEL_MISMATCH"));
-        }
-        let auth = require_object(object, "auth", "HERMES_CAPABILITIES_MALFORMED")?;
-        if require_string(auth, "type", "HERMES_CAPABILITIES_MALFORMED")? != "bearer"
-            || require_bool(auth, "required", "HERMES_CAPABILITIES_MALFORMED")? != Some(true)
-        {
-            return Err(error(
-                HermesAdapterErrorKind::CapabilityMismatch,
-                "HERMES_BEARER_AUTH_REQUIRED",
-            ));
-        }
-        let runtime = require_object(object, "runtime", "HERMES_CAPABILITIES_MALFORMED")?;
-        if require_string(runtime, "mode", "HERMES_CAPABILITIES_MALFORMED")? != "server_agent"
-            || require_string(runtime, "tool_execution", "HERMES_CAPABILITIES_MALFORMED")?
-                != "server"
-            || require_bool(runtime, "split_runtime", "HERMES_CAPABILITIES_MALFORMED")?
-                != Some(false)
-        {
-            return Err(error(
-                HermesAdapterErrorKind::CapabilityMismatch,
-                "HERMES_RUNTIME_CAPABILITY_REJECTED",
-            ));
-        }
-        let features = require_object(object, "features", "HERMES_CAPABILITIES_MALFORMED")?;
-        for name in ["run_submission", "run_status", "run_events_sse", "run_stop"] {
-            if require_bool(features, name, "HERMES_CAPABILITIES_MALFORMED")? != Some(true) {
-                return Err(error(
-                    HermesAdapterErrorKind::CapabilityMismatch,
-                    "HERMES_REQUIRED_CAPABILITY_MISSING",
-                ));
-            }
-        }
-        for name in ["admin_config_rw", "memory_write_api"] {
-            if require_bool(features, name, "HERMES_CAPABILITIES_MALFORMED")? != Some(false) {
-                return Err(error(
-                    HermesAdapterErrorKind::CapabilityMismatch,
-                    "HERMES_MUTATING_CAPABILITY_REJECTED",
-                ));
-            }
-        }
-        Ok(())
+        validate_capability_identity(object, self.job.model())?;
+        validate_capability_runtime(object, self.config.containment_receipt.is_some())?;
+        validate_capability_features(object)?;
+        validate_capability_endpoints(object)
     }
 
-    fn submit_run(&self) -> HermesAdapterResult<String> {
+    fn submit_run(&self, deadline: Instant) -> HermesAdapterResult<String> {
         let body = json!({
             "input": self.job.prompt(),
             "instructions": READ_ONLY_INSTRUCTIONS,
@@ -893,7 +1138,13 @@ impl HermesReflectionAdapter {
             "model": self.job.model(),
         })
         .to_string();
-        let response = self.http("POST", "/v1/runs", "application/json", Some(&body))?;
+        let response = self.http(
+            "POST",
+            "/v1/runs",
+            "application/json",
+            Some(&body),
+            deadline,
+        )?;
         require_status(&response, 202, "HERMES_RUN_SUBMIT_HTTP_REJECTED")?;
         let value = parse_json_body(&response, "HERMES_RUN_SUBMIT_MALFORMED")?;
         let object = value
@@ -909,9 +1160,9 @@ impl HermesReflectionAdapter {
         Ok(run_id.to_owned())
     }
 
-    fn read_events(&self, run_id: &str) -> HermesAdapterResult<Option<String>> {
+    fn read_events(&self, run_id: &str, deadline: Instant) -> HermesAdapterResult<Option<String>> {
         let path = format!("/v1/runs/{run_id}/events");
-        let response = self.http("GET", &path, "text/event-stream", None)?;
+        let response = self.http("GET", &path, "text/event-stream", None, deadline)?;
         if matches!(response.status, 404 | 409 | 410 | 503) {
             return Err(error(
                 HermesAdapterErrorKind::Transport,
@@ -933,11 +1184,16 @@ impl HermesReflectionAdapter {
         parse_sse_terminal(body, run_id)
     }
 
-    fn poll_terminal(&self, run_id: &str) -> HermesAdapterResult<String> {
-        let deadline = Instant::now() + self.config.timeout();
+    fn poll_terminal(&self, run_id: &str, deadline: Instant) -> HermesAdapterResult<String> {
         loop {
             let path = format!("/v1/runs/{run_id}");
-            let response = self.http("GET", &path, "application/json", None)?;
+            let response = self.http("GET", &path, "application/json", None, deadline)?;
+            if response.status == 404 {
+                return Err(error(
+                    HermesAdapterErrorKind::Ambiguous,
+                    "HERMES_RUN_NOT_RECOVERABLE",
+                ));
+            }
             require_status(&response, 200, "HERMES_STATUS_HTTP_REJECTED")?;
             match parse_status(&response, run_id, &self.job)? {
                 RunState::Pending => {
@@ -947,7 +1203,8 @@ impl HermesReflectionAdapter {
                             "HERMES_RUN_DEADLINE_EXCEEDED",
                         ));
                     }
-                    thread::sleep(self.config.poll_interval());
+                    let remaining = remaining_until(deadline)?;
+                    thread::sleep(self.config.poll_interval().min(remaining));
                 }
                 RunState::Completed(output) => return Ok(output),
             }
@@ -960,14 +1217,16 @@ impl HermesReflectionAdapter {
         path: &str,
         accept: &str,
         body: Option<&str>,
+        deadline: Instant,
     ) -> HermesAdapterResult<HttpResponse> {
-        let mut stream = TcpStream::connect_timeout(&self.config.endpoint(), self.config.timeout())
+        let mut stream =
+            TcpStream::connect_timeout(&self.config.endpoint(), remaining_until(deadline)?)
+                .map_err(|failure| map_io_error(&failure))?;
+        stream
+            .set_read_timeout(Some(remaining_until(deadline)?))
             .map_err(|failure| map_io_error(&failure))?;
         stream
-            .set_read_timeout(Some(self.config.timeout()))
-            .map_err(|failure| map_io_error(&failure))?;
-        stream
-            .set_write_timeout(Some(self.config.timeout()))
+            .set_write_timeout(Some(remaining_until(deadline)?))
             .map_err(|failure| map_io_error(&failure))?;
         let body_bytes = body.unwrap_or_default().as_bytes();
         let mut request = format!(
@@ -997,6 +1256,9 @@ impl HermesReflectionAdapter {
         let mut bytes = Vec::new();
         let mut buffer = [0_u8; 8_192];
         loop {
+            stream
+                .set_read_timeout(Some(remaining_until(deadline)?))
+                .map_err(|failure| map_io_error(&failure))?;
             match stream.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => {
@@ -1013,14 +1275,11 @@ impl HermesReflectionAdapter {
 }
 
 impl HermesPort for HermesReflectionAdapter {
-    fn research(&mut self, request: HermesResearchRequest) -> PortResult<HermesEvidence> {
-        let reflection = self
-            .run_reflection(&request)
-            .map_err(|failure| map_port_error(&failure))?;
-        Ok(HermesEvidence::new(
-            request.into_invocation(),
-            RuntimeKind::Live,
-            reflection.output_digest().clone(),
+    fn research(&mut self, _request: HermesResearchRequest) -> PortResult<HermesEvidence> {
+        Err(PortError::new(
+            Component::Hermes,
+            PortErrorKind::Denied,
+            "HERMES_LIVE_RUNTIME_RECEIPT_REQUIRED",
         ))
     }
 
@@ -1032,19 +1291,44 @@ impl HermesPort for HermesReflectionAdapter {
                 "HERMES_INTERRUPT_REQUEST_BINDING_REJECTED",
             ));
         }
-        let run_id = self.active_run_id.as_deref().ok_or_else(|| {
+        let receipt = self.active_run.clone().ok_or_else(|| {
             PortError::new(
                 Component::Hermes,
                 PortErrorKind::Unavailable,
                 "HERMES_INTERRUPT_NO_ACTIVE_RUN",
             )
         })?;
+        let run_id = receipt.run_id().ok_or_else(|| {
+            PortError::new(
+                Component::Hermes,
+                PortErrorKind::Ambiguous,
+                "HERMES_SUBMISSION_OUTCOME_UNKNOWN",
+            )
+        })?;
         let path = format!("/v1/runs/{run_id}/stop");
+        let deadline = self
+            .operation_deadline()
+            .map_err(|failure| map_port_error(&failure))?;
         let response = self
-            .http("POST", &path, "application/json", Some("{}"))
+            .http("POST", &path, "application/json", Some("{}"), deadline)
             .map_err(|failure| map_port_error(&failure))?;
         require_status(&response, 200, "HERMES_STOP_HTTP_REJECTED")
             .map_err(|failure| map_port_error(&failure))?;
+        let value = parse_json_body(&response, "HERMES_STOP_MALFORMED")
+            .map_err(|failure| map_port_error(&failure))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| map_port_error(&malformed("HERMES_STOP_MALFORMED")))?;
+        if object.len() != 2
+            || require_string(object, "run_id", "HERMES_STOP_MALFORMED")
+                .map_err(|failure| map_port_error(&failure))?
+                != run_id
+            || require_string(object, "status", "HERMES_STOP_MALFORMED")
+                .map_err(|failure| map_port_error(&failure))?
+                != "stopping"
+        {
+            return Err(map_port_error(&malformed("HERMES_STOP_MALFORMED")));
+        }
         Ok(())
     }
 }
@@ -1113,7 +1397,7 @@ fn parse_reflection(
     if actual != expected {
         return Err(cross_binding("HERMES_REFLECTION_BINDING_REJECTED"));
     }
-    validate_text(
+    validate_redacted_text(
         &raw.summary,
         MAX_REFLECTION_SUMMARY_BYTES,
         "HERMES_REFLECTION_SUMMARY_REJECTED",
@@ -1137,7 +1421,7 @@ fn parse_reflection(
                 "inference" => ReflectionClassification::Inference,
                 _ => return Err(malformed("HERMES_REFLECTION_CLASSIFICATION_REJECTED")),
             };
-            validate_text(
+            validate_redacted_text(
                 &finding.statement,
                 MAX_TEXT_BYTES,
                 "HERMES_REFLECTION_STATEMENT_REJECTED",
@@ -1160,9 +1444,7 @@ fn parse_reflection(
             })
         })
         .collect::<HermesAdapterResult<Vec<_>>>()?;
-    for action in &raw.next_actions {
-        validate_text(action, MAX_TEXT_BYTES, "HERMES_REFLECTION_ACTION_REJECTED")?;
-    }
+    validate_reflection_actions(&raw.next_actions)?;
     let canonical_value = reflection_value(&actual, &raw.summary, &findings, &raw.next_actions);
     let canonical_bytes = canonicalize(&canonical_value)
         .map_err(|_| malformed("HERMES_REFLECTION_CANONICALIZATION_REJECTED"))?
@@ -1183,6 +1465,13 @@ fn parse_reflection(
         canonical_bytes,
         output_digest,
     })
+}
+
+fn validate_reflection_actions(actions: &[String]) -> HermesAdapterResult<()> {
+    for action in actions {
+        validate_redacted_text(action, MAX_TEXT_BYTES, "HERMES_REFLECTION_ACTION_REJECTED")?;
+    }
+    Ok(())
 }
 
 fn input_value(
@@ -1217,7 +1506,17 @@ fn input_value(
                         CanonicalValue::Object(vec![
                             string_entry("digest", item.digest().as_str()),
                             string_entry("kind", item.kind().as_str()),
-                            string_entry("summary", item.summary()),
+                            (
+                                "sensitive_value_digests".to_owned(),
+                                CanonicalValue::Array(
+                                    item.sensitive_value_digests()
+                                        .iter()
+                                        .map(|digest| {
+                                            CanonicalValue::String(digest.as_str().to_owned())
+                                        })
+                                        .collect(),
+                                ),
+                            ),
                         ])
                     })
                     .collect(),
@@ -1415,23 +1714,81 @@ fn parse_sse_terminal(body: &str, expected_run_id: &str) -> HermesAdapterResult<
         if run_id != expected_run_id {
             return Err(cross_binding("HERMES_EVENT_RUN_BINDING_REJECTED"));
         }
+        if !object
+            .get("timestamp")
+            .is_some_and(serde_json::Value::is_number)
+        {
+            return Err(malformed("HERMES_EVENT_MALFORMED"));
+        }
         match require_string(object, "event", "HERMES_EVENT_MALFORMED")? {
             "run.completed" => {
+                require_only_keys(
+                    object,
+                    &["event", "run_id", "timestamp", "output", "usage"],
+                    "HERMES_EVENT_UNKNOWN_FIELD",
+                )?;
+                if let Some(usage) = object.get("usage") {
+                    let usage = usage
+                        .as_object()
+                        .ok_or_else(|| malformed("HERMES_EVENT_MALFORMED"))?;
+                    require_only_keys(
+                        usage,
+                        &["input_tokens", "output_tokens", "total_tokens"],
+                        "HERMES_EVENT_UNKNOWN_FIELD",
+                    )?;
+                    if usage.values().any(|value| !value.is_u64()) {
+                        return Err(malformed("HERMES_EVENT_MALFORMED"));
+                    }
+                }
                 let output = require_string(object, "output", "HERMES_EVENT_MALFORMED")?;
                 if terminal.replace(output.to_owned()).is_some() {
                     return Err(malformed("HERMES_DUPLICATE_TERMINAL_EVENT"));
                 }
             }
             "run.failed" => {
+                require_only_keys(
+                    object,
+                    &["event", "run_id", "timestamp", "error"],
+                    "HERMES_EVENT_UNKNOWN_FIELD",
+                )?;
+                require_string(object, "error", "HERMES_EVENT_MALFORMED")?;
                 return Err(error(HermesAdapterErrorKind::Failed, "HERMES_RUN_FAILED"));
             }
             "run.cancelled" => {
+                require_only_keys(
+                    object,
+                    &["event", "run_id", "timestamp"],
+                    "HERMES_EVENT_UNKNOWN_FIELD",
+                )?;
                 return Err(error(
                     HermesAdapterErrorKind::Cancelled,
                     "HERMES_RUN_CANCELLED",
                 ));
             }
-            _ => {}
+            "message.delta" => {
+                require_only_keys(
+                    object,
+                    &["event", "run_id", "timestamp", "delta"],
+                    "HERMES_EVENT_UNKNOWN_FIELD",
+                )?;
+                require_string(object, "delta", "HERMES_EVENT_MALFORMED")?;
+            }
+            "reasoning.available" => {
+                require_only_keys(
+                    object,
+                    &["event", "run_id", "timestamp", "text"],
+                    "HERMES_EVENT_UNKNOWN_FIELD",
+                )?;
+                require_string(object, "text", "HERMES_EVENT_MALFORMED")?;
+            }
+            "tool.started" | "tool.completed" | "approval.request" | "subagent.start"
+            | "subagent.complete" => {
+                return Err(error(
+                    HermesAdapterErrorKind::CapabilityMismatch,
+                    "HERMES_UNEXPECTED_EXECUTION_EVENT",
+                ));
+            }
+            _ => return Err(malformed("HERMES_EVENT_DISCRIMINATOR_REJECTED")),
         }
     }
     Ok(terminal)
@@ -1451,6 +1808,36 @@ fn parse_status(
     let object = value
         .as_object()
         .ok_or_else(|| malformed("HERMES_STATUS_MALFORMED"))?;
+    require_only_keys(
+        object,
+        &[
+            "object",
+            "run_id",
+            "status",
+            "created_at",
+            "updated_at",
+            "session_id",
+            "model",
+            "last_event",
+            "output",
+            "usage",
+            "error",
+        ],
+        "HERMES_STATUS_UNKNOWN_FIELD",
+    )?;
+    if let Some(usage) = object.get("usage") {
+        let usage = usage
+            .as_object()
+            .ok_or_else(|| malformed("HERMES_STATUS_MALFORMED"))?;
+        require_only_keys(
+            usage,
+            &["input_tokens", "output_tokens", "total_tokens"],
+            "HERMES_STATUS_UNKNOWN_FIELD",
+        )?;
+        if usage.values().any(|value| !value.is_u64()) {
+            return Err(malformed("HERMES_STATUS_MALFORMED"));
+        }
+    }
     if require_string(object, "object", "HERMES_STATUS_MALFORMED")? != "hermes.run" {
         return Err(malformed("HERMES_STATUS_OBJECT_REJECTED"));
     }
@@ -1475,6 +1862,141 @@ fn parse_status(
         )),
         _ => Err(malformed("HERMES_STATUS_VALUE_REJECTED")),
     }
+}
+
+fn validate_capability_identity(
+    object: &Map<String, Value>,
+    expected_model: &str,
+) -> HermesAdapterResult<()> {
+    require_only_keys(
+        object,
+        &[
+            "object",
+            "platform",
+            "model",
+            "auth",
+            "runtime",
+            "features",
+            "endpoints",
+        ],
+        "HERMES_CAPABILITIES_UNKNOWN_FIELD",
+    )?;
+    require_string(object, "object", "HERMES_CAPABILITIES_MALFORMED").and_then(|value| {
+        require_equal(
+            value,
+            "hermes.api_server.capabilities",
+            "HERMES_CAPABILITY_OBJECT_REJECTED",
+        )
+    })?;
+    require_string(object, "platform", "HERMES_CAPABILITIES_MALFORMED").and_then(|value| {
+        require_equal(value, "hermes-agent", "HERMES_CAPABILITY_PLATFORM_REJECTED")
+    })?;
+    if require_string(object, "model", "HERMES_CAPABILITIES_MALFORMED")? != expected_model {
+        return Err(cross_binding("HERMES_CAPABILITY_MODEL_MISMATCH"));
+    }
+    let auth = require_object(object, "auth", "HERMES_CAPABILITIES_MALFORMED")?;
+    require_only_keys(
+        auth,
+        &["type", "required"],
+        "HERMES_CAPABILITIES_UNKNOWN_FIELD",
+    )?;
+    if require_string(auth, "type", "HERMES_CAPABILITIES_MALFORMED")? != "bearer"
+        || require_bool(auth, "required", "HERMES_CAPABILITIES_MALFORMED")? != Some(true)
+    {
+        return Err(error(
+            HermesAdapterErrorKind::CapabilityMismatch,
+            "HERMES_BEARER_AUTH_REQUIRED",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_capability_runtime(
+    object: &Map<String, Value>,
+    has_containment_receipt: bool,
+) -> HermesAdapterResult<&str> {
+    let runtime = require_object(object, "runtime", "HERMES_CAPABILITIES_MALFORMED")?;
+    require_only_keys(
+        runtime,
+        &["mode", "tool_execution", "split_runtime", "description"],
+        "HERMES_CAPABILITIES_UNKNOWN_FIELD",
+    )?;
+    if require_string(runtime, "mode", "HERMES_CAPABILITIES_MALFORMED")? != "server_agent"
+        || require_bool(runtime, "split_runtime", "HERMES_CAPABILITIES_MALFORMED")? != Some(false)
+    {
+        return Err(error(
+            HermesAdapterErrorKind::CapabilityMismatch,
+            "HERMES_RUNTIME_CAPABILITY_REJECTED",
+        ));
+    }
+    let tool_execution =
+        require_string(runtime, "tool_execution", "HERMES_CAPABILITIES_MALFORMED")?;
+    if tool_execution != "server" {
+        return Err(error(
+            HermesAdapterErrorKind::CapabilityMismatch,
+            "HERMES_RUNTIME_CAPABILITY_REJECTED",
+        ));
+    }
+    if !has_containment_receipt {
+        return Err(error(
+            HermesAdapterErrorKind::CapabilityMismatch,
+            "HERMES_SERVER_TOOL_CONTAINMENT_REQUIRED",
+        ));
+    }
+    Ok(tool_execution)
+}
+
+fn validate_capability_features(object: &Map<String, Value>) -> HermesAdapterResult<()> {
+    let features = require_object(object, "features", "HERMES_CAPABILITIES_MALFORMED")?;
+    require_only_keys(
+        features,
+        CAPABILITY_FEATURE_FIELDS,
+        "HERMES_CAPABILITIES_UNKNOWN_FIELD",
+    )?;
+    for name in ["run_submission", "run_status", "run_events_sse", "run_stop"] {
+        if require_bool(features, name, "HERMES_CAPABILITIES_MALFORMED")? != Some(true) {
+            return Err(error(
+                HermesAdapterErrorKind::CapabilityMismatch,
+                "HERMES_REQUIRED_CAPABILITY_MISSING",
+            ));
+        }
+    }
+    for name in ["admin_config_rw", "memory_write_api"] {
+        if require_bool(features, name, "HERMES_CAPABILITIES_MALFORMED")? != Some(false) {
+            return Err(error(
+                HermesAdapterErrorKind::CapabilityMismatch,
+                "HERMES_MUTATING_CAPABILITY_REJECTED",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_capability_endpoints(object: &Map<String, Value>) -> HermesAdapterResult<()> {
+    let Some(endpoints) = object.get("endpoints") else {
+        return Ok(());
+    };
+    let endpoints = endpoints
+        .as_object()
+        .ok_or_else(|| malformed("HERMES_CAPABILITIES_MALFORMED"))?;
+    require_only_keys(
+        endpoints,
+        CAPABILITY_ENDPOINT_FIELDS,
+        "HERMES_CAPABILITIES_UNKNOWN_FIELD",
+    )?;
+    for endpoint in endpoints.values() {
+        let endpoint = endpoint
+            .as_object()
+            .ok_or_else(|| malformed("HERMES_CAPABILITIES_MALFORMED"))?;
+        require_only_keys(
+            endpoint,
+            &["method", "path"],
+            "HERMES_CAPABILITIES_UNKNOWN_FIELD",
+        )?;
+        require_string(endpoint, "method", "HERMES_CAPABILITIES_MALFORMED")?;
+        require_string(endpoint, "path", "HERMES_CAPABILITIES_MALFORMED")?;
+    }
+    Ok(())
 }
 
 fn require_object<'a>(
@@ -1510,6 +2032,20 @@ fn require_bool(
         .transpose()
 }
 
+fn require_only_keys(
+    object: &Map<String, Value>,
+    allowed: &[&str],
+    code: &'static str,
+) -> HermesAdapterResult<()> {
+    if object
+        .keys()
+        .any(|key| !allowed.iter().any(|allowed_key| key == allowed_key))
+    {
+        return Err(malformed(code));
+    }
+    Ok(())
+}
+
 fn require_equal(actual: &str, expected: &str, code: &'static str) -> HermesAdapterResult<()> {
     if actual == expected {
         Ok(())
@@ -1528,6 +2064,169 @@ fn require_status(
     } else {
         Err(error(HermesAdapterErrorKind::HttpStatus, code))
     }
+}
+
+fn recovery_receipt(job: &HermesReflectionJob, run_id: Option<String>) -> HermesRunRecoveryReceipt {
+    HermesRunRecoveryReceipt {
+        run_id,
+        request_id: job.request().invocation().request_id().as_str().to_owned(),
+        session_id: job.session_id().to_owned(),
+        input_digest: job.input_digest().clone(),
+        model: job.model().to_owned(),
+    }
+}
+
+fn remaining_until(deadline: Instant) -> HermesAdapterResult<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(error(
+            HermesAdapterErrorKind::Timeout,
+            "HERMES_RUN_DEADLINE_EXCEEDED",
+        ))
+    } else {
+        Ok(remaining)
+    }
+}
+
+fn bounded_output(
+    command: &mut Command,
+    timeout: Duration,
+) -> HermesAdapterResult<std::process::Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|_| {
+        error(
+            HermesAdapterErrorKind::Identity,
+            "HERMES_VERSION_PROBE_FAILED",
+        )
+    })?;
+    let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+        error(
+            HermesAdapterErrorKind::Timeout,
+            "HERMES_VERSION_PROBE_TIMEOUT",
+        )
+    })?;
+    loop {
+        if child
+            .try_wait()
+            .map_err(|_| {
+                error(
+                    HermesAdapterErrorKind::Ambiguous,
+                    "HERMES_VERSION_PROBE_STATUS_UNKNOWN",
+                )
+            })?
+            .is_some()
+        {
+            return child.wait_with_output().map_err(|_| {
+                error(
+                    HermesAdapterErrorKind::Ambiguous,
+                    "HERMES_VERSION_PROBE_OUTPUT_UNKNOWN",
+                )
+            });
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            child.kill().map_err(|_| {
+                error(
+                    HermesAdapterErrorKind::Ambiguous,
+                    "HERMES_VERSION_PROBE_KILL_UNKNOWN",
+                )
+            })?;
+            child.wait().map_err(|_| {
+                error(
+                    HermesAdapterErrorKind::Ambiguous,
+                    "HERMES_VERSION_PROBE_REAP_UNKNOWN",
+                )
+            })?;
+            return Err(error(
+                HermesAdapterErrorKind::Timeout,
+                "HERMES_VERSION_PROBE_TIMEOUT",
+            ));
+        }
+        thread::sleep(Duration::from_millis(5).min(deadline.saturating_duration_since(now)));
+    }
+}
+
+fn validate_pinned_version_output(stdout: &[u8], stderr: &[u8]) -> HermesAdapterResult<()> {
+    if !stderr.is_empty() {
+        return Err(error(
+            HermesAdapterErrorKind::Identity,
+            "HERMES_VERSION_STDERR_REJECTED",
+        ));
+    }
+    let stdout = std::str::from_utf8(stdout).map_err(|_| {
+        error(
+            HermesAdapterErrorKind::Identity,
+            "HERMES_VERSION_UTF8_REJECTED",
+        )
+    })?;
+    let expected = format!(
+        "Hermes Agent v{HERMES_PACKAGE_VERSION} ({})",
+        HERMES_RELEASE.strip_prefix('v').unwrap_or(HERMES_RELEASE)
+    );
+    if stdout.lines().next() != Some(expected.as_str()) {
+        return Err(error(
+            HermesAdapterErrorKind::Identity,
+            "HERMES_PACKAGE_VERSION_MISMATCH",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sha256(value: &str, code: &'static str) -> HermesAdapterResult<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(error(HermesAdapterErrorKind::Identity, code));
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> HermesAdapterResult<String> {
+    let metadata = fs::metadata(path).map_err(|_| {
+        error(
+            HermesAdapterErrorKind::Identity,
+            "HERMES_EXECUTABLE_METADATA_FAILED",
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_EXECUTABLE_BYTES {
+        return Err(error(
+            HermesAdapterErrorKind::Identity,
+            "HERMES_EXECUTABLE_FILE_REJECTED",
+        ));
+    }
+    let mut file = fs::File::open(path).map_err(|_| {
+        error(
+            HermesAdapterErrorKind::Identity,
+            "HERMES_EXECUTABLE_READ_FAILED",
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let count = file.read(&mut buffer).map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Identity,
+                "HERMES_EXECUTABLE_READ_FAILED",
+            )
+        })?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Identity,
+                "HERMES_EXECUTABLE_HASH_FAILED",
+            )
+        })?;
+    }
+    Ok(encoded)
 }
 
 fn validate_identifier(value: &str, max: usize, code: &'static str) -> HermesAdapterResult<()> {
@@ -1551,6 +2250,51 @@ fn validate_text(value: &str, max: usize, code: &'static str) -> HermesAdapterRe
         return Err(malformed(code));
     }
     Ok(())
+}
+
+fn validate_redacted_text(value: &str, max: usize, code: &'static str) -> HermesAdapterResult<()> {
+    validate_text(value, max, code)?;
+    let lower = value.to_ascii_lowercase();
+    let fixed_patterns = [
+        "authorization: bearer ",
+        "-----begin private key-----",
+        "-----begin rsa private key-----",
+        "-----begin openssh private key-----",
+        "postgres://",
+        "postgresql://",
+        "openai_api_key=",
+        "openrouter_api_key=",
+        "anthropic_api_key=",
+        "api_key=",
+        "api-key=",
+        "password=",
+        "passwd=",
+        "secret=",
+        "token=",
+    ];
+    if fixed_patterns.iter().any(|pattern| lower.contains(pattern))
+        || contains_long_secret_prefix(&lower, "sk-")
+        || contains_long_secret_prefix(&lower, "ghp_")
+    {
+        return Err(malformed(code));
+    }
+    Ok(())
+}
+
+fn contains_long_secret_prefix(value: &str, prefix: &str) -> bool {
+    let mut remainder = value;
+    while let Some(index) = remainder.find(prefix) {
+        let candidate = &remainder[index + prefix.len()..];
+        let length = candidate
+            .bytes()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            .count();
+        if length >= 16 {
+            return true;
+        }
+        remainder = &candidate[length..];
+    }
+    false
 }
 
 fn validate_run_id(run_id: &str) -> HermesAdapterResult<()> {
@@ -1616,13 +2360,6 @@ const fn cross_binding(code: &'static str) -> HermesAdapterError {
     error(HermesAdapterErrorKind::CrossBinding, code)
 }
 
-fn validate_fresh_home(path: &Path, code: &'static str) -> HermesAdapterResult<()> {
-    if !path.is_absolute() || path.exists() {
-        return Err(error(HermesAdapterErrorKind::Configuration, code));
-    }
-    Ok(())
-}
-
 fn is_daily_home(candidate: &Path, variable: &str) -> bool {
     std::env::var_os(variable)
         .map(PathBuf::from)
@@ -1650,23 +2387,242 @@ fn same_path(left: &Path, right: &Path) -> bool {
     }
 }
 
-fn prepare_ephemeral_home(path: &Path) -> HermesAdapterResult<()> {
-    validate_fresh_home(path, "HERMES_EPHEMERAL_HOME_NOT_FRESH")?;
-    fs::create_dir_all(path).map_err(|_| {
+fn validate_isolation_boundary(
+    isolation_root: &Path,
+    product_root: &Path,
+) -> HermesAdapterResult<(PathBuf, PathBuf)> {
+    if !isolation_root.is_absolute()
+        || isolation_root.exists()
+        || isolation_root.file_name().is_none()
+        || !product_root.is_absolute()
+        || !product_root.is_dir()
+    {
+        return Err(error(
+            HermesAdapterErrorKind::Configuration,
+            "HERMES_ISOLATION_ROOT_REJECTED",
+        ));
+    }
+    #[cfg(windows)]
+    if windows_path_is_unsupported(isolation_root) || windows_path_is_unsupported(product_root) {
+        return Err(error(
+            HermesAdapterErrorKind::Configuration,
+            "HERMES_ISOLATION_UNC_REJECTED",
+        ));
+    }
+    let parent = isolation_root.parent().ok_or_else(|| {
+        error(
+            HermesAdapterErrorKind::Configuration,
+            "HERMES_ISOLATION_PARENT_REJECTED",
+        )
+    })?;
+    if !parent.is_dir() {
+        return Err(error(
+            HermesAdapterErrorKind::Configuration,
+            "HERMES_ISOLATION_PARENT_REJECTED",
+        ));
+    }
+    reject_link_or_reparse_ancestors(parent)?;
+    reject_link_or_reparse_ancestors(product_root)?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|_| {
+        error(
+            HermesAdapterErrorKind::Configuration,
+            "HERMES_ISOLATION_PARENT_REJECTED",
+        )
+    })?;
+    let canonical_product = fs::canonicalize(product_root).map_err(|_| {
+        error(
+            HermesAdapterErrorKind::Configuration,
+            "HERMES_PRODUCT_ROOT_REJECTED",
+        )
+    })?;
+    reject_link_or_reparse_ancestors(&canonical_parent)?;
+    reject_link_or_reparse_ancestors(&canonical_product)?;
+    let canonical_candidate =
+        canonical_parent.join(isolation_root.file_name().ok_or_else(|| {
+            error(
+                HermesAdapterErrorKind::Configuration,
+                "HERMES_ISOLATION_ROOT_REJECTED",
+            )
+        })?);
+    if canonical_candidate.exists()
+        || path_is_within(&canonical_candidate, &canonical_product)
+        || path_is_within(&canonical_product, &canonical_candidate)
+    {
+        return Err(error(
+            HermesAdapterErrorKind::Configuration,
+            "HERMES_PRODUCT_ROOT_OVERLAP_REJECTED",
+        ));
+    }
+    Ok((canonical_candidate, canonical_product))
+}
+
+#[cfg(windows)]
+fn windows_path_is_unsupported(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => {
+            !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        }
+        _ => true,
+    }
+}
+
+fn path_is_within(candidate: &Path, ancestor: &Path) -> bool {
+    let normalize = |path: &Path| {
+        path.components()
+            .map(|component| {
+                let value = component.as_os_str().to_string_lossy().into_owned();
+                if cfg!(windows) {
+                    value.to_ascii_lowercase()
+                } else {
+                    value
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let candidate = normalize(candidate);
+    let ancestor = normalize(ancestor);
+    candidate.len() >= ancestor.len() && candidate[..ancestor.len()] == ancestor
+}
+
+fn reject_link_or_reparse_ancestors(path: &Path) -> HermesAdapterResult<()> {
+    for ancestor in path.ancestors() {
+        if !ancestor.exists() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(ancestor).map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Configuration,
+                "HERMES_ISOLATION_PATH_METADATA_FAILED",
+            )
+        })?;
+        if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+            return Err(error(
+                HermesAdapterErrorKind::Configuration,
+                "HERMES_ISOLATION_REPARSE_REJECTED",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+const fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+fn prepare_isolated_run(config: &HermesProcessConfig) -> HermesAdapterResult<()> {
+    let (isolation_root, product_root) =
+        validate_isolation_boundary(&config.isolation_root, &config.product_root)?;
+    if isolation_root != config.isolation_root || product_root != config.product_root {
+        return Err(error(
+            HermesAdapterErrorKind::Configuration,
+            "HERMES_ISOLATION_IDENTITY_CHANGED",
+        ));
+    }
+    fs::create_dir(&config.isolation_root).map_err(|_| {
         error(
             HermesAdapterErrorKind::Spawn,
-            "HERMES_EPHEMERAL_HOME_CREATE_FAILED",
+            "HERMES_ISOLATION_ROOT_CREATE_FAILED",
         )
     })?;
     let marker = format!(
-        "release={HERMES_RELEASE}\ncommit={HERMES_UPSTREAM_COMMIT}\npolicy=ephemeral-isolated-home\n"
+        "release={HERMES_RELEASE}\ncommit={HERMES_UPSTREAM_COMMIT}\npolicy=lattice-owned-ephemeral-root\n"
     );
-    fs::write(path.join(HOME_MARKER_NAME), marker.as_bytes()).map_err(|_| {
+    let mut marker_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(config.isolation_root.join(HOME_MARKER_NAME))
+        .map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Spawn,
+                "HERMES_ISOLATION_MARKER_FAILED",
+            )
+        })?;
+    marker_file.write_all(marker.as_bytes()).map_err(|_| {
         error(
             HermesAdapterErrorKind::Spawn,
-            "HERMES_EPHEMERAL_HOME_MARKER_FAILED",
+            "HERMES_ISOLATION_MARKER_FAILED",
         )
-    })
+    })?;
+    for directory in [
+        &config.working_directory,
+        &config.hermes_home,
+        &config.codex_home,
+        &config.temp_directory,
+    ] {
+        fs::create_dir(directory).map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Spawn,
+                "HERMES_ISOLATION_CHILD_CREATE_FAILED",
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_prepared_isolation(config: &HermesProcessConfig) -> HermesAdapterResult<()> {
+    reject_link_or_reparse_ancestors(&config.isolation_root)?;
+    reject_link_or_reparse_ancestors(&config.product_root)?;
+    let canonical_root = fs::canonicalize(&config.isolation_root).map_err(|_| {
+        error(
+            HermesAdapterErrorKind::Spawn,
+            "HERMES_ISOLATION_ROOT_RECHECK_FAILED",
+        )
+    })?;
+    if canonical_root != config.isolation_root
+        || path_is_within(&canonical_root, &config.product_root)
+        || path_is_within(&config.product_root, &canonical_root)
+    {
+        return Err(error(
+            HermesAdapterErrorKind::Spawn,
+            "HERMES_ISOLATION_ROOT_RECHECK_FAILED",
+        ));
+    }
+    for directory in [
+        &config.working_directory,
+        &config.hermes_home,
+        &config.codex_home,
+        &config.temp_directory,
+    ] {
+        reject_link_or_reparse_ancestors(directory)?;
+        if directory.parent() != Some(config.isolation_root.as_path())
+            || !directory.is_dir()
+            || fs::read_dir(directory)
+                .map_err(|_| {
+                    error(
+                        HermesAdapterErrorKind::Spawn,
+                        "HERMES_ISOLATION_CHILD_RECHECK_FAILED",
+                    )
+                })?
+                .next()
+                .is_some()
+        {
+            return Err(error(
+                HermesAdapterErrorKind::Spawn,
+                "HERMES_ISOLATION_CHILD_RECHECK_FAILED",
+            ));
+        }
+    }
+    if !config.isolation_root.join(HOME_MARKER_NAME).is_file()
+        || config.hermes_home.join(HOME_MARKER_NAME).exists()
+        || config.codex_home.join(HOME_MARKER_NAME).exists()
+    {
+        return Err(error(
+            HermesAdapterErrorKind::Spawn,
+            "HERMES_ISOLATION_MARKER_RECHECK_FAILED",
+        ));
+    }
+    Ok(())
 }
 
 fn terminate_child(child: &mut Child) -> HermesAdapterResult<()> {
@@ -1694,4 +2650,58 @@ fn terminate_child(child: &mut Child) -> HermesAdapterResult<()> {
             "HERMES_CHILD_REAP_UNKNOWN",
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pinned_version_output_requires_the_exact_official_first_line() {
+        let exact = b"Hermes Agent v0.20.0 (2026.8.3)\nPython: 3.13.5\n";
+        validate_pinned_version_output(exact, b"").expect("exact version line");
+
+        let token_only = b"unrelated helper 0.20.0\n";
+        let mismatch = validate_pinned_version_output(token_only, b"")
+            .expect_err("a version token is not executable identity");
+        assert_eq!(mismatch.code(), "HERMES_PACKAGE_VERSION_MISMATCH");
+
+        let stderr = validate_pinned_version_output(exact, b"warning")
+            .expect_err("probe diagnostics fail closed");
+        assert_eq!(stderr.code(), "HERMES_VERSION_STDERR_REJECTED");
+    }
+
+    #[test]
+    fn version_probe_runner_terminates_at_its_absolute_bound() {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("powershell.exe");
+            command.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 5",
+            ]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 5"]);
+            command
+        };
+
+        let started = Instant::now();
+        let failure = bounded_output(&mut command, Duration::from_millis(25))
+            .expect_err("long-running identity probe must time out");
+
+        assert_eq!(failure.kind(), HermesAdapterErrorKind::Timeout);
+        assert_eq!(failure.code(), "HERMES_VERSION_PROBE_TIMEOUT");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    mod reflection_api {
+        include!("../tests/reflection_api.rs");
+    }
 }

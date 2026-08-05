@@ -313,6 +313,7 @@ dependencies = [
  "lattice-ports",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
