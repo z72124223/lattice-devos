@@ -22,7 +22,7 @@ use crate::git_delivery::GitDeliveryErrorKind;
 
 const USAGE: &str = "usage:\n  lattice-runtime codex-preflight --launcher <absolute-path> --version <exact-version> --sha256 <lowercase-sha256> --schema-dir <absent-path>\n  lattice-runtime delivery-run --launcher <absolute-path> --version <exact-version> --sha256 <lowercase-sha256> --schema-dir <absent-path> --codex-home <absolute-path> --delivery-root <absent-absolute-path> --git-exe <absolute-path> --timeout-seconds <1..3600> --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>\n  lattice-runtime delivery-status --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>";
 
-const DELIVERY_PROMPT: &str = "Create answer.txt in the current repository with exactly the bytes LATTICE_DELIVERY_OK followed by one newline. Do not modify any other path. Do not stage or commit files and do not run Git commands.";
+const DELIVERY_PROMPT: &str = "Create answer.txt in the current repository with exactly the bytes LATTICE_DELIVERY_OK followed by one newline. Use one standalone apply_patch operation in an exec call that performs no verification or other tool work. Confirm that call has completed, then use a separate verification call to read and validate the exact bytes. Do not combine file creation and verification in the same exec call. If any exec result says Script running with cell ID, call functions.wait with that exact cell_id until Script completed is received, and require exit code 0 before reporting success. Never terminate a yielded cell or claim completion from a running marker. Do not modify any other path. Do not stage or commit files and do not run Git commands.";
 
 /// Closed command surface for the first delivery node.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -352,4 +352,18 @@ fn is_lowercase_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DELIVERY_PROMPT;
+
+    #[test]
+    fn fixed_delivery_prompt_requires_completed_separate_tool_evidence() {
+        assert!(DELIVERY_PROMPT.contains("standalone apply_patch"));
+        assert!(DELIVERY_PROMPT.contains("separate verification"));
+        assert!(DELIVERY_PROMPT.contains("functions.wait"));
+        assert!(DELIVERY_PROMPT.contains("Script completed"));
+        assert!(DELIVERY_PROMPT.contains("Do not combine"));
+    }
 }

@@ -19,6 +19,7 @@ pub use session::{
     AppServerSession, InitializeEvidence, SessionError, SessionPhase, SessionRequest,
 };
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Command;
@@ -101,6 +102,7 @@ pub enum ProtocolError {
     UnexpectedThread,
     UnexpectedTurn,
     MalformedTerminal,
+    IncompleteToolExecution,
 }
 
 /// Builds and validates the stable subset of the Codex app-server protocol.
@@ -216,9 +218,10 @@ impl AppServerProtocol {
         let Some(turn) = params.get("turn").and_then(Value::as_object) else {
             return Err(ProtocolError::MalformedTerminal);
         };
-        if turn.get("items").and_then(Value::as_array).is_none() {
-            return Err(ProtocolError::MalformedTerminal);
-        }
+        let items = turn
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or(ProtocolError::MalformedTerminal)?;
         let Some(turn_id) = turn.get("id").and_then(Value::as_str) else {
             return Err(ProtocolError::MalformedTerminal);
         };
@@ -246,6 +249,9 @@ impl AppServerProtocol {
                 Some(message.to_owned())
             }
         };
+        if status == TurnStatus::Completed {
+            validate_completed_tool_evidence(turn, items)?;
+        }
 
         Ok(Some(TurnOutcome {
             turn_id: turn_id.to_owned(),
@@ -253,6 +259,141 @@ impl AppServerProtocol {
             error_message,
         }))
     }
+}
+
+const YIELDED_EXEC_MARKER: &str = "Script running with cell ID ";
+
+fn validate_completed_tool_evidence(
+    turn: &serde_json::Map<String, Value>,
+    items: &[Value],
+) -> Result<(), ProtocolError> {
+    if let Some(items_view) = turn.get("itemsView")
+        && items_view.as_str() != Some("full")
+    {
+        return Err(ProtocolError::IncompleteToolExecution);
+    }
+
+    let mut pending_cells = BTreeSet::new();
+    for item in items {
+        let Some(object) = item.as_object() else {
+            return Err(ProtocolError::MalformedTerminal);
+        };
+        let Some(item_type) = object.get("type").and_then(Value::as_str) else {
+            return Err(ProtocolError::MalformedTerminal);
+        };
+        match item_type {
+            "dynamicToolCall" => {
+                if object.get("status").and_then(Value::as_str) != Some("completed")
+                    || object.get("success").and_then(Value::as_bool) == Some(false)
+                {
+                    return Err(ProtocolError::IncompleteToolExecution);
+                }
+                let tool = object
+                    .get("tool")
+                    .and_then(Value::as_str)
+                    .ok_or(ProtocolError::MalformedTerminal)?;
+                let output = dynamic_tool_output(object)?;
+                for cell_id in yielded_cell_ids(&output)? {
+                    pending_cells.insert(cell_id);
+                }
+                if tool == "wait"
+                    && let Some((cell_id, terminate)) = wait_arguments(object)
+                {
+                    if terminate {
+                        return Err(ProtocolError::IncompleteToolExecution);
+                    }
+                    if completed_wait_result(&output) {
+                        pending_cells.remove(&cell_id);
+                    }
+                }
+            }
+            "commandExecution" | "mcpToolCall" | "fileChange"
+                if object.get("status").and_then(Value::as_str) != Some("completed") =>
+            {
+                return Err(ProtocolError::IncompleteToolExecution);
+            }
+            _ => {}
+        }
+    }
+    if pending_cells.is_empty() {
+        Ok(())
+    } else {
+        Err(ProtocolError::IncompleteToolExecution)
+    }
+}
+
+fn dynamic_tool_output(object: &serde_json::Map<String, Value>) -> Result<String, ProtocolError> {
+    let Some(content_items) = object.get("contentItems") else {
+        return Ok(String::new());
+    };
+    if content_items.is_null() {
+        return Ok(String::new());
+    }
+    let content_items = content_items
+        .as_array()
+        .ok_or(ProtocolError::MalformedTerminal)?;
+    let mut output = String::new();
+    for content_item in content_items {
+        let content_item = content_item
+            .as_object()
+            .ok_or(ProtocolError::MalformedTerminal)?;
+        if content_item.get("type").and_then(Value::as_str) == Some("inputText") {
+            let text = content_item
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or(ProtocolError::MalformedTerminal)?;
+            output.push_str(text);
+            output.push('\n');
+        }
+    }
+    Ok(output)
+}
+
+fn yielded_cell_ids(output: &str) -> Result<Vec<String>, ProtocolError> {
+    let mut ids = Vec::new();
+    let mut remaining = output;
+    while let Some(offset) = remaining.find(YIELDED_EXEC_MARKER) {
+        let tail = &remaining[offset + YIELDED_EXEC_MARKER.len()..];
+        let cell_id = tail
+            .chars()
+            .take_while(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+            .collect::<String>();
+        if cell_id.is_empty() {
+            return Err(ProtocolError::IncompleteToolExecution);
+        }
+        let cell_id_length = cell_id.len();
+        ids.push(cell_id);
+        remaining = tail.get(cell_id_length..).unwrap_or_default();
+    }
+    Ok(ids)
+}
+
+fn wait_arguments(object: &serde_json::Map<String, Value>) -> Option<(String, bool)> {
+    let arguments = object.get("arguments")?;
+    let parsed;
+    let arguments = match arguments {
+        Value::Object(arguments) => arguments,
+        Value::String(encoded) => {
+            parsed = serde_json::from_str::<Value>(encoded).ok()?;
+            parsed.as_object()?
+        }
+        _ => return None,
+    };
+    let cell_id = arguments.get("cell_id")?.as_str()?.to_owned();
+    let terminate = arguments
+        .get("terminate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Some((cell_id, terminate))
+}
+
+fn completed_wait_result(output: &str) -> bool {
+    output.lines().any(|line| line.trim() == "Script completed")
+        && output
+            .lines()
+            .any(|line| matches!(line.trim(), "Exit code: 0" | "Process exited with code 0"))
 }
 
 #[cfg(test)]

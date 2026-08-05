@@ -132,6 +132,7 @@ fn run_config_preserves_the_exact_task_binding() {
 #[derive(Clone, Copy)]
 enum FakeMode {
     Success,
+    Yielded,
     Malformed,
     Eof,
     Timeout,
@@ -323,6 +324,10 @@ fn rejects_unsafe_isolated_home_config_before_spawn() {
 #[test]
 fn scripted_malformed_eof_and_wrong_home_fail_closed() {
     for (mode, expected) in [
+        (
+            FakeMode::Yielded,
+            AppServerRunErrorKind::IncompleteToolExecution,
+        ),
         (FakeMode::Malformed, AppServerRunErrorKind::ProtocolFailed),
         (FakeMode::Eof, AppServerRunErrorKind::AmbiguousEof),
         (FakeMode::Premature, AppServerRunErrorKind::ProtocolFailed),
@@ -420,6 +425,12 @@ fn fake_launcher_script(
     let tail = match mode {
         FakeMode::Success | FakeMode::WrongHome => concat!(
             "[Console]::Out.WriteLine('{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-scripted\",\"turn\":{\"id\":\"turn-scripted\",\"items\":[],\"status\":\"completed\",\"error\":null}}}')\n",
+            "Start-Sleep -Seconds 60\n",
+        )
+        .to_owned(),
+        FakeMode::Yielded => concat!(
+            r#"[Console]::Out.WriteLine('{"method":"turn/completed","params":{"threadId":"thread-scripted","turn":{"id":"turn-scripted","items":[{"arguments":{},"contentItems":[{"text":"Script running with cell ID cell-7","type":"inputText"}],"id":"tool-exec","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"}],"itemsView":"full","status":"completed","error":null}}}')"#,
+            "\n",
             "Start-Sleep -Seconds 60\n",
         )
         .to_owned(),

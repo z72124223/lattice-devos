@@ -327,6 +327,10 @@ fn map_process_error(error: AppServerRunError) -> DeliveryPortError {
             process_error_kind(error.kind()),
             DeliveryFailureCertainty::Known,
         ),
+        AppServerRunErrorKind::IncompleteToolExecution => (
+            PortErrorKind::CapabilityMismatch,
+            DeliveryFailureCertainty::Known,
+        ),
         AppServerRunErrorKind::LauncherChanged
         | AppServerRunErrorKind::PipeUnavailable
         | AppServerRunErrorKind::WriteFailed
@@ -361,6 +365,7 @@ const fn process_error_kind(kind: AppServerRunErrorKind) -> PortErrorKind {
         | AppServerRunErrorKind::ProtocolFailed
         | AppServerRunErrorKind::StdoutLineTooLarge
         | AppServerRunErrorKind::CodexHomeMismatch => PortErrorKind::Malformed,
+        AppServerRunErrorKind::IncompleteToolExecution => PortErrorKind::CapabilityMismatch,
         AppServerRunErrorKind::CodexHomeOwnershipMissing
         | AppServerRunErrorKind::CodexHomeOverlap
         | AppServerRunErrorKind::AmbientCodexHomeDenied => PortErrorKind::Denied,
@@ -406,6 +411,9 @@ const fn process_error_code(kind: AppServerRunErrorKind) -> &'static str {
         AppServerRunErrorKind::StdoutFailed => "CODEX_APP_SERVER_STDOUT_FAILED",
         AppServerRunErrorKind::StdoutLineTooLarge => "CODEX_APP_SERVER_STDOUT_LINE_TOO_LARGE",
         AppServerRunErrorKind::ProtocolFailed => "CODEX_APP_SERVER_PROTOCOL_FAILED",
+        AppServerRunErrorKind::IncompleteToolExecution => {
+            "CODEX_APP_SERVER_TOOL_EXECUTION_INCOMPLETE"
+        }
         AppServerRunErrorKind::CodexHomeMismatch => "CODEX_APP_SERVER_CODEX_HOME_MISMATCH",
         AppServerRunErrorKind::Timeout => "CODEX_APP_SERVER_TIMEOUT",
         AppServerRunErrorKind::AmbiguousEof => "CODEX_APP_SERVER_AMBIGUOUS_EOF",

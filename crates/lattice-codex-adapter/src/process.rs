@@ -20,8 +20,8 @@ use std::os::windows::io::AsRawHandle;
 use win32job::{ExtendedLimitInfo, Job};
 
 use crate::{
-    AppServerProtocol, AppServerSession, InitializeEvidence, SessionError, SessionRequest,
-    TurnOutcome,
+    AppServerProtocol, AppServerSession, InitializeEvidence, ProtocolError, SessionError,
+    SessionRequest, TurnOutcome,
 };
 
 const MAX_STDOUT_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -158,6 +158,7 @@ pub enum AppServerRunErrorKind {
     StdoutFailed,
     StdoutLineTooLarge,
     ProtocolFailed,
+    IncompleteToolExecution,
     CodexHomeMismatch,
     Timeout,
     AmbiguousEof,
@@ -365,7 +366,7 @@ fn drive_child(
     ensure_before_deadline(deadline)?;
     session
         .mark_request_sent(SessionRequest::Initialize)
-        .map_err(map_session_error)?;
+        .map_err(|error| map_session_error(&error))?;
     send_json(&mut stdin, &protocol.initialize_request(0))?;
     receive_until(&receiver, deadline, &mut session, |session| {
         session.initialize_evidence().is_some()
@@ -377,7 +378,7 @@ fn drive_child(
     send_json(&mut stdin, &protocol.initialized_notification())?;
     session
         .mark_request_sent(SessionRequest::ThreadStart)
-        .map_err(map_session_error)?;
+        .map_err(|error| map_session_error(&error))?;
     send_json(
         &mut stdin,
         &protocol.thread_start_request(1, config.working_directory()),
@@ -394,7 +395,7 @@ fn drive_child(
     ensure_before_deadline(deadline)?;
     session
         .mark_request_sent(SessionRequest::TurnStart)
-        .map_err(map_session_error)?;
+        .map_err(|error| map_session_error(&error))?;
     send_json(
         &mut stdin,
         &protocol.turn_start_request(2, &thread_id, config.working_directory(), config.prompt()),
@@ -550,7 +551,9 @@ fn ingest_reader_event(
 ) -> Result<(), AppServerRunError> {
     match event {
         ReaderEvent::Line(line) => {
-            session.ingest_json_line(&line).map_err(map_session_error)?;
+            session
+                .ingest_json_line(&line)
+                .map_err(|error| map_session_error(&error))?;
             Ok(())
         }
         ReaderEvent::Eof => session
@@ -793,8 +796,14 @@ fn is_lowercase_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn map_session_error(_: SessionError) -> AppServerRunError {
-    AppServerRunError::new(AppServerRunErrorKind::ProtocolFailed)
+fn map_session_error(error: &SessionError) -> AppServerRunError {
+    let kind = match error {
+        SessionError::Terminal(ProtocolError::IncompleteToolExecution) => {
+            AppServerRunErrorKind::IncompleteToolExecution
+        }
+        _ => AppServerRunErrorKind::ProtocolFailed,
+    };
+    AppServerRunError::new(kind)
 }
 
 pub(crate) fn stop_owned_child(

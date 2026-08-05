@@ -299,3 +299,131 @@ fn enforces_the_pinned_turn_status_and_error_shape() {
     assert_eq!(failed_without_error.status, TurnStatus::Failed);
     assert_eq!(failed_without_error.error_message, None);
 }
+
+#[test]
+fn rejects_yielded_or_unfinished_tools_as_completed_delivery_evidence() {
+    for items in [
+        json!([{
+            "id": "tool_exec",
+            "type": "dynamicToolCall",
+            "tool": "exec",
+            "arguments": {},
+            "status": "completed",
+            "success": true,
+            "contentItems": [{
+                "type": "inputText",
+                "text": "Script running with cell ID cell-7\nWall time: 11.0 seconds"
+            }]
+        }]),
+        json!([{
+            "id": "tool_exec",
+            "type": "dynamicToolCall",
+            "tool": "exec",
+            "arguments": {},
+            "status": "inProgress",
+            "success": null,
+            "contentItems": null
+        }]),
+        json!([
+            {
+                "id": "tool_exec",
+                "type": "dynamicToolCall",
+                "tool": "exec",
+                "arguments": {},
+                "status": "completed",
+                "success": true,
+                "contentItems": [{
+                    "type": "inputText",
+                    "text": "Script running with cell ID cell-7"
+                }]
+            },
+            {
+                "id": "tool_wait",
+                "type": "dynamicToolCall",
+                "tool": "wait",
+                "arguments": {"cell_id": "cell-7", "terminate": true},
+                "status": "completed",
+                "success": true,
+                "contentItems": [{
+                    "type": "inputText",
+                    "text": "Script completed\nExit code: 0"
+                }]
+            }
+        ]),
+    ] {
+        assert_eq!(
+            AppServerProtocol::parse_turn_completed(
+                &json!({
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thr_123",
+                        "turn": {
+                            "id": "turn_1",
+                            "items": items,
+                            "itemsView": "full",
+                            "status": "completed",
+                            "error": null
+                        }
+                    }
+                }),
+                "thr_123",
+                "turn_1"
+            ),
+            Err(ProtocolError::IncompleteToolExecution)
+        );
+    }
+}
+
+#[test]
+fn accepts_a_yielded_exec_only_after_wait_observes_completed_success() {
+    let outcome = AppServerProtocol::parse_turn_completed(
+        &json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thr_123",
+                "turn": {
+                    "id": "turn_1",
+                    "items": [
+                        {
+                            "id": "tool_exec",
+                            "type": "dynamicToolCall",
+                            "tool": "exec",
+                            "arguments": {},
+                            "status": "completed",
+                            "success": true,
+                            "contentItems": [{
+                                "type": "inputText",
+                                "text": "Script running with cell ID cell-7\nWall time: 11.0 seconds"
+                            }]
+                        },
+                        {
+                            "id": "tool_wait",
+                            "type": "dynamicToolCall",
+                            "tool": "wait",
+                            "arguments": {
+                                "cell_id": "cell-7",
+                                "yield_time_ms": 10000,
+                                "max_tokens": 1000
+                            },
+                            "status": "completed",
+                            "success": true,
+                            "contentItems": [{
+                                "type": "inputText",
+                                "text": "Script completed\nWall time: 0.2 seconds\nExit code: 0"
+                            }]
+                        }
+                    ],
+                    "itemsView": "full",
+                    "status": "completed",
+                    "error": null
+                }
+            }
+        }),
+        "thr_123",
+        "turn_1",
+    )
+    .expect("a completed wait resolves the yielded execution")
+    .expect("this is a terminal notification");
+
+    assert_eq!(outcome.status, TurnStatus::Completed);
+}
