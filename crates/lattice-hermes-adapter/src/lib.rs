@@ -8,6 +8,8 @@ mod broker;
 #[cfg(windows)]
 mod codex_proxy;
 mod containment;
+#[cfg(windows)]
+mod production;
 mod runtime;
 #[cfg(windows)]
 mod windows_job;
@@ -21,6 +23,11 @@ pub use containment::{
 };
 #[cfg(windows)]
 pub use containment::{HermesSocketpairReceipt, HermesWslContainmentConfig};
+#[cfg(windows)]
+pub use production::{
+    CodexProxyFailureEvidence, HermesProductionRunnerConfig, ProductionHermesPort,
+    ProductionHermesRunner,
+};
 pub use runtime::{
     HERMES_CPYTHON_ARCHIVE_BYTES, HERMES_CPYTHON_ARCHIVE_SHA256, HERMES_CPYTHON_BUILD_RELEASE,
     HERMES_CPYTHON_PROVENANCE, HERMES_CPYTHON_SHA256SUMS_SHA256, HERMES_CPYTHON_VERSION,
@@ -46,9 +53,11 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{ErrorKind as IoErrorKind, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Weak;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -587,11 +596,54 @@ pub struct HermesAdapterConfig {
 /// lifecycle ownership are not sufficient to mint this receipt. A future
 /// same-process runner must additionally bind the contained Hermes PID,
 /// endpoint, and nonce before this receipt can become constructible.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct HermesContainmentReceipt {
     endpoint: SocketAddr,
     api_key_sha256: String,
+    runner_nonce_sha256: String,
+    contained_pid: u32,
+    runtime_manifest_sha256: String,
+    bwrap_sha256: String,
+    socketpair_binding_sha256: String,
+    broker_receipt_sha256: String,
+    containment_frame_sha256: String,
     receipt_digest: ContentDigest,
+    owner: Option<Weak<ContainmentOwnerState>>,
+}
+
+struct ContainmentOwnerState {
+    active: AtomicBool,
+    runner_nonce_sha256: String,
+}
+
+impl ContainmentOwnerState {
+    fn new(runner_nonce_sha256: String) -> Self {
+        Self {
+            active: AtomicBool::new(true),
+            runner_nonce_sha256,
+        }
+    }
+
+    fn invalidate(&self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
+impl fmt::Debug for HermesContainmentReceipt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HermesContainmentReceipt")
+            .field("endpoint", &self.endpoint)
+            .field("runner_nonce_sha256", &self.runner_nonce_sha256)
+            .field("contained_pid", &self.contained_pid)
+            .field("runtime_manifest_sha256", &self.runtime_manifest_sha256)
+            .field("bwrap_sha256", &self.bwrap_sha256)
+            .field("socketpair_binding_sha256", &self.socketpair_binding_sha256)
+            .field("broker_receipt_sha256", &self.broker_receipt_sha256)
+            .field("containment_frame_sha256", &self.containment_frame_sha256)
+            .field("receipt_digest", &self.receipt_digest)
+            .finish_non_exhaustive()
+    }
 }
 
 impl HermesContainmentReceipt {
@@ -600,13 +652,82 @@ impl HermesContainmentReceipt {
         &self.receipt_digest
     }
 
+    #[must_use]
+    pub const fn contained_pid(&self) -> u32 {
+        self.contained_pid
+    }
+
+    #[must_use]
+    pub const fn endpoint(&self) -> SocketAddr {
+        self.endpoint
+    }
+
+    #[must_use]
+    pub fn runner_nonce_sha256(&self) -> &str {
+        &self.runner_nonce_sha256
+    }
+
+    #[must_use]
+    pub fn runtime_manifest_sha256(&self) -> &str {
+        &self.runtime_manifest_sha256
+    }
+
+    #[must_use]
+    pub fn bwrap_sha256(&self) -> &str {
+        &self.bwrap_sha256
+    }
+
+    #[must_use]
+    pub fn socketpair_binding_sha256(&self) -> &str {
+        &self.socketpair_binding_sha256
+    }
+
+    #[must_use]
+    pub fn broker_receipt_sha256(&self) -> &str {
+        &self.broker_receipt_sha256
+    }
+
+    #[must_use]
+    pub fn containment_frame_sha256(&self) -> &str {
+        &self.containment_frame_sha256
+    }
+
     fn verify_binding(&self, endpoint: SocketAddr, api_key: &str) -> HermesAdapterResult<()> {
         if self.endpoint != endpoint || self.api_key_sha256 != sha256_text(api_key) {
             return Err(cross_binding(
                 "HERMES_CONTAINMENT_ENDPOINT_BINDING_REJECTED",
             ));
         }
+        if let Some(owner) = &self.owner {
+            let owner = owner
+                .upgrade()
+                .ok_or_else(|| cross_binding("HERMES_CONTAINMENT_RECEIPT_REPLAYED"))?;
+            if !owner.active.load(Ordering::Acquire)
+                || owner.runner_nonce_sha256 != self.runner_nonce_sha256
+            {
+                return Err(cross_binding("HERMES_CONTAINMENT_RECEIPT_REPLAYED"));
+            }
+        } else if !cfg!(test) {
+            return Err(cross_binding("HERMES_CONTAINMENT_RECEIPT_REPLAYED"));
+        }
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn test_only(endpoint: SocketAddr, api_key: &str, receipt_digest: ContentDigest) -> Self {
+        Self {
+            endpoint,
+            api_key_sha256: sha256_text(api_key),
+            runner_nonce_sha256: sha256_text("test-only-runner-nonce"),
+            contained_pid: 1,
+            runtime_manifest_sha256: "a".repeat(64),
+            bwrap_sha256: "b".repeat(64),
+            socketpair_binding_sha256: "c".repeat(64),
+            broker_receipt_sha256: "d".repeat(64),
+            containment_frame_sha256: "e".repeat(64),
+            receipt_digest,
+            owner: None,
+        }
     }
 }
 
@@ -726,6 +847,25 @@ impl HermesAdapterConfig {
     #[must_use]
     pub const fn poll_interval(&self) -> Duration {
         self.poll_interval
+    }
+
+    fn install_containment_receipt(
+        &mut self,
+        receipt: HermesContainmentReceipt,
+    ) -> HermesAdapterResult<()> {
+        receipt.verify_binding(self.endpoint, &self.api_key)?;
+        self.containment_receipt = Some(receipt);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn install_test_containment_receipt(
+        &mut self,
+        receipt_digest: ContentDigest,
+    ) -> HermesAdapterResult<()> {
+        let receipt =
+            HermesContainmentReceipt::test_only(self.endpoint, &self.api_key, receipt_digest);
+        self.install_containment_receipt(receipt)
     }
 }
 
@@ -1433,7 +1573,6 @@ impl HermesReflectionAdapter {
                 .map_err(|failure| map_io_error(&failure))?;
         }
         stream.flush().map_err(|failure| map_io_error(&failure))?;
-        let _ = stream.shutdown(Shutdown::Write);
 
         let mut bytes = Vec::new();
         let mut buffer = [0_u8; 8_192];

@@ -1348,6 +1348,140 @@ fn scripted_adapter_cannot_emit_live_port_evidence() {
     assert!(server.finish().is_empty());
 }
 
+#[cfg(windows)]
+#[test]
+fn production_port_exposes_reflection_and_normalized_evidence_seam() {
+    fn assert_hermes_port<T: HermesPort>() {}
+    fn assert_send<T: Send>() {}
+
+    assert_hermes_port::<crate::ProductionHermesPort>();
+    assert_send::<crate::ProductionHermesRunner>();
+    assert_send::<crate::ProductionHermesPort>();
+    let launch: fn(
+        crate::HermesProductionRunnerConfig,
+        Instant,
+    ) -> crate::HermesAdapterResult<crate::ProductionHermesRunner> =
+        crate::HermesProductionRunnerConfig::launch;
+    let bind: fn(
+        crate::ProductionHermesRunner,
+        crate::HermesReflectionJob,
+    ) -> crate::HermesAdapterResult<crate::ProductionHermesPort> =
+        crate::ProductionHermesRunner::bind;
+    let seam: fn(
+        &mut crate::ProductionHermesPort,
+        &HermesResearchRequest,
+    ) -> lattice_ports::PortResult<crate::HermesReflectionEvidence> =
+        crate::ProductionHermesPort::run_reflection_evidence;
+    let _ = (launch, bind, seam);
+}
+
+#[cfg(windows)]
+#[test]
+fn codex_proxy_fd2_host_wire_is_bound_sequenced_and_fail_closed() {
+    use crate::production::{
+        CodexProxyHostEvent, CodexProxyHostSession, encode_codex_proxy_test_frame,
+    };
+
+    let nonce = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let broker = digest("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    let mut host = CodexProxyHostSession::new(
+        nonce,
+        &broker,
+        Instant::now() + Duration::from_secs(2),
+    )
+    .expect("bound host session");
+    let binding = host.binding();
+    let open = encode_codex_proxy_test_frame(1, 0, binding, &[]);
+    assert_eq!(
+        host.accept(&open).expect("OPEN seq0"),
+        CodexProxyHostEvent::Open
+    );
+    let ack = host.encode_open_ack().expect("host OPEN ack seq0");
+    let mut peer = CodexProxyHostSession::new(
+        nonce,
+        &broker,
+        Instant::now() + Duration::from_secs(2),
+    )
+    .expect("bound peer session");
+    assert_eq!(
+        peer.accept(&ack).expect("peer accepts OPEN ack"),
+        CodexProxyHostEvent::Open
+    );
+    let _peer_ack = peer.encode_open_ack().expect("peer state acknowledges OPEN");
+    let data = encode_codex_proxy_test_frame(2, 1, binding, b"raw-json-line\n");
+    assert_eq!(
+        host.accept(&data).expect("DATA seq1"),
+        CodexProxyHostEvent::Data(b"raw-json-line\n".to_vec())
+    );
+    let response = host
+        .encode_data(b"raw-app-server-line\n")
+        .expect("host DATA seq1");
+    assert_eq!(
+        peer.accept(&response).expect("peer accepts host DATA"),
+        CodexProxyHostEvent::Data(b"raw-app-server-line\n".to_vec())
+    );
+    let close = encode_codex_proxy_test_frame(3, 2, binding, &[]);
+    assert_eq!(
+        host.accept(&close).expect("CLOSE seq2"),
+        CodexProxyHostEvent::Close
+    );
+    let close_ack = host.encode_close().expect("host CLOSE seq2");
+    assert_eq!(
+        peer.accept(&close_ack).expect("peer accepts host CLOSE"),
+        CodexProxyHostEvent::Close
+    );
+
+    let mut wrong_binding = CodexProxyHostSession::new(
+        nonce,
+        &broker,
+        Instant::now() + Duration::from_secs(2),
+    )
+    .expect("bound host session");
+    let forged = encode_codex_proxy_test_frame(1, 0, [0_u8; 32], &[]);
+    assert_eq!(
+        wrong_binding
+            .accept(&forged)
+            .expect_err("binding mismatch fails closed")
+            .code(),
+        "HERMES_CODEX_PROXY_BINDING_REJECTED"
+    );
+
+    let mut skipped = CodexProxyHostSession::new(
+        nonce,
+        &broker,
+        Instant::now() + Duration::from_secs(2),
+    )
+    .expect("bound host session");
+    let skipped_open = encode_codex_proxy_test_frame(1, 1, binding, &[]);
+    assert_eq!(
+        skipped
+            .accept(&skipped_open)
+            .expect_err("sequence skip fails closed")
+            .code(),
+        "HERMES_CODEX_PROXY_SEQUENCE_REJECTED"
+    );
+
+    let diagnostic = b"bwrap: setup failed\n";
+    let mut before_open = CodexProxyHostSession::new(
+        nonce,
+        &broker,
+        Instant::now() + Duration::from_secs(2),
+    )
+    .expect("bound host session");
+    assert_eq!(
+        before_open
+            .accept(diagnostic)
+            .expect_err("diagnostic bytes are never proxy frames")
+            .code(),
+        "HERMES_CODEX_PROXY_MAGIC_REJECTED"
+    );
+    let evidence = before_open
+        .failure_evidence()
+        .expect("bounded diagnostic evidence");
+    assert_eq!(evidence.byte_count(), diagnostic.len() as u64);
+    assert_eq!(evidence.sha256().len(), 64);
+}
+
 #[test]
 fn process_command_uses_only_explicit_isolated_homes_and_loopback_api() {
     let executable = std::env::current_exe().expect("test executable");
