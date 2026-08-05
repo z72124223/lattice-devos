@@ -118,6 +118,14 @@ pub(crate) fn spawn_with_parent_stdin(
     spawn_inner(plan, true, false, false)
 }
 
+/// Starts a Job-owned child with parent-only stdin/stdout pipe ends while
+/// retaining the normal bounded stderr capture.
+pub(crate) fn spawn_with_parent_stdio(
+    plan: &WindowsJobCommandPlan,
+) -> HermesAdapterResult<WindowsJobChild> {
+    spawn_inner(plan, true, true, false)
+}
+
 /// Starts a Job-owned child with parent-only pipe ends for all three standard
 /// streams. The caller must drain stderr concurrently into bounded evidence.
 pub(crate) fn spawn_duplex(plan: &WindowsJobCommandPlan) -> HermesAdapterResult<WindowsJobChild> {
@@ -997,6 +1005,8 @@ mod tests {
 
     #[test]
     fn duplex_parent_ends_relay_and_child_exits_on_input_close() {
+        fn assert_send<T: Send>() {}
+        assert_send::<WindowsJobChild>();
         let sequence = PIPE_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "lattice-hermes-windows-job-duplex-{}-{sequence}",
