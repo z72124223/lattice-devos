@@ -202,6 +202,22 @@ impl AppServerProtocol {
         expected_thread_id: &str,
         expected_turn_id: &str,
     ) -> Result<Option<TurnOutcome>, ProtocolError> {
+        Self::parse_turn_completed_with_items(message, expected_thread_id, expected_turn_id, &[])
+    }
+
+    /// Parses one terminal and validates it against the ordered
+    /// `item/completed` evidence already bound to the same thread and turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fail-closed protocol error when the terminal shape, binding,
+    /// or completed delivery-tool sequence is incomplete or ambiguous.
+    pub(crate) fn parse_turn_completed_with_items(
+        message: &Value,
+        expected_thread_id: &str,
+        expected_turn_id: &str,
+        completed_items: &[Value],
+    ) -> Result<Option<TurnOutcome>, ProtocolError> {
         if message.get("method").and_then(Value::as_str) != Some("turn/completed") {
             return Ok(None);
         }
@@ -250,7 +266,8 @@ impl AppServerProtocol {
             }
         };
         if status == TurnStatus::Completed {
-            validate_completed_tool_evidence(turn, items)?;
+            validate_completed_terminal_items(turn, items)?;
+            validate_completed_tool_evidence(completed_items)?;
         }
 
         Ok(Some(TurnOutcome {
@@ -263,16 +280,26 @@ impl AppServerProtocol {
 
 const YIELDED_EXEC_MARKER: &str = "Script running with cell ID ";
 
-fn validate_completed_tool_evidence(
+fn validate_completed_terminal_items(
     turn: &serde_json::Map<String, Value>,
     items: &[Value],
 ) -> Result<(), ProtocolError> {
-    if turn.get("itemsView").and_then(Value::as_str) != Some("full") {
-        return Err(ProtocolError::IncompleteToolExecution);
+    match turn.get("itemsView").and_then(Value::as_str) {
+        Some("summary")
+            if items.len() == 1
+                && items[0].get("type").and_then(Value::as_str) == Some("agentMessage") =>
+        {
+            Ok(())
+        }
+        Some("notLoaded") if items.is_empty() => Ok(()),
+        _ => Err(ProtocolError::MalformedTerminal),
     }
+}
 
-    let mut pending_cells = BTreeSet::new();
-    let mut completed_delivery_tools = 0_usize;
+fn validate_completed_tool_evidence(items: &[Value]) -> Result<(), ProtocolError> {
+    let mut pending_cell = None;
+    let mut completed_execs = 0_usize;
+    let mut seen_dynamic_items = BTreeSet::new();
     for item in items {
         let Some(object) = item.as_object() else {
             return Err(ProtocolError::MalformedTerminal);
@@ -283,41 +310,67 @@ fn validate_completed_tool_evidence(
         match item_type {
             "dynamicToolCall" => {
                 if object.get("status").and_then(Value::as_str) != Some("completed")
-                    || object.get("success").and_then(Value::as_bool) == Some(false)
+                    || object.get("success").and_then(Value::as_bool) != Some(true)
                 {
+                    return Err(ProtocolError::IncompleteToolExecution);
+                }
+                let item_id = object
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|item_id| !item_id.is_empty())
+                    .ok_or(ProtocolError::MalformedTerminal)?;
+                if !seen_dynamic_items.insert(item_id.to_owned()) {
                     return Err(ProtocolError::IncompleteToolExecution);
                 }
                 let tool = object
                     .get("tool")
                     .and_then(Value::as_str)
                     .ok_or(ProtocolError::MalformedTerminal)?;
-                if tool != "wait" {
-                    completed_delivery_tools += 1;
-                }
                 let output = dynamic_tool_output(object)?;
-                for cell_id in yielded_cell_ids(&output)? {
-                    pending_cells.insert(cell_id);
-                }
-                if tool == "wait"
-                    && let Some((cell_id, terminate)) = wait_arguments(object)
-                {
-                    if terminate {
-                        return Err(ProtocolError::IncompleteToolExecution);
+                match tool {
+                    "exec" => {
+                        if pending_cell.is_some() || completed_execs >= 2 {
+                            return Err(ProtocolError::IncompleteToolExecution);
+                        }
+                        completed_execs += 1;
+                        let mut yielded_cells = yielded_cell_ids(&output)?;
+                        if yielded_cells.len() > 1 {
+                            return Err(ProtocolError::IncompleteToolExecution);
+                        }
+                        pending_cell = yielded_cells.pop();
                     }
-                    if completed_wait_result(&output) {
-                        pending_cells.remove(&cell_id);
+                    "wait" => {
+                        let expected_cell = pending_cell
+                            .as_deref()
+                            .ok_or(ProtocolError::IncompleteToolExecution)?;
+                        let (cell_id, terminate) = wait_arguments(object)?;
+                        if cell_id != expected_cell {
+                            return Err(ProtocolError::IncompleteToolExecution);
+                        }
+                        let yielded_cells = yielded_cell_ids(&output)?;
+                        let completed = completed_wait_result(&output);
+                        if (completed && !yielded_cells.is_empty())
+                            || yielded_cells
+                                .iter()
+                                .any(|yielded_cell_id| yielded_cell_id != expected_cell)
+                        {
+                            return Err(ProtocolError::IncompleteToolExecution);
+                        }
+                        if terminate {
+                            return Err(ProtocolError::IncompleteToolExecution);
+                        }
+                        if completed {
+                            pending_cell = None;
+                        }
                     }
+                    _ => return Err(ProtocolError::IncompleteToolExecution),
                 }
             }
-            "commandExecution" | "mcpToolCall" | "fileChange"
-                if object.get("status").and_then(Value::as_str) != Some("completed") =>
-            {
-                return Err(ProtocolError::IncompleteToolExecution);
-            }
-            _ => {}
+            "userMessage" | "agentMessage" | "reasoning" => {}
+            _ => return Err(ProtocolError::IncompleteToolExecution),
         }
     }
-    if pending_cells.is_empty() && completed_delivery_tools >= 2 {
+    if pending_cell.is_none() && completed_execs == 2 {
         Ok(())
     } else {
         Err(ProtocolError::IncompleteToolExecution)
@@ -372,23 +425,36 @@ fn yielded_cell_ids(output: &str) -> Result<Vec<String>, ProtocolError> {
     Ok(ids)
 }
 
-fn wait_arguments(object: &serde_json::Map<String, Value>) -> Option<(String, bool)> {
-    let arguments = object.get("arguments")?;
+fn wait_arguments(
+    object: &serde_json::Map<String, Value>,
+) -> Result<(String, bool), ProtocolError> {
+    let arguments = object
+        .get("arguments")
+        .ok_or(ProtocolError::IncompleteToolExecution)?;
     let parsed;
     let arguments = match arguments {
         Value::Object(arguments) => arguments,
         Value::String(encoded) => {
-            parsed = serde_json::from_str::<Value>(encoded).ok()?;
-            parsed.as_object()?
+            parsed = serde_json::from_str::<Value>(encoded)
+                .map_err(|_| ProtocolError::IncompleteToolExecution)?;
+            parsed
+                .as_object()
+                .ok_or(ProtocolError::IncompleteToolExecution)?
         }
-        _ => return None,
+        _ => return Err(ProtocolError::IncompleteToolExecution),
     };
-    let cell_id = arguments.get("cell_id")?.as_str()?.to_owned();
-    let terminate = arguments
-        .get("terminate")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    Some((cell_id, terminate))
+    let cell_id = arguments
+        .get("cell_id")
+        .and_then(Value::as_str)
+        .filter(|cell_id| !cell_id.is_empty())
+        .ok_or(ProtocolError::IncompleteToolExecution)?
+        .to_owned();
+    let terminate = match arguments.get("terminate") {
+        None => false,
+        Some(Value::Bool(terminate)) => *terminate,
+        Some(_) => return Err(ProtocolError::IncompleteToolExecution),
+    };
+    Ok((cell_id, terminate))
 }
 
 fn completed_wait_result(output: &str) -> bool {

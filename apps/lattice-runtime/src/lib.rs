@@ -357,6 +357,7 @@ fn is_lowercase_sha256(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::DELIVERY_PROMPT;
+    use lattice_codex_adapter::{AppServerSession, SessionRequest, TurnStatus};
 
     #[test]
     fn fixed_delivery_prompt_requires_completed_separate_tool_evidence() {
@@ -371,21 +372,91 @@ mod tests {
     fn scripted_fixture_tracks_prompt_and_completed_tool_evidence() {
         let fixture = include_str!("fixtures/task032-scripted-codex.ps1");
         assert!(fixture.contains(&format!("[string]$inputs[0].text -ne '{DELIVERY_PROMPT}'")));
-        let terminal = fixture
+        let notifications = fixture
             .lines()
-            .find(|line| line.contains(r#""method":"turn/completed""#))
-            .and_then(|line| line.strip_prefix("[Console]::Out.WriteLine('"))
-            .and_then(|line| line.strip_suffix("')"))
+            .filter_map(|line| line.strip_prefix("[Console]::Out.WriteLine('"))
+            .filter_map(|line| line.strip_suffix("')"))
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .collect::<Vec<_>>();
+        let completed_items = notifications
+            .iter()
+            .filter(|notification| {
+                notification
+                    .get("method")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("item/completed")
+            })
+            .map(|notification| notification["params"]["item"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(completed_items.len(), 2);
+        assert!(completed_items.iter().all(|item| {
+            item.get("success").and_then(serde_json::Value::as_bool) == Some(true)
+        }));
+        let terminal = notifications
+            .iter()
+            .find(|notification| {
+                notification
+                    .get("method")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("turn/completed")
+            })
             .expect("scripted terminal JSON line");
-        let terminal = serde_json::from_str::<serde_json::Value>(terminal)
-            .expect("scripted terminal is valid JSON");
-        let outcome = lattice_codex_adapter::AppServerProtocol::parse_turn_completed(
-            &terminal,
-            "thread-task032-scripted",
-            "turn-task032-scripted",
-        )
-        .expect("scripted terminal satisfies the production parser")
-        .expect("scripted terminal is terminal evidence");
-        assert_eq!(outcome.status, lattice_codex_adapter::TurnStatus::Completed);
+        assert_eq!(terminal["params"]["turn"]["itemsView"], "summary");
+
+        let mut session = AppServerSession::new();
+        for request in [
+            SessionRequest::Initialize,
+            SessionRequest::ThreadStart,
+            SessionRequest::TurnStart,
+        ] {
+            session
+                .mark_request_sent(request)
+                .expect("fixture lifecycle request is sent once");
+        }
+        session
+            .ingest(serde_json::json!({
+                "id": 0,
+                "result": {
+                    "userAgent": "codex_cli_rs/0.144.6",
+                    "platformFamily": "windows",
+                    "platformOs": "windows",
+                    "codexHome": r"C:\lattice\codex-home"
+                }
+            }))
+            .expect("fixture initialize response is valid");
+        session
+            .ingest(serde_json::json!({
+                "id": 1,
+                "result": {"thread": {"id": "thread-task032-scripted"}}
+            }))
+            .expect("fixture thread response is valid");
+        session
+            .ingest(serde_json::json!({
+                "id": 2,
+                "result": {"turn": {"id": "turn-task032-scripted"}}
+            }))
+            .expect("fixture turn response is valid");
+        let mut outcome = None;
+        for notification in notifications.iter().filter(|notification| {
+            matches!(
+                notification
+                    .get("method")
+                    .and_then(serde_json::Value::as_str),
+                Some("item/completed" | "turn/completed")
+            )
+        }) {
+            if let Some(completed) = session
+                .ingest(notification.clone())
+                .expect("fixture notification satisfies the production session")
+            {
+                outcome = Some(completed);
+            }
+        }
+        assert_eq!(
+            outcome
+                .expect("scripted terminal completes the session")
+                .status,
+            TurnStatus::Completed
+        );
     }
 }

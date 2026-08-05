@@ -693,17 +693,19 @@ fn fake_launcher_script(
         "$null = [Console]::In.ReadLine()\n$threadStart = [Console]::In.ReadLine()\nif ($threadStart -like '*\"method\":\"thread/start\"*') {{ [IO.File]::WriteAllText('{}', 'thread/start received') }}\n[Console]::Out.WriteLine('{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"thread-scripted\"}}}}}}')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":2,\"result\":{{\"turn\":{{\"id\":\"turn-scripted\"}}}}}}')\n",
         quote(effect_log)
     );
-    let completed = r#"{"method":"turn/completed","params":{"threadId":"thread-scripted","turn":{"id":"turn-scripted","items":[{"arguments":{},"id":"tool-apply","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"},{"arguments":{},"id":"tool-verify","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"}],"itemsView":"full","status":"completed","error":null}}}"#;
+    let apply_completed = r#"{"method":"item/completed","params":{"threadId":"thread-scripted","turnId":"turn-scripted","item":{"arguments":{"command":"apply_patch fixture"},"id":"tool-apply","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"},"completedAtMs":1}}"#;
+    let verify_completed = r#"{"method":"item/completed","params":{"threadId":"thread-scripted","turnId":"turn-scripted","item":{"arguments":{"command":"verify fixture"},"id":"tool-verify","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"},"completedAtMs":2}}"#;
+    let completed = r#"{"method":"turn/completed","params":{"threadId":"thread-scripted","turn":{"id":"turn-scripted","items":[{"id":"agent-final","text":"Delivery complete.","type":"agentMessage"}],"itemsView":"summary","status":"completed","error":null}}}"#;
     let tail = match mode {
         FakeMode::Success | FakeMode::WrongHome => format!(
-            "[Console]::Out.WriteLine('{completed}')\nStart-Sleep -Seconds 60\n"
+            "[Console]::Out.WriteLine('{apply_completed}')\n[Console]::Out.WriteLine('{verify_completed}')\n[Console]::Out.WriteLine('{completed}')\nStart-Sleep -Seconds 60\n"
         ),
-        FakeMode::Yielded => concat!(
-            r#"[Console]::Out.WriteLine('{"method":"turn/completed","params":{"threadId":"thread-scripted","turn":{"id":"turn-scripted","items":[{"arguments":{},"contentItems":[{"text":"Script running with cell ID cell-7","type":"inputText"}],"id":"tool-exec","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"}],"itemsView":"full","status":"completed","error":null}}}')"#,
-            "\n",
-            "Start-Sleep -Seconds 60\n",
-        )
-        .to_owned(),
+        FakeMode::Yielded => format!(
+            r#"[Console]::Out.WriteLine('{{"method":"item/completed","params":{{"threadId":"thread-scripted","turnId":"turn-scripted","item":{{"arguments":{{}},"contentItems":[{{"text":"Script running with cell ID cell-7","type":"inputText"}}],"id":"tool-exec","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"}},"completedAtMs":1}}}}')
+[Console]::Out.WriteLine('{completed}')
+Start-Sleep -Seconds 60
+"#
+        ),
         FakeMode::Malformed => {
             "[Console]::Out.WriteLine('{not-json')\nStart-Sleep -Seconds 60\n".to_owned()
         }
@@ -720,7 +722,7 @@ fn fake_launcher_script(
         )
         .to_owned(),
         FakeMode::Orphan => format!(
-            "$grandchild = \"Start-Sleep -Milliseconds 800; [IO.File]::WriteAllText('{}', 'survived')\"\n$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($grandchild))\n$descendant = Start-Process -FilePath \"$PSHOME\\powershell.exe\" -WindowStyle Hidden -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -PassThru\n[IO.File]::WriteAllText('{}', [string]$descendant.Id)\n[Console]::Out.WriteLine('{completed}')\nexit 0\n",
+            "$grandchild = \"Start-Sleep -Milliseconds 800; [IO.File]::WriteAllText('{}', 'survived')\"\n$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($grandchild))\n$descendant = Start-Process -FilePath \"$PSHOME\\powershell.exe\" -WindowStyle Hidden -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -PassThru\n[IO.File]::WriteAllText('{}', [string]$descendant.Id)\n[Console]::Out.WriteLine('{apply_completed}')\n[Console]::Out.WriteLine('{verify_completed}')\n[Console]::Out.WriteLine('{completed}')\nexit 0\n",
             quote(descendant_effect_log),
             quote(descendant_pid_log)
         ),
