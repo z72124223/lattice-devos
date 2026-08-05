@@ -802,7 +802,7 @@ fn official_codex_0146_no_marker_broker_canary_is_live_verified() {
     ] {
         assert_eq!(digest.len(), 64);
     }
-    std::fs::remove_dir_all(&isolation_root).expect("remove exact successful canary root");
+    remove_temp_root_with_retry(&isolation_root);
 }
 
 #[test]
@@ -1054,7 +1054,7 @@ fn production_runner_owns_attests_binds_and_invalidates_one_contained_fixture() 
         .install_containment_receipt(replay)
         .expect_err("receipt cannot outlive its sole runner owner");
     assert_eq!(failure.code(), "HERMES_CONTAINMENT_RECEIPT_REPLAYED");
-    std::fs::remove_dir_all(&isolation_root).expect("remove exact fixture root");
+    remove_temp_root_with_retry(&isolation_root);
 }
 
 #[test]
@@ -1083,7 +1083,7 @@ fn production_official_mode_blocks_stably_when_frozen_hermes_is_not_staged() {
         Err(failure) => failure,
     };
     assert_eq!(failure.code(), "HERMES_OFFICIAL_SERVER_NOT_STAGED");
-    std::fs::remove_dir_all(&isolation_root).expect("remove exact official root");
+    remove_temp_root_with_retry(&isolation_root);
 }
 
 #[test]
@@ -1982,6 +1982,17 @@ fn unique_temp_root(label: &str) -> std::path::PathBuf {
             .expect("clock")
             .as_nanos()
     ))
+}
+
+fn remove_temp_root_with_retry(path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Err(error) => panic!("remove exact temporary root {path:?}: {error}"),
+        }
+    }
 }
 
 fn production_containment(isolation_root: std::path::PathBuf) -> HermesWslContainmentConfig {
