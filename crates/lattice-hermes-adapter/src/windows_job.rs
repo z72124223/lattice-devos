@@ -12,15 +12,15 @@ use std::fs::File;
 use std::mem::{size_of, zeroed};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::FileExt;
-use std::os::windows::io::{AsRawHandle, FromRawHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -68,7 +68,33 @@ pub(crate) struct WindowsJobProcessExit {
     pub(crate) stderr: Vec<u8>,
 }
 
+/// One live process tree assigned before first instruction to a private
+/// kill-on-close Job Object.
+pub(crate) struct WindowsJobChild {
+    job: OwnedHandle,
+    process: OwnedHandle,
+    process_id: u32,
+    stdout: File,
+    stderr: File,
+    deadline: Instant,
+    teardown_timeout: Duration,
+    terminated: bool,
+}
+
 pub(crate) fn run(plan: &WindowsJobCommandPlan) -> HermesAdapterResult<WindowsJobProcessExit> {
+    let mut child = spawn(plan)?;
+    let exit_code = child.wait_for_exit()?;
+    let stdout = child.read_stdout(plan.stdout_limit)?;
+    let stderr = child.read_stderr(plan.stderr_limit)?;
+    Ok(WindowsJobProcessExit {
+        exit_code,
+        stdout,
+        stderr,
+    })
+}
+
+/// Starts a long-lived owned child without releasing its Job Object.
+pub(crate) fn spawn(plan: &WindowsJobCommandPlan) -> HermesAdapterResult<WindowsJobChild> {
     let paths = validate_plan(plan)?;
     let redirects = RedirectHandles::create(&paths.stdout_path, &paths.stderr_path)?;
     let job = create_kill_on_close_job()?;
@@ -114,9 +140,9 @@ pub(crate) fn run(plan: &WindowsJobCommandPlan) -> HermesAdapterResult<WindowsJo
         return Err(spawn_error("HERMES_WINDOWS_CREATE_PROCESS"));
     }
 
-    let process = OwnedHandle::new(process_info.hProcess)
+    let process = owned_handle(process_info.hProcess)
         .ok_or_else(|| spawn_error("HERMES_WINDOWS_PROCESS_HANDLE"))?;
-    let Some(thread_handle) = OwnedHandle::new(process_info.hThread) else {
+    let Some(thread_handle) = owned_handle(process_info.hThread) else {
         terminate_unassigned_process(&process, plan.teardown_timeout)?;
         return Err(spawn_error("HERMES_WINDOWS_THREAD_HANDLE"));
     };
@@ -136,14 +162,98 @@ pub(crate) fn run(plan: &WindowsJobCommandPlan) -> HermesAdapterResult<WindowsJo
     }
     drop(thread_handle);
 
-    let exit_code = wait_for_exit(plan, &job, &process)?;
-    let stdout = read_locked_capture(&redirects.stdout, plan.stdout_limit)?;
-    let stderr = read_locked_capture(&redirects.stderr, plan.stderr_limit)?;
-    Ok(WindowsJobProcessExit {
-        exit_code,
+    let RedirectHandles {
+        stdin,
         stdout,
         stderr,
+    } = redirects;
+    drop(stdin);
+    Ok(WindowsJobChild {
+        job,
+        process,
+        process_id: process_info.dwProcessId,
+        stdout,
+        stderr,
+        deadline: plan.deadline,
+        teardown_timeout: plan.teardown_timeout,
+        terminated: false,
     })
+}
+
+impl WindowsJobChild {
+    pub(crate) const fn process_id(&self) -> u32 {
+        self.process_id
+    }
+
+    pub(crate) fn ensure_running(&mut self) -> HermesAdapterResult<()> {
+        if Instant::now() >= self.deadline {
+            self.terminate()?;
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Timeout,
+                "HERMES_PRODUCTION_DEADLINE_EXCEEDED",
+            ));
+        }
+        // SAFETY: the process handle remains owned by `self`; a zero timeout
+        // only observes state and never blocks.
+        match unsafe { WaitForSingleObject(self.process.raw(), 0) } {
+            WAIT_TIMEOUT => match job_active_processes(&self.job) {
+                Ok(active) if active > 0 => Ok(()),
+                _ => {
+                    self.terminate()?;
+                    Err(ambiguous_error("HERMES_PRODUCTION_JOB_STATE_UNKNOWN"))
+                }
+            },
+            WAIT_OBJECT_0 => {
+                ensure_job_empty(&self.job, &self.process, self.teardown_timeout)?;
+                self.terminated = true;
+                Err(HermesAdapterError::new(
+                    HermesAdapterErrorKind::Failed,
+                    "HERMES_PRODUCTION_CHILD_EXITED",
+                ))
+            }
+            _ => {
+                self.terminate()?;
+                Err(ambiguous_error("HERMES_PRODUCTION_CHILD_STATUS_UNKNOWN"))
+            }
+        }
+    }
+
+    pub(crate) fn read_stdout(&self, limit: u64) -> HermesAdapterResult<Vec<u8>> {
+        read_locked_capture(&self.stdout, limit)
+    }
+
+    pub(crate) fn read_stderr(&self, limit: u64) -> HermesAdapterResult<Vec<u8>> {
+        read_locked_capture(&self.stderr, limit)
+    }
+
+    pub(crate) fn terminate(&mut self) -> HermesAdapterResult<()> {
+        if self.terminated {
+            return Ok(());
+        }
+        terminate_job_and_reap(&self.job, &self.process, self.teardown_timeout)?;
+        self.terminated = true;
+        Ok(())
+    }
+
+    fn wait_for_exit(&mut self) -> HermesAdapterResult<u32> {
+        let exit_code = wait_for_exit(
+            self.deadline,
+            self.teardown_timeout,
+            &self.job,
+            &self.process,
+        )?;
+        self.terminated = true;
+        Ok(exit_code)
+    }
+}
+
+impl Drop for WindowsJobChild {
+    fn drop(&mut self) {
+        if !self.terminated {
+            let _ = terminate_job_and_reap(&self.job, &self.process, self.teardown_timeout);
+            self.terminated = true;
+        }
+    }
 }
 
 /// Confirms the broker helper was itself created inside an owned Job Object.
@@ -346,16 +456,13 @@ fn open_inheritable_file(
             null_mut(),
         )
     };
-    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-        return Err(spawn_error("HERMES_WINDOWS_REDIRECT_FILE"));
-    }
-    Ok(OwnedHandle(handle))
+    owned_handle(handle).ok_or_else(|| spawn_error("HERMES_WINDOWS_REDIRECT_FILE"))
 }
 
 fn create_kill_on_close_job() -> HermesAdapterResult<OwnedHandle> {
     // SAFETY: unnamed Job Object creation uses no caller pointers.
     let job = unsafe { CreateJobObjectW(null(), null()) };
-    let job = OwnedHandle::new(job).ok_or_else(|| spawn_error("HERMES_WINDOWS_CREATE_JOB"))?;
+    let job = owned_handle(job).ok_or_else(|| spawn_error("HERMES_WINDOWS_CREATE_JOB"))?;
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     let size = u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
@@ -436,11 +543,12 @@ impl Drop for ProcThreadAttributes {
 }
 
 fn wait_for_exit(
-    plan: &WindowsJobCommandPlan,
+    deadline: Instant,
+    teardown_timeout: Duration,
     job: &OwnedHandle,
     process: &OwnedHandle,
 ) -> HermesAdapterResult<u32> {
-    let wait_millis = millis_until(plan.deadline);
+    let wait_millis = millis_until(deadline);
     // SAFETY: `process` is valid and the timeout is bounded.
     let wait = unsafe { WaitForSingleObject(process.raw(), wait_millis) };
     match wait {
@@ -448,25 +556,25 @@ fn wait_for_exit(
             let mut exit_code = 0_u32;
             // SAFETY: the signaled process handle and output pointer are valid.
             if unsafe { GetExitCodeProcess(process.raw(), &raw mut exit_code) } == 0 {
-                terminate_job_and_reap(job, process, plan.teardown_timeout)?;
+                terminate_job_and_reap(job, process, teardown_timeout)?;
                 return Err(spawn_error("HERMES_WINDOWS_EXIT_CODE"));
             }
-            ensure_job_empty(job, process, plan.teardown_timeout)?;
+            ensure_job_empty(job, process, teardown_timeout)?;
             Ok(exit_code)
         }
         WAIT_TIMEOUT => {
-            terminate_job_and_reap(job, process, plan.teardown_timeout)?;
+            terminate_job_and_reap(job, process, teardown_timeout)?;
             Err(HermesAdapterError::new(
                 HermesAdapterErrorKind::Timeout,
                 "HERMES_WINDOWS_DEADLINE_EXCEEDED",
             ))
         }
         WAIT_FAILED => {
-            terminate_job_and_reap(job, process, plan.teardown_timeout)?;
+            terminate_job_and_reap(job, process, teardown_timeout)?;
             Err(spawn_error("HERMES_WINDOWS_WAIT_FAILED"))
         }
         _ => {
-            terminate_job_and_reap(job, process, plan.teardown_timeout)?;
+            terminate_job_and_reap(job, process, teardown_timeout)?;
             Err(spawn_error("HERMES_WINDOWS_WAIT_UNKNOWN"))
         }
     }
@@ -671,24 +779,22 @@ fn teardown_ambiguous() -> HermesAdapterError {
     ambiguous_error("HERMES_WINDOWS_TEARDOWN_AMBIGUOUS")
 }
 
-struct OwnedHandle(HANDLE);
-
-impl OwnedHandle {
-    fn new(handle: HANDLE) -> Option<Self> {
-        (!handle.is_null() && handle != INVALID_HANDLE_VALUE).then_some(Self(handle))
+fn owned_handle(handle: HANDLE) -> Option<OwnedHandle> {
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return None;
     }
-
-    const fn raw(&self) -> HANDLE {
-        self.0
-    }
+    // SAFETY: every successful Win32 creation call above transfers one unique
+    // owned handle to this function. `OwnedHandle` supplies the matching close
+    // and is `Send` without a local unsafe marker implementation.
+    Some(unsafe { OwnedHandle::from_raw_handle(handle.cast()) })
 }
 
-impl Drop for OwnedHandle {
-    fn drop(&mut self) {
-        // SAFETY: `OwnedHandle` uniquely owns this handle. Closing a configured
-        // Job Object also supplies the kill-on-close unwind/drop backstop.
-        unsafe {
-            CloseHandle(self.0);
-        }
+trait OwnedHandleExt {
+    fn raw(&self) -> HANDLE;
+}
+
+impl OwnedHandleExt for OwnedHandle {
+    fn raw(&self) -> HANDLE {
+        self.as_raw_handle().cast()
     }
 }

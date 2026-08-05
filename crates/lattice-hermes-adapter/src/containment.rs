@@ -1,6 +1,7 @@
 //! Fixed WSL bubblewrap/Landlock boundary for one Hermes reflection.
 
 use std::ffi::OsString;
+use std::net::SocketAddr;
 
 #[cfg(windows)]
 use std::collections::BTreeMap;
@@ -23,15 +24,15 @@ use sha2::{Digest, Sha256};
 use crate::{HermesAdapterError, HermesAdapterErrorKind, HermesAdapterResult};
 
 const BWRAP_PATH: &str = "/usr/bin/bwrap";
-const PRIVATE_RUNNER_SOURCE: &str = include_str!("hermes_sandbox_runner.py");
-const PRIVATE_FRAME_MAGIC: &[u8] = b"LATTICE_HERMES_CONTAINED_V1\n";
-const PRIVATE_FRAME_FIELD_COUNT: usize = 7;
+pub(crate) const PRIVATE_RUNNER_SOURCE: &str = include_str!("hermes_sandbox_runner.py");
+const PRIVATE_FRAME_MAGIC: &[u8] = b"LATTICE_HERMES_CONTAINED_V2\n";
+const PRIVATE_FRAME_FIELD_COUNT: usize = 13;
 #[cfg(windows)]
-const WSL_DISTRO: &str = "Ubuntu";
+pub(crate) const WSL_DISTRO: &str = "Ubuntu";
 #[cfg(windows)]
 const WSL_EXE_SHA256: &str = "4e589e3883229b7a74a4acdb878689dcec94e2539fcad1c194f415b149c337a9";
 #[cfg(windows)]
-const OUTER_RUNNER_SOURCE: &str = include_str!("wsl_outer_runner.py");
+pub(crate) const OUTER_RUNNER_SOURCE: &str = include_str!("wsl_outer_runner.py");
 #[cfg(windows)]
 const SOCKETPAIR_MAGIC: &[u8] = b"LATTICE_HERMES_SOCKETPAIR_V1\n";
 #[cfg(windows)]
@@ -129,8 +130,14 @@ pub struct HermesContainmentFrame<'a> {
     config_sha256: &'a [u8],
     request_sha256: &'a [u8],
     broker_receipt_sha256: &'a [u8],
-    canary_sha256: &'a [u8],
+    bwrap_sha256: &'a [u8],
+    socketpair_binding_sha256: &'a [u8],
+    api_key_sha256: &'a [u8],
+    nonce_sha256: &'a [u8],
     transcript_sha256: &'a [u8],
+    endpoint: SocketAddr,
+    namespace_pid: u32,
+    mode: &'a str,
     reflection: &'a [u8],
 }
 
@@ -165,16 +172,52 @@ impl<'a> HermesContainmentFrame<'a> {
         self.broker_receipt_sha256
     }
 
-    /// No-marker canary receipt digest.
+    /// Exact bubblewrap executable digest observed by the contained runner.
     #[must_use]
-    pub const fn canary_sha256(self) -> &'a [u8] {
-        self.canary_sha256
+    pub const fn bwrap_sha256(self) -> &'a [u8] {
+        self.bwrap_sha256
+    }
+
+    /// Binding of the actual inherited socketpair to this runner nonce.
+    #[must_use]
+    pub const fn socketpair_binding_sha256(self) -> &'a [u8] {
+        self.socketpair_binding_sha256
+    }
+
+    /// Digest-only API bearer binding; the key itself never enters the frame.
+    #[must_use]
+    pub const fn api_key_sha256(self) -> &'a [u8] {
+        self.api_key_sha256
+    }
+
+    /// Digest of the one-run nonce.
+    #[must_use]
+    pub const fn nonce_sha256(self) -> &'a [u8] {
+        self.nonce_sha256
     }
 
     /// Digest-only contained transcript.
     #[must_use]
     pub const fn transcript_sha256(self) -> &'a [u8] {
         self.transcript_sha256
+    }
+
+    /// Loopback endpoint whose bytes are relayed only to this contained child.
+    #[must_use]
+    pub const fn endpoint(self) -> SocketAddr {
+        self.endpoint
+    }
+
+    /// Hermes/fixture PID as observed inside the bubblewrap PID namespace.
+    #[must_use]
+    pub const fn namespace_pid(self) -> u32 {
+        self.namespace_pid
+    }
+
+    /// Closed production mode attested inside bubblewrap.
+    #[must_use]
+    pub const fn mode(self) -> &'a str {
+        self.mode
     }
 }
 
@@ -300,17 +343,18 @@ pub fn parse_containment_frame(
     };
     let mut fields = Vec::with_capacity(PRIVATE_FRAME_FIELD_COUNT);
     for index in 0..PRIVATE_FRAME_FIELD_COUNT {
-        let length_bytes: [u8; 8] = remaining
-            .get(..8)
+        let length_bytes: [u8; 4] = remaining
+            .get(..4)
             .and_then(|prefix| prefix.try_into().ok())
             .ok_or_else(|| malformed("HERMES_CONTAINMENT_FRAME_TRUNCATED"))?;
-        remaining = &remaining[8..];
-        let length = usize::try_from(u64::from_be_bytes(length_bytes))
+        remaining = &remaining[4..];
+        let length = usize::try_from(u32::from_be_bytes(length_bytes))
             .map_err(|_| malformed("HERMES_CONTAINMENT_FRAME_LENGTH_OVERFLOW"))?;
-        let bound = if index + 1 == PRIVATE_FRAME_FIELD_COUNT {
-            limits.max_reflection_bytes
-        } else {
-            64
+        let bound = match index {
+            0..=9 => 64,
+            10 => 10,
+            11 => 32,
+            _ => limits.max_reflection_bytes,
         };
         if u64::try_from(length).map_or(true, |value| value > bound) {
             return Err(malformed("HERMES_CONTAINMENT_FRAME_FIELD_LIMIT"));
@@ -324,17 +368,48 @@ pub fn parse_containment_frame(
     if !remaining.is_empty() {
         return Err(malformed("HERMES_CONTAINMENT_FRAME_TRAILING_BYTES"));
     }
-    if fields[..6].iter().any(|field| !is_lowercase_sha256(field)) || fields[6].is_empty() {
+    if fields[..9].iter().any(|field| !is_lowercase_sha256(field)) || fields[12].is_empty() {
         return Err(malformed("HERMES_CONTAINMENT_FRAME_FIELD_REJECTED"));
+    }
+    let endpoint_text = std::str::from_utf8(fields[9])
+        .map_err(|_| malformed("HERMES_CONTAINMENT_FRAME_ENDPOINT_REJECTED"))?;
+    let endpoint = endpoint_text
+        .parse::<SocketAddr>()
+        .map_err(|_| malformed("HERMES_CONTAINMENT_FRAME_ENDPOINT_REJECTED"))?;
+    if !endpoint.ip().is_loopback() || endpoint.port() == 0 {
+        return Err(malformed("HERMES_CONTAINMENT_FRAME_ENDPOINT_REJECTED"));
+    }
+    let namespace_pid_text = std::str::from_utf8(fields[10])
+        .map_err(|_| malformed("HERMES_CONTAINMENT_FRAME_PID_REJECTED"))?;
+    let namespace_pid = namespace_pid_text
+        .parse::<u32>()
+        .map_err(|_| malformed("HERMES_CONTAINMENT_FRAME_PID_REJECTED"))?;
+    if namespace_pid == 0
+        || namespace_pid_text
+            .bytes()
+            .any(|byte| !byte.is_ascii_digit())
+    {
+        return Err(malformed("HERMES_CONTAINMENT_FRAME_PID_REJECTED"));
+    }
+    let mode = std::str::from_utf8(fields[11])
+        .map_err(|_| malformed("HERMES_CONTAINMENT_FRAME_MODE_REJECTED"))?;
+    if !matches!(mode, "official" | "scripted_fixture") {
+        return Err(malformed("HERMES_CONTAINMENT_FRAME_MODE_REJECTED"));
     }
     Ok(HermesContainmentFrame {
         runtime_manifest_sha256: fields[0],
         config_sha256: fields[1],
         request_sha256: fields[2],
         broker_receipt_sha256: fields[3],
-        canary_sha256: fields[4],
-        transcript_sha256: fields[5],
-        reflection: fields[6],
+        bwrap_sha256: fields[4],
+        socketpair_binding_sha256: fields[5],
+        api_key_sha256: fields[6],
+        nonce_sha256: fields[7],
+        transcript_sha256: fields[8],
+        endpoint,
+        namespace_pid,
+        mode,
+        reflection: fields[12],
     })
 }
 
@@ -511,6 +586,22 @@ impl HermesWslContainmentConfig {
         }
         parse_socketpair_receipt(&outcome.stdout, &nonce)
     }
+
+    pub(crate) fn wsl_executable(&self) -> &Path {
+        &self.wsl_executable
+    }
+
+    pub(crate) fn runtime_guest_root(&self) -> &str {
+        &self.runtime_guest_root
+    }
+
+    pub(crate) fn isolation_root(&self) -> &Path {
+        &self.isolation_root
+    }
+
+    pub(crate) fn product_root(&self) -> &Path {
+        &self.product_root
+    }
 }
 
 #[cfg(windows)]
@@ -663,7 +754,9 @@ fn canary_nonce(isolation_root: &Path) -> HermesAdapterResult<String> {
 }
 
 #[cfg(windows)]
-fn minimal_wsl_environment(executable: &Path) -> HermesAdapterResult<BTreeMap<OsString, OsString>> {
+pub(crate) fn minimal_wsl_environment(
+    executable: &Path,
+) -> HermesAdapterResult<BTreeMap<OsString, OsString>> {
     let mut environment = BTreeMap::new();
     for name in ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT"] {
         if let Some(value) = std::env::var_os(name) {
