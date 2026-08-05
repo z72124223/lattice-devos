@@ -372,15 +372,23 @@ impl ProductionCodexProxyHost {
         let worker = thread::Builder::new()
             .name("lattice-hermes-codex-proxy".to_owned())
             .spawn(move || {
-                let result = run_codex_proxy_host(
-                    provider,
-                    absolute_deadline,
-                    outer_input,
-                    &outer_stream,
-                    initial_bytes,
-                    &worker_stop,
-                    &mut session,
-                );
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_codex_proxy_host(
+                        provider,
+                        absolute_deadline,
+                        outer_input,
+                        &outer_stream,
+                        initial_bytes,
+                        &worker_stop,
+                        &mut session,
+                    )
+                }))
+                .unwrap_or_else(|_| {
+                    Err(error(
+                        HermesAdapterErrorKind::Ambiguous,
+                        "HERMES_CODEX_PROXY_HOST_PANICKED",
+                    ))
+                });
                 if let Err(failure) = result {
                     owner.invalidate();
                     if let Ok(mut observed) = worker_status.lock() {
@@ -409,7 +417,20 @@ impl ProductionCodexProxyHost {
                 "HERMES_CODEX_PROXY_HOST_STATE_UNKNOWN",
             )
         })?;
-        observed.failure.clone().map_or(Ok(()), Err)
+        if let Some(failure) = observed.failure.clone() {
+            return Err(failure);
+        }
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(thread::JoinHandle::is_finished)
+        {
+            return Err(error(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_HOST_EXITED",
+            ));
+        }
+        Ok(())
     }
 
     fn failure_evidence(&self) -> Option<CodexProxyFailureEvidence> {
@@ -430,7 +451,13 @@ impl ProductionCodexProxyHost {
                 "HERMES_CODEX_PROXY_HOST_JOIN_FAILED",
             )
         })?;
-        self.ensure_live()
+        let observed = self.status.lock().map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_HOST_STATE_UNKNOWN",
+            )
+        })?;
+        observed.failure.clone().map_or(Ok(()), Err)
     }
 }
 
@@ -537,7 +564,7 @@ fn run_codex_proxy_host(
             Ok(OuterStreamEvent::Data(payload)) => {
                 buffer.extend_from_slice(&payload);
                 if buffer.len() > MAX_CODEX_PROXY_BUFFER_BYTES {
-                    session.record_failure(&buffer[..MAX_CODEX_PROXY_BUFFER_BYTES]);
+                    session.record_failure(&buffer);
                     return Err(malformed("HERMES_CODEX_PROXY_SIZE_REJECTED"));
                 }
             }
