@@ -1,11 +1,14 @@
 """Offline socketpair tests for the in-bwrap Hermes sandbox runner."""
 
 import importlib.util
+import hashlib
 import json
 import os
 import pathlib
 import socket
 import subprocess
+import threading
+import time
 import unittest
 
 
@@ -13,6 +16,17 @@ RUNNER_PATH = pathlib.Path(__file__).parents[1] / "src" / "hermes_sandbox_runner
 SPEC = importlib.util.spec_from_file_location("lattice_hermes_sandbox_runner", RUNNER_PATH)
 RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
+
+FIXTURE_CODEX_REQUEST = (
+    b'{"id":0,"method":"initialize","params":{}}\n'
+    b'{"id":1,"method":"thread/start","params":{}}\n'
+    b'{"id":2,"method":"turn/start","params":{}}\n'
+)
+FIXTURE_CODEX_RESPONSE = (
+    b'{"id":0,"result":{"ok":true}}\n'
+    b'{"id":1,"result":{"ok":true}}\n'
+    b'{"id":2,"result":{"ok":true}}\n'
+)
 
 
 def read_exact(connection, length):
@@ -84,7 +98,9 @@ class BwrapRunner:
         if os.name != "posix" or not bwrap.is_file() or not python.is_file():
             raise unittest.SkipTest("requires the pinned WSL bwrap/Python runtime")
         self.peer, child = socket.socketpair()
+        self.proxy_peer, proxy_child = socket.socketpair()
         self.peer.settimeout(2.0)
+        self.proxy_peer.settimeout(2.0)
         source = RUNNER_PATH.read_text(encoding="utf-8")
         command = [
             str(bwrap),
@@ -135,6 +151,7 @@ class BwrapRunner:
             ("CODEX_HOME", "/state/codex-unavailable"),
             ("LATTICE_CODEX_BROKER_READ_FD", "0"),
             ("LATTICE_CODEX_BROKER_WRITE_FD", "1"),
+            ("LATTICE_HERMES_CODEX_PROXY_FD", "2"),
             ("TMPDIR", "/tmp"),
             ("PYTHONDONTWRITEBYTECODE", "1"),
             ("PYTHONHASHSEED", "0"),
@@ -165,10 +182,11 @@ class BwrapRunner:
             command,
             stdin=child,
             stdout=child,
-            stderr=subprocess.PIPE,
+            stderr=proxy_child,
             close_fds=True,
         )
         child.close()
+        proxy_child.close()
 
     @property
     def exit_code(self):
@@ -182,16 +200,169 @@ class BwrapRunner:
 
     def close(self):
         self.peer.close()
+        self.proxy_peer.close()
         try:
             self.process.wait(timeout=2.0)
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.wait(timeout=2.0)
             raise AssertionError("sandbox runner did not stop after broker EOF")
-        stderr = self.process.stderr.read(RUNNER.MAX_CONTROL_BYTES + 1)
-        self.process.stderr.close()
-        if stderr:
-            raise AssertionError("sandbox runner wrote unexpected stderr")
+
+
+def host_proxy_frame(kind, sequence, binding, payload):
+    body = (
+        bytes((kind,))
+        + (1).to_bytes(4, "big")
+        + sequence.to_bytes(4, "big")
+        + binding
+        + payload
+    )
+    return RUNNER.CODEX_PROXY_MAGIC + len(body).to_bytes(4, "big") + body
+
+
+def receive_host_proxy_frame(connection):
+    magic = read_exact(connection, len(RUNNER.CODEX_PROXY_MAGIC))
+    if magic != RUNNER.CODEX_PROXY_MAGIC:
+        raise AssertionError("wrong Codex proxy frame magic")
+    length = int.from_bytes(read_exact(connection, 4), "big")
+    if length < 41 or length > 41 + RUNNER.MAX_CODEX_PROXY_DATA_BYTES:
+        raise AssertionError("Codex proxy frame length escaped its bound")
+    body = read_exact(connection, length)
+    return (
+        body[0],
+        int.from_bytes(body[1:5], "big"),
+        int.from_bytes(body[5:9], "big"),
+        body[9:41],
+        body[41:],
+    )
+
+
+def capture_pre_magic_diagnostic(connection, limit=4096):
+    observed = bytearray()
+    while len(observed) <= limit:
+        chunk = connection.recv(min(512, limit + 1 - len(observed)))
+        if not chunk:
+            break
+        observed.extend(chunk)
+        if len(observed) >= len(RUNNER.CODEX_PROXY_MAGIC):
+            break
+    if bytes(observed).startswith(RUNNER.CODEX_PROXY_MAGIC):
+        raise AssertionError("expected a pre-magic launch diagnostic")
+    if not observed or len(observed) > limit:
+        raise AssertionError("pre-magic diagnostic escaped its strict bound")
+    return len(observed), hashlib.sha256(observed).hexdigest()
+
+
+class SyntheticCodexHost:
+    def __init__(self, connection, binding, mode="success"):
+        self.connection = connection
+        self.binding = binding
+        self.mode = mode
+        self.failure = None
+        self.request_bytes = bytearray()
+        self.response_bytes = bytearray()
+        self.open_count = 0
+        self.error_code = None
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def send(self, kind, sequence, payload=b"", binding=None):
+        self.connection.sendall(
+            host_proxy_frame(
+                kind,
+                sequence,
+                self.binding if binding is None else binding,
+                payload,
+            )
+        )
+
+    def expect_error(self, expected_code):
+        kind, stream_id, sequence, binding, payload = receive_host_proxy_frame(self.connection)
+        if (
+            kind != RUNNER.CODEX_PROXY_ERROR
+            or stream_id != 1
+            or sequence != 1
+            or binding != self.binding
+            or len(payload) != 2
+        ):
+            raise AssertionError("runner did not emit the strict terminal error frame")
+        self.error_code = int.from_bytes(payload, "big")
+        if self.error_code != expected_code:
+            raise AssertionError("runner emitted the wrong proxy error code")
+
+    def run(self):
+        try:
+            kind, stream_id, sequence, binding, payload = receive_host_proxy_frame(
+                self.connection
+            )
+            if (
+                kind != RUNNER.CODEX_PROXY_OPEN
+                or stream_id != 1
+                or sequence != 0
+                or binding != self.binding
+                or payload
+            ):
+                raise AssertionError("runner did not emit the exact OPEN frame")
+            self.open_count += 1
+            if self.mode == "wrong_binding":
+                self.send(RUNNER.CODEX_PROXY_OPEN, 0, binding=b"\xff" * 32)
+                self.expect_error(RUNNER.PROXY_ERROR_BINDING)
+                return
+            if self.mode == "unknown":
+                self.send(9, 0)
+                self.expect_error(RUNNER.PROXY_ERROR_PROTOCOL)
+                return
+            if self.mode == "oversize":
+                self.send(RUNNER.CODEX_PROXY_DATA, 0, b"x" * (64 * 1024 + 1))
+                self.expect_error(RUNNER.PROXY_ERROR_SIZE)
+                return
+            if self.mode == "stall":
+                while self.connection.recv(1):
+                    pass
+                return
+
+            self.send(RUNNER.CODEX_PROXY_OPEN, 0)
+            receive_sequence = 1
+            send_sequence = 1
+            responded = False
+            while True:
+                kind, stream_id, sequence, binding, payload = receive_host_proxy_frame(
+                    self.connection
+                )
+                if stream_id != 1 or sequence != receive_sequence or binding != self.binding:
+                    raise AssertionError("runner Codex proxy sequence/binding drifted")
+                receive_sequence += 1
+                if kind == RUNNER.CODEX_PROXY_DATA:
+                    self.request_bytes.extend(payload)
+                    if not FIXTURE_CODEX_REQUEST.startswith(self.request_bytes):
+                        raise AssertionError("runner changed JSON-RPC request bytes")
+                    if bytes(self.request_bytes) == FIXTURE_CODEX_REQUEST and not responded:
+                        fragments = (
+                            FIXTURE_CODEX_RESPONSE[:7],
+                            FIXTURE_CODEX_RESPONSE[7:41],
+                            FIXTURE_CODEX_RESPONSE[41:],
+                        )
+                        for fragment in fragments:
+                            self.send(RUNNER.CODEX_PROXY_DATA, send_sequence, fragment)
+                            self.response_bytes.extend(fragment)
+                            send_sequence += 1
+                        responded = True
+                elif kind == RUNNER.CODEX_PROXY_CLOSE:
+                    if payload or not responded:
+                        raise AssertionError("runner closed before the byte relay completed")
+                    self.send(RUNNER.CODEX_PROXY_CLOSE, send_sequence)
+                    return
+                else:
+                    raise AssertionError("runner emitted an unexpected proxy frame")
+        except BaseException as failure:
+            self.failure = failure
+
+    def join(self, timeout=3.0):
+        self.thread.join(timeout)
+        if self.thread.is_alive():
+            raise AssertionError("synthetic Codex host did not reach a terminal state")
+        if self.failure is not None:
+            raise self.failure
 
 
 class HermesSandboxRunnerFixtureTests(unittest.TestCase):
@@ -222,6 +393,107 @@ class HermesSandboxRunnerFixtureTests(unittest.TestCase):
         send_frame(runner.peer, RUNNER.HTTP_REQUEST_MAGIC, raw_request)
         return receive_frame(runner.peer, RUNNER.HTTP_RESPONSE_MAGIC)
 
+    def run_proxy_rejection(self, mode, deadline_millis=5_000):
+        runner = BwrapRunner()
+        init = self.init()
+        init["deadline_millis"] = deadline_millis
+        codex_host = None
+        try:
+            self.send_init(runner, init)
+            receive_containment_frame(runner.peer)
+            codex_host = SyntheticCodexHost(
+                runner.proxy_peer,
+                RUNNER.codex_proxy_binding(init),
+                mode,
+            )
+            submitted = canonical_json(
+                {"model": "hermes-agent", "session_id": "offline-session"}
+            )
+            send_frame(
+                runner.peer,
+                RUNNER.HTTP_REQUEST_MAGIC,
+                request("POST", "/v1/runs", init["api_key"], submitted),
+            )
+            runner.wait()
+            codex_host.join()
+            return runner.exit_code, codex_host
+        finally:
+            runner.close()
+
+    def test_pre_magic_diagnostic_is_hashed_not_parsed_as_codex_data(self):
+        host, child = socket.socketpair()
+        try:
+            diagnostic = b"bwrap: bounded pre-exec failure\n"
+            child.sendall(diagnostic)
+            child.shutdown(socket.SHUT_WR)
+            byte_count, digest = capture_pre_magic_diagnostic(host)
+        finally:
+            host.close()
+            child.close()
+        self.assertEqual(byte_count, len(diagnostic))
+        self.assertEqual(digest, hashlib.sha256(diagnostic).hexdigest())
+
+    def test_codex_proxy_wire_is_u32_bounded_and_binding_strict(self):
+        init = self.init()
+        binding = RUNNER.codex_proxy_binding(init)
+        frame = RUNNER.encode_codex_proxy_frame(
+            RUNNER.CODEX_PROXY_DATA,
+            1,
+            binding,
+            b'{"id":0}\n',
+        )
+        self.assertEqual(
+            frame[: len(RUNNER.CODEX_PROXY_MAGIC)],
+            RUNNER.CODEX_PROXY_MAGIC,
+        )
+        body_offset = len(RUNNER.CODEX_PROXY_MAGIC) + 4
+        self.assertEqual(
+            int.from_bytes(
+                frame[len(RUNNER.CODEX_PROXY_MAGIC) : body_offset],
+                "big",
+            ),
+            len(frame) - body_offset,
+        )
+        decoded = RUNNER.decode_codex_proxy_body(frame[body_offset:], 1, binding)
+        self.assertEqual(decoded, (RUNNER.CODEX_PROXY_DATA, b'{"id":0}\n'))
+
+        with self.assertRaises(RUNNER.CodexProxyViolation) as out_of_order:
+            RUNNER.decode_codex_proxy_body(frame[body_offset:], 2, binding)
+        self.assertEqual(out_of_order.exception.error_code, RUNNER.PROXY_ERROR_SEQUENCE)
+
+        wrong_binding = bytes.fromhex("ff" * 32)
+        wrong = RUNNER.encode_codex_proxy_frame(
+            RUNNER.CODEX_PROXY_OPEN,
+            0,
+            wrong_binding,
+            b"",
+        )
+        with self.assertRaises(RUNNER.CodexProxyViolation) as rejected:
+            RUNNER.decode_codex_proxy_body(wrong[body_offset:], 0, binding)
+        self.assertEqual(rejected.exception.error_code, RUNNER.PROXY_ERROR_BINDING)
+
+    def test_proxy_wrong_binding_fails_closed_with_terminal_error(self):
+        exit_code, host = self.run_proxy_rejection("wrong_binding")
+        self.assertEqual(exit_code, 80)
+        self.assertEqual(host.open_count, 1)
+        self.assertEqual(host.error_code, RUNNER.PROXY_ERROR_BINDING)
+
+    def test_proxy_oversize_frame_fails_closed_with_terminal_error(self):
+        exit_code, host = self.run_proxy_rejection("oversize")
+        self.assertEqual(exit_code, 80)
+        self.assertEqual(host.error_code, RUNNER.PROXY_ERROR_SIZE)
+
+    def test_proxy_unknown_kind_fails_closed_with_terminal_error(self):
+        exit_code, host = self.run_proxy_rejection("unknown")
+        self.assertEqual(exit_code, 80)
+        self.assertEqual(host.error_code, RUNNER.PROXY_ERROR_PROTOCOL)
+
+    def test_proxy_deadline_fails_closed_without_fabricated_data(self):
+        exit_code, host = self.run_proxy_rejection("stall", deadline_millis=250)
+        self.assertEqual(exit_code, 79)
+        self.assertEqual(host.open_count, 1)
+        self.assertEqual(host.request_bytes, b"")
+
     def test_scripted_fixture_runs_full_reflection_over_private_broker(self):
         runner = BwrapRunner()
         init = self.init()
@@ -248,12 +520,20 @@ class HermesSandboxRunnerFixtureTests(unittest.TestCase):
             submitted = canonical_json(
                 {"model": "hermes-agent", "session_id": "offline-session"}
             )
+            codex_host = SyntheticCodexHost(
+                runner.proxy_peer,
+                RUNNER.codex_proxy_binding(init),
+            )
             started = self.relay(
                 runner,
                 request("POST", "/v1/runs", init["api_key"], submitted),
             )
             self.assertIn(b"HTTP/1.1 202 Accepted", started)
             self.assertIn(b'"run_id":"run_contained_fixture"', started)
+            codex_host.join()
+            self.assertEqual(codex_host.open_count, 1)
+            self.assertEqual(bytes(codex_host.request_bytes), FIXTURE_CODEX_REQUEST)
+            self.assertEqual(bytes(codex_host.response_bytes), FIXTURE_CODEX_RESPONSE)
 
             events = self.relay(
                 runner,
