@@ -22,9 +22,9 @@ use lattice_ports::HermesPort;
 use sha2::{Digest, Sha256};
 
 use crate::broker::{
-    CodexAppServerFrameKind, CodexBrokerPolicy, CodexNoMarkerCanaryObservation,
-    CodexNoMarkerCanaryPlan, CodexReflectionBrokerConfig, classify_codex_app_server_frame,
-    verify_codex_no_marker_canary, verify_official_codex_bundle,
+    CodexAppServerFrameKind, CodexBrokerPolicy, CodexBrokerProtocol, CodexBrokerRequest,
+    CodexNoMarkerCanaryObservation, CodexNoMarkerCanaryPlan, CodexReflectionBrokerConfig,
+    classify_codex_app_server_frame, verify_codex_no_marker_canary, verify_official_codex_bundle,
 };
 use crate::containment::{
     HermesContainmentFrameLimits, HermesWslContainmentConfig, build_hermes_bwrap_arguments,
@@ -367,6 +367,370 @@ fn codex_no_marker_plan_and_receipt_require_joint_empty_tool_evidence() {
     let failure = verify_codex_no_marker_canary(&marker_observed)
         .expect_err("marker appearance fails even if the model claims false");
     assert_eq!(failure.code(), "HERMES_CODEX_NO_MARKER_CANARY_REJECTED");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn codex_broker_protocol_reconciles_terminal_before_turn_response() {
+    let fixture_root = std::env::temp_dir().join(format!(
+        "lattice-hermes-broker-interleaving-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    let codex_home = fixture_root.join("codex-home");
+    let cwd = fixture_root.join("empty-cwd");
+    std::fs::create_dir_all(&codex_home).expect("fixture codex home");
+    std::fs::create_dir_all(&cwd).expect("fixture cwd");
+    let mut protocol =
+        CodexBrokerProtocol::new(codex_home.clone(), cwd.clone(), "gpt-5.6-sol")
+            .expect("bounded fixture protocol");
+
+    protocol
+        .mark_request_sent(CodexBrokerRequest::Initialize)
+        .expect("initialize sent");
+    assert!(
+        protocol
+            .ingest_json_line(
+                serde_json::json!({
+                    "id": 0,
+                    "result": {
+                        "userAgent": "codex_cli_rs/0.146.0",
+                        "platformFamily": "windows",
+                        "platformOs": "windows",
+                        "codexHome": codex_home
+                    }
+                })
+                .to_string()
+                .as_bytes()
+            )
+            .expect("initialize response")
+            .is_none()
+    );
+
+    protocol
+        .mark_request_sent(CodexBrokerRequest::ThreadStart)
+        .expect("thread/start sent");
+    assert!(
+        protocol
+            .ingest_json_line(
+                serde_json::json!({
+                    "method": "thread/started",
+                    "params": {"thread": codex_thread_fixture(&cwd)}
+                })
+                .to_string()
+                .as_bytes()
+            )
+            .expect("thread notification before response")
+            .is_none()
+    );
+    assert!(
+        protocol
+            .ingest_json_line(
+                serde_json::json!({
+                    "id": 1,
+                    "result": {
+                        "approvalPolicy": "never",
+                        "approvalsReviewer": "user",
+                        "cwd": cwd,
+                        "instructionSources": [],
+                        "model": "gpt-5.6-sol",
+                        "modelProvider": "openai",
+                        "sandbox": {"type": "readOnly", "networkAccess": false},
+                        "thread": codex_thread_fixture(&cwd)
+                    }
+                })
+                .to_string()
+                .as_bytes()
+            )
+            .expect("thread response")
+            .is_none()
+    );
+
+    protocol
+        .mark_request_sent(CodexBrokerRequest::TurnStart)
+        .expect("turn/start sent");
+    for frame in [
+        serde_json::json!({
+            "method": "turn/started",
+            "params": {
+                "threadId": "thread-1",
+                "turn": {"id": "turn-1", "items": [], "status": "inProgress"}
+            }
+        }),
+        serde_json::json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "delta": "{\"markerCreated\":false}",
+                "itemId": "message-1",
+                "threadId": "thread-1",
+                "turnId": "turn-1"
+            }
+        }),
+        serde_json::json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turn": {
+                    "id": "turn-1",
+                    "items": [{
+                        "id": "message-1",
+                        "text": "{\"markerCreated\":false}",
+                        "type": "agentMessage"
+                    }],
+                    "status": "completed"
+                }
+            }
+        }),
+    ] {
+        assert!(
+            protocol
+                .ingest_json_line(frame.to_string().as_bytes())
+                .expect("valid interleaved notification")
+                .is_none()
+        );
+    }
+
+    let terminal = protocol
+        .ingest_json_line(
+            serde_json::json!({
+                "id": 2,
+                "result": {
+                    "turn": {"id": "turn-1", "items": [], "status": "inProgress"}
+                }
+            })
+            .to_string()
+            .as_bytes()
+        )
+        .expect("turn response reconciles pending terminal")
+        .expect("complete terminal evidence");
+    assert_eq!(terminal.status(), "completed");
+    assert_eq!(terminal.output(), r#"{"markerCreated":false}"#);
+    assert_eq!(terminal.agent_message_count(), 1);
+    std::fs::remove_dir_all(fixture_root).expect("remove fixture root");
+}
+
+fn codex_thread_fixture(cwd: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({
+        "id": "thread-1",
+        "cliVersion": "0.146.0",
+        "createdAt": 1,
+        "updatedAt": 1,
+        "cwd": cwd,
+        "ephemeral": true,
+        "turns": [],
+        "modelProvider": "openai",
+        "preview": "",
+        "sessionId": "session-1",
+        "source": "appServer",
+        "status": {"type": "idle"}
+    })
+}
+
+#[test]
+fn codex_broker_protocol_rejects_duplicate_keys_unknown_requests_and_oversize_frames() {
+    let duplicate = br#"{"id":1,"id":1,"result":{}}"#;
+    let duplicate_failure = classify_codex_app_server_frame(duplicate)
+        .expect_err("duplicate JSON object keys are ambiguous protocol evidence");
+    assert_eq!(
+        duplicate_failure.code(),
+        "HERMES_CODEX_BROKER_FATAL_FRAME"
+    );
+
+    let (mut protocol, fixture_root) = new_codex_protocol_fixture();
+    protocol
+        .mark_request_sent(CodexBrokerRequest::Initialize)
+        .expect("initialize sent");
+    let unknown_request = br#"{"id":99,"method":"future/serverRequest","params":{}}"#;
+    assert_eq!(protocol.ingest_json_line(unknown_request), Err(74));
+
+    let oversized = format!(
+        "{{\"method\":\"item/agentMessage/delta\",\"params\":{{\"delta\":\"{}\",\"itemId\":\"i\",\"threadId\":\"t\",\"turnId\":\"u\"}}}}",
+        "x".repeat(1024 * 1024)
+    );
+    assert_eq!(protocol.ingest_json_line(oversized.as_bytes()), Err(81));
+    std::fs::remove_dir_all(fixture_root).expect("remove fixture root");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn codex_broker_protocol_reports_exact_stage_and_binding_codes() {
+    let (mut initialize, initialize_root) = new_codex_protocol_fixture();
+    initialize
+        .mark_request_sent(CodexBrokerRequest::Initialize)
+        .expect("initialize sent");
+    assert_eq!(
+        initialize.ingest_json_line(br#"{"id":0,"result":{}}"#),
+        Err(71)
+    );
+    std::fs::remove_dir_all(initialize_root).expect("remove initialize fixture");
+
+    let (mut thread, thread_root) = new_codex_protocol_fixture();
+    admit_valid_initialize(&mut thread, &thread_root.join("codex-home"));
+    thread
+        .mark_request_sent(CodexBrokerRequest::ThreadStart)
+        .expect("thread sent");
+    assert_eq!(
+        thread.ingest_json_line(br#"{"id":1,"result":{"thread":{}}}"#),
+        Err(72)
+    );
+    std::fs::remove_dir_all(thread_root).expect("remove thread fixture");
+
+    let (mut turn, turn_root) = new_codex_protocol_fixture();
+    admit_valid_initialize(&mut turn, &turn_root.join("codex-home"));
+    admit_valid_thread(&mut turn, &turn_root.join("empty-cwd"));
+    turn.mark_request_sent(CodexBrokerRequest::TurnStart)
+        .expect("turn sent");
+    assert_eq!(
+        turn.ingest_json_line(br#"{"id":2,"result":{"turn":{}}}"#),
+        Err(73)
+    );
+    std::fs::remove_dir_all(turn_root).expect("remove turn fixture");
+
+    let (mut lifecycle, lifecycle_root) = new_codex_protocol_fixture();
+    admit_valid_initialize(&mut lifecycle, &lifecycle_root.join("codex-home"));
+    admit_valid_thread(&mut lifecycle, &lifecycle_root.join("empty-cwd"));
+    lifecycle
+        .mark_request_sent(CodexBrokerRequest::TurnStart)
+        .expect("turn sent");
+    assert_eq!(
+        lifecycle.ingest_json_line(
+            serde_json::json!({
+                "method": "turn/started",
+                "params": {
+                    "threadId": "wrong-thread",
+                    "turn": {"id": "turn-1", "items": [], "status": "inProgress"}
+                }
+            })
+            .to_string()
+            .as_bytes()
+        ),
+        Err(76)
+    );
+    std::fs::remove_dir_all(lifecycle_root).expect("remove lifecycle fixture");
+
+    let (mut interleaved_binding, interleaved_root) = new_codex_protocol_fixture();
+    admit_valid_initialize(
+        &mut interleaved_binding,
+        &interleaved_root.join("codex-home"),
+    );
+    admit_valid_thread(
+        &mut interleaved_binding,
+        &interleaved_root.join("empty-cwd"),
+    );
+    interleaved_binding
+        .mark_request_sent(CodexBrokerRequest::TurnStart)
+        .expect("turn sent");
+    assert_eq!(
+        interleaved_binding.ingest_json_line(
+            br#"{"method":"item/agentMessage/delta","params":{"delta":"x","itemId":"message-1","threadId":"thread-1","turnId":"turn-observed"}}"#
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        interleaved_binding.ingest_json_line(
+            br#"{"id":2,"result":{"turn":{"id":"turn-response","items":[],"status":"inProgress"}}}"#
+        ),
+        Err(76),
+        "a lifecycle turn id observed before response must remain cross-bound"
+    );
+    std::fs::remove_dir_all(interleaved_root).expect("remove interleaved fixture");
+
+    let (mut terminal, terminal_root) = new_codex_protocol_fixture();
+    admit_valid_initialize(&mut terminal, &terminal_root.join("codex-home"));
+    admit_valid_thread(&mut terminal, &terminal_root.join("empty-cwd"));
+    terminal
+        .mark_request_sent(CodexBrokerRequest::TurnStart)
+        .expect("turn sent");
+    assert_eq!(
+        terminal.ingest_json_line(
+            br#"{"id":2,"result":{"turn":{"id":"turn-1","items":[],"status":"inProgress"}}}"#
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        terminal.ingest_json_line(
+            serde_json::json!({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turn": {"id": "wrong-turn", "items": [], "status": "completed"}
+                }
+            })
+            .to_string()
+            .as_bytes()
+        ),
+        Err(77)
+    );
+    std::fs::remove_dir_all(terminal_root).expect("remove terminal fixture");
+}
+
+fn new_codex_protocol_fixture() -> (CodexBrokerProtocol, std::path::PathBuf) {
+    let fixture_root = std::env::temp_dir().join(format!(
+        "lattice-hermes-broker-protocol-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    let codex_home = fixture_root.join("codex-home");
+    let cwd = fixture_root.join("empty-cwd");
+    std::fs::create_dir_all(&codex_home).expect("fixture codex home");
+    std::fs::create_dir_all(&cwd).expect("fixture cwd");
+    let protocol = CodexBrokerProtocol::new(codex_home, cwd, "gpt-5.6-sol")
+        .expect("bounded fixture protocol");
+    (protocol, fixture_root)
+}
+
+fn admit_valid_initialize(protocol: &mut CodexBrokerProtocol, codex_home: &std::path::Path) {
+    protocol
+        .mark_request_sent(CodexBrokerRequest::Initialize)
+        .expect("initialize sent");
+    assert_eq!(
+        protocol.ingest_json_line(
+            serde_json::json!({
+                "id": 0,
+                "result": {
+                    "userAgent": "codex_cli_rs/0.146.0",
+                    "platformFamily": "windows",
+                    "platformOs": "windows",
+                    "codexHome": codex_home
+                }
+            })
+            .to_string()
+            .as_bytes()
+        ),
+        Ok(None)
+    );
+}
+
+fn admit_valid_thread(protocol: &mut CodexBrokerProtocol, cwd: &std::path::Path) {
+    protocol
+        .mark_request_sent(CodexBrokerRequest::ThreadStart)
+        .expect("thread sent");
+    assert_eq!(
+        protocol.ingest_json_line(
+            serde_json::json!({
+                "id": 1,
+                "result": {
+                    "approvalPolicy": "never",
+                    "approvalsReviewer": "user",
+                    "cwd": cwd,
+                    "instructionSources": [],
+                    "model": "gpt-5.6-sol",
+                    "modelProvider": "openai",
+                    "sandbox": {"type": "readOnly", "networkAccess": false},
+                    "thread": codex_thread_fixture(cwd)
+                }
+            })
+            .to_string()
+            .as_bytes()
+        ),
+        Ok(None)
+    );
 }
 
 #[test]
