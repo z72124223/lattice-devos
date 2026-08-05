@@ -832,29 +832,71 @@ fn server_side_execution_or_missing_read_only_capabilities_fail_closed() {
 }
 
 #[test]
-fn official_server_tool_execution_requires_a_sealed_os_containment_receipt() {
+fn uncontained_io_entrypoints_fail_before_network() {
     let request = request();
-    let mut official = capabilities_value();
-    official["runtime"]["tool_execution"] = serde_json::json!("server");
-    let features = official["features"]
-        .as_object_mut()
-        .expect("features object");
-    features.remove("tools");
-    features.remove("file_access");
-    features.remove("shell");
-    let server = ScriptedServer::start(vec![Response::json(200, official.to_string())]);
-    let mut adapter = HermesReflectionAdapter::connect(
-        uncontained_config(&server),
-        job(request.clone()),
-    )
-    .expect("adapter");
+    let adapter_job = job(request.clone());
+    let recovery = crate::recovery_receipt(&adapter_job, Some("run_uncontained".to_owned()));
+    let server = ScriptedServer::start(Vec::new());
+    let mut adapter =
+        HermesReflectionAdapter::connect(uncontained_config(&server), adapter_job).expect("adapter");
 
     let failure = adapter
         .run_reflection(&request)
-        .expect_err("official server-side tools need real OS containment evidence");
+        .expect_err("uncontained run must fail before network I/O");
+    assert_eq!(failure.code(), "HERMES_LIVE_RUNTIME_RECEIPT_REQUIRED");
 
-    assert_eq!(failure.code(), "HERMES_SERVER_TOOL_CONTAINMENT_REQUIRED");
-    assert_eq!(server.finish().len(), 1);
+    adapter.active_run = Some(recovery.clone());
+    let failure = adapter
+        .reconcile_reflection(&request, &recovery)
+        .expect_err("uncontained reconciliation must fail before network I/O");
+    assert_eq!(failure.code(), "HERMES_LIVE_RUNTIME_RECEIPT_REQUIRED");
+
+    let failure = HermesPort::interrupt(&mut adapter, request.invocation().request_id())
+        .expect_err("uncontained interrupt must fail before network I/O");
+    assert_eq!(failure.code(), "HERMES_LIVE_RUNTIME_RECEIPT_REQUIRED");
+
+    assert!(server.finish().is_empty());
+}
+
+#[test]
+fn containment_binding_mismatch_fails_before_network() {
+    let request = request();
+    let adapter_job = job(request.clone());
+    let recovery = crate::recovery_receipt(&adapter_job, Some("run_cross_bound".to_owned()));
+    let server = ScriptedServer::start(Vec::new());
+    let mut mismatched = config(&server);
+    mismatched
+        .containment_receipt
+        .as_mut()
+        .expect("test-only containment receipt")
+        .api_key_sha256 = crate::sha256_text("foreign-loopback-key");
+    let mut adapter = HermesReflectionAdapter::connect(mismatched, adapter_job).expect("adapter");
+
+    let failure = adapter
+        .run_reflection(&request)
+        .expect_err("cross-bound run must fail before network I/O");
+    assert_eq!(
+        failure.code(),
+        "HERMES_CONTAINMENT_ENDPOINT_BINDING_REJECTED"
+    );
+
+    adapter.active_run = Some(recovery.clone());
+    let failure = adapter
+        .reconcile_reflection(&request, &recovery)
+        .expect_err("cross-bound reconciliation must fail before network I/O");
+    assert_eq!(
+        failure.code(),
+        "HERMES_CONTAINMENT_ENDPOINT_BINDING_REJECTED"
+    );
+
+    let failure = HermesPort::interrupt(&mut adapter, request.invocation().request_id())
+        .expect_err("cross-bound interrupt must fail before network I/O");
+    assert_eq!(
+        failure.code(),
+        "HERMES_CONTAINMENT_ENDPOINT_BINDING_REJECTED"
+    );
+
+    assert!(server.finish().is_empty());
 }
 
 #[test]

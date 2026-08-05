@@ -1128,6 +1128,7 @@ impl HermesReflectionAdapter {
         &mut self,
         request: &HermesResearchRequest,
     ) -> HermesAdapterResult<CanonicalReflection> {
+        self.require_containment_receipt()?;
         self.verify_request(request)?;
         if let Some(receipt) = &self.active_run {
             return Err(error(
@@ -1205,15 +1206,7 @@ impl HermesReflectionAdapter {
         &mut self,
         request: &HermesResearchRequest,
     ) -> PortResult<HermesReflectionEvidence> {
-        let receipt = self.config.containment_receipt.as_ref().ok_or_else(|| {
-            PortError::new(
-                Component::Hermes,
-                PortErrorKind::Denied,
-                "HERMES_LIVE_RUNTIME_RECEIPT_REQUIRED",
-            )
-        })?;
-        receipt
-            .verify_binding(self.config.endpoint, &self.config.api_key)
+        self.require_containment_receipt()
             .map_err(|failure| map_port_error(&failure))?;
         let invocation = request.invocation().clone();
         let reflection = self
@@ -1240,6 +1233,7 @@ impl HermesReflectionAdapter {
         request: &HermesResearchRequest,
         receipt: &HermesRunRecoveryReceipt,
     ) -> HermesAdapterResult<CanonicalReflection> {
+        self.require_containment_receipt()?;
         self.verify_request(request)?;
         if self.active_run.as_ref() != Some(receipt) {
             return Err(cross_binding("HERMES_RECOVERY_RECEIPT_BINDING_REJECTED"));
@@ -1266,6 +1260,17 @@ impl HermesReflectionAdapter {
     #[must_use]
     pub const fn active_recovery_receipt(&self) -> Option<&HermesRunRecoveryReceipt> {
         self.active_run.as_ref()
+    }
+
+    fn require_containment_receipt(&self) -> HermesAdapterResult<&HermesContainmentReceipt> {
+        let receipt = self.config.containment_receipt.as_ref().ok_or_else(|| {
+            error(
+                HermesAdapterErrorKind::Configuration,
+                "HERMES_LIVE_RUNTIME_RECEIPT_REQUIRED",
+            )
+        })?;
+        receipt.verify_binding(self.config.endpoint, &self.config.api_key)?;
+        Ok(receipt)
     }
 
     fn verify_request(&self, request: &HermesResearchRequest) -> HermesAdapterResult<()> {
@@ -1456,6 +1461,8 @@ impl HermesPort for HermesReflectionAdapter {
     }
 
     fn interrupt(&mut self, request_id: &RequestId) -> PortResult<()> {
+        self.require_containment_receipt()
+            .map_err(|failure| map_port_error(&failure))?;
         if request_id != self.job.request().invocation().request_id() {
             return Err(PortError::new(
                 Component::Hermes,
