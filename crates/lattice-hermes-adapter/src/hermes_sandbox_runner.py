@@ -6,8 +6,9 @@ all currently defined cross-bindings, emits a bounded V2 containment frame,
 and relays bounded HTTP to a loopback endpoint inside the private namespace.
 
 Scripted fixture mode is explicitly labelled and never imports or invokes
-Hermes or a model. Official mode remains fail-closed because the current
-pinned closure does not contain its verified Hermes v2026.8.3 executable.
+Hermes or a model. Official mode starts only the pinned Hermes gateway,
+verifies its authenticated capabilities before attestation, and relays its
+bounded loopback HTTP without synthesizing a model result.
 """
 
 import ctypes
@@ -18,6 +19,7 @@ import os
 import pathlib
 import re
 import select
+import signal
 import socket
 import stat
 import struct
@@ -1192,12 +1194,205 @@ class ScriptedFixtureEndpoint:
                 accepted.close()
 
 
-def reject_unstaged_official_server():
-    # This transport slice must never turn fixture evidence into an official
-    # attestation. The current pinned closure lacks this verified executable;
-    # an unexpected future file also requires the separate official lifecycle.
-    pathlib.Path(OFFICIAL_HERMES_CANDIDATE).is_file()
-    fail(74)
+def expected_official_capabilities(init):
+    return {
+        "auth": {"required": True, "type": "bearer"},
+        "features": {
+            "admin_config_rw": False,
+            "memory_write_api": False,
+            "run_events_sse": True,
+            "run_status": True,
+            "run_stop": True,
+            "run_submission": True,
+        },
+        "model": init["model"],
+        "object": "hermes.api_server.capabilities",
+        "platform": "hermes-agent",
+        "runtime": {
+            "mode": "server_agent",
+            "split_runtime": False,
+            "tool_execution": "server",
+        },
+    }
+
+
+def validate_official_capabilities(response, init):
+    if not response or len(response) > MAX_CONTROL_BYTES:
+        fail(78)
+    try:
+        header, body = response.split(b"\r\n\r\n", 1)
+        lines = header.decode("ascii").split("\r\n")
+        protocol, status, _reason = lines[0].split(" ", 2)
+        headers = {}
+        for line in lines[1:]:
+            name, value = line.split(":", 1)
+            name = name.strip().lower()
+            if not name or name in headers:
+                fail(75)
+            headers[name] = value.strip()
+        content_length = headers["content-length"]
+        capabilities = json.loads(body.decode("utf-8"))
+    except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        fail(75)
+    if (
+        protocol != "HTTP/1.1"
+        or status != "200"
+        or "transfer-encoding" in headers
+        or not content_length.isascii()
+        or not content_length.isdigit()
+        or int(content_length) != len(body)
+    ):
+        fail(75)
+    expected = expected_official_capabilities(init)
+    if not isinstance(capabilities, dict):
+        fail(75)
+    for name in ("object", "platform", "model"):
+        if capabilities.get(name) != expected[name]:
+            fail(75)
+    for section in ("auth", "runtime", "features"):
+        observed = capabilities.get(section)
+        if not isinstance(observed, dict) or any(
+            observed.get(name) != value for name, value in expected[section].items()
+        ):
+            fail(75)
+
+
+class OfficialHermesEndpoint:
+    def __init__(self, init, deadline, codex_bridge):
+        executable = pathlib.Path(OFFICIAL_HERMES_CANDIDATE)
+        try:
+            metadata = executable.stat()
+        except OSError:
+            fail(74)
+        if not stat.S_ISREG(metadata.st_mode) or not os.access(executable, os.X_OK):
+            fail(74)
+        try:
+            pathlib.Path("/state/hermes").mkdir(mode=0o700)
+        except OSError:
+            fail(80)
+        host, port_text = init["endpoint"].rsplit(":", 1)
+        environment = codex_bridge.environment()
+        environment.update(
+            {
+                "API_SERVER_ENABLED": "true",
+                "API_SERVER_HOST": host,
+                "API_SERVER_KEY": init["api_key"],
+                "API_SERVER_MODEL_NAME": init["model"],
+                "API_SERVER_PORT": port_text,
+                "CI": "1",
+                "TZ": "UTC",
+            }
+        )
+        try:
+            self.process = subprocess.Popen(
+                [
+                    OFFICIAL_HERMES_CANDIDATE,
+                    "gateway",
+                    "run",
+                    "--no-supervise",
+                    "--external-supervisor",
+                    "--quiet",
+                ],
+                cwd="/work",
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+            )
+        except OSError:
+            fail(74)
+        self.init = init
+        self.host = host
+        self.port = int(port_text)
+        try:
+            self.wait_until_ready(deadline)
+        except BaseException:
+            self.close()
+            raise
+
+    def ensure_running(self):
+        if self.process.poll() is not None:
+            fail(75)
+
+    def exchange(self, request, deadline):
+        connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            timeout = remaining_seconds(deadline)
+            if timeout is None or timeout <= 0:
+                raise TimeoutError
+            connection.settimeout(timeout)
+            connection.connect((self.host, self.port))
+            connection.sendall(request)
+            connection.shutdown(socket.SHUT_WR)
+            output = bytearray()
+            while True:
+                chunk = connection.recv(8192)
+                if not chunk:
+                    return bytes(output)
+                output.extend(chunk)
+                if len(output) > MAX_CONTROL_BYTES:
+                    fail(78)
+        finally:
+            connection.close()
+
+    def wait_until_ready(self, deadline):
+        probe = (
+            b"GET /v1/capabilities HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            + ("Authorization: Bearer %s\r\n" % self.init["api_key"]).encode("ascii")
+            + b"Accept: application/json\r\n"
+            b"Connection: close\r\n"
+            b"Content-Length: 0\r\n\r\n"
+        )
+        while True:
+            self.ensure_running()
+            now = time.monotonic()
+            if now >= deadline:
+                fail(79)
+            try:
+                response = self.exchange(probe, min(deadline, now + 0.25))
+            except (OSError, TimeoutError, socket.timeout):
+                time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+                continue
+            validate_official_capabilities(response, self.init)
+            return
+
+    def relay(self, request, deadline):
+        parse_http_request(request)
+        self.ensure_running()
+        try:
+            response = self.exchange(request, deadline)
+        except (TimeoutError, socket.timeout):
+            fail(79)
+        except OSError:
+            fail(75)
+        self.ensure_running()
+        if not response:
+            fail(75)
+        return response
+
+    def close(self):
+        if self.process.poll() is not None:
+            return
+        try:
+            os.killpg(self.process.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            self.process.wait(timeout=0.5)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            self.process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            fail(80)
 
 
 def serve_contained_reflection(
@@ -1209,16 +1404,18 @@ def serve_contained_reflection(
 ):
     init = parse_init(connection)
     bindings = verified_bindings(init, bwrap_sha256, net_namespace, namespace_pid)
-    if init["mode"] == "official":
-        reject_unstaged_official_server()
     deadline = time.monotonic() + init["deadline_millis"] / 1000.0
     codex_bridge = CodexProxyBridge(
         codex_proxy_connection,
         codex_proxy_binding(init),
         deadline,
     )
-    fixture = ScriptedFixtureEndpoint(init, deadline, codex_bridge)
+    endpoint = None
     try:
+        if init["mode"] == "official":
+            endpoint = OfficialHermesEndpoint(init, deadline, codex_bridge)
+        else:
+            endpoint = ScriptedFixtureEndpoint(init, deadline, codex_bridge)
         connection.settimeout(remaining_seconds(deadline))
         try:
             connection.sendall(containment_frame(bindings))
@@ -1235,11 +1432,14 @@ def serve_contained_reflection(
             )
             if request is None:
                 return
-            response = fixture.relay(request, deadline)
+            response = endpoint.relay(request, deadline)
             send_frame(connection, HTTP_RESPONSE_MAGIC, response, deadline)
     finally:
-        fixture.close()
-        codex_bridge.close()
+        try:
+            if endpoint is not None:
+                endpoint.close()
+        finally:
+            codex_bridge.close()
 
 
 def main(arguments):
