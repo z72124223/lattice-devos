@@ -7,6 +7,7 @@ members = [
     "crates/lattice-codebase-memory",
     "crates/lattice-contracts",
     "crates/lattice-graphify-adapter",
+    "crates/lattice-hermes-adapter",
     "crates/lattice-orchestrator",
     "crates/lattice-core",
     "crates/lattice-gateway-ipc",
