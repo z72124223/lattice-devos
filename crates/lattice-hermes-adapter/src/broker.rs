@@ -27,6 +27,10 @@ use sha2::{Digest, Sha256};
 
 use lattice_contracts::ContentDigest;
 
+#[cfg(windows)]
+use crate::codex_proxy::{
+    ProductionCodexProxyDuplex, ProductionCodexProxyLifecycle, ProductionCodexProxyProvider,
+};
 use crate::{HermesAdapterError, HermesAdapterErrorKind, HermesAdapterResult};
 
 const CODEX_VERSION: &str = "codex-cli 0.146.0";
@@ -403,6 +407,8 @@ const MAX_BROKER_WIRE_BYTES: usize = 64 * 1024;
 const MAX_CODEX_FRAME_BYTES: usize = 1024 * 1024;
 #[cfg(windows)]
 const MAX_CODEX_STDERR_BYTES: u64 = 8 * 1024 * 1024;
+#[cfg(windows)]
+const MAX_CODEX_PROXY_STDERR_BYTES: u64 = 64 * 1024;
 
 /// Private host-side configuration for the one-shot official Codex broker.
 /// No constructor is exported outside this crate, so an arbitrary helper
@@ -461,6 +467,44 @@ impl CodexReflectionBrokerConfig {
             model,
             product_root,
         })
+    }
+
+    /// Consumes the canary configuration into the only production Codex
+    /// provider admitted by the Hermes relay.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a substituted model or receipt, or any identity/path/config
+    /// drift observed since the sealed canary completed.
+    pub(crate) fn into_production_proxy_provider(
+        self,
+        receipt: &CodexBrokerReceipt,
+        expected_model: &str,
+    ) -> HermesAdapterResult<Box<dyn ProductionCodexProxyProvider>> {
+        let binding_rejected = || {
+            HermesAdapterError::new(
+                HermesAdapterErrorKind::CrossBinding,
+                "HERMES_CODEX_PROXY_FACTORY_BINDING_REJECTED",
+            )
+        };
+        if expected_model != self.model || expected_model != "gpt-5.6-sol" {
+            return Err(binding_rejected());
+        }
+        receipt.validate_for_containment()?;
+        if receipt.helper_sha256 != self.broker_helper_sha256
+            || receipt.launcher_sha256 != CODEX_LAUNCHER_SHA256
+            || receipt.config_lock_sha256 != sha256_bytes(CODEX_CONFIG_LOCK.as_bytes())
+        {
+            return Err(binding_rejected());
+        }
+        let verified = VerifiedCodexProxyConfig::from_config(self)?;
+        if verified.helper_sha256 != receipt.helper_sha256
+            || verified.config_lock_sha256 != receipt.config_lock_sha256
+            || verified.child_environment_sha256 != receipt.child_environment_sha256
+        {
+            return Err(binding_rejected());
+        }
+        Ok(Box::new(OfficialCodexProxyProvider { verified }))
     }
 
     /// Runs the official four-file bundle inside one kill-on-close Job and
@@ -627,6 +671,448 @@ impl CodexReflectionBrokerConfig {
             receipt_digest,
             transcript_sha256: candidate.transcript_sha256,
         })
+    }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifiedCodexProxyConfig {
+    broker_helper: PathBuf,
+    child_environment_sha256: String,
+    codex_home: PathBuf,
+    config_lock: PathBuf,
+    config_lock_sha256: String,
+    cwd: PathBuf,
+    helper_sha256: String,
+    isolation_root: PathBuf,
+    launcher: PathBuf,
+    model: String,
+    product_root: PathBuf,
+    temp: PathBuf,
+}
+
+#[cfg(windows)]
+impl VerifiedCodexProxyConfig {
+    fn from_config(config: CodexReflectionBrokerConfig) -> HermesAdapterResult<Self> {
+        let identity_rejected = || {
+            HermesAdapterError::new(
+                HermesAdapterErrorKind::Identity,
+                "HERMES_CODEX_PROXY_CONFIG_IDENTITY_REJECTED",
+            )
+        };
+        let broker_helper =
+            fs::canonicalize(&config.broker_helper).map_err(|_| identity_rejected())?;
+        let launcher = fs::canonicalize(&config.launcher).map_err(|_| identity_rejected())?;
+        let codex_home = fs::canonicalize(&config.codex_home).map_err(|_| identity_rejected())?;
+        let isolation_root =
+            fs::canonicalize(&config.isolation_root).map_err(|_| identity_rejected())?;
+        let product_root =
+            fs::canonicalize(&config.product_root).map_err(|_| identity_rejected())?;
+        let cwd =
+            fs::canonicalize(isolation_root.join("empty-work")).map_err(|_| identity_rejected())?;
+        let temp =
+            fs::canonicalize(isolation_root.join("temp")).map_err(|_| identity_rejected())?;
+        let config_lock = fs::canonicalize(isolation_root.join("codex-reflection.lock.toml"))
+            .map_err(|_| identity_rejected())?;
+        for path in [
+            broker_helper.as_path(),
+            launcher.as_path(),
+            codex_home.as_path(),
+            isolation_root.as_path(),
+            product_root.as_path(),
+            cwd.as_path(),
+            temp.as_path(),
+            config_lock.as_path(),
+        ] {
+            crate::reject_link_or_reparse_ancestors(path).map_err(|_| identity_rejected())?;
+        }
+        if !broker_helper.is_file()
+            || !launcher.is_file()
+            || !codex_home.is_dir()
+            || !isolation_root.is_dir()
+            || !product_root.is_dir()
+            || !cwd.is_dir()
+            || !temp.is_dir()
+            || cwd.parent() != Some(isolation_root.as_path())
+            || temp.parent() != Some(isolation_root.as_path())
+            || config_lock.parent() != Some(isolation_root.as_path())
+            || crate::path_is_within(&isolation_root, &codex_home)
+            || crate::path_is_within(&codex_home, &isolation_root)
+            || crate::path_is_within(&isolation_root, &product_root)
+            || crate::path_is_within(&product_root, &isolation_root)
+        {
+            return Err(identity_rejected());
+        }
+        if fs::read_dir(&cwd)
+            .map_err(|_| identity_rejected())?
+            .next()
+            .is_some()
+        {
+            return Err(identity_rejected());
+        }
+        match fs::symlink_metadata(codex_home.join("environments.toml")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(identity_rejected()),
+        }
+        let lock_bytes = bounded_file_bytes(&config_lock, MAX_BROKER_WIRE_BYTES as u64)
+            .map_err(|_| identity_rejected())?;
+        if lock_bytes != CODEX_CONFIG_LOCK.as_bytes() {
+            return Err(identity_rejected());
+        }
+        let config_lock_sha256 = sha256_bytes(&lock_bytes);
+        let helper_sha256 = bounded_file_sha256(&broker_helper, MAX_CODEX_LAUNCHER_BYTES)
+            .map_err(|_| identity_rejected())?;
+        if helper_sha256 != config.broker_helper_sha256 {
+            return Err(identity_rejected());
+        }
+        let child_environment = codex_child_environment(&launcher, &codex_home, &temp)
+            .map_err(|_| identity_rejected())?;
+        let child_environment_sha256 =
+            digest_environment(&child_environment).map_err(|_| identity_rejected())?;
+        Ok(Self {
+            broker_helper,
+            child_environment_sha256,
+            codex_home,
+            config_lock,
+            config_lock_sha256,
+            cwd,
+            helper_sha256,
+            isolation_root,
+            launcher,
+            model: config.model,
+            product_root,
+            temp,
+        })
+    }
+
+    fn command_plan(
+        &self,
+        reviewed: &ReviewedCodexBundle,
+        deadline: Instant,
+    ) -> HermesAdapterResult<crate::windows_job::WindowsJobCommandPlan> {
+        if deadline <= Instant::now()
+            || reviewed.version() != CODEX_VERSION
+            || reviewed.launcher() != self.launcher
+            || reviewed.launcher_sha256() != CODEX_LAUNCHER_SHA256
+            || reviewed.package_manifest_sha256() != CODEX_PACKAGE_MANIFEST_SHA256
+            || self.model != "gpt-5.6-sol"
+        {
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Identity,
+                "HERMES_CODEX_PROXY_CONFIG_IDENTITY_REJECTED",
+            ));
+        }
+        CodexProxyInvocation::parse(["app-server", "--listen", "stdio://", "--strict-config"])?;
+        let environment = codex_child_environment(&self.launcher, &self.codex_home, &self.temp)?;
+        if digest_environment(&environment)? != self.child_environment_sha256 {
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::CrossBinding,
+                "HERMES_CODEX_PROXY_FACTORY_BINDING_REJECTED",
+            ));
+        }
+        let config_override = config_lock_override(&self.config_lock)?;
+        Ok(crate::windows_job::WindowsJobCommandPlan {
+            executable: self.launcher.clone(),
+            arguments: [
+                OsString::from("app-server"),
+                OsString::from("--listen"),
+                OsString::from("stdio://"),
+                OsString::from("--strict-config"),
+                OsString::from("-c"),
+                OsString::from(config_override),
+            ]
+            .into_iter()
+            .collect(),
+            current_dir: self.cwd.clone(),
+            environment,
+            run_root: self.isolation_root.clone(),
+            stdout_path: self.isolation_root.join("codex-proxy.stdout.unused"),
+            stderr_path: self.isolation_root.join("codex-proxy.stderr.unused"),
+            stdout_limit: MAX_CODEX_FRAME_BYTES as u64,
+            stderr_limit: MAX_CODEX_PROXY_STDERR_BYTES,
+            deadline,
+            teardown_timeout: Duration::from_secs(3),
+        })
+    }
+
+    fn reverify_open(&self) -> HermesAdapterResult<ReviewedCodexBundle> {
+        let current = Self::from_config(CodexReflectionBrokerConfig {
+            broker_helper: self.broker_helper.clone(),
+            broker_helper_sha256: self.helper_sha256.clone(),
+            codex_home: self.codex_home.clone(),
+            isolation_root: self.isolation_root.clone(),
+            launcher: self.launcher.clone(),
+            model: self.model.clone(),
+            product_root: self.product_root.clone(),
+        })?;
+        if current != *self {
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Identity,
+                "HERMES_CODEX_PROXY_CONFIG_IDENTITY_REJECTED",
+            ));
+        }
+        let reviewed = verify_official_codex_bundle(&self.launcher)?;
+        if reviewed.version() != CODEX_VERSION
+            || reviewed.launcher_sha256() != CODEX_LAUNCHER_SHA256
+            || reviewed.package_manifest_sha256() != CODEX_PACKAGE_MANIFEST_SHA256
+        {
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Identity,
+                "HERMES_CODEX_BUNDLE_IDENTITY_REJECTED",
+            ));
+        }
+        Ok(reviewed)
+    }
+}
+
+#[cfg(windows)]
+struct OfficialCodexProxyProvider {
+    verified: VerifiedCodexProxyConfig,
+}
+
+#[cfg(windows)]
+impl ProductionCodexProxyProvider for OfficialCodexProxyProvider {
+    fn open(
+        self: Box<Self>,
+        absolute_deadline: Instant,
+    ) -> HermesAdapterResult<ProductionCodexProxyDuplex> {
+        if absolute_deadline <= Instant::now() {
+            return Err(timeout("HERMES_CODEX_PROXY_DEADLINE_EXCEEDED"));
+        }
+        let reviewed = self.verified.reverify_open()?;
+        let plan = self.verified.command_plan(&reviewed, absolute_deadline)?;
+        launch_owned_proxy(
+            &plan,
+            MAX_CODEX_PROXY_STDERR_BYTES,
+            || self.verified.reverify_open().map(|_| ()),
+            |_| {},
+        )
+    }
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BoundedCodexStderrEvidence {
+    byte_count: u64,
+    sha256: String,
+    exceeded: bool,
+}
+
+#[cfg(windows)]
+struct OwnedCodexProxyLifecycle {
+    child: crate::windows_job::WindowsJobChild,
+    stderr_evidence: Option<BoundedCodexStderrEvidence>,
+    stderr_limit: u64,
+    stderr_thread: Option<JoinHandle<Result<BoundedCodexStderrEvidence, ()>>>,
+}
+
+#[cfg(windows)]
+impl OwnedCodexProxyLifecycle {
+    fn poll_stderr(&mut self) -> HermesAdapterResult<()> {
+        if self
+            .stderr_thread
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            self.join_stderr()?;
+        }
+        Ok(())
+    }
+
+    fn join_stderr(&mut self) -> HermesAdapterResult<()> {
+        let Some(thread) = self.stderr_thread.take() else {
+            return self.validate_stderr_evidence();
+        };
+        let evidence = thread
+            .join()
+            .map_err(|_| {
+                HermesAdapterError::new(
+                    HermesAdapterErrorKind::Ambiguous,
+                    "HERMES_CODEX_PROXY_STDERR_DRAIN_AMBIGUOUS",
+                )
+            })?
+            .map_err(|()| {
+                HermesAdapterError::new(
+                    HermesAdapterErrorKind::Transport,
+                    "HERMES_CODEX_PROXY_STDERR_DRAIN_FAILED",
+                )
+            })?;
+        self.stderr_evidence = Some(evidence);
+        self.validate_stderr_evidence()
+    }
+
+    fn validate_stderr_evidence(&self) -> HermesAdapterResult<()> {
+        let Some(evidence) = &self.stderr_evidence else {
+            return Ok(());
+        };
+        if !is_lowercase_sha256(&evidence.sha256) || evidence.byte_count > self.stderr_limit + 1 {
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_STDERR_EVIDENCE_AMBIGUOUS",
+            ));
+        }
+        if evidence.exceeded {
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Malformed,
+                "HERMES_CODEX_PROXY_STDERR_LIMIT_EXCEEDED",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl ProductionCodexProxyLifecycle for OwnedCodexProxyLifecycle {
+    fn ensure_running(&mut self) -> HermesAdapterResult<()> {
+        if let Err(error) = self.poll_stderr() {
+            self.child.terminate()?;
+            return Err(error);
+        }
+        match self.child.ensure_running() {
+            Ok(()) => self.poll_stderr(),
+            Err(error) => {
+                let _ = self.join_stderr();
+                Err(error)
+            }
+        }
+    }
+
+    fn terminate(&mut self) -> HermesAdapterResult<()> {
+        let termination = self.child.terminate();
+        let stderr = self.join_stderr();
+        termination?;
+        stderr
+    }
+}
+
+#[cfg(windows)]
+impl Drop for OwnedCodexProxyLifecycle {
+    fn drop(&mut self) {
+        if self.child.terminate().is_ok() {
+            let _ = self.join_stderr();
+        }
+    }
+}
+
+#[cfg(windows)]
+fn launch_owned_proxy<F, G>(
+    plan: &crate::windows_job::WindowsJobCommandPlan,
+    stderr_limit: u64,
+    post_spawn_identity_check: F,
+    observe_process_id: G,
+) -> HermesAdapterResult<ProductionCodexProxyDuplex>
+where
+    F: FnOnce() -> HermesAdapterResult<()>,
+    G: FnOnce(u32),
+{
+    if stderr_limit == 0 || stderr_limit > MAX_CODEX_PROXY_STDERR_BYTES {
+        return Err(configuration("HERMES_CODEX_PROXY_STDERR_LIMIT_REJECTED"));
+    }
+    let mut child = crate::windows_job::spawn_duplex(plan)?;
+    observe_process_id(child.process_id());
+    post_spawn_identity_check()?;
+    let writer = child.take_stdin_writer()?;
+    let reader = child.take_stdout_reader()?;
+    let stderr = child.take_stderr_reader()?;
+    let stderr_thread = thread::Builder::new()
+        .name("lattice-codex-stderr".to_owned())
+        .spawn(move || drain_bounded_codex_stderr(stderr, stderr_limit))
+        .map_err(|_| spawn("HERMES_CODEX_PROXY_STDERR_THREAD_SPAWN_FAILED"))?;
+    let mut lifecycle = OwnedCodexProxyLifecycle {
+        child,
+        stderr_evidence: None,
+        stderr_limit,
+        stderr_thread: Some(stderr_thread),
+    };
+    lifecycle.ensure_running()?;
+    Ok(ProductionCodexProxyDuplex::new(
+        Box::new(reader),
+        Box::new(writer),
+        Box::new(lifecycle),
+    ))
+}
+
+#[cfg(windows)]
+fn drain_bounded_codex_stderr(
+    mut stderr: File,
+    limit: u64,
+) -> Result<BoundedCodexStderrEvidence, ()> {
+    let mut digest = Sha256::new();
+    let mut byte_count = 0_u64;
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let remaining = limit
+            .checked_add(1)
+            .and_then(|bound| bound.checked_sub(byte_count))
+            .ok_or(())?;
+        if remaining == 0 {
+            return Ok(BoundedCodexStderrEvidence {
+                byte_count,
+                sha256: encode_digest(&digest.finalize()),
+                exceeded: true,
+            });
+        }
+        let capacity = usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| ())?;
+        let read = stderr.read(&mut buffer[..capacity]).map_err(|_| ())?;
+        if read == 0 {
+            return Ok(BoundedCodexStderrEvidence {
+                byte_count,
+                sha256: encode_digest(&digest.finalize()),
+                exceeded: false,
+            });
+        }
+        digest.update(&buffer[..read]);
+        byte_count = byte_count
+            .checked_add(u64::try_from(read).map_err(|_| ())?)
+            .ok_or(())?;
+    }
+}
+
+#[cfg(all(test, windows))]
+struct FixtureCodexProxyProvider {
+    executable_sha256: String,
+    plan: crate::windows_job::WindowsJobCommandPlan,
+    process_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    stderr_limit: u64,
+}
+
+#[cfg(all(test, windows))]
+impl ProductionCodexProxyProvider for FixtureCodexProxyProvider {
+    fn open(
+        self: Box<Self>,
+        absolute_deadline: Instant,
+    ) -> HermesAdapterResult<ProductionCodexProxyDuplex> {
+        if absolute_deadline <= Instant::now() {
+            return Err(timeout("HERMES_CODEX_PROXY_DEADLINE_EXCEEDED"));
+        }
+        let Self {
+            executable_sha256,
+            mut plan,
+            process_id,
+            stderr_limit,
+        } = *self;
+        let executable = fs::canonicalize(&plan.executable)
+            .map_err(|_| identity("HERMES_CODEX_PROXY_FIXTURE_IDENTITY_REJECTED"))?;
+        if bounded_file_sha256(&executable, MAX_CODEX_LAUNCHER_BYTES)? != executable_sha256 {
+            return Err(identity("HERMES_CODEX_PROXY_FIXTURE_IDENTITY_REJECTED"));
+        }
+        plan.executable.clone_from(&executable);
+        plan.deadline = absolute_deadline;
+        launch_owned_proxy(
+            &plan,
+            stderr_limit,
+            move || {
+                if bounded_file_sha256(&executable, MAX_CODEX_LAUNCHER_BYTES)? == executable_sha256
+                {
+                    Ok(())
+                } else {
+                    Err(identity("HERMES_CODEX_PROXY_FIXTURE_IDENTITY_REJECTED"))
+                }
+            },
+            move |observed| {
+                process_id.store(observed, std::sync::atomic::Ordering::Release);
+            },
+        )
     }
 }
 
@@ -2850,4 +3336,419 @@ fn parse_bounded_codex_json(bytes: &[u8]) -> Result<Value, serde_json::Error> {
     .deserialize(&mut deserializer)?;
     deserializer.end()?;
     Ok(value)
+}
+
+#[cfg(all(test, windows))]
+mod production_provider_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    struct ProviderFixture {
+        config: CodexReflectionBrokerConfig,
+        config_lock: PathBuf,
+        receipt: CodexBrokerReceipt,
+        root: PathBuf,
+    }
+
+    impl ProviderFixture {
+        fn new() -> Self {
+            let sequence = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("fixture clock")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "lattice-hermes-codex-provider-{}-{sequence}",
+                std::process::id()
+            ));
+            let bundle = root.join("bundle").join("x86_64-pc-windows-msvc");
+            let launcher = bundle.join("bin").join("codex.exe");
+            let helper = root.join("lattice-hermes-broker.exe");
+            let codex_home = root.join("codex-home");
+            let isolation_root = root.join("isolation");
+            let product_root = root.join("product");
+            let cwd = isolation_root.join("empty-work");
+            let temp = isolation_root.join("temp");
+            let config_lock = isolation_root.join("codex-reflection.lock.toml");
+            for directory in [
+                launcher.parent().expect("launcher parent"),
+                &codex_home,
+                &cwd,
+                &temp,
+                &product_root,
+            ] {
+                fs::create_dir_all(directory).expect("fixture directory");
+            }
+            fs::write(&launcher, b"fixture launcher").expect("fixture launcher");
+            fs::write(&helper, b"fixture helper").expect("fixture helper");
+            fs::write(&config_lock, CODEX_CONFIG_LOCK.as_bytes()).expect("fixture config lock");
+
+            let launcher = fs::canonicalize(launcher).expect("canonical fixture launcher");
+            let helper = fs::canonicalize(helper).expect("canonical fixture helper");
+            let codex_home = fs::canonicalize(codex_home).expect("canonical fixture home");
+            let isolation_root =
+                fs::canonicalize(isolation_root).expect("canonical fixture isolation");
+            let product_root = fs::canonicalize(product_root).expect("canonical fixture product");
+            let temp = fs::canonicalize(temp).expect("canonical fixture temp");
+            let helper_sha256 =
+                bounded_file_sha256(&helper, MAX_CODEX_LAUNCHER_BYTES).expect("helper identity");
+            let child_environment = codex_child_environment(&launcher, &codex_home, &temp)
+                .expect("fixture child environment");
+            let child_environment_sha256 =
+                digest_environment(&child_environment).expect("fixture environment digest");
+            let config = CodexReflectionBrokerConfig::new(
+                helper,
+                helper_sha256.clone(),
+                launcher,
+                codex_home,
+                isolation_root,
+                product_root,
+                "gpt-5.6-sol",
+            )
+            .expect("fixture broker config");
+            let receipt = CodexBrokerReceipt {
+                canary_receipt_digest: ContentDigest::from_sha256("a".repeat(64))
+                    .expect("fixture canary digest"),
+                child_environment_sha256,
+                config_lock_sha256: sha256_bytes(CODEX_CONFIG_LOCK.as_bytes()),
+                helper_sha256,
+                launcher_sha256: CODEX_LAUNCHER_SHA256.to_owned(),
+                receipt_digest: ContentDigest::from_sha256("b".repeat(64))
+                    .expect("fixture receipt digest"),
+                transcript_sha256: "c".repeat(64),
+            };
+            Self {
+                config,
+                config_lock,
+                receipt,
+                root,
+            }
+        }
+    }
+
+    impl Drop for ProviderFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    struct ProcessFixture {
+        process_probe: PathBuf,
+        root: PathBuf,
+        system_root: PathBuf,
+    }
+
+    impl ProcessFixture {
+        fn new() -> Self {
+            let sequence = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("process fixture clock")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "lattice-hermes-codex-process-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).expect("process fixture root");
+            let system_root = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"));
+            let process_probe = fs::canonicalize(
+                system_root
+                    .join("System32")
+                    .join("WindowsPowerShell")
+                    .join("v1.0")
+                    .join("powershell.exe"),
+            )
+            .expect("canonical fixture PowerShell");
+            Self {
+                process_probe,
+                root,
+                system_root,
+            }
+        }
+
+        fn provider(&self, stderr_limit: u64) -> (FixtureCodexProxyProvider, Arc<AtomicU32>) {
+            let executable = fs::canonicalize(self.system_root.join("System32").join("more.com"))
+                .expect("canonical fixture more.com");
+            self.provider_for(&executable, Vec::new(), BTreeMap::new(), stderr_limit)
+        }
+
+        fn stderr_provider(
+            &self,
+            stderr_limit: u64,
+        ) -> (FixtureCodexProxyProvider, Arc<AtomicU32>) {
+            let executable = fs::canonicalize(self.system_root.join("System32").join("cmd.exe"))
+                .expect("canonical fixture cmd.exe");
+            let mut environment = BTreeMap::new();
+            for name in ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT"] {
+                if let Some(value) = std::env::var_os(name) {
+                    environment.insert(OsString::from(name), value);
+                }
+            }
+            let command = "(for /L %i in (1,1,200) do @echo 0123456789abcdef0123456789abcdef 1>&2) & pause >NUL";
+            self.provider_for(
+                &executable,
+                ["/D", "/Q", "/S", "/C", command]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+                environment,
+                stderr_limit,
+            )
+        }
+
+        fn provider_for(
+            &self,
+            executable: &Path,
+            arguments: Vec<OsString>,
+            environment: BTreeMap<OsString, OsString>,
+            stderr_limit: u64,
+        ) -> (FixtureCodexProxyProvider, Arc<AtomicU32>) {
+            let process_id = Arc::new(AtomicU32::new(0));
+            let plan = crate::windows_job::WindowsJobCommandPlan {
+                executable: executable.to_path_buf(),
+                arguments,
+                current_dir: self.root.clone(),
+                environment,
+                run_root: self.root.clone(),
+                stdout_path: self.root.join("fixture.stdout.unused"),
+                stderr_path: self.root.join("fixture.stderr.unused"),
+                stdout_limit: MAX_CODEX_FRAME_BYTES as u64,
+                stderr_limit,
+                deadline: Instant::now() + Duration::from_secs(10),
+                teardown_timeout: Duration::from_secs(3),
+            };
+            (
+                FixtureCodexProxyProvider {
+                    executable_sha256: bounded_file_sha256(&executable, MAX_CODEX_LAUNCHER_BYTES)
+                        .expect("fixture executable identity"),
+                    plan,
+                    process_id: Arc::clone(&process_id),
+                    stderr_limit,
+                },
+                process_id,
+            )
+        }
+    }
+
+    impl Drop for ProcessFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn process_has_exited(executable: &Path, process_id: u32) -> bool {
+        let probe = format!(
+            "if (Get-Process -Id {process_id} -ErrorAction SilentlyContinue) {{ exit 1 }} else {{ exit 0 }}"
+        );
+        Command::new(executable)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &probe,
+            ])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[test]
+    fn production_provider_factory_rejects_model_receipt_and_lock_drift() {
+        let fixture = ProviderFixture::new();
+        fixture
+            .config
+            .clone()
+            .into_production_proxy_provider(&fixture.receipt, "gpt-5.6-sol")
+            .expect("one receipt-bound official provider");
+
+        let failure = fixture
+            .config
+            .clone()
+            .into_production_proxy_provider(&fixture.receipt, "gpt-5.6-terra")
+            .err()
+            .expect("model substitution fails before process launch");
+        assert_eq!(failure.kind(), HermesAdapterErrorKind::CrossBinding);
+        assert_eq!(
+            failure.code(),
+            "HERMES_CODEX_PROXY_FACTORY_BINDING_REJECTED"
+        );
+
+        let mut wrong_receipt = fixture.receipt.clone();
+        wrong_receipt.child_environment_sha256 = "d".repeat(64);
+        let failure = fixture
+            .config
+            .clone()
+            .into_production_proxy_provider(&wrong_receipt, "gpt-5.6-sol")
+            .err()
+            .expect("receipt substitution fails before process launch");
+        assert_eq!(failure.kind(), HermesAdapterErrorKind::CrossBinding);
+        assert_eq!(
+            failure.code(),
+            "HERMES_CODEX_PROXY_FACTORY_BINDING_REJECTED"
+        );
+
+        fs::write(&fixture.config_lock, b"drifted lock").expect("drift fixture lock");
+        let failure = fixture
+            .config
+            .clone()
+            .into_production_proxy_provider(&fixture.receipt, "gpt-5.6-sol")
+            .err()
+            .expect("config-lock drift fails before process launch");
+        assert_eq!(failure.kind(), HermesAdapterErrorKind::Identity);
+        assert_eq!(
+            failure.code(),
+            "HERMES_CODEX_PROXY_CONFIG_IDENTITY_REJECTED"
+        );
+    }
+
+    #[test]
+    fn production_provider_launch_plan_is_exact_and_config_lock_bound() {
+        let fixture = ProviderFixture::new();
+        let verified =
+            VerifiedCodexProxyConfig::from_config(fixture.config.clone()).expect("verified config");
+        let reviewed = ReviewedCodexBundle {
+            launcher: verified.launcher.clone(),
+            launcher_sha256: CODEX_LAUNCHER_SHA256.to_owned(),
+            package_manifest_sha256: CODEX_PACKAGE_MANIFEST_SHA256.to_owned(),
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let plan = verified
+            .command_plan(&reviewed, deadline)
+            .expect("one exact official launch plan");
+        let expected_override =
+            config_lock_override(&verified.config_lock).expect("canonical sealed config override");
+        assert_eq!(
+            plan.arguments,
+            [
+                OsString::from("app-server"),
+                OsString::from("--listen"),
+                OsString::from("stdio://"),
+                OsString::from("--strict-config"),
+                OsString::from("-c"),
+                OsString::from(expected_override),
+            ]
+        );
+        assert_eq!(plan.executable, verified.launcher);
+        assert_eq!(plan.current_dir, verified.cwd);
+        assert_eq!(plan.run_root, verified.isolation_root);
+        assert_eq!(plan.deadline, deadline);
+        assert_eq!(
+            plan.environment
+                .get(&OsString::from("CODEX_HOME"))
+                .map(OsString::as_os_str),
+            Some(verified.codex_home.as_os_str())
+        );
+        assert_eq!(
+            plan.environment
+                .get(&OsString::from("CODEX_EXEC_SERVER_URL"))
+                .map(OsString::as_os_str),
+            Some(std::ffi::OsStr::new("none"))
+        );
+        assert_eq!(
+            plan.environment
+                .get(&OsString::from(
+                    "CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED"
+                ))
+                .map(OsString::as_os_str),
+            Some(std::ffi::OsStr::new("1"))
+        );
+        for forbidden in [
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "CODEX_API_KEY",
+            "HERMES_API_KEY",
+            "HERMES_MODEL",
+        ] {
+            assert!(!plan.environment.contains_key(&OsString::from(forbidden)));
+        }
+        assert_eq!(
+            digest_environment(&plan.environment).expect("planned environment digest"),
+            fixture.receipt.child_environment_sha256
+        );
+    }
+
+    #[test]
+    fn process_fixture_relays_raw_bytes_and_drop_reaps_the_owned_job() {
+        let fixture = ProcessFixture::new();
+        let (provider, process_id) = fixture.provider(1024);
+        let mut duplex = Box::new(provider)
+            .open(Instant::now() + Duration::from_secs(10))
+            .expect("open test-only Job-owned raw duplex");
+        let mut reader = BufReader::new(duplex.take_reader().expect("take raw stdout"));
+        let process_id = process_id.load(Ordering::Acquire);
+        assert_ne!(process_id, 0);
+        let payload = b"raw-jsonl-1\r\nraw-jsonl-2\r\n";
+        duplex.write_all(payload).expect("write raw fixture bytes");
+        let mut echoed = vec![0_u8; payload.len()];
+        reader
+            .read_exact(&mut echoed)
+            .expect("read raw fixture bytes");
+        assert_eq!(echoed, payload);
+
+        drop(duplex);
+        let mut trailing = Vec::new();
+        reader
+            .read_to_end(&mut trailing)
+            .expect("Job termination closes raw stdout");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && !process_has_exited(&fixture.process_probe, process_id) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(process_has_exited(&fixture.process_probe, process_id));
+    }
+
+    #[test]
+    fn process_fixture_rejects_deadline_and_identity_before_spawn() {
+        let fixture = ProcessFixture::new();
+        let (provider, process_id) = fixture.provider(1024);
+        let failure = Box::new(provider)
+            .open(Instant::now())
+            .err()
+            .expect("expired deadline fails before spawn");
+        assert_eq!(failure.kind(), HermesAdapterErrorKind::Timeout);
+        assert_eq!(failure.code(), "HERMES_CODEX_PROXY_DEADLINE_EXCEEDED");
+        assert_eq!(process_id.load(Ordering::Acquire), 0);
+
+        let (mut provider, process_id) = fixture.provider(1024);
+        provider.executable_sha256 = "0".repeat(64);
+        let failure = Box::new(provider)
+            .open(Instant::now() + Duration::from_secs(10))
+            .err()
+            .expect("fixture executable substitution fails before spawn");
+        assert_eq!(failure.kind(), HermesAdapterErrorKind::Identity);
+        assert_eq!(
+            failure.code(),
+            "HERMES_CODEX_PROXY_FIXTURE_IDENTITY_REJECTED"
+        );
+        assert_eq!(process_id.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn process_fixture_bounds_stderr_and_reaps_the_owned_job() {
+        let fixture = ProcessFixture::new();
+        let (provider, process_id) = fixture.stderr_provider(1024);
+        let failure = match Box::new(provider).open(Instant::now() + Duration::from_secs(10)) {
+            Err(failure) => failure,
+            Ok(mut duplex) => {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                loop {
+                    match duplex.ensure_running() {
+                        Ok(()) if Instant::now() < deadline => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Ok(()) => panic!("stderr overflow was not detected"),
+                        Err(failure) => break failure,
+                    }
+                }
+            }
+        };
+        assert_eq!(failure.kind(), HermesAdapterErrorKind::Malformed);
+        assert_eq!(failure.code(), "HERMES_CODEX_PROXY_STDERR_LIMIT_EXCEEDED");
+        let process_id = process_id.load(Ordering::Acquire);
+        assert_ne!(process_id, 0);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && !process_has_exited(&fixture.process_probe, process_id) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(process_has_exited(&fixture.process_probe, process_id));
+    }
 }
