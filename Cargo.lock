@@ -364,6 +364,7 @@ dependencies = [
  "lattice-cjson",
  "lattice-codebase-memory",
  "lattice-contracts",
+ "lattice-gateway-ipc",
  "lattice-ports",
  "postgres",
  "sha2",

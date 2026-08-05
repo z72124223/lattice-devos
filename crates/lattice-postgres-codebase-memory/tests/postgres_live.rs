@@ -2,14 +2,20 @@ use std::env;
 
 use lattice_codebase_memory::{digest_query_text, normalize_analysis, plan_retrieval};
 use lattice_contracts::{
-    AttemptId, CONTRACT_VERSION, CodeSnapshotEvidence, ContentDigest, GitObjectId, GraphConfidence,
-    GraphMemoryRunRequest, GraphSourceProvenance, GraphifyIdentity, GraphifyRawEvidence,
-    GraphifyRawNode, HERMES_REFLECTION_SCHEMA_VERSION, HermesReflectionCandidate,
-    HermesReflectionContent, HermesReflectionFinding, HermesReflectionReceipt,
-    HermesReflectionStatus, Invocation, MemoryQuery, MemoryRetrievalPlan, NormalizedGraphAnalysis,
-    ProjectId, ProjectSnapshotId, RequestId, TaskId, TrackedSource,
+    AttemptId, CONTRACT_VERSION, CodeSnapshotEvidence, ContentDigest, GatewayActorId,
+    GatewayCommandId, GatewayCorrelationId, GatewayDenialCode, GatewayProjectStatusTarget,
+    GatewayReply, GatewayReplyBody, GatewayRequest, GatewayRequestBody, GatewayStatusTarget,
+    GitObjectId, GraphConfidence, GraphMemoryRunRequest, GraphSourceProvenance, GraphifyIdentity,
+    GraphifyRawEvidence, GraphifyRawNode, HERMES_REFLECTION_SCHEMA_VERSION,
+    HermesReflectionCandidate, HermesReflectionContent, HermesReflectionFinding,
+    HermesReflectionReceipt, HermesReflectionStatus, Invocation, MemoryQuery, MemoryRetrievalPlan,
+    NormalizedGraphAnalysis, ProjectId, ProjectSnapshotId, RequestId, TaskId, TrackedSource,
 };
-use lattice_ports::{CodebaseMemoryPort, HermesReflectionMemoryPort};
+use lattice_gateway_ipc::{build_reply, build_request};
+use lattice_ports::{
+    CodebaseMemoryPort, HermesReflectionMemoryPort, OpenClawCommandScope,
+    OpenClawIdempotencyDecision, OpenClawIdempotencyStore, OpenClawTerminalCommandRecord,
+};
 use lattice_postgres_codebase_memory::{
     ExtensionApplyOutcome, ExtensionDatabaseRole, ExtensionSetupErrorKind, ExtensionTarget,
     PostgresCodebaseMemory, apply_extension, verify_extension,
@@ -147,6 +153,7 @@ fn exact_memory_extension_install_and_restart_profile() {
         drop(runtime);
         prove_reflection_durability_boundary(&config);
         exercise_runtime_memory(&config, &target, false);
+        exercise_openclaw_idempotency(&config, &target, false);
         println!(
             "MEMORY_EXTENSION_INITIAL_OK database_uuid={} extension_manifest={}",
             evidence.database_uuid(),
@@ -164,6 +171,7 @@ fn exact_memory_extension_install_and_restart_profile() {
         );
         drop(migrator);
         exercise_runtime_memory(&config, &target, true);
+        exercise_openclaw_idempotency(&config, &target, true);
         println!("MEMORY_EXTENSION_RESTART_PROFILE_OK");
     }
 }
@@ -352,6 +360,219 @@ fn exercise_runtime_memory(config: &LiveConfig, target: &ExtensionTarget, restar
             .database_identity_digest()
             .as_str()
     );
+}
+
+#[allow(clippy::too_many_lines)]
+fn exercise_openclaw_idempotency(config: &LiveConfig, target: &ExtensionTarget, restarted: bool) {
+    let request = openclaw_request("project-a", "openclaw-correlation-a");
+    let reply = openclaw_reply(&request);
+    let scope = openclaw_scope(&request, 7);
+    if !restarted {
+        let mut store = new_openclaw_store(config, target);
+        assert_eq!(
+            store
+                .reconcile_and_claim(&scope, &request)
+                .expect("OPENCLAW_POSTGRES_INITIAL_CLAIM_FAILED"),
+            OpenClawIdempotencyDecision::Claimed,
+            "OPENCLAW_POSTGRES_INITIAL_CLAIM_CHANGED"
+        );
+        drop(store);
+        let fingerprint = openclaw_storage_fingerprint(config);
+        assert_eq!(fingerprint.0, 1, "OPENCLAW_POSTGRES_INITIAL_ROW_COUNT");
+        println!(
+            "OPENCLAW_POSTGRES_CLAIM_OK phase=initial command={} digest={}",
+            scope.command_id().as_str(),
+            request.request_digest().as_str()
+        );
+        return;
+    }
+
+    let claimed_fingerprint = openclaw_storage_fingerprint(config);
+    let mut restarted_store = new_openclaw_store(config, target);
+    assert_eq!(
+        restarted_store
+            .reconcile_and_claim(&scope, &request)
+            .expect("OPENCLAW_POSTGRES_RESTART_CLAIM_FAILED"),
+        OpenClawIdempotencyDecision::InFlight,
+        "OPENCLAW_POSTGRES_RESTART_REDISPATCH_ALLOWED"
+    );
+
+    let foreign_project_request = openclaw_request("project-b", "openclaw-correlation-project");
+    let foreign_project_scope = openclaw_scope(&foreign_project_request, 7);
+    assert_eq!(
+        restarted_store
+            .reconcile_and_claim(&foreign_project_scope, &foreign_project_request)
+            .expect("OPENCLAW_POSTGRES_PROJECT_RECONCILIATION_FAILED"),
+        OpenClawIdempotencyDecision::CommandSubstitution,
+        "OPENCLAW_POSTGRES_CROSS_PROJECT_ALLOWED"
+    );
+    let foreign_epoch_scope = openclaw_scope(&request, 8);
+    assert_eq!(
+        restarted_store
+            .reconcile_and_claim(&foreign_epoch_scope, &request)
+            .expect("OPENCLAW_POSTGRES_EPOCH_RECONCILIATION_FAILED"),
+        OpenClawIdempotencyDecision::CommandSubstitution,
+        "OPENCLAW_POSTGRES_CROSS_EPOCH_ALLOWED"
+    );
+    let changed_request = openclaw_request("project-a", "openclaw-correlation-changed");
+    assert_eq!(
+        restarted_store
+            .reconcile_and_claim(&scope, &changed_request)
+            .expect("OPENCLAW_POSTGRES_DIGEST_RECONCILIATION_FAILED"),
+        OpenClawIdempotencyDecision::CommandSubstitution,
+        "OPENCLAW_POSTGRES_CROSS_DIGEST_ALLOWED"
+    );
+    drop(restarted_store);
+    assert_eq!(
+        openclaw_storage_fingerprint(config),
+        claimed_fingerprint,
+        "OPENCLAW_POSTGRES_PURE_RECONCILIATION_MUTATED_ROW"
+    );
+
+    let foreign_project_record = OpenClawTerminalCommandRecord::new(
+        foreign_project_scope,
+        foreign_project_request.clone(),
+        openclaw_reply(&foreign_project_request),
+    )
+    .expect("OPENCLAW_POSTGRES_FOREIGN_PROJECT_RECORD_INVALID");
+    assert!(
+        new_openclaw_store(config, target)
+            .finalize_terminal(foreign_project_record)
+            .is_err(),
+        "OPENCLAW_POSTGRES_CROSS_PROJECT_FINALIZE_ALLOWED"
+    );
+    let foreign_epoch_record =
+        OpenClawTerminalCommandRecord::new(foreign_epoch_scope, request.clone(), reply.clone())
+            .expect("OPENCLAW_POSTGRES_FOREIGN_EPOCH_RECORD_INVALID");
+    assert!(
+        new_openclaw_store(config, target)
+            .finalize_terminal(foreign_epoch_record)
+            .is_err(),
+        "OPENCLAW_POSTGRES_CROSS_EPOCH_FINALIZE_ALLOWED"
+    );
+    let changed_record = OpenClawTerminalCommandRecord::new(
+        scope.clone(),
+        changed_request.clone(),
+        openclaw_reply(&changed_request),
+    )
+    .expect("OPENCLAW_POSTGRES_CHANGED_RECORD_INVALID");
+    assert!(
+        new_openclaw_store(config, target)
+            .finalize_terminal(changed_record)
+            .is_err(),
+        "OPENCLAW_POSTGRES_CROSS_DIGEST_FINALIZE_ALLOWED"
+    );
+    assert_eq!(
+        openclaw_storage_fingerprint(config),
+        claimed_fingerprint,
+        "OPENCLAW_POSTGRES_REJECTED_FINALIZE_MUTATED_ROW"
+    );
+
+    let record = OpenClawTerminalCommandRecord::new(scope, request.clone(), reply.clone())
+        .expect("OPENCLAW_POSTGRES_TERMINAL_RECORD_INVALID");
+    new_openclaw_store(config, target)
+        .finalize_terminal(record.clone())
+        .expect("OPENCLAW_POSTGRES_FINALIZE_FAILED");
+    let terminal_fingerprint = openclaw_storage_fingerprint(config);
+    assert_ne!(
+        terminal_fingerprint, claimed_fingerprint,
+        "OPENCLAW_POSTGRES_FINALIZE_DID_NOT_MUTATE_CLAIM"
+    );
+
+    let mut fresh_store = new_openclaw_store(config, target);
+    let exact = fresh_store
+        .reconcile_and_claim(record.scope(), &request)
+        .expect("OPENCLAW_POSTGRES_FRESH_EXACT_RETRY_FAILED");
+    match exact {
+        OpenClawIdempotencyDecision::Exact(replayed) => assert_eq!(
+            replayed.as_ref(),
+            &reply,
+            "OPENCLAW_POSTGRES_TERMINAL_REPLY_CHANGED"
+        ),
+        other => panic!("OPENCLAW_POSTGRES_TERMINAL_REPLAY_NOT_EXACT: {other:?}"),
+    }
+    assert_eq!(
+        openclaw_storage_fingerprint(config),
+        terminal_fingerprint,
+        "OPENCLAW_POSTGRES_EXACT_RETRY_MUTATED_ROW"
+    );
+    fresh_store
+        .finalize_terminal(record)
+        .expect("OPENCLAW_POSTGRES_FINALIZE_REPLAY_FAILED");
+    drop(fresh_store);
+    assert_eq!(
+        openclaw_storage_fingerprint(config),
+        terminal_fingerprint,
+        "OPENCLAW_POSTGRES_FINALIZE_REPLAY_MUTATED_ROW"
+    );
+    println!(
+        "OPENCLAW_POSTGRES_RECONCILIATION_OK phase=restart reply={}",
+        reply.reply_digest().as_str()
+    );
+}
+
+fn new_openclaw_store(config: &LiveConfig, target: &ExtensionTarget) -> PostgresCodebaseMemory {
+    PostgresCodebaseMemory::new(
+        config.role_client(ExtensionDatabaseRole::Runtime),
+        target.clone(),
+    )
+    .expect("OPENCLAW_POSTGRES_STORE_CONSTRUCTION_FAILED")
+}
+
+fn openclaw_request(project: &str, correlation: &str) -> GatewayRequest {
+    build_request(
+        GatewayCommandId::new("openclaw-command-restart").expect("openclaw command"),
+        GatewayCorrelationId::new(correlation).expect("openclaw correlation"),
+        GatewayRequestBody::Status(GatewayStatusTarget::Project(
+            GatewayProjectStatusTarget::new(
+                ProjectId::new(project).expect("openclaw project"),
+                10,
+                None,
+            )
+            .expect("openclaw status target"),
+        )),
+    )
+    .expect("OPENCLAW_POSTGRES_REQUEST_INVALID")
+}
+
+fn openclaw_reply(request: &GatewayRequest) -> GatewayReply {
+    build_reply(
+        request,
+        GatewayReplyBody::Denied(GatewayDenialCode::DownstreamDenied),
+    )
+    .expect("OPENCLAW_POSTGRES_REPLY_INVALID")
+}
+
+fn openclaw_scope(request: &GatewayRequest, epoch: u64) -> OpenClawCommandScope {
+    OpenClawCommandScope::new(
+        request.project_id().clone(),
+        GatewayActorId::new("openclaw-live-actor").expect("openclaw actor"),
+        epoch,
+        request.command_id().clone(),
+    )
+    .expect("OPENCLAW_POSTGRES_SCOPE_INVALID")
+}
+
+fn openclaw_storage_fingerprint(config: &LiveConfig) -> (i64, String) {
+    let mut admin = config.admin_client();
+    let row = admin
+        .query_one(
+            "SELECT pg_catalog.count(*)::bigint, \
+                    coalesce(pg_catalog.string_agg( \
+                        actor_id || ':' || command_id || ':' || project_id || ':' || \
+                        logical_session_epoch::text || ':' || \
+                        pg_catalog.encode(request_digest, 'hex') || ':' || command_state || ':' || \
+                        coalesce(pg_catalog.encode(terminal_reply_digest, 'hex'), '-') || ':' || \
+                        coalesce(pg_catalog.encode(terminal_frame_digest, 'hex'), '-') || ':' || \
+                        xmin::text || ':' || claimed_at::text || ':' || \
+                        coalesce(finalized_at::text, '-'), \
+                        ',' ORDER BY actor_id, command_id \
+                    ), '')::text \
+               FROM ONLY memory.openclaw_gateway_commands",
+            &[],
+        )
+        .expect("OPENCLAW_POSTGRES_FINGERPRINT_FAILED");
+    (row.get(0), row.get(1))
 }
 
 fn changed_request(analysis: &NormalizedGraphAnalysis) -> GraphMemoryRunRequest {

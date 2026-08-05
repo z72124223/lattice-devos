@@ -17,7 +17,7 @@ const REQUIRED_GLOBAL_MANIFEST_SHA256: &str =
 const DATABASE_IDENTITY_DOMAIN: &[u8] = b"LATTICE_POSTGRES_DATABASE_IDENTITY_V1\0";
 const EXTENSION_ADVISORY_LOCK: i64 = 0x4c41_5443_4d45_4d31;
 
-const EXPECTED_TABLES: [&str; 7] = [
+const EXPECTED_TABLES: [&str; 8] = [
     "codebase_memory_analyses",
     "codebase_memory_extension_identity",
     "codebase_memory_extension_ledger",
@@ -25,13 +25,16 @@ const EXPECTED_TABLES: [&str; 7] = [
     "codebase_memory_records",
     "codebase_memory_reflections",
     "codebase_memory_retrieval_audits",
+    "openclaw_gateway_commands",
 ];
-const EXPECTED_FUNCTIONS: [&str; 5] = [
+const EXPECTED_FUNCTIONS: [&str; 7] = [
     "codebase_memory_load_receipt_v1",
     "codebase_memory_load_reflection_v2",
     "codebase_memory_persist_analysis_v1",
     "codebase_memory_persist_reflection_v2",
     "codebase_memory_persist_retrieval_v1",
+    "openclaw_gateway_finalize_terminal_v1",
+    "openclaw_gateway_reconcile_and_claim_v1",
 ];
 
 /// Closed database roles admitted by the extension setup and verifier.
@@ -500,7 +503,8 @@ fn classify_pre_state(
                     'codebase_memory_receipts', \
                     'codebase_memory_records', \
                     'codebase_memory_reflections', \
-                    'codebase_memory_retrieval_audits' \
+                    'codebase_memory_retrieval_audits', \
+                    'openclaw_gateway_commands' \
                 ))::bigint, \
                 count(*)::bigint \
                FROM pg_catalog.pg_class AS c \
@@ -519,7 +523,9 @@ fn classify_pre_state(
                     'codebase_memory_load_reflection_v2', \
                     'codebase_memory_persist_analysis_v1', \
                     'codebase_memory_persist_reflection_v2', \
-                    'codebase_memory_persist_retrieval_v1' \
+                    'codebase_memory_persist_retrieval_v1', \
+                    'openclaw_gateway_finalize_terminal_v1', \
+                    'openclaw_gateway_reconcile_and_claim_v1' \
                 ))::bigint, \
                 count(*)::bigint \
                FROM pg_catalog.pg_proc AS p \
@@ -647,6 +653,7 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
         "LATTICE_CODEBASE_MEMORY_RECORDS_V1",
         "LATTICE_CODEBASE_MEMORY_REFLECTIONS_V2",
         "LATTICE_CODEBASE_MEMORY_RETRIEVAL_AUDITS_V1",
+        "LATTICE_OPENCLAW_GATEWAY_COMMANDS_V1",
     ];
     for ((row, expected_name), expected_comment) in
         relations.iter().zip(EXPECTED_TABLES).zip(expected_comments)
@@ -683,7 +690,7 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
             .map_err(|_| catalog_stage("MEMORY_EXTENSION_PUBLIC_TABLE_ACL_QUERY_FAILED"))?
             .get(0);
         if public_privilege {
-            return Err(catalog_stage("MEMORY_EXTENSION_TABLE_ACL_MISMATCH"));
+            return Err(catalog_stage("MEMORY_EXTENSION_TABLE_PUBLIC_ACL_MISMATCH"));
         }
         for role in [
             "lattice_runtime",
@@ -698,14 +705,14 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
                 .query_one(
                     "SELECT pg_catalog.has_table_privilege( \
                          $1::text::name, pg_catalog.format('memory.%I', $2::text)::text, \
-                         'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER' \
+                         'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN' \
                      )",
                     &[&role, &name],
                 )
                 .map_err(|_| catalog_stage("MEMORY_EXTENSION_ROLE_TABLE_ACL_QUERY_FAILED"))?
                 .get(0);
             if has_privilege {
-                return Err(catalog_stage("MEMORY_EXTENSION_TABLE_ACL_MISMATCH"));
+                return Err(catalog_stage("MEMORY_EXTENSION_TABLE_ROLE_ACL_MISMATCH"));
             }
         }
         let acl_closure = client
@@ -716,6 +723,7 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
                             AND grantor.rolname = 'lattice_migrator' \
                             AND a.privilege_type IN ( \
                                 'SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER' \
+                                ,'MAINTAIN' \
                             ) \
                             AND NOT a.is_grantable \
                         )::bigint \
@@ -732,8 +740,15 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
             .map_err(|_| catalog_stage("MEMORY_EXTENSION_TABLE_ACL_QUERY_FAILED"))?;
         let acl_count: i64 = acl_closure.get(0);
         let admitted_acl_count: i64 = acl_closure.get(1);
-        if acl_count != 7 || admitted_acl_count != acl_count {
-            return Err(catalog_stage("MEMORY_EXTENSION_TABLE_ACL_MISMATCH"));
+        if acl_count != 8 {
+            return Err(catalog_stage(
+                "MEMORY_EXTENSION_TABLE_OWNER_ACL_COUNT_MISMATCH",
+            ));
+        }
+        if admitted_acl_count != acl_count {
+            return Err(catalog_stage(
+                "MEMORY_EXTENSION_TABLE_OWNER_ACL_ROLE_MISMATCH",
+            ));
         }
     }
 
@@ -791,6 +806,20 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
             "u",
             "bytea, bytea, bytea, bytea, bytea, bytea, bytea, smallint, text, bytea[], bytea[], bigint[], bytea, bytea, bytea",
             "LATTICE_CODEBASE_MEMORY_PERSIST_RETRIEVAL_V1",
+        ),
+        (
+            "openclaw_gateway_finalize_terminal_v1",
+            "v",
+            "u",
+            "bytea, bytea, bytea, bytea, text, text, bigint, text, bytea, bytea, bytea, bytea",
+            "LATTICE_OPENCLAW_GATEWAY_FINALIZE_TERMINAL_V1",
+        ),
+        (
+            "openclaw_gateway_reconcile_and_claim_v1",
+            "v",
+            "u",
+            "bytea, bytea, bytea, bytea, text, text, bigint, text, bytea",
+            "LATTICE_OPENCLAW_GATEWAY_RECONCILE_AND_CLAIM_V1",
         ),
     ];
     for (row, (name, volatility, parallel, arguments, comment)) in
@@ -976,7 +1005,8 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
                     'codebase_memory_receipts', \
                     'codebase_memory_records', \
                     'codebase_memory_reflections', \
-                    'codebase_memory_retrieval_audits' \
+                    'codebase_memory_retrieval_audits', \
+                    'openclaw_gateway_commands' \
                 ) \
                 AND a.attnum > 0 AND NOT a.attisdropped",
             &[],
@@ -996,13 +1026,14 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
                     'codebase_memory_receipts', \
                     'codebase_memory_records', \
                     'codebase_memory_reflections', \
-                    'codebase_memory_retrieval_audits' \
+                    'codebase_memory_retrieval_audits', \
+                    'openclaw_gateway_commands' \
                 )",
             &[],
         )
         .map_err(|_| catalog_stage("MEMORY_EXTENSION_CONSTRAINT_COUNT_QUERY_FAILED"))?
         .get(0);
-    if columns != 104 || constraints != 53 {
+    if columns != 115 || constraints != 58 {
         return Err(catalog_stage(
             "MEMORY_EXTENSION_COLUMN_CONSTRAINT_COUNT_MISMATCH",
         ));

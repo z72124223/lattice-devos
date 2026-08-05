@@ -40,13 +40,13 @@ const V3_EXPECTED_CONSTRAINT_SIGNATURE: &str =
 const V3_EXPECTED_INDEX_SIGNATURE: &str =
     "40ca5ea0781b1be03efe9bead50ae9f78434314123d6f700d278874678d06a9b";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_RELATION_SIGNATURE: &str =
-    "79ca93b806a7762adf65524a419d43cb2e7d2ef4b1bda4c02326288b2c76f3b2";
+    "162e7cdb50850fb31348e32ab4516a259fff2543d42fbfe2dd39e4f48679461d";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_COLUMN_SIGNATURE: &str =
-    "8fa61b960623e768a40afc39fd1c826bfccd75681958275cbecb8574014966ee";
+    "6c71b33bb6ce0adda52c7267a2e15d0f76e80a7da8db847c87155c21db6b574b";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_CONSTRAINT_SIGNATURE: &str =
-    "d1429dd18885b89804ce2e60085b58c16ea23383ce31b345bef6f61dc37be6c9";
+    "272147d02a06e9dd4863efcbc780cd6624d1d74257ae2ef28d8287b6390fe9f7";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_INDEX_SIGNATURE: &str =
-    "68c0c370ad785dc6bbc471fc55f9edcd278810c1bc9be28a24e6dd9de1245540";
+    "1a7bc5e774689c8ad32c1416dc0cdc6b86a6afca402db2d5eed801c6d71afa5a";
 const EXPECTED_SCHEMA_ACL_SIGNATURE: &str =
     "1bd04ad6cebb5dab6a5a48f47a76e88d19a340bf25aaa49ed9c3270cac479568";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_SCHEMA_ACL_SIGNATURE: &str =
@@ -208,7 +208,7 @@ const V2_EXPECTED_FUNCTION_SIGNATURE: &str =
 const V3_EXPECTED_FUNCTION_SIGNATURE: &str =
     "f2c8585e1da944b38a50c65c6b9f448963f4c3d96c909331be87fec0c30d2279";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_SIGNATURE: &str =
-    "4144be2ae87096247f096b6450a5e99f8793f6a666987030b73306a4f9041ee4";
+    "52e146d4e8190bf92ada1754f233423055a435cf281975f05fc83b262ff20db6";
 const FUNCTION_ACL_SIGNATURE_SQL: &str = r"
     SELECT jsonb_build_array(
         n.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
@@ -230,11 +230,11 @@ const V2_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
 const V3_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
     "579b843df8e187eb0f4b7a75e9d1b0c4f109d596c55bcff5aa76a1a06bfcd91b";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
-    "25f7d20b57122d2ad77f3bc8c64a818f60bd8af341a4e2201c029c4ab4db4240";
+    "009fc8df8b1ec0867fdfdecf464d24ad694c61d639ff264f56ffb535a2f3038a";
 const V3_EXPECTED_TABLE_ACL_SIGNATURE: &str =
     "27a0879d1b709abd341653b445d3a64d59819bde2e20e868ac09d2624aab1993";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_TABLE_ACL_SIGNATURE: &str =
-    "9803787757e36f371e58231179bb777a379ee2c9e6d79175fc2bb5556720c798";
+    "273197d8086b87d4e3308afcc19e34d4b558c0723a23f6965fb07c8ad46f5770";
 
 const DATABASE_ACL_SIGNATURE_SQL: &str = r"
     SELECT jsonb_build_array(
@@ -317,7 +317,7 @@ const V3_PROTECTED_CONTROL_TABLES: [&str; 6] = [
     "task_ledger_streams",
     "terminal_transactions",
 ];
-const CODEBASE_MEMORY_V2_TABLES: [&str; 7] = [
+const CODEBASE_MEMORY_V2_TABLES: [&str; 8] = [
     "codebase_memory_analyses",
     "codebase_memory_extension_identity",
     "codebase_memory_extension_ledger",
@@ -325,13 +325,16 @@ const CODEBASE_MEMORY_V2_TABLES: [&str; 7] = [
     "codebase_memory_records",
     "codebase_memory_reflections",
     "codebase_memory_retrieval_audits",
+    "openclaw_gateway_commands",
 ];
-const CODEBASE_MEMORY_V2_FUNCTIONS: [&str; 5] = [
+const CODEBASE_MEMORY_V2_FUNCTIONS: [&str; 7] = [
     "codebase_memory_load_reflection_v2",
     "codebase_memory_load_receipt_v1",
     "codebase_memory_persist_analysis_v1",
     "codebase_memory_persist_reflection_v2",
     "codebase_memory_persist_retrieval_v1",
+    "openclaw_gateway_finalize_terminal_v1",
+    "openclaw_gateway_reconcile_and_claim_v1",
 ];
 const STORE_PREPARE_V2_IDENTITY: &str = "control.store_prepare_v2(smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea)";
 const STORE_FINALIZE_V2_IDENTITY: &str = "control.store_finalize_v2(smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,uuid,bytea,smallint,text,bigint,bytea,bytea,bigint,bytea,bytea,text,bytea,bytea)";
@@ -349,6 +352,8 @@ const CODEBASE_MEMORY_LOAD_REFLECTION_V2_IDENTITY: &str = "memory.codebase_memor
 const CODEBASE_MEMORY_PERSIST_ANALYSIS_V1_IDENTITY: &str = "memory.codebase_memory_persist_analysis_v1(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint,text,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,integer[],bytea[],text[],text[],text[],text[],text[],text[],bytea[],integer[],integer[],text[],bytea[])";
 const CODEBASE_MEMORY_PERSIST_REFLECTION_V2_IDENTITY: &str = "memory.codebase_memory_persist_reflection_v2(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint,bytea,text,text,bytea,bytea,bytea,bytea,text,text[],bytea[],text[])";
 const CODEBASE_MEMORY_PERSIST_RETRIEVAL_V1_IDENTITY: &str = "memory.codebase_memory_persist_retrieval_v1(bytea,bytea,bytea,bytea,bytea,bytea,bytea,smallint,text,bytea[],bytea[],bigint[],bytea,bytea,bytea)";
+const OPENCLAW_GATEWAY_FINALIZE_TERMINAL_V1_IDENTITY: &str = "memory.openclaw_gateway_finalize_terminal_v1(bytea,bytea,bytea,bytea,text,text,bigint,text,bytea,bytea,bytea,bytea)";
+const OPENCLAW_GATEWAY_RECONCILE_AND_CLAIM_V1_IDENTITY: &str = "memory.openclaw_gateway_reconcile_and_claim_v1(bytea,bytea,bytea,bytea,text,text,bigint,text,bytea)";
 const V1_CONTROL_CONSTRAINTS: [&str; 48] = [
     "database_identity_pkey",
     "database_identity_singleton_true",
@@ -686,7 +691,8 @@ fn classify_current_v3_catalog_profile<C: GenericClient>(
                  'codebase_memory_receipts', \
                  'codebase_memory_records', \
                  'codebase_memory_reflections', \
-                 'codebase_memory_retrieval_audits'))::bigint, \
+                 'codebase_memory_retrieval_audits', \
+                 'openclaw_gateway_commands'))::bigint, \
              count(*)::bigint \
              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
              WHERE n.nspname = 'memory' \
@@ -705,7 +711,9 @@ fn classify_current_v3_catalog_profile<C: GenericClient>(
                  'codebase_memory_load_receipt_v1', \
                  'codebase_memory_persist_analysis_v1', \
                  'codebase_memory_persist_reflection_v2', \
-                 'codebase_memory_persist_retrieval_v1'))::bigint, \
+                 'codebase_memory_persist_retrieval_v1', \
+                 'openclaw_gateway_finalize_terminal_v1', \
+                 'openclaw_gateway_reconcile_and_claim_v1'))::bigint, \
              count(*)::bigint \
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname = 'memory'",
@@ -1857,7 +1865,7 @@ fn verify_forbidden_schema_objects<C: GenericClient>(
         CatalogProfile::V1 | CatalogProfile::PreSchema => 0,
         CatalogProfile::V2 => 3,
         CatalogProfile::V3 => 11,
-        CatalogProfile::V3CodebaseMemoryV2 => 16,
+        CatalogProfile::V3CodebaseMemoryV2 => 18,
     };
     if row_value::<i64>(&forbidden, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?
         != expected_functions
@@ -1961,6 +1969,8 @@ fn verify_owned_function_boundary<C: GenericClient>(
             CODEBASE_MEMORY_PERSIST_ANALYSIS_V1_IDENTITY,
             CODEBASE_MEMORY_PERSIST_REFLECTION_V2_IDENTITY,
             CODEBASE_MEMORY_PERSIST_RETRIEVAL_V1_IDENTITY,
+            OPENCLAW_GATEWAY_FINALIZE_TERMINAL_V1_IDENTITY,
+            OPENCLAW_GATEWAY_RECONCILE_AND_CLAIM_V1_IDENTITY,
         ]
         .into_iter()
         .map(str::to_owned)
@@ -1996,6 +2006,8 @@ fn verify_owned_function_boundary<C: GenericClient>(
             CODEBASE_MEMORY_PERSIST_ANALYSIS_V1_IDENTITY,
             CODEBASE_MEMORY_PERSIST_REFLECTION_V2_IDENTITY,
             CODEBASE_MEMORY_PERSIST_RETRIEVAL_V1_IDENTITY,
+            OPENCLAW_GATEWAY_FINALIZE_TERMINAL_V1_IDENTITY,
+            OPENCLAW_GATEWAY_RECONCILE_AND_CLAIM_V1_IDENTITY,
         ]
         .contains(&identity.as_str())
         {
@@ -2159,6 +2171,8 @@ fn verify_owned_function_acl<C: GenericClient>(
             CODEBASE_MEMORY_PERSIST_ANALYSIS_V1_IDENTITY,
             CODEBASE_MEMORY_PERSIST_REFLECTION_V2_IDENTITY,
             CODEBASE_MEMORY_PERSIST_RETRIEVAL_V1_IDENTITY,
+            OPENCLAW_GATEWAY_FINALIZE_TERMINAL_V1_IDENTITY,
+            OPENCLAW_GATEWAY_RECONCILE_AND_CLAIM_V1_IDENTITY,
         ]
         .into_iter()
         .map(str::to_owned)
@@ -2310,7 +2324,7 @@ fn verify_role_and_database_boundary<C: GenericClient>(
         CatalogProfile::PreSchema | CatalogProfile::V1 => 0,
         CatalogProfile::V2 => 3,
         CatalogProfile::V3 => 8,
-        CatalogProfile::V3CodebaseMemoryV2 => 13,
+        CatalogProfile::V3CodebaseMemoryV2 => 15,
     };
     if owner != DatabaseRole::Migrator.as_str()
         || is_template
@@ -3093,18 +3107,18 @@ mod tests {
             CatalogProfile::V3
         );
         assert_eq!(
-            classify_memory_catalog_counts(7, 7, 5, 5).expect("exact Memory v2"),
+            classify_memory_catalog_counts(8, 8, 7, 7).expect("exact Memory v2"),
             CatalogProfile::V3CodebaseMemoryV2
         );
 
         for counts in [
             (1, 1, 0, 0),
-            (6, 6, 3, 3),
-            (6, 6, 2, 2),
-            (6, 7, 3, 3),
-            (6, 6, 3, 4),
-            (7, 7, 3, 3),
-            (6, 6, 4, 4),
+            (7, 7, 6, 6),
+            (7, 7, 5, 5),
+            (7, 8, 6, 6),
+            (7, 7, 6, 7),
+            (8, 8, 6, 6),
+            (7, 7, 7, 7),
         ] {
             assert_eq!(
                 classify_memory_catalog_counts(counts.0, counts.1, counts.2, counts.3)

@@ -7,12 +7,13 @@ use lattice_contracts::{
     CodeSnapshotEvidence, CodexDeliveryEvidence, CodexDeliveryRequest, CodexEvidence,
     CodexRunRequest, Component, DeliveryOutcomeEvidence, DeliveryOutcomeRequest, DeliveryReceipt,
     DeliveryRunRequest, DeliveryStage, DeliveryStatusRequest, DurableIntentEvidence,
-    FixedTestEvidence, GatewayPeerContext, GatewayReply, GatewayRequest, GitCommitEvidence,
-    GraphMemoryPersistenceEvidence, GraphMemoryReceipt, GraphMemoryRunRequest,
-    GraphifyBuildRequest, GraphifyEvidence, GraphifyRawEvidence, HermesEvidence,
-    HermesReflectionCandidate, HermesReflectionReceipt, HermesResearchRequest, MemoryRetrievalPlan,
-    NormalizedGraphAnalysis, PreparedWorkspaceEvidence, RequestId, StorePhysicalHead, StoreScope,
-    StoreTransactionReceipt, StoreTransactionRequest, WorkspaceChangeEvidence,
+    FixedTestEvidence, GatewayActorId, GatewayCommandId, GatewayPeerContext, GatewayReply,
+    GatewayRequest, GitCommitEvidence, GraphMemoryPersistenceEvidence, GraphMemoryReceipt,
+    GraphMemoryRunRequest, GraphifyBuildRequest, GraphifyEvidence, GraphifyRawEvidence,
+    HermesEvidence, HermesReflectionCandidate, HermesReflectionReceipt, HermesResearchRequest,
+    MemoryRetrievalPlan, NormalizedGraphAnalysis, PreparedWorkspaceEvidence, ProjectId, RequestId,
+    StorePhysicalHead, StoreScope, StoreTransactionReceipt, StoreTransactionRequest,
+    WorkspaceChangeEvidence,
 };
 
 /// Result type returned by every LATTICE port.
@@ -288,6 +289,186 @@ impl fmt::Display for GatewayServiceError {
 }
 
 impl Error for GatewayServiceError {}
+
+/// Exact logical-session command scope used by durable `OpenClaw` idempotency.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct OpenClawCommandScope {
+    project: ProjectId,
+    actor: GatewayActorId,
+    session_epoch: u64,
+    command: GatewayCommandId,
+}
+
+impl OpenClawCommandScope {
+    /// Constructs one server-derived scope. All identifiers are already typed;
+    /// the positive logical session epoch is checked again at this boundary.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the zero epoch sentinel.
+    pub fn new(
+        project: ProjectId,
+        actor: GatewayActorId,
+        session_epoch: u64,
+        command: GatewayCommandId,
+    ) -> Result<Self, OpenClawIdempotencyError> {
+        if session_epoch == 0 {
+            return Err(OpenClawIdempotencyError::Malformed);
+        }
+        Ok(Self {
+            project,
+            actor,
+            session_epoch,
+            command,
+        })
+    }
+
+    /// Returns the command's exact project.
+    #[must_use]
+    pub const fn project_id(&self) -> &ProjectId {
+        &self.project
+    }
+
+    /// Returns the server-derived actor identity.
+    #[must_use]
+    pub const fn actor_id(&self) -> &GatewayActorId {
+        &self.actor
+    }
+
+    /// Returns the verified logical `OpenClaw` session epoch.
+    #[must_use]
+    pub const fn session_epoch(&self) -> u64 {
+        self.session_epoch
+    }
+
+    /// Returns the idempotent semantic command identity.
+    #[must_use]
+    pub const fn command_id(&self) -> &GatewayCommandId {
+        &self.command
+    }
+}
+
+/// One typed terminal command record suitable for durable receipt storage.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenClawTerminalCommandRecord {
+    scope: OpenClawCommandScope,
+    request: GatewayRequest,
+    reply: GatewayReply,
+}
+
+impl OpenClawTerminalCommandRecord {
+    /// Constructs one exact terminal record after checking request, reply, and
+    /// logical command-scope binding.
+    ///
+    /// # Errors
+    ///
+    /// Rejects command, project, request-digest, or reply binding drift.
+    pub fn new(
+        scope: OpenClawCommandScope,
+        request: GatewayRequest,
+        reply: GatewayReply,
+    ) -> Result<Self, OpenClawIdempotencyError> {
+        if request.project_id() != scope.project_id()
+            || request.command_id() != scope.command_id()
+            || reply.command_id() != request.command_id()
+            || reply.correlation_id() != request.correlation_id()
+            || reply.action() != request.action()
+            || reply.request_digest() != request.request_digest()
+        {
+            return Err(OpenClawIdempotencyError::Malformed);
+        }
+        Ok(Self {
+            scope,
+            request,
+            reply,
+        })
+    }
+
+    /// Returns the exact project/actor/session/command scope.
+    #[must_use]
+    pub const fn scope(&self) -> &OpenClawCommandScope {
+        &self.scope
+    }
+
+    /// Returns the exact mechanically verified gateway request.
+    #[must_use]
+    pub const fn request(&self) -> &GatewayRequest {
+        &self.request
+    }
+
+    /// Returns the exact reconstructed gateway request digest.
+    #[must_use]
+    pub const fn request_digest(&self) -> &lattice_contracts::ContentDigest {
+        self.request.request_digest()
+    }
+
+    /// Returns the validated terminal gateway reply.
+    #[must_use]
+    pub const fn reply(&self) -> &GatewayReply {
+        &self.reply
+    }
+}
+
+/// Persistence claim exposed by a terminal-idempotency provider.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenClawIdempotencyDurability {
+    /// Process-local checkpoint storage; never restart-safe.
+    ProcessMemory,
+    /// Durable terminal command receipts reconciled across process starts.
+    DurableTerminalReceipts,
+}
+
+/// Typed result of reconciling one command before dispatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpenClawIdempotencyDecision {
+    /// The exact request now owns a bounded pre-dispatch claim.
+    Claimed,
+    /// The exact request is already claimed but has no terminal reply yet.
+    InFlight,
+    /// The exact request already has a terminal reply.
+    Exact(Box<GatewayReply>),
+    /// The command scope exists under a different request digest.
+    CommandSubstitution,
+}
+
+/// Closed idempotency-provider failure without backend details.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenClawIdempotencyError {
+    /// The provider could not be reached.
+    Unavailable,
+    /// The provider's bounded capacity was exhausted.
+    Capacity,
+    /// The provider returned a malformed or contradictory record.
+    Malformed,
+}
+
+/// Typed terminal-command idempotency port implemented by process-memory test
+/// checkpoints or the `PostgreSQL` truth owner.
+pub trait OpenClawIdempotencyStore: Send {
+    /// States whether records survive a process restart.
+    fn durability(&self) -> OpenClawIdempotencyDurability;
+
+    /// Atomically reconciles or claims one command before dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed provider failure without backend detail.
+    fn reconcile_and_claim(
+        &mut self,
+        scope: &OpenClawCommandScope,
+        request: &GatewayRequest,
+    ) -> Result<OpenClawIdempotencyDecision, OpenClawIdempotencyError>;
+
+    /// Finalizes one existing claim with a validated terminal reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed provider failure without backend detail.
+    fn finalize_terminal(
+        &mut self,
+        record: OpenClawTerminalCommandRecord,
+    ) -> Result<(), OpenClawIdempotencyError>;
+}
 
 /// Stable fail-closed Store failure categories.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

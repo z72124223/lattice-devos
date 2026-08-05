@@ -17,15 +17,19 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lattice_contracts::{
-    ContentDigest, GatewayActorId, GatewayClientKind, GatewayCommandId, GatewayDenialCode,
-    GatewayPeerContext, GatewayReply, GatewayReplyBody, GatewayRequest, GatewayRequestBody,
-    GatewayUnknownCode, ProjectId, RuntimeKind, TaskSpecSubmission,
+    ContentDigest, GatewayClientKind, GatewayDenialCode, GatewayPeerContext, GatewayReply,
+    GatewayReplyBody, GatewayRequest, GatewayRequestBody, GatewayUnknownCode, ProjectId,
+    RuntimeKind, TaskSpecSubmission,
 };
 use lattice_gateway_ipc::{
     MAX_FRAME_BYTES, build_reply, build_request, decode_reply, decode_request, encode_reply,
     encode_request, verify_task_spec_document,
 };
 use lattice_ports::{GatewayService, PortErrorKind};
+pub use lattice_ports::{
+    OpenClawCommandScope, OpenClawIdempotencyDecision, OpenClawIdempotencyDurability,
+    OpenClawIdempotencyError, OpenClawIdempotencyStore, OpenClawTerminalCommandRecord,
+};
 use sha2::{Digest, Sha256};
 
 const REQUEST_MAGIC: [u8; 8] = *b"LATGW001";
@@ -52,131 +56,6 @@ pub const MAX_FROZEN_SUBMISSION_BYTES: usize = 4 * MAX_FRAME_BYTES;
 /// Maximum concurrent unauthenticated connection readers.
 pub const MAX_INFLIGHT_CONNECTIONS: usize = 8;
 
-/// Exact command scope used by the durable terminal-idempotency seam.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct OpenClawCommandScope {
-    project: ProjectId,
-    actor: GatewayActorId,
-    command: GatewayCommandId,
-}
-
-impl OpenClawCommandScope {
-    /// Returns the command's exact project.
-    #[must_use]
-    pub const fn project_id(&self) -> &ProjectId {
-        &self.project
-    }
-
-    /// Returns the server-derived actor identity.
-    #[must_use]
-    pub const fn actor_id(&self) -> &GatewayActorId {
-        &self.actor
-    }
-
-    /// Returns the idempotent semantic command identity.
-    #[must_use]
-    pub const fn command_id(&self) -> &GatewayCommandId {
-        &self.command
-    }
-}
-
-/// One typed terminal command record suitable for durable receipt storage.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OpenClawTerminalCommandRecord {
-    scope: OpenClawCommandScope,
-    request_digest: ContentDigest,
-    reply: GatewayReply,
-}
-
-impl OpenClawTerminalCommandRecord {
-    /// Returns the exact project/actor/command scope.
-    #[must_use]
-    pub const fn scope(&self) -> &OpenClawCommandScope {
-        &self.scope
-    }
-
-    /// Returns the exact reconstructed gateway request digest.
-    #[must_use]
-    pub const fn request_digest(&self) -> &ContentDigest {
-        &self.request_digest
-    }
-
-    /// Returns the validated terminal gateway reply.
-    #[must_use]
-    pub const fn reply(&self) -> &GatewayReply {
-        &self.reply
-    }
-}
-
-/// Persistence claim exposed by a terminal-idempotency provider.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OpenClawIdempotencyDurability {
-    /// Process-local checkpoint storage; never restart-safe.
-    ProcessMemory,
-    /// Durable terminal command receipts reconciled across process starts.
-    DurableTerminalReceipts,
-}
-
-/// Typed result of reconciling one command before dispatch.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum OpenClawIdempotencyDecision {
-    /// The exact request now owns a bounded pre-dispatch claim.
-    Claimed,
-    /// The exact request is already claimed but has no terminal reply yet.
-    InFlight,
-    /// The exact request already has a terminal reply.
-    Exact(Box<GatewayReply>),
-    /// The command scope exists under a different request digest.
-    CommandSubstitution,
-}
-
-/// Closed idempotency-provider failure without backend details.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OpenClawIdempotencyError {
-    /// The provider could not be reached.
-    Unavailable,
-    /// The provider's bounded capacity was exhausted.
-    Capacity,
-    /// The provider returned a malformed or contradictory record.
-    Malformed,
-}
-
-/// Typed terminal-command idempotency port. A `PostgreSQL` implementation is an
-/// integration-window responsibility and is not supplied by this transport crate.
-pub trait OpenClawIdempotencyStore: Send {
-    /// States whether records survive a process restart.
-    fn durability(&self) -> OpenClawIdempotencyDurability;
-
-    /// Atomically reconciles or claims one command before dispatch.
-    ///
-    /// A `Claimed` result guarantees that bounded capacity has already been
-    /// reserved before the caller may invoke `GatewayService`. Providers must
-    /// return `InFlight` for an existing non-terminal claim with the same
-    /// digest and must never issue a second claim for that command scope.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed provider failure without backend detail.
-    fn reconcile_and_claim(
-        &mut self,
-        scope: &OpenClawCommandScope,
-        request_digest: &ContentDigest,
-    ) -> Result<OpenClawIdempotencyDecision, OpenClawIdempotencyError>;
-
-    /// Finalizes one existing claim with a validated terminal reply.
-    ///
-    /// Finalization must be idempotent for an identical record. It must fail
-    /// closed rather than creating a terminal record without a matching claim.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed provider failure without backend detail.
-    fn finalize_terminal(
-        &mut self,
-        record: OpenClawTerminalCommandRecord,
-    ) -> Result<(), OpenClawIdempotencyError>;
-}
-
 enum ProcessMemoryOpenClawIdempotencyEntry {
     Claimed(ContentDigest),
     Terminal(Box<OpenClawTerminalCommandRecord>),
@@ -196,8 +75,13 @@ impl OpenClawIdempotencyStore for ProcessMemoryOpenClawIdempotencyStore {
     fn reconcile_and_claim(
         &mut self,
         scope: &OpenClawCommandScope,
-        request_digest: &ContentDigest,
+        request: &GatewayRequest,
     ) -> Result<OpenClawIdempotencyDecision, OpenClawIdempotencyError> {
+        if request.project_id() != scope.project_id() || request.command_id() != scope.command_id()
+        {
+            return Err(OpenClawIdempotencyError::Malformed);
+        }
+        let request_digest = request.request_digest();
         if let Some(entry) = self.records.get(scope) {
             return Ok(match entry {
                 ProcessMemoryOpenClawIdempotencyEntry::Claimed(digest)
@@ -668,15 +552,17 @@ where
                 GatewayTransportErrorKind::CrossProject,
             ));
         }
-        let replay_key = OpenClawCommandScope {
-            project: request.project_id().clone(),
-            actor: self.peer.actor_id().clone(),
-            command: request.command_id().clone(),
-        };
+        let replay_key = OpenClawCommandScope::new(
+            request.project_id().clone(),
+            self.peer.actor_id().clone(),
+            self.peer.session_epoch(),
+            request.command_id().clone(),
+        )
+        .map_err(map_idempotency_error)?;
         self.reconcile_pending()?;
         match self
             .idempotency_store
-            .reconcile_and_claim(&replay_key, request.request_digest())
+            .reconcile_and_claim(&replay_key, &request)
             .map_err(map_idempotency_error)?
         {
             OpenClawIdempotencyDecision::Exact(reply) => {
@@ -907,11 +793,8 @@ where
     ) -> Result<Vec<u8>, GatewayTransportError> {
         let reply = map_service_result(request, result)?;
         let reply_frame = encode_transport_reply(request, &reply, reply_encoding)?;
-        let record = OpenClawTerminalCommandRecord {
-            scope: replay_key,
-            request_digest: request.request_digest().clone(),
-            reply,
-        };
+        let record = OpenClawTerminalCommandRecord::new(replay_key, request.clone(), reply)
+            .map_err(map_idempotency_error)?;
         if self
             .idempotency_store
             .finalize_terminal(record.clone())
@@ -1470,8 +1353,12 @@ mod tests {
     }
 
     fn status_request() -> GatewayRequest {
+        status_request_with_command("command-unit")
+    }
+
+    fn status_request_with_command(command_id: &str) -> GatewayRequest {
         lattice_gateway_ipc::build_request(
-            GatewayCommandId::new("command-unit").expect("command"),
+            GatewayCommandId::new(command_id).expect("command"),
             GatewayCorrelationId::new("correlation-unit").expect("correlation"),
             GatewayRequestBody::Status(GatewayStatusTarget::Project(
                 GatewayProjectStatusTarget::new(
@@ -1528,8 +1415,14 @@ mod tests {
         fn reconcile_and_claim(
             &mut self,
             scope: &OpenClawCommandScope,
-            request_digest: &ContentDigest,
+            request: &GatewayRequest,
         ) -> Result<OpenClawIdempotencyDecision, OpenClawIdempotencyError> {
+            if request.project_id() != scope.project_id()
+                || request.command_id() != scope.command_id()
+            {
+                return Err(OpenClawIdempotencyError::Malformed);
+            }
+            let request_digest = request.request_digest();
             let mut records = self
                 .records
                 .lock()
@@ -1965,16 +1858,18 @@ mod tests {
     fn durable_inflight_claim_after_restart_never_redispatches() {
         let request = status_request();
         let peer = transport_peer();
-        let scope = OpenClawCommandScope {
-            project: request.project_id().clone(),
-            actor: peer.actor_id().clone(),
-            command: request.command_id().clone(),
-        };
+        let scope = OpenClawCommandScope::new(
+            request.project_id().clone(),
+            peer.actor_id().clone(),
+            peer.session_epoch(),
+            request.command_id().clone(),
+        )
+        .expect("scope");
         let store = TestDurableIdempotencyStore::default();
         assert_eq!(
             store
                 .clone()
-                .reconcile_and_claim(&scope, request.request_digest())
+                .reconcile_and_claim(&scope, &request)
                 .expect("persist prior-process claim"),
             OpenClawIdempotencyDecision::Claimed
         );
@@ -2025,18 +1920,20 @@ mod tests {
     fn process_store_capacity_is_reserved_before_service_dispatch() {
         let mut store = ProcessMemoryOpenClawIdempotencyStore::default();
         let project = ProjectId::new("project-a").expect("project");
-        let actor = transport_peer().actor_id().clone();
-        let request_digest = status_request().request_digest().clone();
+        let peer = transport_peer();
+        let actor = peer.actor_id().clone();
         for index in 0..MAX_COMMAND_REPLAY_ENTRIES {
-            let scope = OpenClawCommandScope {
-                project: project.clone(),
-                actor: actor.clone(),
-                command: GatewayCommandId::new(format!("capacity-command-{index}"))
-                    .expect("command"),
-            };
+            let request = status_request_with_command(&format!("capacity-command-{index}"));
+            let scope = OpenClawCommandScope::new(
+                project.clone(),
+                actor.clone(),
+                peer.session_epoch(),
+                request.command_id().clone(),
+            )
+            .expect("scope");
             assert_eq!(
                 store
-                    .reconcile_and_claim(&scope, &request_digest)
+                    .reconcile_and_claim(&scope, &request)
                     .expect("bounded claim"),
                 OpenClawIdempotencyDecision::Claimed
             );

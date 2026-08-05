@@ -326,7 +326,7 @@ function Invoke-LiveTest {
                 $suiteOutput | ForEach-Object {
                     foreach ($match in [regex]::Matches(
                         [string]$_,
-                        '(?<![A-Z0-9_])(?:TASK019|STORE|POSTGRES_TASK_LEDGER|MEMORY)_[A-Z0-9_]{1,63}(?![A-Z0-9_])'
+                        '(?<![A-Z0-9_])(?:TASK019|STORE|POSTGRES_TASK_LEDGER|MEMORY|OPENCLAW)_[A-Z0-9_]{1,63}(?![A-Z0-9_])'
                     )) {
                         $match.Value
                     }

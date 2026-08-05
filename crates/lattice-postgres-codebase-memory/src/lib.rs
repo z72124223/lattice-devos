@@ -21,11 +21,11 @@ pub use setup::{
 /// Repository-relative location of the sole embedded extension profile.
 pub const CODEBASE_MEMORY_EXTENSION_PATH: &str = "db/extensions/codebase-memory/v2.sql";
 const EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/codebase-memory/v2.sql");
-const EXPECTED_EXTENSION_SQL_BYTES: usize = 62_314;
+const EXPECTED_EXTENSION_SQL_BYTES: usize = 76_866;
 const EXPECTED_EXTENSION_SQL_SHA256: &str =
-    "85ee6bba81bf4020014eccd7e6833e8fa8b788a15bf683977a17d10863434adc";
+    "9db54342b88f554ca76054c7a33ae72f04b412d2dfe21fae6eb4d8faf3e854e2";
 const EXPECTED_EXTENSION_MANIFEST_SHA256: &str =
-    "058c7357e912041dedc54fb696a0b65c543629334efa3b78d652d7a63d0528d3";
+    "0aedbd7d9ef7ca07fc2910d0da34c163cc83e3dd56f9b28292ae1f4f0c3c4d7e";
 const EXTENSION_MANIFEST_DOMAIN: &str = "lattice.postgres-codebase-memory.extension-manifest.v1";
 
 /// Exact embedded extension-manifest verification failure.

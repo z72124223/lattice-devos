@@ -6,12 +6,16 @@ use lattice_contracts::{
     HermesReflectionReceipt, HermesReflectionStatus, MemoryRetrievalDisposition,
     MemoryRetrievalEvidence, MemoryRetrievalPlan, NormalizedGraphAnalysis, RankedMemoryRecord,
 };
+use lattice_gateway_ipc::{decode_reply, encode_reply};
 use lattice_ports::{
     CodebaseMemoryPort, GraphMemoryFailureCertainty, GraphMemoryPortError, GraphMemoryPortResult,
-    GraphMemoryStage, HermesReflectionMemoryPort, PortErrorKind,
+    GraphMemoryStage, HermesReflectionMemoryPort, OpenClawCommandScope,
+    OpenClawIdempotencyDecision, OpenClawIdempotencyDurability, OpenClawIdempotencyError,
+    OpenClawIdempotencyStore, OpenClawTerminalCommandRecord, PortErrorKind,
 };
 use postgres::error::SqlState;
 use postgres::{Client, GenericClient, IsolationLevel, Row};
+use sha2::{Digest, Sha256};
 
 use crate::{ExtensionTarget, verify_embedded_extension_manifest};
 
@@ -78,6 +82,202 @@ impl PostgresCodebaseMemory {
             ));
         }
         Ok(())
+    }
+}
+
+impl OpenClawIdempotencyStore for PostgresCodebaseMemory {
+    fn durability(&self) -> OpenClawIdempotencyDurability {
+        OpenClawIdempotencyDurability::DurableTerminalReceipts
+    }
+
+    fn reconcile_and_claim(
+        &mut self,
+        scope: &OpenClawCommandScope,
+        request: &lattice_contracts::GatewayRequest,
+    ) -> Result<OpenClawIdempotencyDecision, OpenClawIdempotencyError> {
+        if self.identity.database_identity_digest()
+            != self.target.expected_database_identity_digest()
+            || request.project_id() != scope.project_id()
+            || request.command_id() != scope.command_id()
+        {
+            return Err(OpenClawIdempotencyError::Malformed);
+        }
+        let identity = identity_bytes(&self.identity, GraphMemoryStage::Persistence)
+            .map_err(|_| OpenClawIdempotencyError::Malformed)?;
+        let request_digest = openclaw_digest_bytes(request.request_digest())?;
+        let session_epoch = i64::try_from(scope.session_epoch())
+            .map_err(|_| OpenClawIdempotencyError::Malformed)?;
+        let mut transaction = self
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::Serializable)
+            .start()
+            .map_err(|error| openclaw_database_error(&error))?;
+        harden_openclaw_write(&mut transaction)?;
+        let row = transaction
+            .query_one(
+                "SELECT claim_decision, terminal_reply_frame, terminal_reply_digest, \
+                        terminal_frame_digest \
+                   FROM memory.openclaw_gateway_reconcile_and_claim_v1(\
+                       $1,$2,$3,$4,$5,$6,$7,$8,$9\
+                   )",
+                &[
+                    &identity.database,
+                    &identity.global_manifest,
+                    &identity.extension_sql,
+                    &identity.extension_manifest,
+                    &scope.project_id().as_str(),
+                    &scope.actor_id().as_str(),
+                    &session_epoch,
+                    &scope.command_id().as_str(),
+                    &request_digest,
+                ],
+            )
+            .map_err(|error| openclaw_database_error(&error))?;
+        let decision = decode_openclaw_claim_row(&row, request)?;
+        transaction
+            .commit()
+            .map_err(|_| OpenClawIdempotencyError::Unavailable)?;
+        Ok(decision)
+    }
+
+    fn finalize_terminal(
+        &mut self,
+        record: OpenClawTerminalCommandRecord,
+    ) -> Result<(), OpenClawIdempotencyError> {
+        if self.identity.database_identity_digest()
+            != self.target.expected_database_identity_digest()
+        {
+            return Err(OpenClawIdempotencyError::Malformed);
+        }
+        let identity = identity_bytes(&self.identity, GraphMemoryStage::Persistence)
+            .map_err(|_| OpenClawIdempotencyError::Malformed)?;
+        let request_digest = openclaw_digest_bytes(record.request_digest())?;
+        let reply_digest = openclaw_digest_bytes(record.reply().reply_digest())?;
+        let reply_frame =
+            encode_reply(record.reply()).map_err(|_| OpenClawIdempotencyError::Malformed)?;
+        let terminal_frame_digest = Sha256::digest(&reply_frame).to_vec();
+        let session_epoch = i64::try_from(record.scope().session_epoch())
+            .map_err(|_| OpenClawIdempotencyError::Malformed)?;
+        let mut transaction = self
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::Serializable)
+            .start()
+            .map_err(|error| openclaw_database_error(&error))?;
+        harden_openclaw_write(&mut transaction)?;
+        let row = transaction
+            .query_one(
+                "SELECT memory.openclaw_gateway_finalize_terminal_v1(\
+                    $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12\
+                )",
+                &[
+                    &identity.database,
+                    &identity.global_manifest,
+                    &identity.extension_sql,
+                    &identity.extension_manifest,
+                    &record.scope().project_id().as_str(),
+                    &record.scope().actor_id().as_str(),
+                    &session_epoch,
+                    &record.scope().command_id().as_str(),
+                    &request_digest,
+                    &reply_frame,
+                    &reply_digest,
+                    &terminal_frame_digest,
+                ],
+            )
+            .map_err(|error| openclaw_database_error(&error))?;
+        let status: String = row.get(0);
+        if !matches!(status.as_str(), "FINALIZED" | "REPLAYED") {
+            return Err(OpenClawIdempotencyError::Malformed);
+        }
+        transaction
+            .commit()
+            .map_err(|_| OpenClawIdempotencyError::Unavailable)
+    }
+}
+
+fn decode_openclaw_claim_row(
+    row: &Row,
+    request: &lattice_contracts::GatewayRequest,
+) -> Result<OpenClawIdempotencyDecision, OpenClawIdempotencyError> {
+    let decision: String = row
+        .try_get(0)
+        .map_err(|_| OpenClawIdempotencyError::Malformed)?;
+    let reply_frame: Option<Vec<u8>> = row
+        .try_get(1)
+        .map_err(|_| OpenClawIdempotencyError::Malformed)?;
+    let reply_digest: Option<Vec<u8>> = row
+        .try_get(2)
+        .map_err(|_| OpenClawIdempotencyError::Malformed)?;
+    let frame_digest: Option<Vec<u8>> = row
+        .try_get(3)
+        .map_err(|_| OpenClawIdempotencyError::Malformed)?;
+    match decision.as_str() {
+        "CLAIMED" if reply_frame.is_none() && reply_digest.is_none() && frame_digest.is_none() => {
+            Ok(OpenClawIdempotencyDecision::Claimed)
+        }
+        "IN_FLIGHT"
+            if reply_frame.is_none() && reply_digest.is_none() && frame_digest.is_none() =>
+        {
+            Ok(OpenClawIdempotencyDecision::InFlight)
+        }
+        "SUBSTITUTION"
+            if reply_frame.is_none() && reply_digest.is_none() && frame_digest.is_none() =>
+        {
+            Ok(OpenClawIdempotencyDecision::CommandSubstitution)
+        }
+        "EXACT" => {
+            let reply_frame = reply_frame.ok_or(OpenClawIdempotencyError::Malformed)?;
+            let reply_digest = reply_digest.ok_or(OpenClawIdempotencyError::Malformed)?;
+            let frame_digest = frame_digest.ok_or(OpenClawIdempotencyError::Malformed)?;
+            if reply_frame.is_empty()
+                || reply_frame.len() > lattice_gateway_ipc::MAX_FRAME_BYTES
+                || frame_digest.as_slice() != Sha256::digest(&reply_frame).as_slice()
+            {
+                return Err(OpenClawIdempotencyError::Malformed);
+            }
+            let reply = decode_reply(request, &reply_frame)
+                .map_err(|_| OpenClawIdempotencyError::Malformed)?;
+            if reply_digest != openclaw_digest_bytes(reply.reply_digest())?
+                || encode_reply(&reply).map_err(|_| OpenClawIdempotencyError::Malformed)?
+                    != reply_frame
+            {
+                return Err(OpenClawIdempotencyError::Malformed);
+            }
+            Ok(OpenClawIdempotencyDecision::Exact(Box::new(reply)))
+        }
+        _ => Err(OpenClawIdempotencyError::Malformed),
+    }
+}
+
+fn harden_openclaw_write(client: &mut impl GenericClient) -> Result<(), OpenClawIdempotencyError> {
+    client
+        .batch_execute(
+            "SET LOCAL search_path = pg_catalog; \
+             SET LOCAL row_security = on; \
+             SET LOCAL lock_timeout = '5s'; \
+             SET LOCAL statement_timeout = '30s'; \
+             SET LOCAL idle_in_transaction_session_timeout = '30s'; \
+             SET LOCAL synchronous_commit = on;",
+        )
+        .map_err(|error| openclaw_database_error(&error))
+}
+
+fn openclaw_digest_bytes(digest: &ContentDigest) -> Result<Vec<u8>, OpenClawIdempotencyError> {
+    let bytes = hex_bytes(digest.as_str()).ok_or(OpenClawIdempotencyError::Malformed)?;
+    if bytes.iter().all(|byte| *byte == 0) {
+        return Err(OpenClawIdempotencyError::Malformed);
+    }
+    Ok(bytes)
+}
+
+fn openclaw_database_error(error: &postgres::Error) -> OpenClawIdempotencyError {
+    match error.code().map(SqlState::code) {
+        Some("LCM01" | "LCM02" | "LCM03" | "LCM04" | "LCM05" | "42501") => {
+            OpenClawIdempotencyError::Malformed
+        }
+        _ => OpenClawIdempotencyError::Unavailable,
     }
 }
 

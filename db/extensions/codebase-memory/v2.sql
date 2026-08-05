@@ -328,6 +328,50 @@ CREATE TABLE memory.codebase_memory_reflections (
     )
 );
 
+CREATE TABLE memory.openclaw_gateway_commands (
+    actor_id varchar(128) NOT NULL,
+    command_id varchar(128) NOT NULL,
+    project_id varchar(64) NOT NULL,
+    logical_session_epoch bigint NOT NULL,
+    request_digest bytea NOT NULL,
+    command_state varchar(16) NOT NULL,
+    terminal_reply_frame bytea,
+    terminal_reply_digest bytea,
+    terminal_frame_digest bytea,
+    claimed_at timestamp with time zone NOT NULL DEFAULT pg_catalog.clock_timestamp(),
+    finalized_at timestamp with time zone,
+    PRIMARY KEY (actor_id, command_id),
+    CONSTRAINT openclaw_gateway_commands_identifiers CHECK (
+        actor_id ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$'
+        AND command_id ~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$'
+        AND project_id ~ '^[a-z0-9][a-z0-9._-]{1,63}$'
+    ),
+    CONSTRAINT openclaw_gateway_commands_epoch CHECK (
+        logical_session_epoch BETWEEN 1 AND 9223372036854775807
+    ),
+    CONSTRAINT openclaw_gateway_commands_request_digest CHECK (
+        pg_catalog.octet_length(request_digest) = 32
+        AND request_digest <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+    ),
+    CONSTRAINT openclaw_gateway_commands_terminal_shape CHECK (
+        (
+            command_state = 'CLAIMED'
+            AND terminal_reply_frame IS NULL
+            AND terminal_reply_digest IS NULL
+            AND terminal_frame_digest IS NULL
+            AND finalized_at IS NULL
+        ) OR (
+            command_state = 'TERMINAL'
+            AND pg_catalog.octet_length(terminal_reply_frame) BETWEEN 1 AND 1048576
+            AND pg_catalog.octet_length(terminal_reply_digest) = 32
+            AND terminal_reply_digest <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+            AND pg_catalog.octet_length(terminal_frame_digest) = 32
+            AND terminal_frame_digest <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+            AND finalized_at IS NOT NULL
+        )
+    )
+);
+
 CREATE FUNCTION memory.codebase_memory_persist_analysis_v1(
     p_database_identity_digest bytea,
     p_global_manifest_digest bytea,
@@ -1292,6 +1336,278 @@ BEGIN
 END;
 $lattice_codebase_memory_load_reflection_v2$;
 
+CREATE FUNCTION memory.openclaw_gateway_reconcile_and_claim_v1(
+    p_database_identity_digest bytea,
+    p_global_manifest_digest bytea,
+    p_extension_sql_digest bytea,
+    p_extension_manifest_digest bytea,
+    p_project_id text,
+    p_actor_id text,
+    p_logical_session_epoch bigint,
+    p_command_id text,
+    p_request_digest bytea
+)
+RETURNS TABLE (
+    claim_decision text,
+    terminal_reply_frame bytea,
+    terminal_reply_digest bytea,
+    terminal_frame_digest bytea
+)
+LANGUAGE plpgsql
+VOLATILE
+PARALLEL UNSAFE
+SECURITY DEFINER
+SET search_path = pg_catalog
+SET row_security = on
+SET lock_timeout = '5s'
+SET statement_timeout = '30s'
+AS $lattice_openclaw_gateway_reconcile_and_claim_v1$
+DECLARE
+    v_identity_count bigint;
+    v_command memory.openclaw_gateway_commands%ROWTYPE;
+BEGIN
+    IF session_user <> 'lattice_runtime_login'
+       OR pg_catalog.current_setting('role') <> 'lattice_runtime'
+       OR pg_catalog.current_setting('transaction_isolation') <> 'serializable'
+       OR pg_catalog.current_setting('transaction_read_only')::boolean
+       OR pg_catalog.current_setting('synchronous_commit') <> 'on'
+       OR p_project_id IS NULL
+       OR p_project_id !~ '^[a-z0-9][a-z0-9._-]{1,63}$'
+       OR p_actor_id IS NULL
+       OR p_actor_id !~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$'
+       OR p_logical_session_epoch IS NULL
+       OR p_logical_session_epoch < 1
+       OR p_command_id IS NULL
+       OR p_command_id !~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$'
+       OR p_request_digest IS NULL
+       OR pg_catalog.octet_length(p_request_digest) <> 32
+       OR p_request_digest = pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+    THEN
+        RAISE EXCEPTION USING ERRCODE = 'LCM03', MESSAGE = 'invalid OpenClaw claim';
+    END IF;
+
+    SELECT pg_catalog.count(*) INTO v_identity_count
+      FROM ONLY memory.codebase_memory_extension_identity AS i
+      JOIN ONLY memory.codebase_memory_extension_ledger AS l USING (singleton)
+      CROSS JOIN ONLY control.database_identity AS d
+      CROSS JOIN ONLY control.schema_compatibility AS c
+     WHERE i.singleton AND l.ledger_ordinal = 1
+       AND i.database_uuid = d.database_uuid
+       AND i.extension_schema_version = 2
+       AND i.extension_path = 'db/extensions/codebase-memory/v2.sql'
+       AND i.global_schema_version = c.current_schema_version
+       AND c.current_schema_version = 3
+       AND pg_catalog.decode(pg_catalog.btrim(i.database_identity_sha256), 'hex') = p_database_identity_digest
+       AND pg_catalog.decode(pg_catalog.btrim(i.global_manifest_sha256), 'hex') = p_global_manifest_digest
+       AND pg_catalog.decode(pg_catalog.btrim(i.extension_sql_sha256), 'hex') = p_extension_sql_digest
+       AND pg_catalog.decode(pg_catalog.btrim(i.extension_manifest_sha256), 'hex') = p_extension_manifest_digest
+       AND pg_catalog.btrim(i.global_manifest_sha256) = pg_catalog.btrim(c.manifest_sha256)
+       AND l.extension_id = i.extension_id
+       AND l.extension_schema_version = i.extension_schema_version
+       AND l.extension_sql_sha256 = i.extension_sql_sha256
+       AND l.extension_manifest_sha256 = i.extension_manifest_sha256
+       AND l.database_uuid = i.database_uuid
+       AND l.database_identity_sha256 = i.database_identity_sha256
+       AND l.global_schema_version = i.global_schema_version
+       AND l.global_manifest_sha256 = i.global_manifest_sha256
+       AND l.event_kind = 'INSTALLED';
+    IF v_identity_count IS DISTINCT FROM 1 THEN
+        RAISE EXCEPTION USING ERRCODE = 'LCM02', MESSAGE = 'memory extension identity mismatch';
+    END IF;
+
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+            'lattice.openclaw.command.v1:' ||
+            pg_catalog.length(p_actor_id)::text || ':' || p_actor_id || ':' || p_command_id,
+            0
+        )
+    );
+    SELECT c.* INTO v_command
+      FROM ONLY memory.openclaw_gateway_commands AS c
+     WHERE c.actor_id = p_actor_id
+       AND c.command_id = p_command_id
+     FOR UPDATE OF c;
+    IF FOUND THEN
+        IF v_command.project_id <> p_project_id
+           OR v_command.logical_session_epoch <> p_logical_session_epoch
+           OR v_command.request_digest <> p_request_digest
+        THEN
+            RETURN QUERY SELECT 'SUBSTITUTION'::text, NULL::bytea, NULL::bytea, NULL::bytea;
+            RETURN;
+        END IF;
+        IF v_command.command_state = 'CLAIMED' THEN
+            RETURN QUERY SELECT 'IN_FLIGHT'::text, NULL::bytea, NULL::bytea, NULL::bytea;
+            RETURN;
+        END IF;
+        IF v_command.command_state = 'TERMINAL'
+           AND v_command.terminal_reply_frame IS NOT NULL
+           AND v_command.terminal_reply_digest IS NOT NULL
+           AND v_command.terminal_frame_digest IS NOT NULL
+        THEN
+            RETURN QUERY SELECT
+                'EXACT'::text,
+                v_command.terminal_reply_frame,
+                v_command.terminal_reply_digest,
+                v_command.terminal_frame_digest;
+            RETURN;
+        END IF;
+        RAISE EXCEPTION USING ERRCODE = 'LCM05', MESSAGE = 'OpenClaw command row corrupt';
+    END IF;
+
+    INSERT INTO memory.openclaw_gateway_commands (
+        actor_id,
+        command_id,
+        project_id,
+        logical_session_epoch,
+        request_digest,
+        command_state
+    ) VALUES (
+        p_actor_id,
+        p_command_id,
+        p_project_id,
+        p_logical_session_epoch,
+        p_request_digest,
+        'CLAIMED'
+    );
+    RETURN QUERY SELECT 'CLAIMED'::text, NULL::bytea, NULL::bytea, NULL::bytea;
+END;
+$lattice_openclaw_gateway_reconcile_and_claim_v1$;
+
+CREATE FUNCTION memory.openclaw_gateway_finalize_terminal_v1(
+    p_database_identity_digest bytea,
+    p_global_manifest_digest bytea,
+    p_extension_sql_digest bytea,
+    p_extension_manifest_digest bytea,
+    p_project_id text,
+    p_actor_id text,
+    p_logical_session_epoch bigint,
+    p_command_id text,
+    p_request_digest bytea,
+    p_terminal_reply_frame bytea,
+    p_terminal_reply_digest bytea,
+    p_terminal_frame_digest bytea
+)
+RETURNS text
+LANGUAGE plpgsql
+VOLATILE
+PARALLEL UNSAFE
+SECURITY DEFINER
+SET search_path = pg_catalog
+SET row_security = on
+SET lock_timeout = '5s'
+SET statement_timeout = '30s'
+AS $lattice_openclaw_gateway_finalize_terminal_v1$
+DECLARE
+    v_identity_count bigint;
+    v_command memory.openclaw_gateway_commands%ROWTYPE;
+BEGIN
+    IF session_user <> 'lattice_runtime_login'
+       OR pg_catalog.current_setting('role') <> 'lattice_runtime'
+       OR pg_catalog.current_setting('transaction_isolation') <> 'serializable'
+       OR pg_catalog.current_setting('transaction_read_only')::boolean
+       OR pg_catalog.current_setting('synchronous_commit') <> 'on'
+       OR p_project_id IS NULL
+       OR p_project_id !~ '^[a-z0-9][a-z0-9._-]{1,63}$'
+       OR p_actor_id IS NULL
+       OR p_actor_id !~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$'
+       OR p_logical_session_epoch IS NULL
+       OR p_logical_session_epoch < 1
+       OR p_command_id IS NULL
+       OR p_command_id !~ '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$'
+       OR p_request_digest IS NULL
+       OR pg_catalog.octet_length(p_request_digest) <> 32
+       OR p_request_digest = pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+       OR p_terminal_reply_frame IS NULL
+       OR pg_catalog.octet_length(p_terminal_reply_frame) NOT BETWEEN 1 AND 1048576
+       OR p_terminal_reply_digest IS NULL
+       OR pg_catalog.octet_length(p_terminal_reply_digest) <> 32
+       OR p_terminal_reply_digest = pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+       OR p_terminal_frame_digest IS NULL
+       OR pg_catalog.octet_length(p_terminal_frame_digest) <> 32
+       OR p_terminal_frame_digest = pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+       OR pg_catalog.sha256(p_terminal_reply_frame) <> p_terminal_frame_digest
+    THEN
+        RAISE EXCEPTION USING ERRCODE = 'LCM03', MESSAGE = 'invalid OpenClaw terminal receipt';
+    END IF;
+
+    SELECT pg_catalog.count(*) INTO v_identity_count
+      FROM ONLY memory.codebase_memory_extension_identity AS i
+      JOIN ONLY memory.codebase_memory_extension_ledger AS l USING (singleton)
+      CROSS JOIN ONLY control.database_identity AS d
+      CROSS JOIN ONLY control.schema_compatibility AS c
+     WHERE i.singleton AND l.ledger_ordinal = 1
+       AND i.database_uuid = d.database_uuid
+       AND i.extension_schema_version = 2
+       AND i.extension_path = 'db/extensions/codebase-memory/v2.sql'
+       AND i.global_schema_version = c.current_schema_version
+       AND c.current_schema_version = 3
+       AND pg_catalog.decode(pg_catalog.btrim(i.database_identity_sha256), 'hex') = p_database_identity_digest
+       AND pg_catalog.decode(pg_catalog.btrim(i.global_manifest_sha256), 'hex') = p_global_manifest_digest
+       AND pg_catalog.decode(pg_catalog.btrim(i.extension_sql_sha256), 'hex') = p_extension_sql_digest
+       AND pg_catalog.decode(pg_catalog.btrim(i.extension_manifest_sha256), 'hex') = p_extension_manifest_digest
+       AND pg_catalog.btrim(i.global_manifest_sha256) = pg_catalog.btrim(c.manifest_sha256)
+       AND l.extension_id = i.extension_id
+       AND l.extension_schema_version = i.extension_schema_version
+       AND l.extension_sql_sha256 = i.extension_sql_sha256
+       AND l.extension_manifest_sha256 = i.extension_manifest_sha256
+       AND l.database_uuid = i.database_uuid
+       AND l.database_identity_sha256 = i.database_identity_sha256
+       AND l.global_schema_version = i.global_schema_version
+       AND l.global_manifest_sha256 = i.global_manifest_sha256
+       AND l.event_kind = 'INSTALLED';
+    IF v_identity_count IS DISTINCT FROM 1 THEN
+        RAISE EXCEPTION USING ERRCODE = 'LCM02', MESSAGE = 'memory extension identity mismatch';
+    END IF;
+
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+            'lattice.openclaw.command.v1:' ||
+            pg_catalog.length(p_actor_id)::text || ':' || p_actor_id || ':' || p_command_id,
+            0
+        )
+    );
+    SELECT c.* INTO v_command
+      FROM ONLY memory.openclaw_gateway_commands AS c
+     WHERE c.actor_id = p_actor_id
+       AND c.command_id = p_command_id
+     FOR UPDATE OF c;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = 'LCM03', MESSAGE = 'OpenClaw claim unavailable';
+    END IF;
+    IF v_command.project_id <> p_project_id
+       OR v_command.logical_session_epoch <> p_logical_session_epoch
+       OR v_command.request_digest <> p_request_digest
+    THEN
+        RAISE EXCEPTION USING ERRCODE = 'LCM04', MESSAGE = 'OpenClaw claim substitution rejected';
+    END IF;
+    IF v_command.command_state = 'TERMINAL' THEN
+        IF v_command.terminal_reply_frame = p_terminal_reply_frame
+           AND v_command.terminal_reply_digest = p_terminal_reply_digest
+           AND v_command.terminal_frame_digest = p_terminal_frame_digest
+        THEN
+            RETURN 'REPLAYED';
+        END IF;
+        RAISE EXCEPTION USING ERRCODE = 'LCM04', MESSAGE = 'OpenClaw terminal substitution rejected';
+    END IF;
+    IF v_command.command_state <> 'CLAIMED' THEN
+        RAISE EXCEPTION USING ERRCODE = 'LCM05', MESSAGE = 'OpenClaw command row corrupt';
+    END IF;
+
+    UPDATE ONLY memory.openclaw_gateway_commands
+       SET command_state = 'TERMINAL',
+           terminal_reply_frame = p_terminal_reply_frame,
+           terminal_reply_digest = p_terminal_reply_digest,
+           terminal_frame_digest = p_terminal_frame_digest,
+           finalized_at = pg_catalog.clock_timestamp()
+     WHERE actor_id = p_actor_id
+       AND command_id = p_command_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = 'LCM05', MESSAGE = 'OpenClaw finalization lost claim';
+    END IF;
+    RETURN 'FINALIZED';
+END;
+$lattice_openclaw_gateway_finalize_terminal_v1$;
+
 REVOKE ALL ON ALL TABLES IN SCHEMA memory FROM
     PUBLIC, lattice_runtime, lattice_guardian, lattice_readonly,
     lattice_migrator_login, lattice_runtime_login,
@@ -1326,6 +1642,12 @@ GRANT EXECUTE ON FUNCTION memory.codebase_memory_load_reflection_v2(
     bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea,
     text, text, bytea, bytea, smallint
 ) TO lattice_runtime;
+GRANT EXECUTE ON FUNCTION memory.openclaw_gateway_reconcile_and_claim_v1(
+    bytea, bytea, bytea, bytea, text, text, bigint, text, bytea
+) TO lattice_runtime;
+GRANT EXECUTE ON FUNCTION memory.openclaw_gateway_finalize_terminal_v1(
+    bytea, bytea, bytea, bytea, text, text, bigint, text, bytea, bytea, bytea, bytea
+) TO lattice_runtime;
 
 COMMENT ON TABLE memory.codebase_memory_extension_identity IS
     'LATTICE_CODEBASE_MEMORY_EXTENSION_IDENTITY_V2';
@@ -1341,6 +1663,8 @@ COMMENT ON TABLE memory.codebase_memory_receipts IS
     'LATTICE_CODEBASE_MEMORY_RECEIPTS_V1';
 COMMENT ON TABLE memory.codebase_memory_reflections IS
     'LATTICE_CODEBASE_MEMORY_REFLECTIONS_V2';
+COMMENT ON TABLE memory.openclaw_gateway_commands IS
+    'LATTICE_OPENCLAW_GATEWAY_COMMANDS_V1';
 COMMENT ON FUNCTION memory.codebase_memory_persist_analysis_v1(
     bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea,
     text, text, bytea, bytea, smallint, text, bytea, bytea, bytea, bytea,
@@ -1364,3 +1688,9 @@ COMMENT ON FUNCTION memory.codebase_memory_load_reflection_v2(
     bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea,
     text, text, bytea, bytea, smallint
 ) IS 'LATTICE_CODEBASE_MEMORY_LOAD_REFLECTION_V2';
+COMMENT ON FUNCTION memory.openclaw_gateway_reconcile_and_claim_v1(
+    bytea, bytea, bytea, bytea, text, text, bigint, text, bytea
+) IS 'LATTICE_OPENCLAW_GATEWAY_RECONCILE_AND_CLAIM_V1';
+COMMENT ON FUNCTION memory.openclaw_gateway_finalize_terminal_v1(
+    bytea, bytea, bytea, bytea, text, text, bigint, text, bytea, bytea, bytea, bytea
+) IS 'LATTICE_OPENCLAW_GATEWAY_FINALIZE_TERMINAL_V1';

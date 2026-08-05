@@ -9,6 +9,7 @@ rust-version.workspace = true
 lattice-cjson = { path = "../lattice-cjson" }
 lattice-codebase-memory = { path = "../lattice-codebase-memory" }
 lattice-contracts = { path = "../lattice-contracts" }
+lattice-gateway-ipc = { path = "../lattice-gateway-ipc" }
 lattice-ports = { path = "../lattice-ports" }
 postgres = { version = "=0.19.14", default-features = false }
 sha2 = "=0.11.0"
