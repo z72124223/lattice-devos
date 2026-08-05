@@ -316,6 +316,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-openclaw-adapter"
+version = "0.1.0"
+dependencies = [
+ "lattice-contracts",
+ "lattice-gateway-ipc",
+ "lattice-ports",
+ "sha2",
+]
+
+[[package]]
 name = "lattice-orchestrator"
 version = "0.1.0"
 dependencies = [

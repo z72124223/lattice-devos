@@ -6758,12 +6758,14 @@ impl GatewayActorKind {
     }
 }
 
-/// Server-derived fake peer context kept outside untrusted gateway bytes.
+/// Server-derived peer context kept outside untrusted gateway bytes.
 ///
-/// This value is deliberately fake-only in TASK-017. It is representation of
-/// a test boundary, not proof of operating-system authentication.
+/// Construction distinguishes visibly fake contract tests from a live,
+/// authenticated `OpenClaw` transport. The marker does not itself grant task,
+/// approval, database, or protected-release authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GatewayPeerContext {
+    runtime: RuntimeKind,
     client_kind: GatewayClientKind,
     gateway_instance_id: GatewayInstanceId,
     adapter_id: GatewayAdapterId,
@@ -6788,6 +6790,82 @@ impl GatewayPeerContext {
     /// signed-BIGINT-incompatible epoch, zero digests, or receipt/head drift.
     #[allow(clippy::too_many_arguments)]
     pub fn new_fake(
+        client_kind: GatewayClientKind,
+        gateway_instance_id: GatewayInstanceId,
+        adapter_id: GatewayAdapterId,
+        adapter_version: impl Into<String>,
+        adapter_binary_digest: ContentDigest,
+        schema_digest: ContentDigest,
+        actor_id: GatewayActorId,
+        actor_kind: GatewayActorKind,
+        channel_id: GatewayChannelId,
+        session_id: GatewaySessionId,
+        session_epoch: u64,
+        session_receipt_digest: ContentDigest,
+        current_session_head_digest: ContentDigest,
+    ) -> Result<Self, ContractError> {
+        Self::new(
+            RuntimeKind::Fake,
+            client_kind,
+            gateway_instance_id,
+            adapter_id,
+            adapter_version,
+            adapter_binary_digest,
+            schema_digest,
+            actor_id,
+            actor_kind,
+            channel_id,
+            session_id,
+            session_epoch,
+            session_receipt_digest,
+            current_session_head_digest,
+        )
+    }
+
+    /// Constructs one live `OpenClaw` peer after transport authentication.
+    ///
+    /// The caller must derive these values from process-owned configuration and
+    /// the authenticated local session, never from request bytes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid version text, a zero or signed-BIGINT-incompatible
+    /// epoch, zero digests, or receipt/head drift.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_authenticated_openclaw(
+        gateway_instance_id: GatewayInstanceId,
+        adapter_id: GatewayAdapterId,
+        adapter_version: impl Into<String>,
+        adapter_binary_digest: ContentDigest,
+        schema_digest: ContentDigest,
+        actor_id: GatewayActorId,
+        channel_id: GatewayChannelId,
+        session_id: GatewaySessionId,
+        session_epoch: u64,
+        session_receipt_digest: ContentDigest,
+        current_session_head_digest: ContentDigest,
+    ) -> Result<Self, ContractError> {
+        Self::new(
+            RuntimeKind::Live,
+            GatewayClientKind::OpenClaw,
+            gateway_instance_id,
+            adapter_id,
+            adapter_version,
+            adapter_binary_digest,
+            schema_digest,
+            actor_id,
+            GatewayActorKind::ResponsibleUser,
+            channel_id,
+            session_id,
+            session_epoch,
+            session_receipt_digest,
+            current_session_head_digest,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        runtime: RuntimeKind,
         client_kind: GatewayClientKind,
         gateway_instance_id: GatewayInstanceId,
         adapter_id: GatewayAdapterId,
@@ -6838,6 +6916,7 @@ impl GatewayPeerContext {
             });
         }
         Ok(Self {
+            runtime,
             client_kind,
             gateway_instance_id,
             adapter_id,
@@ -6856,7 +6935,7 @@ impl GatewayPeerContext {
 
     #[must_use]
     pub const fn runtime(&self) -> RuntimeKind {
-        RuntimeKind::Fake
+        self.runtime
     }
     #[must_use]
     pub const fn client_kind(&self) -> GatewayClientKind {

@@ -1,0 +1,15 @@
+[package]
+name = "lattice-openclaw-adapter"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lattice-contracts = { path = "../lattice-contracts" }
+lattice-gateway-ipc = { path = "../lattice-gateway-ipc" }
+lattice-ports = { path = "../lattice-ports" }
+sha2 = "=0.11.0"
+
+[lints]
+workspace = true
