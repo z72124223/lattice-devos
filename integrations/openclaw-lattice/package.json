@@ -1,0 +1,56 @@
+{
+  "name": "@lattice-devos/openclaw-lattice",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Authenticated loopback-only OpenClaw entry into the LATTICE Rust gateway.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "files": [
+    "dist/",
+    "scripts/",
+    "src/",
+    "openclaw.plugin.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "eslint \"src/**/*.ts\" \"tests/**/*.ts\" --max-warnings=0",
+    "official:one-shot": "npm run build && node scripts/official-one-shot.mjs",
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify": "npm run typecheck && npm run lint && npm test && npm run build"
+  },
+  "peerDependencies": {
+    "openclaw": "2026.7.1-2"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.13.3",
+    "eslint": "10.8.0",
+    "openclaw": "2026.7.1-2",
+    "tsx": "4.23.7",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.66.0"
+  },
+  "openclaw": {
+    "plugin": {
+      "id": "lattice-devos"
+    },
+    "extensions": [
+      "./src/index.ts"
+    ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": "2026.7.1",
+      "minGatewayVersion": "2026.7.1-2"
+    },
+    "build": {
+      "openclawVersion": "2026.7.1-2",
+      "pluginSdkVersion": "2026.7.1-2"
+    }
+  }
+}
