@@ -19,8 +19,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
+    GENERIC_READ, GENERIC_WRITE, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -34,6 +34,7 @@ use windows_sys::Win32::System::JobObjects::{
     JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
     QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
+use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
@@ -74,11 +75,22 @@ pub(crate) struct WindowsJobChild {
     job: OwnedHandle,
     process: OwnedHandle,
     process_id: u32,
-    stdout: File,
-    stderr: File,
+    stdin: Option<File>,
+    stdout: WindowsJobStdout,
+    stderr: WindowsJobStderr,
     deadline: Instant,
     teardown_timeout: Duration,
     terminated: bool,
+}
+
+enum WindowsJobStdout {
+    Capture(File),
+    Pipe(Option<File>),
+}
+
+enum WindowsJobStderr {
+    Capture(File),
+    Pipe(Option<File>),
 }
 
 pub(crate) fn run(plan: &WindowsJobCommandPlan) -> HermesAdapterResult<WindowsJobProcessExit> {
@@ -95,8 +107,37 @@ pub(crate) fn run(plan: &WindowsJobCommandPlan) -> HermesAdapterResult<WindowsJo
 
 /// Starts a long-lived owned child without releasing its Job Object.
 pub(crate) fn spawn(plan: &WindowsJobCommandPlan) -> HermesAdapterResult<WindowsJobChild> {
+    spawn_inner(plan, false, false, false)
+}
+
+/// Starts a Job-owned child with a parent-only writer connected to child
+/// standard input while retaining the normal bounded capture outputs.
+pub(crate) fn spawn_with_parent_stdin(
+    plan: &WindowsJobCommandPlan,
+) -> HermesAdapterResult<WindowsJobChild> {
+    spawn_inner(plan, true, false, false)
+}
+
+/// Starts a Job-owned child with parent-only pipe ends for all three standard
+/// streams. The caller must drain stderr concurrently into bounded evidence.
+pub(crate) fn spawn_duplex(plan: &WindowsJobCommandPlan) -> HermesAdapterResult<WindowsJobChild> {
+    spawn_inner(plan, true, true, true)
+}
+
+fn spawn_inner(
+    plan: &WindowsJobCommandPlan,
+    pipe_stdin: bool,
+    pipe_stdout: bool,
+    pipe_stderr: bool,
+) -> HermesAdapterResult<WindowsJobChild> {
     let paths = validate_plan(plan)?;
-    let redirects = RedirectHandles::create(&paths.stdout_path, &paths.stderr_path)?;
+    let redirects = RedirectHandles::create(
+        &paths.stdout_path,
+        &paths.stderr_path,
+        pipe_stdin,
+        pipe_stdout,
+        pipe_stderr,
+    )?;
     let job = create_kill_on_close_job()?;
     let attributes = ProcThreadAttributes::for_handles(redirects.as_slice())?;
     let mut command_line = command_line(&paths.executable, &plan.arguments)?;
@@ -108,9 +149,9 @@ pub(crate) fn spawn(plan: &WindowsJobCommandPlan) -> HermesAdapterResult<Windows
     startup.StartupInfo.cb = u32::try_from(size_of::<STARTUPINFOEXW>())
         .map_err(|_| spawn_error("HERMES_WINDOWS_STARTUP_INFO_SIZE"))?;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    startup.StartupInfo.hStdInput = redirects.stdin.raw();
-    startup.StartupInfo.hStdOutput = redirects.stdout.as_raw_handle().cast();
-    startup.StartupInfo.hStdError = redirects.stderr.as_raw_handle().cast();
+    startup.StartupInfo.hStdInput = redirects.child_stdin.raw();
+    startup.StartupInfo.hStdOutput = redirects.child_stdout.raw();
+    startup.StartupInfo.hStdError = redirects.child_stderr.raw();
     startup.lpAttributeList = attributes.raw();
 
     // SAFETY: all pointers reference live storage through this call. The
@@ -163,15 +204,33 @@ pub(crate) fn spawn(plan: &WindowsJobCommandPlan) -> HermesAdapterResult<Windows
     drop(thread_handle);
 
     let RedirectHandles {
-        stdin,
-        stdout,
-        stderr,
+        child_stdin,
+        child_stdout,
+        parent_stdin,
+        parent_stdout,
+        parent_stderr,
+        child_stderr,
     } = redirects;
-    drop(stdin);
+    drop(child_stdin);
+    let stdout = match parent_stdout {
+        Some(reader) => {
+            drop(child_stdout);
+            WindowsJobStdout::Pipe(Some(reader))
+        }
+        None => WindowsJobStdout::Capture(File::from(child_stdout)),
+    };
+    let stderr = match parent_stderr {
+        Some(reader) => {
+            drop(child_stderr);
+            WindowsJobStderr::Pipe(Some(reader))
+        }
+        None => WindowsJobStderr::Capture(File::from(child_stderr)),
+    };
     Ok(WindowsJobChild {
         job,
         process,
         process_id: process_info.dwProcessId,
+        stdin: parent_stdin,
         stdout,
         stderr,
         deadline: plan.deadline,
@@ -219,11 +278,56 @@ impl WindowsJobChild {
     }
 
     pub(crate) fn read_stdout(&self, limit: u64) -> HermesAdapterResult<Vec<u8>> {
-        read_locked_capture(&self.stdout, limit)
+        match &self.stdout {
+            WindowsJobStdout::Capture(stdout) => read_locked_capture(stdout, limit),
+            WindowsJobStdout::Pipe(_) => Err(spawn_error("HERMES_WINDOWS_STDOUT_NOT_CAPTURED")),
+        }
+    }
+
+    pub(crate) fn read_stdout_since(
+        &self,
+        offset: u64,
+        limit: u64,
+    ) -> HermesAdapterResult<Vec<u8>> {
+        match &self.stdout {
+            WindowsJobStdout::Capture(stdout) => read_locked_capture_since(stdout, offset, limit),
+            WindowsJobStdout::Pipe(_) => Err(spawn_error("HERMES_WINDOWS_STDOUT_NOT_CAPTURED")),
+        }
     }
 
     pub(crate) fn read_stderr(&self, limit: u64) -> HermesAdapterResult<Vec<u8>> {
-        read_locked_capture(&self.stderr, limit)
+        match &self.stderr {
+            WindowsJobStderr::Capture(stderr) => read_locked_capture(stderr, limit),
+            WindowsJobStderr::Pipe(_) => Err(spawn_error("HERMES_WINDOWS_STDERR_NOT_CAPTURED")),
+        }
+    }
+
+    pub(crate) fn take_stdin_writer(&mut self) -> HermesAdapterResult<File> {
+        self.stdin
+            .take()
+            .ok_or_else(|| spawn_error("HERMES_WINDOWS_STDIN_PIPE_UNAVAILABLE"))
+    }
+
+    pub(crate) fn take_stdout_reader(&mut self) -> HermesAdapterResult<File> {
+        match &mut self.stdout {
+            WindowsJobStdout::Pipe(reader) => reader
+                .take()
+                .ok_or_else(|| spawn_error("HERMES_WINDOWS_STDOUT_PIPE_UNAVAILABLE")),
+            WindowsJobStdout::Capture(_) => {
+                Err(spawn_error("HERMES_WINDOWS_STDOUT_PIPE_UNAVAILABLE"))
+            }
+        }
+    }
+
+    pub(crate) fn take_stderr_reader(&mut self) -> HermesAdapterResult<File> {
+        match &mut self.stderr {
+            WindowsJobStderr::Pipe(reader) => reader
+                .take()
+                .ok_or_else(|| spawn_error("HERMES_WINDOWS_STDERR_PIPE_UNAVAILABLE")),
+            WindowsJobStderr::Capture(_) => {
+                Err(spawn_error("HERMES_WINDOWS_STDERR_PIPE_UNAVAILABLE"))
+            }
+        }
     }
 
     pub(crate) fn terminate(&mut self) -> HermesAdapterResult<()> {
@@ -353,37 +457,101 @@ fn is_reparse_point(path: &Path) -> HermesAdapterResult<bool> {
 }
 
 struct RedirectHandles {
-    stdin: OwnedHandle,
-    stdout: File,
-    stderr: File,
+    child_stdin: OwnedHandle,
+    child_stdout: OwnedHandle,
+    child_stderr: OwnedHandle,
+    parent_stdin: Option<File>,
+    parent_stdout: Option<File>,
+    parent_stderr: Option<File>,
 }
 
 impl RedirectHandles {
-    fn create(stdout_path: &Path, stderr_path: &Path) -> HermesAdapterResult<Self> {
+    fn create(
+        stdout_path: &Path,
+        stderr_path: &Path,
+        pipe_stdin: bool,
+        pipe_stdout: bool,
+        pipe_stderr: bool,
+    ) -> HermesAdapterResult<Self> {
+        let (child_stdin, parent_stdin) = if pipe_stdin {
+            let (child_reader, parent_writer) = create_anonymous_pipe(true)?;
+            (child_reader, Some(File::from(parent_writer)))
+        } else {
+            (
+                open_inheritable_file(OsStr::new("NUL"), GENERIC_READ, OPEN_EXISTING)?,
+                None,
+            )
+        };
+        let (child_stdout, parent_stdout) = if pipe_stdout {
+            let (parent_reader, child_writer) = create_anonymous_pipe(false)?;
+            (child_writer, Some(File::from(parent_reader)))
+        } else {
+            (open_inheritable_capture(stdout_path.as_os_str())?, None)
+        };
+        let (child_stderr, parent_stderr) = if pipe_stderr {
+            let (parent_reader, child_writer) = create_anonymous_pipe(false)?;
+            (child_writer, Some(File::from(parent_reader)))
+        } else {
+            (open_inheritable_capture(stderr_path.as_os_str())?, None)
+        };
         Ok(Self {
-            stdin: open_inheritable_file(OsStr::new("NUL"), GENERIC_READ, OPEN_EXISTING)?,
-            stdout: open_inheritable_capture(stdout_path.as_os_str())?,
-            stderr: open_inheritable_capture(stderr_path.as_os_str())?,
+            child_stdin,
+            child_stdout,
+            child_stderr,
+            parent_stdin,
+            parent_stdout,
+            parent_stderr,
         })
     }
 
     fn as_slice(&self) -> [HANDLE; 3] {
         [
-            self.stdin.raw(),
-            self.stdout.as_raw_handle().cast(),
-            self.stderr.as_raw_handle().cast(),
+            self.child_stdin.raw(),
+            self.child_stdout.raw(),
+            self.child_stderr.raw(),
         ]
     }
 }
 
-fn open_inheritable_capture(path: &OsStr) -> HermesAdapterResult<File> {
-    let path = wide_null(path)?;
-    let attributes = SECURITY_ATTRIBUTES {
-        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
-            .map_err(|_| spawn_error("HERMES_WINDOWS_SECURITY_ATTRIBUTES_SIZE"))?,
-        lpSecurityDescriptor: null_mut(),
-        bInheritHandle: 1,
+fn create_anonymous_pipe(
+    parent_is_writer: bool,
+) -> HermesAdapterResult<(OwnedHandle, OwnedHandle)> {
+    let attributes = inheritable_security_attributes()?;
+    let mut read_handle: HANDLE = null_mut();
+    let mut write_handle: HANDLE = null_mut();
+    // SAFETY: both output pointers and the security attributes are valid for
+    // the duration of this call. Successful handles are each owned once below.
+    if unsafe {
+        CreatePipe(
+            &raw mut read_handle,
+            &raw mut write_handle,
+            &raw const attributes,
+            0,
+        )
+    } == 0
+    {
+        return Err(spawn_error("HERMES_WINDOWS_PIPE_CREATE_FAILED"));
+    }
+    let reader = owned_handle(read_handle)
+        .ok_or_else(|| spawn_error("HERMES_WINDOWS_PIPE_HANDLE_INVALID"))?;
+    let writer = owned_handle(write_handle)
+        .ok_or_else(|| spawn_error("HERMES_WINDOWS_PIPE_HANDLE_INVALID"))?;
+    let parent = if parent_is_writer {
+        writer.raw()
+    } else {
+        reader.raw()
     };
+    // SAFETY: `parent` is the live parent-owned pipe end. Clearing inheritance
+    // ensures the explicit child handle list cannot leak the peer end.
+    if unsafe { SetHandleInformation(parent, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return Err(spawn_error("HERMES_WINDOWS_PIPE_INHERITANCE_REJECTED"));
+    }
+    Ok((reader, writer))
+}
+
+fn open_inheritable_capture(path: &OsStr) -> HermesAdapterResult<OwnedHandle> {
+    let path = wide_null(path)?;
+    let attributes = inheritable_security_attributes()?;
     // SAFETY: the path and attributes remain live. Share mode zero prevents
     // replacement while the parent retains this same handle.
     let handle = unsafe {
@@ -400,33 +568,51 @@ fn open_inheritable_capture(path: &OsStr) -> HermesAdapterResult<File> {
     if handle == INVALID_HANDLE_VALUE || handle.is_null() {
         return Err(spawn_error("HERMES_WINDOWS_REDIRECT_FILE"));
     }
-    // SAFETY: this unique successful handle transfers to `File` exactly once.
-    Ok(unsafe { File::from_raw_handle(handle.cast()) })
+    owned_handle(handle).ok_or_else(|| spawn_error("HERMES_WINDOWS_REDIRECT_FILE"))
+}
+
+fn inheritable_security_attributes() -> HermesAdapterResult<SECURITY_ATTRIBUTES> {
+    Ok(SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
+            .map_err(|_| spawn_error("HERMES_WINDOWS_SECURITY_ATTRIBUTES_SIZE"))?,
+        lpSecurityDescriptor: null_mut(),
+        bInheritHandle: 1,
+    })
 }
 
 fn read_locked_capture(file: &File, limit: u64) -> HermesAdapterResult<Vec<u8>> {
+    read_locked_capture_since(file, 0, limit)
+}
+
+fn read_locked_capture_since(file: &File, offset: u64, limit: u64) -> HermesAdapterResult<Vec<u8>> {
     let length = file
         .metadata()
         .map_err(|_| spawn_error("HERMES_WINDOWS_CAPTURE_METADATA"))?
         .len();
-    if length > limit {
+    let remaining = length
+        .checked_sub(offset)
+        .ok_or_else(|| ambiguous_error("HERMES_WINDOWS_CAPTURE_OFFSET_REJECTED"))?;
+    if remaining > limit {
         return Err(HermesAdapterError::new(
             HermesAdapterErrorKind::Malformed,
             "HERMES_WINDOWS_CAPTURE_LIMIT",
         ));
     }
-    let capacity =
-        usize::try_from(length).map_err(|_| spawn_error("HERMES_WINDOWS_CAPTURE_SIZE_OVERFLOW"))?;
+    let capacity = usize::try_from(remaining)
+        .map_err(|_| spawn_error("HERMES_WINDOWS_CAPTURE_SIZE_OVERFLOW"))?;
     let mut bytes = vec![0_u8; capacity];
-    let mut offset = 0_usize;
-    while offset < bytes.len() {
+    let mut read_offset = 0_usize;
+    while read_offset < bytes.len() {
+        let file_offset = offset
+            .checked_add(read_offset as u64)
+            .ok_or_else(|| spawn_error("HERMES_WINDOWS_CAPTURE_SIZE_OVERFLOW"))?;
         let read = file
-            .seek_read(&mut bytes[offset..], offset as u64)
+            .seek_read(&mut bytes[read_offset..], file_offset)
             .map_err(|_| ambiguous_error("HERMES_WINDOWS_CAPTURE_READ"))?;
         if read == 0 {
             return Err(ambiguous_error("HERMES_WINDOWS_CAPTURE_TRUNCATED"));
         }
-        offset += read;
+        read_offset += read;
     }
     Ok(bytes)
 }
@@ -796,5 +982,65 @@ trait OwnedHandleExt {
 impl OwnedHandleExt for OwnedHandle {
     fn raw(&self) -> HANDLE {
         self.as_raw_handle().cast()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    static PIPE_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn duplex_parent_ends_relay_and_child_exits_on_input_close() {
+        let sequence = PIPE_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "lattice-hermes-windows-job-duplex-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create exact duplex root");
+        let system_root = std::env::var_os("SystemRoot").expect("Windows system root");
+        let plan = WindowsJobCommandPlan {
+            executable: PathBuf::from(system_root).join("System32").join("more.com"),
+            arguments: Vec::new(),
+            current_dir: root.clone(),
+            environment: BTreeMap::new(),
+            run_root: root.clone(),
+            stdout_path: root.join("unused.stdout"),
+            stderr_path: root.join("unused.stderr"),
+            stdout_limit: 4096,
+            stderr_limit: 4096,
+            deadline: Instant::now() + Duration::from_secs(5),
+            teardown_timeout: Duration::from_secs(2),
+        };
+        let mut child = spawn_duplex(&plan).expect("spawn owned duplex child");
+        let mut stdin = child.take_stdin_writer().expect("parent stdin writer");
+        let mut stdout = child.take_stdout_reader().expect("parent stdout reader");
+        let mut stderr = child.take_stderr_reader().expect("parent stderr reader");
+        stdin
+            .write_all(b"lattice-pipe-probe\r\n")
+            .and_then(|()| stdin.flush())
+            .expect("write probe");
+        drop(stdin);
+
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).expect("read child stdout");
+        let mut diagnostic = Vec::new();
+        stderr
+            .read_to_end(&mut diagnostic)
+            .expect("read child stderr");
+        assert_eq!(child.wait_for_exit().expect("child exit"), 0);
+        assert!(
+            output
+                .windows(b"lattice-pipe-probe".len())
+                .any(|window| window == b"lattice-pipe-probe")
+        );
+        assert!(diagnostic.is_empty());
+        drop(child);
+        fs::remove_dir(&root).expect("remove exact duplex root");
     }
 }
