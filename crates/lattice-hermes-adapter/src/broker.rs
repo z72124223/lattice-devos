@@ -1030,43 +1030,95 @@ impl OwnedCodexProxyControl {
 
     fn ensure_open_allowed(&self) -> HermesAdapterResult<()> {
         if self.cancelled.load(Ordering::Acquire) {
-            Err(HermesAdapterError::new(
-                HermesAdapterErrorKind::Cancelled,
-                "HERMES_CODEX_PROXY_OPEN_CANCELLED",
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn install(
-        &self,
-        mut child: crate::windows_job::WindowsJobChild,
-        stderr_thread: JoinHandle<Result<BoundedCodexStderrEvidence, ()>>,
-    ) -> HermesAdapterResult<()> {
-        let mut state = self.state.lock().map_err(|_| {
-            HermesAdapterError::new(
-                HermesAdapterErrorKind::Ambiguous,
-                "HERMES_CODEX_PROXY_CONTROL_STATE_UNKNOWN",
-            )
-        })?;
-        if state.child.is_some() || state.stderr_thread.is_some() {
-            child.terminate()?;
-            return Err(HermesAdapterError::new(
-                HermesAdapterErrorKind::Ambiguous,
-                "HERMES_CODEX_PROXY_CONTROL_REPLAY_REJECTED",
-            ));
-        }
-        state.child = Some(child);
-        state.stderr_thread = Some(stderr_thread);
-        if self.cancelled.load(Ordering::Acquire) {
-            state.terminate()?;
             return Err(HermesAdapterError::new(
                 HermesAdapterErrorKind::Cancelled,
                 "HERMES_CODEX_PROXY_OPEN_CANCELLED",
             ));
         }
         Ok(())
+    }
+
+    fn ensure_unbound(&self) -> HermesAdapterResult<()> {
+        self.ensure_open_allowed()?;
+        let state = self.state.lock().map_err(|_| {
+            HermesAdapterError::new(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_CONTROL_STATE_UNKNOWN",
+            )
+        })?;
+        if state.child.is_some() {
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_PROCESS_ALREADY_BOUND",
+            ));
+        }
+        Ok(())
+    }
+
+    fn bind_child(
+        &self,
+        mut child: crate::windows_job::WindowsJobChild,
+    ) -> HermesAdapterResult<()> {
+        let Ok(mut state) = self.state.lock() else {
+            child.terminate()?;
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_CONTROL_STATE_UNKNOWN",
+            ));
+        };
+        if state.child.is_some() {
+            child.terminate()?;
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_PROCESS_ALREADY_BOUND",
+            ));
+        }
+        if self.cancelled.load(Ordering::Acquire) {
+            child.terminate()?;
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Cancelled,
+                "HERMES_CODEX_PROXY_OPEN_CANCELLED",
+            ));
+        }
+        state.child = Some(child);
+        Ok(())
+    }
+
+    fn start_stdio(&self) -> HermesAdapterResult<(Box<dyn Read + Send>, Box<dyn Write + Send>)> {
+        let mut state = self.state.lock().map_err(|_| {
+            HermesAdapterError::new(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_CONTROL_STATE_UNKNOWN",
+            )
+        })?;
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Cancelled,
+                "HERMES_CODEX_PROXY_OPEN_CANCELLED",
+            ));
+        }
+        if state.stderr_thread.is_some() || state.stderr_evidence.is_some() {
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_STDIO_ALREADY_BOUND",
+            ));
+        }
+        let stderr_limit = state.stderr_limit;
+        let child = state.child.as_mut().ok_or_else(|| {
+            HermesAdapterError::new(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_PROCESS_NOT_STARTED",
+            )
+        })?;
+        let writer = child.take_stdin_writer()?;
+        let reader = child.take_stdout_reader()?;
+        let stderr = child.take_stderr_reader()?;
+        let stderr_thread = thread::Builder::new()
+            .name("lattice-codex-stderr".to_owned())
+            .spawn(move || drain_bounded_codex_stderr(stderr, stderr_limit))
+            .map_err(|_| spawn("HERMES_CODEX_PROXY_STDERR_THREAD_SPAWN_FAILED"))?;
+        state.stderr_thread = Some(stderr_thread);
+        Ok((Box::new(reader), Box::new(writer)))
     }
 }
 
@@ -1141,26 +1193,24 @@ where
     if stderr_limit == 0 || stderr_limit > MAX_CODEX_PROXY_STDERR_BYTES {
         return Err(configuration("HERMES_CODEX_PROXY_STDERR_LIMIT_REJECTED"));
     }
-    control.ensure_open_allowed()?;
-    let mut child = crate::windows_job::spawn_duplex(plan)?;
-    observe_process_id(child.process_id());
-    let writer = child.take_stdin_writer()?;
-    let reader = child.take_stdout_reader()?;
-    let stderr = child.take_stderr_reader()?;
-    let stderr_thread = thread::Builder::new()
-        .name("lattice-codex-stderr".to_owned())
-        .spawn(move || drain_bounded_codex_stderr(stderr, stderr_limit))
-        .map_err(|_| spawn("HERMES_CODEX_PROXY_STDERR_THREAD_SPAWN_FAILED"))?;
-    control.install(child, stderr_thread)?;
+    control.ensure_unbound()?;
+    let child = crate::windows_job::spawn_duplex(plan)?;
+    let process_id = child.process_id();
+    control.bind_child(child)?;
+    observe_process_id(process_id);
+    let (reader, writer) = match control.start_stdio() {
+        Ok(streams) => streams,
+        Err(failure) => {
+            control.terminate()?;
+            return Err(failure);
+        }
+    };
     if let Err(failure) = post_spawn_identity_check() {
         control.terminate()?;
         return Err(failure);
     }
     control.ensure_running()?;
-    Ok(ProductionCodexProxyDuplex::new(
-        Box::new(reader),
-        Box::new(writer),
-    ))
+    Ok(ProductionCodexProxyDuplex::new(reader, writer))
 }
 
 #[cfg(windows)]
@@ -3481,6 +3531,7 @@ mod production_provider_tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::mpsc;
 
     struct ProviderFixture {
         config: CodexReflectionBrokerConfig,
@@ -3883,6 +3934,69 @@ mod production_provider_tests {
             "HERMES_CODEX_PROXY_FIXTURE_IDENTITY_REJECTED"
         );
         assert_eq!(process_id.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn process_fixture_pre_open_cancel_prevents_spawn() {
+        let fixture = ProcessFixture::new();
+        let (provider, process_id) = fixture.provider(1024);
+        let control = provider.control();
+        control.terminate().expect("pre-open cancellation");
+        let failure = Box::new(provider)
+            .open(Instant::now() + Duration::from_secs(10))
+            .err()
+            .expect("cancelled provider cannot spawn");
+        assert_eq!(failure.kind(), HermesAdapterErrorKind::Cancelled);
+        assert_eq!(failure.code(), "HERMES_CODEX_PROXY_OPEN_CANCELLED");
+        assert_eq!(process_id.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn process_fixture_post_spawn_check_is_cancellable_through_bound_control() {
+        let fixture = ProcessFixture::new();
+        let (provider, process_id) = fixture.provider(1024);
+        let FixtureCodexProxyProvider {
+            control,
+            plan,
+            stderr_limit,
+            ..
+        } = provider;
+        let retained_control = Arc::clone(&control);
+        let observed_process_id = Arc::clone(&process_id);
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            launch_owned_proxy(
+                &plan,
+                stderr_limit,
+                &control,
+                move || {
+                    entered_sender.send(()).expect("signal post-spawn check");
+                    release_receiver.recv().expect("release post-spawn check");
+                    Ok(())
+                },
+                move |observed| {
+                    observed_process_id.store(observed, Ordering::Release);
+                },
+            )
+        });
+        entered_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("post-spawn check entered after control binding");
+        let process_id = process_id.load(Ordering::Acquire);
+        assert_ne!(process_id, 0);
+        retained_control
+            .terminate()
+            .expect("shared control cancels blocked post-spawn check");
+        assert!(process_has_exited(&fixture.process_probe, process_id));
+        release_sender.send(()).expect("release post-spawn check");
+        let failure = worker
+            .join()
+            .expect("post-spawn worker joins")
+            .err()
+            .expect("cancelled launch cannot return a duplex");
+        assert_eq!(failure.kind(), HermesAdapterErrorKind::Cancelled);
+        assert_eq!(failure.code(), "HERMES_CODEX_PROXY_OPEN_CANCELLED");
     }
 
     #[test]
