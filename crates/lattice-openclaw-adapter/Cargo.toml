@@ -6,9 +6,13 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+getrandom = "=0.4.3"
+lattice-cjson = { path = "../lattice-cjson" }
 lattice-contracts = { path = "../lattice-contracts" }
 lattice-gateway-ipc = { path = "../lattice-gateway-ipc" }
 lattice-ports = { path = "../lattice-ports" }
+serde = { version = "=1.0.229", default-features = false, features = ["derive", "std"] }
+serde_json = "=1.0.151"
 sha2 = "=0.11.0"
 
 [lints]
