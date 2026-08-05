@@ -1,5 +1,6 @@
 //! Pure state machine for one Codex app-server initialize/thread/turn session.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -9,6 +10,17 @@ use crate::{AppServerProtocol, ProtocolError, TurnOutcome};
 const INITIALIZE_RESPONSE_ID: i64 = 0;
 const THREAD_START_RESPONSE_ID: i64 = 1;
 const TURN_START_RESPONSE_ID: i64 = 2;
+const MAX_COMPLETED_ITEMS: usize = 256;
+const MAX_COMPLETED_ITEM_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug)]
+struct PendingTurnItems {
+    thread_id: String,
+    turn_id: String,
+    items: Vec<Value>,
+    item_ids: BTreeSet<String>,
+    total_bytes: usize,
+}
 
 /// Server identity returned by the required `initialize` response.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -83,6 +95,7 @@ pub struct AppServerSession {
     initialize: Option<InitializeEvidence>,
     thread_id: Option<String>,
     turn_id: Option<String>,
+    pending_items: Option<PendingTurnItems>,
     pending_terminal: Option<Value>,
     validated_terminal: Option<TurnOutcome>,
     seen_responses: [bool; 3],
@@ -131,6 +144,8 @@ impl AppServerSession {
 
         let result = self.ingest_inner(message);
         if let Err(error) = &result {
+            self.pending_items = None;
+            self.pending_terminal = None;
             self.failure = Some(error.clone());
         }
         result
@@ -308,20 +323,115 @@ impl AppServerSession {
                     "notification method must be a string",
                 ))?;
 
-        if method == "turn/completed" {
-            if !self.sent_requests[SessionRequest::TurnStart.index()] {
-                return Err(SessionError::TerminalBeforeTurnStart);
+        match method {
+            "item/completed" => self.ingest_completed_item(&message)?,
+            "turn/completed" => {
+                if !self.sent_requests[SessionRequest::TurnStart.index()] {
+                    return Err(SessionError::TerminalBeforeTurnStart);
+                }
+                if self.pending_terminal.is_some() || self.validated_terminal.is_some() {
+                    return Err(SessionError::DuplicateTerminal);
+                }
+                self.pending_terminal = Some(message);
             }
-            if self.pending_terminal.is_some() || self.validated_terminal.is_some() {
-                return Err(SessionError::DuplicateTerminal);
-            }
-            self.pending_terminal = Some(message);
+            _ => {}
         }
 
         Ok(())
     }
 
+    fn ingest_completed_item(&mut self, message: &Value) -> Result<(), SessionError> {
+        if !self.sent_requests[SessionRequest::TurnStart.index()] {
+            return Err(SessionError::MalformedMessage(
+                "item/completed before turn/start",
+            ));
+        }
+        if self.pending_terminal.is_some() || self.validated_terminal.is_some() {
+            return Err(SessionError::MalformedMessage(
+                "item/completed after turn/completed",
+            ));
+        }
+
+        let params = message.get("params").and_then(Value::as_object).ok_or(
+            SessionError::MalformedMessage("item/completed params must be an object"),
+        )?;
+        let thread_id = notification_id(params.get("threadId"), "item/completed threadId")?;
+        let turn_id = notification_id(params.get("turnId"), "item/completed turnId")?;
+        let item =
+            params
+                .get("item")
+                .and_then(Value::as_object)
+                .ok_or(SessionError::MalformedMessage(
+                    "item/completed item must be an object",
+                ))?;
+        let item_id = notification_id(item.get("id"), "item/completed item.id")?;
+
+        if self
+            .thread_id
+            .as_deref()
+            .is_some_and(|expected| expected != thread_id)
+        {
+            return Err(SessionError::Terminal(ProtocolError::UnexpectedThread));
+        }
+        if self
+            .turn_id
+            .as_deref()
+            .is_some_and(|expected| expected != turn_id)
+        {
+            return Err(SessionError::Terminal(ProtocolError::UnexpectedTurn));
+        }
+
+        let item_value = Value::Object(item.clone());
+        let item_bytes = serde_json::to_vec(&item_value)
+            .map_err(|_| SessionError::MalformedMessage("item/completed item is not encodable"))?
+            .len();
+        let pending = self.pending_items.get_or_insert_with(|| PendingTurnItems {
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            items: Vec::new(),
+            item_ids: BTreeSet::new(),
+            total_bytes: 0,
+        });
+        if pending.thread_id != thread_id {
+            return Err(SessionError::Terminal(ProtocolError::UnexpectedThread));
+        }
+        if pending.turn_id != turn_id {
+            return Err(SessionError::Terminal(ProtocolError::UnexpectedTurn));
+        }
+        if !pending.item_ids.insert(item_id.to_owned()) {
+            return Err(SessionError::MalformedMessage(
+                "duplicate item/completed item.id",
+            ));
+        }
+        let Some(total_bytes) = pending.total_bytes.checked_add(item_bytes) else {
+            return Err(SessionError::MalformedMessage(
+                "item/completed evidence limit exceeded",
+            ));
+        };
+        if pending.items.len() >= MAX_COMPLETED_ITEMS || total_bytes > MAX_COMPLETED_ITEM_BYTES {
+            return Err(SessionError::MalformedMessage(
+                "item/completed evidence limit exceeded",
+            ));
+        }
+        pending.total_bytes = total_bytes;
+        pending.items.push(item_value);
+        Ok(())
+    }
+
     fn reconcile(&mut self) -> Result<Option<TurnOutcome>, SessionError> {
+        if let (Some(expected_thread_id), Some(pending)) =
+            (self.thread_id.as_deref(), self.pending_items.as_ref())
+            && pending.thread_id != expected_thread_id
+        {
+            return Err(SessionError::Terminal(ProtocolError::UnexpectedThread));
+        }
+        if let (Some(expected_turn_id), Some(pending)) =
+            (self.turn_id.as_deref(), self.pending_items.as_ref())
+            && pending.turn_id != expected_turn_id
+        {
+            return Err(SessionError::Terminal(ProtocolError::UnexpectedTurn));
+        }
+
         if self.validated_terminal.is_none()
             && let (Some(thread_id), Some(turn_id), Some(message)) = (
                 self.thread_id.as_deref(),
@@ -329,13 +439,23 @@ impl AppServerSession {
                 self.pending_terminal.as_ref(),
             )
         {
-            let outcome = AppServerProtocol::parse_turn_completed(message, thread_id, turn_id)
-                .map_err(SessionError::Terminal)?
-                .ok_or(SessionError::MalformedMessage(
-                    "pending terminal was not turn/completed",
-                ))?;
+            let completed_items = self
+                .pending_items
+                .as_ref()
+                .map_or(&[][..], |pending| pending.items.as_slice());
+            let outcome = AppServerProtocol::parse_turn_completed_with_items(
+                message,
+                thread_id,
+                turn_id,
+                completed_items,
+            )
+            .map_err(SessionError::Terminal)?
+            .ok_or(SessionError::MalformedMessage(
+                "pending terminal was not turn/completed",
+            ))?;
             self.validated_terminal = Some(outcome);
             self.pending_terminal = None;
+            self.pending_items = None;
         }
 
         if !self.completion_emitted
@@ -349,9 +469,21 @@ impl AppServerSession {
     }
 
     fn fail<T>(&mut self, error: SessionError) -> Result<T, SessionError> {
+        self.pending_items = None;
+        self.pending_terminal = None;
         self.failure = Some(error.clone());
         Err(error)
     }
+}
+
+fn notification_id<'a>(
+    value: Option<&'a Value>,
+    field: &'static str,
+) -> Result<&'a str, SessionError> {
+    value
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(SessionError::MalformedMessage(field))
 }
 
 fn parse_initialize_result(result: &Value) -> Result<InitializeEvidence, SessionError> {
@@ -498,24 +630,11 @@ mod tests {
 
     fn terminal(status: &str) -> Value {
         let items = if status == "completed" {
-            json!([
-                {
-                    "id": "tool_apply",
-                    "type": "dynamicToolCall",
-                    "tool": "exec",
-                    "arguments": {},
-                    "status": "completed",
-                    "success": true
-                },
-                {
-                    "id": "tool_verify",
-                    "type": "dynamicToolCall",
-                    "tool": "exec",
-                    "arguments": {},
-                    "status": "completed",
-                    "success": true
-                }
-            ])
+            json!([{
+                "id": "agent-final",
+                "type": "agentMessage",
+                "text": "Delivery complete."
+            }])
         } else {
             json!([])
         };
@@ -527,9 +646,39 @@ mod tests {
             }
         });
         if status == "completed" {
-            terminal["params"]["turn"]["itemsView"] = json!("full");
+            terminal["params"]["turn"]["itemsView"] = json!("summary");
         }
         terminal
+    }
+
+    fn completed_item(id: &str, tool: &str) -> Value {
+        json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thr_123",
+                "turnId": "turn_456",
+                "item": {
+                    "id": id,
+                    "type": "dynamicToolCall",
+                    "tool": tool,
+                    "arguments": {},
+                    "status": "completed",
+                    "success": true
+                },
+                "completedAtMs": 1
+            }
+        })
+    }
+
+    fn ingest_completed_delivery_items(session: &mut AppServerSession) {
+        for item in [
+            completed_item("tool_apply", "exec"),
+            completed_item("tool_verify", "exec"),
+        ] {
+            session
+                .ingest(item)
+                .expect("completed delivery item is valid");
+        }
     }
 
     fn sent_session() -> AppServerSession {
@@ -565,12 +714,9 @@ mod tests {
     fn demultiplexes_responses_and_notifications_in_any_order() {
         let mut session = sent_session();
 
+        ingest_completed_delivery_items(&mut session);
         assert_eq!(session.ingest(terminal("completed")), Ok(None));
         assert_eq!(session.ingest(turn_response()), Ok(None));
-        assert_eq!(
-            session.ingest(json!({"method": "item/completed", "params": {}})),
-            Ok(None)
-        );
         assert_eq!(session.ingest(initialize_response()), Ok(None));
         let outcome = session
             .ingest(thread_response())
@@ -591,9 +737,90 @@ mod tests {
         );
 
         assert_eq!(
-            session.ingest(json!({"method": "item/completed", "params": {}})),
+            session.ingest(json!({
+                "method": "thread/status/changed",
+                "params": {"threadId": "thr_123", "status": "idle"}
+            })),
             Ok(None),
             "the terminal outcome must not be emitted twice"
+        );
+    }
+
+    #[test]
+    fn accepts_not_loaded_terminal_after_bound_completed_items() {
+        let mut session = sent_session();
+        session
+            .ingest(initialize_response())
+            .expect("initialize response is valid");
+        session
+            .ingest(thread_response())
+            .expect("thread response is valid");
+        session
+            .ingest(turn_response())
+            .expect("turn response is valid");
+        ingest_completed_delivery_items(&mut session);
+        let mut terminal = terminal("completed");
+        terminal["params"]["turn"]["items"] = json!([]);
+        terminal["params"]["turn"]["itemsView"] = json!("notLoaded");
+
+        let outcome = session
+            .ingest(terminal)
+            .expect("official notLoaded terminal is valid")
+            .expect("terminal completes the session");
+        assert_eq!(outcome.status, TurnStatus::Completed);
+    }
+
+    #[test]
+    fn rejects_foreign_duplicate_and_late_completed_items() {
+        let mut foreign_before_response = sent_session();
+        let mut foreign = completed_item("tool_foreign", "exec");
+        foreign["params"]["threadId"] = json!("thr_other");
+        assert_eq!(foreign_before_response.ingest(foreign), Ok(None));
+        assert_eq!(
+            foreign_before_response.ingest(thread_response()),
+            Err(SessionError::Terminal(ProtocolError::UnexpectedThread))
+        );
+
+        let mut duplicate = sent_session();
+        assert_eq!(
+            duplicate.ingest(completed_item("tool_apply", "exec")),
+            Ok(None)
+        );
+        assert_eq!(
+            duplicate.ingest(completed_item("tool_apply", "exec")),
+            Err(SessionError::MalformedMessage(
+                "duplicate item/completed item.id"
+            ))
+        );
+
+        let mut mixed_turn = sent_session();
+        assert_eq!(
+            mixed_turn.ingest(completed_item("tool_apply", "exec")),
+            Ok(None)
+        );
+        let mut other_turn = completed_item("tool_verify", "exec");
+        other_turn["params"]["turnId"] = json!("turn_other");
+        assert_eq!(
+            mixed_turn.ingest(other_turn),
+            Err(SessionError::Terminal(ProtocolError::UnexpectedTurn))
+        );
+
+        let mut late = sent_session();
+        late.ingest(initialize_response())
+            .expect("initialize response is valid");
+        late.ingest(thread_response())
+            .expect("thread response is valid");
+        late.ingest(turn_response())
+            .expect("turn response is valid");
+        ingest_completed_delivery_items(&mut late);
+        late.ingest(terminal("completed"))
+            .expect("terminal is valid")
+            .expect("terminal completes the session");
+        assert_eq!(
+            late.ingest(completed_item("tool_late", "exec")),
+            Err(SessionError::MalformedMessage(
+                "item/completed after turn/completed"
+            ))
         );
     }
 
@@ -655,6 +882,38 @@ mod tests {
             session.ingest(wrong_turn),
             Err(SessionError::Terminal(ProtocolError::UnexpectedTurn))
         );
+        assert!(session.pending_terminal.is_none());
+    }
+
+    #[test]
+    fn bounds_completed_item_count_and_bytes() {
+        let mut count_limited = sent_session();
+        for index in 0..MAX_COMPLETED_ITEMS {
+            count_limited
+                .ingest(completed_item(&format!("item-{index}"), "exec"))
+                .expect("items through the exact count limit are retained");
+        }
+        assert_eq!(
+            count_limited.ingest(completed_item("item-over-limit", "exec")),
+            Err(SessionError::MalformedMessage(
+                "item/completed evidence limit exceeded"
+            ))
+        );
+        assert!(count_limited.pending_items.is_none());
+
+        let mut bytes_limited = sent_session();
+        let mut oversized = completed_item("item-oversized", "exec");
+        oversized["params"]["item"]["contentItems"] = json!([{
+            "type": "inputText",
+            "text": "x".repeat(MAX_COMPLETED_ITEM_BYTES)
+        }]);
+        assert_eq!(
+            bytes_limited.ingest(oversized),
+            Err(SessionError::MalformedMessage(
+                "item/completed evidence limit exceeded"
+            ))
+        );
+        assert!(bytes_limited.pending_items.is_none());
     }
 
     #[test]
@@ -736,6 +995,7 @@ mod tests {
         complete
             .ingest(turn_response())
             .expect("turn response is valid");
+        ingest_completed_delivery_items(&mut complete);
         complete
             .ingest(terminal("completed"))
             .expect("terminal notification is valid");
