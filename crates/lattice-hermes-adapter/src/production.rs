@@ -1592,7 +1592,7 @@ impl ProductionHermesPort {
         if let Err(teardown) = proxy_result {
             return map_port_error(&teardown);
         }
-        map_port_error(&failure)
+        map_port_error(failure)
     }
 
     #[cfg(test)]

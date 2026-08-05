@@ -1639,9 +1639,20 @@ fn codex_proxy_fd2_host_wire_is_bound_sequenced_and_fail_closed() {
         "HERMES_CODEX_PROXY_STATE_REJECTED"
     );
 
+    assert_codex_proxy_rejections(nonce, &broker, binding);
+}
+
+#[cfg(windows)]
+fn assert_codex_proxy_rejections(
+    nonce: &str,
+    broker: &ContentDigest,
+    binding: [u8; 32],
+) {
+    use crate::production::{CodexProxyHostSession, encode_codex_proxy_test_frame};
+
     let mut wrong_binding = CodexProxyHostSession::new(
         nonce,
-        &broker,
+        broker,
         Instant::now() + Duration::from_secs(2),
     )
     .expect("bound host session");
@@ -1656,7 +1667,7 @@ fn codex_proxy_fd2_host_wire_is_bound_sequenced_and_fail_closed() {
 
     let mut skipped = CodexProxyHostSession::new(
         nonce,
-        &broker,
+        broker,
         Instant::now() + Duration::from_secs(2),
     )
     .expect("bound host session");
@@ -1672,7 +1683,7 @@ fn codex_proxy_fd2_host_wire_is_bound_sequenced_and_fail_closed() {
     let diagnostic = b"bwrap: setup failed\n";
     let mut before_open = CodexProxyHostSession::new(
         nonce,
-        &broker,
+        broker,
         Instant::now() + Duration::from_secs(2),
     )
     .expect("bound host session");
