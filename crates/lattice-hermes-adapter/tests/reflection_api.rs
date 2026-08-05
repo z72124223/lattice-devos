@@ -3,28 +3,549 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lattice_contracts::{
     AttemptId, CONTRACT_VERSION, ContentDigest, HermesResearchRequest, Invocation,
     ProjectSnapshotId, RequestId, TaskId,
 };
 use crate::{
-    HERMES_LICENSE, HERMES_RELEASE, HERMES_SCHEMA_VERSION, HERMES_UPSTREAM_COMMIT,
-    HermesAdapterConfig, HermesAdapterErrorKind, HermesMemoryPolicy, HermesProcessConfig,
-    HermesReflectionAdapter, HermesReflectionJob, ReflectionEvidence, ReflectionEvidenceKind,
+    CodexProxyInvocation, HERMES_CPYTHON_ARCHIVE_BYTES, HERMES_CPYTHON_ARCHIVE_SHA256,
+    HERMES_CPYTHON_BUILD_RELEASE, HERMES_CPYTHON_PROVENANCE, HERMES_CPYTHON_SHA256SUMS_SHA256,
+    HERMES_CPYTHON_VERSION, HERMES_LICENSE, HERMES_PYPROJECT_SHA256, HERMES_RELEASE,
+    HERMES_RUNTIME_ARCHIVE_SHA256, HERMES_SCHEMA_VERSION, HERMES_UPSTREAM_COMMIT,
+    HERMES_UV_LOCK_SHA256, HermesAdapterConfig, HermesAdapterErrorKind, HermesMemoryPolicy,
+    HermesOfflineRuntimeManifest, HermesProcessConfig, HermesReflectionAdapter,
+    HermesReflectionJob, HermesSandboxProfile, ReflectionEvidence, ReflectionEvidenceKind,
 };
 use lattice_ports::HermesPort;
 use sha2::{Digest, Sha256};
+
+use crate::broker::{
+    CodexAppServerFrameKind, CodexBrokerPolicy, CodexNoMarkerCanaryObservation,
+    CodexNoMarkerCanaryPlan, CodexReflectionBrokerConfig, classify_codex_app_server_frame,
+    verify_codex_no_marker_canary, verify_official_codex_bundle,
+};
+use crate::containment::{
+    HermesContainmentFrameLimits, HermesWslContainmentConfig, build_hermes_bwrap_arguments,
+    parse_containment_frame,
+};
 
 const SUBJECT_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const GRAPH_DIGEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 #[test]
+fn pinned_runtime_sandbox_and_proxy_contract_are_closed_by_construction() {
+    assert_eq!(HERMES_CPYTHON_VERSION, "3.12.13");
+    assert_eq!(
+        HERMES_CPYTHON_ARCHIVE_SHA256,
+        "a140c0868258075d160fa0da51ddffd423efbc9dd350695abd33e7ce3ce94352"
+    );
+    assert_eq!(HERMES_CPYTHON_BUILD_RELEASE, "20260804");
+    assert_eq!(HERMES_CPYTHON_PROVENANCE, "astral-sh/python-build-standalone");
+    assert_eq!(HERMES_CPYTHON_ARCHIVE_BYTES, 111_375_313);
+    assert_eq!(
+        HERMES_CPYTHON_SHA256SUMS_SHA256,
+        "eccfdcc61c9fe48b7fe61db8812925ce30f23943d16c60861001004a4ae8f55c"
+    );
+    assert_eq!(
+        HERMES_RUNTIME_ARCHIVE_SHA256,
+        "a9a84a25999a23a859a9d17ef3134ea1c3371d8bf1984313eab839e939528152"
+    );
+    assert_eq!(
+        HERMES_PYPROJECT_SHA256,
+        "64d1085ee1c23caf0ae0d9e65c73e280f466362ed43fdda1531f18f3af1d9869"
+    );
+    assert_eq!(
+        HERMES_UV_LOCK_SHA256,
+        "aab3c83f71b683507a590b6315b23bdc0abd6b63b76b2349eae15bf00dfbaf2b"
+    );
+
+    let profile = HermesSandboxProfile::official();
+    assert_eq!(profile.work_directory(), "/work");
+    assert_eq!(
+        profile.read_only_ingress(),
+        [
+            "/runtime-input",
+            "/config-input",
+            "/request-input",
+            "/broker-input",
+        ]
+    );
+    assert_eq!(profile.writable_paths(), ["/state", "/output", "/tmp"]);
+    assert!(profile.product_source_mount().is_none());
+    assert!(profile.network_namespace_isolated());
+    assert_eq!(profile.minimum_landlock_abi(), 3);
+
+    assert_eq!(
+        CodexProxyInvocation::parse(["--version"]).expect("fixed version probe"),
+        CodexProxyInvocation::Version
+    );
+    assert_eq!(
+        CodexProxyInvocation::parse(["app-server", "--listen", "stdio://", "--strict-config"])
+            .expect("fixed app-server relay"),
+        CodexProxyInvocation::AppServer
+    );
+    for rejected in [
+        vec!["exec"],
+        vec!["app-server"],
+        vec!["app-server", "--listen", "ws://127.0.0.1:0", "--strict-config"],
+        vec!["app-server", "--listen", "stdio://"],
+        vec!["app-server", "--strict-config", "--listen", "stdio://"],
+        vec!["--version", "--verbose"],
+        Vec::new(),
+    ] {
+        let failure = CodexProxyInvocation::parse(rejected)
+            .expect_err("the in-sandbox proxy has no caller-selected command surface");
+        assert_eq!(failure.code(), "HERMES_CODEX_PROXY_INVOCATION_REJECTED");
+    }
+}
+
+#[test]
+fn offline_runtime_manifest_is_canonical_strict_and_exactly_pinned() {
+    let bytes = format!(
+        concat!(
+            "{{\"cpython_archive_bytes\":{},",
+            "\"cpython_archive_sha256\":\"{}\",",
+            "\"cpython_build_release\":\"{}\",",
+            "\"cpython_provenance\":\"{}\",",
+            "\"cpython_sha256sums_sha256\":\"{}\",",
+            "\"cpython_version\":\"3.12.13\",",
+            "\"hermes_archive_sha256\":\"{}\",",
+            "\"hermes_commit\":\"{}\",",
+            "\"hermes_release\":\"v2026.8.3\",",
+            "\"payload_byte_count\":1,\"payload_file_count\":1,",
+            "\"payload_manifest_sha256\":\"{}\",",
+            "\"platform\":\"x86_64-unknown-linux-gnu\",",
+            "\"pyproject_sha256\":\"{}\",",
+            "\"schema\":\"lattice.hermes.offline-runtime.v1\",",
+            "\"uv_lock_sha256\":\"{}\"}}"
+        ),
+        HERMES_CPYTHON_ARCHIVE_BYTES,
+        HERMES_CPYTHON_ARCHIVE_SHA256,
+        HERMES_CPYTHON_BUILD_RELEASE,
+        HERMES_CPYTHON_PROVENANCE,
+        HERMES_CPYTHON_SHA256SUMS_SHA256,
+        HERMES_RUNTIME_ARCHIVE_SHA256,
+        HERMES_UPSTREAM_COMMIT,
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        HERMES_PYPROJECT_SHA256,
+        HERMES_UV_LOCK_SHA256,
+    );
+    let manifest = HermesOfflineRuntimeManifest::from_canonical_json(bytes.as_bytes())
+        .expect("one exact offline manifest");
+    assert_eq!(manifest.payload_file_count(), 1);
+    assert_eq!(manifest.payload_byte_count(), 1);
+    assert_eq!(
+        manifest.payload_manifest_sha256(),
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    );
+
+    let unknown = bytes.replacen(
+        '{',
+        "{\"future_install_mode\":\"network\",",
+        1,
+    );
+    let failure = HermesOfflineRuntimeManifest::from_canonical_json(unknown.as_bytes())
+        .expect_err("unknown install surfaces fail closed");
+    assert_eq!(failure.code(), "HERMES_RUNTIME_MANIFEST_UNKNOWN_FIELD");
+
+    let drift = bytes.replace(HERMES_CPYTHON_VERSION, "3.12.14");
+    let failure = HermesOfflineRuntimeManifest::from_canonical_json(drift.as_bytes())
+        .expect_err("runtime version drift fails closed");
+    assert_eq!(failure.code(), "HERMES_RUNTIME_MANIFEST_IDENTITY_MISMATCH");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn codex_broker_pins_four_files_and_locks_the_proven_empty_tool_policy() {
+    let policy = CodexBrokerPolicy::official();
+    assert_eq!(policy.codex_version(), "codex-cli 0.146.0");
+    assert_eq!(
+        policy.launcher_sha256(),
+        "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb"
+    );
+    assert_eq!(
+        policy.sandbox_setup_sha256(),
+        "c12d225b34e7f82cdab6bbc714797abed661f40e158104694953889750121cef"
+    );
+    assert_eq!(
+        policy.command_runner_sha256(),
+        "0102fa1820ecd03bb03a991fd2303a1a484118f7da8a71864f88ec94bca61d6d"
+    );
+    assert_eq!(
+        policy.package_manifest_sha256(),
+        "aaa0646d6b615da94187b51efd50c69621a00867761161ae55cc16cfd545bec7"
+    );
+    let lock = policy.config_lock_toml();
+    for required in [
+        "approval_policy = \"never\"",
+        "sandbox_mode = \"read-only\"",
+        "web_search = \"disabled\"",
+        "mcp_servers = {}",
+        "include_apps_instructions = false",
+        "include_collaboration_mode_instructions = false",
+        "external_agent_memory_import = false",
+        "artifact = false",
+        "plugin_sharing = false",
+        "enabled = false",
+        "shell_tool = false",
+        "unified_exec = false",
+        "shell_snapshot = false",
+        "apps = false",
+        "plugins = false",
+        "multi_agent = false",
+        "hooks = false",
+        "memories = false",
+        "code_mode = false",
+        "image_generation = false",
+        "browser_use = false",
+        "computer_use = false",
+        "goals = false",
+        "workspace_dependencies = false",
+        "auth_elicitation = false",
+        "request_permissions_tool = false",
+        "deferred_executor = false",
+        "token_budget = false",
+    ] {
+        assert!(lock.contains(required), "missing no-tools lock: {required}");
+    }
+    assert!(!lock.contains("auth.json"));
+    let environment = policy.required_child_environment();
+    assert_eq!(environment.len(), 2);
+    assert_eq!(environment["CODEX_EXEC_SERVER_URL"], "none");
+    assert_eq!(
+        environment["CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED"],
+        "1"
+    );
+
+    let response = br#"{"id":1,"result":{}}"#;
+    assert_eq!(
+        classify_codex_app_server_frame(response).expect("pending response shape"),
+        CodexAppServerFrameKind::Response { id: 1 }
+    );
+    for (id, method) in [
+        (9, "account/chatgptAuthTokens/refresh"),
+        (10, "attestation/generate"),
+        (11, "applyPatchApproval"),
+        (12, "execCommandApproval"),
+        (13, "item/commandExecution/requestApproval"),
+        (14, "item/fileChange/requestApproval"),
+        (15, "item/permissions/requestApproval"),
+        (16, "item/tool/call"),
+        (17, "item/tool/requestUserInput"),
+        (18, "mcpServer/elicitation/request"),
+    ] {
+        let frame = serde_json::to_vec(&serde_json::json!({
+            "id": id,
+            "method": method,
+            "params": {}
+        }))
+        .expect("server request fixture");
+        assert_eq!(
+            classify_codex_app_server_frame(&frame).expect("typed deny request"),
+            CodexAppServerFrameKind::ServerRequest {
+                id,
+                method: method.to_owned(),
+            }
+        );
+    }
+    for fatal in [
+        br#"{"method":"item/started","params":{"item":{"type":"commandExecution"}}}"#
+            .as_slice(),
+        br#"{"method":"item/completed","params":{"item":{"type":"hookPrompt"}}}"#
+            .as_slice(),
+        br#"{"method":"turn/completed","params":{"turn":{"id":"turn-1","items":[{"type":"mcpToolCall"}],"status":"completed"}}}"#
+            .as_slice(),
+        br#"{"method":"thread/environment/connected","params":{}}"#.as_slice(),
+        br#"{"method":"hook/started","params":{}}"#.as_slice(),
+        br#"{"method":"hook/completed","params":{}}"#.as_slice(),
+        br#"{"method":"item/commandExecution/outputDelta","params":{}}"#.as_slice(),
+        br#"{"method":"item/fileChange/outputDelta","params":{}}"#.as_slice(),
+        br#"{"method":"item/fileChange/patchUpdated","params":{}}"#.as_slice(),
+        br#"{"method":"turn/plan/updated","params":{}}"#.as_slice(),
+        br#"{"method":"future/notification","params":{}}"#.as_slice(),
+    ] {
+        let failure = classify_codex_app_server_frame(fatal)
+            .expect_err("unknown, approval, plan, and tool frames terminate the broker");
+        assert_eq!(failure.code(), "HERMES_CODEX_BROKER_FATAL_FRAME");
+    }
+
+    policy
+        .verify_model_visible_tools(std::iter::empty::<&str>())
+        .expect("the admitted 0.146 policy has no model-visible tools");
+    let failure = policy
+        .verify_model_visible_tools(["update_plan"])
+        .expect_err("any observed tool fails the no-tools canary");
+    assert_eq!(failure.code(), "HERMES_CODEX_TOOLSET_NOT_EMPTY");
+
+    let wrong_bundle = std::env::current_exe().expect("test binary");
+    let failure = verify_official_codex_bundle(&wrong_bundle)
+        .expect_err("one binary can never substitute for the four-file bundle");
+    assert_eq!(failure.code(), "HERMES_CODEX_BUNDLE_IDENTITY_REJECTED");
+}
+
+#[test]
+fn codex_no_marker_plan_and_receipt_require_joint_empty_tool_evidence() {
+    let cwd = std::env::temp_dir().join("lattice-hermes-empty-cwd-contract");
+    let nonce = "abababababababababababababababababababababababababababababababab";
+    let plan = CodexNoMarkerCanaryPlan::new(cwd.clone(), nonce, "gpt-5.6-sol")
+        .expect("fixed canary plan");
+    let initialize = plan.initialize_request();
+    for capability in [
+        "experimentalApi",
+        "requestAttestation",
+        "mcpServerOpenaiFormElicitation",
+    ] {
+        assert_eq!(initialize["params"]["capabilities"][capability], false);
+    }
+    let thread = plan.thread_start_request();
+    assert_eq!(thread["params"]["approvalPolicy"], "never");
+    assert_eq!(thread["params"]["sandbox"], "read-only");
+    assert_eq!(thread["params"]["ephemeral"], true);
+    assert!(thread["params"].get("environments").is_none());
+    assert!(thread["params"].get("runtimeWorkspaceRoots").is_none());
+    assert!(thread["params"].get("dynamicTools").is_none());
+    assert!(thread["params"].get("selectedCapabilityRoots").is_none());
+    let turn = plan.turn_start_request("thread-canary");
+    assert_eq!(turn["id"], 2);
+    assert_eq!(turn["params"]["sandboxPolicy"]["type"], "readOnly");
+    assert_eq!(turn["params"]["sandboxPolicy"]["networkAccess"], false);
+    assert!(turn["params"].get("environments").is_none());
+    assert!(turn["params"].get("runtimeWorkspaceRoots").is_none());
+    assert_eq!(
+        turn["params"]["outputSchema"]["properties"]["nonce"]["const"],
+        nonce
+    );
+    assert_eq!(
+        turn["params"]["outputSchema"]["properties"]["markerCreated"]["const"],
+        false
+    );
+
+    let tree = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+    let transcript =
+        "dededededededededededededededededededededededededededededededede";
+    let output = format!(r#"{{"markerCreated":false,"nonce":"{nonce}"}}"#);
+    let observation = CodexNoMarkerCanaryObservation::new(
+        nonce,
+        tree,
+        0,
+        tree,
+        0,
+        false,
+        false,
+        "completed",
+        1,
+        0,
+        0,
+        output.as_bytes(),
+        transcript,
+        true,
+    )
+    .expect("typed observation");
+    let receipt = verify_codex_no_marker_canary(&observation).expect("joint canary evidence");
+    assert_eq!(receipt.receipt_digest().as_str().len(), 64);
+    assert_eq!(receipt.transcript_sha256(), transcript);
+
+    let marker_observed = CodexNoMarkerCanaryObservation::new(
+        nonce,
+        tree,
+        0,
+        tree,
+        0,
+        false,
+        true,
+        "completed",
+        1,
+        0,
+        0,
+        output.as_bytes(),
+        transcript,
+        true,
+    )
+    .expect("typed observation");
+    let failure = verify_codex_no_marker_canary(&marker_observed)
+        .expect_err("marker appearance fails even if the model claims false");
+    assert_eq!(failure.code(), "HERMES_CODEX_NO_MARKER_CANARY_REJECTED");
+}
+
+#[test]
+#[ignore = "requires the staged official @openai/codex 0.146.0 four-file bundle"]
+fn official_codex_0146_four_file_bundle_identity_is_live_verified() {
+    let launcher = std::env::var_os("LATTICE_HERMES_CODEX_0146_LAUNCHER")
+        .expect("set exact staged launcher path");
+    let reviewed = verify_official_codex_bundle(std::path::Path::new(&launcher))
+        .expect("exact four-file official bundle");
+    assert_eq!(reviewed.version(), "codex-cli 0.146.0");
+    assert_eq!(reviewed.launcher_sha256(), CodexBrokerPolicy::official().launcher_sha256());
+    assert_eq!(
+        reviewed.package_manifest_sha256(),
+        CodexBrokerPolicy::official().package_manifest_sha256()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires the built broker helper, official Codex 0.146.0 bundle, and daily subscription login"]
+fn official_codex_0146_no_marker_broker_canary_is_live_verified() {
+    let launcher = std::path::PathBuf::from(
+        std::env::var_os("LATTICE_HERMES_CODEX_0146_LAUNCHER")
+            .expect("set exact staged launcher path"),
+    );
+    let helper = std::path::PathBuf::from(
+        std::env::var_os("LATTICE_HERMES_CODEX_BROKER_HELPER")
+            .expect("set built broker helper path"),
+    );
+    let codex_home = std::path::PathBuf::from(
+        std::env::var_os("LATTICE_HERMES_DAILY_CODEX_HOME")
+            .expect("set daily logged-in CODEX_HOME"),
+    );
+    let product_root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR"))
+        .expect("crate product root");
+    let sequence = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("monotonic wall clock seed")
+        .as_nanos();
+    let isolation_root = std::env::temp_dir().join(format!(
+        "lattice-hermes-codex-broker-live-{}-{sequence}",
+        std::process::id()
+    ));
+    let helper_sha256 = crate::sha256_file(&helper).expect("broker helper digest");
+    let config = CodexReflectionBrokerConfig::new(
+        helper,
+        helper_sha256.clone(),
+        launcher,
+        codex_home,
+        isolation_root.clone(),
+        product_root,
+        "gpt-5.6-sol",
+    )
+    .expect("sealed broker config");
+    let receipt = config
+        .run_no_marker_canary(Instant::now() + Duration::from_mins(4))
+        .expect("real no-marker broker canary");
+    assert_eq!(receipt.helper_sha256(), helper_sha256);
+    assert_eq!(
+        receipt.launcher_sha256(),
+        CodexBrokerPolicy::official().launcher_sha256()
+    );
+    for digest in [
+        receipt.receipt_digest().as_str(),
+        receipt.canary_receipt_digest().as_str(),
+        receipt.config_lock_sha256(),
+        receipt.child_environment_sha256(),
+        receipt.transcript_sha256(),
+    ] {
+        assert_eq!(digest.len(), 64);
+    }
+    std::fs::remove_dir_all(&isolation_root).expect("remove exact successful canary root");
+}
+
+#[test]
+fn bwrap_plan_and_private_frame_are_fixed_bounded_and_cross_bound() {
+    let arguments = build_hermes_bwrap_arguments(
+        "/var/tmp/lattice-runtime-targets/hermes-v2026.8.3-cpython-3.12.13-pbs-20260804",
+        "/mnt/c/lattice-run/config",
+        "/mnt/c/lattice-run/request.json",
+    )
+    .expect("fixed sandbox plan");
+    let rendered = arguments
+        .iter()
+        .map(|argument| argument.to_string_lossy())
+        .collect::<Vec<_>>();
+    for required in [
+        "--die-with-parent",
+        "--unshare-all",
+        "--unshare-user",
+        "--disable-userns",
+        "--assert-userns-disabled",
+        "--new-session",
+        "--cap-drop",
+        "--clearenv",
+        "LATTICE_CODEX_BROKER_READ_FD",
+        "LATTICE_CODEX_BROKER_WRITE_FD",
+        "/work",
+        "/runtime-input",
+        "/config-input",
+        "/request-input/request.json",
+        "/state",
+        "/output",
+        "/tmp",
+    ] {
+        assert!(rendered.iter().any(|value| value == required));
+    }
+    assert!(!rendered.iter().any(|value| value.contains("hermes-reflection")));
+    assert!(!rendered.iter().any(|value| value == "/source"));
+    assert_eq!(
+        rendered
+            .iter()
+            .filter(|argument| argument.as_ref() == "--ro-bind")
+            .count(),
+        6
+    );
+    assert!(!rendered.iter().any(|value| value == "/broker-input"));
+
+    let digests = (*b"abcdef").map(|byte| vec![byte; 64]);
+    let reflection = br#"{"schema_version":"lattice.hermes.reflection.v1"}"#;
+    let mut frame = b"LATTICE_HERMES_CONTAINED_V1\n".to_vec();
+    for field in digests
+        .iter()
+        .map(Vec::as_slice)
+        .chain(std::iter::once(reflection.as_slice()))
+    {
+        frame.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        frame.extend_from_slice(field);
+    }
+    let parsed = parse_containment_frame(&frame, HermesContainmentFrameLimits::default())
+        .expect("one complete strict frame");
+    assert_eq!(parsed.runtime_manifest_sha256(), digests[0]);
+    assert_eq!(parsed.request_sha256(), digests[2]);
+    assert_eq!(parsed.reflection(), reflection);
+
+    frame.push(0);
+    let failure = parse_containment_frame(&frame, HermesContainmentFrameLimits::default())
+        .expect_err("trailing bytes fail closed");
+    assert_eq!(failure.code(), "HERMES_CONTAINMENT_FRAME_TRAILING_BYTES");
+}
+
+#[test]
+#[ignore = "requires WSL2, bubblewrap, and the staged Linux CPython runtime"]
+fn wsl_bwrap_socketpair_inherited_fd_canary_is_live_verified() {
+    let wsl = std::path::PathBuf::from(r"C:\Windows\System32\wsl.exe");
+    let product_root = std::fs::canonicalize(std::env::current_dir().expect("cwd"))
+        .expect("canonical product root");
+    let isolation_root = std::env::temp_dir().join(format!(
+        "lattice-hermes-socketpair-canary-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let config = HermesWslContainmentConfig::new(
+        wsl,
+        "/var/tmp/lattice-runtime-targets/hermes-v2026.8.3-cpython-3.12.13-pbs-20260804",
+        isolation_root,
+        product_root,
+    )
+    .expect("exact WSL containment config");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let receipt = config
+        .run_socketpair_canary(deadline)
+        .expect("socketpair survives into bwrap as fd 3 and reaps");
+    assert_eq!(receipt.broker_read_fd(), 0);
+    assert_eq!(receipt.broker_write_fd(), 1);
+    assert_eq!(receipt.python_version(), "3.12.13");
+    assert_eq!(receipt.bwrap_sha256().len(), 64);
+    assert!(receipt.descendants_reaped());
+    assert_eq!(receipt.receipt_digest().as_str().len(), 64);
+}
+
+#[test]
 fn capabilities_runs_events_and_status_produce_bound_canonical_reflection() {
     let request = request();
-    let job = job(request.clone());
-    let output = bound_output(&job);
+    let reflection_job = job(request.clone());
+    let output = bound_output(&reflection_job);
     let server = ScriptedServer::start(vec![
         capabilities(),
         Response::json(202, r#"{"run_id":"run_abc123","status":"started"}"#),
@@ -32,7 +553,8 @@ fn capabilities_runs_events_and_status_produce_bound_canonical_reflection() {
         completed_status("run_abc123", "lattice-task-034-session", &output),
     ]);
 
-    let mut adapter = HermesReflectionAdapter::connect(config(&server), job).expect("adapter");
+    let mut adapter =
+        HermesReflectionAdapter::connect(config(&server), reflection_job).expect("adapter");
     let reflection = adapter
         .run_reflection(&request)
         .expect("strict reflection accepted");
@@ -52,6 +574,14 @@ fn capabilities_runs_events_and_status_produce_bound_canonical_reflection() {
     assert_eq!(reflection.binding().request_id(), "request-hermes-1");
     assert_eq!(reflection.canonical_bytes()[0], b'{');
     assert_eq!(reflection.output_digest().as_str().len(), 64);
+    println!(
+        "SCRIPTED_CONTRACT_CANONICAL_REFLECTION_SHA256={}",
+        reflection.output_digest().as_str()
+    );
+    println!(
+        "SCRIPTED_CONTRACT_CANONICAL_REFLECTION={}",
+        std::str::from_utf8(reflection.canonical_bytes()).expect("canonical UTF-8")
+    );
 
     let requests = server.finish();
     assert_eq!(requests.len(), 4);
@@ -399,8 +929,11 @@ fn control_envelopes_reject_unknown_fields_and_event_discriminator_drift() {
 fn scripted_adapter_cannot_emit_live_port_evidence() {
     let request = request();
     let server = ScriptedServer::start(Vec::new());
-    let mut adapter =
-        HermesReflectionAdapter::connect(config(&server), job(request.clone())).expect("adapter");
+    let mut adapter = HermesReflectionAdapter::connect(
+        uncontained_config(&server),
+        job(request.clone()),
+    )
+    .expect("adapter");
 
     let failure = HermesPort::research(&mut adapter, request)
         .expect_err("no exact binary plus OS containment receipt means no Live evidence");
@@ -612,6 +1145,8 @@ fn contained_config_with_timing(
     )
     .expect("loopback config");
     config.containment_receipt = Some(crate::HermesContainmentReceipt {
+        endpoint: server.address(),
+        api_key_sha256: crate::sha256_text("test-only-loopback-key"),
         receipt_digest: digest(
             "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         ),

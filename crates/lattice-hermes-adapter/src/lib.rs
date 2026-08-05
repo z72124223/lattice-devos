@@ -4,6 +4,39 @@
 //! reflection job and converts a schema-valid Hermes response into an
 //! untrusted LATTICE candidate digest.
 
+mod broker;
+mod containment;
+mod runtime;
+#[cfg(windows)]
+mod windows_job;
+
+pub use broker::CodexProxyInvocation;
+#[cfg(windows)]
+pub use broker::{CodexBrokerReceipt, CodexReflectionBrokerConfig};
+pub use containment::{
+    HermesContainmentFrame, HermesContainmentFrameLimits, HermesSandboxProfile,
+    build_hermes_bwrap_arguments, parse_containment_frame,
+};
+#[cfg(windows)]
+pub use containment::{HermesSocketpairReceipt, HermesWslContainmentConfig};
+pub use runtime::{
+    HERMES_CPYTHON_ARCHIVE_BYTES, HERMES_CPYTHON_ARCHIVE_SHA256, HERMES_CPYTHON_BUILD_RELEASE,
+    HERMES_CPYTHON_PROVENANCE, HERMES_CPYTHON_SHA256SUMS_SHA256, HERMES_CPYTHON_VERSION,
+    HERMES_PYPROJECT_SHA256, HERMES_RUNTIME_ARCHIVE_SHA256, HERMES_UV_LOCK_SHA256,
+    HermesOfflineRuntimeManifest,
+};
+
+/// Private executable entrypoint used by the Job-contained broker helper.
+///
+/// This is public only because Cargo binary targets are separate crates. Its
+/// output is an untrusted candidate; only this crate's sealed verifier can
+/// turn it into broker evidence.
+#[doc(hidden)]
+#[must_use]
+pub fn __run_codex_reflection_broker_helper() -> i32 {
+    broker::run_codex_reflection_broker_helper()
+}
+
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
@@ -19,7 +52,7 @@ use std::time::{Duration, Instant};
 
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256, canonicalize, normalize_nfc};
 use lattice_contracts::{
-    Component, ContentDigest, HermesEvidence, HermesResearchRequest, RequestId,
+    Component, ContentDigest, HermesEvidence, HermesResearchRequest, RequestId, RuntimeKind,
 };
 use lattice_ports::{HermesPort, PortError, PortErrorKind, PortResult};
 use serde::Deserialize;
@@ -549,13 +582,85 @@ pub struct HermesAdapterConfig {
 ///
 /// There is intentionally no public constructor. Empty directories,
 /// `current_dir`, environment clearing, prompt instructions, and process
-/// lifecycle ownership are not sufficient to mint this receipt.
+/// lifecycle ownership are not sufficient to mint this receipt. A future
+/// same-process runner must additionally bind the contained Hermes PID,
+/// endpoint, and nonce before this receipt can become constructible.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HermesContainmentReceipt {
+    endpoint: SocketAddr,
+    api_key_sha256: String,
     receipt_digest: ContentDigest,
 }
 
 impl HermesContainmentReceipt {
+    #[must_use]
+    pub const fn receipt_digest(&self) -> &ContentDigest {
+        &self.receipt_digest
+    }
+
+    fn verify_binding(&self, endpoint: SocketAddr, api_key: &str) -> HermesAdapterResult<()> {
+        if self.endpoint != endpoint || self.api_key_sha256 != sha256_text(api_key) {
+            return Err(cross_binding(
+                "HERMES_CONTAINMENT_ENDPOINT_BINDING_REJECTED",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Joint identity proof for the runtime, socketpair sandbox, and broker.
+///
+/// This is infrastructure evidence only. It deliberately cannot be installed
+/// into [`HermesAdapterConfig`] and cannot authorize [`RuntimeKind::Live`]
+/// because it does not bind a running Hermes PID, endpoint, and nonce.
+#[cfg(windows)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HermesContainmentPrerequisites {
+    receipt_digest: ContentDigest,
+}
+
+#[cfg(windows)]
+impl HermesContainmentPrerequisites {
+    /// Verifies the three independent prerequisite receipts without claiming
+    /// that any Hermes endpoint was launched inside that containment.
+    ///
+    /// # Errors
+    ///
+    /// Rejects runtime, socketpair, broker, identity, reap, descriptor, or
+    /// digest drift.
+    pub fn verify(
+        runtime: &HermesOfflineRuntimeManifest,
+        socketpair: &HermesSocketpairReceipt,
+        broker: &CodexBrokerReceipt,
+    ) -> HermesAdapterResult<Self> {
+        socketpair.validate_for_containment()?;
+        broker.validate_for_containment()?;
+        if runtime.payload_file_count() == 0 || runtime.payload_byte_count() == 0 {
+            return Err(error(
+                HermesAdapterErrorKind::Identity,
+                "HERMES_CONTAINMENT_RUNTIME_REJECTED",
+            ));
+        }
+        let mut digest = Sha256::new();
+        digest.update(b"lattice.hermes.containment-prerequisites.v1\0");
+        for field in [
+            HERMES_RELEASE.to_owned(),
+            HERMES_UPSTREAM_COMMIT.to_owned(),
+            HERMES_CPYTHON_VERSION.to_owned(),
+            runtime.payload_file_count().to_string(),
+            runtime.payload_byte_count().to_string(),
+            runtime.payload_manifest_sha256().to_owned(),
+            socketpair.receipt_digest().as_str().to_owned(),
+            broker.receipt_digest().as_str().to_owned(),
+        ] {
+            digest.update((field.len() as u64).to_be_bytes());
+            digest.update(field.as_bytes());
+        }
+        let receipt_digest = ContentDigest::from_sha256(encode_sha256(&digest.finalize()))
+            .map_err(|_| malformed("HERMES_CONTAINMENT_PREREQUISITES_REJECTED"))?;
+        Ok(Self { receipt_digest })
+    }
+
     #[must_use]
     pub const fn receipt_digest(&self) -> &ContentDigest {
         &self.receipt_digest
@@ -953,6 +1058,39 @@ impl CanonicalReflection {
     }
 }
 
+/// One production reflection together with the normalized Hermes port
+/// evidence derived from exactly the same canonical output digest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HermesReflectionEvidence {
+    reflection: CanonicalReflection,
+    evidence: HermesEvidence,
+}
+
+impl HermesReflectionEvidence {
+    /// Returns the strict canonical reflection payload.
+    #[must_use]
+    pub const fn reflection(&self) -> &CanonicalReflection {
+        &self.reflection
+    }
+
+    /// Returns the normalized untrusted-candidate evidence reference.
+    #[must_use]
+    pub const fn evidence(&self) -> &HermesEvidence {
+        &self.evidence
+    }
+
+    /// Splits the typed payload and normalized evidence without recomputing
+    /// or resubmitting a Hermes run.
+    #[must_use]
+    pub fn into_parts(self) -> (CanonicalReflection, HermesEvidence) {
+        (self.reflection, self.evidence)
+    }
+
+    fn into_evidence(self) -> HermesEvidence {
+        self.evidence
+    }
+}
+
 /// Synchronous production adapter for one pre-bound Hermes reflection job.
 pub struct HermesReflectionAdapter {
     config: HermesAdapterConfig,
@@ -1053,6 +1191,43 @@ impl HermesReflectionAdapter {
             .map_err(|failure| failure.with_recovery_receipt(receipt))?;
         self.active_run = None;
         Ok(reflection)
+    }
+
+    /// Executes one contained production reflection and returns both the
+    /// canonical payload and its normalized Hermes evidence reference.
+    ///
+    /// # Errors
+    ///
+    /// Denies uncontained endpoints and otherwise preserves every strict
+    /// capability, transport, recovery, schema, and cross-binding failure
+    /// from [`Self::run_reflection`].
+    pub fn run_reflection_evidence(
+        &mut self,
+        request: &HermesResearchRequest,
+    ) -> PortResult<HermesReflectionEvidence> {
+        let receipt = self.config.containment_receipt.as_ref().ok_or_else(|| {
+            PortError::new(
+                Component::Hermes,
+                PortErrorKind::Denied,
+                "HERMES_LIVE_RUNTIME_RECEIPT_REQUIRED",
+            )
+        })?;
+        receipt
+            .verify_binding(self.config.endpoint, &self.config.api_key)
+            .map_err(|failure| map_port_error(&failure))?;
+        let invocation = request.invocation().clone();
+        let reflection = self
+            .run_reflection(request)
+            .map_err(|failure| map_port_error(&failure))?;
+        let evidence = HermesEvidence::new(
+            invocation,
+            RuntimeKind::Live,
+            reflection.output_digest().clone(),
+        );
+        Ok(HermesReflectionEvidence {
+            reflection,
+            evidence,
+        })
     }
 
     /// Reconciles one known run against the same Hermes server process.
@@ -1275,12 +1450,9 @@ impl HermesReflectionAdapter {
 }
 
 impl HermesPort for HermesReflectionAdapter {
-    fn research(&mut self, _request: HermesResearchRequest) -> PortResult<HermesEvidence> {
-        Err(PortError::new(
-            Component::Hermes,
-            PortErrorKind::Denied,
-            "HERMES_LIVE_RUNTIME_RECEIPT_REQUIRED",
-        ))
+    fn research(&mut self, request: HermesResearchRequest) -> PortResult<HermesEvidence> {
+        self.run_reflection_evidence(&request)
+            .map(HermesReflectionEvidence::into_evidence)
     }
 
     fn interrupt(&mut self, request_id: &RequestId) -> PortResult<()> {
@@ -2227,6 +2399,19 @@ fn sha256_file(path: &Path) -> HermesAdapterResult<String> {
         })?;
     }
     Ok(encoded)
+}
+
+fn sha256_text(value: &str) -> String {
+    encode_sha256(&Sha256::digest(value.as_bytes()))
+}
+
+fn encode_sha256(digest: &[u8]) -> String {
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }
 
 fn validate_identifier(value: &str, max: usize, code: &'static str) -> HermesAdapterResult<()> {
