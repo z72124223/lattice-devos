@@ -14,6 +14,8 @@ use lattice_ports::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::identity::preflight_codex_identity_in_home_until;
+use crate::process::validate_owned_codex_home;
 use crate::{
     AppServerRunConfig, AppServerRunError, AppServerRunErrorKind, CodexIdentityError,
     CodexIdentityErrorKind, CodexIdentityExpectation, TurnStatus, run_codex_app_server_until,
@@ -144,15 +146,27 @@ impl DeliveryCodexPort for CodexDeliveryAdapter {
         if remaining > self.config.timeout {
             return Err(known_config("CODEX_DELIVERY_DEADLINE_INVALID"));
         }
-        let identity = self
-            .config
-            .identity
-            .preflight_with_deadline(
-                self.config.identity.launcher_path(),
-                &self.config.schema_output_dir,
-                deadline,
-            )
-            .map_err(map_identity_error)?;
+        let workspace = PathBuf::from(request.workspace().workspace_locator());
+        let process_config = AppServerRunConfig::new(
+            self.config.identity.launcher_path().to_path_buf(),
+            self.config.identity.launcher_sha256(),
+            self.config.codex_home.clone(),
+            workspace,
+            self.config.prompt.clone(),
+            remaining,
+        )
+        .map_err(map_process_error)?;
+        if self.config.runtime == DeliveryRuntime::OfficialCodexAppServer {
+            validate_owned_codex_home(&process_config).map_err(map_process_error)?;
+        }
+        let identity = preflight_codex_identity_in_home_until(
+            self.config.identity.launcher_path(),
+            &self.config.identity,
+            &self.config.schema_output_dir,
+            &self.config.codex_home,
+            deadline,
+        )
+        .map_err(map_identity_error)?;
 
         let launcher_sha256 = ContentDigest::from_sha256(identity.launcher_sha256().to_owned())
             .map_err(|_| known_config("CODEX_IDENTITY_LAUNCHER_DIGEST_INVALID"))?;
@@ -164,21 +178,6 @@ impl DeliveryCodexPort for CodexDeliveryAdapter {
         let launcher_locator = path_text(identity.launcher_path())
             .ok_or_else(|| known_config("CODEX_IDENTITY_LAUNCHER_PATH_INVALID"))?
             .to_owned();
-        let workspace = PathBuf::from(request.workspace().workspace_locator());
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .filter(|remaining| !remaining.is_zero())
-            .ok_or_else(|| known(PortErrorKind::Timeout, "CODEX_DELIVERY_DEADLINE_EXPIRED"))?;
-        let process_config = AppServerRunConfig::new(
-            identity.launcher_path().to_path_buf(),
-            identity.launcher_sha256(),
-            self.config.codex_home.clone(),
-            workspace,
-            self.config.prompt.clone(),
-            remaining,
-        )
-        .map_err(map_process_error)?;
-
         let run =
             run_codex_app_server_until(&process_config, deadline).map_err(map_process_error)?;
         match run.outcome().status {

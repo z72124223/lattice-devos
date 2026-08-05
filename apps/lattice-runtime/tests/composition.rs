@@ -169,17 +169,6 @@ fn execution_configuration_digest_detects_every_process_owned_substitution() {
             Duration::from_secs(31),
             DeliveryRuntime::ScriptedAcceptance,
         ),
-        delivery_config(
-            r"C:\tools\codex.exe",
-            "codex-cli 0.144.6",
-            'a',
-            r"C:\delivery\schema",
-            r"C:\delivery\codex-home",
-            r"C:\delivery\root",
-            r"C:\tools\git.exe",
-            Duration::from_secs(30),
-            DeliveryRuntime::OfficialCodexAppServer,
-        ),
     ];
 
     for substituted in substitutions {
@@ -272,12 +261,13 @@ fn executable_has_config_binding_while_status_waits_for_durable_reconstruction()
     assert!(status.request_binding().is_none());
 }
 
+#[cfg(windows)]
 #[test]
-fn official_codex_live_is_blocked_before_database_or_process_effects() {
-    let config = LatticedDeliveryConfig::new(
+fn official_codex_rejects_arbitrary_or_content_mismatched_launchers_before_effects() {
+    let arbitrary = LatticedDeliveryConfig::new(
         PathBuf::from(r"C:\tools\codex.exe"),
-        "codex-cli 0.144.6",
-        "a".repeat(64),
+        "codex-cli 0.146.0",
+        "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb",
         PathBuf::from(r"C:\delivery\schema"),
         PathBuf::from(r"C:\delivery\codex-home"),
         PathBuf::from(r"C:\delivery\root"),
@@ -285,20 +275,47 @@ fn official_codex_live_is_blocked_before_database_or_process_effects() {
         Duration::from_secs(30),
         DeliveryRuntime::OfficialCodexAppServer,
     )
-    .expect("official configuration remains inspectable");
-    let mut service = LatticedDeliveryService::for_delivery(
-        config,
-        database("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-        "test-password".to_owned(),
+    .expect_err("an arbitrary launcher path must fail before any database effect");
+    assert_eq!(arbitrary.kind(), LatticedErrorKind::OfficialLiveBlocked);
+
+    let unique = NEXT_SCRIPTED_GATE_FIXTURE.fetch_add(1, Ordering::Relaxed);
+    let repository_root = std::env::temp_dir().join(format!(
+        "lattice-official-gate-{}-{unique}",
+        std::process::id()
+    ));
+    let target_root = repository_root.join("target");
+    let launcher = target_root
+        .join("codex-official")
+        .join("0.146.0")
+        .join("node_modules")
+        .join("@openai")
+        .join("codex-win32-x64")
+        .join("vendor")
+        .join("x86_64-pc-windows-msvc")
+        .join("bin")
+        .join("codex.exe");
+    fs::create_dir_all(launcher.parent().expect("launcher parent"))
+        .expect("create exact-looking bundle layout");
+    fs::write(&launcher, b"not the official Codex launcher")
+        .expect("write content-mismatched launcher");
+    let delivery_root = target_root
+        .join("lattice-delivery")
+        .join("a".repeat(32))
+        .join("delivery");
+    let mismatched = LatticedDeliveryConfig::new(
+        launcher,
+        "codex-cli 0.146.0",
+        "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb",
+        target_root.join("schema"),
+        repository_root.join("codex-home"),
+        delivery_root,
+        PathBuf::from(r"C:\tools\git.exe"),
+        Duration::from_secs(30),
+        DeliveryRuntime::OfficialCodexAppServer,
     )
-    .expect("service binding");
-
-    let error = service
-        .run_json()
-        .expect_err("official live must remain incident-blocked");
-
-    assert_eq!(error.kind(), LatticedErrorKind::OfficialLiveBlocked);
-    assert_eq!(error.code(), "LATTICE_OFFICIAL_CODEX_FAILED_DIAGNOSTIC");
+    .expect_err("self-claimed identity cannot authorize mismatched launcher bytes");
+    fs::remove_dir_all(&repository_root).expect("remove owned official gate fixture");
+    assert_eq!(mismatched.kind(), LatticedErrorKind::OfficialLiveBlocked);
 }
 
 #[test]

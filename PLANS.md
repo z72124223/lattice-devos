@@ -68,29 +68,26 @@ an implementation input, not a pending review gate:
 
 ## Current TASK-032 Incident Gate — 2026-08-05
 
-The first official-Codex live attempt is `FAILED_DIAGNOSTIC`, not acceptance
-evidence. Windows displayed `codex-windows-sandbox-setup.exe` with "The
-specified module could not be found" while the official turn was editing the
-isolated fixture. The exact npm-package helper is OpenAI-signed, x64, SHA-256
-`7191d24f6fb4a26cbbce0d2aecd6deb71fa074a8cb5f24a45d2fa2164473885f`;
-its direct imports resolve to installed Windows system DLLs or an API-set.
-OpenAI issues [#29952](https://github.com/openai/codex/issues/29952) and
-[#29200](https://github.com/openai/codex/issues/29200) remain open with the same
-modal failure and no linked repair branch or pull request.
+The Windows module diagnosis was disproved by local evidence: the historical
+0.144.6 sandbox setup completed, and the helper's imported DLLs resolve. The
+repair binds official mode before effects to the protected canonical
+`@openai/codex` 0.146.0 bundle, all three OpenAI-signed executables, the package
+manifest, an exact isolated-home config, and one consumed live-attempt latch.
 
-Until that upstream Windows sandbox-helper regression/compatibility failure is
-resolved or the user explicitly authorizes a new safety posture, all official
-Codex live and sandbox-setup launches are fail-closed before process or database
-effects. Do not retry, install/modify system components, or switch to
-unelevated/no-sandbox. Scripted acceptance, code fixes, tests, review, and
-durable handoff work may continue, but cannot close TASK-032's official-live
-acceptance criterion.
+The one authorized official attempt created exact `answer.txt`, passed the
+fixed test, committed only that path as
+`7b4b79ddd95124e2762a442f73e994278737fa3f`, and returned a durable
+`COMPLETED` receipt. The outer PowerShell wrapper then misclassified that
+terminal JSON on its nonzero branch, so the PostgreSQL harness cleanup removed
+run `cb0c871dbcc24c6eaeb6dfd772712245` before restart/status replay. The exact
+data directory no longer exists; an unrelated older cluster was not used.
 
-TASK-032 therefore remains `FAILED_DIAGNOSTIC` for official live, but it no
-longer blocks independently safe downstream executable nodes. The user
-explicitly directed the next bounded node to attach real Graphify and
-PostgreSQL Codebase Memory to the already verified scripted delivery fixture.
-This does not waive or reinterpret the official-live criterion.
+TASK-032 is therefore `NEEDS_REVIEW`, not fully accepted. The wrapper now
+accepts only strict, task/run/repository/commit/digest-bound completed terminal
+envelopes and has no-model positive/negative regressions. The official hard
+gate is restored to disabled and the one-shot latch remains consumed. No model
+or delivery retry is permitted in this checkpoint. Graphify, Memory, Hermes,
+and OpenClaw remain untouched by this repair window.
 
 ## Current TASK-033 Graphify/Memory Slice — 2026-08-05
 
@@ -732,7 +729,7 @@ remain future Orchestrator/PostgreSQL responsibilities.
     AC-06 remains open for real Windows/Git inspection, Workspace Git, and
     Scope Check. Writer Lease, Approval, Artifact, external components,
     production/release/deployment, and the unrelated website remain excluded.
-- [ ] **BLOCKED TASK-032 — executable Codex/PostgreSQL delivery node:** first
+- [ ] **CURRENT TASK-032 — executable Codex/PostgreSQL delivery node:** first
   record the approved versioned contract/port/orchestrator/`latticed` boundary,
   then implement it with TDD and prove an official Codex app-server repository
   modification, fixed verification, Git commit, durable PostgreSQL result, and
@@ -741,10 +738,11 @@ remain future Orchestrator/PostgreSQL responsibilities.
   claim OpenClaw, Graphify, Hermes, or Codebase Memory until each real component
   is attached and verified by a following executable node. Current bounded
   scripted subpath, fail-closed repair, full verification, and durable incident
-  handoff are complete. The official-live acceptance substep remains blocked by
-  the incident gate above and must not be retried in this window; TASK-032 stays
-  `in-progress` with official acceptance `FAILED_DIAGNOSTIC`.
-- [ ] **CURRENT TASK-033 — real Graphify/PostgreSQL Codebase Memory node:** pin
+  handoff are complete. The one authorized official-live attempt completed the
+  Codex edit, fixed test, Git commit, and durable receipt, but the wrapper
+  removed that PostgreSQL run before restart/status replay. It must not be
+  retried in this window; TASK-032 stays `in-progress` and `NEEDS_REVIEW`.
+- [ ] **PAUSED TASK-033 — real Graphify/PostgreSQL Codebase Memory node:** pin
   Graphify v0.9.33 at commit
   `4e7e6b1f7e0df10ed07d5f28f9189bbde42940f1`, analyze only an exact tracked
   Git snapshot and validate/canonicalize typed graph evidence. Pure contracts,

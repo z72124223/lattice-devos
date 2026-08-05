@@ -1,3 +1,62 @@
+# LATTICE DevOS TASK-036 Codex App-Server Windows Repair Checkpoint
+
+## Status
+
+`NEEDS_REVIEW`. The one authorized official Codex app-server attempt performed
+the real repository edit, fixed test, one-path Git commit, and durable
+`COMPLETED` receipt. The wrapper then misclassified the nonzero terminal JSON
+and deleted the exact PostgreSQL run before restart/status replay. The consumed
+one-shot must not be rerun in this checkpoint.
+
+## Completed And Evidence
+
+- Bound official execution to the canonical isolated `@openai/codex` 0.146.0
+  bundle, exact launcher/setup/runner/package hashes, signer, protected
+  `CODEX_HOME`, and exact config bytes before effects.
+- Split the effect deadline from the reserved finalization deadline. A real
+  no-model PostgreSQL regression persists `RECONCILIATION_REQUIRED`, replays it
+  from a fresh status process, records one scripted invocation, and completes
+  within the 30-second reserve.
+- Official fixture `target/lattice-delivery/21085913aba6414da468646c1ddf4adf`
+  contains exact `answer.txt` SHA-256
+  `1dab4dcc0e1d27971ce5c2f3cccd2631f4ddae0a82284588ee5e3437cde030ae`.
+  The fixed test passed and Codex committed only that path as
+  `7b4b79ddd95124e2762a442f73e994278737fa3f`.
+- Runtime stdout contains the durable `COMPLETED` receipt
+  `8e4c314fb6a0bb7f755759fe8a45a044c1b403d2cad9e30b708bbc7e8981bdaf`.
+  The full immutable evidence map is
+  `target/lattice-delivery/21085913aba6414da468646c1ddf4adf/evidence/official-live-salvage.json`.
+- Repaired nonzero terminal-envelope handling. Only an exact
+  `COMPLETED` envelope bound to request, repository, launcher, commit, schema,
+  and receipt digests is accepted; positive and tamper cases run without a
+  model. The ordinary official-live gate is restored to `false`, and the latch
+  remains consumed.
+
+## Verification And Review
+
+- `-TestRuntimeTerminalEnvelope`: PASS without model or delivery.
+- `-ScriptedDeadlineRegression`: PASS against PostgreSQL 17.10 in 10.477s;
+  durable fresh replay and no resend confirmed.
+- `cargo test -p lattice-codex-adapter`: PASS.
+- Focused runtime identity/deadline/orchestrator tests: PASS.
+- `npm.cmd run verify`: PASS, 44/44 tests.
+- Architecture boundaries remain unchanged: composition owns identity and
+  deadlines, the adapter owns the Codex process, and the wrapper owns local
+  acceptance orchestration. No new dependency, data owner, or public listener
+  was added. No Graphify, Memory, Hermes, or OpenClaw path changed.
+- Full workspace Rust testing previously reached only an unrelated, untouched
+  Graphify fake expectation failure; the user excluded that path from this
+  repair. No remote CI or upstream exists for this branch.
+
+## Remaining Gap And Integration State
+
+The exact PostgreSQL data directory for run
+`cb0c871dbcc24c6eaeb6dfd772712245` no longer exists. An older unrelated
+cluster was deliberately not substituted, so same-receipt restart/status
+replay cannot be truthfully recovered without a newly authorized official
+attempt and a new latch. This local repair checkpoint is committed only; it is
+not pushed or merged and is not represented as TASK-032 completion.
+
 # LATTICE DevOS TASK-033 Pure Graphify Checkpoint Handoff
 
 ## Status And Alignment
