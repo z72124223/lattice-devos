@@ -36,7 +36,7 @@ const STARTUP_MAGIC: &[u8] = b"LATTICE_HERMES_PRODUCTION_START_V1\n";
 const STARTUP_SCHEMA: &str = "lattice.hermes.production-start.v1";
 const ATTESTATION_SCHEMA: &str = "lattice.hermes.containment-attestation.v2";
 const CONFIG_SCHEMA: &str = "lattice.hermes.production-config.v2";
-const OFFICIAL_HERMES_CONFIG: &[u8] = br#"_config_version: 33
+const OFFICIAL_HERMES_CONFIG: &[u8] = br"_config_version: 33
 model:
   provider: openai-api
   default: gpt-5.6-sol
@@ -48,7 +48,7 @@ platform_toolsets:
 plugins:
   enabled: []
 mcp_servers: {}
-"#;
+";
 const BWRAP_SHA256: &str = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b";
 const MAX_STARTUP_BYTES: usize = 128 * 1024;
 const MAX_RUNNER_TIMEOUT: Duration = Duration::from_mins(5);
