@@ -20,6 +20,7 @@ use std::thread::{self, JoinHandle};
 #[cfg(windows)]
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -399,7 +400,6 @@ const BROKER_HELPER_SCHEMA: &str = "lattice.hermes.codex-broker-helper.v1";
 const BROKER_CANDIDATE_SCHEMA: &str = "lattice.hermes.codex-broker-candidate.v1";
 #[cfg(windows)]
 const MAX_BROKER_WIRE_BYTES: usize = 64 * 1024;
-#[cfg(windows)]
 const MAX_CODEX_FRAME_BYTES: usize = 1024 * 1024;
 #[cfg(windows)]
 const MAX_CODEX_STDERR_BYTES: u64 = 8 * 1024 * 1024;
@@ -901,65 +901,43 @@ fn run_broker_helper_inner() -> Result<CodexBrokerCandidate, i32> {
     let plan =
         CodexNoMarkerCanaryPlan::new(cwd.clone(), request.nonce.clone(), request.model.clone())
             .map_err(|_| 66)?;
+    let mut protocol =
+        CodexBrokerProtocol::new(codex_home.clone(), cwd.clone(), request.model.clone())?;
 
+    protocol.mark_request_sent(CodexBrokerRequest::Initialize)?;
     send_codex_json(&mut stdin, &plan.initialize_request(), &mut transcript).map_err(|_| 83)?;
-    let initialize = wait_for_response(&receiver, &mut stdin, &mut transcript, 0, None, deadline)
-        .map_err(|code| remap_protocol_code(code, 71))?;
-    validate_initialize_response(&initialize, &codex_home).map_err(|_| 71)?;
+    while !protocol.responses_seen[CodexBrokerRequest::Initialize.index()] {
+        let frame = receive_codex_frame(&receiver, &mut transcript, deadline)?;
+        ingest_codex_broker_frame(&mut protocol, &frame, &mut stdin, &mut transcript)?;
+    }
     send_codex_json(
         &mut stdin,
         &plan.initialized_notification(),
         &mut transcript,
     )
     .map_err(|_| 84)?;
+    protocol.mark_request_sent(CodexBrokerRequest::ThreadStart)?;
     send_codex_json(&mut stdin, &plan.thread_start_request(), &mut transcript).map_err(|_| 84)?;
-    let thread_response =
-        wait_for_response(&receiver, &mut stdin, &mut transcript, 1, None, deadline)
-            .map_err(|code| remap_protocol_code(code, 72))?;
-    let thread_id =
-        validate_thread_start_response(&thread_response, &cwd, &request.model).map_err(|_| 72)?;
+    while protocol.thread_id.is_none() {
+        let frame = receive_codex_frame(&receiver, &mut transcript, deadline)?;
+        ingest_codex_broker_frame(&mut protocol, &frame, &mut stdin, &mut transcript)?;
+    }
+    let thread_id = protocol.thread_id.clone().ok_or(72)?;
+    protocol.mark_request_sent(CodexBrokerRequest::TurnStart)?;
     send_codex_json(
         &mut stdin,
         &plan.turn_start_request(&thread_id),
         &mut transcript,
     )
     .map_err(|_| 85)?;
-    let mut turn_id = None;
-    let mut terminal = None;
-    while turn_id.is_none() || terminal.is_none() {
+    let terminal = loop {
         let frame = receive_codex_frame(&receiver, &mut transcript, deadline)?;
-        match frame.kind {
-            CodexAppServerFrameKind::Response { id: 2 } => {
-                if turn_id.is_some() {
-                    deny_and_interrupt(&mut stdin, None, Some(&thread_id), &mut transcript);
-                    return Err(86);
-                }
-                turn_id = Some(validate_turn_start_response(&frame.value).map_err(|_| 73)?);
-            }
-            CodexAppServerFrameKind::Response { .. } => {
-                deny_and_interrupt(&mut stdin, None, Some(&thread_id), &mut transcript);
-                return Err(87);
-            }
-            CodexAppServerFrameKind::ServerRequest { id, .. } => {
-                deny_and_interrupt(&mut stdin, Some(id), Some(&thread_id), &mut transcript);
-                return Err(74);
-            }
-            CodexAppServerFrameKind::Lifecycle { ref method } if method == "turn/completed" => {
-                if terminal.is_some() {
-                    deny_and_interrupt(&mut stdin, None, Some(&thread_id), &mut transcript);
-                    return Err(88);
-                }
-                terminal = Some(frame.value);
-            }
-            CodexAppServerFrameKind::Lifecycle { .. } => {
-                validate_lifecycle_binding(&frame.value, &thread_id, turn_id.as_deref())
-                    .map_err(|_| 76)?;
-            }
+        if let Some(terminal) =
+            ingest_codex_broker_frame(&mut protocol, &frame, &mut stdin, &mut transcript)?
+        {
+            break terminal;
         }
-    }
-    let turn_id = turn_id.ok_or(68)?;
-    let terminal = validate_terminal_evidence(terminal.as_ref().ok_or(68)?, &thread_id, &turn_id)
-        .map_err(|_| 77)?;
+    };
     guard.stop().map_err(|()| 67)?;
     drop(stdin);
     let (stderr_sha256, stderr_bytes, stderr_overflow) = stderr_reader.join().map_err(|_| 67)?;
@@ -1166,36 +1144,29 @@ fn receive_codex_frame(
     transcript.update(b"S\0");
     transcript.update((line.len() as u64).to_be_bytes());
     transcript.update(&line);
-    let value = serde_json::from_slice(&line).map_err(|_| 82)?;
-    let kind = classify_codex_app_server_frame(&line).map_err(|_| 75)?;
+    let value = parse_bounded_codex_json(&line).map_err(|_| 82)?;
+    let kind = classify_codex_app_server_envelope(&value).map_err(|_| 75)?;
     Ok(ReceivedCodexFrame { kind, value })
 }
 
 #[cfg(windows)]
-fn wait_for_response(
-    receiver: &Receiver<CodexReaderEvent>,
+fn ingest_codex_broker_frame(
+    protocol: &mut CodexBrokerProtocol,
+    frame: &ReceivedCodexFrame,
     stdin: &mut ChildStdin,
     transcript: &mut Sha256,
-    expected_id: i64,
-    thread_id: Option<&str>,
-    deadline: Instant,
-) -> Result<Value, i32> {
-    loop {
-        let frame = receive_codex_frame(receiver, transcript, deadline)?;
-        match frame.kind {
-            CodexAppServerFrameKind::Response { id } if id == expected_id => {
-                return Ok(frame.value);
-            }
-            CodexAppServerFrameKind::Response { .. } => return Err(68),
-            CodexAppServerFrameKind::ServerRequest { id, .. } => {
-                deny_and_interrupt(stdin, Some(id), thread_id, transcript);
-                return Err(68);
-            }
-            CodexAppServerFrameKind::Lifecycle { .. } => {
-                validate_lifecycle_binding(&frame.value, thread_id.unwrap_or(""), None)?;
-            }
-        }
+) -> Result<Option<CodexBrokerTerminal>, i32> {
+    if let CodexAppServerFrameKind::ServerRequest { id, .. } = &frame.kind {
+        deny_and_interrupt(
+            stdin,
+            Some(*id),
+            protocol.thread_id.as_deref(),
+            protocol.active_turn_id(),
+            transcript,
+        );
+        return Err(74);
     }
+    protocol.ingest_frame(frame)
 }
 
 #[cfg(windows)]
@@ -1203,6 +1174,7 @@ fn deny_and_interrupt(
     stdin: &mut ChildStdin,
     request_id: Option<i64>,
     thread_id: Option<&str>,
+    turn_id: Option<&str>,
     transcript: &mut Sha256,
 ) {
     if let Some(id) = request_id {
@@ -1212,11 +1184,14 @@ fn deny_and_interrupt(
         });
         let _ = send_codex_json(stdin, &denied, transcript);
     }
-    if let Some(thread_id) = thread_id.filter(|value| !value.is_empty()) {
+    if let (Some(thread_id), Some(turn_id)) = (
+        thread_id.filter(|value| !value.is_empty()),
+        turn_id.filter(|value| !value.is_empty()),
+    ) {
         let interrupt = serde_json::json!({
             "id": 3,
             "method": "turn/interrupt",
-            "params": {"threadId": thread_id}
+            "params": {"threadId": thread_id, "turnId": turn_id}
         });
         let _ = send_codex_json(stdin, &interrupt, transcript);
     }
@@ -1276,7 +1251,15 @@ fn validate_thread_start_response(value: &Value, cwd: &Path, model: &str) -> Res
         }
     }
     if result.get("approvalPolicy").and_then(Value::as_str) != Some("never")
+        || !matches!(
+            result.get("approvalsReviewer").and_then(Value::as_str),
+            Some("user" | "auto_review" | "guardian_subagent")
+        )
         || result.get("model").and_then(Value::as_str) != Some(model)
+        || !result
+            .get("modelProvider")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty() && value.len() <= 256)
         || !result
             .get("cwd")
             .and_then(Value::as_str)
@@ -1289,6 +1272,11 @@ fn validate_thread_start_response(value: &Value, cwd: &Path, model: &str) -> Res
     }
     validate_read_only_sandbox(result.get("sandbox").ok_or(68)?)?;
     let thread = result.get("thread").and_then(Value::as_object).ok_or(68)?;
+    validate_thread_object(thread, cwd)
+}
+
+#[cfg(windows)]
+fn validate_thread_object(thread: &Map<String, Value>, cwd: &Path) -> Result<String, i32> {
     crate::require_only_keys(
         thread,
         &[
@@ -1318,16 +1306,99 @@ fn validate_thread_start_response(value: &Value, cwd: &Path, model: &str) -> Res
         "HERMES_CODEX_BROKER_FATAL_FRAME",
     )
     .map_err(|_| 68)?;
-    if thread.get("ephemeral").and_then(Value::as_bool) != Some(true)
+    for required in [
+        "cliVersion",
+        "createdAt",
+        "cwd",
+        "ephemeral",
+        "id",
+        "modelProvider",
+        "preview",
+        "sessionId",
+        "source",
+        "status",
+        "turns",
+        "updatedAt",
+    ] {
+        if !thread.contains_key(required) {
+            return Err(68);
+        }
+    }
+    if !thread
+        .get("cliVersion")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.is_empty() && value.len() <= 256)
+        || thread.get("ephemeral").and_then(Value::as_bool) != Some(true)
         || !thread
             .get("cwd")
             .and_then(Value::as_str)
             .is_some_and(|value| same_canonical_path(value, cwd))
-        || !thread.get("turns").is_some_and(Value::is_array)
+        || thread
+            .get("turns")
+            .and_then(Value::as_array)
+            .is_none_or(|turns| !turns.is_empty())
+        || !thread
+            .get("modelProvider")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty() && value.len() <= 256)
+        || !thread.get("preview").is_some_and(Value::is_string)
+        || !thread
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty() && value.len() <= 4_096)
+        || thread.get("createdAt").and_then(Value::as_i64).is_none()
+        || thread.get("updatedAt").and_then(Value::as_i64).is_none()
+        || !validate_session_source(thread.get("source").ok_or(68)?)
+        || !validate_thread_status(thread.get("status").ok_or(68)?)
     {
         return Err(68);
     }
     required_nonempty_string(thread, "id")
+}
+
+#[cfg(windows)]
+fn validate_session_source(value: &Value) -> bool {
+    if matches!(
+        value.as_str(),
+        Some("cli" | "vscode" | "exec" | "appServer" | "unknown")
+    ) {
+        return true;
+    }
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    (object.len() == 1
+        && object
+            .get("custom")
+            .and_then(Value::as_str)
+            .is_some_and(|source| !source.is_empty() && source.len() <= 256))
+        || (object.len() == 1 && object.get("subAgent").is_some_and(Value::is_object))
+}
+
+#[cfg(windows)]
+fn validate_thread_status(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    match object.get("type").and_then(Value::as_str) {
+        Some("notLoaded" | "idle" | "systemError") => object.len() == 1,
+        Some("active") => {
+            object.len() == 2
+                && object
+                    .get("activeFlags")
+                    .and_then(Value::as_array)
+                    .is_some_and(|flags| {
+                        flags.len() <= 2
+                            && flags.iter().all(|flag| {
+                                matches!(
+                                    flag.as_str(),
+                                    Some("waitingOnApproval" | "waitingOnUserInput")
+                                )
+                            })
+                    })
+        }
+        _ => false,
+    }
 }
 
 #[cfg(windows)]
@@ -1340,10 +1411,355 @@ fn validate_turn_start_response(value: &Value) -> Result<String, i32> {
 }
 
 #[cfg(windows)]
-struct TerminalEvidence {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CodexBrokerTerminal {
     agent_message_count: u64,
     output: String,
     status: String,
+}
+
+impl CodexBrokerTerminal {
+    #[cfg(test)]
+    pub(crate) const fn agent_message_count(&self) -> u64 {
+        self.agent_message_count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn output(&self) -> &str {
+        &self.output
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> &str {
+        &self.status
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CodexBrokerRequest {
+    Initialize,
+    ThreadStart,
+    TurnStart,
+}
+
+impl CodexBrokerRequest {
+    const fn index(self) -> usize {
+        match self {
+            Self::Initialize => 0,
+            Self::ThreadStart => 1,
+            Self::TurnStart => 2,
+        }
+    }
+
+    const fn error_code(self) -> i32 {
+        match self {
+            Self::Initialize => 71,
+            Self::ThreadStart => 72,
+            Self::TurnStart => 73,
+        }
+    }
+}
+
+pub(crate) struct CodexBrokerProtocol {
+    codex_home: PathBuf,
+    cwd: PathBuf,
+    model: String,
+    requests_sent: [bool; 3],
+    responses_seen: [bool; 3],
+    thread_id: Option<String>,
+    observed_thread_id: Option<String>,
+    turn_id: Option<String>,
+    observed_turn_id: Option<String>,
+    lifecycle_starts_seen: [bool; 2],
+    pending_terminal: Option<(String, CodexBrokerTerminal)>,
+    terminal_emitted: bool,
+}
+
+impl CodexBrokerProtocol {
+    pub(crate) fn new(
+        codex_home: PathBuf,
+        cwd: PathBuf,
+        model: impl Into<String>,
+    ) -> Result<Self, i32> {
+        let model = model.into();
+        if !codex_home.is_absolute()
+            || !cwd.is_absolute()
+            || model != "gpt-5.6-sol"
+            || model.len() > 256
+        {
+            return Err(66);
+        }
+        let codex_home = fs::canonicalize(codex_home).map_err(|_| 66)?;
+        let cwd = fs::canonicalize(cwd).map_err(|_| 66)?;
+        Ok(Self {
+            codex_home,
+            cwd,
+            model,
+            requests_sent: [false; 3],
+            responses_seen: [false; 3],
+            thread_id: None,
+            observed_thread_id: None,
+            turn_id: None,
+            observed_turn_id: None,
+            lifecycle_starts_seen: [false; 2],
+            pending_terminal: None,
+            terminal_emitted: false,
+        })
+    }
+
+    pub(crate) fn mark_request_sent(&mut self, request: CodexBrokerRequest) -> Result<(), i32> {
+        let index = request.index();
+        if self.requests_sent[index]
+            || (request == CodexBrokerRequest::ThreadStart && !self.responses_seen[0])
+            || (request == CodexBrokerRequest::TurnStart && self.thread_id.is_none())
+        {
+            return Err(request.error_code());
+        }
+        self.requests_sent[index] = true;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ingest_json_line(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<Option<CodexBrokerTerminal>, i32> {
+        if bytes.is_empty() || bytes.len() > MAX_CODEX_FRAME_BYTES || bytes.contains(&b'\n') {
+            return Err(81);
+        }
+        let value = parse_bounded_codex_json(bytes).map_err(|_| 82)?;
+        let kind = classify_codex_app_server_envelope(&value).map_err(|_| 75)?;
+        self.ingest_frame(&ReceivedCodexFrame { kind, value })
+    }
+
+    fn ingest_frame(
+        &mut self,
+        frame: &ReceivedCodexFrame,
+    ) -> Result<Option<CodexBrokerTerminal>, i32> {
+        if let CodexAppServerFrameKind::Lifecycle { ref method } = frame.kind {
+            let object = frame
+                .value
+                .as_object()
+                .ok_or_else(|| if method == "turn/completed" { 77 } else { 76 })?;
+            classify_notification(object)
+                .map_err(|_| if method == "turn/completed" { 77 } else { 76 })?;
+        }
+        match &frame.kind {
+            CodexAppServerFrameKind::Response { id } => self.ingest_response(*id, &frame.value)?,
+            CodexAppServerFrameKind::ServerRequest { .. } => return Err(74),
+            CodexAppServerFrameKind::Lifecycle { method } if method == "thread/started" => {
+                if !self.requests_sent[CodexBrokerRequest::ThreadStart.index()]
+                    || self.lifecycle_starts_seen[0]
+                {
+                    return Err(76);
+                }
+                let params = frame
+                    .value
+                    .get("params")
+                    .and_then(Value::as_object)
+                    .ok_or(76)?;
+                let thread = params.get("thread").and_then(Value::as_object).ok_or(76)?;
+                let id = validate_thread_object(thread, &self.cwd).map_err(|_| 76)?;
+                self.bind_thread_id(&id, 76)?;
+                self.lifecycle_starts_seen[0] = true;
+            }
+            CodexAppServerFrameKind::Lifecycle { method } if method == "turn/started" => {
+                self.require_turn_request()?;
+                if self.lifecycle_starts_seen[1] {
+                    return Err(76);
+                }
+                let params = frame
+                    .value
+                    .get("params")
+                    .and_then(Value::as_object)
+                    .ok_or(76)?;
+                self.validate_thread_binding(params, 76)?;
+                let turn = params.get("turn").and_then(Value::as_object).ok_or(76)?;
+                validate_turn_object(turn).map_err(|_| 76)?;
+                for item in turn.get("items").and_then(Value::as_array).ok_or(76)? {
+                    validate_safe_item(item).map_err(|_| 76)?;
+                }
+                let id = required_nonempty_string(turn, "id").map_err(|_| 76)?;
+                self.bind_turn_id(&id, 76)?;
+                self.lifecycle_starts_seen[1] = true;
+            }
+            CodexAppServerFrameKind::Lifecycle { method } if method == "turn/completed" => {
+                self.require_turn_request()?;
+                if self.pending_terminal.is_some() {
+                    return Err(88);
+                }
+                let params = frame
+                    .value
+                    .get("params")
+                    .and_then(Value::as_object)
+                    .ok_or(77)?;
+                self.validate_thread_binding(params, 77)?;
+                let turn = params.get("turn").and_then(Value::as_object).ok_or(77)?;
+                let id = required_nonempty_string(turn, "id").map_err(|_| 77)?;
+                if self
+                    .observed_turn_id
+                    .as_deref()
+                    .is_some_and(|expected| expected != id)
+                    || self
+                        .turn_id
+                        .as_deref()
+                        .is_some_and(|expected| expected != id)
+                {
+                    return Err(77);
+                }
+                let terminal = validate_terminal_evidence(
+                    &frame.value,
+                    self.thread_id.as_deref().ok_or(77)?,
+                    &id,
+                )
+                .map_err(|_| 77)?;
+                self.pending_terminal = Some((id, terminal));
+            }
+            CodexAppServerFrameKind::Lifecycle { method } => {
+                let params = frame
+                    .value
+                    .get("params")
+                    .and_then(Value::as_object)
+                    .ok_or(76)?;
+                if method == "thread/status/changed" {
+                    if !self.requests_sent[CodexBrokerRequest::ThreadStart.index()] {
+                        return Err(76);
+                    }
+                } else {
+                    self.require_turn_request()?;
+                }
+                self.validate_thread_binding(params, 76)?;
+                if let Some(turn_id) = params.get("turnId").and_then(Value::as_str) {
+                    self.bind_turn_id(turn_id, 76)?;
+                }
+            }
+        }
+        self.reconcile()
+    }
+
+    fn ingest_response(&mut self, id: i64, value: &Value) -> Result<(), i32> {
+        let (request, index) = match id {
+            0 => (CodexBrokerRequest::Initialize, 0),
+            1 => (CodexBrokerRequest::ThreadStart, 1),
+            2 => (CodexBrokerRequest::TurnStart, 2),
+            _ => return Err(75),
+        };
+        if !self.requests_sent[index] || self.responses_seen[index] {
+            return Err(request.error_code());
+        }
+        self.responses_seen[index] = true;
+        match request {
+            CodexBrokerRequest::Initialize => {
+                validate_initialize_response(value, &self.codex_home).map_err(|_| 71)?;
+            }
+            CodexBrokerRequest::ThreadStart => {
+                let id = validate_thread_start_response(value, &self.cwd, &self.model)
+                    .map_err(|_| 72)?;
+                if self
+                    .observed_thread_id
+                    .as_deref()
+                    .is_some_and(|observed| observed != id)
+                {
+                    return Err(76);
+                }
+                self.thread_id = Some(id);
+            }
+            CodexBrokerRequest::TurnStart => {
+                let id = validate_turn_start_response(value).map_err(|_| 73)?;
+                if self
+                    .observed_turn_id
+                    .as_deref()
+                    .is_some_and(|observed| observed != id)
+                    || self
+                        .pending_terminal
+                        .as_ref()
+                        .is_some_and(|(observed, _)| observed != &id)
+                {
+                    return Err(76);
+                }
+                self.turn_id = Some(id);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_thread_binding(&self, params: &Map<String, Value>, code: i32) -> Result<(), i32> {
+        let observed = params.get("threadId").and_then(Value::as_str).ok_or(code)?;
+        let expected = self
+            .thread_id
+            .as_deref()
+            .or(self.observed_thread_id.as_deref());
+        if expected != Some(observed) {
+            return Err(code);
+        }
+        Ok(())
+    }
+
+    fn bind_thread_id(&mut self, observed: &str, code: i32) -> Result<(), i32> {
+        if self
+            .thread_id
+            .as_deref()
+            .or(self.observed_thread_id.as_deref())
+            .is_some_and(|expected| expected != observed)
+        {
+            return Err(code);
+        }
+        if self.observed_thread_id.is_none() {
+            self.observed_thread_id = Some(observed.to_owned());
+        }
+        Ok(())
+    }
+
+    fn bind_turn_id(&mut self, observed: &str, code: i32) -> Result<(), i32> {
+        if observed.is_empty()
+            || observed.len() > 4_096
+            || self
+                .turn_id
+                .as_deref()
+                .or(self.observed_turn_id.as_deref())
+                .is_some_and(|expected| expected != observed)
+        {
+            return Err(code);
+        }
+        if self.observed_turn_id.is_none() {
+            self.observed_turn_id = Some(observed.to_owned());
+        }
+        Ok(())
+    }
+
+    fn require_turn_request(&self) -> Result<(), i32> {
+        self.requests_sent[CodexBrokerRequest::TurnStart.index()]
+            .then_some(())
+            .ok_or(76)
+    }
+
+    fn active_turn_id(&self) -> Option<&str> {
+        self.turn_id
+            .as_deref()
+            .or(self.observed_turn_id.as_deref())
+            .or_else(|| {
+                self.pending_terminal
+                    .as_ref()
+                    .map(|(turn_id, _)| turn_id.as_str())
+            })
+    }
+
+    fn reconcile(&mut self) -> Result<Option<CodexBrokerTerminal>, i32> {
+        if self.terminal_emitted {
+            return Ok(None);
+        }
+        let Some(turn_id) = self.turn_id.as_deref() else {
+            return Ok(None);
+        };
+        let Some((terminal_turn_id, terminal)) = self.pending_terminal.as_ref() else {
+            return Ok(None);
+        };
+        if terminal_turn_id != turn_id {
+            return Err(77);
+        }
+        self.terminal_emitted = true;
+        Ok(Some(terminal.clone()))
+    }
 }
 
 #[cfg(windows)]
@@ -1351,7 +1767,7 @@ fn validate_terminal_evidence(
     value: &Value,
     expected_thread: &str,
     expected_turn: &str,
-) -> Result<TerminalEvidence, i32> {
+) -> Result<CodexBrokerTerminal, i32> {
     let params = value.get("params").and_then(Value::as_object).ok_or(68)?;
     if params.get("threadId").and_then(Value::as_str) != Some(expected_thread) {
         return Err(68);
@@ -1377,37 +1793,11 @@ fn validate_terminal_evidence(
             );
         }
     }
-    Ok(TerminalEvidence {
+    Ok(CodexBrokerTerminal {
         agent_message_count,
         output: output.unwrap_or_else(|| "{}".to_owned()),
         status: status.to_owned(),
     })
-}
-
-#[cfg(windows)]
-fn validate_lifecycle_binding(
-    value: &Value,
-    expected_thread: &str,
-    expected_turn: Option<&str>,
-) -> Result<(), i32> {
-    let method = value.get("method").and_then(Value::as_str).ok_or(68)?;
-    let params = value.get("params").and_then(Value::as_object).ok_or(68)?;
-    if let Some(thread_id) = params.get("threadId").and_then(Value::as_str)
-        && !expected_thread.is_empty()
-        && thread_id != expected_thread
-    {
-        return Err(68);
-    }
-    if let Some(turn_id) = params.get("turnId").and_then(Value::as_str)
-        && let Some(expected) = expected_turn
-        && turn_id != expected
-    {
-        return Err(68);
-    }
-    if matches!(method, "item/started" | "item/completed") {
-        validate_safe_item(params.get("item").ok_or(68)?)?;
-    }
-    Ok(())
 }
 
 #[cfg(windows)]
@@ -1732,11 +2122,6 @@ const fn broker_helper_exit_code(code: u32) -> &'static str {
     }
 }
 
-#[cfg(windows)]
-const fn remap_protocol_code(code: i32, stage_code: i32) -> i32 {
-    if code == 68 { stage_code } else { code }
-}
-
 fn configuration(code: &'static str) -> HermesAdapterError {
     HermesAdapterError::new(HermesAdapterErrorKind::Configuration, code)
 }
@@ -2051,15 +2436,28 @@ pub(crate) enum CodexAppServerFrameKind {
 /// Parses a complete app-server JSON line. Any server request, tool-bearing
 /// item, plan update, approval, auth refresh, or future discriminator is fatal
 /// to the one-shot broker and therefore never forwarded to Hermes.
+#[cfg(test)]
 pub(crate) fn classify_codex_app_server_frame(
     bytes: &[u8],
 ) -> HermesAdapterResult<CodexAppServerFrameKind> {
-    const MAX_FRAME_BYTES: usize = 1024 * 1024;
-    if bytes.is_empty() || bytes.len() > MAX_FRAME_BYTES || bytes.contains(&b'\n') {
+    if bytes.is_empty() || bytes.len() > MAX_CODEX_FRAME_BYTES || bytes.contains(&b'\n') {
         return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
     }
-    let value: Value =
-        serde_json::from_slice(bytes).map_err(|_| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
+    let value =
+        parse_bounded_codex_json(bytes).map_err(|_| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
+    let kind = classify_codex_app_server_envelope(&value)?;
+    if matches!(kind, CodexAppServerFrameKind::Lifecycle { .. }) {
+        let object = value
+            .as_object()
+            .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
+        return classify_notification(object);
+    }
+    Ok(kind)
+}
+
+fn classify_codex_app_server_envelope(
+    value: &Value,
+) -> HermesAdapterResult<CodexAppServerFrameKind> {
     let object = value
         .as_object()
         .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
@@ -2072,7 +2470,7 @@ pub(crate) fn classify_codex_app_server_frame(
         return classify_response(object);
     }
     if has_method {
-        return classify_notification(object);
+        return classify_notification_envelope(object);
     }
     Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))
 }
@@ -2095,23 +2493,44 @@ fn classify_server_request(
         .get("method")
         .and_then(Value::as_str)
         .filter(|method| {
-            matches!(
-                *method,
-                "account/chatgptAuthTokens/refresh"
-                    | "attestation/generate"
-                    | "applyPatchApproval"
-                    | "execCommandApproval"
-                    | "item/commandExecution/requestApproval"
-                    | "item/fileChange/requestApproval"
-                    | "item/permissions/requestApproval"
-                    | "item/tool/call"
-                    | "item/tool/requestUserInput"
-                    | "mcpServer/elicitation/request"
-            )
+            !method.is_empty() && method.len() <= 256 && !method.chars().any(char::is_control)
         })
         .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
     Ok(CodexAppServerFrameKind::ServerRequest {
         id,
+        method: method.to_owned(),
+    })
+}
+
+fn classify_notification_envelope(
+    object: &Map<String, Value>,
+) -> HermesAdapterResult<CodexAppServerFrameKind> {
+    let keys = object.keys().map(String::as_str).collect::<HashSet<_>>();
+    if keys != HashSet::from(["method", "params"])
+        || !object.get("params").is_some_and(Value::is_object)
+    {
+        return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
+    }
+    let method = object
+        .get("method")
+        .and_then(Value::as_str)
+        .filter(|method| {
+            matches!(
+                *method,
+                "thread/started"
+                    | "turn/started"
+                    | "thread/status/changed"
+                    | "thread/tokenUsage/updated"
+                    | "item/agentMessage/delta"
+                    | "item/reasoning/textDelta"
+                    | "item/reasoning/summaryTextDelta"
+                    | "item/started"
+                    | "item/completed"
+                    | "turn/completed"
+            )
+        })
+        .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
+    Ok(CodexAppServerFrameKind::Lifecycle {
         method: method.to_owned(),
     })
 }
@@ -2267,4 +2686,168 @@ fn validate_safe_control_item(value: &Value) -> HermesAdapterResult<()> {
 
 fn fatal(code: &'static str) -> HermesAdapterError {
     HermesAdapterError::new(HermesAdapterErrorKind::CapabilityMismatch, code)
+}
+
+const MAX_CODEX_JSON_DEPTH: usize = 64;
+const MAX_CODEX_JSON_NODES: usize = 65_536;
+const MAX_CODEX_JSON_ARRAY_ITEMS: usize = 4_096;
+const MAX_CODEX_JSON_OBJECT_FIELDS: usize = 1_024;
+const MAX_CODEX_JSON_STRING_BYTES: usize = 256 * 1024;
+const DUPLICATE_CODEX_KEY: &str = "LATTICE_DUPLICATE_CODEX_KEY";
+
+struct CodexJsonStats {
+    nodes: usize,
+}
+
+struct CodexValueSeed<'a> {
+    depth: usize,
+    stats: &'a mut CodexJsonStats,
+}
+
+impl<'de> DeserializeSeed<'de> for CodexValueSeed<'_> {
+    type Value = Value;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if self.depth > MAX_CODEX_JSON_DEPTH {
+            return Err(de::Error::custom("LATTICE_CODEX_JSON_DEPTH"));
+        }
+        self.stats.nodes = self.stats.nodes.saturating_add(1);
+        if self.stats.nodes > MAX_CODEX_JSON_NODES {
+            return Err(de::Error::custom("LATTICE_CODEX_JSON_NODES"));
+        }
+        deserializer.deserialize_any(CodexValueVisitor {
+            depth: self.depth,
+            stats: self.stats,
+        })
+    }
+}
+
+struct CodexValueVisitor<'a> {
+    depth: usize,
+    stats: &'a mut CodexJsonStats,
+}
+
+impl<'de> Visitor<'de> for CodexValueVisitor<'_> {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("one bounded Codex JSON value")
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(Value::Null)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(Value::Null)
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(Value::Number(value.into()))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(Value::Number)
+            .ok_or_else(|| E::custom("LATTICE_CODEX_JSON_NUMBER"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        if value.len() > MAX_CODEX_JSON_STRING_BYTES {
+            return Err(E::custom("LATTICE_CODEX_JSON_STRING"));
+        }
+        Ok(Value::String(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        if value.len() > MAX_CODEX_JSON_STRING_BYTES {
+            return Err(E::custom("LATTICE_CODEX_JSON_STRING"));
+        }
+        Ok(Value::String(value))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element_seed(CodexValueSeed {
+            depth: self.depth.saturating_add(1),
+            stats: self.stats,
+        })? {
+            if values.len() == MAX_CODEX_JSON_ARRAY_ITEMS {
+                return Err(de::Error::custom("LATTICE_CODEX_JSON_ARRAY"));
+            }
+            values.push(value);
+        }
+        Ok(Value::Array(values))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut object = Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if key.len() > 256 || object.contains_key(&key) {
+                return Err(de::Error::custom(DUPLICATE_CODEX_KEY));
+            }
+            if object.len() == MAX_CODEX_JSON_OBJECT_FIELDS {
+                return Err(de::Error::custom("LATTICE_CODEX_JSON_OBJECT"));
+            }
+            let value = map.next_value_seed(CodexValueSeed {
+                depth: self.depth.saturating_add(1),
+                stats: self.stats,
+            })?;
+            object.insert(key, value);
+        }
+        Ok(Value::Object(object))
+    }
+}
+
+fn parse_bounded_codex_json(bytes: &[u8]) -> Result<Value, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let mut stats = CodexJsonStats { nodes: 0 };
+    let value = CodexValueSeed {
+        depth: 0,
+        stats: &mut stats,
+    }
+    .deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(value)
 }
