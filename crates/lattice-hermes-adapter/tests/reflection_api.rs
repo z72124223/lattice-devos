@@ -1,3 +1,4 @@
+use std::fmt::Write as FmtWrite;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -8,11 +9,13 @@ use lattice_contracts::{
     AttemptId, CONTRACT_VERSION, ContentDigest, HermesResearchRequest, Invocation,
     ProjectSnapshotId, RequestId, TaskId,
 };
-use lattice_hermes_adapter::{
+use crate::{
     HERMES_LICENSE, HERMES_RELEASE, HERMES_SCHEMA_VERSION, HERMES_UPSTREAM_COMMIT,
     HermesAdapterConfig, HermesAdapterErrorKind, HermesMemoryPolicy, HermesProcessConfig,
     HermesReflectionAdapter, HermesReflectionJob, ReflectionEvidence, ReflectionEvidenceKind,
 };
+use lattice_ports::HermesPort;
+use sha2::{Digest, Sha256};
 
 const SUBJECT_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const GRAPH_DIGEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -90,26 +93,56 @@ fn event_transport_loss_recovers_through_bound_status_polling() {
 }
 
 #[test]
-fn restart_recovery_uses_capabilities_and_pollable_status_without_resubmission() {
+fn same_process_reconciliation_uses_receipt_without_resubmission() {
     let request = request();
     let job = job(request.clone());
     let output = bound_output(&job);
     let server = ScriptedServer::start(vec![
         capabilities(),
-        completed_status("run_restart", "lattice-task-034-session", &output),
+        Response::json(202, r#"{"run_id":"run_reconcile","status":"started"}"#),
+        Response::json(503, r#"{"error":{"message":"events unavailable"}}"#),
+        completed_status("run_reconcile", "lattice-task-034-session", &output)
+            .with_delay(Duration::from_millis(200)),
+        capabilities(),
+        completed_status("run_reconcile", "lattice-task-034-session", &output),
     ]);
-    let mut restarted =
-        HermesReflectionAdapter::connect(config(&server), job).expect("restarted adapter");
+    let timeout_config = contained_config_with_timing(
+        &server,
+        Duration::from_millis(100),
+        Duration::from_millis(1),
+    );
+    let mut adapter = HermesReflectionAdapter::connect(timeout_config, job).expect("adapter");
 
-    let reflection = restarted
-        .recover_reflection(&request, "run_restart")
-        .expect("status recovery");
+    let failure = adapter
+        .run_reflection(&request)
+        .expect_err("ambiguous post-submit status must return a receipt");
+    let receipt = failure
+        .recovery_receipt()
+        .expect("typed recovery receipt")
+        .clone();
+    assert_eq!(receipt.run_id(), Some("run_reconcile"));
+    let duplicate = adapter
+        .run_reflection(&request)
+        .expect_err("same job cannot be silently resubmitted");
+    assert_eq!(duplicate.code(), "HERMES_RUN_RECONCILIATION_REQUIRED");
+
+    thread::sleep(Duration::from_millis(250));
+    let reflection = adapter
+        .reconcile_reflection(&request, &receipt)
+        .expect("same-process status reconciliation");
 
     assert_eq!(reflection.binding().input_digest().len(), 64);
     let requests = server.finish();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 6);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("POST /v1/runs HTTP/1.1"))
+            .count(),
+        1
+    );
     assert!(requests[0].starts_with("GET /v1/capabilities"));
-    assert!(requests[1].starts_with("GET /v1/runs/run_restart HTTP/1.1"));
+    assert!(requests[5].starts_with("GET /v1/runs/run_reconcile HTTP/1.1"));
 }
 
 #[test]
@@ -145,6 +178,47 @@ fn malformed_reflection_schema_fails_closed() {
 }
 
 #[test]
+fn evidence_and_reflection_text_reject_sensitive_values_but_accept_digest_only_binding() {
+    let secret = "Authorization: Bearer sk-example-secret-value-123456";
+    let sensitive_digest =
+        digest("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+    let digest_only = ReflectionEvidence::new_digest_only(
+        ReflectionEvidenceKind::Test,
+        digest(GRAPH_DIGEST),
+        vec![sensitive_digest.clone()],
+    )
+    .expect("typed digest-only evidence");
+    let digest_only_job = HermesReflectionJob::new(
+        request(),
+        "lattice-task-034-session",
+        "hermes-agent",
+        vec![digest_only],
+    )
+    .expect("digest-only job");
+    assert!(digest_only_job.prompt().contains(sensitive_digest.as_str()));
+    assert!(!digest_only_job.prompt().contains(secret));
+
+    let request = request();
+    let job = job(request.clone());
+    let mut unsafe_output: serde_json::Value =
+        serde_json::from_str(&bound_output(&job)).expect("reflection fixture");
+    unsafe_output["summary"] = serde_json::json!(secret);
+    let unsafe_output = unsafe_output.to_string();
+    let server = ScriptedServer::start(vec![
+        capabilities(),
+        Response::json(202, r#"{"run_id":"run_secret","status":"started"}"#),
+        completed_events("run_secret", &unsafe_output),
+        completed_status("run_secret", "lattice-task-034-session", &unsafe_output),
+    ]);
+    let mut adapter = HermesReflectionAdapter::connect(config(&server), job).expect("adapter");
+    let failure = adapter
+        .run_reflection(&request)
+        .expect_err("secret-bearing reflection output must fail closed");
+    assert_eq!(failure.kind(), HermesAdapterErrorKind::Malformed);
+    assert_eq!(server.finish().len(), 4);
+}
+
+#[test]
 fn status_session_cross_binding_fails_closed() {
     let request = request();
     let job = job(request.clone());
@@ -171,18 +245,17 @@ fn event_and_status_timeouts_fail_closed() {
     let request = request();
     let job = job(request.clone());
     let server = ScriptedServer::start(vec![
-        capabilities(),
-        Response::json(202, r#"{"run_id":"run_timeout","status":"started"}"#),
-        Response::sse(200, ": late\n\n").with_delay(Duration::from_millis(60)),
-        Response::json(200, r#"{"object":"hermes.run"}"#).with_delay(Duration::from_millis(60)),
+        capabilities().with_delay(Duration::from_millis(20)),
+        Response::json(202, r#"{"run_id":"run_timeout","status":"started"}"#)
+            .with_delay(Duration::from_millis(20)),
+        Response::json(503, r#"{"error":{"message":"events unavailable"}}"#),
+        Response::json(200, r#"{"object":"hermes.run"}"#).with_delay(Duration::from_millis(120)),
     ]);
-    let timeout_config = HermesAdapterConfig::new(
-        server.address(),
-        "test-only-loopback-key",
-        Duration::from_millis(20),
+    let timeout_config = contained_config_with_timing(
+        &server,
+        Duration::from_millis(100),
         Duration::from_millis(1),
-    )
-    .expect("short timeout config");
+    );
     let mut adapter = HermesReflectionAdapter::connect(timeout_config, job).expect("adapter");
 
     let failure = adapter
@@ -190,22 +263,167 @@ fn event_and_status_timeouts_fail_closed() {
         .expect_err("timeout must fail closed");
 
     assert_eq!(failure.kind(), HermesAdapterErrorKind::Timeout);
+    assert_eq!(
+        failure
+            .recovery_receipt()
+            .and_then(|receipt| receipt.run_id()),
+        Some("run_timeout")
+    );
     assert_eq!(server.finish().len(), 4);
+}
+
+#[test]
+fn server_side_execution_or_missing_read_only_capabilities_fail_closed() {
+    let mut unsafe_cases = Vec::new();
+
+    for feature in ["tools", "file_access", "shell", "memory_write_api"] {
+        let mut enabled = capabilities_value();
+        enabled["features"][feature] = serde_json::json!(true);
+        unsafe_cases.push(enabled);
+    }
+
+    for unsafe_capabilities in unsafe_cases {
+        let request = request();
+        let server =
+            ScriptedServer::start(vec![Response::json(200, unsafe_capabilities.to_string())]);
+        let mut adapter = HermesReflectionAdapter::connect(config(&server), job(request.clone()))
+            .expect("adapter");
+
+        let failure = adapter
+            .run_reflection(&request)
+            .expect_err("unsafe or incomplete capability contract must fail closed");
+
+        assert!(matches!(
+            failure.kind(),
+            HermesAdapterErrorKind::CapabilityMismatch | HermesAdapterErrorKind::Malformed
+        ));
+        assert_eq!(server.finish().len(), 1);
+    }
+}
+
+#[test]
+fn official_server_tool_execution_requires_a_sealed_os_containment_receipt() {
+    let request = request();
+    let mut official = capabilities_value();
+    official["runtime"]["tool_execution"] = serde_json::json!("server");
+    let features = official["features"]
+        .as_object_mut()
+        .expect("features object");
+    features.remove("tools");
+    features.remove("file_access");
+    features.remove("shell");
+    let server = ScriptedServer::start(vec![Response::json(200, official.to_string())]);
+    let mut adapter = HermesReflectionAdapter::connect(
+        uncontained_config(&server),
+        job(request.clone()),
+    )
+    .expect("adapter");
+
+    let failure = adapter
+        .run_reflection(&request)
+        .expect_err("official server-side tools need real OS containment evidence");
+
+    assert_eq!(failure.code(), "HERMES_SERVER_TOOL_CONTAINMENT_REQUIRED");
+    assert_eq!(server.finish().len(), 1);
+}
+
+#[test]
+fn control_envelopes_reject_unknown_fields_and_event_discriminator_drift() {
+    let request = request();
+    let mut capability = capabilities_value();
+    capability["unexpected"] = serde_json::json!(true);
+    let capability_server =
+        ScriptedServer::start(vec![Response::json(200, capability.to_string())]);
+    let mut capability_adapter =
+        HermesReflectionAdapter::connect(config(&capability_server), job(request.clone()))
+            .expect("adapter");
+    let capability_failure = capability_adapter
+        .run_reflection(&request)
+        .expect_err("capability unknown field must fail closed");
+    assert_eq!(
+        capability_failure.code(),
+        "HERMES_CAPABILITIES_UNKNOWN_FIELD"
+    );
+    assert_eq!(capability_server.finish().len(), 1);
+
+    let event_job = job(request.clone());
+    let drift_event = serde_json::json!({
+        "event": "run.future",
+        "run_id": "run_event_drift",
+        "timestamp": 1.0
+    });
+    let event_server = ScriptedServer::start(vec![
+        capabilities(),
+        Response::json(202, r#"{"run_id":"run_event_drift","status":"started"}"#),
+        Response::sse(200, format!("data: {drift_event}\n\n")),
+    ]);
+    let mut event_adapter =
+        HermesReflectionAdapter::connect(config(&event_server), event_job).expect("adapter");
+    let event_failure = event_adapter
+        .run_reflection(&request)
+        .expect_err("unknown SSE discriminator must fail closed");
+    assert_eq!(event_failure.code(), "HERMES_EVENT_DISCRIMINATOR_REJECTED");
+    assert!(event_failure.recovery_receipt().is_some());
+    assert_eq!(event_server.finish().len(), 3);
+
+    let status_job = job(request.clone());
+    let output = bound_output(&status_job);
+    let status_server = ScriptedServer::start(vec![
+        capabilities(),
+        Response::json(202, r#"{"run_id":"run_status_extra","status":"started"}"#),
+        completed_events("run_status_extra", &output),
+        Response::json(
+            200,
+            serde_json::json!({
+                "object": "hermes.run",
+                "run_id": "run_status_extra",
+                "status": "completed",
+                "session_id": "lattice-task-034-session",
+                "model": "hermes-agent",
+                "output": output,
+                "unexpected": true
+            })
+            .to_string(),
+        ),
+    ]);
+    let mut status_adapter =
+        HermesReflectionAdapter::connect(config(&status_server), status_job).expect("adapter");
+    let status_failure = status_adapter
+        .run_reflection(&request)
+        .expect_err("status unknown field must fail closed");
+    assert_eq!(status_failure.code(), "HERMES_STATUS_UNKNOWN_FIELD");
+    assert_eq!(status_server.finish().len(), 4);
+}
+
+#[test]
+fn scripted_adapter_cannot_emit_live_port_evidence() {
+    let request = request();
+    let server = ScriptedServer::start(Vec::new());
+    let mut adapter =
+        HermesReflectionAdapter::connect(config(&server), job(request.clone())).expect("adapter");
+
+    let failure = HermesPort::research(&mut adapter, request)
+        .expect_err("no exact binary plus OS containment receipt means no Live evidence");
+
+    assert_eq!(failure.code(), "HERMES_LIVE_RUNTIME_RECEIPT_REQUIRED");
+    assert!(server.finish().is_empty());
 }
 
 #[test]
 fn process_command_uses_only_explicit_isolated_homes_and_loopback_api() {
     let executable = std::env::current_exe().expect("test executable");
+    let executable_hash = sha256_file(&executable);
     let scratch = std::env::temp_dir().join(format!(
         "lattice-hermes-process-contract-{}",
         std::process::id()
     ));
-    let hermes_home = scratch.join("hermes-home");
-    let codex_home = scratch.join("codex-home");
+    let product_root = std::fs::canonicalize(std::env::current_dir().expect("current directory"))
+        .expect("canonical product root");
     let process = HermesProcessConfig::new(
         executable.clone(),
-        hermes_home.clone(),
-        codex_home.clone(),
+        executable_hash.clone(),
+        scratch.clone(),
+        product_root.clone(),
         "127.0.0.1:8642".parse().expect("loopback"),
         "process-local-api-key",
         "hermes-agent",
@@ -217,24 +435,40 @@ fn process_command_uses_only_explicit_isolated_homes_and_loopback_api() {
         process.memory_policy(),
         HermesMemoryPolicy::EphemeralIsolatedHome
     );
+    assert_gateway_command(&process, &executable);
+    assert_probe_command(&process);
+    assert_eq!(process.executable_sha256(), executable_hash);
+    assert_process_rejections(&executable, &executable_hash, &product_root);
+}
 
+fn assert_gateway_command(process: &HermesProcessConfig, executable: &std::path::Path) {
     let command = process.gateway_command().expect("gateway command");
-    assert_eq!(command.get_program(), executable.as_os_str());
+    assert_eq!(
+        command.get_program(),
+        std::fs::canonicalize(executable)
+            .expect("canonical executable")
+            .as_os_str()
+    );
     assert_eq!(
         command.get_args().collect::<Vec<_>>(),
         vec![std::ffi::OsStr::new("gateway")]
     );
+    assert_eq!(command.get_current_dir(), Some(process.working_directory()));
     let environment = command
         .get_envs()
         .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value.to_owned())))
         .collect::<std::collections::HashMap<_, _>>();
     assert_eq!(
-        environment.get(std::ffi::OsStr::new("HERMES_HOME")),
-        Some(&hermes_home.into_os_string())
+        environment
+            .get(std::ffi::OsStr::new("HERMES_HOME"))
+            .map(std::ffi::OsString::as_os_str),
+        Some(process.hermes_home().as_os_str())
     );
     assert_eq!(
-        environment.get(std::ffi::OsStr::new("CODEX_HOME")),
-        Some(&codex_home.into_os_string())
+        environment
+            .get(std::ffi::OsStr::new("CODEX_HOME"))
+            .map(std::ffi::OsString::as_os_str),
+        Some(process.codex_home().as_os_str())
     );
     assert_eq!(
         environment.get(std::ffi::OsStr::new("API_SERVER_HOST")),
@@ -244,16 +478,82 @@ fn process_command_uses_only_explicit_isolated_homes_and_loopback_api() {
         environment.get(std::ffi::OsStr::new("API_SERVER_PORT")),
         Some(&std::ffi::OsString::from("8642"))
     );
+    assert_eq!(
+        environment.get(std::ffi::OsStr::new("API_SERVER_KEY")),
+        Some(&std::ffi::OsString::from("process-local-api-key"))
+    );
     assert!(!environment.contains_key(std::ffi::OsStr::new("OPENAI_API_KEY")));
     assert!(!environment.contains_key(std::ffi::OsStr::new("DATABASE_URL")));
     assert!(!environment.contains_key(std::ffi::OsStr::new("GIT_ASKPASS")));
-    assert!(!environment.contains_key(std::ffi::OsStr::new("HOME")));
-    assert!(!environment.contains_key(std::ffi::OsStr::new("USERPROFILE")));
+    assert_eq!(
+        environment
+            .get(std::ffi::OsStr::new("HOME"))
+            .map(std::ffi::OsString::as_os_str),
+        Some(process.hermes_home().as_os_str())
+    );
+    assert_eq!(
+        environment
+            .get(std::ffi::OsStr::new("USERPROFILE"))
+            .map(std::ffi::OsString::as_os_str),
+        Some(process.hermes_home().as_os_str())
+    );
+    assert_eq!(
+        environment
+            .get(std::ffi::OsStr::new("TEMP"))
+            .map(std::ffi::OsString::as_os_str),
+        Some(process.temp_directory().as_os_str())
+    );
+    assert!(!environment.contains_key(std::ffi::OsStr::new("PATH")));
+}
+
+fn assert_probe_command(process: &HermesProcessConfig) {
+    let probe = process
+        .version_probe_command()
+        .expect("bounded identity probe command");
+    assert_eq!(
+        probe.get_args().collect::<Vec<_>>(),
+        vec![std::ffi::OsStr::new("--version")]
+    );
+    let probe_environment = probe
+        .get_envs()
+        .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value.to_owned())))
+        .collect::<std::collections::HashMap<_, _>>();
+    for secret_or_server_setting in [
+        "API_SERVER_KEY",
+        "API_SERVER_ENABLED",
+        "API_SERVER_HOST",
+        "API_SERVER_PORT",
+        "API_SERVER_MODEL_NAME",
+    ] {
+        assert!(!probe_environment.contains_key(std::ffi::OsStr::new(secret_or_server_setting)));
+    }
+}
+
+fn assert_process_rejections(
+    executable: &std::path::Path,
+    executable_hash: &str,
+    product_root: &std::path::Path,
+) {
+    let Err(hash_failure) = HermesProcessConfig::new(
+        executable.to_path_buf(),
+        "0".repeat(64),
+        std::env::temp_dir().join(format!("lattice-hermes-hash-reject-{}", std::process::id())),
+        product_root.to_path_buf(),
+        "127.0.0.1:8642".parse().expect("loopback"),
+        "process-local-api-key",
+        "hermes-agent",
+        Duration::from_secs(2),
+    ) else {
+        panic!("an executable outside the pinned hash must fail closed");
+    };
+    assert_eq!(hash_failure.kind(), HermesAdapterErrorKind::Identity);
+    assert_eq!(hash_failure.code(), "HERMES_EXECUTABLE_HASH_MISMATCH");
 
     let Err(existing_home_failure) = HermesProcessConfig::new(
-        std::env::current_exe().expect("test executable"),
+        executable.to_path_buf(),
+        executable_hash.to_owned(),
         std::env::temp_dir(),
-        scratch.join("other-codex-home"),
+        product_root.to_path_buf(),
         "127.0.0.1:8642".parse().expect("loopback"),
         "process-local-api-key",
         "hermes-agent",
@@ -265,9 +565,61 @@ fn process_command_uses_only_explicit_isolated_homes_and_loopback_api() {
         existing_home_failure.kind(),
         HermesAdapterErrorKind::Configuration
     );
+
+    let Err(overlap) = HermesProcessConfig::new(
+        executable.to_path_buf(),
+        executable_hash.to_owned(),
+        product_root.join("forbidden-hermes-run"),
+        product_root.to_path_buf(),
+        "127.0.0.1:8642".parse().expect("loopback"),
+        "process-local-api-key",
+        "hermes-agent",
+        Duration::from_secs(2),
+    ) else {
+        panic!("product descendant cannot be an isolation root");
+    };
+    assert_eq!(overlap.code(), "HERMES_PRODUCT_ROOT_OVERLAP_REJECTED");
+}
+
+fn sha256_file(path: &std::path::Path) -> String {
+    let bytes = std::fs::read(path).expect("read executable bytes");
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}").expect("write digest to string");
+    }
+    encoded
 }
 
 fn config(server: &ScriptedServer) -> HermesAdapterConfig {
+    contained_config_with_timing(
+        server,
+        Duration::from_secs(2),
+        Duration::from_millis(1),
+    )
+}
+
+fn contained_config_with_timing(
+    server: &ScriptedServer,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> HermesAdapterConfig {
+    let mut config = HermesAdapterConfig::new(
+        server.address(),
+        "test-only-loopback-key",
+        timeout,
+        poll_interval,
+    )
+    .expect("loopback config");
+    config.containment_receipt = Some(crate::HermesContainmentReceipt {
+        receipt_digest: digest(
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        ),
+    });
+    config
+}
+
+fn uncontained_config(server: &ScriptedServer) -> HermesAdapterConfig {
     HermesAdapterConfig::new(
         server.address(),
         "test-only-loopback-key",
@@ -283,12 +635,8 @@ fn job(request: HermesResearchRequest) -> HermesReflectionJob {
         "lattice-task-034-session",
         "hermes-agent",
         vec![
-            ReflectionEvidence::new(
-                ReflectionEvidenceKind::Graphify,
-                digest(GRAPH_DIGEST),
-                "Graphify extracted the adapter boundary from the exact Git snapshot.",
-            )
-            .expect("bounded evidence"),
+            ReflectionEvidence::new(ReflectionEvidenceKind::Graphify, digest(GRAPH_DIGEST))
+                .expect("bounded evidence"),
         ],
     )
     .expect("valid bound job")
@@ -302,29 +650,29 @@ fn bound_output(job: &HermesReflectionJob) -> String {
 }
 
 fn capabilities() -> Response {
-    Response::json(
-        200,
-        serde_json::json!({
-            "object": "hermes.api_server.capabilities",
-            "platform": "hermes-agent",
-            "model": "hermes-agent",
-            "auth": {"type": "bearer", "required": true},
-            "runtime": {
-                "mode": "server_agent",
-                "tool_execution": "server",
-                "split_runtime": false
-            },
-            "features": {
-                "run_submission": true,
-                "run_status": true,
-                "run_events_sse": true,
-                "run_stop": true,
-                "admin_config_rw": false,
-                "memory_write_api": false
-            }
-        })
-        .to_string(),
-    )
+    Response::json(200, capabilities_value().to_string())
+}
+
+fn capabilities_value() -> serde_json::Value {
+    serde_json::json!({
+        "object": "hermes.api_server.capabilities",
+        "platform": "hermes-agent",
+        "model": "hermes-agent",
+        "auth": {"type": "bearer", "required": true},
+        "runtime": {
+            "mode": "server_agent",
+            "tool_execution": "server",
+            "split_runtime": false
+        },
+        "features": {
+            "run_submission": true,
+            "run_status": true,
+            "run_events_sse": true,
+            "run_stop": true,
+            "admin_config_rw": false,
+            "memory_write_api": false
+        }
+    })
 }
 
 fn completed_events(run_id: &str, output: &str) -> Response {
