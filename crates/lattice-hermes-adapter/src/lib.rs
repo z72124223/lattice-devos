@@ -80,9 +80,6 @@ pub const HERMES_PACKAGE_VERSION: &str = "0.20.0";
 pub const HERMES_LICENSE: &str = "MIT";
 /// Only reflection envelope schema accepted by this adapter.
 pub const HERMES_SCHEMA_VERSION: &str = "lattice.hermes.reflection.v1";
-/// False until the atomic FD2 inner/host pair and request lifecycle are both
-/// integrated with the pinned frozen Hermes runtime closure.
-pub const HERMES_OFFICIAL_FULL_CHAIN_READY: bool = false;
 
 const MAX_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_EVIDENCE_ITEMS: usize = 128;

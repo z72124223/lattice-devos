@@ -6,8 +6,9 @@ all currently defined cross-bindings, emits a bounded V2 containment frame,
 and relays bounded HTTP to a loopback endpoint inside the private namespace.
 
 Scripted fixture mode is explicitly labelled and never imports or invokes
-Hermes or a model. Official mode remains fail-closed because the current
-pinned closure does not contain its verified Hermes v2026.8.3 executable.
+Hermes or a model. Official mode starts only the pinned Hermes gateway,
+verifies its authenticated capabilities before attestation, and relays its
+bounded loopback HTTP without synthesizing a model result.
 """
 
 import ctypes
@@ -18,6 +19,7 @@ import os
 import pathlib
 import re
 import select
+import signal
 import socket
 import stat
 import struct
@@ -36,6 +38,7 @@ CODEX_SHIM_MAGIC = b"LATTICE_HERMES_CODEX_SHIM_V1\n"
 MAX_CONTROL_BYTES = 2 * 1024 * 1024
 MAX_REFLECTION_BYTES = 64 * 1024
 MAX_EXECUTABLE_BYTES = 32 * 1024 * 1024
+MAX_RUNTIME_FILE_BYTES = 128 * 1024 * 1024
 MAX_CODEX_PROXY_DATA_BYTES = 64 * 1024
 CODEX_PROXY_HEADER_BYTES = 41
 CODEX_PROXY_STREAM_ID = 1
@@ -53,8 +56,36 @@ PROXY_ERROR_DEADLINE = 6
 PROXY_ERROR_IO = 7
 EXPECTED_BWRAP_SHA256 = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b"
 OFFICIAL_HERMES_CANDIDATE = "/runtime-input/python/bin/hermes"
+OFFICIAL_RUNTIME_PYTHON = "/runtime-input/python/bin/python3.12"
+OFFICIAL_RUNTIME_MANIFEST = "/runtime-input/offline-runtime-manifest.json"
+OFFICIAL_RUNTIME_TREE_MANIFEST = "/runtime-input/provenance/runtime-tree-manifest.json"
+OFFICIAL_HERMES_SHA256 = "5f0937f77b6df59262dad536c1f6ed1447295584cdd129eed403b84f5bc826a8"
+OFFICIAL_RUNTIME_PYTHON_SHA256 = (
+    "b4274ebd5b568c6b6dc5f1668d1d747c574c0e0d605f41e09f26c51b2446971b"
+)
+OFFICIAL_RUNTIME_MANIFEST_SHA256 = (
+    "51e7c972ffebb00ed0e09e688b7d8490853764295a3c28237dd198950f7524ab"
+)
+OFFICIAL_RUNTIME_TREE_SHA256 = (
+    "3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d"
+)
+OFFICIAL_HERMES_CONFIG_PATH = "/state/hermes/config.yaml"
+OFFICIAL_OPENAI_SENTINEL = "lattice-codex-app-server-only"
 CODEX_PROXY_SOCKET_PATH = "/state/codex-proxy.sock"
 CODEX_SHIM_PATH = "/state/bin/codex"
+OFFICIAL_HERMES_CONFIG = b"""_config_version: 33
+model:
+  provider: openai-api
+  default: gpt-5.6-sol
+  openai_runtime: codex_app_server
+  api_mode: codex_app_server
+  base_url: http://127.0.0.1:9/v1
+platform_toolsets:
+  api_server: []
+plugins:
+  enabled: []
+mcp_servers: {}
+"""
 FIXTURE_CODEX_REQUEST = (
     b'{"id":0,"method":"initialize","params":{}}\n'
     b'{"id":1,"method":"thread/start","params":{}}\n'
@@ -421,8 +452,14 @@ def parse_init_payload(encoded):
             fail(72)
         if not isinstance(parsed_reflection, dict) or canonical_json(parsed_reflection) != encoded_reflection:
             fail(72)
-    elif value["fixture_reflection"] is not None:
-        fail(72)
+    else:
+        if (
+            value["fixture_reflection"] is not None
+            or value["model"] != "hermes-agent"
+            or len(value["api_key"]) < 16
+            or not value["api_key"].isascii()
+        ):
+            fail(72)
     return value
 
 
@@ -434,9 +471,12 @@ def config_digest(init):
     value = {
         "api_key_sha256": sha256_bytes(init["api_key"].encode("utf-8")),
         "endpoint": init["endpoint"],
+        "hermes_config_sha256": (
+            sha256_bytes(OFFICIAL_HERMES_CONFIG) if init["mode"] == "official" else None
+        ),
         "model": init["model"],
         "nonce": init["nonce"],
-        "schema": "lattice.hermes.production-config.v1",
+        "schema": "lattice.hermes.production-config.v2",
     }
     return sha256_bytes(canonical_json(value))
 
@@ -608,6 +648,54 @@ def install_codex_shim():
     ):
         fail(80)
     return sha256_bytes(source)
+
+
+def install_official_hermes_config():
+    source = OFFICIAL_HERMES_CONFIG
+    if not source or len(source) > MAX_REFLECTION_BYTES:
+        fail(80)
+    try:
+        home = pathlib.Path("/state/hermes")
+        home.mkdir(mode=0o700)
+        home_metadata = os.lstat(home)
+        descriptor = os.open(
+            OFFICIAL_HERMES_CONFIG_PATH,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            offset = 0
+            while offset < len(source):
+                written = os.write(descriptor, source[offset:])
+                if written <= 0:
+                    fail(80)
+                offset += written
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.chmod(OFFICIAL_HERMES_CONFIG_PATH, 0o600)
+        metadata = os.lstat(OFFICIAL_HERMES_CONFIG_PATH)
+        descriptor = os.open(
+            OFFICIAL_HERMES_CONFIG_PATH,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        try:
+            observed = os.read(descriptor, len(source) + 1)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        fail(80)
+    if (
+        observed != source
+        or not stat.S_ISDIR(home_metadata.st_mode)
+        or home_metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(home_metadata.st_mode) != 0o700
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        fail(80)
+    return sha256_bytes(observed)
 
 
 def create_codex_proxy_listener():
@@ -934,6 +1022,43 @@ def digest_file(path, limit):
     return digest.hexdigest()
 
 
+def validate_official_runtime_identity():
+    expected_files = (
+        (OFFICIAL_HERMES_CANDIDATE, 182, OFFICIAL_HERMES_SHA256, True),
+        (
+            OFFICIAL_RUNTIME_PYTHON,
+            102380768,
+            OFFICIAL_RUNTIME_PYTHON_SHA256,
+            True,
+        ),
+        (
+            OFFICIAL_RUNTIME_MANIFEST,
+            925,
+            OFFICIAL_RUNTIME_MANIFEST_SHA256,
+            False,
+        ),
+        (
+            OFFICIAL_RUNTIME_TREE_MANIFEST,
+            2673723,
+            OFFICIAL_RUNTIME_TREE_SHA256,
+            False,
+        ),
+    )
+    try:
+        for path, expected_size, expected_sha256, executable in expected_files:
+            metadata = os.lstat(path)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size != expected_size
+                or os.path.realpath(path) != path
+                or (executable and not os.access(path, os.X_OK))
+                or digest_file(path, MAX_RUNTIME_FILE_BYTES) != expected_sha256
+            ):
+                fail(73)
+    except OSError:
+        fail(73)
+
+
 def validate_observations(bwrap_sha256, net_namespace, namespace_pid):
     if (
         bwrap_sha256 != EXPECTED_BWRAP_SHA256
@@ -1208,12 +1333,208 @@ class ScriptedFixtureEndpoint:
                 accepted.close()
 
 
-def reject_unstaged_official_server():
-    # This transport slice must never turn fixture evidence into an official
-    # attestation. The current pinned closure lacks this verified executable;
-    # an unexpected future file also requires the separate official lifecycle.
-    pathlib.Path(OFFICIAL_HERMES_CANDIDATE).is_file()
-    fail(74)
+def expected_official_capabilities(init):
+    return {
+        "auth": {"required": True, "type": "bearer"},
+        "features": {
+            "admin_config_rw": False,
+            "memory_write_api": False,
+            "run_events_sse": True,
+            "run_status": True,
+            "run_stop": True,
+            "run_submission": True,
+        },
+        "model": init["model"],
+        "object": "hermes.api_server.capabilities",
+        "platform": "hermes-agent",
+        "runtime": {
+            "mode": "server_agent",
+            "split_runtime": False,
+            "tool_execution": "server",
+        },
+    }
+
+
+def validate_official_capabilities(response, init):
+    if not response or len(response) > MAX_CONTROL_BYTES:
+        fail(78)
+    try:
+        header, body = response.split(b"\r\n\r\n", 1)
+        lines = header.decode("ascii").split("\r\n")
+        protocol, status, _reason = lines[0].split(" ", 2)
+        headers = {}
+        for line in lines[1:]:
+            name, value = line.split(":", 1)
+            name = name.strip().lower()
+            if not name or name in headers:
+                fail(75)
+            headers[name] = value.strip()
+        content_length = headers["content-length"]
+        capabilities = json.loads(body.decode("utf-8"))
+    except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        fail(75)
+    if (
+        protocol != "HTTP/1.1"
+        or status != "200"
+        or "transfer-encoding" in headers
+        or not content_length.isascii()
+        or not content_length.isdigit()
+        or int(content_length) != len(body)
+    ):
+        fail(75)
+    expected = expected_official_capabilities(init)
+    if not isinstance(capabilities, dict):
+        fail(75)
+    for name in ("object", "platform", "model"):
+        if capabilities.get(name) != expected[name]:
+            fail(75)
+    for section in ("auth", "runtime", "features"):
+        observed = capabilities.get(section)
+        if not isinstance(observed, dict) or any(
+            observed.get(name) != value for name, value in expected[section].items()
+        ):
+            fail(75)
+
+
+class OfficialHermesEndpoint:
+    def __init__(self, init, deadline, codex_bridge):
+        executable = pathlib.Path(OFFICIAL_HERMES_CANDIDATE)
+        try:
+            metadata = executable.stat()
+        except OSError:
+            fail(74)
+        if not stat.S_ISREG(metadata.st_mode) or not os.access(executable, os.X_OK):
+            fail(74)
+        validate_official_runtime_identity()
+        config_sha256 = install_official_hermes_config()
+        if config_sha256 != sha256_bytes(OFFICIAL_HERMES_CONFIG):
+            fail(80)
+        host, port_text = init["endpoint"].rsplit(":", 1)
+        environment = codex_bridge.environment()
+        environment.update(
+            {
+                "API_SERVER_ENABLED": "true",
+                "API_SERVER_HOST": host,
+                "API_SERVER_KEY": init["api_key"],
+                "API_SERVER_MODEL_NAME": init["model"],
+                "API_SERVER_PORT": port_text,
+                "CI": "1",
+                "HERMES_SAFE_MODE": "1",
+                "OPENAI_API_KEY": OFFICIAL_OPENAI_SENTINEL,
+                "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
+                "TZ": "UTC",
+            }
+        )
+        try:
+            self.process = subprocess.Popen(
+                [
+                    OFFICIAL_HERMES_CANDIDATE,
+                    "gateway",
+                    "run",
+                    "--no-supervise",
+                    "--external-supervisor",
+                    "--quiet",
+                ],
+                cwd="/work",
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+            )
+        except OSError:
+            fail(74)
+        self.init = init
+        self.host = host
+        self.port = int(port_text)
+        try:
+            self.wait_until_ready(deadline)
+        except BaseException:
+            self.close()
+            raise
+
+    def ensure_running(self):
+        if self.process.poll() is not None:
+            fail(75)
+
+    def exchange(self, request, deadline):
+        connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            timeout = remaining_seconds(deadline)
+            if timeout is None or timeout <= 0:
+                raise TimeoutError
+            connection.settimeout(timeout)
+            connection.connect((self.host, self.port))
+            connection.sendall(request)
+            connection.shutdown(socket.SHUT_WR)
+            output = bytearray()
+            while True:
+                chunk = connection.recv(8192)
+                if not chunk:
+                    return bytes(output)
+                output.extend(chunk)
+                if len(output) > MAX_CONTROL_BYTES:
+                    fail(78)
+        finally:
+            connection.close()
+
+    def wait_until_ready(self, deadline):
+        probe = (
+            b"GET /v1/capabilities HTTP/1.1\r\n"
+            b"Host: 127.0.0.1\r\n"
+            + ("Authorization: Bearer %s\r\n" % self.init["api_key"]).encode("ascii")
+            + b"Accept: application/json\r\n"
+            b"Connection: close\r\n"
+            b"Content-Length: 0\r\n\r\n"
+        )
+        while True:
+            self.ensure_running()
+            now = time.monotonic()
+            if now >= deadline:
+                fail(79)
+            try:
+                response = self.exchange(probe, min(deadline, now + 0.25))
+            except (OSError, TimeoutError, socket.timeout):
+                time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+                continue
+            validate_official_capabilities(response, self.init)
+            return
+
+    def relay(self, request, deadline):
+        parse_http_request(request)
+        self.ensure_running()
+        try:
+            response = self.exchange(request, deadline)
+        except (TimeoutError, socket.timeout):
+            fail(79)
+        except OSError:
+            fail(75)
+        self.ensure_running()
+        if not response:
+            fail(75)
+        return response
+
+    def close(self):
+        if self.process.poll() is not None:
+            return
+        try:
+            os.killpg(self.process.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        try:
+            self.process.wait(timeout=0.5)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            self.process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            fail(80)
 
 
 def serve_contained_reflection(
@@ -1225,16 +1546,18 @@ def serve_contained_reflection(
 ):
     init = parse_init(connection)
     bindings = verified_bindings(init, bwrap_sha256, net_namespace, namespace_pid)
-    if init["mode"] == "official":
-        reject_unstaged_official_server()
     deadline = time.monotonic() + init["deadline_millis"] / 1000.0
     codex_bridge = CodexProxyBridge(
         codex_proxy_connection,
         codex_proxy_binding(init),
         deadline,
     )
-    fixture = ScriptedFixtureEndpoint(init, deadline, codex_bridge)
+    endpoint = None
     try:
+        if init["mode"] == "official":
+            endpoint = OfficialHermesEndpoint(init, deadline, codex_bridge)
+        else:
+            endpoint = ScriptedFixtureEndpoint(init, deadline, codex_bridge)
         connection.settimeout(remaining_seconds(deadline))
         try:
             connection.sendall(containment_frame(bindings))
@@ -1251,11 +1574,14 @@ def serve_contained_reflection(
             )
             if request is None:
                 return
-            response = fixture.relay(request, deadline)
+            response = endpoint.relay(request, deadline)
             send_frame(connection, HTTP_RESPONSE_MAGIC, response, deadline)
     finally:
-        fixture.close()
-        codex_bridge.close()
+        try:
+            if endpoint is not None:
+                endpoint.close()
+        finally:
+            codex_bridge.close()
 
 
 def main(arguments):

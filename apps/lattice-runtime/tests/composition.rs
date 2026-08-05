@@ -526,6 +526,7 @@ fn real_latticed_binary_serves_only_the_two_bounded_tools() {
 #[test]
 fn full_chain_binary_is_reachable_and_fails_closed_without_a_sealed_hermes_runner() {
     let output = Command::new(env!("CARGO_BIN_EXE_lattice-full-chain"))
+        .env_clear()
         .env("LATTICE_DELIVERY_CODEX_MODE", "SCRIPTED_ACCEPTANCE")
         .env("LATTICE_TASK019_HOST", "not-a-database-host")
         .output()

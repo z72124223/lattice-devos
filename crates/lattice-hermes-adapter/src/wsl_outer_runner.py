@@ -26,7 +26,36 @@ HTTP_RESPONSE_MAGIC = b"LATTICE_HERMES_HTTP_RESPONSE_V1\n"
 CONTAINMENT_MAGIC = b"LATTICE_HERMES_CONTAINED_V2\n"
 EXPECTED_BWRAP_SHA256 = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b"
 EXPECTED_PYTHON_VERSION = (3, 12, 13)
+EXPECTED_OFFICIAL_RUNTIME_ROOT = (
+    "/var/tmp/lattice-runtime-targets/"
+    "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-offline-final-2UEmH84h"
+)
+EXPECTED_OFFLINE_MANIFEST_SHA256 = (
+    "51e7c972ffebb00ed0e09e688b7d8490853764295a3c28237dd198950f7524ab"
+)
+EXPECTED_RUNTIME_TREE_SHA256 = (
+    "3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d"
+)
+EXPECTED_HERMES_ENTRYPOINT_SHA256 = (
+    "5f0937f77b6df59262dad536c1f6ed1447295584cdd129eed403b84f5bc826a8"
+)
+EXPECTED_RUNTIME_PYTHON_SHA256 = (
+    "b4274ebd5b568c6b6dc5f1668d1d747c574c0e0d605f41e09f26c51b2446971b"
+)
 MAX_DIAGNOSTIC_BYTES = 4096
+OFFICIAL_HERMES_CONFIG = b"""_config_version: 33
+model:
+  provider: openai-api
+  default: gpt-5.6-sol
+  openai_runtime: codex_app_server
+  api_mode: codex_app_server
+  base_url: http://127.0.0.1:9/v1
+platform_toolsets:
+  api_server: []
+plugins:
+  enabled: []
+mcp_servers: {}
+"""
 MAX_CONTROL_BYTES = 2 * 1024 * 1024
 MAX_PROXY_COPY_BYTES = 64 * 1024
 
@@ -171,6 +200,44 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
+def validate_official_runtime_identity(runtime_root):
+    if runtime_root != EXPECTED_OFFICIAL_RUNTIME_ROOT:
+        fail(65)
+    expected_files = (
+        ("offline-runtime-manifest.json", 925, EXPECTED_OFFLINE_MANIFEST_SHA256, False),
+        (
+            "provenance/runtime-tree-manifest.json",
+            2673723,
+            EXPECTED_RUNTIME_TREE_SHA256,
+            False,
+        ),
+        ("python/bin/hermes", 182, EXPECTED_HERMES_ENTRYPOINT_SHA256, True),
+        (
+            "python/bin/python3.12",
+            102380768,
+            EXPECTED_RUNTIME_PYTHON_SHA256,
+            True,
+        ),
+    )
+    try:
+        root_metadata = os.lstat(runtime_root)
+        if not stat.S_ISDIR(root_metadata.st_mode) or os.path.realpath(runtime_root) != runtime_root:
+            fail(65)
+        for relative, expected_size, expected_sha256, executable in expected_files:
+            path = os.path.join(runtime_root, relative)
+            metadata = os.lstat(path)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size != expected_size
+                or os.path.realpath(path) != path
+                or (executable and not os.access(path, os.X_OK))
+                or file_sha256(path) != expected_sha256
+            ):
+                fail(65)
+    except OSError:
+        fail(65)
+
+
 def child_code():
     return """import os,sys
 nonce = bytes.fromhex(sys.argv[1])
@@ -282,9 +349,14 @@ def config_digest(init):
     value = {
         "api_key_sha256": hashlib.sha256(init["api_key"].encode("utf-8")).hexdigest(),
         "endpoint": init["endpoint"],
+        "hermes_config_sha256": (
+            hashlib.sha256(OFFICIAL_HERMES_CONFIG).hexdigest()
+            if init["mode"] == "official"
+            else None
+        ),
         "model": init["model"],
         "nonce": init["nonce"],
-        "schema": "lattice.hermes.production-config.v1",
+        "schema": "lattice.hermes.production-config.v2",
     }
     return hashlib.sha256(canonical_json(value)).hexdigest()
 
@@ -589,6 +661,8 @@ def production(runtime_root, nonce, secret_path, runner_path, runner_sha256):
     if file_sha256("/usr/bin/bwrap") != EXPECTED_BWRAP_SHA256:
         fail(66)
     init = read_secret_bundle(secret_path, nonce)
+    if init["mode"] == "official":
+        validate_official_runtime_identity(runtime_root)
     runner_fd = open_runner_source(runner_path, runner_sha256)
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))

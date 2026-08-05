@@ -17,6 +17,15 @@ SPEC = importlib.util.spec_from_file_location("lattice_hermes_sandbox_runner", R
 RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
 
+BASE_RUNTIME_ROOT = pathlib.Path(
+    "/var/tmp/lattice-runtime-targets/"
+    "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804"
+)
+OFFICIAL_RUNTIME_ROOT = pathlib.Path(
+    "/var/tmp/lattice-runtime-targets/"
+    "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-offline-final-2UEmH84h"
+)
+
 FIXTURE_CODEX_REQUEST = (
     b'{"id":0,"method":"initialize","params":{}}\n'
     b'{"id":1,"method":"thread/start","params":{}}\n'
@@ -88,18 +97,15 @@ def request(method, path, api_key, body=b""):
 
 
 class BwrapRunner:
-    def __init__(self):
-        runtime_root = pathlib.Path(
-            "/var/tmp/lattice-runtime-targets/"
-            "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804"
-        )
+    def __init__(self, runtime_root=BASE_RUNTIME_ROOT):
         bwrap = pathlib.Path("/usr/bin/bwrap")
         python = runtime_root / "python" / "bin" / "python3.12"
         if os.name != "posix" or not bwrap.is_file() or not python.is_file():
             raise unittest.SkipTest("requires the pinned WSL bwrap/Python runtime")
         self.peer, child = socket.socketpair()
         self.proxy_peer, proxy_child = socket.socketpair()
-        self.peer.settimeout(2.0)
+        has_hermes = (runtime_root / "python" / "bin" / "hermes").is_file()
+        self.peer.settimeout(7.0 if has_hermes else 2.0)
         self.proxy_peer.settimeout(2.0)
         source = RUNNER_PATH.read_text(encoding="utf-8")
         command = [
@@ -580,7 +586,7 @@ class HermesSandboxRunnerFixtureTests(unittest.TestCase):
         finally:
             runner.close()
 
-    def test_official_mode_is_blocked_without_staged_package(self):
+    def test_official_mode_without_staged_executable_fails_closed(self):
         runner = BwrapRunner()
         init = self.init("official")
         try:
@@ -591,6 +597,70 @@ class HermesSandboxRunnerFixtureTests(unittest.TestCase):
         finally:
             runner.close()
 
+    def test_official_mode_starts_pinned_gateway_and_reports_capabilities(self):
+        hermes = OFFICIAL_RUNTIME_ROOT / "python" / "bin" / "hermes"
+        if not hermes.is_file():
+            raise unittest.SkipTest("requires the exact pinned Hermes runtime")
+        runner = BwrapRunner(OFFICIAL_RUNTIME_ROOT)
+        init = self.init("official")
+        try:
+            self.send_init(runner, init)
+            try:
+                fields = receive_containment_frame(runner.peer)
+            except AssertionError:
+                runner.wait()
+                self.fail(
+                    "official gateway closed before containment frame "
+                    "(exit %s)" % runner.exit_code
+                )
+            self.assertEqual(fields[1], RUNNER.config_digest(init).encode("ascii"))
+            self.assertEqual(fields[11], b"official")
+
+            health_response = self.relay(
+                runner,
+                request("GET", "/health/detailed", init["api_key"]),
+            )
+            self.assertTrue(health_response.startswith(b"HTTP/1.1 200"))
+            health = json.loads(health_response.split(b"\r\n\r\n", 1)[1])
+            self.assertEqual(health["status"], "ok")
+            self.assertEqual(health["readiness"]["checks"]["config"], {"status": "ok"})
+            self.assertEqual(health["readiness"]["checks"]["model"], {"status": "ok"})
+            self.assertEqual(health["active_agents"], 0)
+            self.assertIs(health["gateway_busy"], False)
+
+            response = self.relay(
+                runner,
+                request("GET", "/v1/capabilities", init["api_key"]),
+            )
+            self.assertTrue(response.startswith(b"HTTP/1.1 200"))
+            capabilities = json.loads(response.split(b"\r\n\r\n", 1)[1])
+            self.assertEqual(capabilities["object"], "hermes.api_server.capabilities")
+            self.assertEqual(capabilities["platform"], "hermes-agent")
+            self.assertEqual(capabilities["model"], "hermes-agent")
+            self.assertEqual(capabilities["auth"], {"required": True, "type": "bearer"})
+            self.assertEqual(capabilities["runtime"]["mode"], "server_agent")
+            self.assertEqual(capabilities["runtime"]["tool_execution"], "server")
+            self.assertIs(capabilities["runtime"]["split_runtime"], False)
+            for feature in (
+                "run_submission",
+                "run_status",
+                "run_events_sse",
+                "run_stop",
+            ):
+                self.assertIs(capabilities["features"][feature], True)
+            for feature in ("admin_config_rw", "memory_write_api"):
+                self.assertIs(capabilities["features"][feature], False)
+            self.assertIs(capabilities["features"]["responses_api"], True)
+            self.assertEqual(
+                capabilities["endpoints"]["runs"],
+                {"method": "POST", "path": "/v1/runs"},
+            )
+            runner.proxy_peer.settimeout(0.1)
+            with self.assertRaises(socket.timeout):
+                runner.proxy_peer.recv(1)
+        finally:
+            runner.close()
+        self.assertEqual(runner.exit_code, 0)
 
 if __name__ == "__main__":
     unittest.main()

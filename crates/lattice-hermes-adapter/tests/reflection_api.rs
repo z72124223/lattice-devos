@@ -114,7 +114,7 @@ fn offline_runtime_manifest_is_canonical_strict_and_exactly_pinned() {
             "\"hermes_archive_sha256\":\"{}\",",
             "\"hermes_commit\":\"{}\",",
             "\"hermes_release\":\"v2026.8.3\",",
-            "\"payload_byte_count\":1,\"payload_file_count\":1,",
+            "\"payload_byte_count\":722642720,\"payload_file_count\":14076,",
             "\"payload_manifest_sha256\":\"{}\",",
             "\"platform\":\"x86_64-unknown-linux-gnu\",",
             "\"pyproject_sha256\":\"{}\",",
@@ -128,17 +128,17 @@ fn offline_runtime_manifest_is_canonical_strict_and_exactly_pinned() {
         HERMES_CPYTHON_SHA256SUMS_SHA256,
         HERMES_RUNTIME_ARCHIVE_SHA256,
         HERMES_UPSTREAM_COMMIT,
-        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d",
         HERMES_PYPROJECT_SHA256,
         HERMES_UV_LOCK_SHA256,
     );
     let manifest = HermesOfflineRuntimeManifest::from_canonical_json(bytes.as_bytes())
         .expect("one exact offline manifest");
-    assert_eq!(manifest.payload_file_count(), 1);
-    assert_eq!(manifest.payload_byte_count(), 1);
+    assert_eq!(manifest.payload_file_count(), 14_076);
+    assert_eq!(manifest.payload_byte_count(), 722_642_720);
     assert_eq!(
         manifest.payload_manifest_sha256(),
-        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        "3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d"
     );
 
     let unknown = bytes.replacen(
@@ -1090,9 +1090,9 @@ fn production_runner_owns_attests_binds_and_invalidates_one_contained_fixture() 
 }
 
 #[test]
-#[ignore = "requires WSL2, bubblewrap, and the staged Linux CPython runtime"]
-fn production_official_mode_blocks_stably_when_frozen_hermes_is_not_staged() {
-    let isolation_root = unique_temp_root("lattice-hermes-production-official");
+#[ignore = "requires WSL2, bubblewrap, and the exact frozen Hermes runtime"]
+fn production_official_no_model_preflight_owns_the_pinned_gateway() {
+    let isolation_root = unique_temp_root("lattice-hermes-production-no-model");
     let config = crate::HermesProductionRunnerConfig::official_with_broker_digest(
         production_containment(isolation_root.clone()),
         &test_runtime_manifest(),
@@ -1104,31 +1104,18 @@ fn production_official_mode_blocks_stably_when_frozen_hermes_is_not_staged() {
         Duration::from_millis(1),
     )
     .expect("bounded official config");
-    let failure = match config.launch(Instant::now() + Duration::from_secs(30)) {
-        Ok(runner) => {
-            runner
-                .terminate()
-                .expect("unexpected official runner still reaps exactly");
-            panic!("the current frozen closure has CPython but no Hermes executable");
-        }
-        Err(failure) => failure,
-    };
-    assert_eq!(failure.code(), "HERMES_OFFICIAL_SERVER_NOT_STAGED");
-    let stderr = read_text_with_retry(&isolation_root.join("capture/production.stderr"));
-    let evidence = stderr
-        .lines()
-        .find_map(|line| line.strip_prefix("HERMES_OUTER_PROXY_EVIDENCE:"))
-        .expect("startup proxy evidence line");
-    let (byte_count, sha256) = evidence
-        .split_once(':')
-        .expect("count and digest only");
-    assert!(byte_count.parse::<usize>().expect("bounded byte count") <= 4096);
-    assert_eq!(sha256.len(), 64);
-    assert!(
-        sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    let mut runner = config
+        .launch(Instant::now() + Duration::from_secs(30))
+        .expect("exact official gateway reaches no-model readiness");
+    runner.verify_live().expect("owned process remains live");
+    assert!(runner.windows_launcher_pid() > 0);
+    assert!(runner.outer_pid() > 0);
+    assert!(runner.bwrap_pid() > 0);
+    assert_eq!(
+        runner.containment_receipt().receipt_digest().as_str().len(),
+        64
     );
+    runner.terminate().expect("exact Job tree is reaped");
     remove_temp_root_with_retry(&isolation_root);
 }
 
@@ -1669,25 +1656,20 @@ fn codex_proxy_fd2_host_wire_is_bound_sequenced_and_fail_closed() {
             .code(),
         "HERMES_CODEX_PROXY_STATE_REJECTED"
     );
+    assert_codex_proxy_rejections(nonce, &broker, binding);
 }
 
 #[cfg(windows)]
-#[test]
-fn codex_proxy_fd2_host_wire_rejects_binding_sequence_and_diagnostics() {
+fn assert_codex_proxy_rejections(
+    nonce: &str,
+    broker: &ContentDigest,
+    binding: [u8; 32],
+) {
     use crate::production::{CodexProxyHostSession, encode_codex_proxy_test_frame};
 
-    let nonce = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let broker = digest("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
-    let binding = CodexProxyHostSession::new(
-        nonce,
-        &broker,
-        Instant::now() + Duration::from_secs(2),
-    )
-    .expect("bound source session")
-    .binding();
     let mut wrong_binding = CodexProxyHostSession::new(
         nonce,
-        &broker,
+        broker,
         Instant::now() + Duration::from_secs(2),
     )
     .expect("bound host session");
@@ -1702,7 +1684,7 @@ fn codex_proxy_fd2_host_wire_rejects_binding_sequence_and_diagnostics() {
 
     let mut skipped = CodexProxyHostSession::new(
         nonce,
-        &broker,
+        broker,
         Instant::now() + Duration::from_secs(2),
     )
     .expect("bound host session");
@@ -1718,7 +1700,7 @@ fn codex_proxy_fd2_host_wire_rejects_binding_sequence_and_diagnostics() {
     let diagnostic = b"bwrap: setup failed\n";
     let mut before_open = CodexProxyHostSession::new(
         nonce,
-        &broker,
+        broker,
         Instant::now() + Duration::from_secs(2),
     )
     .expect("bound host session");
@@ -2068,21 +2050,13 @@ fn remove_temp_root_with_retry(path: &std::path::Path) {
     }
 }
 
-fn read_text_with_retry(path: &std::path::Path) -> String {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        match std::fs::read_to_string(path) {
-            Ok(text) => return text,
-            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Err(error) => panic!("read exact temporary evidence {path:?}: {error}"),
-        }
-    }
-}
-
 fn production_containment(isolation_root: std::path::PathBuf) -> HermesWslContainmentConfig {
     HermesWslContainmentConfig::new(
         r"C:\Windows\System32\wsl.exe",
-        "/var/tmp/lattice-runtime-targets/hermes-v2026.8.3-cpython-3.12.13-pbs-20260804",
+        concat!(
+            "/var/tmp/lattice-runtime-targets/",
+            "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-offline-final-2UEmH84h"
+        ),
         isolation_root,
         std::fs::canonicalize(std::env::current_dir().expect("cwd"))
             .expect("canonical product root"),
@@ -2102,7 +2076,7 @@ fn test_runtime_manifest() -> HermesOfflineRuntimeManifest {
             "\"hermes_archive_sha256\":\"{}\",",
             "\"hermes_commit\":\"{}\",",
             "\"hermes_release\":\"v2026.8.3\",",
-            "\"payload_byte_count\":1,\"payload_file_count\":1,",
+            "\"payload_byte_count\":722642720,\"payload_file_count\":14076,",
             "\"payload_manifest_sha256\":\"{}\",",
             "\"platform\":\"x86_64-unknown-linux-gnu\",",
             "\"pyproject_sha256\":\"{}\",",
@@ -2116,7 +2090,7 @@ fn test_runtime_manifest() -> HermesOfflineRuntimeManifest {
         HERMES_CPYTHON_SHA256SUMS_SHA256,
         HERMES_RUNTIME_ARCHIVE_SHA256,
         HERMES_UPSTREAM_COMMIT,
-        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d",
         HERMES_PYPROJECT_SHA256,
         HERMES_UV_LOCK_SHA256,
     );

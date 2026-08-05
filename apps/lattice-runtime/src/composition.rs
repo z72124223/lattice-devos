@@ -44,9 +44,9 @@ use lattice_hermes_adapter::{
 };
 #[cfg(windows)]
 use lattice_hermes_adapter::{
-    CodexReflectionBrokerConfig, HERMES_OFFICIAL_FULL_CHAIN_READY, HermesOfflineRuntimeManifest,
-    HermesProductionRunnerConfig, HermesWslContainmentConfig,
-    ProductionHermesPort as HermesAdapterProductionPort, ProductionHermesRunner,
+    CodexReflectionBrokerConfig, HermesOfflineRuntimeManifest, HermesProductionRunnerConfig,
+    HermesWslContainmentConfig, ProductionHermesPort as HermesAdapterProductionPort,
+    ProductionHermesRunner,
 };
 use lattice_openclaw_adapter::{
     AuthenticationKey, GatewayTransportErrorKind, OpenClawGatewayConfig, OpenClawGatewayServer,
@@ -93,11 +93,33 @@ const GRAPH_RETRIEVAL_LIMIT: u16 = 10;
 const GRAPH_MEMORY_ROOT_NAME: &str = "graph-memory";
 const GRAPHIFY_RUNTIME_RELATIVE_PATH: &str = "target/supply-chain/graphify-v0.9.33/wsl-runtime";
 const FULL_CHAIN_HERMES_TASK_ID: &str = "TASK-037";
-const FULL_CHAIN_HERMES_MODEL: &str = "gpt-5.6-sol";
+#[cfg(windows)]
+const FULL_CHAIN_HERMES_MODEL: &str = "hermes-agent";
+#[cfg(windows)]
+const FULL_CHAIN_CODEX_BROKER_MODEL: &str = "gpt-5.6-sol";
+#[cfg(windows)]
 const FULL_CHAIN_HERMES_SESSION_PREFIX: &str = "task037-hermes-session-";
+#[cfg(windows)]
 const MAX_HERMES_RUNTIME_MANIFEST_BYTES: u64 = 64 * 1024;
+#[cfg(windows)]
 const HERMES_OPERATION_TIMEOUT: Duration = Duration::from_mins(1);
+#[cfg(windows)]
 const HERMES_POLL_INTERVAL: Duration = Duration::from_millis(250);
+#[cfg(windows)]
+const OFFICIAL_HERMES_RUNTIME_GUEST_ROOT: &str = concat!(
+    "/var/tmp/lattice-runtime-targets/",
+    "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-offline-final-2UEmH84h"
+);
+#[cfg(windows)]
+const OFFICIAL_HERMES_RUNTIME_MANIFEST_SHA256: &str =
+    "51e7c972ffebb00ed0e09e688b7d8490853764295a3c28237dd198950f7524ab";
+#[cfg(windows)]
+const OFFICIAL_HERMES_RUNTIME_TREE_SHA256: &str =
+    "3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d";
+#[cfg(windows)]
+const OFFICIAL_HERMES_RUNTIME_FILE_COUNT: u64 = 14_076;
+#[cfg(windows)]
+const OFFICIAL_HERMES_RUNTIME_BYTE_COUNT: u64 = 722_642_720;
 const OPENCLAW_ADAPTER_VERSION: &str = "1.0.0";
 const FIXED_GATEWAY_TASK_REVISION: &str = "1";
 const SCRIPTED_SERVER_BYTES: &[u8] = include_bytes!("fixtures/task032-scripted-codex.ps1");
@@ -914,10 +936,18 @@ impl HermesEnvironmentConfig {
             &runtime_manifest_bytes,
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        let runtime_guest_root = hermes_environment("LATTICE_HERMES_RUNTIME_GUEST_ROOT")?;
+        validate_official_hermes_runtime_identity(
+            &runtime_guest_root,
+            &runtime_manifest_bytes,
+            &runtime_manifest,
+        )?;
+        let api_key = hermes_environment("LATTICE_HERMES_API_KEY")?;
+        validate_hermes_api_key(&api_key)?;
         let product_root = PathBuf::from(hermes_environment("LATTICE_HERMES_PRODUCT_ROOT")?);
         let containment = HermesWslContainmentConfig::new(
             PathBuf::from(hermes_environment("LATTICE_HERMES_WSL_EXE")?),
-            hermes_environment("LATTICE_HERMES_RUNTIME_GUEST_ROOT")?,
+            runtime_guest_root,
             PathBuf::from(hermes_environment("LATTICE_HERMES_ISOLATION_ROOT")?),
             product_root.clone(),
         )
@@ -929,7 +959,7 @@ impl HermesEnvironmentConfig {
             PathBuf::from(hermes_environment("LATTICE_HERMES_CODEX_HOME")?),
             PathBuf::from(hermes_environment("LATTICE_HERMES_BROKER_ISOLATION_ROOT")?),
             product_root,
-            FULL_CHAIN_HERMES_MODEL,
+            FULL_CHAIN_CODEX_BROKER_MODEL,
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
         let timeout_seconds = hermes_environment("LATTICE_HERMES_DEADLINE_SECONDS")?
@@ -941,7 +971,7 @@ impl HermesEnvironmentConfig {
             containment,
             runtime_manifest,
             broker,
-            api_key: hermes_environment("LATTICE_HERMES_API_KEY")?,
+            api_key,
             timeout: Duration::from_secs(timeout_seconds),
         })
     }
@@ -969,6 +999,47 @@ impl HermesEnvironmentConfig {
         .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
         FullChainHermes::from_ready(runner, run_id)
     }
+}
+
+#[cfg(windows)]
+fn validate_official_hermes_runtime_identity(
+    runtime_guest_root: &str,
+    runtime_manifest_bytes: &[u8],
+    runtime_manifest: &HermesOfflineRuntimeManifest,
+) -> Result<(), LatticedError> {
+    let digest = Sha256::digest(runtime_manifest_bytes);
+    let mut manifest_sha256 = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut manifest_sha256, "{byte:02x}")
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+    }
+    if runtime_guest_root != OFFICIAL_HERMES_RUNTIME_GUEST_ROOT
+        || manifest_sha256 != OFFICIAL_HERMES_RUNTIME_MANIFEST_SHA256
+        || runtime_manifest.payload_file_count() != OFFICIAL_HERMES_RUNTIME_FILE_COUNT
+        || runtime_manifest.payload_byte_count() != OFFICIAL_HERMES_RUNTIME_BYTE_COUNT
+        || runtime_manifest.payload_manifest_sha256() != OFFICIAL_HERMES_RUNTIME_TREE_SHA256
+    {
+        return Err(LatticedError::new(
+            LatticedErrorKind::HermesProductionRunnerRequired,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_hermes_api_key(api_key: &str) -> Result<(), LatticedError> {
+    if api_key.trim().is_empty()
+        || api_key.len() < 16
+        || api_key.len() > 4_096
+        || !api_key.is_ascii()
+        || api_key.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(LatticedError::new(
+            LatticedErrorKind::HermesProductionRunnerRequired,
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1479,11 +1550,6 @@ pub fn serve_full_chain_from_environment() -> Result<(), LatticedError> {
     }
     #[cfg(windows)]
     {
-        if !HERMES_OFFICIAL_FULL_CHAIN_READY {
-            return Err(LatticedError::new(
-                LatticedErrorKind::HermesProductionRunnerRequired,
-            ));
-        }
         let hermes_environment = HermesEnvironmentConfig::from_environment()?;
         let (config, database, password) = delivery_environment()?;
         let (openclaw_config, launch_record) = openclaw_from_environment()?;
@@ -3293,6 +3359,49 @@ mod tests {
             LatticedErrorKind::HermesProductionRunnerRequired
         );
         assert_eq!(error.code(), "LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn production_hermes_environment_accepts_only_the_frozen_runtime_identity() {
+        let manifest_bytes = br#"{"cpython_archive_bytes":111375313,"cpython_archive_sha256":"a140c0868258075d160fa0da51ddffd423efbc9dd350695abd33e7ce3ce94352","cpython_build_release":"20260804","cpython_provenance":"astral-sh/python-build-standalone","cpython_sha256sums_sha256":"eccfdcc61c9fe48b7fe61db8812925ce30f23943d16c60861001004a4ae8f55c","cpython_version":"3.12.13","hermes_archive_sha256":"a9a84a25999a23a859a9d17ef3134ea1c3371d8bf1984313eab839e939528152","hermes_commit":"3c27eb6234bf91b8ceee9e9071591b31e9b148cb","hermes_release":"v2026.8.3","payload_byte_count":722642720,"payload_file_count":14076,"payload_manifest_sha256":"3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d","platform":"x86_64-unknown-linux-gnu","pyproject_sha256":"64d1085ee1c23caf0ae0d9e65c73e280f466362ed43fdda1531f18f3af1d9869","schema":"lattice.hermes.offline-runtime.v1","uv_lock_sha256":"aab3c83f71b683507a590b6315b23bdc0abd6b63b76b2349eae15bf00dfbaf2b"}"#;
+        let manifest = HermesOfflineRuntimeManifest::from_canonical_json(manifest_bytes)
+            .expect("exact frozen runtime manifest");
+        validate_official_hermes_runtime_identity(
+            OFFICIAL_HERMES_RUNTIME_GUEST_ROOT,
+            manifest_bytes,
+            &manifest,
+        )
+        .expect("exact runtime identity");
+
+        assert!(
+            validate_official_hermes_runtime_identity(
+                "/var/tmp/lattice-runtime-targets/drift",
+                manifest_bytes,
+                &manifest,
+            )
+            .is_err()
+        );
+        let mut drifted_bytes = manifest_bytes.to_vec();
+        drifted_bytes.push(b'\n');
+        assert!(
+            validate_official_hermes_runtime_identity(
+                OFFICIAL_HERMES_RUNTIME_GUEST_ROOT,
+                &drifted_bytes,
+                &manifest,
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn production_hermes_secret_is_rejected_before_any_canary() {
+        validate_hermes_api_key("process-local-key").expect("bounded process-local secret");
+        for rejected in ["", "                ", "short", "control-byte-123\n"] {
+            assert!(validate_hermes_api_key(rejected).is_err());
+        }
+        assert!(validate_hermes_api_key(&"x".repeat(4_097)).is_err());
     }
 
     #[test]

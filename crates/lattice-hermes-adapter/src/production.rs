@@ -35,8 +35,31 @@ use crate::{
 const STARTUP_MAGIC: &[u8] = b"LATTICE_HERMES_PRODUCTION_START_V1\n";
 const STARTUP_SCHEMA: &str = "lattice.hermes.production-start.v1";
 const ATTESTATION_SCHEMA: &str = "lattice.hermes.containment-attestation.v2";
-const CONFIG_SCHEMA: &str = "lattice.hermes.production-config.v1";
+const CONFIG_SCHEMA: &str = "lattice.hermes.production-config.v2";
+const OFFICIAL_HERMES_CONFIG: &[u8] = br"_config_version: 33
+model:
+  provider: openai-api
+  default: gpt-5.6-sol
+  openai_runtime: codex_app_server
+  api_mode: codex_app_server
+  base_url: http://127.0.0.1:9/v1
+platform_toolsets:
+  api_server: []
+plugins:
+  enabled: []
+mcp_servers: {}
+";
 const BWRAP_SHA256: &str = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b";
+const OFFICIAL_RUNTIME_GUEST_ROOT: &str = concat!(
+    "/var/tmp/lattice-runtime-targets/",
+    "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-offline-final-2UEmH84h"
+);
+const OFFICIAL_RUNTIME_MANIFEST_SHA256: &str =
+    "51e7c972ffebb00ed0e09e688b7d8490853764295a3c28237dd198950f7524ab";
+const OFFICIAL_RUNTIME_TREE_SHA256: &str =
+    "3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d";
+const OFFICIAL_RUNTIME_FILE_COUNT: u64 = 14_076;
+const OFFICIAL_RUNTIME_BYTE_COUNT: u64 = 722_642_720;
 const MAX_STARTUP_BYTES: usize = 128 * 1024;
 const MAX_RUNNER_TIMEOUT: Duration = Duration::from_mins(5);
 const CODEX_PROXY_MAGIC: &[u8] = b"LATTICE_HERMES_CODEX_PROXY_V1\n";
@@ -928,10 +951,12 @@ impl HermesProductionRunnerConfig {
         operation_timeout: Duration,
         poll_interval: Duration,
     ) -> HermesAdapterResult<Self> {
+        validate_official_runtime_identity(&containment, runtime_manifest)?;
         broker_receipt.validate_for_containment()?;
         let model = model.into();
-        let codex_provider = broker.into_production_proxy_provider(broker_receipt, &model)?;
-        let mut config = Self::validated(
+        let codex_provider =
+            broker.into_production_proxy_provider(broker_receipt, "gpt-5.6-sol")?;
+        Self::validated(
             containment,
             runtime_manifest,
             broker_receipt.receipt_digest().as_str().to_owned(),
@@ -941,9 +966,8 @@ impl HermesProductionRunnerConfig {
             operation_timeout,
             poll_interval,
             RunnerMode::Official,
-        )?;
-        config.codex_provider = Some(codex_provider);
-        Ok(config)
+            Some(codex_provider),
+        )
     }
 
     #[cfg(test)]
@@ -975,6 +999,7 @@ impl HermesProductionRunnerConfig {
             operation_timeout,
             poll_interval,
             RunnerMode::ScriptedFixture(reflection),
+            Some(Box::new(ScriptedCodexProxyProvider::default())),
         )
     }
 
@@ -1000,6 +1025,7 @@ impl HermesProductionRunnerConfig {
             operation_timeout,
             poll_interval,
             RunnerMode::Official,
+            None,
         )
     }
 
@@ -1014,7 +1040,19 @@ impl HermesProductionRunnerConfig {
         operation_timeout: Duration,
         poll_interval: Duration,
         mode: RunnerMode,
+        codex_provider: Option<Box<dyn ProductionCodexProxyProvider>>,
     ) -> HermesAdapterResult<Self> {
+        if matches!(mode, RunnerMode::Official)
+            && (model != "hermes-agent"
+                || api_key.len() < 16
+                || !api_key.is_ascii()
+                || (codex_provider.is_none() && !cfg!(test)))
+        {
+            return Err(error(
+                HermesAdapterErrorKind::Configuration,
+                "HERMES_PRODUCTION_OFFICIAL_CONFIG_REJECTED",
+            ));
+        }
         if startup_timeout.is_zero() || startup_timeout > MAX_RUNNER_TIMEOUT {
             return Err(error(
                 HermesAdapterErrorKind::Configuration,
@@ -1030,13 +1068,6 @@ impl HermesProductionRunnerConfig {
         let manifest_bytes = serde_json::to_vec(runtime_manifest)
             .map_err(|_| malformed("HERMES_RUNTIME_MANIFEST_CANONICALIZATION_FAILED"))?;
         let runtime_manifest_sha256 = encode_sha256(&Sha256::digest(&manifest_bytes));
-        #[cfg(test)]
-        let codex_provider: Option<Box<dyn ProductionCodexProxyProvider>> = match &mode {
-            RunnerMode::Official => None,
-            RunnerMode::ScriptedFixture(_) => Some(Box::new(ScriptedCodexProxyProvider::default())),
-        };
-        #[cfg(not(test))]
-        let codex_provider = None;
         Ok(Self {
             containment,
             runtime_manifest_sha256,
@@ -1270,6 +1301,26 @@ impl HermesProductionRunnerConfig {
             bwrap_pid: startup.wire.bwrap_pid,
         })
     }
+}
+
+fn validate_official_runtime_identity(
+    containment: &HermesWslContainmentConfig,
+    runtime_manifest: &HermesOfflineRuntimeManifest,
+) -> HermesAdapterResult<()> {
+    let manifest_bytes = serde_json::to_vec(runtime_manifest)
+        .map_err(|_| malformed("HERMES_RUNTIME_MANIFEST_CANONICALIZATION_FAILED"))?;
+    if containment.runtime_guest_root() != OFFICIAL_RUNTIME_GUEST_ROOT
+        || encode_sha256(&Sha256::digest(&manifest_bytes)) != OFFICIAL_RUNTIME_MANIFEST_SHA256
+        || runtime_manifest.payload_file_count() != OFFICIAL_RUNTIME_FILE_COUNT
+        || runtime_manifest.payload_byte_count() != OFFICIAL_RUNTIME_BYTE_COUNT
+        || runtime_manifest.payload_manifest_sha256() != OFFICIAL_RUNTIME_TREE_SHA256
+    {
+        return Err(error(
+            HermesAdapterErrorKind::Identity,
+            "HERMES_PRODUCTION_RUNTIME_IDENTITY_REJECTED",
+        ));
+    }
+    Ok(())
 }
 
 /// Live contained Hermes process that exists before any Codex effect and can
@@ -1784,7 +1835,8 @@ fn verify_startup(
         digest_join(&[&nonce_bytes, b"LATTICE_HERMES_PRODUCTION_SOCKETPAIR_V1"]);
     let request_sha256 = digest_join(&[&nonce_bytes, b"LATTICE_HERMES_PRODUCTION_REQUEST_V1"]);
     let transcript_sha256 = digest_join(&[&nonce_bytes, b"LATTICE_HERMES_PRODUCTION_READY_V1"]);
-    let config_sha256 = production_config_sha256(frame.endpoint(), &api_key_sha256, model, nonce)?;
+    let config_sha256 =
+        production_config_sha256(frame.endpoint(), &api_key_sha256, model, nonce, mode)?;
     if frame.runtime_manifest_sha256() != runtime_manifest_sha256.as_bytes()
         || frame.config_sha256() != config_sha256.as_bytes()
         || frame.request_sha256() != request_sha256.as_bytes()
@@ -1884,18 +1936,23 @@ fn production_config_sha256(
     api_key_sha256: &str,
     model: &str,
     nonce: &str,
+    mode: &str,
 ) -> HermesAdapterResult<String> {
     #[derive(Serialize)]
     struct ConfigWire<'a> {
         api_key_sha256: &'a str,
         endpoint: String,
+        hermes_config_sha256: Option<&'a str>,
         model: &'a str,
         nonce: &'a str,
         schema: &'a str,
     }
+    let hermes_config_sha256 =
+        (mode == "official").then(|| encode_sha256(&Sha256::digest(OFFICIAL_HERMES_CONFIG)));
     let bytes = serde_json::to_vec(&ConfigWire {
         api_key_sha256,
         endpoint: endpoint.to_string(),
+        hermes_config_sha256: hermes_config_sha256.as_deref(),
         model,
         nonce,
         schema: CONFIG_SCHEMA,
@@ -2074,6 +2131,38 @@ mod proxy_host_tests {
     use std::sync::Condvar;
 
     use super::*;
+
+    #[test]
+    fn official_hermes_config_bytes_are_exact_and_cross_bound() {
+        let config_text = std::str::from_utf8(OFFICIAL_HERMES_CONFIG).expect("ASCII YAML");
+        assert_eq!(OFFICIAL_HERMES_CONFIG.len(), 246);
+        assert_eq!(
+            encode_sha256(&Sha256::digest(OFFICIAL_HERMES_CONFIG)),
+            "f090a8469d7ee4bf4370e0d209f5b77c678d1528cb157c080cb7477637cb0bfd"
+        );
+        assert!(PRIVATE_RUNNER_SOURCE.contains(config_text));
+        assert!(OUTER_RUNNER_SOURCE.contains(config_text));
+        let endpoint = "127.0.0.1:8642".parse().expect("fixed loopback endpoint");
+        let api_key_sha256 = "a".repeat(64);
+        let nonce = "b".repeat(64);
+        let official = production_config_sha256(
+            endpoint,
+            &api_key_sha256,
+            "hermes-agent",
+            &nonce,
+            "official",
+        )
+        .expect("official config binding");
+        let fixture = production_config_sha256(
+            endpoint,
+            &api_key_sha256,
+            "hermes-agent",
+            &nonce,
+            "scripted_fixture",
+        )
+        .expect("fixture config binding");
+        assert_ne!(official, fixture);
+    }
 
     #[derive(Default)]
     struct BlockingProxyState {
