@@ -888,6 +888,39 @@ fn bwrap_plan_and_private_frame_are_fixed_bounded_and_cross_bound() {
         .expect_err("trailing bytes fail closed");
     assert_eq!(failure.code(), "HERMES_CONTAINMENT_FRAME_TRAILING_BYTES");
 
+}
+
+#[test]
+fn containment_v2_rejects_u64_length_prefix_drift() {
+    let digests = (*b"abcdef012").map(|byte| vec![byte; 64]);
+    let endpoint = b"127.0.0.1:48642";
+    let namespace_pid = b"7";
+    let mode = b"scripted_fixture";
+    let reflection = br#"{"schema_version":"lattice.hermes.reflection.v1"}"#;
+    let mut frame = b"LATTICE_HERMES_CONTAINED_V2\n".to_vec();
+    for field in digests
+        .iter()
+        .map(Vec::as_slice)
+        .chain([endpoint.as_slice(), namespace_pid.as_slice(), mode.as_slice()])
+        .chain(std::iter::once(reflection.as_slice()))
+    {
+        frame.extend_from_slice(
+            &u64::try_from(field.len())
+                .expect("bounded drift field length")
+                .to_be_bytes(),
+        );
+        frame.extend_from_slice(field);
+    }
+    parse_containment_frame(&frame, HermesContainmentFrameLimits::default())
+        .expect_err("V2 rejects a u64 length-prefix drift");
+}
+
+#[test]
+fn containment_v2_rejects_non_loopback_endpoint() {
+    let digests = (*b"abcdef012").map(|byte| vec![byte; 64]);
+    let namespace_pid = b"7";
+    let mode = b"scripted_fixture";
+    let reflection = br#"{"schema_version":"lattice.hermes.reflection.v1"}"#;
     let mut external = b"LATTICE_HERMES_CONTAINED_V2\n".to_vec();
     for field in digests
         .iter()
@@ -961,7 +994,6 @@ fn production_runner_owns_attests_binds_and_invalidates_one_contained_fixture() 
         containment,
         &test_runtime_manifest(),
         &digest("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
-        request.clone(),
         "production-fixture-key",
         "hermes-agent",
         Duration::from_secs(20),
@@ -1065,7 +1097,6 @@ fn production_official_mode_blocks_stably_when_frozen_hermes_is_not_staged() {
         production_containment(isolation_root.clone()),
         &test_runtime_manifest(),
         &digest("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
-        request(),
         "production-official-key",
         "hermes-agent",
         Duration::from_secs(20),

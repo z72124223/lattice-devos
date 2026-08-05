@@ -68,7 +68,6 @@ impl RunnerMode {
 /// owns WSL, bubblewrap, the namespace PID, endpoint, and adapter together.
 pub struct HermesProductionRunnerConfig {
     containment: HermesWslContainmentConfig,
-    expected_request: HermesResearchRequest,
     runtime_manifest_sha256: String,
     broker_receipt_sha256: String,
     api_key: String,
@@ -91,7 +90,6 @@ impl HermesProductionRunnerConfig {
         containment: HermesWslContainmentConfig,
         runtime_manifest: &HermesOfflineRuntimeManifest,
         broker_receipt: &CodexBrokerReceipt,
-        expected_request: HermesResearchRequest,
         api_key: impl Into<String>,
         model: impl Into<String>,
         startup_timeout: Duration,
@@ -103,7 +101,6 @@ impl HermesProductionRunnerConfig {
             containment,
             runtime_manifest,
             broker_receipt.receipt_digest().as_str().to_owned(),
-            expected_request,
             api_key.into(),
             model.into(),
             startup_timeout,
@@ -119,7 +116,6 @@ impl HermesProductionRunnerConfig {
         containment: HermesWslContainmentConfig,
         runtime_manifest: &HermesOfflineRuntimeManifest,
         broker_receipt_digest: &ContentDigest,
-        expected_request: HermesResearchRequest,
         api_key: impl Into<String>,
         model: impl Into<String>,
         startup_timeout: Duration,
@@ -137,7 +133,6 @@ impl HermesProductionRunnerConfig {
             containment,
             runtime_manifest,
             broker_receipt_digest.as_str().to_owned(),
-            expected_request,
             api_key.into(),
             model.into(),
             startup_timeout,
@@ -153,7 +148,6 @@ impl HermesProductionRunnerConfig {
         containment: HermesWslContainmentConfig,
         runtime_manifest: &HermesOfflineRuntimeManifest,
         broker_receipt_digest: &ContentDigest,
-        expected_request: HermesResearchRequest,
         api_key: impl Into<String>,
         model: impl Into<String>,
         startup_timeout: Duration,
@@ -164,7 +158,6 @@ impl HermesProductionRunnerConfig {
             containment,
             runtime_manifest,
             broker_receipt_digest.as_str().to_owned(),
-            expected_request,
             api_key.into(),
             model.into(),
             startup_timeout,
@@ -179,7 +172,6 @@ impl HermesProductionRunnerConfig {
         containment: HermesWslContainmentConfig,
         runtime_manifest: &HermesOfflineRuntimeManifest,
         broker_receipt_sha256: String,
-        expected_request: HermesResearchRequest,
         api_key: String,
         model: String,
         startup_timeout: Duration,
@@ -204,7 +196,6 @@ impl HermesProductionRunnerConfig {
         let runtime_manifest_sha256 = encode_sha256(&Sha256::digest(&manifest_bytes));
         Ok(Self {
             containment,
-            expected_request,
             runtime_manifest_sha256,
             broker_receipt_sha256,
             api_key,
@@ -398,7 +389,6 @@ impl HermesProductionRunnerConfig {
             endpoint: attestation.endpoint,
             api_key: self.api_key,
             model: self.model,
-            expected_request: self.expected_request,
             receipt,
             process,
             owner,
@@ -418,7 +408,6 @@ pub struct ProductionHermesRunner {
     endpoint: SocketAddr,
     api_key: String,
     model: String,
-    expected_request: HermesResearchRequest,
     receipt: HermesContainmentReceipt,
     process: crate::windows_job::WindowsJobChild,
     owner: Arc<ContainmentOwnerState>,
@@ -438,7 +427,7 @@ impl ProductionHermesRunner {
     /// Rejects a mismatched model, expired/dead child, or receipt binding before
     /// adapter construction. Any error drops and reaps the owned process tree.
     pub fn bind(mut self, job: HermesReflectionJob) -> HermesAdapterResult<ProductionHermesPort> {
-        if job.model() != self.model || job.request() != &self.expected_request {
+        if job.model() != self.model {
             return Err(error(
                 HermesAdapterErrorKind::CrossBinding,
                 "HERMES_PRODUCTION_JOB_BINDING_REJECTED",

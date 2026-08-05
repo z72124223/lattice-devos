@@ -12,6 +12,7 @@ lattice-cjson = { path = "../../crates/lattice-cjson" }
 lattice-contracts = { path = "../../crates/lattice-contracts" }
 lattice-graphify-adapter = { path = "../../crates/lattice-graphify-adapter" }
 lattice-gateway-ipc = { path = "../../crates/lattice-gateway-ipc" }
+lattice-hermes-adapter = { path = "../../crates/lattice-hermes-adapter" }
 lattice-openclaw-adapter = { path = "../../crates/lattice-openclaw-adapter" }
 lattice-orchestrator = { path = "../../crates/lattice-orchestrator" }
 lattice-ports = { path = "../../crates/lattice-ports" }

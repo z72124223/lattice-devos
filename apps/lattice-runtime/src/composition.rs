@@ -6,6 +6,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Arc, Mutex};
@@ -23,22 +24,34 @@ use lattice_codex_adapter::{
 use lattice_contracts::{
     AttemptId, CONTRACT_VERSION, CompletedDeliveryEvidence, Component, ContentDigest,
     DeliveryProfile, DeliveryReceipt, DeliveryRunRequest, DeliveryRuntime, DeliveryStage,
-    DeliveryTerminalStatus, GATEWAY_TASK_SPEC_SCHEMA_VERSION, GatewayClientKind, GatewayDenialCode,
+    DeliveryTerminalStatus, GATEWAY_TASK_SPEC_SCHEMA_VERSION, GatewayActorId, GatewayActorKind,
+    GatewayAdapterId, GatewayChannelId, GatewayClientKind, GatewayDenialCode, GatewayInstanceId,
     GatewayPeerContext, GatewayReply, GatewayReplyBody, GatewayRequest, GatewayRequestBody,
-    GatewayStatusObservation, GatewayStatusTarget, GatewayTaskProjection, GatewayTaskState,
-    GitObjectId, GraphMemoryReceipt, GraphMemoryRunRequest, HermesEvidence,
-    HermesReflectionCandidate, HermesReflectionReceipt, HermesResearchRequest, Invocation,
-    MemoryQuery, ProjectId, ProjectSnapshotId, RequestId, RuntimeKind, SubjectBinding, TaskId,
-    TaskSpecSubmission,
+    GatewaySessionId, GatewayStatusObservation, GatewayStatusTarget, GatewayTaskProjection,
+    GatewayTaskState, GitObjectId, GraphMemoryReceipt, GraphMemoryRunRequest, HermesEvidence,
+    HermesReflectionCandidate, HermesReflectionContent, HermesReflectionFinding,
+    HermesReflectionReceipt, HermesResearchRequest, Invocation, MemoryQuery, ProjectId,
+    ProjectSnapshotId, RequestId, RuntimeKind, SubjectBinding, TaskId, TaskSpecSubmission,
 };
 use lattice_gateway_ipc::{build_reply, task_spec_document_digest};
 use lattice_graphify_adapter::{
     ExactGitSnapshotMaterializer, GitSnapshotConfig, GraphOutputLimits, GraphifyRuntimeConfig,
     PinnedGraphifyAdapter, SnapshotBridge, SnapshotLimits,
 };
+use lattice_hermes_adapter::{
+    CanonicalReflection, HermesAdapterError, HermesAdapterErrorKind, HermesReflectionJob,
+    ReflectionClassification, ReflectionEvidence, ReflectionEvidenceKind,
+};
+#[cfg(windows)]
+use lattice_hermes_adapter::{
+    CodexReflectionBrokerConfig, HERMES_OFFICIAL_FULL_CHAIN_READY, HermesOfflineRuntimeManifest,
+    HermesProductionRunnerConfig, HermesWslContainmentConfig,
+    ProductionHermesPort as HermesAdapterProductionPort, ProductionHermesRunner,
+};
 use lattice_openclaw_adapter::{
-    GatewayTransportErrorKind, OpenClawGatewayConfig, OpenClawGatewayServer,
-    OpenClawOfficialLaunchRecord,
+    AuthenticationKey, GatewayTransportErrorKind, OpenClawGatewayConfig, OpenClawGatewayServer,
+    OpenClawLaunchAttestationKey, OpenClawLaunchAttestationTag, OpenClawOfficialLaunchEvidence,
+    OpenClawOfficialLaunchRecord, OpenClawProcessStartNonce,
 };
 use lattice_orchestrator::{
     DeliveryOrchestratorError, delivery_status, graph_memory_status, run_delivery, run_graph_memory,
@@ -80,6 +93,12 @@ const GRAPH_RETRIEVAL_LIMIT: u16 = 10;
 const GRAPH_MEMORY_ROOT_NAME: &str = "graph-memory";
 const GRAPHIFY_RUNTIME_RELATIVE_PATH: &str = "target/supply-chain/graphify-v0.9.33/wsl-runtime";
 const FULL_CHAIN_HERMES_TASK_ID: &str = "TASK-037";
+const FULL_CHAIN_HERMES_MODEL: &str = "gpt-5.6-sol";
+const FULL_CHAIN_HERMES_SESSION_PREFIX: &str = "task037-hermes-session-";
+const MAX_HERMES_RUNTIME_MANIFEST_BYTES: u64 = 64 * 1024;
+const HERMES_OPERATION_TIMEOUT: Duration = Duration::from_mins(1);
+const HERMES_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const OPENCLAW_ADAPTER_VERSION: &str = "1.0.0";
 const FIXED_GATEWAY_TASK_REVISION: &str = "1";
 const SCRIPTED_SERVER_BYTES: &[u8] = include_bytes!("fixtures/task032-scripted-codex.ps1");
 const OFFICIAL_CODEX_VERSION: &str = "codex-cli 0.146.0";
@@ -671,12 +690,14 @@ pub struct ProductionHermesOutput {
 ///
 /// There is deliberately no public constructor. A containment canary, endpoint
 /// probe, or adapter-reported `RuntimeKind::Live` cannot mint this value.
-pub struct HermesProductionSeal {
-    _private: (),
+struct HermesProductionSeal {
+    receipt_digest: ContentDigest,
 }
 
 mod production_hermes_sealed {
-    pub trait Sealed {}
+    pub trait Sealed {
+        fn has_production_seal(&self) -> bool;
+    }
 }
 
 impl ProductionHermesOutput {
@@ -685,7 +706,7 @@ impl ProductionHermesOutput {
     /// # Errors
     ///
     /// Rejects fake runtime evidence or any request, graph, or reflection substitution.
-    pub fn new(
+    fn new(
         _seal: &HermesProductionSeal,
         request: &HermesResearchRequest,
         graph_request: &GraphMemoryRunRequest,
@@ -725,12 +746,9 @@ impl ProductionHermesOutput {
 ///
 /// Implementations must expose a live preflight classification before any Codex
 /// effect and return both [`HermesEvidence`] and bounded canonical reflection content.
-pub trait ProductionHermesPort: HermesPort + Send + production_hermes_sealed::Sealed {
+pub trait FullChainHermesPort: HermesPort + Send + production_hermes_sealed::Sealed {
     /// Reports the verified runtime classification for this configured port.
     fn runtime_kind(&self) -> RuntimeKind;
-
-    /// Returns composition-issued sealed runner evidence, never a canary receipt.
-    fn production_seal(&self) -> Option<&HermesProductionSeal>;
 
     /// Produces one exact-graph-bound canonical reflection.
     ///
@@ -745,55 +763,390 @@ pub trait ProductionHermesPort: HermesPort + Send + production_hermes_sealed::Se
     ) -> PortResult<ProductionHermesOutput>;
 }
 
-enum EnvironmentProductionHermes {}
+#[cfg(windows)]
+struct FullChainHermes {
+    ready: Option<ProductionHermesRunner>,
+    bound: Option<HermesAdapterProductionPort>,
+    model: String,
+    session_id: String,
+    seal: HermesProductionSeal,
+}
 
-impl production_hermes_sealed::Sealed for EnvironmentProductionHermes {}
+#[cfg(windows)]
+impl FullChainHermes {
+    fn from_ready(mut runner: ProductionHermesRunner, run_id: &str) -> Result<Self, LatticedError> {
+        runner
+            .verify_live()
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        let receipt_digest = runner.containment_receipt().receipt_digest().clone();
+        Ok(Self {
+            ready: Some(runner),
+            bound: None,
+            model: FULL_CHAIN_HERMES_MODEL.to_owned(),
+            session_id: format!("{FULL_CHAIN_HERMES_SESSION_PREFIX}{run_id}"),
+            seal: HermesProductionSeal { receipt_digest },
+        })
+    }
+}
 
-impl HermesPort for EnvironmentProductionHermes {
+#[cfg(windows)]
+impl production_hermes_sealed::Sealed for FullChainHermes {
+    fn has_production_seal(&self) -> bool {
+        self.ready.is_some()
+    }
+}
+
+#[cfg(windows)]
+impl HermesPort for FullChainHermes {
     fn research(&mut self, _request: HermesResearchRequest) -> PortResult<HermesEvidence> {
         Err(PortError::new(
             Component::Hermes,
             PortErrorKind::Denied,
-            "HERMES_PRODUCTION_RUNNER_REQUIRED",
+            "HERMES_PRODUCTION_GRAPH_CONTEXT_REQUIRED",
         ))
     }
 
-    fn interrupt(&mut self, _request_id: &RequestId) -> PortResult<()> {
-        Err(PortError::new(
-            Component::Hermes,
-            PortErrorKind::Denied,
-            "HERMES_PRODUCTION_RUNNER_REQUIRED",
-        ))
+    fn interrupt(&mut self, request_id: &RequestId) -> PortResult<()> {
+        self.bound.as_mut().map_or_else(
+            || {
+                Err(PortError::new(
+                    Component::Hermes,
+                    PortErrorKind::Denied,
+                    "HERMES_PRODUCTION_RUN_NOT_BOUND",
+                ))
+            },
+            |port| HermesPort::interrupt(port, request_id),
+        )
     }
 }
 
-impl ProductionHermesPort for EnvironmentProductionHermes {
+#[cfg(windows)]
+impl FullChainHermesPort for FullChainHermes {
     fn runtime_kind(&self) -> RuntimeKind {
-        RuntimeKind::Fake
-    }
-
-    fn production_seal(&self) -> Option<&HermesProductionSeal> {
-        None
+        RuntimeKind::Live
     }
 
     fn research_canonical(
         &mut self,
-        _request: &HermesResearchRequest,
-        _graph_request: &GraphMemoryRunRequest,
-        _graph_receipt: &GraphMemoryReceipt,
+        request: &HermesResearchRequest,
+        graph_request: &GraphMemoryRunRequest,
+        graph_receipt: &GraphMemoryReceipt,
     ) -> PortResult<ProductionHermesOutput> {
-        Err(PortError::new(
-            Component::Hermes,
-            PortErrorKind::Denied,
-            "HERMES_PRODUCTION_RUNNER_REQUIRED",
-        ))
+        if self.bound.is_some() {
+            return Err(PortError::new(
+                Component::Hermes,
+                PortErrorKind::Ambiguous,
+                "HERMES_PRODUCTION_ALREADY_BOUND",
+            ));
+        }
+        let job = HermesReflectionJob::new(
+            request.clone(),
+            self.session_id.clone(),
+            self.model.clone(),
+            hermes_job_evidence(graph_request, graph_receipt)?,
+        )
+        .map_err(|failure| map_hermes_adapter_error(&failure))?;
+        let input_digest = job.input_digest().clone();
+        let runner = self.ready.take().ok_or_else(|| {
+            PortError::new(
+                Component::Hermes,
+                PortErrorKind::Denied,
+                "HERMES_PRODUCTION_RUNNER_REQUIRED",
+            )
+        })?;
+        let port = runner
+            .bind(job)
+            .map_err(|failure| map_hermes_adapter_error(&failure))?;
+        if port.containment_receipt().receipt_digest() != &self.seal.receipt_digest {
+            return Err(hermes_port_error(
+                PortErrorKind::Denied,
+                "HERMES_PRODUCTION_IDENTITY_BINDING_REJECTED",
+            ));
+        }
+        self.bound = Some(port);
+        let output = self
+            .bound
+            .as_mut()
+            .expect("bound port installed immediately above")
+            .run_reflection_evidence(request)?;
+        let (reflection, evidence) = output.into_parts();
+        let candidate = reflection_candidate(
+            request,
+            graph_request,
+            graph_receipt,
+            &self.session_id,
+            &self.model,
+            &input_digest,
+            &self.seal.receipt_digest,
+            &reflection,
+            &evidence,
+        )?;
+        ProductionHermesOutput::new(
+            &self.seal,
+            request,
+            graph_request,
+            graph_receipt,
+            evidence,
+            candidate,
+        )
     }
 }
 
-fn production_hermes_from_environment() -> Result<EnvironmentProductionHermes, LatticedError> {
-    Err(LatticedError::new(
-        LatticedErrorKind::HermesProductionRunnerRequired,
-    ))
+#[cfg(windows)]
+struct HermesEnvironmentConfig {
+    containment: HermesWslContainmentConfig,
+    runtime_manifest: HermesOfflineRuntimeManifest,
+    broker: CodexReflectionBrokerConfig,
+    api_key: String,
+    timeout: Duration,
+}
+
+#[cfg(windows)]
+impl HermesEnvironmentConfig {
+    fn from_environment() -> Result<Self, LatticedError> {
+        let runtime_manifest_path =
+            PathBuf::from(hermes_environment("LATTICE_HERMES_RUNTIME_MANIFEST")?);
+        let runtime_manifest_bytes =
+            read_regular_file(&runtime_manifest_path, MAX_HERMES_RUNTIME_MANIFEST_BYTES).map_err(
+                |_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired),
+            )?;
+        let runtime_manifest = HermesOfflineRuntimeManifest::from_canonical_json(
+            &runtime_manifest_bytes,
+        )
+        .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        let product_root = PathBuf::from(hermes_environment("LATTICE_HERMES_PRODUCT_ROOT")?);
+        let containment = HermesWslContainmentConfig::new(
+            PathBuf::from(hermes_environment("LATTICE_HERMES_WSL_EXE")?),
+            hermes_environment("LATTICE_HERMES_RUNTIME_GUEST_ROOT")?,
+            PathBuf::from(hermes_environment("LATTICE_HERMES_ISOLATION_ROOT")?),
+            product_root.clone(),
+        )
+        .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        let broker = CodexReflectionBrokerConfig::new(
+            PathBuf::from(hermes_environment("LATTICE_HERMES_BROKER_HELPER")?),
+            hermes_environment("LATTICE_HERMES_BROKER_HELPER_SHA256")?,
+            PathBuf::from(hermes_environment("LATTICE_HERMES_CODEX_LAUNCHER")?),
+            PathBuf::from(hermes_environment("LATTICE_HERMES_CODEX_HOME")?),
+            PathBuf::from(hermes_environment("LATTICE_HERMES_BROKER_ISOLATION_ROOT")?),
+            product_root,
+            FULL_CHAIN_HERMES_MODEL,
+        )
+        .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        let timeout_seconds = hermes_environment("LATTICE_HERMES_DEADLINE_SECONDS")?
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| (1..=300).contains(seconds))
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        Ok(Self {
+            containment,
+            runtime_manifest,
+            broker,
+            api_key: hermes_environment("LATTICE_HERMES_API_KEY")?,
+            timeout: Duration::from_secs(timeout_seconds),
+        })
+    }
+
+    fn launch(self, run_id: &str) -> Result<FullChainHermes, LatticedError> {
+        let absolute_deadline = Instant::now()
+            .checked_add(self.timeout)
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        let broker_receipt = self
+            .broker
+            .run_no_marker_canary(absolute_deadline)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        let runner = HermesProductionRunnerConfig::new(
+            self.containment,
+            &self.runtime_manifest,
+            &broker_receipt,
+            self.api_key,
+            FULL_CHAIN_HERMES_MODEL,
+            HERMES_OPERATION_TIMEOUT.min(self.timeout),
+            HERMES_OPERATION_TIMEOUT.min(self.timeout),
+            HERMES_POLL_INTERVAL,
+        )
+        .and_then(|config| config.launch(absolute_deadline))
+        .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        FullChainHermes::from_ready(runner, run_id)
+    }
+}
+
+#[cfg(windows)]
+fn hermes_environment(name: &'static str) -> Result<String, LatticedError> {
+    required_environment(name)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))
+}
+
+#[cfg(windows)]
+struct OpenClawEnvironmentLaunch {
+    authentication_key: AuthenticationKey,
+    launch_record: OpenClawOfficialLaunchRecord,
+    launch_record_id: String,
+    process_id: u32,
+    process_nonce_hex: String,
+}
+
+#[cfg(windows)]
+fn openclaw_launch_from_environment() -> Result<OpenClawEnvironmentLaunch, LatticedError> {
+    let authentication_key = AuthenticationKey::new(parse_lowercase_hex_environment::<32>(
+        "LATTICE_OPENCLAW_AUTH_KEY_HEX",
+    )?)
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    let attestation_key = OpenClawLaunchAttestationKey::new(parse_lowercase_hex_environment::<32>(
+        "LATTICE_OPENCLAW_LAUNCH_ATTESTATION_KEY_HEX",
+    )?)
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    let attestation_tag = OpenClawLaunchAttestationTag::new(parse_lowercase_hex_environment::<32>(
+        "LATTICE_OPENCLAW_LAUNCH_ATTESTATION_TAG_HEX",
+    )?)
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    let process_nonce_hex = required_environment("LATTICE_OPENCLAW_PROCESS_START_NONCE")?;
+    let process_nonce =
+        OpenClawProcessStartNonce::new(parse_lowercase_hex::<16>(&process_nonce_hex)?)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    let launch_record_id = required_environment("LATTICE_OPENCLAW_LAUNCH_RECORD_ID")?;
+    let process_id = required_environment("LATTICE_OPENCLAW_PROCESS_ID")?
+        .parse::<u32>()
+        .ok()
+        .filter(|value| *value != 0)
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::Transport))?;
+    let launch_evidence = OpenClawOfficialLaunchEvidence::new(
+        launch_record_id.clone(),
+        process_id,
+        process_nonce,
+        content_digest_environment("LATTICE_OPENCLAW_PACKAGE_TARBALL_SHA256")?,
+        content_digest_environment("LATTICE_OPENCLAW_ENTRYPOINT_SHA256")?,
+        content_digest_environment("LATTICE_OPENCLAW_PROFILE_SHA256")?,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    let launch_record = OpenClawOfficialLaunchRecord::verify_lattice_attestation(
+        launch_evidence,
+        &attestation_key,
+        attestation_tag,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    Ok(OpenClawEnvironmentLaunch {
+        authentication_key,
+        launch_record,
+        launch_record_id,
+        process_id,
+        process_nonce_hex,
+    })
+}
+
+#[cfg(windows)]
+fn openclaw_from_environment()
+-> Result<(OpenClawGatewayConfig, OpenClawOfficialLaunchRecord), LatticedError> {
+    let OpenClawEnvironmentLaunch {
+        authentication_key,
+        launch_record,
+        launch_record_id,
+        process_id,
+        process_nonce_hex,
+    } = openclaw_launch_from_environment()?;
+    let session_epoch = required_environment("LATTICE_OPENCLAW_SESSION_EPOCH")?
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value != 0)
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::Transport))?;
+    let session_receipt = digest(
+        "lattice.openclaw.full-chain-session",
+        &CanonicalValue::Object(vec![
+            (
+                "launch_record_id".to_owned(),
+                CanonicalValue::String(launch_record_id),
+            ),
+            (
+                "process_id".to_owned(),
+                CanonicalValue::String(process_id.to_string()),
+            ),
+            (
+                "process_start_nonce".to_owned(),
+                CanonicalValue::String(process_nonce_hex),
+            ),
+            (
+                "session_epoch".to_owned(),
+                CanonicalValue::String(session_epoch.to_string()),
+            ),
+        ]),
+    )?;
+    let schema_digest = digest(
+        "lattice.openclaw.full-chain-schema",
+        &CanonicalValue::String("LATGW001".to_owned()),
+    )?;
+    let peer = GatewayPeerContext::new_fake(
+        GatewayClientKind::OpenClaw,
+        GatewayInstanceId::new(required_environment(
+            "LATTICE_OPENCLAW_GATEWAY_INSTANCE_ID",
+        )?)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?,
+        GatewayAdapterId::new("openclaw-lattice-plugin")
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?,
+        OPENCLAW_ADAPTER_VERSION,
+        launch_record.entrypoint_digest().clone(),
+        schema_digest,
+        GatewayActorId::new(required_environment("LATTICE_OPENCLAW_ACTOR_ID")?)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?,
+        GatewayActorKind::ResponsibleUser,
+        GatewayChannelId::new(required_environment("LATTICE_OPENCLAW_CHANNEL_ID")?)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?,
+        GatewaySessionId::new(required_environment("LATTICE_OPENCLAW_SESSION_ID")?)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?,
+        session_epoch,
+        session_receipt.clone(),
+        session_receipt,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    let port = required_environment("LATTICE_OPENCLAW_GATEWAY_PORT")?
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::Transport))?;
+    let timeout_millis = required_environment("LATTICE_OPENCLAW_DEADLINE_MS")?
+        .parse::<u64>()
+        .ok()
+        .filter(|millis| (1..=30_000).contains(millis))
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::Transport))?;
+    let config = OpenClawGatewayConfig::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        Duration::from_millis(timeout_millis),
+        ProjectId::new(GRAPH_PROJECT_ID)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?,
+        peer,
+        authentication_key,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    Ok((config, launch_record))
+}
+
+#[cfg(windows)]
+fn parse_lowercase_hex_environment<const N: usize>(
+    name: &'static str,
+) -> Result<[u8; N], LatticedError> {
+    parse_lowercase_hex(&required_environment(name)?)
+}
+
+#[cfg(windows)]
+fn parse_lowercase_hex<const N: usize>(value: &str) -> Result<[u8; N], LatticedError> {
+    if value.len() != N * 2
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(LatticedError::new(LatticedErrorKind::Transport));
+    }
+    let mut bytes = [0_u8; N];
+    for (index, output) in bytes.iter_mut().enumerate() {
+        let start = index * 2;
+        *output = u8::from_str_radix(&value[start..start + 2], 16)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    }
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+fn content_digest_environment(name: &'static str) -> Result<ContentDigest, LatticedError> {
+    ContentDigest::from_sha256(required_environment(name)?)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -831,7 +1184,7 @@ struct FullChainCore<H> {
     submission: TaskSpecSubmission,
 }
 
-impl<H: ProductionHermesPort> FullChainCore<H> {
+impl<H: FullChainHermesPort> FullChainCore<H> {
     fn run_json(&mut self, entry: FullChainEntry) -> Result<Value, LatticedError> {
         let base = self.delivery.run_json()?;
         let reflection = self.load_or_run_reflection(&base)?;
@@ -915,7 +1268,7 @@ impl<H> Clone for FullChainService<H> {
     }
 }
 
-impl<H: ProductionHermesPort> FullChainService<H> {
+impl<H: FullChainHermesPort> FullChainService<H> {
     fn handle_submit(
         core: &mut FullChainCore<H>,
         request: &GatewayRequest,
@@ -1011,7 +1364,7 @@ impl<H: ProductionHermesPort> FullChainService<H> {
     }
 }
 
-impl<H: ProductionHermesPort> DeliveryToolService for FullChainService<H> {
+impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
     fn run(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
         let mut core = self
             .inner
@@ -1041,7 +1394,7 @@ impl<H: ProductionHermesPort> DeliveryToolService for FullChainService<H> {
     }
 }
 
-impl<H: ProductionHermesPort> GatewayService for FullChainService<H> {
+impl<H: FullChainHermesPort> GatewayService for FullChainService<H> {
     fn handle(
         &mut self,
         peer: GatewayPeerContext,
@@ -1086,7 +1439,7 @@ impl<H: ProductionHermesPort> GatewayService for FullChainService<H> {
 /// One composition result containing both MCP and official-package `OpenClaw` surfaces.
 pub struct FullChainRuntime<H>
 where
-    H: ProductionHermesPort + 'static,
+    H: FullChainHermesPort + 'static,
 {
     mcp_service: FullChainService<H>,
     openclaw_server: OpenClawGatewayServer<FullChainService<H>>,
@@ -1094,7 +1447,7 @@ where
 
 impl<H> FullChainRuntime<H>
 where
-    H: ProductionHermesPort + 'static,
+    H: FullChainHermesPort + 'static,
 {
     /// Splits the one assembled runtime for concurrent MCP and loopback serving.
     #[must_use]
@@ -1117,8 +1470,33 @@ where
 ///
 /// Returns a stable startup, configuration, database, or transport failure.
 pub fn serve_full_chain_from_environment() -> Result<(), LatticedError> {
-    let hermes = production_hermes_from_environment()?;
-    match hermes {}
+    #[cfg(not(windows))]
+    {
+        Err(LatticedError::new(
+            LatticedErrorKind::HermesProductionRunnerRequired,
+        ))
+    }
+    #[cfg(windows)]
+    {
+        if !HERMES_OFFICIAL_FULL_CHAIN_READY {
+            return Err(LatticedError::new(
+                LatticedErrorKind::HermesProductionRunnerRequired,
+            ));
+        }
+        let hermes_environment = HermesEnvironmentConfig::from_environment()?;
+        let (config, database, password) = delivery_environment()?;
+        let (openclaw_config, launch_record) = openclaw_from_environment()?;
+        let hermes = hermes_environment.launch(database.run_id())?;
+        let runtime = assemble_full_chain_runtime(
+            config,
+            &database,
+            &password,
+            hermes,
+            openclaw_config,
+            launch_record,
+        )?;
+        serve_full_chain_runtime(runtime)
+    }
 }
 
 /// Serves MCP stdio and continuously pumps the authenticated `OpenClaw` listener.
@@ -1134,7 +1512,7 @@ pub fn serve_full_chain_from_environment() -> Result<(), LatticedError> {
 /// leaving a falsely healthy MCP-only process.
 pub fn serve_full_chain_runtime<H>(runtime: FullChainRuntime<H>) -> Result<(), LatticedError>
 where
-    H: ProductionHermesPort + 'static,
+    H: FullChainHermesPort + 'static,
 {
     let (mcp_service, openclaw_server) = runtime.into_parts();
     let endpoint = openclaw_server
@@ -1239,12 +1617,14 @@ pub fn assemble_full_chain_runtime<H>(
     launch_record: OpenClawOfficialLaunchRecord,
 ) -> Result<FullChainRuntime<H>, LatticedError>
 where
-    H: ProductionHermesPort + 'static,
+    H: FullChainHermesPort + 'static,
 {
     if config.runtime != DeliveryRuntime::OfficialCodexAppServer {
         return Err(LatticedError::new(LatticedErrorKind::OfficialLiveBlocked));
     }
-    if hermes.runtime_kind() != RuntimeKind::Live || hermes.production_seal().is_none() {
+    if hermes.runtime_kind() != RuntimeKind::Live
+        || !production_hermes_sealed::Sealed::has_production_seal(&hermes)
+    {
         return Err(LatticedError::new(
             LatticedErrorKind::HermesProductionRunnerRequired,
         ));
@@ -1400,6 +1780,232 @@ fn hermes_request_for_graph(
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
     Ok(HermesResearchRequest::new(invocation))
+}
+
+#[cfg(any(windows, test))]
+fn hermes_job_evidence(
+    graph_request: &GraphMemoryRunRequest,
+    graph_receipt: &GraphMemoryReceipt,
+) -> PortResult<Vec<ReflectionEvidence>> {
+    if !graph_receipt.matches_request(graph_request) {
+        return Err(hermes_port_error(
+            PortErrorKind::Denied,
+            "HERMES_PRODUCTION_GRAPH_BINDING_REJECTED",
+        ));
+    }
+    let task_spec = fixed_gateway_submission().map_err(|_| {
+        hermes_port_error(
+            PortErrorKind::Malformed,
+            "HERMES_PRODUCTION_TASK_CONTEXT_REJECTED",
+        )
+    })?;
+    let task = ReflectionEvidence::new_digest_only(
+        ReflectionEvidenceKind::Task,
+        task_spec.claimed_spec_digest().clone(),
+        vec![graph_request.invocation().subject_digest().clone()],
+    )
+    .map_err(|failure| map_hermes_adapter_error(&failure))?;
+
+    let mut graph_details = vec![
+        graph_receipt.persistence().analysis_digest().clone(),
+        graph_receipt.persistence().persistence_digest().clone(),
+        graph_receipt.retrieval().retrieval_digest().clone(),
+    ];
+    graph_details.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    graph_details.dedup();
+    let graphify = ReflectionEvidence::new_digest_only(
+        ReflectionEvidenceKind::Graphify,
+        graph_receipt.receipt_digest().clone(),
+        graph_details,
+    )
+    .map_err(|failure| map_hermes_adapter_error(&failure))?;
+
+    let git_context = CanonicalValue::Object(vec![
+        (
+            "commit_sha".to_owned(),
+            CanonicalValue::String(graph_request.commit_id().as_str().to_owned()),
+        ),
+        (
+            "project_id".to_owned(),
+            CanonicalValue::String(graph_request.project_id().as_str().to_owned()),
+        ),
+        (
+            "project_snapshot_id".to_owned(),
+            CanonicalValue::String(
+                graph_request
+                    .invocation()
+                    .project_snapshot_id()
+                    .as_str()
+                    .to_owned(),
+            ),
+        ),
+    ]);
+    let git = ReflectionEvidence::new(
+        ReflectionEvidenceKind::Git,
+        hermes_canonical_digest("lattice.hermes.git-context", &git_context)?,
+    )
+    .map_err(|failure| map_hermes_adapter_error(&failure))?;
+    Ok(vec![task, graphify, git])
+}
+
+#[cfg(any(windows, test))]
+#[allow(clippy::too_many_arguments)]
+fn reflection_candidate(
+    request: &HermesResearchRequest,
+    graph_request: &GraphMemoryRunRequest,
+    graph_receipt: &GraphMemoryReceipt,
+    session_id: &str,
+    model: &str,
+    input_digest: &ContentDigest,
+    identity_digest: &ContentDigest,
+    reflection: &CanonicalReflection,
+    evidence: &HermesEvidence,
+) -> PortResult<HermesReflectionCandidate> {
+    let invocation = request.invocation();
+    let binding = reflection.binding();
+    if !graph_receipt.matches_request(graph_request)
+        || invocation.subject_digest() != graph_receipt.receipt_digest()
+        || binding.request_id() != invocation.request_id().as_str()
+        || binding.task_id() != invocation.task_id().as_str()
+        || binding.attempt_id() != invocation.attempt_id().as_str()
+        || binding.project_snapshot_id() != invocation.project_snapshot_id().as_str()
+        || binding.subject_digest() != invocation.subject_digest().as_str()
+        || binding.session_id() != session_id
+        || binding.input_digest() != input_digest.as_str()
+        || binding.model() != model
+        || evidence.invocation() != invocation
+        || evidence.runtime() != RuntimeKind::Live
+        || evidence.output_digest() != reflection.output_digest()
+    {
+        return Err(hermes_port_error(
+            PortErrorKind::Denied,
+            "HERMES_PRODUCTION_REFLECTION_BINDING_REJECTED",
+        ));
+    }
+
+    let findings = reflection
+        .findings()
+        .iter()
+        .map(|finding| {
+            if finding.classification() != ReflectionClassification::Inference {
+                return Err(hermes_port_error(
+                    PortErrorKind::Denied,
+                    "HERMES_PRODUCTION_CLASSIFICATION_REJECTED",
+                ));
+            }
+            HermesReflectionFinding::new(
+                finding.statement().to_owned(),
+                hermes_finding_evidence_digest(finding.evidence_digests())?,
+            )
+            .map_err(|_| {
+                hermes_port_error(
+                    PortErrorKind::Malformed,
+                    "HERMES_PRODUCTION_REFLECTION_CONTENT_REJECTED",
+                )
+            })
+        })
+        .collect::<PortResult<Vec<_>>>()?;
+    let content = HermesReflectionContent::new(
+        reflection.summary().to_owned(),
+        findings,
+        reflection.next_actions().to_vec(),
+    )
+    .map_err(|_| {
+        hermes_port_error(
+            PortErrorKind::Malformed,
+            "HERMES_PRODUCTION_REFLECTION_CONTENT_REJECTED",
+        )
+    })?;
+    HermesReflectionCandidate::new(
+        graph_request,
+        graph_receipt,
+        content,
+        identity_digest.clone(),
+        input_digest.clone(),
+        reflection.output_digest().clone(),
+    )
+    .map_err(|_| {
+        hermes_port_error(
+            PortErrorKind::Denied,
+            "HERMES_PRODUCTION_CANDIDATE_BINDING_REJECTED",
+        )
+    })
+}
+
+#[cfg(any(windows, test))]
+fn hermes_finding_evidence_digest(digests: &[String]) -> PortResult<ContentDigest> {
+    if digests.is_empty() {
+        return Err(hermes_port_error(
+            PortErrorKind::Malformed,
+            "HERMES_PRODUCTION_FINDING_EVIDENCE_REJECTED",
+        ));
+    }
+    let mut parsed = digests
+        .iter()
+        .map(|digest| {
+            ContentDigest::from_sha256(digest.clone()).map_err(|_| {
+                hermes_port_error(
+                    PortErrorKind::Malformed,
+                    "HERMES_PRODUCTION_FINDING_EVIDENCE_REJECTED",
+                )
+            })
+        })
+        .collect::<PortResult<Vec<_>>>()?;
+    parsed.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    parsed.dedup();
+    let value = CanonicalValue::Array(
+        parsed
+            .iter()
+            .map(|digest| CanonicalValue::String(digest.as_str().to_owned()))
+            .collect(),
+    );
+    hermes_canonical_digest("lattice.hermes.reflection-finding-evidence-set", &value)
+}
+
+#[cfg(any(windows, test))]
+fn hermes_canonical_digest(schema_id: &str, value: &CanonicalValue) -> PortResult<ContentDigest> {
+    let domain = HashDomain::new(schema_id, "1").map_err(|_| {
+        hermes_port_error(
+            PortErrorKind::Malformed,
+            "HERMES_PRODUCTION_CANONICAL_CONTEXT_REJECTED",
+        )
+    })?;
+    let digest = canonical_sha256(&domain, value).map_err(|_| {
+        hermes_port_error(
+            PortErrorKind::Malformed,
+            "HERMES_PRODUCTION_CANONICAL_CONTEXT_REJECTED",
+        )
+    })?;
+    ContentDigest::from_sha256(digest.to_hex()).map_err(|_| {
+        hermes_port_error(
+            PortErrorKind::Malformed,
+            "HERMES_PRODUCTION_CANONICAL_CONTEXT_REJECTED",
+        )
+    })
+}
+
+#[cfg(any(windows, test))]
+fn map_hermes_adapter_error(error: &HermesAdapterError) -> PortError {
+    let kind = match error.kind() {
+        HermesAdapterErrorKind::Configuration
+        | HermesAdapterErrorKind::CrossBinding
+        | HermesAdapterErrorKind::Identity => PortErrorKind::Denied,
+        HermesAdapterErrorKind::CapabilityMismatch => PortErrorKind::CapabilityMismatch,
+        HermesAdapterErrorKind::Malformed => PortErrorKind::Malformed,
+        HermesAdapterErrorKind::Timeout => PortErrorKind::Timeout,
+        HermesAdapterErrorKind::Cancelled => PortErrorKind::Cancelled,
+        HermesAdapterErrorKind::Ambiguous => PortErrorKind::Ambiguous,
+        HermesAdapterErrorKind::Transport
+        | HermesAdapterErrorKind::HttpStatus
+        | HermesAdapterErrorKind::Failed
+        | HermesAdapterErrorKind::Spawn => PortErrorKind::Unavailable,
+    };
+    hermes_port_error(kind, error.code())
+}
+
+#[cfg(any(windows, test))]
+fn hermes_port_error(kind: PortErrorKind, code: &'static str) -> PortError {
+    PortError::new(Component::Hermes, kind, code)
 }
 
 fn reflection_memory(
@@ -2499,7 +3105,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use lattice_contracts::{HermesReflectionContent, HermesReflectionFinding};
     use lattice_ports::{DeliveryFailureCertainty, DeliveryPortError};
 
     fn test_content_digest(fill: char) -> ContentDigest {
@@ -2680,15 +3285,38 @@ mod tests {
 
     #[test]
     fn full_chain_startup_requires_a_true_production_hermes_runner() {
-        let error = match production_hermes_from_environment() {
-            Ok(value) => match value {},
-            Err(error) => error,
-        };
+        let error = serve_full_chain_from_environment()
+            .expect_err("incomplete official Hermes chain fails before external effects");
         assert_eq!(
             error.kind(),
             LatticedErrorKind::HermesProductionRunnerRequired
         );
         assert_eq!(error.code(), "LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED");
+    }
+
+    #[test]
+    fn hermes_finding_commitment_sorts_deduplicates_and_commits_every_digest() {
+        let first = test_content_digest('a');
+        let second = test_content_digest('b');
+        let canonical = hermes_finding_evidence_digest(&[
+            second.as_str().to_owned(),
+            first.as_str().to_owned(),
+            second.as_str().to_owned(),
+        ])
+        .expect("bounded evidence set");
+        let reordered = hermes_finding_evidence_digest(&[
+            first.as_str().to_owned(),
+            second.as_str().to_owned(),
+        ])
+        .expect("reordered evidence set");
+        let incomplete = hermes_finding_evidence_digest(&[first.as_str().to_owned()])
+            .expect("one evidence item");
+
+        assert_eq!(canonical, reordered);
+        assert_ne!(canonical, incomplete);
+        let empty = hermes_finding_evidence_digest(&[])
+            .expect_err("an empty evidence set is never committed");
+        assert_eq!(empty.code(), "HERMES_PRODUCTION_FINDING_EVIDENCE_REJECTED");
     }
 
     #[test]

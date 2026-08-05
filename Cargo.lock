@@ -402,6 +402,7 @@ dependencies = [
  "lattice-contracts",
  "lattice-gateway-ipc",
  "lattice-graphify-adapter",
+ "lattice-hermes-adapter",
  "lattice-openclaw-adapter",
  "lattice-orchestrator",
  "lattice-ports",
