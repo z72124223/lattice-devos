@@ -19,13 +19,13 @@ pub use setup::{
 };
 
 /// Repository-relative location of the sole embedded extension profile.
-pub const CODEBASE_MEMORY_EXTENSION_PATH: &str = "db/extensions/codebase-memory/v1.sql";
-const EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/codebase-memory/v1.sql");
-const EXPECTED_EXTENSION_SQL_BYTES: usize = 42_411;
+pub const CODEBASE_MEMORY_EXTENSION_PATH: &str = "db/extensions/codebase-memory/v2.sql";
+const EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/codebase-memory/v2.sql");
+const EXPECTED_EXTENSION_SQL_BYTES: usize = 62_314;
 const EXPECTED_EXTENSION_SQL_SHA256: &str =
-    "555eabce843417bcbcd111a3cec42d05f3e2aaff802aa168b54be2fbfb300a3f";
+    "85ee6bba81bf4020014eccd7e6833e8fa8b788a15bf683977a17d10863434adc";
 const EXPECTED_EXTENSION_MANIFEST_SHA256: &str =
-    "90942d378fce1e7a35356e537bd3724c505fe062cd581b5be956a2960f531600";
+    "058c7357e912041dedc54fb696a0b65c543629334efa3b78d652d7a63d0528d3";
 const EXTENSION_MANIFEST_DOMAIN: &str = "lattice.postgres-codebase-memory.extension-manifest.v1";
 
 /// Exact embedded extension-manifest verification failure.

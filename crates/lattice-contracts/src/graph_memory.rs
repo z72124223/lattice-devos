@@ -8,6 +8,11 @@ use crate::{ContentDigest, Invocation, ProjectId};
 
 const MAX_SOURCE_PATH_BYTES: usize = 1_024;
 const MAX_GRAPH_TEXT_BYTES: usize = 1_024;
+const MAX_HERMES_SUMMARY_BYTES: usize = 8_192;
+const MAX_HERMES_FINDING_BYTES: usize = 4_096;
+const MAX_HERMES_NEXT_ACTION_BYTES: usize = 4_096;
+const MAX_HERMES_FINDINGS: usize = 256;
+const MAX_HERMES_NEXT_ACTIONS: usize = 64;
 
 /// Exact package identity pinned for the first executable graph-memory slice.
 pub const GRAPHIFY_PACKAGE: &str = "graphifyy";
@@ -30,10 +35,12 @@ pub const GRAPH_MEMORY_MAX_RECORDS: usize = 100_000;
 pub const GRAPH_MEMORY_MAX_RESULTS: u16 = 100;
 /// Fixed identity of the independent same-database Memory extension.
 pub const CODEBASE_MEMORY_EXTENSION_ID: &str = "lattice-codebase-memory";
-/// First and only supported Memory extension schema version.
-pub const CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION: u16 = 1;
+/// Current Memory extension schema version with structured reflection storage.
+pub const CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION: u16 = 2;
 /// Global Store schema profile required by the first Memory extension.
 pub const CODEBASE_MEMORY_REQUIRED_GLOBAL_SCHEMA_VERSION: u16 = 3;
+/// Closed schema accepted for a persisted Hermes reflection receipt.
+pub const HERMES_REFLECTION_SCHEMA_VERSION: &str = "lattice.hermes.reflection.v1";
 
 /// Structural construction failures for graph-memory boundary values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1142,6 +1149,43 @@ impl CodebaseMemoryPersistenceIdentity {
         extension_sql_digest: ContentDigest,
         extension_manifest_digest: ContentDigest,
     ) -> Result<Self, GraphMemoryContractError> {
+        Self::with_schema_version(
+            1,
+            database_identity_digest,
+            global_manifest_digest,
+            extension_sql_digest,
+            extension_manifest_digest,
+        )
+    }
+
+    /// Constructs the exact v2 same-database extension identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any zero database, global-manifest, SQL, or extension-manifest
+    /// commitment.
+    pub fn v2(
+        database_identity_digest: ContentDigest,
+        global_manifest_digest: ContentDigest,
+        extension_sql_digest: ContentDigest,
+        extension_manifest_digest: ContentDigest,
+    ) -> Result<Self, GraphMemoryContractError> {
+        Self::with_schema_version(
+            CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION,
+            database_identity_digest,
+            global_manifest_digest,
+            extension_sql_digest,
+            extension_manifest_digest,
+        )
+    }
+
+    fn with_schema_version(
+        extension_schema_version: u16,
+        database_identity_digest: ContentDigest,
+        global_manifest_digest: ContentDigest,
+        extension_sql_digest: ContentDigest,
+        extension_manifest_digest: ContentDigest,
+    ) -> Result<Self, GraphMemoryContractError> {
         require_digest(&database_identity_digest, "memory_database_identity_digest")?;
         require_digest(&global_manifest_digest, "memory_global_manifest_digest")?;
         require_digest(&extension_sql_digest, "memory_extension_sql_digest")?;
@@ -1154,7 +1198,7 @@ impl CodebaseMemoryPersistenceIdentity {
             global_schema_version: CODEBASE_MEMORY_REQUIRED_GLOBAL_SCHEMA_VERSION,
             global_manifest_digest,
             extension_id: CODEBASE_MEMORY_EXTENSION_ID,
-            extension_schema_version: CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION,
+            extension_schema_version,
             extension_sql_digest,
             extension_manifest_digest,
         })
@@ -1582,6 +1626,397 @@ pub struct GraphMemoryReceipt {
     receipt_digest: ContentDigest,
 }
 
+/// Closed durable status for one untrusted Hermes reflection.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum HermesReflectionStatus {
+    /// Schema-valid inference retained only as a reviewable candidate.
+    InferenceCandidate,
+}
+
+/// One bounded inference statement and its canonical evidence-set commitment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HermesReflectionFinding {
+    statement: String,
+    evidence_digest: ContentDigest,
+}
+
+impl HermesReflectionFinding {
+    /// Constructs one inference-only finding.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, control-bearing text or a zero evidence digest.
+    pub fn new(
+        statement: impl Into<String>,
+        evidence_digest: ContentDigest,
+    ) -> Result<Self, GraphMemoryContractError> {
+        let statement = reflection_text(
+            statement,
+            MAX_HERMES_FINDING_BYTES,
+            "hermes_finding_statement",
+        )?;
+        require_digest(&evidence_digest, "hermes_finding_evidence_digest")?;
+        Ok(Self {
+            statement,
+            evidence_digest,
+        })
+    }
+
+    #[must_use]
+    pub const fn classification(&self) -> HermesReflectionStatus {
+        HermesReflectionStatus::InferenceCandidate
+    }
+
+    #[must_use]
+    pub fn statement(&self) -> &str {
+        &self.statement
+    }
+
+    #[must_use]
+    pub const fn evidence_digest(&self) -> &ContentDigest {
+        &self.evidence_digest
+    }
+}
+
+/// Bounded structured reflection content retained by `PostgreSQL` Memory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HermesReflectionContent {
+    summary: String,
+    findings: Vec<HermesReflectionFinding>,
+    next_actions: Vec<String>,
+}
+
+impl HermesReflectionContent {
+    /// Constructs sanitized structured content without raw prompt/source state.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty/oversized/control-bearing text or collection overflow.
+    pub fn new(
+        summary: impl Into<String>,
+        findings: Vec<HermesReflectionFinding>,
+        next_actions: Vec<String>,
+    ) -> Result<Self, GraphMemoryContractError> {
+        if findings.len() > MAX_HERMES_FINDINGS || next_actions.len() > MAX_HERMES_NEXT_ACTIONS {
+            return Err(GraphMemoryContractError::InvalidValue {
+                field: "hermes_reflection_content_count",
+            });
+        }
+        let summary = reflection_text(
+            summary,
+            MAX_HERMES_SUMMARY_BYTES,
+            "hermes_reflection_summary",
+        )?;
+        let next_actions = next_actions
+            .into_iter()
+            .map(|action| {
+                reflection_text(action, MAX_HERMES_NEXT_ACTION_BYTES, "hermes_next_action")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            summary,
+            findings,
+            next_actions,
+        })
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    #[must_use]
+    pub fn findings(&self) -> &[HermesReflectionFinding] {
+        &self.findings
+    }
+
+    #[must_use]
+    pub fn next_actions(&self) -> &[String] {
+        &self.next_actions
+    }
+}
+
+impl HermesReflectionStatus {
+    /// Returns the fixed persistence-facing label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InferenceCandidate => "INFERENCE_CANDIDATE",
+        }
+    }
+}
+
+/// Exact-graph-bound structured candidate supplied to the durable owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HermesReflectionCandidate {
+    request: GraphMemoryRunRequest,
+    graph_receipt_digest: ContentDigest,
+    content: HermesReflectionContent,
+    hermes_identity_digest: ContentDigest,
+    input_digest: ContentDigest,
+    reflection_digest: ContentDigest,
+}
+
+impl HermesReflectionCandidate {
+    /// Constructs one typed candidate from the exact terminal graph receipt.
+    ///
+    /// # Errors
+    ///
+    /// Rejects request/graph substitution or a zero provenance digest.
+    pub fn new(
+        request: &GraphMemoryRunRequest,
+        graph_receipt: &GraphMemoryReceipt,
+        content: HermesReflectionContent,
+        hermes_identity_digest: ContentDigest,
+        input_digest: ContentDigest,
+        reflection_digest: ContentDigest,
+    ) -> Result<Self, GraphMemoryContractError> {
+        if !graph_receipt.matches_request(request) {
+            return Err(GraphMemoryContractError::CrossBinding {
+                field: "hermes_reflection_graph_receipt",
+            });
+        }
+        Self::replay(
+            request.clone(),
+            graph_receipt.receipt_digest().clone(),
+            content,
+            hermes_identity_digest,
+            input_digest,
+            reflection_digest,
+        )
+    }
+
+    /// Reconstructs one candidate from typed durable columns.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any zero graph, identity, input, or reflection digest.
+    pub fn replay(
+        request: GraphMemoryRunRequest,
+        graph_receipt_digest: ContentDigest,
+        content: HermesReflectionContent,
+        hermes_identity_digest: ContentDigest,
+        input_digest: ContentDigest,
+        reflection_digest: ContentDigest,
+    ) -> Result<Self, GraphMemoryContractError> {
+        for (digest, field) in [
+            (&graph_receipt_digest, "hermes_graph_receipt_digest"),
+            (&hermes_identity_digest, "hermes_identity_digest"),
+            (&input_digest, "hermes_input_digest"),
+            (&reflection_digest, "hermes_reflection_digest"),
+        ] {
+            require_digest(digest, field)?;
+        }
+        Ok(Self {
+            request,
+            graph_receipt_digest,
+            content,
+            hermes_identity_digest,
+            input_digest,
+            reflection_digest,
+        })
+    }
+
+    #[must_use]
+    pub const fn request(&self) -> &GraphMemoryRunRequest {
+        &self.request
+    }
+
+    #[must_use]
+    pub const fn graph_receipt_digest(&self) -> &ContentDigest {
+        &self.graph_receipt_digest
+    }
+
+    #[must_use]
+    pub const fn content(&self) -> &HermesReflectionContent {
+        &self.content
+    }
+
+    #[must_use]
+    pub const fn hermes_identity_digest(&self) -> &ContentDigest {
+        &self.hermes_identity_digest
+    }
+
+    #[must_use]
+    pub const fn input_digest(&self) -> &ContentDigest {
+        &self.input_digest
+    }
+
+    #[must_use]
+    pub const fn reflection_digest(&self) -> &ContentDigest {
+        &self.reflection_digest
+    }
+
+    #[must_use]
+    pub fn matches_request(&self, request: &GraphMemoryRunRequest) -> bool {
+        &self.request == request
+    }
+}
+
+/// Restart-safe, exact-graph-bound receipt for one Hermes inference candidate.
+///
+/// The receipt deliberately retains no raw prompt, source, credential, raw
+/// model response, path, SQL, or Hermes-owned memory. Its bounded structured
+/// content, provenance digests, and graph binding let the sole `PostgreSQL`
+/// owner replay the accepted candidate without invoking Hermes again.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HermesReflectionReceipt {
+    request: GraphMemoryRunRequest,
+    graph_receipt_digest: ContentDigest,
+    content: HermesReflectionContent,
+    hermes_identity_digest: ContentDigest,
+    input_digest: ContentDigest,
+    reflection_digest: ContentDigest,
+    receipt_digest: ContentDigest,
+}
+
+impl HermesReflectionReceipt {
+    /// Constructs an owner receipt from a validated structured candidate.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero owner receipt digest.
+    pub fn from_candidate(
+        candidate: HermesReflectionCandidate,
+        receipt_digest: ContentDigest,
+    ) -> Result<Self, GraphMemoryContractError> {
+        require_digest(&receipt_digest, "hermes_reflection_receipt_digest")?;
+        Ok(Self {
+            request: candidate.request,
+            graph_receipt_digest: candidate.graph_receipt_digest,
+            content: candidate.content,
+            hermes_identity_digest: candidate.hermes_identity_digest,
+            input_digest: candidate.input_digest,
+            reflection_digest: candidate.reflection_digest,
+            receipt_digest,
+        })
+    }
+
+    /// Constructs one inference-only receipt from the exact terminal graph.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a request/graph mismatch or any zero provenance/receipt digest.
+    pub fn new(
+        request: &GraphMemoryRunRequest,
+        graph_receipt: &GraphMemoryReceipt,
+        content: HermesReflectionContent,
+        hermes_identity_digest: ContentDigest,
+        input_digest: ContentDigest,
+        reflection_digest: ContentDigest,
+        receipt_digest: ContentDigest,
+    ) -> Result<Self, GraphMemoryContractError> {
+        if !graph_receipt.matches_request(request) {
+            return Err(GraphMemoryContractError::CrossBinding {
+                field: "hermes_reflection_graph_receipt",
+            });
+        }
+        Self::replay(
+            request.clone(),
+            graph_receipt.receipt_digest().clone(),
+            content,
+            hermes_identity_digest,
+            input_digest,
+            reflection_digest,
+            receipt_digest,
+        )
+    }
+
+    /// Reconstructs one exact receipt read from the sole durable owner.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any zero provenance, graph, reflection, or receipt digest.
+    pub fn replay(
+        request: GraphMemoryRunRequest,
+        graph_receipt_digest: ContentDigest,
+        content: HermesReflectionContent,
+        hermes_identity_digest: ContentDigest,
+        input_digest: ContentDigest,
+        reflection_digest: ContentDigest,
+        receipt_digest: ContentDigest,
+    ) -> Result<Self, GraphMemoryContractError> {
+        for (digest, field) in [
+            (&graph_receipt_digest, "hermes_graph_receipt_digest"),
+            (&hermes_identity_digest, "hermes_identity_digest"),
+            (&input_digest, "hermes_input_digest"),
+            (&reflection_digest, "hermes_reflection_digest"),
+            (&receipt_digest, "hermes_reflection_receipt_digest"),
+        ] {
+            require_digest(digest, field)?;
+        }
+        Ok(Self {
+            request,
+            graph_receipt_digest,
+            content,
+            hermes_identity_digest,
+            input_digest,
+            reflection_digest,
+            receipt_digest,
+        })
+    }
+
+    #[must_use]
+    pub const fn schema_version(&self) -> &'static str {
+        HERMES_REFLECTION_SCHEMA_VERSION
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> HermesReflectionStatus {
+        HermesReflectionStatus::InferenceCandidate
+    }
+
+    #[must_use]
+    pub const fn request(&self) -> &GraphMemoryRunRequest {
+        &self.request
+    }
+
+    #[must_use]
+    pub const fn project_id(&self) -> &ProjectId {
+        self.request.project_id()
+    }
+
+    #[must_use]
+    pub const fn commit_id(&self) -> &GitObjectId {
+        self.request.commit_id()
+    }
+
+    #[must_use]
+    pub const fn graph_receipt_digest(&self) -> &ContentDigest {
+        &self.graph_receipt_digest
+    }
+
+    #[must_use]
+    pub const fn content(&self) -> &HermesReflectionContent {
+        &self.content
+    }
+
+    #[must_use]
+    pub const fn hermes_identity_digest(&self) -> &ContentDigest {
+        &self.hermes_identity_digest
+    }
+
+    #[must_use]
+    pub const fn input_digest(&self) -> &ContentDigest {
+        &self.input_digest
+    }
+
+    #[must_use]
+    pub const fn reflection_digest(&self) -> &ContentDigest {
+        &self.reflection_digest
+    }
+
+    #[must_use]
+    pub const fn receipt_digest(&self) -> &ContentDigest {
+        &self.receipt_digest
+    }
+
+    #[must_use]
+    pub fn matches_request(&self, request: &GraphMemoryRunRequest) -> bool {
+        &self.request == request
+    }
+}
+
 impl GraphMemoryReceipt {
     /// Constructs a cross-bound terminal graph-memory receipt.
     ///
@@ -1784,6 +2219,19 @@ fn graph_text(
         || value.len() > MAX_GRAPH_TEXT_BYTES
         || value.bytes().any(|byte| byte.is_ascii_control())
     {
+        Err(GraphMemoryContractError::InvalidValue { field })
+    } else {
+        Ok(value)
+    }
+}
+
+fn reflection_text(
+    value: impl Into<String>,
+    max_bytes: usize,
+    field: &'static str,
+) -> Result<String, GraphMemoryContractError> {
+    let value = value.into();
+    if value.trim().is_empty() || value.len() > max_bytes || value.chars().any(char::is_control) {
         Err(GraphMemoryContractError::InvalidValue { field })
     } else {
         Ok(value)

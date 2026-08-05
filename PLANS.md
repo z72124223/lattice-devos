@@ -763,37 +763,26 @@ remain future Orchestrator/PostgreSQL responsibilities.
   handoff are complete. The official-live acceptance substep remains blocked by
   the incident gate above and must not be retried in this window; TASK-032 stays
   `in-progress` with official acceptance `FAILED_DIAGNOSTIC`.
-- [ ] **CURRENT TASK-033 — real Graphify/PostgreSQL Codebase Memory node:** pin
-  Graphify v0.9.33 at commit
-  `4e7e6b1f7e0df10ed07d5f28f9189bbde42940f1`, analyze only an exact tracked
-  Git snapshot and validate/canonicalize typed graph evidence. Pure contracts,
-  ports, Codebase Memory, Graphify adapter, and orchestrator work may continue.
-  PostgreSQL persistence/restart replay will use an independent same-database
-  Memory extension profile owned only by `postgres-codebase-memory` 1.0, not
-  global schema v4. The exact bounded versioned amendment is approved and the
-  database substep is now current. Postgres Store changes are limited to a
-  read-only exact V3+Memory verifier compatibility profile; its migrations,
-  manifest, domain dependencies, and write paths remain unchanged. This node
-  uses the scripted delivery fixture and makes
-  no official-Codex-live claim. The pure/Graphify checkpoint is complete:
-  typed contracts/ports, pure memory and orchestration, exact Git snapshots,
-  the pinned Graphify adapter, private tmpfs copy/verification, strict framed
-  capture, and Landlock ABI 3 enforcement have passed focused/full local gates
-  and independent P0/P1 review. The independent extension's exact manifest,
-  admin runner, pre-state rejection, transaction rollback, catalog/ACL closure,
-  production `CodebaseMemoryPort`, runtime direct-table denial, exact
-  persist/retrieve/load retry, and PostgreSQL 17.10 stop/start fresh-process
-  replay now pass the disposable `-MemoryOnly` harness. The exact Store
-  V3+Memory compatibility verifier and `latticed` status composition remain the
-  active substeps; TASK-033 stays current.
+- [ ] **CURRENT TASK-033 — full-chain Steps 9/10 continuation:** the exact
+  Graphify/PostgreSQL Codebase Memory checkpoint is complete and remains the
+  control. The current step persists a typed Hermes `INFERENCE/CANDIDATE`
+  reflection through the same `postgres-codebase-memory` owner and proves fresh
+  status performs zero Hermes calls. Production Hermes additionally requires
+  verified OS containment, empty isolated cwd/no product mount, memory off,
+  redacted bounded context, exact identity, and one absolute deadline. After
+  that passes, authenticated loopback OpenClaw may expose only
+  submit/status/stop through the same fixed GatewayService and PostgreSQL
+  terminal idempotency. Baseline commits `b682ca4` and `e648529` are integration
+  inputs, not live acceptance evidence; the two zero-parameter MCP tools remain
+  unchanged.
 - [ ] Step 7: Complete TASK-026 and TASK-027 for Workspace Git 2.0 and exact
   Scope Check 1.1 behavior in disposable repositories; retain the local
   filesystem lock only as defense in depth.
 - [ ] Step 8: Preserve unfinished TASK-028 through TASK-031 controls as
   hardening backlog and pull forward only a control that blocks the executable
   delivery path; do not let the older fake-adapter sequence override TASK-032.
-- [ ] Step 9: After TASK-033 passes, attach the OS-contained Hermes reflection
-  lane to the same exact graph/memory receipt.
+- [ ] **CURRENT STEP 9:** Attach the OS-contained Hermes reflection lane to the
+  same exact graph/memory receipt and persist/replay it only through PostgreSQL.
 - [ ] Step 10: After Hermes passes, attach and verify the bounded OpenClaw
   gateway against the same durable delivery request and receipt.
 - [ ] Step 11: Harden Codebase Memory retrieval quality/project isolation and

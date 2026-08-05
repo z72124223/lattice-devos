@@ -19,7 +19,13 @@ additional_modules:
     constitution_version: 1.4
   - module_id: postgres-codebase-memory
     constitution_version: 1.0
-status: complete
+  - module_id: hermes-adapter
+    constitution_version: 1.0
+  - module_id: openclaw-adapter
+    constitution_version: 2.0
+  - module_id: gateway-ipc
+    constitution_version: 1.1
+status: in-progress
 parallel_safe: false
 depends_on:
   - TASK-021
@@ -36,7 +42,11 @@ allowed_paths:
   - crates/lattice-codebase-memory/**
   - crates/lattice-postgres-store/**
   - crates/lattice-postgres-codebase-memory/**
+  - crates/lattice-hermes-adapter/**
+  - crates/lattice-openclaw-adapter/**
+  - crates/lattice-gateway-ipc/**
   - db/extensions/codebase-memory/v1.sql
+  - db/extensions/codebase-memory/v2.sql
   - scripts/run-lattice-graph-memory.ps1
   - scripts/run-lattice-delivery.ps1
   - scripts/run-task019-postgres.ps1
@@ -53,6 +63,9 @@ allowed_paths:
   - docs/modules/latticed/**
   - docs/modules/postgres-store/**
   - docs/modules/postgres-codebase-memory/**
+  - docs/modules/hermes-adapter/**
+  - docs/modules/openclaw-adapter/**
+  - docs/modules/gateway-ipc/**
   - docs/tickets/TASK-022-postgres-project-registry.md
   - docs/tickets/TASK-033-graphify-postgres-codebase-memory.md
   - docs/workflow/WORKFLOW_LEDGER.md

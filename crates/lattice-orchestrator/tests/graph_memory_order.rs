@@ -21,7 +21,7 @@ fn digest(byte: char) -> ContentDigest {
 }
 
 fn persistence_identity() -> CodebaseMemoryPersistenceIdentity {
-    CodebaseMemoryPersistenceIdentity::v1(digest('a'), digest('b'), digest('c'), digest('d'))
+    CodebaseMemoryPersistenceIdentity::v2(digest('a'), digest('b'), digest('c'), digest('d'))
         .expect("persistence identity")
 }
 

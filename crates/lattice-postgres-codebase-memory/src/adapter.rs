@@ -1,12 +1,14 @@
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
 use lattice_contracts::{
     CodebaseMemoryPersistenceIdentity, ContentDigest, GraphMemoryPersistenceEvidence,
-    GraphMemoryReceipt, GraphMemoryRunRequest, MemoryRetrievalDisposition, MemoryRetrievalEvidence,
-    MemoryRetrievalPlan, NormalizedGraphAnalysis, RankedMemoryRecord,
+    GraphMemoryReceipt, GraphMemoryRunRequest, HERMES_REFLECTION_SCHEMA_VERSION,
+    HermesReflectionCandidate, HermesReflectionContent, HermesReflectionFinding,
+    HermesReflectionReceipt, HermesReflectionStatus, MemoryRetrievalDisposition,
+    MemoryRetrievalEvidence, MemoryRetrievalPlan, NormalizedGraphAnalysis, RankedMemoryRecord,
 };
 use lattice_ports::{
     CodebaseMemoryPort, GraphMemoryFailureCertainty, GraphMemoryPortError, GraphMemoryPortResult,
-    GraphMemoryStage, PortErrorKind,
+    GraphMemoryStage, HermesReflectionMemoryPort, PortErrorKind,
 };
 use postgres::error::SqlState;
 use postgres::{Client, GenericClient, IsolationLevel, Row};
@@ -44,7 +46,7 @@ impl PostgresCodebaseMemory {
         })?;
         let global_manifest_digest = ContentDigest::from_sha256(GLOBAL_MANIFEST_SHA256)
             .map_err(|_| contract_error(GraphMemoryStage::Persistence))?;
-        let identity = CodebaseMemoryPersistenceIdentity::v1(
+        let identity = CodebaseMemoryPersistenceIdentity::v2(
             target.expected_database_identity_digest().clone(),
             global_manifest_digest,
             manifest.sql_sha256().clone(),
@@ -65,12 +67,12 @@ impl PostgresCodebaseMemory {
         &self.identity
     }
 
-    fn assert_target_binding(&self) -> GraphMemoryPortResult<()> {
+    fn assert_target_binding(&self, stage: GraphMemoryStage) -> GraphMemoryPortResult<()> {
         if self.identity.database_identity_digest()
             != self.target.expected_database_identity_digest()
         {
             return Err(known(
-                GraphMemoryStage::Persistence,
+                stage,
                 PortErrorKind::Denied,
                 "MEMORY_ADAPTER_TARGET_IDENTITY_MISMATCH",
             ));
@@ -85,7 +87,7 @@ impl CodebaseMemoryPort for PostgresCodebaseMemory {
         &mut self,
         analysis: &NormalizedGraphAnalysis,
     ) -> GraphMemoryPortResult<GraphMemoryPersistenceEvidence> {
-        self.assert_target_binding()?;
+        self.assert_target_binding(GraphMemoryStage::Persistence)?;
         let record_count = u32::try_from(analysis.records().len())
             .map_err(|_| contract_error(GraphMemoryStage::Persistence))?;
         let persistence_digest = persistence_digest(analysis, &self.identity, record_count)?;
@@ -271,7 +273,7 @@ impl CodebaseMemoryPort for PostgresCodebaseMemory {
         persistence: &GraphMemoryPersistenceEvidence,
         plan: MemoryRetrievalPlan,
     ) -> GraphMemoryPortResult<GraphMemoryReceipt> {
-        self.assert_target_binding()?;
+        self.assert_target_binding(GraphMemoryStage::Retrieval)?;
         if persistence.identity() != &self.identity {
             return Err(known(
                 GraphMemoryStage::Retrieval,
@@ -380,13 +382,14 @@ impl CodebaseMemoryPort for PostgresCodebaseMemory {
         &mut self,
         request: &GraphMemoryRunRequest,
     ) -> GraphMemoryPortResult<GraphMemoryReceipt> {
-        self.assert_target_binding().map_err(|_| {
-            known(
-                GraphMemoryStage::Receipt,
-                PortErrorKind::Denied,
-                "MEMORY_RECEIPT_TARGET_IDENTITY_MISMATCH",
-            )
-        })?;
+        self.assert_target_binding(GraphMemoryStage::Receipt)
+            .map_err(|_| {
+                known(
+                    GraphMemoryStage::Receipt,
+                    PortErrorKind::Denied,
+                    "MEMORY_RECEIPT_TARGET_IDENTITY_MISMATCH",
+                )
+            })?;
         let identity = identity_bytes(&self.identity, GraphMemoryStage::Receipt)?;
         let invocation = request.invocation();
         let contract_version = i16::try_from(invocation.version())
@@ -405,7 +408,7 @@ impl CodebaseMemoryPort for PostgresCodebaseMemory {
             .read_only(true)
             .start()
             .map_err(|error| database_error(GraphMemoryStage::Receipt, &error))?;
-        harden_read(&mut transaction)?;
+        harden_read(&mut transaction, GraphMemoryStage::Receipt)?;
         let rows = transaction
             .query(
                 "SELECT analysis_digest, record_set_digest, record_count, persistence_digest, \
@@ -444,6 +447,177 @@ impl CodebaseMemoryPort for PostgresCodebaseMemory {
             .commit()
             .map_err(|error| database_error(GraphMemoryStage::Receipt, &error))?;
         Ok(receipt)
+    }
+}
+
+impl HermesReflectionMemoryPort for PostgresCodebaseMemory {
+    fn persist_reflection(
+        &mut self,
+        reflection: &HermesReflectionCandidate,
+    ) -> GraphMemoryPortResult<HermesReflectionReceipt> {
+        let stage = GraphMemoryStage::ReflectionPersistence;
+        self.assert_target_binding(stage)?;
+        let receipt_digest = reflection_receipt_digest(reflection, &self.identity)?;
+        let expected =
+            HermesReflectionReceipt::from_candidate(reflection.clone(), receipt_digest.clone())
+                .map_err(|_| contract_error(stage))?;
+        let identity = identity_bytes(&self.identity, stage)?;
+        let request = reflection.request();
+        let invocation = request.invocation();
+        let contract_version =
+            i16::try_from(invocation.version()).map_err(|_| contract_error(stage))?;
+        let retrieval_limit =
+            i16::try_from(request.retrieval_limit()).map_err(|_| contract_error(stage))?;
+        let subject_digest = digest_bytes(invocation.subject_digest(), stage)?;
+        let query_digest = digest_bytes(request.query_digest(), stage)?;
+        let configuration_digest = digest_bytes(request.configuration_digest(), stage)?;
+        let graph_receipt_digest = digest_bytes(reflection.graph_receipt_digest(), stage)?;
+        let hermes_identity_digest = digest_bytes(reflection.hermes_identity_digest(), stage)?;
+        let input_digest = digest_bytes(reflection.input_digest(), stage)?;
+        let reflection_digest = digest_bytes(reflection.reflection_digest(), stage)?;
+        let receipt_digest_bytes = digest_bytes(&receipt_digest, stage)?;
+        let finding_statements = reflection
+            .content()
+            .findings()
+            .iter()
+            .map(|finding| finding.statement().to_owned())
+            .collect::<Vec<_>>();
+        let finding_evidence_digests = reflection
+            .content()
+            .findings()
+            .iter()
+            .map(|finding| digest_bytes(finding.evidence_digest(), stage))
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_actions = reflection.content().next_actions().to_vec();
+
+        let mut transaction = self
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::Serializable)
+            .start()
+            .map_err(|error| database_error(stage, &error))?;
+        harden_write(&mut transaction, stage)?;
+        let row = transaction
+            .query_one(
+                "SELECT reflection_status \
+                   FROM memory.codebase_memory_persist_reflection_v2(\
+                       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,\
+                       $19,$20,$21,$22,$23,$24,$25,$26\
+                   )",
+                &[
+                    &identity.database,
+                    &identity.global_manifest,
+                    &identity.extension_sql,
+                    &identity.extension_manifest,
+                    &contract_version,
+                    &invocation.request_id().as_str(),
+                    &invocation.task_id().as_str(),
+                    &invocation.attempt_id().as_str(),
+                    &invocation.project_snapshot_id().as_str(),
+                    &subject_digest,
+                    &request.project_id().as_str(),
+                    &request.commit_id().as_str(),
+                    &query_digest,
+                    &configuration_digest,
+                    &retrieval_limit,
+                    &graph_receipt_digest,
+                    &HERMES_REFLECTION_SCHEMA_VERSION,
+                    &HermesReflectionStatus::InferenceCandidate.as_str(),
+                    &hermes_identity_digest,
+                    &input_digest,
+                    &reflection_digest,
+                    &receipt_digest_bytes,
+                    &reflection.content().summary(),
+                    &finding_statements,
+                    &finding_evidence_digests,
+                    &next_actions,
+                ],
+            )
+            .map_err(|error| database_error(stage, &error))?;
+        let status: String = row.get(0);
+        if !matches!(status.as_str(), "PERSISTED" | "REPLAYED") {
+            return Err(corrupt(
+                stage,
+                "MEMORY_REFLECTION_PERSISTENCE_RESULT_MISMATCH",
+            ));
+        }
+        transaction.commit().map_err(|_| {
+            ambiguous(
+                stage,
+                "MEMORY_REFLECTION_PERSISTENCE_COMMIT_OUTCOME_UNKNOWN",
+            )
+        })?;
+
+        let replayed = self.load_reflection(request)?;
+        if replayed != expected {
+            return Err(corrupt(
+                GraphMemoryStage::ReflectionReceipt,
+                "MEMORY_REFLECTION_POST_WRITE_MISMATCH",
+            ));
+        }
+        Ok(replayed)
+    }
+
+    fn load_reflection(
+        &mut self,
+        request: &GraphMemoryRunRequest,
+    ) -> GraphMemoryPortResult<HermesReflectionReceipt> {
+        let stage = GraphMemoryStage::ReflectionReceipt;
+        self.assert_target_binding(stage)?;
+        let identity = identity_bytes(&self.identity, stage)?;
+        let invocation = request.invocation();
+        let contract_version =
+            i16::try_from(invocation.version()).map_err(|_| contract_error(stage))?;
+        let retrieval_limit =
+            i16::try_from(request.retrieval_limit()).map_err(|_| contract_error(stage))?;
+        let subject_digest = digest_bytes(invocation.subject_digest(), stage)?;
+        let query_digest = digest_bytes(request.query_digest(), stage)?;
+        let configuration_digest = digest_bytes(request.configuration_digest(), stage)?;
+
+        let mut transaction = self
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .map_err(|error| database_error(stage, &error))?;
+        harden_read(&mut transaction, stage)?;
+        let rows = transaction
+            .query(
+                "SELECT graph_receipt_digest, reflection_schema_version, reflection_status, \
+                        hermes_identity_digest, input_digest, reflection_digest, \
+                        reflection_receipt_digest, summary, finding_statements, \
+                        finding_evidence_digests, next_actions \
+                   FROM memory.codebase_memory_load_reflection_v2(\
+                       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15\
+                   )",
+                &[
+                    &identity.database,
+                    &identity.global_manifest,
+                    &identity.extension_sql,
+                    &identity.extension_manifest,
+                    &contract_version,
+                    &invocation.request_id().as_str(),
+                    &invocation.task_id().as_str(),
+                    &invocation.attempt_id().as_str(),
+                    &invocation.project_snapshot_id().as_str(),
+                    &subject_digest,
+                    &request.project_id().as_str(),
+                    &request.commit_id().as_str(),
+                    &query_digest,
+                    &configuration_digest,
+                    &retrieval_limit,
+                ],
+            )
+            .map_err(|error| database_error(stage, &error))?;
+        if rows.len() != 1 {
+            return Err(corrupt(stage, "MEMORY_REFLECTION_CARDINALITY_MISMATCH"));
+        }
+        let reflection = decode_reflection(request, &self.identity, &rows[0])?;
+        transaction
+            .commit()
+            .map_err(|error| database_error(stage, &error))?;
+        Ok(reflection)
     }
 }
 
@@ -557,6 +731,59 @@ fn decode_receipt(
         .map_err(|_| corrupt(GraphMemoryStage::Receipt, "MEMORY_RECEIPT_BINDING_INVALID"))
 }
 
+fn decode_reflection(
+    request: &GraphMemoryRunRequest,
+    identity: &CodebaseMemoryPersistenceIdentity,
+    row: &Row,
+) -> GraphMemoryPortResult<HermesReflectionReceipt> {
+    let stage = GraphMemoryStage::ReflectionReceipt;
+    let graph_receipt_digest = row_digest_at(row, 0, stage)?;
+    let schema_version: String = row.get(1);
+    let status: String = row.get(2);
+    if schema_version != HERMES_REFLECTION_SCHEMA_VERSION
+        || status != HermesReflectionStatus::InferenceCandidate.as_str()
+    {
+        return Err(corrupt(stage, "MEMORY_REFLECTION_SCHEMA_STATUS_INVALID"));
+    }
+    let hermes_identity_digest = row_digest_at(row, 3, stage)?;
+    let input_digest = row_digest_at(row, 4, stage)?;
+    let reflection_digest = row_digest_at(row, 5, stage)?;
+    let persisted_receipt_digest = row_digest_at(row, 6, stage)?;
+    let summary: String = row.get(7);
+    let finding_statements: Vec<String> = row.get(8);
+    let finding_evidence_digests: Vec<Vec<u8>> = row.get(9);
+    let next_actions: Vec<String> = row.get(10);
+    if finding_statements.len() != finding_evidence_digests.len() {
+        return Err(corrupt(stage, "MEMORY_REFLECTION_FINDING_ARRAY_MISMATCH"));
+    }
+    let findings = finding_statements
+        .into_iter()
+        .zip(finding_evidence_digests)
+        .map(|(statement, evidence_digest)| {
+            let evidence_digest = bytes_digest_at(&evidence_digest, stage)?;
+            HermesReflectionFinding::new(statement, evidence_digest)
+                .map_err(|_| corrupt(stage, "MEMORY_REFLECTION_FINDING_INVALID"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let content = HermesReflectionContent::new(summary, findings, next_actions)
+        .map_err(|_| corrupt(stage, "MEMORY_REFLECTION_CONTENT_INVALID"))?;
+    let candidate = HermesReflectionCandidate::replay(
+        request.clone(),
+        graph_receipt_digest,
+        content,
+        hermes_identity_digest,
+        input_digest,
+        reflection_digest,
+    )
+    .map_err(|_| corrupt(stage, "MEMORY_REFLECTION_BINDING_INVALID"))?;
+    let expected_receipt_digest = reflection_receipt_digest(&candidate, identity)?;
+    if persisted_receipt_digest != expected_receipt_digest {
+        return Err(corrupt(stage, "MEMORY_REFLECTION_DIGEST_MISMATCH"));
+    }
+    HermesReflectionReceipt::from_candidate(candidate, persisted_receipt_digest)
+        .map_err(|_| corrupt(stage, "MEMORY_REFLECTION_RECEIPT_INVALID"))
+}
+
 fn persistence_digest(
     analysis: &NormalizedGraphAnalysis,
     identity: &CodebaseMemoryPersistenceIdentity,
@@ -659,6 +886,64 @@ fn receipt_digest(
     )
 }
 
+fn reflection_receipt_digest(
+    reflection: &HermesReflectionCandidate,
+    identity: &CodebaseMemoryPersistenceIdentity,
+) -> GraphMemoryPortResult<ContentDigest> {
+    hash(
+        GraphMemoryStage::ReflectionPersistence,
+        "lattice.postgres-codebase-memory.hermes-reflection-receipt",
+        &CanonicalValue::Object(vec![
+            (
+                "commit".to_owned(),
+                string(reflection.request().commit_id().as_str()),
+            ),
+            (
+                "configuration".to_owned(),
+                string(reflection.request().configuration_digest().as_str()),
+            ),
+            (
+                "content".to_owned(),
+                reflection_content_value(reflection.content()),
+            ),
+            (
+                "graph_receipt".to_owned(),
+                string(reflection.graph_receipt_digest().as_str()),
+            ),
+            (
+                "hermes_identity".to_owned(),
+                string(reflection.hermes_identity_digest().as_str()),
+            ),
+            ("identity".to_owned(), identity_value(identity)),
+            (
+                "input".to_owned(),
+                string(reflection.input_digest().as_str()),
+            ),
+            (
+                "project".to_owned(),
+                string(reflection.request().project_id().as_str()),
+            ),
+            (
+                "query".to_owned(),
+                string(reflection.request().query_digest().as_str()),
+            ),
+            (
+                "reflection".to_owned(),
+                string(reflection.reflection_digest().as_str()),
+            ),
+            ("request".to_owned(), request_value(reflection.request())),
+            (
+                "schema".to_owned(),
+                string(HERMES_REFLECTION_SCHEMA_VERSION),
+            ),
+            (
+                "status".to_owned(),
+                string(HermesReflectionStatus::InferenceCandidate.as_str()),
+            ),
+        ]),
+    )
+}
+
 fn request_value(request: &GraphMemoryRunRequest) -> CanonicalValue {
     let invocation = request.invocation();
     CanonicalValue::Object(vec![
@@ -736,6 +1021,34 @@ fn results_value(results: &[RankedMemoryRecord]) -> CanonicalValue {
     )
 }
 
+fn reflection_content_value(content: &HermesReflectionContent) -> CanonicalValue {
+    CanonicalValue::Object(vec![
+        (
+            "findings".to_owned(),
+            CanonicalValue::Array(
+                content
+                    .findings()
+                    .iter()
+                    .map(|finding| {
+                        CanonicalValue::Object(vec![
+                            (
+                                "evidence".to_owned(),
+                                string(finding.evidence_digest().as_str()),
+                            ),
+                            ("statement".to_owned(), string(finding.statement())),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "next_actions".to_owned(),
+            CanonicalValue::Array(content.next_actions().iter().map(string).collect()),
+        ),
+        ("summary".to_owned(), string(content.summary())),
+    ])
+}
+
 fn hash(
     stage: GraphMemoryStage,
     schema_id: &str,
@@ -765,7 +1078,10 @@ fn harden_write(
         .map_err(|error| database_error(stage, &error))
 }
 
-fn harden_read(client: &mut impl GenericClient) -> GraphMemoryPortResult<()> {
+fn harden_read(
+    client: &mut impl GenericClient,
+    stage: GraphMemoryStage,
+) -> GraphMemoryPortResult<()> {
     client
         .batch_execute(
             "SET LOCAL search_path = pg_catalog; \
@@ -773,7 +1089,7 @@ fn harden_read(client: &mut impl GenericClient) -> GraphMemoryPortResult<()> {
              SET LOCAL statement_timeout = '30s'; \
              SET LOCAL idle_in_transaction_session_timeout = '30s';",
         )
-        .map_err(|error| database_error(GraphMemoryStage::Receipt, &error))
+        .map_err(|error| database_error(stage, &error))
 }
 
 fn digest_bytes(digest: &ContentDigest, stage: GraphMemoryStage) -> GraphMemoryPortResult<Vec<u8>> {
@@ -781,11 +1097,12 @@ fn digest_bytes(digest: &ContentDigest, stage: GraphMemoryStage) -> GraphMemoryP
 }
 
 fn bytes_digest(bytes: &[u8]) -> GraphMemoryPortResult<ContentDigest> {
+    bytes_digest_at(bytes, GraphMemoryStage::Receipt)
+}
+
+fn bytes_digest_at(bytes: &[u8], stage: GraphMemoryStage) -> GraphMemoryPortResult<ContentDigest> {
     if bytes.len() != 32 {
-        return Err(corrupt(
-            GraphMemoryStage::Receipt,
-            "MEMORY_RECEIPT_DIGEST_LENGTH_INVALID",
-        ));
+        return Err(corrupt(stage, "MEMORY_RECEIPT_DIGEST_LENGTH_INVALID"));
     }
     let mut output = String::with_capacity(64);
     for byte in bytes {
@@ -793,12 +1110,9 @@ fn bytes_digest(bytes: &[u8]) -> GraphMemoryPortResult<ContentDigest> {
         write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
     }
     let digest = ContentDigest::from_sha256(output)
-        .map_err(|_| corrupt(GraphMemoryStage::Receipt, "MEMORY_RECEIPT_DIGEST_INVALID"))?;
+        .map_err(|_| corrupt(stage, "MEMORY_RECEIPT_DIGEST_INVALID"))?;
     if digest.as_str().bytes().all(|byte| byte == b'0') {
-        return Err(corrupt(
-            GraphMemoryStage::Receipt,
-            "MEMORY_RECEIPT_ZERO_DIGEST",
-        ));
+        return Err(corrupt(stage, "MEMORY_RECEIPT_ZERO_DIGEST"));
     }
     Ok(digest)
 }
@@ -806,6 +1120,15 @@ fn bytes_digest(bytes: &[u8]) -> GraphMemoryPortResult<ContentDigest> {
 fn row_digest(row: &Row, index: usize) -> GraphMemoryPortResult<ContentDigest> {
     let bytes: Vec<u8> = row.get(index);
     bytes_digest(&bytes)
+}
+
+fn row_digest_at(
+    row: &Row,
+    index: usize,
+    stage: GraphMemoryStage,
+) -> GraphMemoryPortResult<ContentDigest> {
+    let bytes: Vec<u8> = row.get(index);
+    bytes_digest_at(&bytes, stage)
 }
 
 fn hex_bytes(value: &str) -> Option<Vec<u8>> {

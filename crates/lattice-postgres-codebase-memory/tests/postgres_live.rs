@@ -4,10 +4,12 @@ use lattice_codebase_memory::{digest_query_text, normalize_analysis, plan_retrie
 use lattice_contracts::{
     AttemptId, CONTRACT_VERSION, CodeSnapshotEvidence, ContentDigest, GitObjectId, GraphConfidence,
     GraphMemoryRunRequest, GraphSourceProvenance, GraphifyIdentity, GraphifyRawEvidence,
-    GraphifyRawNode, Invocation, MemoryQuery, MemoryRetrievalPlan, NormalizedGraphAnalysis,
+    GraphifyRawNode, HERMES_REFLECTION_SCHEMA_VERSION, HermesReflectionCandidate,
+    HermesReflectionContent, HermesReflectionFinding, HermesReflectionReceipt,
+    HermesReflectionStatus, Invocation, MemoryQuery, MemoryRetrievalPlan, NormalizedGraphAnalysis,
     ProjectId, ProjectSnapshotId, RequestId, TaskId, TrackedSource,
 };
-use lattice_ports::CodebaseMemoryPort;
+use lattice_ports::{CodebaseMemoryPort, HermesReflectionMemoryPort};
 use lattice_postgres_codebase_memory::{
     ExtensionApplyOutcome, ExtensionDatabaseRole, ExtensionSetupErrorKind, ExtensionTarget,
     PostgresCodebaseMemory, apply_extension, verify_extension,
@@ -119,6 +121,7 @@ fn exact_memory_extension_install_and_restart_profile() {
             evidence.identity().extension_id(),
             "lattice-codebase-memory"
         );
+        prove_foreign_acl_rejected(&config, &target);
         let before_no_op = extension_install_fingerprint(&mut migrator);
         assert_eq!(
             apply_extension(&mut migrator, &target)
@@ -142,6 +145,7 @@ fn exact_memory_extension_install_and_restart_profile() {
             "MEMORY_EXTENSION_RUNTIME_TABLE_DENIAL_WRONG"
         );
         drop(runtime);
+        prove_reflection_durability_boundary(&config);
         exercise_runtime_memory(&config, &target, false);
         println!(
             "MEMORY_EXTENSION_INITIAL_OK database_uuid={} extension_manifest={}",
@@ -164,8 +168,76 @@ fn exact_memory_extension_install_and_restart_profile() {
     }
 }
 
+fn prove_foreign_acl_rejected(config: &LiveConfig, target: &ExtensionTarget) {
+    let mut admin = config.admin_client();
+    admin
+        .batch_execute(
+            "CREATE ROLE task033_memory_foreign NOLOGIN; \
+             GRANT USAGE ON SCHEMA memory TO task033_memory_foreign; \
+             GRANT SELECT ON memory.codebase_memory_reflections TO task033_memory_foreign",
+        )
+        .expect("MEMORY_EXTENSION_FOREIGN_ACL_FIXTURE_FAILED");
+    drop(admin);
+
+    let mut migrator = config.role_client(ExtensionDatabaseRole::Migrator);
+    assert_setup_kind(
+        verify_extension(&mut migrator, target, ExtensionDatabaseRole::Migrator),
+        ExtensionSetupErrorKind::CatalogMismatch,
+    );
+    drop(migrator);
+
+    let mut admin = config.admin_client();
+    admin
+        .batch_execute(
+            "REVOKE SELECT ON memory.codebase_memory_reflections FROM task033_memory_foreign; \
+             REVOKE USAGE ON SCHEMA memory FROM task033_memory_foreign; \
+             DROP ROLE task033_memory_foreign",
+        )
+        .expect("MEMORY_EXTENSION_FOREIGN_ACL_CLEANUP_FAILED");
+    drop(admin);
+
+    let mut migrator = config.role_client(ExtensionDatabaseRole::Migrator);
+    verify_extension(&mut migrator, target, ExtensionDatabaseRole::Migrator)
+        .unwrap_or_else(|error| panic!("{}", error.code()));
+}
+
+fn prove_reflection_durability_boundary(config: &LiveConfig) {
+    let mut runtime = config.role_client(ExtensionDatabaseRole::Runtime);
+    runtime
+        .batch_execute(
+            "BEGIN ISOLATION LEVEL SERIALIZABLE; \
+             SET LOCAL search_path = pg_catalog; \
+             SET LOCAL row_security = on; \
+             SET LOCAL synchronous_commit = off",
+        )
+        .expect("MEMORY_REFLECTION_DURABILITY_FIXTURE_FAILED");
+    let error = runtime
+        .query_one(
+            "SELECT reflection_status \
+               FROM memory.codebase_memory_persist_reflection_v2(\
+                   NULL::bytea,NULL::bytea,NULL::bytea,NULL::bytea,NULL::smallint,\
+                   NULL::text,NULL::text,NULL::text,NULL::text,NULL::bytea,\
+                   NULL::text,NULL::text,NULL::bytea,NULL::bytea,NULL::smallint,\
+                   NULL::bytea,NULL::text,NULL::text,NULL::bytea,NULL::bytea,\
+                   NULL::bytea,NULL::bytea,NULL::text,NULL::text[],NULL::bytea[],NULL::text[]\
+               )",
+            &[],
+        )
+        .expect_err("MEMORY_REFLECTION_SYNCHRONOUS_COMMIT_OFF_ALLOWED");
+    assert_eq!(
+        error.code().map(SqlState::code),
+        Some("LCM01"),
+        "MEMORY_REFLECTION_DURABILITY_DENIAL_WRONG"
+    );
+    runtime
+        .batch_execute("ROLLBACK")
+        .expect("MEMORY_REFLECTION_DURABILITY_ROLLBACK_FAILED");
+}
+
+#[allow(clippy::too_many_lines)]
 fn exercise_runtime_memory(config: &LiveConfig, target: &ExtensionTarget, restarted: bool) {
     let (analysis, plan) = graph_memory_fixture();
+    let before_restart_read = restarted.then(|| reflection_storage_fingerprint(config));
     let runtime = config.role_client(ExtensionDatabaseRole::Runtime);
     let mut memory = PostgresCodebaseMemory::new(runtime, target.clone())
         .expect("MEMORY_ADAPTER_CONSTRUCTION_FAILED");
@@ -177,6 +249,36 @@ fn exercise_runtime_memory(config: &LiveConfig, target: &ExtensionTarget, restar
         assert!(replayed.matches_request(analysis.request()));
         assert_eq!(replayed.persistence().record_count(), 1);
         assert_eq!(replayed.retrieval().results().len(), 1);
+        let reflection = memory
+            .load_reflection(analysis.request())
+            .unwrap_or_else(|error| panic!("{}", error.code()));
+        assert_reflection(&reflection, &replayed);
+        let changed_request = changed_request(&analysis);
+        assert!(
+            memory.load_receipt(&changed_request).is_err(),
+            "MEMORY_CHANGED_REQUEST_REPLAY_ALLOWED"
+        );
+        assert!(
+            memory.load_reflection(&changed_request).is_err(),
+            "MEMORY_CHANGED_REFLECTION_REPLAY_ALLOWED"
+        );
+        drop(memory);
+        assert_eq!(
+            before_restart_read.expect("restart fingerprint"),
+            reflection_storage_fingerprint(config),
+            "MEMORY_RESTART_READER_MUTATED_REFLECTION"
+        );
+        println!(
+            "MEMORY_RUNTIME_REPLAY_OK phase=restart receipt={} persistence={} database_identity={}",
+            replayed.receipt_digest().as_str(),
+            replayed.persistence().persistence_digest().as_str(),
+            replayed
+                .persistence()
+                .identity()
+                .database_identity_digest()
+                .as_str()
+        );
+        return;
     }
 
     let persisted = memory
@@ -211,22 +313,37 @@ fn exercise_runtime_memory(config: &LiveConfig, target: &ExtensionTarget, restar
         "MEMORY_RECEIPT_EXACT_REPLAY_CHANGED"
     );
 
-    let changed_request = GraphMemoryRunRequest::new(
-        analysis.request().invocation().clone(),
-        analysis.request().project_id().clone(),
-        analysis.request().commit_id().clone(),
-        analysis.request().query_digest().clone(),
-        digest('9'),
-        analysis.request().retrieval_limit(),
-    )
-    .expect("MEMORY_CHANGED_REQUEST_INVALID");
+    let candidate = reflection_candidate(&receipt);
+    let reflection = memory
+        .persist_reflection(&candidate)
+        .unwrap_or_else(|error| panic!("{}", error.code()));
+    assert_reflection(&reflection, &receipt);
+    assert_eq!(
+        memory
+            .persist_reflection(&candidate)
+            .unwrap_or_else(|error| panic!("{}", error.code())),
+        reflection,
+        "MEMORY_REFLECTION_EXACT_RETRY_CHANGED"
+    );
+    assert_eq!(
+        memory
+            .load_reflection(analysis.request())
+            .unwrap_or_else(|error| panic!("{}", error.code())),
+        reflection,
+        "MEMORY_REFLECTION_CONTENT_REPLAY_CHANGED"
+    );
+
+    let changed_request = changed_request(&analysis);
     assert!(
         memory.load_receipt(&changed_request).is_err(),
         "MEMORY_CHANGED_REQUEST_REPLAY_ALLOWED"
     );
+    assert!(
+        memory.load_reflection(&changed_request).is_err(),
+        "MEMORY_CHANGED_REFLECTION_REPLAY_ALLOWED"
+    );
     println!(
-        "MEMORY_RUNTIME_REPLAY_OK phase={} receipt={} persistence={} database_identity={}",
-        if restarted { "restart" } else { "initial" },
+        "MEMORY_RUNTIME_REPLAY_OK phase=initial receipt={} persistence={} database_identity={}",
         receipt.receipt_digest().as_str(),
         receipt.persistence().persistence_digest().as_str(),
         receipt
@@ -235,6 +352,108 @@ fn exercise_runtime_memory(config: &LiveConfig, target: &ExtensionTarget, restar
             .database_identity_digest()
             .as_str()
     );
+}
+
+fn changed_request(analysis: &NormalizedGraphAnalysis) -> GraphMemoryRunRequest {
+    GraphMemoryRunRequest::new(
+        analysis.request().invocation().clone(),
+        analysis.request().project_id().clone(),
+        analysis.request().commit_id().clone(),
+        analysis.request().query_digest().clone(),
+        digest('9'),
+        analysis.request().retrieval_limit(),
+    )
+    .expect("MEMORY_CHANGED_REQUEST_INVALID")
+}
+
+fn reflection_storage_fingerprint(config: &LiveConfig) -> (i64, String) {
+    let mut admin = config.admin_client();
+    let row = admin
+        .query_one(
+            "SELECT pg_catalog.count(*)::bigint, \
+                    coalesce(pg_catalog.string_agg( \
+                        pg_catalog.encode(reflection_receipt_digest, 'hex') || ':' || \
+                        xmin::text || ':' || recorded_at::text, \
+                        ',' ORDER BY reflection_receipt_digest \
+                    ), '')::text \
+               FROM ONLY memory.codebase_memory_reflections",
+            &[],
+        )
+        .expect("MEMORY_REFLECTION_FINGERPRINT_QUERY_FAILED");
+    (row.get(0), row.get(1))
+}
+
+fn reflection_candidate(
+    graph_receipt: &lattice_contracts::GraphMemoryReceipt,
+) -> HermesReflectionCandidate {
+    let finding = HermesReflectionFinding::new(
+        "The exact graph snapshot contains the CodebaseMemoryPort boundary.",
+        digest('7'),
+    )
+    .expect("MEMORY_LIVE_REFLECTION_FINDING_INVALID");
+    let content = HermesReflectionContent::new(
+        "The bounded reflection is tied to the persisted TASK-033 graph receipt.",
+        vec![finding],
+        vec!["Review the inference before any later implementation decision.".to_owned()],
+    )
+    .expect("MEMORY_LIVE_REFLECTION_CONTENT_INVALID");
+    HermesReflectionCandidate::new(
+        graph_receipt.persistence().request(),
+        graph_receipt,
+        content,
+        digest('8'),
+        digest('9'),
+        digest('b'),
+    )
+    .expect("MEMORY_LIVE_REFLECTION_CANDIDATE_INVALID")
+}
+
+fn assert_reflection(
+    reflection: &HermesReflectionReceipt,
+    graph_receipt: &lattice_contracts::GraphMemoryReceipt,
+) {
+    assert_eq!(
+        reflection.schema_version(),
+        HERMES_REFLECTION_SCHEMA_VERSION
+    );
+    assert_eq!(
+        reflection.status(),
+        HermesReflectionStatus::InferenceCandidate
+    );
+    assert_eq!(reflection.request(), graph_receipt.persistence().request());
+    assert_eq!(
+        reflection.project_id(),
+        graph_receipt.persistence().request().project_id()
+    );
+    assert_eq!(
+        reflection.commit_id(),
+        graph_receipt.persistence().request().commit_id()
+    );
+    assert_eq!(
+        reflection.graph_receipt_digest(),
+        graph_receipt.receipt_digest()
+    );
+    assert_eq!(
+        reflection.content().summary(),
+        "The bounded reflection is tied to the persisted TASK-033 graph receipt."
+    );
+    assert_eq!(reflection.content().findings().len(), 1);
+    assert_eq!(
+        reflection.content().findings()[0].statement(),
+        "The exact graph snapshot contains the CodebaseMemoryPort boundary."
+    );
+    assert_eq!(
+        reflection.content().findings()[0].evidence_digest(),
+        &digest('7')
+    );
+    assert_eq!(
+        reflection.content().next_actions(),
+        &["Review the inference before any later implementation decision.".to_owned()]
+    );
+    assert_eq!(reflection.hermes_identity_digest(), &digest('8'));
+    assert_eq!(reflection.input_digest(), &digest('9'));
+    assert_eq!(reflection.reflection_digest(), &digest('b'));
+    assert_ne!(reflection.receipt_digest(), graph_receipt.receipt_digest());
 }
 
 fn graph_memory_fixture() -> (NormalizedGraphAnalysis, MemoryRetrievalPlan) {

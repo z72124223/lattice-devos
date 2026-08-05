@@ -17,17 +17,20 @@ const REQUIRED_GLOBAL_MANIFEST_SHA256: &str =
 const DATABASE_IDENTITY_DOMAIN: &[u8] = b"LATTICE_POSTGRES_DATABASE_IDENTITY_V1\0";
 const EXTENSION_ADVISORY_LOCK: i64 = 0x4c41_5443_4d45_4d31;
 
-const EXPECTED_TABLES: [&str; 6] = [
+const EXPECTED_TABLES: [&str; 7] = [
     "codebase_memory_analyses",
     "codebase_memory_extension_identity",
     "codebase_memory_extension_ledger",
     "codebase_memory_receipts",
     "codebase_memory_records",
+    "codebase_memory_reflections",
     "codebase_memory_retrieval_audits",
 ];
-const EXPECTED_FUNCTIONS: [&str; 3] = [
+const EXPECTED_FUNCTIONS: [&str; 5] = [
     "codebase_memory_load_receipt_v1",
+    "codebase_memory_load_reflection_v2",
     "codebase_memory_persist_analysis_v1",
+    "codebase_memory_persist_reflection_v2",
     "codebase_memory_persist_retrieval_v1",
 ];
 
@@ -224,7 +227,7 @@ impl Error for ExtensionSetupError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExtensionPreState {
     Fresh,
-    ExactV1,
+    ExactV2,
     Partial,
     Collision,
 }
@@ -270,7 +273,7 @@ pub fn apply_extension(
                 .batch_execute(sql)
                 .map_err(|error| map_extension_sql_error(&error))?;
             insert_identity(&mut transaction, target, &manifest)?;
-            if classify_pre_state(&mut transaction)? != ExtensionPreState::ExactV1 {
+            if classify_pre_state(&mut transaction)? != ExtensionPreState::ExactV2 {
                 return Err(catalog_error());
             }
             verify_catalog_closure(&mut transaction)?;
@@ -303,7 +306,7 @@ pub fn apply_extension(
             ExtensionSetupErrorKind::SchemaCollision,
             "MEMORY_EXTENSION_SCHEMA_COLLISION",
         )),
-        ExtensionPreState::ExactV1 => {
+        ExtensionPreState::ExactV2 => {
             verify_catalog_closure(&mut transaction)?;
             read_identity(
                 &mut transaction,
@@ -355,7 +358,7 @@ pub fn verify_extension(
     harden_transaction(&mut transaction)?;
     let server_version_num = preflight(&mut transaction, target, role)?;
     let state = classify_pre_state(&mut transaction)?;
-    if state != ExtensionPreState::ExactV1 {
+    if state != ExtensionPreState::ExactV2 {
         return Err(match state {
             ExtensionPreState::Fresh => ExtensionSetupError::new(
                 ExtensionSetupErrorKind::InstallationRequired,
@@ -369,7 +372,7 @@ pub fn verify_extension(
                 ExtensionSetupErrorKind::SchemaCollision,
                 "MEMORY_EXTENSION_SCHEMA_COLLISION",
             ),
-            ExtensionPreState::ExactV1 => unreachable!(),
+            ExtensionPreState::ExactV2 => unreachable!(),
         });
     }
     verify_catalog_closure(&mut transaction)?;
@@ -496,6 +499,7 @@ fn classify_pre_state(
                     'codebase_memory_extension_ledger', \
                     'codebase_memory_receipts', \
                     'codebase_memory_records', \
+                    'codebase_memory_reflections', \
                     'codebase_memory_retrieval_audits' \
                 ))::bigint, \
                 count(*)::bigint \
@@ -512,7 +516,9 @@ fn classify_pre_state(
             "SELECT \
                 count(*) FILTER (WHERE p.proname IN ( \
                     'codebase_memory_load_receipt_v1', \
+                    'codebase_memory_load_reflection_v2', \
                     'codebase_memory_persist_analysis_v1', \
+                    'codebase_memory_persist_reflection_v2', \
                     'codebase_memory_persist_retrieval_v1' \
                 ))::bigint, \
                 count(*)::bigint \
@@ -551,7 +557,7 @@ fn classify_pre_state(
         .map_err(|_| stage_error("MEMORY_EXTENSION_PRESTATE_IDENTITY_QUERY_FAILED"))?
         .get(0);
     Ok(if identity == 2 {
-        ExtensionPreState::ExactV1
+        ExtensionPreState::ExactV2
     } else {
         ExtensionPreState::Partial
     })
@@ -635,10 +641,11 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
     }
     let expected_comments = [
         "LATTICE_CODEBASE_MEMORY_ANALYSES_V1",
-        "LATTICE_CODEBASE_MEMORY_EXTENSION_IDENTITY_V1",
-        "LATTICE_CODEBASE_MEMORY_EXTENSION_LEDGER_V1",
+        "LATTICE_CODEBASE_MEMORY_EXTENSION_IDENTITY_V2",
+        "LATTICE_CODEBASE_MEMORY_EXTENSION_LEDGER_V2",
         "LATTICE_CODEBASE_MEMORY_RECEIPTS_V1",
         "LATTICE_CODEBASE_MEMORY_RECORDS_V1",
+        "LATTICE_CODEBASE_MEMORY_REFLECTIONS_V2",
         "LATTICE_CODEBASE_MEMORY_RETRIEVAL_AUDITS_V1",
     ];
     for ((row, expected_name), expected_comment) in
@@ -701,6 +708,33 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
                 return Err(catalog_stage("MEMORY_EXTENSION_TABLE_ACL_MISMATCH"));
             }
         }
+        let acl_closure = client
+            .query_one(
+                "SELECT pg_catalog.count(*)::bigint, \
+                        pg_catalog.count(*) FILTER (WHERE \
+                            grantee.rolname = 'lattice_migrator' \
+                            AND grantor.rolname = 'lattice_migrator' \
+                            AND a.privilege_type IN ( \
+                                'SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER' \
+                            ) \
+                            AND NOT a.is_grantable \
+                        )::bigint \
+                   FROM pg_catalog.pg_class AS c \
+                   JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace \
+                   CROSS JOIN LATERAL pg_catalog.aclexplode( \
+                       coalesce(c.relacl, pg_catalog.acldefault('r', c.relowner)) \
+                   ) AS a \
+                   LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = a.grantee \
+                   JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = a.grantor \
+                  WHERE n.nspname = 'memory' AND c.relname = $1::text::name",
+                &[&name],
+            )
+            .map_err(|_| catalog_stage("MEMORY_EXTENSION_TABLE_ACL_QUERY_FAILED"))?;
+        let acl_count: i64 = acl_closure.get(0);
+        let admitted_acl_count: i64 = acl_closure.get(1);
+        if acl_count != 7 || admitted_acl_count != acl_count {
+            return Err(catalog_stage("MEMORY_EXTENSION_TABLE_ACL_MISMATCH"));
+        }
     }
 
     let functions = client
@@ -731,11 +765,25 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
             "LATTICE_CODEBASE_MEMORY_LOAD_RECEIPT_V1",
         ),
         (
+            "codebase_memory_load_reflection_v2",
+            "s",
+            "r",
+            "bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea, text, text, bytea, bytea, smallint",
+            "LATTICE_CODEBASE_MEMORY_LOAD_REFLECTION_V2",
+        ),
+        (
             "codebase_memory_persist_analysis_v1",
             "v",
             "u",
             "bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea, text, text, bytea, bytea, smallint, text, bytea, bytea, bytea, bytea, bytea, bytea, bytea, bytea, bytea, integer[], bytea[], text[], text[], text[], text[], text[], text[], bytea[], integer[], integer[], text[], bytea[]",
             "LATTICE_CODEBASE_MEMORY_PERSIST_ANALYSIS_V1",
+        ),
+        (
+            "codebase_memory_persist_reflection_v2",
+            "v",
+            "u",
+            "bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea, text, text, bytea, bytea, smallint, bytea, text, text, bytea, bytea, bytea, bytea, text, text[], bytea[], text[]",
+            "LATTICE_CODEBASE_MEMORY_PERSIST_REFLECTION_V2",
         ),
         (
             "codebase_memory_persist_retrieval_v1",
@@ -810,6 +858,42 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
                 return Err(catalog_stage("MEMORY_EXTENSION_FUNCTION_ACL_MISMATCH"));
             }
         }
+        let acl_closure = client
+            .query_one(
+                "SELECT pg_catalog.count(*)::bigint, \
+                        pg_catalog.count(*) FILTER (WHERE \
+                            grantee.rolname IN ('lattice_migrator', 'lattice_runtime') \
+                            AND grantor.rolname = 'lattice_migrator' \
+                            AND a.privilege_type = 'EXECUTE' \
+                            AND NOT a.is_grantable \
+                        )::bigint, \
+                        pg_catalog.count(*) FILTER (WHERE \
+                            grantee.rolname = 'lattice_migrator' \
+                        )::bigint, \
+                        pg_catalog.count(*) FILTER (WHERE \
+                            grantee.rolname = 'lattice_runtime' \
+                        )::bigint \
+                   FROM pg_catalog.pg_proc AS p \
+                   CROSS JOIN LATERAL pg_catalog.aclexplode( \
+                       coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner)) \
+                   ) AS a \
+                   LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = a.grantee \
+                   JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = a.grantor \
+                  WHERE p.oid = $1::oid",
+                &[&oid],
+            )
+            .map_err(|_| catalog_stage("MEMORY_EXTENSION_FUNCTION_ACL_QUERY_FAILED"))?;
+        let acl_count: i64 = acl_closure.get(0);
+        let admitted_acl_count: i64 = acl_closure.get(1);
+        let owner_acl_count: i64 = acl_closure.get(2);
+        let runtime_acl_count: i64 = acl_closure.get(3);
+        if acl_count != 2
+            || admitted_acl_count != acl_count
+            || owner_acl_count != 1
+            || runtime_acl_count != 1
+        {
+            return Err(catalog_stage("MEMORY_EXTENSION_FUNCTION_ACL_MISMATCH"));
+        }
     }
 
     let schema_acl = client
@@ -838,6 +922,46 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
     if public_usage || !runtime_usage || runtime_create || guardian_usage || readonly_usage {
         return Err(catalog_stage("MEMORY_EXTENSION_SCHEMA_ACL_MISMATCH"));
     }
+    let schema_acl_closure = client
+        .query_one(
+            "SELECT pg_catalog.count(*)::bigint, \
+                    pg_catalog.count(*) FILTER (WHERE \
+                        grantor.rolname = 'lattice_migrator' \
+                        AND NOT a.is_grantable \
+                        AND ( \
+                            (grantee.rolname = 'lattice_migrator' \
+                                AND a.privilege_type IN ('USAGE', 'CREATE')) \
+                            OR (grantee.rolname = 'lattice_runtime' \
+                                AND a.privilege_type = 'USAGE') \
+                        ) \
+                    )::bigint, \
+                    pg_catalog.count(*) FILTER (WHERE \
+                        grantee.rolname = 'lattice_migrator' \
+                    )::bigint, \
+                    pg_catalog.count(*) FILTER (WHERE \
+                        grantee.rolname = 'lattice_runtime' \
+                    )::bigint \
+               FROM pg_catalog.pg_namespace AS n \
+               CROSS JOIN LATERAL pg_catalog.aclexplode( \
+                   coalesce(n.nspacl, pg_catalog.acldefault('n', n.nspowner)) \
+               ) AS a \
+               LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = a.grantee \
+               JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = a.grantor \
+              WHERE n.nspname = 'memory'",
+            &[],
+        )
+        .map_err(|_| catalog_stage("MEMORY_EXTENSION_SCHEMA_ACL_QUERY_FAILED"))?;
+    let schema_acl_count: i64 = schema_acl_closure.get(0);
+    let admitted_schema_acl_count: i64 = schema_acl_closure.get(1);
+    let owner_schema_acl_count: i64 = schema_acl_closure.get(2);
+    let runtime_schema_acl_count: i64 = schema_acl_closure.get(3);
+    if schema_acl_count != 3
+        || admitted_schema_acl_count != schema_acl_count
+        || owner_schema_acl_count != 2
+        || runtime_schema_acl_count != 1
+    {
+        return Err(catalog_stage("MEMORY_EXTENSION_SCHEMA_ACL_MISMATCH"));
+    }
 
     let columns: i64 = client
         .query_one(
@@ -851,6 +975,7 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
                     'codebase_memory_extension_ledger', \
                     'codebase_memory_receipts', \
                     'codebase_memory_records', \
+                    'codebase_memory_reflections', \
                     'codebase_memory_retrieval_audits' \
                 ) \
                 AND a.attnum > 0 AND NOT a.attisdropped",
@@ -870,13 +995,14 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
                     'codebase_memory_extension_ledger', \
                     'codebase_memory_receipts', \
                     'codebase_memory_records', \
+                    'codebase_memory_reflections', \
                     'codebase_memory_retrieval_audits' \
                 )",
             &[],
         )
         .map_err(|_| catalog_stage("MEMORY_EXTENSION_CONSTRAINT_COUNT_QUERY_FAILED"))?
         .get(0);
-    if columns != 81 || constraints != 43 {
+    if columns != 104 || constraints != 53 {
         return Err(catalog_stage(
             "MEMORY_EXTENSION_COLUMN_CONSTRAINT_COUNT_MISMATCH",
         ));
@@ -926,7 +1052,7 @@ fn read_identity(
     }
     let global_manifest_digest =
         ContentDigest::from_sha256(global_manifest_sha256).map_err(|_| catalog_error())?;
-    let identity = CodebaseMemoryPersistenceIdentity::v1(
+    let identity = CodebaseMemoryPersistenceIdentity::v2(
         target.expected_database_identity_digest().clone(),
         global_manifest_digest,
         manifest.sql_sha256().clone(),

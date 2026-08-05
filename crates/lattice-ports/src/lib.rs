@@ -10,9 +10,9 @@ use lattice_contracts::{
     FixedTestEvidence, GatewayPeerContext, GatewayReply, GatewayRequest, GitCommitEvidence,
     GraphMemoryPersistenceEvidence, GraphMemoryReceipt, GraphMemoryRunRequest,
     GraphifyBuildRequest, GraphifyEvidence, GraphifyRawEvidence, HermesEvidence,
-    HermesResearchRequest, MemoryRetrievalPlan, NormalizedGraphAnalysis, PreparedWorkspaceEvidence,
-    RequestId, StorePhysicalHead, StoreScope, StoreTransactionReceipt, StoreTransactionRequest,
-    WorkspaceChangeEvidence,
+    HermesReflectionCandidate, HermesReflectionReceipt, HermesResearchRequest, MemoryRetrievalPlan,
+    NormalizedGraphAnalysis, PreparedWorkspaceEvidence, RequestId, StorePhysicalHead, StoreScope,
+    StoreTransactionReceipt, StoreTransactionRequest, WorkspaceChangeEvidence,
 };
 
 /// Result type returned by every LATTICE port.
@@ -177,6 +177,10 @@ pub enum GraphMemoryStage {
     Retrieval,
     /// Restart-safe terminal receipt readback.
     Receipt,
+    /// Atomic Hermes structured-reflection persistence.
+    ReflectionPersistence,
+    /// Restart-safe Hermes structured-reflection readback.
+    ReflectionReceipt,
 }
 
 /// Whether a failed graph-memory effect is known not to have completed.
@@ -599,6 +603,35 @@ pub trait CodebaseMemoryPort {
         &mut self,
         request: &GraphMemoryRunRequest,
     ) -> GraphMemoryPortResult<GraphMemoryReceipt>;
+}
+
+/// Sole durable repository boundary for structured Hermes reflection content.
+///
+/// The implementation is owned by the same `PostgreSQL` Codebase Memory adapter
+/// as graph receipts. Hermes itself never receives this port or a database
+/// client, and fresh status uses only [`Self::load_reflection`].
+pub trait HermesReflectionMemoryPort {
+    /// Atomically persists one exact-graph-bound inference candidate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure for missing/substituted graph truth, invalid
+    /// structured content, unavailable storage, or ambiguous commit outcome.
+    fn persist_reflection(
+        &mut self,
+        reflection: &HermesReflectionCandidate,
+    ) -> GraphMemoryPortResult<HermesReflectionReceipt>;
+
+    /// Loads one exact structured reflection without invoking Hermes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure for missing, incomplete, cross-bound, corrupt,
+    /// or unavailable durable state.
+    fn load_reflection(
+        &mut self,
+        request: &GraphMemoryRunRequest,
+    ) -> GraphMemoryPortResult<HermesReflectionReceipt>;
 }
 
 /// Read-only derived-knowledge boundary implemented by the `Graphify` adapter.

@@ -22,7 +22,7 @@ fn exact_extension_manifest_and_typed_identity_are_required() {
     assert_eq!(manifest.sql_sha256().as_str().len(), 64);
     assert_eq!(manifest.manifest_sha256().as_str().len(), 64);
 
-    let identity = CodebaseMemoryPersistenceIdentity::v1(
+    let identity = CodebaseMemoryPersistenceIdentity::v2(
         digest('1'),
         digest('2'),
         manifest.sql_sha256().clone(),

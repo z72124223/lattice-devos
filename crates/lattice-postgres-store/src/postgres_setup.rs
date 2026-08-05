@@ -39,17 +39,17 @@ const V3_EXPECTED_CONSTRAINT_SIGNATURE: &str =
     "f9d587125d792646b77ca68e6224c9866bd32c87a0e98c4d2f85b75dd0c22be8";
 const V3_EXPECTED_INDEX_SIGNATURE: &str =
     "40ca5ea0781b1be03efe9bead50ae9f78434314123d6f700d278874678d06a9b";
-const V3_CODEBASE_MEMORY_V1_EXPECTED_RELATION_SIGNATURE: &str =
-    "b452c081f20dbbe5a60c25aa42ab80b9fbf3d0b9bf5d614d69c31b5251697944";
-const V3_CODEBASE_MEMORY_V1_EXPECTED_COLUMN_SIGNATURE: &str =
-    "c5125bf5a298e84e29f20effba0316f951d80f43a6f38280ed3ca587bcdd247e";
-const V3_CODEBASE_MEMORY_V1_EXPECTED_CONSTRAINT_SIGNATURE: &str =
-    "1bae2a02f7ef40eb16eec33927a903aaae11789053b6112affe980f2296d06f9";
-const V3_CODEBASE_MEMORY_V1_EXPECTED_INDEX_SIGNATURE: &str =
-    "ba337d832dc38ad9d7b50749593b20b90c6c16f287f2605015bbbe7bc61d5a9b";
+const V3_CODEBASE_MEMORY_V2_EXPECTED_RELATION_SIGNATURE: &str =
+    "79ca93b806a7762adf65524a419d43cb2e7d2ef4b1bda4c02326288b2c76f3b2";
+const V3_CODEBASE_MEMORY_V2_EXPECTED_COLUMN_SIGNATURE: &str =
+    "8fa61b960623e768a40afc39fd1c826bfccd75681958275cbecb8574014966ee";
+const V3_CODEBASE_MEMORY_V2_EXPECTED_CONSTRAINT_SIGNATURE: &str =
+    "d1429dd18885b89804ce2e60085b58c16ea23383ce31b345bef6f61dc37be6c9";
+const V3_CODEBASE_MEMORY_V2_EXPECTED_INDEX_SIGNATURE: &str =
+    "68c0c370ad785dc6bbc471fc55f9edcd278810c1bc9be28a24e6dd9de1245540";
 const EXPECTED_SCHEMA_ACL_SIGNATURE: &str =
     "1bd04ad6cebb5dab6a5a48f47a76e88d19a340bf25aaa49ed9c3270cac479568";
-const V3_CODEBASE_MEMORY_V1_EXPECTED_SCHEMA_ACL_SIGNATURE: &str =
+const V3_CODEBASE_MEMORY_V2_EXPECTED_SCHEMA_ACL_SIGNATURE: &str =
     "093efdae2f43f0f5adfdb1296010e990fed1120e54401537939454a2952e7d8e";
 const EXPECTED_TABLE_ACL_SIGNATURE: &str =
     "62294e52f6ce6c6c2ab563cc2771b7e4af9f02fb9c891b7592135a7ed7508485";
@@ -207,8 +207,8 @@ const V2_EXPECTED_FUNCTION_SIGNATURE: &str =
     "1e0a53bff3e47d1accf1da1e0856b8edf77738fb5a20f9163b9d2d5747481064";
 const V3_EXPECTED_FUNCTION_SIGNATURE: &str =
     "f2c8585e1da944b38a50c65c6b9f448963f4c3d96c909331be87fec0c30d2279";
-const V3_CODEBASE_MEMORY_V1_EXPECTED_FUNCTION_SIGNATURE: &str =
-    "5e5ae41bd12e750ef691ffbe7e98b39c9029cbcaeb896f157666ac056c6433ab";
+const V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_SIGNATURE: &str =
+    "4144be2ae87096247f096b6450a5e99f8793f6a666987030b73306a4f9041ee4";
 const FUNCTION_ACL_SIGNATURE_SQL: &str = r"
     SELECT jsonb_build_array(
         n.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
@@ -229,12 +229,12 @@ const V2_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
     "ceedd8bee4f0f430505385bac5cee89e1fdb1ce42a72965fd1b1b4ecad0ac5e5";
 const V3_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
     "579b843df8e187eb0f4b7a75e9d1b0c4f109d596c55bcff5aa76a1a06bfcd91b";
-const V3_CODEBASE_MEMORY_V1_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
-    "bafa8d1ecbe842f30c93562ee1dd881053bfff89c2936757490d1b0d7c8a4ce0";
+const V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
+    "25f7d20b57122d2ad77f3bc8c64a818f60bd8af341a4e2201c029c4ab4db4240";
 const V3_EXPECTED_TABLE_ACL_SIGNATURE: &str =
     "27a0879d1b709abd341653b445d3a64d59819bde2e20e868ac09d2624aab1993";
-const V3_CODEBASE_MEMORY_V1_EXPECTED_TABLE_ACL_SIGNATURE: &str =
-    "7cf7fe6078f6eedf39672760af34d48357433cd44bfa4131342cea3a49a43cc9";
+const V3_CODEBASE_MEMORY_V2_EXPECTED_TABLE_ACL_SIGNATURE: &str =
+    "9803787757e36f371e58231179bb777a379ee2c9e6d79175fc2bb5556720c798";
 
 const DATABASE_ACL_SIGNATURE_SQL: &str = r"
     SELECT jsonb_build_array(
@@ -317,17 +317,20 @@ const V3_PROTECTED_CONTROL_TABLES: [&str; 6] = [
     "task_ledger_streams",
     "terminal_transactions",
 ];
-const CODEBASE_MEMORY_V1_TABLES: [&str; 6] = [
+const CODEBASE_MEMORY_V2_TABLES: [&str; 7] = [
     "codebase_memory_analyses",
     "codebase_memory_extension_identity",
     "codebase_memory_extension_ledger",
     "codebase_memory_receipts",
     "codebase_memory_records",
+    "codebase_memory_reflections",
     "codebase_memory_retrieval_audits",
 ];
-const CODEBASE_MEMORY_V1_FUNCTIONS: [&str; 3] = [
+const CODEBASE_MEMORY_V2_FUNCTIONS: [&str; 5] = [
+    "codebase_memory_load_reflection_v2",
     "codebase_memory_load_receipt_v1",
     "codebase_memory_persist_analysis_v1",
+    "codebase_memory_persist_reflection_v2",
     "codebase_memory_persist_retrieval_v1",
 ];
 const STORE_PREPARE_V2_IDENTITY: &str = "control.store_prepare_v2(smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea)";
@@ -342,7 +345,9 @@ const TASK_LEDGER_READ_EVENTS_V1_IDENTITY: &str = "control.task_ledger_read_even
 const TASK_LEDGER_READ_COMMANDS_V1_IDENTITY: &str = "control.task_ledger_read_commands_v1(bytea)";
 const TASK_LEDGER_FINALIZE_V1_IDENTITY: &str = "control.task_ledger_finalize_v1(bytea,text,text,text,text,bytea,text,text,bytea,text,bytea,bytea,text,text,text,text,text,text,text,text,text,bytea,bytea,text,bytea,text,bytea,text,bytea,bytea,text,text,text,text,text,text,text,bytea,jsonb,boolean,text,text,text,text,text,text,text,bytea,text,bytea,bytea,text,bytea,text,bytea,bytea,text,text,bytea,bytea,bytea,text,boolean,text,bytea,text,bytea,boolean,bytea,bytea)";
 const CODEBASE_MEMORY_LOAD_RECEIPT_V1_IDENTITY: &str = "memory.codebase_memory_load_receipt_v1(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint)";
+const CODEBASE_MEMORY_LOAD_REFLECTION_V2_IDENTITY: &str = "memory.codebase_memory_load_reflection_v2(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint)";
 const CODEBASE_MEMORY_PERSIST_ANALYSIS_V1_IDENTITY: &str = "memory.codebase_memory_persist_analysis_v1(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint,text,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,integer[],bytea[],text[],text[],text[],text[],text[],text[],bytea[],integer[],integer[],text[],bytea[])";
+const CODEBASE_MEMORY_PERSIST_REFLECTION_V2_IDENTITY: &str = "memory.codebase_memory_persist_reflection_v2(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint,bytea,text,text,bytea,bytea,bytea,bytea,text,text[],bytea[],text[])";
 const CODEBASE_MEMORY_PERSIST_RETRIEVAL_V1_IDENTITY: &str = "memory.codebase_memory_persist_retrieval_v1(bytea,bytea,bytea,bytea,bytea,bytea,bytea,smallint,text,bytea[],bytea[],bigint[],bytea,bytea,bytea)";
 const V1_CONTROL_CONSTRAINTS: [&str; 48] = [
     "database_identity_pkey",
@@ -641,7 +646,7 @@ enum CatalogProfile {
     V1,
     V2,
     V3,
-    V3CodebaseMemoryV1,
+    V3CodebaseMemoryV2,
 }
 
 fn classify_memory_catalog_counts(
@@ -657,13 +662,13 @@ fn classify_memory_catalog_counts(
     {
         return Ok(CatalogProfile::V3);
     }
-    if expected_relations == i64::try_from(CODEBASE_MEMORY_V1_TABLES.len()).expect("fixed count")
+    if expected_relations == i64::try_from(CODEBASE_MEMORY_V2_TABLES.len()).expect("fixed count")
         && all_relations == expected_relations
         && expected_functions
-            == i64::try_from(CODEBASE_MEMORY_V1_FUNCTIONS.len()).expect("fixed count")
+            == i64::try_from(CODEBASE_MEMORY_V2_FUNCTIONS.len()).expect("fixed count")
         && all_functions == expected_functions
     {
-        return Ok(CatalogProfile::V3CodebaseMemoryV1);
+        return Ok(CatalogProfile::V3CodebaseMemoryV2);
     }
     Err(catalog_error())
 }
@@ -680,6 +685,7 @@ fn classify_current_v3_catalog_profile<C: GenericClient>(
                  'codebase_memory_extension_ledger', \
                  'codebase_memory_receipts', \
                  'codebase_memory_records', \
+                 'codebase_memory_reflections', \
                  'codebase_memory_retrieval_audits'))::bigint, \
              count(*)::bigint \
              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
@@ -695,8 +701,10 @@ fn classify_current_v3_catalog_profile<C: GenericClient>(
         .query_one(
             "SELECT \
              count(*) FILTER (WHERE p.proname IN ( \
+                 'codebase_memory_load_reflection_v2', \
                  'codebase_memory_load_receipt_v1', \
                  'codebase_memory_persist_analysis_v1', \
+                 'codebase_memory_persist_reflection_v2', \
                  'codebase_memory_persist_retrieval_v1'))::bigint, \
              count(*)::bigint \
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
@@ -1374,7 +1382,7 @@ fn verify_compatibility<C: GenericClient>(
     let expected_versions = match profile {
         CatalogProfile::V1 => [1, 1, 1, 1, 1],
         CatalogProfile::V2 => [2, 2, 2, 2, 2],
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV1 => [3, 3, 3, 3, 3],
+        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => [3, 3, 3, 3, 3],
         CatalogProfile::PreSchema => {
             return Err(PostgresStoreSetupError::new(
                 PostgresStoreSetupErrorKind::CompatibilityMismatch,
@@ -1585,7 +1593,7 @@ fn verify_schema_objects<C: GenericClient>(
     verify_forbidden_schema_objects(client, profile)?;
     if matches!(
         profile,
-        CatalogProfile::V2 | CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV1
+        CatalogProfile::V2 | CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2
     ) {
         verify_owned_function_boundary(client, profile)?;
     }
@@ -1615,11 +1623,11 @@ fn verify_catalog_signatures<C: GenericClient>(
             V3_EXPECTED_CONSTRAINT_SIGNATURE,
             V3_EXPECTED_INDEX_SIGNATURE,
         ],
-        CatalogProfile::V3CodebaseMemoryV1 => [
-            V3_CODEBASE_MEMORY_V1_EXPECTED_RELATION_SIGNATURE,
-            V3_CODEBASE_MEMORY_V1_EXPECTED_COLUMN_SIGNATURE,
-            V3_CODEBASE_MEMORY_V1_EXPECTED_CONSTRAINT_SIGNATURE,
-            V3_CODEBASE_MEMORY_V1_EXPECTED_INDEX_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2 => [
+            V3_CODEBASE_MEMORY_V2_EXPECTED_RELATION_SIGNATURE,
+            V3_CODEBASE_MEMORY_V2_EXPECTED_COLUMN_SIGNATURE,
+            V3_CODEBASE_MEMORY_V2_EXPECTED_CONSTRAINT_SIGNATURE,
+            V3_CODEBASE_MEMORY_V2_EXPECTED_INDEX_SIGNATURE,
         ],
         CatalogProfile::PreSchema => return Err(catalog_error()),
     };
@@ -1658,7 +1666,7 @@ fn verify_schema_headers<C: GenericClient>(
     let suffix = match profile {
         CatalogProfile::V1 => "V1",
         CatalogProfile::V2 => "V2",
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV1 => "V3",
+        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => "V3",
         CatalogProfile::PreSchema => return Err(catalog_error()),
     };
     let expected_comments = [
@@ -1692,7 +1700,7 @@ fn verify_schema_headers<C: GenericClient>(
         CatalogProfile::V1 | CatalogProfile::V2 => {
             CONTROL_TABLES.into_iter().map(str::to_owned).collect()
         }
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV1 => {
+        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => {
             V3_CONTROL_TABLES.into_iter().map(str::to_owned).collect()
         }
         CatalogProfile::PreSchema => return Err(catalog_error()),
@@ -1715,7 +1723,7 @@ fn verify_schema_headers<C: GenericClient>(
             .into_iter()
             .map(str::to_owned)
             .collect(),
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV1 => V2_CONTROL_CONSTRAINTS
+        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => V2_CONTROL_CONSTRAINTS
             .into_iter()
             .chain(TASK_LEDGER_CONTROL_CONSTRAINTS)
             .map(str::to_owned)
@@ -1759,11 +1767,11 @@ fn verify_owned_type_closure<C: GenericClient>(
             .into_iter()
             .map(|table| ("control", table))
             .collect(),
-        CatalogProfile::V3CodebaseMemoryV1 => V3_CONTROL_TABLES
+        CatalogProfile::V3CodebaseMemoryV2 => V3_CONTROL_TABLES
             .into_iter()
             .map(|table| ("control", table))
             .chain(
-                CODEBASE_MEMORY_V1_TABLES
+                CODEBASE_MEMORY_V2_TABLES
                     .into_iter()
                     .map(|table| ("memory", table)),
             )
@@ -1849,7 +1857,7 @@ fn verify_forbidden_schema_objects<C: GenericClient>(
         CatalogProfile::V1 | CatalogProfile::PreSchema => 0,
         CatalogProfile::V2 => 3,
         CatalogProfile::V3 => 11,
-        CatalogProfile::V3CodebaseMemoryV1 => 14,
+        CatalogProfile::V3CodebaseMemoryV2 => 16,
     };
     if row_value::<i64>(&forbidden, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?
         != expected_functions
@@ -1870,14 +1878,14 @@ fn verify_forbidden_schema_objects<C: GenericClient>(
         CatalogProfile::V1 => 4,
         CatalogProfile::V2
         | CatalogProfile::V3
-        | CatalogProfile::V3CodebaseMemoryV1
+        | CatalogProfile::V3CodebaseMemoryV2
         | CatalogProfile::PreSchema => 0,
     };
     let expected_internal_triggers = match profile {
         CatalogProfile::V1 => 4,
         CatalogProfile::V2 | CatalogProfile::PreSchema => 0,
         CatalogProfile::V3 => 20,
-        CatalogProfile::V3CodebaseMemoryV1 => 40,
+        CatalogProfile::V3CodebaseMemoryV2 => 44,
     };
     if row_value::<i64>(&forbidden, 6, PostgresStoreSetupErrorKind::CorruptCatalog)?
         != expected_scope_head_triggers
@@ -1904,7 +1912,7 @@ fn verify_owned_function_boundary<C: GenericClient>(
     let expected_signature = match profile {
         CatalogProfile::V2 => V2_EXPECTED_FUNCTION_SIGNATURE,
         CatalogProfile::V3 => V3_EXPECTED_FUNCTION_SIGNATURE,
-        CatalogProfile::V3CodebaseMemoryV1 => V3_CODEBASE_MEMORY_V1_EXPECTED_FUNCTION_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2 => V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_SIGNATURE,
         CatalogProfile::V1 | CatalogProfile::PreSchema => return Err(catalog_error()),
     };
     if signature != expected_signature {
@@ -1936,7 +1944,7 @@ fn verify_owned_function_boundary<C: GenericClient>(
         .into_iter()
         .map(str::to_owned)
         .collect(),
-        CatalogProfile::V3CodebaseMemoryV1 => [
+        CatalogProfile::V3CodebaseMemoryV2 => [
             STORE_PREPARE_V2_IDENTITY,
             STORE_FINALIZE_V2_IDENTITY,
             STORE_CURRENT_HEAD_V2_IDENTITY,
@@ -1948,8 +1956,10 @@ fn verify_owned_function_boundary<C: GenericClient>(
             TASK_LEDGER_READ_EVENTS_V1_IDENTITY,
             TASK_LEDGER_READ_COMMANDS_V1_IDENTITY,
             TASK_LEDGER_FINALIZE_V1_IDENTITY,
+            CODEBASE_MEMORY_LOAD_REFLECTION_V2_IDENTITY,
             CODEBASE_MEMORY_LOAD_RECEIPT_V1_IDENTITY,
             CODEBASE_MEMORY_PERSIST_ANALYSIS_V1_IDENTITY,
+            CODEBASE_MEMORY_PERSIST_REFLECTION_V2_IDENTITY,
             CODEBASE_MEMORY_PERSIST_RETRIEVAL_V1_IDENTITY,
         ]
         .into_iter()
@@ -1981,8 +1991,10 @@ fn verify_owned_function_boundary<C: GenericClient>(
             TASK_LEDGER_READ_EVENTS_V1_IDENTITY,
             TASK_LEDGER_READ_COMMANDS_V1_IDENTITY,
             TASK_LEDGER_FINALIZE_V1_IDENTITY,
+            CODEBASE_MEMORY_LOAD_REFLECTION_V2_IDENTITY,
             CODEBASE_MEMORY_LOAD_RECEIPT_V1_IDENTITY,
             CODEBASE_MEMORY_PERSIST_ANALYSIS_V1_IDENTITY,
+            CODEBASE_MEMORY_PERSIST_REFLECTION_V2_IDENTITY,
             CODEBASE_MEMORY_PERSIST_RETRIEVAL_V1_IDENTITY,
         ]
         .contains(&identity.as_str())
@@ -2051,7 +2063,7 @@ fn verify_roles_and_grants<C: GenericClient>(
 ) -> Result<(), PostgresStoreSetupError> {
     verify_role_and_database_boundary(client, profile)?;
     let expected_schema_acl = match profile {
-        CatalogProfile::V3CodebaseMemoryV1 => V3_CODEBASE_MEMORY_V1_EXPECTED_SCHEMA_ACL_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2 => V3_CODEBASE_MEMORY_V2_EXPECTED_SCHEMA_ACL_SIGNATURE,
         CatalogProfile::PreSchema
         | CatalogProfile::V1
         | CatalogProfile::V2
@@ -2062,7 +2074,7 @@ fn verify_roles_and_grants<C: GenericClient>(
             EXPECTED_TABLE_ACL_SIGNATURE
         }
         CatalogProfile::V3 => V3_EXPECTED_TABLE_ACL_SIGNATURE,
-        CatalogProfile::V3CodebaseMemoryV1 => V3_CODEBASE_MEMORY_V1_EXPECTED_TABLE_ACL_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2 => V3_CODEBASE_MEMORY_V2_EXPECTED_TABLE_ACL_SIGNATURE,
     };
     for (query, expected) in [
         (SCHEMA_ACL_SIGNATURE_SQL, expected_schema_acl),
@@ -2077,7 +2089,7 @@ fn verify_roles_and_grants<C: GenericClient>(
     }
     if matches!(
         profile,
-        CatalogProfile::V2 | CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV1
+        CatalogProfile::V2 | CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2
     ) {
         verify_owned_function_acl(client, profile)?;
     }
@@ -2104,7 +2116,7 @@ fn verify_owned_function_acl<C: GenericClient>(
     let expected_signature = match profile {
         CatalogProfile::V2 => V2_EXPECTED_FUNCTION_ACL_SIGNATURE,
         CatalogProfile::V3 => V3_EXPECTED_FUNCTION_ACL_SIGNATURE,
-        CatalogProfile::V3CodebaseMemoryV1 => V3_CODEBASE_MEMORY_V1_EXPECTED_FUNCTION_ACL_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2 => V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_ACL_SIGNATURE,
         CatalogProfile::V1 | CatalogProfile::PreSchema => return Err(permission_error()),
     };
     if signature != expected_signature {
@@ -2133,7 +2145,7 @@ fn verify_owned_function_acl<C: GenericClient>(
         .into_iter()
         .map(str::to_owned)
         .collect(),
-        CatalogProfile::V3CodebaseMemoryV1 => [
+        CatalogProfile::V3CodebaseMemoryV2 => [
             STORE_PREPARE_V3_IDENTITY,
             STORE_FINALIZE_V3_IDENTITY,
             STORE_CURRENT_HEAD_V3_IDENTITY,
@@ -2142,8 +2154,10 @@ fn verify_owned_function_acl<C: GenericClient>(
             TASK_LEDGER_READ_EVENTS_V1_IDENTITY,
             TASK_LEDGER_READ_COMMANDS_V1_IDENTITY,
             TASK_LEDGER_FINALIZE_V1_IDENTITY,
+            CODEBASE_MEMORY_LOAD_REFLECTION_V2_IDENTITY,
             CODEBASE_MEMORY_LOAD_RECEIPT_V1_IDENTITY,
             CODEBASE_MEMORY_PERSIST_ANALYSIS_V1_IDENTITY,
+            CODEBASE_MEMORY_PERSIST_REFLECTION_V2_IDENTITY,
             CODEBASE_MEMORY_PERSIST_RETRIEVAL_V1_IDENTITY,
         ]
         .into_iter()
@@ -2296,7 +2310,7 @@ fn verify_role_and_database_boundary<C: GenericClient>(
         CatalogProfile::PreSchema | CatalogProfile::V1 => 0,
         CatalogProfile::V2 => 3,
         CatalogProfile::V3 => 8,
-        CatalogProfile::V3CodebaseMemoryV1 => 11,
+        CatalogProfile::V3CodebaseMemoryV2 => 13,
     };
     if owner != DatabaseRole::Migrator.as_str()
         || is_template
@@ -2758,7 +2772,7 @@ fn verify_nonwriter_capabilities<C: GenericClient>(
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
         })?;
     let memory_usage = matches!(role, DatabaseRole::Runtime)
-        && matches!(profile, CatalogProfile::V3CodebaseMemoryV1);
+        && matches!(profile, CatalogProfile::V3CodebaseMemoryV2);
     let expected = [true, false, memory_usage, false, true, false, false, false];
     for (index, expected_value) in expected.into_iter().enumerate() {
         if row_value::<bool>(
@@ -2775,7 +2789,7 @@ fn verify_nonwriter_capabilities<C: GenericClient>(
 
     let protected_tables: Vec<&str> = match profile {
         CatalogProfile::V1 | CatalogProfile::V2 => PROTECTED_CONTROL_TABLES.into_iter().collect(),
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV1 => {
+        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => {
             V3_PROTECTED_CONTROL_TABLES.into_iter().collect()
         }
         CatalogProfile::PreSchema => Vec::new(),
@@ -2789,9 +2803,9 @@ fn verify_nonwriter_capabilities<C: GenericClient>(
                 .map(|table| ("control", table, false)),
         )
         .collect();
-    if matches!(profile, CatalogProfile::V3CodebaseMemoryV1) {
+    if matches!(profile, CatalogProfile::V3CodebaseMemoryV2) {
         bounded_tables.extend(
-            CODEBASE_MEMORY_V1_TABLES
+            CODEBASE_MEMORY_V2_TABLES
                 .into_iter()
                 .map(|table| ("memory", table, false)),
         );
@@ -3079,12 +3093,13 @@ mod tests {
             CatalogProfile::V3
         );
         assert_eq!(
-            classify_memory_catalog_counts(6, 6, 3, 3).expect("exact Memory v1"),
-            CatalogProfile::V3CodebaseMemoryV1
+            classify_memory_catalog_counts(7, 7, 5, 5).expect("exact Memory v2"),
+            CatalogProfile::V3CodebaseMemoryV2
         );
 
         for counts in [
             (1, 1, 0, 0),
+            (6, 6, 3, 3),
             (6, 6, 2, 2),
             (6, 7, 3, 3),
             (6, 6, 3, 4),
