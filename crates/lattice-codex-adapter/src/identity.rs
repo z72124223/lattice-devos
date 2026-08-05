@@ -11,7 +11,8 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::process::{
-    OwnedProcessTree, stop_owned_child, terminate_uncontained_process_tree_bounded,
+    OwnedProcessTree, PinnedCodexResources, configure_pinned_child_environment, stop_owned_child,
+    terminate_uncontained_process_tree_bounded, validate_pinned_resources_for_launcher,
 };
 
 const SCHEMA_BUNDLE_DOMAIN: &[u8] = b"lattice.codex-app-server.schema-bundle.v1\0";
@@ -140,6 +141,8 @@ pub enum CodexIdentityErrorKind {
     SchemaReadFailed,
     Timeout,
     ProcessContainmentFailed,
+    PinnedResourcesRejected,
+    PinnedResourcesChanged,
 }
 
 /// Payload-free Codex identity preflight error.
@@ -149,7 +152,7 @@ pub struct CodexIdentityError {
 }
 
 impl CodexIdentityError {
-    const fn new(kind: CodexIdentityErrorKind) -> Self {
+    pub(crate) const fn new(kind: CodexIdentityErrorKind) -> Self {
         Self { kind }
     }
 
@@ -179,6 +182,12 @@ impl fmt::Display for CodexIdentityError {
             CodexIdentityErrorKind::Timeout => "CODEX_IDENTITY_TIMEOUT",
             CodexIdentityErrorKind::ProcessContainmentFailed => {
                 "CODEX_IDENTITY_PROCESS_CONTAINMENT_FAILED"
+            }
+            CodexIdentityErrorKind::PinnedResourcesRejected => {
+                "CODEX_IDENTITY_PINNED_RESOURCES_REJECTED"
+            }
+            CodexIdentityErrorKind::PinnedResourcesChanged => {
+                "CODEX_IDENTITY_PINNED_RESOURCES_CHANGED"
             }
         })
     }
@@ -219,6 +228,7 @@ fn preflight_codex_identity_until(
         expectation,
         schema_output_dir,
         None,
+        None,
         deadline,
     )
 }
@@ -228,6 +238,7 @@ pub(crate) fn preflight_codex_identity_in_home_until(
     expectation: &CodexIdentityExpectation,
     schema_output_dir: &Path,
     codex_home: &Path,
+    pinned_resources: Option<&PinnedCodexResources>,
     deadline: Instant,
 ) -> Result<CodexIdentityEvidence, CodexIdentityError> {
     preflight_codex_identity_until_with_home(
@@ -235,6 +246,7 @@ pub(crate) fn preflight_codex_identity_in_home_until(
         expectation,
         schema_output_dir,
         Some(codex_home),
+        pinned_resources,
         deadline,
     )
 }
@@ -244,6 +256,7 @@ fn preflight_codex_identity_until_with_home(
     expectation: &CodexIdentityExpectation,
     schema_output_dir: &Path,
     codex_home: Option<&Path>,
+    pinned_resources: Option<&PinnedCodexResources>,
     deadline: Instant,
 ) -> Result<CodexIdentityEvidence, CodexIdentityError> {
     if configured_launcher != expectation.launcher_path() {
@@ -272,7 +285,7 @@ fn preflight_codex_identity_until_with_home(
 
     ensure_before_deadline(deadline)?;
     let (version_status, version_stdout) =
-        run_version_command(configured_launcher, codex_home, deadline)?;
+        run_version_command(configured_launcher, codex_home, pinned_resources, deadline)?;
     if !version_status.success() {
         return Err(error(CodexIdentityErrorKind::VersionCommandFailed));
     }
@@ -284,8 +297,13 @@ fn preflight_codex_identity_until_with_home(
     }
 
     ensure_before_deadline(deadline)?;
-    let schema_status =
-        run_schema_command(configured_launcher, schema_output_dir, codex_home, deadline)?;
+    let schema_status = run_schema_command(
+        configured_launcher,
+        schema_output_dir,
+        codex_home,
+        pinned_resources,
+        deadline,
+    )?;
     if !schema_status.success() {
         return Err(error(CodexIdentityErrorKind::SchemaGenerationFailed));
     }
@@ -311,20 +329,29 @@ fn preflight_codex_identity_until_with_home(
 fn run_version_command(
     launcher: &Path,
     codex_home: Option<&Path>,
+    pinned_resources: Option<&PinnedCodexResources>,
     deadline: Instant,
 ) -> Result<(ExitStatus, Vec<u8>), CodexIdentityError> {
-    let mut command = identity_command(launcher, codex_home);
-    let mut child = command
+    let mut command = identity_command(launcher, codex_home, pinned_resources)?;
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    validate_identity_resources_before_spawn(launcher, pinned_resources)?;
+    let mut child = command
         .spawn()
         .map_err(|_| error(CodexIdentityErrorKind::VersionCommandFailed))?;
     let Ok(process_tree) = OwnedProcessTree::attach(&child) else {
         let _ = terminate_uncontained_process_tree_bounded(&mut child);
         return Err(error(CodexIdentityErrorKind::ProcessContainmentFailed));
     };
+    let process_tree = validate_identity_resources_after_attach(
+        &mut child,
+        process_tree,
+        launcher,
+        pinned_resources,
+    )?;
     let Some(stdout) = child.stdout.take() else {
         let _ = stop_owned_child(&mut child, process_tree);
         return Err(error(CodexIdentityErrorKind::VersionCommandFailed));
@@ -356,21 +383,30 @@ fn run_schema_command(
     launcher: &Path,
     schema_output_dir: &Path,
     codex_home: Option<&Path>,
+    pinned_resources: Option<&PinnedCodexResources>,
     deadline: Instant,
 ) -> Result<ExitStatus, CodexIdentityError> {
-    let mut command = identity_command(launcher, codex_home);
-    let mut child = command
+    let mut command = identity_command(launcher, codex_home, pinned_resources)?;
+    command
         .args(["app-server", "generate-json-schema", "--out"])
         .arg(schema_output_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    validate_identity_resources_before_spawn(launcher, pinned_resources)?;
+    let mut child = command
         .spawn()
         .map_err(|_| error(CodexIdentityErrorKind::SchemaGenerationFailed))?;
     let Ok(process_tree) = OwnedProcessTree::attach(&child) else {
         let _ = terminate_uncontained_process_tree_bounded(&mut child);
         return Err(error(CodexIdentityErrorKind::ProcessContainmentFailed));
     };
+    let process_tree = validate_identity_resources_after_attach(
+        &mut child,
+        process_tree,
+        launcher,
+        pinned_resources,
+    )?;
     wait_for_owned_child(
         &mut child,
         process_tree,
@@ -379,13 +415,41 @@ fn run_schema_command(
     )
 }
 
-fn identity_command(launcher: &Path, codex_home: Option<&Path>) -> Command {
+fn identity_command(
+    launcher: &Path,
+    codex_home: Option<&Path>,
+    pinned_resources: Option<&PinnedCodexResources>,
+) -> Result<Command, CodexIdentityError> {
     let mut command = Command::new(launcher);
     crate::scrub_protected_environment(&mut command);
     if let Some(codex_home) = codex_home {
         command.env("CODEX_HOME", codex_home);
     }
-    command
+    configure_pinned_child_environment(&mut command, pinned_resources)
+        .map_err(|_| error(CodexIdentityErrorKind::PinnedResourcesRejected))?;
+    Ok(command)
+}
+
+fn validate_identity_resources_before_spawn(
+    launcher: &Path,
+    pinned_resources: Option<&PinnedCodexResources>,
+) -> Result<(), CodexIdentityError> {
+    validate_pinned_resources_for_launcher(launcher, pinned_resources)
+        .map_err(|_| error(CodexIdentityErrorKind::PinnedResourcesRejected))
+}
+
+fn validate_identity_resources_after_attach(
+    child: &mut Child,
+    process_tree: OwnedProcessTree,
+    launcher: &Path,
+    pinned_resources: Option<&PinnedCodexResources>,
+) -> Result<OwnedProcessTree, CodexIdentityError> {
+    if validate_pinned_resources_for_launcher(launcher, pinned_resources).is_err() {
+        stop_owned_child(child, process_tree)
+            .map_err(|_| error(CodexIdentityErrorKind::ProcessContainmentFailed))?;
+        return Err(error(CodexIdentityErrorKind::PinnedResourcesChanged));
+    }
+    Ok(process_tree)
 }
 
 fn ensure_before_deadline(deadline: Instant) -> Result<(), CodexIdentityError> {
@@ -576,7 +640,7 @@ mod tests {
     use std::ffi::OsStr;
     use std::path::Path;
 
-    use super::{canonical_json_bytes, identity_command};
+    use super::{CodexIdentityErrorKind, canonical_json_bytes, error, identity_command};
 
     #[test]
     fn schema_identity_ignores_json_object_member_order() {
@@ -596,7 +660,9 @@ mod tests {
         let command = identity_command(
             Path::new("codex"),
             Some(Path::new(r"C:\lattice\isolated-codex-home")),
-        );
+            None,
+        )
+        .expect("unmanaged identity command");
         let codex_home = command
             .get_envs()
             .find(|(name, _)| *name == OsStr::new("CODEX_HOME"))
@@ -605,6 +671,18 @@ mod tests {
         assert_eq!(
             codex_home.1,
             Some(OsStr::new(r"C:\lattice\isolated-codex-home"))
+        );
+    }
+
+    #[test]
+    fn pinned_resource_phase_errors_have_distinct_stable_codes() {
+        assert_eq!(
+            error(CodexIdentityErrorKind::PinnedResourcesRejected).to_string(),
+            "CODEX_IDENTITY_PINNED_RESOURCES_REJECTED"
+        );
+        assert_eq!(
+            error(CodexIdentityErrorKind::PinnedResourcesChanged).to_string(),
+            "CODEX_IDENTITY_PINNED_RESOURCES_CHANGED"
         );
     }
 }

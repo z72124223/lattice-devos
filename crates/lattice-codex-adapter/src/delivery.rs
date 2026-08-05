@@ -15,10 +15,11 @@ use lattice_ports::{
 use sha2::{Digest, Sha256};
 
 use crate::identity::preflight_codex_identity_in_home_until;
-use crate::process::validate_owned_codex_home;
+use crate::process::validate_live_paths;
 use crate::{
     AppServerRunConfig, AppServerRunError, AppServerRunErrorKind, CodexIdentityError,
-    CodexIdentityErrorKind, CodexIdentityExpectation, TurnStatus, run_codex_app_server_until,
+    CodexIdentityErrorKind, CodexIdentityExpectation, PinnedCodexResources, TurnStatus,
+    run_codex_app_server_until,
 };
 
 /// LATTICE-owned, fixed configuration for one bounded Codex delivery lane.
@@ -30,6 +31,7 @@ pub struct CodexDeliveryAdapterConfig {
     prompt: String,
     timeout: Duration,
     runtime: DeliveryRuntime,
+    pinned_resources: Option<PinnedCodexResources>,
 }
 
 impl CodexDeliveryAdapterConfig {
@@ -49,6 +51,7 @@ impl CodexDeliveryAdapterConfig {
         prompt: impl Into<String>,
         timeout: Duration,
         runtime: DeliveryRuntime,
+        pinned_resources: Option<PinnedCodexResources>,
     ) -> DeliveryPortResult<Self> {
         let prompt = prompt.into();
         if !identity.launcher_path().is_absolute() {
@@ -72,6 +75,15 @@ impl CodexDeliveryAdapterConfig {
         if timeout.is_zero() {
             return Err(known_config("CODEX_CONFIG_TIMEOUT_ZERO"));
         }
+        match (runtime, pinned_resources.is_some()) {
+            (DeliveryRuntime::OfficialCodexAppServer, false) => {
+                return Err(known_config("CODEX_CONFIG_PINNED_RESOURCES_MISSING"));
+            }
+            (DeliveryRuntime::ScriptedAcceptance, true) => {
+                return Err(known_config("CODEX_CONFIG_PINNED_RESOURCES_UNEXPECTED"));
+            }
+            _ => {}
+        }
         Ok(Self {
             identity,
             schema_output_dir,
@@ -79,6 +91,7 @@ impl CodexDeliveryAdapterConfig {
             prompt,
             timeout,
             runtime,
+            pinned_resources,
         })
     }
 
@@ -154,16 +167,18 @@ impl DeliveryCodexPort for CodexDeliveryAdapter {
             workspace,
             self.config.prompt.clone(),
             remaining,
+            self.config.pinned_resources.clone(),
         )
         .map_err(map_process_error)?;
         if self.config.runtime == DeliveryRuntime::OfficialCodexAppServer {
-            validate_owned_codex_home(&process_config).map_err(map_process_error)?;
+            validate_live_paths(&process_config).map_err(map_process_error)?;
         }
         let identity = preflight_codex_identity_in_home_until(
             self.config.identity.launcher_path(),
             &self.config.identity,
             &self.config.schema_output_dir,
             &self.config.codex_home,
+            self.config.pinned_resources.as_ref(),
             deadline,
         )
         .map_err(map_identity_error)?;
@@ -290,12 +305,16 @@ fn is_lowercase_sha256(value: &str) -> bool {
 }
 
 fn map_identity_error(error: CodexIdentityError) -> DeliveryPortError {
+    if error.kind() == CodexIdentityErrorKind::PinnedResourcesChanged {
+        return ambiguous(PortErrorKind::Ambiguous, error.to_string());
+    }
     let kind = match error.kind() {
         CodexIdentityErrorKind::VersionMismatch => PortErrorKind::VersionMismatch,
         CodexIdentityErrorKind::LauncherPathMismatch
         | CodexIdentityErrorKind::LauncherDigestMismatch
         | CodexIdentityErrorKind::SchemaBundleInvalid
-        | CodexIdentityErrorKind::SchemaBundleEmpty => PortErrorKind::CapabilityMismatch,
+        | CodexIdentityErrorKind::SchemaBundleEmpty
+        | CodexIdentityErrorKind::PinnedResourcesRejected => PortErrorKind::CapabilityMismatch,
         CodexIdentityErrorKind::VersionOutputInvalid => PortErrorKind::Malformed,
         CodexIdentityErrorKind::LauncherNotFile
         | CodexIdentityErrorKind::LauncherReadFailed
@@ -306,6 +325,9 @@ fn map_identity_error(error: CodexIdentityError) -> DeliveryPortError {
         | CodexIdentityErrorKind::SchemaReadFailed
         | CodexIdentityErrorKind::Timeout
         | CodexIdentityErrorKind::ProcessContainmentFailed => PortErrorKind::Unavailable,
+        CodexIdentityErrorKind::PinnedResourcesChanged => {
+            unreachable!("pinned resource changes are mapped before known identity failures")
+        }
     };
     known(kind, error.to_string())
 }
@@ -321,6 +343,10 @@ fn map_process_error(error: AppServerRunError) -> DeliveryPortError {
         | AppServerRunErrorKind::InvalidWorkingDirectory
         | AppServerRunErrorKind::InvalidPrompt
         | AppServerRunErrorKind::InvalidTimeout
+        | AppServerRunErrorKind::InvalidPinnedResources
+        | AppServerRunErrorKind::PinnedResourcesMissing
+        | AppServerRunErrorKind::PinnedResourcesDigestMismatch
+        | AppServerRunErrorKind::PinnedResourcePathInvalid
         | AppServerRunErrorKind::LauncherReadFailed
         | AppServerRunErrorKind::LauncherDigestMismatch
         | AppServerRunErrorKind::SpawnFailed => (
@@ -332,6 +358,7 @@ fn map_process_error(error: AppServerRunError) -> DeliveryPortError {
             DeliveryFailureCertainty::Known,
         ),
         AppServerRunErrorKind::LauncherChanged
+        | AppServerRunErrorKind::PinnedResourcesChanged
         | AppServerRunErrorKind::PipeUnavailable
         | AppServerRunErrorKind::WriteFailed
         | AppServerRunErrorKind::StdoutFailed
@@ -362,10 +389,14 @@ const fn process_error_kind(kind: AppServerRunErrorKind) -> PortErrorKind {
         | AppServerRunErrorKind::InvalidWorkingDirectory
         | AppServerRunErrorKind::InvalidPrompt
         | AppServerRunErrorKind::InvalidTimeout
+        | AppServerRunErrorKind::InvalidPinnedResources
+        | AppServerRunErrorKind::PinnedResourcePathInvalid
         | AppServerRunErrorKind::ProtocolFailed
         | AppServerRunErrorKind::StdoutLineTooLarge
         | AppServerRunErrorKind::CodexHomeMismatch => PortErrorKind::Malformed,
-        AppServerRunErrorKind::IncompleteToolExecution => PortErrorKind::CapabilityMismatch,
+        AppServerRunErrorKind::IncompleteToolExecution
+        | AppServerRunErrorKind::PinnedResourcesMissing
+        | AppServerRunErrorKind::PinnedResourcesDigestMismatch => PortErrorKind::CapabilityMismatch,
         AppServerRunErrorKind::CodexHomeOwnershipMissing
         | AppServerRunErrorKind::CodexHomeOverlap
         | AppServerRunErrorKind::AmbientCodexHomeDenied => PortErrorKind::Denied,
@@ -373,7 +404,8 @@ const fn process_error_kind(kind: AppServerRunErrorKind) -> PortErrorKind {
         AppServerRunErrorKind::AmbiguousEof
         | AppServerRunErrorKind::ChildCleanupFailed
         | AppServerRunErrorKind::JobObjectFailed
-        | AppServerRunErrorKind::LauncherChanged => PortErrorKind::Ambiguous,
+        | AppServerRunErrorKind::LauncherChanged
+        | AppServerRunErrorKind::PinnedResourcesChanged => PortErrorKind::Ambiguous,
         AppServerRunErrorKind::LauncherReadFailed
         | AppServerRunErrorKind::LauncherDigestMismatch
         | AppServerRunErrorKind::SpawnFailed
@@ -400,6 +432,21 @@ const fn process_error_code(kind: AppServerRunErrorKind) -> &'static str {
         }
         AppServerRunErrorKind::InvalidPrompt => "CODEX_APP_SERVER_INVALID_PROMPT",
         AppServerRunErrorKind::InvalidTimeout => "CODEX_APP_SERVER_INVALID_TIMEOUT",
+        AppServerRunErrorKind::InvalidPinnedResources => {
+            "CODEX_APP_SERVER_PINNED_RESOURCES_INVALID"
+        }
+        AppServerRunErrorKind::PinnedResourcesMissing => {
+            "CODEX_APP_SERVER_PINNED_RESOURCES_MISSING"
+        }
+        AppServerRunErrorKind::PinnedResourcesDigestMismatch => {
+            "CODEX_APP_SERVER_PINNED_RESOURCES_DIGEST_MISMATCH"
+        }
+        AppServerRunErrorKind::PinnedResourcesChanged => {
+            "CODEX_APP_SERVER_PINNED_RESOURCES_CHANGED"
+        }
+        AppServerRunErrorKind::PinnedResourcePathInvalid => {
+            "CODEX_APP_SERVER_PINNED_RESOURCE_PATH_INVALID"
+        }
         AppServerRunErrorKind::LauncherReadFailed => "CODEX_APP_SERVER_LAUNCHER_READ_FAILED",
         AppServerRunErrorKind::LauncherDigestMismatch => {
             "CODEX_APP_SERVER_LAUNCHER_DIGEST_MISMATCH"
@@ -442,4 +489,23 @@ fn ambiguous(kind: PortErrorKind, code: impl Into<String>) -> DeliveryPortError 
         DeliveryFailureCertainty::Ambiguous,
         code,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use lattice_ports::{DeliveryFailureCertainty, PortErrorKind};
+
+    use super::map_identity_error;
+    use crate::{CodexIdentityError, CodexIdentityErrorKind};
+
+    #[test]
+    fn identity_resource_change_maps_to_ambiguous_delivery_failure() {
+        let error = map_identity_error(CodexIdentityError::new(
+            CodexIdentityErrorKind::PinnedResourcesChanged,
+        ));
+
+        assert_eq!(error.kind(), PortErrorKind::Ambiguous);
+        assert_eq!(error.certainty(), DeliveryFailureCertainty::Ambiguous);
+        assert_eq!(error.code(), "CODEX_IDENTITY_PINNED_RESOURCES_CHANGED");
+    }
 }

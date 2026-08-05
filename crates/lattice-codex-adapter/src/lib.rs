@@ -12,8 +12,8 @@ pub use identity::{
 };
 pub use process::{
     AppServerRunConfig, AppServerRunError, AppServerRunErrorKind, AppServerRunEvidence,
-    CODEX_HOME_OWNERSHIP_MARKER_BYTES, CODEX_HOME_OWNERSHIP_MARKER_NAME, run_codex_app_server,
-    run_codex_app_server_until,
+    CODEX_HOME_OWNERSHIP_MARKER_BYTES, CODEX_HOME_OWNERSHIP_MARKER_NAME, PinnedCodexResources,
+    run_codex_app_server, run_codex_app_server_until,
 };
 pub use session::{
     AppServerSession, InitializeEvidence, SessionError, SessionPhase, SessionRequest,

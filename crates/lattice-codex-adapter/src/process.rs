@@ -1,6 +1,8 @@
 //! Owned-process transport for one bounded Codex app-server turn.
 
+use std::env;
 use std::error::Error;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -41,6 +43,67 @@ model_reasoning_effort = \"low\"\n\
 [windows]\n\
 sandbox = \"elevated\"\n";
 
+/// Exact managed package and helper identities admitted for one official Codex child.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PinnedCodexResources {
+    managed_package_root: PathBuf,
+    resources_directory: PathBuf,
+    sandbox_setup_sha256: String,
+    command_runner_sha256: String,
+    package_manifest_sha256: String,
+    managed_package_manifest_sha256: String,
+}
+
+impl PinnedCodexResources {
+    /// Binds an absolute managed package root to exact helper and manifest digests.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a relative root or non-canonical SHA-256 text.
+    pub fn new(
+        managed_package_root: PathBuf,
+        resources_directory: PathBuf,
+        sandbox_setup_sha256: impl Into<String>,
+        command_runner_sha256: impl Into<String>,
+        package_manifest_sha256: impl Into<String>,
+        managed_package_manifest_sha256: impl Into<String>,
+    ) -> Result<Self, AppServerRunError> {
+        let sandbox_setup_sha256 = sandbox_setup_sha256.into();
+        let command_runner_sha256 = command_runner_sha256.into();
+        let package_manifest_sha256 = package_manifest_sha256.into();
+        let managed_package_manifest_sha256 = managed_package_manifest_sha256.into();
+        if !managed_package_root.is_absolute()
+            || !resources_directory.is_absolute()
+            || !is_lowercase_sha256(&sandbox_setup_sha256)
+            || !is_lowercase_sha256(&command_runner_sha256)
+            || !is_lowercase_sha256(&package_manifest_sha256)
+            || !is_lowercase_sha256(&managed_package_manifest_sha256)
+        {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::InvalidPinnedResources,
+            ));
+        }
+        Ok(Self {
+            managed_package_root,
+            resources_directory,
+            sandbox_setup_sha256,
+            command_runner_sha256,
+            package_manifest_sha256,
+            managed_package_manifest_sha256,
+        })
+    }
+
+    #[must_use]
+    pub fn managed_package_root(&self) -> &Path {
+        &self.managed_package_root
+    }
+
+    #[must_use]
+    pub fn resources_directory(&self) -> &Path {
+        &self.resources_directory
+    }
+}
+
 /// Exact inputs for one supervised app-server turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppServerRunConfig {
@@ -50,6 +113,7 @@ pub struct AppServerRunConfig {
     working_directory: PathBuf,
     prompt: String,
     timeout: Duration,
+    pinned_resources: Option<PinnedCodexResources>,
 }
 
 impl AppServerRunConfig {
@@ -65,6 +129,7 @@ impl AppServerRunConfig {
         working_directory: PathBuf,
         prompt: impl Into<String>,
         timeout: Duration,
+        pinned_resources: Option<PinnedCodexResources>,
     ) -> Result<Self, AppServerRunError> {
         let expected_launcher_sha256 = expected_launcher_sha256.into();
         let prompt = prompt.into();
@@ -103,6 +168,7 @@ impl AppServerRunConfig {
             working_directory,
             prompt,
             timeout,
+            pinned_resources,
         })
     }
 
@@ -135,6 +201,11 @@ impl AppServerRunConfig {
     pub const fn timeout(&self) -> Duration {
         self.timeout
     }
+
+    #[must_use]
+    pub const fn pinned_resources(&self) -> Option<&PinnedCodexResources> {
+        self.pinned_resources.as_ref()
+    }
 }
 
 /// Stable fail-closed process failure classes.
@@ -149,6 +220,11 @@ pub enum AppServerRunErrorKind {
     InvalidWorkingDirectory,
     InvalidPrompt,
     InvalidTimeout,
+    InvalidPinnedResources,
+    PinnedResourcesMissing,
+    PinnedResourcesDigestMismatch,
+    PinnedResourcesChanged,
+    PinnedResourcePathInvalid,
     LauncherReadFailed,
     LauncherDigestMismatch,
     LauncherChanged,
@@ -267,6 +343,7 @@ pub fn run_codex_app_server_until(
     ensure_before_deadline(deadline)?;
     let mut command = Command::new(config.launcher());
     crate::scrub_protected_environment(&mut command);
+    configure_pinned_child_environment(&mut command, config.pinned_resources())?;
     command
         .args(["app-server", "--listen", "stdio://"])
         .current_dir(config.working_directory())
@@ -300,6 +377,12 @@ pub fn run_codex_app_server_until(
         stop_owned_child(&mut child, process_tree)?;
         return Err(AppServerRunError::new(
             AppServerRunErrorKind::LauncherChanged,
+        ));
+    }
+    if validate_pinned_resources(config).is_err() {
+        stop_owned_child(&mut child, process_tree)?;
+        return Err(AppServerRunError::new(
+            AppServerRunErrorKind::PinnedResourcesChanged,
         ));
     }
     if let Err(error) = ensure_before_deadline(deadline) {
@@ -665,6 +748,144 @@ pub(crate) fn validate_live_paths(config: &AppServerRunConfig) -> Result<(), App
         ));
     }
     validate_owned_codex_home(config)?;
+    validate_pinned_resources(config)?;
+    Ok(())
+}
+
+pub(crate) fn configure_pinned_child_environment(
+    command: &mut Command,
+    resources: Option<&PinnedCodexResources>,
+) -> Result<(), AppServerRunError> {
+    let Some(resources) = resources else {
+        return Ok(());
+    };
+    let resources_directory = resources.resources_directory();
+    let ambient = env::var_os("PATH");
+    let child_path = pinned_child_path(resources_directory, ambient.as_deref())?;
+    command
+        .env(
+            "CODEX_MANAGED_PACKAGE_ROOT",
+            resources.managed_package_root(),
+        )
+        .env("PATH", child_path);
+    Ok(())
+}
+
+fn pinned_child_path(
+    resources_directory: &Path,
+    ambient: Option<&OsStr>,
+) -> Result<OsString, AppServerRunError> {
+    let paths = std::iter::once(resources_directory.to_path_buf()).chain(
+        ambient
+            .into_iter()
+            .flat_map(env::split_paths)
+            .filter(|path| {
+                !same_existing_directory(path, resources_directory)
+                    && !path.file_name().is_some_and(|name| {
+                        name.to_string_lossy()
+                            .eq_ignore_ascii_case("codex-resources")
+                    })
+                    && !path.join("codex-windows-sandbox-setup.exe").is_file()
+                    && !path.join("codex-command-runner.exe").is_file()
+            }),
+    );
+    env::join_paths(paths)
+        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::PinnedResourcePathInvalid))
+}
+
+fn validate_pinned_resources(config: &AppServerRunConfig) -> Result<(), AppServerRunError> {
+    validate_pinned_resources_for_launcher(config.launcher(), config.pinned_resources())
+}
+
+pub(crate) fn validate_pinned_resources_for_launcher(
+    launcher: &Path,
+    resources: Option<&PinnedCodexResources>,
+) -> Result<(), AppServerRunError> {
+    let Some(resources) = resources else {
+        return Ok(());
+    };
+    let managed_root = resources.managed_package_root();
+    let root_metadata = std::fs::symlink_metadata(managed_root)
+        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::PinnedResourcesMissing))?;
+    if !root_metadata.file_type().is_dir() || metadata_is_reparse(&root_metadata) {
+        return Err(AppServerRunError::new(
+            AppServerRunErrorKind::InvalidPinnedResources,
+        ));
+    }
+    let resources_directory = resources.resources_directory();
+    let bundle_root = resources_directory
+        .parent()
+        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::InvalidPinnedResources))?;
+    let launcher_parent = launcher
+        .parent()
+        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::InvalidPinnedResources))?;
+    let launcher_parent_metadata = std::fs::symlink_metadata(launcher_parent)
+        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::PinnedResourcesMissing))?;
+    if !launcher_parent_metadata.file_type().is_dir()
+        || metadata_is_reparse(&launcher_parent_metadata)
+    {
+        return Err(AppServerRunError::new(
+            AppServerRunErrorKind::InvalidPinnedResources,
+        ));
+    }
+    let launcher_bundle_root = launcher_parent
+        .parent()
+        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::InvalidPinnedResources))?;
+    let platform_scope = bundle_root
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::InvalidPinnedResources))?;
+    let managed_scope = managed_root
+        .parent()
+        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::InvalidPinnedResources))?;
+    if managed_root.file_name() != Some(OsStr::new("codex"))
+        || resources_directory.file_name() != Some(OsStr::new("codex-resources"))
+        || !same_existing_directory(launcher_bundle_root, bundle_root)
+        || !same_existing_directory(platform_scope, managed_scope)
+    {
+        return Err(AppServerRunError::new(
+            AppServerRunErrorKind::InvalidPinnedResources,
+        ));
+    }
+    let resources_metadata = std::fs::symlink_metadata(resources_directory)
+        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::PinnedResourcesMissing))?;
+    if !resources_metadata.file_type().is_dir() || metadata_is_reparse(&resources_metadata) {
+        return Err(AppServerRunError::new(
+            AppServerRunErrorKind::InvalidPinnedResources,
+        ));
+    }
+    for (path, expected_sha256) in [
+        (
+            resources_directory.join("codex-windows-sandbox-setup.exe"),
+            resources.sandbox_setup_sha256.as_str(),
+        ),
+        (
+            resources_directory.join("codex-command-runner.exe"),
+            resources.command_runner_sha256.as_str(),
+        ),
+        (
+            bundle_root.join("codex-package.json"),
+            resources.package_manifest_sha256.as_str(),
+        ),
+        (
+            managed_root.join("package.json"),
+            resources.managed_package_manifest_sha256.as_str(),
+        ),
+    ] {
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::PinnedResourcesMissing))?;
+        if !metadata.file_type().is_file() || metadata_is_reparse(&metadata) {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::InvalidPinnedResources,
+            ));
+        }
+        if file_sha256(&path, AppServerRunErrorKind::PinnedResourcesMissing)? != expected_sha256 {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::PinnedResourcesDigestMismatch,
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -766,14 +987,20 @@ fn ensure_before_deadline(deadline: Instant) -> Result<(), AppServerRunError> {
 }
 
 fn launcher_sha256(path: &Path) -> Result<String, AppServerRunError> {
-    let mut file = File::open(path)
-        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::LauncherReadFailed))?;
+    file_sha256(path, AppServerRunErrorKind::LauncherReadFailed)
+}
+
+fn file_sha256(
+    path: &Path,
+    read_error: AppServerRunErrorKind,
+) -> Result<String, AppServerRunError> {
+    let mut file = File::open(path).map_err(|_| AppServerRunError::new(read_error))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 16 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
-            .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::LauncherReadFailed))?;
+            .map_err(|_| AppServerRunError::new(read_error))?;
         if read == 0 {
             break;
         }
@@ -783,8 +1010,7 @@ fn launcher_sha256(path: &Path) -> Result<String, AppServerRunError> {
     let mut digest = String::with_capacity(64);
     for byte in bytes {
         use std::fmt::Write as _;
-        write!(&mut digest, "{byte:02x}")
-            .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::LauncherReadFailed))?;
+        write!(&mut digest, "{byte:02x}").map_err(|_| AppServerRunError::new(read_error))?;
     }
     Ok(digest)
 }
@@ -907,4 +1133,54 @@ pub(crate) fn terminate_uncontained_process_tree_bounded(
     child: &mut Child,
 ) -> Result<(), AppServerRunError> {
     terminate_child_bounded(child)
+}
+
+#[cfg(all(test, windows))]
+mod resource_environment_tests {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use super::{PinnedCodexResources, configure_pinned_child_environment, pinned_child_path};
+
+    #[test]
+    fn pinned_package_root_and_resources_replace_hostile_codex_resource_paths() {
+        let managed_root = PathBuf::from(r"C:\pinned\node_modules\@openai\codex");
+        let resources_directory = PathBuf::from(
+            r"C:\pinned\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex-resources",
+        );
+        let resources = PinnedCodexResources::new(
+            managed_root.clone(),
+            resources_directory.clone(),
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+        )
+        .expect("absolute pinned resource binding");
+        let ambient = std::env::join_paths([
+            Path::new(r"C:\global\codex-0.144.6\codex-resources"),
+            Path::new(r"C:\WindowsApps\CodexDesktop\codex-resources"),
+            Path::new(r"C:\Windows\System32"),
+        ])
+        .expect("hostile ambient path fixture");
+        let child_path = pinned_child_path(resources.resources_directory(), Some(&ambient))
+            .expect("pinned child path");
+        let child_paths = std::env::split_paths(&child_path).collect::<Vec<_>>();
+
+        assert_eq!(child_paths.first(), Some(&resources_directory));
+        assert_eq!(
+            child_paths,
+            vec![resources_directory, PathBuf::from(r"C:\Windows\System32")]
+        );
+
+        let mut command = Command::new("unused");
+        configure_pinned_child_environment(&mut command, Some(&resources))
+            .expect("bind pinned child environment");
+        let managed = command
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new("CODEX_MANAGED_PACKAGE_ROOT"))
+            .expect("managed package root is explicit");
+        assert_eq!(managed.1, Some(managed_root.as_os_str()));
+    }
 }

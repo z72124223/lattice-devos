@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use lattice_codex_adapter::{
     AppServerRunConfig, AppServerRunErrorKind, CODEX_HOME_OWNERSHIP_MARKER_BYTES,
-    CODEX_HOME_OWNERSHIP_MARKER_NAME, TurnStatus,
+    CODEX_HOME_OWNERSHIP_MARKER_NAME, PinnedCodexResources, TurnStatus,
 };
 
 #[cfg(windows)]
@@ -22,6 +22,21 @@ use sha2::{Digest, Sha256};
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
 #[test]
+fn pinned_resource_binding_requires_an_absolute_directory_and_exact_digests() {
+    let error = PinnedCodexResources::new(
+        PathBuf::from("managed-package"),
+        PathBuf::from("codex-resources"),
+        "a".repeat(64),
+        "b".repeat(64),
+        "c".repeat(64),
+        "d".repeat(64),
+    )
+    .expect_err("a caller-relative resource directory must fail closed");
+
+    assert_eq!(error.kind(), AppServerRunErrorKind::InvalidPinnedResources);
+}
+
+#[test]
 fn run_config_requires_exact_absolute_inputs_and_a_bounded_timeout() {
     assert_eq!(
         AppServerRunConfig::new(
@@ -31,6 +46,7 @@ fn run_config_requires_exact_absolute_inputs_and_a_bounded_timeout() {
             PathBuf::from(r"C:\fixture"),
             "create answer.txt",
             Duration::from_secs(30),
+            None,
         )
         .expect_err("launcher digest must be canonical")
         .kind(),
@@ -45,6 +61,7 @@ fn run_config_requires_exact_absolute_inputs_and_a_bounded_timeout() {
             PathBuf::from(r"C:\fixture"),
             "create answer.txt",
             Duration::from_secs(30),
+            None,
         )
         .expect_err("Codex home must be absolute")
         .kind(),
@@ -59,6 +76,7 @@ fn run_config_requires_exact_absolute_inputs_and_a_bounded_timeout() {
             PathBuf::from(r"C:\fixture"),
             "create answer.txt",
             Duration::from_secs(30),
+            None,
         )
         .expect_err("launcher must be absolute")
         .kind(),
@@ -73,6 +91,7 @@ fn run_config_requires_exact_absolute_inputs_and_a_bounded_timeout() {
             PathBuf::from("fixture"),
             "create answer.txt",
             Duration::from_secs(30),
+            None,
         )
         .expect_err("working directory must be absolute")
         .kind(),
@@ -87,6 +106,7 @@ fn run_config_requires_exact_absolute_inputs_and_a_bounded_timeout() {
             PathBuf::from(r"C:\fixture"),
             "   ",
             Duration::from_secs(30),
+            None,
         )
         .expect_err("prompt must not be blank")
         .kind(),
@@ -101,6 +121,7 @@ fn run_config_requires_exact_absolute_inputs_and_a_bounded_timeout() {
             PathBuf::from(r"C:\fixture"),
             "create answer.txt",
             Duration::ZERO,
+            None,
         )
         .expect_err("timeout must be positive")
         .kind(),
@@ -117,6 +138,7 @@ fn run_config_preserves_the_exact_task_binding() {
         PathBuf::from(r"C:\fixture"),
         "create answer.txt",
         Duration::from_secs(90),
+        None,
     )
     .expect("valid bounded run config");
 
@@ -234,6 +256,7 @@ impl ProcessFixture {
             self.working_directory.clone(),
             "Create answer.txt",
             timeout,
+            None,
         )
         .expect("valid scripted app-server config")
     }
@@ -244,6 +267,253 @@ impl Drop for ProcessFixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+#[cfg(windows)]
+struct PinnedProcessFixture {
+    root: PathBuf,
+    launcher: PathBuf,
+    codex_home: PathBuf,
+    working_directory: PathBuf,
+    resources: PinnedCodexResources,
+    sandbox_setup: PathBuf,
+    command_runner: PathBuf,
+    launch_log: PathBuf,
+    launcher_sha256: String,
+}
+
+#[cfg(windows)]
+impl PinnedProcessFixture {
+    fn new() -> Self {
+        let unique = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "lattice-codex-pinned-process-{}-{unique}",
+            std::process::id()
+        ));
+        let package_scope = root.join("node_modules").join("@openai");
+        let managed_root = package_scope.join("codex");
+        let bundle_root = package_scope
+            .join("codex-win32-x64")
+            .join("vendor")
+            .join("x86_64-pc-windows-msvc");
+        let bin = bundle_root.join("bin");
+        let resources_directory = bundle_root.join("codex-resources");
+        let codex_home = root.join("codex-home");
+        let working_directory = root.join("worktree");
+        for directory in [
+            &managed_root,
+            &bin,
+            &resources_directory,
+            &codex_home,
+            &working_directory,
+        ] {
+            fs::create_dir_all(directory).expect("create pinned process fixture directory");
+        }
+        fs::write(
+            codex_home.join(CODEX_HOME_OWNERSHIP_MARKER_NAME),
+            CODEX_HOME_OWNERSHIP_MARKER_BYTES,
+        )
+        .expect("write Codex home marker");
+        fs::write(codex_home.join("auth.json"), b"{}\n").expect("write inert fixture auth");
+        fs::write(
+            codex_home.join("config.toml"),
+            concat!(
+                "approval_policy = \"never\"\n",
+                "sandbox_mode = \"workspace-write\"\n",
+                "model = \"gpt-5.6-sol\"\n",
+                "model_reasoning_effort = \"low\"\n",
+                "\n",
+                "[windows]\n",
+                "sandbox = \"elevated\"\n",
+            ),
+        )
+        .expect("write exact safe fixture config");
+        let sandbox_setup = resources_directory.join("codex-windows-sandbox-setup.exe");
+        let command_runner = resources_directory.join("codex-command-runner.exe");
+        let package_manifest = bundle_root.join("codex-package.json");
+        let managed_package_manifest = managed_root.join("package.json");
+        fs::write(&sandbox_setup, b"pinned sandbox setup").expect("write pinned setup helper");
+        fs::write(&command_runner, b"pinned command runner").expect("write pinned runner helper");
+        fs::write(&package_manifest, b"{\"version\":\"0.146.0\"}\n")
+            .expect("write pinned package manifest");
+        fs::write(&managed_package_manifest, b"{\"version\":\"0.146.0\"}\n")
+            .expect("write managed package manifest");
+        let resources = PinnedCodexResources::new(
+            managed_root.clone(),
+            resources_directory.clone(),
+            sha256(&fs::read(&sandbox_setup).expect("read setup helper")),
+            sha256(&fs::read(&command_runner).expect("read runner helper")),
+            sha256(&fs::read(&package_manifest).expect("read package manifest")),
+            sha256(&fs::read(&managed_package_manifest).expect("read managed package manifest")),
+        )
+        .expect("bind pinned resource identity");
+        let launch_log = root.join("child-launched.txt");
+        let server = bin.join("fake-app-server.ps1");
+        let quote = |path: &std::path::Path| path.display().to_string().replace('\'', "''");
+        let reported_home = codex_home.display().to_string().replace('\\', r"\\");
+        let script = format!(
+            "$ErrorActionPreference = 'Stop'\n$log = '{}'\n[IO.File]::WriteAllText($log, 'spawned')\nif ($env:CODEX_MANAGED_PACKAGE_ROOT -ne '{}') {{ [IO.File]::WriteAllText($log, 'root:' + $env:CODEX_MANAGED_PACKAGE_ROOT); exit 51 }}\n$first = ($env:PATH -split ';')[0]\nif ($first -ne '{}') {{ [IO.File]::WriteAllText($log, 'path:' + $first); exit 52 }}\n$matches = @(Get-Command 'codex-windows-sandbox-setup.exe' -CommandType Application -ErrorAction Stop)\nif ($matches.Count -ne 1) {{ [IO.File]::WriteAllText($log, 'matches:' + $matches.Count); exit 54 }}\n$resolved = $matches[0].Source\nif ($resolved -ne '{}') {{ [IO.File]::WriteAllText($log, 'resolved:' + $resolved); exit 53 }}\n[IO.File]::WriteAllText($log, 'verified')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":0,\"result\":{{\"userAgent\":\"codex_cli_rs/0.146.0\",\"platformFamily\":\"windows\",\"platformOs\":\"windows\",\"codexHome\":\"{}\"}}}}')\n$null = [Console]::In.ReadLine()\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"thread-pinned\"}}}}}}')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":2,\"result\":{{\"turn\":{{\"id\":\"turn-pinned\"}}}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"turn/completed\",\"params\":{{\"threadId\":\"thread-pinned\",\"turn\":{{\"id\":\"turn-pinned\",\"items\":[],\"status\":\"completed\",\"error\":null}}}}}}')\nStart-Sleep -Seconds 60\n",
+            quote(&launch_log),
+            quote(&managed_root),
+            quote(&resources_directory),
+            quote(&sandbox_setup),
+            reported_home,
+        );
+        fs::write(&server, script).expect("write pinned fake app-server");
+        let launcher = bin.join("fake-codex.cmd");
+        fs::write(
+            &launcher,
+            "@echo off\r\n\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0fake-app-server.ps1\" %*\r\n",
+        )
+        .expect("write pinned fake launcher");
+        let launcher_sha256 = sha256(&fs::read(&launcher).expect("read pinned launcher"));
+        Self {
+            root,
+            launcher,
+            codex_home,
+            working_directory,
+            resources,
+            sandbox_setup,
+            command_runner,
+            launch_log,
+            launcher_sha256,
+        }
+    }
+
+    fn config(&self) -> AppServerRunConfig {
+        AppServerRunConfig::new(
+            self.launcher.clone(),
+            self.launcher_sha256.clone(),
+            self.codex_home.clone(),
+            self.working_directory.clone(),
+            "Create answer.txt",
+            Duration::from_secs(5),
+            Some(self.resources.clone()),
+        )
+        .expect("valid pinned app-server config")
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PinnedProcessFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn pinned_official_child_uses_managed_root_and_rejects_helper_drift_before_spawn() {
+    let fixture = PinnedProcessFixture::new();
+    let evidence = run_codex_app_server(&fixture.config()).unwrap_or_else(|error| {
+        let launch =
+            fs::read_to_string(&fixture.launch_log).unwrap_or_else(|_| "absent".to_owned());
+        panic!("pinned managed package child failed: {error:?}; launch={launch}")
+    });
+    assert_eq!(evidence.thread_id(), "thread-pinned");
+    assert!(fixture.launch_log.is_file());
+
+    fs::remove_file(&fixture.launch_log).expect("reset child launch evidence");
+    let cross_version_root = fixture.root.join("managed-package-0.144.6");
+    fs::create_dir(&cross_version_root).expect("create cross-version package root");
+    let cross_version = PinnedCodexResources::new(
+        cross_version_root,
+        fixture.resources.resources_directory().to_path_buf(),
+        "a".repeat(64),
+        "b".repeat(64),
+        "c".repeat(64),
+        "d".repeat(64),
+    )
+    .expect("syntactically valid cross-version resource claim");
+    let cross_version_config = AppServerRunConfig::new(
+        fixture.launcher.clone(),
+        fixture.launcher_sha256.clone(),
+        fixture.codex_home.clone(),
+        fixture.working_directory.clone(),
+        "Create answer.txt",
+        Duration::from_secs(5),
+        Some(cross_version),
+    )
+    .expect("cross-version claim reaches live identity validation");
+    let error = run_codex_app_server(&cross_version_config)
+        .expect_err("a managed root from another package version must fail before spawn");
+    assert_eq!(error.kind(), AppServerRunErrorKind::InvalidPinnedResources);
+    assert!(!fixture.launch_log.exists());
+
+    fs::write(&fixture.sandbox_setup, b"tampered helper").expect("tamper setup helper");
+    let error = run_codex_app_server(&fixture.config())
+        .expect_err("helper digest drift must fail before child spawn");
+    assert_eq!(
+        error.kind(),
+        AppServerRunErrorKind::PinnedResourcesDigestMismatch
+    );
+    assert!(!fixture.launch_log.exists());
+
+    fs::write(&fixture.sandbox_setup, b"pinned sandbox setup")
+        .expect("restore pinned setup helper");
+    fs::remove_file(&fixture.command_runner).expect("remove command runner helper");
+    let error = run_codex_app_server(&fixture.config())
+        .expect_err("a missing helper must fail before child spawn");
+    assert_eq!(error.kind(), AppServerRunErrorKind::PinnedResourcesMissing);
+    assert!(!fixture.launch_log.exists());
+
+    let resources_directory = fixture.resources.resources_directory();
+    fs::remove_dir_all(resources_directory).expect("remove resources before junction fixture");
+    let reparse_target = fixture.root.join("reparse-resources-target");
+    fs::create_dir(&reparse_target).expect("create resources junction target");
+    fs::write(
+        reparse_target.join("codex-windows-sandbox-setup.exe"),
+        b"pinned sandbox setup",
+    )
+    .expect("write setup junction target");
+    fs::write(
+        reparse_target.join("codex-command-runner.exe"),
+        b"pinned command runner",
+    )
+    .expect("write runner junction target");
+    let cmd = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
+        .join("System32")
+        .join("cmd.exe");
+    let status = std::process::Command::new(cmd)
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(resources_directory)
+        .arg(&reparse_target)
+        .status()
+        .expect("run mklink for directory junction");
+    assert!(status.success(), "create resources directory junction");
+    let error = run_codex_app_server(&fixture.config())
+        .expect_err("a resources directory reparse point must fail before child spawn");
+    assert_eq!(error.kind(), AppServerRunErrorKind::InvalidPinnedResources);
+    assert!(!fixture.launch_log.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn launcher_bin_junction_is_rejected_before_child_effect() {
+    let fixture = PinnedProcessFixture::new();
+    let launcher_bin = fixture
+        .launcher
+        .parent()
+        .expect("pinned launcher has a bin directory")
+        .to_path_buf();
+    let junction_target = fixture.root.join("launcher-bin-target");
+    fs::rename(&launcher_bin, &junction_target).expect("move real launcher bin directory");
+    let cmd = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
+        .join("System32")
+        .join("cmd.exe");
+    let status = std::process::Command::new(cmd)
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&launcher_bin)
+        .arg(&junction_target)
+        .status()
+        .expect("run mklink for launcher bin junction");
+    assert!(status.success(), "create launcher bin directory junction");
+
+    let error = run_codex_app_server(&fixture.config())
+        .expect_err("a launcher bin reparse point must fail before child spawn");
+
+    assert_eq!(error.kind(), AppServerRunErrorKind::InvalidPinnedResources);
+    assert!(!fixture.launch_log.exists());
 }
 
 #[cfg(windows)]
@@ -298,6 +568,7 @@ fn rejects_unowned_or_worktree_overlapping_codex_home_before_spawn() {
         overlap.root.clone(),
         "Create answer.txt",
         Duration::from_secs(5),
+        None,
     )
     .expect("overlap is rejected at live admission");
     let error = run_codex_app_server(&config)

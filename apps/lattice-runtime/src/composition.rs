@@ -20,6 +20,7 @@ use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256, canonicalize};
 use lattice_codebase_memory::digest_query_text;
 use lattice_codex_adapter::{
     CodexDeliveryAdapter, CodexDeliveryAdapterConfig, CodexIdentityExpectation,
+    PinnedCodexResources,
 };
 use lattice_contracts::{
     AttemptId, CONTRACT_VERSION, CompletedDeliveryEvidence, Component, ContentDigest,
@@ -132,6 +133,8 @@ const OFFICIAL_COMMAND_RUNNER_SHA256: &str =
     "0102fa1820ecd03bb03a991fd2303a1a484118f7da8a71864f88ec94bca61d6d";
 const OFFICIAL_PACKAGE_MANIFEST_SHA256: &str =
     "aaa0646d6b615da94187b51efd50c69621a00867761161ae55cc16cfd545bec7";
+const OFFICIAL_MANAGED_PACKAGE_MANIFEST_SHA256: &str =
+    "24dd8c63a4d2b7bc2ded86c887974f842093ce4f2ed8473267a91e036c38da20";
 const MAX_OFFICIAL_LAUNCHER_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_OFFICIAL_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_OFFICIAL_MANIFEST_BYTES: u64 = 64 * 1024;
@@ -235,6 +238,7 @@ pub struct LatticedDeliveryConfig {
     git_executable: PathBuf,
     timeout: Duration,
     runtime: DeliveryRuntime,
+    pinned_codex_resources: Option<PinnedCodexResources>,
 }
 
 impl LatticedDeliveryConfig {
@@ -261,14 +265,16 @@ impl LatticedDeliveryConfig {
         }
         let version = version.into();
         let launcher_sha256 = launcher_sha256.into();
-        if runtime == DeliveryRuntime::OfficialCodexAppServer {
-            validate_official_codex_identity(
+        let pinned_codex_resources = if runtime == DeliveryRuntime::OfficialCodexAppServer {
+            Some(validate_official_codex_identity(
                 &launcher,
                 &version,
                 &launcher_sha256,
                 &delivery_root,
-            )?;
-        }
+            )?)
+        } else {
+            None
+        };
         let identity = CodexIdentityExpectation::new(
             launcher.clone(),
             version.clone(),
@@ -281,6 +287,7 @@ impl LatticedDeliveryConfig {
             DELIVERY_PROMPT,
             timeout,
             runtime,
+            pinned_codex_resources.clone(),
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::CodexConfiguration))?;
         DeliveryWorkspaceGitAdapterConfig::new(
@@ -299,6 +306,7 @@ impl LatticedDeliveryConfig {
             git_executable,
             timeout,
             runtime,
+            pinned_codex_resources,
         })
     }
 }
@@ -308,7 +316,7 @@ fn validate_official_codex_identity(
     version: &str,
     launcher_sha256: &str,
     delivery_root: &Path,
-) -> Result<(), LatticedError> {
+) -> Result<PinnedCodexResources, LatticedError> {
     let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
     if version != OFFICIAL_CODEX_VERSION
         || launcher_sha256 != OFFICIAL_CODEX_LAUNCHER_SHA256
@@ -333,6 +341,11 @@ fn validate_official_codex_identity(
         return Err(rejected());
     }
     let install_root = target_root.join("codex-official").join("0.146.0");
+    let managed_package_root = install_root
+        .join("node_modules")
+        .join("@openai")
+        .join("codex");
+    let managed_package_manifest = managed_package_root.join("package.json");
     let expected_launcher = install_root
         .join("node_modules")
         .join("@openai")
@@ -360,6 +373,7 @@ fn validate_official_codex_identity(
         sandbox_setup.as_path(),
         command_runner.as_path(),
         package_manifest.as_path(),
+        managed_package_manifest.as_path(),
     ] {
         reject_reparse_path(path, target_root)?;
     }
@@ -374,10 +388,20 @@ fn validate_official_codex_identity(
             != OFFICIAL_COMMAND_RUNNER_SHA256
         || official_file_sha256(&package_manifest, MAX_OFFICIAL_MANIFEST_BYTES)?
             != OFFICIAL_PACKAGE_MANIFEST_SHA256
+        || official_file_sha256(&managed_package_manifest, MAX_OFFICIAL_MANIFEST_BYTES)?
+            != OFFICIAL_MANAGED_PACKAGE_MANIFEST_SHA256
     {
         return Err(rejected());
     }
-    Ok(())
+    PinnedCodexResources::new(
+        managed_package_root,
+        bundle_root.join("codex-resources"),
+        OFFICIAL_SANDBOX_SETUP_SHA256,
+        OFFICIAL_COMMAND_RUNNER_SHA256,
+        OFFICIAL_PACKAGE_MANIFEST_SHA256,
+        OFFICIAL_MANAGED_PACKAGE_MANIFEST_SHA256,
+    )
+    .map_err(|_| rejected())
 }
 
 #[cfg(windows)]
@@ -571,6 +595,7 @@ impl LatticedDeliveryService {
             DELIVERY_PROMPT,
             config.timeout,
             config.runtime,
+            config.pinned_codex_resources.clone(),
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::CodexConfiguration))?;
         let mut codex = CodexDeliveryAdapter::with_deadline(codex_config, effect_deadline);

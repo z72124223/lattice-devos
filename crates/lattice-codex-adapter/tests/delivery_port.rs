@@ -57,6 +57,7 @@ fn missing_launcher_is_a_known_codex_preflight_failure() {
         "Apply the fixed TASK-032 delivery change.",
         Duration::from_secs(5),
         DeliveryRuntime::ScriptedAcceptance,
+        None,
     )
     .expect("valid fixed adapter config");
     let mut adapter = CodexDeliveryAdapter::new(config);
@@ -82,6 +83,7 @@ fn an_expired_composition_deadline_stops_before_codex_preflight() {
         "Apply the fixed TASK-032 delivery change.",
         Duration::from_secs(5),
         DeliveryRuntime::ScriptedAcceptance,
+        None,
     )
     .expect("valid fixed adapter config");
     let deadline = Instant::now()
@@ -96,4 +98,25 @@ fn an_expired_composition_deadline_stops_before_codex_preflight() {
     assert_eq!(error.kind(), PortErrorKind::Timeout);
     assert_eq!(error.certainty(), DeliveryFailureCertainty::Known);
     assert_eq!(error.code(), "CODEX_DELIVERY_DEADLINE_EXPIRED");
+}
+
+#[test]
+fn official_adapter_requires_a_runtime_verified_pinned_resource_binding() {
+    let error = CodexDeliveryAdapterConfig::new(
+        CodexIdentityExpectation::new(
+            PathBuf::from(r"C:\pinned\bin\codex.exe"),
+            "codex-cli 0.146.0",
+            "1".repeat(64),
+        ),
+        PathBuf::from(r"C:\delivery\schema"),
+        PathBuf::from(r"C:\delivery\codex-home"),
+        "Apply the fixed TASK-032 delivery change.",
+        Duration::from_secs(5),
+        DeliveryRuntime::OfficialCodexAppServer,
+        None,
+    )
+    .expect_err("official mode must fail closed without the pinned managed package");
+
+    assert_eq!(error.code(), "CODEX_CONFIG_PINNED_RESOURCES_MISSING");
+    assert_eq!(error.certainty(), DeliveryFailureCertainty::Known);
 }
