@@ -20,7 +20,7 @@ use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256, canonicalize};
 use lattice_codebase_memory::digest_query_text;
 use lattice_codex_adapter::{
     CodexDeliveryAdapter, CodexDeliveryAdapterConfig, CodexIdentityExpectation,
-    PinnedCodexResources,
+    PinnedCodexResourceDigests, PinnedCodexResources,
 };
 use lattice_contracts::{
     AttemptId, CONTRACT_VERSION, CompletedDeliveryEvidence, Component, ContentDigest,
@@ -131,6 +131,9 @@ const OFFICIAL_SANDBOX_SETUP_SHA256: &str =
     "c12d225b34e7f82cdab6bbc714797abed661f40e158104694953889750121cef";
 const OFFICIAL_COMMAND_RUNNER_SHA256: &str =
     "0102fa1820ecd03bb03a991fd2303a1a484118f7da8a71864f88ec94bca61d6d";
+const OFFICIAL_CODE_MODE_HOST_SHA256: &str =
+    "6ef1de0e04d859f8f4f6d4d64f0f3ceeec28658423d91de160f5e804280d1c36";
+const OFFICIAL_RG_SHA256: &str = "14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680";
 const OFFICIAL_PACKAGE_MANIFEST_SHA256: &str =
     "aaa0646d6b615da94187b51efd50c69621a00867761161ae55cc16cfd545bec7";
 const OFFICIAL_MANAGED_PACKAGE_MANIFEST_SHA256: &str =
@@ -364,6 +367,8 @@ fn validate_official_codex_identity(
     let command_runner = bundle_root
         .join("codex-resources")
         .join("codex-command-runner.exe");
+    let code_mode_host = bundle_root.join("bin").join("codex-code-mode-host.exe");
+    let rg = bundle_root.join("codex-path").join("rg.exe");
     let package_manifest = bundle_root.join("codex-package.json");
     if !same_declared_path(launcher, &expected_launcher) {
         return Err(rejected());
@@ -372,6 +377,8 @@ fn validate_official_codex_identity(
         expected_launcher.as_path(),
         sandbox_setup.as_path(),
         command_runner.as_path(),
+        code_mode_host.as_path(),
+        rg.as_path(),
         package_manifest.as_path(),
         managed_package_manifest.as_path(),
     ] {
@@ -386,6 +393,9 @@ fn validate_official_codex_identity(
             != OFFICIAL_SANDBOX_SETUP_SHA256
         || official_file_sha256(&command_runner, MAX_OFFICIAL_RESOURCE_BYTES)?
             != OFFICIAL_COMMAND_RUNNER_SHA256
+        || official_file_sha256(&code_mode_host, MAX_OFFICIAL_RESOURCE_BYTES)?
+            != OFFICIAL_CODE_MODE_HOST_SHA256
+        || official_file_sha256(&rg, MAX_OFFICIAL_RESOURCE_BYTES)? != OFFICIAL_RG_SHA256
         || official_file_sha256(&package_manifest, MAX_OFFICIAL_MANIFEST_BYTES)?
             != OFFICIAL_PACKAGE_MANIFEST_SHA256
         || official_file_sha256(&managed_package_manifest, MAX_OFFICIAL_MANIFEST_BYTES)?
@@ -396,10 +406,15 @@ fn validate_official_codex_identity(
     PinnedCodexResources::new(
         managed_package_root,
         bundle_root.join("codex-resources"),
-        OFFICIAL_SANDBOX_SETUP_SHA256,
-        OFFICIAL_COMMAND_RUNNER_SHA256,
-        OFFICIAL_PACKAGE_MANIFEST_SHA256,
-        OFFICIAL_MANAGED_PACKAGE_MANIFEST_SHA256,
+        PinnedCodexResourceDigests::new(
+            OFFICIAL_SANDBOX_SETUP_SHA256,
+            OFFICIAL_COMMAND_RUNNER_SHA256,
+            OFFICIAL_CODE_MODE_HOST_SHA256,
+            OFFICIAL_RG_SHA256,
+            OFFICIAL_PACKAGE_MANIFEST_SHA256,
+            OFFICIAL_MANAGED_PACKAGE_MANIFEST_SHA256,
+        )
+        .map_err(|_| rejected())?,
     )
     .map_err(|_| rejected())
 }

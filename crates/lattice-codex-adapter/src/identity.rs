@@ -11,7 +11,8 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::process::{
-    OwnedProcessTree, PinnedCodexResources, configure_pinned_child_environment, stop_owned_child,
+    OwnedProcessTree, OwnedSandboxTemp, PinnedCodexResources, cleanup_sandbox_temp,
+    configure_pinned_child_environment, stop_owned_child,
     terminate_uncontained_process_tree_bounded, validate_pinned_resources_for_launcher,
 };
 
@@ -332,28 +333,37 @@ fn run_version_command(
     pinned_resources: Option<&PinnedCodexResources>,
     deadline: Instant,
 ) -> Result<(ExitStatus, Vec<u8>), CodexIdentityError> {
-    let mut command = identity_command(launcher, codex_home, pinned_resources)?;
+    let (mut command, sandbox_temp) = identity_command(launcher, codex_home, pinned_resources)?;
     command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     validate_identity_resources_before_spawn(launcher, pinned_resources)?;
-    let mut child = command
-        .spawn()
-        .map_err(|_| error(CodexIdentityErrorKind::VersionCommandFailed))?;
+    let Ok(mut child) = command.spawn() else {
+        cleanup_identity_sandbox_temp(sandbox_temp)?;
+        return Err(error(CodexIdentityErrorKind::VersionCommandFailed));
+    };
     let Ok(process_tree) = OwnedProcessTree::attach(&child) else {
         let _ = terminate_uncontained_process_tree_bounded(&mut child);
+        cleanup_identity_sandbox_temp(sandbox_temp)?;
         return Err(error(CodexIdentityErrorKind::ProcessContainmentFailed));
     };
-    let process_tree = validate_identity_resources_after_attach(
+    let process_tree = match validate_identity_resources_after_attach(
         &mut child,
         process_tree,
         launcher,
         pinned_resources,
-    )?;
+    ) {
+        Ok(process_tree) => process_tree,
+        Err(error) => {
+            cleanup_identity_sandbox_temp(sandbox_temp)?;
+            return Err(error);
+        }
+    };
     let Some(stdout) = child.stdout.take() else {
         let _ = stop_owned_child(&mut child, process_tree);
+        cleanup_identity_sandbox_temp(sandbox_temp)?;
         return Err(error(CodexIdentityErrorKind::VersionCommandFailed));
     };
     let reader = thread::spawn(move || {
@@ -368,7 +378,9 @@ fn run_version_command(
         process_tree,
         deadline,
         CodexIdentityErrorKind::VersionCommandFailed,
-    )?;
+    );
+    cleanup_identity_sandbox_temp(sandbox_temp)?;
+    let status = status?;
     let stdout = reader
         .join()
         .map_err(|_| error(CodexIdentityErrorKind::VersionOutputInvalid))?
@@ -386,7 +398,7 @@ fn run_schema_command(
     pinned_resources: Option<&PinnedCodexResources>,
     deadline: Instant,
 ) -> Result<ExitStatus, CodexIdentityError> {
-    let mut command = identity_command(launcher, codex_home, pinned_resources)?;
+    let (mut command, sandbox_temp) = identity_command(launcher, codex_home, pinned_resources)?;
     command
         .args(["app-server", "generate-json-schema", "--out"])
         .arg(schema_output_dir)
@@ -394,32 +406,42 @@ fn run_schema_command(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     validate_identity_resources_before_spawn(launcher, pinned_resources)?;
-    let mut child = command
-        .spawn()
-        .map_err(|_| error(CodexIdentityErrorKind::SchemaGenerationFailed))?;
+    let Ok(mut child) = command.spawn() else {
+        cleanup_identity_sandbox_temp(sandbox_temp)?;
+        return Err(error(CodexIdentityErrorKind::SchemaGenerationFailed));
+    };
     let Ok(process_tree) = OwnedProcessTree::attach(&child) else {
         let _ = terminate_uncontained_process_tree_bounded(&mut child);
+        cleanup_identity_sandbox_temp(sandbox_temp)?;
         return Err(error(CodexIdentityErrorKind::ProcessContainmentFailed));
     };
-    let process_tree = validate_identity_resources_after_attach(
+    let process_tree = match validate_identity_resources_after_attach(
         &mut child,
         process_tree,
         launcher,
         pinned_resources,
-    )?;
-    wait_for_owned_child(
+    ) {
+        Ok(process_tree) => process_tree,
+        Err(error) => {
+            cleanup_identity_sandbox_temp(sandbox_temp)?;
+            return Err(error);
+        }
+    };
+    let status = wait_for_owned_child(
         &mut child,
         process_tree,
         deadline,
         CodexIdentityErrorKind::SchemaGenerationFailed,
-    )
+    );
+    cleanup_identity_sandbox_temp(sandbox_temp)?;
+    status
 }
 
 fn identity_command(
     launcher: &Path,
     codex_home: Option<&Path>,
     pinned_resources: Option<&PinnedCodexResources>,
-) -> Result<Command, CodexIdentityError> {
+) -> Result<(Command, Option<OwnedSandboxTemp>), CodexIdentityError> {
     let mut command = Command::new(launcher);
     crate::scrub_protected_environment(&mut command);
     if let Some(codex_home) = codex_home {
@@ -427,7 +449,25 @@ fn identity_command(
     }
     configure_pinned_child_environment(&mut command, pinned_resources)
         .map_err(|_| error(CodexIdentityErrorKind::PinnedResourcesRejected))?;
-    Ok(command)
+    let sandbox_temp = match (codex_home, pinned_resources) {
+        (Some(codex_home), Some(_)) => Some(
+            OwnedSandboxTemp::prepare(codex_home)
+                .map_err(|_| error(CodexIdentityErrorKind::PinnedResourcesRejected))?,
+        ),
+        (None, Some(_)) => return Err(error(CodexIdentityErrorKind::PinnedResourcesRejected)),
+        (_, None) => None,
+    };
+    if let Some(sandbox_temp) = &sandbox_temp {
+        sandbox_temp.configure(&mut command);
+    }
+    Ok((command, sandbox_temp))
+}
+
+fn cleanup_identity_sandbox_temp(
+    sandbox_temp: Option<OwnedSandboxTemp>,
+) -> Result<(), CodexIdentityError> {
+    cleanup_sandbox_temp(sandbox_temp)
+        .map_err(|_| error(CodexIdentityErrorKind::ProcessContainmentFailed))
 }
 
 fn validate_identity_resources_before_spawn(
@@ -657,12 +697,13 @@ mod tests {
 
     #[test]
     fn identity_commands_bind_the_isolated_codex_home() {
-        let command = identity_command(
+        let (command, sandbox_temp) = identity_command(
             Path::new("codex"),
             Some(Path::new(r"C:\lattice\isolated-codex-home")),
             None,
         )
         .expect("unmanaged identity command");
+        assert!(sandbox_temp.is_none());
         let codex_home = command
             .get_envs()
             .find(|(name, _)| *name == OsStr::new("CODEX_HOME"))

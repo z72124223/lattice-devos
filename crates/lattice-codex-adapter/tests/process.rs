@@ -3,11 +3,13 @@ use std::time::Duration;
 
 use lattice_codex_adapter::{
     AppServerRunConfig, AppServerRunErrorKind, CODEX_HOME_OWNERSHIP_MARKER_BYTES,
-    CODEX_HOME_OWNERSHIP_MARKER_NAME, PinnedCodexResources, TurnStatus,
+    CODEX_HOME_OWNERSHIP_MARKER_NAME, PinnedCodexResourceDigests, PinnedCodexResources, TurnStatus,
 };
 
 #[cfg(windows)]
 use std::fs;
+#[cfg(windows)]
+use std::path::Path;
 #[cfg(windows)]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(windows)]
@@ -26,10 +28,15 @@ fn pinned_resource_binding_requires_an_absolute_directory_and_exact_digests() {
     let error = PinnedCodexResources::new(
         PathBuf::from("managed-package"),
         PathBuf::from("codex-resources"),
-        "a".repeat(64),
-        "b".repeat(64),
-        "c".repeat(64),
-        "d".repeat(64),
+        PinnedCodexResourceDigests::new(
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+            "e".repeat(64),
+            "f".repeat(64),
+        )
+        .expect("valid digest bundle"),
     )
     .expect_err("a caller-relative resource directory must fail closed");
 
@@ -206,7 +213,7 @@ impl ProcessFixture {
                 "model_reasoning_effort = \"low\"\n",
                 "\n",
                 "[windows]\n",
-                "sandbox = \"elevated\"\n",
+                "sandbox = \"unelevated\"\n",
             ),
         )
         .expect("write safe fixture configuration");
@@ -278,8 +285,260 @@ struct PinnedProcessFixture {
     resources: PinnedCodexResources,
     sandbox_setup: PathBuf,
     command_runner: PathBuf,
+    code_mode_host: PathBuf,
+    rg: PathBuf,
+    sandbox_preflight_mode: PathBuf,
+    sandbox_preflight_log: PathBuf,
+    sandbox_preflight_descendant_pid_log: PathBuf,
+    sandbox_preflight_descendant_effect_log: PathBuf,
+    readiness_mode: PathBuf,
+    readiness_descendant_pid_log: PathBuf,
+    readiness_descendant_effect_log: PathBuf,
+    turn_start_log: PathBuf,
+    sandbox_temp: PathBuf,
     launch_log: PathBuf,
     launcher_sha256: String,
+}
+
+#[cfg(windows)]
+struct PinnedServerScript<'a> {
+    launch_log: &'a Path,
+    sandbox_preflight_log: &'a Path,
+    managed_root: &'a Path,
+    resources_directory: &'a Path,
+    sandbox_temp: &'a Path,
+    sandbox_setup: &'a Path,
+    codex_home: &'a Path,
+    readiness_mode: &'a Path,
+    readiness_descendant_pid_log: &'a Path,
+    readiness_descendant_effect_log: &'a Path,
+    turn_start_log: &'a Path,
+}
+
+#[cfg(windows)]
+fn pinned_app_server_script(paths: &PinnedServerScript<'_>) -> String {
+    let quote = |path: &Path| path.display().to_string().replace('\'', "''");
+    let reported_home = paths.codex_home.display().to_string().replace('\\', r"\\");
+    format!(
+        "$ErrorActionPreference = 'Stop'\n$log = '{}'\nif ([IO.File]::ReadAllText('{}') -ne 'completed') {{ exit 57 }}\nif ($args.Count -ne 3 -or $args[0] -ne 'app-server' -or $args[1] -ne '--listen' -or $args[2] -ne 'stdio://') {{ exit 58 }}\n[IO.File]::WriteAllText($log, 'spawned')\nif ($env:CODEX_HOME -ne '{}') {{ [IO.File]::WriteAllText($log, 'home:' + $env:CODEX_HOME); exit 59 }}\nif ($env:CODEX_MANAGED_PACKAGE_ROOT -ne '{}') {{ [IO.File]::WriteAllText($log, 'root:' + $env:CODEX_MANAGED_PACKAGE_ROOT); exit 51 }}\n$first = ($env:PATH -split ';')[0]\nif ($first -ne '{}') {{ [IO.File]::WriteAllText($log, 'path:' + $first); exit 52 }}\nif ($env:TMP -ne '{}' -or $env:TEMP -ne '{}' -or $env:TMPDIR -ne '{}') {{ [IO.File]::WriteAllText($log, 'temp'); exit 56 }}\n$matches = @(Get-Command 'codex-windows-sandbox-setup.exe' -CommandType Application -ErrorAction Stop)\nif ($matches.Count -ne 1) {{ [IO.File]::WriteAllText($log, 'matches:' + $matches.Count); exit 54 }}\n$resolved = $matches[0].Source\nif ($resolved -ne '{}') {{ [IO.File]::WriteAllText($log, 'resolved:' + $resolved); exit 53 }}\n[IO.File]::WriteAllText($log, 'verified')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":0,\"result\":{{\"userAgent\":\"codex_cli_rs/0.146.0\",\"platformFamily\":\"windows\",\"platformOs\":\"windows\",\"codexHome\":\"{}\"}}}}')\n$null = [Console]::In.ReadLine()\n$readiness = [Console]::In.ReadLine() | ConvertFrom-Json\nif ($readiness.method -ne 'windowsSandbox/readiness' -or $readiness.id -ne 3) {{ exit 55 }}\n$mode = [IO.File]::ReadAllText('{}').Trim()\nif ($mode -eq 'hang') {{\n  Start-Sleep -Milliseconds 250\n  $grandchild = \"Start-Sleep -Seconds 31; [IO.File]::WriteAllText('{}', 'survived')\"\n  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($grandchild))\n  $descendant = Start-Process -FilePath \"$PSHOME\\powershell.exe\" -WindowStyle Hidden -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -PassThru\n  [IO.File]::WriteAllText('{}', [string]$descendant.Id)\n  Start-Sleep -Seconds 60\n}}\nif ($mode -eq 'update-required') {{\n  [Console]::Out.WriteLine('{{\"id\":3,\"result\":{{\"status\":\"updateRequired\"}}}}')\n  Start-Sleep -Seconds 60\n}}\n[Console]::Out.WriteLine('{{\"id\":3,\"result\":{{\"status\":\"ready\"}}}}')\n$threadStart = [Console]::In.ReadLine()\n[IO.File]::WriteAllText('{}', $threadStart)\n[Console]::Out.WriteLine('{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"thread-pinned\"}}}}}}')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":2,\"result\":{{\"turn\":{{\"id\":\"turn-pinned\"}}}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"item/completed\",\"params\":{{\"threadId\":\"thread-pinned\",\"turnId\":\"turn-pinned\",\"item\":{{\"arguments\":{{\"command\":\"apply fixture\"}},\"id\":\"tool-apply\",\"status\":\"completed\",\"success\":true,\"tool\":\"exec\",\"type\":\"dynamicToolCall\"}},\"completedAtMs\":1}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"item/completed\",\"params\":{{\"threadId\":\"thread-pinned\",\"turnId\":\"turn-pinned\",\"item\":{{\"arguments\":{{\"command\":\"verify fixture\"}},\"id\":\"tool-verify\",\"status\":\"completed\",\"success\":true,\"tool\":\"exec\",\"type\":\"dynamicToolCall\"}},\"completedAtMs\":2}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"turn/completed\",\"params\":{{\"threadId\":\"thread-pinned\",\"turn\":{{\"id\":\"turn-pinned\",\"items\":[{{\"id\":\"agent-final\",\"text\":\"Delivery complete.\",\"type\":\"agentMessage\"}}],\"itemsView\":\"summary\",\"status\":\"completed\",\"error\":null}}}}}}')\nStart-Sleep -Seconds 60\n",
+        quote(paths.launch_log),
+        quote(paths.sandbox_preflight_log),
+        quote(paths.codex_home),
+        quote(paths.managed_root),
+        quote(paths.resources_directory),
+        quote(paths.sandbox_temp),
+        quote(paths.sandbox_temp),
+        quote(paths.sandbox_temp),
+        quote(paths.sandbox_setup),
+        reported_home,
+        quote(paths.readiness_mode),
+        quote(paths.readiness_descendant_effect_log),
+        quote(paths.readiness_descendant_pid_log),
+        quote(paths.turn_start_log),
+    )
+}
+
+#[cfg(windows)]
+struct PinnedSandboxPreflightScript<'a> {
+    log: &'a Path,
+    mode: &'a Path,
+    managed_root: &'a Path,
+    resources_directory: &'a Path,
+    sandbox_setup: &'a Path,
+    sandbox_temp: &'a Path,
+    codex_home: &'a Path,
+    working_directory: &'a Path,
+    descendant_pid_log: &'a Path,
+    descendant_effect_log: &'a Path,
+}
+
+#[cfg(windows)]
+fn pinned_sandbox_preflight_script(paths: &PinnedSandboxPreflightScript<'_>) -> String {
+    let quote = |path: &Path| path.display().to_string().replace('\'', "''");
+    format!(
+        "$ErrorActionPreference = 'Stop'\n$log = '{}'\nif ($args.Count -ne 9 -or $args[0] -ne 'sandbox' -or $args[1] -ne '-P' -or $args[2] -ne ':workspace' -or $args[3] -ne '-C' -or $args[4] -ne '{}' -or $args[5] -ne 'cmd.exe' -or $args[6] -ne '/d' -or $args[7] -ne '/c' -or $args[8] -ne 'exit 0') {{ [IO.File]::WriteAllText($log, 'args'); exit 61 }}\nif ((Get-Location).Path -ne '{}') {{ [IO.File]::WriteAllText($log, 'cwd'); exit 62 }}\nif ($env:CODEX_HOME -ne '{}' -or $env:CODEX_MANAGED_PACKAGE_ROOT -ne '{}') {{ [IO.File]::WriteAllText($log, 'identity'); exit 63 }}\n$first = ($env:PATH -split ';')[0]\nif ($first -ne '{}') {{ [IO.File]::WriteAllText($log, 'path'); exit 64 }}\nif ($env:TMP -ne '{}' -or $env:TEMP -ne '{}' -or $env:TMPDIR -ne '{}') {{ [IO.File]::WriteAllText($log, 'temp'); exit 65 }}\n$matches = @(Get-Command 'codex-windows-sandbox-setup.exe' -CommandType Application -ErrorAction Stop)\nif ($matches.Count -ne 1 -or $matches[0].Source -ne '{}') {{ [IO.File]::WriteAllText($log, 'helper'); exit 66 }}\n[IO.File]::WriteAllText($log, 'started')\n$mode = [IO.File]::ReadAllText('{}').Trim()\nif ($mode -eq 'hang') {{\n  Start-Sleep -Milliseconds 250\n  $grandchild = \"Start-Sleep -Seconds 61; [IO.File]::WriteAllText('{}', 'survived')\"\n  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($grandchild))\n  $descendant = Start-Process -FilePath \"$PSHOME\\powershell.exe\" -WindowStyle Hidden -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -PassThru\n  [IO.File]::WriteAllText('{}', [string]$descendant.Id)\n  Start-Sleep -Seconds 70\n}}\nif ($mode -eq 'fail') {{ exit 67 }}\nif ($mode -eq 'tamper-after-preflight') {{\n  Start-Sleep -Milliseconds 250\n  [IO.File]::WriteAllText($matches[0].Source, 'tampered')\n  [IO.File]::WriteAllText($log, 'completed')\n  exit 0\n}}\nif ($mode -ne 'ready') {{ exit 68 }}\n[IO.File]::WriteAllText($log, 'completed')\nexit 0\n",
+        quote(paths.log),
+        quote(paths.working_directory),
+        quote(paths.working_directory),
+        quote(paths.codex_home),
+        quote(paths.managed_root),
+        quote(paths.resources_directory),
+        quote(paths.sandbox_temp),
+        quote(paths.sandbox_temp),
+        quote(paths.sandbox_temp),
+        quote(paths.sandbox_setup),
+        quote(paths.mode),
+        quote(paths.descendant_effect_log),
+        quote(paths.descendant_pid_log),
+    )
+}
+
+#[cfg(windows)]
+fn write_pinned_codex_home(codex_home: &Path) {
+    fs::write(
+        codex_home.join(CODEX_HOME_OWNERSHIP_MARKER_NAME),
+        CODEX_HOME_OWNERSHIP_MARKER_BYTES,
+    )
+    .expect("write Codex home marker");
+    fs::write(codex_home.join("auth.json"), b"{}\n").expect("write inert fixture auth");
+    fs::write(
+        codex_home.join("config.toml"),
+        concat!(
+            "approval_policy = \"never\"\n",
+            "sandbox_mode = \"workspace-write\"\n",
+            "model = \"gpt-5.6-sol\"\n",
+            "model_reasoning_effort = \"low\"\n",
+            "\n",
+            "[windows]\n",
+            "sandbox = \"unelevated\"\n",
+        ),
+    )
+    .expect("write exact safe fixture config");
+}
+
+#[cfg(windows)]
+struct PinnedFixtureResources {
+    binding: PinnedCodexResources,
+    sandbox_setup: PathBuf,
+    command_runner: PathBuf,
+    code_mode_host: PathBuf,
+    rg: PathBuf,
+}
+
+#[cfg(windows)]
+fn write_pinned_resources(
+    managed_root: &Path,
+    bundle_root: &Path,
+    bin: &Path,
+    resources_directory: &Path,
+    codex_path_directory: &Path,
+) -> PinnedFixtureResources {
+    let sandbox_setup = resources_directory.join("codex-windows-sandbox-setup.exe");
+    let command_runner = resources_directory.join("codex-command-runner.exe");
+    let package_manifest = bundle_root.join("codex-package.json");
+    let managed_package_manifest = managed_root.join("package.json");
+    let code_mode_host = bin.join("codex-code-mode-host.exe");
+    let rg = codex_path_directory.join("rg.exe");
+    fs::write(&sandbox_setup, b"pinned sandbox setup").expect("write pinned setup helper");
+    fs::write(&command_runner, b"pinned command runner").expect("write pinned runner helper");
+    fs::write(&code_mode_host, b"pinned code mode host").expect("write pinned code mode host");
+    fs::write(&rg, b"pinned rg").expect("write pinned rg");
+    fs::write(&package_manifest, b"{\"version\":\"0.146.0\"}\n")
+        .expect("write pinned package manifest");
+    fs::write(&managed_package_manifest, b"{\"version\":\"0.146.0\"}\n")
+        .expect("write managed package manifest");
+    let binding = PinnedCodexResources::new(
+        managed_root.to_path_buf(),
+        resources_directory.to_path_buf(),
+        PinnedCodexResourceDigests::new(
+            sha256(&fs::read(&sandbox_setup).expect("read setup helper")),
+            sha256(&fs::read(&command_runner).expect("read runner helper")),
+            sha256(&fs::read(&code_mode_host).expect("read code mode host")),
+            sha256(&fs::read(&rg).expect("read rg")),
+            sha256(&fs::read(&package_manifest).expect("read package manifest")),
+            sha256(&fs::read(&managed_package_manifest).expect("read managed package manifest")),
+        )
+        .expect("bind pinned resource digests"),
+    )
+    .expect("bind pinned resource identity");
+    PinnedFixtureResources {
+        binding,
+        sandbox_setup,
+        command_runner,
+        code_mode_host,
+        rg,
+    }
+}
+
+#[cfg(windows)]
+struct PinnedFixtureControls {
+    launcher: PathBuf,
+    launcher_sha256: String,
+    launch_log: PathBuf,
+    sandbox_preflight_mode: PathBuf,
+    sandbox_preflight_log: PathBuf,
+    sandbox_preflight_descendant_pid_log: PathBuf,
+    sandbox_preflight_descendant_effect_log: PathBuf,
+    readiness_mode: PathBuf,
+    readiness_descendant_pid_log: PathBuf,
+    readiness_descendant_effect_log: PathBuf,
+    turn_start_log: PathBuf,
+    sandbox_temp: PathBuf,
+}
+
+#[cfg(windows)]
+fn write_pinned_control_scripts(
+    root: &Path,
+    bin: &Path,
+    managed_root: &Path,
+    resources_directory: &Path,
+    sandbox_setup: &Path,
+    codex_home: &Path,
+    working_directory: &Path,
+) -> PinnedFixtureControls {
+    let launch_log = root.join("child-launched.txt");
+    let sandbox_preflight_mode = root.join("sandbox-preflight-mode.txt");
+    let sandbox_preflight_log = root.join("sandbox-preflight.txt");
+    let sandbox_preflight_descendant_pid_log = root.join("sandbox-preflight-descendant.pid");
+    let sandbox_preflight_descendant_effect_log =
+        root.join("sandbox-preflight-descendant-effect.txt");
+    let readiness_mode = root.join("readiness-mode.txt");
+    let readiness_descendant_pid_log = root.join("readiness-descendant.pid");
+    let readiness_descendant_effect_log = root.join("readiness-descendant-effect.txt");
+    let turn_start_log = root.join("turn-started.txt");
+    let sandbox_temp = codex_home.join(".lattice-fs-sandbox-temp-v1");
+    fs::write(&sandbox_preflight_mode, b"ready\n").expect("write sandbox preflight mode");
+    fs::write(&readiness_mode, b"ready\n").expect("write readiness mode");
+    let sandbox_preflight = bin.join("fake-sandbox-preflight.ps1");
+    let preflight_script = pinned_sandbox_preflight_script(&PinnedSandboxPreflightScript {
+        log: &sandbox_preflight_log,
+        mode: &sandbox_preflight_mode,
+        managed_root,
+        resources_directory,
+        sandbox_setup,
+        sandbox_temp: &sandbox_temp,
+        codex_home,
+        working_directory,
+        descendant_pid_log: &sandbox_preflight_descendant_pid_log,
+        descendant_effect_log: &sandbox_preflight_descendant_effect_log,
+    });
+    fs::write(&sandbox_preflight, preflight_script).expect("write fake sandbox preflight");
+    let server = bin.join("fake-app-server.ps1");
+    let script = pinned_app_server_script(&PinnedServerScript {
+        launch_log: &launch_log,
+        sandbox_preflight_log: &sandbox_preflight_log,
+        managed_root,
+        resources_directory,
+        sandbox_temp: &sandbox_temp,
+        sandbox_setup,
+        codex_home,
+        readiness_mode: &readiness_mode,
+        readiness_descendant_pid_log: &readiness_descendant_pid_log,
+        readiness_descendant_effect_log: &readiness_descendant_effect_log,
+        turn_start_log: &turn_start_log,
+    });
+    fs::write(&server, script).expect("write pinned fake app-server");
+    let launcher = bin.join("fake-codex.cmd");
+    fs::write(
+        &launcher,
+        "@echo off\r\nif /I \"%~1\"==\"sandbox\" goto sandbox\r\n\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0fake-app-server.ps1\" %*\r\nexit /b %ERRORLEVEL%\r\n:sandbox\r\n\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0fake-sandbox-preflight.ps1\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+    )
+    .expect("write pinned fake launcher");
+    let launcher_sha256 = sha256(&fs::read(&launcher).expect("read pinned launcher"));
+    PinnedFixtureControls {
+        launcher,
+        launcher_sha256,
+        launch_log,
+        sandbox_preflight_mode,
+        sandbox_preflight_log,
+        sandbox_preflight_descendant_pid_log,
+        sandbox_preflight_descendant_effect_log,
+        readiness_mode,
+        readiness_descendant_pid_log,
+        readiness_descendant_effect_log,
+        turn_start_log,
+        sandbox_temp,
+    }
 }
 
 #[cfg(windows)]
@@ -298,85 +557,64 @@ impl PinnedProcessFixture {
             .join("x86_64-pc-windows-msvc");
         let bin = bundle_root.join("bin");
         let resources_directory = bundle_root.join("codex-resources");
+        let codex_path_directory = bundle_root.join("codex-path");
         let codex_home = root.join("codex-home");
         let working_directory = root.join("worktree");
         for directory in [
             &managed_root,
             &bin,
             &resources_directory,
+            &codex_path_directory,
             &codex_home,
             &working_directory,
         ] {
             fs::create_dir_all(directory).expect("create pinned process fixture directory");
         }
-        fs::write(
-            codex_home.join(CODEX_HOME_OWNERSHIP_MARKER_NAME),
-            CODEX_HOME_OWNERSHIP_MARKER_BYTES,
-        )
-        .expect("write Codex home marker");
-        fs::write(codex_home.join("auth.json"), b"{}\n").expect("write inert fixture auth");
-        fs::write(
-            codex_home.join("config.toml"),
-            concat!(
-                "approval_policy = \"never\"\n",
-                "sandbox_mode = \"workspace-write\"\n",
-                "model = \"gpt-5.6-sol\"\n",
-                "model_reasoning_effort = \"low\"\n",
-                "\n",
-                "[windows]\n",
-                "sandbox = \"elevated\"\n",
-            ),
-        )
-        .expect("write exact safe fixture config");
-        let sandbox_setup = resources_directory.join("codex-windows-sandbox-setup.exe");
-        let command_runner = resources_directory.join("codex-command-runner.exe");
-        let package_manifest = bundle_root.join("codex-package.json");
-        let managed_package_manifest = managed_root.join("package.json");
-        fs::write(&sandbox_setup, b"pinned sandbox setup").expect("write pinned setup helper");
-        fs::write(&command_runner, b"pinned command runner").expect("write pinned runner helper");
-        fs::write(&package_manifest, b"{\"version\":\"0.146.0\"}\n")
-            .expect("write pinned package manifest");
-        fs::write(&managed_package_manifest, b"{\"version\":\"0.146.0\"}\n")
-            .expect("write managed package manifest");
-        let resources = PinnedCodexResources::new(
-            managed_root.clone(),
-            resources_directory.clone(),
-            sha256(&fs::read(&sandbox_setup).expect("read setup helper")),
-            sha256(&fs::read(&command_runner).expect("read runner helper")),
-            sha256(&fs::read(&package_manifest).expect("read package manifest")),
-            sha256(&fs::read(&managed_package_manifest).expect("read managed package manifest")),
-        )
-        .expect("bind pinned resource identity");
-        let launch_log = root.join("child-launched.txt");
-        let server = bin.join("fake-app-server.ps1");
-        let quote = |path: &std::path::Path| path.display().to_string().replace('\'', "''");
-        let reported_home = codex_home.display().to_string().replace('\\', r"\\");
-        let script = format!(
-            "$ErrorActionPreference = 'Stop'\n$log = '{}'\n[IO.File]::WriteAllText($log, 'spawned')\nif ($env:CODEX_MANAGED_PACKAGE_ROOT -ne '{}') {{ [IO.File]::WriteAllText($log, 'root:' + $env:CODEX_MANAGED_PACKAGE_ROOT); exit 51 }}\n$first = ($env:PATH -split ';')[0]\nif ($first -ne '{}') {{ [IO.File]::WriteAllText($log, 'path:' + $first); exit 52 }}\n$matches = @(Get-Command 'codex-windows-sandbox-setup.exe' -CommandType Application -ErrorAction Stop)\nif ($matches.Count -ne 1) {{ [IO.File]::WriteAllText($log, 'matches:' + $matches.Count); exit 54 }}\n$resolved = $matches[0].Source\nif ($resolved -ne '{}') {{ [IO.File]::WriteAllText($log, 'resolved:' + $resolved); exit 53 }}\n[IO.File]::WriteAllText($log, 'verified')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":0,\"result\":{{\"userAgent\":\"codex_cli_rs/0.146.0\",\"platformFamily\":\"windows\",\"platformOs\":\"windows\",\"codexHome\":\"{}\"}}}}')\n$null = [Console]::In.ReadLine()\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"thread-pinned\"}}}}}}')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":2,\"result\":{{\"turn\":{{\"id\":\"turn-pinned\"}}}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"turn/completed\",\"params\":{{\"threadId\":\"thread-pinned\",\"turn\":{{\"id\":\"turn-pinned\",\"items\":[],\"status\":\"completed\",\"error\":null}}}}}}')\nStart-Sleep -Seconds 60\n",
-            quote(&launch_log),
-            quote(&managed_root),
-            quote(&resources_directory),
-            quote(&sandbox_setup),
-            reported_home,
+        write_pinned_codex_home(&codex_home);
+        let PinnedFixtureResources {
+            binding: resources,
+            sandbox_setup,
+            command_runner,
+            code_mode_host,
+            rg,
+        } = write_pinned_resources(
+            &managed_root,
+            &bundle_root,
+            &bin,
+            &resources_directory,
+            &codex_path_directory,
         );
-        fs::write(&server, script).expect("write pinned fake app-server");
-        let launcher = bin.join("fake-codex.cmd");
-        fs::write(
-            &launcher,
-            "@echo off\r\n\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0fake-app-server.ps1\" %*\r\n",
-        )
-        .expect("write pinned fake launcher");
-        let launcher_sha256 = sha256(&fs::read(&launcher).expect("read pinned launcher"));
+        let controls = write_pinned_control_scripts(
+            &root,
+            &bin,
+            &managed_root,
+            &resources_directory,
+            &sandbox_setup,
+            &codex_home,
+            &working_directory,
+        );
         Self {
             root,
-            launcher,
+            launcher: controls.launcher,
             codex_home,
             working_directory,
             resources,
             sandbox_setup,
             command_runner,
-            launch_log,
-            launcher_sha256,
+            code_mode_host,
+            rg,
+            sandbox_preflight_mode: controls.sandbox_preflight_mode,
+            sandbox_preflight_log: controls.sandbox_preflight_log,
+            sandbox_preflight_descendant_pid_log: controls.sandbox_preflight_descendant_pid_log,
+            sandbox_preflight_descendant_effect_log: controls
+                .sandbox_preflight_descendant_effect_log,
+            readiness_mode: controls.readiness_mode,
+            readiness_descendant_pid_log: controls.readiness_descendant_pid_log,
+            readiness_descendant_effect_log: controls.readiness_descendant_effect_log,
+            turn_start_log: controls.turn_start_log,
+            sandbox_temp: controls.sandbox_temp,
+            launch_log: controls.launch_log,
+            launcher_sha256: controls.launcher_sha256,
         }
     }
 
@@ -387,7 +625,7 @@ impl PinnedProcessFixture {
             self.codex_home.clone(),
             self.working_directory.clone(),
             "Create answer.txt",
-            Duration::from_secs(5),
+            Duration::from_mins(2),
             Some(self.resources.clone()),
         )
         .expect("valid pinned app-server config")
@@ -411,18 +649,30 @@ fn pinned_official_child_uses_managed_root_and_rejects_helper_drift_before_spawn
         panic!("pinned managed package child failed: {error:?}; launch={launch}")
     });
     assert_eq!(evidence.thread_id(), "thread-pinned");
+    assert_eq!(
+        fs::read_to_string(&fixture.sandbox_preflight_log).expect("read preflight evidence"),
+        "completed"
+    );
     assert!(fixture.launch_log.is_file());
+    assert!(fixture.turn_start_log.is_file());
+    assert!(!fixture.sandbox_temp.exists());
 
     fs::remove_file(&fixture.launch_log).expect("reset child launch evidence");
+    fs::remove_file(&fixture.sandbox_preflight_log).expect("reset sandbox preflight evidence");
     let cross_version_root = fixture.root.join("managed-package-0.144.6");
     fs::create_dir(&cross_version_root).expect("create cross-version package root");
     let cross_version = PinnedCodexResources::new(
         cross_version_root,
         fixture.resources.resources_directory().to_path_buf(),
-        "a".repeat(64),
-        "b".repeat(64),
-        "c".repeat(64),
-        "d".repeat(64),
+        PinnedCodexResourceDigests::new(
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+            "e".repeat(64),
+            "f".repeat(64),
+        )
+        .expect("valid cross-version digest claim"),
     )
     .expect("syntactically valid cross-version resource claim");
     let cross_version_config = AppServerRunConfig::new(
@@ -457,6 +707,115 @@ fn pinned_official_child_uses_managed_root_and_rejects_helper_drift_before_spawn
     assert_eq!(error.kind(), AppServerRunErrorKind::PinnedResourcesMissing);
     assert!(!fixture.launch_log.exists());
 
+    fs::write(&fixture.command_runner, b"pinned command runner")
+        .expect("restore command runner helper");
+    fs::write(&fixture.code_mode_host, b"tampered code mode host").expect("tamper code mode host");
+    let error = run_codex_app_server(&fixture.config())
+        .expect_err("code mode host digest drift must fail before child spawn");
+    assert_eq!(
+        error.kind(),
+        AppServerRunErrorKind::PinnedResourcesDigestMismatch
+    );
+    assert!(!fixture.launch_log.exists());
+
+    fs::write(&fixture.code_mode_host, b"pinned code mode host").expect("restore code mode host");
+    fs::remove_file(&fixture.rg).expect("remove pinned rg");
+    let error = run_codex_app_server(&fixture.config())
+        .expect_err("a missing pinned rg must fail before child spawn");
+    assert_eq!(error.kind(), AppServerRunErrorKind::PinnedResourcesMissing);
+    assert!(!fixture.launch_log.exists());
+    fs::write(&fixture.rg, b"pinned rg").expect("restore pinned rg");
+    assert!(!fixture.sandbox_preflight_log.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn sandbox_preflight_failure_prevents_app_server_spawn() {
+    let fixture = PinnedProcessFixture::new();
+    fs::write(&fixture.sandbox_preflight_mode, b"fail\n")
+        .expect("select failing sandbox preflight");
+
+    let error = run_codex_app_server(&fixture.config())
+        .expect_err("failed official sandbox preflight must stop before app-server spawn");
+
+    assert_eq!(
+        error.kind(),
+        AppServerRunErrorKind::FsSandboxBootstrapFailed
+    );
+    assert_eq!(
+        fs::read_to_string(&fixture.sandbox_preflight_log).expect("read preflight start evidence"),
+        "started"
+    );
+    assert!(!fixture.launch_log.exists());
+    assert!(!fixture.sandbox_temp.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn resource_drift_after_preflight_is_rejected_before_app_server_spawn() {
+    let fixture = PinnedProcessFixture::new();
+    fs::write(&fixture.sandbox_preflight_mode, b"tamper-after-preflight\n")
+        .expect("select post-preflight resource drift");
+
+    let error = run_codex_app_server(&fixture.config())
+        .expect_err("resource drift after preflight must stop before app-server spawn");
+
+    assert_eq!(error.kind(), AppServerRunErrorKind::PinnedResourcesChanged);
+    assert_eq!(
+        fs::read_to_string(&fixture.sandbox_preflight_log)
+            .expect("read completed preflight evidence"),
+        "completed"
+    );
+    assert!(!fixture.launch_log.exists());
+    assert!(!fixture.sandbox_temp.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn sandbox_preflight_timeout_reaps_owned_tree_before_app_server_spawn() {
+    let fixture = PinnedProcessFixture::new();
+    fs::write(&fixture.sandbox_preflight_mode, b"hang\n")
+        .expect("select hanging sandbox preflight");
+    let started = Instant::now();
+
+    let error = run_codex_app_server(&fixture.config())
+        .expect_err("hanging official sandbox preflight must time out");
+
+    assert_eq!(error.kind(), AppServerRunErrorKind::FsSandboxHelperTimeout);
+    assert!(started.elapsed() >= Duration::from_mins(1));
+    assert!(started.elapsed() < Duration::from_secs(65));
+    assert!(!fixture.launch_log.exists());
+    let descendant_pid = fs::read_to_string(&fixture.sandbox_preflight_descendant_pid_log)
+        .expect("preflight spawned a descendant before hanging");
+    assert!(descendant_pid.trim().parse::<u32>().is_ok());
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        !fixture.sandbox_preflight_descendant_effect_log.exists(),
+        "preflight descendant survived Job Object close"
+    );
+    assert!(!fixture.sandbox_temp.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn caller_deadline_remains_distinct_from_preflight_watchdog() {
+    let fixture = PinnedProcessFixture::new();
+    fs::write(&fixture.sandbox_preflight_mode, b"hang\n")
+        .expect("select hanging sandbox preflight");
+    let deadline = Instant::now() + Duration::from_secs(1);
+
+    let error = run_codex_app_server_until(&fixture.config(), deadline)
+        .expect_err("the shorter caller deadline must remain authoritative");
+
+    assert_eq!(error.kind(), AppServerRunErrorKind::Timeout);
+    assert!(!fixture.launch_log.exists());
+    assert!(!fixture.sandbox_temp.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn resources_directory_junction_is_rejected_before_child_effect() {
+    let fixture = PinnedProcessFixture::new();
     let resources_directory = fixture.resources.resources_directory();
     fs::remove_dir_all(resources_directory).expect("remove resources before junction fixture");
     let reparse_target = fixture.root.join("reparse-resources-target");
@@ -481,10 +840,124 @@ fn pinned_official_child_uses_managed_root_and_rejects_helper_drift_before_spawn
         .status()
         .expect("run mklink for directory junction");
     assert!(status.success(), "create resources directory junction");
+
     let error = run_codex_app_server(&fixture.config())
         .expect_err("a resources directory reparse point must fail before child spawn");
+
     assert_eq!(error.kind(), AppServerRunErrorKind::InvalidPinnedResources);
     assert!(!fixture.launch_log.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn codex_path_junction_is_rejected_before_child_effect() {
+    let fixture = PinnedProcessFixture::new();
+    let codex_path = fixture.rg.parent().expect("rg has codex-path parent");
+    let junction_target = fixture.root.join("codex-path-target");
+    fs::rename(codex_path, &junction_target).expect("move real codex-path directory");
+    let cmd = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
+        .join("System32")
+        .join("cmd.exe");
+    let status = std::process::Command::new(cmd)
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(codex_path)
+        .arg(&junction_target)
+        .status()
+        .expect("run mklink for codex-path junction");
+    assert!(status.success(), "create codex-path directory junction");
+
+    let error = run_codex_app_server(&fixture.config())
+        .expect_err("a codex-path reparse point must fail before child spawn");
+
+    assert_eq!(error.kind(), AppServerRunErrorKind::InvalidPinnedResources);
+    assert!(!fixture.launch_log.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn sandbox_readiness_must_be_ready_before_thread_start() {
+    let fixture = PinnedProcessFixture::new();
+    fs::write(&fixture.readiness_mode, b"update-required\n")
+        .expect("select update-required readiness");
+
+    let error = run_codex_app_server(&fixture.config())
+        .expect_err("a non-ready sandbox must fail before thread/start");
+
+    assert_eq!(
+        error.kind(),
+        AppServerRunErrorKind::FsSandboxBootstrapFailed
+    );
+    assert!(!fixture.turn_start_log.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn sandbox_temp_must_be_fresh_empty_and_non_reparse_before_spawn() {
+    let stale = PinnedProcessFixture::new();
+    fs::create_dir(&stale.sandbox_temp).expect("create stale sandbox temp");
+    fs::write(stale.sandbox_temp.join("ambient.tmp"), b"ambient")
+        .expect("populate stale sandbox temp");
+    let error = run_codex_app_server(&stale.config())
+        .expect_err("a non-fresh sandbox temp must fail before spawn");
+    assert_eq!(error.kind(), AppServerRunErrorKind::InvalidCodexHome);
+    assert!(!stale.launch_log.exists());
+
+    let reparse = PinnedProcessFixture::new();
+    let target = reparse.root.join("sandbox-temp-target");
+    fs::create_dir(&target).expect("create sandbox temp junction target");
+    let cmd = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
+        .join("System32")
+        .join("cmd.exe");
+    let status = std::process::Command::new(cmd)
+        .args(["/d", "/c", "mklink", "/J"])
+        .arg(&reparse.sandbox_temp)
+        .arg(&target)
+        .status()
+        .expect("run mklink for sandbox temp junction");
+    assert!(status.success(), "create sandbox temp directory junction");
+    let error = run_codex_app_server(&reparse.config())
+        .expect_err("a sandbox temp reparse point must fail before spawn");
+    assert_eq!(error.kind(), AppServerRunErrorKind::InvalidCodexHome);
+    assert!(!reparse.launch_log.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn sandbox_readiness_timeout_reaps_the_owned_tree_before_thread_start() {
+    let fixture = PinnedProcessFixture::new();
+    fs::write(&fixture.readiness_mode, b"hang\n").expect("select hanging readiness");
+    let started = Instant::now();
+
+    let error = run_codex_app_server(&fixture.config())
+        .expect_err("a hanging sandbox readiness request must time out");
+
+    assert_eq!(error.kind(), AppServerRunErrorKind::FsSandboxHelperTimeout);
+    assert!(started.elapsed() >= Duration::from_secs(30));
+    assert!(started.elapsed() < Duration::from_secs(35));
+    assert!(!fixture.turn_start_log.exists());
+    let descendant_pid = fs::read_to_string(&fixture.readiness_descendant_pid_log)
+        .expect("readiness handler spawned a descendant before hanging");
+    assert!(descendant_pid.trim().parse::<u32>().is_ok());
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(
+        !fixture.readiness_descendant_effect_log.exists(),
+        "readiness descendant survived Job Object close"
+    );
+    assert!(!fixture.sandbox_temp.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn caller_deadline_remains_distinct_from_the_readiness_watchdog() {
+    let fixture = PinnedProcessFixture::new();
+    fs::write(&fixture.readiness_mode, b"hang\n").expect("select hanging readiness");
+    let deadline = Instant::now() + Duration::from_secs(1);
+
+    let error = run_codex_app_server_until(&fixture.config(), deadline)
+        .expect_err("the shorter caller deadline must remain authoritative");
+
+    assert_eq!(error.kind(), AppServerRunErrorKind::Timeout);
+    assert!(!fixture.turn_start_log.exists());
 }
 
 #[cfg(windows)]
@@ -589,6 +1062,25 @@ fn rejects_unsafe_isolated_home_config_before_spawn() {
         .expect_err("unsafe config must fail before spawn");
     assert_eq!(error.kind(), AppServerRunErrorKind::InvalidCodexHome);
     assert!(!unsafe_config.effect_log.exists());
+
+    let elevated = ProcessFixture::new(FakeMode::Success);
+    fs::write(
+        elevated.codex_home.join("config.toml"),
+        concat!(
+            "approval_policy = \"never\"\n",
+            "sandbox_mode = \"workspace-write\"\n",
+            "model = \"gpt-5.6-sol\"\n",
+            "model_reasoning_effort = \"low\"\n",
+            "\n",
+            "[windows]\n",
+            "sandbox = \"elevated\"\n",
+        ),
+    )
+    .expect("replace fixture with elevated config");
+    let error = run_codex_app_server(&elevated.config(Duration::from_secs(5)))
+        .expect_err("implicit elevated setup must fail before spawn");
+    assert_eq!(error.kind(), AppServerRunErrorKind::InvalidCodexHome);
+    assert!(!elevated.effect_log.exists());
 }
 
 #[cfg(windows)]
@@ -625,11 +1117,11 @@ fn scripted_malformed_eof_and_wrong_home_fail_closed() {
 fn timeout_sends_interrupt_then_terminates_the_owned_tree() {
     let fixture = ProcessFixture::new(FakeMode::Timeout);
     let started = Instant::now();
-    let error = run_codex_app_server(&fixture.config(Duration::from_secs(2)))
+    let error = run_codex_app_server(&fixture.config(Duration::from_secs(10)))
         .expect_err("timed out turn must not succeed");
 
     assert_eq!(error.kind(), AppServerRunErrorKind::Timeout);
-    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(started.elapsed() < Duration::from_secs(20));
     let interrupt = fs::read_to_string(&fixture.interrupt_log)
         .expect("scripted child observed the interrupt request");
     assert!(
@@ -711,7 +1203,7 @@ Start-Sleep -Seconds 60
         }
         FakeMode::Eof => "exit 0\n".to_owned(),
         FakeMode::Timeout => format!(
-            "$interrupt = [Console]::In.ReadLine()\n[IO.File]::WriteAllText('{}', $interrupt + [Environment]::NewLine)\n[Console]::Out.WriteLine('{{\"id\":3,\"result\":{{}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"turn/completed\",\"params\":{{\"threadId\":\"thread-scripted\",\"turn\":{{\"id\":\"turn-scripted\",\"items\":[],\"status\":\"interrupted\",\"error\":null}}}}}}')\nStart-Sleep -Seconds 60\n",
+            "$interrupt = [Console]::In.ReadLine()\n[IO.File]::WriteAllText('{}', $interrupt + [Environment]::NewLine)\n[Console]::Out.WriteLine('{{\"id\":4,\"result\":{{}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"turn/completed\",\"params\":{{\"threadId\":\"thread-scripted\",\"turn\":{{\"id\":\"turn-scripted\",\"items\":[],\"status\":\"interrupted\",\"error\":null}}}}}}')\nStart-Sleep -Seconds 60\n",
             quote(interrupt_log)
         ),
         FakeMode::Premature => concat!(

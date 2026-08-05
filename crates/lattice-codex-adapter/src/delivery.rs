@@ -349,7 +349,9 @@ fn map_process_error(error: AppServerRunError) -> DeliveryPortError {
         | AppServerRunErrorKind::PinnedResourcePathInvalid
         | AppServerRunErrorKind::LauncherReadFailed
         | AppServerRunErrorKind::LauncherDigestMismatch
-        | AppServerRunErrorKind::SpawnFailed => (
+        | AppServerRunErrorKind::SpawnFailed
+        | AppServerRunErrorKind::FsSandboxBootstrapFailed
+        | AppServerRunErrorKind::FsSandboxHelperTimeout => (
             process_error_kind(error.kind()),
             DeliveryFailureCertainty::Known,
         ),
@@ -400,7 +402,9 @@ const fn process_error_kind(kind: AppServerRunErrorKind) -> PortErrorKind {
         AppServerRunErrorKind::CodexHomeOwnershipMissing
         | AppServerRunErrorKind::CodexHomeOverlap
         | AppServerRunErrorKind::AmbientCodexHomeDenied => PortErrorKind::Denied,
-        AppServerRunErrorKind::Timeout => PortErrorKind::Timeout,
+        AppServerRunErrorKind::FsSandboxHelperTimeout | AppServerRunErrorKind::Timeout => {
+            PortErrorKind::Timeout
+        }
         AppServerRunErrorKind::AmbiguousEof
         | AppServerRunErrorKind::ChildCleanupFailed
         | AppServerRunErrorKind::JobObjectFailed
@@ -409,6 +413,7 @@ const fn process_error_kind(kind: AppServerRunErrorKind) -> PortErrorKind {
         AppServerRunErrorKind::LauncherReadFailed
         | AppServerRunErrorKind::LauncherDigestMismatch
         | AppServerRunErrorKind::SpawnFailed
+        | AppServerRunErrorKind::FsSandboxBootstrapFailed
         | AppServerRunErrorKind::PipeUnavailable
         | AppServerRunErrorKind::WriteFailed
         | AppServerRunErrorKind::StdoutFailed => PortErrorKind::Unavailable,
@@ -462,6 +467,8 @@ const fn process_error_code(kind: AppServerRunErrorKind) -> &'static str {
             "CODEX_APP_SERVER_TOOL_EXECUTION_INCOMPLETE"
         }
         AppServerRunErrorKind::CodexHomeMismatch => "CODEX_APP_SERVER_CODEX_HOME_MISMATCH",
+        AppServerRunErrorKind::FsSandboxBootstrapFailed => "CODEX_FS_SANDBOX_BOOTSTRAP_FAILED",
+        AppServerRunErrorKind::FsSandboxHelperTimeout => "CODEX_FS_SANDBOX_HELPER_TIMEOUT",
         AppServerRunErrorKind::Timeout => "CODEX_APP_SERVER_TIMEOUT",
         AppServerRunErrorKind::AmbiguousEof => "CODEX_APP_SERVER_AMBIGUOUS_EOF",
         AppServerRunErrorKind::ChildCleanupFailed => "CODEX_APP_SERVER_CHILD_CLEANUP_FAILED",
@@ -495,8 +502,10 @@ fn ambiguous(kind: PortErrorKind, code: impl Into<String>) -> DeliveryPortError 
 mod tests {
     use lattice_ports::{DeliveryFailureCertainty, PortErrorKind};
 
-    use super::map_identity_error;
-    use crate::{CodexIdentityError, CodexIdentityErrorKind};
+    use super::{map_identity_error, map_process_error};
+    use crate::{
+        AppServerRunError, AppServerRunErrorKind, CodexIdentityError, CodexIdentityErrorKind,
+    };
 
     #[test]
     fn identity_resource_change_maps_to_ambiguous_delivery_failure() {
@@ -507,5 +516,27 @@ mod tests {
         assert_eq!(error.kind(), PortErrorKind::Ambiguous);
         assert_eq!(error.certainty(), DeliveryFailureCertainty::Ambiguous);
         assert_eq!(error.code(), "CODEX_IDENTITY_PINNED_RESOURCES_CHANGED");
+    }
+
+    #[test]
+    fn sandbox_readiness_timeout_is_a_known_bounded_pre_model_failure() {
+        let error = map_process_error(AppServerRunError::new(
+            AppServerRunErrorKind::FsSandboxHelperTimeout,
+        ));
+
+        assert_eq!(error.kind(), PortErrorKind::Timeout);
+        assert_eq!(error.certainty(), DeliveryFailureCertainty::Known);
+        assert_eq!(error.code(), "CODEX_FS_SANDBOX_HELPER_TIMEOUT");
+    }
+
+    #[test]
+    fn sandbox_not_ready_is_a_known_pre_model_failure() {
+        let error = map_process_error(AppServerRunError::new(
+            AppServerRunErrorKind::FsSandboxBootstrapFailed,
+        ));
+
+        assert_eq!(error.kind(), PortErrorKind::Unavailable);
+        assert_eq!(error.certainty(), DeliveryFailureCertainty::Known);
+        assert_eq!(error.code(), "CODEX_FS_SANDBOX_BOOTSTRAP_FAILED");
     }
 }

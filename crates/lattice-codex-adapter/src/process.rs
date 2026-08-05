@@ -28,8 +28,14 @@ use crate::{
 
 const MAX_STDOUT_LINE_BYTES: usize = 8 * 1024 * 1024;
 const CHILD_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+const FS_SANDBOX_PREFLIGHT_TIMEOUT: Duration = Duration::from_mins(1);
+#[cfg(windows)]
+const FS_SANDBOX_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+const FS_SANDBOX_TEMP_DIRECTORY_NAME: &str = ".lattice-fs-sandbox-temp-v1";
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
-const INTERRUPT_REQUEST_ID: i64 = 3;
+const WINDOWS_SANDBOX_READINESS_REQUEST_ID: i64 = 3;
+const INTERRUPT_REQUEST_ID: i64 = 4;
 const PROTOCOL_QUIET_WINDOW: Duration = Duration::from_millis(10);
 /// Marker required before a directory can be admitted as LATTICE-owned Codex state.
 pub const CODEX_HOME_OWNERSHIP_MARKER_NAME: &str = ".lattice-codex-home-v1";
@@ -41,17 +47,123 @@ model = \"gpt-5.6-sol\"\n\
 model_reasoning_effort = \"low\"\n\
 \n\
 [windows]\n\
-sandbox = \"elevated\"\n";
+sandbox = \"unelevated\"\n";
 
 /// Exact managed package and helper identities admitted for one official Codex child.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PinnedCodexResources {
     managed_package_root: PathBuf,
     resources_directory: PathBuf,
-    sandbox_setup_sha256: String,
-    command_runner_sha256: String,
-    package_manifest_sha256: String,
-    managed_package_manifest_sha256: String,
+    digests: PinnedCodexResourceDigests,
+}
+
+/// Exact SHA-256 identities for every executable and manifest in one Codex bundle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PinnedCodexResourceDigests {
+    sandbox_setup: String,
+    command_runner: String,
+    code_mode_host: String,
+    rg: String,
+    package_manifest: String,
+    managed_package_manifest: String,
+}
+
+impl PinnedCodexResourceDigests {
+    /// Binds all admitted bundle resources to canonical lowercase SHA-256 text.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any missing, uppercase, or malformed digest.
+    pub fn new(
+        sandbox_setup_sha256: impl Into<String>,
+        command_runner_sha256: impl Into<String>,
+        code_mode_host_sha256: impl Into<String>,
+        rg_sha256: impl Into<String>,
+        package_manifest_sha256: impl Into<String>,
+        managed_package_manifest_sha256: impl Into<String>,
+    ) -> Result<Self, AppServerRunError> {
+        let digests = Self {
+            sandbox_setup: sandbox_setup_sha256.into(),
+            command_runner: command_runner_sha256.into(),
+            code_mode_host: code_mode_host_sha256.into(),
+            rg: rg_sha256.into(),
+            package_manifest: package_manifest_sha256.into(),
+            managed_package_manifest: managed_package_manifest_sha256.into(),
+        };
+        if [
+            digests.sandbox_setup.as_str(),
+            digests.command_runner.as_str(),
+            digests.code_mode_host.as_str(),
+            digests.rg.as_str(),
+            digests.package_manifest.as_str(),
+            digests.managed_package_manifest.as_str(),
+        ]
+        .into_iter()
+        .any(|digest| !is_lowercase_sha256(digest))
+        {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::InvalidPinnedResources,
+            ));
+        }
+        Ok(digests)
+    }
+}
+
+pub(crate) struct OwnedSandboxTemp {
+    path: PathBuf,
+}
+
+impl OwnedSandboxTemp {
+    pub(crate) fn prepare(codex_home: &Path) -> Result<Self, AppServerRunError> {
+        let home_metadata = std::fs::symlink_metadata(codex_home)
+            .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::InvalidCodexHome))?;
+        if !home_metadata.file_type().is_dir() || metadata_is_reparse(&home_metadata) {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::InvalidCodexHome,
+            ));
+        }
+        let path = codex_home.join(FS_SANDBOX_TEMP_DIRECTORY_NAME);
+        std::fs::create_dir(&path)
+            .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::InvalidCodexHome))?;
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::InvalidCodexHome))?;
+        let is_empty = std::fs::read_dir(&path)
+            .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::InvalidCodexHome))?
+            .next()
+            .is_none();
+        if !metadata.file_type().is_dir() || metadata_is_reparse(&metadata) || !is_empty {
+            let _ = std::fs::remove_dir(&path);
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::InvalidCodexHome,
+            ));
+        }
+        Ok(Self { path })
+    }
+
+    pub(crate) fn configure(&self, command: &mut Command) {
+        command
+            .env("TMP", &self.path)
+            .env("TEMP", &self.path)
+            .env("TMPDIR", &self.path);
+    }
+
+    pub(crate) fn cleanup(self) -> Result<(), AppServerRunError> {
+        let metadata = std::fs::symlink_metadata(&self.path)
+            .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::ChildCleanupFailed))?;
+        if !metadata.file_type().is_dir() || metadata_is_reparse(&metadata) {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::ChildCleanupFailed,
+            ));
+        }
+        std::fs::remove_dir_all(&self.path)
+            .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::ChildCleanupFailed))?;
+        if self.path.exists() {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::ChildCleanupFailed,
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl PinnedCodexResources {
@@ -63,22 +175,9 @@ impl PinnedCodexResources {
     pub fn new(
         managed_package_root: PathBuf,
         resources_directory: PathBuf,
-        sandbox_setup_sha256: impl Into<String>,
-        command_runner_sha256: impl Into<String>,
-        package_manifest_sha256: impl Into<String>,
-        managed_package_manifest_sha256: impl Into<String>,
+        digests: PinnedCodexResourceDigests,
     ) -> Result<Self, AppServerRunError> {
-        let sandbox_setup_sha256 = sandbox_setup_sha256.into();
-        let command_runner_sha256 = command_runner_sha256.into();
-        let package_manifest_sha256 = package_manifest_sha256.into();
-        let managed_package_manifest_sha256 = managed_package_manifest_sha256.into();
-        if !managed_package_root.is_absolute()
-            || !resources_directory.is_absolute()
-            || !is_lowercase_sha256(&sandbox_setup_sha256)
-            || !is_lowercase_sha256(&command_runner_sha256)
-            || !is_lowercase_sha256(&package_manifest_sha256)
-            || !is_lowercase_sha256(&managed_package_manifest_sha256)
-        {
+        if !managed_package_root.is_absolute() || !resources_directory.is_absolute() {
             return Err(AppServerRunError::new(
                 AppServerRunErrorKind::InvalidPinnedResources,
             ));
@@ -86,10 +185,7 @@ impl PinnedCodexResources {
         Ok(Self {
             managed_package_root,
             resources_directory,
-            sandbox_setup_sha256,
-            command_runner_sha256,
-            package_manifest_sha256,
-            managed_package_manifest_sha256,
+            digests,
         })
     }
 
@@ -236,6 +332,8 @@ pub enum AppServerRunErrorKind {
     ProtocolFailed,
     IncompleteToolExecution,
     CodexHomeMismatch,
+    FsSandboxBootstrapFailed,
+    FsSandboxHelperTimeout,
     Timeout,
     AmbiguousEof,
     ChildCleanupFailed,
@@ -249,7 +347,7 @@ pub struct AppServerRunError {
 }
 
 impl AppServerRunError {
-    const fn new(kind: AppServerRunErrorKind) -> Self {
+    pub(crate) const fn new(kind: AppServerRunErrorKind) -> Self {
         Self { kind }
     }
 
@@ -341,6 +439,32 @@ pub fn run_codex_app_server_until(
         ));
     }
     ensure_before_deadline(deadline)?;
+    let sandbox_temp = config
+        .pinned_resources()
+        .map(|_| OwnedSandboxTemp::prepare(config.codex_home()))
+        .transpose()?;
+    let result =
+        run_app_server_with_sandbox_temp(config, sandbox_temp.as_ref(), &before_spawn, deadline);
+    let cleanup = cleanup_sandbox_temp(sandbox_temp);
+    cleanup?;
+    result
+}
+
+fn run_app_server_with_sandbox_temp(
+    config: &AppServerRunConfig,
+    sandbox_temp: Option<&OwnedSandboxTemp>,
+    before_spawn: &str,
+    deadline: Instant,
+) -> Result<AppServerRunEvidence, AppServerRunError> {
+    #[cfg(windows)]
+    let preflight = sandbox_temp.map_or(Ok(()), |sandbox_temp| {
+        run_windows_sandbox_preflight(config, sandbox_temp, before_spawn, deadline)
+    });
+    #[cfg(windows)]
+    preflight?;
+    ensure_before_deadline(deadline)?;
+    verify_app_server_identity(config, before_spawn)?;
+    ensure_before_deadline(deadline)?;
     let mut command = Command::new(config.launcher());
     crate::scrub_protected_environment(&mut command);
     configure_pinned_child_environment(&mut command, config.pinned_resources())?;
@@ -352,48 +476,144 @@ pub fn run_codex_app_server_until(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     ensure_before_deadline(deadline)?;
-    let mut child = command
-        .spawn()
-        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::SpawnFailed))?;
+    if let Some(sandbox_temp) = sandbox_temp {
+        sandbox_temp.configure(&mut command);
+    }
+    let Ok(mut child) = command.spawn() else {
+        return Err(AppServerRunError::new(AppServerRunErrorKind::SpawnFailed));
+    };
     let Ok(process_tree) = OwnedProcessTree::attach(&child) else {
         let _ = terminate_uncontained_process_tree_bounded(&mut child);
         return Err(AppServerRunError::new(
             AppServerRunErrorKind::JobObjectFailed,
         ));
     };
-    if let Err(error) = ensure_before_deadline(deadline) {
-        stop_owned_child(&mut child, process_tree)?;
-        return Err(error);
-    }
+    let result = ensure_before_deadline(deadline)
+        .and_then(|()| verify_app_server_identity(config, before_spawn))
+        .and_then(|()| ensure_before_deadline(deadline))
+        .and_then(|()| drive_child(&mut child, config, deadline));
+    let cleanup = stop_owned_child(&mut child, process_tree);
+    cleanup?;
+    result
+}
 
-    let after_spawn = match launcher_sha256(config.launcher()) {
-        Ok(digest) => digest,
-        Err(error) => {
-            stop_owned_child(&mut child, process_tree)?;
-            return Err(error);
-        }
-    };
+fn verify_app_server_identity(
+    config: &AppServerRunConfig,
+    before_spawn: &str,
+) -> Result<(), AppServerRunError> {
+    let after_spawn = launcher_sha256(config.launcher())?;
     if after_spawn != before_spawn {
-        stop_owned_child(&mut child, process_tree)?;
         return Err(AppServerRunError::new(
             AppServerRunErrorKind::LauncherChanged,
         ));
     }
-    if validate_pinned_resources(config).is_err() {
-        stop_owned_child(&mut child, process_tree)?;
-        return Err(AppServerRunError::new(
-            AppServerRunErrorKind::PinnedResourcesChanged,
-        ));
-    }
-    if let Err(error) = ensure_before_deadline(deadline) {
-        stop_owned_child(&mut child, process_tree)?;
-        return Err(error);
-    }
+    validate_pinned_resources(config)
+        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::PinnedResourcesChanged))
+}
 
-    let result = drive_child(&mut child, config, deadline);
+#[cfg(windows)]
+fn run_windows_sandbox_preflight(
+    config: &AppServerRunConfig,
+    sandbox_temp: &OwnedSandboxTemp,
+    expected_launcher_digest: &str,
+    caller_deadline: Instant,
+) -> Result<(), AppServerRunError> {
+    let bootstrap_deadline = Instant::now()
+        .checked_add(FS_SANDBOX_PREFLIGHT_TIMEOUT)
+        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::InvalidTimeout))?;
+    ensure_before_sandbox_deadline(caller_deadline, bootstrap_deadline)?;
+    validate_pinned_resources(config)?;
+    let mut command = Command::new(config.launcher());
+    crate::scrub_protected_environment(&mut command);
+    configure_pinned_child_environment(&mut command, config.pinned_resources())?;
+    sandbox_temp.configure(&mut command);
+    command
+        .args(["sandbox", "-P", ":workspace", "-C"])
+        .arg(config.working_directory())
+        .args(["cmd.exe", "/d", "/c", "exit 0"])
+        .current_dir(config.working_directory())
+        .env("CODEX_HOME", config.codex_home())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    ensure_before_sandbox_deadline(caller_deadline, bootstrap_deadline)?;
+    let Ok(mut child) = command.spawn() else {
+        return Err(AppServerRunError::new(
+            AppServerRunErrorKind::FsSandboxBootstrapFailed,
+        ));
+    };
+    let Ok(process_tree) = OwnedProcessTree::attach(&child) else {
+        let _ = terminate_uncontained_process_tree_bounded(&mut child);
+        return Err(AppServerRunError::new(
+            AppServerRunErrorKind::JobObjectFailed,
+        ));
+    };
+    let post_attach = ensure_before_sandbox_deadline(caller_deadline, bootstrap_deadline)
+        .and_then(|()| verify_preflight_identity(config, expected_launcher_digest))
+        .and_then(|()| ensure_before_sandbox_deadline(caller_deadline, bootstrap_deadline));
+    let result = post_attach
+        .and_then(|()| wait_for_sandbox_preflight(&mut child, caller_deadline, bootstrap_deadline));
     let cleanup = stop_owned_child(&mut child, process_tree);
     cleanup?;
     result
+}
+
+#[cfg(windows)]
+fn verify_preflight_identity(
+    config: &AppServerRunConfig,
+    expected_launcher_digest: &str,
+) -> Result<(), AppServerRunError> {
+    let after_spawn = launcher_sha256(config.launcher())?;
+    if after_spawn != expected_launcher_digest {
+        return Err(AppServerRunError::new(
+            AppServerRunErrorKind::LauncherChanged,
+        ));
+    }
+    validate_pinned_resources(config)
+        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::PinnedResourcesChanged))
+}
+
+#[cfg(windows)]
+fn wait_for_sandbox_preflight(
+    child: &mut Child,
+    caller_deadline: Instant,
+    bootstrap_deadline: Instant,
+) -> Result<(), AppServerRunError> {
+    let deadline = bootstrap_deadline.min(caller_deadline);
+    loop {
+        ensure_before_sandbox_deadline(caller_deadline, bootstrap_deadline)?;
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) | Err(_) => {
+                return Err(AppServerRunError::new(
+                    AppServerRunErrorKind::FsSandboxBootstrapFailed,
+                ));
+            }
+            Ok(None) => {}
+        }
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| readiness_timeout(caller_deadline, bootstrap_deadline))?;
+        std::thread::sleep(Duration::from_millis(10).min(remaining));
+    }
+}
+
+#[cfg(windows)]
+fn ensure_before_sandbox_deadline(
+    caller_deadline: Instant,
+    bootstrap_deadline: Instant,
+) -> Result<(), AppServerRunError> {
+    if Instant::now() < caller_deadline.min(bootstrap_deadline) {
+        Ok(())
+    } else {
+        Err(readiness_timeout(caller_deadline, bootstrap_deadline))
+    }
+}
+
+pub(crate) fn cleanup_sandbox_temp(
+    sandbox_temp: Option<OwnedSandboxTemp>,
+) -> Result<(), AppServerRunError> {
+    sandbox_temp.map_or(Ok(()), OwnedSandboxTemp::cleanup)
 }
 
 #[cfg(windows)]
@@ -459,6 +679,17 @@ fn drive_child(
 
     ensure_before_deadline(deadline)?;
     send_json(&mut stdin, &protocol.initialized_notification())?;
+    #[cfg(windows)]
+    if config.pinned_resources().is_some() {
+        send_json(
+            &mut stdin,
+            &json!({
+                "method": "windowsSandbox/readiness",
+                "id": WINDOWS_SANDBOX_READINESS_REQUEST_ID
+            }),
+        )?;
+        receive_windows_sandbox_readiness(&receiver, deadline, &mut session)?;
+    }
     session
         .mark_request_sent(SessionRequest::ThreadStart)
         .map_err(|error| map_session_error(&error))?;
@@ -499,6 +730,74 @@ fn drive_child(
     ensure_before_deadline(deadline)?;
 
     build_run_evidence(&session, initialize, thread_id)
+}
+
+#[cfg(windows)]
+fn receive_windows_sandbox_readiness(
+    receiver: &Receiver<ReaderEvent>,
+    caller_deadline: Instant,
+    session: &mut AppServerSession,
+) -> Result<(), AppServerRunError> {
+    let bootstrap_deadline = Instant::now()
+        .checked_add(FS_SANDBOX_READINESS_TIMEOUT)
+        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::InvalidTimeout))?;
+    let deadline = bootstrap_deadline.min(caller_deadline);
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(readiness_timeout(caller_deadline, bootstrap_deadline));
+        };
+        let event = match receiver.recv_timeout(remaining) {
+            Ok(event) => event,
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(readiness_timeout(caller_deadline, bootstrap_deadline));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(AppServerRunError::new(AppServerRunErrorKind::AmbiguousEof));
+            }
+        };
+        match event {
+            ReaderEvent::Line(line) => {
+                let message: Value = serde_json::from_str(&line)
+                    .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::ProtocolFailed))?;
+                if message.get("id").and_then(Value::as_i64)
+                    == Some(WINDOWS_SANDBOX_READINESS_REQUEST_ID)
+                {
+                    if message.pointer("/result/status").and_then(Value::as_str) == Some("ready")
+                        && message.get("error").is_none()
+                    {
+                        return Ok(());
+                    }
+                    return Err(AppServerRunError::new(
+                        AppServerRunErrorKind::FsSandboxBootstrapFailed,
+                    ));
+                }
+                session
+                    .ingest(message)
+                    .map_err(|error| map_session_error(&error))?;
+            }
+            ReaderEvent::Eof => {
+                return Err(AppServerRunError::new(AppServerRunErrorKind::AmbiguousEof));
+            }
+            ReaderEvent::Failed => {
+                return Err(AppServerRunError::new(AppServerRunErrorKind::StdoutFailed));
+            }
+            ReaderEvent::LineTooLarge => {
+                return Err(AppServerRunError::new(
+                    AppServerRunErrorKind::StdoutLineTooLarge,
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn readiness_timeout(caller_deadline: Instant, bootstrap_deadline: Instant) -> AppServerRunError {
+    let kind = if caller_deadline <= bootstrap_deadline {
+        AppServerRunErrorKind::Timeout
+    } else {
+        AppServerRunErrorKind::FsSandboxHelperTimeout
+    };
+    AppServerRunError::new(kind)
 }
 
 fn start_readers(
@@ -855,24 +1154,46 @@ pub(crate) fn validate_pinned_resources_for_launcher(
             AppServerRunErrorKind::InvalidPinnedResources,
         ));
     }
-    for (path, expected_sha256) in [
+    let codex_path_directory = bundle_root.join("codex-path");
+    let codex_path_metadata = std::fs::symlink_metadata(&codex_path_directory)
+        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::PinnedResourcesMissing))?;
+    if !codex_path_metadata.file_type().is_dir() || metadata_is_reparse(&codex_path_metadata) {
+        return Err(AppServerRunError::new(
+            AppServerRunErrorKind::InvalidPinnedResources,
+        ));
+    }
+    validate_pinned_resource_files([
         (
             resources_directory.join("codex-windows-sandbox-setup.exe"),
-            resources.sandbox_setup_sha256.as_str(),
+            resources.digests.sandbox_setup.as_str(),
         ),
         (
             resources_directory.join("codex-command-runner.exe"),
-            resources.command_runner_sha256.as_str(),
+            resources.digests.command_runner.as_str(),
+        ),
+        (
+            launcher_parent.join("codex-code-mode-host.exe"),
+            resources.digests.code_mode_host.as_str(),
+        ),
+        (
+            codex_path_directory.join("rg.exe"),
+            resources.digests.rg.as_str(),
         ),
         (
             bundle_root.join("codex-package.json"),
-            resources.package_manifest_sha256.as_str(),
+            resources.digests.package_manifest.as_str(),
         ),
         (
             managed_root.join("package.json"),
-            resources.managed_package_manifest_sha256.as_str(),
+            resources.digests.managed_package_manifest.as_str(),
         ),
-    ] {
+    ])
+}
+
+fn validate_pinned_resource_files(
+    resources: [(PathBuf, &str); 6],
+) -> Result<(), AppServerRunError> {
+    for (path, expected_sha256) in resources {
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::PinnedResourcesMissing))?;
         if !metadata.file_type().is_file() || metadata_is_reparse(&metadata) {
@@ -1141,7 +1462,10 @@ mod resource_environment_tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use super::{PinnedCodexResources, configure_pinned_child_environment, pinned_child_path};
+    use super::{
+        PinnedCodexResourceDigests, PinnedCodexResources, configure_pinned_child_environment,
+        pinned_child_path,
+    };
 
     #[test]
     fn pinned_package_root_and_resources_replace_hostile_codex_resource_paths() {
@@ -1152,10 +1476,15 @@ mod resource_environment_tests {
         let resources = PinnedCodexResources::new(
             managed_root.clone(),
             resources_directory.clone(),
-            "a".repeat(64),
-            "b".repeat(64),
-            "c".repeat(64),
-            "d".repeat(64),
+            PinnedCodexResourceDigests::new(
+                "a".repeat(64),
+                "b".repeat(64),
+                "c".repeat(64),
+                "d".repeat(64),
+                "e".repeat(64),
+                "f".repeat(64),
+            )
+            .expect("valid digest bundle"),
         )
         .expect("absolute pinned resource binding");
         let ambient = std::env::join_paths([
