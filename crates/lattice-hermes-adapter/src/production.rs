@@ -2,11 +2,12 @@
 
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -16,6 +17,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::broker::CodexBrokerReceipt;
+#[cfg(test)]
+use crate::codex_proxy::ProductionCodexProxyLifecycle;
+use crate::codex_proxy::{ProductionCodexProxyDuplex, ProductionCodexProxyProvider};
 use crate::containment::{
     HermesContainmentFrameLimits, HermesWslContainmentConfig, OUTER_RUNNER_SOURCE,
     PRIVATE_RUNNER_SOURCE, WSL_DISTRO, minimal_wsl_environment, parse_containment_frame,
@@ -35,7 +39,684 @@ const CONFIG_SCHEMA: &str = "lattice.hermes.production-config.v1";
 const BWRAP_SHA256: &str = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b";
 const MAX_STARTUP_BYTES: usize = 128 * 1024;
 const MAX_RUNNER_TIMEOUT: Duration = Duration::from_mins(5);
+const CODEX_PROXY_MAGIC: &[u8] = b"LATTICE_HERMES_CODEX_PROXY_V1\n";
+const CODEX_PROXY_BINDING_DOMAIN: &[u8] = b"LATTICE_HERMES_CODEX_PROXY_V1";
+const CODEX_PROXY_STREAM_ID: u32 = 1;
+const CODEX_PROXY_HEADER_BYTES: usize = 41;
+const MAX_CODEX_PROXY_DATA_BYTES: usize = 65_536;
+const MAX_CODEX_PROXY_BODY_BYTES: usize = CODEX_PROXY_HEADER_BYTES + MAX_CODEX_PROXY_DATA_BYTES;
+const MAX_CODEX_PROXY_WIRE_BYTES: usize = CODEX_PROXY_MAGIC.len() + 4 + MAX_CODEX_PROXY_BODY_BYTES;
+const MAX_CODEX_PROXY_BUFFER_BYTES: usize = MAX_CODEX_PROXY_WIRE_BYTES + 8192;
 static RUNNER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CodexProxyHostEvent {
+    Open,
+    Data(Vec<u8>),
+    Close,
+    Error(u16),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodexProxyFailureEvidence {
+    byte_count: u64,
+    sha256: String,
+}
+
+impl CodexProxyFailureEvidence {
+    #[must_use]
+    pub const fn byte_count(&self) -> u64 {
+        self.byte_count
+    }
+
+    #[must_use]
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
+
+pub(crate) struct CodexProxyHostSession {
+    binding: [u8; 32],
+    deadline: Instant,
+    expected_sequence: u32,
+    outbound_sequence: u32,
+    inbound: CodexProxyInboundState,
+    outbound: CodexProxyOutboundState,
+    failure_evidence: Option<CodexProxyFailureEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CodexProxyInboundState {
+    AwaitOpen,
+    Open,
+    Closed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CodexProxyOutboundState {
+    AwaitOpenAck,
+    Open,
+    Closed,
+}
+
+impl CodexProxyHostSession {
+    pub(crate) fn new(
+        nonce: &str,
+        broker_receipt: &ContentDigest,
+        deadline: Instant,
+    ) -> HermesAdapterResult<Self> {
+        if deadline <= Instant::now() {
+            return Err(error(
+                HermesAdapterErrorKind::Timeout,
+                "HERMES_CODEX_PROXY_DEADLINE_EXCEEDED",
+            ));
+        }
+        let nonce = decode_hex(nonce)
+            .map_err(|_| malformed("HERMES_CODEX_PROXY_BINDING_INPUT_REJECTED"))?;
+        let broker = decode_hex(broker_receipt.as_str())
+            .map_err(|_| malformed("HERMES_CODEX_PROXY_BINDING_INPUT_REJECTED"))?;
+        let digest = digest_join(&[&nonce, &broker, CODEX_PROXY_BINDING_DOMAIN]);
+        let binding: [u8; 32] = decode_hex(&digest)
+            .map_err(|_| malformed("HERMES_CODEX_PROXY_BINDING_INPUT_REJECTED"))?
+            .try_into()
+            .map_err(|_| malformed("HERMES_CODEX_PROXY_BINDING_INPUT_REJECTED"))?;
+        Ok(Self {
+            binding,
+            deadline,
+            expected_sequence: 0,
+            outbound_sequence: 0,
+            inbound: CodexProxyInboundState::AwaitOpen,
+            outbound: CodexProxyOutboundState::AwaitOpenAck,
+            failure_evidence: None,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn binding(&self) -> [u8; 32] {
+        self.binding
+    }
+
+    pub(crate) fn failure_evidence(&self) -> Option<&CodexProxyFailureEvidence> {
+        self.failure_evidence.as_ref()
+    }
+
+    pub(crate) fn encode_open_ack(&mut self) -> HermesAdapterResult<Vec<u8>> {
+        if self.inbound != CodexProxyInboundState::Open
+            || self.outbound != CodexProxyOutboundState::AwaitOpenAck
+        {
+            return Err(malformed("HERMES_CODEX_PROXY_STATE_REJECTED"));
+        }
+        let frame = self.encode_outbound(1, &[])?;
+        self.outbound = CodexProxyOutboundState::Open;
+        Ok(frame)
+    }
+
+    pub(crate) fn encode_data(&mut self, payload: &[u8]) -> HermesAdapterResult<Vec<u8>> {
+        if self.outbound != CodexProxyOutboundState::Open
+            || payload.is_empty()
+            || payload.len() > MAX_CODEX_PROXY_DATA_BYTES
+        {
+            return Err(malformed("HERMES_CODEX_PROXY_STATE_REJECTED"));
+        }
+        self.encode_outbound(2, payload)
+    }
+
+    pub(crate) fn encode_close(&mut self) -> HermesAdapterResult<Vec<u8>> {
+        if self.outbound != CodexProxyOutboundState::Open {
+            return Err(malformed("HERMES_CODEX_PROXY_STATE_REJECTED"));
+        }
+        let frame = self.encode_outbound(3, &[])?;
+        self.outbound = CodexProxyOutboundState::Closed;
+        Ok(frame)
+    }
+
+    pub(crate) fn accept(&mut self, frame: &[u8]) -> HermesAdapterResult<CodexProxyHostEvent> {
+        let result = self.accept_inner(frame);
+        if result.is_err() {
+            self.record_failure(frame);
+        }
+        result
+    }
+
+    fn record_failure(&mut self, bytes: &[u8]) {
+        self.failure_evidence = Some(CodexProxyFailureEvidence {
+            byte_count: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            sha256: encode_sha256(&Sha256::digest(bytes)),
+        });
+    }
+
+    fn accept_inner(&mut self, frame: &[u8]) -> HermesAdapterResult<CodexProxyHostEvent> {
+        if Instant::now() >= self.deadline {
+            return Err(error(
+                HermesAdapterErrorKind::Timeout,
+                "HERMES_CODEX_PROXY_DEADLINE_EXCEEDED",
+            ));
+        }
+        let Some(encoded) = frame.strip_prefix(CODEX_PROXY_MAGIC) else {
+            return Err(malformed("HERMES_CODEX_PROXY_MAGIC_REJECTED"));
+        };
+        let length_bytes: [u8; 4] = encoded
+            .get(..4)
+            .and_then(|value| value.try_into().ok())
+            .ok_or_else(|| malformed("HERMES_CODEX_PROXY_SIZE_REJECTED"))?;
+        let body_length = usize::try_from(u32::from_be_bytes(length_bytes))
+            .map_err(|_| malformed("HERMES_CODEX_PROXY_SIZE_REJECTED"))?;
+        let body = encoded
+            .get(4..)
+            .filter(|body| body.len() == body_length)
+            .ok_or_else(|| malformed("HERMES_CODEX_PROXY_SIZE_REJECTED"))?;
+        if !(CODEX_PROXY_HEADER_BYTES..=MAX_CODEX_PROXY_BODY_BYTES).contains(&body.len()) {
+            return Err(malformed("HERMES_CODEX_PROXY_SIZE_REJECTED"));
+        }
+        let kind = body[0];
+        let stream_id = u32::from_be_bytes(
+            body[1..5]
+                .try_into()
+                .map_err(|_| malformed("HERMES_CODEX_PROXY_SIZE_REJECTED"))?,
+        );
+        let sequence = u32::from_be_bytes(
+            body[5..9]
+                .try_into()
+                .map_err(|_| malformed("HERMES_CODEX_PROXY_SIZE_REJECTED"))?,
+        );
+        if stream_id != CODEX_PROXY_STREAM_ID {
+            return Err(malformed("HERMES_CODEX_PROXY_STREAM_REJECTED"));
+        }
+        if !constant_time_equal(&body[9..41], &self.binding) {
+            return Err(cross_binding("HERMES_CODEX_PROXY_BINDING_REJECTED"));
+        }
+        if sequence != self.expected_sequence {
+            return Err(cross_binding("HERMES_CODEX_PROXY_SEQUENCE_REJECTED"));
+        }
+        let payload = &body[CODEX_PROXY_HEADER_BYTES..];
+        let event = match kind {
+            1 if payload.is_empty()
+                && self.inbound == CodexProxyInboundState::AwaitOpen
+                && self.outbound == CodexProxyOutboundState::AwaitOpenAck =>
+            {
+                self.inbound = CodexProxyInboundState::Open;
+                CodexProxyHostEvent::Open
+            }
+            2 if !payload.is_empty()
+                && payload.len() <= MAX_CODEX_PROXY_DATA_BYTES
+                && self.inbound == CodexProxyInboundState::Open
+                && self.outbound == CodexProxyOutboundState::Open =>
+            {
+                CodexProxyHostEvent::Data(payload.to_vec())
+            }
+            3 if payload.is_empty()
+                && self.inbound == CodexProxyInboundState::Open
+                && self.outbound == CodexProxyOutboundState::Open =>
+            {
+                self.inbound = CodexProxyInboundState::Closed;
+                CodexProxyHostEvent::Close
+            }
+            4 if payload.len() == 2 && self.inbound == CodexProxyInboundState::Open => {
+                self.inbound = CodexProxyInboundState::Closed;
+                CodexProxyHostEvent::Error(u16::from_be_bytes([payload[0], payload[1]]))
+            }
+            1..=4 => return Err(malformed("HERMES_CODEX_PROXY_STATE_REJECTED")),
+            _ => return Err(malformed("HERMES_CODEX_PROXY_KIND_REJECTED")),
+        };
+        self.expected_sequence = self
+            .expected_sequence
+            .checked_add(1)
+            .ok_or_else(|| malformed("HERMES_CODEX_PROXY_SEQUENCE_REJECTED"))?;
+        Ok(event)
+    }
+
+    fn encode_outbound(&mut self, kind: u8, payload: &[u8]) -> HermesAdapterResult<Vec<u8>> {
+        if Instant::now() >= self.deadline {
+            return Err(error(
+                HermesAdapterErrorKind::Timeout,
+                "HERMES_CODEX_PROXY_DEADLINE_EXCEEDED",
+            ));
+        }
+        let frame = encode_codex_proxy_frame(kind, self.outbound_sequence, self.binding, payload)?;
+        self.outbound_sequence = self
+            .outbound_sequence
+            .checked_add(1)
+            .ok_or_else(|| malformed("HERMES_CODEX_PROXY_SEQUENCE_REJECTED"))?;
+        Ok(frame)
+    }
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
+#[cfg(test)]
+pub(crate) fn encode_codex_proxy_test_frame(
+    kind: u8,
+    sequence: u32,
+    binding: [u8; 32],
+    payload: &[u8],
+) -> Vec<u8> {
+    encode_codex_proxy_frame(kind, sequence, binding, payload).unwrap_or_default()
+}
+
+fn encode_codex_proxy_frame(
+    kind: u8,
+    sequence: u32,
+    binding: [u8; 32],
+    payload: &[u8],
+) -> HermesAdapterResult<Vec<u8>> {
+    let body_length = CODEX_PROXY_HEADER_BYTES
+        .checked_add(payload.len())
+        .filter(|length| *length <= MAX_CODEX_PROXY_BODY_BYTES)
+        .ok_or_else(|| malformed("HERMES_CODEX_PROXY_SIZE_REJECTED"))?;
+    let mut frame = Vec::with_capacity(CODEX_PROXY_MAGIC.len() + 4 + body_length);
+    frame.extend_from_slice(CODEX_PROXY_MAGIC);
+    frame.extend_from_slice(
+        &u32::try_from(body_length)
+            .map_err(|_| malformed("HERMES_CODEX_PROXY_SIZE_REJECTED"))?
+            .to_be_bytes(),
+    );
+    frame.push(kind);
+    frame.extend_from_slice(&CODEX_PROXY_STREAM_ID.to_be_bytes());
+    frame.extend_from_slice(&sequence.to_be_bytes());
+    frame.extend_from_slice(&binding);
+    frame.extend_from_slice(payload);
+    Ok(frame)
+}
+
+enum OuterStreamEvent {
+    Data(Vec<u8>),
+    Eof,
+    Failed,
+}
+
+enum ProviderStreamEvent {
+    Data(Vec<u8>),
+    Eof,
+    Failed,
+}
+
+#[derive(Default)]
+struct CodexProxyHostStatus {
+    failure: Option<HermesAdapterError>,
+    failure_evidence: Option<CodexProxyFailureEvidence>,
+}
+
+struct ProductionCodexProxyHost {
+    status: Arc<Mutex<CodexProxyHostStatus>>,
+    stop: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl ProductionCodexProxyHost {
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        provider: Box<dyn ProductionCodexProxyProvider>,
+        nonce: &str,
+        broker_receipt: &ContentDigest,
+        absolute_deadline: Instant,
+        outer_input: std::fs::File,
+        outer_stream: Receiver<OuterStreamEvent>,
+        initial_bytes: Vec<u8>,
+        owner: Arc<ContainmentOwnerState>,
+    ) -> HermesAdapterResult<Self> {
+        let mut session = CodexProxyHostSession::new(nonce, broker_receipt, absolute_deadline)?;
+        let status = Arc::new(Mutex::new(CodexProxyHostStatus::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_status = Arc::clone(&status);
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::Builder::new()
+            .name("lattice-hermes-codex-proxy".to_owned())
+            .spawn(move || {
+                let result = run_codex_proxy_host(
+                    provider,
+                    absolute_deadline,
+                    outer_input,
+                    &outer_stream,
+                    initial_bytes,
+                    &worker_stop,
+                    &mut session,
+                );
+                if let Err(failure) = result {
+                    owner.invalidate();
+                    if let Ok(mut observed) = worker_status.lock() {
+                        observed.failure = Some(failure);
+                        observed.failure_evidence = session.failure_evidence().cloned();
+                    }
+                }
+            })
+            .map_err(|_| {
+                error(
+                    HermesAdapterErrorKind::Spawn,
+                    "HERMES_CODEX_PROXY_HOST_THREAD_FAILED",
+                )
+            })?;
+        Ok(Self {
+            status,
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    fn ensure_live(&self) -> HermesAdapterResult<()> {
+        let observed = self.status.lock().map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_HOST_STATE_UNKNOWN",
+            )
+        })?;
+        observed.failure.clone().map_or(Ok(()), Err)
+    }
+
+    fn failure_evidence(&self) -> Option<CodexProxyFailureEvidence> {
+        self.status
+            .lock()
+            .ok()
+            .and_then(|observed| observed.failure_evidence.clone())
+    }
+
+    fn terminate(&mut self) -> HermesAdapterResult<()> {
+        self.stop.store(true, Ordering::Release);
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+        worker.join().map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_HOST_JOIN_FAILED",
+            )
+        })?;
+        self.ensure_live()
+    }
+}
+
+impl Drop for ProductionCodexProxyHost {
+    fn drop(&mut self) {
+        let _ = self.terminate();
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run_codex_proxy_host(
+    provider: Box<dyn ProductionCodexProxyProvider>,
+    absolute_deadline: Instant,
+    mut outer_input: std::fs::File,
+    outer_stream: &Receiver<OuterStreamEvent>,
+    initial_bytes: Vec<u8>,
+    stop: &AtomicBool,
+    session: &mut CodexProxyHostSession,
+) -> HermesAdapterResult<()> {
+    let mut provider = Some(provider);
+    let mut duplex: Option<ProductionCodexProxyDuplex> = None;
+    let mut provider_stream: Option<Receiver<ProviderStreamEvent>> = None;
+    let mut buffer = initial_bytes;
+
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if Instant::now() >= absolute_deadline {
+            return Err(error(
+                HermesAdapterErrorKind::Timeout,
+                "HERMES_CODEX_PROXY_DEADLINE_EXCEEDED",
+            ));
+        }
+
+        while let Some(frame) = take_codex_proxy_frame(&mut buffer, session)? {
+            match session.accept(&frame)? {
+                CodexProxyHostEvent::Open => {
+                    let sealed = provider
+                        .take()
+                        .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_REPLAY_REJECTED"))?;
+                    let mut opened = sealed.open(absolute_deadline)?;
+                    opened.ensure_running()?;
+                    let reader = opened.take_reader()?;
+                    provider_stream = Some(start_provider_reader(reader)?);
+                    write_proxy_frame(&mut outer_input, &session.encode_open_ack()?)?;
+                    duplex = Some(opened);
+                }
+                CodexProxyHostEvent::Data(payload) => {
+                    let opened = duplex
+                        .as_mut()
+                        .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_STATE_REJECTED"))?;
+                    opened.ensure_running()?;
+                    opened.write_all(&payload)?;
+                }
+                CodexProxyHostEvent::Close => {
+                    let opened = duplex
+                        .as_mut()
+                        .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_STATE_REJECTED"))?;
+                    opened.close_input();
+                }
+                CodexProxyHostEvent::Error(_) => {
+                    return Err(error(
+                        HermesAdapterErrorKind::Failed,
+                        "HERMES_CODEX_PROXY_CHILD_ERROR",
+                    ));
+                }
+            }
+        }
+
+        let provider_event = provider_stream
+            .as_ref()
+            .and_then(|events| match events.try_recv() {
+                Ok(event) => Some(Ok(event)),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => Some(Err(error(
+                    HermesAdapterErrorKind::Ambiguous,
+                    "HERMES_CODEX_PROXY_PROVIDER_STREAM_LOST",
+                ))),
+            });
+        if let Some(provider_event) = provider_event {
+            match provider_event? {
+                ProviderStreamEvent::Data(payload) => {
+                    write_proxy_frame(&mut outer_input, &session.encode_data(&payload)?)?;
+                }
+                ProviderStreamEvent::Eof => {
+                    write_proxy_frame(&mut outer_input, &session.encode_close()?)?;
+                    provider_stream = None;
+                    if let Some(opened) = duplex.as_mut() {
+                        opened.close_input();
+                    }
+                }
+                ProviderStreamEvent::Failed => {
+                    return Err(error(
+                        HermesAdapterErrorKind::Transport,
+                        "HERMES_CODEX_PROXY_PROVIDER_READ_FAILED",
+                    ));
+                }
+            }
+            continue;
+        }
+
+        match outer_stream.recv_timeout(Duration::from_millis(2)) {
+            Ok(OuterStreamEvent::Data(payload)) => {
+                buffer.extend_from_slice(&payload);
+                if buffer.len() > MAX_CODEX_PROXY_BUFFER_BYTES {
+                    session.record_failure(&buffer[..MAX_CODEX_PROXY_BUFFER_BYTES]);
+                    return Err(malformed("HERMES_CODEX_PROXY_SIZE_REJECTED"));
+                }
+            }
+            Ok(OuterStreamEvent::Eof) => {
+                return Err(error(
+                    HermesAdapterErrorKind::Failed,
+                    "HERMES_CODEX_PROXY_OUTER_EOF",
+                ));
+            }
+            Ok(OuterStreamEvent::Failed) => {
+                return Err(error(
+                    HermesAdapterErrorKind::Transport,
+                    "HERMES_CODEX_PROXY_OUTER_READ_FAILED",
+                ));
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(error(
+                    HermesAdapterErrorKind::Ambiguous,
+                    "HERMES_CODEX_PROXY_OUTER_STREAM_LOST",
+                ));
+            }
+        }
+    }
+}
+
+fn take_codex_proxy_frame(
+    buffer: &mut Vec<u8>,
+    session: &mut CodexProxyHostSession,
+) -> HermesAdapterResult<Option<Vec<u8>>> {
+    let comparable = buffer.len().min(CODEX_PROXY_MAGIC.len());
+    if buffer[..comparable] != CODEX_PROXY_MAGIC[..comparable] {
+        session.record_failure(buffer);
+        return Err(malformed("HERMES_CODEX_PROXY_MAGIC_REJECTED"));
+    }
+    let prefix_bytes = CODEX_PROXY_MAGIC.len() + 4;
+    if buffer.len() < prefix_bytes {
+        return Ok(None);
+    }
+    let body_length = usize::try_from(u32::from_be_bytes(
+        buffer[CODEX_PROXY_MAGIC.len()..prefix_bytes]
+            .try_into()
+            .expect("fixed four-byte proxy length"),
+    ))
+    .map_err(|_| malformed("HERMES_CODEX_PROXY_SIZE_REJECTED"))?;
+    if !(CODEX_PROXY_HEADER_BYTES..=MAX_CODEX_PROXY_BODY_BYTES).contains(&body_length) {
+        session.record_failure(&buffer[..prefix_bytes]);
+        return Err(malformed("HERMES_CODEX_PROXY_SIZE_REJECTED"));
+    }
+    let total = prefix_bytes
+        .checked_add(body_length)
+        .ok_or_else(|| malformed("HERMES_CODEX_PROXY_SIZE_REJECTED"))?;
+    if buffer.len() < total {
+        return Ok(None);
+    }
+    Ok(Some(buffer.drain(..total).collect()))
+}
+
+fn write_proxy_frame(writer: &mut std::fs::File, frame: &[u8]) -> HermesAdapterResult<()> {
+    writer
+        .write_all(frame)
+        .and_then(|()| writer.flush())
+        .map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Transport,
+                "HERMES_CODEX_PROXY_OUTER_WRITE_FAILED",
+            )
+        })
+}
+
+fn start_outer_reader(mut reader: std::fs::File) -> Receiver<OuterStreamEvent> {
+    let (sender, receiver) = mpsc::sync_channel(8);
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = sender.send(OuterStreamEvent::Eof);
+                    return;
+                }
+                Ok(read) => {
+                    if sender
+                        .send(OuterStreamEvent::Data(buffer[..read].to_vec()))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(_) => {
+                    let _ = sender.send(OuterStreamEvent::Failed);
+                    return;
+                }
+            }
+        }
+    });
+    receiver
+}
+
+fn start_provider_reader(
+    mut reader: Box<dyn Read + Send>,
+) -> HermesAdapterResult<Receiver<ProviderStreamEvent>> {
+    let (sender, receiver) = mpsc::sync_channel(8);
+    thread::Builder::new()
+        .name("lattice-hermes-codex-output".to_owned())
+        .spawn(move || {
+            let mut buffer = vec![0_u8; MAX_CODEX_PROXY_DATA_BYTES].into_boxed_slice();
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => {
+                        let _ = sender.send(ProviderStreamEvent::Eof);
+                        return;
+                    }
+                    Ok(read) => {
+                        if sender
+                            .send(ProviderStreamEvent::Data(buffer[..read].to_vec()))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(_) => {
+                        let _ = sender.send(ProviderStreamEvent::Failed);
+                        return;
+                    }
+                }
+            }
+        })
+        .map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Spawn,
+                "HERMES_CODEX_PROXY_READER_THREAD_FAILED",
+            )
+        })?;
+    Ok(receiver)
+}
+
+#[cfg(test)]
+struct ScriptedCodexProxyProvider;
+
+#[cfg(test)]
+impl ProductionCodexProxyProvider for ScriptedCodexProxyProvider {
+    fn open(
+        self: Box<Self>,
+        absolute_deadline: Instant,
+    ) -> HermesAdapterResult<ProductionCodexProxyDuplex> {
+        if absolute_deadline <= Instant::now() {
+            return Err(error(
+                HermesAdapterErrorKind::Timeout,
+                "HERMES_CODEX_PROXY_DEADLINE_EXCEEDED",
+            ));
+        }
+        let response = concat!(
+            "{\"id\":0,\"result\":{\"ok\":true}}\n",
+            "{\"id\":1,\"result\":{\"ok\":true}}\n",
+            "{\"id\":2,\"result\":{\"ok\":true}}\n"
+        )
+        .as_bytes()
+        .to_vec();
+        Ok(ProductionCodexProxyDuplex::new(
+            Box::new(std::io::Cursor::new(response)),
+            Box::new(Vec::<u8>::new()),
+            Box::new(ScriptedCodexProxyLifecycle),
+        ))
+    }
+}
+
+#[cfg(test)]
+struct ScriptedCodexProxyLifecycle;
+
+#[cfg(test)]
+impl ProductionCodexProxyLifecycle for ScriptedCodexProxyLifecycle {
+    fn ensure_running(&mut self) -> HermesAdapterResult<()> {
+        Ok(())
+    }
+
+    fn terminate(&mut self) -> HermesAdapterResult<()> {
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 enum RunnerMode {
@@ -76,6 +757,7 @@ pub struct HermesProductionRunnerConfig {
     operation_timeout: Duration,
     poll_interval: Duration,
     mode: RunnerMode,
+    codex_provider: Option<Box<dyn ProductionCodexProxyProvider>>,
 }
 
 impl HermesProductionRunnerConfig {
@@ -194,6 +876,13 @@ impl HermesProductionRunnerConfig {
         let manifest_bytes = serde_json::to_vec(runtime_manifest)
             .map_err(|_| malformed("HERMES_RUNTIME_MANIFEST_CANONICALIZATION_FAILED"))?;
         let runtime_manifest_sha256 = encode_sha256(&Sha256::digest(&manifest_bytes));
+        #[cfg(test)]
+        let codex_provider: Option<Box<dyn ProductionCodexProxyProvider>> = match &mode {
+            RunnerMode::Official => None,
+            RunnerMode::ScriptedFixture(_) => Some(Box::new(ScriptedCodexProxyProvider)),
+        };
+        #[cfg(not(test))]
+        let codex_provider = None;
         Ok(Self {
             containment,
             runtime_manifest_sha256,
@@ -204,6 +893,7 @@ impl HermesProductionRunnerConfig {
             operation_timeout,
             poll_interval,
             mode,
+            codex_provider,
         })
     }
 
@@ -335,7 +1025,7 @@ impl HermesProductionRunnerConfig {
             deadline: absolute_deadline,
             teardown_timeout: Duration::from_secs(3),
         };
-        let mut process = match crate::windows_job::spawn(&plan) {
+        let mut process = match crate::windows_job::spawn_with_parent_stdio(&plan) {
             Ok(process) => process,
             Err(failure) => {
                 remove_ingress(&secret_path);
@@ -343,12 +1033,31 @@ impl HermesProductionRunnerConfig {
                 return Err(failure);
             }
         };
+        let outer_input = match process.take_stdin_writer() {
+            Ok(writer) => writer,
+            Err(failure) => {
+                let _ = process.terminate();
+                remove_ingress(&secret_path);
+                remove_ingress(&runner_path);
+                return Err(failure);
+            }
+        };
+        let outer_output = match process.take_stdout_reader() {
+            Ok(reader) => reader,
+            Err(failure) => {
+                let _ = process.terminate();
+                remove_ingress(&secret_path);
+                remove_ingress(&runner_path);
+                return Err(failure);
+            }
+        };
+        let outer_stream = start_outer_reader(outer_output);
         let startup_deadline = Instant::now()
             .checked_add(self.startup_timeout)
             .map_or(absolute_deadline, |candidate| {
                 candidate.min(absolute_deadline)
             });
-        let startup = match wait_for_startup(&mut process, startup_deadline) {
+        let mut startup = match wait_for_startup(&mut process, &outer_stream, startup_deadline) {
             Ok(startup) => startup,
             Err(failure) => {
                 let mapped = map_outer_failure(&process, failure);
@@ -385,10 +1094,17 @@ impl HermesProductionRunnerConfig {
             runner_nonce_sha256,
             Arc::downgrade(&owner),
         )?;
+        let outer_initial_bytes = std::mem::take(&mut startup.trailing);
         Ok(ProductionHermesRunner {
             endpoint: attestation.endpoint,
             api_key: self.api_key,
             model: self.model,
+            nonce,
+            broker_receipt_sha256: self.broker_receipt_sha256,
+            codex_provider: self.codex_provider,
+            outer_input: Some(outer_input),
+            outer_stream: Some(outer_stream),
+            outer_initial_bytes,
             receipt,
             process,
             owner,
@@ -408,6 +1124,12 @@ pub struct ProductionHermesRunner {
     endpoint: SocketAddr,
     api_key: String,
     model: String,
+    nonce: String,
+    broker_receipt_sha256: String,
+    codex_provider: Option<Box<dyn ProductionCodexProxyProvider>>,
+    outer_input: Option<std::fs::File>,
+    outer_stream: Option<Receiver<OuterStreamEvent>>,
+    outer_initial_bytes: Vec<u8>,
     receipt: HermesContainmentReceipt,
     process: crate::windows_job::WindowsJobChild,
     owner: Arc<ContainmentOwnerState>,
@@ -435,6 +1157,36 @@ impl ProductionHermesRunner {
         }
         self.process.ensure_running()?;
         self.receipt.verify_binding(self.endpoint, &self.api_key)?;
+        let broker_receipt = ContentDigest::from_sha256(self.broker_receipt_sha256.clone())
+            .map_err(|_| malformed("HERMES_CODEX_PROXY_BINDING_INPUT_REJECTED"))?;
+        let provider = self.codex_provider.take().ok_or_else(|| {
+            error(
+                HermesAdapterErrorKind::CapabilityMismatch,
+                "HERMES_CODEX_PROXY_PROVIDER_NOT_STAGED",
+            )
+        })?;
+        let outer_input = self.outer_input.take().ok_or_else(|| {
+            error(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_OUTER_INPUT_UNAVAILABLE",
+            )
+        })?;
+        let outer_stream = self.outer_stream.take().ok_or_else(|| {
+            error(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_OUTER_STREAM_UNAVAILABLE",
+            )
+        })?;
+        let codex_proxy = ProductionCodexProxyHost::start(
+            provider,
+            &self.nonce,
+            &broker_receipt,
+            self.absolute_deadline,
+            outer_input,
+            outer_stream,
+            std::mem::take(&mut self.outer_initial_bytes),
+            Arc::clone(&self.owner),
+        )?;
         let remaining = self
             .absolute_deadline
             .checked_duration_since(Instant::now())
@@ -455,6 +1207,7 @@ impl ProductionHermesRunner {
         let adapter = HermesReflectionAdapter::connect(adapter_config, job)?;
         Ok(ProductionHermesPort {
             adapter,
+            codex_proxy,
             receipt: self.receipt,
             process: self.process,
             owner: self.owner,
@@ -513,6 +1266,7 @@ impl ProductionHermesRunner {
 /// unforgeable owner capability.
 pub struct ProductionHermesPort {
     adapter: HermesReflectionAdapter,
+    codex_proxy: ProductionCodexProxyHost,
     receipt: HermesContainmentReceipt,
     process: crate::windows_job::WindowsJobChild,
     owner: Arc<ContainmentOwnerState>,
@@ -590,7 +1344,9 @@ impl ProductionHermesPort {
     /// exited. Drop retains kill-on-close as a final backstop.
     pub fn terminate(mut self) -> HermesAdapterResult<()> {
         self.owner.invalidate();
-        self.process.terminate()
+        let proxy_result = self.codex_proxy.terminate();
+        let process_result = self.process.terminate();
+        proxy_result.and(process_result)
     }
 
     fn prepare_operation(&mut self) -> PortResult<()> {
@@ -615,6 +1371,11 @@ impl ProductionHermesPort {
             self.owner.invalidate();
             return Err(map_port_error(&failure));
         }
+        if let Err(failure) = self.codex_proxy.ensure_live() {
+            self.owner.invalidate();
+            let _ = self.process.terminate();
+            return Err(map_port_error(&failure));
+        }
         self.adapter
             .require_containment_receipt()
             .map(|_| ())
@@ -624,6 +1385,12 @@ impl ProductionHermesPort {
     #[cfg(test)]
     pub(crate) fn terminate_child_for_test(&mut self) -> HermesAdapterResult<()> {
         self.process.terminate()
+    }
+
+    /// Returns bounded count-and-digest evidence for rejected proxy bytes.
+    #[must_use]
+    pub fn codex_proxy_failure_evidence(&self) -> Option<CodexProxyFailureEvidence> {
+        self.codex_proxy.failure_evidence()
     }
 }
 
@@ -644,6 +1411,7 @@ impl HermesPort for ProductionHermesPort {
 impl Drop for ProductionHermesPort {
     fn drop(&mut self) {
         self.owner.invalidate();
+        let _ = self.codex_proxy.terminate();
         let _ = self.process.terminate();
     }
 }
@@ -676,6 +1444,7 @@ struct StartupObservation {
     wire: StartupWire,
     frame: Vec<u8>,
     windows_launcher_pid: u32,
+    trailing: Vec<u8>,
 }
 
 struct VerifiedAttestation {
@@ -706,15 +1475,18 @@ struct ContainmentAttestationWire {
 
 fn wait_for_startup(
     process: &mut crate::windows_job::WindowsJobChild,
+    stream: &Receiver<OuterStreamEvent>,
     deadline: Instant,
 ) -> HermesAdapterResult<StartupObservation> {
+    let mut bytes = Vec::new();
     loop {
-        let bytes = process.read_stdout(MAX_STARTUP_BYTES as u64)?;
-        if let Some((wire, frame)) = parse_startup(&bytes)? {
+        if let Some((wire, frame, consumed)) = parse_startup(&bytes)? {
+            let trailing = bytes.split_off(consumed);
             return Ok(StartupObservation {
                 wire,
                 frame,
                 windows_launcher_pid: process.process_id(),
+                trailing,
             });
         }
         process.ensure_running()?;
@@ -724,11 +1496,41 @@ fn wait_for_startup(
                 "HERMES_PRODUCTION_STARTUP_TIMEOUT",
             ));
         }
-        thread::sleep(Duration::from_millis(2));
+        let wait = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or_default()
+            .min(Duration::from_millis(2));
+        match stream.recv_timeout(wait) {
+            Ok(OuterStreamEvent::Data(payload)) => {
+                bytes.extend_from_slice(&payload);
+                if bytes.len() > MAX_STARTUP_BYTES + MAX_CODEX_PROXY_WIRE_BYTES {
+                    return Err(malformed("HERMES_PRODUCTION_STARTUP_LENGTH_REJECTED"));
+                }
+            }
+            Ok(OuterStreamEvent::Eof) => {
+                return Err(error(
+                    HermesAdapterErrorKind::Failed,
+                    "HERMES_PRODUCTION_CHILD_EXITED",
+                ));
+            }
+            Ok(OuterStreamEvent::Failed) => {
+                return Err(error(
+                    HermesAdapterErrorKind::Transport,
+                    "HERMES_PRODUCTION_STARTUP_READ_FAILED",
+                ));
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(error(
+                    HermesAdapterErrorKind::Ambiguous,
+                    "HERMES_PRODUCTION_STARTUP_STREAM_LOST",
+                ));
+            }
+        }
     }
 }
 
-fn parse_startup(bytes: &[u8]) -> HermesAdapterResult<Option<(StartupWire, Vec<u8>)>> {
+fn parse_startup(bytes: &[u8]) -> HermesAdapterResult<Option<(StartupWire, Vec<u8>, usize)>> {
     if bytes.len() < STARTUP_MAGIC.len() {
         if STARTUP_MAGIC.starts_with(bytes) {
             return Ok(None);
@@ -760,10 +1562,7 @@ fn parse_startup(bytes: &[u8]) -> HermesAdapterResult<Option<(StartupWire, Vec<u
     if bytes.len() < total {
         return Ok(None);
     }
-    if bytes.len() != total {
-        return Err(malformed("HERMES_PRODUCTION_STARTUP_TRAILING_BYTES"));
-    }
-    let encoded = &bytes[offset + 8..];
+    let encoded = &bytes[offset + 8..total];
     let wire: StartupWire = serde_json::from_slice(encoded)
         .map_err(|_| malformed("HERMES_PRODUCTION_STARTUP_MALFORMED"))?;
     if serde_json::to_vec(&wire).map_err(|_| malformed("HERMES_PRODUCTION_STARTUP_MALFORMED"))?
@@ -780,7 +1579,7 @@ fn parse_startup(bytes: &[u8]) -> HermesAdapterResult<Option<(StartupWire, Vec<u
             "HERMES_PRODUCTION_CONTAINMENT_FRAME_DIGEST_REJECTED",
         ));
     }
-    Ok(Some((wire, frame)))
+    Ok(Some((wire, frame, total)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1084,4 +1883,63 @@ fn digest_join(parts: &[&[u8]]) -> String {
         digest.update(part);
     }
     encode_sha256(&digest.finalize())
+}
+
+#[cfg(test)]
+mod proxy_host_tests {
+    use super::*;
+
+    #[test]
+    fn pre_magic_bytes_fail_closed_with_only_bounded_digest_evidence() {
+        let path = std::env::temp_dir().join(format!(
+            "lattice-hermes-proxy-evidence-{}-{}",
+            std::process::id(),
+            RUNNER_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let outer_input = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create exact test sink");
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let owner = Arc::new(ContainmentOwnerState::new("11".repeat(32)));
+        let mut host = ProductionCodexProxyHost::start(
+            Box::new(ScriptedCodexProxyProvider),
+            &"22".repeat(32),
+            &ContentDigest::from_sha256("33".repeat(32)).expect("digest"),
+            Instant::now() + Duration::from_secs(2),
+            outer_input,
+            receiver,
+            Vec::new(),
+            Arc::clone(&owner),
+        )
+        .expect("start proxy host");
+        let diagnostic = b"bwrap: pre-exec diagnostic\n";
+        sender
+            .send(OuterStreamEvent::Data(diagnostic.to_vec()))
+            .expect("send untrusted diagnostic");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let failure = loop {
+            if let Err(failure) = host.ensure_live() {
+                break failure;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "proxy rejection reached deadline"
+            );
+            thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(failure.code(), "HERMES_CODEX_PROXY_MAGIC_REJECTED");
+        let evidence = host.failure_evidence().expect("bounded failure evidence");
+        assert_eq!(evidence.byte_count(), diagnostic.len() as u64);
+        assert_eq!(
+            evidence.sha256(),
+            encode_sha256(&Sha256::digest(diagnostic))
+        );
+        assert!(!owner.active.load(Ordering::Acquire));
+        let terminal = host.terminate().expect_err("terminal failure is retained");
+        assert_eq!(terminal.code(), "HERMES_CODEX_PROXY_MAGIC_REJECTED");
+        drop(host);
+        fs::remove_file(path).expect("remove exact test sink");
+    }
 }

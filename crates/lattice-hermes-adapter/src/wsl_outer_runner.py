@@ -1,18 +1,20 @@
 """Pinned outer WSL runner for the inherited-FD containment bridge.
 
-This process remains outside bubblewrap. It creates an AF_UNIX socketpair,
-connects the child endpoint to the bubblewrap child's stdin/stdout, and keeps
-the peer for the bounded framed Windows relay. No filesystem Unix socket
-crosses the Windows/WSL boundary.
+This process remains outside bubblewrap. It creates one AF_UNIX socketpair for
+the control stream and a second for the bubblewrap child's FD2 Codex proxy,
+then bridges the proxy peer through bounded Windows-owner pipes. No filesystem
+Unix socket crosses the Windows/WSL boundary.
 """
 
 import hashlib
 import json
 import os
+import select
 import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -26,11 +28,92 @@ EXPECTED_BWRAP_SHA256 = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f
 EXPECTED_PYTHON_VERSION = (3, 12, 13)
 MAX_DIAGNOSTIC_BYTES = 4096
 MAX_CONTROL_BYTES = 2 * 1024 * 1024
+MAX_PROXY_COPY_BYTES = 64 * 1024
 
 
 def fail(code):
     os.write(2, ("HERMES_OUTER_FAIL:%d\n" % code).encode("ascii"))
     raise SystemExit(code)
+
+
+def write_all_descriptor(descriptor, payload):
+    offset = 0
+    while offset < len(payload):
+        try:
+            written = os.write(descriptor, payload[offset:])
+        except OSError:
+            return False
+        if written <= 0:
+            return False
+        offset += written
+    return True
+
+
+class ProxyRelay:
+    def __init__(self, connection):
+        self.connection = connection
+        self.stop = threading.Event()
+        self.failed = threading.Event()
+        self.threads = []
+
+    def start(self):
+        self.connection.settimeout(0.1)
+        self.threads = [
+            threading.Thread(target=self.copy_child_to_host, daemon=True),
+            threading.Thread(target=self.copy_host_to_child, daemon=True),
+        ]
+        for worker in self.threads:
+            worker.start()
+
+    def mark_failed(self):
+        if not self.stop.is_set():
+            self.failed.set()
+
+    def copy_child_to_host(self):
+        while not self.stop.is_set():
+            try:
+                payload = self.connection.recv(MAX_PROXY_COPY_BYTES)
+            except socket.timeout:
+                continue
+            except OSError:
+                self.mark_failed()
+                return
+            if not payload or not write_all_descriptor(1, payload):
+                self.mark_failed()
+                return
+
+    def copy_host_to_child(self):
+        while not self.stop.is_set():
+            try:
+                readable, _, _ = select.select([0], [], [], 0.1)
+            except (OSError, ValueError):
+                self.mark_failed()
+                return
+            if not readable:
+                continue
+            try:
+                payload = os.read(0, MAX_PROXY_COPY_BYTES)
+                if not payload:
+                    self.mark_failed()
+                    return
+                self.connection.sendall(payload)
+            except (OSError, socket.timeout):
+                self.mark_failed()
+                return
+
+    def check(self):
+        if self.failed.is_set():
+            fail(75)
+
+    def close(self):
+        self.stop.set()
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.connection.close()
+        for worker in self.threads:
+            worker.join(0.5)
 
 
 def checked_nonce(value):
@@ -280,6 +363,9 @@ def production_bwrap_command(runtime_root, runner_fd, mode):
         "LATTICE_CODEX_BROKER_WRITE_FD",
         "1",
         "--setenv",
+        "LATTICE_HERMES_CODEX_PROXY_FD",
+        "2",
+        "--setenv",
         "TMPDIR",
         "/tmp",
         "--setenv",
@@ -480,20 +566,23 @@ def production(runtime_root, nonce, secret_path, runner_path, runner_sha256):
     init["endpoint"] = "%s:%d" % endpoint
     init["config_sha256"] = config_digest(init)
     peer, child_endpoint = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    proxy_peer, proxy_child_endpoint = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     process = None
+    proxy_relay = None
     deadline = time.monotonic() + init["deadline_millis"] / 1000.0
     try:
         process = subprocess.Popen(
             production_bwrap_command(runtime_root, runner_fd, init["mode"]),
             stdin=child_endpoint,
             stdout=child_endpoint,
-            stderr=subprocess.PIPE,
+            stderr=proxy_child_endpoint,
             close_fds=True,
             pass_fds=(runner_fd,),
         )
         os.close(runner_fd)
         runner_fd = -1
         child_endpoint.close()
+        proxy_child_endpoint.close()
         peer.settimeout(max(0.001, deadline - time.monotonic()))
         send_frame(peer, INIT_MAGIC, canonical_json(init))
         try:
@@ -509,7 +598,10 @@ def production(runtime_root, nonce, secret_path, runner_path, runner_sha256):
                 fail(return_code)
             raise
         emit_startup(frame, os.getpid(), process.pid)
+        proxy_relay = ProxyRelay(proxy_peer)
+        proxy_relay.start()
         while time.monotonic() < deadline:
+            proxy_relay.check()
             if process.poll() is not None:
                 fail(75)
             try:
@@ -531,20 +623,21 @@ def production(runtime_root, nonce, secret_path, runner_path, runner_sha256):
         listener.close()
         peer.close()
         child_endpoint.close()
+        proxy_child_endpoint.close()
+        if proxy_relay is not None:
+            proxy_relay.close()
+        else:
+            proxy_peer.close()
         if runner_fd >= 0:
             os.close(runner_fd)
         if process is not None:
             if process.poll() is None:
                 process.kill()
             try:
-                _output, diagnostic = process.communicate(timeout=2.0)
+                process.wait(timeout=2.0)
             except subprocess.SubprocessError:
                 process.kill()
-                _output, diagnostic = process.communicate()
-            if diagnostic:
-                marker = diagnostic[:MAX_DIAGNOSTIC_BYTES].strip()
-                if marker.startswith(b"HERMES_INNER_FAIL:") and marker[18:].isdigit():
-                    os.write(2, marker + b"\n")
+                process.wait()
 
 
 def socketpair_canary(runtime_root, nonce):

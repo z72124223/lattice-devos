@@ -24,7 +24,10 @@ pub use containment::{
 #[cfg(windows)]
 pub use containment::{HermesSocketpairReceipt, HermesWslContainmentConfig};
 #[cfg(windows)]
-pub use production::{HermesProductionRunnerConfig, ProductionHermesPort, ProductionHermesRunner};
+pub use production::{
+    CodexProxyFailureEvidence, HermesProductionRunnerConfig, ProductionHermesPort,
+    ProductionHermesRunner,
+};
 pub use runtime::{
     HERMES_CPYTHON_ARCHIVE_BYTES, HERMES_CPYTHON_ARCHIVE_SHA256, HERMES_CPYTHON_BUILD_RELEASE,
     HERMES_CPYTHON_PROVENANCE, HERMES_CPYTHON_SHA256SUMS_SHA256, HERMES_CPYTHON_VERSION,

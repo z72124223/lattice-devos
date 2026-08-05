@@ -110,14 +110,6 @@ pub(crate) fn spawn(plan: &WindowsJobCommandPlan) -> HermesAdapterResult<Windows
     spawn_inner(plan, false, false, false)
 }
 
-/// Starts a Job-owned child with a parent-only writer connected to child
-/// standard input while retaining the normal bounded capture outputs.
-pub(crate) fn spawn_with_parent_stdin(
-    plan: &WindowsJobCommandPlan,
-) -> HermesAdapterResult<WindowsJobChild> {
-    spawn_inner(plan, true, false, false)
-}
-
 /// Starts a Job-owned child with parent-only stdin/stdout pipe ends while
 /// retaining the normal bounded stderr capture.
 pub(crate) fn spawn_with_parent_stdio(
@@ -288,17 +280,6 @@ impl WindowsJobChild {
     pub(crate) fn read_stdout(&self, limit: u64) -> HermesAdapterResult<Vec<u8>> {
         match &self.stdout {
             WindowsJobStdout::Capture(stdout) => read_locked_capture(stdout, limit),
-            WindowsJobStdout::Pipe(_) => Err(spawn_error("HERMES_WINDOWS_STDOUT_NOT_CAPTURED")),
-        }
-    }
-
-    pub(crate) fn read_stdout_since(
-        &self,
-        offset: u64,
-        limit: u64,
-    ) -> HermesAdapterResult<Vec<u8>> {
-        match &self.stdout {
-            WindowsJobStdout::Capture(stdout) => read_locked_capture_since(stdout, offset, limit),
             WindowsJobStdout::Pipe(_) => Err(spawn_error("HERMES_WINDOWS_STDOUT_NOT_CAPTURED")),
         }
     }
