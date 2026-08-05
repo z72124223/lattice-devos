@@ -5,6 +5,8 @@
 //! untrusted LATTICE candidate digest.
 
 mod broker;
+#[cfg(windows)]
+mod codex_proxy;
 mod containment;
 #[cfg(windows)]
 mod production;
