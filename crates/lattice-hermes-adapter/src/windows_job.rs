@@ -18,6 +18,8 @@ use std::ptr::{null, null_mut};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use windows_sys::Win32::Foundation::GetHandleInformation;
 use windows_sys::Win32::Foundation::{
     GENERIC_READ, GENERIC_WRITE, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
     SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -187,6 +189,10 @@ fn spawn_inner(
         terminate_unassigned_process(&process, plan.teardown_timeout)?;
         return Err(spawn_error("HERMES_WINDOWS_THREAD_HANDLE"));
     };
+    if redirects.clear_parent_capture_inheritance().is_err() {
+        terminate_unassigned_process(&process, plan.teardown_timeout)?;
+        return Err(spawn_error("HERMES_WINDOWS_CAPTURE_INHERITANCE_REJECTED"));
+    }
     drop(attributes);
 
     // SAFETY: `job` and `process` are valid handles. The child is suspended,
@@ -500,6 +506,16 @@ impl RedirectHandles {
             self.child_stderr.raw(),
         ]
     }
+
+    fn clear_parent_capture_inheritance(&self) -> Result<(), ()> {
+        if self.parent_stdout.is_none() {
+            clear_handle_inheritance(&self.child_stdout)?;
+        }
+        if self.parent_stderr.is_none() {
+            clear_handle_inheritance(&self.child_stderr)?;
+        }
+        Ok(())
+    }
 }
 
 fn create_anonymous_pipe(
@@ -536,6 +552,16 @@ fn create_anonymous_pipe(
         return Err(spawn_error("HERMES_WINDOWS_PIPE_INHERITANCE_REJECTED"));
     }
     Ok((reader, writer))
+}
+
+fn clear_handle_inheritance(handle: &OwnedHandle) -> Result<(), ()> {
+    // SAFETY: `handle` is live and owned by the caller. Clearing the inherit
+    // bit does not change its access rights or lifetime.
+    if unsafe { SetHandleInformation(handle.raw(), HANDLE_FLAG_INHERIT, 0) } == 0 {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 fn open_inheritable_capture(path: &OsStr) -> HermesAdapterResult<OwnedHandle> {
@@ -984,6 +1010,19 @@ mod tests {
 
     static PIPE_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+    fn remove_capture_with_retry(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match fs::remove_file(path) {
+                Ok(()) => return,
+                Err(_) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("remove exact capture {path:?}: {error}"),
+            }
+        }
+    }
+
     #[test]
     fn duplex_parent_ends_relay_and_child_exits_on_input_close() {
         fn assert_send<T: Send>() {}
@@ -1033,5 +1072,51 @@ mod tests {
         assert!(diagnostic.is_empty());
         drop(child);
         fs::remove_dir(&root).expect("remove exact duplex root");
+    }
+
+    #[test]
+    fn retained_capture_handles_are_not_inheritable_after_spawn() {
+        let sequence = PIPE_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "lattice-hermes-windows-job-capture-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create exact capture root");
+        let system_root = std::env::var_os("SystemRoot").expect("Windows system root");
+        let plan = WindowsJobCommandPlan {
+            executable: PathBuf::from(system_root).join("System32").join("more.com"),
+            arguments: Vec::new(),
+            current_dir: root.clone(),
+            environment: BTreeMap::new(),
+            run_root: root.clone(),
+            stdout_path: root.join("capture.stdout"),
+            stderr_path: root.join("capture.stderr"),
+            stdout_limit: 4096,
+            stderr_limit: 4096,
+            deadline: Instant::now() + Duration::from_secs(5),
+            teardown_timeout: Duration::from_secs(2),
+        };
+        let mut child = spawn(&plan).expect("spawn owned capture child");
+
+        let stdout_handle = match &child.stdout {
+            WindowsJobStdout::Capture(file) => file.as_raw_handle().cast(),
+            WindowsJobStdout::Pipe(_) => unreachable!("stdout must be captured"),
+        };
+        let stderr_handle = match &child.stderr {
+            WindowsJobStderr::Capture(file) => file.as_raw_handle().cast(),
+            WindowsJobStderr::Pipe(_) => unreachable!("stderr must be captured"),
+        };
+        for handle in [stdout_handle, stderr_handle] {
+            let mut flags = 0_u32;
+            // SAFETY: each handle is still owned by `child` for this call.
+            assert_ne!(unsafe { GetHandleInformation(handle, &raw mut flags) }, 0);
+            assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+        }
+
+        assert_eq!(child.wait_for_exit().expect("child exit"), 0);
+        drop(child);
+        remove_capture_with_retry(&plan.stdout_path);
+        remove_capture_with_retry(&plan.stderr_path);
+        fs::remove_dir(&root).expect("remove exact capture root");
     }
 }
