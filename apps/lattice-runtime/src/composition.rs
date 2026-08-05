@@ -7,30 +7,47 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::process;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 
-use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
+use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256, canonicalize};
 use lattice_codebase_memory::digest_query_text;
 use lattice_codex_adapter::{
     CodexDeliveryAdapter, CodexDeliveryAdapterConfig, CodexIdentityExpectation,
 };
 use lattice_contracts::{
-    AttemptId, CONTRACT_VERSION, CompletedDeliveryEvidence, ContentDigest, DeliveryProfile,
-    DeliveryReceipt, DeliveryRunRequest, DeliveryRuntime, DeliveryStage, DeliveryTerminalStatus,
-    GitObjectId, GraphMemoryReceipt, GraphMemoryRunRequest, Invocation, MemoryQuery, ProjectId,
-    ProjectSnapshotId, RequestId, TaskId,
+    AttemptId, CONTRACT_VERSION, CompletedDeliveryEvidence, Component, ContentDigest,
+    DeliveryProfile, DeliveryReceipt, DeliveryRunRequest, DeliveryRuntime, DeliveryStage,
+    DeliveryTerminalStatus, GATEWAY_TASK_SPEC_SCHEMA_VERSION, GatewayClientKind, GatewayDenialCode,
+    GatewayPeerContext, GatewayReply, GatewayReplyBody, GatewayRequest, GatewayRequestBody,
+    GatewayStatusObservation, GatewayStatusTarget, GatewayTaskProjection, GatewayTaskState,
+    GitObjectId, GraphMemoryReceipt, GraphMemoryRunRequest, HermesEvidence,
+    HermesReflectionCandidate, HermesReflectionReceipt, HermesResearchRequest, Invocation,
+    MemoryQuery, ProjectId, ProjectSnapshotId, RequestId, RuntimeKind, SubjectBinding, TaskId,
+    TaskSpecSubmission,
 };
+use lattice_gateway_ipc::{build_reply, task_spec_document_digest};
 use lattice_graphify_adapter::{
     ExactGitSnapshotMaterializer, GitSnapshotConfig, GraphOutputLimits, GraphifyRuntimeConfig,
     PinnedGraphifyAdapter, SnapshotBridge, SnapshotLimits,
 };
+use lattice_openclaw_adapter::{
+    GatewayTransportErrorKind, OpenClawGatewayConfig, OpenClawGatewayServer,
+    OpenClawOfficialLaunchRecord,
+};
 use lattice_orchestrator::{
     DeliveryOrchestratorError, delivery_status, graph_memory_status, run_delivery, run_graph_memory,
 };
-use lattice_ports::{DeliveryFailureCertainty, PortErrorKind};
+use lattice_ports::{
+    DeliveryFailureCertainty, GatewayService, GatewayServiceError, GatewayServiceResult,
+    GraphMemoryFailureCertainty, GraphMemoryPortError, GraphMemoryStage, HermesPort,
+    HermesReflectionMemoryPort, PortError, PortErrorKind, PortResult,
+};
 use lattice_postgres_codebase_memory::{ExtensionTarget, PostgresCodebaseMemory};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -42,7 +59,7 @@ use crate::delivery_ledger::{
     connect_fixed_runtime_client,
 };
 use crate::git_delivery::{DeliveryWorkspaceGitAdapter, DeliveryWorkspaceGitAdapterConfig};
-use crate::mcp::{self, DeliveryToolService, ToolExecutionError};
+use crate::mcp::{self, DeliveryToolArguments, DeliveryToolService, ToolExecutionError};
 
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 3_600;
@@ -62,6 +79,8 @@ const GRAPH_QUERY: &str = "lattice_delivery_fixture";
 const GRAPH_RETRIEVAL_LIMIT: u16 = 10;
 const GRAPH_MEMORY_ROOT_NAME: &str = "graph-memory";
 const GRAPHIFY_RUNTIME_RELATIVE_PATH: &str = "target/supply-chain/graphify-v0.9.33/wsl-runtime";
+const FULL_CHAIN_HERMES_TASK_ID: &str = "TASK-037";
+const FIXED_GATEWAY_TASK_REVISION: &str = "1";
 const SCRIPTED_SERVER_BYTES: &[u8] = include_bytes!("fixtures/task032-scripted-codex.ps1");
 const OFFICIAL_CODEX_VERSION: &str = "codex-cli 0.146.0";
 const OFFICIAL_CODEX_LAUNCHER_SHA256: &str =
@@ -97,6 +116,9 @@ pub enum LatticedErrorKind {
     GraphConfiguration,
     GraphExecution,
     GraphReceiptRead,
+    HermesProductionRunnerRequired,
+    HermesExecution,
+    HermesReceiptRead,
     Transport,
 }
 
@@ -122,6 +144,9 @@ impl LatticedErrorKind {
             Self::GraphConfiguration => "LATTICE_GRAPH_MEMORY_CONFIGURATION_REJECTED",
             Self::GraphExecution => "LATTICE_GRAPH_MEMORY_RUN_REJECTED",
             Self::GraphReceiptRead => "LATTICE_GRAPH_MEMORY_RECEIPT_REJECTED",
+            Self::HermesProductionRunnerRequired => "LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED",
+            Self::HermesExecution => "LATTICE_HERMES_REFLECTION_REJECTED",
+            Self::HermesReceiptRead => "LATTICE_HERMES_MEMORY_RECEIPT_REJECTED",
             Self::Transport => "LATTICED_STDIO_REJECTED",
         }
     }
@@ -361,7 +386,7 @@ fn official_file_sha256(path: &Path, max_bytes: u64) -> Result<String, LatticedE
     }
     let mut file = fs::File::open(path).map_err(|_| rejected())?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
         let read = file.read(&mut buffer).map_err(|_| rejected())?;
         if read == 0 {
@@ -438,43 +463,8 @@ impl LatticedDeliveryService {
     ///
     /// Fails closed for every missing or malformed process input.
     pub fn from_environment() -> Result<Self, LatticedError> {
-        let timeout = match env::var("LATTICE_DELIVERY_TIMEOUT_SECONDS") {
-            Ok(value) => parse_timeout(&value)?,
-            Err(env::VarError::NotPresent) => Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
-            Err(env::VarError::NotUnicode(_)) => {
-                return Err(LatticedError::new(LatticedErrorKind::Configuration));
-            }
-        };
-        let runtime = match required_environment("LATTICE_DELIVERY_CODEX_MODE")?.as_str() {
-            "SCRIPTED_ACCEPTANCE" => DeliveryRuntime::ScriptedAcceptance,
-            "OFFICIAL_CODEX_APP_SERVER" => DeliveryRuntime::OfficialCodexAppServer,
-            _ => return Err(LatticedError::new(LatticedErrorKind::Configuration)),
-        };
-        let port = required_environment("LATTICE_TASK019_PORT")?
-            .parse::<u16>()
-            .map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))?;
-        let database = DeliveryDatabaseBinding::new(
-            required_environment("LATTICE_TASK019_HOST")?,
-            port,
-            required_environment("LATTICE_TASK019_RUN_ID")?,
-        )
-        .map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))?;
-        let config = LatticedDeliveryConfig::new(
-            PathBuf::from(required_environment("LATTICE_DELIVERY_LAUNCHER")?),
-            required_environment("LATTICE_DELIVERY_LAUNCHER_VERSION")?,
-            required_environment("LATTICE_DELIVERY_LAUNCHER_SHA256")?,
-            PathBuf::from(required_environment("LATTICE_DELIVERY_SCHEMA_DIR")?),
-            PathBuf::from(required_environment("LATTICE_DELIVERY_CODEX_HOME")?),
-            PathBuf::from(required_environment("LATTICE_DELIVERY_ROOT")?),
-            PathBuf::from(required_environment("LATTICE_DELIVERY_GIT_EXE")?),
-            timeout,
-            runtime,
-        )?;
-        Self::for_delivery(
-            config,
-            database,
-            required_environment("LATTICE_TASK019_PASSWORD")?,
-        )
+        let (config, database, password) = delivery_environment()?;
+        Self::for_delivery(config, database, password)
     }
 
     /// Returns the process-configured run request. Status-only services resolve
@@ -604,15 +594,58 @@ impl LatticedDeliveryService {
 }
 
 impl DeliveryToolService for LatticedDeliveryService {
-    fn run(&mut self) -> Result<Value, ToolExecutionError> {
+    fn run(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        validate_mcp_task_binding(arguments)?;
         self.run_json()
             .map_err(|error| ToolExecutionError::new(error.code()))
     }
 
-    fn status(&mut self) -> Result<Value, ToolExecutionError> {
+    fn status(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        validate_mcp_task_binding(arguments)?;
         self.status_json()
             .map_err(|error| ToolExecutionError::new(error.code()))
     }
+}
+
+fn delivery_environment()
+-> Result<(LatticedDeliveryConfig, DeliveryDatabaseBinding, String), LatticedError> {
+    let timeout = match env::var("LATTICE_DELIVERY_TIMEOUT_SECONDS") {
+        Ok(value) => parse_timeout(&value)?,
+        Err(env::VarError::NotPresent) => Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(LatticedError::new(LatticedErrorKind::Configuration));
+        }
+    };
+    let runtime = match required_environment("LATTICE_DELIVERY_CODEX_MODE")?.as_str() {
+        "SCRIPTED_ACCEPTANCE" => DeliveryRuntime::ScriptedAcceptance,
+        "OFFICIAL_CODEX_APP_SERVER" => DeliveryRuntime::OfficialCodexAppServer,
+        _ => return Err(LatticedError::new(LatticedErrorKind::Configuration)),
+    };
+    let port = required_environment("LATTICE_TASK019_PORT")?
+        .parse::<u16>()
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))?;
+    let database = DeliveryDatabaseBinding::new(
+        required_environment("LATTICE_TASK019_HOST")?,
+        port,
+        required_environment("LATTICE_TASK019_RUN_ID")?,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))?;
+    let config = LatticedDeliveryConfig::new(
+        PathBuf::from(required_environment("LATTICE_DELIVERY_LAUNCHER")?),
+        required_environment("LATTICE_DELIVERY_LAUNCHER_VERSION")?,
+        required_environment("LATTICE_DELIVERY_LAUNCHER_SHA256")?,
+        PathBuf::from(required_environment("LATTICE_DELIVERY_SCHEMA_DIR")?),
+        PathBuf::from(required_environment("LATTICE_DELIVERY_CODEX_HOME")?),
+        PathBuf::from(required_environment("LATTICE_DELIVERY_ROOT")?),
+        PathBuf::from(required_environment("LATTICE_DELIVERY_GIT_EXE")?),
+        timeout,
+        runtime,
+    )?;
+    Ok((
+        config,
+        database,
+        required_environment("LATTICE_TASK019_PASSWORD")?,
+    ))
 }
 
 /// Starts the canonical newline-delimited MCP stdio server.
@@ -626,6 +659,978 @@ pub fn serve_stdio_from_environment() -> Result<(), LatticedError> {
     let output = io::stdout();
     mcp::serve(service, input.lock(), output.lock())
         .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))
+}
+
+/// One live Hermes result carrying both normalized evidence and persistable content.
+pub struct ProductionHermesOutput {
+    evidence: HermesEvidence,
+    candidate: HermesReflectionCandidate,
+}
+
+/// Opaque proof issued only by the composition-owned verified Hermes runner wrapper.
+///
+/// There is deliberately no public constructor. A containment canary, endpoint
+/// probe, or adapter-reported `RuntimeKind::Live` cannot mint this value.
+pub struct HermesProductionSeal {
+    _private: (),
+}
+
+mod production_hermes_sealed {
+    pub trait Sealed {}
+}
+
+impl ProductionHermesOutput {
+    /// Validates a canonical reflection against the exact request and graph receipt.
+    ///
+    /// # Errors
+    ///
+    /// Rejects fake runtime evidence or any request, graph, or reflection substitution.
+    pub fn new(
+        _seal: &HermesProductionSeal,
+        request: &HermesResearchRequest,
+        graph_request: &GraphMemoryRunRequest,
+        graph_receipt: &GraphMemoryReceipt,
+        evidence: HermesEvidence,
+        candidate: HermesReflectionCandidate,
+    ) -> PortResult<Self> {
+        if evidence.runtime() != RuntimeKind::Live
+            || evidence.invocation() != request.invocation()
+            || evidence.output_digest() != candidate.reflection_digest()
+            || !candidate.matches_request(graph_request)
+            || candidate.graph_receipt_digest() != graph_receipt.receipt_digest()
+        {
+            return Err(PortError::new(
+                Component::Hermes,
+                PortErrorKind::Denied,
+                "HERMES_PRODUCTION_REFLECTION_BINDING_REJECTED",
+            ));
+        }
+        Ok(Self {
+            evidence,
+            candidate,
+        })
+    }
+
+    fn into_candidate(self) -> HermesReflectionCandidate {
+        let Self {
+            evidence,
+            candidate,
+        } = self;
+        debug_assert_eq!(evidence.output_digest(), candidate.reflection_digest());
+        candidate
+    }
+}
+
+/// Injectable Hermes boundary required by the production full-chain coordinator.
+///
+/// Implementations must expose a live preflight classification before any Codex
+/// effect and return both [`HermesEvidence`] and bounded canonical reflection content.
+pub trait ProductionHermesPort: HermesPort + Send + production_hermes_sealed::Sealed {
+    /// Reports the verified runtime classification for this configured port.
+    fn runtime_kind(&self) -> RuntimeKind;
+
+    /// Returns composition-issued sealed runner evidence, never a canary receipt.
+    fn production_seal(&self) -> Option<&HermesProductionSeal>;
+
+    /// Produces one exact-graph-bound canonical reflection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded port failure when live evidence or canonical content is absent.
+    fn research_canonical(
+        &mut self,
+        request: &HermesResearchRequest,
+        graph_request: &GraphMemoryRunRequest,
+        graph_receipt: &GraphMemoryReceipt,
+    ) -> PortResult<ProductionHermesOutput>;
+}
+
+enum EnvironmentProductionHermes {}
+
+impl production_hermes_sealed::Sealed for EnvironmentProductionHermes {}
+
+impl HermesPort for EnvironmentProductionHermes {
+    fn research(&mut self, _request: HermesResearchRequest) -> PortResult<HermesEvidence> {
+        Err(PortError::new(
+            Component::Hermes,
+            PortErrorKind::Denied,
+            "HERMES_PRODUCTION_RUNNER_REQUIRED",
+        ))
+    }
+
+    fn interrupt(&mut self, _request_id: &RequestId) -> PortResult<()> {
+        Err(PortError::new(
+            Component::Hermes,
+            PortErrorKind::Denied,
+            "HERMES_PRODUCTION_RUNNER_REQUIRED",
+        ))
+    }
+}
+
+impl ProductionHermesPort for EnvironmentProductionHermes {
+    fn runtime_kind(&self) -> RuntimeKind {
+        RuntimeKind::Fake
+    }
+
+    fn production_seal(&self) -> Option<&HermesProductionSeal> {
+        None
+    }
+
+    fn research_canonical(
+        &mut self,
+        _request: &HermesResearchRequest,
+        _graph_request: &GraphMemoryRunRequest,
+        _graph_receipt: &GraphMemoryReceipt,
+    ) -> PortResult<ProductionHermesOutput> {
+        Err(PortError::new(
+            Component::Hermes,
+            PortErrorKind::Denied,
+            "HERMES_PRODUCTION_RUNNER_REQUIRED",
+        ))
+    }
+}
+
+fn production_hermes_from_environment() -> Result<EnvironmentProductionHermes, LatticedError> {
+    Err(LatticedError::new(
+        LatticedErrorKind::HermesProductionRunnerRequired,
+    ))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FullChainEntry {
+    CodexAppMcp,
+    OpenClawTyped,
+}
+
+impl FullChainEntry {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::CodexAppMcp => "codex-app-mcp",
+            Self::OpenClawTyped => "openclaw-typed",
+        }
+    }
+
+    const fn classification(self) -> &'static str {
+        match self {
+            Self::CodexAppMcp => "official-codex-app-live",
+            Self::OpenClawTyped => "official-package-preflight-only",
+        }
+    }
+
+    const fn runtime_kind(self) -> &'static str {
+        match self {
+            Self::CodexAppMcp => "Live",
+            Self::OpenClawTyped => "Fake",
+        }
+    }
+}
+
+struct FullChainCore<H> {
+    delivery: LatticedDeliveryService,
+    hermes: H,
+    submission: TaskSpecSubmission,
+}
+
+impl<H: ProductionHermesPort> FullChainCore<H> {
+    fn run_json(&mut self, entry: FullChainEntry) -> Result<Value, LatticedError> {
+        let base = self.delivery.run_json()?;
+        let reflection = self.load_or_run_reflection(&base)?;
+        append_full_chain_json(base, &reflection, entry)
+    }
+
+    fn status_json(&mut self, entry: FullChainEntry) -> Result<Value, LatticedError> {
+        let base = self.delivery.status_json()?;
+        let request = graph_request_from_json(self.delivery.database.run_id(), &base)?;
+        let reflection = load_reflection_from_postgres(
+            &self.delivery.database,
+            &self.delivery.password,
+            self.delivery.timeout,
+            &request,
+        )
+        .map_err(|error| map_reflection_read_error(&error))?;
+        append_full_chain_json(base, &reflection, entry)
+    }
+
+    fn load_or_run_reflection(
+        &mut self,
+        base: &Value,
+    ) -> Result<HermesReflectionReceipt, LatticedError> {
+        let request = graph_request_from_json(self.delivery.database.run_id(), base)?;
+        match load_reflection_from_postgres(
+            &self.delivery.database,
+            &self.delivery.password,
+            self.delivery.timeout,
+            &request,
+        ) {
+            Ok(receipt) => return Ok(receipt),
+            Err(error)
+                if error.kind() == PortErrorKind::Unavailable
+                    && error.code() == "MEMORY_RECEIPT_UNAVAILABLE" => {}
+            Err(error) => return Err(map_reflection_read_error(&error)),
+        }
+
+        let graph_receipt = load_delivery_graph_receipt(
+            &self.delivery.database,
+            &self.delivery.password,
+            deadline(self.delivery.timeout)?,
+            &request,
+        )?;
+        let hermes_request =
+            hermes_request_for_graph(self.delivery.database.run_id(), &request, &graph_receipt)?;
+        let output = self
+            .hermes
+            .research_canonical(&hermes_request, &request, &graph_receipt)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesExecution))?;
+        let candidate = output.into_candidate();
+        let persisted = persist_reflection_to_postgres(
+            &self.delivery.database,
+            &self.delivery.password,
+            self.delivery.timeout,
+            &candidate,
+        )?;
+        let replayed = load_reflection_from_postgres(
+            &self.delivery.database,
+            &self.delivery.password,
+            self.delivery.timeout,
+            &request,
+        )
+        .map_err(|error| map_reflection_read_error(&error))?;
+        if replayed != persisted {
+            return Err(LatticedError::new(LatticedErrorKind::HermesReceiptRead));
+        }
+        Ok(replayed)
+    }
+}
+
+/// Shared service used by both typed MCP tools and typed `OpenClaw` ingress.
+pub struct FullChainService<H> {
+    inner: Arc<Mutex<FullChainCore<H>>>,
+}
+
+impl<H> Clone for FullChainService<H> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<H: ProductionHermesPort> FullChainService<H> {
+    fn handle_submit(
+        core: &mut FullChainCore<H>,
+        request: &GatewayRequest,
+        submission: &TaskSpecSubmission,
+    ) -> GatewayServiceResult<GatewayReply> {
+        if submission != &core.submission {
+            return gateway_reply(
+                request,
+                GatewayReplyBody::Denied(GatewayDenialCode::CommandSubstitution),
+            );
+        }
+        let result = core
+            .run_json(FullChainEntry::OpenClawTyped)
+            .map_err(map_gateway_service_error)?;
+        let receipt_digest =
+            full_chain_receipt_digest(&result).map_err(map_gateway_service_error)?;
+        gateway_reply(
+            request,
+            GatewayReplyBody::SubmitAccepted {
+                binding: core.submission.binding().clone(),
+                command_receipt_digest: receipt_digest,
+            },
+        )
+    }
+
+    fn handle_status(
+        core: &mut FullChainCore<H>,
+        request: &GatewayRequest,
+        target: GatewayStatusTarget,
+    ) -> GatewayServiceResult<GatewayReply> {
+        let fixed_binding = core.submission.binding().clone();
+        match &target {
+            GatewayStatusTarget::Project(project)
+                if project.project_id() != fixed_binding.project_id()
+                    || project.cursor().is_some() =>
+            {
+                return gateway_reply(
+                    request,
+                    GatewayReplyBody::Denied(GatewayDenialCode::ScopeDenied),
+                );
+            }
+            GatewayStatusTarget::Task(task) if task.binding() != &fixed_binding => {
+                return gateway_reply(
+                    request,
+                    GatewayReplyBody::Denied(GatewayDenialCode::CommandSubstitution),
+                );
+            }
+            GatewayStatusTarget::Command { .. } => {
+                return gateway_reply(
+                    request,
+                    GatewayReplyBody::Denied(GatewayDenialCode::DownstreamDenied),
+                );
+            }
+            GatewayStatusTarget::Project(_) | GatewayStatusTarget::Task(_) => {}
+        }
+        let result = core
+            .status_json(FullChainEntry::OpenClawTyped)
+            .map_err(map_gateway_service_error)?;
+        let receipt_digest =
+            full_chain_receipt_digest(&result).map_err(map_gateway_service_error)?;
+        if matches!(
+            &target,
+            GatewayStatusTarget::Task(task)
+                if task.expected_ledger_head_digest() != &receipt_digest
+        ) {
+            return gateway_reply(
+                request,
+                GatewayReplyBody::Denied(GatewayDenialCode::CommandSubstitution),
+            );
+        }
+        let projection = GatewayTaskProjection::new(
+            fixed_binding,
+            GatewayTaskState::Completed,
+            receipt_digest.clone(),
+            receipt_digest,
+        )
+        .map_err(|_| {
+            GatewayServiceError::new(
+                PortErrorKind::Malformed,
+                "FULL_CHAIN_STATUS_PROJECTION_REJECTED",
+            )
+        })?;
+        let observation = match target {
+            GatewayStatusTarget::Project(project) => GatewayStatusObservation::Project {
+                project_id: project.project_id().clone(),
+                tasks: vec![projection],
+                next_cursor: None,
+            },
+            GatewayStatusTarget::Task(_) => GatewayStatusObservation::Task(projection),
+            GatewayStatusTarget::Command { .. } => unreachable!("handled above"),
+        };
+        gateway_reply(request, GatewayReplyBody::StatusObserved(observation))
+    }
+}
+
+impl<H: ProductionHermesPort> DeliveryToolService for FullChainService<H> {
+    fn run(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        let mut core = self
+            .inner
+            .lock()
+            .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Transport.code()))?;
+        if arguments.binding() != core.submission.binding() {
+            return Err(ToolExecutionError::new(
+                "LATTICE_FULL_CHAIN_BINDING_REJECTED",
+            ));
+        }
+        core.run_json(FullChainEntry::CodexAppMcp)
+            .map_err(|error| ToolExecutionError::new(error.code()))
+    }
+
+    fn status(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        let mut core = self
+            .inner
+            .lock()
+            .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Transport.code()))?;
+        if arguments.binding() != core.submission.binding() {
+            return Err(ToolExecutionError::new(
+                "LATTICE_FULL_CHAIN_BINDING_REJECTED",
+            ));
+        }
+        core.status_json(FullChainEntry::CodexAppMcp)
+            .map_err(|error| ToolExecutionError::new(error.code()))
+    }
+}
+
+impl<H: ProductionHermesPort> GatewayService for FullChainService<H> {
+    fn handle(
+        &mut self,
+        peer: GatewayPeerContext,
+        request: GatewayRequest,
+    ) -> GatewayServiceResult<GatewayReply> {
+        if peer.client_kind() != GatewayClientKind::OpenClaw || peer.runtime() != RuntimeKind::Fake
+        {
+            return gateway_reply(
+                &request,
+                GatewayReplyBody::Denied(GatewayDenialCode::RoleDenied),
+            );
+        }
+        let mut core = self.inner.lock().map_err(|_| {
+            GatewayServiceError::new(
+                PortErrorKind::Unavailable,
+                "FULL_CHAIN_SERVICE_LOCK_REJECTED",
+            )
+        })?;
+        if request.project_id() != core.submission.binding().project_id() {
+            return gateway_reply(
+                &request,
+                GatewayReplyBody::Denied(GatewayDenialCode::ScopeDenied),
+            );
+        }
+
+        match request.body().clone() {
+            GatewayRequestBody::Submit(submission) => {
+                Self::handle_submit(&mut core, &request, &submission)
+            }
+            GatewayRequestBody::Status(target) => Self::handle_status(&mut core, &request, target),
+            GatewayRequestBody::Plan(_)
+            | GatewayRequestBody::Approve(_)
+            | GatewayRequestBody::Reject(_)
+            | GatewayRequestBody::Stop(_) => gateway_reply(
+                &request,
+                GatewayReplyBody::Denied(GatewayDenialCode::RoleDenied),
+            ),
+        }
+    }
+}
+
+/// One composition result containing both MCP and official-package `OpenClaw` surfaces.
+pub struct FullChainRuntime<H>
+where
+    H: ProductionHermesPort + 'static,
+{
+    mcp_service: FullChainService<H>,
+    openclaw_server: OpenClawGatewayServer<FullChainService<H>>,
+}
+
+impl<H> FullChainRuntime<H>
+where
+    H: ProductionHermesPort + 'static,
+{
+    /// Splits the one assembled runtime for concurrent MCP and loopback serving.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        FullChainService<H>,
+        OpenClawGatewayServer<FullChainService<H>>,
+    ) {
+        (self.mcp_service, self.openclaw_server)
+    }
+}
+
+/// Starts the single full-chain executable surface from process-owned inputs.
+///
+/// Hermes is resolved first. Until a same-runner PID/endpoint/nonce seal exists,
+/// this entry fails before `PostgreSQL`, listener, MCP, Codex, or Graphify effects.
+///
+/// # Errors
+///
+/// Returns a stable startup, configuration, database, or transport failure.
+pub fn serve_full_chain_from_environment() -> Result<(), LatticedError> {
+    let hermes = production_hermes_from_environment()?;
+    match hermes {}
+}
+
+/// Serves MCP stdio and continuously pumps the authenticated `OpenClaw` listener.
+///
+/// Both surfaces hold clones of the same [`FullChainService`], so they serialize
+/// through one coordinator and share `PostgreSQL` receipts. Process lifetime is the
+/// shutdown policy for this bounded entrypoint.
+///
+/// # Errors
+///
+/// Returns a bounded MCP startup or stdio transport failure. A fatal `OpenClaw`
+/// listener failure terminates the executable with exit code 2 rather than
+/// leaving a falsely healthy MCP-only process.
+pub fn serve_full_chain_runtime<H>(runtime: FullChainRuntime<H>) -> Result<(), LatticedError>
+where
+    H: ProductionHermesPort + 'static,
+{
+    let (mcp_service, openclaw_server) = runtime.into_parts();
+    let endpoint = openclaw_server
+        .local_addr()
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    thread::Builder::new()
+        .name("lattice-openclaw-full-chain".to_owned())
+        .spawn(move || {
+            run_openclaw_pump(openclaw_server, |failure| {
+                eprintln!("{}", failure.code);
+                if fatal_openclaw_pump_error(failure.kind) {
+                    process::exit(2);
+                }
+                OpenClawPumpControl::Continue
+            });
+        })
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    eprintln!(
+        "{}",
+        json!({
+            "classification": "official-package-transport",
+            "endpoint": endpoint.to_string(),
+            "entrypoint": "openclaw-typed",
+            "event": "ready",
+            "runtime_kind": "Fake"
+        })
+    );
+    let input = io::stdin();
+    let output = io::stdout();
+    mcp::serve(mcp_service, input.lock(), output.lock())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OpenClawPumpFailure {
+    kind: GatewayTransportErrorKind,
+    code: &'static str,
+}
+
+trait FullChainOpenClawPump: Send + 'static {
+    fn pump_once(&mut self) -> Result<(), OpenClawPumpFailure>;
+}
+
+impl<S> FullChainOpenClawPump for OpenClawGatewayServer<S>
+where
+    S: GatewayService + Send + 'static,
+{
+    fn pump_once(&mut self) -> Result<(), OpenClawPumpFailure> {
+        self.serve_once().map_err(|error| OpenClawPumpFailure {
+            kind: error.kind(),
+            code: error.code(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenClawPumpControl {
+    Continue,
+    Stop,
+}
+
+fn run_openclaw_pump<P, F>(mut pump: P, mut on_failure: F)
+where
+    P: FullChainOpenClawPump,
+    F: FnMut(OpenClawPumpFailure) -> OpenClawPumpControl,
+{
+    loop {
+        if let Err(failure) = pump.pump_once()
+            && on_failure(failure) == OpenClawPumpControl::Stop
+        {
+            return;
+        }
+    }
+}
+
+const fn fatal_openclaw_pump_error(kind: GatewayTransportErrorKind) -> bool {
+    matches!(
+        kind,
+        GatewayTransportErrorKind::Configuration
+            | GatewayTransportErrorKind::Unavailable
+            | GatewayTransportErrorKind::NonLocal
+            | GatewayTransportErrorKind::Capacity
+    )
+}
+
+/// Assembles the only production full-chain core and both bounded entry surfaces.
+///
+/// The `OpenClaw` peer remains visibly `RuntimeKind::Fake`; the official launch
+/// record proves package/process provenance only. Both surfaces share the same
+/// in-process coordinator and `PostgreSQL` task, graph, reflection, and command receipts.
+///
+/// # Errors
+///
+/// Rejects non-official Codex, fake Hermes, malformed fixed Task Spec, database,
+/// or official `OpenClaw` launch configuration before serving.
+pub fn assemble_full_chain_runtime<H>(
+    config: LatticedDeliveryConfig,
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    hermes: H,
+    openclaw_config: OpenClawGatewayConfig,
+    launch_record: OpenClawOfficialLaunchRecord,
+) -> Result<FullChainRuntime<H>, LatticedError>
+where
+    H: ProductionHermesPort + 'static,
+{
+    if config.runtime != DeliveryRuntime::OfficialCodexAppServer {
+        return Err(LatticedError::new(LatticedErrorKind::OfficialLiveBlocked));
+    }
+    if hermes.runtime_kind() != RuntimeKind::Live || hermes.production_seal().is_none() {
+        return Err(LatticedError::new(
+            LatticedErrorKind::HermesProductionRunnerRequired,
+        ));
+    }
+    let submission = fixed_gateway_submission()?;
+    let openclaw_config = openclaw_config
+        .with_frozen_submission(submission.clone())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    let timeout = config.timeout;
+    let delivery =
+        LatticedDeliveryService::for_delivery(config, database.clone(), password.to_owned())?;
+    let core = FullChainCore {
+        delivery,
+        hermes,
+        submission,
+    };
+    let mcp_service = FullChainService {
+        inner: Arc::new(Mutex::new(core)),
+    };
+    let client = connect_fixed_runtime_client(database, password, deadline(timeout)?)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+    let target = ExtensionTarget::new(database.database_name(), database.run_id())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let idempotency = PostgresCodebaseMemory::new(client, target)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let openclaw_server = OpenClawGatewayServer::bind_official_launch_with_durable_idempotency(
+        openclaw_config,
+        mcp_service.clone(),
+        launch_record,
+        idempotency,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    Ok(FullChainRuntime {
+        mcp_service,
+        openclaw_server,
+    })
+}
+
+/// Returns the one server-owned immutable Task Spec admitted by typed `OpenClaw` submit.
+///
+/// # Errors
+///
+/// Returns a contract failure if canonical hashing or fixed binding construction fails.
+pub fn fixed_gateway_submission() -> Result<TaskSpecSubmission, LatticedError> {
+    let document = CanonicalValue::Object(vec![
+        (
+            "project_id".to_owned(),
+            CanonicalValue::String(GRAPH_PROJECT_ID.to_owned()),
+        ),
+        (
+            "project_snapshot_id".to_owned(),
+            CanonicalValue::String(PROJECT_SNAPSHOT_ID.to_owned()),
+        ),
+        (
+            "revision".to_owned(),
+            CanonicalValue::String(FIXED_GATEWAY_TASK_REVISION.to_owned()),
+        ),
+        (
+            "schema_version".to_owned(),
+            CanonicalValue::String(GATEWAY_TASK_SPEC_SCHEMA_VERSION.to_owned()),
+        ),
+        (
+            "task_id".to_owned(),
+            CanonicalValue::String(TASK_ID.to_owned()),
+        ),
+    ]);
+    let bytes = canonicalize(&document)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?
+        .into_vec();
+    let digest = task_spec_document_digest(&bytes)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
+    let binding = SubjectBinding::new(
+        ProjectId::new(GRAPH_PROJECT_ID)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        ProjectSnapshotId::new(PROJECT_SNAPSHOT_ID)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        TaskId::new(TASK_ID).map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        FIXED_GATEWAY_TASK_REVISION,
+        digest.clone(),
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
+    TaskSpecSubmission::new(binding, bytes, digest)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))
+}
+
+fn validate_mcp_task_binding(arguments: &DeliveryToolArguments) -> Result<(), ToolExecutionError> {
+    let submission = fixed_gateway_submission()
+        .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Contract.code()))?;
+    if arguments.binding() != submission.binding() {
+        return Err(ToolExecutionError::new(
+            "LATTICE_FULL_CHAIN_BINDING_REJECTED",
+        ));
+    }
+    Ok(())
+}
+
+fn graph_request_from_json(
+    run_id: &str,
+    value: &Value,
+) -> Result<GraphMemoryRunRequest, LatticedError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
+    let delivery_receipt_digest = json_digest(object, "receipt_digest")?;
+    let configuration_digest = json_digest(object, "configuration_digest")?;
+    let commit = object
+        .get("commit_sha")
+        .and_then(Value::as_str)
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
+    let invocation = Invocation::new(
+        CONTRACT_VERSION,
+        RequestId::new(format!("task033-graph-request-{run_id}"))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        TaskId::new(GRAPH_TASK_ID).map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        AttemptId::new(format!("task033-graph-attempt-{run_id}"))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        ProjectSnapshotId::new(GRAPH_PROJECT_SNAPSHOT_ID)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        delivery_receipt_digest,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
+    GraphMemoryRunRequest::new(
+        invocation,
+        ProjectId::new(GRAPH_PROJECT_ID)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        GitObjectId::new(commit).map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        digest_query_text(GRAPH_QUERY)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        configuration_digest,
+        GRAPH_RETRIEVAL_LIMIT,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))
+}
+
+fn hermes_request_for_graph(
+    run_id: &str,
+    graph_request: &GraphMemoryRunRequest,
+    graph_receipt: &GraphMemoryReceipt,
+) -> Result<HermesResearchRequest, LatticedError> {
+    if !graph_receipt.matches_request(graph_request) {
+        return Err(LatticedError::new(LatticedErrorKind::ReceiptMismatch));
+    }
+    let invocation = Invocation::new(
+        CONTRACT_VERSION,
+        RequestId::new(format!("task037-hermes-request-{run_id}"))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        TaskId::new(FULL_CHAIN_HERMES_TASK_ID)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        AttemptId::new(format!("task037-hermes-attempt-{run_id}"))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        graph_request.invocation().project_snapshot_id().clone(),
+        graph_receipt.receipt_digest().clone(),
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
+    Ok(HermesResearchRequest::new(invocation))
+}
+
+fn reflection_memory(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    timeout: Duration,
+    stage: GraphMemoryStage,
+) -> Result<PostgresCodebaseMemory, GraphMemoryPortError> {
+    let operation_deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+        GraphMemoryPortError::new(
+            stage,
+            PortErrorKind::Unavailable,
+            GraphMemoryFailureCertainty::Known,
+            "MEMORY_REFLECTION_DEADLINE_REJECTED",
+        )
+    })?;
+    let client =
+        connect_fixed_runtime_client(database, password, operation_deadline).map_err(|_| {
+            GraphMemoryPortError::new(
+                stage,
+                PortErrorKind::Unavailable,
+                GraphMemoryFailureCertainty::Known,
+                "MEMORY_DATABASE_CONNECT_REJECTED",
+            )
+        })?;
+    let target =
+        ExtensionTarget::new(database.database_name(), database.run_id()).map_err(|_| {
+            GraphMemoryPortError::new(
+                stage,
+                PortErrorKind::Malformed,
+                GraphMemoryFailureCertainty::Known,
+                "MEMORY_REFLECTION_TARGET_REJECTED",
+            )
+        })?;
+    PostgresCodebaseMemory::new(client, target).map_err(|_| {
+        GraphMemoryPortError::new(
+            stage,
+            PortErrorKind::Unavailable,
+            GraphMemoryFailureCertainty::Known,
+            "MEMORY_REFLECTION_ADAPTER_REJECTED",
+        )
+    })
+}
+
+fn load_reflection_from_postgres(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    timeout: Duration,
+    request: &GraphMemoryRunRequest,
+) -> Result<HermesReflectionReceipt, GraphMemoryPortError> {
+    reflection_memory(
+        database,
+        password,
+        timeout,
+        GraphMemoryStage::ReflectionReceipt,
+    )?
+    .load_reflection(request)
+}
+
+fn persist_reflection_to_postgres(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    timeout: Duration,
+    candidate: &HermesReflectionCandidate,
+) -> Result<HermesReflectionReceipt, LatticedError> {
+    reflection_memory(
+        database,
+        password,
+        timeout,
+        GraphMemoryStage::ReflectionPersistence,
+    )
+    .map_err(|error| {
+        if error.certainty() == GraphMemoryFailureCertainty::Ambiguous {
+            LatticedError::new(LatticedErrorKind::ReconciliationRequired)
+        } else {
+            LatticedError::new(LatticedErrorKind::HermesExecution)
+        }
+    })?
+    .persist_reflection(candidate)
+    .map_err(|error| {
+        if error.certainty() == GraphMemoryFailureCertainty::Ambiguous {
+            LatticedError::new(LatticedErrorKind::ReconciliationRequired)
+        } else {
+            LatticedError::new(LatticedErrorKind::HermesExecution)
+        }
+    })
+}
+
+fn map_reflection_read_error(error: &GraphMemoryPortError) -> LatticedError {
+    if error.certainty() == GraphMemoryFailureCertainty::Ambiguous {
+        LatticedError::new(LatticedErrorKind::ReconciliationRequired)
+    } else {
+        LatticedError::new(LatticedErrorKind::HermesReceiptRead)
+    }
+}
+
+fn append_full_chain_json(
+    mut base: Value,
+    reflection: &HermesReflectionReceipt,
+    entry: FullChainEntry,
+) -> Result<Value, LatticedError> {
+    let object = base
+        .as_object_mut()
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
+    let findings = reflection
+        .content()
+        .findings()
+        .iter()
+        .map(|finding| {
+            json!({
+                "evidence_digest": finding.evidence_digest().as_str(),
+                "statement": finding.statement(),
+            })
+        })
+        .collect::<Vec<_>>();
+    object.insert(
+        "entrypoint".to_owned(),
+        Value::String(entry.name().to_owned()),
+    );
+    object.insert(
+        "entrypoint_classification".to_owned(),
+        Value::String(entry.classification().to_owned()),
+    );
+    object.insert(
+        "entrypoint_runtime_kind".to_owned(),
+        Value::String(entry.runtime_kind().to_owned()),
+    );
+    object.insert(
+        "full_chain_receipt_digest".to_owned(),
+        Value::String(reflection.receipt_digest().as_str().to_owned()),
+    );
+    object.insert("hermes_findings".to_owned(), Value::Array(findings));
+    object.insert(
+        "hermes_graph_receipt_digest".to_owned(),
+        Value::String(reflection.graph_receipt_digest().as_str().to_owned()),
+    );
+    object.insert(
+        "hermes_identity_digest".to_owned(),
+        Value::String(reflection.hermes_identity_digest().as_str().to_owned()),
+    );
+    object.insert(
+        "hermes_input_digest".to_owned(),
+        Value::String(reflection.input_digest().as_str().to_owned()),
+    );
+    object.insert(
+        "hermes_next_actions".to_owned(),
+        json!(reflection.content().next_actions()),
+    );
+    object.insert(
+        "hermes_reflection_digest".to_owned(),
+        Value::String(reflection.reflection_digest().as_str().to_owned()),
+    );
+    object.insert(
+        "hermes_provenance_status".to_owned(),
+        Value::String("PERSISTED_STRUCTURED_INFERENCE".to_owned()),
+    );
+    object.insert(
+        "hermes_schema_version".to_owned(),
+        Value::String(reflection.schema_version().to_owned()),
+    );
+    object.insert(
+        "hermes_status".to_owned(),
+        Value::String(reflection.status().as_str().to_owned()),
+    );
+    object.insert(
+        "hermes_summary".to_owned(),
+        Value::String(reflection.content().summary().to_owned()),
+    );
+    Ok(base)
+}
+
+fn json_digest(
+    object: &Map<String, Value>,
+    field: &'static str,
+) -> Result<ContentDigest, LatticedError> {
+    let value = object
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
+    ContentDigest::from_sha256(value)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::ReceiptMismatch))
+}
+
+fn full_chain_receipt_digest(value: &Value) -> Result<ContentDigest, LatticedError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
+    json_digest(object, "full_chain_receipt_digest")
+}
+
+fn gateway_reply(
+    request: &GatewayRequest,
+    body: GatewayReplyBody,
+) -> GatewayServiceResult<GatewayReply> {
+    build_reply(request, body).map_err(|_| {
+        GatewayServiceError::new(
+            PortErrorKind::Malformed,
+            "FULL_CHAIN_GATEWAY_REPLY_REJECTED",
+        )
+    })
+}
+
+const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
+    match kind {
+        LatticedErrorKind::ReconciliationRequired => PortErrorKind::Ambiguous,
+        LatticedErrorKind::DatabaseConnect
+        | LatticedErrorKind::GraphReceiptRead
+        | LatticedErrorKind::HermesReceiptRead => PortErrorKind::Unavailable,
+        LatticedErrorKind::Configuration
+        | LatticedErrorKind::Contract
+        | LatticedErrorKind::ReceiptMismatch => PortErrorKind::Malformed,
+        LatticedErrorKind::Intent
+        | LatticedErrorKind::OutcomePersistence
+        | LatticedErrorKind::DeliveryFailed
+        | LatticedErrorKind::OfficialLiveBlocked
+        | LatticedErrorKind::ScriptedFixtureRejected
+        | LatticedErrorKind::GraphExecution
+        | LatticedErrorKind::HermesProductionRunnerRequired
+        | LatticedErrorKind::HermesExecution
+        | LatticedErrorKind::DatabaseSecret
+        | LatticedErrorKind::LedgerConfiguration
+        | LatticedErrorKind::WorkspaceConfiguration
+        | LatticedErrorKind::CodexConfiguration
+        | LatticedErrorKind::ReceiptRead
+        | LatticedErrorKind::GraphConfiguration
+        | LatticedErrorKind::Transport => PortErrorKind::Denied,
+    }
+}
+
+fn map_gateway_service_error(error: LatticedError) -> GatewayServiceError {
+    GatewayServiceError::new(gateway_error_kind(error.kind()), error.code())
 }
 
 fn stable_run_binding(run_id: &str) -> CanonicalValue {
@@ -841,7 +1846,9 @@ fn validate_scripted_fixture(
     })
 }
 
-fn official_graph_paths(config: &LatticedDeliveryConfig) -> Result<DeliveryGraphPaths, LatticedError> {
+fn official_graph_paths(
+    config: &LatticedDeliveryConfig,
+) -> Result<DeliveryGraphPaths, LatticedError> {
     let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
     if config.runtime != DeliveryRuntime::OfficialCodexAppServer {
         return Err(rejected());
@@ -853,8 +1860,8 @@ fn official_graph_paths(config: &LatticedDeliveryConfig) -> Result<DeliveryGraph
 
     let delivery_root = fs::canonicalize(&config.delivery_root).map_err(|_| rejected())?;
     let canonical_fixture_root = delivery_root.parent().ok_or_else(rejected)?.to_path_buf();
-    let repository_root = fs::canonicalize(target_root.parent().ok_or_else(rejected)?)
-        .map_err(|_| rejected())?;
+    let repository_root =
+        fs::canonicalize(target_root.parent().ok_or_else(rejected)?).map_err(|_| rejected())?;
     Ok(DeliveryGraphPaths {
         root: canonical_fixture_root,
         repository_root,
@@ -1488,12 +2495,32 @@ fn path_text(path: &Path) -> Result<String, LatticedError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
+    use lattice_contracts::{HermesReflectionContent, HermesReflectionFinding};
     use lattice_ports::{DeliveryFailureCertainty, DeliveryPortError};
+
+    fn test_content_digest(fill: char) -> ContentDigest {
+        ContentDigest::from_sha256(fill.to_string().repeat(64)).expect("test digest")
+    }
+
+    struct TestOpenClawPump {
+        calls: Arc<AtomicUsize>,
+        outcomes: VecDeque<Result<(), OpenClawPumpFailure>>,
+    }
+
+    impl FullChainOpenClawPump for TestOpenClawPump {
+        fn pump_once(&mut self) -> Result<(), OpenClawPumpFailure> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.outcomes.pop_front().expect("bounded pump outcome")
+        }
+    }
 
     #[test]
     fn effect_deadline_reserves_time_for_cleanup_and_terminal_ledger_finalization() {
-        let finalization = deadline(Duration::from_secs(120)).expect("finalization deadline");
+        let finalization = deadline(Duration::from_mins(2)).expect("finalization deadline");
         let effect = effect_deadline(finalization).expect("effect deadline");
 
         assert_eq!(finalization.duration_since(effect), FINALIZATION_RESERVE);
@@ -1639,5 +2666,165 @@ mod tests {
                 Some(if name == "graph_commit_sha" { 40 } else { 64 })
             );
         }
+    }
+
+    #[test]
+    fn full_chain_entry_classifications_do_not_promote_openclaw_identity() {
+        assert_eq!(FullChainEntry::CodexAppMcp.runtime_kind(), "Live");
+        assert_eq!(
+            FullChainEntry::OpenClawTyped.classification(),
+            "official-package-preflight-only"
+        );
+        assert_eq!(FullChainEntry::OpenClawTyped.runtime_kind(), "Fake");
+    }
+
+    #[test]
+    fn full_chain_startup_requires_a_true_production_hermes_runner() {
+        let error = match production_hermes_from_environment() {
+            Ok(value) => match value {},
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.kind(),
+            LatticedErrorKind::HermesProductionRunnerRequired
+        );
+        assert_eq!(error.code(), "LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED");
+    }
+
+    #[test]
+    fn full_chain_openclaw_pump_only_terminates_for_process_level_failures() {
+        for fatal in [
+            GatewayTransportErrorKind::Configuration,
+            GatewayTransportErrorKind::Unavailable,
+            GatewayTransportErrorKind::NonLocal,
+            GatewayTransportErrorKind::Capacity,
+        ] {
+            assert!(fatal_openclaw_pump_error(fatal), "{fatal:?}");
+        }
+        for request_scoped in [
+            GatewayTransportErrorKind::Timeout,
+            GatewayTransportErrorKind::Ambiguous,
+            GatewayTransportErrorKind::Malformed,
+            GatewayTransportErrorKind::Authentication,
+            GatewayTransportErrorKind::Replay,
+            GatewayTransportErrorKind::Codec,
+            GatewayTransportErrorKind::ForbiddenPayload,
+            GatewayTransportErrorKind::CrossProject,
+            GatewayTransportErrorKind::Service,
+            GatewayTransportErrorKind::Reply,
+        ] {
+            assert!(
+                !fatal_openclaw_pump_error(request_scoped),
+                "{request_scoped:?}"
+            );
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let pump = TestOpenClawPump {
+            calls: Arc::clone(&calls),
+            outcomes: VecDeque::from([
+                Err(OpenClawPumpFailure {
+                    kind: GatewayTransportErrorKind::Authentication,
+                    code: "OPENCLAW_GATEWAY_AUTH_REJECTED",
+                }),
+                Ok(()),
+                Err(OpenClawPumpFailure {
+                    kind: GatewayTransportErrorKind::Unavailable,
+                    code: "OPENCLAW_GATEWAY_UNAVAILABLE",
+                }),
+            ]),
+        };
+        let mut observed = Vec::new();
+        run_openclaw_pump(pump, |failure| {
+            observed.push(failure);
+            if fatal_openclaw_pump_error(failure.kind) {
+                OpenClawPumpControl::Stop
+            } else {
+                OpenClawPumpControl::Continue
+            }
+        });
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            observed,
+            vec![
+                OpenClawPumpFailure {
+                    kind: GatewayTransportErrorKind::Authentication,
+                    code: "OPENCLAW_GATEWAY_AUTH_REJECTED",
+                },
+                OpenClawPumpFailure {
+                    kind: GatewayTransportErrorKind::Unavailable,
+                    code: "OPENCLAW_GATEWAY_UNAVAILABLE",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn full_chain_final_receipt_exposes_content_without_claiming_replayed_hermes_is_live() {
+        let request = GraphMemoryRunRequest::new(
+            Invocation::new(
+                CONTRACT_VERSION,
+                RequestId::new("full-chain-receipt-request").expect("request"),
+                TaskId::new(GRAPH_TASK_ID).expect("task"),
+                AttemptId::new("full-chain-receipt-attempt").expect("attempt"),
+                ProjectSnapshotId::new(GRAPH_PROJECT_SNAPSHOT_ID).expect("snapshot"),
+                test_content_digest('9'),
+            )
+            .expect("invocation"),
+            ProjectId::new(GRAPH_PROJECT_ID).expect("project"),
+            GitObjectId::new("a".repeat(40)).expect("commit"),
+            test_content_digest('b'),
+            test_content_digest('c'),
+            GRAPH_RETRIEVAL_LIMIT,
+        )
+        .expect("graph request");
+        let content = HermesReflectionContent::new(
+            "Bounded persisted summary.",
+            vec![
+                HermesReflectionFinding::new(
+                    "One persisted inference finding.",
+                    test_content_digest('d'),
+                )
+                .expect("finding"),
+            ],
+            vec!["Review before action.".to_owned()],
+        )
+        .expect("reflection content");
+        let receipt = HermesReflectionReceipt::replay(
+            request,
+            test_content_digest('e'),
+            content,
+            test_content_digest('f'),
+            test_content_digest('1'),
+            test_content_digest('2'),
+            test_content_digest('3'),
+        )
+        .expect("reflection receipt");
+
+        let value = append_full_chain_json(
+            json!({"status": "COMPLETED"}),
+            &receipt,
+            FullChainEntry::OpenClawTyped,
+        )
+        .expect("final receipt");
+
+        assert_eq!(value["full_chain_receipt_digest"], "3".repeat(64));
+        assert_eq!(value["hermes_summary"], "Bounded persisted summary.");
+        assert_eq!(
+            value["hermes_findings"][0]["statement"],
+            "One persisted inference finding."
+        );
+        assert_eq!(value["hermes_next_actions"][0], "Review before action.");
+        assert_eq!(
+            value["hermes_provenance_status"],
+            "PERSISTED_STRUCTURED_INFERENCE"
+        );
+        assert_eq!(value["entrypoint_runtime_kind"], "Fake");
+        assert!(value.get("hermes_runtime_kind").is_none());
+        assert_eq!(
+            full_chain_receipt_digest(&value).expect("typed final digest"),
+            test_content_digest('3')
+        );
     }
 }

@@ -2,9 +2,10 @@ use std::cell::Cell;
 use std::io::Cursor;
 use std::rc::Rc;
 
+use lattice_runtime::composition::fixed_gateway_submission;
 use lattice_runtime::mcp::{
-    DeliveryToolService, MAX_STDIO_MESSAGE_BYTES, MAX_TOOL_INVOCATIONS_PER_SESSION, McpServer,
-    ToolExecutionError, serve,
+    DeliveryToolArguments, DeliveryToolService, MAX_STDIO_MESSAGE_BYTES,
+    MAX_TOOL_INVOCATIONS_PER_SESSION, McpServer, ToolExecutionError, serve,
 };
 use serde_json::{Value, json};
 
@@ -15,15 +16,27 @@ struct FakeService {
 }
 
 impl DeliveryToolService for FakeService {
-    fn run(&mut self) -> Result<Value, ToolExecutionError> {
+    fn run(&mut self, _arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
         self.run_calls.set(self.run_calls.get() + 1);
         Ok(json!({"status": "COMPLETED", "kind": "run"}))
     }
 
-    fn status(&mut self) -> Result<Value, ToolExecutionError> {
+    fn status(&mut self, _arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
         self.status_calls.set(self.status_calls.get() + 1);
         Ok(json!({"status": "COMPLETED", "kind": "status"}))
     }
+}
+
+fn tool_arguments() -> Value {
+    let submission = fixed_gateway_submission().expect("fixed full-chain submission");
+    let binding = submission.binding();
+    json!({
+        "project_id": binding.project_id().as_str(),
+        "project_snapshot_id": binding.project_snapshot_id().as_str(),
+        "task_id": binding.task_id().as_str(),
+        "revision": binding.task_revision(),
+        "task_spec_digest": binding.task_spec_digest().as_str(),
+    })
 }
 
 fn server() -> (McpServer<FakeService>, Rc<Cell<u32>>, Rc<Cell<u32>>) {
@@ -62,7 +75,7 @@ fn initialize(server: &mut McpServer<FakeService>) {
 }
 
 #[test]
-fn tool_list_is_exactly_two_closed_zero_parameter_tools() {
+fn tool_list_is_exactly_two_closed_typed_binding_tools() {
     let (mut server, _, _) = server();
     initialize(&mut server);
 
@@ -79,16 +92,38 @@ fn tool_list_is_exactly_two_closed_zero_parameter_tools() {
             .collect::<Vec<_>>(),
         ["lattice_delivery_run", "lattice_delivery_status"]
     );
+    let expected_arguments = tool_arguments();
     for tool in tools {
+        let schema = &tool["inputSchema"];
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["additionalProperties"], false);
         assert_eq!(
-            tool["inputSchema"],
-            json!({"type":"object","additionalProperties":false})
+            schema["required"],
+            json!([
+                "project_id",
+                "project_snapshot_id",
+                "task_id",
+                "revision",
+                "task_spec_digest"
+            ])
         );
+        for field in [
+            "project_id",
+            "project_snapshot_id",
+            "task_id",
+            "revision",
+            "task_spec_digest",
+        ] {
+            assert_eq!(
+                schema["properties"][field]["const"],
+                expected_arguments[field]
+            );
+        }
     }
 }
 
 #[test]
-fn empty_arguments_dispatch_each_fixed_tool() {
+fn exact_typed_arguments_dispatch_each_fixed_tool() {
     let (mut server, run_calls, status_calls) = server();
     initialize(&mut server);
 
@@ -98,7 +133,7 @@ fn empty_arguments_dispatch_each_fixed_tool() {
                 "jsonrpc":"2.0",
                 "id":id,
                 "method":"tools/call",
-                "params":{"name":name,"arguments":{}}
+                "params":{"name":name,"arguments":tool_arguments()}
             }))
             .expect("tool response");
         assert_eq!(response["result"]["isError"], false);
@@ -131,7 +166,7 @@ fn request_metadata_is_allowed_without_widening_tool_arguments() {
             "method":"tools/call",
             "params":{
                 "name":"lattice_delivery_run",
-                "arguments":{},
+                "arguments":tool_arguments(),
                 "_meta":{"progressToken":"run-progress"}
             }
         }))
@@ -147,7 +182,7 @@ fn request_metadata_is_allowed_without_widening_tool_arguments() {
             "method":"tools/call",
             "params":{
                 "name":"lattice_delivery_status",
-                "arguments":{},
+                "arguments":tool_arguments(),
                 "_meta":"not-an-object"
             }
         }))
@@ -194,7 +229,7 @@ fn tool_invocations_are_bounded_per_session() {
                 "jsonrpc":"2.0",
                 "id":id + 10,
                 "method":"tools/call",
-                "params":{"name":"lattice_delivery_status","arguments":{}}
+                "params":{"name":"lattice_delivery_status","arguments":tool_arguments()}
             }))
             .expect("tool response within limit");
         assert_eq!(response["result"]["isError"], false);
@@ -205,7 +240,7 @@ fn tool_invocations_are_bounded_per_session() {
             "jsonrpc":"2.0",
             "id":999,
             "method":"tools/call",
-            "params":{"name":"lattice_delivery_run","arguments":{}}
+            "params":{"name":"lattice_delivery_run","arguments":tool_arguments()}
         }))
         .expect("rate limit response");
     assert_eq!(rejected["error"]["code"], -32029);
@@ -217,7 +252,7 @@ fn tool_invocations_are_bounded_per_session() {
 }
 
 #[test]
-fn every_nonempty_argument_object_is_rejected_before_dispatch() {
+fn every_unknown_argument_field_is_rejected_before_dispatch() {
     let dangerous = [
         "shell",
         "sql",
@@ -231,7 +266,7 @@ fn every_nonempty_argument_object_is_rejected_before_dispatch() {
     for property in dangerous {
         let (mut server, run_calls, status_calls) = server();
         initialize(&mut server);
-        let mut arguments = serde_json::Map::new();
+        let mut arguments = tool_arguments().as_object().expect("arguments").clone();
         arguments.insert(property.to_owned(), json!("forbidden"));
         let response = server
             .handle(json!({
@@ -266,11 +301,14 @@ fn tools_are_unavailable_before_initialized_notification() {
 fn execution_failures_are_tool_errors_without_sensitive_messages() {
     struct FailingService;
     impl DeliveryToolService for FailingService {
-        fn run(&mut self) -> Result<Value, ToolExecutionError> {
+        fn run(&mut self, _arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
             Err(ToolExecutionError::new("LATTICE_DELIVERY_REJECTED"))
         }
 
-        fn status(&mut self) -> Result<Value, ToolExecutionError> {
+        fn status(
+            &mut self,
+            _arguments: &DeliveryToolArguments,
+        ) -> Result<Value, ToolExecutionError> {
             Err(ToolExecutionError::new("LATTICE_STATUS_REJECTED"))
         }
     }
@@ -291,7 +329,7 @@ fn execution_failures_are_tool_errors_without_sensitive_messages() {
     let response = server
         .handle(json!({
             "jsonrpc":"2.0","id":2,"method":"tools/call",
-            "params":{"name":"lattice_delivery_run"}
+            "params":{"name":"lattice_delivery_run","arguments":tool_arguments()}
         }))
         .expect("tool result");
 

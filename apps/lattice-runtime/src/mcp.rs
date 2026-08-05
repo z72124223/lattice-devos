@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, BufRead, Write};
 
+use lattice_contracts::{ContentDigest, ProjectId, ProjectSnapshotId, SubjectBinding, TaskId};
 use serde_json::{Map, Value, json};
 
 /// Stable MCP protocol version implemented by this server.
@@ -12,6 +13,13 @@ pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 pub const DELIVERY_RUN_TOOL: &str = "lattice_delivery_run";
 /// Sole delivery status tool.
 pub const DELIVERY_STATUS_TOOL: &str = "lattice_delivery_status";
+
+const FIXED_PROJECT_ID: &str = "task032-delivery";
+const FIXED_PROJECT_SNAPSHOT_ID: &str = "task032-delivery:snapshot:1";
+const FIXED_TASK_ID: &str = "TASK-032";
+const FIXED_TASK_REVISION: &str = "1";
+const FIXED_TASK_SPEC_DIGEST: &str =
+    "b70aa1a7445ea7e7ebe466154d13ea1039f963b5ac4ffe1f7d5094dd8c949e0e";
 
 /// Maximum encoded bytes accepted for one newline-delimited stdio message.
 pub const MAX_STDIO_MESSAGE_BYTES: usize = 65_536;
@@ -45,21 +53,35 @@ impl fmt::Display for ToolExecutionError {
 
 impl Error for ToolExecutionError {}
 
-/// Composition-owned zero-argument operations exposed by MCP.
+/// Exact fixed-task selector accepted by both MCP tools.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliveryToolArguments {
+    binding: SubjectBinding,
+}
+
+impl DeliveryToolArguments {
+    /// Returns the fully typed immutable task binding selected by the caller.
+    #[must_use]
+    pub const fn binding(&self) -> &SubjectBinding {
+        &self.binding
+    }
+}
+
+/// Composition-owned typed operations exposed by MCP.
 pub trait DeliveryToolService {
     /// Executes the fixed delivery profile.
     ///
     /// # Errors
     ///
     /// Returns only a stable, secret-free failure code.
-    fn run(&mut self) -> Result<Value, ToolExecutionError>;
+    fn run(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError>;
 
     /// Reads the fixed delivery profile's durable status.
     ///
     /// # Errors
     ///
     /// Returns only a stable, secret-free failure code.
-    fn status(&mut self) -> Result<Value, ToolExecutionError>;
+    fn status(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,7 +180,7 @@ impl<S: DeliveryToolService> McpServer<S> {
                     "title": "LATTICE DevOS",
                     "version": "1.0.0"
                 },
-                "instructions": "Two fixed zero-argument delivery tools; OpenClaw remains the normal human gateway."
+                "instructions": "Two fixed-task delivery tools. Callers select only the typed immutable task binding; execution configuration remains server-owned."
             }),
         )
     }
@@ -178,13 +200,13 @@ impl<S: DeliveryToolService> McpServer<S> {
                         "name": DELIVERY_RUN_TOOL,
                         "title": "Run LATTICE delivery",
                         "description": "Runs the one LATTICE-owned delivery profile using server configuration.",
-                        "inputSchema": {"type": "object", "additionalProperties": false}
+                        "inputSchema": delivery_arguments_schema()
                     },
                     {
                         "name": DELIVERY_STATUS_TOOL,
                         "title": "Read LATTICE delivery status",
                         "description": "Reads the durable status for the one LATTICE-owned delivery profile.",
-                        "inputSchema": {"type": "object", "additionalProperties": false}
+                        "inputSchema": delivery_arguments_schema()
                     }
                 ]
             }),
@@ -208,21 +230,21 @@ impl<S: DeliveryToolService> McpServer<S> {
         let Some(name) = params.get("name").and_then(Value::as_str) else {
             return protocol_error(id, -32602, "Invalid tools/call params");
         };
-        if !empty_object_or_absent(params.get("arguments")) {
-            return protocol_error(id, -32602, "Tool accepts no arguments");
-        }
         let operation = match name {
             DELIVERY_RUN_TOOL => DeliveryOperation::Run,
             DELIVERY_STATUS_TOOL => DeliveryOperation::Status,
             _ => return protocol_error(id, -32602, "Unknown tool"),
+        };
+        let Some(arguments) = parse_delivery_arguments(params.get("arguments")) else {
+            return protocol_error(id, -32602, "Invalid typed task binding");
         };
         if self.tool_invocations >= MAX_TOOL_INVOCATIONS_PER_SESSION {
             return protocol_error(id, -32029, "Tool invocation limit exceeded");
         }
         self.tool_invocations += 1;
         let result = match operation {
-            DeliveryOperation::Run => self.service.run(),
-            DeliveryOperation::Status => self.service.status(),
+            DeliveryOperation::Run => self.service.run(&arguments),
+            DeliveryOperation::Status => self.service.status(&arguments),
         };
         success(id, tool_result(result))
     }
@@ -318,8 +340,54 @@ fn read_bounded_frame<R: BufRead>(reader: &mut R) -> io::Result<StdioFrame> {
     }
 }
 
-fn empty_object_or_absent(value: Option<&Value>) -> bool {
-    value.is_none_or(|value| value.as_object().is_some_and(Map::is_empty))
+fn delivery_arguments_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "project_id": {"type": "string", "const": FIXED_PROJECT_ID},
+            "project_snapshot_id": {"type": "string", "const": FIXED_PROJECT_SNAPSHOT_ID},
+            "task_id": {"type": "string", "const": FIXED_TASK_ID},
+            "revision": {"type": "string", "const": FIXED_TASK_REVISION},
+            "task_spec_digest": {"type": "string", "const": FIXED_TASK_SPEC_DIGEST}
+        },
+        "required": [
+            "project_id",
+            "project_snapshot_id",
+            "task_id",
+            "revision",
+            "task_spec_digest"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn parse_delivery_arguments(value: Option<&Value>) -> Option<DeliveryToolArguments> {
+    const FIELDS: [&str; 5] = [
+        "project_id",
+        "project_snapshot_id",
+        "task_id",
+        "revision",
+        "task_spec_digest",
+    ];
+    let object = value?.as_object()?;
+    if object.len() != FIELDS.len() || object.keys().any(|key| !FIELDS.contains(&key.as_str())) {
+        return None;
+    }
+    let text = |field: &str| {
+        object
+            .get(field)?
+            .as_str()
+            .filter(|value| !value.is_empty())
+    };
+    let binding = SubjectBinding::new(
+        ProjectId::new(text("project_id")?).ok()?,
+        ProjectSnapshotId::new(text("project_snapshot_id")?).ok()?,
+        TaskId::new(text("task_id")?).ok()?,
+        text("revision")?,
+        ContentDigest::from_sha256(text("task_spec_digest")?).ok()?,
+    )
+    .ok()?;
+    Some(DeliveryToolArguments { binding })
 }
 
 fn metadata_object_or_absent(value: Option<&Value>) -> bool {

@@ -11,6 +11,8 @@ lattice-codex-adapter = { path = "../../crates/lattice-codex-adapter" }
 lattice-cjson = { path = "../../crates/lattice-cjson" }
 lattice-contracts = { path = "../../crates/lattice-contracts" }
 lattice-graphify-adapter = { path = "../../crates/lattice-graphify-adapter" }
+lattice-gateway-ipc = { path = "../../crates/lattice-gateway-ipc" }
+lattice-openclaw-adapter = { path = "../../crates/lattice-openclaw-adapter" }
 lattice-orchestrator = { path = "../../crates/lattice-orchestrator" }
 lattice-ports = { path = "../../crates/lattice-ports" }
 lattice-postgres-codebase-memory = { path = "../../crates/lattice-postgres-codebase-memory" }
@@ -31,3 +33,7 @@ path = "src/main.rs"
 [[bin]]
 name = "latticed"
 path = "src/bin/latticed.rs"
+
+[[bin]]
+name = "lattice-full-chain"
+path = "src/bin/lattice-full-chain.rs"

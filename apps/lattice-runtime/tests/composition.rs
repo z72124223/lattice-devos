@@ -508,9 +508,33 @@ fn real_latticed_binary_serves_only_the_two_bounded_tools() {
         ["lattice_delivery_run", "lattice_delivery_status"]
     );
     for tool in tools {
+        assert_eq!(tool["inputSchema"]["type"], "object");
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
         assert_eq!(
-            tool["inputSchema"],
-            json!({"type":"object","additionalProperties":false})
+            tool["inputSchema"]["required"],
+            json!([
+                "project_id",
+                "project_snapshot_id",
+                "task_id",
+                "revision",
+                "task_spec_digest"
+            ])
         );
     }
+}
+
+#[test]
+fn full_chain_binary_is_reachable_and_fails_closed_without_a_sealed_hermes_runner() {
+    let output = Command::new(env!("CARGO_BIN_EXE_lattice-full-chain"))
+        .env("LATTICE_DELIVERY_CODEX_MODE", "SCRIPTED_ACCEPTANCE")
+        .env("LATTICE_TASK019_HOST", "not-a-database-host")
+        .output()
+        .expect("start full-chain entrypoint");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr utf8"),
+        "LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED\n"
+    );
 }
