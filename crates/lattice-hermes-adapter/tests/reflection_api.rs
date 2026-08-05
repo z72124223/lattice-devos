@@ -1626,6 +1626,18 @@ fn codex_proxy_fd2_host_wire_is_bound_sequenced_and_fail_closed() {
         peer.accept(&close_ack).expect("peer accepts host CLOSE"),
         CodexProxyHostEvent::Close
     );
+    let terminal = encode_codex_proxy_test_frame(5, 3, binding, &[]);
+    assert_eq!(
+        host.accept(&terminal).expect("bound terminal seq3"),
+        CodexProxyHostEvent::Terminal
+    );
+    let replay = encode_codex_proxy_test_frame(5, 4, binding, &[]);
+    assert_eq!(
+        host.accept(&replay)
+            .expect_err("terminal replay fails closed")
+            .code(),
+        "HERMES_CODEX_PROXY_STATE_REJECTED"
+    );
 
     let mut wrong_binding = CodexProxyHostSession::new(
         nonce,

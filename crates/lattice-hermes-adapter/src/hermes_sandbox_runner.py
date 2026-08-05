@@ -45,6 +45,7 @@ CODEX_PROXY_OPEN = 1
 CODEX_PROXY_DATA = 2
 CODEX_PROXY_CLOSE = 3
 CODEX_PROXY_ERROR = 4
+CODEX_PROXY_TERMINAL = 5
 PROXY_ERROR_PROTOCOL = 1
 PROXY_ERROR_BINDING = 2
 PROXY_ERROR_SEQUENCE = 3
@@ -453,7 +454,7 @@ def codex_proxy_binding(init):
 
 
 def validate_codex_proxy_payload(kind, payload):
-    if kind in (CODEX_PROXY_OPEN, CODEX_PROXY_CLOSE):
+    if kind in (CODEX_PROXY_OPEN, CODEX_PROXY_CLOSE, CODEX_PROXY_TERMINAL):
         if payload:
             raise CodexProxyViolation(PROXY_ERROR_SIZE)
     elif kind == CODEX_PROXY_DATA:
@@ -500,7 +501,13 @@ def decode_codex_proxy_body(body, expected_sequence, expected_binding):
     sequence = int.from_bytes(body[5:9], "big")
     binding = body[9:41]
     payload = body[41:]
-    if kind not in (CODEX_PROXY_OPEN, CODEX_PROXY_DATA, CODEX_PROXY_CLOSE, CODEX_PROXY_ERROR):
+    if kind not in (
+        CODEX_PROXY_OPEN,
+        CODEX_PROXY_DATA,
+        CODEX_PROXY_CLOSE,
+        CODEX_PROXY_ERROR,
+        CODEX_PROXY_TERMINAL,
+    ):
         raise CodexProxyViolation(PROXY_ERROR_PROTOCOL)
     if stream_id != CODEX_PROXY_STREAM_ID:
         raise CodexProxyViolation(PROXY_ERROR_STATE)
@@ -788,6 +795,15 @@ class CodexProxyBridge:
                     raise CodexProxyViolation(PROXY_ERROR_STATE)
                 else:
                     raise CodexProxyViolation(PROXY_ERROR_STATE)
+        send_codex_proxy_frame(
+            self.host_connection,
+            CODEX_PROXY_TERMINAL,
+            self.send_sequence,
+            self.binding,
+            b"",
+            self.deadline,
+        )
+        self.send_sequence += 1
 
     def run(self):
         local = None
