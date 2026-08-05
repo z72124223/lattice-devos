@@ -16,6 +16,8 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 #[cfg(windows)]
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 #[cfg(windows)]
+use std::sync::{Arc, Mutex};
+#[cfg(windows)]
 use std::thread::{self, JoinHandle};
 #[cfg(windows)]
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29,7 +31,7 @@ use lattice_contracts::ContentDigest;
 
 #[cfg(windows)]
 use crate::codex_proxy::{
-    ProductionCodexProxyDuplex, ProductionCodexProxyLifecycle, ProductionCodexProxyProvider,
+    ProductionCodexProxyControl, ProductionCodexProxyDuplex, ProductionCodexProxyProvider,
 };
 use crate::{HermesAdapterError, HermesAdapterErrorKind, HermesAdapterResult};
 
@@ -504,7 +506,10 @@ impl CodexReflectionBrokerConfig {
         {
             return Err(binding_rejected());
         }
-        Ok(Box::new(OfficialCodexProxyProvider { verified }))
+        Ok(Box::new(OfficialCodexProxyProvider {
+            verified,
+            control: Arc::new(OwnedCodexProxyControl::new()),
+        }))
     }
 
     /// Runs the official four-file bundle inside one kill-on-close Job and
@@ -868,23 +873,31 @@ impl VerifiedCodexProxyConfig {
 #[cfg(windows)]
 struct OfficialCodexProxyProvider {
     verified: VerifiedCodexProxyConfig,
+    control: Arc<OwnedCodexProxyControl>,
 }
 
 #[cfg(windows)]
 impl ProductionCodexProxyProvider for OfficialCodexProxyProvider {
+    fn control(&self) -> Arc<dyn ProductionCodexProxyControl> {
+        self.control.clone()
+    }
+
     fn open(
         self: Box<Self>,
         absolute_deadline: Instant,
     ) -> HermesAdapterResult<ProductionCodexProxyDuplex> {
+        let Self { verified, control } = *self;
+        control.ensure_open_allowed()?;
         if absolute_deadline <= Instant::now() {
             return Err(timeout("HERMES_CODEX_PROXY_DEADLINE_EXCEEDED"));
         }
-        let reviewed = self.verified.reverify_open()?;
-        let plan = self.verified.command_plan(&reviewed, absolute_deadline)?;
+        let reviewed = verified.reverify_open()?;
+        let plan = verified.command_plan(&reviewed, absolute_deadline)?;
         launch_owned_proxy(
             &plan,
             MAX_CODEX_PROXY_STDERR_BYTES,
-            || self.verified.reverify_open().map(|_| ()),
+            &control,
+            || verified.reverify_open().map(|_| ()),
             |_| {},
         )
     }
@@ -959,10 +972,7 @@ impl OwnedCodexProxyLifecycle {
         }
         Ok(())
     }
-}
 
-#[cfg(windows)]
-impl ProductionCodexProxyLifecycle for OwnedCodexProxyLifecycle {
     fn ensure_running(&mut self) -> HermesAdapterResult<()> {
         if let Err(error) = self.poll_stderr() {
             self.child.terminate()?;
@@ -986,6 +996,139 @@ impl ProductionCodexProxyLifecycle for OwnedCodexProxyLifecycle {
 }
 
 #[cfg(windows)]
+#[derive(Default)]
+struct OwnedCodexProxyControlState {
+    cancelled: bool,
+    lifecycle: Option<OwnedCodexProxyLifecycle>,
+}
+
+#[cfg(windows)]
+struct OwnedCodexProxyControl {
+    state: Mutex<OwnedCodexProxyControlState>,
+}
+
+#[cfg(windows)]
+impl OwnedCodexProxyControl {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(OwnedCodexProxyControlState::default()),
+        }
+    }
+
+    fn state_unknown() -> HermesAdapterError {
+        HermesAdapterError::new(
+            HermesAdapterErrorKind::Ambiguous,
+            "HERMES_CODEX_PROXY_CONTROL_STATE_UNKNOWN",
+        )
+    }
+
+    fn cancelled() -> HermesAdapterError {
+        HermesAdapterError::new(
+            HermesAdapterErrorKind::Failed,
+            "HERMES_CODEX_PROXY_OPEN_CANCELLED",
+        )
+    }
+
+    fn ensure_open_allowed(&self) -> HermesAdapterResult<()> {
+        let state = self.state.lock().map_err(|_| Self::state_unknown())?;
+        if state.cancelled {
+            return Err(Self::cancelled());
+        }
+        if state.lifecycle.is_some() {
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_PROCESS_ALREADY_BOUND",
+            ));
+        }
+        Ok(())
+    }
+
+    fn bind(&self, mut lifecycle: OwnedCodexProxyLifecycle) -> HermesAdapterResult<()> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                lifecycle.terminate()?;
+                return Err(Self::state_unknown());
+            }
+        };
+        let rejection = if state.cancelled {
+            Some(Self::cancelled())
+        } else if state.lifecycle.is_some() {
+            Some(HermesAdapterError::new(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_PROCESS_ALREADY_BOUND",
+            ))
+        } else {
+            None
+        };
+        if let Some(rejection) = rejection {
+            drop(state);
+            lifecycle.terminate()?;
+            return Err(rejection);
+        }
+        state.lifecycle = Some(lifecycle);
+        Ok(())
+    }
+
+    fn start_stdio(&self) -> HermesAdapterResult<(Box<dyn Read + Send>, Box<dyn Write + Send>)> {
+        let mut state = self.state.lock().map_err(|_| Self::state_unknown())?;
+        if state.cancelled {
+            return Err(Self::cancelled());
+        }
+        let lifecycle = state.lifecycle.as_mut().ok_or_else(|| {
+            HermesAdapterError::new(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_PROCESS_NOT_BOUND",
+            )
+        })?;
+        if lifecycle.stderr_thread.is_some() || lifecycle.stderr_evidence.is_some() {
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_STDIO_ALREADY_BOUND",
+            ));
+        }
+        let writer = lifecycle.child.take_stdin_writer()?;
+        let reader = lifecycle.child.take_stdout_reader()?;
+        let stderr = lifecycle.child.take_stderr_reader()?;
+        let stderr_limit = lifecycle.stderr_limit;
+        let stderr_thread = thread::Builder::new()
+            .name("lattice-codex-stderr".to_owned())
+            .spawn(move || drain_bounded_codex_stderr(stderr, stderr_limit))
+            .map_err(|_| spawn("HERMES_CODEX_PROXY_STDERR_THREAD_SPAWN_FAILED"))?;
+        lifecycle.stderr_thread = Some(stderr_thread);
+        Ok((Box::new(reader), Box::new(writer)))
+    }
+}
+
+#[cfg(windows)]
+impl ProductionCodexProxyControl for OwnedCodexProxyControl {
+    fn ensure_running(&self) -> HermesAdapterResult<()> {
+        let mut state = self.state.lock().map_err(|_| Self::state_unknown())?;
+        if state.cancelled {
+            return Err(Self::cancelled());
+        }
+        state.lifecycle.as_mut().map_or_else(
+            || {
+                Err(HermesAdapterError::new(
+                    HermesAdapterErrorKind::Ambiguous,
+                    "HERMES_CODEX_PROXY_PROCESS_NOT_BOUND",
+                ))
+            },
+            OwnedCodexProxyLifecycle::ensure_running,
+        )
+    }
+
+    fn terminate(&self) -> HermesAdapterResult<()> {
+        let mut state = self.state.lock().map_err(|_| Self::state_unknown())?;
+        state.cancelled = true;
+        state
+            .lifecycle
+            .as_mut()
+            .map_or(Ok(()), OwnedCodexProxyLifecycle::terminate)
+    }
+}
+
+#[cfg(windows)]
 impl Drop for OwnedCodexProxyLifecycle {
     fn drop(&mut self) {
         if self.child.terminate().is_ok() {
@@ -998,6 +1141,7 @@ impl Drop for OwnedCodexProxyLifecycle {
 fn launch_owned_proxy<F, G>(
     plan: &crate::windows_job::WindowsJobCommandPlan,
     stderr_limit: u64,
+    control: &Arc<OwnedCodexProxyControl>,
     post_spawn_identity_check: F,
     observe_process_id: G,
 ) -> HermesAdapterResult<ProductionCodexProxyDuplex>
@@ -1008,28 +1152,34 @@ where
     if stderr_limit == 0 || stderr_limit > MAX_CODEX_PROXY_STDERR_BYTES {
         return Err(configuration("HERMES_CODEX_PROXY_STDERR_LIMIT_REJECTED"));
     }
-    let mut child = crate::windows_job::spawn_duplex(plan)?;
-    observe_process_id(child.process_id());
-    post_spawn_identity_check()?;
-    let writer = child.take_stdin_writer()?;
-    let reader = child.take_stdout_reader()?;
-    let stderr = child.take_stderr_reader()?;
-    let stderr_thread = thread::Builder::new()
-        .name("lattice-codex-stderr".to_owned())
-        .spawn(move || drain_bounded_codex_stderr(stderr, stderr_limit))
-        .map_err(|_| spawn("HERMES_CODEX_PROXY_STDERR_THREAD_SPAWN_FAILED"))?;
-    let mut lifecycle = OwnedCodexProxyLifecycle {
+    control.ensure_open_allowed()?;
+    let child = crate::windows_job::spawn_duplex(plan)?;
+    let process_id = child.process_id();
+    let lifecycle = OwnedCodexProxyLifecycle {
         child,
         stderr_evidence: None,
         stderr_limit,
-        stderr_thread: Some(stderr_thread),
+        stderr_thread: None,
     };
-    lifecycle.ensure_running()?;
-    Ok(ProductionCodexProxyDuplex::new(
-        Box::new(reader),
-        Box::new(writer),
-        Box::new(lifecycle),
-    ))
+    control.bind(lifecycle)?;
+    observe_process_id(process_id);
+    let (reader, writer) = match control.start_stdio() {
+        Ok(streams) => streams,
+        Err(error) => {
+            return match control.terminate() {
+                Ok(()) => Err(error),
+                Err(termination) => Err(termination),
+            };
+        }
+    };
+    if let Err(error) = post_spawn_identity_check() {
+        return match control.terminate() {
+            Ok(()) => Err(error),
+            Err(termination) => Err(termination),
+        };
+    }
+    control.ensure_running()?;
+    Ok(ProductionCodexProxyDuplex::new(reader, writer))
 }
 
 #[cfg(windows)]
@@ -1070,6 +1220,7 @@ fn drain_bounded_codex_stderr(
 
 #[cfg(all(test, windows))]
 struct FixtureCodexProxyProvider {
+    control: Arc<OwnedCodexProxyControl>,
     executable_sha256: String,
     plan: crate::windows_job::WindowsJobCommandPlan,
     process_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
@@ -1078,6 +1229,10 @@ struct FixtureCodexProxyProvider {
 
 #[cfg(all(test, windows))]
 impl ProductionCodexProxyProvider for FixtureCodexProxyProvider {
+    fn control(&self) -> Arc<dyn ProductionCodexProxyControl> {
+        self.control.clone()
+    }
+
     fn open(
         self: Box<Self>,
         absolute_deadline: Instant,
@@ -1086,6 +1241,7 @@ impl ProductionCodexProxyProvider for FixtureCodexProxyProvider {
             return Err(timeout("HERMES_CODEX_PROXY_DEADLINE_EXCEEDED"));
         }
         let Self {
+            control,
             executable_sha256,
             mut plan,
             process_id,
@@ -1101,6 +1257,7 @@ impl ProductionCodexProxyProvider for FixtureCodexProxyProvider {
         launch_owned_proxy(
             &plan,
             stderr_limit,
+            &control,
             move || {
                 if bounded_file_sha256(&executable, MAX_CODEX_LAUNCHER_BYTES)? == executable_sha256
                 {
@@ -3343,6 +3500,7 @@ mod production_provider_tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::mpsc;
 
     struct ProviderFixture {
         config: CodexReflectionBrokerConfig,
@@ -3518,6 +3676,7 @@ mod production_provider_tests {
             };
             (
                 FixtureCodexProxyProvider {
+                    control: Arc::new(OwnedCodexProxyControl::new()),
                     executable_sha256: bounded_file_sha256(&executable, MAX_CODEX_LAUNCHER_BYTES)
                         .expect("fixture executable identity"),
                     plan,
@@ -3667,9 +3826,10 @@ mod production_provider_tests {
     }
 
     #[test]
-    fn process_fixture_relays_raw_bytes_and_drop_reaps_the_owned_job() {
+    fn process_fixture_relays_raw_bytes_and_shared_control_reaps_the_owned_job() {
         let fixture = ProcessFixture::new();
         let (provider, process_id) = fixture.provider(1024);
+        let control = provider.control();
         let mut duplex = Box::new(provider)
             .open(Instant::now() + Duration::from_secs(10))
             .expect("open test-only Job-owned raw duplex");
@@ -3685,6 +3845,9 @@ mod production_provider_tests {
         assert_eq!(echoed, payload);
 
         drop(duplex);
+        control
+            .terminate()
+            .expect("shared control terminates the owned Job");
         let mut trailing = Vec::new();
         reader
             .read_to_end(&mut trailing)
@@ -3723,15 +3886,78 @@ mod production_provider_tests {
     }
 
     #[test]
+    fn process_fixture_pre_open_cancel_prevents_spawn() {
+        let fixture = ProcessFixture::new();
+        let (provider, process_id) = fixture.provider(1024);
+        let control = provider.control();
+        control.terminate().expect("pre-open cancellation");
+        let failure = Box::new(provider)
+            .open(Instant::now() + Duration::from_secs(10))
+            .err()
+            .expect("cancelled provider cannot spawn");
+        assert_eq!(failure.kind(), HermesAdapterErrorKind::Failed);
+        assert_eq!(failure.code(), "HERMES_CODEX_PROXY_OPEN_CANCELLED");
+        assert_eq!(process_id.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn process_fixture_post_spawn_check_is_cancellable_through_bound_control() {
+        let fixture = ProcessFixture::new();
+        let (provider, process_id) = fixture.provider(1024);
+        let FixtureCodexProxyProvider {
+            control,
+            plan,
+            stderr_limit,
+            ..
+        } = provider;
+        let retained_control = Arc::clone(&control);
+        let observed_process_id = Arc::clone(&process_id);
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            launch_owned_proxy(
+                &plan,
+                stderr_limit,
+                &control,
+                move || {
+                    entered_sender.send(()).expect("signal post-spawn check");
+                    release_receiver.recv().expect("release post-spawn check");
+                    Ok(())
+                },
+                move |observed| {
+                    observed_process_id.store(observed, Ordering::Release);
+                },
+            )
+        });
+        entered_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("post-spawn check entered after control binding");
+        let process_id = process_id.load(Ordering::Acquire);
+        assert_ne!(process_id, 0);
+        retained_control
+            .terminate()
+            .expect("shared control cancels blocked post-spawn check");
+        assert!(process_has_exited(&fixture.process_probe, process_id));
+        release_sender.send(()).expect("release post-spawn check");
+        let failure = worker
+            .join()
+            .expect("post-spawn worker joins")
+            .err()
+            .expect("cancelled launch cannot return a duplex");
+        assert_eq!(failure.code(), "HERMES_CODEX_PROXY_OPEN_CANCELLED");
+    }
+
+    #[test]
     fn process_fixture_bounds_stderr_and_reaps_the_owned_job() {
         let fixture = ProcessFixture::new();
         let (provider, process_id) = fixture.stderr_provider(1024);
+        let control = provider.control();
         let failure = match Box::new(provider).open(Instant::now() + Duration::from_secs(10)) {
             Err(failure) => failure,
-            Ok(mut duplex) => {
+            Ok(_duplex) => {
                 let deadline = Instant::now() + Duration::from_secs(3);
                 loop {
-                    match duplex.ensure_running() {
+                    match control.ensure_running() {
                         Ok(()) if Instant::now() < deadline => {
                             thread::sleep(Duration::from_millis(10));
                         }
@@ -3743,6 +3969,7 @@ mod production_provider_tests {
         };
         assert_eq!(failure.kind(), HermesAdapterErrorKind::Malformed);
         assert_eq!(failure.code(), "HERMES_CODEX_PROXY_STDERR_LIMIT_EXCEEDED");
+        let _ = control.terminate();
         let process_id = process_id.load(Ordering::Acquire);
         assert_ne!(process_id, 0);
         let deadline = Instant::now() + Duration::from_secs(3);
