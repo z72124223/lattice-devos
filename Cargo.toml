@@ -8,6 +8,7 @@ members = [
     "crates/lattice-contracts",
     "crates/lattice-graphify-adapter",
     "crates/lattice-orchestrator",
+    "crates/lattice-openclaw-adapter",
     "crates/lattice-core",
     "crates/lattice-gateway-ipc",
     "crates/lattice-approval-verifier",
