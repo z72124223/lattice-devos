@@ -56,6 +56,7 @@ pub(crate) enum CodexProxyHostEvent {
     Data(Vec<u8>),
     Close,
     Error(u16),
+    Terminal,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -83,6 +84,7 @@ pub(crate) struct CodexProxyHostSession {
     outbound_sequence: u32,
     inbound: CodexProxyInboundState,
     outbound: CodexProxyOutboundState,
+    terminal: bool,
     failure_evidence: Option<CodexProxyFailureEvidence>,
 }
 
@@ -128,6 +130,7 @@ impl CodexProxyHostSession {
             outbound_sequence: 0,
             inbound: CodexProxyInboundState::AwaitOpen,
             outbound: CodexProxyOutboundState::AwaitOpenAck,
+            terminal: false,
             failure_evidence: None,
         })
     }
@@ -260,7 +263,15 @@ impl CodexProxyHostSession {
                 self.inbound = CodexProxyInboundState::Closed;
                 CodexProxyHostEvent::Error(u16::from_be_bytes([payload[0], payload[1]]))
             }
-            1..=4 => return Err(malformed("HERMES_CODEX_PROXY_STATE_REJECTED")),
+            5 if payload.is_empty()
+                && self.inbound_closed()
+                && self.outbound_closed()
+                && !self.terminal =>
+            {
+                self.terminal = true;
+                CodexProxyHostEvent::Terminal
+            }
+            1..=5 => return Err(malformed("HERMES_CODEX_PROXY_STATE_REJECTED")),
             _ => return Err(malformed("HERMES_CODEX_PROXY_KIND_REJECTED")),
         };
         self.expected_sequence = self
@@ -614,6 +625,17 @@ fn run_codex_proxy_host(
                         "HERMES_CODEX_PROXY_CHILD_ERROR",
                     ));
                 }
+                CodexProxyHostEvent::Terminal => {
+                    status
+                        .lock()
+                        .map_err(|_| {
+                            error(
+                                HermesAdapterErrorKind::Ambiguous,
+                                "HERMES_CODEX_PROXY_HOST_STATE_UNKNOWN",
+                            )
+                        })?
+                        .clean_terminal = true;
+                }
             }
         }
 
@@ -643,15 +665,6 @@ fn run_codex_proxy_host(
                     write_proxy_frame(&mut outer_input, &session.encode_close()?)?;
                     provider_stream = None;
                     debug_assert!(session.outbound_closed());
-                    status
-                        .lock()
-                        .map_err(|_| {
-                            error(
-                                HermesAdapterErrorKind::Ambiguous,
-                                "HERMES_CODEX_PROXY_HOST_STATE_UNKNOWN",
-                            )
-                        })?
-                        .clean_terminal = true;
                 }
                 ProviderStreamEvent::Failed => {
                     return Err(error(
@@ -2303,6 +2316,19 @@ mod proxy_host_tests {
             session.accept(&close).expect("independent inbound close"),
             CodexProxyHostEvent::Close
         );
+        let terminal = encode_codex_proxy_test_frame(5, 3, binding, &[]);
+        assert_eq!(
+            session.accept(&terminal).expect("bound terminal"),
+            CodexProxyHostEvent::Terminal
+        );
+        let replay = encode_codex_proxy_test_frame(5, 4, binding, &[]);
+        assert_eq!(
+            session
+                .accept(&replay)
+                .expect_err("terminal replay rejected")
+                .code(),
+            "HERMES_CODEX_PROXY_STATE_REJECTED"
+        );
     }
 
     #[test]
@@ -2467,6 +2493,55 @@ mod proxy_host_tests {
             .expect_err("no-open host cannot cross completion barrier");
         assert_eq!(failure.code(), "HERMES_CODEX_PROXY_COMPLETION_TIMEOUT");
         host.terminate().expect("unused provider terminates");
+        drop(host);
+        fs::remove_file(path).expect("remove exact test sink");
+    }
+
+    #[test]
+    fn delayed_invalid_frame_before_terminal_prevents_completion() {
+        let (outer_input, path) = test_sink("proxy-delayed-invalid");
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let nonce = "22".repeat(32);
+        let receipt = ContentDigest::from_sha256("33".repeat(32)).expect("digest");
+        let binding = test_binding(&nonce, &receipt);
+        let mut host = ProductionCodexProxyHost::start(
+            Box::new(ScriptedCodexProxyProvider::default()),
+            &nonce,
+            &receipt,
+            Instant::now() + Duration::from_secs(2),
+            outer_input,
+            receiver,
+            Vec::new(),
+            Arc::new(ContainmentOwnerState::new("11".repeat(32))),
+        )
+        .expect("start proxy host");
+        let mut open_then_close = encode_codex_proxy_test_frame(1, 0, binding, &[]);
+        open_then_close.extend_from_slice(&encode_codex_proxy_test_frame(3, 1, binding, &[]));
+        sender
+            .send(OuterStreamEvent::Data(open_then_close))
+            .expect("send open and remote close");
+        wait_until(
+            || host.status.lock().expect("host status").authenticated_open,
+            "provider did not authenticate open",
+        );
+        thread::sleep(Duration::from_millis(25));
+        assert!(
+            !host.status.lock().expect("host status").clean_terminal,
+            "bilateral close without the inner terminal frame is not complete"
+        );
+        sender
+            .send(OuterStreamEvent::Data(encode_codex_proxy_test_frame(
+                2,
+                2,
+                binding,
+                b"replayed after close",
+            )))
+            .expect("send delayed invalid frame");
+        let failure = host
+            .wait_for_clean_terminal(Instant::now() + Duration::from_secs(1))
+            .expect_err("invalid pre-terminal frame fails the barrier");
+        assert_eq!(failure.code(), "HERMES_CODEX_PROXY_STATE_REJECTED");
+        let _ = host.terminate();
         drop(host);
         fs::remove_file(path).expect("remove exact test sink");
     }
