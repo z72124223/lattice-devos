@@ -351,6 +351,17 @@ class SyntheticCodexHost:
                     if payload or not responded:
                         raise AssertionError("runner closed before the byte relay completed")
                     self.send(RUNNER.CODEX_PROXY_CLOSE, send_sequence)
+                    kind, stream_id, sequence, binding, payload = receive_host_proxy_frame(
+                        self.connection
+                    )
+                    if (
+                        kind != RUNNER.CODEX_PROXY_TERMINAL
+                        or stream_id != 1
+                        or sequence != receive_sequence
+                        or binding != self.binding
+                        or payload
+                    ):
+                        raise AssertionError("runner omitted the bound terminal frame")
                     return
                 else:
                     raise AssertionError("runner emitted an unexpected proxy frame")
