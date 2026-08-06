@@ -1267,6 +1267,30 @@ enum FullChainEntry {
     OpenClawTyped,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FullChainRunMode {
+    Fresh,
+    ResumeExisting,
+}
+
+fn parse_full_chain_run_mode(value: Option<&str>) -> Result<FullChainRunMode, LatticedError> {
+    match value {
+        None | Some("FRESH") => Ok(FullChainRunMode::Fresh),
+        Some("RESUME_EXISTING") => Ok(FullChainRunMode::ResumeExisting),
+        Some(_) => Err(LatticedError::new(LatticedErrorKind::Configuration)),
+    }
+}
+
+fn full_chain_run_mode_from_environment() -> Result<FullChainRunMode, LatticedError> {
+    match env::var("LATTICE_FULL_CHAIN_RUN_MODE") {
+        Ok(value) => parse_full_chain_run_mode(Some(&value)),
+        Err(env::VarError::NotPresent) => parse_full_chain_run_mode(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(LatticedError::new(LatticedErrorKind::Configuration))
+        }
+    }
+}
+
 impl FullChainEntry {
     const fn name(self) -> &'static str {
         match self {
@@ -1294,11 +1318,15 @@ struct FullChainCore<H> {
     delivery: LatticedDeliveryService,
     hermes: H,
     submission: TaskSpecSubmission,
+    run_mode: FullChainRunMode,
 }
 
 impl<H: FullChainHermesPort> FullChainCore<H> {
     fn run_json(&mut self, entry: FullChainEntry) -> Result<Value, LatticedError> {
-        let base = self.delivery.run_json()?;
+        let base = match self.run_mode {
+            FullChainRunMode::Fresh => self.delivery.run_json()?,
+            FullChainRunMode::ResumeExisting => self.delivery.status_json()?,
+        };
         let reflection = self.load_or_run_reflection(&base)?;
         append_full_chain_json(base, &reflection, entry)
     }
@@ -1591,16 +1619,18 @@ pub fn serve_full_chain_from_environment() -> Result<(), LatticedError> {
     #[cfg(windows)]
     {
         let hermes_environment = HermesEnvironmentConfig::from_environment()?;
+        let run_mode = full_chain_run_mode_from_environment()?;
         let (config, database, password) = delivery_environment()?;
         let (openclaw_config, launch_record) = openclaw_from_environment()?;
         let hermes = hermes_environment.launch(database.run_id())?;
-        let runtime = assemble_full_chain_runtime(
+        let runtime = assemble_full_chain_runtime_with_mode(
             config,
             &database,
             &password,
             hermes,
             openclaw_config,
             launch_record,
+            run_mode,
         )?;
         serve_full_chain_runtime(runtime)
     }
@@ -1726,6 +1756,46 @@ pub fn assemble_full_chain_runtime<H>(
 where
     H: FullChainHermesPort + 'static,
 {
+    assemble_full_chain_runtime_with_mode(
+        config,
+        database,
+        password,
+        hermes,
+        openclaw_config,
+        launch_record,
+        FullChainRunMode::Fresh,
+    )
+}
+
+fn full_chain_delivery_service(
+    config: LatticedDeliveryConfig,
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    run_mode: FullChainRunMode,
+) -> Result<LatticedDeliveryService, LatticedError> {
+    let timeout = config.timeout;
+    match run_mode {
+        FullChainRunMode::Fresh => {
+            LatticedDeliveryService::for_delivery(config, database.clone(), password.to_owned())
+        }
+        FullChainRunMode::ResumeExisting => {
+            LatticedDeliveryService::status_only(database.clone(), password.to_owned(), timeout)
+        }
+    }
+}
+
+fn assemble_full_chain_runtime_with_mode<H>(
+    config: LatticedDeliveryConfig,
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    hermes: H,
+    openclaw_config: OpenClawGatewayConfig,
+    launch_record: OpenClawOfficialLaunchRecord,
+    run_mode: FullChainRunMode,
+) -> Result<FullChainRuntime<H>, LatticedError>
+where
+    H: FullChainHermesPort + 'static,
+{
     if config.runtime != DeliveryRuntime::OfficialCodexAppServer {
         return Err(LatticedError::new(LatticedErrorKind::OfficialLiveBlocked));
     }
@@ -1741,12 +1811,12 @@ where
         .with_frozen_submission(submission.clone())
         .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
     let timeout = config.timeout;
-    let delivery =
-        LatticedDeliveryService::for_delivery(config, database.clone(), password.to_owned())?;
+    let delivery = full_chain_delivery_service(config, database, password, run_mode)?;
     let core = FullChainCore {
         delivery,
         hermes,
         submission,
+        run_mode,
     };
     let mcp_service = FullChainService {
         inner: Arc::new(Mutex::new(core)),
@@ -3388,6 +3458,61 @@ mod tests {
             "official-package-preflight-only"
         );
         assert_eq!(FullChainEntry::OpenClawTyped.runtime_kind(), "Fake");
+    }
+
+    #[test]
+    fn full_chain_run_mode_is_process_owned_and_fail_closed() {
+        assert_eq!(
+            parse_full_chain_run_mode(None).expect("default fresh mode"),
+            FullChainRunMode::Fresh
+        );
+        assert_eq!(
+            parse_full_chain_run_mode(Some("FRESH")).expect("explicit fresh mode"),
+            FullChainRunMode::Fresh
+        );
+        assert_eq!(
+            parse_full_chain_run_mode(Some("RESUME_EXISTING")).expect("bounded resume mode"),
+            FullChainRunMode::ResumeExisting
+        );
+        assert!(parse_full_chain_run_mode(Some("resume_existing")).is_err());
+        assert!(parse_full_chain_run_mode(Some("")).is_err());
+    }
+
+    #[test]
+    fn resume_existing_mode_removes_delivery_run_capability() {
+        let config = LatticedDeliveryConfig::new(
+            PathBuf::from(r"C:\tools\codex.exe"),
+            "codex-cli 0.147.0",
+            "a".repeat(64),
+            PathBuf::from(r"C:\delivery\schema"),
+            PathBuf::from(r"C:\delivery\codex-home"),
+            PathBuf::from(r"C:\delivery\root"),
+            PathBuf::from(r"C:\tools\git.exe"),
+            Duration::from_secs(30),
+            DeliveryRuntime::ScriptedAcceptance,
+        )
+        .expect("fixed delivery config");
+        let database =
+            DeliveryDatabaseBinding::new("127.0.0.1", 54_171, "63ee62186707475c91b62c614d2c2528")
+                .expect("fixed database binding");
+
+        let fresh = full_chain_delivery_service(
+            config.clone(),
+            &database,
+            "bounded-password",
+            FullChainRunMode::Fresh,
+        )
+        .expect("fresh service");
+        let resumed = full_chain_delivery_service(
+            config,
+            &database,
+            "bounded-password",
+            FullChainRunMode::ResumeExisting,
+        )
+        .expect("resume service");
+
+        assert!(fresh.request_binding().is_some());
+        assert!(resumed.request_binding().is_none());
     }
 
     #[test]
