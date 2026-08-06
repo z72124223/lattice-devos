@@ -1692,13 +1692,55 @@ struct RawFinding {
 
 fn verified_reflection_output(output: &str) -> HermesAdapterResult<&str> {
     let output = output.trim();
-    if output.is_empty() || output.starts_with("Codex app-server turn failed: ") {
+    if let Some(diagnostic) = codex_app_server_failure_diagnostic(output) {
+        eprintln!("{diagnostic}");
         return Err(error(
             HermesAdapterErrorKind::Failed,
             "HERMES_CODEX_APP_SERVER_RUN_FAILED",
         ));
     }
     Ok(output)
+}
+
+fn codex_app_server_failure_diagnostic(output: &str) -> Option<Value> {
+    const PREFIX: &str = "Codex app-server turn failed: ";
+
+    let output = output.trim();
+    if output.is_empty() {
+        return Some(json!({
+            "component": "Codex app-server",
+            "event": "run_failure_detail",
+            "source": "empty"
+        }));
+    }
+    let detail = output.strip_prefix(PREFIX)?.trim();
+    let detail_sha256 = sha256_text(detail);
+    let detail_byte_count = detail.len();
+    if validate_redacted_text(
+        detail,
+        MAX_TEXT_BYTES,
+        "HERMES_CODEX_APP_SERVER_FAILURE_DETAIL_REJECTED",
+    )
+    .is_ok()
+    {
+        Some(json!({
+            "component": "Codex app-server",
+            "detail": detail,
+            "detail_byte_count": detail_byte_count,
+            "detail_sha256": detail_sha256,
+            "event": "run_failure_detail",
+            "source": "completed_output"
+        }))
+    } else {
+        Some(json!({
+            "component": "Codex app-server",
+            "detail_byte_count": detail_byte_count,
+            "detail_redacted": true,
+            "detail_sha256": detail_sha256,
+            "event": "run_failure_detail",
+            "source": "completed_output"
+        }))
+    }
 }
 
 fn parse_reflection(
@@ -3014,6 +3056,46 @@ fn terminate_child(child: &mut Child) -> HermesAdapterResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_failure_diagnostic_preserves_only_safe_bounded_detail() {
+        let detail = "thread/start rejected";
+        let diagnostic =
+            codex_app_server_failure_diagnostic(&format!("Codex app-server turn failed: {detail}"))
+                .expect("explicit Codex failure diagnostic");
+
+        assert_eq!(diagnostic["source"], "completed_output");
+        assert_eq!(diagnostic["detail"], detail);
+        assert_eq!(diagnostic["detail_byte_count"], detail.len());
+        assert_eq!(diagnostic["detail_sha256"], sha256_text(detail));
+        assert!(diagnostic.get("detail_redacted").is_none());
+    }
+
+    #[test]
+    fn codex_failure_diagnostic_hashes_sensitive_detail_without_retaining_it() {
+        let detail = "Authorization: Bearer sk-example-secret-value-123456";
+        let diagnostic =
+            codex_app_server_failure_diagnostic(&format!("Codex app-server turn failed: {detail}"))
+                .expect("sensitive Codex failure diagnostic");
+
+        assert_eq!(diagnostic["source"], "completed_output");
+        assert_eq!(diagnostic["detail_redacted"], true);
+        assert_eq!(diagnostic["detail_byte_count"], detail.len());
+        assert_eq!(diagnostic["detail_sha256"], sha256_text(detail));
+        assert!(diagnostic.get("detail").is_none());
+        assert!(!diagnostic.to_string().contains(detail));
+    }
+
+    #[test]
+    fn codex_failure_diagnostic_marks_empty_output_without_inventing_detail() {
+        let diagnostic =
+            codex_app_server_failure_diagnostic(" \r\n ").expect("empty Codex failure diagnostic");
+
+        assert_eq!(diagnostic["source"], "empty");
+        assert!(diagnostic.get("detail").is_none());
+        assert!(diagnostic.get("detail_byte_count").is_none());
+        assert!(diagnostic.get("detail_sha256").is_none());
+    }
 
     #[test]
     fn pinned_version_output_requires_the_exact_official_first_line() {
