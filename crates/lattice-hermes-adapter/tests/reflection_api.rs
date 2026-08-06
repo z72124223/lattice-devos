@@ -310,6 +310,7 @@ fn codex_broker_pins_four_files_and_locks_the_proven_empty_tool_policy() {
         br#"{"method":"item/fileChange/outputDelta","params":{}}"#.as_slice(),
         br#"{"method":"item/fileChange/patchUpdated","params":{}}"#.as_slice(),
         br#"{"method":"turn/plan/updated","params":{}}"#.as_slice(),
+        br#"{"method":"account/rateLimits/updated","params":{"rateLimits":null}}"#.as_slice(),
         br#"{"method":"future/notification","params":{}}"#.as_slice(),
     ] {
         let failure = classify_codex_app_server_frame(fatal)
@@ -478,13 +479,18 @@ fn codex_broker_protocol_reconciles_terminal_before_turn_response() {
                 serde_json::json!({
                     "id": 1,
                     "result": {
+                        "activePermissionProfile": null,
                         "approvalPolicy": "never",
                         "approvalsReviewer": "user",
                         "cwd": cwd,
                         "instructionSources": [],
                         "model": "gpt-5.6-sol",
                         "modelProvider": "openai",
+                        "multiAgentMode": "explicitRequestOnly",
+                        "reasoningEffort": "low",
+                        "runtimeWorkspaceRoots": [],
                         "sandbox": {"type": "readOnly", "networkAccess": false},
+                        "serviceTier": null,
                         "thread": codex_thread_fixture(&cwd)
                     }
                 })
@@ -507,10 +513,35 @@ fn codex_broker_protocol_reconciles_terminal_before_turn_response() {
             }
         }),
         serde_json::json!({
+            "method": "account/rateLimits/updated",
+            "params": {
+                "rateLimits": {
+                    "limitId": "codex",
+                    "limitName": null,
+                    "primary": null,
+                    "secondary": null,
+                    "credits": null,
+                    "individualLimit": null,
+                    "spendControlReached": null,
+                    "planType": "plus",
+                    "rateLimitReachedType": null
+                }
+            }
+        }),
+        serde_json::json!({
             "method": "item/agentMessage/delta",
             "params": {
                 "delta": "{\"markerCreated\":false}",
                 "itemId": "message-1",
+                "threadId": "thread-1",
+                "turnId": "turn-1"
+            }
+        }),
+        serde_json::json!({
+            "method": "item/reasoning/summaryPartAdded",
+            "params": {
+                "itemId": "reasoning-1",
+                "summaryIndex": 1,
                 "threadId": "thread-1",
                 "turnId": "turn-1"
             }
@@ -561,17 +592,30 @@ fn codex_broker_protocol_reconciles_terminal_before_turn_response() {
 fn codex_thread_fixture(cwd: &std::path::Path) -> serde_json::Value {
     serde_json::json!({
         "id": "thread-1",
-        "cliVersion": "0.146.0",
+        "extra": null,
+        "sessionId": "thread-1",
+        "forkedFromId": null,
+        "parentThreadId": null,
+        "preview": "",
+        "ephemeral": true,
+        "isPinned": false,
+        "historyMode": "legacy",
+        "modelProvider": "openai",
         "createdAt": 1,
         "updatedAt": 1,
+        "recencyAt": 1,
+        "status": {"type": "idle"},
+        "path": null,
         "cwd": cwd,
-        "ephemeral": true,
+        "cliVersion": "0.146.0",
+        "source": "vscode",
+        "canAcceptDirectInput": true,
+        "threadSource": null,
+        "agentNickname": null,
+        "agentRole": null,
+        "gitInfo": null,
+        "name": null,
         "turns": [],
-        "modelProvider": "openai",
-        "preview": "",
-        "sessionId": "session-1",
-        "source": "appServer",
-        "status": {"type": "idle"}
     })
 }
 
@@ -762,13 +806,18 @@ fn admit_valid_thread(protocol: &mut CodexBrokerProtocol, cwd: &std::path::Path)
             serde_json::json!({
                 "id": 1,
                 "result": {
+                    "activePermissionProfile": null,
                     "approvalPolicy": "never",
                     "approvalsReviewer": "user",
                     "cwd": cwd,
                     "instructionSources": [],
                     "model": "gpt-5.6-sol",
                     "modelProvider": "openai",
+                    "multiAgentMode": "explicitRequestOnly",
+                    "reasoningEffort": "low",
+                    "runtimeWorkspaceRoots": [],
                     "sandbox": {"type": "readOnly", "networkAccess": false},
+                    "serviceTier": null,
                     "thread": codex_thread_fixture(cwd)
                 }
             })

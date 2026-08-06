@@ -1943,6 +1943,7 @@ fn validate_thread_start_response(value: &Value, cwd: &Path, model: &str) -> Res
     crate::require_only_keys(
         result,
         &[
+            "activePermissionProfile",
             "serviceTier",
             "approvalPolicy",
             "approvalsReviewer",
@@ -1950,6 +1951,8 @@ fn validate_thread_start_response(value: &Value, cwd: &Path, model: &str) -> Res
             "instructionSources",
             "model",
             "modelProvider",
+            "multiAgentMode",
+            "runtimeWorkspaceRoots",
             "sandbox",
             "reasoningEffort",
             "thread",
@@ -1958,12 +1961,18 @@ fn validate_thread_start_response(value: &Value, cwd: &Path, model: &str) -> Res
     )
     .map_err(|_| 68)?;
     for required in [
+        "activePermissionProfile",
         "approvalPolicy",
         "approvalsReviewer",
         "cwd",
+        "instructionSources",
         "model",
         "modelProvider",
+        "multiAgentMode",
+        "reasoningEffort",
+        "runtimeWorkspaceRoots",
         "sandbox",
+        "serviceTier",
         "thread",
     ] {
         if !result.contains_key(required) {
@@ -1971,22 +1980,27 @@ fn validate_thread_start_response(value: &Value, cwd: &Path, model: &str) -> Res
         }
     }
     if result.get("approvalPolicy").and_then(Value::as_str) != Some("never")
-        || !matches!(
-            result.get("approvalsReviewer").and_then(Value::as_str),
-            Some("user" | "auto_review" | "guardian_subagent")
-        )
+        || result.get("approvalsReviewer").and_then(Value::as_str) != Some("user")
         || result.get("model").and_then(Value::as_str) != Some(model)
+        || result.get("modelProvider").and_then(Value::as_str) != Some("openai")
+        || result.get("reasoningEffort").and_then(Value::as_str) != Some("low")
+        || result.get("multiAgentMode").and_then(Value::as_str) != Some("explicitRequestOnly")
         || !result
-            .get("modelProvider")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty() && value.len() <= 256)
+            .get("activePermissionProfile")
+            .is_some_and(Value::is_null)
+        || !result.get("serviceTier").is_some_and(Value::is_null)
+        || !result
+            .get("runtimeWorkspaceRoots")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
         || !result
             .get("cwd")
             .and_then(Value::as_str)
             .is_some_and(|value| same_canonical_path(value, cwd))
-        || !result
+        || result
             .get("instructionSources")
-            .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty))
+            .and_then(Value::as_array)
+            .is_none_or(|sources| !sources.is_empty())
     {
         return Err(68);
     }
@@ -1996,12 +2010,15 @@ fn validate_thread_start_response(value: &Value, cwd: &Path, model: &str) -> Res
 }
 
 #[cfg(windows)]
+#[allow(clippy::too_many_lines)]
 fn validate_thread_object(thread: &Map<String, Value>, cwd: &Path) -> Result<String, i32> {
     crate::require_only_keys(
         thread,
         &[
             "agentNickname",
             "agentRole",
+            "canAcceptDirectInput",
+            "extra",
             "updatedAt",
             "cliVersion",
             "createdAt",
@@ -2010,6 +2027,7 @@ fn validate_thread_object(thread: &Map<String, Value>, cwd: &Path) -> Result<Str
             "threadSource",
             "forkedFromId",
             "gitInfo",
+            "historyMode",
             "turns",
             "id",
             "isPinned",
@@ -2027,16 +2045,29 @@ fn validate_thread_object(thread: &Map<String, Value>, cwd: &Path) -> Result<Str
     )
     .map_err(|_| 68)?;
     for required in [
+        "agentNickname",
+        "agentRole",
+        "canAcceptDirectInput",
         "cliVersion",
         "createdAt",
         "cwd",
         "ephemeral",
+        "extra",
+        "forkedFromId",
+        "gitInfo",
+        "historyMode",
         "id",
+        "isPinned",
         "modelProvider",
+        "name",
+        "parentThreadId",
+        "path",
         "preview",
+        "recencyAt",
         "sessionId",
         "source",
         "status",
+        "threadSource",
         "turns",
         "updatedAt",
     ] {
@@ -2044,11 +2075,11 @@ fn validate_thread_object(thread: &Map<String, Value>, cwd: &Path) -> Result<Str
             return Err(68);
         }
     }
-    if !thread
-        .get("cliVersion")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.is_empty() && value.len() <= 256)
+    if thread.get("cliVersion").and_then(Value::as_str) != Some("0.146.0")
         || thread.get("ephemeral").and_then(Value::as_bool) != Some(true)
+        || thread.get("isPinned").and_then(Value::as_bool) != Some(false)
+        || thread.get("canAcceptDirectInput").and_then(Value::as_bool) != Some(true)
+        || thread.get("historyMode").and_then(Value::as_str) != Some("legacy")
         || !thread
             .get("cwd")
             .and_then(Value::as_str)
@@ -2057,19 +2088,37 @@ fn validate_thread_object(thread: &Map<String, Value>, cwd: &Path) -> Result<Str
             .get("turns")
             .and_then(Value::as_array)
             .is_none_or(|turns| !turns.is_empty())
-        || !thread
-            .get("modelProvider")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty() && value.len() <= 256)
-        || !thread.get("preview").is_some_and(Value::is_string)
+        || thread.get("modelProvider").and_then(Value::as_str) != Some("openai")
+        || thread.get("preview").and_then(Value::as_str) != Some("")
         || !thread
             .get("sessionId")
             .and_then(Value::as_str)
             .is_some_and(|value| !value.is_empty() && value.len() <= 4_096)
+        || thread.get("id") != thread.get("sessionId")
         || thread.get("createdAt").and_then(Value::as_i64).is_none()
         || thread.get("updatedAt").and_then(Value::as_i64).is_none()
+        || thread.get("recencyAt").and_then(Value::as_i64).is_none()
+        || [
+            "agentNickname",
+            "agentRole",
+            "extra",
+            "forkedFromId",
+            "gitInfo",
+            "name",
+            "parentThreadId",
+            "path",
+            "threadSource",
+        ]
+        .iter()
+        .any(|field| !thread.get(*field).is_some_and(Value::is_null))
         || !validate_session_source(thread.get("source").ok_or(68)?)
         || !validate_thread_status(thread.get("status").ok_or(68)?)
+        || thread
+            .get("status")
+            .and_then(Value::as_object)
+            .and_then(|status| status.get("type"))
+            .and_then(Value::as_str)
+            != Some("idle")
     {
         return Err(68);
     }
@@ -2252,6 +2301,7 @@ impl CodexBrokerProtocol {
         self.ingest_frame(&ReceivedCodexFrame { kind, value })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn ingest_frame(
         &mut self,
         frame: &ReceivedCodexFrame,
@@ -2341,16 +2391,20 @@ impl CodexBrokerProtocol {
                     .get("params")
                     .and_then(Value::as_object)
                     .ok_or(76)?;
-                if method == "thread/status/changed" {
-                    if !self.requests_sent[CodexBrokerRequest::ThreadStart.index()] {
-                        return Err(76);
-                    }
-                } else {
+                if method == "account/rateLimits/updated" {
                     self.require_turn_request()?;
-                }
-                self.validate_thread_binding(params, 76)?;
-                if let Some(turn_id) = params.get("turnId").and_then(Value::as_str) {
-                    self.bind_turn_id(turn_id, 76)?;
+                } else {
+                    if method == "thread/status/changed" {
+                        if !self.requests_sent[CodexBrokerRequest::ThreadStart.index()] {
+                            return Err(76);
+                        }
+                    } else {
+                        self.require_turn_request()?;
+                    }
+                    self.validate_thread_binding(params, 76)?;
+                    if let Some(turn_id) = params.get("turnId").and_then(Value::as_str) {
+                        self.bind_turn_id(turn_id, 76)?;
+                    }
                 }
             }
         }
@@ -3234,10 +3288,12 @@ fn classify_notification_envelope(
                 *method,
                 "thread/started"
                     | "turn/started"
+                    | "account/rateLimits/updated"
                     | "thread/status/changed"
                     | "thread/tokenUsage/updated"
                     | "item/agentMessage/delta"
                     | "item/reasoning/textDelta"
+                    | "item/reasoning/summaryPartAdded"
                     | "item/reasoning/summaryTextDelta"
                     | "item/started"
                     | "item/completed"
@@ -3282,6 +3338,12 @@ fn classify_notification(
         .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
     match method {
         "thread/started" => require_control_keys(params, &["thread"])?,
+        "account/rateLimits/updated" => {
+            require_control_keys(params, &["rateLimits"])?;
+            if !params.get("rateLimits").is_some_and(Value::is_object) {
+                return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
+            }
+        }
         "turn/started" => require_control_keys(params, &["threadId", "turn"])?,
         "thread/status/changed" => require_control_keys(params, &["status", "threadId"])?,
         "thread/tokenUsage/updated" => {
@@ -3295,6 +3357,9 @@ fn classify_notification(
                 params,
                 &["contentIndex", "delta", "itemId", "threadId", "turnId"],
             )?;
+        }
+        "item/reasoning/summaryPartAdded" => {
+            require_control_keys(params, &["itemId", "summaryIndex", "threadId", "turnId"])?;
         }
         "item/reasoning/summaryTextDelta" => {
             require_control_keys(
