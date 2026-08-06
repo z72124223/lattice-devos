@@ -9,8 +9,11 @@
   },
   "scripts": {
     "check": "node scripts/check-project.mjs",
+    "operator:start": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/start-lattice-full-chain.ps1",
+    "operator:smoke": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/start-lattice-full-chain.ps1 -Mode Smoke",
     "test": "node --test \"test/*.test.js\"",
     "test:domain": "node --test test/task-domain.test.js",
+    "test:operator-entrypoint": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/test-lattice-full-chain-entrypoint.ps1",
     "verify": "npm run check && npm test"
   }
 }
