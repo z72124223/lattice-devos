@@ -663,7 +663,11 @@ mod tests {
                     "tool": tool,
                     "arguments": {},
                     "status": "completed",
-                    "success": true
+                    "success": true,
+                    "contentItems": [{
+                        "type": "inputText",
+                        "text": "Script completed\nExit code: 0"
+                    }]
                 },
                 "completedAtMs": 1
             }
@@ -672,8 +676,8 @@ mod tests {
 
     fn ingest_completed_delivery_items(session: &mut AppServerSession) {
         for item in [
-            completed_item("tool_apply", "exec"),
-            completed_item("tool_verify", "exec"),
+            completed_item("tool_shell_write", "exec"),
+            completed_item("tool_shell_verify", "exec"),
         ] {
             session
                 .ingest(item)

@@ -22,7 +22,17 @@ use crate::git_delivery::GitDeliveryErrorKind;
 
 const USAGE: &str = "usage:\n  lattice-runtime codex-preflight --launcher <absolute-path> --version <exact-version> --sha256 <lowercase-sha256> --schema-dir <absent-path>\n  lattice-runtime delivery-run --launcher <absolute-path> --version <exact-version> --sha256 <lowercase-sha256> --schema-dir <absent-path> --codex-home <absolute-path> --delivery-root <absent-absolute-path> --git-exe <absolute-path> --timeout-seconds <1..3600> --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>\n  lattice-runtime delivery-status --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>";
 
-const DELIVERY_PROMPT: &str = "Create answer.txt in the current repository with exactly the bytes LATTICE_DELIVERY_OK followed by one newline. Use one standalone apply_patch operation in an exec call that performs no verification or other tool work. Confirm that call has completed, then use a separate verification call to read and validate the exact bytes. Do not combine file creation and verification in the same exec call. If any exec result says Script running with cell ID, call functions.wait with that exact cell_id until Script completed is received, and require exit code 0 before reporting success. Never terminate a yielded cell or claim completion from a running marker. Do not modify any other path. Do not stage or commit files and do not run Git commands.";
+const DELIVERY_PROMPT: &str = concat!(
+    "Create answer.txt in the current repository with exactly the bytes LATTICE_DELIVERY_OK followed by one newline. ",
+    "Use code mode and one standalone exec call whose JavaScript invokes nested tools.shell_command for the write. ",
+    "Keep the inherited workspaceWrite sandbox and current working directory: Do not set sandbox_permissions, request escalation, or pass a different workdir. ",
+    "The nested PowerShell command must be exactly [System.IO.File]::WriteAllBytes('answer.txt',[byte[]](76,65,84,84,73,67,69,95,68,69,76,73,86,69,82,89,95,79,75,10)), producing 20 bytes ending in LF. ",
+    "In every exec assign the awaited nested result to result and, before calling text(result), run this fail-closed check: if (typeof result !== \"string\" || !/^Exit code: 0(?:\\r?\\n|$)/.test(result)) { throw new Error(\"nested shell_command failed\"); }. ",
+    "Do not call tools.apply_patch. The write exec must perform no verification or other tool work. ",
+    "Confirm that call has completed, then use a separate verification exec call whose JavaScript invokes nested tools.shell_command to read and validate the exact bytes. ",
+    "The second exec is only the exact-byte verification test. Do not combine file creation and verification in the same exec call. If any exec result says Script running with cell ID, call functions.wait with that exact cell_id until Script completed is received, and require exit code 0 before reporting success. ",
+    "Never terminate a yielded cell or claim completion from a running marker. Do not modify any other path. Do not run Git commands, stage, or commit files; LATTICE performs scope inspection, the fixed project test, and Git commit afterward."
+);
 
 /// Closed command surface for the first delivery node.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -360,18 +370,34 @@ mod tests {
     use lattice_codex_adapter::{AppServerSession, SessionRequest, TurnStatus};
 
     #[test]
-    fn fixed_delivery_prompt_requires_completed_separate_tool_evidence() {
-        assert!(DELIVERY_PROMPT.contains("standalone apply_patch"));
+    fn fixed_delivery_prompt_uses_sandboxed_nested_shell_edit_protocol() {
+        assert!(DELIVERY_PROMPT.contains("nested tools.shell_command"));
+        assert!(DELIVERY_PROMPT.contains("[System.IO.File]::WriteAllBytes"));
+        assert!(DELIVERY_PROMPT.contains(
+            "[System.IO.File]::WriteAllBytes('answer.txt',[byte[]](76,65,84,84,73,67,69,95,68,69,76,73,86,69,82,89,95,79,75,10))"
+        ));
+        assert!(!DELIVERY_PROMPT.contains("[byte[]]@(0x4C"));
+        assert!(!DELIVERY_PROMPT.contains("FromBase64String"));
+        assert!(!DELIVERY_PROMPT.contains("Base64-encoded"));
+        assert!(!DELIVERY_PROMPT.contains("git apply"));
+        assert!(DELIVERY_PROMPT.contains("Do not call tools.apply_patch"));
+        assert!(DELIVERY_PROMPT.contains("Do not set sandbox_permissions"));
+        assert!(DELIVERY_PROMPT.contains("20 bytes ending in LF"));
+        assert!(DELIVERY_PROMPT.contains("typeof result !== \"string\""));
+        assert!(DELIVERY_PROMPT.contains("/^Exit code: 0(?:\\r?\\n|$)/"));
+        assert!(DELIVERY_PROMPT.contains("throw new Error"));
         assert!(DELIVERY_PROMPT.contains("separate verification"));
         assert!(DELIVERY_PROMPT.contains("functions.wait"));
         assert!(DELIVERY_PROMPT.contains("Script completed"));
         assert!(DELIVERY_PROMPT.contains("Do not combine"));
+        assert!(DELIVERY_PROMPT.contains("LATTICE performs scope inspection"));
     }
 
     #[test]
     fn scripted_fixture_tracks_prompt_and_completed_tool_evidence() {
         let fixture = include_str!("fixtures/task032-scripted-codex.ps1");
-        assert!(fixture.contains(&format!("[string]$inputs[0].text -ne '{DELIVERY_PROMPT}'")));
+        let escaped_prompt = DELIVERY_PROMPT.replace('\'', "''");
+        assert!(fixture.contains(&format!("[string]$inputs[0].text -ne '{escaped_prompt}'")));
         let notifications = fixture
             .lines()
             .filter_map(|line| line.strip_prefix("[Console]::Out.WriteLine('"))
@@ -389,6 +415,14 @@ mod tests {
             .map(|notification| notification["params"]["item"].clone())
             .collect::<Vec<_>>();
         assert_eq!(completed_items.len(), 2);
+        assert_eq!(
+            completed_items[0]["arguments"]["command"],
+            "code-mode nested tools.shell_command write fixture"
+        );
+        assert_eq!(
+            completed_items[1]["arguments"]["command"],
+            "code-mode nested tools.shell_command verify fixture"
+        );
         assert!(completed_items.iter().all(|item| {
             item.get("success").and_then(serde_json::Value::as_bool) == Some(true)
         }));
@@ -458,5 +492,15 @@ mod tests {
                 .status,
             TurnStatus::Completed
         );
+    }
+
+    #[test]
+    fn official_delivery_script_keeps_the_windows_sandbox_unelevated() {
+        let script = include_str!("../../../scripts/run-lattice-delivery.ps1");
+        assert!(script.contains("'sandbox = \"unelevated\"'"));
+        assert!(script.contains("windows_sandbox = 'unelevated'"));
+        assert!(script.contains("safety = 'workspace-write;unelevated;stdio-only'"));
+        assert!(!script.contains("sandbox = \"elevated\""));
+        assert!(!script.contains("workspace-write;elevated;stdio-only"));
     }
 }
