@@ -1411,6 +1411,134 @@ fn false_completed_codex_app_server_runs_are_classified_as_failed() {
     }
 }
 
+const FAILED_RUN_HINT_CASES: &[(&str, &str)] = &[
+    (
+        "quota exceeded for this account",
+        "HERMES_RUN_FAILED_HINT_QUOTA",
+    ),
+    ("rate limit reached", "HERMES_RUN_FAILED_HINT_QUOTA"),
+    (
+        "HTTP 429 too many requests",
+        "HERMES_RUN_FAILED_HINT_QUOTA",
+    ),
+    ("HTTP 401 unauthorized", "HERMES_RUN_FAILED_HINT_AUTH"),
+    ("HTTP 403 forbidden", "HERMES_RUN_FAILED_HINT_AUTH"),
+    ("authentication failed", "HERMES_RUN_FAILED_HINT_AUTH"),
+    (
+        "quota endpoint returned 401 unauthorized",
+        "HERMES_RUN_FAILED_HINT_AUTH",
+    ),
+    ("connection refused", "HERMES_RUN_FAILED_HINT_TRANSPORT"),
+    (
+        "network unreachable",
+        "HERMES_RUN_FAILED_HINT_TRANSPORT",
+    ),
+    ("DNS lookup failed", "HERMES_RUN_FAILED_HINT_TRANSPORT"),
+    (
+        "TLS handshake failed",
+        "HERMES_RUN_FAILED_HINT_TRANSPORT",
+    ),
+    ("proxy error", "HERMES_RUN_FAILED_HINT_TRANSPORT"),
+    ("request timed out", "HERMES_RUN_FAILED_HINT_TRANSPORT"),
+    ("ECONNRESET", "HERMES_RUN_FAILED_HINT_TRANSPORT"),
+    ("broken pipe", "HERMES_RUN_FAILED_HINT_TRANSPORT"),
+    ("unexpected EOF", "HERMES_RUN_FAILED_HINT_TRANSPORT"),
+    (
+        "HTTP 502 bad gateway",
+        "HERMES_RUN_FAILED_HINT_TRANSPORT",
+    ),
+    (
+        "HTTP 503 service unavailable",
+        "HERMES_RUN_FAILED_HINT_TRANSPORT",
+    ),
+    (
+        "HTTP 504 gateway timeout",
+        "HERMES_RUN_FAILED_HINT_TRANSPORT",
+    ),
+    (
+        "invalid JSONL response",
+        "HERMES_RUN_FAILED_HINT_TRANSPORT",
+    ),
+    (
+        "Failed to deserialize JSONRPCMessage: expected value at line 1 column 1",
+        "HERMES_RUN_FAILED_HINT_TRANSPORT",
+    ),
+];
+
+const GENERIC_RUN_FAILURE_DETAILS: &[&str] = &[
+    "unclassified provider failure",
+    "request id 15041",
+    "authorization header redacted",
+    "credential sample",
+    "filesystem permission denied",
+    "provider code 4290",
+    "prompt policy: do not access network; model rejected output",
+    "redacted proxy_password sample; schema validation failed",
+    "prompt contains unauthorized",
+    "JSON parser failed: invalid token at line 1",
+    "missing token usage field",
+    "invalid tokenizer configuration",
+    "reflection output rejected: expected value at line 1 column 1",
+];
+
+#[test]
+fn failed_run_details_are_bounded_and_reduced_to_fixed_safe_hints() {
+
+    for through_status in [false, true] {
+        for (index, (detail, expected_code)) in
+            FAILED_RUN_HINT_CASES.iter().copied().enumerate()
+        {
+            let failure = observe_failed_run(
+                Some(serde_json::json!(detail)),
+                through_status,
+                &format!("run_classified_{through_status}_{index}"),
+            );
+            assert_eq!(failure.kind(), HermesAdapterErrorKind::Failed);
+            assert_eq!(failure.code(), expected_code, "detail={detail:?}");
+            assert!(!format!("{failure}").contains(detail));
+            assert!(!format!("{failure:?}").contains(detail));
+        }
+
+        for (index, detail) in GENERIC_RUN_FAILURE_DETAILS.iter().copied().enumerate() {
+            let failure = observe_failed_run(
+                Some(serde_json::json!(detail)),
+                through_status,
+                &format!("run_generic_{through_status}_{index}"),
+            );
+            assert_eq!(failure.code(), "HERMES_RUN_FAILED");
+        }
+
+        let out_of_window = format!("{}quota exceeded", "x".repeat(1_024));
+        let failure = observe_failed_run(
+            Some(serde_json::json!(out_of_window)),
+            through_status,
+            &format!("run_bounded_{through_status}"),
+        );
+        assert_eq!(failure.code(), "HERMES_RUN_FAILED");
+        assert!(!format!("{failure:?}").contains("quota exceeded"));
+    }
+
+    for (index, detail) in [None, Some(serde_json::Value::Null), Some(serde_json::json!({
+        "message": "authentication failed"
+    }))]
+    .into_iter()
+    .enumerate()
+    {
+        let status_failure = observe_failed_run(
+            detail.clone(),
+            true,
+            &format!("run_status_schema_{index}"),
+        );
+        assert_eq!(status_failure.kind(), HermesAdapterErrorKind::Failed);
+        assert_eq!(status_failure.code(), "HERMES_RUN_FAILED");
+
+        let event_failure =
+            observe_failed_run(detail, false, &format!("run_event_schema_{index}"));
+        assert_eq!(event_failure.kind(), HermesAdapterErrorKind::Malformed);
+        assert_eq!(event_failure.code(), "HERMES_EVENT_MALFORMED");
+    }
+}
+
 #[test]
 fn evidence_and_reflection_text_reject_sensitive_values_but_accept_digest_only_binding() {
     let secret = "Authorization: Bearer sk-example-secret-value-123456";
@@ -2134,6 +2262,72 @@ fn completed_status(run_id: &str, session_id: &str, output: &str) -> Response {
         })
         .to_string(),
     )
+}
+
+fn failed_events(run_id: &str, detail: Option<serde_json::Value>) -> Response {
+    let mut event = serde_json::json!({
+        "event": "run.failed",
+        "run_id": run_id,
+        "timestamp": 1.0,
+    });
+    if let Some(detail) = detail {
+        event
+            .as_object_mut()
+            .expect("failed event object")
+            .insert("error".to_owned(), detail);
+    }
+    Response::sse(200, format!("data: {event}\n\n: stream closed\n\n"))
+}
+
+fn failed_status(run_id: &str, detail: Option<serde_json::Value>) -> Response {
+    let mut status = serde_json::json!({
+        "object": "hermes.run",
+        "run_id": run_id,
+        "status": "failed",
+        "session_id": "lattice-task-034-session",
+        "model": "hermes-agent",
+    });
+    if let Some(detail) = detail {
+        status
+            .as_object_mut()
+            .expect("failed status object")
+            .insert("error".to_owned(), detail);
+    }
+    Response::json(200, status.to_string())
+}
+
+fn observe_failed_run(
+    detail: Option<serde_json::Value>,
+    through_status: bool,
+    run_id: &str,
+) -> crate::HermesAdapterError {
+    let request = request();
+    let job = job(request.clone());
+    let mut responses = vec![
+        capabilities(),
+        Response::json(
+            202,
+            serde_json::json!({"run_id": run_id, "status": "started"}).to_string(),
+        ),
+    ];
+    if through_status {
+        responses.push(Response::json(
+            503,
+            r#"{"error":{"message":"events unavailable"}}"#,
+        ));
+        responses.push(failed_status(run_id, detail));
+    } else {
+        responses.push(failed_events(run_id, detail));
+    }
+    let expected_requests = responses.len();
+    let server = ScriptedServer::start(responses);
+    let mut adapter = HermesReflectionAdapter::connect(config(&server), job).expect("adapter");
+
+    let failure = adapter
+        .run_reflection(&request)
+        .expect_err("failed run must return only a sanitized diagnostic hint");
+    assert_eq!(server.finish().len(), expected_requests);
+    failure
 }
 
 fn request() -> HermesResearchRequest {

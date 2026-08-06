@@ -82,6 +82,7 @@ pub const HERMES_LICENSE: &str = "MIT";
 pub const HERMES_SCHEMA_VERSION: &str = "lattice.hermes.reflection.v1";
 
 const MAX_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_RUN_FAILURE_CLASSIFICATION_BYTES: usize = 1_024;
 const MAX_EVIDENCE_ITEMS: usize = 128;
 const MAX_REFLECTION_SUMMARY_BYTES: usize = 8_192;
 const MAX_FINDINGS: usize = 256;
@@ -2140,8 +2141,9 @@ fn parse_sse_terminal(body: &str, expected_run_id: &str) -> HermesAdapterResult<
                     &["event", "run_id", "timestamp", "error"],
                     "HERMES_EVENT_UNKNOWN_FIELD",
                 )?;
-                require_string(object, "error", "HERMES_EVENT_MALFORMED")?;
-                return Err(error(HermesAdapterErrorKind::Failed, "HERMES_RUN_FAILED"));
+                let detail = require_string(object, "error", "HERMES_EVENT_MALFORMED")?;
+                let code = classify_run_failure_hint(detail);
+                return Err(error(HermesAdapterErrorKind::Failed, code));
             }
             "run.cancelled" => {
                 require_only_keys(
@@ -2244,13 +2246,121 @@ fn parse_status(
         "completed" => Ok(RunState::Completed(
             require_string(object, "output", "HERMES_STATUS_MALFORMED")?.to_owned(),
         )),
-        "failed" => Err(error(HermesAdapterErrorKind::Failed, "HERMES_RUN_FAILED")),
+        "failed" => Err(error(
+            HermesAdapterErrorKind::Failed,
+            object
+                .get("error")
+                .and_then(Value::as_str)
+                .map_or("HERMES_RUN_FAILED", classify_run_failure_hint),
+        )),
         "cancelled" => Err(error(
             HermesAdapterErrorKind::Cancelled,
             "HERMES_RUN_CANCELLED",
         )),
         _ => Err(malformed("HERMES_STATUS_VALUE_REJECTED")),
     }
+}
+
+fn classify_run_failure_hint(detail: &str) -> &'static str {
+    let bytes = &detail.as_bytes()[..detail.len().min(MAX_RUN_FAILURE_CLASSIFICATION_BYTES)];
+
+    if contains_any_ascii_case_insensitive(
+        bytes,
+        &[
+            b"401 unauthorized",
+            b"403 forbidden",
+            b"authentication failed",
+            b"authentication required",
+            b"authentication error",
+            b"invalid api key",
+            b"missing api key",
+            b"expired api key",
+            b"api key invalid",
+            b"api key missing",
+            b"api key expired",
+            b"invalid access token",
+            b"missing access token",
+            b"expired access token",
+            b"access token invalid",
+            b"access token missing",
+            b"access token expired",
+            b"invalid credentials",
+            b"missing credentials",
+            b"expired credentials",
+            b"credentials invalid",
+            b"credentials missing",
+            b"credentials expired",
+        ],
+    ) {
+        return "HERMES_RUN_FAILED_HINT_AUTH";
+    }
+    if contains_any_ascii_case_insensitive(
+        bytes,
+        &[
+            b"quota exceeded",
+            b"quota exhausted",
+            b"quota reached",
+            b"out of quota",
+            b"rate limit reached",
+            b"rate limit exceeded",
+            b"rate_limit_exceeded",
+            b"rate-limit exceeded",
+            b"too many requests",
+            b"usage limit reached",
+            b"usage limit exceeded",
+            b"usage_limit_exceeded",
+            b"insufficient credit",
+            b"credit balance exhausted",
+            b"credit balance depleted",
+            b"429 too many requests",
+        ],
+    ) {
+        return "HERMES_RUN_FAILED_HINT_QUOTA";
+    }
+    if contains_any_ascii_case_insensitive(
+        bytes,
+        &[
+            b"connection refused",
+            b"connection reset",
+            b"connection closed",
+            b"connection failed",
+            b"connection lost",
+            b"connection timed out",
+            b"network unreachable",
+            b"network error",
+            b"network failed",
+            b"dns lookup failed",
+            b"dns resolution failed",
+            b"tls handshake failed",
+            b"tls error",
+            b"proxy error",
+            b"proxy connect failed",
+            b"request timed out",
+            b"timeout exceeded",
+            b"econnreset",
+            b"broken pipe",
+            b"unexpected eof",
+            b"502 bad gateway",
+            b"503 service unavailable",
+            b"504 gateway timeout",
+            b"failed to deserialize jsonrpc",
+            b"invalid jsonl response",
+        ],
+    ) {
+        return "HERMES_RUN_FAILED_HINT_TRANSPORT";
+    }
+    "HERMES_RUN_FAILED"
+}
+
+fn contains_any_ascii_case_insensitive(bytes: &[u8], needles: &[&[u8]]) -> bool {
+    needles.iter().any(|needle| {
+        bytes.windows(needle.len()).any(|window| {
+            window
+                .iter()
+                .zip(*needle)
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        })
+    })
 }
 
 fn validate_capability_identity(
