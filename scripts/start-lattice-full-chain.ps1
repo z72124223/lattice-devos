@@ -65,7 +65,10 @@ try {
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
+    $originalConsoleInputEncoding = [Console]::InputEncoding
+    [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
     if (-not $process.Start()) {
+        [Console]::InputEncoding = $originalConsoleInputEncoding
         throw 'LATTICE_OPERATOR_START_FAILED'
     }
 
@@ -77,10 +80,16 @@ try {
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
             '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
         )
-        foreach ($request in $requests) {
-            $process.StandardInput.WriteLine($request)
+        $inputBytes = [System.Text.UTF8Encoding]::new($false).GetBytes(
+            ($requests -join [Environment]::NewLine) + [Environment]::NewLine
+        )
+        if ($inputBytes[0] -ne 0x7b) {
+            throw 'LATTICE_OPERATOR_MCP_INPUT_ENCODING_REJECTED'
         }
-        $process.StandardInput.Close()
+        $inputStream = $process.StandardInput.BaseStream
+        $inputStream.Write($inputBytes, 0, $inputBytes.Length)
+        $inputStream.Flush()
+        $inputStream.Close()
 
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             $process.Kill()
@@ -98,6 +107,7 @@ try {
         }
     }
     finally {
+        [Console]::InputEncoding = $originalConsoleInputEncoding
         if (-not $process.HasExited) {
             $process.Kill()
             $process.WaitForExit()
