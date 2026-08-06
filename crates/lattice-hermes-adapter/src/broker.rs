@@ -51,61 +51,191 @@ const CODEX_PACKAGE_MANIFEST_SHA256: &str =
 const CODEX_HOME_OWNERSHIP_MARKER_NAME: &str = ".lattice-codex-home-v1";
 const CODEX_HOME_OWNERSHIP_MARKER_BYTES: &[u8] = b"lattice.codex-home.v1\n";
 const MAX_CODEX_AUTH_BYTES: u64 = 4 * 1024 * 1024;
-const CODEX_CONFIG_LOCK: &str = r#"approval_policy = "never"
-sandbox_mode = "read-only"
-web_search = "disabled"
-mcp_servers = {}
+const CODEX_CONFIG_LOCK: &str = r#"version = 1
+codex_version = "0.146.0"
+
+[config]
+model = "gpt-5.6-sol"
+model_provider = "openai"
+approval_policy = "never"
+include_permissions_instructions = false
 include_apps_instructions = false
 include_collaboration_mode_instructions = false
-external_agent_memory_import = false
-artifact = false
-plugin_sharing = false
+include_environment_context = false
+project_doc_max_bytes = 32768
+project_doc_fallback_filenames = []
+background_terminal_max_timeout = 300000
+hide_agent_reasoning = false
+model_reasoning_effort = "low"
+web_search = "disabled"
 
-[agents]
+[config.shell_environment_policy]
+
+[config.mcp_servers]
+
+[config.model_providers]
+
+[config.profiles]
+
+[config.history]
+persistence = "none"
+
+[config.orchestrator.skills]
 enabled = false
 
-[tools.experimental_request_user_input]
+[config.orchestrator.mcp]
 enabled = false
 
-[tools.update_plan]
+[config.tools.experimental_request_user_input]
 enabled = false
 
-[apps._default]
+[config.tools.update_plan]
 enabled = false
 
-[features]
-shell_tool = false
-unified_exec = false
-shell_snapshot = false
-apps = false
-plugins = false
-remote_plugin = false
-multi_agent = false
-multi_agent_v2 = false
-hooks = false
-memories = false
+[config.agents]
+enabled = false
+max_depth = 1
+interrupt_message = true
+
+[config.memories]
+disable_on_external_context = false
+generate_memories = false
+use_memories = false
+dedicated_tools = false
+max_raw_memories_for_consolidation = 256
+max_unused_days = 30
+max_rollout_age_days = 10
+max_rollouts_per_startup = 2
+min_rollout_idle_hours = 6
+min_rate_limit_remaining_percent = 25
+
+[config.skills]
+include_instructions = false
+
+[config.plugins]
+
+[config.marketplaces]
+
+[config.features]
 code_mode = false
 code_mode_host = false
-image_generation = false
-tool_suggest = false
+non_prefixed_mcp_tool_names = false
+token_budget = false
+rollout_budget = false
+current_time_reminder = false
+network_proxy = false
+apply_patch_freeform = false
+apply_patch_streaming_events = false
+apps = false
+apps_mcp_path_override = false
+artifact = false
+auth_elicitation = false
 browser_use = false
 browser_use_external = false
 browser_use_full_cdp_access = false
+chronicle = false
+code_mode_buffered_exec = false
+code_mode_only = false
+codex_git_commit = false
+collaboration_modes = true
 computer_use = false
-in_app_browser = false
+concurrent_reasoning_summaries = false
+default_mode_request_user_input = false
+deferred_executor = false
+deferred_tool_world_state = false
+elevated_windows_sandbox = false
+enable_fanout = false
+enable_mcp_apps = false
+enable_request_compression = true
+exec_permission_approvals = false
+executor_capability_discovery = false
+experimental_windows_sandbox = false
+external_agent_memory_import = false
+external_migration = false
+fast_mode = true
 goals = false
-workspace_dependencies = false
-auth_elicitation = false
-tool_call_mcp_elicitation = false
+guardian_approval = true
+guardianv2 = false
+hooks = false
+image_detail_original = false
+image_generation = false
+in_app_browser = false
+in_app_updates = false
+item_ids = true
+js_repl = false
+js_repl_tools_only = false
+local_thread_store_compression = false
+mcp_2026_07_28 = false
+memories = false
+mentions_v2 = true
+multi_agent = false
+multi_agent_mode = false
+personality = true
+plugin_hooks = false
+plugin_sharing = false
+plugins = false
+prevent_idle_sleep = false
+realtime_conversation = false
+remote_compaction_v2 = true
+remote_control = false
+remote_models = false
+remote_plugin = false
+request_permissions_tool = false
+request_rule = false
+resize_all_images = true
+respect_system_proxy = false
+responses_websockets = false
+responses_websockets_v2 = false
+runtime_metrics = false
+search_tool = false
+secret_auth_storage = true
+shell_snapshot = false
+shell_tool = false
+shell_zsh_fork = false
+skill_env_var_dependency_prompt = false
 skill_mcp_dependency_install = false
 skill_search = false
-enable_mcp_apps = false
+sqlite = true
 standalone_web_search = false
-request_permissions_tool = false
-deferred_executor = false
-current_time_reminder = false
-token_budget = false
+steer = true
+terminal_resize_reflow = true
+terminal_visualization_instructions = false
+tool_call_mcp_elicitation = false
+tool_search = false
+tool_search_always_defer_mcp_tools = true
+tool_suggest = false
+tui_app_server = true
+unavailable_dummy_tools = false
+undo = false
+unified_exec = false
+unified_exec_zsh_fork = false
+use_agent_identity = false
+use_legacy_landlock = false
+use_linux_sandbox_bwrap = false
+web_search_cached = false
+web_search_request = false
+workspace_dependencies = false
+workspace_owner_usage_nudge = false
+
+[config.features.multi_agent_v2]
+enabled = false
+max_concurrent_threads_per_session = 4
+min_wait_timeout_ms = 10000
+max_wait_timeout_ms = 3600000
+default_wait_timeout_ms = 30000
+root_agent_usage_hint_text = "disabled"
+subagent_usage_hint_text = "disabled"
+tool_namespace = "collaboration"
+hide_spawn_agent_metadata = true
+expose_spawn_agent_model_overrides = true
+wait_agent_enabled = true
+non_code_mode_only = true
+
+[config.apps._default]
+enabled = false
 "#;
+const CODEX_CONFIG_LOCK_RESOLUTION_OVERRIDE: &str =
+    "debug.config_lockfile.save_fields_resolved_from_model_catalog=false";
 const MAX_CODEX_LAUNCHER_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_CODEX_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_CODEX_MANIFEST_BYTES: u64 = 64 * 1024;
@@ -771,6 +901,8 @@ impl VerifiedCodexProxyConfig {
                 OsString::from("--strict-config"),
                 OsString::from("-c"),
                 OsString::from(config_override),
+                OsString::from("-c"),
+                OsString::from(CODEX_CONFIG_LOCK_RESOLUTION_OVERRIDE),
             ]
             .into_iter()
             .collect(),
@@ -1462,6 +1594,8 @@ fn run_broker_helper_inner() -> Result<CodexBrokerCandidate, i32> {
             "--strict-config",
             "-c",
             &config_override,
+            "-c",
+            CODEX_CONFIG_LOCK_RESOLUTION_OVERRIDE,
         ])
         .current_dir(&cwd)
         .env_clear()
@@ -3723,6 +3857,10 @@ mod production_provider_tests {
                 OsString::from("--strict-config"),
                 OsString::from("-c"),
                 OsString::from(expected_override),
+                OsString::from("-c"),
+                OsString::from(
+                    "debug.config_lockfile.save_fields_resolved_from_model_catalog=false"
+                ),
             ]
         );
         assert_eq!(plan.executable, verified.launcher);

@@ -178,13 +178,31 @@ fn codex_broker_pins_four_files_and_locks_the_proven_empty_tool_policy() {
         "aaa0646d6b615da94187b51efd50c69621a00867761161ae55cc16cfd545bec7"
     );
     let lock = policy.config_lock_toml();
+    assert!(lock.starts_with("version = 1\ncodex_version = \"0.146.0\"\n\n[config]\n"));
     for required in [
+        "model = \"gpt-5.6-sol\"",
+        "model_provider = \"openai\"",
+        "model_reasoning_effort = \"low\"",
         "approval_policy = \"never\"",
-        "sandbox_mode = \"read-only\"",
         "web_search = \"disabled\"",
-        "mcp_servers = {}",
+        "include_permissions_instructions = false",
         "include_apps_instructions = false",
         "include_collaboration_mode_instructions = false",
+        "include_environment_context = false",
+        "persistence = \"none\"",
+        "[config.mcp_servers]",
+        "[config.orchestrator.skills]",
+        "[config.orchestrator.mcp]",
+        "[config.agents]",
+        "[config.memories]",
+        "generate_memories = false",
+        "use_memories = false",
+        "[config.skills]",
+        "include_instructions = false",
+        "[config.tools.experimental_request_user_input]",
+        "[config.tools.update_plan]",
+        "[config.apps._default]",
+        "[config.features]",
         "external_agent_memory_import = false",
         "artifact = false",
         "plugin_sharing = false",
@@ -201,15 +219,43 @@ fn codex_broker_pins_four_files_and_locks_the_proven_empty_tool_policy() {
         "image_generation = false",
         "browser_use = false",
         "computer_use = false",
+        "in_app_updates = false",
         "goals = false",
         "workspace_dependencies = false",
         "auth_elicitation = false",
         "request_permissions_tool = false",
         "deferred_executor = false",
         "token_budget = false",
+        "root_agent_usage_hint_text = \"disabled\"",
+        "subagent_usage_hint_text = \"disabled\"",
     ] {
         assert!(lock.contains(required), "missing no-tools lock: {required}");
     }
+    for required_block in [
+        "[config.orchestrator.skills]\nenabled = false",
+        "[config.orchestrator.mcp]\nenabled = false",
+        "[config.skills]\ninclude_instructions = false",
+    ] {
+        assert!(
+            lock.contains(required_block),
+            "missing disabled subsystem block: {required_block}"
+        );
+    }
+    for forbidden in [
+        "\nsandbox_mode =",
+        "\n[agents]",
+        "\n[tools.",
+        "\n[apps.",
+        "\n[features]",
+    ] {
+        assert!(
+            !lock.contains(forbidden),
+            "non-replayable or unnested lock field: {forbidden}"
+        );
+    }
+    assert!(lock.len() <= 64 * 1024);
+    assert!(!lock.contains("You are `/root`"));
+    assert!(!lock.contains("usage_hint_text = \"\"\""));
     assert!(!lock.contains("auth.json"));
     let environment = policy.required_child_environment();
     assert_eq!(environment.len(), 2);
