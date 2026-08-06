@@ -1032,7 +1032,7 @@ impl HermesEnvironmentConfig {
             self.api_key,
             FULL_CHAIN_HERMES_MODEL,
             HERMES_OPERATION_TIMEOUT.min(self.timeout),
-            HERMES_OPERATION_TIMEOUT.min(self.timeout),
+            self.timeout,
             HERMES_POLL_INTERVAL,
         )
         .and_then(|config| config.launch(absolute_deadline))

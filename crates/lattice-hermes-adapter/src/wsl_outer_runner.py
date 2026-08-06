@@ -676,6 +676,7 @@ def production(runtime_root, nonce, secret_path, runner_path, runner_sha256):
     process = None
     proxy_relay = None
     deadline = time.monotonic() + init["deadline_millis"] / 1000.0
+    deadline_rearmed = False
     try:
         process = subprocess.Popen(
             production_bwrap_command(runtime_root, runner_fd, init["mode"]),
@@ -715,6 +716,9 @@ def production(runtime_root, nonce, secret_path, runner_path, runner_sha256):
             except socket.timeout:
                 continue
             try:
+                if not deadline_rearmed:
+                    deadline = time.monotonic() + init["deadline_millis"] / 1000.0
+                    deadline_rearmed = True
                 request = read_http_request(connection, deadline)
                 peer.settimeout(max(0.001, deadline - time.monotonic()))
                 send_frame(peer, HTTP_REQUEST_MAGIC, request)

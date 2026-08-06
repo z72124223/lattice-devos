@@ -770,16 +770,25 @@ class CodexProxyBridge:
             if not self.cancelled:
                 self.failure_code = 80
 
+    def rearm(self, deadline):
+        if deadline <= time.monotonic():
+            raise CodexProxyViolation(PROXY_ERROR_DEADLINE)
+        self.deadline = deadline
+
     def accept_shim(self):
-        self.listener.settimeout(codex_proxy_timeout(self.deadline))
-        try:
-            local, _ = self.listener.accept()
-        except socket.timeout as failure:
-            raise CodexProxyViolation(PROXY_ERROR_DEADLINE) from failure
-        except OSError as failure:
-            if self.cancelled:
-                return None
-            raise CodexProxyViolation(PROXY_ERROR_IO) from failure
+        while True:
+            if time.monotonic() >= self.deadline:
+                raise CodexProxyViolation(PROXY_ERROR_DEADLINE)
+            self.listener.settimeout(min(0.1, codex_proxy_timeout(self.deadline)))
+            try:
+                local, _ = self.listener.accept()
+                break
+            except socket.timeout:
+                continue
+            except OSError as failure:
+                if self.cancelled:
+                    return None
+                raise CodexProxyViolation(PROXY_ERROR_IO) from failure
         self.close_listener()
         try:
             credentials = local.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
@@ -1553,6 +1562,7 @@ def serve_contained_reflection(
         deadline,
     )
     endpoint = None
+    deadline_rearmed = False
     try:
         if init["mode"] == "official":
             endpoint = OfficialHermesEndpoint(init, deadline, codex_bridge)
@@ -1574,6 +1584,10 @@ def serve_contained_reflection(
             )
             if request is None:
                 return
+            if not deadline_rearmed:
+                deadline = time.monotonic() + init["deadline_millis"] / 1000.0
+                codex_bridge.rearm(deadline)
+                deadline_rearmed = True
             response = endpoint.relay(request, deadline)
             send_frame(connection, HTTP_RESPONSE_MAGIC, response, deadline)
     finally:

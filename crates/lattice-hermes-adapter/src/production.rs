@@ -391,6 +391,11 @@ struct CodexProxyOneTurnGate {
 
 struct CodexProxyJsonLine {
     method: Option<String>,
+    params: Option<CodexProxyJsonParams>,
+}
+
+struct CodexProxyJsonParams {
+    cwd: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for CodexProxyJsonLine {
@@ -413,8 +418,10 @@ impl<'de> Deserialize<'de> for CodexProxyJsonLine {
             {
                 let mut keys = HashSet::new();
                 let mut method = None;
+                let mut params = None;
                 while let Some(key) = map.next_key::<String>()? {
                     let is_method = key == "method";
+                    let is_params = key == "params";
                     if !keys.insert(key) {
                         return Err(serde::de::Error::custom("duplicate JSON object key"));
                     }
@@ -428,15 +435,56 @@ impl<'de> Deserialize<'de> for CodexProxyJsonLine {
                                 })?
                                 .to_owned(),
                         );
+                    } else if is_params {
+                        params = Some(map.next_value::<CodexProxyJsonParams>()?);
                     } else {
                         map.next_value::<IgnoredAny>()?;
                     }
                 }
-                Ok(CodexProxyJsonLine { method })
+                Ok(CodexProxyJsonLine { method, params })
             }
         }
 
         deserializer.deserialize_map(JsonLineVisitor)
+    }
+}
+
+impl<'de> Deserialize<'de> for CodexProxyJsonParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct JsonParamsVisitor;
+
+        impl<'de> Visitor<'de> for JsonParamsVisitor {
+            type Value = CodexProxyJsonParams;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("one JSON-RPC params object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut keys = HashSet::new();
+                let mut cwd = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    let is_cwd = key == "cwd";
+                    if !keys.insert(key) {
+                        return Err(serde::de::Error::custom("duplicate JSON params key"));
+                    }
+                    if is_cwd {
+                        cwd = Some(map.next_value::<String>()?);
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+                Ok(CodexProxyJsonParams { cwd })
+            }
+        }
+
+        deserializer.deserialize_map(JsonParamsVisitor)
     }
 }
 
@@ -461,8 +509,11 @@ impl CodexProxyOneTurnGate {
             };
             let line_fragment = &remaining[..newline_offset];
             self.extend_pending(line_fragment)?;
-            self.validate_complete_line()?;
-            admitted.extend_from_slice(&self.pending);
+            if let Some(normalized) = self.validate_complete_line()? {
+                admitted.extend_from_slice(&normalized);
+            } else {
+                admitted.extend_from_slice(&self.pending);
+            }
             admitted.push(b'\n');
             self.pending.clear();
             cursor = cursor
@@ -484,7 +535,7 @@ impl CodexProxyOneTurnGate {
         Ok(())
     }
 
-    fn validate_complete_line(&mut self) -> HermesAdapterResult<()> {
+    fn validate_complete_line(&mut self) -> HermesAdapterResult<Option<Vec<u8>>> {
         let line = self.pending.strip_suffix(b"\r").unwrap_or(&self.pending);
         let value: CodexProxyJsonLine = serde_json::from_slice(line)
             .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?;
@@ -494,7 +545,25 @@ impl CodexProxyOneTurnGate {
             }
             self.turn_start_count = 1;
         }
-        Ok(())
+        if value.method.as_deref() != Some("thread/start") {
+            return Ok(None);
+        }
+        let Some(cwd) = value.params.and_then(|params| params.cwd) else {
+            return Ok(None);
+        };
+        if cwd != "/work" {
+            return Err(cross_binding("HERMES_CODEX_PROXY_CWD_REJECTED"));
+        }
+        let mut normalized: serde_json::Value = serde_json::from_slice(line)
+            .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?;
+        normalized
+            .get_mut("params")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?
+            .remove("cwd");
+        serde_json::to_vec(&normalized)
+            .map(Some)
+            .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))
     }
 
     fn finish_input(&self) -> HermesAdapterResult<()> {
@@ -1453,6 +1522,7 @@ impl HermesProductionRunnerConfig {
             process,
             owner,
             absolute_deadline,
+            deadline_window: Duration::from_millis(deadline_millis),
             operation_timeout: self.operation_timeout,
             poll_interval: self.poll_interval,
             windows_launcher_pid: startup.windows_launcher_pid,
@@ -1498,6 +1568,7 @@ pub struct ProductionHermesRunner {
     process: crate::windows_job::WindowsJobChild,
     owner: Arc<ContainmentOwnerState>,
     absolute_deadline: Instant,
+    deadline_window: Duration,
     operation_timeout: Duration,
     poll_interval: Duration,
     windows_launcher_pid: u32,
@@ -1520,6 +1591,14 @@ impl ProductionHermesRunner {
             ));
         }
         self.process.ensure_running()?;
+        self.absolute_deadline = Instant::now()
+            .checked_add(self.deadline_window)
+            .ok_or_else(|| {
+                error(
+                    HermesAdapterErrorKind::Timeout,
+                    "HERMES_PRODUCTION_DEADLINE_EXCEEDED",
+                )
+            })?;
         self.receipt.verify_binding(self.endpoint, &self.api_key)?;
         let broker_receipt = ContentDigest::from_sha256(self.broker_receipt_sha256.clone())
             .map_err(|_| malformed("HERMES_CODEX_PROXY_BINDING_INPUT_REJECTED"))?;
@@ -2314,6 +2393,52 @@ mod proxy_host_tests {
     }
 
     #[test]
+    fn one_turn_gate_maps_only_the_contained_work_directory() {
+        let mut gate = CodexProxyOneTurnGate::default();
+        assert_eq!(
+            gate.ingest(b"{\"id\":1,\"method\":\"thread/start\",\"params\":{\"cwd\":\"/wo")
+                .expect("partial contained cwd request"),
+            b""
+        );
+        assert_eq!(
+            gate.ingest(b"rk\"}}\n")
+                .expect("contained cwd is mapped to the broker-owned directory"),
+            b"{\"id\":1,\"method\":\"thread/start\",\"params\":{}}\n"
+        );
+
+        let mut absent = CodexProxyOneTurnGate::default();
+        let without_cwd = b"{\"id\":1,\"method\":\"thread/start\",\"params\":{}}\n";
+        assert_eq!(
+            absent
+                .ingest(without_cwd)
+                .expect("absent cwd remains absent"),
+            without_cwd
+        );
+
+        let mut foreign = CodexProxyOneTurnGate::default();
+        assert_eq!(
+            foreign
+                .ingest(
+                    b"{\"id\":1,\"method\":\"thread/start\",\"params\":{\"cwd\":\"C:\\\\foreign\"}}\n"
+                )
+                .expect_err("foreign cwd must fail closed")
+                .code(),
+            "HERMES_CODEX_PROXY_CWD_REJECTED"
+        );
+
+        let mut duplicate = CodexProxyOneTurnGate::default();
+        assert_eq!(
+            duplicate
+                .ingest(
+                    b"{\"id\":1,\"method\":\"thread/start\",\"params\":{\"cwd\":\"/work\",\"cwd\":\"/work\"}}\n"
+                )
+                .expect_err("duplicate cwd must fail closed")
+                .code(),
+            "HERMES_CODEX_PROXY_JSONL_REJECTED"
+        );
+    }
+
+    #[test]
     fn one_turn_gate_rejects_second_turn_and_malformed_jsonl() {
         let mut second = CodexProxyOneTurnGate::default();
         second
@@ -2895,20 +3020,36 @@ mod proxy_host_tests {
             || host.status.lock().expect("host status").authenticated_open,
             "provider did not authenticate open",
         );
+        let contained_thread =
+            b"{\"id\":0,\"method\":\"thread/start\",\"params\":{\"cwd\":\"/work\"}}\n";
+        let broker_thread = b"{\"id\":0,\"method\":\"thread/start\",\"params\":{}}\n";
+        sender
+            .send(OuterStreamEvent::Data(encode_codex_proxy_test_frame(
+                2,
+                1,
+                binding,
+                contained_thread,
+            )))
+            .expect("send contained thread start");
+        wait_until(
+            || written.lock().expect("written input").as_slice() == broker_thread,
+            "contained cwd was not mapped before provider forwarding",
+        );
         let first = b"{\"id\":1,\"method\":\"turn/start\",\"params\":{}}\n";
         sender
             .send(OuterStreamEvent::Data(encode_codex_proxy_test_frame(
-                2, 1, binding, first,
+                2, 2, binding, first,
             )))
             .expect("send first turn");
+        let expected = [broker_thread.as_slice(), first.as_slice()].concat();
         wait_until(
-            || written.lock().expect("written input").as_slice() == first,
+            || written.lock().expect("written input").as_slice() == expected,
             "first turn was not forwarded",
         );
         sender
             .send(OuterStreamEvent::Data(encode_codex_proxy_test_frame(
                 2,
-                2,
+                3,
                 binding,
                 b"{\"id\":2,\"method\":\"turn/start\",\"params\":{}}\n",
             )))
@@ -2919,7 +3060,7 @@ mod proxy_host_tests {
         );
         let failure = host.ensure_live().expect_err("second turn remains failed");
         assert_eq!(failure.code(), "HERMES_CODEX_PROXY_TURN_REPLAY_REJECTED");
-        assert_eq!(written.lock().expect("written input").as_slice(), first);
+        assert_eq!(written.lock().expect("written input").as_slice(), expected);
         assert!(*state.cancelled.lock().expect("cancelled provider"));
         wait_until(
             || state.read_exited.load(Ordering::Acquire),

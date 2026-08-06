@@ -1684,10 +1684,22 @@ struct RawFinding {
     evidence_digests: Vec<String>,
 }
 
+fn verified_reflection_output(output: &str) -> HermesAdapterResult<&str> {
+    let output = output.trim();
+    if output.is_empty() || output.starts_with("Codex app-server turn failed: ") {
+        return Err(error(
+            HermesAdapterErrorKind::Failed,
+            "HERMES_CODEX_APP_SERVER_RUN_FAILED",
+        ));
+    }
+    Ok(output)
+}
+
 fn parse_reflection(
     output: &str,
     job: &HermesReflectionJob,
 ) -> HermesAdapterResult<CanonicalReflection> {
+    let output = verified_reflection_output(output)?;
     let raw: RawReflection =
         serde_json::from_str(output).map_err(|_| malformed("HERMES_REFLECTION_SCHEMA_REJECTED"))?;
     if raw.schema_version != HERMES_SCHEMA_VERSION {

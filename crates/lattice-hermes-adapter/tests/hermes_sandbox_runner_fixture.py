@@ -574,6 +574,27 @@ class HermesSandboxRunnerFixtureTests(unittest.TestCase):
             runner.close()
         self.assertEqual(runner.exit_code, 0)
 
+    def test_first_request_rearms_the_reflection_phase_deadline(self):
+        runner = BwrapRunner()
+        init = self.init()
+        init["deadline_millis"] = 2_000
+        try:
+            self.send_init(runner, init)
+            receive_containment_frame(runner.peer)
+            time.sleep(1.1)
+            first = self.relay(
+                runner, request("GET", "/v1/capabilities", init["api_key"])
+            )
+            self.assertIn(b"HTTP/1.1 200 OK", first)
+            time.sleep(1.1)
+            second = self.relay(
+                runner, request("GET", "/v1/capabilities", init["api_key"])
+            )
+            self.assertIn(b"HTTP/1.1 200 OK", second)
+        finally:
+            runner.close()
+        self.assertEqual(runner.exit_code, 0)
+
     def test_one_wrong_config_binding_fails_closed_before_frame(self):
         runner = BwrapRunner()
         init = self.init()

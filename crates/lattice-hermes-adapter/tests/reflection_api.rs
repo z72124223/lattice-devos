@@ -1284,6 +1284,39 @@ fn malformed_reflection_schema_fails_closed() {
 }
 
 #[test]
+fn false_completed_codex_app_server_runs_are_classified_as_failed() {
+    for (run_id, output) in [
+        ("run_empty_codex_failure", ""),
+        (
+            "run_explicit_codex_failure",
+            "Codex app-server turn failed: thread/start rejected",
+        ),
+    ] {
+        let request = request();
+        let job = job(request.clone());
+        let server = ScriptedServer::start(vec![
+            capabilities(),
+            Response::json(
+                202,
+                serde_json::json!({"run_id": run_id, "status": "started"}).to_string(),
+            ),
+            completed_events(run_id, output),
+            completed_status(run_id, "lattice-task-034-session", output),
+        ]);
+        let mut adapter =
+            HermesReflectionAdapter::connect(config(&server), job).expect("adapter");
+
+        let failure = adapter
+            .run_reflection(&request)
+            .expect_err("a false completed Codex run must fail closed");
+
+        assert_eq!(failure.kind(), HermesAdapterErrorKind::Failed);
+        assert_eq!(failure.code(), "HERMES_CODEX_APP_SERVER_RUN_FAILED");
+        assert_eq!(server.finish().len(), 4);
+    }
+}
+
+#[test]
 fn evidence_and_reflection_text_reject_sensitive_values_but_accept_digest_only_binding() {
     let secret = "Authorization: Bearer sk-example-secret-value-123456";
     let sensitive_digest =
