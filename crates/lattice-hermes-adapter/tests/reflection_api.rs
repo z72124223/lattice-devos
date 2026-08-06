@@ -114,7 +114,7 @@ fn offline_runtime_manifest_is_canonical_strict_and_exactly_pinned() {
             "\"hermes_archive_sha256\":\"{}\",",
             "\"hermes_commit\":\"{}\",",
             "\"hermes_release\":\"v2026.8.3\",",
-            "\"payload_byte_count\":722642720,\"payload_file_count\":14076,",
+            "\"payload_byte_count\":722643145,\"payload_file_count\":14077,",
             "\"payload_manifest_sha256\":\"{}\",",
             "\"platform\":\"x86_64-unknown-linux-gnu\",",
             "\"pyproject_sha256\":\"{}\",",
@@ -128,17 +128,17 @@ fn offline_runtime_manifest_is_canonical_strict_and_exactly_pinned() {
         HERMES_CPYTHON_SHA256SUMS_SHA256,
         HERMES_RUNTIME_ARCHIVE_SHA256,
         HERMES_UPSTREAM_COMMIT,
-        "3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d",
+        "cb0e331bcb2b4fe2fd0977401d246819aadb800b645ca31ec233ad4e25b96929",
         HERMES_PYPROJECT_SHA256,
         HERMES_UV_LOCK_SHA256,
     );
     let manifest = HermesOfflineRuntimeManifest::from_canonical_json(bytes.as_bytes())
         .expect("one exact offline manifest");
-    assert_eq!(manifest.payload_file_count(), 14_076);
-    assert_eq!(manifest.payload_byte_count(), 722_642_720);
+    assert_eq!(manifest.payload_file_count(), 14_077);
+    assert_eq!(manifest.payload_byte_count(), 722_643_145);
     assert_eq!(
         manifest.payload_manifest_sha256(),
-        "3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d"
+        "cb0e331bcb2b4fe2fd0977401d246819aadb800b645ca31ec233ad4e25b96929"
     );
 
     let unknown = bytes.replacen(
@@ -2181,7 +2181,7 @@ fn production_containment(isolation_root: std::path::PathBuf) -> HermesWslContai
         r"C:\Windows\System32\wsl.exe",
         concat!(
             "/var/tmp/lattice-runtime-targets/",
-            "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-offline-final-2UEmH84h"
+            "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-errorfix-v1"
         ),
         isolation_root,
         std::fs::canonicalize(std::env::current_dir().expect("cwd"))
@@ -2202,7 +2202,7 @@ fn test_runtime_manifest() -> HermesOfflineRuntimeManifest {
             "\"hermes_archive_sha256\":\"{}\",",
             "\"hermes_commit\":\"{}\",",
             "\"hermes_release\":\"v2026.8.3\",",
-            "\"payload_byte_count\":722642720,\"payload_file_count\":14076,",
+            "\"payload_byte_count\":722643145,\"payload_file_count\":14077,",
             "\"payload_manifest_sha256\":\"{}\",",
             "\"platform\":\"x86_64-unknown-linux-gnu\",",
             "\"pyproject_sha256\":\"{}\",",
@@ -2216,7 +2216,7 @@ fn test_runtime_manifest() -> HermesOfflineRuntimeManifest {
         HERMES_CPYTHON_SHA256SUMS_SHA256,
         HERMES_RUNTIME_ARCHIVE_SHA256,
         HERMES_UPSTREAM_COMMIT,
-        "3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d",
+        "cb0e331bcb2b4fe2fd0977401d246819aadb800b645ca31ec233ad4e25b96929",
         HERMES_PYPROJECT_SHA256,
         HERMES_UV_LOCK_SHA256,
     );

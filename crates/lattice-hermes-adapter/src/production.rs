@@ -56,14 +56,14 @@ mcp_servers: {}
 const BWRAP_SHA256: &str = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b";
 const OFFICIAL_RUNTIME_GUEST_ROOT: &str = concat!(
     "/var/tmp/lattice-runtime-targets/",
-    "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-offline-final-2UEmH84h"
+    "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-errorfix-v1"
 );
 const OFFICIAL_RUNTIME_MANIFEST_SHA256: &str =
-    "51e7c972ffebb00ed0e09e688b7d8490853764295a3c28237dd198950f7524ab";
+    "e3a3272b6cead30cd2df1af755df031766475595fdacfb080d0886671b6d1fbb";
 const OFFICIAL_RUNTIME_TREE_SHA256: &str =
-    "3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d";
-const OFFICIAL_RUNTIME_FILE_COUNT: u64 = 14_076;
-const OFFICIAL_RUNTIME_BYTE_COUNT: u64 = 722_642_720;
+    "cb0e331bcb2b4fe2fd0977401d246819aadb800b645ca31ec233ad4e25b96929";
+const OFFICIAL_RUNTIME_FILE_COUNT: u64 = 14_077;
+const OFFICIAL_RUNTIME_BYTE_COUNT: u64 = 722_643_145;
 const MAX_STARTUP_BYTES: usize = 128 * 1024;
 const MAX_RUNNER_TIMEOUT: Duration = Duration::from_mins(5);
 const CODEX_PROXY_MAGIC: &[u8] = b"LATTICE_HERMES_CODEX_PROXY_V1\n";
@@ -3630,6 +3630,7 @@ mod proxy_host_tests {
         observation: Arc<Mutex<InteractiveFakeCodexObservation>>,
         queue: Mutex<InteractiveFakeCodexQueue>,
         reflection: String,
+        fail_turn: bool,
         wake: Condvar,
     }
 
@@ -3647,6 +3648,56 @@ mod proxy_host_tests {
             }
             self.wake.notify_all();
             Ok(())
+        }
+
+        fn turn_responses(&self, request_id: &serde_json::Value) -> Vec<serde_json::Value> {
+            let mut responses = vec![
+                serde_json::json!({
+                    "id": request_id,
+                    "result": {"turn": {"id": "turn-zero-model"}}
+                }),
+                serde_json::json!({
+                    "method": "turn/started",
+                    "params": {
+                        "threadId": "thread-zero-model",
+                        "turn": {"id": "turn-zero-model", "status": "inProgress"}
+                    }
+                }),
+            ];
+            if self.fail_turn {
+                responses.push(serde_json::json!({
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-zero-model",
+                        "turn": {
+                            "id": "turn-zero-model",
+                            "status": "failed",
+                            "error": {"message": "zero-model injected failure"}
+                        }
+                    }
+                }));
+            } else {
+                responses.push(serde_json::json!({
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-zero-model",
+                        "turnId": "turn-zero-model",
+                        "item": {
+                            "id": "item-zero-model",
+                            "type": "agentMessage",
+                            "text": self.reflection
+                        }
+                    }
+                }));
+                responses.push(serde_json::json!({
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": "thread-zero-model",
+                        "turn": {"id": "turn-zero-model", "status": "completed"}
+                    }
+                }));
+            }
+            responses
         }
     }
 
@@ -3750,40 +3801,12 @@ mod proxy_host_tests {
                             .map_err(|_| io::Error::other("fake Codex observation poisoned"))?;
                         observation.turn_input = Some(turn_input);
                         observation.turn_output_schema = turn_output_schema;
-                        observation.reflection_emitted = true;
+                        observation.reflection_emitted = !self.state.fail_turn;
                     }
-                    self.state.enqueue(&[
-                        serde_json::json!({
-                            "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
-                            "result": {"turn": {"id": "turn-zero-model"}}
-                        }),
-                        serde_json::json!({
-                            "method": "turn/started",
-                            "params": {
-                                "threadId": "thread-zero-model",
-                                "turn": {"id": "turn-zero-model", "status": "inProgress"}
-                            }
-                        }),
-                        serde_json::json!({
-                            "method": "item/completed",
-                            "params": {
-                                "threadId": "thread-zero-model",
-                                "turnId": "turn-zero-model",
-                                "item": {
-                                    "id": "item-zero-model",
-                                    "type": "agentMessage",
-                                    "text": self.state.reflection
-                                }
-                            }
-                        }),
-                        serde_json::json!({
-                            "method": "turn/completed",
-                            "params": {
-                                "threadId": "thread-zero-model",
-                                "turn": {"id": "turn-zero-model", "status": "completed"}
-                            }
-                        }),
-                    ])
+                    let responses = self
+                        .state
+                        .turn_responses(request.get("id").unwrap_or(&serde_json::Value::Null));
+                    self.state.enqueue(&responses)
                 }
                 _ => Err(io::Error::other(format!(
                     "unexpected fake Codex method {method}"
@@ -3847,11 +3870,23 @@ mod proxy_host_tests {
 
     impl InteractiveFakeCodexProvider {
         fn new(reflection: String) -> (Self, Arc<Mutex<InteractiveFakeCodexObservation>>) {
+            Self::with_outcome(reflection, false)
+        }
+
+        fn failing() -> (Self, Arc<Mutex<InteractiveFakeCodexObservation>>) {
+            Self::with_outcome(String::new(), true)
+        }
+
+        fn with_outcome(
+            reflection: String,
+            fail_turn: bool,
+        ) -> (Self, Arc<Mutex<InteractiveFakeCodexObservation>>) {
             let observation = Arc::new(Mutex::new(InteractiveFakeCodexObservation::default()));
             let state = Arc::new(InteractiveFakeCodexState {
                 observation: Arc::clone(&observation),
                 queue: Mutex::new(InteractiveFakeCodexQueue::default()),
                 reflection,
+                fail_turn,
                 wake: Condvar::new(),
             });
             (
@@ -3901,7 +3936,7 @@ mod proxy_host_tests {
                 "\"hermes_archive_sha256\":\"{}\",",
                 "\"hermes_commit\":\"{}\",",
                 "\"hermes_release\":\"v2026.8.3\",",
-                "\"payload_byte_count\":722642720,\"payload_file_count\":14076,",
+                "\"payload_byte_count\":722643145,\"payload_file_count\":14077,",
                 "\"payload_manifest_sha256\":\"{}\",",
                 "\"platform\":\"x86_64-unknown-linux-gnu\",",
                 "\"pyproject_sha256\":\"{}\",",
@@ -4052,5 +4087,56 @@ mod proxy_host_tests {
         );
         drop(observed);
         fs::remove_dir_all(&isolation_root).expect("remove zero-model isolation root");
+    }
+
+    #[test]
+    #[ignore = "requires WSL2, bubblewrap, and the exact frozen Hermes runtime"]
+    fn official_hermes_gateway_reports_failed_fake_codex_turn_without_model() {
+        let request = zero_model_request();
+        let job = zero_model_job(request.clone());
+        let (provider, observation) = InteractiveFakeCodexProvider::failing();
+        let isolation_root = std::env::temp_dir().join(format!(
+            "lattice-hermes-official-zero-model-failure-{}-{}",
+            std::process::id(),
+            RUNNER_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let containment = HermesWslContainmentConfig::new(
+            r"C:\Windows\System32\wsl.exe",
+            OFFICIAL_RUNTIME_GUEST_ROOT,
+            isolation_root.clone(),
+            fs::canonicalize(std::env::current_dir().expect("cwd"))
+                .expect("canonical product root"),
+        )
+        .expect("official zero-model containment");
+        let mut config = HermesProductionRunnerConfig::official_with_broker_digest(
+            containment,
+            &zero_model_runtime_manifest(),
+            &ContentDigest::from_sha256("ff".repeat(32)).expect("broker digest"),
+            "production-zero-model-failure-key",
+            "hermes-agent",
+            Duration::from_secs(10),
+            Duration::from_secs(4),
+            Duration::from_millis(1),
+        )
+        .expect("official zero-model failure config");
+        config.codex_provider = Some(Box::new(provider));
+        let runner = config
+            .launch(Instant::now() + Duration::from_secs(12))
+            .expect("official Hermes gateway starts");
+        let mut port = runner.bind(job).expect("bind zero-model failure job");
+        let failure = port
+            .run_reflection_evidence(&request)
+            .expect_err("failed Codex turn must produce run.failed");
+        assert_eq!(failure.code(), "HERMES_RUN_FAILED");
+        drop(port);
+
+        let observed = observation.lock().expect("fake Codex observation");
+        assert_eq!(
+            observed.calls,
+            ["initialize", "initialized", "thread/start", "turn/start"]
+        );
+        assert!(!observed.reflection_emitted);
+        drop(observed);
+        fs::remove_dir_all(&isolation_root).expect("remove zero-model failure isolation root");
     }
 }

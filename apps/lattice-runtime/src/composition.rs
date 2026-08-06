@@ -109,18 +109,18 @@ const HERMES_POLL_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(windows)]
 const OFFICIAL_HERMES_RUNTIME_GUEST_ROOT: &str = concat!(
     "/var/tmp/lattice-runtime-targets/",
-    "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-offline-final-2UEmH84h"
+    "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-errorfix-v1"
 );
 #[cfg(windows)]
 const OFFICIAL_HERMES_RUNTIME_MANIFEST_SHA256: &str =
-    "51e7c972ffebb00ed0e09e688b7d8490853764295a3c28237dd198950f7524ab";
+    "e3a3272b6cead30cd2df1af755df031766475595fdacfb080d0886671b6d1fbb";
 #[cfg(windows)]
 const OFFICIAL_HERMES_RUNTIME_TREE_SHA256: &str =
-    "3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d";
+    "cb0e331bcb2b4fe2fd0977401d246819aadb800b645ca31ec233ad4e25b96929";
 #[cfg(windows)]
-const OFFICIAL_HERMES_RUNTIME_FILE_COUNT: u64 = 14_076;
+const OFFICIAL_HERMES_RUNTIME_FILE_COUNT: u64 = 14_077;
 #[cfg(windows)]
-const OFFICIAL_HERMES_RUNTIME_BYTE_COUNT: u64 = 722_642_720;
+const OFFICIAL_HERMES_RUNTIME_BYTE_COUNT: u64 = 722_643_145;
 const OPENCLAW_ADAPTER_VERSION: &str = "1.0.0";
 const FIXED_GATEWAY_TASK_REVISION: &str = "1";
 const SCRIPTED_SERVER_BYTES: &[u8] = include_bytes!("fixtures/task032-scripted-codex.ps1");
@@ -3539,7 +3539,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn production_hermes_environment_accepts_only_the_frozen_runtime_identity() {
-        let manifest_bytes = br#"{"cpython_archive_bytes":111375313,"cpython_archive_sha256":"a140c0868258075d160fa0da51ddffd423efbc9dd350695abd33e7ce3ce94352","cpython_build_release":"20260804","cpython_provenance":"astral-sh/python-build-standalone","cpython_sha256sums_sha256":"eccfdcc61c9fe48b7fe61db8812925ce30f23943d16c60861001004a4ae8f55c","cpython_version":"3.12.13","hermes_archive_sha256":"a9a84a25999a23a859a9d17ef3134ea1c3371d8bf1984313eab839e939528152","hermes_commit":"3c27eb6234bf91b8ceee9e9071591b31e9b148cb","hermes_release":"v2026.8.3","payload_byte_count":722642720,"payload_file_count":14076,"payload_manifest_sha256":"3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d","platform":"x86_64-unknown-linux-gnu","pyproject_sha256":"64d1085ee1c23caf0ae0d9e65c73e280f466362ed43fdda1531f18f3af1d9869","schema":"lattice.hermes.offline-runtime.v1","uv_lock_sha256":"aab3c83f71b683507a590b6315b23bdc0abd6b63b76b2349eae15bf00dfbaf2b"}"#;
+        let manifest_bytes = br#"{"cpython_archive_bytes":111375313,"cpython_archive_sha256":"a140c0868258075d160fa0da51ddffd423efbc9dd350695abd33e7ce3ce94352","cpython_build_release":"20260804","cpython_provenance":"astral-sh/python-build-standalone","cpython_sha256sums_sha256":"eccfdcc61c9fe48b7fe61db8812925ce30f23943d16c60861001004a4ae8f55c","cpython_version":"3.12.13","hermes_archive_sha256":"a9a84a25999a23a859a9d17ef3134ea1c3371d8bf1984313eab839e939528152","hermes_commit":"3c27eb6234bf91b8ceee9e9071591b31e9b148cb","hermes_release":"v2026.8.3","payload_byte_count":722643145,"payload_file_count":14077,"payload_manifest_sha256":"cb0e331bcb2b4fe2fd0977401d246819aadb800b645ca31ec233ad4e25b96929","platform":"x86_64-unknown-linux-gnu","pyproject_sha256":"64d1085ee1c23caf0ae0d9e65c73e280f466362ed43fdda1531f18f3af1d9869","schema":"lattice.hermes.offline-runtime.v1","uv_lock_sha256":"aab3c83f71b683507a590b6315b23bdc0abd6b63b76b2349eae15bf00dfbaf2b"}"#;
         let manifest = HermesOfflineRuntimeManifest::from_canonical_json(manifest_bytes)
             .expect("exact frozen runtime manifest");
         validate_official_hermes_runtime_identity(

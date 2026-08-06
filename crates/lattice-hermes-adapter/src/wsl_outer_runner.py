@@ -28,19 +28,22 @@ EXPECTED_BWRAP_SHA256 = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f
 EXPECTED_PYTHON_VERSION = (3, 12, 13)
 EXPECTED_OFFICIAL_RUNTIME_ROOT = (
     "/var/tmp/lattice-runtime-targets/"
-    "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-offline-final-2UEmH84h"
+    "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-errorfix-v1"
 )
 EXPECTED_OFFLINE_MANIFEST_SHA256 = (
-    "51e7c972ffebb00ed0e09e688b7d8490853764295a3c28237dd198950f7524ab"
+    "e3a3272b6cead30cd2df1af755df031766475595fdacfb080d0886671b6d1fbb"
 )
 EXPECTED_RUNTIME_TREE_SHA256 = (
-    "3159e079402fad16348d5ee5be97f84b2bb8f2bf1fa4efaf65dfc73506918e4d"
+    "cb0e331bcb2b4fe2fd0977401d246819aadb800b645ca31ec233ad4e25b96929"
 )
 EXPECTED_HERMES_ENTRYPOINT_SHA256 = (
     "5f0937f77b6df59262dad536c1f6ed1447295584cdd129eed403b84f5bc826a8"
 )
 EXPECTED_RUNTIME_PYTHON_SHA256 = (
     "b4274ebd5b568c6b6dc5f1668d1d747c574c0e0d605f41e09f26c51b2446971b"
+)
+EXPECTED_GATEWAY_API_SERVER_SHA256 = (
+    "8272ff767069e67c4a210899e1adb6a8f9763a1eecb9328f6807307c104c0523"
 )
 MAX_DIAGNOSTIC_BYTES = 4096
 OFFICIAL_HERMES_CONFIG = b"""_config_version: 33
@@ -207,7 +210,7 @@ def validate_official_runtime_identity(runtime_root):
         ("offline-runtime-manifest.json", 925, EXPECTED_OFFLINE_MANIFEST_SHA256, False),
         (
             "provenance/runtime-tree-manifest.json",
-            2673723,
+            2673882,
             EXPECTED_RUNTIME_TREE_SHA256,
             False,
         ),
@@ -217,6 +220,12 @@ def validate_official_runtime_identity(runtime_root):
             102380768,
             EXPECTED_RUNTIME_PYTHON_SHA256,
             True,
+        ),
+        (
+            "python/lib/python3.12/site-packages/gateway/platforms/api_server.py",
+            325578,
+            EXPECTED_GATEWAY_API_SERVER_SHA256,
+            False,
         ),
     )
     try:

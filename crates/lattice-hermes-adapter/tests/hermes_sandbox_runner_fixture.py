@@ -23,7 +23,7 @@ BASE_RUNTIME_ROOT = pathlib.Path(
 )
 OFFICIAL_RUNTIME_ROOT = pathlib.Path(
     "/var/tmp/lattice-runtime-targets/"
-    "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-offline-final-2UEmH84h"
+    "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-errorfix-v1"
 )
 
 FIXTURE_CODEX_REQUEST = (
