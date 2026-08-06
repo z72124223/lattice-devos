@@ -29,7 +29,8 @@ const DELIVERY_PROMPT: &str = concat!(
     "The nested PowerShell command must be exactly [System.IO.File]::WriteAllBytes('answer.txt',[byte[]](76,65,84,84,73,67,69,95,68,69,76,73,86,69,82,89,95,79,75,10)), producing 20 bytes ending in LF. ",
     "In every exec assign the awaited nested result to result and, before calling text(result), run this fail-closed check: if (typeof result !== \"string\" || !/^Exit code: 0(?:\\r?\\n|$)/.test(result)) { throw new Error(\"nested shell_command failed\"); }. ",
     "Do not call tools.apply_patch. The write exec must perform no verification or other tool work. ",
-    "Confirm that call has completed, then use a separate verification exec call whose JavaScript invokes nested tools.shell_command to read and validate the exact bytes. ",
+    "Confirm that call has completed, then use a separate verification exec call whose JavaScript invokes nested tools.shell_command. ",
+    "That verification call's nested PowerShell command must be exactly $bytes=[System.IO.File]::ReadAllBytes('answer.txt'); $expected=[byte[]](76,65,84,84,73,67,69,95,68,69,76,73,86,69,82,89,95,79,75,10); if ($bytes.Length -ne $expected.Length -or (Compare-Object -ReferenceObject $expected -DifferenceObject $bytes -SyncWindow 0)) { exit 1 }. ",
     "The second exec is only the exact-byte verification test. Do not combine file creation and verification in the same exec call. If any exec result says Script running with cell ID, call functions.wait with that exact cell_id until Script completed is received, and require exit code 0 before reporting success. ",
     "Never terminate a yielded cell or claim completion from a running marker. Do not modify any other path. Do not run Git commands, stage, or commit files; LATTICE performs scope inspection, the fixed project test, and Git commit afterward."
 );
@@ -368,6 +369,17 @@ fn is_lowercase_sha256(value: &str) -> bool {
 mod tests {
     use super::DELIVERY_PROMPT;
     use lattice_codex_adapter::{AppServerSession, SessionRequest, TurnStatus};
+    use sha2::{Digest, Sha256};
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+
+        let mut output = String::with_capacity(64);
+        for byte in Sha256::digest(bytes) {
+            write!(&mut output, "{byte:02x}").expect("write digest");
+        }
+        output
+    }
 
     #[test]
     fn fixed_delivery_prompt_uses_sandboxed_nested_shell_edit_protocol() {
@@ -387,6 +399,9 @@ mod tests {
         assert!(DELIVERY_PROMPT.contains("/^Exit code: 0(?:\\r?\\n|$)/"));
         assert!(DELIVERY_PROMPT.contains("throw new Error"));
         assert!(DELIVERY_PROMPT.contains("separate verification"));
+        assert!(DELIVERY_PROMPT.contains(
+            "$bytes=[System.IO.File]::ReadAllBytes('answer.txt'); $expected=[byte[]](76,65,84,84,73,67,69,95,68,69,76,73,86,69,82,89,95,79,75,10); if ($bytes.Length -ne $expected.Length -or (Compare-Object -ReferenceObject $expected -DifferenceObject $bytes -SyncWindow 0)) { exit 1 }"
+        ));
         assert!(DELIVERY_PROMPT.contains("functions.wait"));
         assert!(DELIVERY_PROMPT.contains("Script completed"));
         assert!(DELIVERY_PROMPT.contains("Do not combine"));
@@ -396,8 +411,11 @@ mod tests {
     #[test]
     fn scripted_fixture_tracks_prompt_and_completed_tool_evidence() {
         let fixture = include_str!("fixtures/task032-scripted-codex.ps1");
-        let escaped_prompt = DELIVERY_PROMPT.replace('\'', "''");
-        assert!(fixture.contains(&format!("[string]$inputs[0].text -ne '{escaped_prompt}'")));
+        let prompt_sha256 = sha256_hex(DELIVERY_PROMPT.as_bytes());
+        assert!(
+            fixture.contains(&format!("$expectedPromptSha256 = '{prompt_sha256}'")),
+            "scripted fixture must pin prompt digest {prompt_sha256}"
+        );
         let notifications = fixture
             .lines()
             .filter_map(|line| line.strip_prefix("[Console]::Out.WriteLine('"))

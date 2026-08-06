@@ -91,6 +91,17 @@ $turn = Read-Request
 $turnDirectory = [System.IO.Path]::GetFullPath([string]$turn.params.cwd)
 $inputs = @($turn.params.input)
 $roots = @($turn.params.sandboxPolicy.writableRoots)
+$promptDigest = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $promptSha256 = -join (
+        $promptDigest.ComputeHash([System.Text.Encoding]::UTF8.GetBytes([string]$inputs[0].text)) |
+            ForEach-Object { $_.ToString('x2') }
+    )
+}
+finally {
+    $promptDigest.Dispose()
+}
+$expectedPromptSha256 = 'a96dbe826a690eaa0d89f3b42000a1f4194b762fd5da6ebab00096a3f9ff8461'
 if (
     [string]$turn.method -ne 'turn/start' -or
     [int]$turn.id -ne 2 -or
@@ -100,7 +111,7 @@ if (
     [bool]$turn.params.sandboxPolicy.networkAccess -ne $false -or
     $inputs.Count -ne 1 -or
     [string]$inputs[0].type -ne 'text' -or
-    [string]$inputs[0].text -ne 'Create answer.txt in the current repository with exactly the bytes LATTICE_DELIVERY_OK followed by one newline. Use code mode and one standalone exec call whose JavaScript invokes nested tools.shell_command for the write. Keep the inherited workspaceWrite sandbox and current working directory: Do not set sandbox_permissions, request escalation, or pass a different workdir. The nested PowerShell command must be exactly [System.IO.File]::WriteAllBytes(''answer.txt'',[byte[]](76,65,84,84,73,67,69,95,68,69,76,73,86,69,82,89,95,79,75,10)), producing 20 bytes ending in LF. In every exec assign the awaited nested result to result and, before calling text(result), run this fail-closed check: if (typeof result !== "string" || !/^Exit code: 0(?:\r?\n|$)/.test(result)) { throw new Error("nested shell_command failed"); }. Do not call tools.apply_patch. The write exec must perform no verification or other tool work. Confirm that call has completed, then use a separate verification exec call whose JavaScript invokes nested tools.shell_command to read and validate the exact bytes. The second exec is only the exact-byte verification test. Do not combine file creation and verification in the same exec call. If any exec result says Script running with cell ID, call functions.wait with that exact cell_id until Script completed is received, and require exit code 0 before reporting success. Never terminate a yielded cell or claim completion from a running marker. Do not modify any other path. Do not run Git commands, stage, or commit files; LATTICE performs scope inspection, the fixed project test, and Git commit afterward.' -or
+    $promptSha256 -ne $expectedPromptSha256 -or
     $roots.Count -ne 1 -or
     -not [string]::Equals([System.IO.Path]::GetFullPath([string]$roots[0]), $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase) -or
     -not [string]::Equals($turnDirectory, $currentDirectory, [System.StringComparison]::OrdinalIgnoreCase)
