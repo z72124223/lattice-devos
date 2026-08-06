@@ -21,6 +21,20 @@ fn completed_exec(id: &str) -> Value {
     })
 }
 
+fn completed_command_execution(id: &str, status: &str) -> Value {
+    json!({
+        "id": id,
+        "type": "commandExecution",
+        "command": "code-mode nested tools.shell_command",
+        "cwd": "C:\\workspace",
+        "status": status,
+        "commandActions": [],
+        "aggregatedOutput": "",
+        "exitCode": 0,
+        "content": null
+    })
+}
+
 fn official_completed_terminal(items_view: &str) -> Value {
     let items = match items_view {
         "summary" => json!([{
@@ -460,6 +474,10 @@ fn requires_exact_two_execs_and_explicit_success_evidence() {
     null_success["success"] = Value::Null;
     let mut false_success = completed_exec("tool_apply");
     false_success["success"] = json!(false);
+    let mut policy_declined = completed_exec("tool_shell_write");
+    policy_declined["status"] = json!("declined");
+    policy_declined["success"] = json!(false);
+    policy_declined["contentItems"][0]["text"] = json!("Tool execution declined by command policy");
     let mut arbitrary_tool = completed_exec("tool_apply");
     arbitrary_tool["tool"] = json!("mcp");
     let orphan_wait = json!({
@@ -479,6 +497,7 @@ fn requires_exact_two_execs_and_explicit_success_evidence() {
         vec![missing_success, completed_exec("tool_verify")],
         vec![null_success, completed_exec("tool_verify")],
         vec![false_success, completed_exec("tool_verify")],
+        vec![policy_declined, completed_exec("tool_verify")],
         vec![arbitrary_tool, completed_exec("tool_verify")],
         vec![orphan_wait, completed_exec("tool_verify")],
         vec![
@@ -489,6 +508,138 @@ fn requires_exact_two_execs_and_explicit_success_evidence() {
     ] {
         assert_eq!(
             completed_session(completed_items, terminal.clone()),
+            Err(SessionError::Terminal(
+                ProtocolError::IncompleteToolExecution
+            ))
+        );
+    }
+}
+
+#[test]
+fn rejects_nested_shell_nonzero_even_when_outer_exec_reports_success() {
+    let mut failed_write = completed_exec("tool_shell_write");
+    failed_write["contentItems"][0]["text"] =
+        json!("Script completed\nWall time: 0.2 seconds\nOutput:\nExit code: 7\nWrite failed");
+
+    assert_eq!(
+        completed_session(
+            vec![failed_write, completed_exec("tool_shell_verify")],
+            official_completed_terminal("notLoaded"),
+        ),
+        Err(SessionError::Terminal(
+            ProtocolError::IncompleteToolExecution
+        ))
+    );
+}
+
+#[test]
+fn rejects_missing_nested_shell_exit_evidence() {
+    let mut ambiguous_write = completed_exec("tool_shell_write");
+    ambiguous_write["contentItems"][0]["text"] =
+        json!("Script completed\nWall time: 0.2 seconds\nOutput:\nambiguous result");
+
+    assert_eq!(
+        completed_session(
+            vec![ambiguous_write, completed_exec("tool_shell_verify")],
+            official_completed_terminal("notLoaded"),
+        ),
+        Err(SessionError::Terminal(
+            ProtocolError::IncompleteToolExecution
+        ))
+    );
+}
+
+#[test]
+fn accepts_only_two_completed_official_command_executions() {
+    let outcome = completed_session(
+        vec![
+            completed_command_execution("command_shell_write", "completed"),
+            completed_command_execution("command_shell_verify", "completed"),
+        ],
+        official_completed_terminal("notLoaded"),
+    )
+    .expect("the exact official commandExecution sequence is accepted")
+    .expect("this is a terminal notification");
+    assert_eq!(outcome.status, TurnStatus::Completed);
+
+    let mut forged_success = completed_command_execution("command_shell_write", "completed");
+    forged_success["success"] = json!(true);
+    let mut nonzero_exit = completed_command_execution("command_shell_write", "completed");
+    nonzero_exit["exitCode"] = json!(7);
+    let mut missing_exit = completed_command_execution("command_shell_write", "completed");
+    missing_exit
+        .as_object_mut()
+        .expect("command fixture is an object")
+        .remove("exitCode");
+    let mut null_exit = completed_command_execution("command_shell_write", "completed");
+    null_exit["exitCode"] = Value::Null;
+    let mut missing_command = completed_command_execution("command_shell_write", "completed");
+    missing_command
+        .as_object_mut()
+        .expect("command fixture is an object")
+        .remove("command");
+    let mut missing_cwd = completed_command_execution("command_shell_write", "completed");
+    missing_cwd
+        .as_object_mut()
+        .expect("command fixture is an object")
+        .remove("cwd");
+    let mut malformed_actions = completed_command_execution("command_shell_write", "completed");
+    malformed_actions["commandActions"] = json!({});
+    let mut malformed_output = completed_command_execution("command_shell_write", "completed");
+    malformed_output["aggregatedOutput"] = json!([]);
+    for completed_items in [
+        vec![
+            completed_command_execution("command_shell_write", "failed"),
+            completed_command_execution("command_shell_verify", "completed"),
+        ],
+        vec![
+            completed_command_execution("command_shell_write", "declined"),
+            completed_command_execution("command_shell_verify", "completed"),
+        ],
+        vec![
+            forged_success,
+            completed_command_execution("command_shell_verify", "completed"),
+        ],
+        vec![
+            nonzero_exit,
+            completed_command_execution("command_shell_verify", "completed"),
+        ],
+        vec![
+            missing_exit,
+            completed_command_execution("command_shell_verify", "completed"),
+        ],
+        vec![
+            null_exit,
+            completed_command_execution("command_shell_verify", "completed"),
+        ],
+        vec![
+            missing_command,
+            completed_command_execution("command_shell_verify", "completed"),
+        ],
+        vec![
+            missing_cwd,
+            completed_command_execution("command_shell_verify", "completed"),
+        ],
+        vec![
+            malformed_actions,
+            completed_command_execution("command_shell_verify", "completed"),
+        ],
+        vec![
+            malformed_output,
+            completed_command_execution("command_shell_verify", "completed"),
+        ],
+        vec![
+            completed_command_execution("command_shell_write", "completed"),
+            completed_exec("tool_shell_verify"),
+        ],
+        vec![
+            completed_command_execution("command_shell_write", "completed"),
+            completed_command_execution("command_shell_verify", "completed"),
+            completed_command_execution("command_extra", "completed"),
+        ],
+    ] {
+        assert_eq!(
+            completed_session(completed_items, official_completed_terminal("notLoaded")),
             Err(SessionError::Terminal(
                 ProtocolError::IncompleteToolExecution
             ))
@@ -546,7 +697,7 @@ fn accepts_a_yielded_exec_only_after_wait_observes_completed_success() {
             "success": true,
             "contentItems": [{
                 "type": "inputText",
-                "text": "Script completed\nWall time: 0.2 seconds\nExit code: 0"
+                "text": "Script completed\nWall time: 0.2 seconds\nProcess exited with code 0"
             }]
         },
         completed_exec("tool_verify")
@@ -631,6 +782,24 @@ fn rejects_wait_cell_drift_multiple_yields_and_malformed_termination() {
                 "Script running with cell ID cell-A\nScript completed\nExit code: 0",
             ),
             completed_exec("tool_verify"),
+        ],
+        vec![
+            yielded_exec("tool_shell_write", "Script running with cell ID cell-A"),
+            wait(
+                "tool_wait",
+                "cell-A",
+                json!(false),
+                "Script completed\nExit code: 0\nOutput:\nExit code: 7",
+            ),
+            completed_exec("tool_shell_verify"),
+        ],
+        vec![
+            yielded_exec(
+                "tool_shell_write",
+                "Script running with cell ID cell-A\nExit code: 7",
+            ),
+            wait("tool_wait", "cell-A", json!(false), completed),
+            completed_exec("tool_shell_verify"),
         ],
     ] {
         assert_eq!(

@@ -44,7 +44,7 @@ $codexHomeConfigBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((@(
     'model_reasoning_effort = "low"',
     '',
     '[windows]',
-    'sandbox = "elevated"'
+    'sandbox = "unelevated"'
 ) -join "`n") + "`n")
 $scriptedDeliveryTimeoutSeconds = if ($deadlineRegression) { '40' } else { '120' }
 $officialDeliveryTimeoutSeconds = '600'
@@ -424,7 +424,7 @@ function Get-OfficialCodexHomeEvidence {
         acl_protected = [bool]$aclEvidence.acl_protected
         auth_present = $true
         sandbox_mode = 'workspace-write'
-        windows_sandbox = 'elevated'
+        windows_sandbox = 'unelevated'
     }
 }
 
@@ -474,7 +474,7 @@ function New-OfficialLiveAttemptLatch {
         command_runner_sha256 = [string]$BundleEvidence.command_runner.sha256
         codex_home = [string]$CodexHomeEvidence.path
         auth_present = [bool]$CodexHomeEvidence.auth_present
-        safety = 'workspace-write;elevated;stdio-only'
+        safety = 'workspace-write;unelevated;stdio-only'
     }
     $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes(
         (($latch | ConvertTo-Json -Depth 5 -Compress) + "`n")

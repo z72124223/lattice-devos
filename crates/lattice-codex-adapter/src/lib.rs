@@ -300,6 +300,7 @@ fn validate_completed_terminal_items(
 fn validate_completed_tool_evidence(items: &[Value]) -> Result<(), ProtocolError> {
     let mut pending_cell = None;
     let mut completed_execs = 0_usize;
+    let mut completed_commands = 0_usize;
     let mut seen_dynamic_items = BTreeSet::new();
     for item in items {
         let Some(object) = item.as_object() else {
@@ -330,7 +331,8 @@ fn validate_completed_tool_evidence(items: &[Value]) -> Result<(), ProtocolError
                 let output = dynamic_tool_output(object)?;
                 match tool {
                     "exec" => {
-                        if pending_cell.is_some() || completed_execs >= 2 {
+                        if pending_cell.is_some() || completed_commands != 0 || completed_execs >= 2
+                        {
                             return Err(ProtocolError::IncompleteToolExecution);
                         }
                         completed_execs += 1;
@@ -338,6 +340,7 @@ fn validate_completed_tool_evidence(items: &[Value]) -> Result<(), ProtocolError
                         if yielded_cells.len() > 1 {
                             return Err(ProtocolError::IncompleteToolExecution);
                         }
+                        validate_nested_exit_evidence(&output, yielded_cells.is_empty())?;
                         pending_cell = yielded_cells.pop();
                     }
                     "wait" => {
@@ -360,6 +363,7 @@ fn validate_completed_tool_evidence(items: &[Value]) -> Result<(), ProtocolError
                         if terminate {
                             return Err(ProtocolError::IncompleteToolExecution);
                         }
+                        validate_nested_exit_evidence(&output, completed)?;
                         if completed {
                             pending_cell = None;
                         }
@@ -367,14 +371,98 @@ fn validate_completed_tool_evidence(items: &[Value]) -> Result<(), ProtocolError
                     _ => return Err(ProtocolError::IncompleteToolExecution),
                 }
             }
+            "commandExecution" => {
+                if pending_cell.is_some() || completed_execs != 0 || completed_commands >= 2 {
+                    return Err(ProtocolError::IncompleteToolExecution);
+                }
+                let item_id = validated_command_execution_id(object)?;
+                if !seen_dynamic_items.insert(item_id.to_owned()) {
+                    return Err(ProtocolError::IncompleteToolExecution);
+                }
+                completed_commands += 1;
+            }
             "userMessage" | "agentMessage" | "reasoning" => {}
             _ => return Err(ProtocolError::IncompleteToolExecution),
         }
     }
-    if pending_cell.is_none() && completed_execs == 2 {
+    if pending_cell.is_none()
+        && ((completed_execs == 2 && completed_commands == 0)
+            || (completed_execs == 0 && completed_commands == 2))
+    {
         Ok(())
     } else {
         Err(ProtocolError::IncompleteToolExecution)
+    }
+}
+
+fn validated_command_execution_id(
+    object: &serde_json::Map<String, Value>,
+) -> Result<&str, ProtocolError> {
+    if object.get("status").and_then(Value::as_str) != Some("completed")
+        || object
+            .get("command")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || object
+            .get("cwd")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || object
+            .get("commandActions")
+            .and_then(Value::as_array)
+            .is_none()
+        || object
+            .get("aggregatedOutput")
+            .and_then(Value::as_str)
+            .is_none()
+        || object.get("exitCode").and_then(Value::as_i64) != Some(0)
+        || object.contains_key("success")
+        || object
+            .get("content")
+            .is_some_and(|content| !content.is_null())
+        || object
+            .get("contentItems")
+            .is_some_and(|content| !content.is_null())
+    {
+        return Err(ProtocolError::IncompleteToolExecution);
+    }
+    object
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|item_id| !item_id.is_empty())
+        .ok_or(ProtocolError::MalformedTerminal)
+}
+
+fn validate_nested_exit_evidence(
+    output: &str,
+    require_success_marker: bool,
+) -> Result<(), ProtocolError> {
+    if output.contains("Script failed") || output.contains("Script error:") {
+        return Err(ProtocolError::IncompleteToolExecution);
+    }
+
+    let mut marker_count = 0_usize;
+    for marker in ["Exit code:", "Process exited with code"] {
+        let mut remaining = output;
+        while let Some(offset) = remaining.find(marker) {
+            let tail = &remaining[offset + marker.len()..];
+            let tail = tail.trim_start_matches([' ', '\t']);
+            let digits = tail
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>();
+            if digits.parse::<u32>() != Ok(0) {
+                return Err(ProtocolError::IncompleteToolExecution);
+            }
+            marker_count += 1;
+            remaining = tail.get(digits.len()..).unwrap_or_default();
+        }
+    }
+
+    if require_success_marker && marker_count == 0 {
+        Err(ProtocolError::IncompleteToolExecution)
+    } else {
+        Ok(())
     }
 }
 

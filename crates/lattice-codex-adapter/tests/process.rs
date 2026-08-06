@@ -336,6 +336,10 @@ fn pinned_app_server_script(paths: &PinnedServerScript<'_>) -> String {
         quote(paths.readiness_descendant_pid_log),
         quote(paths.turn_start_log),
     )
+    .replace(
+        r#""status":"completed","success":true,"tool":"exec""#,
+        r#""contentItems":[{"text":"Script completed\nExit code: 0","type":"inputText"}],"status":"completed","success":true,"tool":"exec""#,
+    )
 }
 
 #[cfg(windows)]
@@ -1185,8 +1189,8 @@ fn fake_launcher_script(
         "$null = [Console]::In.ReadLine()\n$threadStart = [Console]::In.ReadLine()\nif ($threadStart -like '*\"method\":\"thread/start\"*') {{ [IO.File]::WriteAllText('{}', 'thread/start received') }}\n[Console]::Out.WriteLine('{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"thread-scripted\"}}}}}}')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":2,\"result\":{{\"turn\":{{\"id\":\"turn-scripted\"}}}}}}')\n",
         quote(effect_log)
     );
-    let apply_completed = r#"{"method":"item/completed","params":{"threadId":"thread-scripted","turnId":"turn-scripted","item":{"arguments":{"command":"apply_patch fixture"},"id":"tool-apply","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"},"completedAtMs":1}}"#;
-    let verify_completed = r#"{"method":"item/completed","params":{"threadId":"thread-scripted","turnId":"turn-scripted","item":{"arguments":{"command":"verify fixture"},"id":"tool-verify","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"},"completedAtMs":2}}"#;
+    let apply_completed = r#"{"method":"item/completed","params":{"threadId":"thread-scripted","turnId":"turn-scripted","item":{"arguments":{"command":"nested shell write fixture"},"contentItems":[{"text":"Script completed\nExit code: 0","type":"inputText"}],"id":"tool-shell-write","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"},"completedAtMs":1}}"#;
+    let verify_completed = r#"{"method":"item/completed","params":{"threadId":"thread-scripted","turnId":"turn-scripted","item":{"arguments":{"command":"nested shell verify fixture"},"contentItems":[{"text":"Script completed\nExit code: 0","type":"inputText"}],"id":"tool-shell-verify","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"},"completedAtMs":2}}"#;
     let completed = r#"{"method":"turn/completed","params":{"threadId":"thread-scripted","turn":{"id":"turn-scripted","items":[{"id":"agent-final","text":"Delivery complete.","type":"agentMessage"}],"itemsView":"summary","status":"completed","error":null}}}"#;
     let tail = match mode {
         FakeMode::Success | FakeMode::WrongHome => format!(
