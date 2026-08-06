@@ -28,10 +28,10 @@ use crate::containment::{
 };
 use crate::runtime::HermesOfflineRuntimeManifest;
 use crate::{
-    CanonicalReflection, ContainmentOwnerState, HermesAdapterConfig, HermesAdapterError,
-    HermesAdapterErrorKind, HermesAdapterResult, HermesContainmentReceipt, HermesReflectionAdapter,
-    HermesReflectionEvidence, HermesReflectionJob, cross_binding, encode_sha256, error, malformed,
-    map_port_error, sha256_text,
+    CanonicalReflection, ContainmentOwnerState, HERMES_SCHEMA_VERSION, HermesAdapterConfig,
+    HermesAdapterError, HermesAdapterErrorKind, HermesAdapterResult, HermesContainmentReceipt,
+    HermesReflectionAdapter, HermesReflectionEvidence, HermesReflectionJob, cross_binding,
+    encode_sha256, error, malformed, map_port_error, sha256_text,
 };
 
 const STARTUP_MAGIC: &[u8] = b"LATTICE_HERMES_PRODUCTION_START_V1\n";
@@ -387,6 +387,7 @@ enum ProviderStreamEvent {
 struct CodexProxyOneTurnGate {
     pending: Vec<u8>,
     turn_start_count: u8,
+    output_schema: Option<serde_json::Value>,
 }
 
 struct CodexProxyJsonLine {
@@ -489,6 +490,13 @@ impl<'de> Deserialize<'de> for CodexProxyJsonParams {
 }
 
 impl CodexProxyOneTurnGate {
+    fn with_output_schema(output_schema: Option<serde_json::Value>) -> Self {
+        Self {
+            output_schema,
+            ..Self::default()
+        }
+    }
+
     fn ingest(&mut self, payload: &[u8]) -> HermesAdapterResult<Vec<u8>> {
         if payload.is_empty() || payload.len() > MAX_CODEX_PROXY_DATA_BYTES {
             return Err(malformed("HERMES_CODEX_PROXY_JSONL_SIZE_REJECTED"));
@@ -544,6 +552,19 @@ impl CodexProxyOneTurnGate {
                 return Err(malformed("HERMES_CODEX_PROXY_TURN_REPLAY_REJECTED"));
             }
             self.turn_start_count = 1;
+            let Some(output_schema) = &self.output_schema else {
+                return Ok(None);
+            };
+            let mut normalized: serde_json::Value = serde_json::from_slice(line)
+                .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?;
+            normalized
+                .get_mut("params")
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?
+                .insert("outputSchema".to_owned(), output_schema.clone());
+            return serde_json::to_vec(&normalized)
+                .map(Some)
+                .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"));
         }
         if value.method.as_deref() != Some("thread/start") {
             return Ok(None);
@@ -591,6 +612,62 @@ impl CodexProxyOneTurnGate {
     }
 }
 
+fn codex_reflection_output_schema(job: &HermesReflectionJob) -> serde_json::Value {
+    let invocation = job.request().invocation();
+    let evidence_digests = job
+        .evidence()
+        .iter()
+        .map(|evidence| evidence.digest().as_str())
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "binding", "summary", "findings", "next_actions"],
+        "properties": {
+            "schema_version": {"type": "string", "enum": [HERMES_SCHEMA_VERSION]},
+            "binding": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                    "request_id", "task_id", "attempt_id", "project_snapshot_id",
+                    "subject_digest", "session_id", "input_digest", "model"
+                ],
+                "properties": {
+                    "request_id": {"type": "string", "enum": [invocation.request_id().as_str()]},
+                    "task_id": {"type": "string", "enum": [invocation.task_id().as_str()]},
+                    "attempt_id": {"type": "string", "enum": [invocation.attempt_id().as_str()]},
+                    "project_snapshot_id": {"type": "string", "enum": [invocation.project_snapshot_id().as_str()]},
+                    "subject_digest": {"type": "string", "enum": [invocation.subject_digest().as_str()]},
+                    "session_id": {"type": "string", "enum": [job.session_id()]},
+                    "input_digest": {"type": "string", "enum": [job.input_digest().as_str()]},
+                    "model": {"type": "string", "enum": [job.model()]}
+                }
+            },
+            "summary": {"type": "string"},
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["classification", "statement", "evidence_digests"],
+                    "properties": {
+                        "classification": {"type": "string", "enum": ["inference"]},
+                        "statement": {"type": "string"},
+                        "evidence_digests": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": evidence_digests}
+                        }
+                    }
+                }
+            },
+            "next_actions": {
+                "type": "array",
+                "items": {"type": "string"}
+            }
+        }
+    })
+}
+
 #[derive(Default)]
 struct CodexProxyHostStatus {
     failure: Option<HermesAdapterError>,
@@ -623,6 +700,7 @@ struct ProductionCodexProxyHost {
 }
 
 impl ProductionCodexProxyHost {
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn start(
         provider: Box<dyn ProductionCodexProxyProvider>,
@@ -632,6 +710,31 @@ impl ProductionCodexProxyHost {
         outer_input: std::fs::File,
         outer_stream: Receiver<OuterStreamEvent>,
         initial_bytes: Vec<u8>,
+        owner: Arc<ContainmentOwnerState>,
+    ) -> HermesAdapterResult<Self> {
+        Self::start_with_output_schema(
+            provider,
+            nonce,
+            broker_receipt,
+            absolute_deadline,
+            outer_input,
+            outer_stream,
+            initial_bytes,
+            None,
+            owner,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_with_output_schema(
+        provider: Box<dyn ProductionCodexProxyProvider>,
+        nonce: &str,
+        broker_receipt: &ContentDigest,
+        absolute_deadline: Instant,
+        outer_input: std::fs::File,
+        outer_stream: Receiver<OuterStreamEvent>,
+        initial_bytes: Vec<u8>,
+        output_schema: Option<serde_json::Value>,
         owner: Arc<ContainmentOwnerState>,
     ) -> HermesAdapterResult<Self> {
         let mut session = CodexProxyHostSession::new(nonce, broker_receipt, absolute_deadline)?;
@@ -657,6 +760,7 @@ impl ProductionCodexProxyHost {
                         &worker_control,
                         &worker_status,
                         &worker_commands,
+                        output_schema,
                     )
                 }))
                 .unwrap_or_else(|_| {
@@ -859,12 +963,13 @@ fn run_codex_proxy_host(
     control: &Arc<dyn ProductionCodexProxyControl>,
     status: &Arc<Mutex<CodexProxyHostStatus>>,
     commands: &Receiver<CodexProxyHostCommand>,
+    output_schema: Option<serde_json::Value>,
 ) -> HermesAdapterResult<()> {
     let mut provider = Some(provider);
     let mut duplex: Option<ProductionCodexProxyDuplex> = None;
     let mut provider_stream: Option<Receiver<ProviderStreamEvent>> = None;
     let mut buffer = initial_bytes;
-    let mut one_turn_gate = CodexProxyOneTurnGate::default();
+    let mut one_turn_gate = CodexProxyOneTurnGate::with_output_schema(output_schema);
     let mut provider_input_state = CodexProxyProviderInputState::Open;
 
     loop {
@@ -1712,7 +1817,7 @@ impl ProductionHermesRunner {
                 "HERMES_CODEX_PROXY_OUTER_STREAM_UNAVAILABLE",
             )
         })?;
-        let codex_proxy = ProductionCodexProxyHost::start(
+        let codex_proxy = ProductionCodexProxyHost::start_with_output_schema(
             provider,
             &self.nonce,
             &broker_receipt,
@@ -1720,6 +1825,7 @@ impl ProductionHermesRunner {
             outer_input,
             outer_stream,
             std::mem::take(&mut self.outer_initial_bytes),
+            Some(codex_reflection_output_schema(&job)),
             Arc::clone(&self.owner),
         )?;
         let remaining = self
@@ -2491,6 +2597,27 @@ mod proxy_host_tests {
         gate.finish_input().expect("no partial JSON line");
         gate.ensure_single_turn()
             .expect("exactly one turn reaches the barrier");
+    }
+
+    #[test]
+    fn one_turn_gate_installs_the_owned_reflection_output_schema() {
+        let job = zero_model_job(zero_model_request());
+        let schema = codex_reflection_output_schema(&job);
+        let mut gate = CodexProxyOneTurnGate::with_output_schema(Some(schema.clone()));
+        let admitted = gate
+            .ingest(
+                b"{\"id\":1,\"method\":\"turn/start\",\"params\":{\"outputSchema\":{\"type\":\"string\"}}}\n",
+            )
+            .expect("owned output schema replaces the contained request value");
+        let line: serde_json::Value = serde_json::from_slice(
+            admitted
+                .strip_suffix(b"\n")
+                .expect("normalized JSONL keeps one newline"),
+        )
+        .expect("normalized turn is JSON");
+
+        assert_eq!(line["params"]["outputSchema"], schema);
+        assert_eq!(gate.turn_start_count(), 1);
     }
 
     #[test]
@@ -3487,6 +3614,7 @@ mod proxy_host_tests {
         reflection_emitted: bool,
         thread_start_had_cwd: Option<bool>,
         turn_input: Option<String>,
+        turn_output_schema: Option<serde_json::Value>,
     }
 
     #[derive(Default)]
@@ -3607,6 +3735,10 @@ mod proxy_host_tests {
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or_default()
                         .to_owned();
+                    let turn_output_schema = request
+                        .get("params")
+                        .and_then(|params| params.get("outputSchema"))
+                        .cloned();
                     {
                         let mut observation = self
                             .state
@@ -3614,6 +3746,7 @@ mod proxy_host_tests {
                             .lock()
                             .map_err(|_| io::Error::other("fake Codex observation poisoned"))?;
                         observation.turn_input = Some(turn_input);
+                        observation.turn_output_schema = turn_output_schema;
                         observation.reflection_emitted = true;
                     }
                     self.state.enqueue(&[
@@ -3909,6 +4042,23 @@ mod proxy_host_tests {
                 .turn_input
                 .as_deref()
                 .is_some_and(|input| input.contains(job.input_digest().as_str()))
+        );
+        let output_schema = observed
+            .turn_output_schema
+            .as_ref()
+            .expect("production proxy installs a structured reflection schema");
+        assert_eq!(
+            output_schema["properties"]["schema_version"]["enum"][0],
+            HERMES_SCHEMA_VERSION
+        );
+        assert_eq!(
+            output_schema["properties"]["findings"]["items"]["properties"]["classification"]["enum"]
+                [0],
+            "inference"
+        );
+        assert_eq!(
+            output_schema["properties"]["binding"]["properties"]["input_digest"]["enum"][0],
+            job.input_digest().as_str()
         );
         drop(observed);
         fs::remove_dir_all(&isolation_root).expect("remove zero-model isolation root");

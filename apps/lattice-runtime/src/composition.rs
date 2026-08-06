@@ -1373,7 +1373,17 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         let output = self
             .hermes
             .research_canonical(&hermes_request, &request, &graph_receipt)
-            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesExecution))?;
+            .map_err(|error| {
+                eprintln!(
+                    "{}",
+                    json!({
+                        "component": "Hermes",
+                        "error_code": error.code(),
+                        "event": "reflection_rejected"
+                    })
+                );
+                LatticedError::new(LatticedErrorKind::HermesExecution)
+            })?;
         let candidate = output.into_candidate();
         let persisted = persist_reflection_to_postgres(
             &self.delivery.database,
