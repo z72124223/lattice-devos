@@ -29,7 +29,7 @@ fn completed_command_execution(id: &str, status: &str) -> Value {
         "cwd": "C:\\workspace",
         "status": status,
         "commandActions": [],
-        "aggregatedOutput": "",
+        "aggregatedOutput": null,
         "exitCode": 0,
         "content": null
     })
@@ -585,8 +585,6 @@ fn accepts_only_two_completed_official_command_executions() {
         .remove("cwd");
     let mut malformed_actions = completed_command_execution("command_shell_write", "completed");
     malformed_actions["commandActions"] = json!({});
-    let mut malformed_output = completed_command_execution("command_shell_write", "completed");
-    malformed_output["aggregatedOutput"] = json!([]);
     for completed_items in [
         vec![
             completed_command_execution("command_shell_write", "failed"),
@@ -625,10 +623,6 @@ fn accepts_only_two_completed_official_command_executions() {
             completed_command_execution("command_shell_verify", "completed"),
         ],
         vec![
-            malformed_output,
-            completed_command_execution("command_shell_verify", "completed"),
-        ],
-        vec![
             completed_command_execution("command_shell_write", "completed"),
             completed_exec("tool_shell_verify"),
         ],
@@ -640,6 +634,51 @@ fn accepts_only_two_completed_official_command_executions() {
     ] {
         assert_eq!(
             completed_session(completed_items, official_completed_terminal("notLoaded")),
+            Err(SessionError::Terminal(
+                ProtocolError::IncompleteToolExecution
+            ))
+        );
+    }
+}
+
+#[test]
+fn command_execution_aggregated_output_must_be_present_null_or_string() {
+    for output in [Value::Null, json!("written")] {
+        let mut write = completed_command_execution("command_shell_write", "completed");
+        write["aggregatedOutput"] = output;
+        let outcome = completed_session(
+            vec![
+                write,
+                completed_command_execution("command_shell_verify", "completed"),
+            ],
+            official_completed_terminal("notLoaded"),
+        )
+        .expect("null and string aggregatedOutput values are valid")
+        .expect("this is a terminal notification");
+        assert_eq!(outcome.status, TurnStatus::Completed);
+    }
+
+    let mut missing = completed_command_execution("command_shell_write", "completed");
+    missing
+        .as_object_mut()
+        .expect("command fixture is an object")
+        .remove("aggregatedOutput");
+    let mut array = completed_command_execution("command_shell_write", "completed");
+    array["aggregatedOutput"] = json!([]);
+    let mut number = completed_command_execution("command_shell_write", "completed");
+    number["aggregatedOutput"] = json!(0);
+    let mut object = completed_command_execution("command_shell_write", "completed");
+    object["aggregatedOutput"] = json!({});
+
+    for write in [missing, array, number, object] {
+        assert_eq!(
+            completed_session(
+                vec![
+                    write,
+                    completed_command_execution("command_shell_verify", "completed"),
+                ],
+                official_completed_terminal("notLoaded"),
+            ),
             Err(SessionError::Terminal(
                 ProtocolError::IncompleteToolExecution
             ))

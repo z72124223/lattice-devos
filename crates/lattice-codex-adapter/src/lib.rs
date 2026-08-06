@@ -413,8 +413,7 @@ fn validated_command_execution_id(
             .is_none()
         || object
             .get("aggregatedOutput")
-            .and_then(Value::as_str)
-            .is_none()
+            .is_none_or(|output| !output.is_null() && !output.is_string())
         || object.get("exitCode").and_then(Value::as_i64) != Some(0)
         || object.contains_key("success")
         || object
