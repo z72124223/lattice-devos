@@ -1990,6 +1990,14 @@ fn parse_http_response(bytes: &[u8]) -> HermesAdapterResult<HttpResponse> {
 
 fn decode_chunked(mut bytes: &[u8]) -> HermesAdapterResult<Vec<u8>> {
     let mut output = Vec::new();
+    // aiohttp can close an SSE response before emitting its first event when
+    // the run reaches a terminal state before the subscriber is attached. In
+    // that case the authoritative status endpoint is queried next, so an
+    // empty close-delimited chunk stream is equivalent to no SSE event. Keep
+    // every non-empty/truncated chunk strict.
+    if bytes.is_empty() {
+        return Ok(output);
+    }
     loop {
         let line_end =
             find_bytes(bytes, b"\r\n").ok_or_else(|| malformed("HERMES_HTTP_CHUNK_MALFORMED"))?;
@@ -3044,6 +3052,22 @@ mod tests {
         assert_eq!(failure.kind(), HermesAdapterErrorKind::Timeout);
         assert_eq!(failure.code(), "HERMES_VERSION_PROBE_TIMEOUT");
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn empty_close_delimited_chunk_stream_defers_to_authoritative_status() {
+        let response = parse_http_response(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        )
+        .expect("an empty SSE stream carries no terminal event");
+
+        assert!(response.body.is_empty());
+        let Err(truncated) = parse_http_response(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nabc",
+        ) else {
+            panic!("a non-empty truncated chunk must stay rejected");
+        };
+        assert_eq!(truncated.code(), "HERMES_HTTP_CHUNK_MALFORMED");
     }
 
     mod reflection_api {

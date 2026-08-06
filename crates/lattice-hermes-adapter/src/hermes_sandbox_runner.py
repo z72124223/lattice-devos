@@ -155,16 +155,20 @@ def main():
 
     input_thread = threading.Thread(target=copy_input, daemon=True)
     input_thread.start()
+    host_closed_cleanly = False
     try:
         while True:
             chunk = channel.recv(MAX_CHUNK)
             if not chunk:
+                host_closed_cleanly = True
                 break
             write_all(1, chunk)
     except OSError:
         failed.append(True)
     finally:
         channel.close()
+    if host_closed_cleanly:
+        return 70 if failed else 0
     input_thread.join(timeout)
     if input_thread.is_alive() or failed:
         return 70
@@ -938,6 +942,7 @@ class CodexProxyBridge:
             "PYTHONNOUSERSITE": "1",
             "PYTHONSAFEPATH": "1",
             "PYTHONUTF8": "1",
+            "TERMINAL_CWD": "/work",
             "TMPDIR": "/tmp",
         }
 

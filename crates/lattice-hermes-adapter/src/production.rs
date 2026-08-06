@@ -595,14 +595,29 @@ impl CodexProxyOneTurnGate {
 struct CodexProxyHostStatus {
     failure: Option<HermesAdapterError>,
     failure_evidence: Option<CodexProxyFailureEvidence>,
+    adapter_success_accepted: bool,
     authenticated_open: bool,
     clean_terminal: bool,
     turn_start_count: u8,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CodexProxyHostCommand {
+    AdapterSucceeded,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CodexProxyProviderInputState {
+    Open,
+    ClosedByPeer,
+    ClosedAfterAdapterSuccess,
+}
+
 struct ProductionCodexProxyHost {
     status: Arc<Mutex<CodexProxyHostStatus>>,
     stop: Arc<AtomicBool>,
+    adapter_success_requested: AtomicBool,
+    commands: mpsc::SyncSender<CodexProxyHostCommand>,
     control: Arc<dyn ProductionCodexProxyControl>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -623,6 +638,7 @@ impl ProductionCodexProxyHost {
         let control = provider.control();
         let status = Arc::new(Mutex::new(CodexProxyHostStatus::default()));
         let stop = Arc::new(AtomicBool::new(false));
+        let (commands, worker_commands) = mpsc::sync_channel(1);
         let worker_status = Arc::clone(&status);
         let worker_stop = Arc::clone(&stop);
         let worker_control = Arc::clone(&control);
@@ -640,6 +656,7 @@ impl ProductionCodexProxyHost {
                         &mut session,
                         &worker_control,
                         &worker_status,
+                        &worker_commands,
                     )
                 }))
                 .unwrap_or_else(|_| {
@@ -666,6 +683,8 @@ impl ProductionCodexProxyHost {
         Ok(Self {
             status,
             stop,
+            adapter_success_requested: AtomicBool::new(false),
+            commands,
             control,
             worker: Some(worker),
         })
@@ -701,7 +720,39 @@ impl ProductionCodexProxyHost {
             .and_then(|observed| observed.failure_evidence.clone())
     }
 
+    #[cfg(test)]
     fn wait_for_clean_terminal(&self, deadline: Instant) -> HermesAdapterResult<()> {
+        self.wait_for_terminal(deadline, false)
+    }
+
+    fn complete_after_adapter_success(&self, deadline: Instant) -> HermesAdapterResult<()> {
+        if self
+            .adapter_success_requested
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(malformed(
+                "HERMES_CODEX_PROXY_ADAPTER_SUCCESS_REPLAY_REJECTED",
+            ));
+        }
+        if self
+            .commands
+            .try_send(CodexProxyHostCommand::AdapterSucceeded)
+            .is_err()
+        {
+            return Err(error(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_CODEX_PROXY_HOST_COMMAND_FAILED",
+            ));
+        }
+        self.wait_for_terminal(deadline, true)
+    }
+
+    fn wait_for_terminal(
+        &self,
+        deadline: Instant,
+        require_adapter_success: bool,
+    ) -> HermesAdapterResult<()> {
         loop {
             {
                 let observed = self.status.lock().map_err(|_| {
@@ -716,6 +767,7 @@ impl ProductionCodexProxyHost {
                 if observed.authenticated_open
                     && observed.clean_terminal
                     && observed.turn_start_count == 1
+                    && (!require_adapter_success || observed.adapter_success_accepted)
                 {
                     return Ok(());
                 }
@@ -806,12 +858,14 @@ fn run_codex_proxy_host(
     session: &mut CodexProxyHostSession,
     control: &Arc<dyn ProductionCodexProxyControl>,
     status: &Arc<Mutex<CodexProxyHostStatus>>,
+    commands: &Receiver<CodexProxyHostCommand>,
 ) -> HermesAdapterResult<()> {
     let mut provider = Some(provider);
     let mut duplex: Option<ProductionCodexProxyDuplex> = None;
     let mut provider_stream: Option<Receiver<ProviderStreamEvent>> = None;
     let mut buffer = initial_bytes;
     let mut one_turn_gate = CodexProxyOneTurnGate::default();
+    let mut provider_input_state = CodexProxyProviderInputState::Open;
 
     loop {
         if stop.load(Ordering::Acquire) {
@@ -850,10 +904,14 @@ fn run_codex_proxy_host(
                     let opened = duplex
                         .as_mut()
                         .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_STATE_REJECTED"))?;
-                    control.ensure_running()?;
                     let admitted = one_turn_gate.ingest(&payload).inspect_err(|_| {
                         session.record_failure(&payload);
                     })?;
+                    if provider_input_state != CodexProxyProviderInputState::Open {
+                        session.record_failure(&payload);
+                        return Err(malformed("HERMES_CODEX_PROXY_STATE_REJECTED"));
+                    }
+                    control.ensure_running()?;
                     if !admitted.is_empty() {
                         opened.write_all(&admitted)?;
                     }
@@ -865,7 +923,10 @@ fn run_codex_proxy_host(
                     one_turn_gate.finish_input().inspect_err(|_| {
                         session.record_failure(one_turn_gate.pending());
                     })?;
-                    opened.close_input();
+                    if provider_input_state == CodexProxyProviderInputState::Open {
+                        opened.close_input();
+                        provider_input_state = CodexProxyProviderInputState::ClosedByPeer;
+                    }
                 }
                 CodexProxyHostEvent::Error(_) => {
                     return Err(error(
@@ -903,7 +964,7 @@ fn run_codex_proxy_host(
                     write_proxy_frame(&mut outer_input, &session.encode_data(&payload)?)?;
                 }
                 ProviderStreamEvent::Eof => {
-                    if !session.inbound_closed() {
+                    if provider_input_state == CodexProxyProviderInputState::Open {
                         control.ensure_running()?;
                         return Err(error(
                             HermesAdapterErrorKind::Failed,
@@ -920,6 +981,37 @@ fn run_codex_proxy_host(
                         "HERMES_CODEX_PROXY_PROVIDER_READ_FAILED",
                     ));
                 }
+            }
+        }
+
+        match commands.try_recv() {
+            Ok(CodexProxyHostCommand::AdapterSucceeded) => {
+                let opened = duplex
+                    .as_mut()
+                    .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_STATE_REJECTED"))?;
+                one_turn_gate.finish_input().inspect_err(|_| {
+                    session.record_failure(one_turn_gate.pending());
+                })?;
+                one_turn_gate.ensure_single_turn()?;
+                if provider_input_state == CodexProxyProviderInputState::Open {
+                    opened.close_input();
+                    provider_input_state = CodexProxyProviderInputState::ClosedAfterAdapterSuccess;
+                }
+                let mut observed = status.lock().map_err(|_| {
+                    error(
+                        HermesAdapterErrorKind::Ambiguous,
+                        "HERMES_CODEX_PROXY_HOST_STATE_UNKNOWN",
+                    )
+                })?;
+                observed.adapter_success_accepted = true;
+                observed.turn_start_count = one_turn_gate.turn_start_count();
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                return Err(error(
+                    HermesAdapterErrorKind::Ambiguous,
+                    "HERMES_CODEX_PROXY_HOST_COMMAND_LOST",
+                ));
             }
         }
 
@@ -1736,7 +1828,7 @@ impl ProductionHermesPort {
         self.prepare_operation()?;
         let result = self.adapter.run_reflection_evidence(request);
         if result.is_ok() {
-            self.require_clean_proxy_terminal()?;
+            self.complete_proxy_after_adapter_success()?;
         }
         self.ensure_live()?;
         result
@@ -1759,7 +1851,7 @@ impl ProductionHermesPort {
             .reconcile_reflection(request, receipt)
             .map_err(|failure| map_port_error(&failure));
         if result.is_ok() {
-            self.require_clean_proxy_terminal()?;
+            self.complete_proxy_after_adapter_success()?;
         }
         self.ensure_live()?;
         result
@@ -1831,10 +1923,10 @@ impl ProductionHermesPort {
             .map_err(|failure| map_port_error(&failure))
     }
 
-    fn require_clean_proxy_terminal(&mut self) -> PortResult<()> {
+    fn complete_proxy_after_adapter_success(&mut self) -> PortResult<()> {
         match self
             .codex_proxy
-            .wait_for_clean_terminal(self.absolute_deadline)
+            .complete_after_adapter_success(self.absolute_deadline)
         {
             Ok(()) => Ok(()),
             Err(failure) => Err(self.fail_closed(&failure)),
@@ -2365,10 +2457,19 @@ fn digest_join(parts: &[&[u8]]) -> String {
 
 #[cfg(test)]
 mod proxy_host_tests {
+    use std::collections::VecDeque;
     use std::io;
     use std::sync::Condvar;
 
+    use lattice_contracts::{AttemptId, CONTRACT_VERSION, Invocation, ProjectSnapshotId, TaskId};
+
     use super::*;
+    use crate::{
+        HERMES_CPYTHON_ARCHIVE_BYTES, HERMES_CPYTHON_ARCHIVE_SHA256, HERMES_CPYTHON_BUILD_RELEASE,
+        HERMES_CPYTHON_PROVENANCE, HERMES_CPYTHON_SHA256SUMS_SHA256, HERMES_PYPROJECT_SHA256,
+        HERMES_RUNTIME_ARCHIVE_SHA256, HERMES_SCHEMA_VERSION, HERMES_UPSTREAM_COMMIT,
+        HERMES_UV_LOCK_SHA256, ReflectionEvidence, ReflectionEvidenceKind,
+    };
 
     #[test]
     fn one_turn_gate_forwards_only_complete_valid_jsonl() {
@@ -2670,6 +2771,106 @@ mod proxy_host_tests {
         written: Arc<Mutex<Vec<u8>>>,
     }
 
+    struct HalfCloseReader(mpsc::Receiver<()>);
+
+    impl Read for HalfCloseReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            self.0
+                .recv()
+                .map_err(|_| io::Error::other("half-close signal lost"))?;
+            Ok(0)
+        }
+    }
+
+    struct HalfCloseWriter {
+        close: Option<mpsc::Sender<()>>,
+        close_count: Arc<AtomicU64>,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for HalfCloseWriter {
+        fn write(&mut self, payload: &[u8]) -> io::Result<usize> {
+            self.written
+                .lock()
+                .map_err(|_| io::Error::other("half-close writer poisoned"))?
+                .extend_from_slice(payload);
+            Ok(payload.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for HalfCloseWriter {
+        fn drop(&mut self) {
+            self.close_count.fetch_add(1, Ordering::AcqRel);
+            if let Some(close) = self.close.take() {
+                let _ = close.send(());
+            }
+        }
+    }
+
+    struct HalfCloseControl(mpsc::Sender<()>);
+
+    impl ProductionCodexProxyControl for HalfCloseControl {
+        fn ensure_running(&self) -> HermesAdapterResult<()> {
+            Ok(())
+        }
+
+        fn terminate(&self) -> HermesAdapterResult<()> {
+            let _ = self.0.send(());
+            Ok(())
+        }
+    }
+
+    struct HalfCloseProvider {
+        close: mpsc::Sender<()>,
+        eof: mpsc::Receiver<()>,
+        close_count: Arc<AtomicU64>,
+        control: Arc<HalfCloseControl>,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl HalfCloseProvider {
+        fn new() -> (Self, Arc<AtomicU64>, Arc<Mutex<Vec<u8>>>) {
+            let (close, eof) = mpsc::channel();
+            let close_count = Arc::new(AtomicU64::new(0));
+            let written = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    close: close.clone(),
+                    eof,
+                    close_count: Arc::clone(&close_count),
+                    control: Arc::new(HalfCloseControl(close)),
+                    written: Arc::clone(&written),
+                },
+                close_count,
+                written,
+            )
+        }
+    }
+
+    impl ProductionCodexProxyProvider for HalfCloseProvider {
+        fn control(&self) -> Arc<dyn ProductionCodexProxyControl> {
+            self.control.clone()
+        }
+
+        fn open(
+            self: Box<Self>,
+            _absolute_deadline: Instant,
+        ) -> HermesAdapterResult<ProductionCodexProxyDuplex> {
+            Ok(ProductionCodexProxyDuplex::new(
+                Box::new(HalfCloseReader(self.eof)),
+                Box::new(HalfCloseWriter {
+                    close: Some(self.close),
+                    close_count: self.close_count,
+                    written: self.written,
+                }),
+            ))
+        }
+    }
+
     impl RecordingIoProvider {
         fn new(state: Arc<BlockingProxyState>, written: Arc<Mutex<Vec<u8>>>) -> Self {
             Self {
@@ -2841,6 +3042,89 @@ mod proxy_host_tests {
                 .code(),
             "HERMES_CODEX_PROXY_STATE_REJECTED"
         );
+    }
+
+    #[test]
+    fn adapter_success_half_closes_provider_once_and_waits_for_bound_terminal() {
+        let (outer_input, path) = test_sink("proxy-adapter-success-half-close");
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let (provider, close_count, written) = HalfCloseProvider::new();
+        let nonce = "22".repeat(32);
+        let receipt = ContentDigest::from_sha256("33".repeat(32)).expect("digest");
+        let binding = test_binding(&nonce, &receipt);
+        let mut host = ProductionCodexProxyHost::start(
+            Box::new(provider),
+            &nonce,
+            &receipt,
+            Instant::now() + Duration::from_secs(2),
+            outer_input,
+            receiver,
+            Vec::new(),
+            Arc::new(ContainmentOwnerState::new("11".repeat(32))),
+        )
+        .expect("start proxy host");
+
+        let contained = concat!(
+            "{\"id\":0,\"method\":\"initialize\",\"params\":{}}\n",
+            "{\"id\":1,\"method\":\"thread/start\",\"params\":{\"cwd\":\"/work\"}}\n",
+            "{\"id\":2,\"method\":\"turn/start\",\"params\":{}}\n"
+        )
+        .as_bytes();
+        let expected = concat!(
+            "{\"id\":0,\"method\":\"initialize\",\"params\":{}}\n",
+            "{\"id\":1,\"method\":\"thread/start\",\"params\":{}}\n",
+            "{\"id\":2,\"method\":\"turn/start\",\"params\":{}}\n"
+        )
+        .as_bytes();
+        let mut frames = encode_codex_proxy_test_frame(1, 0, binding, &[]);
+        frames.extend_from_slice(&encode_codex_proxy_test_frame(2, 1, binding, contained));
+        sender
+            .send(OuterStreamEvent::Data(frames))
+            .expect("send authenticated one-turn input");
+        wait_until(
+            || written.lock().expect("half-close written bytes").as_slice() == expected,
+            "one-turn input was not forwarded",
+        );
+
+        let peer_path = path.clone();
+        let peer_sender = sender.clone();
+        let peer = thread::spawn(move || {
+            wait_until(
+                || close_count.load(Ordering::Acquire) == 1,
+                "adapter success did not close provider input",
+            );
+            wait_until(
+                || {
+                    fs::read(&peer_path).is_ok_and(|bytes| {
+                        bytes
+                            .windows(CODEX_PROXY_MAGIC.len())
+                            .filter(|window| *window == CODEX_PROXY_MAGIC)
+                            .count()
+                            >= 2
+                    })
+                },
+                "provider EOF did not produce outbound close",
+            );
+            let mut terminal = encode_codex_proxy_test_frame(3, 2, binding, &[]);
+            terminal.extend_from_slice(&encode_codex_proxy_test_frame(5, 3, binding, &[]));
+            peer_sender
+                .send(OuterStreamEvent::Data(terminal))
+                .expect("send peer close and terminal");
+        });
+
+        host.complete_after_adapter_success(Instant::now() + Duration::from_secs(1))
+            .expect("adapter success crosses the bound terminal barrier");
+        peer.join().expect("bound terminal peer");
+        assert_eq!(
+            host.complete_after_adapter_success(Instant::now() + Duration::from_millis(10))
+                .expect_err("adapter success is one-shot")
+                .code(),
+            "HERMES_CODEX_PROXY_ADAPTER_SUCCESS_REPLAY_REJECTED"
+        );
+        assert_eq!(host.status.lock().expect("host status").turn_start_count, 1);
+        host.terminate().expect("completed host terminates cleanly");
+        drop(host);
+        fs::remove_file(path).expect("remove exact test sink");
     }
 
     #[test]
@@ -3195,5 +3479,438 @@ mod proxy_host_tests {
         let _ = host.terminate();
         drop(host);
         fs::remove_file(path).expect("remove exact test sink");
+    }
+
+    #[derive(Default)]
+    struct InteractiveFakeCodexObservation {
+        calls: Vec<String>,
+        reflection_emitted: bool,
+        thread_start_had_cwd: Option<bool>,
+        turn_input: Option<String>,
+    }
+
+    #[derive(Default)]
+    struct InteractiveFakeCodexQueue {
+        bytes: VecDeque<u8>,
+        cancelled: bool,
+    }
+
+    struct InteractiveFakeCodexState {
+        observation: Arc<Mutex<InteractiveFakeCodexObservation>>,
+        queue: Mutex<InteractiveFakeCodexQueue>,
+        reflection: String,
+        wake: Condvar,
+    }
+
+    impl InteractiveFakeCodexState {
+        fn enqueue(&self, messages: &[serde_json::Value]) -> io::Result<()> {
+            let mut queue = self
+                .queue
+                .lock()
+                .map_err(|_| io::Error::other("fake Codex queue poisoned"))?;
+            for message in messages {
+                let encoded = serde_json::to_vec(message)
+                    .map_err(|failure| io::Error::other(failure.to_string()))?;
+                queue.bytes.extend(encoded);
+                queue.bytes.push_back(b'\n');
+            }
+            self.wake.notify_all();
+            Ok(())
+        }
+    }
+
+    struct InteractiveFakeCodexReader(Arc<InteractiveFakeCodexState>);
+
+    impl Read for InteractiveFakeCodexReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if buffer.is_empty() {
+                return Ok(0);
+            }
+            let mut queue = self
+                .0
+                .queue
+                .lock()
+                .map_err(|_| io::Error::other("fake Codex queue poisoned"))?;
+            loop {
+                if !queue.bytes.is_empty() {
+                    let read = buffer.len().min(queue.bytes.len());
+                    for byte in &mut buffer[..read] {
+                        *byte = queue.bytes.pop_front().expect("bounded fake response byte");
+                    }
+                    return Ok(read);
+                }
+                if queue.cancelled {
+                    return Ok(0);
+                }
+                queue = self
+                    .0
+                    .wake
+                    .wait(queue)
+                    .map_err(|_| io::Error::other("fake Codex queue wait poisoned"))?;
+            }
+        }
+    }
+
+    struct InteractiveFakeCodexWriter {
+        pending: Vec<u8>,
+        state: Arc<InteractiveFakeCodexState>,
+    }
+
+    impl InteractiveFakeCodexWriter {
+        fn accept_line(&self, line: &[u8]) -> io::Result<()> {
+            let request: serde_json::Value = serde_json::from_slice(line)
+                .map_err(|failure| io::Error::other(failure.to_string()))?;
+            let method = request
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| io::Error::other("fake Codex request lacks method"))?;
+            self.state
+                .observation
+                .lock()
+                .map_err(|_| io::Error::other("fake Codex observation poisoned"))?
+                .calls
+                .push(method.to_owned());
+
+            match method {
+                "initialize" => self.state.enqueue(&[serde_json::json!({
+                    "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                    "result": {
+                        "codexHome": "fake",
+                        "platformFamily": "windows",
+                        "platformOs": "windows",
+                        "userAgent": "lattice-zero-model-fake"
+                    }
+                })]),
+                "initialized" => Ok(()),
+                "thread/start" => {
+                    let had_cwd = request
+                        .get("params")
+                        .and_then(|params| params.get("cwd"))
+                        .is_some();
+                    self.state
+                        .observation
+                        .lock()
+                        .map_err(|_| io::Error::other("fake Codex observation poisoned"))?
+                        .thread_start_had_cwd = Some(had_cwd);
+                    self.state.enqueue(&[serde_json::json!({
+                        "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                        "result": {"thread": {"id": "thread-zero-model"}}
+                    })])
+                }
+                "turn/start" => {
+                    let turn_input = request
+                        .get("params")
+                        .and_then(|params| params.get("input"))
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|items| items.first())
+                        .and_then(|item| item.get("text"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    {
+                        let mut observation = self
+                            .state
+                            .observation
+                            .lock()
+                            .map_err(|_| io::Error::other("fake Codex observation poisoned"))?;
+                        observation.turn_input = Some(turn_input);
+                        observation.reflection_emitted = true;
+                    }
+                    self.state.enqueue(&[
+                        serde_json::json!({
+                            "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
+                            "result": {"turn": {"id": "turn-zero-model"}}
+                        }),
+                        serde_json::json!({
+                            "method": "turn/started",
+                            "params": {
+                                "threadId": "thread-zero-model",
+                                "turn": {"id": "turn-zero-model", "status": "inProgress"}
+                            }
+                        }),
+                        serde_json::json!({
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": "thread-zero-model",
+                                "turnId": "turn-zero-model",
+                                "item": {
+                                    "id": "item-zero-model",
+                                    "type": "agentMessage",
+                                    "text": self.state.reflection
+                                }
+                            }
+                        }),
+                        serde_json::json!({
+                            "method": "turn/completed",
+                            "params": {
+                                "threadId": "thread-zero-model",
+                                "turn": {"id": "turn-zero-model", "status": "completed"}
+                            }
+                        }),
+                    ])
+                }
+                _ => Err(io::Error::other(format!(
+                    "unexpected fake Codex method {method}"
+                ))),
+            }
+        }
+    }
+
+    impl Write for InteractiveFakeCodexWriter {
+        fn write(&mut self, payload: &[u8]) -> io::Result<usize> {
+            self.pending.extend_from_slice(payload);
+            while let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') {
+                let mut line = self.pending.drain(..=newline).collect::<Vec<_>>();
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                self.accept_line(&line)?;
+            }
+            Ok(payload.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for InteractiveFakeCodexWriter {
+        fn drop(&mut self) {
+            if let Ok(mut queue) = self.state.queue.lock() {
+                queue.cancelled = true;
+                self.state.wake.notify_all();
+            }
+        }
+    }
+
+    struct InteractiveFakeCodexControl(Arc<InteractiveFakeCodexState>);
+
+    impl ProductionCodexProxyControl for InteractiveFakeCodexControl {
+        fn ensure_running(&self) -> HermesAdapterResult<()> {
+            Ok(())
+        }
+
+        fn terminate(&self) -> HermesAdapterResult<()> {
+            let mut queue = self.0.queue.lock().map_err(|_| {
+                error(
+                    HermesAdapterErrorKind::Ambiguous,
+                    "HERMES_CODEX_PROXY_TEST_STATE_UNKNOWN",
+                )
+            })?;
+            queue.cancelled = true;
+            self.0.wake.notify_all();
+            Ok(())
+        }
+    }
+
+    struct InteractiveFakeCodexProvider {
+        control: Arc<InteractiveFakeCodexControl>,
+        state: Arc<InteractiveFakeCodexState>,
+    }
+
+    impl InteractiveFakeCodexProvider {
+        fn new(reflection: String) -> (Self, Arc<Mutex<InteractiveFakeCodexObservation>>) {
+            let observation = Arc::new(Mutex::new(InteractiveFakeCodexObservation::default()));
+            let state = Arc::new(InteractiveFakeCodexState {
+                observation: Arc::clone(&observation),
+                queue: Mutex::new(InteractiveFakeCodexQueue::default()),
+                reflection,
+                wake: Condvar::new(),
+            });
+            (
+                Self {
+                    control: Arc::new(InteractiveFakeCodexControl(Arc::clone(&state))),
+                    state,
+                },
+                observation,
+            )
+        }
+    }
+
+    impl ProductionCodexProxyProvider for InteractiveFakeCodexProvider {
+        fn control(&self) -> Arc<dyn ProductionCodexProxyControl> {
+            self.control.clone()
+        }
+
+        fn open(
+            self: Box<Self>,
+            absolute_deadline: Instant,
+        ) -> HermesAdapterResult<ProductionCodexProxyDuplex> {
+            if absolute_deadline <= Instant::now() {
+                return Err(error(
+                    HermesAdapterErrorKind::Timeout,
+                    "HERMES_CODEX_PROXY_DEADLINE_EXCEEDED",
+                ));
+            }
+            Ok(ProductionCodexProxyDuplex::new(
+                Box::new(InteractiveFakeCodexReader(Arc::clone(&self.state))),
+                Box::new(InteractiveFakeCodexWriter {
+                    pending: Vec::new(),
+                    state: Arc::clone(&self.state),
+                }),
+            ))
+        }
+    }
+
+    fn zero_model_runtime_manifest() -> HermesOfflineRuntimeManifest {
+        let bytes = format!(
+            concat!(
+                "{{\"cpython_archive_bytes\":{},",
+                "\"cpython_archive_sha256\":\"{}\",",
+                "\"cpython_build_release\":\"{}\",",
+                "\"cpython_provenance\":\"{}\",",
+                "\"cpython_sha256sums_sha256\":\"{}\",",
+                "\"cpython_version\":\"3.12.13\",",
+                "\"hermes_archive_sha256\":\"{}\",",
+                "\"hermes_commit\":\"{}\",",
+                "\"hermes_release\":\"v2026.8.3\",",
+                "\"payload_byte_count\":722642720,\"payload_file_count\":14076,",
+                "\"payload_manifest_sha256\":\"{}\",",
+                "\"platform\":\"x86_64-unknown-linux-gnu\",",
+                "\"pyproject_sha256\":\"{}\",",
+                "\"schema\":\"lattice.hermes.offline-runtime.v1\",",
+                "\"uv_lock_sha256\":\"{}\"}}"
+            ),
+            HERMES_CPYTHON_ARCHIVE_BYTES,
+            HERMES_CPYTHON_ARCHIVE_SHA256,
+            HERMES_CPYTHON_BUILD_RELEASE,
+            HERMES_CPYTHON_PROVENANCE,
+            HERMES_CPYTHON_SHA256SUMS_SHA256,
+            HERMES_RUNTIME_ARCHIVE_SHA256,
+            HERMES_UPSTREAM_COMMIT,
+            OFFICIAL_RUNTIME_TREE_SHA256,
+            HERMES_PYPROJECT_SHA256,
+            HERMES_UV_LOCK_SHA256,
+        );
+        HermesOfflineRuntimeManifest::from_canonical_json(bytes.as_bytes())
+            .expect("exact zero-model runtime manifest")
+    }
+
+    fn zero_model_request() -> HermesResearchRequest {
+        HermesResearchRequest::new(
+            Invocation::new(
+                CONTRACT_VERSION,
+                RequestId::new("request-zero-model").expect("request id"),
+                TaskId::new("task-zero-model").expect("task id"),
+                AttemptId::new("attempt-zero-model").expect("attempt id"),
+                ProjectSnapshotId::new("snapshot-zero-model").expect("snapshot id"),
+                ContentDigest::from_sha256("aa".repeat(32)).expect("subject digest"),
+            )
+            .expect("zero-model invocation"),
+        )
+    }
+
+    fn zero_model_job(request: HermesResearchRequest) -> HermesReflectionJob {
+        HermesReflectionJob::new(
+            request,
+            "session-zero-model",
+            "hermes-agent",
+            vec![
+                ReflectionEvidence::new(
+                    ReflectionEvidenceKind::Graphify,
+                    ContentDigest::from_sha256("bb".repeat(32)).expect("graph digest"),
+                )
+                .expect("graph evidence"),
+            ],
+        )
+        .expect("zero-model reflection job")
+    }
+
+    fn zero_model_reflection(job: &HermesReflectionJob) -> String {
+        format!(
+            concat!(
+                "{{\"schema_version\":\"{}\",\"binding\":{{",
+                "\"request_id\":\"request-zero-model\",",
+                "\"task_id\":\"task-zero-model\",",
+                "\"attempt_id\":\"attempt-zero-model\",",
+                "\"project_snapshot_id\":\"snapshot-zero-model\",",
+                "\"subject_digest\":\"{}\",",
+                "\"session_id\":\"session-zero-model\",",
+                "\"input_digest\":\"{}\",",
+                "\"model\":\"hermes-agent\"}},",
+                "\"summary\":\"The official Hermes gateway reached the fake Codex proxy.\",",
+                "\"findings\":[{{\"classification\":\"inference\",",
+                "\"statement\":\"The zero-model shim path completed one turn.\",",
+                "\"evidence_digests\":[\"{}\"]}}],",
+                "\"next_actions\":[\"Close the successful Codex session before the terminal barrier.\"]}}"
+            ),
+            HERMES_SCHEMA_VERSION,
+            "aa".repeat(32),
+            job.input_digest().as_str(),
+            "bb".repeat(32),
+        )
+    }
+
+    #[test]
+    #[ignore = "requires WSL2, bubblewrap, and the exact frozen Hermes runtime"]
+    fn official_hermes_gateway_reaches_interactive_fake_codex_without_model() {
+        let request = zero_model_request();
+        let job = zero_model_job(request.clone());
+        let reflection = zero_model_reflection(&job);
+        serde_json::from_str::<serde_json::Value>(&reflection).expect("canonical reflection JSON");
+        let (provider, observation) = InteractiveFakeCodexProvider::new(reflection.clone());
+        let isolation_root = std::env::temp_dir().join(format!(
+            "lattice-hermes-official-zero-model-{}-{}",
+            std::process::id(),
+            RUNNER_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let containment = HermesWslContainmentConfig::new(
+            r"C:\Windows\System32\wsl.exe",
+            OFFICIAL_RUNTIME_GUEST_ROOT,
+            isolation_root.clone(),
+            fs::canonicalize(std::env::current_dir().expect("cwd"))
+                .expect("canonical product root"),
+        )
+        .expect("official zero-model containment");
+        let mut config = HermesProductionRunnerConfig::official_with_broker_digest(
+            containment,
+            &zero_model_runtime_manifest(),
+            &ContentDigest::from_sha256("ff".repeat(32)).expect("broker digest"),
+            "production-zero-model-key",
+            "hermes-agent",
+            Duration::from_secs(10),
+            Duration::from_secs(4),
+            Duration::from_millis(1),
+        )
+        .expect("official zero-model config");
+        config.codex_provider = Some(Box::new(provider));
+        let runner = config
+            .launch(Instant::now() + Duration::from_secs(12))
+            .expect("official Hermes gateway starts");
+        let mut port = runner.bind(job.clone()).expect("bind zero-model job");
+        let result = port
+            .run_reflection_evidence(&request)
+            .expect("successful reflection reaches a clean proxy terminal");
+        assert_eq!(
+            result.reflection().summary(),
+            "The official Hermes gateway reached the fake Codex proxy."
+        );
+        assert_eq!(
+            result.reflection().binding().input_digest(),
+            job.input_digest().as_str()
+        );
+        assert_eq!(
+            result.reflection().output_digest(),
+            result.evidence().output_digest()
+        );
+        drop(port);
+
+        let observed = observation.lock().expect("fake Codex observation");
+        assert_eq!(
+            observed.calls,
+            ["initialize", "initialized", "thread/start", "turn/start"],
+            "unexpected calls in the complete fake Codex lifecycle"
+        );
+        assert_eq!(observed.thread_start_had_cwd, Some(false));
+        assert!(observed.reflection_emitted);
+        assert!(
+            observed
+                .turn_input
+                .as_deref()
+                .is_some_and(|input| input.contains(job.input_digest().as_str()))
+        );
+        drop(observed);
+        fs::remove_dir_all(&isolation_root).expect("remove zero-model isolation root");
     }
 }
