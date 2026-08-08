@@ -1,3 +1,25 @@
+# Current GitHub Handoff — 2026-08-09
+
+Repository: `z72124223/lattice-devos`<br>
+GitHub URL: `https://github.com/z72124223/lattice-devos`<br>
+Branch / upstream: `feature/task-037-full-chain-integration` /
+`origin/feature/task-037-full-chain-integration`<br>
+HEAD: `562a963c7185986b9349e24f6928b867beadf52d`<br>
+Workspace: clean at last verification.
+
+The private GitHub repository and current feature branch are pushed. The
+Hermes adapter failure-safe hint change is complete and its focused/package
+checks pass. Formal Hermes -> Memory -> status acceptance is still pending:
+the previous Run returned `LATTICE_HERMES_REFLECTION_REJECTED` /
+`HERMES_RUN_FAILED`. Next, use a fresh evidence copy with the current broker
+SHA, run once, and only query Status after a successful Run. Do not treat a
+failure hint as an authoritative root cause. Official Codex live remains
+`FAILED_DIAGNOSTIC`, and Graphify has a known intermittent staging-directory
+PID collision in full-workspace tests.
+
+Historical sections below are preserved; this section is the authoritative
+cross-session handoff.
+
 # LATTICE DevOS TASK-033 Graphify/PostgreSQL Memory Checkpoint Handoff
 
 ## Status And Alignment

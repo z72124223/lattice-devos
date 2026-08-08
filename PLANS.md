@@ -15,6 +15,47 @@ The governing invariant remains:
 
 > **One Gateway. One Truth. One Writer.**
 
+## Current GitHub Handoff — 2026-08-09
+
+Repository: `z72124223/lattice-devos`<br>
+GitHub URL: `https://github.com/z72124223/lattice-devos`<br>
+Remote: `origin` -> `https://github.com/z72124223/lattice-devos.git`<br>
+Default branch: not established; remote HEAD is currently
+`feature/task-037-full-chain-integration`<br>
+Current branch: `feature/task-037-full-chain-integration`<br>
+Upstream: `origin/feature/task-037-full-chain-integration`<br>
+Current HEAD: `562a963c7185986b9349e24f6928b867beadf52d`<br>
+Workspace: clean at last verification (2026-08-09)
+
+Current Goal:
+- Make GitHub a durable handoff source without changing LATTICE product scope.
+
+Completed:
+- Created the private GitHub repository and pushed the current feature branch.
+- Hermes failure-safe hint commit `562a963` is on local and origin.
+- Existing Rust/PostgreSQL/Graphify/Codebase Memory scripted checkpoints remain preserved.
+- Hermes adapter focused/package/Clippy/format checks pass.
+
+In Progress:
+- Formal Hermes -> Memory -> status acceptance is not complete; the prior Run
+  returned `LATTICE_HERMES_REFLECTION_REJECTED` / `HERMES_RUN_FAILED`.
+- Evidence remains under `target/full-chain-acceptance/ea0dba18c00c42bea509c1ba`.
+- The preserved acceptance script binds an older broker SHA; the next run must
+  use a new evidence copy with the current broker SHA.
+
+Next:
+- When capability/quota is available, update only the copied acceptance script,
+  create a fresh acceptance ID, run one formal Run, then Status only if Run
+  succeeds. If it fails, stop and treat HINT as non-authoritative.
+
+Blocked / Known Issues:
+- Official Codex live remains `FAILED_DIAGNOSTIC` because of the Windows sandbox helper issue.
+- Full-workspace verification has an intermittent Graphify staging-directory PID collision; targeted Graphify package passed afterward.
+- No remote default/main branch is established; `scripts/audit-workflow.ps1` is absent. Existing README and historical handoff sections are stale; this current section is authoritative.
+
+Relevant Issues / PRs:
+- None created yet.
+
 ## User Execution Preference — 2026-07-29
 
 The user changed the project workflow preference to direct execution without

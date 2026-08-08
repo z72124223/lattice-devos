@@ -110,3 +110,24 @@ Node commands prove only the preserved prototype behavior and do not prove V2.
   PostgreSQL, sandbox, service, or release integration.
 - Local CI configuration is documented automation until a remote service runs
   it and branch policy requires it.
+
+## GitHub Handoff Protocol
+
+Canonical repository: `z72124223/lattice-devos`<br>
+GitHub URL: `https://github.com/z72124223/lattice-devos`<br>
+Remote: `origin` (`https://github.com/z72124223/lattice-devos.git`)
+
+Before starting work, read `AGENTS.md`, `PLANS.md`, and `HANDOFF.md`; inspect
+`git status`, the current branch and HEAD, `git remote show origin`, then run
+`git fetch --all --prune` when a remote exists. Compare `HEAD...@{u}` and stop
+on unknown dirty changes, divergence, or an absent upstream; do not invent an
+upstream automatically. Check related GitHub Issues/PRs when GitHub access is
+available.
+
+At a handoff checkpoint, run relevant tests, update the current sections of
+`PLANS.md` and `HANDOFF.md`, create one logical commit, and push only when the
+current task authorizes it. Never use `git reset --hard`, `git clean`, or
+force-push to resolve handoff state; do not overwrite or discard unknown
+changes, and compare local/remote state before merge or rebase. Do not delete
+unknown functionality merely to make a check pass. This is a convention, not
+a claim that hooks or CI enforce it.
