@@ -1117,6 +1117,20 @@ fn emit_codex_broker_trace(event: serde_json::Value) {
 }
 
 #[cfg(windows)]
+fn codex_stderr_evidence_json(evidence: Option<&BoundedCodexStderrEvidence>) -> serde_json::Value {
+    evidence.map_or_else(
+        || serde_json::Value::Null,
+        |evidence| {
+            json!({
+                "byte_count": evidence.byte_count,
+                "exceeded": evidence.exceeded,
+                "sha256": evidence.sha256,
+            })
+        },
+    )
+}
+
+#[cfg(windows)]
 impl ProductionCodexProxyProvider for OfficialCodexProxyProvider {
     fn control(&self) -> Arc<dyn ProductionCodexProxyControl> {
         self.control.clone()
@@ -1401,6 +1415,13 @@ impl ProductionCodexProxyControl for OwnedCodexProxyControl {
         }
         if let Err(failure) = state.poll_stderr() {
             state.terminate()?;
+            emit_codex_broker_trace(json!({
+                "component": "Hermes",
+                "error_code": failure.code(),
+                "event": "codex_proxy_ensure_running_failed",
+                "stage": "stderr_poll",
+                "stderr": codex_stderr_evidence_json(state.stderr_evidence.as_ref()),
+            }));
             return Err(failure);
         }
         let running = state.child.as_mut().ok_or_else(|| {
@@ -1410,9 +1431,29 @@ impl ProductionCodexProxyControl for OwnedCodexProxyControl {
             )
         })?;
         match running.ensure_running() {
-            Ok(()) => state.poll_stderr(),
+            Ok(()) => match state.poll_stderr() {
+                Ok(()) => Ok(()),
+                Err(failure) => {
+                    state.terminate()?;
+                    emit_codex_broker_trace(json!({
+                        "component": "Hermes",
+                        "error_code": failure.code(),
+                        "event": "codex_proxy_ensure_running_failed",
+                        "stage": "stderr_poll_after_running",
+                        "stderr": codex_stderr_evidence_json(state.stderr_evidence.as_ref()),
+                    }));
+                    Err(failure)
+                }
+            },
             Err(failure) => {
                 let _ = state.join_stderr();
+                emit_codex_broker_trace(json!({
+                    "component": "Hermes",
+                    "error_code": failure.code(),
+                    "event": "codex_proxy_ensure_running_failed",
+                    "stage": "process_status",
+                    "stderr": codex_stderr_evidence_json(state.stderr_evidence.as_ref()),
+                }));
                 Err(failure)
             }
         }
