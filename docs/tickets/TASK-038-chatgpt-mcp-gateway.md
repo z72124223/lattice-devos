@@ -1,7 +1,7 @@
 ---
 ticket_id: TASK-038
 spec_id: SPEC-003
-spec_version: 1
+spec_version: 2
 module_id: latticed
 constitution_version: 1.1
 status: in-progress
@@ -36,10 +36,11 @@ branch: feature/task-038-chatgpt-mcp
 
 ## Objective
 
-Deliver one locally testable ChatGPT MCP checkpoint: the official Secure MCP
-Tunnel can launch the private `latticed` stdio server, which exposes exactly two
-closed zero-argument tools and injects the immutable server-owned binding into
-the existing typed service boundary.
+Deliver a live, bounded ChatGPT MCP Phase 1 checkpoint: the official Secure MCP
+Tunnel launches the private `latticed` stdio server, ChatGPT's stateless
+`2026-07-28` refresh discovers exactly two closed zero-argument tools, and both
+legacy and modern calls inject the same immutable server-owned binding into the
+existing typed service boundary.
 
 ## Acceptance Criteria
 
@@ -49,11 +50,16 @@ the existing typed service boundary.
       claim.
 - [x] No second orchestrator, state store, writer, listener, credential store,
       or generic tool surface is introduced.
+- [x] Legacy stateful and modern stateless MCP paths pass focused and
+      real-binary compatibility tests.
+- [x] A restricted runtime key starts the existing tunnel profile, readiness is
+      200, and the existing ChatGPT app refresh discovers the two tools.
 
 ## Non-Goals
 
-Live tunnel/account provisioning, ChatGPT workspace setup, production E2E,
-push, merge, deployment, and TASK-037 Hermes repair.
+Successful production tool execution, per-human actor/session authorization,
+production E2E, public exposure, push, merge, deployment, release, and
+TASK-037 Hermes repair.
 
 ## Module And Constitution Constraints
 
@@ -75,6 +81,8 @@ branch.
 3. RED/GREEN caller-supplied property rejection before dispatch.
 4. RED/GREEN real-binary and TASK-037 verifier compatibility.
 5. RED/GREEN exact, credential-free tunnel `init`/`doctor`/`run` entrypoint.
+6. RED/GREEN stateless `server/discover`, per-request metadata, result/cache
+   shape, downgrade rejection, and legacy-lifecycle preservation.
 
 ## Verification
 
@@ -88,7 +96,8 @@ branch.
 
 ## Human Gate
 
-None for local implementation. Live tunnel/workspace/credential use and
-production completion remain separately gated. The ticket remains in progress
-for broader Issue #4 identity/live work even though this bounded checkpoint is
-complete.
+The user explicitly authorized the bounded live tunnel/workspace/runtime-key
+flow on 2026-08-09. Production completion, public exposure, push, merge,
+deployment, and release remain separately gated. The bounded Phase 1 live
+discovery checkpoint is complete; the ticket remains in progress for the
+explicitly excluded identity and production-execution slices.

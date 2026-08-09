@@ -453,9 +453,8 @@ fn test_scripted_launcher_bytes(server_sha256: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-#[test]
-fn real_latticed_binary_serves_only_the_two_bounded_tools() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_latticed"))
+fn spawn_scripted_latticed() -> std::process::Child {
+    Command::new(env!("CARGO_BIN_EXE_latticed"))
         .env("LATTICE_DELIVERY_CODEX_MODE", "SCRIPTED_ACCEPTANCE")
         .env("LATTICE_DELIVERY_LAUNCHER", r"C:\tools\codex.exe")
         .env("LATTICE_DELIVERY_LAUNCHER_VERSION", "codex-cli 0.144.6")
@@ -473,7 +472,12 @@ fn real_latticed_binary_serves_only_the_two_bounded_tools() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("start latticed");
+        .expect("start latticed")
+}
+
+#[test]
+fn real_latticed_binary_serves_only_the_two_bounded_tools() {
+    let mut child = spawn_scripted_latticed();
     child
         .stdin
         .take()
@@ -515,6 +519,68 @@ fn real_latticed_binary_serves_only_the_two_bounded_tools() {
             tool["inputSchema"],
             json!({"type":"object","additionalProperties":false})
         );
+        assert!(tool.get("annotations").is_none());
+    }
+    for response in &responses[2..] {
+        assert_eq!(response["result"]["isError"], true);
+        assert_ne!(
+            response["result"]["structuredContent"]["code"],
+            "LATTICE_FULL_CHAIN_BINDING_REJECTED"
+        );
+    }
+}
+
+#[test]
+fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
+    let mut child = spawn_scripted_latticed();
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(
+            concat!(
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n",
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n",
+                "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"lattice_delivery_run\",\"arguments\":{},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n",
+                "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"lattice_delivery_status\",\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n"
+            )
+            .as_bytes(),
+        )
+        .expect("write modern MCP requests");
+    let output = child.wait_with_output().expect("wait latticed");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let responses = String::from_utf8(output.stdout)
+        .expect("stdout utf8")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("JSON-RPC response"))
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 4);
+    assert_eq!(
+        responses[0]["result"]["supportedVersions"],
+        json!(["2026-07-28"])
+    );
+    assert_eq!(responses[0]["result"]["capabilities"], json!({"tools": {}}));
+    let tools = responses[1]["result"]["tools"]
+        .as_array()
+        .expect("tool list");
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>(),
+        ["lattice_delivery_run", "lattice_delivery_status"]
+    );
+    for tool in tools {
+        assert_eq!(
+            tool["inputSchema"],
+            json!({"type":"object","additionalProperties":false})
+        );
+        assert!(tool["annotations"].is_object());
+    }
+    for response in &responses {
+        assert_eq!(response["result"]["resultType"], "complete");
     }
     for response in &responses[2..] {
         assert_eq!(response["result"]["isError"], true);

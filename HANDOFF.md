@@ -1,8 +1,9 @@
 # Current GitHub Handoff — 2026-08-09
 
-Status: `DONE` for the bounded SPEC-003 local MCP checkpoint; GitHub Issue #4
-remains `IN_PROGRESS` for identity and live ChatGPT evidence. TASK-037 gates
-only production `Hermes -> Memory -> Status` E2E.
+Status: `DONE` for the bounded SPEC-003 v2 Phase 1 live ChatGPT discovery
+checkpoint; GitHub Issue #4 remains `IN_PROGRESS` for successful production
+invoke, per-human identity/audit, and reconnect evidence. TASK-037 gates only
+production `Hermes -> Memory -> Status` E2E.
 
 Repository: `z72124223/lattice-devos`<br>
 Branch: `feature/task-038-chatgpt-mcp`<br>
@@ -27,20 +28,31 @@ Worktree:
   tunnel/MCP/control/log/health/UI/profile/proxy/certificate overrides, prove
   all are absent from the child, preserve one `LATTICE_*` canary, and prove the
   parent environment is restored.
+- Added stateless MCP `2026-07-28` discovery/list/call with final-schema
+  metadata validation and result/cache shapes while preserving the legacy
+  `2025-11-25` lifecycle. Modern-only annotations conservatively classify Run
+  as destructive/non-idempotent and Status as read-only.
 - Official `tunnel-client` v0.0.11 Windows amd64 was verified in ignored build
   output against SHA-256
   `eb912c86c6ccde90cda805cb17009507176a656725cf86c36fabe1901a12e29b`.
   Isolated profile creation for the real built `latticed.exe` passed and stored
-  only an environment-key reference. `doctor --explain` then failed closed
-  because the runtime key is absent.
+  only an environment-key reference.
+- One restricted Tunnels Read+Use runtime key now backs the final private
+  daemon. Superseded LATTICE keys were revoked; the final key was transferred
+  directly into process memory and removed from both browser and system
+  clipboards without printing or persistence.
+- The daemon is health/ready 200. ChatGPT refresh succeeded and now shows
+  exactly `lattice_delivery_run` and `lattice_delivery_status`; the old three
+  actions are absent. Tunnel discover/list events have no errors and were
+  delivered to the control plane with HTTP 200.
 
 ## Current Verification
 
-- `cargo test -p lattice-runtime --locked`: 43 unit, 8 composition, 5 dispatch,
-  and 12 MCP tests passed.
-- The real binary test performs initialize/list plus run `{}` and status with
-  omitted arguments; both pass binding validation before the intentionally
-  unavailable database returns a bounded error.
+- `cargo test -p lattice-runtime --locked`: 43 unit, 9 composition, 5 dispatch,
+  and 21 MCP tests passed.
+- Separate real-binary tests prove legacy initialize/list/calls and modern
+  discover/list/calls. Both reach the same binding validation before the
+  intentionally unavailable database returns a bounded error.
 - `npm.cmd run verify`: project check passed with 416 files, 24 constitutions,
   25 tickets, one current task; Node tests 44/44 passed.
 - Tunnel hostile-environment harness, PowerShell AST parse, Rust format, and
@@ -53,9 +65,9 @@ Worktree:
 
 ## True Remaining Gates
 
-- No real tunnel ID, `CONTROL_PLANE_API_KEY`, Tunnels Read+Use permission,
-  ChatGPT developer-mode workspace association, `/readyz` 200, or ChatGPT
-  discovery/invoke evidence exists.
+- Live transport and exact discovery pass, but the current Phase 1
+  `SCRIPTED_ACCEPTANCE` composition deliberately uses an unavailable database;
+  no successful ChatGPT tool execution is claimed.
 - Official stdio binding has no HTTP MCP session ID or connector bearer header.
   The current tunnel/profile therefore maps to one fixed subject; per-human
   actor/session authorization, durable audit correlation, per-actor rate
@@ -72,9 +84,8 @@ Worktree:
 1. Decide the identity boundary: one fixed tunnel/profile gateway actor with
    narrow policy, or an authenticated loopback HTTP adapter with a versioned
    architecture change.
-2. Once real workspace/tunnel permission, tunnel ID, and runtime key are
-   available, create the real profile, run `doctor`, start the daemon, require
-   `/readyz` 200, and verify ChatGPT discovers/invokes both bounded tools.
+2. Provision a matched live PostgreSQL/delivery composition before attempting a
+   successful ChatGPT call; a bounded error is not acceptance.
 3. Prove interruption/restart behavior and the selected actor/audit boundary.
 4. Resume TASK-037 only for the production E2E completion gate.
 

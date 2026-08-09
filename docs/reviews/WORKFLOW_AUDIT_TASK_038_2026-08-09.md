@@ -25,12 +25,15 @@ dependency, or durable adapter state is introduced.
 
 All changed paths are listed in
 `docs/tickets/TASK-038-chatgpt-mcp-gateway.md`. Generated tunnel-client binaries,
-profiles, and build output remain under ignored `target/` paths. No credential,
-account, workspace, tunnel, deployment, push, merge, or production retry was
-performed.
+profiles, and build output remain under ignored `target/` paths. The later
+user-authorized live slice created one restricted runtime key and used the
+existing tunnel/app; key text was never persisted or reported, and superseded
+LATTICE keys were revoked. No deployment, push, merge, public listener, or
+production retry was performed.
 
 ## Audit Result
 
-PASS for the bounded local checkpoint. Live ChatGPT identity, workspace/tunnel
-permissions, runtime authentication, actual discovery/invoke, safe reconnect,
-and production E2E remain explicit later gates.
+PASS for the bounded Phase 1 checkpoint. Runtime authentication, readiness, and
+actual ChatGPT discovery now pass. Per-human identity, successful production
+invoke, durable actor audit correlation, safe reconnect, and production E2E
+remain explicit later gates.

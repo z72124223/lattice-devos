@@ -79,6 +79,428 @@ fn initialize(server: &mut McpServer<FakeService>) {
     );
 }
 
+fn modern_request_meta() -> Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "task038-chatgpt",
+            "version": "1"
+        },
+        "io.modelcontextprotocol/clientCapabilities": {}
+    })
+}
+
+#[test]
+fn modern_discovery_advertises_the_stateless_tool_contract() {
+    let (mut server, run_calls, status_calls) = server();
+    let metadata = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+
+    let response = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "discover",
+            "method": "server/discover",
+            "params": {"_meta": metadata}
+        }))
+        .expect("discovery response");
+
+    assert_eq!(response["result"]["resultType"], "complete");
+    assert_eq!(
+        response["result"]["supportedVersions"],
+        json!(["2026-07-28"])
+    );
+    assert_eq!(response["result"]["capabilities"], json!({"tools": {}}));
+    assert_eq!(response["result"]["cacheScope"], "private");
+    assert_eq!(response["result"]["ttlMs"], 0);
+    assert_eq!(
+        response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "latticed"
+    );
+    assert_eq!(run_calls.get(), 0);
+    assert_eq!(status_calls.get(), 0);
+}
+
+#[test]
+fn modern_tool_requests_are_stateless_and_preserve_the_server_binding() {
+    let (mut server, run_calls, status_calls) = server();
+
+    let list = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "list",
+            "method": "tools/list",
+            "params": {"_meta": modern_request_meta()}
+        }))
+        .expect("modern tool list");
+    assert_eq!(list["result"]["resultType"], "complete");
+    assert_eq!(list["result"]["cacheScope"], "private");
+    assert_eq!(list["result"]["ttlMs"], 0);
+    assert_eq!(
+        list["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "latticed"
+    );
+    assert_eq!(
+        list["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>(),
+        ["lattice_delivery_run", "lattice_delivery_status"]
+    );
+    assert_eq!(
+        list["result"]["tools"][0]["annotations"],
+        json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": false
+        })
+    );
+    assert_eq!(
+        list["result"]["tools"][1]["annotations"],
+        json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+        })
+    );
+
+    for (id, name, arguments) in [
+        ("run", "lattice_delivery_run", Some(json!({}))),
+        ("status", "lattice_delivery_status", None),
+    ] {
+        let mut params = json!({"name": name, "_meta": modern_request_meta()});
+        if let Some(arguments) = arguments {
+            params["arguments"] = arguments;
+        }
+        let response = server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": params
+            }))
+            .expect("modern tool response");
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert_eq!(response["result"]["isError"], false);
+        assert_eq!(
+            response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "latticed"
+        );
+        assert!(response["result"].get("ttlMs").is_none());
+        assert!(response["result"].get("cacheScope").is_none());
+    }
+
+    assert_eq!(run_calls.get(), 1);
+    assert_eq!(status_calls.get(), 1);
+}
+
+#[test]
+fn modern_metadata_and_protocol_versions_fail_closed_before_dispatch() {
+    for name in ["lattice_delivery_run", "lattice_delivery_status"] {
+        let (mut server, run_calls, status_calls) = server();
+        let missing_capabilities = server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": name,
+                    "arguments": {},
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+                    }
+                }
+            }))
+            .expect("invalid modern metadata response");
+        assert_eq!(missing_capabilities["error"]["code"], -32602);
+
+        let unsupported = server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": name,
+                    "arguments": {},
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": "2027-01-01",
+                        "io.modelcontextprotocol/clientCapabilities": {}
+                    }
+                }
+            }))
+            .expect("unsupported protocol response");
+        assert_eq!(unsupported["error"]["code"], -32022);
+        assert_eq!(
+            unsupported["error"]["data"]["supported"],
+            json!(["2026-07-28", "2025-11-25"])
+        );
+        assert_eq!(unsupported["error"]["data"]["requested"], "2027-01-01");
+        assert_eq!(run_calls.get(), 0, "{name}");
+        assert_eq!(status_calls.get(), 0, "{name}");
+    }
+
+    let (mut server, _, _) = server();
+    let missing_metadata = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "server/discover",
+            "params": {}
+        }))
+        .expect("missing discovery metadata response");
+    assert_eq!(missing_metadata["error"]["code"], -32602);
+
+    initialize(&mut server);
+    let reserved_metadata_without_version = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_delivery_run",
+                "arguments": {},
+                "_meta": {
+                    "io.modelcontextprotocol/logLevel": "warning"
+                }
+            }
+        }))
+        .expect("reserved metadata downgrade response");
+    assert_eq!(reserved_metadata_without_version["error"]["code"], -32602);
+}
+
+#[test]
+fn modern_known_metadata_fields_are_validated_before_dispatch() {
+    for metadata in [
+        json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {"roots": false}
+        }),
+        json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {
+                "name": "client",
+                "version": "1",
+                "title": 42
+            }
+        }),
+        json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/logLevel": "verbose"
+        }),
+        json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "progressToken": {}
+        }),
+    ] {
+        let (mut server, run_calls, status_calls) = server();
+        let response = server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": "malformed-known-metadata",
+                "method": "tools/call",
+                "params": {
+                    "name": "lattice_delivery_run",
+                    "arguments": {},
+                    "_meta": metadata
+                }
+            }))
+            .expect("malformed metadata response");
+        assert_eq!(response["error"]["code"], -32602);
+        assert_eq!(run_calls.get(), 0);
+        assert_eq!(status_calls.get(), 0);
+    }
+}
+
+#[test]
+fn modern_known_metadata_fields_accept_final_schema_shapes() {
+    let (mut server, run_calls, status_calls) = server();
+    let response = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "valid-known-metadata",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_delivery_status",
+                "arguments": {},
+                "_meta": {
+                    "progressToken": 7,
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {
+                        "experimental": {"feature": {}},
+                        "roots": {},
+                        "sampling": {"context": {}, "tools": {}},
+                        "elicitation": {"form": {}, "url": {}},
+                        "extensions": {"com.example/extension": {}}
+                    },
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "client",
+                        "title": "Client",
+                        "version": "1",
+                        "description": "Compatibility probe",
+                        "websiteUrl": "https://example.com",
+                        "icons": [{
+                            "src": "https://example.com/icon.png",
+                            "mimeType": "image/png",
+                            "sizes": ["48x48"],
+                            "theme": "light"
+                        }]
+                    },
+                    "io.modelcontextprotocol/logLevel": "warning"
+                }
+            }
+        }))
+        .expect("valid known metadata response");
+    assert_eq!(response["result"]["resultType"], "complete");
+    assert_eq!(response["result"]["isError"], false);
+    assert_eq!(run_calls.get(), 0);
+    assert_eq!(status_calls.get(), 1);
+}
+
+#[test]
+fn modern_metadata_validator_matches_string_and_extension_key_schema() {
+    let (mut accepting_server, run_calls, status_calls) = server();
+    let accepted = accepting_server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "empty-schema-strings",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_delivery_status",
+                "arguments": {},
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": {
+                        "name": "",
+                        "version": "",
+                        "icons": [{"src": ""}]
+                    }
+                }
+            }
+        }))
+        .expect("schema-valid empty string response");
+    assert_eq!(accepted["result"]["resultType"], "complete");
+    assert_eq!(run_calls.get(), 0);
+    assert_eq!(status_calls.get(), 1);
+
+    for extension_key in ["feature", "1example/feature", "com..example/feature"] {
+        let (mut rejecting_server, run_calls, status_calls) = server();
+        let rejected = rejecting_server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": extension_key,
+                "method": "tools/call",
+                "params": {
+                    "name": "lattice_delivery_run",
+                    "arguments": {},
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                        "io.modelcontextprotocol/clientCapabilities": {
+                            "extensions": {extension_key: {}}
+                        }
+                    }
+                }
+            }))
+            .expect("invalid extension key response");
+        assert_eq!(rejected["error"]["code"], -32602, "{extension_key}");
+        assert_eq!(run_calls.get(), 0, "{extension_key}");
+        assert_eq!(status_calls.get(), 0, "{extension_key}");
+    }
+}
+
+#[test]
+fn modern_stateless_calls_do_not_exhaust_the_legacy_session_counter() {
+    let (mut server, run_calls, status_calls) = server();
+    for id in 0..=MAX_TOOL_INVOCATIONS_PER_SESSION {
+        let response = server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": "lattice_delivery_status",
+                    "arguments": {},
+                    "_meta": modern_request_meta()
+                }
+            }))
+            .expect("modern tool response");
+        assert_eq!(response["result"]["resultType"], "complete", "{id}");
+        assert_eq!(response["result"]["isError"], false, "{id}");
+    }
+    assert_eq!(run_calls.get(), 0);
+    assert_eq!(
+        status_calls.get() as usize,
+        MAX_TOOL_INVOCATIONS_PER_SESSION + 1
+    );
+}
+
+#[test]
+fn modern_tool_calls_reject_caller_owned_arguments_before_dispatch() {
+    for name in ["lattice_delivery_run", "lattice_delivery_status"] {
+        let (mut server, run_calls, status_calls) = server();
+        let response = server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": name,
+                "method": "tools/call",
+                "params": {
+                    "name": name,
+                    "arguments": {"task_id": "caller-owned"},
+                    "_meta": modern_request_meta()
+                }
+            }))
+            .expect("closed argument response");
+        assert_eq!(response["error"]["code"], -32602, "{name}");
+        assert_eq!(run_calls.get(), 0, "{name}");
+        assert_eq!(status_calls.get(), 0, "{name}");
+    }
+}
+
+#[test]
+fn modern_discovery_does_not_replace_the_legacy_lifecycle() {
+    let (mut legacy_server, _, _) = server();
+    let discover = legacy_server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "server/discover",
+            "params": {"_meta": modern_request_meta()}
+        }))
+        .expect("discover response");
+    assert_eq!(discover["result"]["resultType"], "complete");
+
+    initialize(&mut legacy_server);
+    let legacy_list = legacy_server
+        .handle(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
+        .expect("legacy tool list");
+    assert_eq!(
+        legacy_list["result"]["tools"].as_array().map(Vec::len),
+        Some(2)
+    );
+
+    for method in ["initialize", "ping"] {
+        let (mut modern_server, _, _) = server();
+        let response = modern_server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": method,
+                "method": method,
+                "params": {"_meta": modern_request_meta()}
+            }))
+            .expect("removed modern method response");
+        assert_eq!(response["error"]["code"], -32601, "{method}");
+    }
+}
+
 #[test]
 fn tool_list_is_exactly_two_closed_zero_argument_tools() {
     let (mut server, _, _) = server();
@@ -102,6 +524,7 @@ fn tool_list_is_exactly_two_closed_zero_argument_tools() {
             tool["inputSchema"],
             json!({"type":"object","additionalProperties":false})
         );
+        assert!(tool.get("annotations").is_none());
     }
 }
 
@@ -360,6 +783,32 @@ fn execution_failures_are_tool_errors_without_sensitive_messages() {
         response["result"]["structuredContent"],
         json!({"status":"ERROR","code":"LATTICE_DELIVERY_REJECTED"})
     );
+
+    let mut modern_server = McpServer::new(FailingService, fixed_binding().clone());
+    let modern_response = modern_server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "modern-failure",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_delivery_status",
+                "arguments": {},
+                "_meta": modern_request_meta()
+            }
+        }))
+        .expect("modern tool result");
+    assert_eq!(modern_response["result"]["resultType"], "complete");
+    assert_eq!(modern_response["result"]["isError"], true);
+    assert_eq!(
+        modern_response["result"]["structuredContent"],
+        json!({"status":"ERROR","code":"LATTICE_STATUS_REJECTED"})
+    );
+    assert_eq!(
+        modern_response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "latticed"
+    );
+    assert!(modern_response["result"].get("ttlMs").is_none());
+    assert!(modern_response["result"].get("cacheScope").is_none());
 }
 
 #[test]

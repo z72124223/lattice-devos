@@ -29,15 +29,14 @@ Latest fetched TASK-037 remote head: `8828d2b`<br>
 Workspace: expected clean after the TASK-038 checkpoint commit (2026-08-09)
 
 Current Goal:
-- Complete TASK-038 Phase 1 MCP compatibility work and the subsequent bounded
-  GPT Web gateway implementation without weakening One Gateway, One Truth, or
-  One Writer. TASK-037 remains the production end-to-end acceptance gate only.
+- Preserve the completed TASK-038 Phase 1 live discovery checkpoint and choose
+  the next explicit identity/production-invoke slice. TASK-037 remains the
+  production end-to-end acceptance gate only.
 
-CURRENT TASK-038 — restore the approved zero-argument `latticed` MCP contract,
-inject the immutable binding from composition, and add the credential-free
-Secure MCP Tunnel operator entrypoint defined by SPEC-003/TASK-038. The local
-implementation, regression gates, and independent reviews pass. Broader Issue
-#4 identity and live-connection work remains in progress.
+CURRENT TASK-038 — the approved zero-argument contract, composition binding,
+Secure MCP Tunnel entrypoint, dual MCP protocol support, restricted live key,
+readiness, and exact ChatGPT two-tool discovery now pass. Broader Issue #4
+identity, reconnect, and successful production-invoke work remains in progress.
 
 Completed:
 - Added a clean-copy TASK-037 verifier and nineteen bounded implementation
@@ -52,6 +51,11 @@ Completed:
   binding from composition, added the bounded tunnel launcher, isolated 58
   hostile child-environment overrides, and passed independent code and
   architecture review with P0-P3 = 0.
+- TASK-038 added stateless MCP `2026-07-28` discovery/list/call without breaking
+  the legacy lifecycle. The final private daemon is health/ready 200; ChatGPT
+  refresh replaced the three stale actions with exactly
+  `lattice_delivery_run` and `lattice_delivery_status`, and tunnel events show
+  error-free discover/list delivery to the control plane.
 
 In Progress:
 - Formal acceptance remains `NEEDS_REVIEW`. Latest evidence is
@@ -60,8 +64,9 @@ In Progress:
   then exited with fixed code `HERMES_PRODUCTION_CHILD_EXITED`. The outer Run
   returned `LATTICE_HERMES_REFLECTION_REJECTED` with `tool_is_error=true`.
 - Run did not reach post-Run Memory persistence/readback or Status success.
-- No real tunnel ID/runtime key/workspace was available, and direct stdio has
-  no per-human HTTP session/bearer identity. Live discovery/invoke, actor/session
+- The live Phase 1 transport and discovery gate passes. Successful tool
+  execution still uses a deliberately unavailable scripted composition, and
+  direct stdio has no per-human HTTP session/bearer identity. Actor/session
   authorization, durable audit correlation, per-actor rate limiting, and safe
   reconnect evidence remain open.
 
@@ -69,9 +74,9 @@ Next:
 - Decide the next identity slice explicitly: one fixed tunnel/profile gateway
   actor with narrow policy, or a versioned authenticated loopback HTTP adapter.
   Caller-declared identity cannot become authority.
-- When real Tunnels Read+Use, workspace association, tunnel ID, and runtime key
-  exist, run `doctor`, require `/readyz` 200, then verify ChatGPT discovery and
-  both bounded calls. Do not treat local `doctor` or `/healthz` as readiness.
+- Provision a matched live PostgreSQL/delivery composition before attempting a
+  successful ChatGPT tool call; do not treat the current bounded downstream
+  error as execution acceptance.
 - Diagnose the redacted broker child exit without exposing raw stderr or
   credentials, apply the minimum fix, run focused checks, then perform one
   formal verifier run. TASK-037 PASS remains required before production
@@ -83,8 +88,6 @@ Blocked / Known Issues:
   `9dc173682b03ca48eaa6e2f1deb5706d4a7a265e4f9bfb4cc4a60ac80ed9797f`.
 - Failure isolation roots are retained; process/listener/profile/temp-home
   cleanup completed, but success-only isolation cleanup did not apply.
-- `CONTROL_PLANE_API_KEY`, real tunnel identity, ChatGPT developer-mode
-  workspace association, and Tunnels Read+Use were not present for live proof.
 - Direct stdio cannot by itself convey per-user MCP session or OAuth bearer
   identity; that blocks declaring the broad Phase 2/4 gateway complete.
 - No remote default/main branch is established. Existing README and historical

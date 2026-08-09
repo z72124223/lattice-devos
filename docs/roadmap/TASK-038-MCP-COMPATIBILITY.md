@@ -1,10 +1,9 @@
 # TASK-038 Phase 1 — ChatGPT MCP Compatibility
 
-Status on 2026-08-09: the local contract correction and bounded tunnel
-entrypoint are implemented on `feature/task-038-chatgpt-mcp`. Live ChatGPT
-connection remains unclaimed until a real tunnel ID, runtime key, workspace
-permissions, successful control-plane readiness, and ChatGPT discovery/call
-evidence exist.
+Status on 2026-08-09: the bounded Phase 1 connection is live. The private
+Tunnel is ready, ChatGPT refreshed successfully, and the existing development
+app now lists exactly `lattice_delivery_run` and `lattice_delivery_status`.
+Successful production tool execution and per-human identity remain unclaimed.
 
 ## Decision
 
@@ -37,9 +36,13 @@ leases, or introduce orchestration logic.
   size and invocation count. TASK-038 restored both input schemas to closed
   empty objects and moved the immutable binding back to composition-owned
   process configuration.
-- No tunnel, developer-mode app, API key, authentication material, public
-  endpoint, or listener was created during Phase 1. Those require separately
-  authorized account/credential actions.
+- `latticed` now preserves legacy stateful `2025-11-25` clients and adds the
+  stateless `2026-07-28` discovery/list/call path used by current ChatGPT.
+  Reserved modern metadata is validated before dispatch and cannot downgrade
+  into the legacy lifecycle.
+- The user authorized the bounded account/credential flow. One restricted
+  Tunnels Read+Use runtime key is active for the final daemon; superseded
+  LATTICE runtime keys were revoked and no key text was persisted or exposed.
 
 ## Required Platform Preconditions
 
@@ -67,15 +70,22 @@ tests reject the retired five fields and generic shell, SQL, filesystem, Git,
 credential, provider, arbitrary-task, non-object, or other input before service
 dispatch.
 
-## Local Tunnel Evidence
+## Live Phase 1 Evidence
 
 - Official `tunnel-client` v0.0.11 was downloaded into ignored build output and
   matched the published Windows amd64 SHA-256
   `eb912c86c6ccde90cda805cb17009507176a656725cf86c36fabe1901a12e29b`.
 - The local launcher generated an isolated `sample_mcp_stdio_local` profile for
   the real built `latticed.exe` without storing a key.
-- `doctor --explain` failed closed because `CONTROL_PLANE_API_KEY` is absent.
-  This proves local preflight behavior only; it is not live readiness.
+- The final daemon reports `/healthz = 200` and `/readyz = 200`; control-plane
+  polling is successful.
+- ChatGPT refresh reports `已重新整理動作。` and the old `fetch`, `search`, and
+  `get_work_status` entries are absent. The two LATTICE entries each expose the
+  closed empty-object input schema; Run is shown as write/destructive and
+  Status as read-only.
+- Tunnel admin events show error-free `server/discover` and `tools/list`
+  responses delivered to the control plane with HTTP 200. No negotiation error
+  event exists in the acceptance window.
 - The launcher accepts no credential parameter and gives the child a closed
   environment containing only the explicit runtime key, required `LATTICE_*`
   process configuration, and bounded Windows process variables. Hostile
@@ -101,8 +111,7 @@ identity as authority.
 ## Non-Goals
 
 - Publishing a public MCP endpoint or plugin.
-- Creating or storing credentials, tunnels, workspace access, or developer-mode
-  configuration.
+- Persisting credentials or expanding the restricted runtime permission set.
 - Changing Rust task semantics, tool names, durable state, policy, or writer
   ownership.
 - Claiming production `Hermes -> Memory -> Status` completion before TASK-037
@@ -114,3 +123,5 @@ identity as authority.
 - OpenAI, [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels): ChatGPT private-stdio tunnel support, workspace permissions, and outbound-only network model.
 - OpenAI, [tunnel-client configuration v0.0.11](https://github.com/openai/tunnel-client/blob/v0.0.11/docs/configuration.md): configuration precedence, runtime/admin key split, stdio limits, readiness, and local admin surfaces.
 - OpenAI, [connector behavior v0.0.11](https://github.com/openai/tunnel-client/blob/v0.0.11/docs/connectors.md): command forwarding, stdio session limitations, OAuth-header behavior, and reconnect/error semantics.
+- Model Context Protocol, [2026-07-28 release](https://blog.modelcontextprotocol.io/posts/2026-07-28/): stateless discovery and per-request negotiation.
+- Model Context Protocol, [final 2026-07-28 schema](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/2026-07-28/schema/2026-07-28/schema.ts): request metadata, result/cache fields, errors, tools, and annotations.

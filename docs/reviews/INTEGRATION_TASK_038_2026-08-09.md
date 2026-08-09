@@ -14,6 +14,7 @@
 | Gate | Result |
 |---|---|
 | Exact two-tool schema and empty-call dispatch | PASS |
+| Legacy `2025-11-25` and stateless `2026-07-28` | PASS |
 | Retired/prohibited/non-object arguments, both tools | PASS |
 | Real `latticed` discovery plus run/status dispatch | PASS |
 | TASK-037 verifier empty-argument compatibility | PASS (parser/static; production not rerun) |
@@ -23,6 +24,9 @@
 | Format and diff whitespace | PASS |
 | Independent code review | PASS, P0-P3 = 0 |
 | Independent architecture review | PASS |
+| Restricted live runtime key and `/readyz` | PASS, 200 |
+| ChatGPT development-app refresh | PASS, exact two LATTICE tools |
+| Tunnel protocol events | PASS, discover/list delivered HTTP 200, no errors |
 
 Strict full Clippy is not green on the unchanged baseline: eleven diagnostics
 come from untouched `lattice-hermes-adapter` files, and strict runtime
@@ -32,7 +36,8 @@ come from untouched `lattice-hermes-adapter` files, and strict runtime
 
 ## Integration Status
 
-Local checkpoint is merge-candidate quality for its bounded contract and
-launcher slice, but no push or merge was authorized or performed. Broader Issue
-#4 remains in progress until live tunnel/ChatGPT/identity/reconnect evidence
-exists; production E2E additionally remains gated by TASK-037.
+Local checkpoint is merge-candidate quality for its bounded Phase 1 contract,
+launcher, and live discovery slice, but no push or merge was authorized or
+performed. Broader Issue #4 remains in progress for successful production
+invocation, per-human identity/audit, and reconnect evidence; production E2E
+additionally remains gated by TASK-037.
