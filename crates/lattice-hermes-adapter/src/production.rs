@@ -396,6 +396,18 @@ enum CodexProxyProviderLineAction {
     Drop,
 }
 
+fn emit_codex_proxy_trace(event: serde_json::Value) {
+    eprintln!("{event}");
+}
+
+fn codex_proxy_scalar_id(object: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
+    match object.get("id") {
+        Some(value) if value.is_number() || value.is_string() || value.is_null() => value.clone(),
+        Some(_) => json!("non_scalar"),
+        None => serde_json::Value::Null,
+    }
+}
+
 impl CodexProxyProviderOutputGate {
     fn ingest(&mut self, payload: &[u8]) -> HermesAdapterResult<Vec<u8>> {
         if payload.is_empty() || payload.len() > MAX_CODEX_PROXY_DATA_BYTES {
@@ -455,22 +467,63 @@ impl CodexProxyProviderOutputGate {
         let object = value
             .as_object()
             .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"))?;
-        let Some(method) = object.get("method").and_then(serde_json::Value::as_str) else {
+        let Some(method) = object
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        else {
+            emit_codex_proxy_trace(json!({
+                "component": "Hermes",
+                "direction": "codex_app_server_to_hermes",
+                "event": "codex_proxy_provider_response",
+                "has_error": object.contains_key("error"),
+                "has_id": object.contains_key("id"),
+                "has_result": object.contains_key("result"),
+                "id": codex_proxy_scalar_id(object),
+            }));
             return Ok(CodexProxyProviderLineAction::ForwardOriginal);
         };
         if object.contains_key("id") {
+            emit_codex_proxy_trace(json!({
+                "action": "reject_request",
+                "component": "Hermes",
+                "direction": "codex_app_server_to_hermes",
+                "event": "codex_proxy_provider_line",
+                "method": method.as_str(),
+            }));
             return Err(malformed("HERMES_CODEX_PROXY_PROVIDER_REQUEST_REJECTED"));
         }
-        if is_codex_proxy_ignorable_provider_notice(method) {
-            validate_codex_proxy_ignorable_provider_notice(method, object)?;
+        if is_codex_proxy_ignorable_provider_notice(method.as_str()) {
+            validate_codex_proxy_ignorable_provider_notice(method.as_str(), object)?;
+            emit_codex_proxy_trace(json!({
+                "action": "drop",
+                "component": "Hermes",
+                "direction": "codex_app_server_to_hermes",
+                "event": "codex_proxy_provider_line",
+                "method": method.as_str(),
+            }));
             return Ok(CodexProxyProviderLineAction::Drop);
         }
-        if !is_codex_proxy_hermes_notification(method) {
+        if !is_codex_proxy_hermes_notification(method.as_str()) {
+            emit_codex_proxy_trace(json!({
+                "action": "reject_notice",
+                "component": "Hermes",
+                "direction": "codex_app_server_to_hermes",
+                "event": "codex_proxy_provider_line",
+                "method": method.as_str(),
+            }));
             return Err(malformed("HERMES_CODEX_PROXY_PROVIDER_NOTICE_REJECTED"));
         }
         let keys = object.keys().map(String::as_str).collect::<HashSet<_>>();
         match keys {
             keys if keys == HashSet::from(["method", "params"]) => {
+                emit_codex_proxy_trace(json!({
+                    "action": "forward",
+                    "component": "Hermes",
+                    "direction": "codex_app_server_to_hermes",
+                    "event": "codex_proxy_provider_line",
+                    "method": method.as_str(),
+                }));
                 Ok(CodexProxyProviderLineAction::ForwardOriginal)
             }
             keys if keys == HashSet::from(["emittedAtMs", "method", "params"]) => {
@@ -488,11 +541,27 @@ impl CodexProxyProviderOutputGate {
                     .as_object_mut()
                     .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"))?
                     .remove("emittedAtMs");
+                emit_codex_proxy_trace(json!({
+                    "action": "normalize",
+                    "component": "Hermes",
+                    "direction": "codex_app_server_to_hermes",
+                    "event": "codex_proxy_provider_line",
+                    "method": method.as_str(),
+                }));
                 serde_json::to_vec(&normalized)
                     .map(CodexProxyProviderLineAction::ForwardNormalized)
                     .map_err(|_| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"))
             }
-            _ => Err(malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED")),
+            _ => {
+                emit_codex_proxy_trace(json!({
+                    "action": "reject_jsonl",
+                    "component": "Hermes",
+                    "direction": "codex_app_server_to_hermes",
+                    "event": "codex_proxy_provider_line",
+                    "method": method.as_str(),
+                }));
+                Err(malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"))
+            }
         }
     }
 
@@ -731,8 +800,23 @@ impl CodexProxyOneTurnGate {
         let line = self.pending.strip_suffix(b"\r").unwrap_or(&self.pending);
         let value: CodexProxyJsonLine = serde_json::from_slice(line)
             .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?;
+        let raw_value: serde_json::Value = serde_json::from_slice(line)
+            .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?;
+        let raw_object = raw_value
+            .as_object()
+            .ok_or_else(|| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?;
+        let input_id = codex_proxy_scalar_id(raw_object);
         if value.method.as_deref() == Some("turn/start") {
             if self.turn_start_count != 0 {
+                emit_codex_proxy_trace(json!({
+                    "action": "reject_turn_replay",
+                    "component": "Hermes",
+                    "direction": "hermes_to_codex_app_server",
+                    "event": "codex_proxy_input_line",
+                    "id": input_id,
+                    "method": "turn/start",
+                    "turn_start_count": self.turn_start_count,
+                }));
                 return Err(malformed("HERMES_CODEX_PROXY_TURN_REPLAY_REJECTED"));
             }
             self.turn_start_count = 1;
@@ -742,10 +826,31 @@ impl CodexProxyOneTurnGate {
                 .and_then(|params| params.cwd.as_deref())
             {
                 Some("/work") => true,
-                Some(_) => return Err(cross_binding("HERMES_CODEX_PROXY_CWD_REJECTED")),
+                Some(_) => {
+                    emit_codex_proxy_trace(json!({
+                        "action": "reject_cwd",
+                        "component": "Hermes",
+                        "direction": "hermes_to_codex_app_server",
+                        "event": "codex_proxy_input_line",
+                        "id": input_id,
+                        "method": "turn/start",
+                        "turn_start_count": self.turn_start_count,
+                    }));
+                    return Err(cross_binding("HERMES_CODEX_PROXY_CWD_REJECTED"));
+                }
                 None => false,
             };
             if self.output_schema.is_none() && !contained_cwd {
+                emit_codex_proxy_trace(json!({
+                    "action": "forward",
+                    "component": "Hermes",
+                    "direction": "hermes_to_codex_app_server",
+                    "event": "codex_proxy_input_line",
+                    "id": input_id,
+                    "method": "turn/start",
+                    "output_schema": false,
+                    "turn_start_count": self.turn_start_count,
+                }));
                 return Ok(None);
             };
             let mut normalized: serde_json::Value = serde_json::from_slice(line)
@@ -760,17 +865,52 @@ impl CodexProxyOneTurnGate {
             if let Some(output_schema) = &self.output_schema {
                 params.insert("outputSchema".to_owned(), output_schema.clone());
             }
+            emit_codex_proxy_trace(json!({
+                "action": "normalize",
+                "component": "Hermes",
+                "contained_cwd": contained_cwd,
+                "direction": "hermes_to_codex_app_server",
+                "event": "codex_proxy_input_line",
+                "id": input_id,
+                "method": "turn/start",
+                "output_schema": self.output_schema.is_some(),
+                "turn_start_count": self.turn_start_count,
+            }));
             return serde_json::to_vec(&normalized)
                 .map(Some)
                 .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"));
         }
         if value.method.as_deref() != Some("thread/start") {
+            emit_codex_proxy_trace(json!({
+                "action": "forward",
+                "component": "Hermes",
+                "direction": "hermes_to_codex_app_server",
+                "event": "codex_proxy_input_line",
+                "id": input_id,
+                "method": value.method.as_deref().unwrap_or("none"),
+            }));
             return Ok(None);
         }
         let Some(cwd) = value.params.and_then(|params| params.cwd) else {
+            emit_codex_proxy_trace(json!({
+                "action": "forward",
+                "component": "Hermes",
+                "direction": "hermes_to_codex_app_server",
+                "event": "codex_proxy_input_line",
+                "id": input_id,
+                "method": "thread/start",
+            }));
             return Ok(None);
         };
         if cwd != "/work" {
+            emit_codex_proxy_trace(json!({
+                "action": "reject_cwd",
+                "component": "Hermes",
+                "direction": "hermes_to_codex_app_server",
+                "event": "codex_proxy_input_line",
+                "id": input_id,
+                "method": "thread/start",
+            }));
             return Err(cross_binding("HERMES_CODEX_PROXY_CWD_REJECTED"));
         }
         let mut normalized: serde_json::Value = serde_json::from_slice(line)
@@ -780,6 +920,15 @@ impl CodexProxyOneTurnGate {
             .and_then(serde_json::Value::as_object_mut)
             .ok_or_else(|| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?
             .remove("cwd");
+        emit_codex_proxy_trace(json!({
+            "action": "normalize",
+            "component": "Hermes",
+            "contained_cwd": true,
+            "direction": "hermes_to_codex_app_server",
+            "event": "codex_proxy_input_line",
+            "id": input_id,
+            "method": "thread/start",
+        }));
         serde_json::to_vec(&normalized)
             .map(Some)
             .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))
