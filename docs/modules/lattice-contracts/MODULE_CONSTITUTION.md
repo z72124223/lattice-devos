@@ -1,10 +1,10 @@
 ---
 module_id: lattice-contracts
 name: LATTICE Shared Contracts
-version: 1.11
+version: 1.12
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-05
+last_reviewed: 2026-08-10
 ---
 
 ## Mission
@@ -46,6 +46,11 @@ their mutable domain state.
   graph record, memory persistence/retrieval, graph-memory status, and terminal
   receipt representations. These values carry provenance and digests only;
   they grant no source, database, task, policy, or release authority.
+- Immutable provider-neutral Worker Provider, Worker Instance, Work Session,
+  Activity Event, Task Binding, Process Binding, observation-source,
+  confidence, freshness, and read-only query representations. These values
+  carry bounded identities and evidence only; they own no process, session,
+  task, lease, or persistence transition.
 - Neutral bounded gateway peer, request/action payload, reply/disposition,
   stable denial, and redacted Task Spec document representations.
 - Neutral bounded Store transaction/daemon identifiers, closed repository
@@ -53,9 +58,11 @@ their mutable domain state.
   compare-and-swap head, request commitments, terminal disposition/receipt,
   explicit fake/PostgreSQL durability classification, and immutable database-
   identity/schema-manifest persistence evidence.
-- No durable or mutable project truth, credential, or provider-session data.
-  Shared receipts carry immutable identifiers and digests only; Project
-  Registry retains lifecycle and issuance ownership.
+- No durable or mutable project truth, credential, raw provider-session
+  content, or process-control authority. Shared receipts and observations
+  carry immutable bounded identifiers and digests only; Project Registry,
+  Task Domain, Task Ledger, Writer Lease, and future PostgreSQL observation
+  persistence retain their respective semantic and durable ownership.
 
 ## Public Contracts
 
@@ -84,6 +91,30 @@ their mutable domain state.
   sorted tracked-source manifest digest, pinned Graphify identity, fixed
   configuration/capability/exclusion digests, complete graph/record-set
   digests, and terminal disposition.
+- Represent providers, instances, sessions, and activity without naming Codex
+  as the platform identity. Codex, PowerShell/WSL terminals, verification
+  runners, and future tools use the same closed provider-neutral shapes.
+- Keep process lifecycle, worker-session lifecycle, LATTICE task projection,
+  and Writer Lease/runtime-admission observation in separate typed fields.
+  No constructor derives, coerces, or promotes one dimension from another.
+- Keep observation source, confidence, freshness, and observation time as
+  separate fields. Confidence must match the declared evidence class and
+  cannot upgrade process discovery into provider or LATTICE evidence.
+- Managed-process supervision may prove process lifecycle only. It cannot by
+  itself claim a running session or link a last session-activity event.
+- Permit a task binding or task projection only from a managed or formal
+  provider observation. Process-presence-only discovery cannot claim a task,
+  session progress, session/task activity meaning beyond process lifecycle,
+  or writer authority.
+- Represent process ID only as a current locator paired with optional
+  process-start evidence. Worker/session identity remains independently
+  durable; PID reuse cannot become permanent worker identity.
+- Expose only closed read-only worker/session list and status query variants.
+  The contract cannot represent pause, resume, kill, cancel, command history,
+  shell input, SQL, path selection, writable thread control, or lease claim.
+- Carry no screenshot/OCR/keylogging data, command line, shell history,
+  environment variables, prompt/conversation, raw stderr, credential, or
+  secret field in worker/session observations or activity events.
 - Represent memory records and ranked retrieval results with bounded closed
   enums, strict ordinals/ranks, exact digests, and no raw source, SQL, path
   selection, credential, provider configuration, or caller-selected MCP query.
@@ -256,6 +287,25 @@ their mutable domain state.
 38. Delivery stage and terminal evidence remain request-bound and ordered;
     scripted evidence cannot be substituted for official-live evidence, and
     reconciliation cannot be represented as completion.
+39. Worker observation representation performs no I/O and grants no process,
+    task, provider, orchestration, persistence, lease, fencing, MCP, or
+    cancellation authority.
+40. A process-presence-only or unobservable record cannot contain a task
+    binding, task state projection, Writer Lease observation, or claimed
+    session progress.
+41. Process state, work-session state, task state, and authority state remain
+    independently observable. A running process does not prove a running task
+    or session, and an exited process does not prove task completion.
+42. A task projection and Writer Lease observation must match the exact task
+    binding; carrying either value is structural read-only evidence and never
+    proves owner currentness or grants authority.
+43. Worker/session identifiers, timestamps, cursors, and event sequences are
+    bounded for PostgreSQL-safe persistence; source, confidence, freshness,
+    unknown, stale, and unobservable remain explicit rather than inferred as
+    success or failure.
+44. Worker observation types contain no raw command, terminal content,
+    environment, prompt, conversation, stderr, credential, secret, screen,
+    input-monitoring, or arbitrary path field.
 
 ## Allowed Dependencies
 
@@ -268,7 +318,10 @@ their mutable domain state.
 
 ## Failure, Compatibility, And Migration
 
-Invalid values return typed construction errors. Version 1.10 preserves every
+Invalid values return typed construction errors. Version 1.12 preserves every
+1.11 contract and adds provider-neutral, read-only worker/session observation
+representations without I/O, persistence, task transitions, process control,
+or lease authority. Version 1.10 preserves every
 1.9 contract and adds typed delivery request/stage/outcome/status/receipt
 representation without I/O or authority. Version 1.9 preserves v1
 fake-only request/receipt compatibility and adds v2 live/durable PostgreSQL
@@ -308,6 +361,7 @@ constitution amendment plus compatibility evidence.
 | Gateway boundary/substitution matrix | identifier and digest bounds, request/reply variant binding, page limit, role-before-replay, and fake replay capacity | Security review | yes |
 | Store transaction/substitution matrix | identifier/scope/digest/revision/runtime/durability and complete receipt-field checks | Security review | yes |
 | Delivery request/evidence matrix | binding/digest/stage/order/runtime/status substitution plus prohibited-input construction tests | Security review | yes |
+| Worker/session observation matrix | provider neutrality, ownership/visibility, source/confidence/freshness, process/session/task/authority separation, process-only downgrade, prohibited-data shape, and closed read-only query tests | Security review | yes |
 | Dependency inspection | Cargo metadata shows no dependencies | Architecture review | yes |
 | Full Rust verification | workspace format, lint, and tests | Engineering | yes |
 
@@ -331,3 +385,5 @@ a versioned amendment, SPEC-002 trace, architecture review, and user approval.
 | 1.8 | 2026-08-01 | SPEC-002 v15, ADR-016, TASK-018 | Neutral typed Store transaction, daemon authority, physical head, commitments, terminal receipt, and explicit non-durable fake representation | User MVP-3 execution directive |
 | 1.9 | 2026-08-02 | SPEC-002 v22, ADR-018, TASK-020 | Preserve Store v1 fake-only compatibility and add v2 live PostgreSQL durability plus database/schema persistence evidence | User MVP-3 execution directive |
 | 1.10 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Immutable typed delivery request, ordered stage evidence, terminal status/outcome, and receipt representations without caller command/path/credential escape hatches | User approval in preceding implementation window |
+| 1.11 | 2026-08-05 | SPEC-002 v27, ADR-022, TASK-033 | Exact tracked-source, Graphify, Memory analysis, record, retrieval, status, and receipt values without new authority or caller-selected input | User-approved TASK-033 implementation |
+| 1.12 | 2026-08-10 | GitHub Issue #6, TASK-048 | Provider-neutral Worker Provider/Instance, Work Session, Activity Event, Task/Process Binding, separated state/evidence dimensions, and closed read-only query representations | User-authoritative Issue #6 directive |
