@@ -803,6 +803,9 @@
       "id": "verified-current-allows",
       "observation": {
         "evidence_state": "VERIFIED",
+        "value": {
+          "present": true
+        },
         "freshness": {
           "state": "CURRENT",
           "valid_until": "2026-08-11T02:00:00+08:00"
@@ -817,6 +820,9 @@
       "id": "verified-pinned-allows",
       "observation": {
         "evidence_state": "VERIFIED",
+        "value": {
+          "present": true
+        },
         "freshness": {
           "state": "PINNED",
           "valid_until": null
@@ -831,6 +837,7 @@
       "id": "unknown-blocks",
       "observation": {
         "evidence_state": "UNKNOWN",
+        "value": null,
         "freshness": {
           "state": "CURRENT",
           "valid_until": "2026-08-11T02:00:00+08:00"
@@ -845,6 +852,7 @@
       "id": "unverified-blocks",
       "observation": {
         "evidence_state": "UNVERIFIED",
+        "value": null,
         "freshness": {
           "state": "CURRENT",
           "valid_until": "2026-08-11T02:00:00+08:00"
@@ -859,6 +867,9 @@
       "id": "stale-blocks",
       "observation": {
         "evidence_state": "VERIFIED",
+        "value": {
+          "present": true
+        },
         "freshness": {
           "state": "STALE",
           "valid_until": "2026-08-09T02:00:00+08:00"
@@ -873,6 +884,9 @@
       "id": "unknown-freshness-blocks",
       "observation": {
         "evidence_state": "VERIFIED",
+        "value": {
+          "present": true
+        },
         "freshness": {
           "state": "UNKNOWN",
           "valid_until": null
@@ -887,6 +901,9 @@
       "id": "current-expired-blocks",
       "observation": {
         "evidence_state": "VERIFIED",
+        "value": {
+          "present": true
+        },
         "freshness": {
           "state": "CURRENT",
           "valid_until": "2026-08-09T02:00:00+08:00"
@@ -901,6 +918,9 @@
       "id": "current-missing-expiry-blocks",
       "observation": {
         "evidence_state": "VERIFIED",
+        "value": {
+          "present": true
+        },
         "freshness": {
           "state": "CURRENT",
           "valid_until": null
@@ -910,8 +930,123 @@
         "disposition": "BLOCK",
         "reason_code": "ROUTE_CAPABILITY_EVIDENCE_STALE"
       }
+    },
+    {
+      "id": "verified-null-blocks",
+      "observation": {
+        "evidence_state": "VERIFIED",
+        "value": null,
+        "freshness": {
+          "state": "CURRENT",
+          "valid_until": "2026-08-11T02:00:00+08:00"
+        }
+      },
+      "expected": {
+        "disposition": "BLOCK",
+        "reason_code": "ROUTE_CAPABILITY_EVIDENCE_MISSING"
+      }
     }
   ],
+  "actual_evidence_cases": [
+    {
+      "id": "runtime-actual-allows",
+      "requested": {
+        "model_id": "requested-model"
+      },
+      "resolved": {
+        "model_id": "resolved-model"
+      },
+      "actual": {
+        "model_id": "observed-model",
+        "evidence_state": "VERIFIED",
+        "source_ref": "runtime:thread-start-result"
+      },
+      "expected": {
+        "disposition": "ALLOW",
+        "reason_code": "ROUTE_CAPABILITY_MATCH"
+      }
+    },
+    {
+      "id": "missing-actual-blocks-with-requested-resolved-present",
+      "requested": {
+        "model_id": "requested-model"
+      },
+      "resolved": {
+        "model_id": "resolved-model"
+      },
+      "actual": null,
+      "expected": {
+        "disposition": "BLOCK",
+        "reason_code": "ROUTE_ACTUAL_SETTING_MISMATCH"
+      }
+    },
+    {
+      "id": "requested-substitution-blocks",
+      "requested": {
+        "model_id": "requested-model"
+      },
+      "resolved": {
+        "model_id": "resolved-model"
+      },
+      "actual": {
+        "model_id": "requested-model",
+        "evidence_state": "VERIFIED",
+        "source_ref": "requested:model_id"
+      },
+      "expected": {
+        "disposition": "BLOCK",
+        "reason_code": "ROUTE_ACTUAL_SETTING_MISMATCH"
+      }
+    },
+    {
+      "id": "resolved-substitution-blocks",
+      "requested": {
+        "model_id": "requested-model"
+      },
+      "resolved": {
+        "model_id": "resolved-model"
+      },
+      "actual": {
+        "model_id": "resolved-model",
+        "evidence_state": "VERIFIED",
+        "source_ref": "resolved:model_id"
+      },
+      "expected": {
+        "disposition": "BLOCK",
+        "reason_code": "ROUTE_ACTUAL_SETTING_MISMATCH"
+      }
+    },
+    {
+      "id": "unknown-actual-blocks",
+      "requested": {
+        "model_id": "requested-model"
+      },
+      "resolved": {
+        "model_id": "resolved-model"
+      },
+      "actual": {
+        "model_id": "observed-model",
+        "evidence_state": "UNKNOWN",
+        "source_ref": "runtime:thread-start-result"
+      },
+      "expected": {
+        "disposition": "BLOCK",
+        "reason_code": "ROUTE_ACTUAL_SETTING_MISMATCH"
+      }
+    }
+  ],
+  "actual_origin_policy": {
+    "allowed_source_prefixes": [
+      "provider:",
+      "runtime:"
+    ],
+    "forbidden_source_prefixes": [
+      "requested:",
+      "resolved:"
+    ],
+    "missing_actual_disposition": "BLOCK",
+    "substitution_reason_code": "ROUTE_ACTUAL_SETTING_MISMATCH"
+  },
   "governance_profiles": [
     {
       "name": "守望",
@@ -1068,6 +1203,10 @@
         "max_escalations"
       ],
       "immutable_boundary_fields": [
+        "task_classes",
+        "required_tools",
+        "input_modalities",
+        "output_modalities",
         "governance_profile",
         "risk_class",
         "quality_floor",

@@ -281,6 +281,12 @@ function evidenceDecision(observation) {
       reason_code: "ROUTE_CAPABILITY_EVIDENCE_MISSING",
     };
   }
+  if (observation.value === null || observation.value === undefined) {
+    return {
+      disposition: "BLOCK",
+      reason_code: "ROUTE_CAPABILITY_EVIDENCE_MISSING",
+    };
+  }
   if (observation.freshness.state === "PINNED") {
     return { disposition: "ALLOW", reason_code: "ROUTE_CAPABILITY_MATCH" };
   }
@@ -296,6 +302,25 @@ function evidenceDecision(observation) {
     };
   }
   return { disposition: "ALLOW", reason_code: "ROUTE_CAPABILITY_MATCH" };
+}
+
+function actualEvidenceDecision({ actual }) {
+  if (
+    !actual ||
+    actual.evidence_state !== "VERIFIED" ||
+    typeof actual.model_id !== "string" ||
+    actual.model_id.length === 0 ||
+    !/^(?:provider|runtime):/u.test(actual.source_ref ?? "")
+  ) {
+    return {
+      disposition: "BLOCK",
+      reason_code: "ROUTE_ACTUAL_SETTING_MISMATCH",
+    };
+  }
+  return {
+    disposition: "ALLOW",
+    reason_code: "ROUTE_CAPABILITY_MATCH",
+  };
 }
 
 function assertTypedObservationValue(observation) {
@@ -333,6 +358,13 @@ const forbiddenNormalizedKeys = new Set([
   "authtoken",
   "bearertoken",
   "tokenvalue",
+  "token",
+  "tokens",
+  "apitoken",
+  "sessiontoken",
+  "githubtoken",
+  "idtoken",
+  "personalaccesstoken",
   "authorization",
   "proxyauthorization",
   "cookie",
@@ -371,6 +403,10 @@ const forbiddenNormalizedKeys = new Set([
 const sensitiveValuePatterns = [
   /\bsk-[A-Za-z0-9_-]{12,}\b/,
   /\bBearer\s+[A-Za-z0-9._~-]{12,}\b/i,
+  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/,
+  /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/,
+  /\bAIza[0-9A-Za-z_-]{20,}\b/,
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
   /\b(?:api[_-]?key|password|passwd|secret)\s*[:=]\s*[^\s,]{6,}/i,
 ];
@@ -381,6 +417,7 @@ function isForbiddenEvidenceKey(normalizedKey) {
     /(?:credential|secret|password|passwd)/u.test(normalizedKey) ||
     /^(?:api)?key(?:value)?$/u.test(normalizedKey) ||
     /(?:access|refresh|auth|bearer)token/u.test(normalizedKey) ||
+    /token(?:s|value|data)?$/u.test(normalizedKey) ||
     /(?:raw|full|private|system|developer|user)prompt/u.test(normalizedKey) ||
     /prompt(?:content|payload|text|body|messages)$/u.test(normalizedKey) ||
     /(?:hidden|private|raw)reasoning/u.test(normalizedKey) ||
@@ -485,6 +522,7 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
         );
       }
       if (observation.evidence_state === "VERIFIED") {
+        assert.notEqual(observation.value, null);
         assert.ok(["CURRENT", "PINNED"].includes(observation.freshness.state));
       }
     }
@@ -520,6 +558,7 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
       "unknown-freshness-blocks",
       "current-expired-blocks",
       "current-missing-expiry-blocks",
+      "verified-null-blocks",
     ],
   );
   assert.deepEqual(
@@ -550,6 +589,10 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
     assert.deepEqual(fixture.evidence_shape[stage].required_fields, fields);
   }
   assert.deepEqual(fixture.evidence_shape.requested.immutable_boundary_fields, [
+    "task_classes",
+    "required_tools",
+    "input_modalities",
+    "output_modalities",
     "governance_profile",
     "risk_class",
     "quality_floor",
@@ -562,6 +605,49 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
     "escalation_allowed",
     "max_escalations",
   ]);
+  assert.equal(
+    fixture.evidence_shape.actual.rule,
+    "Only runtime or provider evidence populates actual values. Missing fields stay UNKNOWN and never inherit requested or resolved values.",
+  );
+  assert.deepEqual(fixture.actual_origin_policy, {
+    allowed_source_prefixes: ["provider:", "runtime:"],
+    forbidden_source_prefixes: ["requested:", "resolved:"],
+    missing_actual_disposition: "BLOCK",
+    substitution_reason_code: "ROUTE_ACTUAL_SETTING_MISMATCH",
+  });
+  assert.deepEqual(
+    fixture.actual_evidence_cases.map((characterizationCase) =>
+      actualEvidenceDecision(characterizationCase),
+    ),
+    fixture.actual_evidence_cases.map(({ expected }) => expected),
+  );
+  assert.deepEqual(
+    fixture.actual_evidence_cases.map(({ id }) => id),
+    [
+      "runtime-actual-allows",
+      "missing-actual-blocks-with-requested-resolved-present",
+      "requested-substitution-blocks",
+      "resolved-substitution-blocks",
+      "unknown-actual-blocks",
+    ],
+  );
+  for (const stage of ["requested", "resolved"]) {
+    for (const field of expectedEvidenceFields.actual) {
+      assert.deepEqual(
+        actualEvidenceDecision({
+          actual: {
+            model_id: "copied-value",
+            evidence_state: "VERIFIED",
+            source_ref: `${stage}:${field}`,
+          },
+        }),
+        {
+          disposition: "BLOCK",
+          reason_code: "ROUTE_ACTUAL_SETTING_MISMATCH",
+        },
+      );
+    }
+  }
 
   assert.deepEqual(fixture.reason_codes, expectedReasonCodes);
   assert.equal(
@@ -643,6 +729,10 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
     "apiKey",
     "credentials",
     "access_token",
+    "token",
+    "apiToken",
+    "sessionToken",
+    "githubToken",
     "authorization",
     "privateKey",
     "prompt",
@@ -663,6 +753,8 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
     "Bearer " + "examplecredential123456",
     "-----BEGIN " + "PRIVATE KEY-----",
     "password" + "=examplecredential",
+    "ghp_" + "examplecredential1234567890",
+    "xoxb-" + "examplecredential1234567890",
   ]) {
     assert.throws(
       () => assertNoSensitivePayload({ note: value }),
