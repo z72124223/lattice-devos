@@ -69,8 +69,10 @@ Workspace: expected clean after the handoff commit.
    needed; do not persist raw stderr, credentials, prompts, or URLs.
 3. Apply the minimum fix, run focused tests, then run the formal verifier once.
    Query post-Run Memory and Status only if Run succeeds.
-4. Keep the proposed GPT Web UI -> LATTICE MCP interface deferred until
-   TASK-037 has trustworthy full-chain PASS evidence.
+4. TASK-038 may proceed through MCP compatibility, bounded transport/adapter,
+   identity, and contract-test work before TASK-037 passes. Its Phase 1
+   decision is recorded in `docs/roadmap/TASK-038-MCP-COMPATIBILITY.md`.
+   TASK-037 remains the production end-to-end acceptance gate only.
 
 Historical sections below are preserved; this section is the authoritative
 cross-session handoff.

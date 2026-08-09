@@ -30,8 +30,9 @@ Remote checkpoint `dba4ebe` was preserved by synchronization merge
 Workspace: expected clean after the handoff commit (2026-08-09)
 
 Current Goal:
-- Complete TASK-037 formal `Hermes -> Memory -> Status` acceptance without
-  weakening One Gateway, One Truth, or One Writer.
+- Complete TASK-038 Phase 1 MCP compatibility work and the subsequent bounded
+  GPT Web gateway implementation without weakening One Gateway, One Truth, or
+  One Writer. TASK-037 remains the production end-to-end acceptance gate only.
 
 Completed:
 - Added a clean-copy TASK-037 verifier and nineteen bounded implementation
@@ -52,10 +53,17 @@ In Progress:
 - Run did not reach post-Run Memory persistence/readback or Status success.
 
 Next:
+- Use `docs/roadmap/TASK-038-MCP-COMPATIBILITY.md` as the Phase 1 transport
+  decision: keep `latticed` as the private stdio server and use Secure MCP
+  Tunnel as the thin ChatGPT-facing transport bridge. Do not expose a public
+  listener or alter Rust task semantics.
+- Before Phase 2 adapter/tool-contract work, reconcile the documented
+  zero-parameter MCP schema with the current fixed typed-binding schema; this
+  is a contract-drift decision, not permission to add caller-selected inputs.
 - Diagnose the redacted broker child exit without exposing raw stderr or
   credentials, apply the minimum fix, run focused checks, then perform one
-  formal verifier run. Status may run only after a successful Run.
-- Defer the proposed GPT Web UI -> LATTICE MCP interface until TASK-037 passes.
+  formal verifier run. TASK-037 PASS remains required before production
+  `Hermes -> Memory -> Status` completion is claimed.
 
 Blocked / Known Issues:
 - Exact child-exit cause remains unproven. Redacted stderr evidence is 354 bytes
