@@ -736,9 +736,10 @@ fn delivery_environment()
 /// Returns a bounded startup/configuration or transport failure.
 pub fn serve_stdio_from_environment() -> Result<(), LatticedError> {
     let service = LatticedDeliveryService::from_environment()?;
+    let binding = fixed_gateway_submission()?.binding().clone();
     let input = io::stdin();
     let output = io::stdout();
-    mcp::serve(service, input.lock(), output.lock())
+    mcp::serve(service, binding, input.lock(), output.lock())
         .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))
 }
 
@@ -1592,6 +1593,7 @@ where
     H: FullChainHermesPort + 'static,
 {
     mcp_service: FullChainService<H>,
+    mcp_binding: SubjectBinding,
     openclaw_server: OpenClawGatewayServer<FullChainService<H>>,
 }
 
@@ -1605,9 +1607,10 @@ where
         self,
     ) -> (
         FullChainService<H>,
+        SubjectBinding,
         OpenClawGatewayServer<FullChainService<H>>,
     ) {
-        (self.mcp_service, self.openclaw_server)
+        (self.mcp_service, self.mcp_binding, self.openclaw_server)
     }
 }
 
@@ -1661,7 +1664,7 @@ pub fn serve_full_chain_runtime<H>(runtime: FullChainRuntime<H>) -> Result<(), L
 where
     H: FullChainHermesPort + 'static,
 {
-    let (mcp_service, openclaw_server) = runtime.into_parts();
+    let (mcp_service, mcp_binding, openclaw_server) = runtime.into_parts();
     let endpoint = openclaw_server
         .local_addr()
         .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
@@ -1689,7 +1692,7 @@ where
     );
     let input = io::stdin();
     let output = io::stdout();
-    mcp::serve(mcp_service, input.lock(), output.lock())
+    mcp::serve(mcp_service, mcp_binding, input.lock(), output.lock())
         .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))
 }
 
@@ -1817,6 +1820,7 @@ where
         ));
     }
     let submission = fixed_gateway_submission()?;
+    let mcp_binding = submission.binding().clone();
     let openclaw_config = openclaw_config
         .with_frozen_submission(submission.clone())
         .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
@@ -1846,6 +1850,7 @@ where
     .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
     Ok(FullChainRuntime {
         mcp_service,
+        mcp_binding,
         openclaw_server,
     })
 }

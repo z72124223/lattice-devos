@@ -16,13 +16,6 @@ $openClawEntrypointSha256 = 'f643b005d6db233a0b45204e8d8e943256874ccc6897b8a6e0c
 $openClawVersion = '2026.7.1-2'
 $hermesRuntimeGuestRoot = '/var/tmp/lattice-runtime-targets/hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-errorfix-v1'
 $hermesRuntimeManifestSha256 = 'e3a3272b6cead30cd2df1af755df031766475595fdacfb080d0886671b6d1fbb'
-$taskBinding = [ordered]@{
-    project_id = 'task032-delivery'
-    project_snapshot_id = 'task032-delivery:snapshot:1'
-    task_id = 'TASK-032'
-    revision = '1'
-    task_spec_digest = 'b70aa1a7445ea7e7ebe466154d13ea1039f963b5ac4ffe1f7d5094dd8c949e0e'
-}
 $deliveryConfigBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((@(
     'approval_policy = "never"',
     'sandbox_mode = "workspace-write"',
@@ -593,7 +586,7 @@ function Get-McpInputBytes {
             method = 'tools/call'
             params = [ordered]@{
                 name = $ToolName
-                arguments = $taskBinding
+                arguments = [ordered]@{}
             }
         }
     )

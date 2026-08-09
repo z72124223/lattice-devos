@@ -1,5 +1,88 @@
 # Current GitHub Handoff — 2026-08-09
 
+Status: `DONE` for the bounded SPEC-003 local MCP checkpoint; GitHub Issue #4
+remains `IN_PROGRESS` for identity and live ChatGPT evidence. TASK-037 gates
+only production `Hermes -> Memory -> Status` E2E.
+
+Repository: `z72124223/lattice-devos`<br>
+Branch: `feature/task-038-chatgpt-mcp`<br>
+Upstream: none; not pushed<br>
+Base: local Phase 1 checkpoint `845328d`<br>
+Worktree:
+`C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\chatgpt-mcp`
+
+## TASK-038 Delivered
+
+- Restored exactly two closed zero-argument MCP schemas. Empty or omitted
+  arguments dispatch with the immutable binding injected by composition; the
+  retired five fields, prohibited properties, and non-object inputs fail with
+  `-32602` before service dispatch.
+- Updated the TASK-037 verifier to call both tools with `{}` while preserving
+  all production gates.
+- Added a Windows operator entrypoint for official Secure MCP Tunnel
+  `init`/`doctor`/`run`. It accepts no credential or generic command, rejects
+  unsafe paths and IDs, requires `CONTROL_PLANE_API_KEY` for run, and preserves
+  fixed redacted failures.
+- Added a closed child-environment boundary. Tests inject 58 hostile
+  tunnel/MCP/control/log/health/UI/profile/proxy/certificate overrides, prove
+  all are absent from the child, preserve one `LATTICE_*` canary, and prove the
+  parent environment is restored.
+- Official `tunnel-client` v0.0.11 Windows amd64 was verified in ignored build
+  output against SHA-256
+  `eb912c86c6ccde90cda805cb17009507176a656725cf86c36fabe1901a12e29b`.
+  Isolated profile creation for the real built `latticed.exe` passed and stored
+  only an environment-key reference. `doctor --explain` then failed closed
+  because the runtime key is absent.
+
+## Current Verification
+
+- `cargo test -p lattice-runtime --locked`: 43 unit, 8 composition, 5 dispatch,
+  and 12 MCP tests passed.
+- The real binary test performs initialize/list plus run `{}` and status with
+  omitted arguments; both pass binding validation before the intentionally
+  unavailable database returns a bounded error.
+- `npm.cmd run verify`: project check passed with 416 files, 24 constitutions,
+  25 tickets, one current task; Node tests 44/44 passed.
+- Tunnel hostile-environment harness, PowerShell AST parse, Rust format, and
+  `git diff --check`: passed.
+- Scoped strict Clippy passes with the exact unchanged `manual_inspect`
+  exception. Baseline-wide strict Clippy separately reproduces eleven untouched
+  Hermes lints plus the unchanged runtime lint; TASK-038 adds no warning.
+- Independent code and architecture reviews pass with P0-P3 = 0; no
+  constitution or ADR amendment is required for this correction.
+
+## True Remaining Gates
+
+- No real tunnel ID, `CONTROL_PLANE_API_KEY`, Tunnels Read+Use permission,
+  ChatGPT developer-mode workspace association, `/readyz` 200, or ChatGPT
+  discovery/invoke evidence exists.
+- Official stdio binding has no HTTP MCP session ID or connector bearer header.
+  The current tunnel/profile therefore maps to one fixed subject; per-human
+  actor/session authorization, durable audit correlation, per-actor rate
+  limiting, and live reconnect evidence are not complete.
+- A future authenticated loopback HTTP adapter would be a new listener and
+  public-contract boundary. It needs versioned SPEC/ADR/constitution review;
+  caller-declared identity cannot become authority.
+- TASK-037 production acceptance was not retried. The existing redacted Hermes
+  child-exit blocker is unchanged.
+- No CI, push, primary-branch merge, deployment, or release was performed.
+
+## Exact Next Action
+
+1. Decide the identity boundary: one fixed tunnel/profile gateway actor with
+   narrow policy, or an authenticated loopback HTTP adapter with a versioned
+   architecture change.
+2. Once real workspace/tunnel permission, tunnel ID, and runtime key are
+   available, create the real profile, run `doctor`, start the daemon, require
+   `/readyz` 200, and verify ChatGPT discovers/invokes both bounded tools.
+3. Prove interruption/restart behavior and the selected actor/audit boundary.
+4. Resume TASK-037 only for the production E2E completion gate.
+
+The section below preserves the TASK-037 production incident state. This top
+section is the authoritative cross-session handoff.
+
+# TASK-037 Production Gate Handoff — 2026-08-09
+
 Status: `NEEDS_REVIEW` for TASK-037. The formal
 `Hermes -> Memory -> Status` acceptance has not passed.
 
@@ -74,8 +157,8 @@ Workspace: expected clean after the handoff commit.
    decision is recorded in `docs/roadmap/TASK-038-MCP-COMPATIBILITY.md`.
    TASK-037 remains the production end-to-end acceptance gate only.
 
-Historical sections below are preserved; this section is the authoritative
-cross-session handoff.
+Historical TASK-037 sections below are preserved for incident diagnosis; the
+TASK-038 section at the top is the authoritative cross-session handoff.
 
 # LATTICE DevOS TASK-033 Graphify/PostgreSQL Memory Checkpoint Handoff
 

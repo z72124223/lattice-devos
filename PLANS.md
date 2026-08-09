@@ -22,17 +22,22 @@ GitHub URL: `https://github.com/z72124223/lattice-devos`<br>
 Remote: `origin` -> `https://github.com/z72124223/lattice-devos.git`<br>
 Default branch: not established; remote HEAD is currently
 `feature/task-037-full-chain-integration`<br>
-Current branch: `feature/task-037-full-chain-integration`<br>
-Upstream: `origin/feature/task-037-full-chain-integration`<br>
-Implementation checkpoint: `90f44cc17b5c60a339a59926709e8672f576ec29`<br>
-Remote checkpoint `dba4ebe` was preserved by synchronization merge
-`8898a79b10bdc60bee47c45d62a0794dd4cfe408`.<br>
-Workspace: expected clean after the handoff commit (2026-08-09)
+Current branch: `feature/task-038-chatgpt-mcp`<br>
+Upstream: none; this branch has not been pushed<br>
+Base checkpoint: local Phase 1 commit `845328d`<br>
+Latest fetched TASK-037 remote head: `8828d2b`<br>
+Workspace: expected clean after the TASK-038 checkpoint commit (2026-08-09)
 
 Current Goal:
 - Complete TASK-038 Phase 1 MCP compatibility work and the subsequent bounded
   GPT Web gateway implementation without weakening One Gateway, One Truth, or
   One Writer. TASK-037 remains the production end-to-end acceptance gate only.
+
+CURRENT TASK-038 — restore the approved zero-argument `latticed` MCP contract,
+inject the immutable binding from composition, and add the credential-free
+Secure MCP Tunnel operator entrypoint defined by SPEC-003/TASK-038. The local
+implementation, regression gates, and independent reviews pass. Broader Issue
+#4 identity and live-connection work remains in progress.
 
 Completed:
 - Added a clean-copy TASK-037 verifier and nineteen bounded implementation
@@ -43,6 +48,10 @@ Completed:
   pass (8 passed), format passes, and `git diff --check` passes.
 - Latest acceptance proves correct repository/branch/HEAD binding, a clean
   starting tree, fail-closed pre-status, and an empty Memory baseline.
+- TASK-038 restored the exact two zero-argument MCP schemas, injected the fixed
+  binding from composition, added the bounded tunnel launcher, isolated 58
+  hostile child-environment overrides, and passed independent code and
+  architecture review with P0-P3 = 0.
 
 In Progress:
 - Formal acceptance remains `NEEDS_REVIEW`. Latest evidence is
@@ -51,15 +60,18 @@ In Progress:
   then exited with fixed code `HERMES_PRODUCTION_CHILD_EXITED`. The outer Run
   returned `LATTICE_HERMES_REFLECTION_REJECTED` with `tool_is_error=true`.
 - Run did not reach post-Run Memory persistence/readback or Status success.
+- No real tunnel ID/runtime key/workspace was available, and direct stdio has
+  no per-human HTTP session/bearer identity. Live discovery/invoke, actor/session
+  authorization, durable audit correlation, per-actor rate limiting, and safe
+  reconnect evidence remain open.
 
 Next:
-- Use `docs/roadmap/TASK-038-MCP-COMPATIBILITY.md` as the Phase 1 transport
-  decision: keep `latticed` as the private stdio server and use Secure MCP
-  Tunnel as the thin ChatGPT-facing transport bridge. Do not expose a public
-  listener or alter Rust task semantics.
-- Before Phase 2 adapter/tool-contract work, reconcile the documented
-  zero-parameter MCP schema with the current fixed typed-binding schema; this
-  is a contract-drift decision, not permission to add caller-selected inputs.
+- Decide the next identity slice explicitly: one fixed tunnel/profile gateway
+  actor with narrow policy, or a versioned authenticated loopback HTTP adapter.
+  Caller-declared identity cannot become authority.
+- When real Tunnels Read+Use, workspace association, tunnel ID, and runtime key
+  exist, run `doctor`, require `/readyz` 200, then verify ChatGPT discovery and
+  both bounded calls. Do not treat local `doctor` or `/healthz` as readiness.
 - Diagnose the redacted broker child exit without exposing raw stderr or
   credentials, apply the minimum fix, run focused checks, then perform one
   formal verifier run. TASK-037 PASS remains required before production
@@ -71,11 +83,15 @@ Blocked / Known Issues:
   `9dc173682b03ca48eaa6e2f1deb5706d4a7a265e4f9bfb4cc4a60ac80ed9797f`.
 - Failure isolation roots are retained; process/listener/profile/temp-home
   cleanup completed, but success-only isolation cleanup did not apply.
+- `CONTROL_PLANE_API_KEY`, real tunnel identity, ChatGPT developer-mode
+  workspace association, and Tunnels Read+Use were not present for live proof.
+- Direct stdio cannot by itself convey per-user MCP session or OAuth bearer
+  identity; that blocks declaring the broad Phase 2/4 gateway complete.
 - No remote default/main branch is established. Existing README and historical
   handoff sections are stale; this current section is authoritative.
 
 Relevant Issues / PRs:
-- None created yet.
+- GitHub Issue #4: `TASK-038 — GPT Web UI ↔ LATTICE MCP Gateway Interface`.
 
 ## User Execution Preference — 2026-07-29
 
@@ -825,7 +841,7 @@ remain future Orchestrator/PostgreSQL responsibilities.
   handoff are complete. The official-live acceptance substep remains blocked by
   the incident gate above and must not be retried in this window; TASK-032 stays
   `in-progress` with official acceptance `FAILED_DIAGNOSTIC`.
-- [ ] **CURRENT TASK-033 — full-chain Steps 9/10 continuation:** the exact
+- [ ] **TASK-033 historical full-chain Steps 9/10 continuation:** the exact
   Graphify/PostgreSQL Codebase Memory checkpoint is complete and remains the
   control. The current step persists a typed Hermes `INFERENCE/CANDIDATE`
   reflection through the same `postgres-codebase-memory` owner and proves fresh

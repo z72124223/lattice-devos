@@ -465,9 +465,10 @@ fn real_latticed_binary_serves_only_the_two_bounded_tools() {
         .env("LATTICE_DELIVERY_ROOT", r"C:\delivery\root")
         .env("LATTICE_DELIVERY_GIT_EXE", r"C:\tools\git.exe")
         .env("LATTICE_TASK019_HOST", "127.0.0.1")
-        .env("LATTICE_TASK019_PORT", "55432")
+        .env("LATTICE_TASK019_PORT", "1")
         .env("LATTICE_TASK019_RUN_ID", "0123456789abcdef0123456789abcdef")
         .env("LATTICE_TASK019_PASSWORD", "test-password")
+        .env("LATTICE_DELIVERY_TIMEOUT_SECONDS", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -481,7 +482,9 @@ fn real_latticed_binary_serves_only_the_two_bounded_tools() {
             concat!(
                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n",
                 "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n"
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n",
+                "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"lattice_delivery_run\",\"arguments\":{}}}\n",
+                "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"lattice_delivery_status\"}}\n"
             )
             .as_bytes(),
         )
@@ -495,7 +498,7 @@ fn real_latticed_binary_serves_only_the_two_bounded_tools() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("JSON-RPC response"))
         .collect::<Vec<_>>();
-    assert_eq!(responses.len(), 2);
+    assert_eq!(responses.len(), 4);
     assert_eq!(responses[0]["result"]["capabilities"], json!({"tools": {}}));
     let tools = responses[1]["result"]["tools"]
         .as_array()
@@ -508,17 +511,16 @@ fn real_latticed_binary_serves_only_the_two_bounded_tools() {
         ["lattice_delivery_run", "lattice_delivery_status"]
     );
     for tool in tools {
-        assert_eq!(tool["inputSchema"]["type"], "object");
-        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
         assert_eq!(
-            tool["inputSchema"]["required"],
-            json!([
-                "project_id",
-                "project_snapshot_id",
-                "task_id",
-                "revision",
-                "task_spec_digest"
-            ])
+            tool["inputSchema"],
+            json!({"type":"object","additionalProperties":false})
+        );
+    }
+    for response in &responses[2..] {
+        assert_eq!(response["result"]["isError"], true);
+        assert_ne!(
+            response["result"]["structuredContent"]["code"],
+            "LATTICE_FULL_CHAIN_BINDING_REJECTED"
         );
     }
 }

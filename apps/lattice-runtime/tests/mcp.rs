@@ -16,26 +16,27 @@ struct FakeService {
 }
 
 impl DeliveryToolService for FakeService {
-    fn run(&mut self, _arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+    fn run(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        assert_eq!(arguments.binding(), fixed_binding());
         self.run_calls.set(self.run_calls.get() + 1);
         Ok(json!({"status": "COMPLETED", "kind": "run"}))
     }
 
-    fn status(&mut self, _arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+    fn status(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        assert_eq!(arguments.binding(), fixed_binding());
         self.status_calls.set(self.status_calls.get() + 1);
         Ok(json!({"status": "COMPLETED", "kind": "status"}))
     }
 }
 
-fn tool_arguments() -> Value {
-    let submission = fixed_gateway_submission().expect("fixed full-chain submission");
-    let binding = submission.binding();
-    json!({
-        "project_id": binding.project_id().as_str(),
-        "project_snapshot_id": binding.project_snapshot_id().as_str(),
-        "task_id": binding.task_id().as_str(),
-        "revision": binding.task_revision(),
-        "task_spec_digest": binding.task_spec_digest().as_str(),
+fn fixed_binding() -> &'static lattice_contracts::SubjectBinding {
+    static BINDING: std::sync::OnceLock<lattice_contracts::SubjectBinding> =
+        std::sync::OnceLock::new();
+    BINDING.get_or_init(|| {
+        fixed_gateway_submission()
+            .expect("fixed full-chain submission")
+            .binding()
+            .clone()
     })
 }
 
@@ -46,7 +47,11 @@ fn server() -> (McpServer<FakeService>, Rc<Cell<u32>>, Rc<Cell<u32>>) {
         run_calls: run_calls.clone(),
         status_calls: status_calls.clone(),
     };
-    (McpServer::new(service), run_calls, status_calls)
+    (
+        McpServer::new(service, fixed_binding().clone()),
+        run_calls,
+        status_calls,
+    )
 }
 
 fn initialize(server: &mut McpServer<FakeService>) {
@@ -75,7 +80,7 @@ fn initialize(server: &mut McpServer<FakeService>) {
 }
 
 #[test]
-fn tool_list_is_exactly_two_closed_typed_binding_tools() {
+fn tool_list_is_exactly_two_closed_zero_argument_tools() {
     let (mut server, _, _) = server();
     initialize(&mut server);
 
@@ -92,48 +97,33 @@ fn tool_list_is_exactly_two_closed_typed_binding_tools() {
             .collect::<Vec<_>>(),
         ["lattice_delivery_run", "lattice_delivery_status"]
     );
-    let expected_arguments = tool_arguments();
     for tool in tools {
-        let schema = &tool["inputSchema"];
-        assert_eq!(schema["type"], "object");
-        assert_eq!(schema["additionalProperties"], false);
         assert_eq!(
-            schema["required"],
-            json!([
-                "project_id",
-                "project_snapshot_id",
-                "task_id",
-                "revision",
-                "task_spec_digest"
-            ])
+            tool["inputSchema"],
+            json!({"type":"object","additionalProperties":false})
         );
-        for field in [
-            "project_id",
-            "project_snapshot_id",
-            "task_id",
-            "revision",
-            "task_spec_digest",
-        ] {
-            assert_eq!(
-                schema["properties"][field]["const"],
-                expected_arguments[field]
-            );
-        }
     }
 }
 
 #[test]
-fn exact_typed_arguments_dispatch_each_fixed_tool() {
+fn empty_or_omitted_arguments_dispatch_each_fixed_tool_with_server_binding() {
     let (mut server, run_calls, status_calls) = server();
     initialize(&mut server);
 
-    for (id, name) in [(2, "lattice_delivery_run"), (3, "lattice_delivery_status")] {
+    for (id, name, arguments) in [
+        (2, "lattice_delivery_run", Some(json!({}))),
+        (3, "lattice_delivery_status", None),
+    ] {
+        let mut params = json!({"name":name});
+        if let Some(arguments) = arguments {
+            params["arguments"] = arguments;
+        }
         let response = server
             .handle(json!({
                 "jsonrpc":"2.0",
                 "id":id,
                 "method":"tools/call",
-                "params":{"name":name,"arguments":tool_arguments()}
+                "params":params
             }))
             .expect("tool response");
         assert_eq!(response["result"]["isError"], false);
@@ -166,7 +156,7 @@ fn request_metadata_is_allowed_without_widening_tool_arguments() {
             "method":"tools/call",
             "params":{
                 "name":"lattice_delivery_run",
-                "arguments":tool_arguments(),
+                "arguments":{},
                 "_meta":{"progressToken":"run-progress"}
             }
         }))
@@ -182,7 +172,7 @@ fn request_metadata_is_allowed_without_widening_tool_arguments() {
             "method":"tools/call",
             "params":{
                 "name":"lattice_delivery_status",
-                "arguments":tool_arguments(),
+                "arguments":{},
                 "_meta":"not-an-object"
             }
         }))
@@ -229,7 +219,7 @@ fn tool_invocations_are_bounded_per_session() {
                 "jsonrpc":"2.0",
                 "id":id + 10,
                 "method":"tools/call",
-                "params":{"name":"lattice_delivery_status","arguments":tool_arguments()}
+                "params":{"name":"lattice_delivery_status","arguments":{}}
             }))
             .expect("tool response within limit");
         assert_eq!(response["result"]["isError"], false);
@@ -240,7 +230,7 @@ fn tool_invocations_are_bounded_per_session() {
             "jsonrpc":"2.0",
             "id":999,
             "method":"tools/call",
-            "params":{"name":"lattice_delivery_run","arguments":tool_arguments()}
+            "params":{"name":"lattice_delivery_run","arguments":{}}
         }))
         .expect("rate limit response");
     assert_eq!(rejected["error"]["code"], -32029);
@@ -254,6 +244,11 @@ fn tool_invocations_are_bounded_per_session() {
 #[test]
 fn every_unknown_argument_field_is_rejected_before_dispatch() {
     let dangerous = [
+        "project_id",
+        "project_snapshot_id",
+        "task_id",
+        "revision",
+        "task_spec_digest",
         "shell",
         "sql",
         "path",
@@ -264,25 +259,52 @@ fn every_unknown_argument_field_is_rejected_before_dispatch() {
     ];
 
     for property in dangerous {
-        let (mut server, run_calls, status_calls) = server();
-        initialize(&mut server);
-        let mut arguments = tool_arguments().as_object().expect("arguments").clone();
-        arguments.insert(property.to_owned(), json!("forbidden"));
-        let response = server
-            .handle(json!({
-                "jsonrpc":"2.0",
-                "id":2,
-                "method":"tools/call",
-                "params":{
-                    "name":"lattice_delivery_run",
-                    "arguments":Value::Object(arguments)
-                }
-            }))
-            .expect("error response");
+        for name in ["lattice_delivery_run", "lattice_delivery_status"] {
+            let (mut server, run_calls, status_calls) = server();
+            initialize(&mut server);
+            let mut arguments = serde_json::Map::new();
+            arguments.insert(property.to_owned(), json!("forbidden"));
+            let response = server
+                .handle(json!({
+                    "jsonrpc":"2.0",
+                    "id":2,
+                    "method":"tools/call",
+                    "params":{
+                        "name":name,
+                        "arguments":Value::Object(arguments)
+                    }
+                }))
+                .expect("error response");
 
-        assert_eq!(response["error"]["code"], -32602);
-        assert_eq!(run_calls.get(), 0, "{property}");
-        assert_eq!(status_calls.get(), 0, "{property}");
+            assert_eq!(response["error"]["code"], -32602);
+            assert_eq!(run_calls.get(), 0, "{name}:{property}");
+            assert_eq!(status_calls.get(), 0, "{name}:{property}");
+        }
+    }
+}
+
+#[test]
+fn every_non_object_argument_shape_is_rejected_before_dispatch() {
+    for arguments in [Value::Null, json!(false), json!(0), json!(""), json!([])] {
+        for name in ["lattice_delivery_run", "lattice_delivery_status"] {
+            let (mut server, run_calls, status_calls) = server();
+            initialize(&mut server);
+            let response = server
+                .handle(json!({
+                    "jsonrpc":"2.0",
+                    "id":2,
+                    "method":"tools/call",
+                    "params":{
+                        "name":name,
+                        "arguments":arguments.clone()
+                    }
+                }))
+                .expect("error response");
+
+            assert_eq!(response["error"]["code"], -32602);
+            assert_eq!(run_calls.get(), 0, "{name}");
+            assert_eq!(status_calls.get(), 0, "{name}");
+        }
     }
 }
 
@@ -312,7 +334,7 @@ fn execution_failures_are_tool_errors_without_sensitive_messages() {
             Err(ToolExecutionError::new("LATTICE_STATUS_REJECTED"))
         }
     }
-    let mut server = McpServer::new(FailingService);
+    let mut server = McpServer::new(FailingService, fixed_binding().clone());
     let response = server
         .handle(json!({
             "jsonrpc":"2.0","id":1,"method":"initialize",
@@ -329,7 +351,7 @@ fn execution_failures_are_tool_errors_without_sensitive_messages() {
     let response = server
         .handle(json!({
             "jsonrpc":"2.0","id":2,"method":"tools/call",
-            "params":{"name":"lattice_delivery_run","arguments":tool_arguments()}
+            "params":{"name":"lattice_delivery_run","arguments":{}}
         }))
         .expect("tool result");
 
@@ -356,7 +378,13 @@ fn stdio_transport_emits_only_jsonrpc_responses_and_parse_errors() {
     );
     let mut output = Vec::new();
 
-    serve(service, Cursor::new(input.as_bytes()), &mut output).expect("serve");
+    serve(
+        service,
+        fixed_binding().clone(),
+        Cursor::new(input.as_bytes()),
+        &mut output,
+    )
+    .expect("serve");
 
     let responses = String::from_utf8(output)
         .expect("utf8")
@@ -384,7 +412,13 @@ fn stdio_transport_drains_oversized_frames_before_next_message() {
     );
     let mut output = Vec::new();
 
-    serve(service, Cursor::new(input), &mut output).expect("serve");
+    serve(
+        service,
+        fixed_binding().clone(),
+        Cursor::new(input),
+        &mut output,
+    )
+    .expect("serve");
 
     let responses = String::from_utf8(output)
         .expect("utf8")
@@ -409,7 +443,13 @@ fn stdio_transport_rejects_unterminated_frames_without_dispatch() {
     let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"lattice_delivery_run\",\"arguments\":{}}}";
     let mut output = Vec::new();
 
-    serve(service, Cursor::new(input), &mut output).expect("serve");
+    serve(
+        service,
+        fixed_binding().clone(),
+        Cursor::new(input),
+        &mut output,
+    )
+    .expect("serve");
 
     let response = serde_json::from_slice::<Value>(&output).expect("json response");
     assert_eq!(response["id"], Value::Null);

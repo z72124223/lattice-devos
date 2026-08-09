@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, BufRead, Write};
 
-use lattice_contracts::{ContentDigest, ProjectId, ProjectSnapshotId, SubjectBinding, TaskId};
+use lattice_contracts::SubjectBinding;
 use serde_json::{Map, Value, json};
 
 /// Stable MCP protocol version implemented by this server.
@@ -13,13 +13,6 @@ pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 pub const DELIVERY_RUN_TOOL: &str = "lattice_delivery_run";
 /// Sole delivery status tool.
 pub const DELIVERY_STATUS_TOOL: &str = "lattice_delivery_status";
-
-const FIXED_PROJECT_ID: &str = "task032-delivery";
-const FIXED_PROJECT_SNAPSHOT_ID: &str = "task032-delivery:snapshot:1";
-const FIXED_TASK_ID: &str = "TASK-032";
-const FIXED_TASK_REVISION: &str = "1";
-const FIXED_TASK_SPEC_DIGEST: &str =
-    "b70aa1a7445ea7e7ebe466154d13ea1039f963b5ac4ffe1f7d5094dd8c949e0e";
 
 /// Maximum encoded bytes accepted for one newline-delimited stdio message.
 pub const MAX_STDIO_MESSAGE_BYTES: usize = 65_536;
@@ -53,14 +46,18 @@ impl fmt::Display for ToolExecutionError {
 
 impl Error for ToolExecutionError {}
 
-/// Exact fixed-task selector accepted by both MCP tools.
+/// Exact fixed-task selector injected by composition for both MCP tools.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeliveryToolArguments {
     binding: SubjectBinding,
 }
 
 impl DeliveryToolArguments {
-    /// Returns the fully typed immutable task binding selected by the caller.
+    pub(crate) const fn new(binding: SubjectBinding) -> Self {
+        Self { binding }
+    }
+
+    /// Returns the fully typed immutable task binding selected by composition.
     #[must_use]
     pub const fn binding(&self) -> &SubjectBinding {
         &self.binding
@@ -94,6 +91,7 @@ enum Lifecycle {
 /// Stateful MCP lifecycle and request dispatcher.
 pub struct McpServer<S> {
     service: S,
+    arguments: DeliveryToolArguments,
     lifecycle: Lifecycle,
     tool_invocations: usize,
 }
@@ -101,9 +99,10 @@ pub struct McpServer<S> {
 impl<S: DeliveryToolService> McpServer<S> {
     /// Constructs an uninitialized server.
     #[must_use]
-    pub const fn new(service: S) -> Self {
+    pub const fn new(service: S, binding: SubjectBinding) -> Self {
         Self {
             service,
+            arguments: DeliveryToolArguments::new(binding),
             lifecycle: Lifecycle::AwaitingInitialize,
             tool_invocations: 0,
         }
@@ -180,7 +179,7 @@ impl<S: DeliveryToolService> McpServer<S> {
                     "title": "LATTICE DevOS",
                     "version": "1.0.0"
                 },
-                "instructions": "Two fixed-task delivery tools. Callers select only the typed immutable task binding; execution configuration remains server-owned."
+                "instructions": "Two fixed zero-argument delivery tools. Task binding and execution configuration remain server-owned."
             }),
         )
     }
@@ -230,21 +229,21 @@ impl<S: DeliveryToolService> McpServer<S> {
         let Some(name) = params.get("name").and_then(Value::as_str) else {
             return protocol_error(id, -32602, "Invalid tools/call params");
         };
+        if !empty_object_or_absent(params.get("arguments")) {
+            return protocol_error(id, -32602, "Tool accepts no arguments");
+        }
         let operation = match name {
             DELIVERY_RUN_TOOL => DeliveryOperation::Run,
             DELIVERY_STATUS_TOOL => DeliveryOperation::Status,
             _ => return protocol_error(id, -32602, "Unknown tool"),
-        };
-        let Some(arguments) = parse_delivery_arguments(params.get("arguments")) else {
-            return protocol_error(id, -32602, "Invalid typed task binding");
         };
         if self.tool_invocations >= MAX_TOOL_INVOCATIONS_PER_SESSION {
             return protocol_error(id, -32029, "Tool invocation limit exceeded");
         }
         self.tool_invocations += 1;
         let result = match operation {
-            DeliveryOperation::Run => self.service.run(&arguments),
-            DeliveryOperation::Status => self.service.status(&arguments),
+            DeliveryOperation::Run => self.service.run(&self.arguments),
+            DeliveryOperation::Status => self.service.status(&self.arguments),
         };
         success(id, tool_result(result))
     }
@@ -272,10 +271,11 @@ enum StdioFrame {
 /// written as JSON-RPC responses.
 pub fn serve<S: DeliveryToolService, R: BufRead, W: Write>(
     service: S,
+    binding: SubjectBinding,
     mut reader: R,
     mut writer: W,
 ) -> io::Result<()> {
-    let mut server = McpServer::new(service);
+    let mut server = McpServer::new(service, binding);
     loop {
         let response = match read_bounded_frame(&mut reader)? {
             StdioFrame::EndOfStream => return Ok(()),
@@ -343,51 +343,12 @@ fn read_bounded_frame<R: BufRead>(reader: &mut R) -> io::Result<StdioFrame> {
 fn delivery_arguments_schema() -> Value {
     json!({
         "type": "object",
-        "properties": {
-            "project_id": {"type": "string", "const": FIXED_PROJECT_ID},
-            "project_snapshot_id": {"type": "string", "const": FIXED_PROJECT_SNAPSHOT_ID},
-            "task_id": {"type": "string", "const": FIXED_TASK_ID},
-            "revision": {"type": "string", "const": FIXED_TASK_REVISION},
-            "task_spec_digest": {"type": "string", "const": FIXED_TASK_SPEC_DIGEST}
-        },
-        "required": [
-            "project_id",
-            "project_snapshot_id",
-            "task_id",
-            "revision",
-            "task_spec_digest"
-        ],
         "additionalProperties": false
     })
 }
 
-fn parse_delivery_arguments(value: Option<&Value>) -> Option<DeliveryToolArguments> {
-    const FIELDS: [&str; 5] = [
-        "project_id",
-        "project_snapshot_id",
-        "task_id",
-        "revision",
-        "task_spec_digest",
-    ];
-    let object = value?.as_object()?;
-    if object.len() != FIELDS.len() || object.keys().any(|key| !FIELDS.contains(&key.as_str())) {
-        return None;
-    }
-    let text = |field: &str| {
-        object
-            .get(field)?
-            .as_str()
-            .filter(|value| !value.is_empty())
-    };
-    let binding = SubjectBinding::new(
-        ProjectId::new(text("project_id")?).ok()?,
-        ProjectSnapshotId::new(text("project_snapshot_id")?).ok()?,
-        TaskId::new(text("task_id")?).ok()?,
-        text("revision")?,
-        ContentDigest::from_sha256(text("task_spec_digest")?).ok()?,
-    )
-    .ok()?;
-    Some(DeliveryToolArguments { binding })
+fn empty_object_or_absent(value: Option<&Value>) -> bool {
+    value.is_none_or(|value| value.as_object().is_some_and(Map::is_empty))
 }
 
 fn metadata_object_or_absent(value: Option<&Value>) -> bool {
