@@ -387,6 +387,188 @@ enum ProviderStreamEvent {
 }
 
 #[derive(Default)]
+struct CodexProxyProviderOutputGate {
+    pending: Vec<u8>,
+}
+
+enum CodexProxyProviderLineAction {
+    ForwardOriginal,
+    ForwardNormalized(Vec<u8>),
+    Drop,
+}
+
+impl CodexProxyProviderOutputGate {
+    fn ingest(&mut self, payload: &[u8]) -> HermesAdapterResult<Vec<u8>> {
+        if payload.is_empty() || payload.len() > MAX_CODEX_PROXY_DATA_BYTES {
+            return Err(malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_SIZE_REJECTED"));
+        }
+        let admitted_capacity = self
+            .pending
+            .len()
+            .checked_add(payload.len())
+            .filter(|length| *length <= MAX_CODEX_PROXY_JSONL_BATCH_BYTES)
+            .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_SIZE_REJECTED"))?;
+        let mut admitted = Vec::with_capacity(admitted_capacity);
+        let mut cursor = 0;
+        while cursor < payload.len() {
+            let remaining = &payload[cursor..];
+            let Some(newline_offset) = remaining.iter().position(|byte| *byte == b'\n') else {
+                self.extend_pending(remaining)?;
+                break;
+            };
+            let line_fragment = &remaining[..newline_offset];
+            self.extend_pending(line_fragment)?;
+            match self.validate_complete_line()? {
+                CodexProxyProviderLineAction::ForwardOriginal => {
+                    admitted.extend_from_slice(&self.pending);
+                    admitted.push(b'\n');
+                }
+                CodexProxyProviderLineAction::ForwardNormalized(normalized) => {
+                    admitted.extend_from_slice(&normalized);
+                    admitted.push(b'\n');
+                }
+                CodexProxyProviderLineAction::Drop => {}
+            }
+            self.pending.clear();
+            cursor = cursor
+                .checked_add(newline_offset + 1)
+                .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_SIZE_REJECTED"))?;
+        }
+        Ok(admitted)
+    }
+
+    fn extend_pending(&mut self, fragment: &[u8]) -> HermesAdapterResult<()> {
+        let line_length = self
+            .pending
+            .len()
+            .checked_add(fragment.len())
+            .filter(|length| *length <= MAX_CODEX_PROXY_JSONL_LINE_BYTES)
+            .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_SIZE_REJECTED"))?;
+        self.pending.reserve(line_length - self.pending.len());
+        self.pending.extend_from_slice(fragment);
+        Ok(())
+    }
+
+    fn validate_complete_line(&self) -> HermesAdapterResult<CodexProxyProviderLineAction> {
+        let line = self.pending.strip_suffix(b"\r").unwrap_or(&self.pending);
+        let value: serde_json::Value = serde_json::from_slice(line)
+            .map_err(|_| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"))?;
+        let Some(method) = object.get("method").and_then(serde_json::Value::as_str) else {
+            return Ok(CodexProxyProviderLineAction::ForwardOriginal);
+        };
+        if object.contains_key("id") {
+            return Err(malformed("HERMES_CODEX_PROXY_PROVIDER_REQUEST_REJECTED"));
+        }
+        if is_codex_proxy_ignorable_provider_notice(method) {
+            validate_codex_proxy_ignorable_provider_notice(method, object)?;
+            return Ok(CodexProxyProviderLineAction::Drop);
+        }
+        if !is_codex_proxy_hermes_notification(method) {
+            return Err(malformed("HERMES_CODEX_PROXY_PROVIDER_NOTICE_REJECTED"));
+        }
+        let keys = object.keys().map(String::as_str).collect::<HashSet<_>>();
+        match keys {
+            keys if keys == HashSet::from(["method", "params"]) => {
+                Ok(CodexProxyProviderLineAction::ForwardOriginal)
+            }
+            keys if keys == HashSet::from(["emittedAtMs", "method", "params"]) => {
+                if !object
+                    .get("emittedAtMs")
+                    .is_some_and(serde_json::Value::is_number)
+                    || !object
+                        .get("params")
+                        .is_some_and(serde_json::Value::is_object)
+                {
+                    return Err(malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"));
+                }
+                let mut normalized = value;
+                normalized
+                    .as_object_mut()
+                    .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"))?
+                    .remove("emittedAtMs");
+                serde_json::to_vec(&normalized)
+                    .map(CodexProxyProviderLineAction::ForwardNormalized)
+                    .map_err(|_| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"))
+            }
+            _ => Err(malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED")),
+        }
+    }
+
+    fn finish_input(&self) -> HermesAdapterResult<()> {
+        if self.pending.is_empty() {
+            Ok(())
+        } else {
+            Err(malformed(
+                "HERMES_CODEX_PROXY_PROVIDER_JSONL_PARTIAL_REJECTED",
+            ))
+        }
+    }
+}
+
+fn is_codex_proxy_ignorable_provider_notice(method: &str) -> bool {
+    matches!(method, "remoteControl/status/changed" | "deprecationNotice")
+}
+
+fn is_codex_proxy_hermes_notification(method: &str) -> bool {
+    matches!(
+        method,
+        "thread/started"
+            | "turn/started"
+            | "account/rateLimits/updated"
+            | "thread/status/changed"
+            | "thread/tokenUsage/updated"
+            | "item/agentMessage/delta"
+            | "item/reasoning/textDelta"
+            | "item/reasoning/summaryPartAdded"
+            | "item/reasoning/summaryTextDelta"
+            | "item/started"
+            | "item/completed"
+            | "turn/completed"
+    )
+}
+
+fn validate_codex_proxy_ignorable_provider_notice(
+    method: &str,
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> HermesAdapterResult<()> {
+    let keys = object.keys().map(String::as_str).collect::<HashSet<_>>();
+    if keys != HashSet::from(["emittedAtMs", "method", "params"])
+        || !object
+            .get("emittedAtMs")
+            .is_some_and(serde_json::Value::is_number)
+    {
+        return Err(malformed("HERMES_CODEX_PROXY_PROVIDER_NOTICE_REJECTED"));
+    }
+    let params = object
+        .get("params")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_NOTICE_REJECTED"))?;
+    let params_keys = params.keys().map(String::as_str).collect::<HashSet<_>>();
+    match method {
+        "remoteControl/status/changed" => {
+            if params_keys
+                != HashSet::from(["environmentId", "installationId", "serverName", "status"])
+                || params.values().any(|value| !value.is_string())
+            {
+                return Err(malformed("HERMES_CODEX_PROXY_PROVIDER_NOTICE_REJECTED"));
+            }
+        }
+        "deprecationNotice" => {
+            if params_keys != HashSet::from(["details", "summary"])
+                || params.values().any(|value| !value.is_string())
+            {
+                return Err(malformed("HERMES_CODEX_PROXY_PROVIDER_NOTICE_REJECTED"));
+            }
+        }
+        _ => return Err(malformed("HERMES_CODEX_PROXY_PROVIDER_NOTICE_REJECTED")),
+    }
+    Ok(())
+}
+
+#[derive(Default)]
 struct CodexProxyOneTurnGate {
     pending: Vec<u8>,
     turn_start_count: u8,
@@ -999,6 +1181,7 @@ fn run_codex_proxy_host(
     let mut provider_stream: Option<Receiver<ProviderStreamEvent>> = None;
     let mut buffer = initial_bytes;
     let mut one_turn_gate = CodexProxyOneTurnGate::with_output_schema(output_schema);
+    let mut provider_output_gate = CodexProxyProviderOutputGate::default();
     let mut provider_input_state = CodexProxyProviderInputState::Open;
 
     loop {
@@ -1095,9 +1278,17 @@ fn run_codex_proxy_host(
         if let Some(provider_event) = provider_event {
             match provider_event? {
                 ProviderStreamEvent::Data(payload) => {
-                    write_proxy_frame(&mut outer_input, &session.encode_data(&payload)?)?;
+                    let admitted = provider_output_gate.ingest(&payload).inspect_err(|_| {
+                        session.record_failure(&payload);
+                    })?;
+                    if !admitted.is_empty() {
+                        write_proxy_frame(&mut outer_input, &session.encode_data(&admitted)?)?;
+                    }
                 }
                 ProviderStreamEvent::Eof => {
+                    provider_output_gate.finish_input().inspect_err(|_| {
+                        session.record_failure(provider_output_gate.pending.as_slice());
+                    })?;
                     if provider_input_state == CodexProxyProviderInputState::Open {
                         control.ensure_running()?;
                         return Err(error(
@@ -3621,6 +3812,56 @@ mod proxy_host_tests {
         host.terminate().expect("unused provider terminates");
         drop(host);
         fs::remove_file(path).expect("remove exact test sink");
+    }
+
+    #[test]
+    fn provider_output_gate_filters_codex_0146_compatibility_notices() {
+        let mut gate = CodexProxyProviderOutputGate::default();
+        let admitted = gate
+            .ingest(
+                br#"{"method":"remoteControl/status/changed","params":{"environmentId":"environment-zero","installationId":"installation-zero","serverName":"lattice","status":"running"},"emittedAtMs":1}
+{"method":"thread/started","params":{"thread":{"id":"thread-zero-model"}},"emittedAtMs":2}
+{"id":1,"result":{"thread":{"id":"thread-zero-model"}}}
+{"method":"deprecationNotice","params":{"details":"legacy client notice","summary":"deprecated field"},"emittedAtMs":3}
+"#,
+            )
+            .expect("0.146 compatibility notices are normalized for frozen Hermes");
+        gate.finish_input().expect("no partial provider JSONL");
+
+        let lines = String::from_utf8(admitted)
+            .expect("normalized provider output remains UTF-8")
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lines.len(),
+            2,
+            "remote-control and deprecation notices are not forwarded"
+        );
+        let lifecycle: serde_json::Value =
+            serde_json::from_str(&lines[0]).expect("normalized lifecycle line");
+        assert_eq!(lifecycle["method"], "thread/started");
+        assert!(lifecycle.get("emittedAtMs").is_none());
+        assert_eq!(lifecycle["params"]["thread"]["id"], "thread-zero-model");
+
+        let response: serde_json::Value =
+            serde_json::from_str(&lines[1]).expect("response line is preserved");
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["result"]["thread"]["id"], "thread-zero-model");
+    }
+
+    #[test]
+    fn provider_output_gate_fails_closed_on_unknown_notifications() {
+        let mut gate = CodexProxyProviderOutputGate::default();
+        assert_eq!(
+            gate.ingest(
+                br#"{"method":"future/tool/request","params":{},"emittedAtMs":1}
+"#
+            )
+            .expect_err("unknown app-server notifications cannot be hidden from Hermes")
+            .code(),
+            "HERMES_CODEX_PROXY_PROVIDER_NOTICE_REJECTED"
+        );
     }
 
     #[test]
