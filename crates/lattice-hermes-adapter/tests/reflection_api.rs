@@ -1825,6 +1825,36 @@ fn control_envelopes_reject_unknown_fields_and_event_discriminator_drift() {
 }
 
 #[test]
+fn completed_event_usage_accepts_only_unsigned_token_counts() {
+    let valid = serde_json::json!({
+        "event": "run.completed",
+        "run_id": "run_usage",
+        "timestamp": 1.0,
+        "output": "bounded",
+        "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+    });
+    assert_eq!(
+        crate::parse_sse_terminal(&format!("data: {valid}\n\n"), "run_usage")
+            .expect("unsigned usage is valid"),
+        Some("bounded".to_owned())
+    );
+
+    let invalid = serde_json::json!({
+        "event": "run.completed",
+        "run_id": "run_usage",
+        "timestamp": 1.0,
+        "output": "bounded",
+        "usage": {"input_tokens": -1, "output_tokens": 2, "total_tokens": 1}
+    });
+    assert_eq!(
+        crate::parse_sse_terminal(&format!("data: {invalid}\n\n"), "run_usage")
+            .expect_err("negative token counts fail closed")
+            .code(),
+        "HERMES_EVENT_MALFORMED"
+    );
+}
+
+#[test]
 fn scripted_adapter_cannot_emit_live_port_evidence() {
     let request = request();
     let server = ScriptedServer::start(Vec::new());

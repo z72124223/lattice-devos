@@ -2145,19 +2145,7 @@ fn parse_sse_terminal(body: &str, expected_run_id: &str) -> HermesAdapterResult<
                     &["event", "run_id", "timestamp", "output", "usage"],
                     "HERMES_EVENT_UNKNOWN_FIELD",
                 )?;
-                if let Some(usage) = object.get("usage") {
-                    let usage = usage
-                        .as_object()
-                        .ok_or_else(|| malformed("HERMES_EVENT_MALFORMED"))?;
-                    require_only_keys(
-                        usage,
-                        &["input_tokens", "output_tokens", "total_tokens"],
-                        "HERMES_EVENT_UNKNOWN_FIELD",
-                    )?;
-                    if usage.values().any(|value| !value.is_u64()) {
-                        return Err(malformed("HERMES_EVENT_MALFORMED"));
-                    }
-                }
+                validate_sse_completion_usage(object)?;
                 let output = require_string(object, "output", "HERMES_EVENT_MALFORMED")?;
                 if terminal.replace(output.to_owned()).is_some() {
                     return Err(malformed("HERMES_DUPLICATE_TERMINAL_EVENT"));
@@ -2215,6 +2203,24 @@ fn parse_sse_terminal(body: &str, expected_run_id: &str) -> HermesAdapterResult<
         }
     }
     Ok(terminal)
+}
+
+fn validate_sse_completion_usage(object: &Map<String, Value>) -> HermesAdapterResult<()> {
+    let Some(usage) = object.get("usage") else {
+        return Ok(());
+    };
+    let usage = usage
+        .as_object()
+        .ok_or_else(|| malformed("HERMES_EVENT_MALFORMED"))?;
+    require_only_keys(
+        usage,
+        &["input_tokens", "output_tokens", "total_tokens"],
+        "HERMES_EVENT_UNKNOWN_FIELD",
+    )?;
+    if usage.values().any(|value| !value.is_u64()) {
+        return Err(malformed("HERMES_EVENT_MALFORMED"));
+    }
+    Ok(())
 }
 
 enum RunState {
@@ -2304,120 +2310,111 @@ fn parse_status(
     }
 }
 
+const RUN_FAILURE_AUTH_HINTS: &[&[u8]] = &[
+    b"401 unauthorized",
+    b"403 forbidden",
+    b"authorization: bearer ",
+    b"authentication failed",
+    b"authentication required",
+    b"authentication error",
+    b"invalid api key",
+    b"missing api key",
+    b"expired api key",
+    b"api key invalid",
+    b"api key missing",
+    b"api key expired",
+    b"invalid access token",
+    b"missing access token",
+    b"expired access token",
+    b"access token invalid",
+    b"access token missing",
+    b"access token expired",
+    b"invalid credentials",
+    b"missing credentials",
+    b"expired credentials",
+    b"credentials invalid",
+    b"credentials missing",
+    b"credentials expired",
+];
+const RUN_FAILURE_QUOTA_HINTS: &[&[u8]] = &[
+    b"quota exceeded",
+    b"quota exhausted",
+    b"quota reached",
+    b"out of quota",
+    b"rate limit reached",
+    b"rate limit exceeded",
+    b"rate_limit_exceeded",
+    b"rate-limit exceeded",
+    b"too many requests",
+    b"usage limit reached",
+    b"usage limit exceeded",
+    b"usage_limit_exceeded",
+    b"insufficient credit",
+    b"credit balance exhausted",
+    b"credit balance depleted",
+    b"429 too many requests",
+];
+const RUN_FAILURE_TRANSPORT_HINTS: &[&[u8]] = &[
+    b"connection refused",
+    b"connection reset",
+    b"connection closed",
+    b"connection failed",
+    b"connection lost",
+    b"connection timed out",
+    b"network unreachable",
+    b"network error",
+    b"network failed",
+    b"dns lookup failed",
+    b"dns resolution failed",
+    b"tls handshake failed",
+    b"tls error",
+    b"proxy error",
+    b"proxy connect failed",
+    b"request timed out",
+    b"timeout exceeded",
+    b"econnreset",
+    b"broken pipe",
+    b"unexpected eof",
+    b"502 bad gateway",
+    b"503 service unavailable",
+    b"504 gateway timeout",
+    b"failed to deserialize jsonrpc",
+    b"invalid jsonl response",
+];
+const RUN_FAILURE_APP_SERVER_TIMEOUT_HINTS: &[&[u8]] = &[
+    b"turn timed out",
+    b"compact turn timed out",
+    b"went silent",
+    b"turn/start timed out",
+    b"codex app-server method",
+];
+const RUN_FAILURE_SCHEMA_HINTS: &[&[u8]] = &[
+    b"structured output",
+    b"output schema",
+    b"json schema",
+    b"schema validation",
+    b"response format",
+];
+
 fn classify_run_failure_hint(detail: &str) -> &'static str {
     let bytes = &detail.as_bytes()[..detail.len().min(MAX_RUN_FAILURE_CLASSIFICATION_BYTES)];
 
-    if contains_any_ascii_case_insensitive(
-        bytes,
-        &[
-            b"401 unauthorized",
-            b"403 forbidden",
-            b"authorization: bearer ",
-            b"authentication failed",
-            b"authentication required",
-            b"authentication error",
-            b"invalid api key",
-            b"missing api key",
-            b"expired api key",
-            b"api key invalid",
-            b"api key missing",
-            b"api key expired",
-            b"invalid access token",
-            b"missing access token",
-            b"expired access token",
-            b"access token invalid",
-            b"access token missing",
-            b"access token expired",
-            b"invalid credentials",
-            b"missing credentials",
-            b"expired credentials",
-            b"credentials invalid",
-            b"credentials missing",
-            b"credentials expired",
-        ],
-    ) {
+    if contains_any_ascii_case_insensitive(bytes, RUN_FAILURE_AUTH_HINTS) {
         return "HERMES_RUN_FAILED_HINT_AUTH";
     }
-    if contains_any_ascii_case_insensitive(
-        bytes,
-        &[
-            b"quota exceeded",
-            b"quota exhausted",
-            b"quota reached",
-            b"out of quota",
-            b"rate limit reached",
-            b"rate limit exceeded",
-            b"rate_limit_exceeded",
-            b"rate-limit exceeded",
-            b"too many requests",
-            b"usage limit reached",
-            b"usage limit exceeded",
-            b"usage_limit_exceeded",
-            b"insufficient credit",
-            b"credit balance exhausted",
-            b"credit balance depleted",
-            b"429 too many requests",
-        ],
-    ) {
+    if contains_any_ascii_case_insensitive(bytes, RUN_FAILURE_QUOTA_HINTS) {
         return "HERMES_RUN_FAILED_HINT_QUOTA";
     }
-    if contains_any_ascii_case_insensitive(
-        bytes,
-        &[
-            b"connection refused",
-            b"connection reset",
-            b"connection closed",
-            b"connection failed",
-            b"connection lost",
-            b"connection timed out",
-            b"network unreachable",
-            b"network error",
-            b"network failed",
-            b"dns lookup failed",
-            b"dns resolution failed",
-            b"tls handshake failed",
-            b"tls error",
-            b"proxy error",
-            b"proxy connect failed",
-            b"request timed out",
-            b"timeout exceeded",
-            b"econnreset",
-            b"broken pipe",
-            b"unexpected eof",
-            b"502 bad gateway",
-            b"503 service unavailable",
-            b"504 gateway timeout",
-            b"failed to deserialize jsonrpc",
-            b"invalid jsonl response",
-        ],
-    ) {
+    if contains_any_ascii_case_insensitive(bytes, RUN_FAILURE_TRANSPORT_HINTS) {
         return "HERMES_RUN_FAILED_HINT_TRANSPORT";
     }
-    if contains_any_ascii_case_insensitive(
-        bytes,
-        &[
-            b"turn timed out",
-            b"compact turn timed out",
-            b"went silent",
-            b"turn/start timed out",
-            b"codex app-server method",
-        ],
-    ) {
+    if contains_any_ascii_case_insensitive(bytes, RUN_FAILURE_APP_SERVER_TIMEOUT_HINTS) {
         return "HERMES_RUN_FAILED_HINT_APP_SERVER_TIMEOUT";
     }
     if contains_any_ascii_case_insensitive(bytes, &[b"turn ended status="]) {
         return "HERMES_RUN_FAILED_HINT_APP_SERVER_TURN_STATUS";
     }
-    if contains_any_ascii_case_insensitive(
-        bytes,
-        &[
-            b"structured output",
-            b"output schema",
-            b"json schema",
-            b"schema validation",
-            b"response format",
-        ],
-    ) {
+    if contains_any_ascii_case_insensitive(bytes, RUN_FAILURE_SCHEMA_HINTS) {
         return "HERMES_RUN_FAILED_HINT_SCHEMA";
     }
     if contains_any_ascii_case_insensitive(bytes, &[b"codex app-server"]) {
