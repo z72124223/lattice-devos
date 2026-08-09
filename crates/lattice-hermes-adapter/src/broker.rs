@@ -520,8 +520,35 @@ pub(crate) fn verify_official_codex_bundle(
 }
 
 fn bounded_file_sha256(path: &Path, limit: u64) -> HermesAdapterResult<String> {
-    let bytes = bounded_file_bytes(path, limit)?;
-    Ok(sha256_bytes(&bytes))
+    let rejected = || {
+        HermesAdapterError::new(
+            HermesAdapterErrorKind::Identity,
+            "HERMES_CODEX_BUNDLE_IDENTITY_REJECTED",
+        )
+    };
+    let metadata = fs::symlink_metadata(path).map_err(|_| rejected())?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > limit {
+        return Err(rejected());
+    }
+    let mut file = File::open(path).map_err(|_| rejected())?;
+    let mut digest = Sha256::new();
+    let mut byte_count = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|_| rejected())?;
+        if read == 0 {
+            break;
+        }
+        byte_count = byte_count
+            .checked_add(u64::try_from(read).map_err(|_| rejected())?)
+            .filter(|count| *count <= limit)
+            .ok_or_else(rejected)?;
+        digest.update(&buffer[..read]);
+    }
+    if byte_count != metadata.len() {
+        return Err(rejected());
+    }
+    Ok(encode_digest(&digest.finalize()))
 }
 
 fn bounded_file_bytes(path: &Path, limit: u64) -> HermesAdapterResult<Vec<u8>> {
