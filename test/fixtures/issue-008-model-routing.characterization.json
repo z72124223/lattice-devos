@@ -957,9 +957,32 @@
         "model_id": "resolved-model"
       },
       "actual": {
+        "request_digest": "sha256:request-example",
+        "resolution_digest": "sha256:resolution-example",
+        "provider_id": "openai",
+        "provider_surface": "codex-app-server",
         "model_id": "observed-model",
+        "model_version": "observed-version",
+        "reasoning_effort": "low",
+        "service_tier": "UNKNOWN",
+        "model_calls": 1,
+        "escalations": 0,
+        "usage": {
+          "input_units": 1,
+          "output_units": 1,
+          "total_units": 2
+        },
+        "rate_limit_snapshot": {
+          "evidence_state": "UNKNOWN"
+        },
+        "run_thread_binding": {
+          "run_id": "run-example",
+          "thread_id": "thread-example"
+        },
         "evidence_state": "VERIFIED",
-        "source_ref": "runtime:thread-start-result"
+        "source_ref": "runtime:thread-start-result",
+        "observed_at": "2026-08-10T03:20:00+08:00",
+        "conformance": "MATCH"
       },
       "expected": {
         "disposition": "ALLOW",
@@ -989,9 +1012,32 @@
         "model_id": "resolved-model"
       },
       "actual": {
+        "request_digest": "sha256:request-example",
+        "resolution_digest": "sha256:resolution-example",
+        "provider_id": "openai",
+        "provider_surface": "codex-app-server",
         "model_id": "requested-model",
+        "model_version": "observed-version",
+        "reasoning_effort": "low",
+        "service_tier": "UNKNOWN",
+        "model_calls": 1,
+        "escalations": 0,
+        "usage": {
+          "input_units": 1,
+          "output_units": 1,
+          "total_units": 2
+        },
+        "rate_limit_snapshot": {
+          "evidence_state": "UNKNOWN"
+        },
+        "run_thread_binding": {
+          "run_id": "run-example",
+          "thread_id": "thread-example"
+        },
         "evidence_state": "VERIFIED",
-        "source_ref": "requested:model_id"
+        "source_ref": "requested:model_id",
+        "observed_at": "2026-08-10T03:20:00+08:00",
+        "conformance": "MATCH"
       },
       "expected": {
         "disposition": "BLOCK",
@@ -1007,9 +1053,32 @@
         "model_id": "resolved-model"
       },
       "actual": {
+        "request_digest": "sha256:request-example",
+        "resolution_digest": "sha256:resolution-example",
+        "provider_id": "openai",
+        "provider_surface": "codex-app-server",
         "model_id": "resolved-model",
+        "model_version": "observed-version",
+        "reasoning_effort": "low",
+        "service_tier": "UNKNOWN",
+        "model_calls": 1,
+        "escalations": 0,
+        "usage": {
+          "input_units": 1,
+          "output_units": 1,
+          "total_units": 2
+        },
+        "rate_limit_snapshot": {
+          "evidence_state": "UNKNOWN"
+        },
+        "run_thread_binding": {
+          "run_id": "run-example",
+          "thread_id": "thread-example"
+        },
         "evidence_state": "VERIFIED",
-        "source_ref": "resolved:model_id"
+        "source_ref": "resolved:model_id",
+        "observed_at": "2026-08-10T03:20:00+08:00",
+        "conformance": "MATCH"
       },
       "expected": {
         "disposition": "BLOCK",
@@ -1025,9 +1094,32 @@
         "model_id": "resolved-model"
       },
       "actual": {
+        "request_digest": "sha256:request-example",
+        "resolution_digest": "sha256:resolution-example",
+        "provider_id": "openai",
+        "provider_surface": "codex-app-server",
         "model_id": "observed-model",
+        "model_version": "observed-version",
+        "reasoning_effort": "low",
+        "service_tier": "UNKNOWN",
+        "model_calls": 1,
+        "escalations": 0,
+        "usage": {
+          "input_units": 1,
+          "output_units": 1,
+          "total_units": 2
+        },
+        "rate_limit_snapshot": {
+          "evidence_state": "UNKNOWN"
+        },
+        "run_thread_binding": {
+          "run_id": "run-example",
+          "thread_id": "thread-example"
+        },
         "evidence_state": "UNKNOWN",
-        "source_ref": "runtime:thread-start-result"
+        "source_ref": "runtime:thread-start-result",
+        "observed_at": "2026-08-10T03:20:00+08:00",
+        "conformance": "UNKNOWN"
       },
       "expected": {
         "disposition": "BLOCK",

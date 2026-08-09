@@ -305,8 +305,43 @@ function evidenceDecision(observation) {
 }
 
 function actualEvidenceDecision({ actual }) {
+  const hasAllRequiredFields =
+    actual &&
+    expectedEvidenceFields.actual.every((field) =>
+      Object.prototype.hasOwnProperty.call(actual, field),
+    );
+  const allRequiredValuesPresent =
+    hasAllRequiredFields &&
+    expectedEvidenceFields.actual.every(
+      (field) => actual[field] !== null && actual[field] !== undefined,
+    );
+  const nonEmptyStringFields = [
+    "request_digest",
+    "resolution_digest",
+    "provider_id",
+    "provider_surface",
+    "model_id",
+    "model_version",
+    "reasoning_effort",
+    "service_tier",
+    "source_ref",
+    "conformance",
+  ];
+  const hasTypedValues =
+    allRequiredValuesPresent &&
+    nonEmptyStringFields.every(
+      (field) => typeof actual[field] === "string" && actual[field].length > 0,
+    ) &&
+    ["model_calls", "escalations"].every(
+      (field) => Number.isInteger(actual[field]) && actual[field] >= 0,
+    ) &&
+    ["usage", "rate_limit_snapshot", "run_thread_binding"].every(
+      (field) =>
+        typeof actual[field] === "object" && !Array.isArray(actual[field]),
+    ) &&
+    Number.isNaN(Date.parse(actual.observed_at)) === false;
   if (
-    !actual ||
+    !hasTypedValues ||
     actual.evidence_state !== "VERIFIED" ||
     typeof actual.model_id !== "string" ||
     actual.model_id.length === 0 ||
@@ -561,6 +596,31 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
       "verified-null-blocks",
     ],
   );
+  const completeActual = fixture.actual_evidence_cases.find(
+    ({ id }) => id === "runtime-actual-allows",
+  ).actual;
+  for (const field of expectedEvidenceFields.actual) {
+    const partialActual = structuredClone(completeActual);
+    delete partialActual[field];
+    assert.deepEqual(
+      actualEvidenceDecision({ actual: partialActual }),
+      {
+        disposition: "BLOCK",
+        reason_code: "ROUTE_ACTUAL_SETTING_MISMATCH",
+      },
+      `missing actual field should block: ${field}`,
+    );
+    const nullActual = structuredClone(completeActual);
+    nullActual[field] = null;
+    assert.deepEqual(
+      actualEvidenceDecision({ actual: nullActual }),
+      {
+        disposition: "BLOCK",
+        reason_code: "ROUTE_ACTUAL_SETTING_MISMATCH",
+      },
+      `null actual field should block: ${field}`,
+    );
+  }
   assert.deepEqual(
     evidenceDecision(
       fixture.evidence_inventory.find(
@@ -755,6 +815,8 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
     "password" + "=examplecredential",
     "ghp_" + "examplecredential1234567890",
     "xoxb-" + "examplecredential1234567890",
+    "AIza" + "examplecredential1234567890",
+    "eyJ" + "abcdefghijk" + "." + "abcdefghijk" + "." + "abcdefghijk",
   ]) {
     assert.throws(
       () => assertNoSensitivePayload({ note: value }),
