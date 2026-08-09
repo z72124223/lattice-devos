@@ -1092,6 +1092,12 @@ impl ProductionCodexProxyHost {
         let worker_status = Arc::clone(&status);
         let worker_stop = Arc::clone(&stop);
         let worker_control = Arc::clone(&control);
+        emit_codex_proxy_trace(json!({
+            "component": "Hermes",
+            "event": "codex_proxy_host_start",
+            "initial_bytes": initial_bytes.len(),
+            "output_schema": output_schema.is_some(),
+        }));
         let worker = thread::Builder::new()
             .name("lattice-hermes-codex-proxy".to_owned())
             .spawn(move || {
@@ -1330,12 +1336,25 @@ fn run_codex_proxy_host(
     let mut one_turn_gate = CodexProxyOneTurnGate::with_output_schema(output_schema);
     let mut provider_output_gate = CodexProxyProviderOutputGate::default();
     let mut provider_input_state = CodexProxyProviderInputState::Open;
+    emit_codex_proxy_trace(json!({
+        "component": "Hermes",
+        "event": "codex_proxy_host_loop_start",
+        "initial_buffer_bytes": buffer.len(),
+    }));
 
     loop {
         if stop.load(Ordering::Acquire) {
+            emit_codex_proxy_trace(json!({
+                "component": "Hermes",
+                "event": "codex_proxy_host_stop_requested",
+            }));
             return Ok(());
         }
         if Instant::now() >= absolute_deadline {
+            emit_codex_proxy_trace(json!({
+                "component": "Hermes",
+                "event": "codex_proxy_host_deadline_exceeded",
+            }));
             return Err(error(
                 HermesAdapterErrorKind::Timeout,
                 "HERMES_CODEX_PROXY_DEADLINE_EXCEEDED",
@@ -1345,10 +1364,19 @@ fn run_codex_proxy_host(
         while let Some(frame) = take_codex_proxy_frame(&mut buffer, session)? {
             match session.accept(&frame)? {
                 CodexProxyHostEvent::Open => {
+                    emit_codex_proxy_trace(json!({
+                        "component": "Hermes",
+                        "event": "codex_proxy_host_frame",
+                        "kind": "open",
+                    }));
                     let sealed = provider
                         .take()
                         .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_REPLAY_REJECTED"))?;
                     let mut opened = sealed.open(absolute_deadline)?;
+                    emit_codex_proxy_trace(json!({
+                        "component": "Hermes",
+                        "event": "codex_proxy_provider_opened",
+                    }));
                     control.ensure_running()?;
                     let reader = opened.take_reader()?;
                     provider_stream = Some(start_provider_reader(reader)?);
@@ -1365,6 +1393,12 @@ fn run_codex_proxy_host(
                     duplex = Some(opened);
                 }
                 CodexProxyHostEvent::Data(payload) => {
+                    emit_codex_proxy_trace(json!({
+                        "component": "Hermes",
+                        "event": "codex_proxy_host_frame",
+                        "kind": "data",
+                        "payload_bytes": payload.len(),
+                    }));
                     let opened = duplex
                         .as_mut()
                         .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_STATE_REJECTED"))?;
@@ -1381,6 +1415,11 @@ fn run_codex_proxy_host(
                     }
                 }
                 CodexProxyHostEvent::Close => {
+                    emit_codex_proxy_trace(json!({
+                        "component": "Hermes",
+                        "event": "codex_proxy_host_frame",
+                        "kind": "close",
+                    }));
                     let opened = duplex
                         .as_mut()
                         .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_STATE_REJECTED"))?;
@@ -1392,13 +1431,24 @@ fn run_codex_proxy_host(
                         provider_input_state = CodexProxyProviderInputState::ClosedByPeer;
                     }
                 }
-                CodexProxyHostEvent::Error(_) => {
+                CodexProxyHostEvent::Error(code) => {
+                    emit_codex_proxy_trace(json!({
+                        "code": code,
+                        "component": "Hermes",
+                        "event": "codex_proxy_host_frame",
+                        "kind": "error",
+                    }));
                     return Err(error(
                         HermesAdapterErrorKind::Failed,
                         "HERMES_CODEX_PROXY_CHILD_ERROR",
                     ));
                 }
                 CodexProxyHostEvent::Terminal => {
+                    emit_codex_proxy_trace(json!({
+                        "component": "Hermes",
+                        "event": "codex_proxy_host_frame",
+                        "kind": "terminal",
+                    }));
                     one_turn_gate.ensure_single_turn()?;
                     let mut observed = status.lock().map_err(|_| {
                         error(
@@ -1425,6 +1475,12 @@ fn run_codex_proxy_host(
         if let Some(provider_event) = provider_event {
             match provider_event? {
                 ProviderStreamEvent::Data(payload) => {
+                    emit_codex_proxy_trace(json!({
+                        "component": "Hermes",
+                        "event": "codex_proxy_provider_event",
+                        "kind": "data",
+                        "payload_bytes": payload.len(),
+                    }));
                     let admitted = provider_output_gate.ingest(&payload).inspect_err(|_| {
                         session.record_failure(&payload);
                     })?;
@@ -1433,6 +1489,12 @@ fn run_codex_proxy_host(
                     }
                 }
                 ProviderStreamEvent::Eof => {
+                    emit_codex_proxy_trace(json!({
+                        "component": "Hermes",
+                        "event": "codex_proxy_provider_event",
+                        "kind": "eof",
+                        "provider_input_state": format!("{provider_input_state:?}"),
+                    }));
                     provider_output_gate.finish_input().inspect_err(|_| {
                         session.record_failure(provider_output_gate.pending.as_slice());
                     })?;
@@ -1448,6 +1510,11 @@ fn run_codex_proxy_host(
                     debug_assert!(session.outbound_closed());
                 }
                 ProviderStreamEvent::Failed => {
+                    emit_codex_proxy_trace(json!({
+                        "component": "Hermes",
+                        "event": "codex_proxy_provider_event",
+                        "kind": "failed",
+                    }));
                     return Err(error(
                         HermesAdapterErrorKind::Transport,
                         "HERMES_CODEX_PROXY_PROVIDER_READ_FAILED",
@@ -1458,6 +1525,11 @@ fn run_codex_proxy_host(
 
         match commands.try_recv() {
             Ok(CodexProxyHostCommand::AdapterSucceeded) => {
+                emit_codex_proxy_trace(json!({
+                    "component": "Hermes",
+                    "event": "codex_proxy_adapter_succeeded",
+                    "provider_input_state": format!("{provider_input_state:?}"),
+                }));
                 let opened = duplex
                     .as_mut()
                     .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_STATE_REJECTED"))?;
@@ -1489,6 +1561,12 @@ fn run_codex_proxy_host(
 
         match outer_stream.recv_timeout(Duration::from_millis(2)) {
             Ok(OuterStreamEvent::Data(payload)) => {
+                emit_codex_proxy_trace(json!({
+                    "component": "Hermes",
+                    "event": "codex_proxy_outer_event",
+                    "kind": "data",
+                    "payload_bytes": payload.len(),
+                }));
                 buffer.extend_from_slice(&payload);
                 if buffer.len() > MAX_CODEX_PROXY_BUFFER_BYTES {
                     session.record_failure(&buffer);
@@ -1496,6 +1574,11 @@ fn run_codex_proxy_host(
                 }
             }
             Ok(OuterStreamEvent::Eof) => {
+                emit_codex_proxy_trace(json!({
+                    "component": "Hermes",
+                    "event": "codex_proxy_outer_event",
+                    "kind": "eof",
+                }));
                 one_turn_gate.finish_input().inspect_err(|_| {
                     session.record_failure(one_turn_gate.pending());
                 })?;
@@ -1505,6 +1588,11 @@ fn run_codex_proxy_host(
                 ));
             }
             Ok(OuterStreamEvent::Failed) => {
+                emit_codex_proxy_trace(json!({
+                    "component": "Hermes",
+                    "event": "codex_proxy_outer_event",
+                    "kind": "failed",
+                }));
                 return Err(error(
                     HermesAdapterErrorKind::Transport,
                     "HERMES_CODEX_PROXY_OUTER_READ_FAILED",
@@ -2298,8 +2386,25 @@ impl ProductionHermesPort {
         &mut self,
         request: &HermesResearchRequest,
     ) -> PortResult<HermesReflectionEvidence> {
+        emit_codex_proxy_trace(json!({
+            "component": "Hermes",
+            "event": "production_reflection_start",
+        }));
         self.prepare_operation()?;
         let result = self.adapter.run_reflection_evidence(request);
+        match &result {
+            Ok(_) => emit_codex_proxy_trace(json!({
+                "component": "Hermes",
+                "event": "production_reflection_adapter_result",
+                "status": "ok",
+            })),
+            Err(failure) => emit_codex_proxy_trace(json!({
+                "component": "Hermes",
+                "error_code": failure.code(),
+                "event": "production_reflection_adapter_result",
+                "status": "error",
+            })),
+        }
         if result.is_ok() {
             self.complete_proxy_after_adapter_success()?;
         }
