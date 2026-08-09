@@ -28,7 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use lattice_contracts::ContentDigest;
@@ -955,6 +955,11 @@ struct OfficialCodexProxyProvider {
 }
 
 #[cfg(windows)]
+fn emit_codex_broker_trace(event: serde_json::Value) {
+    eprintln!("{event}");
+}
+
+#[cfg(windows)]
 impl ProductionCodexProxyProvider for OfficialCodexProxyProvider {
     fn control(&self) -> Arc<dyn ProductionCodexProxyControl> {
         self.control.clone()
@@ -964,14 +969,36 @@ impl ProductionCodexProxyProvider for OfficialCodexProxyProvider {
         self: Box<Self>,
         absolute_deadline: Instant,
     ) -> HermesAdapterResult<ProductionCodexProxyDuplex> {
+        emit_codex_broker_trace(json!({
+            "component": "Hermes",
+            "event": "codex_proxy_provider_open_start",
+        }));
         if absolute_deadline <= Instant::now() {
             return Err(timeout("HERMES_CODEX_PROXY_DEADLINE_EXCEEDED"));
         }
         let Self { verified, control } = *self;
         control.ensure_open_allowed()?;
+        emit_codex_broker_trace(json!({
+            "component": "Hermes",
+            "event": "codex_proxy_provider_open_allowed",
+            "stage": "initial",
+        }));
         let reviewed = verified.reverify_open()?;
+        emit_codex_broker_trace(json!({
+            "component": "Hermes",
+            "event": "codex_proxy_provider_reverify_ok",
+        }));
         control.ensure_open_allowed()?;
+        emit_codex_broker_trace(json!({
+            "component": "Hermes",
+            "event": "codex_proxy_provider_open_allowed",
+            "stage": "post_reverify",
+        }));
         let plan = verified.command_plan(&reviewed, absolute_deadline)?;
+        emit_codex_broker_trace(json!({
+            "component": "Hermes",
+            "event": "codex_proxy_provider_command_plan_ok",
+        }));
         launch_owned_proxy(
             &plan,
             MAX_CODEX_PROXY_STDERR_BYTES,
@@ -1269,10 +1296,28 @@ where
     if stderr_limit == 0 || stderr_limit > MAX_CODEX_PROXY_STDERR_BYTES {
         return Err(configuration("HERMES_CODEX_PROXY_STDERR_LIMIT_REJECTED"));
     }
+    emit_codex_broker_trace(json!({
+        "component": "Hermes",
+        "event": "codex_proxy_launch_start",
+    }));
     control.ensure_unbound()?;
+    emit_codex_broker_trace(json!({
+        "component": "Hermes",
+        "event": "codex_proxy_control_unbound",
+    }));
     let child = crate::windows_job::spawn_duplex(plan)?;
     let process_id = child.process_id();
+    emit_codex_broker_trace(json!({
+        "component": "Hermes",
+        "event": "codex_proxy_process_spawned",
+        "process_id": process_id,
+    }));
     control.bind_child(child)?;
+    emit_codex_broker_trace(json!({
+        "component": "Hermes",
+        "event": "codex_proxy_process_bound",
+        "process_id": process_id,
+    }));
     observe_process_id(process_id);
     let (reader, writer) = match control.start_stdio() {
         Ok(streams) => streams,
@@ -1281,11 +1326,26 @@ where
             return Err(failure);
         }
     };
+    emit_codex_broker_trace(json!({
+        "component": "Hermes",
+        "event": "codex_proxy_stdio_started",
+        "process_id": process_id,
+    }));
     if let Err(failure) = post_spawn_identity_check() {
         control.terminate()?;
         return Err(failure);
     }
+    emit_codex_broker_trace(json!({
+        "component": "Hermes",
+        "event": "codex_proxy_post_spawn_identity_ok",
+        "process_id": process_id,
+    }));
     control.ensure_running()?;
+    emit_codex_broker_trace(json!({
+        "component": "Hermes",
+        "event": "codex_proxy_process_running",
+        "process_id": process_id,
+    }));
     Ok(ProductionCodexProxyDuplex::new(reader, writer))
 }
 
