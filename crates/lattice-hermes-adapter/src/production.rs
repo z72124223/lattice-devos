@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-#[cfg(test)]
 use crate::HERMES_SCHEMA_VERSION;
 use crate::broker::{CodexBrokerPreflightReceipt, CodexReflectionBrokerConfig};
 use crate::codex_proxy::{
@@ -811,7 +810,6 @@ impl CodexProxyOneTurnGate {
     }
 }
 
-#[cfg(test)]
 fn codex_reflection_output_schema(job: &HermesReflectionJob) -> serde_json::Value {
     let invocation = job.request().invocation();
     let evidence_digests = job
@@ -2045,7 +2043,7 @@ impl ProductionHermesRunner {
             outer_input,
             outer_stream,
             std::mem::take(&mut self.outer_initial_bytes),
-            None,
+            Some(codex_reflection_output_schema(&job)),
             Arc::clone(&self.owner),
         )?;
         let remaining = self
@@ -4390,9 +4388,17 @@ mod proxy_host_tests {
                 .as_deref()
                 .is_some_and(|input| input.contains(job.input_digest().as_str()))
         );
-        assert!(
-            observed.turn_output_schema.is_none(),
-            "production Hermes turns must leave outputSchema absent for Responses Lite compatibility"
+        let output_schema = observed
+            .turn_output_schema
+            .as_ref()
+            .expect("production Hermes turns carry the owned reflection schema");
+        assert_eq!(
+            output_schema["properties"]["schema_version"]["enum"][0],
+            HERMES_SCHEMA_VERSION
+        );
+        assert_eq!(
+            output_schema["properties"]["binding"]["properties"]["input_digest"]["enum"][0],
+            job.input_digest().as_str()
         );
         drop(observed);
         fs::remove_dir_all(&isolation_root).expect("remove zero-model isolation root");

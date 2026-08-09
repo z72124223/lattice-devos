@@ -1058,7 +1058,6 @@ impl HermesReflectionJob {
     }
 
     /// Returns the exact immutable evidence allowed in structured findings.
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn evidence(&self) -> &[ReflectionEvidence] {
         &self.evidence
