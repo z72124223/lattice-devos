@@ -272,6 +272,14 @@ const expectedEvidenceFields = {
   ],
 };
 
+const resolvedActualIdentityFields = [
+  "provider_id",
+  "provider_surface",
+  "model_id",
+  "model_version",
+  "reasoning_effort",
+];
+
 const evidenceEvaluationTime = Date.parse("2026-08-10T02:00:00+08:00");
 
 function evidenceDecision(observation) {
@@ -304,7 +312,7 @@ function evidenceDecision(observation) {
   return { disposition: "ALLOW", reason_code: "ROUTE_CAPABILITY_MATCH" };
 }
 
-function actualEvidenceDecision({ actual }) {
+function actualEvidenceDecision({ resolved, actual }) {
   const hasAllRequiredFields =
     actual &&
     expectedEvidenceFields.actual.every((field) =>
@@ -339,10 +347,27 @@ function actualEvidenceDecision({ actual }) {
       (field) =>
         typeof actual[field] === "object" && !Array.isArray(actual[field]),
     ) &&
+    typeof actual.observed_at === "string" &&
     Number.isNaN(Date.parse(actual.observed_at)) === false;
+  const hasCompleteResolvedIdentity =
+    resolved &&
+    resolvedActualIdentityFields.every(
+      (field) =>
+        Object.prototype.hasOwnProperty.call(resolved, field) &&
+        typeof resolved[field] === "string" &&
+        resolved[field].length > 0,
+    );
+  const resolvedMatchesActual =
+    hasTypedValues &&
+    hasCompleteResolvedIdentity &&
+    resolvedActualIdentityFields.every(
+      (field) => resolved[field] === actual[field],
+    );
   if (
     !hasTypedValues ||
+    !resolvedMatchesActual ||
     actual.evidence_state !== "VERIFIED" ||
+    actual.conformance !== "MATCH" ||
     typeof actual.model_id !== "string" ||
     actual.model_id.length === 0 ||
     !/^(?:provider|runtime):/u.test(actual.source_ref ?? "")
@@ -596,14 +621,18 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
       "verified-null-blocks",
     ],
   );
-  const completeActual = fixture.actual_evidence_cases.find(
+  const completeActualCase = fixture.actual_evidence_cases.find(
     ({ id }) => id === "runtime-actual-allows",
-  ).actual;
+  );
+  const completeActual = completeActualCase.actual;
   for (const field of expectedEvidenceFields.actual) {
     const partialActual = structuredClone(completeActual);
     delete partialActual[field];
     assert.deepEqual(
-      actualEvidenceDecision({ actual: partialActual }),
+      actualEvidenceDecision({
+        resolved: completeActualCase.resolved,
+        actual: partialActual,
+      }),
       {
         disposition: "BLOCK",
         reason_code: "ROUTE_ACTUAL_SETTING_MISMATCH",
@@ -613,7 +642,10 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
     const nullActual = structuredClone(completeActual);
     nullActual[field] = null;
     assert.deepEqual(
-      actualEvidenceDecision({ actual: nullActual }),
+      actualEvidenceDecision({
+        resolved: completeActualCase.resolved,
+        actual: nullActual,
+      }),
       {
         disposition: "BLOCK",
         reason_code: "ROUTE_ACTUAL_SETTING_MISMATCH",
@@ -621,6 +653,56 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
       `null actual field should block: ${field}`,
     );
   }
+  for (const field of resolvedActualIdentityFields) {
+    const mismatchedActual = structuredClone(completeActual);
+    mismatchedActual[field] = `${completeActual[field]}-mismatch`;
+    assert.deepEqual(
+      actualEvidenceDecision({
+        resolved: completeActualCase.resolved,
+        actual: mismatchedActual,
+      }),
+      {
+        disposition: "BLOCK",
+        reason_code: "ROUTE_ACTUAL_SETTING_MISMATCH",
+      },
+      `resolved/actual identity mismatch should block: ${field}`,
+    );
+
+    const partialResolved = structuredClone(completeActualCase.resolved);
+    delete partialResolved[field];
+    assert.deepEqual(
+      actualEvidenceDecision({ resolved: partialResolved, actual: completeActual }),
+      {
+        disposition: "BLOCK",
+        reason_code: "ROUTE_ACTUAL_SETTING_MISMATCH",
+      },
+      `missing resolved identity should block: ${field}`,
+    );
+  }
+  const mismatchedConformance = structuredClone(completeActual);
+  mismatchedConformance.conformance = "MISMATCH";
+  assert.deepEqual(
+    actualEvidenceDecision({
+      resolved: completeActualCase.resolved,
+      actual: mismatchedConformance,
+    }),
+    {
+      disposition: "BLOCK",
+      reason_code: "ROUTE_ACTUAL_SETTING_MISMATCH",
+    },
+  );
+  const numericObservedAt = structuredClone(completeActual);
+  numericObservedAt.observed_at = 0;
+  assert.deepEqual(
+    actualEvidenceDecision({
+      resolved: completeActualCase.resolved,
+      actual: numericObservedAt,
+    }),
+    {
+      disposition: "BLOCK",
+      reason_code: "ROUTE_ACTUAL_SETTING_MISMATCH",
+    },
+  );
   assert.deepEqual(
     evidenceDecision(
       fixture.evidence_inventory.find(
@@ -672,6 +754,8 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
   assert.deepEqual(fixture.actual_origin_policy, {
     allowed_source_prefixes: ["provider:", "runtime:"],
     forbidden_source_prefixes: ["requested:", "resolved:"],
+    resolved_actual_identity_fields: resolvedActualIdentityFields,
+    required_conformance: "MATCH",
     missing_actual_disposition: "BLOCK",
     substitution_reason_code: "ROUTE_ACTUAL_SETTING_MISMATCH",
   });
@@ -695,6 +779,7 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
     for (const field of expectedEvidenceFields.actual) {
       assert.deepEqual(
         actualEvidenceDecision({
+          resolved: completeActualCase.resolved,
           actual: {
             model_id: "copied-value",
             evidence_state: "VERIFIED",

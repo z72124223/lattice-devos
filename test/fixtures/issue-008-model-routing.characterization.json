@@ -954,7 +954,11 @@
         "model_id": "requested-model"
       },
       "resolved": {
-        "model_id": "resolved-model"
+        "provider_id": "openai",
+        "provider_surface": "codex-app-server",
+        "model_id": "observed-model",
+        "model_version": "observed-version",
+        "reasoning_effort": "low"
       },
       "actual": {
         "request_digest": "sha256:request-example",
@@ -995,7 +999,11 @@
         "model_id": "requested-model"
       },
       "resolved": {
-        "model_id": "resolved-model"
+        "provider_id": "openai",
+        "provider_surface": "codex-app-server",
+        "model_id": "observed-model",
+        "model_version": "observed-version",
+        "reasoning_effort": "low"
       },
       "actual": null,
       "expected": {
@@ -1009,7 +1017,11 @@
         "model_id": "requested-model"
       },
       "resolved": {
-        "model_id": "resolved-model"
+        "provider_id": "openai",
+        "provider_surface": "codex-app-server",
+        "model_id": "requested-model",
+        "model_version": "observed-version",
+        "reasoning_effort": "low"
       },
       "actual": {
         "request_digest": "sha256:request-example",
@@ -1050,7 +1062,11 @@
         "model_id": "requested-model"
       },
       "resolved": {
-        "model_id": "resolved-model"
+        "provider_id": "openai",
+        "provider_surface": "codex-app-server",
+        "model_id": "resolved-model",
+        "model_version": "observed-version",
+        "reasoning_effort": "low"
       },
       "actual": {
         "request_digest": "sha256:request-example",
@@ -1091,7 +1107,11 @@
         "model_id": "requested-model"
       },
       "resolved": {
-        "model_id": "resolved-model"
+        "provider_id": "openai",
+        "provider_surface": "codex-app-server",
+        "model_id": "observed-model",
+        "model_version": "observed-version",
+        "reasoning_effort": "low"
       },
       "actual": {
         "request_digest": "sha256:request-example",
@@ -1136,6 +1156,14 @@
       "requested:",
       "resolved:"
     ],
+    "resolved_actual_identity_fields": [
+      "provider_id",
+      "provider_surface",
+      "model_id",
+      "model_version",
+      "reasoning_effort"
+    ],
+    "required_conformance": "MATCH",
     "missing_actual_disposition": "BLOCK",
     "substitution_reason_code": "ROUTE_ACTUAL_SETTING_MISMATCH"
   },
