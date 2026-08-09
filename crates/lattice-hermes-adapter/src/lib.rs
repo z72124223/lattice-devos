@@ -1710,38 +1710,39 @@ fn codex_app_server_failure_diagnostic(output: &str) -> Option<Value> {
     if output.is_empty() {
         return Some(json!({
             "component": "Codex app-server",
+            "classification": "HERMES_CODEX_APP_SERVER_EMPTY_OUTPUT",
             "event": "run_failure_detail",
             "source": "empty"
         }));
     }
     let detail = output.strip_prefix(PREFIX)?.trim();
-    let detail_sha256 = sha256_text(detail);
-    let detail_byte_count = detail.len();
-    if validate_redacted_text(
+    Some(redacted_run_failure_diagnostic(
+        "Codex app-server",
+        "completed_output",
         detail,
-        MAX_TEXT_BYTES,
-        "HERMES_CODEX_APP_SERVER_FAILURE_DETAIL_REJECTED",
-    )
-    .is_ok()
-    {
-        Some(json!({
-            "component": "Codex app-server",
-            "detail": detail,
-            "detail_byte_count": detail_byte_count,
-            "detail_sha256": detail_sha256,
-            "event": "run_failure_detail",
-            "source": "completed_output"
-        }))
-    } else {
-        Some(json!({
-            "component": "Codex app-server",
-            "detail_byte_count": detail_byte_count,
-            "detail_redacted": true,
-            "detail_sha256": detail_sha256,
-            "event": "run_failure_detail",
-            "source": "completed_output"
-        }))
-    }
+    ))
+}
+
+fn redacted_run_failure_diagnostic(component: &str, source: &str, detail: &str) -> Value {
+    json!({
+        "component": component,
+        "classification": classify_run_failure_hint(detail),
+        "detail_byte_count": detail.len(),
+        "detail_redacted": true,
+        "detail_sha256": sha256_text(detail),
+        "event": "run_failure_detail",
+        "source": source
+    })
+}
+
+fn redacted_run_failure_missing_detail_diagnostic(component: &str, source: &str) -> Value {
+    json!({
+        "component": component,
+        "classification": "HERMES_RUN_FAILED",
+        "detail_present": false,
+        "event": "run_failure_detail",
+        "source": source
+    })
 }
 
 fn parse_reflection(
@@ -2141,6 +2142,10 @@ fn parse_sse_terminal(body: &str, expected_run_id: &str) -> HermesAdapterResult<
                     "HERMES_EVENT_UNKNOWN_FIELD",
                 )?;
                 let detail = require_string(object, "error", "HERMES_EVENT_MALFORMED")?;
+                eprintln!(
+                    "{}",
+                    redacted_run_failure_diagnostic("Hermes", "events", detail)
+                );
                 let code = classify_run_failure_hint(detail);
                 return Err(error(HermesAdapterErrorKind::Failed, code));
             }
@@ -2245,13 +2250,24 @@ fn parse_status(
         "completed" => Ok(RunState::Completed(
             require_string(object, "output", "HERMES_STATUS_MALFORMED")?.to_owned(),
         )),
-        "failed" => Err(error(
-            HermesAdapterErrorKind::Failed,
-            object
-                .get("error")
-                .and_then(Value::as_str)
-                .map_or("HERMES_RUN_FAILED", classify_run_failure_hint),
-        )),
+        "failed" => {
+            let detail = object.get("error").and_then(Value::as_str);
+            if let Some(detail) = detail {
+                eprintln!(
+                    "{}",
+                    redacted_run_failure_diagnostic("Hermes", "status", detail)
+                );
+            } else {
+                eprintln!(
+                    "{}",
+                    redacted_run_failure_missing_detail_diagnostic("Hermes", "status")
+                );
+            }
+            Err(error(
+                HermesAdapterErrorKind::Failed,
+                detail.map_or("HERMES_RUN_FAILED", classify_run_failure_hint),
+            ))
+        }
         "cancelled" => Err(error(
             HermesAdapterErrorKind::Cancelled,
             "HERMES_RUN_CANCELLED",
@@ -2268,6 +2284,7 @@ fn classify_run_failure_hint(detail: &str) -> &'static str {
         &[
             b"401 unauthorized",
             b"403 forbidden",
+            b"authorization: bearer ",
             b"authentication failed",
             b"authentication required",
             b"authentication error",
@@ -3168,17 +3185,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_failure_diagnostic_preserves_only_safe_bounded_detail() {
+    fn codex_failure_diagnostic_preserves_only_fixed_hint_and_hash() {
         let detail = "thread/start rejected";
         let diagnostic =
             codex_app_server_failure_diagnostic(&format!("Codex app-server turn failed: {detail}"))
                 .expect("explicit Codex failure diagnostic");
 
         assert_eq!(diagnostic["source"], "completed_output");
-        assert_eq!(diagnostic["detail"], detail);
+        assert_eq!(diagnostic["classification"], "HERMES_RUN_FAILED");
+        assert_eq!(diagnostic["detail_redacted"], true);
         assert_eq!(diagnostic["detail_byte_count"], detail.len());
         assert_eq!(diagnostic["detail_sha256"], sha256_text(detail));
-        assert!(diagnostic.get("detail_redacted").is_none());
+        assert!(diagnostic.get("detail").is_none());
+        assert!(!diagnostic.to_string().contains(detail));
     }
 
     #[test]
@@ -3189,6 +3208,7 @@ mod tests {
                 .expect("sensitive Codex failure diagnostic");
 
         assert_eq!(diagnostic["source"], "completed_output");
+        assert_eq!(diagnostic["classification"], "HERMES_RUN_FAILED_HINT_AUTH");
         assert_eq!(diagnostic["detail_redacted"], true);
         assert_eq!(diagnostic["detail_byte_count"], detail.len());
         assert_eq!(diagnostic["detail_sha256"], sha256_text(detail));
@@ -3202,6 +3222,10 @@ mod tests {
             codex_app_server_failure_diagnostic(" \r\n ").expect("empty Codex failure diagnostic");
 
         assert_eq!(diagnostic["source"], "empty");
+        assert_eq!(
+            diagnostic["classification"],
+            "HERMES_CODEX_APP_SERVER_EMPTY_OUTPUT"
+        );
         assert!(diagnostic.get("detail").is_none());
         assert!(diagnostic.get("detail_byte_count").is_none());
         assert!(diagnostic.get("detail_sha256").is_none());
