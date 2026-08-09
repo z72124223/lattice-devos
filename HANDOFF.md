@@ -1,6 +1,9 @@
 # Current GitHub Handoff — 2026-08-10
 
-Status: `LOCAL_ACCEPTED / CHATGPT_TUNNEL_PENDING` for SPEC-003 v4 / TASK-038
+Status: `WAIT_EXTERNAL / PUSH_PENDING_AUTH / CHATGPT_TUNNEL_PENDING` for
+SPEC-003 v4 / TASK-038. Canonical-local acceptance is complete at stable
+checkpoint `2b424ec9a5401a6fbdc4f37d3d401592331afca0`; only the external GitHub
+authentication and real ChatGPT Secure MCP Tunnel gates remain.
 Phase 2. Production `latticed`, real PostgreSQL Writer Lease/fencing, governed
 Codex, verification/Git, physical database restart, and fresh-process durable
 Status passed the canonical-local gate. A refreshed real ChatGPT Secure MCP
@@ -9,7 +12,7 @@ intentionally second.
 
 Repository: `z72124223/lattice-devos`<br>
 Branch: `feature/task-038-chatgpt-mcp`<br>
-Upstream: none; local stable checkpoint not yet pushed<br>
+Upstream: none; local stable checkpoint `2b424ec9` not yet pushed<br>
 Base: local Phase 1 checkpoint `512732d`<br>
 Worktree:
 `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\chatgpt-mcp`
@@ -153,13 +156,21 @@ exists.
 
 ## Exact Next Action
 
-1. Commit the current clean stable checkpoint and publish the provider-neutral Task,
-   Writer Lease, process-start, and Codex thread/turn evidence boundary to
-   Issue #6; Issue #2 may consume it only as passive observation.
-2. Refresh the real Secure MCP Tunnel and complete the two-session ChatGPT
-   submit/status gate without changing or weakening the canonical-local proof.
-3. Only after TASK-038 Phase 2 acceptance, resume TASK-037 from the actual first
-   production blocker.
+1. Wait for GitHub CLI authentication, then re-run the exact fetch/divergence/
+   scope/secret preflight and push only
+   `feature/task-038-chatgpt-mcp`; no PR, merge, tag, release, deployment, or
+   force push is authorized.
+2. Wait for the existing control-plane credential to be supplied through a
+   trusted operator environment, then refresh the real Secure MCP Tunnel and
+   complete the two-session ChatGPT submit/status gate without changing or
+   weakening the canonical-local proof.
+3. While those external gates remain unavailable, resume TASK-037 in its
+   existing canonical worktree. Do not add another writer or reinterpret
+   TASK-038 local evidence as real ChatGPT acceptance.
+
+Issue #4 records the stable checkpoint and remaining external gates. Issue #6
+records the provider-neutral Task/Writer Lease/process/Codex observation
+interfaces; Issue #2 records the read-only Passive Supervisor boundary.
 
 No CI, PR, merge, tag, release, deployment, public exposure, or
 credential/account change is claimed. The exact feature branch may be pushed

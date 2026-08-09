@@ -28,10 +28,12 @@ Base checkpoint: local Phase 1 commit `512732d`<br>
 Latest fetched TASK-037 remote head: `8828d2b`<br>
 
 Current Goal:
-- Preserve the accepted canonical-local TASK-038 Phase 2 checkpoint, publish
-  its exact feature commit, then refresh the real Secure MCP Tunnel so ChatGPT
-  can discover/invoke the two bounded task tools. Only after that separate live
-  ChatGPT gate resumes TASK-037 production-chain diagnosis/repair.
+- TASK-038 is `WAIT_EXTERNAL / PUSH_PENDING_AUTH` at stable checkpoint
+  `2b424ec9a5401a6fbdc4f37d3d401592331afca0`. Preserve its accepted
+  canonical-local evidence while waiting for GitHub CLI authentication and a
+  trusted control-plane credential. Resume TASK-037 in its existing canonical
+  worktree during that wait; the real ChatGPT tunnel gate remains separate and
+  open.
 
 CURRENT TASK-038 — add `lattice_task_submit` and `lattice_task_status` through
 the same `latticed` One Gateway. The first public intent is exactly
@@ -119,7 +121,7 @@ In Progress / Not Yet Accepted:
 - Broader task templates remain closed until durable Project Registry/live
   Policy, heartbeat, governed interruption, and orphan recovery are composed.
 
-Deferred Until TASK-038 Phase 2 Completes:
+Resumed While TASK-038 Waits On External Gates:
 - The latest ChatGPT delivery-status observation is
   `LATTICED_DATABASE_CONNECT_REJECTED`. It is the current first visible
   production-chain failure and must not be assumed to share the older Hermes
@@ -128,7 +130,7 @@ Deferred Until TASK-038 Phase 2 Completes:
   `HERMES_PRODUCTION_CHILD_EXITED / LATTICE_HERMES_REFLECTION_REJECTED` at the
   later Hermes boundary. It remains useful incident history, not the current
   first blocker.
-- TASK-037 will resume by diagnosing the actual first production failure, then
+- TASK-037 resumes by diagnosing the actual first production failure, then
   proceeding gate-by-gate through PostgreSQL -> Codex -> Graphify -> Hermes ->
   Memory -> Status. No production E2E PASS exists today.
 
