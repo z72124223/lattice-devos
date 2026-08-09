@@ -396,7 +396,7 @@ enum CodexProxyProviderLineAction {
     Drop,
 }
 
-fn emit_codex_proxy_trace(event: serde_json::Value) {
+fn emit_codex_proxy_trace(event: &serde_json::Value) {
     eprintln!("{event}");
 }
 
@@ -461,9 +461,7 @@ impl CodexProxyProviderOutputGate {
     }
 
     fn validate_complete_line(&self) -> HermesAdapterResult<CodexProxyProviderLineAction> {
-        let line = self.pending.strip_suffix(b"\r").unwrap_or(&self.pending);
-        let value: serde_json::Value = serde_json::from_slice(line)
-            .map_err(|_| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"))?;
+        let value = parse_codex_proxy_provider_line(&self.pending)?;
         let object = value
             .as_object()
             .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"))?;
@@ -472,7 +470,7 @@ impl CodexProxyProviderOutputGate {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned)
         else {
-            emit_codex_proxy_trace(json!({
+            emit_codex_proxy_trace(&json!({
                 "component": "Hermes",
                 "direction": "codex_app_server_to_hermes",
                 "event": "codex_proxy_provider_response",
@@ -484,7 +482,7 @@ impl CodexProxyProviderOutputGate {
             return Ok(CodexProxyProviderLineAction::ForwardOriginal);
         };
         if object.contains_key("id") {
-            emit_codex_proxy_trace(json!({
+            emit_codex_proxy_trace(&json!({
                 "action": "reject_request",
                 "component": "Hermes",
                 "direction": "codex_app_server_to_hermes",
@@ -495,7 +493,7 @@ impl CodexProxyProviderOutputGate {
         }
         if is_codex_proxy_ignorable_provider_notice(method.as_str()) {
             validate_codex_proxy_ignorable_provider_notice(method.as_str(), object)?;
-            emit_codex_proxy_trace(json!({
+            emit_codex_proxy_trace(&json!({
                 "action": "drop",
                 "component": "Hermes",
                 "direction": "codex_app_server_to_hermes",
@@ -505,7 +503,7 @@ impl CodexProxyProviderOutputGate {
             return Ok(CodexProxyProviderLineAction::Drop);
         }
         if !is_codex_proxy_hermes_notification(method.as_str()) {
-            emit_codex_proxy_trace(json!({
+            emit_codex_proxy_trace(&json!({
                 "action": "reject_notice",
                 "component": "Hermes",
                 "direction": "codex_app_server_to_hermes",
@@ -517,7 +515,7 @@ impl CodexProxyProviderOutputGate {
         let keys = object.keys().map(String::as_str).collect::<HashSet<_>>();
         match keys {
             keys if keys == HashSet::from(["method", "params"]) => {
-                emit_codex_proxy_trace(json!({
+                emit_codex_proxy_trace(&json!({
                     "action": "forward",
                     "component": "Hermes",
                     "direction": "codex_app_server_to_hermes",
@@ -541,7 +539,7 @@ impl CodexProxyProviderOutputGate {
                     .as_object_mut()
                     .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"))?
                     .remove("emittedAtMs");
-                emit_codex_proxy_trace(json!({
+                emit_codex_proxy_trace(&json!({
                     "action": "normalize",
                     "component": "Hermes",
                     "direction": "codex_app_server_to_hermes",
@@ -553,7 +551,7 @@ impl CodexProxyProviderOutputGate {
                     .map_err(|_| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"))
             }
             _ => {
-                emit_codex_proxy_trace(json!({
+                emit_codex_proxy_trace(&json!({
                     "action": "reject_jsonl",
                     "component": "Hermes",
                     "direction": "codex_app_server_to_hermes",
@@ -574,6 +572,11 @@ impl CodexProxyProviderOutputGate {
             ))
         }
     }
+}
+
+fn parse_codex_proxy_provider_line(line: &[u8]) -> HermesAdapterResult<serde_json::Value> {
+    serde_json::from_slice(line.strip_suffix(b"\r").unwrap_or(line))
+        .map_err(|_| malformed("HERMES_CODEX_PROXY_PROVIDER_JSONL_REJECTED"))
 }
 
 fn is_codex_proxy_ignorable_provider_notice(method: &str) -> bool {
@@ -807,81 +810,16 @@ impl CodexProxyOneTurnGate {
             .ok_or_else(|| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?;
         let input_id = codex_proxy_scalar_id(raw_object);
         if value.method.as_deref() == Some("turn/start") {
-            if self.turn_start_count != 0 {
-                emit_codex_proxy_trace(json!({
-                    "action": "reject_turn_replay",
-                    "component": "Hermes",
-                    "direction": "hermes_to_codex_app_server",
-                    "event": "codex_proxy_input_line",
-                    "id": input_id,
-                    "method": "turn/start",
-                    "turn_start_count": self.turn_start_count,
-                }));
-                return Err(malformed("HERMES_CODEX_PROXY_TURN_REPLAY_REJECTED"));
-            }
-            self.turn_start_count = 1;
-            let contained_cwd = match value
-                .params
-                .as_ref()
-                .and_then(|params| params.cwd.as_deref())
-            {
-                Some("/work") => true,
-                Some(_) => {
-                    emit_codex_proxy_trace(json!({
-                        "action": "reject_cwd",
-                        "component": "Hermes",
-                        "direction": "hermes_to_codex_app_server",
-                        "event": "codex_proxy_input_line",
-                        "id": input_id,
-                        "method": "turn/start",
-                        "turn_start_count": self.turn_start_count,
-                    }));
-                    return Err(cross_binding("HERMES_CODEX_PROXY_CWD_REJECTED"));
-                }
-                None => false,
-            };
-            if self.output_schema.is_none() && !contained_cwd {
-                emit_codex_proxy_trace(json!({
-                    "action": "forward",
-                    "component": "Hermes",
-                    "direction": "hermes_to_codex_app_server",
-                    "event": "codex_proxy_input_line",
-                    "id": input_id,
-                    "method": "turn/start",
-                    "output_schema": false,
-                    "turn_start_count": self.turn_start_count,
-                }));
-                return Ok(None);
-            };
-            let mut normalized: serde_json::Value = serde_json::from_slice(line)
-                .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?;
-            let params = normalized
-                .get_mut("params")
-                .and_then(serde_json::Value::as_object_mut)
-                .ok_or_else(|| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?;
-            if contained_cwd {
-                params.remove("cwd");
-            }
-            if let Some(output_schema) = &self.output_schema {
-                params.insert("outputSchema".to_owned(), output_schema.clone());
-            }
-            emit_codex_proxy_trace(json!({
-                "action": "normalize",
-                "component": "Hermes",
-                "contained_cwd": contained_cwd,
-                "direction": "hermes_to_codex_app_server",
-                "event": "codex_proxy_input_line",
-                "id": input_id,
-                "method": "turn/start",
-                "output_schema": self.output_schema.is_some(),
-                "turn_start_count": self.turn_start_count,
-            }));
-            return serde_json::to_vec(&normalized)
-                .map(Some)
-                .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"));
+            return Self::validate_turn_start(
+                &mut self.turn_start_count,
+                self.output_schema.as_ref(),
+                &value,
+                raw_value,
+                &input_id,
+            );
         }
         if value.method.as_deref() != Some("thread/start") {
-            emit_codex_proxy_trace(json!({
+            emit_codex_proxy_trace(&json!({
                 "action": "forward",
                 "component": "Hermes",
                 "direction": "hermes_to_codex_app_server",
@@ -892,7 +830,7 @@ impl CodexProxyOneTurnGate {
             return Ok(None);
         }
         let Some(cwd) = value.params.and_then(|params| params.cwd) else {
-            emit_codex_proxy_trace(json!({
+            emit_codex_proxy_trace(&json!({
                 "action": "forward",
                 "component": "Hermes",
                 "direction": "hermes_to_codex_app_server",
@@ -903,7 +841,7 @@ impl CodexProxyOneTurnGate {
             return Ok(None);
         };
         if cwd != "/work" {
-            emit_codex_proxy_trace(json!({
+            emit_codex_proxy_trace(&json!({
                 "action": "reject_cwd",
                 "component": "Hermes",
                 "direction": "hermes_to_codex_app_server",
@@ -920,7 +858,7 @@ impl CodexProxyOneTurnGate {
             .and_then(serde_json::Value::as_object_mut)
             .ok_or_else(|| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?
             .remove("cwd");
-        emit_codex_proxy_trace(json!({
+        emit_codex_proxy_trace(&json!({
             "action": "normalize",
             "component": "Hermes",
             "contained_cwd": true,
@@ -928,6 +866,85 @@ impl CodexProxyOneTurnGate {
             "event": "codex_proxy_input_line",
             "id": input_id,
             "method": "thread/start",
+        }));
+        serde_json::to_vec(&normalized)
+            .map(Some)
+            .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))
+    }
+
+    fn validate_turn_start(
+        turn_start_count: &mut u8,
+        output_schema: Option<&serde_json::Value>,
+        value: &CodexProxyJsonLine,
+        mut normalized: serde_json::Value,
+        input_id: &serde_json::Value,
+    ) -> HermesAdapterResult<Option<Vec<u8>>> {
+        if *turn_start_count != 0 {
+            emit_codex_proxy_trace(&json!({
+                "action": "reject_turn_replay",
+                "component": "Hermes",
+                "direction": "hermes_to_codex_app_server",
+                "event": "codex_proxy_input_line",
+                "id": input_id,
+                "method": "turn/start",
+                "turn_start_count": *turn_start_count,
+            }));
+            return Err(malformed("HERMES_CODEX_PROXY_TURN_REPLAY_REJECTED"));
+        }
+        *turn_start_count = 1;
+        let contained_cwd = match value
+            .params
+            .as_ref()
+            .and_then(|params| params.cwd.as_deref())
+        {
+            Some("/work") => true,
+            Some(_) => {
+                emit_codex_proxy_trace(&json!({
+                    "action": "reject_cwd",
+                    "component": "Hermes",
+                    "direction": "hermes_to_codex_app_server",
+                    "event": "codex_proxy_input_line",
+                    "id": input_id,
+                    "method": "turn/start",
+                    "turn_start_count": *turn_start_count,
+                }));
+                return Err(cross_binding("HERMES_CODEX_PROXY_CWD_REJECTED"));
+            }
+            None => false,
+        };
+        if output_schema.is_none() && !contained_cwd {
+            emit_codex_proxy_trace(&json!({
+                "action": "forward",
+                "component": "Hermes",
+                "direction": "hermes_to_codex_app_server",
+                "event": "codex_proxy_input_line",
+                "id": input_id,
+                "method": "turn/start",
+                "output_schema": false,
+                "turn_start_count": *turn_start_count,
+            }));
+            return Ok(None);
+        }
+        let params = normalized
+            .get_mut("params")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?;
+        if contained_cwd {
+            params.remove("cwd");
+        }
+        if let Some(output_schema) = output_schema {
+            params.insert("outputSchema".to_owned(), output_schema.clone());
+        }
+        emit_codex_proxy_trace(&json!({
+            "action": "normalize",
+            "component": "Hermes",
+            "contained_cwd": contained_cwd,
+            "direction": "hermes_to_codex_app_server",
+            "event": "codex_proxy_input_line",
+            "id": input_id,
+            "method": "turn/start",
+            "output_schema": output_schema.is_some(),
+            "turn_start_count": *turn_start_count,
         }));
         serde_json::to_vec(&normalized)
             .map(Some)
@@ -1092,7 +1109,7 @@ impl ProductionCodexProxyHost {
         let worker_status = Arc::clone(&status);
         let worker_stop = Arc::clone(&stop);
         let worker_control = Arc::clone(&control);
-        emit_codex_proxy_trace(json!({
+        emit_codex_proxy_trace(&json!({
             "component": "Hermes",
             "event": "codex_proxy_host_start",
             "initial_bytes": initial_bytes.len(),
@@ -1336,7 +1353,7 @@ fn run_codex_proxy_host(
     let mut one_turn_gate = CodexProxyOneTurnGate::with_output_schema(output_schema);
     let mut provider_output_gate = CodexProxyProviderOutputGate::default();
     let mut provider_input_state = CodexProxyProviderInputState::Open;
-    emit_codex_proxy_trace(json!({
+    emit_codex_proxy_trace(&json!({
         "component": "Hermes",
         "event": "codex_proxy_host_loop_start",
         "initial_buffer_bytes": buffer.len(),
@@ -1344,14 +1361,14 @@ fn run_codex_proxy_host(
 
     loop {
         if stop.load(Ordering::Acquire) {
-            emit_codex_proxy_trace(json!({
+            emit_codex_proxy_trace(&json!({
                 "component": "Hermes",
                 "event": "codex_proxy_host_stop_requested",
             }));
             return Ok(());
         }
         if Instant::now() >= absolute_deadline {
-            emit_codex_proxy_trace(json!({
+            emit_codex_proxy_trace(&json!({
                 "component": "Hermes",
                 "event": "codex_proxy_host_deadline_exceeded",
             }));
@@ -1364,7 +1381,7 @@ fn run_codex_proxy_host(
         while let Some(frame) = take_codex_proxy_frame(&mut buffer, session)? {
             match session.accept(&frame)? {
                 CodexProxyHostEvent::Open => {
-                    emit_codex_proxy_trace(json!({
+                    emit_codex_proxy_trace(&json!({
                         "component": "Hermes",
                         "event": "codex_proxy_host_frame",
                         "kind": "open",
@@ -1373,7 +1390,7 @@ fn run_codex_proxy_host(
                         .take()
                         .ok_or_else(|| malformed("HERMES_CODEX_PROXY_PROVIDER_REPLAY_REJECTED"))?;
                     let mut opened = sealed.open(absolute_deadline)?;
-                    emit_codex_proxy_trace(json!({
+                    emit_codex_proxy_trace(&json!({
                         "component": "Hermes",
                         "event": "codex_proxy_provider_opened",
                     }));
@@ -1393,7 +1410,7 @@ fn run_codex_proxy_host(
                     duplex = Some(opened);
                 }
                 CodexProxyHostEvent::Data(payload) => {
-                    emit_codex_proxy_trace(json!({
+                    emit_codex_proxy_trace(&json!({
                         "component": "Hermes",
                         "event": "codex_proxy_host_frame",
                         "kind": "data",
@@ -1415,7 +1432,7 @@ fn run_codex_proxy_host(
                     }
                 }
                 CodexProxyHostEvent::Close => {
-                    emit_codex_proxy_trace(json!({
+                    emit_codex_proxy_trace(&json!({
                         "component": "Hermes",
                         "event": "codex_proxy_host_frame",
                         "kind": "close",
@@ -1432,7 +1449,7 @@ fn run_codex_proxy_host(
                     }
                 }
                 CodexProxyHostEvent::Error(code) => {
-                    emit_codex_proxy_trace(json!({
+                    emit_codex_proxy_trace(&json!({
                         "code": code,
                         "component": "Hermes",
                         "event": "codex_proxy_host_frame",
@@ -1444,7 +1461,7 @@ fn run_codex_proxy_host(
                     ));
                 }
                 CodexProxyHostEvent::Terminal => {
-                    emit_codex_proxy_trace(json!({
+                    emit_codex_proxy_trace(&json!({
                         "component": "Hermes",
                         "event": "codex_proxy_host_frame",
                         "kind": "terminal",
@@ -1475,7 +1492,7 @@ fn run_codex_proxy_host(
         if let Some(provider_event) = provider_event {
             match provider_event? {
                 ProviderStreamEvent::Data(payload) => {
-                    emit_codex_proxy_trace(json!({
+                    emit_codex_proxy_trace(&json!({
                         "component": "Hermes",
                         "event": "codex_proxy_provider_event",
                         "kind": "data",
@@ -1489,7 +1506,7 @@ fn run_codex_proxy_host(
                     }
                 }
                 ProviderStreamEvent::Eof => {
-                    emit_codex_proxy_trace(json!({
+                    emit_codex_proxy_trace(&json!({
                         "component": "Hermes",
                         "event": "codex_proxy_provider_event",
                         "kind": "eof",
@@ -1510,7 +1527,7 @@ fn run_codex_proxy_host(
                     debug_assert!(session.outbound_closed());
                 }
                 ProviderStreamEvent::Failed => {
-                    emit_codex_proxy_trace(json!({
+                    emit_codex_proxy_trace(&json!({
                         "component": "Hermes",
                         "event": "codex_proxy_provider_event",
                         "kind": "failed",
@@ -1525,7 +1542,7 @@ fn run_codex_proxy_host(
 
         match commands.try_recv() {
             Ok(CodexProxyHostCommand::AdapterSucceeded) => {
-                emit_codex_proxy_trace(json!({
+                emit_codex_proxy_trace(&json!({
                     "component": "Hermes",
                     "event": "codex_proxy_adapter_succeeded",
                     "provider_input_state": format!("{provider_input_state:?}"),
@@ -1561,7 +1578,7 @@ fn run_codex_proxy_host(
 
         match outer_stream.recv_timeout(Duration::from_millis(2)) {
             Ok(OuterStreamEvent::Data(payload)) => {
-                emit_codex_proxy_trace(json!({
+                emit_codex_proxy_trace(&json!({
                     "component": "Hermes",
                     "event": "codex_proxy_outer_event",
                     "kind": "data",
@@ -1574,7 +1591,7 @@ fn run_codex_proxy_host(
                 }
             }
             Ok(OuterStreamEvent::Eof) => {
-                emit_codex_proxy_trace(json!({
+                emit_codex_proxy_trace(&json!({
                     "component": "Hermes",
                     "event": "codex_proxy_outer_event",
                     "kind": "eof",
@@ -1588,7 +1605,7 @@ fn run_codex_proxy_host(
                 ));
             }
             Ok(OuterStreamEvent::Failed) => {
-                emit_codex_proxy_trace(json!({
+                emit_codex_proxy_trace(&json!({
                     "component": "Hermes",
                     "event": "codex_proxy_outer_event",
                     "kind": "failed",
@@ -2386,19 +2403,19 @@ impl ProductionHermesPort {
         &mut self,
         request: &HermesResearchRequest,
     ) -> PortResult<HermesReflectionEvidence> {
-        emit_codex_proxy_trace(json!({
+        emit_codex_proxy_trace(&json!({
             "component": "Hermes",
             "event": "production_reflection_start",
         }));
         self.prepare_operation()?;
         let result = self.adapter.run_reflection_evidence(request);
         match &result {
-            Ok(_) => emit_codex_proxy_trace(json!({
+            Ok(_) => emit_codex_proxy_trace(&json!({
                 "component": "Hermes",
                 "event": "production_reflection_adapter_result",
                 "status": "ok",
             })),
-            Err(failure) => emit_codex_proxy_trace(json!({
+            Err(failure) => emit_codex_proxy_trace(&json!({
                 "component": "Hermes",
                 "error_code": failure.code(),
                 "event": "production_reflection_adapter_result",

@@ -390,7 +390,7 @@ struct CodexPackageManifest {
 pub(crate) fn verify_official_codex_bundle(
     launcher: &Path,
 ) -> HermesAdapterResult<ReviewedCodexBundle> {
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_bundle_verify_start",
     }));
@@ -418,7 +418,7 @@ pub(crate) fn verify_official_codex_bundle(
     if canonical_launcher.parent().and_then(Path::parent) != Some(canonical_bundle.as_path()) {
         return Err(rejected());
     }
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_bundle_paths_ok",
     }));
@@ -437,40 +437,71 @@ pub(crate) fn verify_official_codex_bundle(
     ] {
         reject_reparse_to_boundary(path, &canonical_bundle)?;
     }
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_bundle_reparse_check_ok",
     }));
     let policy = CodexBrokerPolicy::official();
-    emit_codex_broker_trace(json!({
+    let (launcher_sha256, package_manifest_sha256) = verify_official_codex_hashes(
+        &canonical_launcher,
+        &sandbox_setup,
+        &command_runner,
+        &package_manifest,
+        policy,
+    )?;
+    emit_codex_broker_trace(&json!({
+        "component": "Hermes",
+        "event": "codex_bundle_verify_ok",
+    }));
+    Ok(ReviewedCodexBundle {
+        launcher: canonical_launcher,
+        launcher_sha256,
+        package_manifest_sha256,
+    })
+}
+
+fn verify_official_codex_hashes(
+    canonical_launcher: &Path,
+    sandbox_setup: &Path,
+    command_runner: &Path,
+    package_manifest: &Path,
+    policy: CodexBrokerPolicy,
+) -> HermesAdapterResult<(String, String)> {
+    let rejected = || {
+        HermesAdapterError::new(
+            HermesAdapterErrorKind::Identity,
+            "HERMES_CODEX_BUNDLE_IDENTITY_REJECTED",
+        )
+    };
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_bundle_hash_start",
         "file": "launcher",
     }));
-    let launcher_sha256 = bounded_file_sha256(&canonical_launcher, MAX_CODEX_LAUNCHER_BYTES)?;
-    emit_codex_broker_trace(json!({
+    let launcher_sha256 = bounded_file_sha256(canonical_launcher, MAX_CODEX_LAUNCHER_BYTES)?;
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_bundle_hash_ok",
         "file": "launcher",
     }));
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_bundle_hash_start",
         "file": "sandbox_setup",
     }));
-    let sandbox_setup_sha256 = bounded_file_sha256(&sandbox_setup, MAX_CODEX_RESOURCE_BYTES)?;
-    emit_codex_broker_trace(json!({
+    let sandbox_setup_sha256 = bounded_file_sha256(sandbox_setup, MAX_CODEX_RESOURCE_BYTES)?;
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_bundle_hash_ok",
         "file": "sandbox_setup",
     }));
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_bundle_hash_start",
         "file": "command_runner",
     }));
-    let command_runner_sha256 = bounded_file_sha256(&command_runner, MAX_CODEX_RESOURCE_BYTES)?;
-    emit_codex_broker_trace(json!({
+    let command_runner_sha256 = bounded_file_sha256(command_runner, MAX_CODEX_RESOURCE_BYTES)?;
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_bundle_hash_ok",
         "file": "command_runner",
@@ -481,14 +512,14 @@ pub(crate) fn verify_official_codex_bundle(
     {
         return Err(rejected());
     }
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_bundle_hash_start",
         "file": "manifest",
     }));
-    let manifest_bytes = bounded_file_bytes(&package_manifest, MAX_CODEX_MANIFEST_BYTES)?;
+    let manifest_bytes = bounded_file_bytes(package_manifest, MAX_CODEX_MANIFEST_BYTES)?;
     let package_manifest_sha256 = sha256_bytes(&manifest_bytes);
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_bundle_hash_ok",
         "file": "manifest",
@@ -508,15 +539,7 @@ pub(crate) fn verify_official_codex_bundle(
     {
         return Err(rejected());
     }
-    emit_codex_broker_trace(json!({
-        "component": "Hermes",
-        "event": "codex_bundle_verify_ok",
-    }));
-    Ok(ReviewedCodexBundle {
-        launcher: canonical_launcher,
-        launcher_sha256,
-        package_manifest_sha256,
-    })
+    Ok((launcher_sha256, package_manifest_sha256))
 }
 
 fn bounded_file_sha256(path: &Path, limit: u64) -> HermesAdapterResult<String> {
@@ -533,7 +556,7 @@ fn bounded_file_sha256(path: &Path, limit: u64) -> HermesAdapterResult<String> {
     let mut file = File::open(path).map_err(|_| rejected())?;
     let mut digest = Sha256::new();
     let mut byte_count = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let read = file.read(&mut buffer).map_err(|_| rejected())?;
         if read == 0 {
@@ -833,34 +856,24 @@ struct VerifiedCodexProxyConfig {
 #[cfg(windows)]
 impl VerifiedCodexProxyConfig {
     fn from_config(config: CodexReflectionBrokerConfig) -> HermesAdapterResult<Self> {
-        emit_codex_broker_trace(json!({
-            "component": "Hermes",
-            "event": "codex_proxy_config_from_config_start",
-        }));
-        let identity_rejected = || {
-            HermesAdapterError::new(
-                HermesAdapterErrorKind::Identity,
-                "HERMES_CODEX_PROXY_CONFIG_IDENTITY_REJECTED",
-            )
-        };
-        let broker_helper =
-            fs::canonicalize(&config.broker_helper).map_err(|_| identity_rejected())?;
-        let launcher = fs::canonicalize(&config.launcher).map_err(|_| identity_rejected())?;
-        let codex_home = fs::canonicalize(&config.codex_home).map_err(|_| identity_rejected())?;
-        let isolation_root =
-            fs::canonicalize(&config.isolation_root).map_err(|_| identity_rejected())?;
-        let product_root =
-            fs::canonicalize(&config.product_root).map_err(|_| identity_rejected())?;
-        let cwd =
-            fs::canonicalize(isolation_root.join("empty-work")).map_err(|_| identity_rejected())?;
-        let temp =
-            fs::canonicalize(isolation_root.join("temp")).map_err(|_| identity_rejected())?;
+        emit_codex_proxy_config_trace("codex_proxy_config_from_config_start");
+        let broker_helper = fs::canonicalize(&config.broker_helper)
+            .map_err(|_| codex_proxy_config_identity_rejected())?;
+        let launcher = fs::canonicalize(&config.launcher)
+            .map_err(|_| codex_proxy_config_identity_rejected())?;
+        let codex_home = fs::canonicalize(&config.codex_home)
+            .map_err(|_| codex_proxy_config_identity_rejected())?;
+        let isolation_root = fs::canonicalize(&config.isolation_root)
+            .map_err(|_| codex_proxy_config_identity_rejected())?;
+        let product_root = fs::canonicalize(&config.product_root)
+            .map_err(|_| codex_proxy_config_identity_rejected())?;
+        let cwd = fs::canonicalize(isolation_root.join("empty-work"))
+            .map_err(|_| codex_proxy_config_identity_rejected())?;
+        let temp = fs::canonicalize(isolation_root.join("temp"))
+            .map_err(|_| codex_proxy_config_identity_rejected())?;
         let config_lock = fs::canonicalize(isolation_root.join("codex-reflection.lock.toml"))
-            .map_err(|_| identity_rejected())?;
-        emit_codex_broker_trace(json!({
-            "component": "Hermes",
-            "event": "codex_proxy_config_canonical_paths_ok",
-        }));
+            .map_err(|_| codex_proxy_config_identity_rejected())?;
+        emit_codex_proxy_config_trace("codex_proxy_config_canonical_paths_ok");
         for path in [
             broker_helper.as_path(),
             launcher.as_path(),
@@ -871,12 +884,10 @@ impl VerifiedCodexProxyConfig {
             temp.as_path(),
             config_lock.as_path(),
         ] {
-            crate::reject_link_or_reparse_ancestors(path).map_err(|_| identity_rejected())?;
+            crate::reject_link_or_reparse_ancestors(path)
+                .map_err(|_| codex_proxy_config_identity_rejected())?;
         }
-        emit_codex_broker_trace(json!({
-            "component": "Hermes",
-            "event": "codex_proxy_config_reparse_check_ok",
-        }));
+        emit_codex_proxy_config_trace("codex_proxy_config_reparse_check_ok");
         if !broker_helper.is_file()
             || !launcher.is_file()
             || !codex_home.is_dir()
@@ -892,55 +903,29 @@ impl VerifiedCodexProxyConfig {
             || crate::path_is_within(&isolation_root, &product_root)
             || crate::path_is_within(&product_root, &isolation_root)
         {
-            return Err(identity_rejected());
+            return Err(codex_proxy_config_identity_rejected());
         }
-        emit_codex_broker_trace(json!({
-            "component": "Hermes",
-            "event": "codex_proxy_config_shape_ok",
-        }));
+        emit_codex_proxy_config_trace("codex_proxy_config_shape_ok");
         if fs::read_dir(&cwd)
-            .map_err(|_| identity_rejected())?
+            .map_err(|_| codex_proxy_config_identity_rejected())?
             .next()
             .is_some()
         {
-            return Err(identity_rejected());
+            return Err(codex_proxy_config_identity_rejected());
         }
-        emit_codex_broker_trace(json!({
-            "component": "Hermes",
-            "event": "codex_proxy_config_cwd_empty_ok",
-        }));
-        validate_broker_codex_home(&codex_home, &product_root).map_err(|_| identity_rejected())?;
-        emit_codex_broker_trace(json!({
-            "component": "Hermes",
-            "event": "codex_proxy_config_codex_home_ok",
-        }));
-        let lock_bytes = bounded_file_bytes(&config_lock, MAX_BROKER_WIRE_BYTES as u64)
-            .map_err(|_| identity_rejected())?;
-        if lock_bytes != CODEX_CONFIG_LOCK.as_bytes() {
-            return Err(identity_rejected());
-        }
-        let config_lock_sha256 = sha256_bytes(&lock_bytes);
-        emit_codex_broker_trace(json!({
-            "component": "Hermes",
-            "event": "codex_proxy_config_lock_ok",
-        }));
-        let helper_sha256 = bounded_file_sha256(&broker_helper, MAX_CODEX_LAUNCHER_BYTES)
-            .map_err(|_| identity_rejected())?;
-        if helper_sha256 != config.broker_helper_sha256 {
-            return Err(identity_rejected());
-        }
-        emit_codex_broker_trace(json!({
-            "component": "Hermes",
-            "event": "codex_proxy_config_helper_hash_ok",
-        }));
-        let child_environment = codex_child_environment(&launcher, &codex_home, &temp)
-            .map_err(|_| identity_rejected())?;
-        let child_environment_sha256 =
-            digest_environment(&child_environment).map_err(|_| identity_rejected())?;
-        emit_codex_broker_trace(json!({
-            "component": "Hermes",
-            "event": "codex_proxy_config_child_environment_ok",
-        }));
+        emit_codex_proxy_config_trace("codex_proxy_config_cwd_empty_ok");
+        validate_broker_codex_home(&codex_home, &product_root)
+            .map_err(|_| codex_proxy_config_identity_rejected())?;
+        emit_codex_proxy_config_trace("codex_proxy_config_codex_home_ok");
+        let (config_lock_sha256, helper_sha256, child_environment_sha256) =
+            verify_codex_proxy_config_material(
+                &config,
+                &config_lock,
+                &broker_helper,
+                &launcher,
+                &codex_home,
+                &temp,
+            )?;
         Ok(Self {
             broker_helper,
             child_environment_sha256,
@@ -1051,17 +1036,17 @@ impl VerifiedCodexProxyConfig {
     }
 
     fn reverify_open(&self) -> HermesAdapterResult<ReviewedCodexBundle> {
-        emit_codex_broker_trace(json!({
+        emit_codex_broker_trace(&json!({
             "component": "Hermes",
             "event": "codex_proxy_reverify_open_start",
         }));
         self.reverify_config_binding()?;
-        emit_codex_broker_trace(json!({
+        emit_codex_broker_trace(&json!({
             "component": "Hermes",
             "event": "codex_proxy_reverify_config_match_ok",
         }));
         let reviewed = verify_official_codex_bundle(&self.launcher)?;
-        emit_codex_broker_trace(json!({
+        emit_codex_broker_trace(&json!({
             "component": "Hermes",
             "event": "codex_proxy_reverify_bundle_ok",
         }));
@@ -1074,7 +1059,7 @@ impl VerifiedCodexProxyConfig {
                 "HERMES_CODEX_BUNDLE_IDENTITY_REJECTED",
             ));
         }
-        emit_codex_broker_trace(json!({
+        emit_codex_broker_trace(&json!({
             "component": "Hermes",
             "event": "codex_proxy_reverify_open_ok",
         }));
@@ -1091,7 +1076,7 @@ impl VerifiedCodexProxyConfig {
             model: self.model.clone(),
             product_root: self.product_root.clone(),
         })?;
-        emit_codex_broker_trace(json!({
+        emit_codex_broker_trace(&json!({
             "component": "Hermes",
             "event": "codex_proxy_reverify_from_config_ok",
         }));
@@ -1106,14 +1091,65 @@ impl VerifiedCodexProxyConfig {
 }
 
 #[cfg(windows)]
+fn codex_proxy_config_identity_rejected() -> HermesAdapterError {
+    HermesAdapterError::new(
+        HermesAdapterErrorKind::Identity,
+        "HERMES_CODEX_PROXY_CONFIG_IDENTITY_REJECTED",
+    )
+}
+
+#[cfg(windows)]
+fn verify_codex_proxy_config_material(
+    config: &CodexReflectionBrokerConfig,
+    config_lock: &Path,
+    broker_helper: &Path,
+    launcher: &Path,
+    codex_home: &Path,
+    temp: &Path,
+) -> HermesAdapterResult<(String, String, String)> {
+    let identity_rejected = || {
+        HermesAdapterError::new(
+            HermesAdapterErrorKind::Identity,
+            "HERMES_CODEX_PROXY_CONFIG_IDENTITY_REJECTED",
+        )
+    };
+    let lock_bytes = bounded_file_bytes(config_lock, MAX_BROKER_WIRE_BYTES as u64)
+        .map_err(|_| identity_rejected())?;
+    if lock_bytes != CODEX_CONFIG_LOCK.as_bytes() {
+        return Err(identity_rejected());
+    }
+    let config_lock_sha256 = sha256_bytes(&lock_bytes);
+    emit_codex_proxy_config_trace("codex_proxy_config_lock_ok");
+    let helper_sha256 = bounded_file_sha256(broker_helper, MAX_CODEX_LAUNCHER_BYTES)
+        .map_err(|_| identity_rejected())?;
+    if helper_sha256 != config.broker_helper_sha256 {
+        return Err(identity_rejected());
+    }
+    emit_codex_proxy_config_trace("codex_proxy_config_helper_hash_ok");
+    let child_environment =
+        codex_child_environment(launcher, codex_home, temp).map_err(|_| identity_rejected())?;
+    let child_environment_sha256 =
+        digest_environment(&child_environment).map_err(|_| identity_rejected())?;
+    emit_codex_proxy_config_trace("codex_proxy_config_child_environment_ok");
+    Ok((config_lock_sha256, helper_sha256, child_environment_sha256))
+}
+
+#[cfg(windows)]
 struct OfficialCodexProxyProvider {
     verified: VerifiedCodexProxyConfig,
     reviewed: ReviewedCodexBundle,
     control: Arc<OwnedCodexProxyControl>,
 }
 
-fn emit_codex_broker_trace(event: serde_json::Value) {
+fn emit_codex_broker_trace(event: &serde_json::Value) {
     eprintln!("{event}");
+}
+
+fn emit_codex_proxy_config_trace(event: &str) {
+    emit_codex_broker_trace(&json!({
+        "component": "Hermes",
+        "event": event,
+    }));
 }
 
 #[cfg(windows)]
@@ -1140,7 +1176,7 @@ impl ProductionCodexProxyProvider for OfficialCodexProxyProvider {
         self: Box<Self>,
         absolute_deadline: Instant,
     ) -> HermesAdapterResult<ProductionCodexProxyDuplex> {
-        emit_codex_broker_trace(json!({
+        emit_codex_broker_trace(&json!({
             "component": "Hermes",
             "event": "codex_proxy_provider_open_start",
         }));
@@ -1153,24 +1189,24 @@ impl ProductionCodexProxyProvider for OfficialCodexProxyProvider {
             control,
         } = *self;
         control.ensure_open_allowed()?;
-        emit_codex_broker_trace(json!({
+        emit_codex_broker_trace(&json!({
             "component": "Hermes",
             "event": "codex_proxy_provider_open_allowed",
             "stage": "initial",
         }));
         verified.reverify_config_binding()?;
-        emit_codex_broker_trace(json!({
+        emit_codex_broker_trace(&json!({
             "component": "Hermes",
             "event": "codex_proxy_provider_config_reverify_ok",
         }));
         control.ensure_open_allowed()?;
-        emit_codex_broker_trace(json!({
+        emit_codex_broker_trace(&json!({
             "component": "Hermes",
             "event": "codex_proxy_provider_open_allowed",
             "stage": "post_reverify",
         }));
         let plan = verified.command_plan(&reviewed, absolute_deadline)?;
-        emit_codex_broker_trace(json!({
+        emit_codex_broker_trace(&json!({
             "component": "Hermes",
             "event": "codex_proxy_provider_command_plan_ok",
         }));
@@ -1415,7 +1451,7 @@ impl ProductionCodexProxyControl for OwnedCodexProxyControl {
         }
         if let Err(failure) = state.poll_stderr() {
             state.terminate()?;
-            emit_codex_broker_trace(json!({
+            emit_codex_broker_trace(&json!({
                 "component": "Hermes",
                 "error_code": failure.code(),
                 "event": "codex_proxy_ensure_running_failed",
@@ -1435,7 +1471,7 @@ impl ProductionCodexProxyControl for OwnedCodexProxyControl {
                 Ok(()) => Ok(()),
                 Err(failure) => {
                     state.terminate()?;
-                    emit_codex_broker_trace(json!({
+                    emit_codex_broker_trace(&json!({
                         "component": "Hermes",
                         "error_code": failure.code(),
                         "event": "codex_proxy_ensure_running_failed",
@@ -1447,7 +1483,7 @@ impl ProductionCodexProxyControl for OwnedCodexProxyControl {
             },
             Err(failure) => {
                 let _ = state.join_stderr();
-                emit_codex_broker_trace(json!({
+                emit_codex_broker_trace(&json!({
                     "component": "Hermes",
                     "error_code": failure.code(),
                     "event": "codex_proxy_ensure_running_failed",
@@ -1498,24 +1534,24 @@ where
     if stderr_limit == 0 || stderr_limit > MAX_CODEX_PROXY_STDERR_BYTES {
         return Err(configuration("HERMES_CODEX_PROXY_STDERR_LIMIT_REJECTED"));
     }
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_proxy_launch_start",
     }));
     control.ensure_unbound()?;
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_proxy_control_unbound",
     }));
     let child = crate::windows_job::spawn_duplex(plan)?;
     let process_id = child.process_id();
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_proxy_process_spawned",
         "process_id": process_id,
     }));
     control.bind_child(child)?;
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_proxy_process_bound",
         "process_id": process_id,
@@ -1528,7 +1564,7 @@ where
             return Err(failure);
         }
     };
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_proxy_stdio_started",
         "process_id": process_id,
@@ -1537,13 +1573,13 @@ where
         control.terminate()?;
         return Err(failure);
     }
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_proxy_post_spawn_identity_ok",
         "process_id": process_id,
     }));
     control.ensure_running()?;
-    emit_codex_broker_trace(json!({
+    emit_codex_broker_trace(&json!({
         "component": "Hermes",
         "event": "codex_proxy_process_running",
         "process_id": process_id,
@@ -3075,9 +3111,8 @@ fn codex_cmd_ambient_node_path_entry(
         Ok(metadata) if metadata.file_type().is_file() && !metadata_is_reparse(&metadata) => {
             return Ok(None);
         }
-        Ok(_) => return Err(configuration("HERMES_CODEX_NODE_RUNTIME_REJECTED")),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(configuration("HERMES_CODEX_NODE_RUNTIME_REJECTED")),
+        Ok(_) | Err(_) => return Err(configuration("HERMES_CODEX_NODE_RUNTIME_REJECTED")),
     }
 
     let Some(ambient_path) = ambient_path else {
