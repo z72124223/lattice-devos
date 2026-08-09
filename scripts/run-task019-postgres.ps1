@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$RunLatticeDeliveryHook,
+    [switch]$RunFullChainAcceptanceHook,
     [switch]$MemoryOnly
 )
 
@@ -109,6 +110,34 @@ function Get-LatticeDeliveryHookPath {
         -not (Test-ExactPath -Actual $item.FullName -Expected $expectedPath)
     ) {
         throw 'TASK019_DELIVERY_HOOK_NOT_REGULAR_LEAF'
+    }
+
+    return $expectedPath
+}
+
+function Get-LatticeFullChainAcceptanceHookPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptDirectory,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot
+    )
+
+    $canonicalScriptDirectory = Get-CanonicalPath -Path $ScriptDirectory
+    $expectedPath = Get-CanonicalPath -Path (Join-Path $canonicalScriptDirectory 'run-task037-full-chain-verification.ps1')
+    if (-not (Test-ExactPath -Actual (Split-Path -Parent $expectedPath) -Expected $canonicalScriptDirectory)) {
+        throw 'TASK037_FULL_CHAIN_HOOK_NOT_EXACT_SIBLING'
+    }
+
+    Assert-NoReparseAncestor -Path $expectedPath -Boundary $RepositoryRoot
+    $item = Get-Item -LiteralPath $expectedPath -Force -ErrorAction SilentlyContinue
+    if (
+        $null -eq $item -or
+        $item.PSIsContainer -or
+        -not ($item -is [System.IO.FileInfo]) -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
+        -not (Test-Path -LiteralPath $expectedPath -PathType Leaf) -or
+        -not (Test-ExactPath -Actual $item.FullName -Expected $expectedPath)
+    ) {
+        throw 'TASK037_FULL_CHAIN_HOOK_NOT_REGULAR_LEAF'
     }
 
     return $expectedPath
@@ -574,9 +603,16 @@ $installedBefore = $null
 $installedAfter = $null
 $originalEnvironment = @{}
 $deliveryHookPath = $null
+$fullChainHookPath = $null
 
+if ($RunLatticeDeliveryHook -and $RunFullChainAcceptanceHook) {
+    throw 'TASK019_HOOK_MODE_REJECTED'
+}
 if ($RunLatticeDeliveryHook) {
     $deliveryHookPath = Get-LatticeDeliveryHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+}
+if ($RunFullChainAcceptanceHook) {
+    $fullChainHookPath = Get-LatticeFullChainAcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
 }
 
 Invoke-HarnessSelfTest
@@ -723,6 +759,54 @@ try {
 
         $deliveryHookPath = Get-LatticeDeliveryHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
         & $deliveryHookPath -InternalPhase 'DeliveryStatus'
+    }
+    elseif ($RunFullChainAcceptanceHook) {
+        $fullChainHookPath = Get-LatticeFullChainAcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+        & $fullChainHookPath -InternalPhase 'FullChainPreStatus'
+
+        if (-not (Stop-TestCluster -PgCtl $pgCtl -DataDirectory $dataDirectory)) {
+            throw 'Could not prove the disposable PostgreSQL cluster stopped after the full-chain pre-status phase.'
+        }
+        $clusterStarted = $false
+        Remove-HarnessOutputFiles -Root $clusterRoot
+        Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword
+
+        $clusterStarted = $true
+        $null = Invoke-NativeChecked -Executable $pgCtl -Arguments @(
+            '-D', $dataDirectory,
+            '-l', $serverLog,
+            '-w',
+            '-t', '30',
+            'start'
+        ) -Operation 'PostgreSQL test-cluster full-chain run restart'
+        Set-HarnessEnvironment -Phase 'restart' -HostName '127.0.0.1' -Port $port -Password $oneTimePassword -RunId $runId
+        [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_UUID', $restartEvidence.DatabaseId, 'Process')
+        [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_MANIFEST', $restartEvidence.ManifestHash, 'Process')
+
+        $fullChainHookPath = Get-LatticeFullChainAcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+        & $fullChainHookPath -InternalPhase 'FullChainRun'
+
+        if (-not (Stop-TestCluster -PgCtl $pgCtl -DataDirectory $dataDirectory)) {
+            throw 'Could not prove the disposable PostgreSQL cluster stopped after the full-chain run phase.'
+        }
+        $clusterStarted = $false
+        Remove-HarnessOutputFiles -Root $clusterRoot
+        Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword
+
+        $clusterStarted = $true
+        $null = Invoke-NativeChecked -Executable $pgCtl -Arguments @(
+            '-D', $dataDirectory,
+            '-l', $serverLog,
+            '-w',
+            '-t', '30',
+            'start'
+        ) -Operation 'PostgreSQL test-cluster full-chain status restart'
+        Set-HarnessEnvironment -Phase 'restart' -HostName '127.0.0.1' -Port $port -Password $oneTimePassword -RunId $runId
+        [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_UUID', $restartEvidence.DatabaseId, 'Process')
+        [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_MANIFEST', $restartEvidence.ManifestHash, 'Process')
+
+        $fullChainHookPath = Get-LatticeFullChainAcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+        & $fullChainHookPath -InternalPhase 'FullChainStatus'
     }
     $harnessCompleted = $true
 }

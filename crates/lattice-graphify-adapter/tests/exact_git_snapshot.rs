@@ -245,7 +245,7 @@ fn pinned_graphify_live_typed_ports_are_provenance_bound_and_deterministic() {
     );
     assert_eq!(
         GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256,
-        "f270004749c7f4fc260dfc09925b52f3b7071bcc64ba5f7cbd9bd37ae1400dd5"
+        "344488198ac2855077a382180d516df6183d7e4e7f05efb4b7d884904733a547"
     );
 
     let git = find_git();

@@ -24,7 +24,7 @@ INIT_MAGIC = b"LATTICE_HERMES_PRODUCTION_INIT_V1\n"
 HTTP_REQUEST_MAGIC = b"LATTICE_HERMES_HTTP_REQUEST_V1\n"
 HTTP_RESPONSE_MAGIC = b"LATTICE_HERMES_HTTP_RESPONSE_V1\n"
 CONTAINMENT_MAGIC = b"LATTICE_HERMES_CONTAINED_V2\n"
-EXPECTED_BWRAP_SHA256 = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b"
+EXPECTED_BWRAP_SHA256 = "0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0"
 EXPECTED_PYTHON_VERSION = (3, 12, 13)
 EXPECTED_OFFICIAL_RUNTIME_ROOT = (
     "/var/tmp/lattice-runtime-targets/"
@@ -49,7 +49,7 @@ MAX_DIAGNOSTIC_BYTES = 4096
 OFFICIAL_HERMES_CONFIG = b"""_config_version: 33
 model:
   provider: openai-api
-  default: gpt-5.6-sol
+  default: gpt-5.6-luna
   openai_runtime: codex_app_server
   api_mode: codex_app_server
   base_url: http://127.0.0.1:9/v1

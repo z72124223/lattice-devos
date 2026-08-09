@@ -657,7 +657,7 @@ impl HermesSocketpairReceipt {
         if self.broker_read_fd != 0
             || self.broker_write_fd != 1
             || self.bwrap_sha256
-                != "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b"
+                != "0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0"
             || !self.descendants_reaped
             || self.python_version != "3.12.13"
         {
@@ -716,7 +716,7 @@ fn parse_socketpair_receipt(
     if wire.schema != "lattice.hermes.socketpair-receipt.v1"
         || wire.broker_read_fd != 0
         || wire.broker_write_fd != 1
-        || wire.bwrap_sha256 != "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b"
+        || wire.bwrap_sha256 != "0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0"
         || !wire.descendants_reaped
         || wire.python_version != "3.12.13"
         || wire.nonce_binding_sha256 != expected_binding

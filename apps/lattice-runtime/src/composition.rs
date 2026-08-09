@@ -97,7 +97,7 @@ const FULL_CHAIN_HERMES_TASK_ID: &str = "TASK-037";
 #[cfg(windows)]
 const FULL_CHAIN_HERMES_MODEL: &str = "hermes-agent";
 #[cfg(windows)]
-const FULL_CHAIN_CODEX_BROKER_MODEL: &str = "gpt-5.6-sol";
+const FULL_CHAIN_CODEX_BROKER_MODEL: &str = "gpt-5.6-luna";
 #[cfg(windows)]
 const FULL_CHAIN_HERMES_SESSION_PREFIX: &str = "task037-hermes-session-";
 #[cfg(windows)]
@@ -2716,19 +2716,51 @@ fn run_delivery_graph_memory(
         .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphExecution))?;
     let graph_root = fixture.root.join(GRAPH_MEMORY_ROOT_NAME);
     let bridge = SnapshotBridge::new();
+    let git_executable_sha256 =
+        graph_executable_sha256(&config.git_executable).map_err(|error| {
+            eprintln!(
+                "{}",
+                json!({
+                    "component": "GraphMemory",
+                    "event": "configuration_rejected",
+                    "stage": "git_executable_sha256"
+                })
+            );
+            error
+        })?;
     let snapshot_config = GitSnapshotConfig::new(
         config.git_executable.clone(),
-        graph_executable_sha256(&config.git_executable)?,
+        git_executable_sha256,
         config.delivery_root.join("repo"),
         graph_root.join("snapshots"),
         SnapshotLimits::default(),
     )
-    .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    .map_err(|_| {
+        eprintln!(
+            "{}",
+            json!({
+                "component": "GraphMemory",
+                "event": "configuration_rejected",
+                "stage": "snapshot_config"
+            })
+        );
+        LatticedError::new(LatticedErrorKind::GraphConfiguration)
+    })?;
     let mut snapshot = ExactGitSnapshotMaterializer::with_bridge(snapshot_config, bridge.clone());
 
     let system_root = env::var_os("SystemRoot")
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+        .ok_or_else(|| {
+            eprintln!(
+                "{}",
+                json!({
+                    "component": "GraphMemory",
+                    "event": "configuration_rejected",
+                    "stage": "system_root"
+                })
+            );
+            LatticedError::new(LatticedErrorKind::GraphConfiguration)
+        })?;
     let graphify_config = GraphifyRuntimeConfig::new(
         PathBuf::from(system_root).join("System32/wsl.exe"),
         fixture.repository_root.join(GRAPHIFY_RUNTIME_RELATIVE_PATH),
@@ -2736,14 +2768,43 @@ fn run_delivery_graph_memory(
         remaining,
         GraphOutputLimits::default(),
     )
-    .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    .map_err(|_| {
+        eprintln!(
+            "{}",
+            json!({
+                "component": "GraphMemory",
+                "event": "configuration_rejected",
+                "stage": "graphify_runtime_config"
+            })
+        );
+        LatticedError::new(LatticedErrorKind::GraphConfiguration)
+    })?;
     let mut graphify = PinnedGraphifyAdapter::new(graphify_config, bridge);
     let client = connect_fixed_runtime_client(database, password, deadline)
         .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
-    let target = ExtensionTarget::new(database.database_name(), database.run_id())
-        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-    let mut memory = PostgresCodebaseMemory::new(client, target)
-        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let target =
+        ExtensionTarget::new(database.database_name(), database.run_id()).map_err(|_| {
+            eprintln!(
+                "{}",
+                json!({
+                    "component": "GraphMemory",
+                    "event": "configuration_rejected",
+                    "stage": "memory_extension_target"
+                })
+            );
+            LatticedError::new(LatticedErrorKind::GraphConfiguration)
+        })?;
+    let mut memory = PostgresCodebaseMemory::new(client, target).map_err(|_| {
+        eprintln!(
+            "{}",
+            json!({
+                "component": "GraphMemory",
+                "event": "configuration_rejected",
+                "stage": "memory_adapter"
+            })
+        );
+        LatticedError::new(LatticedErrorKind::GraphConfiguration)
+    })?;
 
     run_graph_memory(&request, &query, &mut snapshot, &mut graphify, &mut memory)
         .map_err(|_| LatticedError::new(LatticedErrorKind::GraphExecution))

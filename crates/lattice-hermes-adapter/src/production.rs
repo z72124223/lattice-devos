@@ -16,6 +16,7 @@ use lattice_contracts::{ContentDigest, HermesEvidence, HermesResearchRequest, Re
 use lattice_ports::{HermesPort, PortError, PortResult};
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
@@ -43,7 +44,7 @@ const CONFIG_SCHEMA: &str = "lattice.hermes.production-config.v2";
 const OFFICIAL_HERMES_CONFIG: &[u8] = br"_config_version: 33
 model:
   provider: openai-api
-  default: gpt-5.6-sol
+  default: gpt-5.6-luna
   openai_runtime: codex_app_server
   api_mode: codex_app_server
   base_url: http://127.0.0.1:9/v1
@@ -53,7 +54,7 @@ plugins:
   enabled: []
 mcp_servers: {}
 ";
-const BWRAP_SHA256: &str = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b";
+const BWRAP_SHA256: &str = "0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0";
 const OFFICIAL_RUNTIME_GUEST_ROOT: &str = concat!(
     "/var/tmp/lattice-runtime-targets/",
     "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-errorfix-v1"
@@ -774,7 +775,18 @@ impl ProductionCodexProxyHost {
                 });
                 if let Err(failure) = result {
                     owner.invalidate();
-                    let failure = worker_control.terminate().err().unwrap_or(failure);
+                    if let Err(teardown) = worker_control.terminate() {
+                        eprintln!(
+                            "{}",
+                            json!({
+                                "component": "Hermes",
+                                "error_code": teardown.code(),
+                                "event": "teardown_rejected",
+                                "owner_invalidated": true,
+                                "target": "codex_proxy_worker"
+                            })
+                        );
+                    }
                     if let Ok(mut observed) = worker_status.lock() {
                         observed.failure = Some(failure);
                         observed.failure_evidence = session.failure_evidence().cloned();
@@ -1383,7 +1395,7 @@ impl HermesProductionRunnerConfig {
         broker_receipt.validate_for_containment()?;
         let model = model.into();
         let codex_provider =
-            broker.into_production_proxy_provider_from_preflight(broker_receipt, "gpt-5.6-sol")?;
+            broker.into_production_proxy_provider_from_preflight(broker_receipt, "gpt-5.6-luna")?;
         Self::validated(
             containment,
             runtime_manifest,
@@ -2047,10 +2059,28 @@ impl ProductionHermesPort {
         let process_result = self.process.terminate();
         let proxy_result = self.codex_proxy.stop_and_reap();
         if let Err(teardown) = process_result {
-            return map_port_error(&teardown);
+            eprintln!(
+                "{}",
+                json!({
+                    "component": "Hermes",
+                    "error_code": teardown.code(),
+                    "event": "teardown_rejected",
+                    "owner_invalidated": true,
+                    "target": "production_child"
+                })
+            );
         }
         if let Err(teardown) = proxy_result {
-            return map_port_error(&teardown);
+            eprintln!(
+                "{}",
+                json!({
+                    "component": "Hermes",
+                    "error_code": teardown.code(),
+                    "event": "teardown_rejected",
+                    "owner_invalidated": true,
+                    "target": "codex_proxy"
+                })
+            );
         }
         map_port_error(failure)
     }
@@ -2747,10 +2777,10 @@ mod proxy_host_tests {
     #[test]
     fn official_hermes_config_bytes_are_exact_and_cross_bound() {
         let config_text = std::str::from_utf8(OFFICIAL_HERMES_CONFIG).expect("ASCII YAML");
-        assert_eq!(OFFICIAL_HERMES_CONFIG.len(), 246);
+        assert_eq!(OFFICIAL_HERMES_CONFIG.len(), 247);
         assert_eq!(
             encode_sha256(&Sha256::digest(OFFICIAL_HERMES_CONFIG)),
-            "f090a8469d7ee4bf4370e0d209f5b77c678d1528cb157c080cb7477637cb0bfd"
+            "122d48c392568635bb37d0b23ba06b6a207093ef80d90afe61e5efd05be61e55"
         );
         assert!(PRIVATE_RUNNER_SOURCE.contains(config_text));
         assert!(OUTER_RUNNER_SOURCE.contains(config_text));

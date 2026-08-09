@@ -27,7 +27,7 @@ pub const GRAPHIFY_WSL_PYTHON_PATH: &str = "/usr/bin/python3.14";
 pub const GRAPHIFY_WSL_PYTHON_VERSION: &str = "Python 3.14.4";
 /// SHA-256 of the reviewed system-owned Python executable.
 pub const GRAPHIFY_WSL_PYTHON_SHA256: &str =
-    "fa9796cd3a30878e11a2f40372f773d3fcd913fff35e5bee8dd9a036e22e93ab";
+    "b8d8288faefdd300201f43fcf00f6f539a27218eeed3a3dff5ab10b9c4c99700";
 /// SHA-256 of `python3.14 --version` with its trailing newline.
 pub const GRAPHIFY_WSL_PYTHON_VERSION_SHA256: &str =
     "63990b3ee50c49ab28d70e29c0f967f0c71330e39243ffeb4d3a8d5878c8a978";
@@ -38,7 +38,7 @@ pub const GRAPHIFY_WSL_BWRAP_PATH: &str = "/usr/bin/bwrap";
 pub const GRAPHIFY_WSL_BWRAP_VERSION: &str = "bubblewrap 0.11.1";
 /// SHA-256 of the reviewed system-owned bubblewrap executable.
 pub const GRAPHIFY_WSL_BWRAP_SHA256: &str =
-    "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b";
+    "0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0";
 /// SHA-256 of `bwrap --version` with its trailing newline.
 pub const GRAPHIFY_WSL_BWRAP_VERSION_SHA256: &str =
     "3982b5c6efde838f903123b493520814ab1b56dfb7f35ac96af62ef443eb6acc";
@@ -88,7 +88,7 @@ pub const GRAPHIFY_PRIVATE_RUNNER_SHA256: &str =
     "98d0411709927a5687315f64efc6673a77f2241e2db6df8bd17c34886e3c2ad9";
 /// Digest binding the reviewed system trust boundary and LATTICE-owned payload.
 pub const GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256: &str =
-    "f270004749c7f4fc260dfc09925b52f3b7071bcc64ba5f7cbd9bd37ae1400dd5";
+    "344488198ac2855077a382180d516df6183d7e4e7f05efb4b7d884904733a547";
 
 const SITE_PACKAGES_RELATIVE: &str = "site-packages";
 const INSTALL_REPORT_RELATIVE: &str = "install-report.json";
