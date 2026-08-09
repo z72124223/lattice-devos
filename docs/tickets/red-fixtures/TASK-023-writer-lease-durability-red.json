@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "fixture_id": "TASK-023-RED-001",
+  "ticket_id": "TASK-023",
+  "owner": "lattice-writer-lease",
+  "adapter_role": "physical_persistence_only",
+  "scenario": "concurrent_acquire_restart_and_recovery",
+  "project_id": "task023-red-project",
+  "commands": [
+    {
+      "command_id": "task023-acquire-a",
+      "kind": "ACQUIRE",
+      "attempt_id": "attempt-a",
+      "lease_id": "lease-a",
+      "task_spec_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "command_id": "task023-acquire-b",
+      "kind": "ACQUIRE",
+      "attempt_id": "attempt-b",
+      "lease_id": "lease-b",
+      "task_spec_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "expected": {
+    "concurrent_applied_count": 1,
+    "concurrent_writer_already_held_count": 1,
+    "first_fencing_token": 1,
+    "release_then_reacquire_fencing_token": 2,
+    "stale_head_error": "WRITER_LEASE_REPOSITORY_AUTHORITY_MISMATCH",
+    "expiry_transition": "SUSPECT",
+    "expiry_alone_can_revoke": false,
+    "holder_death_or_newer_epoch_required": true,
+    "fresh_process_replay_equal": true,
+    "unknown_commit_reports_success": false
+  },
+  "forbidden": [
+    "second_writer_lease_owner",
+    "second_repository_trait",
+    "second_postgres_extension",
+    "caller_supplied_fencing_token",
+    "receipt_self_projection_as_currentness",
+    "filesystem_lock_as_durable_truth"
+  ]
+}

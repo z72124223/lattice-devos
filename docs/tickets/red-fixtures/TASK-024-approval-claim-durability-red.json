@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "fixture_id": "TASK-024-RED-001",
+  "ticket_id": "TASK-024",
+  "owner": "lattice-approval-verifier",
+  "adapter_role": "atomic_currentness_nonce_and_claim_persistence_only",
+  "scenario": "concurrent_normal_claim_and_protected_lane_isolation",
+  "normal_approval": {
+    "approval_id": "approval-normal-red",
+    "nonce_commitment": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "issued_at": "2026-08-10T00:00:00Z",
+    "expires_at": "2026-08-10T00:10:00Z",
+    "observed_at": "2026-08-10T00:05:00Z",
+    "claim_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "effect_claim_id": "effect-red-1"
+  },
+  "protected_approval": {
+    "approval_id": "approval-protected-red",
+    "status": "VERIFIED_PROTECTED_PENDING_CLAIM",
+    "normal_claim_allowed": false,
+    "required_claim_owner": "guardian_claim_activation"
+  },
+  "expected": {
+    "concurrent_normal_claim_applied_count": 1,
+    "concurrent_normal_claim_denied_count": 1,
+    "exact_retry_receipt_equal": true,
+    "changed_claim_content_denied": true,
+    "normal_current_head_after_claim_available": false,
+    "protected_state_unchanged_by_normal_claim": true,
+    "fresh_process_replay_equal": true,
+    "unknown_commit_reports_claimed": false
+  },
+  "forbidden": [
+    "general_protected_consume_command",
+    "postgres_subject_semantics",
+    "postgres_proof_verification",
+    "caller_currentness_boolean",
+    "raw_nonce",
+    "raw_token",
+    "raw_key",
+    "raw_authentication_assertion"
+  ]
+}

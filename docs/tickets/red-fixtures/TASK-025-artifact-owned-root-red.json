@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "fixture_id": "TASK-025-RED-001",
+  "ticket_id": "TASK-025",
+  "owner": "lattice-artifact-store",
+  "adapter_role": "verified_disposable_owned_root_bytes_only",
+  "scenario": "unverified_root_rejected_before_effect",
+  "root_capability": {
+    "marker_verified": false,
+    "physical_identity_verified": false,
+    "product_root_separation_verified": false,
+    "same_volume_staging_verified": false
+  },
+  "object": {
+    "project_id": "task025-red-project",
+    "algorithm": "sha256",
+    "content_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "generation": 1,
+    "declared_length": 0,
+    "caller_path": null
+  },
+  "expected": {
+    "error": "UNVERIFIED_ROOT",
+    "files_created": 0,
+    "files_renamed": 0,
+    "files_unlinked": 0,
+    "recursive_operations": 0,
+    "directory_scan_promotions": 0,
+    "artifact_state_changed": false,
+    "quota_released": false
+  },
+  "reject_if_present": [
+    "caller_supplied_path",
+    "root_is_product_root_ancestor",
+    "root_is_product_root_descendant",
+    "case_fold_collision",
+    "reparse_point",
+    "junction",
+    "symlink",
+    "hardlink",
+    "alternate_data_stream",
+    "device_path",
+    "non_regular_file"
+  ],
+  "forbidden": [
+    "recursive_delete",
+    "arbitrary_cleanup_root",
+    "directory_listing_as_authority",
+    "filesystem_owned_identity",
+    "filesystem_owned_provenance",
+    "filesystem_owned_quota",
+    "filesystem_owned_delete_claim"
+  ]
+}
