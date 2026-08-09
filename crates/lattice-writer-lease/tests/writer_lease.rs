@@ -6,8 +6,11 @@ use lattice_contracts::{
 use lattice_writer_lease::test_support::{acquire_command, digest, observation};
 use lattice_writer_lease::{
     CommandOutcome, FakeWriterLease, HeartbeatCommand, LeaseDenial, MarkSuspectCommand,
-    RecoveryEvidence, ReleaseCommand, RevokeCommand, WriterLeaseCommand, WriterLeaseError,
-    apply_plan, plan_command, verify_snapshot, verify_snapshot_against_checkpoint,
+    RecoveryEvidence, ReleaseCommand, RevokeCommand, WriterLeaseAcquireRequest, WriterLeaseCommand,
+    WriterLeaseCurrentAuthority, WriterLeaseError, WriterLeaseProjectEvidence,
+    WriterLeaseRepository, WriterLeaseRepositoryCommand, WriterLeaseRepositoryError,
+    WriterLeaseRepositoryErrorKind, apply_plan, plan_command, verify_snapshot,
+    verify_snapshot_against_checkpoint,
 };
 
 fn project(name: &str) -> ProjectId {
@@ -194,6 +197,193 @@ fn empty_fake_starts_without_writer_authority() {
     let fake = FakeWriterLease::new();
     assert_eq!(fake.project_count(), 0);
     assert!(fake.current_head(&project("project-a")).is_none());
+}
+
+#[test]
+fn canonical_snapshot_bytes_round_trip_through_the_public_verifier() {
+    let project = project("project-canonical-persistence");
+    let mut fake = FakeWriterLease::new();
+    fake.execute(acquire(&project, "acquire")).expect("acquire");
+    let snapshot = fake.export_snapshot(&project).expect("snapshot");
+    let checkpoint = fake
+        .current_checkpoint(&project)
+        .expect("checkpoint")
+        .expect("current checkpoint");
+
+    let bytes = snapshot.canonical_bytes().expect("canonical bytes");
+    let decoded = lattice_writer_lease::UntrustedWriterLeaseSnapshot::from_canonical_bytes(&bytes)
+        .expect("strict canonical decode");
+    assert_eq!(decoded.canonical_bytes().expect("decoded bytes"), bytes);
+    assert_eq!(
+        verify_snapshot_against_checkpoint(&decoded, &checkpoint)
+            .expect("verified round trip")
+            .current_head(),
+        fake.current_head(&project)
+    );
+
+    for invalid in [
+        b" {\"schema_version\":\"1.0\"}".as_slice(),
+        b"{\"schema_version\":\"1.0\",\"schema_version\":\"1.0\"}".as_slice(),
+        b"{\"schema_version\":1}".as_slice(),
+        b"{\"schema_version\":\"1.0\"} trailing".as_slice(),
+        &[0xff_u8][..],
+    ] {
+        assert_eq!(
+            lattice_writer_lease::UntrustedWriterLeaseSnapshot::from_canonical_bytes(invalid),
+            Err(WriterLeaseError::CorruptSnapshot)
+        );
+    }
+
+    let deeply_nested = format!("{}null{}", "[".repeat(130), "]".repeat(130));
+    assert_eq!(
+        lattice_writer_lease::UntrustedWriterLeaseSnapshot::from_canonical_bytes(
+            deeply_nested.as_bytes()
+        ),
+        Err(WriterLeaseError::CorruptSnapshot)
+    );
+
+    let oversized = lattice_writer_lease::UntrustedWriterLeaseSnapshot {
+        payload: lattice_cjson::CanonicalValue::String(
+            "x".repeat(lattice_writer_lease::MAX_CANONICAL_SNAPSHOT_BYTES),
+        ),
+    };
+    assert_eq!(
+        oversized.canonical_bytes(),
+        Err(WriterLeaseError::CorruptSnapshot)
+    );
+}
+
+#[test]
+fn repository_intent_bytes_exclude_adapter_owned_observation() {
+    let project = project("project-repository-intent");
+    let mut pure_command = acquire(&project, "repository-acquire");
+    let WriterLeaseCommand::Acquire(command) = &mut pure_command else {
+        panic!("acquire fixture");
+    };
+    command.observation.runtime = RuntimeKind::Live;
+    let WriterLeaseCommand::Acquire(pure) = &pure_command else {
+        panic!("acquire fixture");
+    };
+    let request = WriterLeaseRepositoryCommand::Acquire(WriterLeaseAcquireRequest {
+        command_id: pure.command_id.clone(),
+        expected_head: pure.expected_head.clone(),
+        project_id: pure.claim.project_id.clone(),
+        project_snapshot_id: pure.claim.project_snapshot_id.clone(),
+        task_id: pure.claim.task_id.clone(),
+        task_revision: pure.claim.task_revision.clone(),
+        task_spec_digest: pure.claim.task_spec_digest.clone(),
+        attempt_id: pure.claim.attempt_id.clone(),
+        lease_id: pure.claim.lease_id.clone(),
+        lease_holder_id: pure.claim.lease_holder_id.clone(),
+        worktree_id: pure.claim.worktree_id.clone(),
+        holder_process_id: pure.claim.holder_process_id,
+        holder_process_start_identity: pure.claim.holder_process_start_identity.clone(),
+    });
+
+    let bytes = request.canonical_bytes().expect("canonical intent");
+    let text = std::str::from_utf8(&bytes).expect("UTF-8 intent");
+    assert_eq!(request.command_id(), "repository-acquire");
+    assert!(text.contains("\"kind\":\"ACQUIRE\""));
+    assert!(!text.contains("observed_at"));
+    assert!(!text.contains("admission"));
+    assert!(!text.contains("daemon_instance_id"));
+    assert!(!text.contains("fencing_token"));
+    assert_eq!(request.canonical_bytes().expect("stable intent"), bytes);
+    assert_eq!(
+        pure_command
+            .repository_intent_canonical_bytes()
+            .expect("reconstructed intent"),
+        bytes
+    );
+    assert!(
+        !pure_command
+            .canonical_bytes()
+            .expect("pure command")
+            .is_empty()
+    );
+}
+
+#[test]
+fn repository_contract_keeps_current_receipt_and_independent_head_together() {
+    struct ContractOnlyRepository;
+
+    impl WriterLeaseRepository for ContractOnlyRepository {
+        fn execute(
+            &mut self,
+            _command: WriterLeaseRepositoryCommand,
+        ) -> Result<lattice_writer_lease::WriterLeaseCommandReceipt, WriterLeaseRepositoryError>
+        {
+            Err(WriterLeaseRepositoryError::new(
+                WriterLeaseRepositoryErrorKind::Unavailable,
+            ))
+        }
+
+        fn current_authority(
+            &mut self,
+            _project_id: &ProjectId,
+        ) -> Result<Option<WriterLeaseCurrentAuthority>, WriterLeaseRepositoryError> {
+            Ok(None)
+        }
+
+        fn assert_current(
+            &mut self,
+            _expected: &lattice_contracts::WriterLeaseAuthorityHead,
+        ) -> Result<(), WriterLeaseRepositoryError> {
+            Err(WriterLeaseRepositoryError::new(
+                WriterLeaseRepositoryErrorKind::AuthorityMismatch,
+            ))
+        }
+    }
+
+    fn assert_repository<T: WriterLeaseRepository>() {}
+    assert_repository::<ContractOnlyRepository>();
+    assert_eq!(
+        WriterLeaseRepositoryError::new(WriterLeaseRepositoryErrorKind::Unavailable).code(),
+        "WRITER_LEASE_REPOSITORY_UNAVAILABLE"
+    );
+    assert_eq!(
+        WriterLeaseRepositoryError::from_domain(WriterLeaseError::CommandIdReuse).kind(),
+        WriterLeaseRepositoryErrorKind::Domain
+    );
+}
+
+#[test]
+fn project_evidence_preserves_active_and_released_replay_high_waters() {
+    let project = project("project-persistence-evidence");
+    let mut fake = FakeWriterLease::new();
+    fake.execute(acquire(&project, "acquire")).expect("acquire");
+
+    let active_snapshot = fake.export_snapshot(&project).expect("active snapshot");
+    let active_checkpoint = fake
+        .current_checkpoint(&project)
+        .expect("active checkpoint")
+        .expect("active checkpoint exists");
+    let active = verify_snapshot_against_checkpoint(&active_snapshot, &active_checkpoint)
+        .expect("active aggregate");
+    let active_evidence =
+        WriterLeaseProjectEvidence::from_verified_aggregate(&active).expect("active evidence");
+    assert_eq!(active_evidence.project_id(), &project);
+    assert_eq!(active_evidence.fencing_high_water(), 1);
+    assert_eq!(active_evidence.transition_high_water(), 1);
+    assert_eq!(active_evidence.command_high_water(), 1);
+    assert!(active_evidence.current_authority().is_some());
+
+    let release_command = release(&fake, &project, "release", RuntimeAdmissionMode::Active);
+    fake.execute(release_command).expect("release");
+    let released_snapshot = fake.export_snapshot(&project).expect("released snapshot");
+    let released_checkpoint = fake
+        .current_checkpoint(&project)
+        .expect("released checkpoint")
+        .expect("released checkpoint exists");
+    let released = verify_snapshot_against_checkpoint(&released_snapshot, &released_checkpoint)
+        .expect("released aggregate");
+    let released_evidence =
+        WriterLeaseProjectEvidence::from_verified_aggregate(&released).expect("released evidence");
+    assert_eq!(released_evidence.project_id(), &project);
+    assert_eq!(released_evidence.fencing_high_water(), 1);
+    assert_eq!(released_evidence.transition_high_water(), 2);
+    assert_eq!(released_evidence.command_high_water(), 2);
+    assert!(released_evidence.current_authority().is_none());
 }
 
 #[test]

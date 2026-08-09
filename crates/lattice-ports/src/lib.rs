@@ -15,6 +15,7 @@ use lattice_contracts::{
     StorePhysicalHead, StoreScope, StoreTransactionReceipt, StoreTransactionRequest,
     WorkspaceChangeEvidence,
 };
+use lattice_task_domain::TaskState;
 
 /// Result type returned by every LATTICE port.
 pub type PortResult<T> = Result<T, PortError>;
@@ -34,6 +35,230 @@ pub type DeliveryPortResult<T> = Result<T, DeliveryPortError>;
 
 /// Result returned by each exact graph-memory effect port.
 pub type GraphMemoryPortResult<T> = Result<T, GraphMemoryPortError>;
+
+/// Result returned by the authoritative Task lifecycle repository boundary.
+pub type TaskLifecycleResult<T> = Result<T, TaskLifecycleError>;
+
+/// Result returned by the single bounded task execution port.
+pub type ControlledTaskExecutionResult<T> = Result<T, ControlledTaskExecutionError>;
+
+/// Whether a failed controlled execution is known not to have completed or
+/// requires reconciliation before any retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlledTaskExecutionErrorKind {
+    Known,
+    Ambiguous,
+}
+
+/// Secret-free controlled execution failure returned to the orchestrator.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlledTaskExecutionError {
+    kind: ControlledTaskExecutionErrorKind,
+    code: &'static str,
+}
+
+impl ControlledTaskExecutionError {
+    #[must_use]
+    pub const fn new(kind: ControlledTaskExecutionErrorKind, code: &'static str) -> Self {
+        Self { kind, code }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> ControlledTaskExecutionErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl fmt::Display for ControlledTaskExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.code)
+    }
+}
+
+impl Error for ControlledTaskExecutionError {}
+
+/// Existing-orchestrator effect boundary for one server-owned bounded task.
+/// The current Writer Lease head is supplied to the adapter but never exposed
+/// through MCP or accepted from the GPT caller.
+pub trait ControlledTaskExecutionPort {
+    /// Executes the one server-owned task under the exact current writer head.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded known or ambiguous execution failure.
+    fn execute(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        writer_authority: &lattice_contracts::WriterLeaseAuthorityHead,
+        writer_guard: &mut dyn WriterAuthorityGuardPort,
+    ) -> ControlledTaskExecutionResult<lattice_contracts::ContentDigest>;
+}
+
+/// Currentness assertion supplied by Orchestrator from the same injected
+/// Writer Lease repository that allocated the fence. Execution adapters may
+/// request checks but cannot acquire, release, or replace writer authority.
+pub trait WriterAuthorityGuardPort {
+    /// Proves the exact authority is still current at one mutation boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded known mismatch or ambiguous owner failure.
+    fn assert_current(
+        &mut self,
+        expected: &lattice_contracts::WriterLeaseAuthorityHead,
+    ) -> ControlledTaskExecutionResult<()>;
+}
+
+/// Closed durable Task lifecycle repository failure classes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskLifecycleErrorKind {
+    Rejected,
+    Unavailable,
+    Ambiguous,
+    Corrupt,
+}
+
+/// Bounded Task lifecycle failure without database or task-source contents.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskLifecycleError {
+    kind: TaskLifecycleErrorKind,
+    code: &'static str,
+}
+
+impl TaskLifecycleError {
+    #[must_use]
+    pub const fn new(kind: TaskLifecycleErrorKind, code: &'static str) -> Self {
+        Self { kind, code }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> TaskLifecycleErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl fmt::Display for TaskLifecycleError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.code)
+    }
+}
+
+impl Error for TaskLifecycleError {}
+
+/// Replay-derived authoritative Task lifecycle projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskLifecycleEvidence {
+    binding: lattice_contracts::SubjectBinding,
+    admitted: bool,
+    state: TaskState,
+    ledger_head_digest: lattice_contracts::ContentDigest,
+    result_digest: Option<lattice_contracts::ContentDigest>,
+}
+
+impl TaskLifecycleEvidence {
+    #[must_use]
+    pub const fn new(
+        binding: lattice_contracts::SubjectBinding,
+        admitted: bool,
+        state: TaskState,
+        ledger_head_digest: lattice_contracts::ContentDigest,
+        result_digest: Option<lattice_contracts::ContentDigest>,
+    ) -> Self {
+        Self {
+            binding,
+            admitted,
+            state,
+            ledger_head_digest,
+            result_digest,
+        }
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> &lattice_contracts::SubjectBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub const fn admitted(&self) -> bool {
+        self.admitted
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> TaskState {
+        self.state
+    }
+
+    #[must_use]
+    pub const fn ledger_head_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.ledger_head_digest
+    }
+
+    #[must_use]
+    pub const fn result_digest(&self) -> Option<&lattice_contracts::ContentDigest> {
+        self.result_digest.as_ref()
+    }
+}
+
+/// PostgreSQL-backed authoritative lifecycle boundary used by the sole
+/// orchestrator. Implementations may persist and replay but never decide
+/// Task Domain transition legality.
+pub trait TaskLifecyclePort {
+    /// Idempotently admits one exact caller retry key and Task binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn admit(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        client_request_id: &str,
+    ) -> TaskLifecycleResult<TaskLifecycleEvidence>;
+
+    /// Appends one Task Domain-approved state transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn transition(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        from: TaskState,
+        to: TaskState,
+        writer_authority: Option<&lattice_contracts::WriterLeaseAuthorityHead>,
+    ) -> TaskLifecycleResult<TaskLifecycleEvidence>;
+
+    /// Persists the exact governed execution result under the current writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn record_result(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        result_digest: &lattice_contracts::ContentDigest,
+        writer_authority: &lattice_contracts::WriterLeaseAuthorityHead,
+    ) -> TaskLifecycleResult<TaskLifecycleEvidence>;
+
+    /// Replays the authoritative lifecycle projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn load(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+    ) -> TaskLifecycleResult<TaskLifecycleEvidence>;
+}
 
 /// Stable fail-closed categories shared across port and inbound-service boundaries.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

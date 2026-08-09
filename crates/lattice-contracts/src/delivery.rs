@@ -3,7 +3,10 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::{ContentDigest, Invocation, RequestId};
+use crate::{
+    ContentDigest, Invocation, RequestId, RuntimeAdmissionMode, RuntimeKind,
+    WriterLeaseAuthorityHead, WriterLeaseStatus,
+};
 
 const MAX_EVIDENCE_TEXT_BYTES: usize = 1_024;
 const MAX_FAILURE_CODE_BYTES: usize = 128;
@@ -290,6 +293,7 @@ pub struct CodexDeliveryRequest {
     request: DeliveryRunRequest,
     intent: DurableIntentEvidence,
     workspace: PreparedWorkspaceEvidence,
+    writer_authority: Option<WriterLeaseAuthorityHead>,
 }
 
 impl CodexDeliveryRequest {
@@ -310,7 +314,36 @@ impl CodexDeliveryRequest {
             request,
             intent,
             workspace,
+            writer_authority: None,
         })
+    }
+
+    /// Binds Codex to one exact current live Writer Lease chosen by LATTICE.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a fake, inactive, non-admitted, or cross-task authority.
+    pub fn new_governed(
+        request: DeliveryRunRequest,
+        intent: DurableIntentEvidence,
+        workspace: PreparedWorkspaceEvidence,
+        writer_authority: WriterLeaseAuthorityHead,
+    ) -> Result<Self, DeliveryContractError> {
+        let invocation = request.invocation();
+        let identity = writer_authority.identity();
+        if writer_authority.runtime() != RuntimeKind::Live
+            || writer_authority.status() != WriterLeaseStatus::Active
+            || writer_authority.runtime_admission() != RuntimeAdmissionMode::Active
+            || identity.project_snapshot_id() != invocation.project_snapshot_id()
+            || identity.task_id() != invocation.task_id()
+            || identity.task_spec_digest() != invocation.subject_digest()
+            || identity.attempt_id() != invocation.attempt_id()
+        {
+            return Err(cross("codex_writer_authority"));
+        }
+        let mut governed = Self::new(request, intent, workspace)?;
+        governed.writer_authority = Some(writer_authority);
+        Ok(governed)
     }
 
     #[must_use]
@@ -326,6 +359,12 @@ impl CodexDeliveryRequest {
     #[must_use]
     pub const fn workspace(&self) -> &PreparedWorkspaceEvidence {
         &self.workspace
+    }
+
+    /// Returns the exact server-owned Writer Lease for governed tasks.
+    #[must_use]
+    pub const fn writer_authority(&self) -> Option<&WriterLeaseAuthorityHead> {
+        self.writer_authority.as_ref()
     }
 }
 

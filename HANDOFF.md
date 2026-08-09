@@ -1,96 +1,171 @@
-# Current GitHub Handoff — 2026-08-09
+# Current GitHub Handoff — 2026-08-10
 
-Status: `DONE` for the bounded SPEC-003 v2 Phase 1 live ChatGPT discovery
-checkpoint; GitHub Issue #4 remains `IN_PROGRESS` for successful production
-invoke, per-human identity/audit, and reconnect evidence. TASK-037 gates only
-production `Hermes -> Memory -> Status` E2E.
+Status: `LOCAL_ACCEPTED / CHATGPT_TUNNEL_PENDING` for SPEC-003 v4 / TASK-038
+Phase 2. Production `latticed`, real PostgreSQL Writer Lease/fencing, governed
+Codex, verification/Git, physical database restart, and fresh-process durable
+Status passed the canonical-local gate. A refreshed real ChatGPT Secure MCP
+Tunnel discovery/invoke is still required. TASK-037 production repair remains
+intentionally second.
 
 Repository: `z72124223/lattice-devos`<br>
 Branch: `feature/task-038-chatgpt-mcp`<br>
-Upstream: none; not pushed<br>
-Base: local Phase 1 checkpoint `845328d`<br>
+Upstream: none; local stable checkpoint not yet pushed<br>
+Base: local Phase 1 checkpoint `512732d`<br>
 Worktree:
 `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\chatgpt-mcp`
 
-## TASK-038 Delivered
+## User-Corrected Execution Order
 
-- Restored exactly two closed zero-argument MCP schemas. Empty or omitted
-  arguments dispatch with the immutable binding injected by composition; the
-  retired five fields, prohibited properties, and non-object inputs fail with
-  `-32602` before service dispatch.
-- Updated the TASK-037 verifier to call both tools with `{}` while preserving
-  all production gates.
-- Added a Windows operator entrypoint for official Secure MCP Tunnel
-  `init`/`doctor`/`run`. It accepts no credential or generic command, rejects
-  unsafe paths and IDs, requires `CONTROL_PLANE_API_KEY` for run, and preserves
-  fixed redacted failures.
-- Added a closed child-environment boundary. Tests inject 58 hostile
-  tunnel/MCP/control/log/health/UI/profile/proxy/certificate overrides, prove
-  all are absent from the child, preserve one `LATTICE_*` canary, and prove the
-  parent environment is restored.
-- Added stateless MCP `2026-07-28` discovery/list/call with final-schema
-  metadata validation and result/cache shapes while preserving the legacy
-  `2025-11-25` lifecycle. Modern-only annotations conservatively classify Run
-  as destructive/non-idempotent and Status as read-only.
-- Official `tunnel-client` v0.0.11 Windows amd64 was verified in ignored build
-  output against SHA-256
-  `eb912c86c6ccde90cda805cb17009507176a656725cf86c36fabe1901a12e29b`.
-  Isolated profile creation for the real built `latticed.exe` passed and stored
-  only an environment-key reference.
-- One restricted Tunnels Read+Use runtime key now backs the final private
-  daemon. Superseded LATTICE keys were revoked; the final key was transferred
-  directly into process memory and removed from both browser and system
-  clipboards without printing or persistence.
-- The daemon is health/ready 200. ChatGPT refresh succeeded and now shows
-  exactly `lattice_delivery_run` and `lattice_delivery_status`; the old three
-  actions are absent. Tunnel discover/list events have no errors and were
-  delivered to the control plane with HTTP 200.
+1. Complete bounded GPT -> LATTICE -> Codex dispatch under TASK-038.
+2. Then resume TASK-037 production-chain diagnosis and repair.
+3. Claim final combined production acceptance only after both gates pass.
 
-## Current Verification
+TASK-038 Phase 2 must add `lattice_task_submit` and `lattice_task_status` to
+the same `latticed` One Gateway. The first intent is exactly
+`CONTROLLED_CODEX_CANARY`; LATTICE, not GPT, owns the complete Task Spec,
+lease/fence, workspace, Codex prompt/profile, verification, Git, audit, and
+status binding. No Project Registry or Policy authority is fabricated for this
+fixed canary; broader templates remain closed until that live composition
+exists.
 
-- `cargo test -p lattice-runtime --locked`: 43 unit, 9 composition, 5 dispatch,
-  and 21 MCP tests passed.
-- Separate real-binary tests prove legacy initialize/list/calls and modern
-  discover/list/calls. Both reach the same binding validation before the
-  intentionally unavailable database returns a bounded error.
-- `npm.cmd run verify`: project check passed with 416 files, 24 constitutions,
-  25 tickets, one current task; Node tests 44/44 passed.
-- Tunnel hostile-environment harness, PowerShell AST parse, Rust format, and
-  `git diff --check`: passed.
-- Scoped strict Clippy passes with the exact unchanged `manual_inspect`
-  exception. Baseline-wide strict Clippy separately reproduces eleven untouched
-  Hermes lints plus the unchanged runtime lint; TASK-038 adds no warning.
-- Independent code and architecture reviews pass with P0-P3 = 0; no
-  constitution or ADR amendment is required for this correction.
+## Retained Phase 1 Evidence
 
-## True Remaining Gates
+- The private Secure MCP Tunnel is able to launch `latticed`; ChatGPT refreshed
+  and discovered exactly `lattice_delivery_run` and
+  `lattice_delivery_status`.
+- Both existing tools have closed zero-argument schemas. Legacy MCP
+  `2025-11-25` and stateless `2026-07-28` reach the same composition-owned
+  binding.
+- The earlier focused runtime/tunnel/governance checks passed at the Phase 1
+  checkpoint. Those results prove transport/discovery only and are not Phase 2
+  or production-execution evidence.
 
-- Live transport and exact discovery pass, but the current Phase 1
-  `SCRIPTED_ACCEPTANCE` composition deliberately uses an unavailable database;
-  no successful ChatGPT tool execution is claimed.
-- Official stdio binding has no HTTP MCP session ID or connector bearer header.
-  The current tunnel/profile therefore maps to one fixed subject; per-human
-  actor/session authorization, durable audit correlation, per-actor rate
-  limiting, and live reconnect evidence are not complete.
-- A future authenticated loopback HTTP adapter would be a new listener and
-  public-contract boundary. It needs versioned SPEC/ADR/constitution review;
-  caller-declared identity cannot become authority.
-- TASK-037 production acceptance was not retried. The existing redacted Hermes
-  child-exit blocker is unchanged.
-- No CI, push, primary-branch merge, deployment, or release was performed.
+## Approved Phase 2 Boundary
+
+- ADR-023, SPEC-003 v4, and TASK-038 select closed process-start ingress
+  evidence. Production Secure MCP Tunnel and local canonical acceptance use
+  distinct non-substitutable commitments. MCP `clientInfo`, model text, and
+  caller identity fields cannot grant authority.
+- Submit accepts only `CONTROLLED_CODEX_CANARY` plus one bounded
+  `client_request_id`. Status accepts only the returned lowercase SHA-256
+  `task_ref`. The public schema
+  contains no arbitrary task/prompt, shell, SQL, path, Git/test command,
+  credential, provider, actor/session, lease/fence, or Codex-thread control.
+- The server builds and Task Domain validates the complete Task Spec 2.1. Its
+  one digest must bind Gateway, Task Ledger, Writer Lease, Codex,
+  verification/Git and status evidence.
+- PostgreSQL is authoritative for task lifecycle, exact idempotency,
+  fixed-profile audit, Writer Lease/fencing, outcomes,
+  and status.
+- Writer Lease 1.1 owns snapshot/checkpoint bytes and the repository trait. New
+  `postgres-writer-lease` 1.0 owns physical persistence through independent
+  `db/extensions/writer-lease/v1.sql`.
+- Postgres Store 1.6 verifies the exact combined
+  `V3CodebaseMemoryV2WriterLeaseV1` catalog/ACL profile and may invoke only the
+  fixed same-transaction 15-field current-authority predicate for a fenced
+  Task Ledger append. It does not install, mutate, parse, depend on lease
+  crates, or own Writer Lease state.
+- Global migrations `0001` through `0004` and Codebase Memory v2 extension are
+  unchanged; no `0005` is introduced.
+- Task Submit/Status is `WriterOnly` and must leave Graphify/Hermes/Memory
+  footprints at zero. The `lattice_delivery_run` MCP tool reaches the same
+  governed writer and starts downstream only after durable Task completion and
+  lease release; the non-MCP compatibility command remains scripted-only.
+  Alternate `lattice-full-chain` is a read-only delivery observer: Run is
+  fixed-denied before dispatch and task tools are absent/unknown under both MCP
+  generations.
+- The fixed canary is limited to a 300-second Task deadline, reserves 30 seconds
+  for finalization, and uses a 600-second lease TTL. Longer profiles remain
+  closed until heartbeat, governed interruption, and orphan recovery exist.
+
+## Current Governance Checkpoint
+
+- New ADR: `docs/adr/ADR-023-bounded-mcp-task-dispatch-and-postgres-writer-lease.md`.
+- SPEC-003 is version 4; TASK-038 remains `in-progress` only because the real
+  ChatGPT tunnel/session gate is still open.
+- Versioned constitutions: `latticed` 1.4, Contracts 1.12, Ports 1.8,
+  Task Domain 2.2, Orchestrator 2.3, Writer Lease 1.1, PostgreSQL Writer Lease
+  1.0, Postgres Store 1.6, and Codex Adapter 1.2.
+- Canonical-local acceptance ID: `8c21e96b9bc44b1d87de0dea884b9678`.
+- Evidence root:
+  `target/lattice-delivery/8c21e96b9bc44b1d87de0dea884b9678/evidence`.
+- Canonical `latticed` SHA-256:
+  `130ef9f92f2582055d9828828c95526a58f01aa7772e43c4db31062219d278b2`.
+- Official Codex 0.146.0 SHA-256:
+  `bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb`.
+
+## Canonical-Local Acceptance Evidence
+
+- Production `latticed` advertised exactly four legacy/stateless tools with
+  closed task input and six-field output schemas. Prohibited authority,
+  shell/SQL/path/Git/credential/lease/thread properties failed before dispatch.
+- Submit and a fresh second `latticed` Status returned the exact same public
+  result: task ref
+  `ab8724dd51419cf190ad491f1f8973894bca56dc0c3aed55ebc3723f6214177d`,
+  ledger head
+  `f3d3b84625f80f26e90b6ed06514bb4f7e8a65f112c089fb6d8a3c82b7d6cdc2`,
+  result `457bab1f71b5bd69e99f3240ca170a25fb88895b94474efd7d747916b2c86bcd`.
+- PostgreSQL 17.10 physically restarted with the same system identifier and a
+  new postmaster start time before the fresh Status request. Database, Git, and
+  timestamp-sensitive Codex Home after-submit/after-status evidence files are
+  pairwise byte-identical.
+- Task Ledger contains one TaskCreated, eight legal transitions, one Codex
+  effect intent, one verified outcome, and one result. Writer Lease has fence
+  high-water `1`, two immutable commands, two transitions, and no current
+  writer. Exact retry was identical and different-key substitution was denied.
+- Codex ran once, fixed verification ran once, and Git produced one governed
+  task commit. Status caused zero rerun. Graphify/Hermes/Memory effect delta is
+  zero for the WriterOnly capability.
+- Both process jobs reported `ActiveProcesses=0`; the execution home was
+  removed and its read-only credential source remained unchanged.
+- Live Store profile and Writer Lease restart/concurrency/fault suites passed
+  without `SKIP:`. Workspace tests, changed-slice strict Clippy, format,
+  `npm.cmd run verify`, PowerShell static/tunnel tests, and diff-check pass.
+- Fresh Status and pre-existing `Merging + result` recovery independently
+  replay Writer Lease snapshot/checkpoint and physical command/transition rows.
+  Completed requires released `1/2/2`; recovery permits only active `1/1/1` or
+  released `1/2/2`, before any additional Task Ledger mutation.
+- Full workspace strict Clippy remains a recorded baseline exception: eleven
+  lints are in unchanged `lattice-hermes-adapter`, outside TASK-038's bounded
+  TASK-041/042-owned slice.
+
+## Required Evidence Still Open
+
+- Refresh the actual Secure MCP Tunnel against this stable feature checkpoint.
+- In a real ChatGPT session, discover and invoke `lattice_task_submit`.
+- In a separate new ChatGPT request/session, invoke `lattice_task_status` and
+  read the same PostgreSQL durable terminal result.
+- Do not relabel the passing scope
+  `LOCAL_CANONICAL_MCP_NOT_CHATGPT_TUNNEL` as ChatGPT evidence.
+
+## Deferred TASK-037 Truth
+
+- The newest ChatGPT observation is
+  `LATTICED_DATABASE_CONNECT_REJECTED`; this is the current first visible
+  production-chain failure and is not assumed to share the older Hermes cause.
+- Older formal evidence remains
+  `HERMES_PRODUCTION_CHILD_EXITED / LATTICE_HERMES_REFLECTION_REJECTED` after
+  reaching the later Hermes/Codex-broker boundary.
+- TASK-037 was not repaired or re-accepted in this Phase 2 governance update.
+  After TASK-038 completes, diagnosis must start from the then-current first
+  failure and proceed PostgreSQL -> Codex -> Graphify -> Hermes -> Memory ->
+  Status. No production E2E PASS is claimed.
 
 ## Exact Next Action
 
-1. Decide the identity boundary: one fixed tunnel/profile gateway actor with
-   narrow policy, or an authenticated loopback HTTP adapter with a versioned
-   architecture change.
-2. Provision a matched live PostgreSQL/delivery composition before attempting a
-   successful ChatGPT call; a bounded error is not acceptance.
-3. Prove interruption/restart behavior and the selected actor/audit boundary.
-4. Resume TASK-037 only for the production E2E completion gate.
+1. Commit the current clean stable checkpoint and publish the provider-neutral Task,
+   Writer Lease, process-start, and Codex thread/turn evidence boundary to
+   Issue #6; Issue #2 may consume it only as passive observation.
+2. Refresh the real Secure MCP Tunnel and complete the two-session ChatGPT
+   submit/status gate without changing or weakening the canonical-local proof.
+3. Only after TASK-038 Phase 2 acceptance, resume TASK-037 from the actual first
+   production blocker.
 
-The section below preserves the TASK-037 production incident state. This top
-section is the authoritative cross-session handoff.
+No CI, PR, merge, tag, release, deployment, public exposure, or
+credential/account change is claimed. The exact feature branch may be pushed
+only after the authorized publish preflight; any missing GitHub authentication
+must be reported as `PUSH_PENDING_AUTH`. Historical TASK-037 sections below
+are retained for incident evidence; this top section is authoritative.
 
 # TASK-037 Production Gate Handoff — 2026-08-09
 

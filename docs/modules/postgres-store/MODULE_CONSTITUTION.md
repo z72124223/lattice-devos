@@ -1,10 +1,10 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.4
+version: 1.6
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-03
+last_reviewed: 2026-08-10
 ---
 
 ## Mission
@@ -16,6 +16,13 @@ explicitly governed Project-Registry-planned global persistence exception.
 Preserve PostgreSQL as the sole durable control-plane truth and every domain
 module as the sole owner of transition legality. `StoreScope` remains strictly
 project-scoped; the Registry exception is a separate typed repository contract.
+Version 1.5 additionally recognizes one exact read-only catalog/ACL profile
+when the independent Codebase Memory v2 and Writer Lease v1 extensions are
+present; it acquires ownership of neither extension.
+Version 1.6 permits the Task Ledger physical transaction adapter to invoke
+exactly one fixed 15-scalar Writer Lease current-authority assertion inside
+the same `SERIALIZABLE` transaction as a fenced Ledger mutation. It does not
+load, plan, transition, persist, or own Writer Lease state.
 
 ## Non-Goals
 
@@ -47,6 +54,11 @@ project-scoped; the Registry exception is a separate typed repository contract.
 - Claim that physical live durability alone proves One Writer composition,
   Guardian activation, domain repository completeness, effect delivery, or
   release safety.
+- Install, migrate, write, replay, repair, or expose Writer Lease extension
+  state. The sole exception is executing the fixed
+  `writer_lease_assert_current_v1` predicate at a Task Ledger mutation
+  boundary; PostgreSQL Writer Lease remains the persistence adapter and Writer
+  Lease remains the semantic owner.
 
 ## Owned Data
 
@@ -110,6 +122,13 @@ project-scoped; the Registry exception is a separate typed repository contract.
 - The exact schema-v4 catalog closure: 15 `control` tables, 28 retained catalog
   functions, 17 runtime-executable functions, and all 11 historical functions
   retained without runtime EXECUTE.
+- Read-only expected catalog, ownership, ACL, and fixed-function signatures for
+  the exact `V3CodebaseMemoryV2WriterLeaseV1` compatibility profile. These
+  constants are verifier evidence only; they are not extension bytes, a
+  migration manifest entry, or a Writer Lease repository API.
+- The physical Task Ledger transaction wiring for the fixed
+  `writer_lease_assert_current_v1` predicate. It consumes the complete typed
+  15-field authority from Contracts and retains no Writer Lease state.
 
 ## Public Contracts
 
@@ -160,6 +179,12 @@ project-scoped; the Registry exception is a separate typed repository contract.
 - A durable Ledger load returns a pure verified stream plus independently
   matched Ledger checkpoint, physical head, and global schema evidence; no
   database row is authoritative before the pure verifier passes.
+- `PostgresTaskLedger::execute_fenced` invokes exactly
+  `writer_lease_assert_current_v1` with the complete typed 15-field authority
+  inside the same `SERIALIZABLE` transaction and before a new Ledger/Store
+  mutation. It exposes no generic SQL or lease repository API. Exact retained
+  command retry remains read-only and returns before mutable currentness
+  checks, including this assertion.
 - `StoreScope`, `ControlStore`, Store heads, and Store receipts remain strictly
   project/snapshot-scoped. `PostgresProjectRegistry` is the only approved global
   persistence exception; it does not call `PostgresControlStore`, construct a
@@ -192,6 +217,11 @@ project-scoped; the Registry exception is a separate typed repository contract.
   below PostgreSQL's 100-input limit. Composite/table arguments, builtin arrays
   as row maps, JSON payloads, omitted positional fields, and extra runtime type
   privileges are forbidden.
+- `SchemaVerifier` may classify exactly the base V3 profile, the approved
+  Codebase Memory v2 extension profile, or the approved combined Codebase
+  Memory v2 plus Writer Lease v1 profile. Partial, extra, drifted, wrong-owner,
+  or wrong-ACL Writer Lease objects fail closed. The verifier cannot install,
+  execute, mutate, or reconstruct Writer Lease state.
 - Project Registry 1.2 owns the canonical command core, logical retained-state
   bytes, checkpoints, record set, and independent retained-checkpoint APIs.
   The adapter stores and independently reads the singleton checkpoint, then
@@ -519,6 +549,24 @@ project-scoped; the Registry exception is a separate typed repository contract.
     the 30-second idle-in-transaction limit is a known pre-commit
     `Unavailable`, rolls back, returns no receipt, and is never automatically
     retried.
+71. Writer Lease v1 remains an independent extension outside the global Store
+    migration manifest. Migrations `0001` through `0004` and
+    `db/extensions/codebase-memory/v2.sql` remain byte-identical under this
+    amendment; no `0005` is created or required by TASK-038.
+72. The combined Writer Lease profile is accepted only after exact relation,
+    column, constraint, index, function, schema/table/function ACL, owner,
+    role, and extension-checksum closure succeeds.
+73. Postgres Store imports no Writer Lease or PostgreSQL Writer Lease crate and
+    cannot call its repository, installer, transition planner, or state parser.
+    Its only Writer Lease function execution is the fixed 15-scalar
+    `writer_lease_assert_current_v1` predicate inside the same transaction as
+    a new fenced Task Ledger mutation. It cannot load or change lease state;
+    profile recognition and the assertion do not confer semantic authority.
+74. A partial Writer Lease install, extra overload, direct runtime table grant,
+    unexpected owner, changed extension byte, or extra object is incompatible;
+    it cannot fall back to the base or Memory-only profile.
+75. Store receipts, heads, transaction semantics, migrations, and global
+    Registry ownership remain unchanged by Writer Lease profile recognition.
 
 ## Allowed Dependencies
 
@@ -539,7 +587,7 @@ project-scoped; the Registry exception is a separate typed repository contract.
 - SQLx, Diesel, direct `tokio-postgres`, pools, TLS adapters, libpq, dynamic SQL
   or migration discovery, environment/credential loaders, provider/model SDKs,
   Git, product repositories, and companion/playmate website code.
-- Task Domain, Writer Lease, Approval, Artifact, Policy,
+- Task Domain, Writer Lease, PostgreSQL Writer Lease, Approval, Artifact, Policy,
   Orchestrator, Gateway, another concrete adapter, Review Runtime, Codebase
   Memory, or Guardian crates. Task Ledger 2.1 and Project Registry 1.2 are the
   only approved domain-owner dependencies in version 1.4.
@@ -593,6 +641,20 @@ Windows/Git inspection, other domain repositories, activation, production
 connectivity, providers/products, effect delivery, and protected release do
 not change.
 
+Version 1.5 adds only fail-closed read-only recognition of the exact
+`V3CodebaseMemoryV2WriterLeaseV1` catalog/ACL profile. Writer Lease installation,
+state, receipts, snapshots, checkpoints, functions, and transactions remain
+owned by Writer Lease 1.1 and PostgreSQL Writer Lease 1.0. This amendment adds
+no global migration, no dependency on either lease crate, and no alternate
+Store, Registry, or Task Ledger write path.
+
+Version 1.6 adds only the atomic fenced-mutation assertion described above.
+The Store adapter accepts the already typed `WriterLeaseAuthorityHead` from
+Contracts and invokes the exact fixed function before its own Task Ledger
+mutation; it neither constructs that authority nor calls the Writer Lease
+repository. No new relation, migration, role grant, domain dependency, or
+truth source is introduced.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -634,6 +696,8 @@ not change.
 | Registry bounds | exact and plus-one 4,096-project, 65,536-command, 67,108,864-byte retained-state, and 131,072-byte canonical-root matrices | Security review | yes |
 | Schema-v4 migration and function profile | fresh/v1/v2/non-empty stopped-v3/v4, rollback/concurrent/ACTIVE; exact 15 tables/28 catalog functions/17 runtime functions/11 historical-ungranted; Registry scalar counts 12, five reads at 2, 73, 22, 27 with max 73 and no composite/array/JSON escape | Integration review | yes |
 | Historical Store/Ledger compatibility | `0001`-`0004` byte-identical; Store-v2 receipts and existing Ledger receipts/checkpoints replay identically after v4 | Compatibility review | yes |
+| Writer Lease profile closure | exact V3+Memory-v2+Writer-Lease-v1 catalog/owner/ACL/function/checksum acceptance plus partial/extra/drift/wrong-owner/direct-grant denial | Security review | yes |
+| Extension ownership | static/dependency tests prove Store cannot install, mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate is executable | Architecture review | yes |
 
 ## Change Policy
 
@@ -656,3 +720,5 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.2 | 2026-08-02 | SPEC-002 v22, ADR-018, TASK-020 | Exact schema-v1-to-v2 expansion plus narrow function-gated live durable physical ControlStore | User MVP-3 execution directive |
 | 1.3 | 2026-08-02 | SPEC-002 v23, ADR-019, TASK-021 | Global schema-v3 profile, immutable Store-v2 receipt compatibility, and Task-Ledger-planned durable event/receipt/projection/outbox repository | Approved V2 amendment and user MVP-3 execution directive |
 | 1.4 | 2026-08-03 | SPEC-002 v24, ADR-020, TASK-022 | Global schema-v4 profile and sole typed Registry persistence exception, corrected with the seeded vacant singleton, Registry-owned canonical/current checkpoint, exact catalog/signature budgets, and bounded transaction semantics without changing Contracts/Ports | Approved V2 amendment and user MVP-3 execution directive |
+| 1.5 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Read-only exact V3+Codebase-Memory-v2+Writer-Lease-v1 catalog/ACL compatibility recognition without installation, mutation, lease ownership, or global migration changes | User TASK-038-first direction |
+| 1.6 | 2026-08-10 | SPEC-003 v3, ADR-023, TASK-038 | Permit only the fixed 15-field Writer Lease current-authority assertion inside a fenced Task Ledger transaction, without lease repository dependency, state ownership, or mutation | User TASK-038-first direction |

@@ -1,10 +1,10 @@
 ---
 module_id: lattice-contracts
 name: LATTICE Shared Contracts
-version: 1.11
+version: 1.12
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-05
+last_reviewed: 2026-08-09
 ---
 
 ## Mission
@@ -48,6 +48,10 @@ their mutable domain state.
   they grant no source, database, task, policy, or release authority.
 - Neutral bounded gateway peer, request/action payload, reply/disposition,
   stable denial, and redacted Task Spec document representations.
+- Neutral fixed-profile MCP client/actor classification, server-derived live
+  peer evidence, controlled task intent/handle, and allowlisted task-status
+  projection values. These values grant no authentication, task, policy,
+  lease, writer, or persistence authority by themselves.
 - Neutral bounded Store transaction/daemon identifiers, closed repository
   owner, project/snapshot/aggregate scope, daemon authority head, physical
   compare-and-swap head, request commitments, terminal disposition/receipt,
@@ -80,6 +84,18 @@ their mutable domain state.
 - Bind terminal delivery evidence to the originating request and exact prior
   stage commitments. Scripted and official-live Codex runtime evidence remain
   structurally distinguishable.
+- Bind the controlled delivery request and every writer/verification/Git stage
+  to the complete Task Spec 2.1 digest and the exact current Writer Lease
+  authority identity, fencing token, and current-head commitment. A receipt
+  projection alone cannot satisfy currentness.
+- Represent exactly one controlled public task intent,
+  `CONTROLLED_CODEX_CANARY`, plus a bounded `client_request_id` and lowercase
+  SHA-256 `task_ref`. No shared value contains free-form implementation text, path,
+  command, SQL, credential, actor/session claim, lease/fence selection, or
+  writable-thread identifier.
+- Represent a server-derived fixed tunnel/profile peer separately from the
+  existing visibly fake peer. MCP `clientInfo` is absent from its authority
+  subject and cannot affect its actor/session/role classification.
 - Bind every graph analysis to one project, snapshot, exact commit/tree,
   sorted tracked-source manifest digest, pinned Graphify identity, fixed
   configuration/capability/exclusion digests, complete graph/record-set
@@ -256,6 +272,23 @@ their mutable domain state.
 38. Delivery stage and terminal evidence remain request-bound and ordered;
     scripted evidence cannot be substituted for official-live evidence, and
     reconciliation cannot be represented as completion.
+39. A live fixed-profile peer requires complete non-zero server-derived
+    adapter/profile/session authority evidence and a closed client/actor pair;
+    no public constructor accepts a caller-authenticated Boolean or raw
+    `clientInfo` as authority.
+40. Controlled Task Submit and Status values are bounded closed types. Unknown
+    intent, malformed/oversized `client_request_id` or `task_ref`, and every prohibited
+    caller field fail before Gateway service dispatch.
+41. The Task Spec digest in Gateway binding, controlled delivery, Writer Lease
+    identity, and public status must be identical. Any substitution is
+    structurally rejected.
+42. Writer Lease receipt/head values grant no currentness by themselves;
+    controlled Codex/verification/Git evidence requires the exact lease
+    identity/fence plus independently obtained matching current-head evidence.
+43. Public task status contains only typed state/disposition and allowlisted
+    identifiers/digests. Raw spec bytes, prompt, diff, command, path, SQL,
+    secret, lease/fence, process output, and database detail are
+    unrepresentable.
 
 ## Allowed Dependencies
 
@@ -295,6 +328,13 @@ Version-1 adapter invocation/evidence behavior is unchanged. Changing a public
 field, meaning, identifier rule, or supported version requires a versioned
 constitution amendment plus compatibility evidence.
 
+Version 1.12 preserves existing Gateway and delivery shapes while adding the
+server-derived fixed-profile peer, closed controlled-task values, unified Task
+Spec binding, and lease-bound writer evidence needed by TASK-038. It does not
+authenticate a tunnel, parse MCP, create a Task Spec, query a lease/current
+head, persist status, run Codex, or perform I/O. Version 1.11 added graph-memory
+and PostgreSQL Memory evidence without changing the delivery/gateway contract.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -308,6 +348,9 @@ constitution amendment plus compatibility evidence.
 | Gateway boundary/substitution matrix | identifier and digest bounds, request/reply variant binding, page limit, role-before-replay, and fake replay capacity | Security review | yes |
 | Store transaction/substitution matrix | identifier/scope/digest/revision/runtime/durability and complete receipt-field checks | Security review | yes |
 | Delivery request/evidence matrix | binding/digest/stage/order/runtime/status substitution plus prohibited-input construction tests | Security review | yes |
+| Fixed-profile peer | live/fake separation, closed client/actor pairs, non-zero authority, and hostile `clientInfo` non-authority matrix | Security review | yes |
+| Controlled task values | exact intent, idempotency/handle bounds, public-status allowlist, and prohibited-field construction matrix | Security review | yes |
+| Spec/lease writer binding | Task Spec, lease identity/fence/current-head, workspace, Codex, verification, Git, and status substitution matrix | Security review | yes |
 | Dependency inspection | Cargo metadata shows no dependencies | Architecture review | yes |
 | Full Rust verification | workspace format, lint, and tests | Engineering | yes |
 
@@ -331,3 +374,5 @@ a versioned amendment, SPEC-002 trace, architecture review, and user approval.
 | 1.8 | 2026-08-01 | SPEC-002 v15, ADR-016, TASK-018 | Neutral typed Store transaction, daemon authority, physical head, commitments, terminal receipt, and explicit non-durable fake representation | User MVP-3 execution directive |
 | 1.9 | 2026-08-02 | SPEC-002 v22, ADR-018, TASK-020 | Preserve Store v1 fake-only compatibility and add v2 live PostgreSQL durability plus database/schema persistence evidence | User MVP-3 execution directive |
 | 1.10 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Immutable typed delivery request, ordered stage evidence, terminal status/outcome, and receipt representations without caller command/path/credential escape hatches | User approval in preceding implementation window |
+| 1.11 | 2026-08-05 | SPEC-002 v26, ADR-022, TASK-033 | Immutable exact-snapshot, Graphify, normalized graph, PostgreSQL Memory, retrieval, and graph-status evidence | User TASK-033 direction |
+| 1.12 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Fixed-profile MCP peer, closed controlled-task values, one Task Spec digest, and lease/fence-bound writer/status evidence | User TASK-038-first direction |

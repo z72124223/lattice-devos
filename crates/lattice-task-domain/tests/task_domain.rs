@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use lattice_cjson::{HashDomain, canonical_sha256};
 use lattice_contracts::{ProjectSnapshotId, TaskId};
 use lattice_task_domain::{
     AcceptanceCriterion, ApprovalRequirement, ApprovalRequirements, Capability, CapabilityRequest,
@@ -123,6 +124,27 @@ fn valid_v21_spec_normalizes_owned_fields_and_hashes_deterministically() {
             .collect::<Vec<_>>(),
         ["RUN_TESTS", "WRITE_PRODUCT_CODE"]
     );
+}
+
+#[test]
+fn canonical_document_is_byte_stable_and_bound_to_the_spec_hash() {
+    let spec = TaskSpec::new(base_input()).expect("valid task spec");
+    let document = spec
+        .canonical_document()
+        .expect("domain-owned canonical document");
+    let domain = HashDomain::new("lattice.task-spec", TASK_SPEC_SCHEMA_VERSION)
+        .expect("task-spec hash domain");
+    let subject = spec.canonical_subject();
+    let recomputed = canonical_sha256(&domain, &subject).expect("document digest");
+
+    assert_eq!(document, spec.canonical_document().expect("stable bytes"));
+    assert_eq!(
+        document,
+        lattice_cjson::canonicalize(&subject)
+            .expect("canonical bytes")
+            .into_vec()
+    );
+    assert_eq!(recomputed.to_hex(), spec.spec_hash().to_hex());
 }
 
 #[test]

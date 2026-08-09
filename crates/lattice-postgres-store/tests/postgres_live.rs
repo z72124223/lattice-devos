@@ -22,8 +22,9 @@ use lattice_postgres_store::{
     migration_manifest, verify_embedded_manifest, verify_postgres_schema,
 };
 use lattice_task_ledger::{
-    ActionId, ActorId, AppendCommand, CommandId, CommandOutcome, CorrelationId, LedgerDenial,
-    LedgerEventKind, LedgerOutcome, ReasonCode, VerifiedStream,
+    ActionId, ActorId, AppendCommand, CommandId, CommandOutcome, CorrelationId, Diagnostic,
+    LedgerDenial, LedgerEventKind, LedgerOutcome, ReasonCode, VerifiedStream, apply_append_plan,
+    plan_append,
 };
 use postgres::config::SslMode;
 use postgres::error::SqlState;
@@ -186,6 +187,8 @@ fn run_initial_phase(config: &LiveConfig) {
     prove_live_control_store(config, &base);
     println!("STORE_TASK021_STAGE_08_BASE_LEDGER");
     prove_live_task_ledger(config, &base);
+    println!("STORE_TASK038_TASK_CREATED_JSONB_ROUND_TRIP");
+    prove_task038_task_created_jsonb_round_trip(config, &base);
     println!("STORE_TASK021_STAGE_09_XMIN_PROVENANCE");
     prove_task021_transaction_provenance_primitive(config, &base);
 
@@ -1335,6 +1338,126 @@ fn prove_live_task_ledger(config: &LiveConfig, target: &MigrationTarget) {
     set_live_admission(config, target, false);
 }
 
+#[allow(clippy::too_many_lines)]
+fn prove_task038_task_created_jsonb_round_trip(config: &LiveConfig, target: &MigrationTarget) {
+    set_live_admission(config, target, true);
+    let identity = live_task_identity("task038-jsonb", "TASK-038");
+    let mut ledger = new_live_task_ledger(config, target);
+    let vacant = ledger
+        .load_stream(identity.clone())
+        .unwrap_or_else(|error| panic!("{}", error.code()));
+    assert!(
+        vacant.stream().head().is_zero(),
+        "STORE_TASK038_JSONB_STREAM_NOT_VACANT"
+    );
+
+    let command = AppendCommand::new(
+        vacant.stream().head().clone(),
+        CommandId::new("task038-jsonb-task-created")
+            .expect("STORE_TASK038_JSONB_COMMAND_FIXTURE_INVALID"),
+        CorrelationId::new("task038-jsonb-correlation")
+            .expect("STORE_TASK038_JSONB_CORRELATION_FIXTURE_INVALID"),
+        "2026-08-10T00:00:00Z",
+        LedgerEventKind::TaskCreated,
+        ActorId::new("lattice-runtime").expect("STORE_TASK038_JSONB_ACTOR_FIXTURE_INVALID"),
+        ActionId::new("admit-controlled-task").expect("STORE_TASK038_JSONB_ACTION_FIXTURE_INVALID"),
+        LedgerOutcome::Recorded,
+        ReasonCode::new("TASK038_TASK_CREATED")
+            .expect("STORE_TASK038_JSONB_REASON_FIXTURE_INVALID"),
+        live_digest('8'),
+        Some(task038_task_created_diagnostic()),
+        None,
+    )
+    .expect("STORE_TASK038_JSONB_APPEND_FIXTURE_INVALID");
+    let plan = plan_append(vacant.stream(), command.clone())
+        .expect("STORE_TASK038_JSONB_PURE_PLAN_FAILED");
+    let expected =
+        apply_append_plan(vacant.stream(), &plan).expect("STORE_TASK038_JSONB_PURE_APPLY_FAILED");
+
+    let first = ledger
+        .execute(command.clone(), live_authority('a', 'b'))
+        .unwrap_or_else(|error| panic!("{}", error.code()));
+    assert!(!first.is_exact_retry(), "STORE_TASK038_JSONB_FALSE_RETRY");
+    assert_eq!(
+        first.receipt(),
+        plan.receipt(),
+        "STORE_TASK038_JSONB_RECEIPT_MISMATCH"
+    );
+    assert_eq!(
+        first.result_checkpoint(),
+        plan.next_checkpoint(),
+        "STORE_TASK038_JSONB_RESULT_CHECKPOINT_MISMATCH"
+    );
+    assert_eq!(
+        first
+            .store_receipt()
+            .request()
+            .mutation()
+            .record_set_digest(),
+        plan.record_set_digest(),
+        "STORE_TASK038_JSONB_RECORD_SET_MISMATCH"
+    );
+    assert_eq!(
+        first.store_receipt().after_head().state_digest(),
+        plan.next_checkpoint().checkpoint_digest(),
+        "STORE_TASK038_JSONB_STORE_CHECKPOINT_MISMATCH"
+    );
+
+    let fresh = ledger
+        .load_stream(identity.clone())
+        .unwrap_or_else(|error| panic!("{}", error.code()));
+    assert_eq!(
+        fresh.stream(),
+        &expected,
+        "STORE_TASK038_JSONB_FRESH_STREAM_MISMATCH"
+    );
+    assert_eq!(
+        fresh.retained_checkpoint(),
+        plan.next_checkpoint(),
+        "STORE_TASK038_JSONB_RETAINED_CHECKPOINT_MISMATCH"
+    );
+    assert_eq!(
+        fresh.physical_head(),
+        first.store_receipt().after_head(),
+        "STORE_TASK038_JSONB_PHYSICAL_HEAD_MISMATCH"
+    );
+
+    let retry_plan = plan_append(fresh.stream(), command.clone())
+        .expect("STORE_TASK038_JSONB_RETRY_PLAN_FAILED");
+    assert!(
+        retry_plan.is_exact_retry(),
+        "STORE_TASK038_JSONB_RETRY_PLAN_NOT_EXACT"
+    );
+    assert_eq!(
+        retry_plan.record_set_digest(),
+        plan.record_set_digest(),
+        "STORE_TASK038_JSONB_REPLAY_RECORD_SET_MISMATCH"
+    );
+    let retry = ledger
+        .execute(command, live_authority('c', 'd'))
+        .unwrap_or_else(|error| panic!("{}", error.code()));
+    assert!(
+        retry.is_exact_retry(),
+        "STORE_TASK038_JSONB_EXECUTE_RETRY_NOT_EXACT"
+    );
+    assert_eq!(
+        retry.store_receipt(),
+        first.store_receipt(),
+        "STORE_TASK038_JSONB_STORE_RECEIPT_CHANGED"
+    );
+
+    drop(ledger);
+    let mut reconnected = new_live_task_ledger(config, target);
+    let reloaded = reconnected
+        .load_stream(identity)
+        .unwrap_or_else(|error| panic!("{}", error.code()));
+    assert_eq!(
+        reloaded, fresh,
+        "STORE_TASK038_JSONB_RECONNECTED_LOAD_MISMATCH"
+    );
+    set_live_admission(config, target, false);
+}
+
 fn prove_live_task_ledger_restart(config: &LiveConfig, target: &MigrationTarget) {
     let identity = live_task_identity("ledger-main", "TASK-021");
     let zero = VerifiedStream::vacant(identity.clone(), RuntimeKind::Live)
@@ -1576,6 +1699,45 @@ fn live_task_command(
         None,
     )
     .expect("STORE_TASK021_APPEND_FIXTURE_INVALID")
+}
+
+fn task038_task_created_diagnostic() -> Diagnostic {
+    let string = |value: &str| CanonicalValue::String(value.to_owned());
+    let fields = vec![
+        ("actor_kind".to_owned(), string("LOCAL_ACCEPTANCE_HARNESS")),
+        (
+            "adapter_id".to_owned(),
+            string("lattice-local-canonical-mcp-acceptance"),
+        ),
+        (
+            "admission_observation_commitment".to_owned(),
+            string(live_digest('c').as_str()),
+        ),
+        (
+            "client_kind".to_owned(),
+            string("LOCAL_CANONICAL_MCP_ACCEPTANCE"),
+        ),
+        (
+            "process_start_authority_digest".to_owned(),
+            string(live_digest('d').as_str()),
+        ),
+        (
+            "profile_adapter_commitment".to_owned(),
+            string(live_digest('e').as_str()),
+        ),
+        (
+            "schema".to_owned(),
+            string("lattice.task-created-ingress-audit.v1"),
+        ),
+    ];
+    assert!(
+        fields
+            .windows(2)
+            .all(|pair| pair[0].0.as_bytes() < pair[1].0.as_bytes()),
+        "STORE_TASK038_JSONB_DIAGNOSTIC_KEYS_NOT_SORTED"
+    );
+    Diagnostic::new(CanonicalValue::Object(fields))
+        .expect("STORE_TASK038_JSONB_DIAGNOSTIC_FIXTURE_INVALID")
 }
 
 fn task_ledger_counts(

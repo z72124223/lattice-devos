@@ -2,7 +2,9 @@
 param(
     [ValidateSet('FullChainPreStatus', 'FullChainRun', 'FullChainStatus')]
     [string]$InternalPhase,
-    [string]$CodexAuthHome
+    [string]$CodexAuthHome,
+    [ValidateSet('Delivery', 'Task')]
+    [string]$Capability = 'Delivery'
 )
 
 Set-StrictMode -Version Latest
@@ -562,9 +564,14 @@ function Start-IsolatedOpenClaw {
 }
 
 function Get-McpInputBytes {
-    param([Parameter(Mandatory = $true)][string]$ToolName)
+    param(
+        [Parameter(Mandatory = $true)][string]$ToolName,
+        [System.Collections.IDictionary]$Arguments = [ordered]@{},
+        [switch]$IncludeDiscovery
+    )
 
-    $frames = @(
+    $frames = [Collections.Generic.List[object]]::new()
+    $frames.Add(
         [ordered]@{
             jsonrpc = '2.0'
             id = 1
@@ -574,19 +581,33 @@ function Get-McpInputBytes {
                 capabilities = [ordered]@{}
                 clientInfo = [ordered]@{ name = 'task037-full-chain-verifier'; version = '1' }
             }
-        },
+        }
+    )
+    $frames.Add(
         [ordered]@{
             jsonrpc = '2.0'
             method = 'notifications/initialized'
             params = [ordered]@{}
-        },
-        [ordered]@{
+        }
+    )
+    $toolRequestId = 2
+    if ($IncludeDiscovery) {
+        $frames.Add([ordered]@{
             jsonrpc = '2.0'
             id = 2
+            method = 'tools/list'
+            params = [ordered]@{}
+        })
+        $toolRequestId = 3
+    }
+    $frames.Add(
+        [ordered]@{
+            jsonrpc = '2.0'
+            id = $toolRequestId
             method = 'tools/call'
             params = [ordered]@{
                 name = $ToolName
-                arguments = [ordered]@{}
+                arguments = $Arguments
             }
         }
     )
@@ -610,6 +631,245 @@ function Get-StructuredToolContent {
         throw 'TASK037_TOOL_CONTENT_SHAPE_REJECTED'
     }
     return ([string]$content[0].text) | ConvertFrom-Json
+}
+
+function Set-Task038StoreAuthority {
+    param(
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][string]$HostName,
+        [Parameter(Mandatory = $true)][string]$Port,
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot
+    )
+
+    $daemonInstanceId = [Environment]::GetEnvironmentVariable('LATTICE_STORE_DAEMON_INSTANCE_ID', 'Process')
+    $daemonEpoch = [Environment]::GetEnvironmentVariable('LATTICE_STORE_DAEMON_EPOCH', 'Process')
+    $authorityRevision = [Environment]::GetEnvironmentVariable('LATTICE_STORE_AUTHORITY_REVISION', 'Process')
+    $observationDigest = [Environment]::GetEnvironmentVariable('LATTICE_STORE_OBSERVATION_DIGEST', 'Process')
+    $headDigest = [Environment]::GetEnvironmentVariable('LATTICE_STORE_AUTHORITY_HEAD_DIGEST', 'Process')
+    if (
+        $daemonInstanceId -notmatch '^[a-z0-9][a-z0-9._:-]{0,127}$' -or
+        $daemonEpoch -notmatch '^[1-9][0-9]{0,18}$' -or
+        $authorityRevision -notmatch '^[1-9][0-9]{0,18}$' -or
+        $observationDigest -notmatch '^[0-9a-f]{64}$' -or
+        $headDigest -notmatch '^[0-9a-f]{64}$'
+    ) {
+        throw 'TASK038_STORE_AUTHORITY_CONFIGURATION_REJECTED'
+    }
+    $psql = Join-Path $postgresBin 'psql.exe'
+    Assert-RegularFile -Path $psql
+    $database = 'lattice_task019_' + $RunId.Substring(0, 8) + '_base'
+    $query = @"
+SET ROLE lattice_migrator;
+UPDATE ONLY control.runtime_admission
+SET admission_mode = 'ACTIVE',
+    daemon_instance_id = '$daemonInstanceId',
+    daemon_epoch = $daemonEpoch,
+    authority_revision = $authorityRevision,
+    observation_digest = decode('$observationDigest', 'hex'),
+    authority_head_digest = decode('$headDigest', 'hex'),
+    updated_at = clock_timestamp()
+WHERE singleton = true;
+RESET ROLE;
+SELECT admission_mode, daemon_instance_id, daemon_epoch::text, authority_revision::text,
+       encode(observation_digest, 'hex') AS observation_digest,
+       encode(authority_head_digest, 'hex') AS authority_head_digest
+FROM ONLY control.runtime_admission WHERE singleton = true;
+"@
+    $originalPassword = [Environment]::GetEnvironmentVariable('PGPASSWORD', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('PGPASSWORD', $Password, 'Process')
+        $output = @(& $psql '--no-psqlrc' '--quiet' '--csv' '-h' $HostName '-p' $Port '-U' 'task019_harness' '-d' $database '-v' 'ON_ERROR_STOP=1' '-c' $query 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable('PGPASSWORD', $originalPassword, 'Process')
+    }
+    if ($exitCode -ne 0) {
+        throw 'TASK038_STORE_AUTHORITY_ACTIVATION_REJECTED'
+    }
+    $csvOutput = @($output | Where-Object {
+        [string]$_ -match '^(admission_mode,|ACTIVE,)'
+    })
+    $rows = @($csvOutput | ConvertFrom-Csv)
+    if (
+        $rows.Count -ne 1 -or
+        [string]$rows[0].admission_mode -ne 'ACTIVE' -or
+        [string]$rows[0].daemon_instance_id -ne $daemonInstanceId -or
+        [string]$rows[0].daemon_epoch -ne $daemonEpoch -or
+        [string]$rows[0].authority_revision -ne $authorityRevision -or
+        [string]$rows[0].observation_digest -ne $observationDigest -or
+        [string]$rows[0].authority_head_digest -ne $headDigest
+    ) {
+        throw 'TASK038_STORE_AUTHORITY_ACTIVATION_REJECTED'
+    }
+    Write-JsonEvidence -Path (Join-Path $EvidenceRoot 'task038-store-authority.json') -Value ([ordered]@{
+        schema_version = 'lattice.task038.store-authority.v1'
+        runtime_admission = 'ACTIVE'
+        daemon_instance_id = $daemonInstanceId
+        daemon_epoch = [uint64]$daemonEpoch
+        authority_revision = [uint64]$authorityRevision
+        observation_digest = $observationDigest
+        authority_head_digest = $headDigest
+        source = 'acceptance-process-start-activation'
+    })
+}
+
+function Invoke-Task038FenceSetup {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot
+    )
+
+    $cargo = @(Get-Command 'cargo.exe' -CommandType Application -ErrorAction Stop)[0]
+    Assert-RegularFile -Path $cargo.Source
+    $originalLive = [Environment]::GetEnvironmentVariable('LATTICE_TASK038_LIVE', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('LATTICE_TASK038_LIVE', '1', 'Process')
+        Push-Location $RepositoryRoot
+        try {
+            $output = @(& $cargo.Source 'test' '-p' 'lattice-runtime' '--test' 'task_control' '--locked' '--' '--nocapture' '--test-threads=1' 2>&1)
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            Pop-Location
+        }
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable('LATTICE_TASK038_LIVE', $originalLive, 'Process')
+    }
+    $text = ($output | Out-String)
+    if ($exitCode -ne 0 -or $text -notmatch '(?m)^TASK038_SAME_TRANSACTION_FENCE_OK fencing_token=2 events=2\s*$') {
+        Write-JsonEvidence -Path (Join-Path $EvidenceRoot 'task038-fence-setup.failure.json') -Value ([ordered]@{
+            schema_version = 'lattice.task038.fence-setup-failure.v1'
+            code = 'TASK038_SAME_TRANSACTION_FENCE_FAILED'
+            output_sha256 = Get-StringSha256 $text
+            output_line_count = @($output).Count
+        })
+        throw 'TASK038_SAME_TRANSACTION_FENCE_FAILED'
+    }
+    Write-JsonEvidence -Path (Join-Path $EvidenceRoot 'task038-fence-setup.json') -Value ([ordered]@{
+        schema_version = 'lattice.task038.fence-setup.v1'
+        status = 'PASS'
+        stale_fence_rejected_in_task_ledger_transaction = $true
+        reacquired_fencing_token = 2
+        durable_event_count = 2
+        output_sha256 = Get-StringSha256 $text
+    })
+}
+
+function Assert-Task038PublicStatus {
+    param(
+        [Parameter(Mandatory = $true)]$Evidence,
+        [Parameter(Mandatory = $true)][string]$DeliveryRoot
+    )
+
+    $propertyNames = @($Evidence.PSObject.Properties.Name | Sort-Object)
+    $expectedNames = @('ledger_head_digest', 'result_digest', 'schema_version', 'status', 'task_ref', 'task_state')
+    if (
+        (Compare-Object -ReferenceObject $expectedNames -DifferenceObject $propertyNames).Count -ne 0 -or
+        [string]$Evidence.schema_version -ne 'lattice.task.status.v1' -or
+        [string]$Evidence.status -ne 'COMPLETED' -or
+        [string]$Evidence.task_state -ne 'COMPLETED' -or
+        [string]$Evidence.task_ref -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Evidence.ledger_head_digest -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Evidence.result_digest -notmatch '^[0-9a-f]{64}$'
+    ) {
+        throw 'TASK038_PUBLIC_STATUS_REJECTED'
+    }
+    $repositoryPath = Get-CanonicalPath -Path (Join-Path $DeliveryRoot 'repo')
+    $answerPath = Join-Path $repositoryPath 'answer.txt'
+    Assert-RegularFile -Path $answerPath
+    $expectedAnswer = [Text.Encoding]::ASCII.GetBytes("LATTICE_DELIVERY_OK`n")
+    $answer = [IO.File]::ReadAllBytes($answerPath)
+    if ([Convert]::ToBase64String($answer) -ne [Convert]::ToBase64String($expectedAnswer)) {
+        throw 'TASK038_CONTROLLED_CHANGE_REJECTED'
+    }
+}
+
+function Invoke-Task038ControlProbe {
+    param(
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][string]$HostName,
+        [Parameter(Mandatory = $true)][string]$Port,
+        [Parameter(Mandatory = $true)]$PublicStatus,
+        [Parameter(Mandatory = $true)][string]$OutputPath
+    )
+
+    $psql = Join-Path $postgresBin 'psql.exe'
+    Assert-RegularFile -Path $psql
+    $database = 'lattice_task019_' + $RunId.Substring(0, 8) + '_base'
+    $taskRef = [string]$PublicStatus.task_ref
+    $query = @"
+SELECT
+  s.sequence::int AS sequence,
+  s.event_count::int AS event_count,
+  s.command_count::int AS command_count,
+  encode(s.task_spec_digest, 'hex') AS task_ref,
+  encode(s.head_digest, 'hex') AS ledger_head_digest,
+  (SELECT count(*)::int FROM ONLY control.task_ledger_events e WHERE e.stream_id = s.stream_id AND e.event_kind = 'TASK_CREATED') AS task_created,
+  (SELECT count(*)::int FROM ONLY control.task_ledger_events e WHERE e.stream_id = s.stream_id AND e.event_kind = 'STATE_TRANSITION') AS state_transitions,
+  (SELECT count(*)::int FROM ONLY control.task_ledger_events e WHERE e.stream_id = s.stream_id AND e.event_kind IN ('EFFECT_INTENT', 'EFFECT_OUTCOME')) AS delivery_effects,
+  (SELECT count(*)::int FROM ONLY control.task_ledger_events e WHERE e.stream_id = s.stream_id AND e.event_kind = 'EVIDENCE_RECORDED' AND e.action_id = 'TASK_RESULT') AS task_results,
+  COALESCE((SELECT encode(e.subject_digest, 'hex') FROM ONLY control.task_ledger_events e WHERE e.stream_id = s.stream_id AND e.event_kind = 'EVIDENCE_RECORDED' AND e.action_id = 'TASK_RESULT'), '') AS result_digest,
+  w.fencing_high_water::int AS fencing_high_water,
+  w.command_high_water::int AS writer_command_count,
+  (SELECT count(*)::int FROM ONLY writer_lease.writer_lease_transitions t WHERE t.project_id = w.project_id) AS writer_transition_count,
+  COALESCE(w.current_status, '') AS current_writer_status
+FROM ONLY control.task_ledger_streams s
+JOIN ONLY writer_lease.writer_lease_heads w ON w.project_id = s.project_id
+WHERE s.project_id = 'task032-delivery'
+  AND s.project_snapshot_id = 'task032-delivery:snapshot:1'
+  AND s.task_id = 'TASK-032'
+  AND s.task_revision = 1
+  AND encode(s.task_spec_digest, 'hex') = '$taskRef';
+"@
+    $originalPassword = [Environment]::GetEnvironmentVariable('PGPASSWORD', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('PGPASSWORD', $Password, 'Process')
+        $output = @(& $psql '--no-psqlrc' '--quiet' '--csv' '-h' $HostName '-p' $Port '-U' 'task019_harness' '-d' $database '-v' 'ON_ERROR_STOP=1' '-c' $query 2>&1)
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable('PGPASSWORD', $originalPassword, 'Process')
+    }
+    if ($exitCode -ne 0) {
+        throw 'TASK038_CONTROL_PROBE_FAILED'
+    }
+    $rows = @($output | ConvertFrom-Csv)
+    if ($rows.Count -ne 1) {
+        throw 'TASK038_CONTROL_PROBE_SHAPE_REJECTED'
+    }
+    $row = $rows[0]
+    if (
+        [int]$row.sequence -ne 12 -or [int]$row.event_count -ne 12 -or [int]$row.command_count -ne 12 -or
+        [string]$row.task_ref -ne $taskRef -or
+        [string]$row.ledger_head_digest -ne [string]$PublicStatus.ledger_head_digest -or
+        [int]$row.task_created -ne 1 -or [int]$row.state_transitions -ne 8 -or
+        [int]$row.delivery_effects -ne 2 -or [int]$row.task_results -ne 1 -or
+        [string]$row.result_digest -ne [string]$PublicStatus.result_digest -or
+        [int]$row.fencing_high_water -ne 1 -or [int]$row.writer_command_count -ne 2 -or
+        [int]$row.writer_transition_count -ne 2 -or -not [string]::IsNullOrEmpty([string]$row.current_writer_status)
+    ) {
+        throw 'TASK038_CONTROL_PROBE_EVIDENCE_REJECTED'
+    }
+    $probe = [ordered]@{
+        schema_version = 'lattice.task038.control-probe.v1'
+        postgres_run_id = $RunId
+        task_ref = $taskRef
+        ledger_head_digest = [string]$row.ledger_head_digest
+        result_digest = [string]$row.result_digest
+        event_count = [int]$row.event_count
+        state_transition_count = [int]$row.state_transitions
+        delivery_effect_count = [int]$row.delivery_effects
+        writer_fencing_high_water = [int]$row.fencing_high_water
+        writer_command_count = [int]$row.writer_command_count
+        writer_transition_count = [int]$row.writer_transition_count
+        writer_released = $true
+    }
+    Write-JsonEvidence -Path $OutputPath -Value $probe
+    return $probe
 }
 
 function Invoke-PostgresMemoryProbe {
@@ -761,6 +1021,7 @@ function Assert-InternalEnvironment {
     $hostName = [Environment]::GetEnvironmentVariable('LATTICE_TASK019_HOST', 'Process')
     $port = [Environment]::GetEnvironmentVariable('LATTICE_TASK019_PORT', 'Process')
     $password = [Environment]::GetEnvironmentVariable('LATTICE_TASK019_PASSWORD', 'Process')
+    $capability = [Environment]::GetEnvironmentVariable('LATTICE_TASK037_CAPABILITY', 'Process')
     if (
         [string]::IsNullOrWhiteSpace($acceptanceId) -or
         $acceptanceId -notmatch '^[0-9a-f]{32}$' -or
@@ -770,6 +1031,7 @@ function Assert-InternalEnvironment {
         [int]$port -eq 0 -or
         [int]$port -eq 5432 -or
         [string]::IsNullOrWhiteSpace($password) -or
+        $capability -notin @('DELIVERY', 'TASK') -or
         [Environment]::GetEnvironmentVariable('LATTICE_TASK019_LIVE', 'Process') -ne '1' -or
         [Environment]::GetEnvironmentVariable('LATTICE_TASK019_PHASE', 'Process') -ne 'restart'
     ) {
@@ -840,6 +1102,8 @@ function Invoke-FullChainInternalPhase {
     $openClawCli = Get-CanonicalPath -Path ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_OPENCLAW_CLI', 'Process'))
     $codexAuthHome = Get-CanonicalPath -Path ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_CODEX_AUTH_HOME', 'Process'))
     $wslExe = Get-CanonicalPath -Path ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_WSL_EXE', 'Process'))
+    $capability = [Environment]::GetEnvironmentVariable('LATTICE_TASK037_CAPABILITY', 'Process')
+    $isTaskCapability = $capability -eq 'TASK'
 
     foreach ($path in @(
         $evidenceRoot, $fixtureRoot, $fullChainExe, $brokerExe, $runtimeManifest,
@@ -860,9 +1124,13 @@ function Invoke-FullChainInternalPhase {
         throw 'TASK037_OPENCLAW_ENTRYPOINT_REJECTED'
     }
 
-    $toolName = if ($Phase -eq 'FullChainRun') { 'lattice_delivery_run' } else { 'lattice_delivery_status' }
+    $toolName = if ($isTaskCapability) {
+        if ($Phase -eq 'FullChainRun') { 'lattice_task_submit' } else { 'lattice_task_status' }
+    }
+    elseif ($Phase -eq 'FullChainRun') { 'lattice_delivery_run' }
+    else { 'lattice_delivery_status' }
     $runMode = if ($Phase -eq 'FullChainRun') { 'FRESH' } else { 'RESUME_EXISTING' }
-    $expectError = $Phase -eq 'FullChainPreStatus'
+    $expectError = -not $isTaskCapability -and $Phase -eq 'FullChainPreStatus'
     $phaseName = switch ($Phase) {
         'FullChainPreStatus' { 'pre-status' }
         'FullChainRun' { 'run' }
@@ -903,6 +1171,15 @@ function Invoke-FullChainInternalPhase {
     $responseDigest = $null
     $phaseSucceeded = $false
     try {
+        if ($isTaskCapability -and $Phase -eq 'FullChainPreStatus') {
+            Set-Task038StoreAuthority `
+                -RunId $runId `
+                -Password $postgresPassword `
+                -HostName $hostName `
+                -Port $port `
+                -EvidenceRoot $evidenceRoot
+            Invoke-Task038FenceSetup -RepositoryRoot $repositoryRoot -EvidenceRoot $evidenceRoot
+        }
         if ($Phase -eq 'FullChainPreStatus') {
             Reset-PostgresMemoryRows `
                 -RunId $runId `
@@ -966,7 +1243,26 @@ function Invoke-FullChainInternalPhase {
             -ProcessNonce $openClawNonce `
             -ProfileSha256 $profileSha256
 
-        [IO.File]::WriteAllBytes($inputPath, (Get-McpInputBytes -ToolName $toolName))
+        $toolArguments = if (-not $isTaskCapability) {
+            [ordered]@{}
+        }
+        elseif ($Phase -eq 'FullChainRun') {
+            [ordered]@{
+                client_request_id = 'task038-' + $acceptanceId
+                intent = 'CONTROLLED_CODEX_CANARY'
+            }
+        }
+        elseif ($Phase -eq 'FullChainStatus') {
+            $submitted = Read-JsonEvidence -Path (Join-Path $evidenceRoot 'run.json')
+            [ordered]@{ task_ref = [string]$submitted.task_ref }
+        }
+        else {
+            [ordered]@{ task_ref = ('a' * 64 -join '') }
+        }
+        [IO.File]::WriteAllBytes(
+            $inputPath,
+            (Get-McpInputBytes -ToolName $toolName -Arguments $toolArguments -IncludeDiscovery:$isTaskCapability)
+        )
         $environment = [ordered]@{
             CI = '1'
             NO_COLOR = '1'
@@ -980,6 +1276,11 @@ function Invoke-FullChainInternalPhase {
             LATTICE_DELIVERY_ROOT = $deliveryRoot
             LATTICE_DELIVERY_GIT_EXE = $gitExe
             LATTICE_DELIVERY_TIMEOUT_SECONDS = '300'
+            LATTICE_STORE_DAEMON_INSTANCE_ID = [Environment]::GetEnvironmentVariable('LATTICE_STORE_DAEMON_INSTANCE_ID', 'Process')
+            LATTICE_STORE_DAEMON_EPOCH = [Environment]::GetEnvironmentVariable('LATTICE_STORE_DAEMON_EPOCH', 'Process')
+            LATTICE_STORE_AUTHORITY_REVISION = [Environment]::GetEnvironmentVariable('LATTICE_STORE_AUTHORITY_REVISION', 'Process')
+            LATTICE_STORE_OBSERVATION_DIGEST = [Environment]::GetEnvironmentVariable('LATTICE_STORE_OBSERVATION_DIGEST', 'Process')
+            LATTICE_STORE_AUTHORITY_HEAD_DIGEST = [Environment]::GetEnvironmentVariable('LATTICE_STORE_AUTHORITY_HEAD_DIGEST', 'Process')
             LATTICE_TASK019_HOST = $hostName
             LATTICE_TASK019_PORT = $port
             LATTICE_TASK019_RUN_ID = $runId
@@ -1052,15 +1353,32 @@ function Invoke-FullChainInternalPhase {
         $stderr = [IO.File]::ReadAllText($stderrPath, [Text.Encoding]::UTF8)
         $responseLines = @($stdout -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
         $responses = @($responseLines | ForEach-Object { $_ | ConvertFrom-Json })
-        if ($responses.Count -ne 2 -or [int]$responses[0].id -ne 1 -or [int]$responses[1].id -ne 2) {
+        $expectedResponseCount = if ($isTaskCapability) { 3 } else { 2 }
+        $toolResponseIndex = if ($isTaskCapability) { 2 } else { 1 }
+        $toolResponseId = if ($isTaskCapability) { 3 } else { 2 }
+        if (
+            $responses.Count -ne $expectedResponseCount -or
+            [int]$responses[0].id -ne 1 -or
+            [int]$responses[$toolResponseIndex].id -ne $toolResponseId
+        ) {
             throw 'TASK037_MCP_RESPONSE_SHAPE_REJECTED'
+        }
+        if ($isTaskCapability) {
+            if ([int]$responses[1].id -ne 2) {
+                throw 'TASK038_MCP_DISCOVERY_RESPONSE_REJECTED'
+            }
+            $discoveredNames = @($responses[1].result.tools | ForEach-Object { [string]$_.name } | Sort-Object)
+            $expectedToolNames = @('lattice_delivery_run', 'lattice_delivery_status', 'lattice_task_status', 'lattice_task_submit')
+            if ((Compare-Object -ReferenceObject $expectedToolNames -DifferenceObject $discoveredNames).Count -ne 0) {
+                throw 'TASK038_MCP_DISCOVERY_CLOSURE_REJECTED'
+            }
         }
         $readyLines = @($stderr -split '\r?\n' | Where-Object { $_ -like '*"event":"ready"*' -and $_ -like ('*"endpoint":"127.0.0.1:' + $rustPort + '"*') })
         if ($readyLines.Count -ne 1) {
             throw 'TASK037_FULL_CHAIN_READY_EVIDENCE_REJECTED'
         }
-        $toolIsError = [bool]$responses[1].result.isError
-        $structured = Get-StructuredToolContent -Response $responses[1]
+        $toolIsError = [bool]$responses[$toolResponseIndex].result.isError
+        $structured = Get-StructuredToolContent -Response $responses[$toolResponseIndex]
         $toolCode = if ($null -ne $structured.PSObject.Properties['code']) { [string]$structured.code } else { $null }
         $responseDigest = Get-FileSha256 $stdoutPath
         $meta = [ordered]@{
@@ -1068,6 +1386,7 @@ function Invoke-FullChainInternalPhase {
             acceptance_id = $acceptanceId
             phase = $Phase
             phase_id = $phaseId
+            capability = $capability
             run_mode = $runMode
             tool_name = $toolName
             postgres_run_id = $runId
@@ -1096,6 +1415,98 @@ function Invoke-FullChainInternalPhase {
         }
         Write-JsonEvidence -Path $metaPath -Value $meta
         Write-JsonEvidence -Path $outputJsonPath -Value $structured
+
+        if ($isTaskCapability) {
+            if ($Phase -eq 'FullChainPreStatus') {
+                if (-not $toolIsError -or [string]$structured.status -ne 'ERROR' -or $toolCode -ne 'LATTICE_TASK_REFERENCE_REJECTED') {
+                    throw 'TASK038_PRE_STATUS_FAIL_CLOSED_REJECTED'
+                }
+                $probe = Invoke-PostgresMemoryProbe -RunId $runId -Password $postgresPassword -HostName $hostName -Port $port -OutputPath $memoryProbePath
+                if (
+                    $probe.analyses -ne 0 -or $probe.receipts -ne 0 -or
+                    $probe.retrieval_audits -ne 0 -or $probe.records -ne 0 -or
+                    $probe.reflections -ne 0 -or $probe.openclaw_commands -ne 0
+                ) {
+                    throw 'TASK038_PRE_STATUS_MEMORY_NOT_EMPTY'
+                }
+                $phaseSucceeded = $true
+                return
+            }
+            if ($toolIsError) {
+                throw ('TASK038_' + $Phase.ToUpperInvariant() + '_TOOL_ERROR_' + $toolCode)
+            }
+            Assert-Task038PublicStatus -Evidence $structured -DeliveryRoot $deliveryRoot
+            $probe = Invoke-PostgresMemoryProbe -RunId $runId -Password $postgresPassword -HostName $hostName -Port $port -OutputPath $memoryProbePath
+            if (
+                $probe.analyses -ne 1 -or $probe.receipts -ne 1 -or
+                $probe.retrieval_audits -ne 1 -or $probe.records -le 0 -or
+                $probe.reflections -ne 1 -or $probe.reflection_status -ne 'INFERENCE_CANDIDATE'
+            ) {
+                throw 'TASK038_MEMORY_PROBE_REJECTED'
+            }
+            $controlProbe = Invoke-Task038ControlProbe `
+                -RunId $runId `
+                -Password $postgresPassword `
+                -HostName $hostName `
+                -Port $port `
+                -PublicStatus $structured `
+                -OutputPath (Join-Path $evidenceRoot ('control-' + $phaseName + '.json'))
+            if ($Phase -eq 'FullChainStatus') {
+                $runEvidence = Read-JsonEvidence -Path (Join-Path $evidenceRoot 'run.json')
+                $runProbe = Read-JsonEvidence -Path (Join-Path $evidenceRoot 'memory-run.json')
+                $runControl = Read-JsonEvidence -Path (Join-Path $evidenceRoot 'control-run.json')
+                $preStatus = Read-JsonEvidence -Path (Join-Path $evidenceRoot 'pre-status.json')
+                $preMeta = Read-JsonEvidence -Path (Join-Path $evidenceRoot 'pre-status.meta.json')
+                if (
+                    [string]$structured.task_ref -ne [string]$runEvidence.task_ref -or
+                    [string]$structured.ledger_head_digest -ne [string]$runEvidence.ledger_head_digest -or
+                    [string]$structured.result_digest -ne [string]$runEvidence.result_digest -or
+                    [string]$structured.task_state -ne [string]$runEvidence.task_state -or
+                    [string]$structured.status -ne [string]$runEvidence.status -or
+                    $probe.analyses -ne [int]$runProbe.analyses -or
+                    $probe.receipts -ne [int]$runProbe.receipts -or
+                    $probe.retrieval_audits -ne [int]$runProbe.retrieval_audits -or
+                    $probe.records -ne [int]$runProbe.records -or
+                    $probe.reflections -ne [int]$runProbe.reflections -or
+                    [string]$controlProbe.ledger_head_digest -ne [string]$runControl.ledger_head_digest -or
+                    [string]$controlProbe.result_digest -ne [string]$runControl.result_digest -or
+                    [int]$controlProbe.event_count -ne [int]$runControl.event_count -or
+                    [int]$controlProbe.writer_command_count -ne [int]$runControl.writer_command_count
+                ) {
+                    throw 'TASK038_STATUS_REPLAY_REJECTED'
+                }
+                $final = [ordered]@{
+                    status = 'PASS'
+                    component = 'task038-bounded-task-submit-verification'
+                    acceptance_id = $acceptanceId
+                    postgres_run_id = $runId
+                    task_ref = [string]$structured.task_ref
+                    task_state = [string]$structured.task_state
+                    ledger_head_digest = [string]$structured.ledger_head_digest
+                    result_digest = [string]$structured.result_digest
+                    repository_path = Get-CanonicalPath -Path (Join-Path $deliveryRoot 'repo')
+                    codex_mode = 'OFFICIAL_CODEX_APP_SERVER'
+                    mcp_tools_discovered = @('lattice_delivery_run', 'lattice_delivery_status', 'lattice_task_status', 'lattice_task_submit')
+                    controlled_change_verified = $true
+                    same_transaction_stale_fence_rejected = $true
+                    writer_fencing_high_water = [int]$controlProbe.writer_fencing_high_water
+                    writer_released = [bool]$controlProbe.writer_released
+                    postgres_event_count = [int]$controlProbe.event_count
+                    postgres_status_replayed_after_restart = $true
+                    status_response_exactly_matches_submit = $true
+                    memory_counts_unchanged_during_status = $true
+                    pre_status_fail_closed = ([bool]$preMeta.tool_is_error -and [string]$preStatus.code -eq 'LATTICE_TASK_REFERENCE_REJECTED')
+                    run_response_sha256 = Get-FileSha256 (Join-Path $evidenceRoot 'run.response.ndjson')
+                    status_response_sha256 = Get-FileSha256 (Join-Path $evidenceRoot 'status.response.ndjson')
+                    runtime_manifest_sha256 = Get-FileSha256 $runtimeManifest
+                    full_chain_binary_sha256 = Get-FileSha256 $fullChainExe
+                    broker_binary_sha256 = Get-FileSha256 $brokerExe
+                }
+                Write-JsonEvidence -Path (Join-Path $evidenceRoot 'final.json') -Value $final
+            }
+            $phaseSucceeded = $true
+            return
+        }
 
         if ($expectError) {
             if (-not $toolIsError -or [string]$structured.status -ne 'ERROR' -or $toolCode -notin @('LATTICE_DELIVERY_RECONCILIATION_REQUIRED', 'LATTICE_HERMES_MEMORY_RECEIPT_REJECTED')) {
@@ -1243,13 +1654,15 @@ function Invoke-DefaultVerification {
     $repositoryRoot = Get-CanonicalPath -Path (Join-Path $PSScriptRoot '..')
     $repositoryTarget = Get-CanonicalPath -Path (Join-Path $repositoryRoot 'target')
     $acceptanceId = [Guid]::NewGuid().ToString('N')
-    $acceptanceRoot = Get-CanonicalPath -Path (Join-Path $repositoryTarget ('full-chain-acceptance\' + $acceptanceId))
+    $acceptanceDirectory = if ($Capability -eq 'Task') { 'task038-task-acceptance' } else { 'full-chain-acceptance' }
+    $acceptanceRoot = Get-CanonicalPath -Path (Join-Path $repositoryTarget ($acceptanceDirectory + '\' + $acceptanceId))
     $fixtureRoot = Get-CanonicalPath -Path (Join-Path $repositoryTarget ('lattice-delivery\' + $acceptanceId))
     $evidenceRoot = Join-Path $acceptanceRoot 'evidence'
     $runtimeManifest = Join-Path $acceptanceRoot 'offline-runtime-manifest.json'
     $sourceManifest = Get-CanonicalPath -Path (Join-Path $repositoryTarget 'full-chain-acceptance\4fe82cdeaa154c28bbe18f6a\offline-runtime-manifest.json')
     $tempBase = Get-CanonicalPath -Path ([IO.Path]::GetTempPath())
-    $deliveryCodexHome = Join-Path $tempBase ('lattice-task037-delivery-codex-home-' + $acceptanceId)
+    $deliveryCodexHomePrefix = if ($Capability -eq 'Task') { 'lattice-task038-delivery-codex-home-' } else { 'lattice-task037-delivery-codex-home-' }
+    $deliveryCodexHome = Join-Path $tempBase ($deliveryCodexHomePrefix + $acceptanceId)
     $schemaDirectory = Join-Path $fixtureRoot 'schema'
     $deliveryRoot = Join-Path $fixtureRoot 'delivery'
     $deliveryLauncher = Get-CanonicalPath -Path (Join-Path $repositoryTarget 'codex-official\0.146.0\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe')
@@ -1327,8 +1740,15 @@ function Invoke-DefaultVerification {
     Assert-RegularFile -Path $fullChainExe
     Assert-RegularFile -Path $brokerExe
 
+    $storeDaemonInstanceId = 'task038-daemon-' + $acceptanceId
+    $storeDaemonEpoch = [Convert]::ToUInt64($acceptanceId.Substring(0, 12), 16) + 8
+    $storeAuthorityRevision = $storeDaemonEpoch
+    $storeObservationDigest = Get-StringSha256 ('lattice.task038.store-observation.v1|' + $acceptanceId + '|' + $storeDaemonEpoch)
+    $storeAuthorityHeadDigest = Get-StringSha256 ('lattice.task038.store-authority-head.v1|' + $storeDaemonInstanceId + '|' + $storeDaemonEpoch + '|' + $storeObservationDigest)
+
     $params = [ordered]@{
         schema_version = 'lattice.task037.params.v1'
+        capability = $Capability.ToUpperInvariant()
         acceptance_id = $acceptanceId
         branch = $branch.Trim()
         head = $head.Trim()
@@ -1346,10 +1766,18 @@ function Invoke-DefaultVerification {
         delivery_launcher_sha256 = Get-FileSha256 $deliveryLauncher
         openclaw_entrypoint_sha256 = Get-FileSha256 $openClawCli
         codex_auth_source = Get-CanonicalPath -Path $CodexAuthHome
+        store_authority = [ordered]@{
+            daemon_instance_id = $storeDaemonInstanceId
+            daemon_epoch = $storeDaemonEpoch
+            authority_revision = $storeAuthorityRevision
+            observation_digest = $storeObservationDigest
+            head_digest = $storeAuthorityHeadDigest
+        }
     }
     Write-JsonEvidence -Path (Join-Path $acceptanceRoot 'params.json') -Value $params
 
     $environmentValues = [ordered]@{
+        LATTICE_TASK037_CAPABILITY = $Capability.ToUpperInvariant()
         LATTICE_TASK037_ACCEPTANCE_ID = $acceptanceId
         LATTICE_TASK037_EVIDENCE_ROOT = $evidenceRoot
         LATTICE_TASK037_FIXTURE_ROOT = $fixtureRoot
@@ -1365,6 +1793,11 @@ function Invoke-DefaultVerification {
         LATTICE_TASK037_OPENCLAW_CLI = $openClawCli
         LATTICE_TASK037_CODEX_AUTH_HOME = Get-CanonicalPath -Path $CodexAuthHome
         LATTICE_TASK037_WSL_EXE = $wslExe
+        LATTICE_STORE_DAEMON_INSTANCE_ID = $storeDaemonInstanceId
+        LATTICE_STORE_DAEMON_EPOCH = [string]$storeDaemonEpoch
+        LATTICE_STORE_AUTHORITY_REVISION = [string]$storeAuthorityRevision
+        LATTICE_STORE_OBSERVATION_DIGEST = $storeObservationDigest
+        LATTICE_STORE_AUTHORITY_HEAD_DIGEST = $storeAuthorityHeadDigest
     }
     $originalEnvironment = @{}
     $driverFailure = $null
@@ -1404,27 +1837,52 @@ function Invoke-DefaultVerification {
 
     $finalPath = Join-Path $evidenceRoot 'final.json'
     $final = Read-JsonEvidence -Path $finalPath
-    if (
-        [string]$final.status -ne 'PASS' -or
-        [string]$final.component -ne 'task037-full-chain-verification' -or
-        [string]$final.acceptance_id -ne $acceptanceId -or
-        [bool]$final.status_replayed_after_postgres_restart -ne $true -or
-        [bool]$final.memory_counts_unchanged_during_status -ne $true -or
-        [bool]$final.pre_status_fail_closed -ne $true
-    ) {
-        throw 'TASK037_FINAL_EVIDENCE_REJECTED'
+    if ($Capability -eq 'Task') {
+        if (
+            [string]$final.status -ne 'PASS' -or
+            [string]$final.component -ne 'task038-bounded-task-submit-verification' -or
+            [string]$final.acceptance_id -ne $acceptanceId -or
+            [string]$final.task_state -ne 'COMPLETED' -or
+            [bool]$final.controlled_change_verified -ne $true -or
+            [bool]$final.same_transaction_stale_fence_rejected -ne $true -or
+            [bool]$final.postgres_status_replayed_after_restart -ne $true -or
+            [bool]$final.status_response_exactly_matches_submit -ne $true
+        ) {
+            throw 'TASK038_FINAL_EVIDENCE_REJECTED'
+        }
+        Write-Output 'TASK038_TASK_SUBMIT_VERIFICATION=PASS'
+        Write-Output (([ordered]@{
+            status = 'PASS'
+            component = 'task038-bounded-task-submit-verification'
+            acceptance_id = $acceptanceId
+            evidence_path = $finalPath
+            postgres_run_id = [string]$final.postgres_run_id
+            task_ref = [string]$final.task_ref
+            result_digest = [string]$final.result_digest
+        }) | ConvertTo-Json -Compress)
     }
-
-    Write-Output 'TASK037_FULL_CHAIN_VERIFICATION=PASS'
-    Write-Output (([ordered]@{
-        status = 'PASS'
-        component = 'task037-full-chain-verification'
-        acceptance_id = $acceptanceId
-        evidence_path = $finalPath
-        postgres_run_id = [string]$final.postgres_run_id
-        full_chain_receipt_digest = [string]$final.full_chain_receipt_digest
-        hermes_reflection_digest = [string]$final.hermes_reflection_digest
-    }) | ConvertTo-Json -Compress)
+    else {
+        if (
+            [string]$final.status -ne 'PASS' -or
+            [string]$final.component -ne 'task037-full-chain-verification' -or
+            [string]$final.acceptance_id -ne $acceptanceId -or
+            [bool]$final.status_replayed_after_postgres_restart -ne $true -or
+            [bool]$final.memory_counts_unchanged_during_status -ne $true -or
+            [bool]$final.pre_status_fail_closed -ne $true
+        ) {
+            throw 'TASK037_FINAL_EVIDENCE_REJECTED'
+        }
+        Write-Output 'TASK037_FULL_CHAIN_VERIFICATION=PASS'
+        Write-Output (([ordered]@{
+            status = 'PASS'
+            component = 'task037-full-chain-verification'
+            acceptance_id = $acceptanceId
+            evidence_path = $finalPath
+            postgres_run_id = [string]$final.postgres_run_id
+            full_chain_receipt_digest = [string]$final.full_chain_receipt_digest
+            hermes_reflection_digest = [string]$final.hermes_reflection_digest
+        }) | ConvertTo-Json -Compress)
+    }
 }
 
 if (-not [string]::IsNullOrEmpty($InternalPhase)) {

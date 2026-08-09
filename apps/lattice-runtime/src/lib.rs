@@ -4,6 +4,7 @@ pub mod composition;
 pub mod delivery_ledger;
 pub mod git_delivery;
 pub mod mcp;
+pub mod task_control;
 
 use std::error::Error;
 use std::fmt;
@@ -284,6 +285,7 @@ struct DeliveryRunInput {
 fn execute_delivery(input: DeliveryRunInput) -> Result<Value, RuntimeError> {
     let timeout = Duration::from_secs(input.timeout_seconds);
     let runtime = delivery_runtime_environment()?;
+    validate_delivery_command_runtime(runtime)?;
     let config = LatticedDeliveryConfig::new(
         input.launcher,
         input.version,
@@ -300,7 +302,7 @@ fn execute_delivery(input: DeliveryRunInput) -> Result<Value, RuntimeError> {
     let mut service = LatticedDeliveryService::for_delivery(config, input.database, password)
         .map_err(|error| RuntimeError::Latticed(error.kind()))?;
     service
-        .run_json()
+        .run_scripted_acceptance_json()
         .map_err(|error| RuntimeError::Latticed(error.kind()))
 }
 
@@ -326,6 +328,16 @@ fn delivery_runtime_environment() -> Result<DeliveryRuntime, RuntimeError> {
         Ok("SCRIPTED_ACCEPTANCE") => Ok(DeliveryRuntime::ScriptedAcceptance),
         Ok("OFFICIAL_CODEX_APP_SERVER") => Ok(DeliveryRuntime::OfficialCodexAppServer),
         _ => Err(RuntimeError::Latticed(LatticedErrorKind::Configuration)),
+    }
+}
+
+fn validate_delivery_command_runtime(runtime: DeliveryRuntime) -> Result<(), RuntimeError> {
+    if runtime == DeliveryRuntime::ScriptedAcceptance {
+        Ok(())
+    } else {
+        Err(RuntimeError::Latticed(
+            LatticedErrorKind::OfficialLiveBlocked,
+        ))
     }
 }
 
@@ -367,8 +379,9 @@ fn is_lowercase_sha256(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::DELIVERY_PROMPT;
+    use super::{DELIVERY_PROMPT, RuntimeError, validate_delivery_command_runtime};
     use lattice_codex_adapter::{AppServerSession, SessionRequest, TurnStatus};
+    use lattice_contracts::DeliveryRuntime;
     use sha2::{Digest, Sha256};
 
     fn sha256_hex(bytes: &[u8]) -> String {
@@ -379,6 +392,17 @@ mod tests {
             write!(&mut output, "{byte:02x}").expect("write digest");
         }
         output
+    }
+
+    #[test]
+    fn compatibility_command_is_scripted_only_and_rejects_official_writer_use() {
+        assert!(validate_delivery_command_runtime(DeliveryRuntime::ScriptedAcceptance).is_ok());
+        assert_eq!(
+            validate_delivery_command_runtime(DeliveryRuntime::OfficialCodexAppServer),
+            Err(RuntimeError::Latticed(
+                crate::composition::LatticedErrorKind::OfficialLiveBlocked
+            ))
+        );
     }
 
     #[test]

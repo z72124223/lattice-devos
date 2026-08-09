@@ -10,10 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lattice_contracts::{DeliveryProfile, DeliveryRuntime};
 use lattice_runtime::composition::{
-    LatticedDeliveryConfig, LatticedDeliveryService, LatticedErrorKind,
+    LatticedDeliveryConfig, LatticedDeliveryService, LatticedErrorKind, fixed_gateway_submission,
 };
 use lattice_runtime::delivery_ledger::DeliveryDatabaseBinding;
-use lattice_runtime::mcp::DeliveryToolService;
 use serde_json::{Value, json};
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
@@ -25,7 +24,28 @@ fn database(run_id: &str) -> DeliveryDatabaseBinding {
     DeliveryDatabaseBinding::new("127.0.0.1", 55432, run_id).expect("database binding")
 }
 
-fn assert_mcp_service<T: DeliveryToolService>() {}
+#[test]
+fn gateway_submission_carries_the_complete_server_owned_task_spec() {
+    let submission = fixed_gateway_submission().expect("fixed Task Spec submission");
+    let document: Value =
+        serde_json::from_slice(submission.canonical_document()).expect("Task Spec document JSON");
+    let object = document.as_object().expect("Task Spec object");
+
+    assert_eq!(object.len(), 23);
+    assert_eq!(document["schema_version"], "2.1");
+    assert_eq!(document["task_id"], "TASK-038-CANARY");
+    assert_eq!(document["project_id"], "task038-controlled-canary");
+    assert_eq!(
+        document["base_commit_id"],
+        "e3b01a182c3273441c879d4d8b796865bba9131a"
+    );
+    assert_eq!(document["scope"]["allowed_paths"], json!(["answer.txt"]));
+    assert_eq!(document["scope"]["forbidden_paths"], json!([".git/**"]));
+    assert_eq!(
+        submission.binding().task_spec_digest(),
+        submission.claimed_spec_digest()
+    );
+}
 
 #[allow(clippy::too_many_arguments)]
 fn delivery_config(
@@ -223,7 +243,6 @@ fn restart_status_does_not_fabricate_an_execution_configuration_without_postgres
     assert!(first.request_binding().is_none());
     assert!(restarted.request_binding().is_none());
     assert!(another_run.request_binding().is_none());
-    assert_mcp_service::<LatticedDeliveryService>();
 }
 
 #[test]
@@ -340,7 +359,7 @@ fn untrusted_launcher_cannot_bypass_the_incident_gate_by_claiming_scripted_runti
     .expect("service binding");
 
     let error = service
-        .run_json()
+        .run_scripted_acceptance_json()
         .expect_err("a mode label cannot authorize an untrusted launcher");
 
     assert_eq!(error.kind(), LatticedErrorKind::ScriptedFixtureRejected);
@@ -411,7 +430,7 @@ fn self_consistent_marker_and_wrapper_cannot_authorize_a_tampered_scripted_serve
     )
     .expect("service binding");
 
-    let result = service.run_json();
+    let result = service.run_scripted_acceptance_json();
     fs::remove_dir_all(&repository_root).expect("remove owned tampered fixture");
 
     let error = result.expect_err("tampered server bytes must fail before database or process");
@@ -453,9 +472,10 @@ fn test_scripted_launcher_bytes(server_sha256: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-fn spawn_scripted_latticed() -> std::process::Child {
+fn spawn_bounded_latticed() -> std::process::Child {
     Command::new(env!("CARGO_BIN_EXE_latticed"))
-        .env("LATTICE_DELIVERY_CODEX_MODE", "SCRIPTED_ACCEPTANCE")
+        .env("LATTICE_DELIVERY_CODEX_MODE", "OFFICIAL_CODEX_APP_SERVER")
+        .env("LATTICE_FULL_CHAIN_RUN_MODE", "RESUME_EXISTING")
         .env("LATTICE_DELIVERY_LAUNCHER", r"C:\tools\codex.exe")
         .env("LATTICE_DELIVERY_LAUNCHER_VERSION", "codex-cli 0.144.6")
         .env("LATTICE_DELIVERY_LAUNCHER_SHA256", "a".repeat(64))
@@ -468,6 +488,16 @@ fn spawn_scripted_latticed() -> std::process::Child {
         .env("LATTICE_TASK019_RUN_ID", "0123456789abcdef0123456789abcdef")
         .env("LATTICE_TASK019_PASSWORD", "test-password")
         .env("LATTICE_DELIVERY_TIMEOUT_SECONDS", "1")
+        .env("LATTICE_STORE_DAEMON_INSTANCE_ID", "test-daemon")
+        .env("LATTICE_STORE_DAEMON_EPOCH", "1")
+        .env("LATTICE_STORE_AUTHORITY_REVISION", "1")
+        .env("LATTICE_STORE_OBSERVATION_DIGEST", "b".repeat(64))
+        .env("LATTICE_STORE_AUTHORITY_HEAD_DIGEST", "c".repeat(64))
+        .env(
+            "LATTICE_TASK_INGRESS_KIND",
+            "LOCAL_CANONICAL_MCP_ACCEPTANCE",
+        )
+        .env("LATTICE_TASK_INGRESS_PROFILE_SHA256", "d".repeat(64))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -476,22 +506,34 @@ fn spawn_scripted_latticed() -> std::process::Child {
 }
 
 #[test]
-fn real_latticed_binary_serves_only_the_two_bounded_tools() {
-    let mut child = spawn_scripted_latticed();
+fn real_latticed_binary_serves_only_the_four_bounded_tools() {
+    let mut child = spawn_bounded_latticed();
+    let task_ref = fixed_gateway_submission()
+        .expect("fixed submission")
+        .binding()
+        .task_spec_digest()
+        .as_str()
+        .to_owned();
+    let requests = [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lattice_delivery_run","arguments":{}}}),
+        json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lattice_delivery_status"}}),
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"lattice_task_submit","arguments":{"client_request_id":"composition-test","intent":"CONTROLLED_CODEX_CANARY"}}}),
+        json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"lattice_task_status","arguments":{"task_ref":task_ref}}}),
+    ];
+    let input = requests
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
     child
         .stdin
         .take()
         .expect("stdin")
-        .write_all(
-            concat!(
-                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n",
-                "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n",
-                "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"lattice_delivery_run\",\"arguments\":{}}}\n",
-                "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"lattice_delivery_status\"}}\n"
-            )
-            .as_bytes(),
-        )
+        .write_all(input.as_bytes())
         .expect("write MCP requests");
     let output = child.wait_with_output().expect("wait latticed");
 
@@ -502,7 +544,7 @@ fn real_latticed_binary_serves_only_the_two_bounded_tools() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("JSON-RPC response"))
         .collect::<Vec<_>>();
-    assert_eq!(responses.len(), 4);
+    assert_eq!(responses.len(), 6);
     assert_eq!(responses[0]["result"]["capabilities"], json!({"tools": {}}));
     let tools = responses[1]["result"]["tools"]
         .as_array()
@@ -512,13 +554,22 @@ fn real_latticed_binary_serves_only_the_two_bounded_tools() {
             .iter()
             .map(|tool| tool["name"].as_str().expect("tool name"))
             .collect::<Vec<_>>(),
-        ["lattice_delivery_run", "lattice_delivery_status"]
+        [
+            "lattice_delivery_run",
+            "lattice_delivery_status",
+            "lattice_task_submit",
+            "lattice_task_status",
+        ]
     );
     for tool in tools {
-        assert_eq!(
-            tool["inputSchema"],
-            json!({"type":"object","additionalProperties":false})
-        );
+        assert_eq!(tool["inputSchema"]["type"], "object");
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        if tool["name"] == "lattice_delivery_run" || tool["name"] == "lattice_delivery_status" {
+            assert_eq!(tool["inputSchema"].as_object().expect("schema").len(), 2);
+        } else {
+            assert!(tool["inputSchema"]["properties"].is_object());
+            assert!(tool["inputSchema"]["required"].is_array());
+        }
         assert!(tool.get("annotations").is_none());
     }
     for response in &responses[2..] {
@@ -527,25 +578,49 @@ fn real_latticed_binary_serves_only_the_two_bounded_tools() {
             response["result"]["structuredContent"]["code"],
             "LATTICE_FULL_CHAIN_BINDING_REJECTED"
         );
+        assert_ne!(
+            response["result"]["structuredContent"]["code"],
+            "LATTICE_TASK_SUBMIT_UNAVAILABLE"
+        );
+        assert_ne!(
+            response["result"]["structuredContent"]["code"],
+            "LATTICE_TASK_STATUS_UNAVAILABLE"
+        );
     }
 }
 
 #[test]
 fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
-    let mut child = spawn_scripted_latticed();
+    let mut child = spawn_bounded_latticed();
+    let task_ref = fixed_gateway_submission()
+        .expect("fixed submission")
+        .binding()
+        .task_spec_digest()
+        .as_str()
+        .to_owned();
+    let metadata = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    let requests = [
+        json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":metadata.clone()}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":metadata.clone()}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lattice_delivery_run","arguments":{},"_meta":metadata.clone()}}),
+        json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lattice_delivery_status","_meta":metadata.clone()}}),
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"lattice_task_submit","arguments":{"client_request_id":"modern-composition-test","intent":"CONTROLLED_CODEX_CANARY"},"_meta":metadata.clone()}}),
+        json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"lattice_task_status","arguments":{"task_ref":task_ref},"_meta":metadata}}),
+    ];
+    let input = requests
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
     child
         .stdin
         .take()
         .expect("stdin")
-        .write_all(
-            concat!(
-                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n",
-                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n",
-                "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"lattice_delivery_run\",\"arguments\":{},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n",
-                "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"lattice_delivery_status\",\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n"
-            )
-            .as_bytes(),
-        )
+        .write_all(input.as_bytes())
         .expect("write modern MCP requests");
     let output = child.wait_with_output().expect("wait latticed");
 
@@ -556,7 +631,7 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("JSON-RPC response"))
         .collect::<Vec<_>>();
-    assert_eq!(responses.len(), 4);
+    assert_eq!(responses.len(), 6);
     assert_eq!(
         responses[0]["result"]["supportedVersions"],
         json!(["2026-07-28"])
@@ -570,13 +645,16 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
             .iter()
             .map(|tool| tool["name"].as_str().expect("tool name"))
             .collect::<Vec<_>>(),
-        ["lattice_delivery_run", "lattice_delivery_status"]
+        [
+            "lattice_delivery_run",
+            "lattice_delivery_status",
+            "lattice_task_submit",
+            "lattice_task_status",
+        ]
     );
     for tool in tools {
-        assert_eq!(
-            tool["inputSchema"],
-            json!({"type":"object","additionalProperties":false})
-        );
+        assert_eq!(tool["inputSchema"]["type"], "object");
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
         assert!(tool["annotations"].is_object());
     }
     for response in &responses {
@@ -587,6 +665,14 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
         assert_ne!(
             response["result"]["structuredContent"]["code"],
             "LATTICE_FULL_CHAIN_BINDING_REJECTED"
+        );
+        assert_ne!(
+            response["result"]["structuredContent"]["code"],
+            "LATTICE_TASK_SUBMIT_UNAVAILABLE"
+        );
+        assert_ne!(
+            response["result"]["structuredContent"]["code"],
+            "LATTICE_TASK_STATUS_UNAVAILABLE"
         );
     }
 }

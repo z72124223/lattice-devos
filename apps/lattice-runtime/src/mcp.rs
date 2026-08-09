@@ -4,7 +4,8 @@ use std::error::Error;
 use std::fmt;
 use std::io::{self, BufRead, Write};
 
-use lattice_contracts::SubjectBinding;
+use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
+use lattice_contracts::{ContentDigest, SubjectBinding};
 use serde_json::{Map, Value, json};
 
 /// Legacy stateful MCP protocol version implemented by this server.
@@ -15,6 +16,40 @@ pub const MCP_STATELESS_PROTOCOL_VERSION: &str = "2026-07-28";
 pub const DELIVERY_RUN_TOOL: &str = "lattice_delivery_run";
 /// Sole delivery status tool.
 pub const DELIVERY_STATUS_TOOL: &str = "lattice_delivery_status";
+/// Bounded high-level task submission tool.
+pub const TASK_SUBMIT_TOOL: &str = "lattice_task_submit";
+/// Bounded durable task status tool.
+pub const TASK_STATUS_TOOL: &str = "lattice_task_status";
+/// Sole task intent accepted by the transport boundary.
+pub const CONTROLLED_CODEX_CANARY_INTENT: &str = "CONTROLLED_CODEX_CANARY";
+
+const LEGACY_DELIVERY_RUN_DISABLED: &str = "LATTICE_DELIVERY_RUN_REQUIRES_CANONICAL_LATTICED";
+
+const MAX_CLIENT_REQUEST_ID_BYTES: usize = 64;
+const TASK_PUBLIC_STATUS_SCHEMA_VERSION: &str = "lattice.task.status.v1";
+const TASK_PUBLIC_STATUS_VALUES: [&str; 4] = [
+    "NOT_SUBMITTED",
+    "RECONCILIATION_REQUIRED",
+    "FAILED",
+    "COMPLETED",
+];
+const TASK_PUBLIC_STATE_VALUES: [&str; 15] = [
+    "NOT_SUBMITTED",
+    "DRAFT",
+    "AWAITING_EXECUTION_APPROVAL",
+    "PREPARING",
+    "EXECUTING",
+    "VERIFYING",
+    "REVIEWING",
+    "AWAITING_MERGE_APPROVAL",
+    "MERGING",
+    "COMPLETED",
+    "REJECTED",
+    "BLOCKED",
+    "FAILED",
+    "STOPPING",
+    "CANCELLED",
+];
 
 /// Maximum encoded bytes accepted for one newline-delimited stdio message.
 pub const MAX_STDIO_MESSAGE_BYTES: usize = 65_536;
@@ -26,6 +61,61 @@ const META_CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
 const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 const META_LOG_LEVEL: &str = "io.modelcontextprotocol/logLevel";
 const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
+
+/// Returns the process-owned commitment to the authorization-relevant MCP
+/// protocol and closed tool schemas. Descriptions are intentionally excluded;
+/// the adapter binary digest independently commits the complete executable.
+pub(crate) fn task_ingress_schema_digest() -> Option<ContentDigest> {
+    let value = CanonicalValue::Object(vec![
+        (
+            "legacy_protocol".to_owned(),
+            CanonicalValue::String(MCP_PROTOCOL_VERSION.to_owned()),
+        ),
+        (
+            "stateless_protocol".to_owned(),
+            CanonicalValue::String(MCP_STATELESS_PROTOCOL_VERSION.to_owned()),
+        ),
+        (
+            "delivery_tools".to_owned(),
+            CanonicalValue::Array(vec![
+                CanonicalValue::String(DELIVERY_RUN_TOOL.to_owned()),
+                CanonicalValue::String(DELIVERY_STATUS_TOOL.to_owned()),
+            ]),
+        ),
+        (
+            "delivery_schema".to_owned(),
+            CanonicalValue::String("closed-empty-object".to_owned()),
+        ),
+        (
+            "task_submit_tool".to_owned(),
+            CanonicalValue::String(TASK_SUBMIT_TOOL.to_owned()),
+        ),
+        (
+            "task_submit_schema".to_owned(),
+            CanonicalValue::String(format!(
+                "closed:client_request_id:ascii-control-id:1..={MAX_CLIENT_REQUEST_ID_BYTES};intent:{CONTROLLED_CODEX_CANARY_INTENT}"
+            )),
+        ),
+        (
+            "task_status_tool".to_owned(),
+            CanonicalValue::String(TASK_STATUS_TOOL.to_owned()),
+        ),
+        (
+            "task_status_schema".to_owned(),
+            CanonicalValue::String("closed:task_ref:lower-sha256".to_owned()),
+        ),
+        (
+            "task_output_schema".to_owned(),
+            CanonicalValue::String(
+                "closed:schema_version:lattice.task.status.v1;status:NOT_SUBMITTED|RECONCILIATION_REQUIRED|FAILED|COMPLETED;task_state:NOT_SUBMITTED|DRAFT|AWAITING_EXECUTION_APPROVAL|PREPARING|EXECUTING|VERIFYING|REVIEWING|AWAITING_MERGE_APPROVAL|MERGING|COMPLETED|REJECTED|BLOCKED|FAILED|STOPPING|CANCELLED;task_ref:lower-sha256;ledger_head_digest:lower-sha256;result_digest:lower-sha256|null"
+                    .to_owned(),
+            ),
+        ),
+    ]);
+    let domain = HashDomain::new("lattice.mcp.task-ingress-schema", "1.0").ok()?;
+    let digest = canonical_sha256(&domain, &value).ok()?;
+    ContentDigest::from_sha256(digest.to_hex()).ok()
+}
 
 /// Bounded execution failure safe for an MCP tool result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +162,144 @@ impl DeliveryToolArguments {
     }
 }
 
+/// Validated high-level task request accepted by the MCP transport boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskSubmitArguments {
+    client_request_id: String,
+    intent: String,
+}
+
+impl TaskSubmitArguments {
+    fn from_value(value: Option<&Value>) -> Option<Self> {
+        let arguments = value?.as_object()?;
+        if arguments.len() != 2
+            || !arguments.contains_key("client_request_id")
+            || !arguments.contains_key("intent")
+        {
+            return None;
+        }
+        let client_request_id = arguments.get("client_request_id")?.as_str()?;
+        let intent = arguments.get("intent")?.as_str()?;
+        if !valid_client_request_id(client_request_id) || intent != CONTROLLED_CODEX_CANARY_INTENT {
+            return None;
+        }
+        Some(Self {
+            client_request_id: client_request_id.to_owned(),
+            intent: intent.to_owned(),
+        })
+    }
+
+    /// Returns the bounded idempotency key supplied by the MCP client.
+    #[must_use]
+    pub fn client_request_id(&self) -> &str {
+        &self.client_request_id
+    }
+
+    /// Returns the one high-level task intent admitted by this transport slice.
+    #[must_use]
+    pub fn intent(&self) -> &str {
+        &self.intent
+    }
+}
+
+/// Validated durable task reference accepted by the MCP transport boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskStatusArguments {
+    task_ref: String,
+}
+
+impl TaskStatusArguments {
+    fn from_value(value: Option<&Value>) -> Option<Self> {
+        let arguments = value?.as_object()?;
+        if arguments.len() != 1 || !arguments.contains_key("task_ref") {
+            return None;
+        }
+        let task_ref = arguments.get("task_ref")?.as_str()?;
+        if !valid_task_ref(task_ref) {
+            return None;
+        }
+        Some(Self {
+            task_ref: task_ref.to_owned(),
+        })
+    }
+
+    /// Returns the exact lowercase SHA-256 task reference.
+    #[must_use]
+    pub fn task_ref(&self) -> &str {
+        &self.task_ref
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TaskPublicStatus {
+    status: String,
+    task_state: String,
+    task_ref: String,
+    ledger_head_digest: String,
+    result_digest: Option<String>,
+}
+
+impl TaskPublicStatus {
+    fn from_value(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        if object.len() != 6
+            || ![
+                "schema_version",
+                "status",
+                "task_state",
+                "task_ref",
+                "ledger_head_digest",
+                "result_digest",
+            ]
+            .iter()
+            .all(|field| object.contains_key(*field))
+        {
+            return None;
+        }
+
+        if object.get("schema_version")?.as_str()? != TASK_PUBLIC_STATUS_SCHEMA_VERSION {
+            return None;
+        }
+        let status = object.get("status")?.as_str()?;
+        if !TASK_PUBLIC_STATUS_VALUES.contains(&status) {
+            return None;
+        }
+        let task_state = object.get("task_state")?.as_str()?;
+        if !TASK_PUBLIC_STATE_VALUES.contains(&task_state) {
+            return None;
+        }
+        let task_ref = object.get("task_ref")?.as_str()?;
+        let ledger_head_digest = object.get("ledger_head_digest")?.as_str()?;
+        if !valid_task_ref(task_ref) || !valid_task_ref(ledger_head_digest) {
+            return None;
+        }
+        let result_digest = match object.get("result_digest")? {
+            Value::Null => None,
+            Value::String(value) if valid_task_ref(value) => Some(value.clone()),
+            _ => return None,
+        };
+
+        Some(Self {
+            status: status.to_owned(),
+            task_state: task_state.to_owned(),
+            task_ref: task_ref.to_owned(),
+            ledger_head_digest: ledger_head_digest.to_owned(),
+            result_digest,
+        })
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "schema_version": TASK_PUBLIC_STATUS_SCHEMA_VERSION,
+            "status": self.status,
+            "task_state": self.task_state,
+            "task_ref": self.task_ref,
+            "ledger_head_digest": self.ledger_head_digest,
+            "result_digest": self.result_digest,
+        })
+    }
+}
+
 /// Composition-owned typed operations exposed by MCP.
 pub trait DeliveryToolService {
     /// Executes the fixed delivery profile.
@@ -87,6 +315,22 @@ pub trait DeliveryToolService {
     ///
     /// Returns only a stable, secret-free failure code.
     fn status(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError>;
+
+    /// Submits one validated high-level task intent to the existing service.
+    ///
+    /// # Errors
+    ///
+    /// Returns only a stable, secret-free failure code.
+    fn task_submit(&mut self, arguments: &TaskSubmitArguments)
+    -> Result<Value, ToolExecutionError>;
+
+    /// Reads one validated durable task reference from the existing service.
+    ///
+    /// # Errors
+    ///
+    /// Returns only a stable, secret-free failure code.
+    fn task_status(&mut self, arguments: &TaskStatusArguments)
+    -> Result<Value, ToolExecutionError>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,6 +346,33 @@ enum RequestProtocol {
     Stateless,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolSurface {
+    CanonicalTaskControl,
+    LegacyDeliveryObserver,
+}
+
+impl ToolSurface {
+    const fn allows_task_control(self) -> bool {
+        matches!(self, Self::CanonicalTaskControl)
+    }
+
+    const fn allows_delivery_run(self) -> bool {
+        matches!(self, Self::CanonicalTaskControl)
+    }
+
+    const fn instructions(self) -> &'static str {
+        match self {
+            Self::CanonicalTaskControl => {
+                "Four bounded LATTICE tools. Authority, task binding, orchestration, and execution configuration remain server-owned."
+            }
+            Self::LegacyDeliveryObserver => {
+                "Legacy LATTICE delivery observer. Delivery mutation and task control are available only through the canonical latticed entrypoint."
+            }
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum RequestProtocolError {
     InvalidMetadata,
@@ -113,6 +384,7 @@ pub struct McpServer<S> {
     service: S,
     arguments: DeliveryToolArguments,
     lifecycle: Lifecycle,
+    tool_surface: ToolSurface,
     tool_invocations: usize,
 }
 
@@ -124,6 +396,19 @@ impl<S: DeliveryToolService> McpServer<S> {
             service,
             arguments: DeliveryToolArguments::new(binding),
             lifecycle: Lifecycle::AwaitingInitialize,
+            tool_surface: ToolSurface::CanonicalTaskControl,
+            tool_invocations: 0,
+        }
+    }
+
+    /// Constructs an uninitialized legacy observer with no mutation capability.
+    #[must_use]
+    pub const fn new_legacy_delivery_observer(service: S, binding: SubjectBinding) -> Self {
+        Self {
+            service,
+            arguments: DeliveryToolArguments::new(binding),
+            lifecycle: Lifecycle::AwaitingInitialize,
+            tool_surface: ToolSurface::LegacyDeliveryObserver,
             tool_invocations: 0,
         }
     }
@@ -173,7 +458,7 @@ impl<S: DeliveryToolService> McpServer<S> {
             }
         };
         match method.as_str() {
-            "server/discover" => Some(Self::discover(id, params.as_ref(), protocol)),
+            "server/discover" => Some(self.discover(id, params.as_ref(), protocol)),
             "initialize" if protocol == RequestProtocol::Stateless => {
                 Some(protocol_error(id, -32601, "Method not found"))
             }
@@ -185,7 +470,7 @@ impl<S: DeliveryToolService> McpServer<S> {
         }
     }
 
-    fn discover(id: Value, params: Option<&Value>, protocol: RequestProtocol) -> Value {
+    fn discover(&self, id: Value, params: Option<&Value>, protocol: RequestProtocol) -> Value {
         if protocol != RequestProtocol::Stateless || !metadata_only_object_or_absent(params) {
             return protocol_error(id, -32602, "Invalid server/discover params");
         }
@@ -195,7 +480,7 @@ impl<S: DeliveryToolService> McpServer<S> {
                 "resultType": "complete",
                 "supportedVersions": [MCP_STATELESS_PROTOCOL_VERSION],
                 "capabilities": {"tools": {}},
-                "instructions": server_instructions(),
+                "instructions": self.tool_surface.instructions(),
                 "ttlMs": 0,
                 "cacheScope": "private",
                 "_meta": server_result_meta()
@@ -230,7 +515,7 @@ impl<S: DeliveryToolService> McpServer<S> {
                     "title": "LATTICE DevOS",
                     "version": "1.0.0"
                 },
-                "instructions": server_instructions()
+                "instructions": self.tool_surface.instructions()
             }),
         )
     }
@@ -242,7 +527,7 @@ impl<S: DeliveryToolService> McpServer<S> {
         if !metadata_only_object_or_absent(params) {
             return protocol_error(id, -32602, "Invalid tools/list params");
         }
-        let mut result = json!({"tools": tool_catalog(protocol)});
+        let mut result = json!({"tools": tool_catalog(protocol, self.tool_surface)});
         if protocol == RequestProtocol::Stateless {
             let result = result
                 .as_object_mut()
@@ -275,23 +560,53 @@ impl<S: DeliveryToolService> McpServer<S> {
         let Some(name) = params.get("name").and_then(Value::as_str) else {
             return protocol_error(id, -32602, "Invalid tools/call params");
         };
-        if !empty_object_or_absent(params.get("arguments")) {
-            return protocol_error(id, -32602, "Tool accepts no arguments");
+        if !self.tool_surface.allows_task_control()
+            && matches!(name, TASK_SUBMIT_TOOL | TASK_STATUS_TOOL)
+        {
+            return protocol_error(id, -32602, "Unknown tool");
         }
         let operation = match name {
-            DELIVERY_RUN_TOOL => DeliveryOperation::Run,
-            DELIVERY_STATUS_TOOL => DeliveryOperation::Status,
+            DELIVERY_RUN_TOOL if empty_object_or_absent(params.get("arguments")) => {
+                ToolOperation::DeliveryRun
+            }
+            DELIVERY_STATUS_TOOL if empty_object_or_absent(params.get("arguments")) => {
+                ToolOperation::DeliveryStatus
+            }
+            DELIVERY_RUN_TOOL | DELIVERY_STATUS_TOOL => {
+                return protocol_error(id, -32602, "Tool accepts no arguments");
+            }
+            TASK_SUBMIT_TOOL => {
+                let Some(arguments) = TaskSubmitArguments::from_value(params.get("arguments"))
+                else {
+                    return protocol_error(id, -32602, "Invalid task submit arguments");
+                };
+                ToolOperation::TaskSubmit(arguments)
+            }
+            TASK_STATUS_TOOL => {
+                let Some(arguments) = TaskStatusArguments::from_value(params.get("arguments"))
+                else {
+                    return protocol_error(id, -32602, "Invalid task status arguments");
+                };
+                ToolOperation::TaskStatus(arguments)
+            }
             _ => return protocol_error(id, -32602, "Unknown tool"),
         };
-        if protocol == RequestProtocol::Legacy {
-            if self.tool_invocations >= MAX_TOOL_INVOCATIONS_PER_SESSION {
-                return protocol_error(id, -32029, "Tool invocation limit exceeded");
-            }
-            self.tool_invocations += 1;
+        if self.tool_invocations >= MAX_TOOL_INVOCATIONS_PER_SESSION {
+            return protocol_error(id, -32029, "Tool invocation limit exceeded");
         }
+        self.tool_invocations += 1;
         let result = match operation {
-            DeliveryOperation::Run => self.service.run(&self.arguments),
-            DeliveryOperation::Status => self.service.status(&self.arguments),
+            ToolOperation::DeliveryRun if !self.tool_surface.allows_delivery_run() => {
+                Err(ToolExecutionError::new(LEGACY_DELIVERY_RUN_DISABLED))
+            }
+            ToolOperation::DeliveryRun => self.service.run(&self.arguments),
+            ToolOperation::DeliveryStatus => self.service.status(&self.arguments),
+            ToolOperation::TaskSubmit(arguments) => {
+                closed_task_public_status(self.service.task_submit(&arguments))
+            }
+            ToolOperation::TaskStatus(arguments) => {
+                closed_task_public_status(self.service.task_status(&arguments))
+            }
         };
         let mut result = tool_result(result);
         if protocol == RequestProtocol::Stateless {
@@ -306,10 +621,12 @@ impl<S: DeliveryToolService> McpServer<S> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DeliveryOperation {
-    Run,
-    Status,
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ToolOperation {
+    DeliveryRun,
+    DeliveryStatus,
+    TaskSubmit(TaskSubmitArguments),
+    TaskStatus(TaskStatusArguments),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -329,10 +646,36 @@ enum StdioFrame {
 pub fn serve<S: DeliveryToolService, R: BufRead, W: Write>(
     service: S,
     binding: SubjectBinding,
+    reader: R,
+    writer: W,
+) -> io::Result<()> {
+    serve_server(McpServer::new(service, binding), reader, writer)
+}
+
+/// Serves the legacy read-only delivery observer over the supplied streams.
+///
+/// # Errors
+///
+/// Returns only transport read/write errors. Protocol and parse errors are
+/// written as JSON-RPC responses.
+pub fn serve_legacy_delivery_observer<S: DeliveryToolService, R: BufRead, W: Write>(
+    service: S,
+    binding: SubjectBinding,
+    reader: R,
+    writer: W,
+) -> io::Result<()> {
+    serve_server(
+        McpServer::new_legacy_delivery_observer(service, binding),
+        reader,
+        writer,
+    )
+}
+
+fn serve_server<S: DeliveryToolService, R: BufRead, W: Write>(
+    mut server: McpServer<S>,
     mut reader: R,
     mut writer: W,
 ) -> io::Result<()> {
-    let mut server = McpServer::new(service, binding);
     loop {
         let response = match read_bounded_frame(&mut reader)? {
             StdioFrame::EndOfStream => return Ok(()),
@@ -404,23 +747,133 @@ fn delivery_arguments_schema() -> Value {
     })
 }
 
-fn tool_catalog(protocol: RequestProtocol) -> Value {
-    let mut tools = json!([
-        {
+fn task_submit_arguments_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "client_request_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_CLIENT_REQUEST_ID_BYTES,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+            },
+            "intent": {
+                "type": "string",
+                "enum": [CONTROLLED_CODEX_CANARY_INTENT]
+            }
+        },
+        "required": ["client_request_id", "intent"],
+        "additionalProperties": false
+    })
+}
+
+fn task_status_arguments_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "task_ref": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "pattern": "^[0-9a-f]{64}$"
+            }
+        },
+        "required": ["task_ref"],
+        "additionalProperties": false
+    })
+}
+
+fn task_public_status_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "schema_version": {
+                "type": "string",
+                "enum": [TASK_PUBLIC_STATUS_SCHEMA_VERSION]
+            },
+            "status": {
+                "type": "string",
+                "enum": TASK_PUBLIC_STATUS_VALUES
+            },
+            "task_state": {
+                "type": "string",
+                "enum": TASK_PUBLIC_STATE_VALUES
+            },
+            "task_ref": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "pattern": "^[0-9a-f]{64}$"
+            },
+            "ledger_head_digest": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "pattern": "^[0-9a-f]{64}$"
+            },
+            "result_digest": {
+                "anyOf": [
+                    {
+                        "type": "string",
+                        "minLength": 64,
+                        "maxLength": 64,
+                        "pattern": "^[0-9a-f]{64}$"
+                    },
+                    {"type": "null"}
+                ]
+            }
+        },
+        "required": [
+            "schema_version",
+            "status",
+            "task_state",
+            "task_ref",
+            "ledger_head_digest",
+            "result_digest"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn tool_catalog(protocol: RequestProtocol, surface: ToolSurface) -> Value {
+    let delivery_run_description = if surface.allows_delivery_run() {
+        "Runs the one LATTICE-owned delivery profile using server configuration."
+    } else {
+        "Legacy name retained for compatibility; mutation requires the canonical latticed entrypoint."
+    };
+    let mut tools = vec![
+        json!({
             "name": DELIVERY_RUN_TOOL,
             "title": "Run LATTICE delivery",
-            "description": "Runs the one LATTICE-owned delivery profile using server configuration.",
+            "description": delivery_run_description,
             "inputSchema": delivery_arguments_schema()
-        },
-        {
+        }),
+        json!({
             "name": DELIVERY_STATUS_TOOL,
             "title": "Read LATTICE delivery status",
             "description": "Reads the durable status for the one LATTICE-owned delivery profile.",
             "inputSchema": delivery_arguments_schema()
-        }
-    ]);
+        }),
+    ];
+    if surface.allows_task_control() {
+        tools.extend([
+            json!({
+                "name": TASK_SUBMIT_TOOL,
+                "title": "Submit a bounded LATTICE task",
+                "description": "Submits the one approved high-level intent through the existing LATTICE service.",
+                "inputSchema": task_submit_arguments_schema(),
+                "outputSchema": task_public_status_schema()
+            }),
+            json!({
+                "name": TASK_STATUS_TOOL,
+                "title": "Read bounded LATTICE task status",
+                "description": "Reads durable status for one validated LATTICE task reference.",
+                "inputSchema": task_status_arguments_schema(),
+                "outputSchema": task_public_status_schema()
+            }),
+        ]);
+    }
     if protocol == RequestProtocol::Stateless {
-        let tools = tools.as_array_mut().expect("tool catalog is an array");
         tools[0]["annotations"] = json!({
             "readOnlyHint": false,
             "destructiveHint": true,
@@ -433,12 +886,22 @@ fn tool_catalog(protocol: RequestProtocol) -> Value {
             "idempotentHint": true,
             "openWorldHint": false
         });
+        if surface.allows_task_control() {
+            tools[2]["annotations"] = json!({
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false
+            });
+            tools[3]["annotations"] = json!({
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            });
+        }
     }
-    tools
-}
-
-fn server_instructions() -> &'static str {
-    "Two fixed zero-argument delivery tools. Task binding and execution configuration remain server-owned."
+    Value::Array(tools)
 }
 
 fn server_result_meta() -> Value {
@@ -621,6 +1084,33 @@ fn valid_logging_level(value: &Value) -> bool {
             level,
             "debug" | "info" | "notice" | "warning" | "error" | "critical" | "alert" | "emergency"
         )
+    })
+}
+
+fn valid_client_request_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= MAX_CLIENT_REQUEST_ID_BYTES
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn valid_task_ref(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn closed_task_public_status(
+    result: Result<Value, ToolExecutionError>,
+) -> Result<Value, ToolExecutionError> {
+    result.and_then(|value| {
+        TaskPublicStatus::from_value(&value)
+            .map(TaskPublicStatus::into_value)
+            .ok_or_else(|| ToolExecutionError::new("LATTICE_TASK_PUBLIC_STATUS_REJECTED"))
     })
 }
 

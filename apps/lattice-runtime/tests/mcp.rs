@@ -1,11 +1,12 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io::Cursor;
 use std::rc::Rc;
 
 use lattice_runtime::composition::fixed_gateway_submission;
 use lattice_runtime::mcp::{
     DeliveryToolArguments, DeliveryToolService, MAX_STDIO_MESSAGE_BYTES,
-    MAX_TOOL_INVOCATIONS_PER_SESSION, McpServer, ToolExecutionError, serve,
+    MAX_TOOL_INVOCATIONS_PER_SESSION, McpServer, TaskStatusArguments, TaskSubmitArguments,
+    ToolExecutionError, serve, serve_legacy_delivery_observer,
 };
 use serde_json::{Value, json};
 
@@ -27,6 +28,225 @@ impl DeliveryToolService for FakeService {
         self.status_calls.set(self.status_calls.get() + 1);
         Ok(json!({"status": "COMPLETED", "kind": "status"}))
     }
+
+    fn task_submit(
+        &mut self,
+        _arguments: &TaskSubmitArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Ok(completed_task_status())
+    }
+
+    fn task_status(
+        &mut self,
+        _arguments: &TaskStatusArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Ok(completed_task_status())
+    }
+}
+
+const CLIENT_REQUEST_ID: &str = "chatgpt-canary-001";
+const CONTROLLED_CODEX_CANARY: &str = "CONTROLLED_CODEX_CANARY";
+const TASK_REF: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const LEDGER_HEAD_DIGEST: &str = "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0";
+const RESULT_DIGEST: &str = "23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01";
+
+fn completed_task_status() -> Value {
+    json!({
+        "schema_version": "lattice.task.status.v1",
+        "status": "COMPLETED",
+        "task_state": "COMPLETED",
+        "task_ref": TASK_REF,
+        "ledger_head_digest": LEDGER_HEAD_DIGEST,
+        "result_digest": RESULT_DIGEST
+    })
+}
+
+fn task_public_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "schema_version": {
+                "type": "string",
+                "enum": ["lattice.task.status.v1"]
+            },
+            "status": {
+                "type": "string",
+                "enum": [
+                    "NOT_SUBMITTED",
+                    "RECONCILIATION_REQUIRED",
+                    "FAILED",
+                    "COMPLETED"
+                ]
+            },
+            "task_state": {
+                "type": "string",
+                "enum": [
+                    "NOT_SUBMITTED",
+                    "DRAFT",
+                    "AWAITING_EXECUTION_APPROVAL",
+                    "PREPARING",
+                    "EXECUTING",
+                    "VERIFYING",
+                    "REVIEWING",
+                    "AWAITING_MERGE_APPROVAL",
+                    "MERGING",
+                    "COMPLETED",
+                    "REJECTED",
+                    "BLOCKED",
+                    "FAILED",
+                    "STOPPING",
+                    "CANCELLED"
+                ]
+            },
+            "task_ref": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "pattern": "^[0-9a-f]{64}$"
+            },
+            "ledger_head_digest": {
+                "type": "string",
+                "minLength": 64,
+                "maxLength": 64,
+                "pattern": "^[0-9a-f]{64}$"
+            },
+            "result_digest": {
+                "anyOf": [
+                    {
+                        "type": "string",
+                        "minLength": 64,
+                        "maxLength": 64,
+                        "pattern": "^[0-9a-f]{64}$"
+                    },
+                    {"type": "null"}
+                ]
+            }
+        },
+        "required": [
+            "schema_version",
+            "status",
+            "task_state",
+            "task_ref",
+            "ledger_head_digest",
+            "result_digest"
+        ],
+        "additionalProperties": false
+    })
+}
+
+#[derive(Clone)]
+struct CapturingTaskService {
+    submits: Rc<RefCell<Vec<TaskSubmitArguments>>>,
+    statuses: Rc<RefCell<Vec<TaskStatusArguments>>>,
+}
+
+impl DeliveryToolService for CapturingTaskService {
+    fn run(&mut self, _arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        panic!("delivery run must not be dispatched by task-tool tests")
+    }
+
+    fn status(&mut self, _arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        panic!("delivery status must not be dispatched by task-tool tests")
+    }
+
+    fn task_submit(
+        &mut self,
+        arguments: &TaskSubmitArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        self.submits.borrow_mut().push(arguments.clone());
+        Ok(completed_task_status())
+    }
+
+    fn task_status(
+        &mut self,
+        arguments: &TaskStatusArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        self.statuses.borrow_mut().push(arguments.clone());
+        Ok(completed_task_status())
+    }
+}
+
+type TaskServerFixture = (
+    McpServer<CapturingTaskService>,
+    Rc<RefCell<Vec<TaskSubmitArguments>>>,
+    Rc<RefCell<Vec<TaskStatusArguments>>>,
+);
+
+fn task_server() -> TaskServerFixture {
+    let submits = Rc::new(RefCell::new(Vec::new()));
+    let statuses = Rc::new(RefCell::new(Vec::new()));
+    let service = CapturingTaskService {
+        submits: submits.clone(),
+        statuses: statuses.clone(),
+    };
+    (
+        McpServer::new(service, fixed_binding().clone()),
+        submits,
+        statuses,
+    )
+}
+
+fn legacy_delivery_observer_task_server() -> TaskServerFixture {
+    let submits = Rc::new(RefCell::new(Vec::new()));
+    let statuses = Rc::new(RefCell::new(Vec::new()));
+    let service = CapturingTaskService {
+        submits: submits.clone(),
+        statuses: statuses.clone(),
+    };
+    (
+        McpServer::new_legacy_delivery_observer(service, fixed_binding().clone()),
+        submits,
+        statuses,
+    )
+}
+
+struct FixedTaskOutputService {
+    output: Value,
+}
+
+impl DeliveryToolService for FixedTaskOutputService {
+    fn run(&mut self, _arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        panic!("delivery run must not be dispatched by task-output tests")
+    }
+
+    fn status(&mut self, _arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        panic!("delivery status must not be dispatched by task-output tests")
+    }
+
+    fn task_submit(
+        &mut self,
+        _arguments: &TaskSubmitArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Ok(self.output.clone())
+    }
+
+    fn task_status(
+        &mut self,
+        _arguments: &TaskStatusArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Ok(self.output.clone())
+    }
+}
+
+fn call_task_tool_with_output(tool_name: &str, output: Value) -> Value {
+    let mut server = McpServer::new(FixedTaskOutputService { output }, fixed_binding().clone());
+    initialize(&mut server);
+    let arguments = match tool_name {
+        "lattice_task_submit" => json!({
+            "client_request_id": CLIENT_REQUEST_ID,
+            "intent": CONTROLLED_CODEX_CANARY
+        }),
+        "lattice_task_status" => json!({"task_ref": TASK_REF}),
+        _ => panic!("unexpected task tool"),
+    };
+    server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "task-output",
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": arguments}
+        }))
+        .expect("task output response")
 }
 
 fn fixed_binding() -> &'static lattice_contracts::SubjectBinding {
@@ -54,7 +274,7 @@ fn server() -> (McpServer<FakeService>, Rc<Cell<u32>>, Rc<Cell<u32>>) {
     )
 }
 
-fn initialize(server: &mut McpServer<FakeService>) {
+fn initialize<S: DeliveryToolService>(server: &mut McpServer<S>) {
     let response = server
         .handle(json!({
             "jsonrpc": "2.0",
@@ -149,7 +369,12 @@ fn modern_tool_requests_are_stateless_and_preserve_the_server_binding() {
             .iter()
             .map(|tool| tool["name"].as_str().expect("tool name"))
             .collect::<Vec<_>>(),
-        ["lattice_delivery_run", "lattice_delivery_status"]
+        [
+            "lattice_delivery_run",
+            "lattice_delivery_status",
+            "lattice_task_submit",
+            "lattice_task_status"
+        ]
     );
     assert_eq!(
         list["result"]["tools"][0]["annotations"],
@@ -169,6 +394,27 @@ fn modern_tool_requests_are_stateless_and_preserve_the_server_binding() {
             "openWorldHint": false
         })
     );
+    assert_eq!(
+        list["result"]["tools"][2]["annotations"],
+        json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": false
+        })
+    );
+    assert_eq!(
+        list["result"]["tools"][3]["annotations"],
+        json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+        })
+    );
+    for tool in &list["result"]["tools"].as_array().expect("tools")[2..] {
+        assert_eq!(tool["outputSchema"], task_public_output_schema());
+    }
 
     for (id, name, arguments) in [
         ("run", "lattice_delivery_run", Some(json!({}))),
@@ -418,9 +664,9 @@ fn modern_metadata_validator_matches_string_and_extension_key_schema() {
 }
 
 #[test]
-fn modern_stateless_calls_do_not_exhaust_the_legacy_session_counter() {
+fn modern_stateless_calls_share_the_bounded_process_rate_counter() {
     let (mut server, run_calls, status_calls) = server();
-    for id in 0..=MAX_TOOL_INVOCATIONS_PER_SESSION {
+    for id in 0..MAX_TOOL_INVOCATIONS_PER_SESSION {
         let response = server
             .handle(json!({
                 "jsonrpc": "2.0",
@@ -436,10 +682,23 @@ fn modern_stateless_calls_do_not_exhaust_the_legacy_session_counter() {
         assert_eq!(response["result"]["resultType"], "complete", "{id}");
         assert_eq!(response["result"]["isError"], false, "{id}");
     }
+    let rejected = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "over-limit",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_delivery_status",
+                "arguments": {},
+                "_meta": modern_request_meta()
+            }
+        }))
+        .expect("modern rate-limit response");
+    assert_eq!(rejected["error"]["code"], -32029);
     assert_eq!(run_calls.get(), 0);
     assert_eq!(
         status_calls.get() as usize,
-        MAX_TOOL_INVOCATIONS_PER_SESSION + 1
+        MAX_TOOL_INVOCATIONS_PER_SESSION
     );
 }
 
@@ -484,7 +743,7 @@ fn modern_discovery_does_not_replace_the_legacy_lifecycle() {
         .expect("legacy tool list");
     assert_eq!(
         legacy_list["result"]["tools"].as_array().map(Vec::len),
-        Some(2)
+        Some(4)
     );
 
     for method in ["initialize", "ping"] {
@@ -502,7 +761,7 @@ fn modern_discovery_does_not_replace_the_legacy_lifecycle() {
 }
 
 #[test]
-fn tool_list_is_exactly_two_closed_zero_argument_tools() {
+fn tool_list_is_exactly_four_bounded_tools_with_closed_schemas() {
     let (mut server, _, _) = server();
     initialize(&mut server);
 
@@ -511,20 +770,588 @@ fn tool_list_is_exactly_two_closed_zero_argument_tools() {
         .expect("tool list");
     let tools = response["result"]["tools"].as_array().expect("tools");
 
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 4);
     assert_eq!(
         tools
             .iter()
             .map(|tool| tool["name"].as_str().expect("name"))
             .collect::<Vec<_>>(),
-        ["lattice_delivery_run", "lattice_delivery_status"]
+        [
+            "lattice_delivery_run",
+            "lattice_delivery_status",
+            "lattice_task_submit",
+            "lattice_task_status"
+        ]
     );
-    for tool in tools {
+    for tool in &tools[..2] {
         assert_eq!(
             tool["inputSchema"],
             json!({"type":"object","additionalProperties":false})
         );
+        assert!(tool.get("outputSchema").is_none());
         assert!(tool.get("annotations").is_none());
+    }
+    let task_output_schema = task_public_output_schema();
+    assert_eq!(
+        tools[2]["inputSchema"],
+        json!({
+            "type": "object",
+            "properties": {
+                "client_request_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+                },
+                "intent": {
+                    "type": "string",
+                    "enum": ["CONTROLLED_CODEX_CANARY"]
+                }
+            },
+            "required": ["client_request_id", "intent"],
+            "additionalProperties": false
+        })
+    );
+    assert_eq!(
+        tools[3]["inputSchema"],
+        json!({
+            "type": "object",
+            "properties": {
+                "task_ref": {
+                    "type": "string",
+                    "minLength": 64,
+                    "maxLength": 64,
+                    "pattern": "^[0-9a-f]{64}$"
+                }
+            },
+            "required": ["task_ref"],
+            "additionalProperties": false
+        })
+    );
+    assert_eq!(tools[2]["outputSchema"], task_output_schema);
+    assert_eq!(tools[3]["outputSchema"], task_output_schema);
+    assert!(tools[2].get("annotations").is_none());
+    assert!(tools[3].get("annotations").is_none());
+}
+
+#[test]
+fn legacy_observer_neither_mutates_nor_advertises_or_dispatches_task_tools() {
+    let (mut legacy_server, submits, statuses) = legacy_delivery_observer_task_server();
+    initialize(&mut legacy_server);
+
+    let legacy_list = legacy_server
+        .handle(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
+        .expect("legacy delivery-only tool list");
+    assert_eq!(
+        legacy_list["result"]["tools"]
+            .as_array()
+            .expect("legacy tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>(),
+        ["lattice_delivery_run", "lattice_delivery_status"]
+    );
+
+    let disabled_run = legacy_server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "legacy-run",
+            "method": "tools/call",
+            "params": {"name": "lattice_delivery_run", "arguments": {}}
+        }))
+        .expect("legacy disabled run response");
+    assert_eq!(disabled_run["result"]["isError"], true);
+    assert_eq!(
+        disabled_run["result"]["structuredContent"],
+        json!({
+            "status": "ERROR",
+            "code": "LATTICE_DELIVERY_RUN_REQUIRES_CANONICAL_LATTICED"
+        })
+    );
+
+    for (id, name, arguments) in [
+        (
+            "legacy-submit",
+            "lattice_task_submit",
+            json!({
+                "client_request_id": CLIENT_REQUEST_ID,
+                "intent": CONTROLLED_CODEX_CANARY
+            }),
+        ),
+        (
+            "legacy-status",
+            "lattice_task_status",
+            json!({"task_ref": TASK_REF}),
+        ),
+    ] {
+        let response = legacy_server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments}
+            }))
+            .expect("legacy disabled task response");
+        assert_eq!(response["error"]["code"], -32602, "{name}");
+        assert_eq!(response["error"]["message"], "Unknown tool", "{name}");
+    }
+    assert!(submits.borrow().is_empty());
+    assert!(statuses.borrow().is_empty());
+}
+
+#[test]
+fn stateless_legacy_observer_neither_advertises_nor_dispatches_task_tools() {
+    let (mut stateless_server, stateless_submits, stateless_statuses) =
+        legacy_delivery_observer_task_server();
+    let stateless_list = stateless_server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "stateless-list",
+            "method": "tools/list",
+            "params": {"_meta": modern_request_meta()}
+        }))
+        .expect("stateless delivery-only tool list");
+    let stateless_tools = stateless_list["result"]["tools"]
+        .as_array()
+        .expect("stateless tools");
+    assert_eq!(
+        stateless_tools
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>(),
+        ["lattice_delivery_run", "lattice_delivery_status"]
+    );
+    assert!(
+        stateless_tools
+            .iter()
+            .all(|tool| tool.get("annotations").is_some())
+    );
+
+    for (id, name, arguments) in [
+        (
+            "stateless-submit",
+            "lattice_task_submit",
+            json!({
+                "client_request_id": CLIENT_REQUEST_ID,
+                "intent": CONTROLLED_CODEX_CANARY
+            }),
+        ),
+        (
+            "stateless-status",
+            "lattice_task_status",
+            json!({"task_ref": TASK_REF}),
+        ),
+    ] {
+        let response = stateless_server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": name,
+                    "arguments": arguments,
+                    "_meta": modern_request_meta()
+                }
+            }))
+            .expect("stateless disabled task response");
+        assert_eq!(response["error"]["code"], -32602, "{name}");
+        assert_eq!(response["error"]["message"], "Unknown tool", "{name}");
+    }
+    assert!(stateless_submits.borrow().is_empty());
+    assert!(stateless_statuses.borrow().is_empty());
+}
+
+#[test]
+fn legacy_observer_stdio_transport_uses_the_restricted_catalog() {
+    let run_calls = Rc::new(Cell::new(0));
+    let status_calls = Rc::new(Cell::new(0));
+    let service = FakeService {
+        run_calls: run_calls.clone(),
+        status_calls: status_calls.clone(),
+    };
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"lattice_delivery_status\",\"arguments\":{}}}\n"
+    );
+    let mut output = Vec::new();
+
+    serve_legacy_delivery_observer(
+        service,
+        fixed_binding().clone(),
+        Cursor::new(input.as_bytes()),
+        &mut output,
+    )
+    .expect("serve legacy observer");
+
+    let responses = String::from_utf8(output)
+        .expect("utf8")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("json response"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        responses[1]["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect::<Vec<_>>(),
+        ["lattice_delivery_run", "lattice_delivery_status"]
+    );
+    assert_eq!(responses[2]["result"]["isError"], false);
+    assert_eq!(
+        responses[2]["result"]["structuredContent"]["kind"],
+        "status"
+    );
+    assert_eq!(run_calls.get(), 0);
+    assert_eq!(status_calls.get(), 1);
+}
+
+#[test]
+fn bounded_task_tools_dispatch_only_typed_arguments() {
+    let (mut server, submits, statuses) = task_server();
+    initialize(&mut server);
+
+    let submit = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "submit",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_task_submit",
+                "arguments": {
+                    "client_request_id": CLIENT_REQUEST_ID,
+                    "intent": CONTROLLED_CODEX_CANARY
+                }
+            }
+        }))
+        .expect("task submit response");
+    assert_eq!(submit["result"]["isError"], false);
+    assert_eq!(submit["result"]["structuredContent"]["task_ref"], TASK_REF);
+
+    let status = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "status",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_task_status",
+                "arguments": {"task_ref": TASK_REF}
+            }
+        }))
+        .expect("task status response");
+    assert_eq!(status["result"]["isError"], false);
+
+    let submits = submits.borrow();
+    assert_eq!(submits.len(), 1);
+    assert_eq!(submits[0].client_request_id(), CLIENT_REQUEST_ID);
+    assert_eq!(submits[0].intent(), CONTROLLED_CODEX_CANARY);
+    let statuses = statuses.borrow();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].task_ref(), TASK_REF);
+}
+
+#[test]
+fn task_tools_emit_only_closed_public_status_shapes() {
+    let accepted = [
+        completed_task_status(),
+        json!({
+            "schema_version": "lattice.task.status.v1",
+            "status": "FAILED",
+            "task_state": "FAILED",
+            "task_ref": TASK_REF,
+            "ledger_head_digest": LEDGER_HEAD_DIGEST,
+            "result_digest": null
+        }),
+        json!({
+            "schema_version": "lattice.task.status.v1",
+            "status": "RECONCILIATION_REQUIRED",
+            "task_state": "EXECUTING",
+            "task_ref": TASK_REF,
+            "ledger_head_digest": LEDGER_HEAD_DIGEST,
+            "result_digest": null
+        }),
+    ];
+
+    for tool_name in ["lattice_task_submit", "lattice_task_status"] {
+        for output in &accepted {
+            let response = call_task_tool_with_output(tool_name, output.clone());
+            assert_eq!(response["result"]["isError"], false, "{tool_name}");
+            assert_eq!(
+                response["result"]["structuredContent"], *output,
+                "{tool_name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn task_tools_fail_closed_before_serializing_invalid_public_status() {
+    let mut invalid = vec![Value::Null, json!([]), json!({})];
+
+    for field in [
+        "schema_version",
+        "status",
+        "task_state",
+        "task_ref",
+        "ledger_head_digest",
+        "result_digest",
+    ] {
+        let mut value = completed_task_status();
+        value.as_object_mut().expect("status object").remove(field);
+        invalid.push(value);
+    }
+
+    for (field, replacement) in [
+        ("schema_version", json!(1)),
+        ("status", json!(false)),
+        ("task_state", json!([])),
+        ("task_ref", json!(7)),
+        ("ledger_head_digest", Value::Null),
+        ("result_digest", json!({})),
+    ] {
+        let mut value = completed_task_status();
+        value[field] = replacement;
+        invalid.push(value);
+    }
+
+    for (field, replacement) in [
+        ("schema_version", "lattice.task.status.v2"),
+        ("status", "ACCEPTED"),
+        ("task_state", "UNKNOWN"),
+        ("task_ref", "a"),
+        (
+            "ledger_head_digest",
+            "A123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
+        ("result_digest", "abc"),
+    ] {
+        let mut value = completed_task_status();
+        value[field] = json!(replacement);
+        invalid.push(value);
+    }
+
+    for field in [
+        "extra",
+        "actor_id",
+        "lease",
+        "fence",
+        "path",
+        "command",
+        "codex_thread",
+    ] {
+        let mut value = completed_task_status();
+        value
+            .as_object_mut()
+            .expect("status object")
+            .insert(field.to_owned(), json!("forbidden"));
+        invalid.push(value);
+    }
+
+    for tool_name in ["lattice_task_submit", "lattice_task_status"] {
+        for output in &invalid {
+            let response = call_task_tool_with_output(tool_name, output.clone());
+            assert_eq!(response["result"]["isError"], true, "{tool_name}: {output}");
+            assert_eq!(
+                response["result"]["structuredContent"],
+                json!({
+                    "status": "ERROR",
+                    "code": "LATTICE_TASK_PUBLIC_STATUS_REJECTED"
+                }),
+                "{tool_name}: {output}"
+            );
+            let text = response["result"]["content"][0]["text"]
+                .as_str()
+                .expect("bounded error text");
+            assert!(!text.contains("forbidden"), "{tool_name}: {output}");
+        }
+    }
+}
+
+#[test]
+fn stateless_client_info_cannot_change_typed_task_arguments() {
+    let (mut server, submits, statuses) = task_server();
+
+    for (id, client_info) in [
+        (
+            "first",
+            json!({
+                "name": "untrusted-first",
+                "version": "1",
+                "actor_id": "attacker",
+                "session_id": "forged-session"
+            }),
+        ),
+        (
+            "second",
+            json!({
+                "name": "untrusted-second",
+                "version": "99",
+                "actor_id": "different-attacker",
+                "session_id": "different-forgery"
+            }),
+        ),
+    ] {
+        let mut metadata = modern_request_meta();
+        metadata["io.modelcontextprotocol/clientInfo"] = client_info;
+        let response = server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": "lattice_task_submit",
+                    "arguments": {
+                        "client_request_id": CLIENT_REQUEST_ID,
+                        "intent": CONTROLLED_CODEX_CANARY
+                    },
+                    "_meta": metadata
+                }
+            }))
+            .expect("stateless task submit response");
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert_eq!(response["result"]["isError"], false);
+    }
+
+    let submits = submits.borrow();
+    assert_eq!(submits.len(), 2);
+    assert_eq!(submits[0], submits[1]);
+    assert_eq!(submits[0].client_request_id(), CLIENT_REQUEST_ID);
+    assert_eq!(submits[0].intent(), CONTROLLED_CODEX_CANARY);
+
+    let status = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "stateless-status",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_task_status",
+                "arguments": {"task_ref": TASK_REF},
+                "_meta": modern_request_meta()
+            }
+        }))
+        .expect("stateless task status response");
+    assert_eq!(status["result"]["resultType"], "complete");
+    assert_eq!(status["result"]["isError"], false);
+    let statuses = statuses.borrow();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].task_ref(), TASK_REF);
+}
+
+#[test]
+fn task_submit_rejects_invalid_or_dangerous_arguments_before_dispatch() {
+    let invalid_arguments = [
+        json!({}),
+        json!({"client_request_id": CLIENT_REQUEST_ID}),
+        json!({"intent": CONTROLLED_CODEX_CANARY}),
+        json!({"client_request_id": "", "intent": CONTROLLED_CODEX_CANARY}),
+        json!({"client_request_id": "a".repeat(65), "intent": CONTROLLED_CODEX_CANARY}),
+        json!({"client_request_id": "not ascii", "intent": CONTROLLED_CODEX_CANARY}),
+        json!({"client_request_id": "非ASCII", "intent": CONTROLLED_CODEX_CANARY}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "intent": "ARBITRARY_TASK"}),
+        json!({"client_request_id": 7, "intent": CONTROLLED_CODEX_CANARY}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "intent": false}),
+        Value::Null,
+        json!([]),
+    ];
+
+    for arguments in invalid_arguments {
+        let (mut server, submits, statuses) = task_server();
+        initialize(&mut server);
+        let response = server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": "invalid-submit",
+                "method": "tools/call",
+                "params": {"name": "lattice_task_submit", "arguments": arguments}
+            }))
+            .expect("invalid submit response");
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(submits.borrow().is_empty());
+        assert!(statuses.borrow().is_empty());
+    }
+
+    for property in [
+        "project_id",
+        "actor_id",
+        "session_id",
+        "command_id",
+        "approval",
+        "shell",
+        "sql",
+        "path",
+        "filesystem_write",
+        "git",
+        "git_command",
+        "credential",
+        "secret",
+        "provider",
+        "lease",
+        "writer_lease",
+        "thread_id",
+        "codex_thread",
+        "task",
+        "extra",
+    ] {
+        let (mut server, submits, statuses) = task_server();
+        initialize(&mut server);
+        let mut arguments = serde_json::Map::from_iter([
+            (
+                "client_request_id".to_owned(),
+                Value::String(CLIENT_REQUEST_ID.to_owned()),
+            ),
+            (
+                "intent".to_owned(),
+                Value::String(CONTROLLED_CODEX_CANARY.to_owned()),
+            ),
+        ]);
+        arguments.insert(property.to_owned(), json!("forbidden"));
+        let response = server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": property,
+                "method": "tools/call",
+                "params": {
+                    "name": "lattice_task_submit",
+                    "arguments": Value::Object(arguments)
+                }
+            }))
+            .expect("dangerous submit response");
+        assert_eq!(response["error"]["code"], -32602, "{property}");
+        assert!(submits.borrow().is_empty(), "{property}");
+        assert!(statuses.borrow().is_empty(), "{property}");
+    }
+}
+
+#[test]
+fn task_status_requires_one_lowercase_sha256_reference_before_dispatch() {
+    for arguments in [
+        json!({}),
+        json!({"task_ref": ""}),
+        json!({"task_ref": "a".repeat(63)}),
+        json!({"task_ref": "a".repeat(65)}),
+        json!({"task_ref": TASK_REF.to_uppercase()}),
+        json!({"task_ref": format!("{}g", "a".repeat(63))}),
+        json!({"task_ref": 7}),
+        json!({"task_ref": TASK_REF, "extra": "forbidden"}),
+        json!({"task_ref": TASK_REF, "shell": "forbidden"}),
+        Value::Null,
+        json!([]),
+    ] {
+        let (mut server, submits, statuses) = task_server();
+        initialize(&mut server);
+        let response = server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": "invalid-status",
+                "method": "tools/call",
+                "params": {"name": "lattice_task_status", "arguments": arguments}
+            }))
+            .expect("invalid status response");
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(submits.borrow().is_empty());
+        assert!(statuses.borrow().is_empty());
     }
 }
 
@@ -570,7 +1397,7 @@ fn request_metadata_is_allowed_without_widening_tool_arguments() {
             "params":{"_meta":{"progressToken":"list-progress"}}
         }))
         .expect("tool list");
-    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(2));
+    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(4));
 
     let call = server
         .handle(json!({
@@ -755,6 +1582,20 @@ fn execution_failures_are_tool_errors_without_sensitive_messages() {
             _arguments: &DeliveryToolArguments,
         ) -> Result<Value, ToolExecutionError> {
             Err(ToolExecutionError::new("LATTICE_STATUS_REJECTED"))
+        }
+
+        fn task_submit(
+            &mut self,
+            _arguments: &TaskSubmitArguments,
+        ) -> Result<Value, ToolExecutionError> {
+            Err(ToolExecutionError::new("LATTICE_TASK_SUBMIT_REJECTED"))
+        }
+
+        fn task_status(
+            &mut self,
+            _arguments: &TaskStatusArguments,
+        ) -> Result<Value, ToolExecutionError> {
+            Err(ToolExecutionError::new("LATTICE_TASK_STATUS_REJECTED"))
         }
     }
     let mut server = McpServer::new(FailingService, fixed_binding().clone());

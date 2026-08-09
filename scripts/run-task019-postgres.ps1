@@ -2,6 +2,9 @@
 param(
     [switch]$RunLatticeDeliveryHook,
     [switch]$RunFullChainAcceptanceHook,
+    [switch]$RunTask038AcceptanceHook,
+    [string]$Task038OfficialCodexExecutable,
+    [string]$Task038CodexAuthHome,
     [switch]$MemoryOnly
 )
 
@@ -28,7 +31,15 @@ $environmentNames = @(
     'LATTICE_TASK019_PASSWORD',
     'LATTICE_TASK019_RUN_ID',
     'LATTICE_TASK019_EXPECTED_UUID',
-    'LATTICE_TASK019_EXPECTED_MANIFEST'
+    'LATTICE_TASK019_EXPECTED_MANIFEST',
+    'LATTICE_TASK038_POSTGRES_PASSWORD',
+    'LATTICE_WRITER_LEASE_MIGRATOR_URL',
+    'LATTICE_WRITER_LEASE_RUNTIME_URL',
+    'LATTICE_WRITER_LEASE_ADMIN_URL',
+    'LATTICE_STORE_PROFILE_LIVE',
+    'LATTICE_STORE_PROFILE_EXPECTED',
+    'LATTICE_STORE_PROFILE_RUNTIME_URL',
+    'LATTICE_STORE_PROFILE_MIGRATOR_URL'
 )
 
 function Get-CanonicalPath {
@@ -143,10 +154,73 @@ function Get-LatticeFullChainAcceptanceHookPath {
     return $expectedPath
 }
 
+function Get-LatticeTask038AcceptanceHookPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptDirectory,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot
+    )
+
+    $canonicalScriptDirectory = Get-CanonicalPath -Path $ScriptDirectory
+    $expectedPath = Get-CanonicalPath -Path (Join-Path $canonicalScriptDirectory 'run-task038-task-submit.ps1')
+    if (-not (Test-ExactPath -Actual (Split-Path -Parent $expectedPath) -Expected $canonicalScriptDirectory)) {
+        throw 'TASK038_ACCEPTANCE_HOOK_NOT_EXACT_SIBLING'
+    }
+    Assert-NoReparseAncestor -Path $expectedPath -Boundary $RepositoryRoot
+    $item = Get-Item -LiteralPath $expectedPath -Force -ErrorAction SilentlyContinue
+    if (
+        $null -eq $item -or
+        $item.PSIsContainer -or
+        -not ($item -is [System.IO.FileInfo]) -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
+        -not (Test-Path -LiteralPath $expectedPath -PathType Leaf) -or
+        -not (Test-ExactPath -Actual $item.FullName -Expected $expectedPath)
+    ) {
+        throw 'TASK038_ACCEPTANCE_HOOK_NOT_REGULAR_LEAF'
+    }
+    return $expectedPath
+}
+
 function Test-PgCtlStatusCodeIsStopped {
     param([Parameter(Mandatory = $true)][int]$StatusCode)
 
     return ($StatusCode -eq 3)
+}
+
+function Test-StoreProfileLiveGateOutput {
+    param(
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [Parameter(Mandatory = $true)][object[]]$Output,
+        [Parameter(Mandatory = $true)][string]$ExpectedProfile
+    )
+
+    $allowedProfiles = @('V3', 'V3_MEMORY_V2', 'V3_MEMORY_V2_WRITER_LEASE_V1')
+    if ($ExpectedProfile -notin $allowedProfiles) {
+        return $false
+    }
+    $text = @($Output | ForEach-Object { [string]$_ }) -join "`n"
+    $escapedProfile = [regex]::Escape($ExpectedProfile)
+    $passPattern = "(?m)(?:^|[^\S\r\n])PASS: Store live profile $escapedProfile accepted with exact fail-closed matrix[ `t]*$"
+    $skipPattern = '(?m)(?:^|[^\S\r\n])SKIP:'
+    return (
+        $ExitCode -eq 0 -and
+        $text -match $passPattern -and
+        $text -notmatch $skipPattern
+    )
+}
+
+function Get-StoreProfileForLiveSuitePhase {
+    param(
+        [Parameter(Mandatory = $true)][string]$Phase,
+        [Parameter(Mandatory = $true)][string]$SuiteName
+    )
+
+    if ($Phase -eq 'initial' -and $SuiteName -eq 'store') {
+        return 'V3'
+    }
+    if ($Phase -eq 'initial' -and $SuiteName -eq 'memory') {
+        return 'V3_MEMORY_V2'
+    }
+    return $null
 }
 
 function Invoke-HarnessSelfTest {
@@ -157,6 +231,33 @@ function Invoke-HarnessSelfTest {
         if (Test-PgCtlStatusCodeIsStopped -StatusCode $statusCode) {
             throw 'TASK-019 stopped-state contract accepted an unknown status.'
         }
+    }
+    $profilePass = @(
+        'test postgres_setup::tests::live_store_profile ... PASS: Store live profile V3 accepted with exact fail-closed matrix'
+    )
+    if (-not (Test-StoreProfileLiveGateOutput -ExitCode 0 -Output $profilePass -ExpectedProfile 'V3')) {
+        throw 'TASK019_STORE_PROFILE_OUTPUT_SELF_TEST_REJECTED_PASS'
+    }
+    foreach ($rejected in @(
+        [pscustomobject]@{ ExitCode = 1; Output = $profilePass; Profile = 'V3' },
+        [pscustomobject]@{ ExitCode = 0; Output = @('SKIP: LATTICE_STORE_PROFILE_LIVE is not enabled'); Profile = 'V3' },
+        [pscustomobject]@{ ExitCode = 0; Output = $profilePass; Profile = 'V3_MEMORY_V2' },
+        [pscustomobject]@{ ExitCode = 0; Output = $profilePass; Profile = 'UNKNOWN' }
+    )) {
+        if (Test-StoreProfileLiveGateOutput `
+                -ExitCode $rejected.ExitCode `
+                -Output $rejected.Output `
+                -ExpectedProfile $rejected.Profile) {
+            throw 'TASK019_STORE_PROFILE_OUTPUT_SELF_TEST_ACCEPTED_REJECTION'
+        }
+    }
+    if (
+        (Get-StoreProfileForLiveSuitePhase -Phase 'initial' -SuiteName 'store') -ne 'V3' -or
+        (Get-StoreProfileForLiveSuitePhase -Phase 'initial' -SuiteName 'memory') -ne 'V3_MEMORY_V2' -or
+        $null -ne (Get-StoreProfileForLiveSuitePhase -Phase 'restart' -SuiteName 'store') -or
+        $null -ne (Get-StoreProfileForLiveSuitePhase -Phase 'initial' -SuiteName 'unknown')
+    ) {
+        throw 'TASK019_STORE_PROFILE_PHASE_MAPPING_SELF_TEST_REJECTED'
     }
     Write-Output 'TASK019_HARNESS_SELF_TEST=PASS'
 }
@@ -286,6 +387,88 @@ function Set-HarnessEnvironment {
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_RUN_ID', $RunId, 'Process')
 }
 
+function Invoke-StoreProfileLiveGate {
+    param(
+        [Parameter(Mandatory = $true)][string]$Cargo,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedProfile,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][string]$RunId
+    )
+
+    if ($ExpectedProfile -notin @('V3', 'V3_MEMORY_V2', 'V3_MEMORY_V2_WRITER_LEASE_V1')) {
+        throw 'TASK019_STORE_PROFILE_EXPECTATION_REJECTED'
+    }
+    if ($RunId -notmatch '^[0-9a-f]{32}$') {
+        throw 'TASK019_STORE_PROFILE_RUN_ID_REJECTED'
+    }
+
+    $databaseName = 'lattice_task019_' + $RunId.Substring(0, 8) + '_base'
+    $encodedPassword = [Uri]::EscapeDataString($Password)
+    $profileEnvironment = [ordered]@{
+        LATTICE_STORE_PROFILE_LIVE = '1'
+        LATTICE_STORE_PROFILE_EXPECTED = $ExpectedProfile
+        LATTICE_STORE_PROFILE_RUNTIME_URL = ('postgresql://lattice_runtime_login:{0}@127.0.0.1:{1}/{2}' -f $encodedPassword, $Port, $databaseName)
+        LATTICE_STORE_PROFILE_MIGRATOR_URL = ('postgresql://lattice_migrator_login:{0}@127.0.0.1:{1}/{2}' -f $encodedPassword, $Port, $databaseName)
+    }
+    $original = @{}
+    $stdoutPath = Join-Path $clusterRoot ".cargo-store-profile-$ExpectedProfile-stdout.log"
+    $stderrPath = Join-Path $clusterRoot ".cargo-store-profile-$ExpectedProfile-stderr.log"
+    $process = $null
+    $testExitCode = $null
+    $testOutput = @()
+    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+    try {
+        foreach ($entry in $profileEnvironment.GetEnumerator()) {
+            $original[[string]$entry.Key] = [Environment]::GetEnvironmentVariable([string]$entry.Key, 'Process')
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+        }
+        $process = Start-Process -FilePath $Cargo -ArgumentList @(
+            'test',
+            '-p', 'lattice-postgres-store',
+            '--lib',
+            'live_store_profile_accepts_exact_profiles_and_rejects_writer_lease_drift_when_provisioned',
+            '--locked',
+            '--',
+            '--nocapture',
+            '--test-threads=1'
+        ) -WorkingDirectory $RepositoryRoot -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru
+        $null = $process.Handle
+        $process.WaitForExit()
+        $testExitCode = $process.ExitCode
+        if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+            $testOutput += @(Get-Content -LiteralPath $stdoutPath -Encoding utf8)
+        }
+        if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            $testOutput += @(Get-Content -LiteralPath $stderrPath -Encoding utf8)
+        }
+    }
+    finally {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+        foreach ($entry in $original.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, 'Process')
+        }
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $path) {
+                throw 'TASK019_STORE_PROFILE_OUTPUT_DELETE_FAILED'
+            }
+        }
+    }
+
+    if (-not (Test-StoreProfileLiveGateOutput `
+            -ExitCode $testExitCode `
+            -Output $testOutput `
+            -ExpectedProfile $ExpectedProfile)) {
+        throw "TASK019_STORE_PROFILE_LIVE_GATE_REJECTED_$ExpectedProfile"
+    }
+}
+
 function Invoke-LiveTest {
     param(
         [Parameter(Mandatory = $true)][string]$Cargo,
@@ -371,6 +554,16 @@ function Invoke-LiveTest {
             throw "$($suite.Name) postgres_live $Phase phase failed with exit code $testExitCode. Allowlisted diagnostics: $safeSummary"
         }
         $testOutput += $suiteOutput
+        $storeProfile = Get-StoreProfileForLiveSuitePhase -Phase $Phase -SuiteName $suite.Name
+        if ($null -ne $storeProfile) {
+            Invoke-StoreProfileLiveGate `
+                -Cargo $Cargo `
+                -RepositoryRoot $RepositoryRoot `
+                -ExpectedProfile $storeProfile `
+                -Port $port `
+                -Password $oneTimePassword `
+                -RunId $runId
+        }
     }
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_PHASE', $Phase, 'Process')
     return ,$testOutput
@@ -604,8 +797,11 @@ $installedAfter = $null
 $originalEnvironment = @{}
 $deliveryHookPath = $null
 $fullChainHookPath = $null
+$task038HookPath = $null
 
-if ($RunLatticeDeliveryHook -and $RunFullChainAcceptanceHook) {
+$selectedHookCount = @($RunLatticeDeliveryHook, $RunFullChainAcceptanceHook, $RunTask038AcceptanceHook) |
+    Where-Object { [bool]$_ }
+if (@($selectedHookCount).Count -gt 1) {
     throw 'TASK019_HOOK_MODE_REJECTED'
 }
 if ($RunLatticeDeliveryHook) {
@@ -613,6 +809,12 @@ if ($RunLatticeDeliveryHook) {
 }
 if ($RunFullChainAcceptanceHook) {
     $fullChainHookPath = Get-LatticeFullChainAcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+}
+if ($RunTask038AcceptanceHook) {
+    if ([string]::IsNullOrWhiteSpace($Task038OfficialCodexExecutable) -or [string]::IsNullOrWhiteSpace($Task038CodexAuthHome)) {
+        throw 'TASK038_ACCEPTANCE_INPUT_REJECTED'
+    }
+    $task038HookPath = Get-LatticeTask038AcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
 }
 
 Invoke-HarnessSelfTest
@@ -807,6 +1009,37 @@ try {
 
         $fullChainHookPath = Get-LatticeFullChainAcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
         & $fullChainHookPath -InternalPhase 'FullChainStatus'
+    }
+    elseif ($RunTask038AcceptanceHook) {
+        $task038HookPath = Get-LatticeTask038AcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+        $task038DatabaseName = 'lattice_task019_' + $runId.Substring(0, 8) + '_base'
+        $encodedPassword = [Uri]::EscapeDataString($oneTimePassword)
+        $task038Environment = [ordered]@{
+            LATTICE_TASK038_POSTGRES_PASSWORD = $oneTimePassword
+            LATTICE_WRITER_LEASE_MIGRATOR_URL = ('postgresql://lattice_migrator_login:{0}@127.0.0.1:{1}/{2}' -f $encodedPassword, $port, $task038DatabaseName)
+            LATTICE_WRITER_LEASE_RUNTIME_URL = ('postgresql://lattice_runtime_login:{0}@127.0.0.1:{1}/{2}' -f $encodedPassword, $port, $task038DatabaseName)
+            LATTICE_WRITER_LEASE_ADMIN_URL = ('postgresql://task019_harness:{0}@127.0.0.1:{1}/postgres' -f $encodedPassword, $port)
+        }
+        foreach ($entry in $task038Environment.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+        }
+        & $task038HookPath `
+            -OfficialCodexExecutable $Task038OfficialCodexExecutable `
+            -CodexAuthHome $Task038CodexAuthHome `
+            -PostgresPort $port `
+            -PostgresRunId $runId `
+            -PsqlExecutable (Join-Path $postgresBin 'psql.exe') `
+            -PostgresDataDirectory $dataDirectory
+        Invoke-StoreProfileLiveGate `
+            -Cargo $cargoCommand.Source `
+            -RepositoryRoot $repositoryRoot `
+            -ExpectedProfile 'V3_MEMORY_V2_WRITER_LEASE_V1' `
+            -Port $port `
+            -Password $oneTimePassword `
+            -RunId $runId
+        foreach ($entry in $task038Environment.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, $originalEnvironment[[string]$entry.Key], 'Process')
+        }
     }
     $harnessCompleted = $true
 }

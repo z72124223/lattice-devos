@@ -6758,6 +6758,261 @@ impl GatewayActorKind {
     }
 }
 
+/// Fixed adapter identity for the production `ChatGPT` secure MCP tunnel.
+pub const CHATGPT_SECURE_MCP_TUNNEL_ADAPTER_ID: &str = "lattice-chatgpt-secure-mcp-tunnel";
+/// Fixed audit actor for the production `ChatGPT` secure MCP tunnel.
+pub const CHATGPT_SECURE_MCP_TUNNEL_ACTOR_ID: &str = "chatgpt-secure-mcp-tunnel-profile";
+/// Fixed adapter identity for local canonical MCP acceptance.
+pub const LOCAL_CANONICAL_MCP_ACCEPTANCE_ADAPTER_ID: &str =
+    "lattice-local-canonical-mcp-acceptance";
+/// Fixed audit actor for local canonical MCP acceptance.
+pub const LOCAL_CANONICAL_MCP_ACCEPTANCE_ACTOR_ID: &str = "local-canonical-mcp-acceptance-profile";
+
+/// Closed client classification for the bounded Task ingress surface.
+///
+/// This is intentionally separate from [`GatewayClientKind`]: `ChatGPT` MCP is
+/// not a second normal human gateway and receives no generic gateway powers.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TaskIngressClientKind {
+    /// The fixed production `ChatGPT` secure MCP tunnel profile.
+    ChatGptSecureMcpTunnel,
+    /// A local canonical acceptance harness; never `ChatGPT` evidence.
+    LocalCanonicalMcpAcceptance,
+}
+
+impl TaskIngressClientKind {
+    /// Returns the stable audit-facing value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatGptSecureMcpTunnel => "CHATGPT_SECURE_MCP_TUNNEL",
+            Self::LocalCanonicalMcpAcceptance => "LOCAL_CANONICAL_MCP_ACCEPTANCE",
+        }
+    }
+}
+
+/// Closed actor classification for the bounded Task ingress surface.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TaskIngressActorKind {
+    /// A server-configured service profile, never an MCP caller claim.
+    ControlledServiceProfile,
+    /// An explicitly local acceptance harness identity.
+    LocalAcceptanceHarness,
+}
+
+impl TaskIngressActorKind {
+    /// Returns the stable audit-facing value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ControlledServiceProfile => "CONTROLLED_SERVICE_PROFILE",
+            Self::LocalAcceptanceHarness => "LOCAL_ACCEPTANCE_HARNESS",
+        }
+    }
+}
+
+/// Fixed live peer evidence for the bounded Task ingress surface.
+///
+/// The constructor fixes the runtime, client kind, and actor kind. It accepts
+/// only server/process-start evidence and deliberately has no MCP `clientInfo`,
+/// caller-authentication Boolean, credential, or writable capability field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskIngressPeerEvidence {
+    client_kind: TaskIngressClientKind,
+    gateway_instance_id: GatewayInstanceId,
+    adapter_id: GatewayAdapterId,
+    adapter_version: String,
+    adapter_binary_digest: ContentDigest,
+    schema_digest: ContentDigest,
+    actor_id: GatewayActorId,
+    actor_kind: TaskIngressActorKind,
+    channel_id: GatewayChannelId,
+    profile_digest: ContentDigest,
+    process_start_authority_digest: ContentDigest,
+}
+
+impl TaskIngressPeerEvidence {
+    /// Constructs the production `ChatGPT` secure MCP tunnel peer from trusted
+    /// process-start configuration evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid adapter version or any zero commitment source.
+    pub fn new_chatgpt_secure_mcp_tunnel_live(
+        gateway_instance_id: GatewayInstanceId,
+        adapter_version: impl Into<String>,
+        adapter_binary_digest: ContentDigest,
+        schema_digest: ContentDigest,
+        channel_id: GatewayChannelId,
+        profile_digest: ContentDigest,
+        process_start_authority_digest: ContentDigest,
+    ) -> Result<Self, ContractError> {
+        Self::new_closed_live(
+            TaskIngressClientKind::ChatGptSecureMcpTunnel,
+            gateway_instance_id,
+            CHATGPT_SECURE_MCP_TUNNEL_ADAPTER_ID,
+            adapter_version,
+            adapter_binary_digest,
+            schema_digest,
+            CHATGPT_SECURE_MCP_TUNNEL_ACTOR_ID,
+            TaskIngressActorKind::ControlledServiceProfile,
+            channel_id,
+            profile_digest,
+            process_start_authority_digest,
+        )
+    }
+
+    /// Constructs an explicitly local canonical MCP acceptance peer from
+    /// trusted process-start configuration evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid adapter version or any zero commitment source.
+    pub fn new_local_canonical_mcp_acceptance_live(
+        gateway_instance_id: GatewayInstanceId,
+        adapter_version: impl Into<String>,
+        adapter_binary_digest: ContentDigest,
+        schema_digest: ContentDigest,
+        channel_id: GatewayChannelId,
+        profile_digest: ContentDigest,
+        process_start_authority_digest: ContentDigest,
+    ) -> Result<Self, ContractError> {
+        Self::new_closed_live(
+            TaskIngressClientKind::LocalCanonicalMcpAcceptance,
+            gateway_instance_id,
+            LOCAL_CANONICAL_MCP_ACCEPTANCE_ADAPTER_ID,
+            adapter_version,
+            adapter_binary_digest,
+            schema_digest,
+            LOCAL_CANONICAL_MCP_ACCEPTANCE_ACTOR_ID,
+            TaskIngressActorKind::LocalAcceptanceHarness,
+            channel_id,
+            profile_digest,
+            process_start_authority_digest,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_closed_live(
+        client_kind: TaskIngressClientKind,
+        gateway_instance_id: GatewayInstanceId,
+        adapter_id: &'static str,
+        adapter_version: impl Into<String>,
+        adapter_binary_digest: ContentDigest,
+        schema_digest: ContentDigest,
+        actor_id: &'static str,
+        actor_kind: TaskIngressActorKind,
+        channel_id: GatewayChannelId,
+        profile_digest: ContentDigest,
+        process_start_authority_digest: ContentDigest,
+    ) -> Result<Self, ContractError> {
+        let adapter_version = adapter_version.into();
+        if !valid_gateway_identifier(&adapter_version) {
+            return Err(ContractError::InvalidGatewayValue {
+                field: "adapter_version",
+            });
+        }
+        if [
+            &adapter_binary_digest,
+            &schema_digest,
+            &profile_digest,
+            &process_start_authority_digest,
+        ]
+        .into_iter()
+        .any(is_zero_digest)
+        {
+            return Err(ContractError::InvalidGatewayValue {
+                field: "task_ingress_commitment_source",
+            });
+        }
+        Ok(Self {
+            client_kind,
+            gateway_instance_id,
+            adapter_id: GatewayAdapterId::new(adapter_id)?,
+            adapter_version,
+            adapter_binary_digest,
+            schema_digest,
+            actor_id: GatewayActorId::new(actor_id)?,
+            actor_kind,
+            channel_id,
+            profile_digest,
+            process_start_authority_digest,
+        })
+    }
+
+    /// Returns the fixed live runtime marker.
+    #[must_use]
+    pub const fn runtime(&self) -> RuntimeKind {
+        RuntimeKind::Live
+    }
+
+    /// Returns the closed bounded ingress client kind.
+    #[must_use]
+    pub const fn client_kind(&self) -> TaskIngressClientKind {
+        self.client_kind
+    }
+
+    /// Returns the closed bounded ingress actor kind.
+    #[must_use]
+    pub const fn actor_kind(&self) -> TaskIngressActorKind {
+        self.actor_kind
+    }
+
+    /// Returns the server-configured gateway instance identity.
+    #[must_use]
+    pub const fn gateway_instance_id(&self) -> &GatewayInstanceId {
+        &self.gateway_instance_id
+    }
+
+    /// Returns the fixed adapter implementation identity.
+    #[must_use]
+    pub const fn adapter_id(&self) -> &GatewayAdapterId {
+        &self.adapter_id
+    }
+
+    /// Returns the fixed adapter implementation version.
+    #[must_use]
+    pub fn adapter_version(&self) -> &str {
+        &self.adapter_version
+    }
+
+    /// Returns the process-start adapter binary commitment.
+    #[must_use]
+    pub const fn adapter_binary_digest(&self) -> &ContentDigest {
+        &self.adapter_binary_digest
+    }
+
+    /// Returns the fixed MCP schema commitment.
+    #[must_use]
+    pub const fn schema_digest(&self) -> &ContentDigest {
+        &self.schema_digest
+    }
+
+    /// Returns the server-configured audit actor identity.
+    #[must_use]
+    pub const fn actor_id(&self) -> &GatewayActorId {
+        &self.actor_id
+    }
+
+    /// Returns the server-configured transport channel identity.
+    #[must_use]
+    pub const fn channel_id(&self) -> &GatewayChannelId {
+        &self.channel_id
+    }
+
+    /// Returns the fixed live profile commitment source.
+    #[must_use]
+    pub const fn profile_digest(&self) -> &ContentDigest {
+        &self.profile_digest
+    }
+
+    /// Returns the process-start authority evidence commitment.
+    #[must_use]
+    pub const fn process_start_authority_digest(&self) -> &ContentDigest {
+        &self.process_start_authority_digest
+    }
+}
+
 /// Server-derived fake peer context kept outside untrusted gateway bytes.
 ///
 /// This value is deliberately fake-only until verified peer, process, and

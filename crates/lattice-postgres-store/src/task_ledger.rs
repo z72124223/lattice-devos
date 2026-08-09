@@ -13,6 +13,7 @@ use lattice_contracts::{
     StoreReceiptDisposition, StoreRepositoryOwner, StoreRevision, StoreScope, StoreTransactionId,
     StoreTransactionReceipt, StoreTransactionRequest, TASK_LEDGER_PRODUCER_ID,
     TASK_LEDGER_PRODUCER_VERSION, TaskId, TaskLedgerStreamHead, TaskLedgerStreamIdentity,
+    WriterLeaseAuthorityHead, WriterLeaseStatus,
 };
 use lattice_task_ledger::{
     AppendCommand, CommandReceipt, Diagnostic, LEDGER_CHECKPOINT_SCHEMA_VERSION,
@@ -21,6 +22,7 @@ use lattice_task_ledger::{
     UntrustedLedgerSnapshot, UntrustedOutboxAdmission, VerifiedStream, apply_append_plan,
     plan_append, verify_untrusted_snapshot_against_checkpoint,
 };
+use postgres::error::SqlState;
 use postgres::types::{FromSqlOwned, ToSql};
 use postgres::{Client, Error as PostgresError, GenericClient, IsolationLevel, Row, Transaction};
 use serde_json::Value as JsonValue;
@@ -41,6 +43,8 @@ const GLOBAL_LEDGER_SCHEMA_VERSION: u16 = 3;
 const MAX_LIVE_SERIALIZATION_RETRIES: u8 = 3;
 const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
 const ZERO_DIGEST_TEXT: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const WRITER_LEASE_ASSERT_CURRENT_SQL: &str = "SELECT writer_lease.writer_lease_assert_current_v1(\
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)";
 
 const LEDGER_PREPARE_SQL: &str = "\
     SELECT stream_found, command_found, retained_request_digest, \
@@ -457,6 +461,34 @@ impl PostgresTaskLedger {
         command: AppendCommand,
         expected_authority: StoreAuthorityHead,
     ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
+        self.execute_with_writer_authority(&command, &expected_authority, None)
+    }
+
+    /// Executes one append while asserting an exact current live Writer Lease
+    /// inside the same serializable transaction as the Store/Ledger mutation.
+    /// Exact retries remain read-only and return their retained receipt without
+    /// requiring a lease that may already have been released.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on every ordinary append error plus any cross-bound,
+    /// stale, inactive, or physically mismatched Writer Lease authority.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn execute_fenced(
+        &mut self,
+        command: AppendCommand,
+        expected_authority: StoreAuthorityHead,
+        writer_authority: WriterLeaseAuthorityHead,
+    ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
+        self.execute_with_writer_authority(&command, &expected_authority, Some(&writer_authority))
+    }
+
+    fn execute_with_writer_authority(
+        &mut self,
+        command: &AppendCommand,
+        expected_authority: &StoreAuthorityHead,
+        writer_authority: Option<&WriterLeaseAuthorityHead>,
+    ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
         self.ensure_reconcilable()?;
         if command.expected_head().runtime() != RuntimeKind::Live {
             return Err(error(PostgresTaskLedgerErrorKind::Malformed));
@@ -466,6 +498,11 @@ impl PostgresTaskLedger {
             .map_err(|ledger| map_ledger_error(&ledger))?;
         if canonical_stream.head().stream_id() != command.expected_head().stream_id() {
             return Err(error(PostgresTaskLedgerErrorKind::Malformed));
+        }
+        if writer_authority
+            .is_some_and(|authority| !writer_authority_matches_identity(authority, &identity))
+        {
+            return Err(error(PostgresTaskLedgerErrorKind::AuthorityMismatch));
         }
         let stream_id_bytes = digest_bytes(canonical_stream.head().stream_id())?;
         let command_id = command.command_id().as_str().to_owned();
@@ -481,6 +518,7 @@ impl PostgresTaskLedger {
                 command.clone(),
                 &command_id,
                 expected_authority.clone(),
+                writer_authority,
             ) {
                 Ok(execution) => return Ok(execution),
                 Err(AttemptFailure::Retryable) if retry_count < MAX_LIVE_SERIALIZATION_RETRIES => {}
@@ -1420,6 +1458,7 @@ fn run_execute_attempt(
     command: AppendCommand,
     command_id: &str,
     expected_authority: StoreAuthorityHead,
+    writer_authority: Option<&WriterLeaseAuthorityHead>,
 ) -> Result<PostgresTaskLedgerExecution, AttemptFailure> {
     let mut transaction = client
         .build_transaction()
@@ -1502,6 +1541,12 @@ fn run_execute_attempt(
             .commit()
             .map(|()| execution)
             .map_err(|database| classify_commit_error(&database));
+    }
+
+    if let Some(writer_authority) = writer_authority
+        && let Err(assertion_error) = assert_writer_authority(&mut transaction, writer_authority)
+    {
+        return rollback_attempt(transaction, assertion_error);
     }
 
     if expected_authority.runtime() != RuntimeKind::Live {
@@ -1656,6 +1701,84 @@ fn run_execute_attempt(
         .commit()
         .map(|()| execution)
         .map_err(|database| classify_commit_error(&database))
+}
+
+fn writer_authority_matches_identity(
+    authority: &WriterLeaseAuthorityHead,
+    identity: &TaskLedgerStreamIdentity,
+) -> bool {
+    let lease = authority.identity();
+    authority.runtime() == RuntimeKind::Live
+        && authority.status() == WriterLeaseStatus::Active
+        && authority.runtime_admission() == RuntimeAdmissionMode::Active
+        && lease.project_id() == identity.project_id()
+        && lease.project_snapshot_id() == identity.project_snapshot_id()
+        && lease.task_id() == identity.task_id()
+        && lease.task_revision() == identity.task_revision()
+        && lease.task_spec_digest() == identity.task_spec_digest()
+}
+
+fn assert_writer_authority(
+    transaction: &mut Transaction<'_>,
+    authority: &WriterLeaseAuthorityHead,
+) -> Result<(), AttemptFailure> {
+    let identity = authority.identity();
+    let receipt_digest =
+        digest_bytes(authority.receipt_digest()).map_err(AttemptFailure::Terminal)?;
+    let task_spec_digest =
+        digest_bytes(identity.task_spec_digest()).map_err(AttemptFailure::Terminal)?;
+    let holder_process_start_identity =
+        digest_bytes(identity.holder_process_start_identity()).map_err(AttemptFailure::Terminal)?;
+    let holder_process_id = i64::try_from(identity.holder_process_id().get()).map_err(|_| {
+        AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::AuthorityMismatch))
+    })?;
+    let daemon_epoch = i64::try_from(identity.daemon_epoch().get()).map_err(|_| {
+        AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::AuthorityMismatch))
+    })?;
+    let fencing_token = i64::try_from(identity.fencing_token().get()).map_err(|_| {
+        AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::AuthorityMismatch))
+    })?;
+    let asserted = transaction
+        .query_one(
+            WRITER_LEASE_ASSERT_CURRENT_SQL,
+            &[
+                &identity.project_id().as_str(),
+                &identity.project_snapshot_id().as_str(),
+                &identity.task_id().as_str(),
+                &identity.task_revision(),
+                &task_spec_digest,
+                &identity.attempt_id().as_str(),
+                &identity.lease_id(),
+                &identity.lease_holder_id(),
+                &identity.worktree_id(),
+                &holder_process_id,
+                &holder_process_start_identity,
+                &identity.daemon_instance_id(),
+                &daemon_epoch,
+                &fencing_token,
+                &receipt_digest,
+            ],
+        )
+        .and_then(|row| row.try_get::<_, bool>(0))
+        .map_err(|database| classify_writer_assert_error(&database))?;
+    if !asserted {
+        return Err(AttemptFailure::Terminal(error(
+            PostgresTaskLedgerErrorKind::AuthorityMismatch,
+        )));
+    }
+    Ok(())
+}
+
+fn classify_writer_assert_error(database: &PostgresError) -> AttemptFailure {
+    if database.code() == Some(&SqlState::T_R_SERIALIZATION_FAILURE) {
+        AttemptFailure::Retryable
+    } else if matches!(database.code().map(SqlState::code), Some("LWL02" | "LWL04")) {
+        AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))
+    } else if matches!(database.code().map(SqlState::code), Some("LWL03" | "LWL05")) {
+        AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::AuthorityMismatch))
+    } else {
+        AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Unavailable))
+    }
 }
 
 fn parse_ledger_prepare_row(row: &Row) -> PostgresTaskLedgerResult<LedgerPrepareRow> {

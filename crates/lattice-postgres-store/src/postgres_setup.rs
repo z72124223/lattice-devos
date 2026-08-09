@@ -336,6 +336,183 @@ const CODEBASE_MEMORY_V2_FUNCTIONS: [&str; 7] = [
     "openclaw_gateway_finalize_terminal_v1",
     "openclaw_gateway_reconcile_and_claim_v1",
 ];
+const WRITER_LEASE_V1_TABLES: [&str; 5] = [
+    "writer_lease_commands",
+    "writer_lease_extension_identity",
+    "writer_lease_extension_ledger",
+    "writer_lease_heads",
+    "writer_lease_transitions",
+];
+const WRITER_LEASE_V1_FUNCTIONS: [&str; 7] = [
+    "writer_lease_assert_current_v1",
+    "writer_lease_bind_runtime_v1",
+    "writer_lease_commit_plan_v1",
+    "writer_lease_load_commands_v1",
+    "writer_lease_load_current_v1",
+    "writer_lease_load_for_update_v1",
+    "writer_lease_load_transitions_v1",
+];
+const WRITER_LEASE_V1_RELATION_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,c.relkind::text,o.rolname,c.relpersistence::text,c.relrowsecurity,\
+    c.relforcerowsecurity,c.relhassubclass,c.relispartition,c.relreplident::text,\
+    COALESCE(pg_catalog.array_to_string(c.reloptions,','),'<NULL>'),\
+    COALESCE(pg_catalog.obj_description(c.oid,'pg_class'),'<NULL>'))::text \
+    FROM pg_catalog.pg_class c \
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=c.relowner \
+    WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') \
+    ORDER BY n.nspname,c.relname";
+const WRITER_LEASE_V1_COLUMN_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,a.attnum,a.attname,pg_catalog.format_type(a.atttypid,a.atttypmod),\
+    a.attnotnull,a.attisdropped,COALESCE(pg_catalog.pg_get_expr(ad.adbin,ad.adrelid,false),'<NULL>'),\
+    a.attidentity::text,a.attgenerated::text,CASE WHEN coll.oid IS NULL THEN '<NULL>' \
+    ELSE coll_ns.nspname||'.'||coll.collname END,a.attstorage::text,a.attcompression::text,\
+    a.attstattarget)::text FROM pg_catalog.pg_class c \
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+    JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid \
+    LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid=c.oid AND ad.adnum=a.attnum \
+    LEFT JOIN pg_catalog.pg_collation coll ON coll.oid=a.attcollation \
+    LEFT JOIN pg_catalog.pg_namespace coll_ns ON coll_ns.oid=coll.collnamespace \
+    WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') AND a.attnum>0 \
+    ORDER BY n.nspname,c.relname,a.attnum";
+const WRITER_LEASE_V1_CONSTRAINT_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,con.conname,con.contype::text,con.convalidated,con.condeferrable,\
+    con.condeferred,con.connoinherit,con.conislocal,con.coninhcount,con.conkey,ref_ns.nspname,\
+    ref.relname,con.confkey,con.confupdtype::text,con.confdeltype::text,con.confmatchtype::text,\
+    pg_catalog.pg_get_constraintdef(con.oid,false))::text \
+    FROM pg_catalog.pg_constraint con \
+    JOIN pg_catalog.pg_namespace n ON n.oid=con.connamespace \
+    JOIN pg_catalog.pg_class c ON c.oid=con.conrelid \
+    LEFT JOIN pg_catalog.pg_class ref ON ref.oid=con.confrelid \
+    LEFT JOIN pg_catalog.pg_namespace ref_ns ON ref_ns.oid=ref.relnamespace \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,c.relname,con.conname";
+const WRITER_LEASE_V1_INDEX_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,t.relname,ix.relname,o.rolname,am.amname,ix.relpersistence::text,\
+    COALESCE(pg_catalog.array_to_string(ix.reloptions,','),'<NULL>'),\
+    COALESCE(ts.spcname,'<NULL>'),i.indisunique,i.indisprimary,i.indisvalid,i.indisready,\
+    i.indislive,i.indisclustered,i.indisreplident,i.indnullsnotdistinct,\
+    pg_catalog.pg_get_indexdef(i.indexrelid,0,true))::text \
+    FROM pg_catalog.pg_index i \
+    JOIN pg_catalog.pg_class t ON t.oid=i.indrelid \
+    JOIN pg_catalog.pg_class ix ON ix.oid=i.indexrelid \
+    JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=ix.relowner \
+    JOIN pg_catalog.pg_am am ON am.oid=ix.relam \
+    LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid=ix.reltablespace \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,t.relname,ix.relname";
+const WRITER_LEASE_V1_FUNCTION_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid),\
+    pg_catalog.pg_get_function_result(p.oid),o.rolname,l.lanname,p.prokind::text,p.prosecdef,\
+    p.proleakproof,p.provolatile::text,p.proparallel::text,p.proisstrict,p.proretset,p.pronargs,\
+    p.pronargdefaults,p.prorettype::regtype::text,p.proargtypes::text,\
+    COALESCE(p.proallargtypes::text,'<NULL>'),COALESCE(p.proargmodes::text,'<NULL>'),\
+    COALESCE(p.proargnames::text,'<NULL>'),COALESCE(pg_catalog.array_to_string(p.proconfig,','),'<NULL>'),\
+    COALESCE(p.probin,'<NULL>'),p.prosrc,pg_catalog.pg_get_functiondef(p.oid),\
+    COALESCE(pg_catalog.obj_description(p.oid,'pg_proc'),'<NULL>'))::text \
+    FROM pg_catalog.pg_proc p \
+    JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=p.proowner \
+    JOIN pg_catalog.pg_language l ON l.oid=p.prolang \
+    WHERE n.nspname='writer_lease' \
+    ORDER BY n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid)";
+const WRITER_LEASE_V1_SCHEMA_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,o.rolname,COALESCE(g.rolname,'PUBLIC'),r.rolname,a.privilege_type,a.is_grantable)::text \
+    FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_roles o ON o.oid=n.nspowner \
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
+    LEFT JOIN pg_catalog.pg_roles g ON g.oid=a.grantee JOIN pg_catalog.pg_roles r ON r.oid=a.grantor \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,o.rolname,COALESCE(g.rolname,'PUBLIC'),\
+    r.rolname,a.privilege_type,a.is_grantable";
+const WRITER_LEASE_V1_TABLE_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,o.rolname,COALESCE(g.rolname,'PUBLIC'),r.rolname,a.privilege_type,\
+    a.is_grantable)::text FROM pg_catalog.pg_class c \
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=c.relowner \
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl,pg_catalog.acldefault('r',c.relowner))) a \
+    LEFT JOIN pg_catalog.pg_roles g ON g.oid=a.grantee JOIN pg_catalog.pg_roles r ON r.oid=a.grantor \
+    WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') \
+    ORDER BY n.nspname,c.relname,o.rolname,COALESCE(g.rolname,'PUBLIC'),r.rolname,\
+    a.privilege_type,a.is_grantable";
+const WRITER_LEASE_V1_FUNCTION_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid),o.rolname,\
+    COALESCE(g.rolname,'PUBLIC'),r.rolname,a.privilege_type,a.is_grantable)::text \
+    FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=p.proowner \
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))) a \
+    LEFT JOIN pg_catalog.pg_roles g ON g.oid=a.grantee JOIN pg_catalog.pg_roles r ON r.oid=a.grantor \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,p.proname,\
+    pg_catalog.pg_get_function_identity_arguments(p.oid),o.rolname,COALESCE(g.rolname,'PUBLIC'),\
+    r.rolname,a.privilege_type,a.is_grantable";
+const WRITER_LEASE_V1_COLUMN_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,a.attnum,a.attname,COALESCE(g.rolname,'PUBLIC'),r.rolname,x.privilege_type,\
+    x.is_grantable)::text FROM pg_catalog.pg_class c \
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+    JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid \
+    CROSS JOIN LATERAL pg_catalog.aclexplode(a.attacl) x \
+    LEFT JOIN pg_catalog.pg_roles g ON g.oid=x.grantee JOIN pg_catalog.pg_roles r ON r.oid=x.grantor \
+    WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') AND a.attnum>0 \
+    ORDER BY n.nspname,c.relname,a.attnum,COALESCE(g.rolname,'PUBLIC'),r.rolname,\
+    x.privilege_type,x.is_grantable";
+const WRITER_LEASE_V1_TYPE_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,t.typname,t.typtype::text,t.typcategory::text,t.typispreferred,t.typisdefined,\
+    t.typdelim::text,o.rolname,COALESCE(c.relname,'<NULL>'),COALESCE(e.typname,'<NULL>'),\
+    COALESCE(pg_catalog.obj_description(t.oid,'pg_type'),'<NULL>'))::text \
+    FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=t.typowner \
+    LEFT JOIN pg_catalog.pg_class c ON c.oid=t.typrelid \
+    LEFT JOIN pg_catalog.pg_type e ON e.oid=t.typelem \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,t.typname";
+const WRITER_LEASE_V1_CATALOG_PROFILES: [(&str, &str, PostgresStoreSetupErrorKind); 10] = [
+    (
+        WRITER_LEASE_V1_RELATION_PROFILE_SQL,
+        "c20048700ff120bc6488c4608eb79df36d329ad817f2b0e45e47020d867b8251",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_COLUMN_PROFILE_SQL,
+        "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_CONSTRAINT_PROFILE_SQL,
+        "3deab2f6ee712692d5ec75682030462ebd4dd4712ff26e40bf323abdd683c5d3",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_INDEX_PROFILE_SQL,
+        "a30a0abfca0a824d75f2f29eb85a8424af35da485f1fef1bc5f852b9be7151a4",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_FUNCTION_PROFILE_SQL,
+        "638941fbd31edbec9d9f860974aac280845063693acc00bd5f6f8c3aa650adc9",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_SCHEMA_ACL_PROFILE_SQL,
+        "a2e1be8a403a96b679c18ddfa75e476fa1d6ceeccc1ccf62ff6424b2c259ef7b",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_TABLE_ACL_PROFILE_SQL,
+        "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_FUNCTION_ACL_PROFILE_SQL,
+        "4e1a2ba0c5abcfe928b66b839166f2bebeecca73a0514f02344c9bbb695b0c44",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_COLUMN_ACL_PROFILE_SQL,
+        "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_TYPE_PROFILE_SQL,
+        "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+];
 const STORE_PREPARE_V2_IDENTITY: &str = "control.store_prepare_v2(smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea)";
 const STORE_FINALIZE_V2_IDENTITY: &str = "control.store_finalize_v2(smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,uuid,bytea,smallint,text,bigint,bytea,bytea,bigint,bytea,bytea,text,bytea,bytea)";
 const STORE_CURRENT_HEAD_V2_IDENTITY: &str = "control.store_current_head_v2(text,text,text,bytea)";
@@ -652,28 +829,52 @@ enum CatalogProfile {
     V2,
     V3,
     V3CodebaseMemoryV2,
+    V3CodebaseMemoryV2WriterLeaseV1,
 }
 
-fn classify_memory_catalog_counts(
-    expected_relations: i64,
-    all_relations: i64,
-    expected_functions: i64,
-    all_functions: i64,
+#[allow(clippy::too_many_arguments)]
+fn classify_extension_catalog_counts(
+    expected_memory_relations: i64,
+    all_memory_relations: i64,
+    expected_memory_functions: i64,
+    all_memory_functions: i64,
+    writer_lease_namespaces: i64,
+    expected_writer_lease_relations: i64,
+    all_writer_lease_relations: i64,
+    expected_writer_lease_functions: i64,
+    all_writer_lease_functions: i64,
 ) -> Result<CatalogProfile, PostgresStoreSetupError> {
-    if expected_relations == 0
-        && all_relations == 0
-        && expected_functions == 0
-        && all_functions == 0
-    {
+    let no_memory = expected_memory_relations == 0
+        && all_memory_relations == 0
+        && expected_memory_functions == 0
+        && all_memory_functions == 0;
+    let exact_memory = expected_memory_relations
+        == i64::try_from(CODEBASE_MEMORY_V2_TABLES.len()).expect("fixed count")
+        && all_memory_relations == expected_memory_relations
+        && expected_memory_functions
+            == i64::try_from(CODEBASE_MEMORY_V2_FUNCTIONS.len()).expect("fixed count")
+        && all_memory_functions == expected_memory_functions;
+    let no_writer_lease = writer_lease_namespaces == 0
+        && expected_writer_lease_relations == 0
+        && all_writer_lease_relations == 0
+        && expected_writer_lease_functions == 0
+        && all_writer_lease_functions == 0;
+    let exact_writer_lease = writer_lease_namespaces == 1
+        && expected_writer_lease_relations
+            == i64::try_from(WRITER_LEASE_V1_TABLES.len()).expect("fixed count")
+        && all_writer_lease_relations == expected_writer_lease_relations
+        && expected_writer_lease_functions
+            == i64::try_from(WRITER_LEASE_V1_FUNCTIONS.len()).expect("fixed count")
+        && all_writer_lease_functions == expected_writer_lease_functions;
+
+    if no_memory && no_writer_lease {
         return Ok(CatalogProfile::V3);
     }
-    if expected_relations == i64::try_from(CODEBASE_MEMORY_V2_TABLES.len()).expect("fixed count")
-        && all_relations == expected_relations
-        && expected_functions
-            == i64::try_from(CODEBASE_MEMORY_V2_FUNCTIONS.len()).expect("fixed count")
-        && all_functions == expected_functions
-    {
+    if exact_memory && no_writer_lease {
         return Ok(CatalogProfile::V3CodebaseMemoryV2);
+    }
+    if exact_memory && exact_writer_lease {
+        return Ok(CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1);
     }
     Err(catalog_error())
 }
@@ -720,12 +921,61 @@ fn classify_current_v3_catalog_profile<C: GenericClient>(
             &[],
         )
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
-    classify_memory_catalog_counts(
+    let writer_lease_counts = writer_lease_catalog_counts(client)?;
+    classify_extension_catalog_counts(
         expected_relations,
         all_relations,
         row_value::<i64>(&row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?,
         row_value::<i64>(&row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?,
+        writer_lease_counts.0,
+        writer_lease_counts.1,
+        writer_lease_counts.2,
+        writer_lease_counts.3,
+        writer_lease_counts.4,
     )
+}
+
+fn writer_lease_catalog_counts<C: GenericClient>(
+    client: &mut C,
+) -> Result<(i64, i64, i64, i64, i64), PostgresStoreSetupError> {
+    let row = client
+        .query_one(
+            "SELECT \
+             (SELECT count(*)::bigint FROM pg_namespace \
+               WHERE nspname = 'writer_lease'), \
+             count(*) FILTER (WHERE c.relname IN ( \
+                 'writer_lease_commands', \
+                 'writer_lease_extension_identity', \
+                 'writer_lease_extension_ledger', \
+                 'writer_lease_heads', \
+                 'writer_lease_transitions'))::bigint, \
+             count(*)::bigint, \
+             (SELECT count(*) FILTER (WHERE p.proname IN ( \
+                 'writer_lease_assert_current_v1', \
+                 'writer_lease_bind_runtime_v1', \
+                 'writer_lease_commit_plan_v1', \
+                 'writer_lease_load_commands_v1', \
+                 'writer_lease_load_current_v1', \
+                 'writer_lease_load_for_update_v1', \
+                 'writer_lease_load_transitions_v1'))::bigint \
+                FROM pg_proc p JOIN pg_namespace function_ns ON function_ns.oid = p.pronamespace \
+               WHERE function_ns.nspname = 'writer_lease'), \
+             (SELECT count(*)::bigint \
+                FROM pg_proc p JOIN pg_namespace function_ns ON function_ns.oid = p.pronamespace \
+               WHERE function_ns.nspname = 'writer_lease') \
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'writer_lease' \
+               AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    Ok((
+        row_value::<i64>(&row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?,
+        row_value::<i64>(&row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?,
+        row_value::<i64>(&row, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?,
+        row_value::<i64>(&row, 3, PostgresStoreSetupErrorKind::CorruptCatalog)?,
+        row_value::<i64>(&row, 4, PostgresStoreSetupErrorKind::CorruptCatalog)?,
+    ))
 }
 
 /// Applies only the exact embedded executable manifest under the migration role.
@@ -1390,7 +1640,9 @@ fn verify_compatibility<C: GenericClient>(
     let expected_versions = match profile {
         CatalogProfile::V1 => [1, 1, 1, 1, 1],
         CatalogProfile::V2 => [2, 2, 2, 2, 2],
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => [3, 3, 3, 3, 3],
+        CatalogProfile::V3
+        | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => [3, 3, 3, 3, 3],
         CatalogProfile::PreSchema => {
             return Err(PostgresStoreSetupError::new(
                 PostgresStoreSetupErrorKind::CompatibilityMismatch,
@@ -1601,11 +1853,149 @@ fn verify_schema_objects<C: GenericClient>(
     verify_forbidden_schema_objects(client, profile)?;
     if matches!(
         profile,
-        CatalogProfile::V2 | CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2
+        CatalogProfile::V2
+            | CatalogProfile::V3
+            | CatalogProfile::V3CodebaseMemoryV2
+            | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
     ) {
         verify_owned_function_boundary(client, profile)?;
     }
+    if matches!(profile, CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1) {
+        verify_writer_lease_v1_profile(client)?;
+    }
     verify_forbidden_namespace_objects(client)
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_writer_lease_v1_profile<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), PostgresStoreSetupError> {
+    let header = client
+        .query_one(
+            "SELECT owner.rolname, pg_catalog.obj_description(n.oid, 'pg_namespace') \
+               FROM pg_catalog.pg_namespace n \
+               JOIN pg_catalog.pg_roles owner ON owner.oid = n.nspowner \
+              WHERE n.nspname = 'writer_lease'",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    if row_value::<String>(&header, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?
+        != DatabaseRole::Migrator.as_str()
+        || row_value::<Option<String>>(&header, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            .as_deref()
+            != Some("LATTICE_WRITER_LEASE_SCHEMA_V1")
+    {
+        return Err(catalog_error());
+    }
+
+    for (query, expected, error_kind) in WRITER_LEASE_V1_CATALOG_PROFILES {
+        if catalog_signature(client, query, error_kind)? != expected {
+            return Err(PostgresStoreSetupError::new(error_kind));
+        }
+    }
+
+    let closure = client
+        .query_one(
+            "SELECT \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger tr \
+               JOIN pg_catalog.pg_class c ON c.oid=tr.tgrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease' AND tr.tgisinternal \
+                AND tr.tgenabled='O' AND tr.tgconstraint<>0), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger tr \
+               JOIN pg_catalog.pg_class c ON c.oid=tr.tgrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease' AND NOT tr.tgisinternal), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_rewrite rw \
+               JOIN pg_catalog.pg_class c ON c.oid=rw.ev_class \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease'), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_policy p \
+               JOIN pg_catalog.pg_class c ON c.oid=p.polrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease'), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_inherits i \
+               JOIN pg_catalog.pg_class c ON c.oid=i.inhrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease'), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_default_acl d \
+               JOIN pg_catalog.pg_namespace n ON n.oid=d.defaclnamespace \
+              WHERE n.nspname='writer_lease'), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease' AND c.relkind NOT IN ('r','i')), \
+             ((SELECT pg_catalog.count(*) FROM pg_catalog.pg_collation x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.collnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_conversion x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.connamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_operator x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.oprnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_opclass x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.opcnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_opfamily x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.opfnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_statistic_ext x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.stxnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_config x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.cfgnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_dict x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.dictnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_parser x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.prsnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_template x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.tmplnamespace WHERE n.nspname='writer_lease')), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+               CROSS JOIN pg_catalog.pg_roles roles \
+              WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') \
+                AND NOT roles.rolsuper AND roles.rolname !~ '^pg_' \
+                AND roles.rolname <> 'lattice_migrator' \
+                AND pg_catalog.has_table_privilege(roles.rolname,c.oid, \
+                  'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               CROSS JOIN pg_catalog.pg_roles roles \
+              WHERE n.nspname='writer_lease' \
+                AND NOT roles.rolsuper AND roles.rolname !~ '^pg_' \
+                AND roles.rolname NOT IN ('lattice_migrator','lattice_runtime') \
+                AND pg_catalog.has_function_privilege(roles.rolname,p.oid,'EXECUTE')), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+              WHERE n.nspname='writer_lease' \
+                AND NOT pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE')), \
+             (NOT pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE') \
+               OR pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','CREATE') \
+               OR EXISTS (SELECT 1 FROM pg_catalog.pg_roles roles \
+                  WHERE NOT roles.rolsuper AND roles.rolname !~ '^pg_' \
+                    AND roles.rolname NOT IN ('lattice_migrator','lattice_runtime') \
+                    AND (pg_catalog.has_schema_privilege(roles.rolname,'writer_lease','USAGE') \
+                      OR pg_catalog.has_schema_privilege(roles.rolname,'writer_lease','CREATE'))))",
+            &[],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog)
+        })?;
+    for (index, expected) in [12_i64, 0, 0, 0, 0, 0, 0, 0].into_iter().enumerate() {
+        if row_value::<i64>(&closure, index, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            != expected
+        {
+            return Err(catalog_error());
+        }
+    }
+    for index in 8..=10 {
+        if row_value::<i64>(
+            &closure,
+            index,
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        )? != 0
+        {
+            return Err(permission_error());
+        }
+    }
+    if row_value::<bool>(&closure, 11, PostgresStoreSetupErrorKind::PermissionDenied)? {
+        return Err(permission_error());
+    }
+    Ok(())
 }
 
 fn verify_catalog_signatures<C: GenericClient>(
@@ -1631,7 +2021,7 @@ fn verify_catalog_signatures<C: GenericClient>(
             V3_EXPECTED_CONSTRAINT_SIGNATURE,
             V3_EXPECTED_INDEX_SIGNATURE,
         ],
-        CatalogProfile::V3CodebaseMemoryV2 => [
+        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => [
             V3_CODEBASE_MEMORY_V2_EXPECTED_RELATION_SIGNATURE,
             V3_CODEBASE_MEMORY_V2_EXPECTED_COLUMN_SIGNATURE,
             V3_CODEBASE_MEMORY_V2_EXPECTED_CONSTRAINT_SIGNATURE,
@@ -1674,7 +2064,9 @@ fn verify_schema_headers<C: GenericClient>(
     let suffix = match profile {
         CatalogProfile::V1 => "V1",
         CatalogProfile::V2 => "V2",
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => "V3",
+        CatalogProfile::V3
+        | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => "V3",
         CatalogProfile::PreSchema => return Err(catalog_error()),
     };
     let expected_comments = [
@@ -1708,7 +2100,9 @@ fn verify_schema_headers<C: GenericClient>(
         CatalogProfile::V1 | CatalogProfile::V2 => {
             CONTROL_TABLES.into_iter().map(str::to_owned).collect()
         }
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => {
+        CatalogProfile::V3
+        | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => {
             V3_CONTROL_TABLES.into_iter().map(str::to_owned).collect()
         }
         CatalogProfile::PreSchema => return Err(catalog_error()),
@@ -1731,7 +2125,9 @@ fn verify_schema_headers<C: GenericClient>(
             .into_iter()
             .map(str::to_owned)
             .collect(),
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => V2_CONTROL_CONSTRAINTS
+        CatalogProfile::V3
+        | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => V2_CONTROL_CONSTRAINTS
             .into_iter()
             .chain(TASK_LEDGER_CONTROL_CONSTRAINTS)
             .map(str::to_owned)
@@ -1776,6 +2172,15 @@ fn verify_owned_type_closure<C: GenericClient>(
             .map(|table| ("control", table))
             .collect(),
         CatalogProfile::V3CodebaseMemoryV2 => V3_CONTROL_TABLES
+            .into_iter()
+            .map(|table| ("control", table))
+            .chain(
+                CODEBASE_MEMORY_V2_TABLES
+                    .into_iter()
+                    .map(|table| ("memory", table)),
+            )
+            .collect(),
+        CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => V3_CONTROL_TABLES
             .into_iter()
             .map(|table| ("control", table))
             .chain(
@@ -1865,7 +2270,7 @@ fn verify_forbidden_schema_objects<C: GenericClient>(
         CatalogProfile::V1 | CatalogProfile::PreSchema => 0,
         CatalogProfile::V2 => 3,
         CatalogProfile::V3 => 11,
-        CatalogProfile::V3CodebaseMemoryV2 => 18,
+        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => 18,
     };
     if row_value::<i64>(&forbidden, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?
         != expected_functions
@@ -1887,13 +2292,14 @@ fn verify_forbidden_schema_objects<C: GenericClient>(
         CatalogProfile::V2
         | CatalogProfile::V3
         | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
         | CatalogProfile::PreSchema => 0,
     };
     let expected_internal_triggers = match profile {
         CatalogProfile::V1 => 4,
         CatalogProfile::V2 | CatalogProfile::PreSchema => 0,
         CatalogProfile::V3 => 20,
-        CatalogProfile::V3CodebaseMemoryV2 => 44,
+        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => 44,
     };
     if row_value::<i64>(&forbidden, 6, PostgresStoreSetupErrorKind::CorruptCatalog)?
         != expected_scope_head_triggers
@@ -1920,7 +2326,9 @@ fn verify_owned_function_boundary<C: GenericClient>(
     let expected_signature = match profile {
         CatalogProfile::V2 => V2_EXPECTED_FUNCTION_SIGNATURE,
         CatalogProfile::V3 => V3_EXPECTED_FUNCTION_SIGNATURE,
-        CatalogProfile::V3CodebaseMemoryV2 => V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => {
+            V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_SIGNATURE
+        }
         CatalogProfile::V1 | CatalogProfile::PreSchema => return Err(catalog_error()),
     };
     if signature != expected_signature {
@@ -1952,7 +2360,7 @@ fn verify_owned_function_boundary<C: GenericClient>(
         .into_iter()
         .map(str::to_owned)
         .collect(),
-        CatalogProfile::V3CodebaseMemoryV2 => [
+        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => [
             STORE_PREPARE_V2_IDENTITY,
             STORE_FINALIZE_V2_IDENTITY,
             STORE_CURRENT_HEAD_V2_IDENTITY,
@@ -2075,7 +2483,9 @@ fn verify_roles_and_grants<C: GenericClient>(
 ) -> Result<(), PostgresStoreSetupError> {
     verify_role_and_database_boundary(client, profile)?;
     let expected_schema_acl = match profile {
-        CatalogProfile::V3CodebaseMemoryV2 => V3_CODEBASE_MEMORY_V2_EXPECTED_SCHEMA_ACL_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => {
+            V3_CODEBASE_MEMORY_V2_EXPECTED_SCHEMA_ACL_SIGNATURE
+        }
         CatalogProfile::PreSchema
         | CatalogProfile::V1
         | CatalogProfile::V2
@@ -2086,7 +2496,9 @@ fn verify_roles_and_grants<C: GenericClient>(
             EXPECTED_TABLE_ACL_SIGNATURE
         }
         CatalogProfile::V3 => V3_EXPECTED_TABLE_ACL_SIGNATURE,
-        CatalogProfile::V3CodebaseMemoryV2 => V3_CODEBASE_MEMORY_V2_EXPECTED_TABLE_ACL_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => {
+            V3_CODEBASE_MEMORY_V2_EXPECTED_TABLE_ACL_SIGNATURE
+        }
     };
     for (query, expected) in [
         (SCHEMA_ACL_SIGNATURE_SQL, expected_schema_acl),
@@ -2101,7 +2513,10 @@ fn verify_roles_and_grants<C: GenericClient>(
     }
     if matches!(
         profile,
-        CatalogProfile::V2 | CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2
+        CatalogProfile::V2
+            | CatalogProfile::V3
+            | CatalogProfile::V3CodebaseMemoryV2
+            | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
     ) {
         verify_owned_function_acl(client, profile)?;
     }
@@ -2128,7 +2543,9 @@ fn verify_owned_function_acl<C: GenericClient>(
     let expected_signature = match profile {
         CatalogProfile::V2 => V2_EXPECTED_FUNCTION_ACL_SIGNATURE,
         CatalogProfile::V3 => V3_EXPECTED_FUNCTION_ACL_SIGNATURE,
-        CatalogProfile::V3CodebaseMemoryV2 => V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_ACL_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => {
+            V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_ACL_SIGNATURE
+        }
         CatalogProfile::V1 | CatalogProfile::PreSchema => return Err(permission_error()),
     };
     if signature != expected_signature {
@@ -2157,7 +2574,7 @@ fn verify_owned_function_acl<C: GenericClient>(
         .into_iter()
         .map(str::to_owned)
         .collect(),
-        CatalogProfile::V3CodebaseMemoryV2 => [
+        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => [
             STORE_PREPARE_V3_IDENTITY,
             STORE_FINALIZE_V3_IDENTITY,
             STORE_CURRENT_HEAD_V3_IDENTITY,
@@ -2325,6 +2742,7 @@ fn verify_role_and_database_boundary<C: GenericClient>(
         CatalogProfile::V2 => 3,
         CatalogProfile::V3 => 8,
         CatalogProfile::V3CodebaseMemoryV2 => 15,
+        CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => 22,
     };
     if owner != DatabaseRole::Migrator.as_str()
         || is_template
@@ -2338,12 +2756,13 @@ fn verify_role_and_database_boundary<C: GenericClient>(
     {
         return Err(permission_error());
     }
-    verify_cluster_wide_acl_closure(client)?;
+    verify_cluster_wide_acl_closure(client, profile)?;
     verify_login_principal_closure(client)
 }
 
 fn verify_cluster_wide_acl_closure<C: GenericClient>(
     client: &mut C,
+    profile: CatalogProfile,
 ) -> Result<(), PostgresStoreSetupError> {
     let parameter_grants = client
         .query_one(
@@ -2387,14 +2806,16 @@ fn verify_cluster_wide_acl_closure<C: GenericClient>(
     {
         return Err(permission_error());
     }
-    verify_external_relation_principal_closure(client)?;
-    verify_external_function_principal_closure(client)?;
+    let writer_lease_is_owned = matches!(profile, CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1);
+    verify_external_relation_principal_closure(client, writer_lease_is_owned)?;
+    verify_external_function_principal_closure(client, writer_lease_is_owned)?;
     verify_pre_role_system_function_boundary(client)?;
     verify_large_object_boundary(client)
 }
 
 fn verify_external_relation_principal_closure<C: GenericClient>(
     client: &mut C,
+    writer_lease_is_owned: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let forbidden = client
         .query_one(
@@ -2411,6 +2832,7 @@ fn verify_external_relation_principal_closure<C: GenericClient>(
                  WHERE n.nspname !~ '^pg_' \
                    AND n.nspname <> 'information_schema' \
                    AND n.nspname NOT IN ('control', 'memory', 'readmodel') \
+                   AND (NOT $1 OR n.nspname <> 'writer_lease') \
              ) \
              SELECT \
                (SELECT count(*) FROM external_relations c \
@@ -2424,7 +2846,7 @@ fn verify_external_relation_principal_closure<C: GenericClient>(
                 CROSS JOIN LATERAL aclexplode(a.attacl) acl \
                 WHERE acl.grantee = 0 \
                    OR acl.grantee IN (SELECT oid FROM fixed_principals))",
-            &[],
+            &[&writer_lease_is_owned],
         )
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
@@ -2444,6 +2866,7 @@ fn verify_external_relation_principal_closure<C: GenericClient>(
 
 fn verify_external_function_principal_closure<C: GenericClient>(
     client: &mut C,
+    writer_lease_is_owned: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let forbidden = client
         .query_one(
@@ -2462,9 +2885,10 @@ fn verify_external_function_principal_closure<C: GenericClient>(
              WHERE n.nspname !~ '^pg_' \
                AND n.nspname <> 'information_schema' \
                AND n.nspname NOT IN ('control', 'memory', 'readmodel') \
+               AND (NOT $1 OR n.nspname <> 'writer_lease') \
                AND (acl.grantee = 0 \
                     OR acl.grantee IN (SELECT oid FROM fixed_principals))",
-            &[],
+            &[&writer_lease_is_owned],
         )
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
@@ -2786,7 +3210,10 @@ fn verify_nonwriter_capabilities<C: GenericClient>(
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
         })?;
     let memory_usage = matches!(role, DatabaseRole::Runtime)
-        && matches!(profile, CatalogProfile::V3CodebaseMemoryV2);
+        && matches!(
+            profile,
+            CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        );
     let expected = [true, false, memory_usage, false, true, false, false, false];
     for (index, expected_value) in expected.into_iter().enumerate() {
         if row_value::<bool>(
@@ -2803,7 +3230,9 @@ fn verify_nonwriter_capabilities<C: GenericClient>(
 
     let protected_tables: Vec<&str> = match profile {
         CatalogProfile::V1 | CatalogProfile::V2 => PROTECTED_CONTROL_TABLES.into_iter().collect(),
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => {
+        CatalogProfile::V3
+        | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => {
             V3_PROTECTED_CONTROL_TABLES.into_iter().collect()
         }
         CatalogProfile::PreSchema => Vec::new(),
@@ -2817,7 +3246,10 @@ fn verify_nonwriter_capabilities<C: GenericClient>(
                 .map(|table| ("control", table, false)),
         )
         .collect();
-    if matches!(profile, CatalogProfile::V3CodebaseMemoryV2) {
+    if matches!(
+        profile,
+        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+    ) {
         bounded_tables.extend(
             CODEBASE_MEMORY_V2_TABLES
                 .into_iter()
@@ -3063,10 +3495,99 @@ fn permission_error() -> PostgresStoreSetupError {
 #[cfg(test)]
 mod tests {
     use super::{
-        CatalogProfile, classify_memory_catalog_counts, verify_network_boundary,
-        verify_server_version,
+        CatalogProfile, REQUIRED_APPLICATION_NAME, classify_current_v3_catalog_profile,
+        classify_extension_catalog_counts, is_loopback, verify_network_boundary,
+        verify_runtime_store_schema, verify_server_version,
     };
-    use crate::migrations::PostgresStoreSetupErrorKind;
+    use crate::migrations::{
+        DatabaseRole, MigrationTarget, PostgresStoreSetupError, PostgresStoreSetupErrorKind,
+    };
+    use postgres::{Client, NoTls};
+
+    const LIVE_PROFILE_GATE: &str = "LATTICE_STORE_PROFILE_LIVE";
+    const LIVE_PROFILE_EXPECTED: &str = "LATTICE_STORE_PROFILE_EXPECTED";
+    const LIVE_PROFILE_RUNTIME_URL: &str = "LATTICE_STORE_PROFILE_RUNTIME_URL";
+    const LIVE_PROFILE_MIGRATOR_URL: &str = "LATTICE_STORE_PROFILE_MIGRATOR_URL";
+    const LIVE_PROFILE_RUN_ID: &str = "LATTICE_TASK019_RUN_ID";
+
+    struct LiveProfileFixture {
+        target: MigrationTarget,
+        runtime_url: String,
+        expected_profile: CatalogProfile,
+        expected_name: &'static str,
+    }
+
+    #[derive(Eq, PartialEq)]
+    struct LiveDatabaseIdentity {
+        database_name: String,
+        database_uuid: String,
+        server_address: String,
+        server_port: i32,
+    }
+
+    struct LiveProfileMutation {
+        apply_sql: &'static str,
+        restore_sql: &'static str,
+        expected_kind: PostgresStoreSetupErrorKind,
+    }
+
+    const WRITER_LEASE_PROFILE_MUTATIONS: [LiveProfileMutation; 9] = [
+        LiveProfileMutation {
+            apply_sql: "ALTER TABLE writer_lease.writer_lease_extension_ledger \
+                        RENAME TO writer_lease_extension_ledger_profile_drift",
+            restore_sql: "ALTER TABLE writer_lease.writer_lease_extension_ledger_profile_drift \
+                          RENAME TO writer_lease_extension_ledger",
+            expected_kind: PostgresStoreSetupErrorKind::CorruptCatalog,
+        },
+        LiveProfileMutation {
+            apply_sql: "CREATE TABLE writer_lease.store_profile_live_extra (id bigint NOT NULL)",
+            restore_sql: "DROP TABLE writer_lease.store_profile_live_extra",
+            expected_kind: PostgresStoreSetupErrorKind::CorruptCatalog,
+        },
+        LiveProfileMutation {
+            apply_sql: "ALTER TABLE writer_lease.writer_lease_extension_identity \
+                        DROP CONSTRAINT writer_lease_extension_identity_singleton",
+            restore_sql: "ALTER TABLE writer_lease.writer_lease_extension_identity \
+                          ADD CONSTRAINT writer_lease_extension_identity_singleton \
+                          CHECK (singleton)",
+            expected_kind: PostgresStoreSetupErrorKind::CorruptCatalog,
+        },
+        LiveProfileMutation {
+            apply_sql: "CREATE TYPE writer_lease.store_profile_live_extra_type AS ENUM ('DRIFT')",
+            restore_sql: "DROP TYPE writer_lease.store_profile_live_extra_type",
+            expected_kind: PostgresStoreSetupErrorKind::CorruptCatalog,
+        },
+        LiveProfileMutation {
+            apply_sql: "ALTER FUNCTION writer_lease.writer_lease_load_current_v1(text) VOLATILE",
+            restore_sql: "ALTER FUNCTION writer_lease.writer_lease_load_current_v1(text) STABLE",
+            expected_kind: PostgresStoreSetupErrorKind::CorruptCatalog,
+        },
+        LiveProfileMutation {
+            apply_sql: "GRANT USAGE ON SCHEMA writer_lease TO lattice_readonly",
+            restore_sql: "REVOKE USAGE ON SCHEMA writer_lease FROM lattice_readonly",
+            expected_kind: PostgresStoreSetupErrorKind::PermissionDenied,
+        },
+        LiveProfileMutation {
+            apply_sql: "GRANT SELECT ON TABLE writer_lease.writer_lease_heads TO lattice_readonly",
+            restore_sql: "REVOKE SELECT ON TABLE writer_lease.writer_lease_heads \
+                          FROM lattice_readonly",
+            expected_kind: PostgresStoreSetupErrorKind::PermissionDenied,
+        },
+        LiveProfileMutation {
+            apply_sql: "GRANT EXECUTE ON FUNCTION \
+                        writer_lease.writer_lease_load_current_v1(text) TO lattice_readonly",
+            restore_sql: "REVOKE EXECUTE ON FUNCTION \
+                          writer_lease.writer_lease_load_current_v1(text) FROM lattice_readonly",
+            expected_kind: PostgresStoreSetupErrorKind::PermissionDenied,
+        },
+        LiveProfileMutation {
+            apply_sql: "GRANT SELECT (project_id) ON TABLE \
+                        writer_lease.writer_lease_heads TO lattice_readonly",
+            restore_sql: "REVOKE SELECT (project_id) ON TABLE \
+                          writer_lease.writer_lease_heads FROM lattice_readonly",
+            expected_kind: PostgresStoreSetupErrorKind::PermissionDenied,
+        },
+    ];
 
     #[test]
     fn server_version_gate_rejects_every_non_seventeen_major() {
@@ -3101,31 +3622,231 @@ mod tests {
     }
 
     #[test]
-    fn memory_catalog_profile_accepts_only_empty_v3_or_the_complete_fixed_extension() {
+    fn extension_catalog_profile_accepts_only_closed_supported_combinations() {
         assert_eq!(
-            classify_memory_catalog_counts(0, 0, 0, 0).expect("strict V3"),
+            classify_extension_catalog_counts(0, 0, 0, 0, 0, 0, 0, 0, 0).expect("strict V3"),
             CatalogProfile::V3
         );
         assert_eq!(
-            classify_memory_catalog_counts(8, 8, 7, 7).expect("exact Memory v2"),
+            classify_extension_catalog_counts(8, 8, 7, 7, 0, 0, 0, 0, 0).expect("exact Memory v2"),
             CatalogProfile::V3CodebaseMemoryV2
+        );
+        assert_eq!(
+            classify_extension_catalog_counts(8, 8, 7, 7, 1, 5, 5, 7, 7)
+                .expect("exact Memory v2 plus Writer Lease v1"),
+            CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
         );
 
         for counts in [
-            (1, 1, 0, 0),
-            (7, 7, 6, 6),
-            (7, 7, 5, 5),
-            (7, 8, 6, 6),
-            (7, 7, 6, 7),
-            (8, 8, 6, 6),
-            (7, 7, 7, 7),
+            (1, 1, 0, 0, 0, 0, 0, 0, 0),
+            (7, 7, 6, 6, 0, 0, 0, 0, 0),
+            (7, 7, 5, 5, 0, 0, 0, 0, 0),
+            (7, 8, 6, 6, 0, 0, 0, 0, 0),
+            (7, 7, 6, 7, 0, 0, 0, 0, 0),
+            (8, 8, 6, 6, 0, 0, 0, 0, 0),
+            (7, 7, 7, 7, 0, 0, 0, 0, 0),
+            (0, 0, 0, 0, 1, 0, 0, 0, 0),
+            (0, 0, 0, 0, 1, 5, 5, 7, 7),
+            (8, 8, 7, 7, 0, 5, 5, 7, 7),
+            (8, 8, 7, 7, 1, 4, 5, 7, 7),
+            (8, 8, 7, 7, 1, 5, 5, 6, 7),
+            (8, 8, 7, 7, 1, 5, 6, 7, 7),
+            (8, 8, 7, 7, 1, 5, 5, 7, 8),
         ] {
             assert_eq!(
-                classify_memory_catalog_counts(counts.0, counts.1, counts.2, counts.3)
-                    .expect_err("partial, unknown, extra, or overload must fail")
-                    .kind(),
+                classify_extension_catalog_counts(
+                    counts.0, counts.1, counts.2, counts.3, counts.4, counts.5, counts.6, counts.7,
+                    counts.8,
+                )
+                .expect_err("partial, unknown, extra, or overload must fail")
+                .kind(),
                 PostgresStoreSetupErrorKind::CorruptCatalog
             );
         }
+    }
+
+    #[test]
+    fn live_store_profile_accepts_exact_profiles_and_rejects_writer_lease_drift_when_provisioned() {
+        if std::env::var(LIVE_PROFILE_GATE).as_deref() != Ok("1") {
+            eprintln!("SKIP: {LIVE_PROFILE_GATE} is not enabled");
+            return;
+        }
+
+        let fixture = live_profile_fixture();
+        let runtime_identity = assert_live_profile_accepted(&fixture);
+        if fixture.expected_profile == CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 {
+            let migrator_url = required_live_environment(LIVE_PROFILE_MIGRATOR_URL);
+            let mut migrator = connect_live_role(&migrator_url, DatabaseRole::Migrator);
+            let migrator_identity = verify_live_connection_identity(
+                &mut migrator,
+                &fixture.target,
+                DatabaseRole::Migrator,
+            );
+            assert!(
+                migrator_identity == runtime_identity,
+                "live profile runtime and migrator connections target different databases"
+            );
+            for mutation in &WRITER_LEASE_PROFILE_MUTATIONS {
+                assert_live_profile_mutation_rejected_and_restored(
+                    &fixture,
+                    &mut migrator,
+                    mutation,
+                );
+            }
+        }
+
+        eprintln!(
+            "PASS: Store live profile {} accepted with exact fail-closed matrix",
+            fixture.expected_name
+        );
+    }
+
+    fn live_profile_fixture() -> LiveProfileFixture {
+        let runtime_url = required_live_environment(LIVE_PROFILE_RUNTIME_URL);
+        let run_id = required_live_environment(LIVE_PROFILE_RUN_ID);
+        let expected = required_live_environment(LIVE_PROFILE_EXPECTED);
+        let (expected_profile, expected_name) = match expected.as_str() {
+            "V3" => (CatalogProfile::V3, "V3"),
+            "V3_MEMORY_V2" => (CatalogProfile::V3CodebaseMemoryV2, "V3_MEMORY_V2"),
+            "V3_MEMORY_V2_WRITER_LEASE_V1" => (
+                CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1,
+                "V3_MEMORY_V2_WRITER_LEASE_V1",
+            ),
+            _ => panic!("unsupported Store live profile expectation"),
+        };
+        let database_name = live_database_name(&runtime_url);
+        let target = MigrationTarget::new(database_name, run_id)
+            .unwrap_or_else(|_| panic!("Store live profile target is not marker-owned disposable"));
+        LiveProfileFixture {
+            target,
+            runtime_url,
+            expected_profile,
+            expected_name,
+        }
+    }
+
+    fn required_live_environment(name: &str) -> String {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| panic!("required Store live profile environment is missing"))
+    }
+
+    fn live_database_name(url: &str) -> String {
+        let config = url
+            .parse::<postgres::Config>()
+            .unwrap_or_else(|_| panic!("Store live profile connection configuration is invalid"));
+        config
+            .get_dbname()
+            .filter(|name| !name.is_empty())
+            .map_or_else(
+                || panic!("Store live profile database name is missing"),
+                str::to_owned,
+            )
+    }
+
+    fn connect_live_role(url: &str, role: DatabaseRole) -> Client {
+        let mut config = url
+            .parse::<postgres::Config>()
+            .unwrap_or_else(|_| panic!("Store live profile connection configuration is invalid"));
+        config.application_name(REQUIRED_APPLICATION_NAME);
+        let mut client = config
+            .connect(NoTls)
+            .unwrap_or_else(|_| panic!("Store live profile connection was rejected"));
+        let set_role = match role {
+            DatabaseRole::Migrator => "SET ROLE lattice_migrator",
+            DatabaseRole::Runtime => "SET ROLE lattice_runtime",
+            DatabaseRole::Guardian | DatabaseRole::ReadOnly => {
+                panic!("unsupported Store live profile role")
+            }
+        };
+        client
+            .batch_execute(set_role)
+            .unwrap_or_else(|_| panic!("Store live profile role transition was rejected"));
+        client
+    }
+
+    fn verify_live_connection_identity(
+        client: &mut Client,
+        target: &MigrationTarget,
+        role: DatabaseRole,
+    ) -> LiveDatabaseIdentity {
+        let row = client
+            .query_one(
+                "SELECT current_database()::text, current_user::text, session_user::text, \
+                 inet_server_addr()::text, inet_client_addr()::text, inet_server_port(), \
+                 current_setting('application_name'), \
+                 COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()), false), \
+                 (SELECT database_uuid::text FROM ONLY control.database_identity \
+                   WHERE singleton=true)",
+                &[],
+            )
+            .unwrap_or_else(|_| panic!("Store live profile connection identity was unavailable"));
+        let database_name = live_row_value::<String>(&row, 0);
+        let current_role = live_row_value::<String>(&row, 1);
+        let session_role = live_row_value::<String>(&row, 2);
+        let server_address = live_row_value::<String>(&row, 3);
+        let client_address = live_row_value::<String>(&row, 4);
+        let server_port = live_row_value::<i32>(&row, 5);
+        let application_name = live_row_value::<String>(&row, 6);
+        let ssl = live_row_value::<bool>(&row, 7);
+        let database_uuid = live_row_value::<String>(&row, 8);
+        assert!(
+            database_name == target.database_name()
+                && database_uuid == target.expected_database_uuid()
+                && current_role == role.as_str()
+                && session_role == role.login_role()
+                && application_name == REQUIRED_APPLICATION_NAME
+                && is_loopback(&server_address)
+                && is_loopback(&client_address)
+                && !ssl,
+            "Store live profile connection identity failed closed"
+        );
+        LiveDatabaseIdentity {
+            database_name,
+            database_uuid,
+            server_address,
+            server_port,
+        }
+    }
+
+    fn live_row_value<T: postgres::types::FromSqlOwned>(row: &postgres::Row, index: usize) -> T {
+        row.try_get(index)
+            .unwrap_or_else(|_| panic!("Store live profile row was malformed"))
+    }
+
+    fn assert_live_profile_accepted(fixture: &LiveProfileFixture) -> LiveDatabaseIdentity {
+        let mut runtime = connect_live_role(&fixture.runtime_url, DatabaseRole::Runtime);
+        let identity =
+            verify_live_connection_identity(&mut runtime, &fixture.target, DatabaseRole::Runtime);
+        let profile = classify_current_v3_catalog_profile(&mut runtime)
+            .unwrap_or_else(|_| panic!("Store live profile classification was rejected"));
+        assert_eq!(profile, fixture.expected_profile);
+        verify_runtime_store_schema(&mut runtime, &fixture.target)
+            .unwrap_or_else(|_| panic!("exact Store live profile was rejected"));
+        identity
+    }
+
+    fn verify_live_profile(fixture: &LiveProfileFixture) -> Result<(), PostgresStoreSetupError> {
+        let mut runtime = connect_live_role(&fixture.runtime_url, DatabaseRole::Runtime);
+        verify_runtime_store_schema(&mut runtime, &fixture.target).map(|_| ())
+    }
+
+    fn assert_live_profile_mutation_rejected_and_restored(
+        fixture: &LiveProfileFixture,
+        migrator: &mut Client,
+        mutation: &LiveProfileMutation,
+    ) {
+        migrator
+            .batch_execute(mutation.apply_sql)
+            .unwrap_or_else(|_| panic!("Store live profile fault injection was rejected"));
+        let rejected = verify_live_profile(fixture);
+        migrator
+            .batch_execute(mutation.restore_sql)
+            .unwrap_or_else(|_| panic!("Store live profile fault restoration was rejected"));
+        let error =
+            rejected.expect_err("drifted or over-privileged Store live profile must fail closed");
+        assert_eq!(error.kind(), mutation.expected_kind);
+        assert_live_profile_accepted(fixture);
     }
 }

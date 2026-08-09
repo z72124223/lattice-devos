@@ -16,6 +16,7 @@ use lattice_contracts::{
     GitCommitEvidence, Invocation, PreparedWorkspaceEvidence, ProjectId, ProjectSnapshotId,
     RuntimeAdmissionMode, RuntimeKind, StoreAuthorityHead, StoreAuthorityRevision,
     StoreDaemonInstanceId, TaskId, TaskLedgerStreamIdentity, WorkspaceChangeEvidence,
+    WriterLeaseAuthorityHead,
 };
 use lattice_ports::{
     DeliveryFailureCertainty, DeliveryLedgerPort, DeliveryPortError, DeliveryPortResult,
@@ -217,6 +218,7 @@ pub struct DeliveryLedger {
     ledger: PostgresTaskLedger,
     identity: TaskLedgerStreamIdentity,
     authority: StoreAuthorityHead,
+    writer_authority: Option<WriterLeaseAuthorityHead>,
     deadline: Instant,
 }
 
@@ -733,6 +735,22 @@ impl DeliveryLedger {
         password: &str,
         deadline: Instant,
     ) -> Result<Self, DeliveryLedgerError> {
+        Self::connect_for_identity(binding, password, deadline, delivery_identity()?)
+    }
+
+    /// Opens the same verified runtime store for one domain-owned Task Spec
+    /// stream identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing credentials, failed role binding, or any schema,
+    /// authority, or retained-ledger mismatch.
+    pub fn connect_for_identity(
+        binding: &DeliveryDatabaseBinding,
+        password: &str,
+        deadline: Instant,
+        identity: TaskLedgerStreamIdentity,
+    ) -> Result<Self, DeliveryLedgerError> {
         let database_name = binding.database_name();
         let target = MigrationTarget::new(database_name.clone(), binding.run_id.clone())
             .map_err(|_| delivery_error(DeliveryLedgerErrorKind::InvalidBinding))?;
@@ -741,10 +759,32 @@ impl DeliveryLedger {
         ensure_before_deadline(deadline)?;
         Ok(Self {
             ledger,
-            identity: delivery_identity()?,
+            identity,
             authority: delivery_authority()?,
+            writer_authority: None,
             deadline,
         })
+    }
+
+    /// Opens the TaskSpec-bound stream and requires the exact current Writer
+    /// Lease for every subsequent delivery mutation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects missing credentials, failed role binding, a mismatched stream,
+    /// or any invalid Store or Writer Lease authority.
+    pub fn connect_for_identity_and_writer(
+        binding: &DeliveryDatabaseBinding,
+        password: &str,
+        deadline: Instant,
+        identity: TaskLedgerStreamIdentity,
+        store_authority: StoreAuthorityHead,
+        writer_authority: WriterLeaseAuthorityHead,
+    ) -> Result<Self, DeliveryLedgerError> {
+        let mut ledger = Self::connect_for_identity(binding, password, deadline, identity)?;
+        ledger.authority = store_authority;
+        ledger.writer_authority = Some(writer_authority);
+        Ok(ledger)
     }
 
     /// Reloads and projects the durable stream without trusting caller state.
@@ -819,10 +859,14 @@ impl DeliveryLedger {
         )?;
         self.ensure_before_deadline()?;
         let deadline = self.deadline;
-        let execution_result = self
-            .ledger
-            .execute(command, self.authority.clone())
-            .map_err(map_ledger_error);
+        let execution_result = match self.writer_authority.as_ref() {
+            Some(authority) => {
+                self.ledger
+                    .execute_fenced(command, self.authority.clone(), authority.clone())
+            }
+            None => self.ledger.execute(command, self.authority.clone()),
+        }
+        .map_err(map_ledger_error);
         let execution = finish_mutation_at(execution_result, deadline, Instant::now())?;
         if execution.receipt().outcome() != &CommandOutcome::Appended
             || execution
@@ -851,7 +895,8 @@ impl DeliveryLedger {
             .map_err(map_outcome_load_error)?;
         self.ensure_before_deadline()?;
         if inspect_stream(loaded.stream()).projection != Projection::Pending
-            || loaded.stream().events()[0].subject_digest() != request.intent_digest()
+            || delivery_event(loaded.stream(), INTENT_COMMAND_ID)
+                .is_none_or(|event| event.subject_digest() != request.intent_digest())
         {
             return Err(delivery_error(
                 DeliveryLedgerErrorKind::ReconciliationRequired,
@@ -879,10 +924,14 @@ impl DeliveryLedger {
         )?;
         self.ensure_before_deadline()?;
         let deadline = self.deadline;
-        let execution_result = self
-            .ledger
-            .execute(command, self.authority.clone())
-            .map_err(map_outcome_append_error);
+        let execution_result = match self.writer_authority.as_ref() {
+            Some(authority) => {
+                self.ledger
+                    .execute_fenced(command, self.authority.clone(), authority.clone())
+            }
+            None => self.ledger.execute(command, self.authority.clone()),
+        }
+        .map_err(map_outcome_append_error);
         let execution = finish_mutation_at(execution_result, deadline, Instant::now())?;
         if execution.receipt().outcome() != &CommandOutcome::Appended {
             return finish_mutation_at(
@@ -996,7 +1045,7 @@ fn delivery_identity() -> Result<TaskLedgerStreamIdentity, DeliveryLedgerError> 
     .map_err(|_| evidence_error())
 }
 
-fn delivery_authority() -> Result<StoreAuthorityHead, DeliveryLedgerError> {
+pub(crate) fn delivery_authority() -> Result<StoreAuthorityHead, DeliveryLedgerError> {
     StoreAuthorityHead::new(
         RuntimeKind::Live,
         StoreDaemonInstanceId::new("daemon-live-1").map_err(|_| evidence_error())?,
@@ -1440,11 +1489,11 @@ fn typed_legacy_receipt(
 }
 
 fn legacy_completed_receipt_from_stream(stream: &VerifiedStream) -> Option<DeliveryReceipt> {
-    if inspect_stream(stream).projection != Projection::Completed || stream.events().len() != 2 {
+    if inspect_stream(stream).projection != Projection::Completed {
         return None;
     }
-    let intent_event = &stream.events()[0];
-    let outcome_event = &stream.events()[1];
+    let intent_event = delivery_event(stream, INTENT_COMMAND_ID)?;
+    let outcome_event = delivery_event(stream, OUTCOME_COMMAND_ID)?;
     let intent = validate_intent_evidence(
         intent_event.diagnostic().map(Diagnostic::value),
         intent_event.subject_digest(),
@@ -1462,13 +1511,10 @@ fn typed_receipt_from_stream(
     request: &DeliveryRunRequest,
 ) -> Result<TypedDeliveryReceipt, DeliveryLedgerError> {
     let inspected = inspect_stream(stream);
-    if stream.events().len() != 2 {
-        return Err(delivery_error(
-            DeliveryLedgerErrorKind::ReconciliationRequired,
-        ));
-    }
-    let intent_event = &stream.events()[0];
-    let outcome_event = &stream.events()[1];
+    let intent_event = delivery_event(stream, INTENT_COMMAND_ID)
+        .ok_or_else(|| delivery_error(DeliveryLedgerErrorKind::ReconciliationRequired))?;
+    let outcome_event = delivery_event(stream, OUTCOME_COMMAND_ID)
+        .ok_or_else(|| delivery_error(DeliveryLedgerErrorKind::ReconciliationRequired))?;
     let receipt = reconstruct_typed_receipt(
         request,
         intent_event.subject_digest(),
@@ -1502,13 +1548,10 @@ fn typed_request_from_stream(
     expected_invocation: &Invocation,
     expected_profile: DeliveryProfile,
 ) -> Result<DeliveryRunRequest, DeliveryLedgerError> {
-    if stream.events().len() != 2 {
-        return Err(delivery_error(
-            DeliveryLedgerErrorKind::ReconciliationRequired,
-        ));
-    }
-    let intent_event = &stream.events()[0];
-    let outcome_event = &stream.events()[1];
+    let intent_event = delivery_event(stream, INTENT_COMMAND_ID)
+        .ok_or_else(|| delivery_error(DeliveryLedgerErrorKind::ReconciliationRequired))?;
+    let outcome_event = delivery_event(stream, OUTCOME_COMMAND_ID)
+        .ok_or_else(|| delivery_error(DeliveryLedgerErrorKind::ReconciliationRequired))?;
     let intent = validate_intent_evidence(
         intent_event.diagnostic().map(Diagnostic::value),
         intent_event.subject_digest(),
@@ -1634,14 +1677,16 @@ fn inspect_stream(stream: &VerifiedStream) -> StreamInspection {
     if stream.events().is_empty() && stream.commands().is_empty() && stream.outboxes().is_empty() {
         return inspection(Projection::NotStarted);
     }
-    if !matches!(stream.events().len(), 1 | 2)
-        || stream.commands().len() != stream.events().len()
-        || stream.outboxes().len() != 1
-    {
-        return inspection(Projection::Ambiguous);
+    let intent_event = delivery_event(stream, INTENT_COMMAND_ID);
+    let outcome_event = delivery_event(stream, OUTCOME_COMMAND_ID);
+    if intent_event.is_none() {
+        return if outcome_event.is_none() && stream.outboxes().is_empty() {
+            inspection(Projection::NotStarted)
+        } else {
+            inspection(Projection::Ambiguous)
+        };
     }
-
-    let intent_event = &stream.events()[0];
+    let intent_event = intent_event.expect("checked above");
     let Some(intent_command) = stream
         .commands()
         .iter()
@@ -1649,6 +1694,9 @@ fn inspect_stream(stream: &VerifiedStream) -> StreamInspection {
     else {
         return inspection(Projection::Ambiguous);
     };
+    if stream.outboxes().len() != 1 {
+        return inspection(Projection::Ambiguous);
+    }
     let outbox = &stream.outboxes()[0];
     let Some(intent_evidence) = validate_intent_evidence(
         intent_event.diagnostic().map(Diagnostic::value),
@@ -1664,7 +1712,6 @@ fn inspect_stream(stream: &VerifiedStream) -> StreamInspection {
         LedgerEventKind::EffectIntent,
         LedgerOutcome::Recorded,
         "TASK032_CODEX_INTENT",
-        1,
     ) || outbox.command_id().as_str() != INTENT_COMMAND_ID
         || outbox.event_sequence() != intent_event.sequence()
         || outbox.event_digest() != intent_event.event_digest()
@@ -1673,11 +1720,10 @@ fn inspect_stream(stream: &VerifiedStream) -> StreamInspection {
     {
         return inspection(Projection::Ambiguous);
     }
-    if stream.events().len() == 1 {
+    let Some(outcome_event) = outcome_event else {
         return inspection(Projection::Pending);
-    }
+    };
 
-    let outcome_event = &stream.events()[1];
     let Some(outcome_command) = stream
         .commands()
         .iter()
@@ -1685,8 +1731,7 @@ fn inspect_stream(stream: &VerifiedStream) -> StreamInspection {
     else {
         return inspection(Projection::Ambiguous);
     };
-    if outcome_command.receipt().before() != intent_command.receipt().after()
-        || outcome_command.receipt().after() != stream.head()
+    if outcome_event.sequence() <= intent_event.sequence()
         || !valid_command_event(
             outcome_command.request(),
             outcome_command.receipt(),
@@ -1695,7 +1740,6 @@ fn inspect_stream(stream: &VerifiedStream) -> StreamInspection {
             LedgerEventKind::EffectOutcome,
             outcome_event.outcome(),
             outcome_event.reason_code().as_str(),
-            2,
         )
     {
         return inspection(Projection::Ambiguous);
@@ -1776,7 +1820,6 @@ fn valid_command_event(
     kind: LedgerEventKind,
     outcome: LedgerOutcome,
     reason: &str,
-    sequence: u64,
 ) -> bool {
     request.command_id().as_str() == command_id
         && request.correlation_id().as_str() == CORRELATION_ID
@@ -1785,9 +1828,11 @@ fn valid_command_event(
         && request.kind() == kind
         && request.outcome() == outcome
         && request.reason_code().as_str() == reason
+        && request.expected_head() == receipt.before()
         && receipt.outcome() == &CommandOutcome::Appended
         && receipt.event_digest() == Some(event.event_digest())
-        && event.sequence() == sequence
+        && receipt.after().sequence() == event.sequence()
+        && receipt.after().last_event_digest() == event.event_digest()
         && event.command_id().as_str() == command_id
         && event.correlation_id().as_str() == CORRELATION_ID
         && event.actor_id().as_str() == ACTOR_ID
@@ -1798,6 +1843,15 @@ fn valid_command_event(
         && event.request_digest() == receipt.request_digest()
         && event.subject_digest() == request.subject_digest()
         && request.diagnostic().map(Diagnostic::value) == event.diagnostic().map(Diagnostic::value)
+}
+
+fn delivery_event<'a>(stream: &'a VerifiedStream, command_id: &str) -> Option<&'a LedgerEvent> {
+    let mut matching = stream
+        .events()
+        .iter()
+        .filter(|event| event.command_id().as_str() == command_id);
+    let event = matching.next()?;
+    matching.next().is_none().then_some(event)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2344,6 +2398,74 @@ mod tests {
             result_digest,
             result_value,
         )
+    }
+
+    #[test]
+    fn delivery_projection_ignores_verified_task_governance_events_in_the_same_stream() {
+        let intent_value = legacy_intent_value();
+        let intent_digest = delivery_digest("lattice.runtime.codex-delivery-intent", &intent_value)
+            .expect("intent digest");
+        let vacant = VerifiedStream::vacant(
+            delivery_identity().expect("delivery identity"),
+            RuntimeKind::Live,
+        )
+        .expect("vacant stream");
+        let admitted = apply_fixture_command(
+            &vacant,
+            "mcp-submit:req-1",
+            LedgerEventKind::TaskCreated,
+            LedgerOutcome::Recorded,
+            "TASK038_TASK_ACCEPTED",
+            vacant.identity().task_spec_digest().clone(),
+            CanonicalValue::Object(vec![]),
+        );
+        let pending = apply_fixture_command(
+            &admitted,
+            INTENT_COMMAND_ID,
+            LedgerEventKind::EffectIntent,
+            LedgerOutcome::Recorded,
+            "TASK032_CODEX_INTENT",
+            intent_digest.clone(),
+            intent_value,
+        );
+        let governed = apply_fixture_command(
+            &pending,
+            "task038-state-executing",
+            LedgerEventKind::StateTransition,
+            LedgerOutcome::Recorded,
+            "TASK038_STATE_TRANSITION",
+            digest('7'),
+            CanonicalValue::Object(vec![]),
+        );
+        let success = DeliverySuccessEvidence::new(
+            intent_digest,
+            r"C:\tools\codex.exe",
+            "codex-cli 0.144.6",
+            "a".repeat(64),
+            "b".repeat(64),
+            1,
+            "thread-1",
+            "turn-1",
+            r"C:\delivery\repo",
+            "d".repeat(40),
+            "e".repeat(40),
+        )
+        .expect("success evidence");
+        let result_value = success.canonical_value();
+        let result_digest = delivery_digest("lattice.runtime.codex-delivery-result", &result_value)
+            .expect("result digest");
+        let completed = apply_fixture_command(
+            &governed,
+            OUTCOME_COMMAND_ID,
+            LedgerEventKind::EffectOutcome,
+            LedgerOutcome::Passed,
+            "TASK032_DELIVERY_COMPLETED",
+            result_digest,
+            result_value,
+        );
+
+        assert_eq!(inspect_stream(&completed).projection, Projection::Completed);
+        assert!(legacy_completed_receipt_from_stream(&completed).is_some());
     }
 
     #[test]

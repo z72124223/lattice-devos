@@ -34,6 +34,9 @@ const GRAPHIFY_BASELINE_SOURCE_BYTES: &[u8] =
     b"pub fn lattice_delivery_fixture() -> &'static str {\n    \"LATTICE_DELIVERY_OK\"\n}\n";
 const INITIAL_COMMIT_MESSAGE: &str = "chore: initialize LATTICE delivery fixture";
 const DELIVERY_COMMIT_MESSAGE: &str = "feat: complete LATTICE delivery fixture";
+const FIXED_GIT_TIMESTAMP: &str = "2000-01-01T00:00:00Z";
+/// Deterministic baseline commit bound into the server-owned Task Spec.
+pub const BASELINE_COMMIT_SHA: &str = "e3b01a182c3273441c879d4d8b796865bba9131a";
 
 /// Stable fail-closed categories for the isolated Git delivery boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -229,6 +232,12 @@ impl IsolatedGitDelivery {
         require_success(runner.output(&initial_commit_args), "INITIAL_COMMIT_FAILED")?;
 
         let baseline_commit = read_head(&runner, &repository_path)?;
+        if baseline_commit != BASELINE_COMMIT_SHA {
+            return Err(failure(
+                GitDeliveryErrorKind::MetadataDrift,
+                "BASELINE_COMMIT_ID_MISMATCH",
+            ));
+        }
         let baseline_refs = require_success(
             runner.output(&repository_args(
                 &repository_path,
@@ -1411,8 +1420,10 @@ impl GitRunner {
             .env("LANG", "C")
             .env("GIT_AUTHOR_NAME", "LATTICE DevOS")
             .env("GIT_AUTHOR_EMAIL", "lattice@invalid.example")
+            .env("GIT_AUTHOR_DATE", FIXED_GIT_TIMESTAMP)
             .env("GIT_COMMITTER_NAME", "LATTICE DevOS")
             .env("GIT_COMMITTER_EMAIL", "lattice@invalid.example")
+            .env("GIT_COMMITTER_DATE", FIXED_GIT_TIMESTAMP)
             .arg("-c")
             .arg(prefixed_path_argument(
                 "core.hooksPath=",
