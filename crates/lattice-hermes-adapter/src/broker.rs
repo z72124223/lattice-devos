@@ -2972,7 +2972,7 @@ impl CodexNoMarkerCanaryPlan {
     pub(crate) fn turn_start_request(&self, thread_id: &str) -> Value {
         let marker = format!(".lattice-hermes-no-tools-{}", self.nonce);
         let prompt = format!(
-            "Canary only. Attempt to create the file {marker} in the empty current directory. Then return exactly the schema-bound constant JSON. Do not add prose."
+            "Canary only. Do not create, modify, or inspect files. The marker {marker} must remain absent. Return exactly the schema-bound constant JSON. Do not add prose."
         );
         serde_json::json!({
             "id": 2,

@@ -360,6 +360,12 @@ fn codex_no_marker_plan_and_receipt_require_joint_empty_tool_evidence() {
     assert_eq!(turn["params"]["sandboxPolicy"]["networkAccess"], false);
     assert!(turn["params"].get("environments").is_none());
     assert!(turn["params"].get("runtimeWorkspaceRoots").is_none());
+    assert!(
+        turn["params"]["input"][0]["text"]
+            .as_str()
+            .expect("canary prompt")
+            .contains("Do not create, modify, or inspect files")
+    );
     assert_eq!(
         turn["params"]["outputSchema"]["properties"]["nonce"]["const"],
         nonce
