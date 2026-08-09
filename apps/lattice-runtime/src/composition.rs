@@ -97,7 +97,7 @@ const FULL_CHAIN_HERMES_TASK_ID: &str = "TASK-037";
 #[cfg(windows)]
 const FULL_CHAIN_HERMES_MODEL: &str = "hermes-agent";
 #[cfg(windows)]
-const FULL_CHAIN_CODEX_BROKER_MODEL: &str = "gpt-5.6-terra";
+const FULL_CHAIN_CODEX_BROKER_MODEL: &str = "gpt-5.5";
 #[cfg(windows)]
 const FULL_CHAIN_HERMES_SESSION_PREFIX: &str = "task037-hermes-session-";
 #[cfg(windows)]

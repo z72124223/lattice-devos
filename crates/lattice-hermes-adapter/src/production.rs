@@ -44,7 +44,7 @@ const CONFIG_SCHEMA: &str = "lattice.hermes.production-config.v2";
 const OFFICIAL_HERMES_CONFIG: &[u8] = br"_config_version: 33
 model:
   provider: openai-api
-  default: gpt-5.6-terra
+  default: gpt-5.5
   openai_runtime: codex_app_server
   api_mode: codex_app_server
   base_url: http://127.0.0.1:9/v1
@@ -1394,8 +1394,8 @@ impl HermesProductionRunnerConfig {
         validate_official_runtime_identity(&containment, runtime_manifest)?;
         broker_receipt.validate_for_containment()?;
         let model = model.into();
-        let codex_provider = broker
-            .into_production_proxy_provider_from_preflight(broker_receipt, "gpt-5.6-terra")?;
+        let codex_provider =
+            broker.into_production_proxy_provider_from_preflight(broker_receipt, "gpt-5.5")?;
         Self::validated(
             containment,
             runtime_manifest,
@@ -2777,10 +2777,10 @@ mod proxy_host_tests {
     #[test]
     fn official_hermes_config_bytes_are_exact_and_cross_bound() {
         let config_text = std::str::from_utf8(OFFICIAL_HERMES_CONFIG).expect("ASCII YAML");
-        assert_eq!(OFFICIAL_HERMES_CONFIG.len(), 248);
+        assert_eq!(OFFICIAL_HERMES_CONFIG.len(), 242);
         assert_eq!(
             encode_sha256(&Sha256::digest(OFFICIAL_HERMES_CONFIG)),
-            "899a208531bc431d9a4f491a588b499b9f1d742b8d6bc16b35fa3bb3d254dfaf"
+            "f99ac7ebebe6c475081c728130fc4db1b67bae914aa99e9ca4409721ead2f40c"
         );
         assert!(PRIVATE_RUNNER_SOURCE.contains(config_text));
         assert!(OUTER_RUNNER_SOURCE.contains(config_text));
