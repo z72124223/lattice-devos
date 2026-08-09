@@ -23,7 +23,7 @@ effect.
   state.
 - Run an LLM, provider, daemon, poller, database client, process, filesystem,
   network call, MCP server, or adapter.
-- Recreate TASK-038 task control, Issue #6/TASK-039 worker observation, the
+- Recreate TASK-038 task control, Issue #6/TASK-048 worker observation, the
   existing Orchestrator, or a second truth/writer/gateway.
 - Treat a process, lease, timer, diagnostic, or recommendation as task truth.
 
@@ -49,7 +49,7 @@ effect.
   authoritative task evidence, and contradictory terminal evidence.
 - Evaluate dependency readiness from exact stable branch, commit, contract
   version, and focused-verification digest references for TASK-038 and Issue
-  #6/TASK-039.
+  #6/TASK-048.
 
 ## Invariants
 
@@ -57,7 +57,7 @@ effect.
    model, clock, randomness, global state, or side effects.
 2. PostgreSQL/Task Ledger task state remains authoritative; Supervisor output
    cannot change or manufacture it.
-3. Worker/session evidence is read-only input owned by Issue #6/TASK-039 and
+3. Worker/session evidence is read-only input owned by Issue #6/TASK-048 and
    cannot be inferred from process existence or lease state.
 4. Writer Lease evidence is independent authority input and never substitutes
    for task or worker/session evidence.

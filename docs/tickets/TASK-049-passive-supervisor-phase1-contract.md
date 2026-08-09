@@ -8,7 +8,7 @@ status: blocked-upstream-contract
 parallel_safe: true
 depends_on:
   - TASK-038
-  - TASK-039
+  - TASK-048
 allowed_paths:
   - contracts/passive-supervisor-phase1/**
   - docs/modules/passive-supervisor/**
@@ -22,7 +22,7 @@ Deliver the isolated, executable contract checkpoint for GitHub Issue #2 Phase
 1. The checkpoint classifies authoritative evidence as pending, running,
 terminal, or stalled and recommends only the next passive observation. It must
 not register a production crate, compose a runtime, write PostgreSQL, dispatch
-work, supervise a process, activate a daemon, or duplicate TASK-038/TASK-039.
+work, supervise a process, activate a daemon, or duplicate TASK-038/TASK-048.
 
 ## Dependency Gate
 
@@ -32,11 +32,18 @@ stable checkpoint:
 | Dependency | Required machine evidence | Current blocker |
 |---|---|---|
 | TASK-038 / Issue #4 | stable branch, 40-hex commit, contract version, and 64-hex digest of formal `latticed` `lattice_task_submit/status` verification | `SUPERVISOR_TASK_CONTROL_CHECKPOINT_MISSING` |
-| TASK-039 / Issue #6 | stable branch, 40-hex commit, contract version, and 64-hex digest of provider-neutral worker/session verification | `SUPERVISOR_WORKER_OBSERVATION_CHECKPOINT_MISSING` |
+| TASK-048 / Issue #6 | stable branch, 40-hex commit, contract version, and 64-hex digest of provider-neutral worker/session verification | READY: `feature/task-048-worker-observation-contract` at `180a269c8af825a3989b2e26875cfa128389ba34`; `lattice-contracts@1.12/worker-observation@1`; digest `41dec097bc564de5cb6ed74db437876cf7b53c788129059b0a6bb5ec8b7e0d52` |
 
 The checked-in dependency gate must remain RED while either blocker exists.
 Passing pure classifier tests does not satisfy this gate and cannot be reported
 as product completion.
+
+The TASK-048 verification digest is SHA-256 over this exact UTF-8 record with
+no trailing newline:
+
+```text
+TASK-048|source_thread_id=019fe759-d4d6-7950-bf10-fbda7487fa9b|branch=feature/task-048-worker-observation-contract|commit=180a269c8af825a3989b2e26875cfa128389ba34|module=lattice-contracts@1.12|contract=worker-observation@1|focused=9/9|contracts-regression=72/72|fmt=PASS|strict-clippy=PASS|review=PASS
+```
 
 ## Acceptance Criteria
 
@@ -68,7 +75,7 @@ as product completion.
 
 - Deterministic dispatch, AI-assisted scheduling, automatic repair, retry,
   cancellation, lease revocation, service activation, or persistent daemon.
-- TASK-038 task-control implementation, Issue #6 worker/session observation,
+- TASK-038 task-control implementation, Issue #6/TASK-048 worker/session observation,
   root workspace membership, PostgreSQL schema/migration, MCP tools, runtime
   composition, DB/WSL/live tests, full workspace test matrix, push, merge,
   deployment, or service creation.
