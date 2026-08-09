@@ -6,6 +6,10 @@
     "canonical_id": "model-routing",
     "internal_task_041_reused": false
   },
+  "provenance": {
+    "stable_repo_commit": "8828d2b88faece6b399258744eea4ff8d46f0bea",
+    "task038_dirty_tree_authoritative": false
+  },
   "governance_invariants": [
     "One Gateway",
     "One Truth",
@@ -35,7 +39,6 @@
       "cost",
       "concurrency",
       "health",
-      "freshness",
       "lifecycle",
       "primary_standby_compatibility"
     ],
@@ -44,134 +47,869 @@
       "UNVERIFIED",
       "UNKNOWN"
     ],
-    "evidence_rule": "Every capability and operational field carries its own evidence_state, source_ref, observed_at and optional valid_until; absent or stale values remain UNKNOWN."
+    "evidence_rule": "Every capability and operational field is a typed observation carrying value_type, value, evidence_state, source_ref, observed_at and freshness; only VERIFIED plus CURRENT or PINNED evidence is admissible."
   },
   "evidence_inventory": [
     {
       "surface": "Codex App and app-server",
-      "source_refs": [
-        "official:openai:codex-app-server-model-list",
-        "runtime:codex-app-host-capability-surface-2026-08-10"
-      ],
-      "evidence_state": "VERIFIED",
-      "verified": [
-        "model catalog exposes id, supported reasoning efforts, default effort, input modalities and lifecycle hints",
-        "current host surface exposes model-specific reasoning effort bounds"
-      ],
-      "catalog_snapshot": {
-        "gpt-5.6-sol": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max",
-          "ultra"
-        ],
-        "gpt-5.6-terra": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max",
-          "ultra"
-        ],
-        "gpt-5.6-luna": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ],
-        "gpt-5.5": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "gpt-5.4": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "gpt-5.4-mini": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "gpt-5.3-codex-spark": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "unknown": [
-        "model-specific tool inventory",
-        "provider cost",
-        "provider concurrency",
-        "cross-provider standby equivalence",
-        "actual model and effort of an already-running task when its runtime surface does not report them"
-      ]
+      "observations": {
+        "task_classes": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "official:openai:codex-app-server-model-list",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "tools": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "official:openai:codex-app-server-model-list",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "input_modalities": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": [
+            "text",
+            "image"
+          ],
+          "evidence_state": "VERIFIED",
+          "source_ref": "official:openai:codex-app-server-model-list",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "output_modalities": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "official:openai:codex-app-server-model-list",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "reasoning_efforts": {
+          "kind": "capability",
+          "value_type": "catalog",
+          "value": {
+            "gpt-5.6-sol": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ],
+            "gpt-5.6-terra": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ],
+            "gpt-5.6-luna": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "gpt-5.5": [
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ],
+            "gpt-5.4": [
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ],
+            "gpt-5.4-mini": [
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ],
+            "gpt-5.3-codex-spark": [
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          },
+          "evidence_state": "VERIFIED",
+          "source_ref": "runtime:codex-app-host-capability-surface-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "context_limits": {
+          "kind": "capability",
+          "value_type": "integer_bounds",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "official:openai:codex-app-server-model-list",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "quota": {
+          "kind": "operational",
+          "value_type": "record",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "official:openai:codex-app-server-account-rate-limits",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "cost": {
+          "kind": "operational",
+          "value_type": "record",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "official:openai:codex-app-server-account-usage",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "concurrency": {
+          "kind": "operational",
+          "value_type": "integer_bounds",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "runtime:codex-app-host-capability-surface-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "health": {
+          "kind": "operational",
+          "value_type": "status",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "runtime:no-codex-provider-health-call-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "lifecycle": {
+          "kind": "operational",
+          "value_type": "record",
+          "value": {
+            "catalog_fields": [
+              "hidden",
+              "isDefault",
+              "upgrade"
+            ]
+          },
+          "evidence_state": "VERIFIED",
+          "source_ref": "official:openai:codex-app-server-model-list",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "primary_standby_compatibility": {
+          "kind": "operational",
+          "value_type": "compatibility_matrix",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "official:openai:codex-app-server-model-list",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        }
+      }
     },
     {
-      "surface": "OpenAI GPT API",
-      "source_refs": [
-        "official:openai:models-catalog",
-        "official:openai:reasoning-guide",
-        "official:openai:rate-limit-headers"
-      ],
-      "evidence_state": "VERIFIED",
-      "verified": [
-        "request can specify model and supported reasoning effort",
-        "official model pages describe supported modalities and tools",
-        "rate-limit response headers expose limit, remaining and reset observations"
-      ],
-      "unknown": [
-        "current account acceptance without a provider call",
-        "credit balance and billed cost without billing evidence",
-        "cross-model or cross-provider standby equivalence"
-      ]
+      "surface": "OpenAI GPT API current GPT-5.6 family",
+      "observations": {
+        "task_classes": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": [
+            "reasoning",
+            "coding"
+          ],
+          "evidence_state": "VERIFIED",
+          "source_ref": "official:openai:latest-model-gpt-5.6-family",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "tools": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": [
+            "Responses API tool use"
+          ],
+          "evidence_state": "VERIFIED",
+          "source_ref": "official:openai:latest-model-gpt-5.6-family",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "input_modalities": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": [
+            "text",
+            "image"
+          ],
+          "evidence_state": "VERIFIED",
+          "source_ref": "official:openai:latest-model-gpt-5.6-family",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "output_modalities": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": [
+            "text"
+          ],
+          "evidence_state": "VERIFIED",
+          "source_ref": "official:openai:latest-model-gpt-5.6-family",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "reasoning_efforts": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "evidence_state": "VERIFIED",
+          "source_ref": "official:openai:reasoning-guide",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "context_limits": {
+          "kind": "capability",
+          "value_type": "integer_bounds",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "official:openai:latest-model-gpt-5.6-family",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "quota": {
+          "kind": "operational",
+          "value_type": "record",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "official:openai:rate-limit-headers",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "cost": {
+          "kind": "operational",
+          "value_type": "record",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "official:openai:latest-model-gpt-5.6-family",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "concurrency": {
+          "kind": "operational",
+          "value_type": "integer_bounds",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "official:openai:rate-limit-headers",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "health": {
+          "kind": "operational",
+          "value_type": "status",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "runtime:no-openai-provider-call-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "lifecycle": {
+          "kind": "operational",
+          "value_type": "record",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "official:openai:latest-model-gpt-5.6-family",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "primary_standby_compatibility": {
+          "kind": "operational",
+          "value_type": "compatibility_matrix",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "official:openai:latest-model-gpt-5.6-family",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        }
+      }
     },
     {
       "surface": "Hermes API server and LATTICE adapter",
-      "source_refs": [
-        "official:nousresearch:hermes-agent-v2026.8.3-programmatic-integration",
-        "official:nousresearch:hermes-agent-v2026.8.3-configuration",
-        "official:nousresearch:hermes-agent-v2026.8.3-provider-registry",
-        "repo:crates/lattice-hermes-adapter/src/lib.rs"
-      ],
-      "evidence_state": "VERIFIED",
-      "verified": [
-        "pinned Hermes release exposes machine-readable capability and model-picker surfaces",
-        "provider registry centralizes model listing and provider-specific reasoning translation",
-        "LATTICE reflection admission verifies run, session, model, containment and token-usage shapes",
-        "the admitted reflection lane is bounded text and JSON without tool, approval or subagent events"
-      ],
-      "unknown": [
-        "image, audio and voice support in the admitted LATTICE reflection lane",
-        "provider cost",
-        "provider-wide concurrency",
-        "primary and standby model compatibility"
-      ]
+      "observations": {
+        "task_classes": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": [
+            "bounded_reflection"
+          ],
+          "evidence_state": "VERIFIED",
+          "source_ref": "repo:crates/lattice-hermes-adapter/src/lib.rs:1470@8828d2b88faece6b399258744eea4ff8d46f0bea",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "PINNED",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": null
+          }
+        },
+        "tools": {
+          "kind": "capability",
+          "value_type": "record",
+          "value": {
+            "allowed": [],
+            "rejected_event_classes": [
+              "tool",
+              "approval",
+              "subagent"
+            ]
+          },
+          "evidence_state": "VERIFIED",
+          "source_ref": "repo:crates/lattice-hermes-adapter/src/lib.rs:2207@8828d2b88faece6b399258744eea4ff8d46f0bea",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "PINNED",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": null
+          }
+        },
+        "input_modalities": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": [
+            "text"
+          ],
+          "evidence_state": "VERIFIED",
+          "source_ref": "repo:crates/lattice-hermes-adapter/src/lib.rs:1470@8828d2b88faece6b399258744eea4ff8d46f0bea",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "PINNED",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": null
+          }
+        },
+        "output_modalities": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": [
+            "text",
+            "json"
+          ],
+          "evidence_state": "VERIFIED",
+          "source_ref": "repo:crates/lattice-hermes-adapter/src/lib.rs:2225@8828d2b88faece6b399258744eea4ff8d46f0bea",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "PINNED",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": null
+          }
+        },
+        "reasoning_efforts": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": [
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "evidence_state": "VERIFIED",
+          "source_ref": "official:nousresearch:hermes-agent-v2026.8.3-configuration",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "PINNED",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": null
+          }
+        },
+        "context_limits": {
+          "kind": "capability",
+          "value_type": "integer_bounds",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "official:nousresearch:hermes-agent-v2026.8.3-configuration",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "PINNED",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": null
+          }
+        },
+        "quota": {
+          "kind": "operational",
+          "value_type": "record",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "official:nousresearch:hermes-agent-v2026.8.3-programmatic-integration",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "PINNED",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": null
+          }
+        },
+        "cost": {
+          "kind": "operational",
+          "value_type": "record",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "official:nousresearch:hermes-agent-v2026.8.3-programmatic-integration",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "PINNED",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": null
+          }
+        },
+        "concurrency": {
+          "kind": "operational",
+          "value_type": "integer_bounds",
+          "value": {
+            "scope": "adapter_instance",
+            "maximum_outstanding_runs": 1
+          },
+          "evidence_state": "VERIFIED",
+          "source_ref": "repo:crates/lattice-hermes-adapter/src/lib.rs:1270@8828d2b88faece6b399258744eea4ff8d46f0bea",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "PINNED",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": null
+          }
+        },
+        "health": {
+          "kind": "operational",
+          "value_type": "status",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "runtime:no-hermes-provider-call-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "lifecycle": {
+          "kind": "operational",
+          "value_type": "record",
+          "value": {
+            "release": "v2026.8.3",
+            "adapter_pin_commit": "bb08e0a6667c1f46c1f390025453bdc668401e12"
+          },
+          "evidence_state": "VERIFIED",
+          "source_ref": "repo:crates/lattice-hermes-adapter/src/lib.rs@8828d2b88faece6b399258744eea4ff8d46f0bea",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "PINNED",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": null
+          }
+        },
+        "primary_standby_compatibility": {
+          "kind": "operational",
+          "value_type": "compatibility_matrix",
+          "value": null,
+          "evidence_state": "UNKNOWN",
+          "source_ref": "repo:crates/lattice-hermes-adapter/src/lib.rs@8828d2b88faece6b399258744eea4ff8d46f0bea",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "PINNED",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": null
+          }
+        }
+      }
     },
     {
       "surface": "Local model providers",
-      "source_refs": [
-        "runtime:windows-command-inventory-2026-08-10",
-        "repo:full-scan-local-model-provider-names-2026-08-10"
-      ],
-      "evidence_state": "UNVERIFIED",
-      "verified": [],
-      "unknown": [
-        "installed runtime",
-        "model catalog",
-        "task, tool and modality capabilities",
-        "reasoning controls",
-        "quota, cost, concurrency and health",
-        "primary and standby compatibility"
-      ]
+      "observations": {
+        "task_classes": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "runtime:windows-command-inventory-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "tools": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "runtime:windows-command-inventory-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "input_modalities": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "runtime:windows-command-inventory-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "output_modalities": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "runtime:windows-command-inventory-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "reasoning_efforts": {
+          "kind": "capability",
+          "value_type": "string_set",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "runtime:windows-command-inventory-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "context_limits": {
+          "kind": "capability",
+          "value_type": "integer_bounds",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "runtime:windows-command-inventory-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "quota": {
+          "kind": "operational",
+          "value_type": "record",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "runtime:windows-command-inventory-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "cost": {
+          "kind": "operational",
+          "value_type": "record",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "runtime:windows-command-inventory-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "concurrency": {
+          "kind": "operational",
+          "value_type": "integer_bounds",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "runtime:windows-command-inventory-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "health": {
+          "kind": "operational",
+          "value_type": "status",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "runtime:windows-command-inventory-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "lifecycle": {
+          "kind": "operational",
+          "value_type": "record",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "repo:full-scan-local-model-provider-names-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        },
+        "primary_standby_compatibility": {
+          "kind": "operational",
+          "value_type": "compatibility_matrix",
+          "value": null,
+          "evidence_state": "UNVERIFIED",
+          "source_ref": "runtime:windows-command-inventory-2026-08-10",
+          "observed_at": "2026-08-10T02:00:00+08:00",
+          "freshness": {
+            "state": "CURRENT",
+            "checked_at": "2026-08-10T02:00:00+08:00",
+            "valid_until": "2026-08-11T02:00:00+08:00"
+          }
+        }
+      }
+    }
+  ],
+  "evidence_admission_cases": [
+    {
+      "id": "verified-current-allows",
+      "observation": {
+        "evidence_state": "VERIFIED",
+        "freshness": {
+          "state": "CURRENT",
+          "valid_until": "2026-08-11T02:00:00+08:00"
+        }
+      },
+      "expected": {
+        "disposition": "ALLOW",
+        "reason_code": "ROUTE_CAPABILITY_MATCH"
+      }
+    },
+    {
+      "id": "verified-pinned-allows",
+      "observation": {
+        "evidence_state": "VERIFIED",
+        "freshness": {
+          "state": "PINNED",
+          "valid_until": null
+        }
+      },
+      "expected": {
+        "disposition": "ALLOW",
+        "reason_code": "ROUTE_CAPABILITY_MATCH"
+      }
+    },
+    {
+      "id": "unknown-blocks",
+      "observation": {
+        "evidence_state": "UNKNOWN",
+        "freshness": {
+          "state": "CURRENT",
+          "valid_until": "2026-08-11T02:00:00+08:00"
+        }
+      },
+      "expected": {
+        "disposition": "BLOCK",
+        "reason_code": "ROUTE_CAPABILITY_EVIDENCE_MISSING"
+      }
+    },
+    {
+      "id": "unverified-blocks",
+      "observation": {
+        "evidence_state": "UNVERIFIED",
+        "freshness": {
+          "state": "CURRENT",
+          "valid_until": "2026-08-11T02:00:00+08:00"
+        }
+      },
+      "expected": {
+        "disposition": "BLOCK",
+        "reason_code": "ROUTE_CAPABILITY_EVIDENCE_MISSING"
+      }
+    },
+    {
+      "id": "stale-blocks",
+      "observation": {
+        "evidence_state": "VERIFIED",
+        "freshness": {
+          "state": "STALE",
+          "valid_until": "2026-08-09T02:00:00+08:00"
+        }
+      },
+      "expected": {
+        "disposition": "BLOCK",
+        "reason_code": "ROUTE_CAPABILITY_EVIDENCE_STALE"
+      }
+    },
+    {
+      "id": "unknown-freshness-blocks",
+      "observation": {
+        "evidence_state": "VERIFIED",
+        "freshness": {
+          "state": "UNKNOWN",
+          "valid_until": null
+        }
+      },
+      "expected": {
+        "disposition": "BLOCK",
+        "reason_code": "ROUTE_CAPABILITY_EVIDENCE_STALE"
+      }
+    },
+    {
+      "id": "current-expired-blocks",
+      "observation": {
+        "evidence_state": "VERIFIED",
+        "freshness": {
+          "state": "CURRENT",
+          "valid_until": "2026-08-09T02:00:00+08:00"
+        }
+      },
+      "expected": {
+        "disposition": "BLOCK",
+        "reason_code": "ROUTE_CAPABILITY_EVIDENCE_STALE"
+      }
+    },
+    {
+      "id": "current-missing-expiry-blocks",
+      "observation": {
+        "evidence_state": "VERIFIED",
+        "freshness": {
+          "state": "CURRENT",
+          "valid_until": null
+        }
+      },
+      "expected": {
+        "disposition": "BLOCK",
+        "reason_code": "ROUTE_CAPABILITY_EVIDENCE_STALE"
+      }
     }
   ],
   "governance_profiles": [
@@ -316,17 +1054,37 @@
         "task_classes",
         "required_tools",
         "input_modalities",
+        "output_modalities",
         "governance_profile",
+        "risk_class",
         "quality_floor",
+        "maximum_reasoning_effort",
+        "max_model_calls",
         "latency_ceiling",
         "cost_ceiling",
         "allowed_provider_scope",
-        "reproducibility_pin"
+        "reproducibility_pin",
+        "escalation_allowed",
+        "max_escalations"
+      ],
+      "immutable_boundary_fields": [
+        "governance_profile",
+        "risk_class",
+        "quality_floor",
+        "maximum_reasoning_effort",
+        "max_model_calls",
+        "latency_ceiling",
+        "cost_ceiling",
+        "allowed_provider_scope",
+        "reproducibility_pin",
+        "escalation_allowed",
+        "max_escalations"
       ],
       "rule": "User and policy constraints are immutable inputs; a model cannot broaden them."
     },
     "resolved": {
       "required_fields": [
+        "request_digest",
         "provider_id",
         "provider_surface",
         "model_id",
@@ -336,18 +1094,25 @@
         "policy_version",
         "reason_codes",
         "primary_or_standby",
+        "model_call_budget",
+        "escalation_budget",
+        "boundary_conformance",
         "resolved_at"
       ],
       "rule": "Resolution is deterministic over verified evidence; ties use declared cost and latency policy only after risk and quality floors."
     },
     "actual": {
       "required_fields": [
+        "request_digest",
+        "resolution_digest",
         "provider_id",
         "provider_surface",
         "model_id",
         "model_version",
         "reasoning_effort",
         "service_tier",
+        "model_calls",
+        "escalations",
         "usage",
         "rate_limit_snapshot",
         "run_thread_binding",
@@ -468,16 +1233,6 @@
     },
     {
       "classification": "acceptance_reproducibility_pin",
-      "source_ref": "repo:worktree:feature/task-038-chatgpt-mcp:scripts/run-task038-task-submit.ps1:1137",
-      "setting": "live TASK-038 submit acceptance model and effort; read-only inventory of a protected dirty path"
-    },
-    {
-      "classification": "acceptance_reproducibility_pin",
-      "source_ref": "repo:worktree:feature/task-038-chatgpt-mcp:crates/lattice-codex-adapter/tests/delivery_port.rs:202",
-      "setting": "live TASK-038 delivery-port acceptance fixture values; read-only inventory of a protected dirty path"
-    },
-    {
-      "classification": "acceptance_reproducibility_pin",
       "source_ref": "repo:apps/lattice-runtime/src/composition.rs:98",
       "setting": "Hermes compatibility platform and model identity; not an underlying LLM route"
     },
@@ -530,6 +1285,16 @@
       "classification": "general_route_candidate",
       "source_ref": "repo:crates/lattice-policy/src/types.rs:212",
       "setting": "closed provider kind boundary requiring an approved future contract"
+    }
+  ],
+  "pending_evidence": [
+    {
+      "scope": "TASK-038 fixed model and reasoning settings",
+      "evidence_state": "UNVERIFIED",
+      "disposition": "WAIT_TASK038_STABLE",
+      "source_ref": "runtime:task-038-dirty-worktree-observation-2026-08-10",
+      "observed_at": "2026-08-10T02:00:00+08:00",
+      "reason": "The dirty worktree has no stable blob or line address and is not authoritative evidence."
     }
   ],
   "next_red": {
