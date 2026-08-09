@@ -695,8 +695,9 @@ impl CodexReflectionBrokerConfig {
     /// and scrubbed child environment without starting Codex or a model turn.
     ///
     /// The returned receipt is only a configuration/identity prerequisite.
-    /// The production provider revalidates the complete binding immediately
-    /// before it opens the one permitted app-server relay.
+    /// The production provider is minted only after a matching bundle
+    /// revalidation and rechecks the mutable config binding immediately before
+    /// it opens the one permitted app-server relay.
     ///
     /// # Errors
     ///
@@ -779,22 +780,34 @@ impl CodexReflectionBrokerConfig {
         {
             return Err(binding_rejected());
         }
-        #[cfg(test)]
-        if !receipt.test_only {
+        let reviewed = {
+            #[cfg(test)]
+            if receipt.test_only {
+                ReviewedCodexBundle {
+                    launcher: verified.launcher.clone(),
+                    launcher_sha256: CODEX_LAUNCHER_SHA256.to_owned(),
+                    package_manifest_sha256: CODEX_PACKAGE_MANIFEST_SHA256.to_owned(),
+                }
+            } else {
+                let reviewed = verified.reverify_open()?;
+                if verified.preflight_receipt_digest(&reviewed)? != receipt.receipt_digest {
+                    return Err(binding_rejected());
+                }
+                reviewed
+            }
+
+            #[cfg(not(test))]
             let reviewed = verified.reverify_open()?;
+            #[cfg(not(test))]
             if verified.preflight_receipt_digest(&reviewed)? != receipt.receipt_digest {
                 return Err(binding_rejected());
             }
-        }
-        #[cfg(not(test))]
-        {
-            let reviewed = verified.reverify_open()?;
-            if verified.preflight_receipt_digest(&reviewed)? != receipt.receipt_digest {
-                return Err(binding_rejected());
-            }
-        }
+            #[cfg(not(test))]
+            reviewed
+        };
         Ok(Box::new(OfficialCodexProxyProvider {
             verified,
+            reviewed,
             control: Arc::new(OwnedCodexProxyControl::new(MAX_CODEX_PROXY_STDERR_BYTES)),
         }))
     }
@@ -1042,25 +1055,7 @@ impl VerifiedCodexProxyConfig {
             "component": "Hermes",
             "event": "codex_proxy_reverify_open_start",
         }));
-        let current = Self::from_config(CodexReflectionBrokerConfig {
-            broker_helper: self.broker_helper.clone(),
-            broker_helper_sha256: self.helper_sha256.clone(),
-            codex_home: self.codex_home.clone(),
-            isolation_root: self.isolation_root.clone(),
-            launcher: self.launcher.clone(),
-            model: self.model.clone(),
-            product_root: self.product_root.clone(),
-        })?;
-        emit_codex_broker_trace(json!({
-            "component": "Hermes",
-            "event": "codex_proxy_reverify_from_config_ok",
-        }));
-        if current != *self {
-            return Err(HermesAdapterError::new(
-                HermesAdapterErrorKind::Identity,
-                "HERMES_CODEX_PROXY_CONFIG_IDENTITY_REJECTED",
-            ));
-        }
+        self.reverify_config_binding()?;
         emit_codex_broker_trace(json!({
             "component": "Hermes",
             "event": "codex_proxy_reverify_config_match_ok",
@@ -1085,11 +1080,35 @@ impl VerifiedCodexProxyConfig {
         }));
         Ok(reviewed)
     }
+
+    fn reverify_config_binding(&self) -> HermesAdapterResult<()> {
+        let current = Self::from_config(CodexReflectionBrokerConfig {
+            broker_helper: self.broker_helper.clone(),
+            broker_helper_sha256: self.helper_sha256.clone(),
+            codex_home: self.codex_home.clone(),
+            isolation_root: self.isolation_root.clone(),
+            launcher: self.launcher.clone(),
+            model: self.model.clone(),
+            product_root: self.product_root.clone(),
+        })?;
+        emit_codex_broker_trace(json!({
+            "component": "Hermes",
+            "event": "codex_proxy_reverify_from_config_ok",
+        }));
+        if current != *self {
+            return Err(HermesAdapterError::new(
+                HermesAdapterErrorKind::Identity,
+                "HERMES_CODEX_PROXY_CONFIG_IDENTITY_REJECTED",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
 struct OfficialCodexProxyProvider {
     verified: VerifiedCodexProxyConfig,
+    reviewed: ReviewedCodexBundle,
     control: Arc<OwnedCodexProxyControl>,
 }
 
@@ -1114,17 +1133,21 @@ impl ProductionCodexProxyProvider for OfficialCodexProxyProvider {
         if absolute_deadline <= Instant::now() {
             return Err(timeout("HERMES_CODEX_PROXY_DEADLINE_EXCEEDED"));
         }
-        let Self { verified, control } = *self;
+        let Self {
+            verified,
+            reviewed,
+            control,
+        } = *self;
         control.ensure_open_allowed()?;
         emit_codex_broker_trace(json!({
             "component": "Hermes",
             "event": "codex_proxy_provider_open_allowed",
             "stage": "initial",
         }));
-        let reviewed = verified.reverify_open()?;
+        verified.reverify_config_binding()?;
         emit_codex_broker_trace(json!({
             "component": "Hermes",
-            "event": "codex_proxy_provider_reverify_ok",
+            "event": "codex_proxy_provider_config_reverify_ok",
         }));
         control.ensure_open_allowed()?;
         emit_codex_broker_trace(json!({
@@ -1141,7 +1164,7 @@ impl ProductionCodexProxyProvider for OfficialCodexProxyProvider {
             &plan,
             MAX_CODEX_PROXY_STDERR_BYTES,
             &control,
-            || verified.reverify_open().map(|_| ()),
+            move || verified.reverify_config_binding(),
             |_| {},
         )
     }
