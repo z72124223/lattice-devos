@@ -1,0 +1,553 @@
+{
+  "schema_version": "lattice.issue-008.model-routing.characterization.v1",
+  "observed_at": "2026-08-10T00:00:00+08:00",
+  "identity": {
+    "github_issue": 8,
+    "canonical_id": "model-routing",
+    "internal_task_041_reused": false
+  },
+  "governance_invariants": [
+    "One Gateway",
+    "One Truth",
+    "One Writer",
+    "deterministic policy precedes model judgment",
+    "models cannot extend scope or approve their own work",
+    "unknown capability evidence fails closed",
+    "requested and resolved values never substitute for actual evidence"
+  ],
+  "capability_model": {
+    "identity_fields": [
+      "provider_id",
+      "provider_surface",
+      "model_id",
+      "model_version"
+    ],
+    "capability_fields": [
+      "task_classes",
+      "tools",
+      "input_modalities",
+      "output_modalities",
+      "reasoning_efforts",
+      "context_limits"
+    ],
+    "operational_fields": [
+      "quota",
+      "cost",
+      "concurrency",
+      "health",
+      "freshness",
+      "lifecycle",
+      "primary_standby_compatibility"
+    ],
+    "evidence_states": [
+      "VERIFIED",
+      "UNVERIFIED",
+      "UNKNOWN"
+    ],
+    "evidence_rule": "Every capability and operational field carries its own evidence_state, source_ref, observed_at and optional valid_until; absent or stale values remain UNKNOWN."
+  },
+  "evidence_inventory": [
+    {
+      "surface": "Codex App and app-server",
+      "source_refs": [
+        "official:openai:codex-app-server-model-list",
+        "runtime:codex-app-host-capability-surface-2026-08-10"
+      ],
+      "evidence_state": "VERIFIED",
+      "verified": [
+        "model catalog exposes id, supported reasoning efforts, default effort, input modalities and lifecycle hints",
+        "current host surface exposes model-specific reasoning effort bounds"
+      ],
+      "catalog_snapshot": {
+        "gpt-5.6-sol": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+          "ultra"
+        ],
+        "gpt-5.6-terra": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+          "ultra"
+        ],
+        "gpt-5.6-luna": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "gpt-5.5": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "gpt-5.4": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "gpt-5.4-mini": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ],
+        "gpt-5.3-codex-spark": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "unknown": [
+        "model-specific tool inventory",
+        "provider cost",
+        "provider concurrency",
+        "cross-provider standby equivalence",
+        "actual model and effort of an already-running task when its runtime surface does not report them"
+      ]
+    },
+    {
+      "surface": "OpenAI GPT API",
+      "source_refs": [
+        "official:openai:models-catalog",
+        "official:openai:reasoning-guide",
+        "official:openai:rate-limit-headers"
+      ],
+      "evidence_state": "VERIFIED",
+      "verified": [
+        "request can specify model and supported reasoning effort",
+        "official model pages describe supported modalities and tools",
+        "rate-limit response headers expose limit, remaining and reset observations"
+      ],
+      "unknown": [
+        "current account acceptance without a provider call",
+        "credit balance and billed cost without billing evidence",
+        "cross-model or cross-provider standby equivalence"
+      ]
+    },
+    {
+      "surface": "Hermes API server and LATTICE adapter",
+      "source_refs": [
+        "official:nousresearch:hermes-agent-v2026.8.3-programmatic-integration",
+        "official:nousresearch:hermes-agent-v2026.8.3-configuration",
+        "official:nousresearch:hermes-agent-v2026.8.3-provider-registry",
+        "repo:crates/lattice-hermes-adapter/src/lib.rs"
+      ],
+      "evidence_state": "VERIFIED",
+      "verified": [
+        "pinned Hermes release exposes machine-readable capability and model-picker surfaces",
+        "provider registry centralizes model listing and provider-specific reasoning translation",
+        "LATTICE reflection admission verifies run, session, model, containment and token-usage shapes",
+        "the admitted reflection lane is bounded text and JSON without tool, approval or subagent events"
+      ],
+      "unknown": [
+        "image, audio and voice support in the admitted LATTICE reflection lane",
+        "provider cost",
+        "provider-wide concurrency",
+        "primary and standby model compatibility"
+      ]
+    },
+    {
+      "surface": "Local model providers",
+      "source_refs": [
+        "runtime:windows-command-inventory-2026-08-10",
+        "repo:full-scan-local-model-provider-names-2026-08-10"
+      ],
+      "evidence_state": "UNVERIFIED",
+      "verified": [],
+      "unknown": [
+        "installed runtime",
+        "model catalog",
+        "task, tool and modality capabilities",
+        "reasoning controls",
+        "quota, cost, concurrency and health",
+        "primary and standby compatibility"
+      ]
+    }
+  ],
+  "governance_profiles": [
+    {
+      "name": "守望",
+      "rank": 0,
+      "intent": "低風險觀察、分類、摘要與不寫入的狀態檢查",
+      "risk_floor": "R0",
+      "quality_floor": "basic",
+      "reasoning_profile": "lowest verified effort that satisfies the task",
+      "upgrade_triggers": [
+        "required evidence is missing",
+        "verification fails",
+        "scope becomes writable"
+      ],
+      "allowed_upgrade": "快速",
+      "deescalation": "future task only after evaluation evidence"
+    },
+    {
+      "name": "快速",
+      "rank": 1,
+      "intent": "邊界清楚、可逆且具聚焦驗證的單一工作切片",
+      "risk_floor": "R1",
+      "quality_floor": "bounded",
+      "reasoning_profile": "low latency within verified quality bounds",
+      "upgrade_triggers": [
+        "one focused verification failure",
+        "conflicting evidence",
+        "scope crosses one module boundary"
+      ],
+      "allowed_upgrade": "標準",
+      "deescalation": "future task only after evaluation evidence"
+    },
+    {
+      "name": "標準",
+      "rank": 2,
+      "intent": "一般開發、除錯與具明確驗收的單模組變更",
+      "risk_floor": "R2",
+      "quality_floor": "production-capable",
+      "reasoning_profile": "balanced verified effort",
+      "upgrade_triggers": [
+        "repeated focused verification failure",
+        "cross-module diagnosis is required",
+        "evidence freshness is disputed"
+      ],
+      "allowed_upgrade": "深度",
+      "deescalation": "future task only after evaluation evidence"
+    },
+    {
+      "name": "深度",
+      "rank": 3,
+      "intent": "跨模組根因分析、架構權衡與高不確定性工作",
+      "risk_floor": "R3",
+      "quality_floor": "high",
+      "reasoning_profile": "high verified effort with bounded retries",
+      "upgrade_triggers": [
+        "security or durable authority boundary is reached",
+        "independent review finds a major issue",
+        "actual runtime setting conflicts with the resolved route"
+      ],
+      "allowed_upgrade": "關鍵",
+      "deescalation": "future task only after evaluation evidence"
+    },
+    {
+      "name": "關鍵",
+      "rank": 4,
+      "intent": "安全、資料庫、租約、writer、公開契約與整合授權邊界",
+      "risk_floor": "R4",
+      "quality_floor": "critical",
+      "reasoning_profile": "highest verified level required by policy; no name-based inference",
+      "upgrade_triggers": [],
+      "allowed_upgrade": null,
+      "deescalation": "denied for the in-flight task; a later task needs fresh evaluation evidence"
+    }
+  ],
+  "routing_crosswalk": [
+    {
+      "profile": "守望",
+      "admit_when": [
+        "read-only",
+        "deterministic classification exists",
+        "no protected action"
+      ],
+      "deny_when": [
+        "write authority is required",
+        "capability evidence is missing"
+      ]
+    },
+    {
+      "profile": "快速",
+      "admit_when": [
+        "single reversible slice",
+        "focused test exists",
+        "risk is low"
+      ],
+      "deny_when": [
+        "shared public contract changes",
+        "durable writer authority is involved"
+      ]
+    },
+    {
+      "profile": "標準",
+      "admit_when": [
+        "bounded module ownership",
+        "normal code and review gates",
+        "verified capability match"
+      ],
+      "deny_when": [
+        "cross-module conflict is unresolved",
+        "actual route cannot be observed"
+      ]
+    },
+    {
+      "profile": "深度",
+      "admit_when": [
+        "cross-module reasoning is necessary",
+        "retry and cost ceilings are explicit",
+        "evidence is current"
+      ],
+      "deny_when": [
+        "critical authority is implied but not granted",
+        "independent verification is unavailable"
+      ]
+    },
+    {
+      "profile": "關鍵",
+      "admit_when": [
+        "protected boundary is explicitly authorized",
+        "strongest required capability is verified",
+        "independent review and actual-route evidence are available"
+      ],
+      "deny_when": [
+        "cost or latency pressure would lower the risk floor",
+        "actual setting mismatches the resolved route",
+        "standby compatibility is unknown"
+      ]
+    }
+  ],
+  "evidence_shape": {
+    "requested": {
+      "required_fields": [
+        "task_classes",
+        "required_tools",
+        "input_modalities",
+        "governance_profile",
+        "quality_floor",
+        "latency_ceiling",
+        "cost_ceiling",
+        "allowed_provider_scope",
+        "reproducibility_pin"
+      ],
+      "rule": "User and policy constraints are immutable inputs; a model cannot broaden them."
+    },
+    "resolved": {
+      "required_fields": [
+        "provider_id",
+        "provider_surface",
+        "model_id",
+        "model_version",
+        "reasoning_effort",
+        "capability_snapshot_ref",
+        "policy_version",
+        "reason_codes",
+        "primary_or_standby",
+        "resolved_at"
+      ],
+      "rule": "Resolution is deterministic over verified evidence; ties use declared cost and latency policy only after risk and quality floors."
+    },
+    "actual": {
+      "required_fields": [
+        "provider_id",
+        "provider_surface",
+        "model_id",
+        "model_version",
+        "reasoning_effort",
+        "service_tier",
+        "usage",
+        "rate_limit_snapshot",
+        "run_thread_binding",
+        "evidence_state",
+        "source_ref",
+        "observed_at",
+        "conformance"
+      ],
+      "rule": "Only runtime or provider evidence populates actual values. Missing fields stay UNKNOWN and never inherit requested or resolved values."
+    }
+  },
+  "reason_codes": [
+    {
+      "category": "selection",
+      "codes": [
+        "ROUTE_REPRODUCIBILITY_PIN",
+        "ROUTE_RISK_FLOOR",
+        "ROUTE_PROFILE_REQUESTED",
+        "ROUTE_CAPABILITY_MATCH",
+        "ROUTE_PRIMARY_HEALTHY",
+        "ROUTE_STANDBY_COMPATIBLE",
+        "ROUTE_COST_LATENCY_TIEBREAK"
+      ]
+    },
+    {
+      "category": "escalation",
+      "codes": [
+        "ROUTE_VERIFICATION_FAILED",
+        "ROUTE_SCOPE_EXPANDED",
+        "ROUTE_RISK_BOUNDARY_CROSSED",
+        "ROUTE_CONFLICTING_EVIDENCE",
+        "ROUTE_MAJOR_REVIEW_FINDING",
+        "ROUTE_SESSION_ABNORMAL_EXIT"
+      ]
+    },
+    {
+      "category": "block",
+      "codes": [
+        "ROUTE_CAPABILITY_EVIDENCE_MISSING",
+        "ROUTE_CAPABILITY_EVIDENCE_STALE",
+        "ROUTE_PROVIDER_UNAVAILABLE",
+        "ROUTE_NO_COMPATIBLE_STANDBY",
+        "ROUTE_BUDGET_EXHAUSTED",
+        "ROUTE_QUALITY_FLOOR_UNMET",
+        "ROUTE_ACTUAL_SETTING_MISMATCH",
+        "ROUTE_ESCALATION_LIMIT_REACHED",
+        "ROUTE_PROVIDER_SCOPE_DENIED",
+        "ROUTE_INDEPENDENT_REVIEW_REQUIRED"
+      ]
+    },
+    {
+      "category": "deescalation",
+      "codes": [
+        "ROUTE_FUTURE_TASK_EVAL_PROVEN",
+        "ROUTE_FUTURE_TASK_LOW_RISK_RETRY"
+      ]
+    }
+  ],
+  "transition_policy": {
+    "deterministic_rules_first": true,
+    "model_may_self_authorize": false,
+    "missing_capability_evidence": "BLOCK",
+    "stale_capability_evidence": "BLOCK",
+    "critical_profile_downgrade": "DENY",
+    "in_flight_deescalation": "DENY",
+    "max_same_route_retries": 1,
+    "max_automatic_escalations": 2,
+    "escalation_step": "one profile at a time unless a deterministic risk floor requires a higher profile",
+    "budget_rule": "cost and latency may break ties but cannot lower the risk or quality floor",
+    "actual_mismatch_rule": "fail closed for reproducibility pins and critical work; otherwise record mismatch and require policy disposition",
+    "deescalation_rule": "only a later task may start lower after current evaluation evidence proves the lower profile meets quality and risk floors"
+  },
+  "fixed_setting_inventory": [
+    {
+      "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo:crates/lattice-codex-adapter/src/process.rs:46",
+      "setting": "Codex product-code delivery model and low effort"
+    },
+    {
+      "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo:crates/lattice-codex-adapter/tests/process.rs:212",
+      "setting": "Codex process acceptance fixture values"
+    },
+    {
+      "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo:scripts/run-lattice-delivery.ps1:43",
+      "setting": "delivery verification model and effort"
+    },
+    {
+      "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo:scripts/run-task037-full-chain-verification.ps1:29",
+      "setting": "full-chain verification model and effort"
+    },
+    {
+      "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo:crates/lattice-hermes-adapter/src/broker.rs:58",
+      "setting": "Hermes Codex broker product, provider, model and effort lock"
+    },
+    {
+      "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo:crates/lattice-hermes-adapter/src/broker.rs:2203",
+      "setting": "thread-start actual model, provider and reasoning verification"
+    },
+    {
+      "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo:crates/lattice-hermes-adapter/src/lib.rs:1470",
+      "setting": "capability, submission, event and status binding"
+    },
+    {
+      "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo:crates/lattice-hermes-adapter/tests/reflection_api.rs:183",
+      "setting": "Hermes broker model, effort and mismatch acceptance fixtures"
+    },
+    {
+      "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo:crates/lattice-hermes-adapter/tests/hermes_sandbox_runner_fixture.py:399",
+      "setting": "Hermes platform and model acceptance fixtures"
+    },
+    {
+      "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo:worktree:feature/task-038-chatgpt-mcp:scripts/run-task038-task-submit.ps1:1137",
+      "setting": "live TASK-038 submit acceptance model and effort; read-only inventory of a protected dirty path"
+    },
+    {
+      "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo:worktree:feature/task-038-chatgpt-mcp:crates/lattice-codex-adapter/tests/delivery_port.rs:202",
+      "setting": "live TASK-038 delivery-port acceptance fixture values; read-only inventory of a protected dirty path"
+    },
+    {
+      "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo:apps/lattice-runtime/src/composition.rs:98",
+      "setting": "Hermes compatibility platform and model identity; not an underlying LLM route"
+    },
+    {
+      "classification": "temporary_implementation_constraint",
+      "source_ref": "repo:crates/lattice-hermes-adapter/src/broker.rs:679",
+      "setting": "exact broker model equality across constructors and validation"
+    },
+    {
+      "classification": "temporary_implementation_constraint",
+      "source_ref": "repo:crates/lattice-hermes-adapter/src/production.rs:46",
+      "setting": "production broker model default"
+    },
+    {
+      "classification": "temporary_implementation_constraint",
+      "source_ref": "repo:crates/lattice-hermes-adapter/src/hermes_sandbox_runner.py:85",
+      "setting": "sandbox broker model default"
+    },
+    {
+      "classification": "temporary_implementation_constraint",
+      "source_ref": "repo:crates/lattice-hermes-adapter/src/wsl_outer_runner.py:52",
+      "setting": "outer runner broker model default"
+    },
+    {
+      "classification": "temporary_implementation_constraint",
+      "source_ref": "repo:apps/lattice-runtime/src/composition.rs:100",
+      "setting": "runtime Codex broker model constant"
+    },
+    {
+      "classification": "general_route_candidate",
+      "source_ref": "official:openai:codex-app-server-model-list",
+      "setting": "dynamic model and reasoning capability catalog"
+    },
+    {
+      "classification": "general_route_candidate",
+      "source_ref": "repo:crates/lattice-hermes-adapter/src/broker.rs:664",
+      "setting": "broker configuration model injection seam"
+    },
+    {
+      "classification": "general_route_candidate",
+      "source_ref": "repo:crates/lattice-hermes-adapter/src/lib.rs:286",
+      "setting": "Hermes process and reflection job model injection seams"
+    },
+    {
+      "classification": "general_route_candidate",
+      "source_ref": "repo:crates/lattice-policy/src/types.rs:407",
+      "setting": "existing provider capability fact that needs model-routing evidence dimensions"
+    },
+    {
+      "classification": "general_route_candidate",
+      "source_ref": "repo:crates/lattice-policy/src/types.rs:212",
+      "setting": "closed provider kind boundary requiring an approved future contract"
+    }
+  ],
+  "next_red": {
+    "status": "WAITING_FOR_TASK038_CONTRACT",
+    "behavior": "A pure resolver consumes a versioned capability snapshot and a requested profile, emits resolved evidence with deterministic reason codes, and returns ROUTE_CAPABILITY_EVIDENCE_MISSING without selecting a provider when a required field is UNKNOWN.",
+    "blocked_paths": [
+      "root Cargo.toml and Cargo.lock",
+      "apps/lattice-runtime",
+      "MCP and orchestrator contracts",
+      "PostgreSQL paths",
+      "task-domain paths",
+      "writer and session contracts",
+      "TASK-038 dirty paths"
+    ],
+    "forbidden_payloads": [
+      "hidden reasoning content",
+      "complete private prompts",
+      "authentication material"
+    ]
+  }
+}
