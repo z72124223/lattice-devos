@@ -38,7 +38,8 @@ repositories.
 - [x] No code path invokes shell interpolation, automatic conflict resolution,
   reset, clean, stash, forced removal, or broad cleanup.
 - [x] A local guard is visibly non-authoritative and every operation rechecks
-  the formal authority pair and exact Git/worktree identity.
+  the complete formal Registry observation, authority pair, and exact
+  Git/worktree identity through current owner lookups.
 - [x] Existing Node workspace tests remain passing characterization evidence.
 
 ## Non-Goals
@@ -73,11 +74,17 @@ are not edited concurrently with TASK-027.
 2. Create one exact-base task worktree from the registered root and prove all
    Git invocations are argument arrays with protected configuration.
 3. Produce stable committed/staged/unstaged/untracked/ignored/delete/rename/
-   type-change/unmerged path and link/reparse evidence.
+   type-change/unmerged path and link/reparse evidence without losing layered
+   changes whose final endpoint equals the base. A physical hazard is a stable
+   terminal outcome and is never packaged as an incomplete change manifest.
 4. Return clean/conflict merge-readiness evidence without changing checkouts or
    refs and without resolving conflicts.
 5. Remove only the exact clean process-owned worktree under matching current
-   authority; stale, dirty, linked, or ambiguous state fails closed.
+   authority; stale, dirty (including ignored), linked, or ambiguous state
+   fails closed.
+6. Reject portable `.git` aliases, trailing-dot/space components, and Windows
+   reserved-device names; detect an empty physical symlink/junction without
+   traversing it, and retain any worktree containing one during cleanup.
 
 ## Verification
 

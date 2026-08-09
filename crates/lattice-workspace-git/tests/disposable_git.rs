@@ -1,5 +1,7 @@
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::fs;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,7 +16,8 @@ use lattice_project_registry::{
 };
 use lattice_workspace_git::{
     ChangeOperation, ChangeState, CommandGitExecutor, GitExecutor, GitOutput, GitRequest,
-    GitWorkspace, IntegrationOutcome, PathKind, WorkspaceAuthority, WorkspaceError,
+    GitWorkspace, IntegrationOutcome, PathKind, WorkspaceAuthority, WorkspaceAuthorityLookup,
+    WorkspaceError,
 };
 use lattice_writer_lease::test_support::{digest, observation as lease_observation};
 use lattice_writer_lease::{
@@ -93,6 +96,29 @@ fn git_fails(cwd: &Path, args: &[&str]) {
     );
 }
 
+#[cfg(unix)]
+fn create_directory_symlink(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).expect("create disposable directory symlink");
+}
+
+#[cfg(windows)]
+fn create_directory_symlink(target: &Path, link: &Path) {
+    if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+        return;
+    }
+    let output = Command::new("cmd.exe")
+        .args(["/d", "/s", "/c", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .expect("run disposable junction fixture command");
+    assert!(
+        output.status.success(),
+        "create disposable junction: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn disposable_repository(root: &Path) -> (PathBuf, String) {
     let repository = root.join("repository");
     fs::create_dir(&repository).expect("repository directory");
@@ -136,6 +162,108 @@ impl OwnerHarness {
                 .expect("lease head"),
         )
         .expect("bind owner authority")
+    }
+}
+
+impl WorkspaceAuthorityLookup for OwnerHarness {
+    fn current_repository_observation(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<RepositoryObservation, WorkspaceError> {
+        if project_id != &self.project_id {
+            return Err(WorkspaceError::ProjectObservationMismatch);
+        }
+        Ok(self.registry_observation.clone())
+    }
+
+    fn current_project_head(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<lattice_contracts::ProjectAuthorityHead, WorkspaceError> {
+        if project_id != &self.project_id {
+            return Err(WorkspaceError::ProjectHeadMismatch);
+        }
+        Ok(self.registry_head.clone())
+    }
+
+    fn current_writer_lease_head(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<lattice_contracts::WriterLeaseAuthorityHead, WorkspaceError> {
+        self.lease_owner
+            .current_head(project_id)
+            .ok_or(WorkspaceError::LeaseHeadMismatch)
+    }
+}
+
+struct CurrentAuthority {
+    authority: WorkspaceAuthority,
+    owners: OwnerHarness,
+}
+
+struct ExpiringLookup<'a> {
+    owners: &'a OwnerHarness,
+    observation_calls: Cell<u8>,
+    allowed_observation_calls: u8,
+}
+
+impl WorkspaceAuthorityLookup for ExpiringLookup<'_> {
+    fn current_repository_observation(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<RepositoryObservation, WorkspaceError> {
+        let calls = self.observation_calls.get();
+        self.observation_calls.set(calls + 1);
+        if calls < self.allowed_observation_calls {
+            self.owners.current_repository_observation(project_id)
+        } else {
+            Err(WorkspaceError::ProjectObservationMismatch)
+        }
+    }
+
+    fn current_project_head(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<lattice_contracts::ProjectAuthorityHead, WorkspaceError> {
+        self.owners.current_project_head(project_id)
+    }
+
+    fn current_writer_lease_head(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<lattice_contracts::WriterLeaseAuthorityHead, WorkspaceError> {
+        self.owners.current_writer_lease_head(project_id)
+    }
+}
+
+impl Deref for CurrentAuthority {
+    type Target = WorkspaceAuthority;
+
+    fn deref(&self) -> &Self::Target {
+        &self.authority
+    }
+}
+
+impl WorkspaceAuthorityLookup for CurrentAuthority {
+    fn current_repository_observation(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<RepositoryObservation, WorkspaceError> {
+        self.owners.current_repository_observation(project_id)
+    }
+
+    fn current_project_head(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<lattice_contracts::ProjectAuthorityHead, WorkspaceError> {
+        self.owners.current_project_head(project_id)
+    }
+
+    fn current_writer_lease_head(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<lattice_contracts::WriterLeaseAuthorityHead, WorkspaceError> {
+        self.owners.current_writer_lease_head(project_id)
     }
 }
 
@@ -200,8 +328,10 @@ fn owner_harness(repository: &Path) -> OwnerHarness {
     }
 }
 
-fn owner_authority(repository: &Path) -> WorkspaceAuthority {
-    owner_harness(repository).authority()
+fn owner_authority(repository: &Path) -> CurrentAuthority {
+    let owners = owner_harness(repository);
+    let authority = owners.authority();
+    CurrentAuthority { authority, owners }
 }
 
 #[test]
@@ -215,7 +345,7 @@ fn creates_exact_base_worktree_only_under_owned_root() {
         GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
 
     let owned = workspace
-        .create_worktree(&authority, &base)
+        .create_worktree(&authority, &authority, &base)
         .expect("create exact worktree");
 
     assert!(owned.path().starts_with(&workspace_root));
@@ -239,7 +369,7 @@ fn every_git_process_uses_protected_argument_arrays() {
     let workspace = GitWorkspace::new(&workspace_root, executor).expect("workspace boundary");
 
     workspace
-        .create_worktree(&authority, &base)
+        .create_worktree(&authority, &authority, &base)
         .expect("create exact worktree");
 
     let requests = requests.lock().expect("recorded requests");
@@ -268,6 +398,47 @@ fn every_git_process_uses_protected_argument_arrays() {
 }
 
 #[test]
+fn authority_is_rechecked_immediately_before_worktree_creation() {
+    let fixture = TempRoot::new();
+    let (repository, base) = disposable_repository(fixture.path());
+    let owners = owner_harness(&repository);
+    let authority = owners.authority();
+    let lookup = ExpiringLookup {
+        owners: &owners,
+        observation_calls: Cell::new(0),
+        allowed_observation_calls: 1,
+    };
+    let workspace_root = fixture.path().join("worktrees");
+    fs::create_dir(&workspace_root).expect("workspace root");
+    let executor = RecordingExecutor::default();
+    let requests = Arc::clone(&executor.requests);
+    let workspace = GitWorkspace::new(&workspace_root, executor).expect("workspace boundary");
+
+    let error = workspace
+        .create_worktree(&authority, &lookup, &base)
+        .expect_err("authority that expires during preflight must stop creation");
+
+    assert_eq!(error, WorkspaceError::ProjectObservationMismatch);
+    assert!(
+        requests
+            .lock()
+            .expect("recorded requests")
+            .iter()
+            .all(|request| !request.windows(2).any(|args| args == ["worktree", "add"]))
+    );
+    assert!(
+        fs::read_dir(workspace_root.join(".lattice-guards"))
+            .expect("guard root")
+            .next()
+            .is_none(),
+        "the exact pre-effect guard must be reclaimed"
+    );
+    workspace
+        .create_worktree(&authority, &owners, &base)
+        .expect("current authority can retry after exact guard reclamation");
+}
+
+#[test]
 fn unsafe_local_git_configuration_fails_before_worktree_creation() {
     let fixture = TempRoot::new();
     let (repository, base) = disposable_repository(fixture.path());
@@ -282,7 +453,7 @@ fn unsafe_local_git_configuration_fails_before_worktree_creation() {
         GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
 
     let error = workspace
-        .create_worktree(&authority, &base)
+        .create_worktree(&authority, &authority, &base)
         .expect_err("external filter must fail closed");
 
     assert_eq!(error, WorkspaceError::UnsafeGitConfiguration);
@@ -291,6 +462,76 @@ fn unsafe_local_git_configuration_fails_before_worktree_creation() {
             .expect("guard directory")
             .count(),
         0
+    );
+}
+
+#[test]
+fn preexisting_or_tampered_execution_sandbox_fails_before_git_effects() {
+    let fixture = TempRoot::new();
+    let preexisting_hooks_root = fixture.path().join("preexisting-hooks-worktrees");
+    fs::create_dir(&preexisting_hooks_root).expect("preexisting hooks workspace root");
+    fs::create_dir(preexisting_hooks_root.join(".lattice-hooks-empty"))
+        .expect("attacker-controlled empty hooks root");
+    assert_eq!(
+        GitWorkspace::new(&preexisting_hooks_root, CommandGitExecutor)
+            .expect_err("must reject preexisting hooks root"),
+        WorkspaceError::WorkspaceRootUnsafe
+    );
+
+    let preexisting_root = fixture.path().join("preexisting-worktrees");
+    fs::create_dir(&preexisting_root).expect("preexisting workspace root");
+    fs::write(
+        preexisting_root.join(".lattice-empty-gitconfig"),
+        "[filter \"danger\"]\nsmudge = dangerous-program\n",
+    )
+    .expect("malicious preexisting global config");
+    assert_eq!(
+        GitWorkspace::new(&preexisting_root, CommandGitExecutor).expect_err("must reject config"),
+        WorkspaceError::WorkspaceRootUnsafe
+    );
+
+    let (repository, base) = disposable_repository(fixture.path());
+    let authority = owner_authority(&repository);
+    let workspace_root = fixture.path().join("worktrees");
+    fs::create_dir(&workspace_root).expect("workspace root");
+    let workspace =
+        GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
+    fs::write(
+        workspace_root.join(".lattice-empty-gitconfig"),
+        "[include]\npath = missing-config\n",
+    )
+    .expect("tamper empty config");
+
+    assert_eq!(
+        workspace
+            .create_worktree(&authority, &authority, &base)
+            .expect_err("tampered config must fail before Git"),
+        WorkspaceError::WorkspaceRootUnsafe
+    );
+}
+
+#[test]
+fn tampered_empty_hooks_directory_fails_before_git_effects() {
+    let fixture = TempRoot::new();
+    let (repository, base) = disposable_repository(fixture.path());
+    let authority = owner_authority(&repository);
+    let workspace_root = fixture.path().join("worktrees");
+    fs::create_dir(&workspace_root).expect("workspace root");
+    let workspace =
+        GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
+    fs::write(
+        workspace_root
+            .join(".lattice-hooks-empty")
+            .join("post-checkout"),
+        "must not execute",
+    )
+    .expect("tamper hooks directory");
+
+    assert_eq!(
+        workspace
+            .create_worktree(&authority, &authority, &base)
+            .expect_err("tampered hooks must fail before Git"),
+        WorkspaceError::WorkspaceRootUnsafe
     );
 }
 
@@ -304,7 +545,7 @@ fn reports_stable_complete_change_evidence_including_ignored_and_rename() {
     let workspace =
         GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
     let owned = workspace
-        .create_worktree(&authority, &base)
+        .create_worktree(&authority, &authority, &base)
         .expect("create exact worktree");
 
     fs::write(owned.path().join("tracked.txt"), "base\nunstaged\n").expect("unstaged modification");
@@ -317,10 +558,10 @@ fn reports_stable_complete_change_evidence_including_ignored_and_rename() {
     fs::write(owned.path().join("hidden.ignored"), "ignored\n").expect("ignored fixture");
 
     let first = workspace
-        .changed_manifest(&authority, &owned)
+        .changed_manifest(&authority, &authority, &owned)
         .expect("changed-path manifest");
     let second = workspace
-        .changed_manifest(&authority, &owned)
+        .changed_manifest(&authority, &authority, &owned)
         .expect("stable repeat manifest");
 
     assert_eq!(first, second);
@@ -359,15 +600,22 @@ fn reports_stable_complete_change_evidence_including_ignored_and_rename() {
     assert_eq!(deleted.source_kind(), Some(PathKind::Regular));
     assert_eq!(deleted.states(), &[ChangeState::Unstaged]);
 
-    let staged = changes
+    let staged_create = changes
         .iter()
-        .find(|change| change.destination_path() == Some("staged.txt"))
-        .expect("mixed staged evidence");
-    assert_eq!(staged.operation(), ChangeOperation::Create);
-    assert_eq!(
-        staged.states(),
-        &[ChangeState::Staged, ChangeState::Unstaged]
-    );
+        .find(|change| {
+            change.destination_path() == Some("staged.txt")
+                && change.operation() == ChangeOperation::Create
+        })
+        .expect("staged create evidence");
+    assert_eq!(staged_create.states(), &[ChangeState::Staged]);
+    let unstaged_modify = changes
+        .iter()
+        .find(|change| {
+            change.destination_path() == Some("staged.txt")
+                && change.operation() == ChangeOperation::Modify
+        })
+        .expect("unstaged modification evidence");
+    assert_eq!(unstaged_modify.states(), &[ChangeState::Unstaged]);
 
     let untracked = changes
         .iter()
@@ -392,7 +640,7 @@ fn changed_manifest_preserves_git_symlink_kind_without_following_it() {
     let workspace =
         GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
     let owned = workspace
-        .create_worktree(&authority, &base)
+        .create_worktree(&authority, &authority, &base)
         .expect("feature worktree");
     fs::write(owned.path().join("link.txt"), "tracked.txt").expect("link payload");
     let object = git(owned.path(), &["hash-object", "-w", "link.txt"]);
@@ -407,7 +655,7 @@ fn changed_manifest_preserves_git_symlink_kind_without_following_it() {
     );
 
     let manifest = workspace
-        .changed_manifest(&authority, &owned)
+        .changed_manifest(&authority, &authority, &owned)
         .expect("symlink-mode evidence");
     let link = manifest
         .changes()
@@ -420,6 +668,43 @@ fn changed_manifest_preserves_git_symlink_kind_without_following_it() {
 }
 
 #[test]
+fn changed_manifest_detects_an_empty_physical_link_without_following_it() {
+    let fixture = TempRoot::new();
+    let (repository, base) = disposable_repository(fixture.path());
+    let authority = owner_authority(&repository);
+    let workspace_root = fixture.path().join("worktrees");
+    fs::create_dir(&workspace_root).expect("workspace root");
+    let workspace =
+        GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
+    let owned = workspace
+        .create_worktree(&authority, &authority, &base)
+        .expect("feature worktree");
+    let outside = fixture.path().join("outside");
+    fs::create_dir(&outside).expect("outside target");
+    fs::write(outside.join("must-not-be-followed.txt"), "outside\n").expect("outside fixture");
+    let link = owned.path().join("empty-link");
+    create_directory_symlink(&outside, &link);
+    fs::write(owned.path().join("forbidden.txt"), "must not be hidden\n")
+        .expect("concurrent regular change");
+
+    let error = workspace
+        .changed_manifest(&authority, &authority, &owned)
+        .expect_err("physical link must stop complete-manifest production");
+    let WorkspaceError::PhysicalPathHazard { evidence } = error else {
+        panic!("unexpected physical-link error: {error:?}");
+    };
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].path(), "empty-link");
+    assert!(matches!(
+        evidence[0].kind(),
+        PathKind::Symlink | PathKind::ReparsePoint
+    ));
+    assert!(outside.join("must-not-be-followed.txt").exists());
+
+    fs::remove_dir(link).expect("remove disposable link without following it");
+}
+
+#[test]
 fn changed_manifest_reports_type_change_evidence() {
     let fixture = TempRoot::new();
     let (repository, base) = disposable_repository(fixture.path());
@@ -429,7 +714,7 @@ fn changed_manifest_reports_type_change_evidence() {
     let workspace =
         GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
     let owned = workspace
-        .create_worktree(&authority, &base)
+        .create_worktree(&authority, &authority, &base)
         .expect("feature worktree");
 
     let tracked_object = git(owned.path(), &["hash-object", "-w", "tracked.txt"]);
@@ -442,7 +727,7 @@ fn changed_manifest_reports_type_change_evidence() {
         ],
     );
     let type_manifest = workspace
-        .changed_manifest(&authority, &owned)
+        .changed_manifest(&authority, &authority, &owned)
         .expect("type-change evidence");
     let type_change = type_manifest
         .changes()
@@ -464,7 +749,7 @@ fn changed_manifest_reports_unmerged_evidence() {
     let workspace =
         GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
     let owned = workspace
-        .create_worktree(&authority, &base)
+        .create_worktree(&authority, &authority, &base)
         .expect("feature worktree");
     fs::write(owned.path().join("shared.txt"), "feature\n").expect("feature conflict");
     git(owned.path(), &["add", "shared.txt"]);
@@ -476,7 +761,7 @@ fn changed_manifest_reports_unmerged_evidence() {
     git_fails(owned.path(), &["merge", "--no-edit", &target]);
 
     let conflict_manifest = workspace
-        .changed_manifest(&authority, &owned)
+        .changed_manifest(&authority, &authority, &owned)
         .expect("unmerged evidence");
     let unmerged = conflict_manifest
         .changes()
@@ -484,6 +769,39 @@ fn changed_manifest_reports_unmerged_evidence() {
         .find(|change| change.destination_path() == Some("shared.txt"))
         .expect("unmerged path");
     assert_eq!(unmerged.operation(), ChangeOperation::Unmerged);
+}
+
+#[test]
+fn layered_changes_remain_visible_when_the_worktree_returns_to_base_endpoint() {
+    let fixture = TempRoot::new();
+    let (repository, base) = disposable_repository(fixture.path());
+    let authority = owner_authority(&repository);
+    let workspace_root = fixture.path().join("worktrees");
+    fs::create_dir(&workspace_root).expect("workspace root");
+    let workspace =
+        GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
+    let owned = workspace
+        .create_worktree(&authority, &authority, &base)
+        .expect("feature worktree");
+    fs::write(owned.path().join("forbidden.txt"), "committed\n").expect("committed layer");
+    git(owned.path(), &["add", "forbidden.txt"]);
+    git(owned.path(), &["commit", "-m", "add forbidden path"]);
+    fs::remove_file(owned.path().join("forbidden.txt")).expect("return endpoint to base");
+
+    let manifest = workspace
+        .changed_manifest(&authority, &authority, &owned)
+        .expect("layer-complete evidence");
+
+    assert!(manifest.changes().iter().any(|change| {
+        change.operation() == ChangeOperation::Create
+            && change.destination_path() == Some("forbidden.txt")
+            && change.states() == [ChangeState::Committed]
+    }));
+    assert!(manifest.changes().iter().any(|change| {
+        change.operation() == ChangeOperation::Delete
+            && change.source_path() == Some("forbidden.txt")
+            && change.states() == [ChangeState::Unstaged]
+    }));
 }
 
 #[test]
@@ -496,7 +814,7 @@ fn merge_readiness_reports_conflict_without_changing_checkout_or_refs() {
     let workspace =
         GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
     let mut owned = workspace
-        .create_worktree(&authority, &base)
+        .create_worktree(&authority, &authority, &base)
         .expect("feature worktree");
 
     fs::write(owned.path().join("shared.txt"), "feature\n").expect("feature conflict");
@@ -514,7 +832,7 @@ fn merge_readiness_reports_conflict_without_changing_checkout_or_refs() {
     );
 
     let readiness = workspace
-        .analyze_integration(&authority, &target, &feature)
+        .analyze_integration(&authority, &authority, &target, &feature)
         .expect("conflict is evidence, not an execution error");
 
     assert_eq!(readiness.outcome(), IntegrationOutcome::Conflict);
@@ -530,9 +848,42 @@ fn merge_readiness_reports_conflict_without_changing_checkout_or_refs() {
     );
 
     workspace
-        .remove_owned_worktree(&authority, &mut owned)
+        .remove_owned_worktree(&authority, &authority, &mut owned)
         .expect("remove exact clean feature worktree");
     assert!(!owned.path().exists());
+}
+
+#[test]
+fn post_merge_tree_authority_failure_requires_reconciliation() {
+    let fixture = TempRoot::new();
+    let (repository, base) = disposable_repository(fixture.path());
+    let owners = owner_harness(&repository);
+    let authority = owners.authority();
+    let lookup = ExpiringLookup {
+        owners: &owners,
+        observation_calls: Cell::new(0),
+        allowed_observation_calls: 2,
+    };
+    let workspace_root = fixture.path().join("worktrees");
+    fs::create_dir(&workspace_root).expect("workspace root");
+    let executor = RecordingExecutor::default();
+    let requests = Arc::clone(&executor.requests);
+    let workspace = GitWorkspace::new(&workspace_root, executor).expect("workspace boundary");
+
+    let error = workspace
+        .analyze_integration(&authority, &lookup, &base, &base)
+        .expect_err("post-effect authority failure must require reconciliation");
+
+    assert_eq!(error, WorkspaceError::ReconciliationRequired);
+    assert!(
+        requests
+            .lock()
+            .expect("recorded requests")
+            .iter()
+            .any(|request| request
+                .windows(2)
+                .any(|args| args == ["merge-tree", "--write-tree"]))
+    );
 }
 
 #[test]
@@ -545,7 +896,7 @@ fn merge_readiness_reports_stable_clean_evidence_without_updating_refs() {
     let workspace =
         GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
     let mut owned = workspace
-        .create_worktree(&authority, &base)
+        .create_worktree(&authority, &authority, &base)
         .expect("feature worktree");
     fs::write(owned.path().join("feature.txt"), "feature\n").expect("feature file");
     git(owned.path(), &["add", "feature.txt"]);
@@ -557,10 +908,10 @@ fn merge_readiness_reports_stable_clean_evidence_without_updating_refs() {
     );
 
     let first = workspace
-        .analyze_integration(&authority, &base, &feature)
+        .analyze_integration(&authority, &authority, &base, &feature)
         .expect("clean readiness");
     let second = workspace
-        .analyze_integration(&authority, &base, &feature)
+        .analyze_integration(&authority, &authority, &base, &feature)
         .expect("stable clean readiness");
 
     assert_eq!(first, second);
@@ -577,7 +928,7 @@ fn merge_readiness_reports_stable_clean_evidence_without_updating_refs() {
     );
 
     workspace
-        .remove_owned_worktree(&authority, &mut owned)
+        .remove_owned_worktree(&authority, &authority, &mut owned)
         .expect("remove exact clean feature worktree");
 }
 
@@ -591,15 +942,99 @@ fn dirty_owned_worktree_is_never_removed() {
     let workspace =
         GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
     let mut owned = workspace
-        .create_worktree(&authority, &base)
+        .create_worktree(&authority, &authority, &base)
         .expect("feature worktree");
     fs::write(owned.path().join("tracked.txt"), "dirty\n").expect("dirty fixture");
 
     let error = workspace
-        .remove_owned_worktree(&authority, &mut owned)
+        .remove_owned_worktree(&authority, &authority, &mut owned)
         .expect_err("dirty worktree must remain");
 
     assert_eq!(error, WorkspaceError::WorktreeDirty);
+    assert!(owned.path().exists());
+}
+
+#[test]
+fn ignored_files_are_dirty_and_are_never_removed() {
+    let fixture = TempRoot::new();
+    let (repository, base) = disposable_repository(fixture.path());
+    let authority = owner_authority(&repository);
+    let workspace_root = fixture.path().join("worktrees");
+    fs::create_dir(&workspace_root).expect("workspace root");
+    let workspace =
+        GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
+    let mut owned = workspace
+        .create_worktree(&authority, &authority, &base)
+        .expect("feature worktree");
+    fs::write(owned.path().join("valuable.ignored"), "retain me\n").expect("ignored user output");
+
+    let error = workspace
+        .remove_owned_worktree(&authority, &authority, &mut owned)
+        .expect_err("ignored output must remain");
+
+    assert_eq!(error, WorkspaceError::WorktreeDirty);
+    assert!(owned.path().join("valuable.ignored").exists());
+}
+
+#[test]
+fn physical_links_are_never_removed_or_followed_during_cleanup() {
+    let fixture = TempRoot::new();
+    let (repository, base) = disposable_repository(fixture.path());
+    let authority = owner_authority(&repository);
+    let workspace_root = fixture.path().join("worktrees");
+    fs::create_dir(&workspace_root).expect("workspace root");
+    let workspace =
+        GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
+    let mut owned = workspace
+        .create_worktree(&authority, &authority, &base)
+        .expect("feature worktree");
+    let outside = fixture.path().join("cleanup-outside");
+    fs::create_dir(&outside).expect("outside target");
+    let sentinel = outside.join("retain.txt");
+    fs::write(&sentinel, "retain\n").expect("outside sentinel");
+    let link = owned.path().join("cleanup-link");
+    create_directory_symlink(&outside, &link);
+
+    let error = workspace
+        .remove_owned_worktree(&authority, &authority, &mut owned)
+        .expect_err("physical link must retain the complete worktree");
+
+    let WorkspaceError::PhysicalPathHazard { evidence } = error else {
+        panic!("unexpected cleanup error: {error:?}");
+    };
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].path(), "cleanup-link");
+    assert!(owned.path().exists());
+    assert!(link.exists());
+    assert!(sentinel.exists());
+
+    fs::remove_dir(link).expect("remove disposable link without following it");
+}
+
+#[test]
+fn authority_is_rechecked_immediately_before_worktree_removal() {
+    let fixture = TempRoot::new();
+    let (repository, base) = disposable_repository(fixture.path());
+    let owners = owner_harness(&repository);
+    let authority = owners.authority();
+    let workspace_root = fixture.path().join("worktrees");
+    fs::create_dir(&workspace_root).expect("workspace root");
+    let workspace =
+        GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
+    let mut owned = workspace
+        .create_worktree(&authority, &owners, &base)
+        .expect("feature worktree");
+    let lookup = ExpiringLookup {
+        owners: &owners,
+        observation_calls: Cell::new(0),
+        allowed_observation_calls: 1,
+    };
+
+    let error = workspace
+        .remove_owned_worktree(&authority, &lookup, &mut owned)
+        .expect_err("authority that expires during preflight must retain the worktree");
+
+    assert_eq!(error, WorkspaceError::ProjectObservationMismatch);
     assert!(owned.path().exists());
 }
 
@@ -614,7 +1049,7 @@ fn newer_formal_lease_head_invalidates_the_owned_worktree_handle() {
     let workspace =
         GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
     let owned = workspace
-        .create_worktree(&initial_authority, &base)
+        .create_worktree(&initial_authority, &owners, &base)
         .expect("feature worktree");
     let current_head = owners
         .lease_owner
@@ -630,11 +1065,38 @@ fn newer_formal_lease_head_invalidates_the_owned_worktree_handle() {
             expires_at: "2026-08-09T00:15:00Z".to_owned(),
         }))
         .expect("advance formal lease head");
-    let newer_authority = owners.authority();
+    let error = workspace
+        .changed_manifest(&initial_authority, &owners, &owned)
+        .expect_err("old authority itself must not cross an owner-head change");
+
+    assert_eq!(error, WorkspaceError::LeaseHeadMismatch);
+}
+
+#[test]
+fn current_physical_registry_observation_must_match_every_git_operation() {
+    let fixture = TempRoot::new();
+    let (repository, base) = disposable_repository(fixture.path());
+    let mut owners = owner_harness(&repository);
+    let authority = owners.authority();
+    let workspace_root = fixture.path().join("worktrees");
+    fs::create_dir(&workspace_root).expect("workspace root");
+    let workspace =
+        GitWorkspace::new(&workspace_root, CommandGitExecutor).expect("workspace boundary");
+    let owned = workspace
+        .create_worktree(&authority, &owners, &base)
+        .expect("feature worktree");
+    owners.registry_observation = RepositoryObservation::new(
+        repository.to_str().expect("utf8 fixture path"),
+        digest('e'),
+        digest('f'),
+        digest('7'),
+        GitRefIdentity::new("refs/heads/main", digest('8')).expect("changed physical ref"),
+    )
+    .expect("changed inspector observation");
 
     let error = workspace
-        .changed_manifest(&newer_authority, &owned)
-        .expect_err("old process handle must not cross an authority-head change");
+        .changed_manifest(&authority, &owners, &owned)
+        .expect_err("physical observation drift must fail before Git");
 
-    assert_eq!(error, WorkspaceError::WorktreeIdentityMismatch);
+    assert_eq!(error, WorkspaceError::ProjectObservationMismatch);
 }

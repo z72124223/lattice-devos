@@ -4,7 +4,7 @@ name: Workspace and Git
 version: 2.0
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-10
 ---
 
 ## Mission
@@ -35,13 +35,17 @@ control-plane truth, and the repository owns product code.
 
 ## Public Contracts
 
-- Bind an accepted `RepositoryObservation` and current Project Registry
-  receipt/head to an exact current Writer Lease receipt/head.
+- Bind a complete accepted `RepositoryObservation` and current Project Registry
+  receipt/head to an exact current Writer Lease receipt/head. Every public Git
+  operation also consumes a fresh formal owner lookup of that observation and
+  both heads; a cached caller assertion is not authority.
 - Create one task worktree at an exact commit using only the registered root,
   the lease-bound worktree identity, and argument-array Git execution.
 - Return stable normalized changed-path evidence for committed, staged,
   unstaged, untracked, ignored, delete, rename, type-change, and unmerged
-  states, including physical path-kind evidence.
+  states without collapsing intermediate layers. A pre-enumeration no-follow
+  scan returns stable `PhysicalPathHazard` evidence for empty link/junction
+  nodes Git may omit and refuses to label any partial set a complete manifest.
 - Analyze a target/feature pair and return clean/conflict evidence without
   changing a checkout or resolving a conflict.
 - Remove only an exact clean worktree represented by the current process-local
@@ -52,7 +56,9 @@ control-plane truth, and the repository owns product code.
 1. No worktree creation, inspection, integration analysis, or removal proceeds
    unless both independent owner heads exactly match their receipts, Registry
    lifecycle is `ACTIVE`, Writer Lease status/admission are `ACTIVE`, and all
-   project/snapshot/worktree/fencing bindings agree.
+   project/snapshot/worktree/fencing bindings agree. The complete owner-made
+   physical repository observation and both current heads are re-queried to
+   bracket each public operation and immediately around worktree effects.
 2. Every Git child is invoked through an executable plus argument array; shell
    command strings are absent.
 3. Worktrees remain outside the registered checkout and inside one canonical,
@@ -61,12 +67,18 @@ control-plane truth, and the repository owns product code.
    token, and cannot replace or outlive owner currentness checks.
 5. Hooks, fsmonitor, inherited Git configuration injection, includes, and
    external filter/merge/diff drivers fail closed before a product worktree
-   effect.
+   effect. The empty configuration file and empty hooks directory must be
+   created exclusively by this process and are revalidated before every Git
+   child.
 6. Conflicts are evidence only; the module never chooses ours/theirs or edits
    a product file to resolve them.
 7. Cleanup never uses force, reset, clean, stash, broad recursion, or an
-   unverified path. Dirty, ambiguous, stale, or mismatched state requires
-   reconciliation.
+   unverified path. Tracked, untracked, and ignored content all count as dirty;
+   any physical link/reparse/unknown node retains the complete worktree;
+   ambiguous, stale, or mismatched state requires reconciliation.
+8. Repository-relative evidence rejects traversal, `.git` aliases, trailing
+   dot/space components, Windows reserved device names, and all other
+   non-portable escape forms on every host.
 
 ## Allowed Dependencies
 

@@ -48,10 +48,25 @@ fn normalized_contract_sorts_changes_and_hashes_stably() {
 
 #[test]
 fn normalized_contract_rejects_escape_and_invalid_rename_shape() {
-    assert_eq!(
-        PathEvidence::new("../escape.rs", PathKind::Regular),
-        Err(WorkspaceError::InvalidChangeEvidence)
-    );
+    for unsafe_path in [
+        "../escape.rs",
+        ".git./config",
+        ".git /config",
+        "src/name./file",
+        "src/name /file",
+        "NUL",
+        "src/CON.txt",
+        "src/COM1.rs",
+        "src/LPT9",
+        "src/COM¹.txt",
+        "src/CONIN$",
+    ] {
+        assert_eq!(
+            PathEvidence::new(unsafe_path, PathKind::Regular),
+            Err(WorkspaceError::InvalidChangeEvidence),
+            "unsafe alias {unsafe_path:?}"
+        );
+    }
     let same = PathEvidence::new("src/same.rs", PathKind::Regular).expect("same path");
     assert_eq!(
         ChangeRecord::new(

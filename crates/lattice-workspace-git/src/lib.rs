@@ -1,11 +1,11 @@
 //! Workspace Git 2.0 consumes formal owner authority before Git effects.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -66,6 +66,11 @@ pub enum WorkspaceError {
     WorktreeIdentityMismatch,
     /// A LATTICE-owned worktree has tracked or untracked changes and is retained.
     WorktreeDirty,
+    /// A no-follow scan found linked, reparse-point, or unknown physical nodes.
+    PhysicalPathHazard {
+        /// Stable sorted node evidence; descendants are never traversed.
+        evidence: Vec<PathEvidence>,
+    },
     /// Git returned malformed or unsafe repository-relative change evidence.
     InvalidChangeEvidence,
     /// Canonical evidence hashing failed.
@@ -96,6 +101,7 @@ impl WorkspaceError {
             Self::ReconciliationRequired => "WORKSPACE_RECONCILIATION_REQUIRED",
             Self::WorktreeIdentityMismatch => "WORKSPACE_WORKTREE_IDENTITY_MISMATCH",
             Self::WorktreeDirty => "WORKSPACE_WORKTREE_DIRTY",
+            Self::PhysicalPathHazard { .. } => "WORKSPACE_PHYSICAL_PATH_HAZARD",
             Self::InvalidChangeEvidence => "WORKSPACE_INVALID_CHANGE_EVIDENCE",
             Self::EvidenceHashFailed => "WORKSPACE_EVIDENCE_HASH_FAILED",
         }
@@ -113,9 +119,48 @@ impl Error for WorkspaceError {}
 /// Exact Registry and Writer Lease capability required before Git effects.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceAuthority {
-    repository_root: String,
+    repository_observation: RepositoryObservation,
     project_receipt: ProjectAuthorityReceipt,
     lease_receipt: WriterLeaseAuthorityReceipt,
+}
+
+/// Formal current-owner lookup boundary consumed immediately before Git work.
+///
+/// Implementations must query the Project Registry/inspection boundary and
+/// Writer Lease owner; cached caller assertions are not authority.
+pub trait WorkspaceAuthorityLookup {
+    /// Returns the current owner-produced physical repository observation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an owner-specific lookup error when no current observation can
+    /// be established for the exact project.
+    fn current_repository_observation(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<RepositoryObservation, WorkspaceError>;
+
+    /// Returns the current independently queried Project Registry head.
+    ///
+    /// # Errors
+    ///
+    /// Returns an owner-specific lookup error when no current Registry head
+    /// can be established for the exact project.
+    fn current_project_head(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<ProjectAuthorityHead, WorkspaceError>;
+
+    /// Returns the current independently queried Writer Lease head.
+    ///
+    /// # Errors
+    ///
+    /// Returns an owner-specific lookup error when no current lease head can
+    /// be established for the exact project.
+    fn current_writer_lease_head(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<WriterLeaseAuthorityHead, WorkspaceError>;
 }
 
 impl WorkspaceAuthority {
@@ -160,10 +205,33 @@ impl WorkspaceAuthority {
             return Err(WorkspaceError::AuthorityBindingMismatch);
         }
         Ok(Self {
-            repository_root: observation.canonical_root().to_owned(),
+            repository_observation: observation.clone(),
             project_receipt,
             lease_receipt,
         })
+    }
+
+    fn verify_current(&self, lookup: &impl WorkspaceAuthorityLookup) -> Result<(), WorkspaceError> {
+        let project_id = self.project_id();
+        if lookup.current_repository_observation(project_id)? != self.repository_observation {
+            return Err(WorkspaceError::ProjectObservationMismatch);
+        }
+        if lookup.current_project_head(project_id)? != self.project_receipt.head() {
+            return Err(WorkspaceError::ProjectHeadMismatch);
+        }
+        if lookup.current_writer_lease_head(project_id)? != self.lease_receipt.head() {
+            return Err(WorkspaceError::LeaseHeadMismatch);
+        }
+        if self.project_receipt.lifecycle() != ProjectLifecycle::Active {
+            return Err(WorkspaceError::ProjectNotActive);
+        }
+        if self.lease_receipt.status() != WriterLeaseStatus::Active {
+            return Err(WorkspaceError::LeaseNotActive);
+        }
+        if self.lease_receipt.runtime_admission() != RuntimeAdmissionMode::Active {
+            return Err(WorkspaceError::RuntimeNotActive);
+        }
+        Ok(())
     }
 
     /// Returns the fake/live runtime carried by both owner receipts.
@@ -187,7 +255,13 @@ impl WorkspaceAuthority {
     /// Returns the Registry-owned canonical repository root.
     #[must_use]
     pub fn repository_root(&self) -> &str {
-        &self.repository_root
+        self.repository_observation.canonical_root()
+    }
+
+    /// Returns the complete accepted Registry-owned physical observation.
+    #[must_use]
+    pub const fn repository_observation(&self) -> &RepositoryObservation {
+        &self.repository_observation
     }
 
     /// Returns the current formal fencing token.
@@ -694,6 +768,7 @@ pub trait GitExecutor {
 pub struct CommandGitExecutor;
 
 const MAX_GIT_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const GUARD_BYTES: &[u8] = b"LATTICE_WORKSPACE_GUARD_V2_NON_AUTHORITATIVE\n";
 
 fn read_bounded<R: Read>(mut reader: R) -> io::Result<(Vec<u8>, bool)> {
     let mut kept = Vec::new();
@@ -798,6 +873,84 @@ const fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
 }
 
+#[cfg(windows)]
+const fn same_file_identity(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
+    // `create_guard_file` denies sharing while the handle is live, so Windows
+    // cannot replace or reopen the path between these checks.
+    true
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(any(unix, windows)))]
+const fn same_file_identity(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
+    false
+}
+
+fn guard_file_is_exact(path: &Path, file: &File) -> Result<bool, WorkspaceError> {
+    let path_metadata =
+        fs::symlink_metadata(path).map_err(|_| WorkspaceError::ReconciliationRequired)?;
+    let handle_metadata = file
+        .metadata()
+        .map_err(|_| WorkspaceError::ReconciliationRequired)?;
+    if !path_metadata.is_file()
+        || path_metadata.file_type().is_symlink()
+        || is_reparse_point(&path_metadata)
+        || path_metadata.len() != GUARD_BYTES.len() as u64
+        || handle_metadata.len() != GUARD_BYTES.len() as u64
+        || !same_file_identity(&path_metadata, &handle_metadata)
+    {
+        return Ok(false);
+    }
+    let mut file = file
+        .try_clone()
+        .map_err(|_| WorkspaceError::ReconciliationRequired)?;
+    let mut observed = vec![0_u8; GUARD_BYTES.len()];
+    file.seek(SeekFrom::Start(0))
+        .and_then(|_| file.read_exact(&mut observed))
+        .map_err(|_| WorkspaceError::ReconciliationRequired)?;
+    if observed != GUARD_BYTES {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn remove_exact_guard(path: &Path, file: File) -> Result<(), WorkspaceError> {
+    if !guard_file_is_exact(path, &file)? {
+        return Err(WorkspaceError::ReconciliationRequired);
+    }
+    drop(file);
+    fs::remove_file(path).map_err(|_| WorkspaceError::ReconciliationRequired)?;
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        _ => Err(WorkspaceError::ReconciliationRequired),
+    }
+}
+
+#[cfg(windows)]
+fn create_guard_file(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(0)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn create_guard_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
 fn native_canonical_path(path: PathBuf) -> PathBuf {
     if !cfg!(windows) {
         return path;
@@ -887,6 +1040,7 @@ struct OwnedBinding {
     repository_root: String,
     project_id: ProjectId,
     project_snapshot_id: ProjectSnapshotId,
+    repository_observation_digest: ContentDigest,
     project_head: ProjectAuthorityHead,
     lease_id: String,
     worktree_id: String,
@@ -900,6 +1054,7 @@ impl OwnedBinding {
             repository_root: authority.repository_root().to_owned(),
             project_id: authority.project_id().clone(),
             project_snapshot_id: authority.project_snapshot_id().clone(),
+            repository_observation_digest: authority.repository_observation().digest().clone(),
             project_head: authority.project_receipt.head(),
             lease_id: authority.lease_id().to_owned(),
             worktree_id: authority.worktree_id().to_owned(),
@@ -923,6 +1078,26 @@ struct RawChange {
     states: BTreeSet<ChangeState>,
 }
 
+fn insert_layer_changes(
+    changes: &mut BTreeMap<RawChangeKey, RawChange>,
+    output: &str,
+    state: ChangeState,
+) -> Result<(), WorkspaceError> {
+    for mut change in parse_name_status(output)? {
+        change.states.insert(state);
+        changes
+            .entry(change.key.clone())
+            .and_modify(|existing| {
+                existing.states.insert(state);
+                if change.git_status < existing.git_status {
+                    existing.git_status.clone_from(&change.git_status);
+                }
+            })
+            .or_insert(change);
+    }
+    Ok(())
+}
+
 fn normalized_repository_path(value: &str) -> Result<String, WorkspaceError> {
     if value.is_empty()
         || value.contains(['\0', '\\'])
@@ -936,12 +1111,33 @@ fn normalized_repository_path(value: &str) -> Result<String, WorkspaceError> {
     if segments.iter().any(|segment| {
         segment.is_empty()
             || matches!(*segment, "." | "..")
+            || segment.ends_with(['.', ' '])
+            || is_windows_reserved_component(segment)
             || segment.eq_ignore_ascii_case(".git")
             || segment.contains(':')
     }) {
         return Err(WorkspaceError::InvalidChangeEvidence);
     }
     Ok(value.to_owned())
+}
+
+fn is_windows_reserved_component(component: &str) -> bool {
+    let base = component.split('.').next().unwrap_or(component);
+    let upper = base.to_ascii_uppercase();
+    if matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$"
+    ) {
+        return true;
+    }
+    let numbered = upper.as_bytes();
+    (numbered.len() == 4
+        && matches!(&numbered[..3], b"COM" | b"LPT")
+        && matches!(numbered[3], b'1'..=b'9'))
+        || matches!(
+            upper.as_str(),
+            "COM¹" | "COM²" | "COM³" | "LPT¹" | "LPT²" | "LPT³"
+        )
 }
 
 fn parse_name_status(output: &str) -> Result<Vec<RawChange>, WorkspaceError> {
@@ -1096,6 +1292,50 @@ fn current_path_kind(root: &Path, relative: &str) -> PathKind {
         }
     }
     PathKind::Unknown
+}
+
+fn scan_physical_hazards(root: &Path) -> Result<Vec<PathEvidence>, WorkspaceError> {
+    const MAX_SCAN_ENTRIES: usize = 100_000;
+    let mut pending = VecDeque::from([(root.to_owned(), String::new())]);
+    let mut hazards = Vec::new();
+    let mut observed = 0_usize;
+    while let Some((directory, prefix)) = pending.pop_front() {
+        let entries =
+            fs::read_dir(&directory).map_err(|_| WorkspaceError::InvalidChangeEvidence)?;
+        for entry in entries {
+            let entry = entry.map_err(|_| WorkspaceError::InvalidChangeEvidence)?;
+            observed = observed
+                .checked_add(1)
+                .filter(|count| *count <= MAX_SCAN_ENTRIES)
+                .ok_or(WorkspaceError::InvalidChangeEvidence)?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| WorkspaceError::InvalidChangeEvidence)?;
+            if prefix.is_empty() && name.eq_ignore_ascii_case(".git") {
+                continue;
+            }
+            let relative = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let relative = normalized_repository_path(&relative)?;
+            let metadata = fs::symlink_metadata(entry.path())
+                .map_err(|_| WorkspaceError::InvalidChangeEvidence)?;
+            if metadata.file_type().is_symlink() {
+                hazards.push(PathEvidence::new(relative, PathKind::Symlink)?);
+            } else if is_reparse_point(&metadata) {
+                hazards.push(PathEvidence::new(relative, PathKind::ReparsePoint)?);
+            } else if metadata.is_dir() {
+                pending.push_back((entry.path(), relative));
+            } else if !metadata.is_file() {
+                hazards.push(PathEvidence::new(relative, PathKind::Unknown)?);
+            }
+        }
+    }
+    hazards.sort_by(|left, right| left.path().cmp(right.path()));
+    Ok(hazards)
 }
 
 fn change_value(change: &ChangeRecord) -> CanonicalValue {
@@ -1271,6 +1511,7 @@ pub struct GitWorkspace<E> {
     guards_root: PathBuf,
     hooks_root: PathBuf,
     empty_config: PathBuf,
+    empty_config_file: File,
     executor: E,
 }
 
@@ -1285,14 +1526,8 @@ impl<E: GitExecutor> GitWorkspace<E> {
         let workspace_root = ensure_real_directory(workspace_root.as_ref())?;
         let guards_root = workspace_root.join(".lattice-guards");
         let hooks_root = workspace_root.join(".lattice-hooks-empty");
+        fs::create_dir(&hooks_root).map_err(|_| WorkspaceError::WorkspaceRootUnsafe)?;
         fs::create_dir(&guards_root)
-            .or_else(|error| {
-                (error.kind() == io::ErrorKind::AlreadyExists)
-                    .then_some(())
-                    .ok_or(error)
-            })
-            .map_err(|_| WorkspaceError::WorkspaceRootUnsafe)?;
-        fs::create_dir(&hooks_root)
             .or_else(|error| {
                 (error.kind() == io::ErrorKind::AlreadyExists)
                     .then_some(())
@@ -1310,16 +1545,10 @@ impl<E: GitExecutor> GitWorkspace<E> {
         }
         let empty_config = workspace_root.join(".lattice-empty-gitconfig");
         let mut config = OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .open(&empty_config)
-            .or_else(|error| {
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    OpenOptions::new().read(true).open(&empty_config)
-                } else {
-                    Err(error)
-                }
-            })
             .map_err(|_| WorkspaceError::WorkspaceRootUnsafe)?;
         config
             .flush()
@@ -1334,8 +1563,39 @@ impl<E: GitExecutor> GitWorkspace<E> {
             guards_root,
             hooks_root,
             empty_config,
+            empty_config_file: config,
             executor,
         })
+    }
+
+    fn verify_execution_sandbox(&self) -> Result<(), WorkspaceError> {
+        let hooks = ensure_real_directory(&self.hooks_root)?;
+        if path_key(&hooks) != path_key(&self.hooks_root)
+            || fs::read_dir(&hooks)
+                .map_err(|_| WorkspaceError::WorkspaceRootUnsafe)?
+                .next()
+                .is_some()
+        {
+            return Err(WorkspaceError::WorkspaceRootUnsafe);
+        }
+        let path_metadata = fs::symlink_metadata(&self.empty_config)
+            .map_err(|_| WorkspaceError::WorkspaceRootUnsafe)?;
+        let handle_metadata = self
+            .empty_config_file
+            .metadata()
+            .map_err(|_| WorkspaceError::WorkspaceRootUnsafe)?;
+        if !path_metadata.is_file()
+            || path_metadata.file_type().is_symlink()
+            || is_reparse_point(&path_metadata)
+            || path_metadata.len() != 0
+            || handle_metadata.len() != 0
+            || !fs::read(&self.empty_config)
+                .map_err(|_| WorkspaceError::WorkspaceRootUnsafe)?
+                .is_empty()
+        {
+            return Err(WorkspaceError::WorkspaceRootUnsafe);
+        }
+        Ok(())
     }
 
     fn git(
@@ -1344,6 +1604,7 @@ impl<E: GitExecutor> GitWorkspace<E> {
         args: &[&OsStr],
         allowed_exit_codes: &[i32],
     ) -> Result<GitOutput, WorkspaceError> {
+        self.verify_execution_sandbox()?;
         let mut protected = vec![
             OsString::from("--no-pager"),
             OsString::from("-c"),
@@ -1425,8 +1686,10 @@ impl<E: GitExecutor> GitWorkspace<E> {
     fn verify_owned_worktree(
         &self,
         authority: &WorkspaceAuthority,
+        lookup: &impl WorkspaceAuthorityLookup,
         owned: &OwnedWorktree,
     ) -> Result<PathBuf, WorkspaceError> {
+        authority.verify_current(lookup)?;
         let expected = OwnedBinding::from_authority(authority);
         if expected != owned.binding || owned.removed || owned.guard_file.is_none() {
             return Err(WorkspaceError::WorktreeIdentityMismatch);
@@ -1438,13 +1701,12 @@ impl<E: GitExecutor> GitWorkspace<E> {
         if !path_contained_by(&self.workspace_root, &target) {
             return Err(WorkspaceError::WorktreeIdentityMismatch);
         }
-        let guard_metadata = fs::symlink_metadata(&owned.guard_path)
-            .map_err(|_| WorkspaceError::WorktreeIdentityMismatch)?;
-        if !guard_metadata.is_file()
-            || guard_metadata.file_type().is_symlink()
-            || is_reparse_point(&guard_metadata)
-            || fs::read(&owned.guard_path).map_err(|_| WorkspaceError::WorktreeIdentityMismatch)?
-                != b"LATTICE_WORKSPACE_GUARD_V2_NON_AUTHORITATIVE\n"
+        let guard_file = owned
+            .guard_file
+            .as_ref()
+            .ok_or(WorkspaceError::WorktreeIdentityMismatch)?;
+        if !guard_file_is_exact(&owned.guard_path, guard_file)
+            .map_err(|_| WorkspaceError::WorktreeIdentityMismatch)?
         {
             return Err(WorkspaceError::WorktreeIdentityMismatch);
         }
@@ -1520,9 +1782,11 @@ impl<E: GitExecutor> GitWorkspace<E> {
     pub fn analyze_integration(
         &self,
         authority: &WorkspaceAuthority,
+        lookup: &impl WorkspaceAuthorityLookup,
         target_commit: &str,
         feature_commit: &str,
     ) -> Result<MergeReadiness, WorkspaceError> {
+        authority.verify_current(lookup)?;
         let target_commit = CommitId::new(target_commit)?;
         let feature_commit = CommitId::new(feature_commit)?;
         let repository = self.repository_root(authority)?;
@@ -1541,6 +1805,9 @@ impl<E: GitExecutor> GitWorkspace<E> {
                 return Err(WorkspaceError::BaseCommitMismatch);
             }
         }
+        let repository = self.repository_root(authority)?;
+        self.reject_unsafe_configuration(&repository)?;
+        authority.verify_current(lookup)?;
         let output = self.git(
             &repository,
             &[
@@ -1554,6 +1821,9 @@ impl<E: GitExecutor> GitWorkspace<E> {
             ],
             &[0, 1],
         )?;
+        authority
+            .verify_current(lookup)
+            .map_err(|_| WorkspaceError::ReconciliationRequired)?;
         let (result_tree, conflicts) = parse_merge_tree_output(output.stdout())?;
         let outcome = match output.exit_code() {
             0 if conflicts.is_empty() => IntegrationOutcome::Clean,
@@ -1587,9 +1857,16 @@ impl<E: GitExecutor> GitWorkspace<E> {
     pub fn remove_owned_worktree(
         &self,
         authority: &WorkspaceAuthority,
+        lookup: &impl WorkspaceAuthorityLookup,
         owned: &mut OwnedWorktree,
     ) -> Result<(), WorkspaceError> {
-        let target = self.verify_owned_worktree(authority, owned)?;
+        let target = self.verify_owned_worktree(authority, lookup, owned)?;
+        let physical_hazards = scan_physical_hazards(&target)?;
+        if !physical_hazards.is_empty() {
+            return Err(WorkspaceError::PhysicalPathHazard {
+                evidence: physical_hazards,
+            });
+        }
         let status = self.git(
             &target,
             &[
@@ -1603,7 +1880,23 @@ impl<E: GitExecutor> GitWorkspace<E> {
         if !status.stdout().is_empty() {
             return Err(WorkspaceError::WorktreeDirty);
         }
+        let ignored = self.git(
+            &target,
+            &[
+                OsStr::new("ls-files"),
+                OsStr::new("--others"),
+                OsStr::new("--ignored"),
+                OsStr::new("--exclude-standard"),
+                OsStr::new("-z"),
+            ],
+            &[0],
+        )?;
+        if !ignored.stdout().is_empty() {
+            return Err(WorkspaceError::WorktreeDirty);
+        }
         let repository = self.repository_root(authority)?;
+        self.reject_unsafe_configuration(&repository)?;
+        authority.verify_current(lookup)?;
         self.git(
             &repository,
             &[
@@ -1617,11 +1910,14 @@ impl<E: GitExecutor> GitWorkspace<E> {
         if fs::symlink_metadata(&target).is_ok() {
             return Err(WorkspaceError::ReconciliationRequired);
         }
-        drop(owned.guard_file.take());
-        fs::remove_file(&owned.guard_path).map_err(|_| WorkspaceError::ReconciliationRequired)?;
-        if fs::symlink_metadata(&owned.guard_path).is_ok() {
-            return Err(WorkspaceError::ReconciliationRequired);
-        }
+        authority
+            .verify_current(lookup)
+            .map_err(|_| WorkspaceError::ReconciliationRequired)?;
+        let guard_file = owned
+            .guard_file
+            .take()
+            .ok_or(WorkspaceError::ReconciliationRequired)?;
+        remove_exact_guard(&owned.guard_path, guard_file)?;
         owned.removed = true;
         Ok(())
     }
@@ -1639,33 +1935,30 @@ impl<E: GitExecutor> GitWorkspace<E> {
     pub fn changed_manifest(
         &self,
         authority: &WorkspaceAuthority,
+        lookup: &impl WorkspaceAuthorityLookup,
         owned: &OwnedWorktree,
     ) -> Result<ChangeManifest, WorkspaceError> {
-        let target = self.verify_owned_worktree(authority, owned)?;
+        let target = self.verify_owned_worktree(authority, lookup, owned)?;
+        let physical_hazards = scan_physical_hazards(&target)?;
+        authority.verify_current(lookup)?;
+        if !physical_hazards.is_empty() {
+            return Err(WorkspaceError::PhysicalPathHazard {
+                evidence: physical_hazards,
+            });
+        }
         let head = self.git(
             &target,
             &[OsStr::new("rev-parse"), OsStr::new("HEAD")],
             &[0],
         )?;
         let head_commit = CommitId::new(head.stdout().trim())?;
-        let total = self.git(
+        let committed = self.git(
             &target,
             &[
                 OsStr::new("diff"),
                 OsStr::new("--name-status"),
                 OsStr::new("-z"),
                 OsStr::new("-M"),
-                OsStr::new(owned.base_commit.as_str()),
-                OsStr::new("--"),
-            ],
-            &[0],
-        )?;
-        let committed = self.git(
-            &target,
-            &[
-                OsStr::new("diff"),
-                OsStr::new("--name-only"),
-                OsStr::new("-z"),
                 OsStr::new(owned.base_commit.as_str()),
                 OsStr::new("HEAD"),
                 OsStr::new("--"),
@@ -1677,8 +1970,9 @@ impl<E: GitExecutor> GitWorkspace<E> {
             &[
                 OsStr::new("diff"),
                 OsStr::new("--cached"),
-                OsStr::new("--name-only"),
+                OsStr::new("--name-status"),
                 OsStr::new("-z"),
+                OsStr::new("-M"),
                 OsStr::new("HEAD"),
                 OsStr::new("--"),
             ],
@@ -1688,8 +1982,9 @@ impl<E: GitExecutor> GitWorkspace<E> {
             &target,
             &[
                 OsStr::new("diff"),
-                OsStr::new("--name-only"),
+                OsStr::new("--name-status"),
                 OsStr::new("-z"),
+                OsStr::new("-M"),
                 OsStr::new("--"),
             ],
             &[0],
@@ -1737,24 +2032,33 @@ impl<E: GitExecutor> GitWorkspace<E> {
             ],
             &[0],
         )?;
+        let head_modes = self.git(
+            &target,
+            &[
+                OsStr::new("ls-tree"),
+                OsStr::new("-r"),
+                OsStr::new("-z"),
+                OsStr::new("HEAD"),
+                OsStr::new("--"),
+            ],
+            &[0],
+        )?;
         let index_modes = self.git(
             &target,
             &[OsStr::new("ls-files"), OsStr::new("-s"), OsStr::new("-z")],
             &[0],
         )?;
 
-        let committed = parse_nul_paths(committed.stdout())?;
-        let staged = parse_nul_paths(staged.stdout())?;
-        let unstaged = parse_nul_paths(unstaged.stdout())?;
         let unmerged = parse_nul_paths(unmerged.stdout())?;
         let untracked = parse_nul_paths(untracked.stdout())?;
         let ignored = parse_nul_paths(ignored.stdout())?;
         let base_modes = parse_tree_modes(base_modes.stdout())?;
+        let head_modes = parse_tree_modes(head_modes.stdout())?;
         let index_modes = parse_index_modes(index_modes.stdout())?;
         let mut raw = BTreeMap::new();
-        for change in parse_name_status(total.stdout())? {
-            raw.insert(change.key.clone(), change);
-        }
+        insert_layer_changes(&mut raw, committed.stdout(), ChangeState::Committed)?;
+        insert_layer_changes(&mut raw, staged.stdout(), ChangeState::Staged)?;
+        insert_layer_changes(&mut raw, unstaged.stdout(), ChangeState::Unstaged)?;
         for path in &unmerged {
             raw.retain(|key, _| {
                 key.source.as_ref() != Some(path) && key.destination.as_ref() != Some(path)
@@ -1769,30 +2073,9 @@ impl<E: GitExecutor> GitWorkspace<E> {
                 RawChange {
                     key,
                     git_status: "U".to_owned(),
-                    states: BTreeSet::new(),
+                    states: BTreeSet::from([ChangeState::Unstaged]),
                 },
             );
-        }
-        for change in raw.values_mut() {
-            let paths = change
-                .key
-                .source
-                .iter()
-                .chain(change.key.destination.iter());
-            for path in paths {
-                if committed.contains(path) {
-                    change.states.insert(ChangeState::Committed);
-                }
-                if staged.contains(path) {
-                    change.states.insert(ChangeState::Staged);
-                }
-                if unstaged.contains(path) {
-                    change.states.insert(ChangeState::Unstaged);
-                }
-            }
-            if change.key.operation == ChangeOperation::Unmerged && change.states.is_empty() {
-                change.states.insert(ChangeState::Unstaged);
-            }
         }
         for (paths, state, status) in [
             (untracked, ChangeState::Untracked, "??"),
@@ -1813,21 +2096,42 @@ impl<E: GitExecutor> GitWorkspace<E> {
         }
         let mut changes = Vec::with_capacity(raw.len());
         for change in raw.into_values() {
+            let source_modes = if change.states.contains(&ChangeState::Committed) {
+                &base_modes
+            } else if change.states.contains(&ChangeState::Staged) {
+                &head_modes
+            } else {
+                &index_modes
+            };
             let source = change
                 .key
                 .source
-                .map(|path| PathEvidence::new(path.clone(), mode_kind(base_modes.get(&path))))
+                .map(|path| PathEvidence::new(path.clone(), mode_kind(source_modes.get(&path))))
                 .transpose()?;
             let destination = change
                 .key
                 .destination
                 .map(|path| {
                     let current = current_path_kind(&target, &path);
-                    let index_kind = mode_kind(index_modes.get(&path));
-                    let kind = match index_kind {
-                        PathKind::Symlink | PathKind::GitLink => index_kind,
-                        _ if current == PathKind::Missing => index_kind,
-                        _ => current,
+                    let mode_kind = if change.states.contains(&ChangeState::Staged)
+                        || change.states.contains(&ChangeState::Unstaged)
+                        || change.states.contains(&ChangeState::Untracked)
+                        || change.states.contains(&ChangeState::Ignored)
+                    {
+                        mode_kind(index_modes.get(&path))
+                    } else {
+                        mode_kind(head_modes.get(&path))
+                    };
+                    let kind = match mode_kind {
+                        PathKind::Symlink | PathKind::GitLink => mode_kind,
+                        _ if current == PathKind::Missing => mode_kind,
+                        _ if change.states.contains(&ChangeState::Unstaged)
+                            || change.states.contains(&ChangeState::Untracked)
+                            || change.states.contains(&ChangeState::Ignored) =>
+                        {
+                            current
+                        }
+                        _ => mode_kind,
                     };
                     PathEvidence::new(path, kind)
                 })
@@ -1840,6 +2144,7 @@ impl<E: GitExecutor> GitWorkspace<E> {
                 change.git_status,
             )?);
         }
+        authority.verify_current(lookup)?;
         ChangeManifest::from_normalized(owned.base_commit.as_str(), head_commit.as_str(), changes)
     }
 
@@ -1857,8 +2162,10 @@ impl<E: GitExecutor> GitWorkspace<E> {
     pub fn create_worktree(
         &self,
         authority: &WorkspaceAuthority,
+        lookup: &impl WorkspaceAuthorityLookup,
         base_commit: &str,
     ) -> Result<OwnedWorktree, WorkspaceError> {
+        authority.verify_current(lookup)?;
         let base_commit = CommitId::new(base_commit)?;
         let repository = self.repository_root(authority)?;
         self.reject_unsafe_configuration(&repository)?;
@@ -1910,16 +2217,19 @@ impl<E: GitExecutor> GitWorkspace<E> {
         if branch_status.exit_code() == 0 {
             return Err(WorkspaceError::WorktreeTargetExists);
         }
-        let mut guard_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&guard_path)
-            .map_err(|_| WorkspaceError::WorktreeTargetExists)?;
+        let repository = self.repository_root(authority)?;
+        self.reject_unsafe_configuration(&repository)?;
+        let mut guard_file =
+            create_guard_file(&guard_path).map_err(|_| WorkspaceError::WorktreeTargetExists)?;
         guard_file
-            .write_all(b"LATTICE_WORKSPACE_GUARD_V2_NON_AUTHORITATIVE\n")
+            .write_all(GUARD_BYTES)
             .and_then(|()| guard_file.sync_data())
             .map_err(|_| WorkspaceError::WorktreeTargetExists)?;
 
+        if let Err(error) = authority.verify_current(lookup) {
+            remove_exact_guard(&guard_path, guard_file)?;
+            return Err(error);
+        }
         self.git(
             &repository,
             &[
@@ -1967,13 +2277,19 @@ impl<E: GitExecutor> GitWorkspace<E> {
         let target_real = fs::canonicalize(&target)
             .map(native_canonical_path)
             .map_err(|_| WorkspaceError::ReconciliationRequired)?;
+        let physical_hazards = scan_physical_hazards(&target_real)
+            .map_err(|_| WorkspaceError::ReconciliationRequired)?;
         if actual_head.stdout().trim() != base_commit.as_str()
             || actual_branch.stdout().trim() != branch_ref
             || !created_status.stdout().is_empty()
             || !path_contained_by(&self.workspace_root, &target_real)
+            || !physical_hazards.is_empty()
         {
             return Err(WorkspaceError::ReconciliationRequired);
         }
+        authority
+            .verify_current(lookup)
+            .map_err(|_| WorkspaceError::ReconciliationRequired)?;
         Ok(OwnedWorktree {
             path: target_real,
             branch_ref,
