@@ -1,0 +1,17 @@
+[package]
+name = "lattice-workspace-git"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lattice-cjson = { path = "../lattice-cjson" }
+lattice-contracts = { path = "../lattice-contracts" }
+lattice-project-registry = { path = "../lattice-project-registry" }
+
+[dev-dependencies]
+lattice-writer-lease = { path = "../lattice-writer-lease" }
+
+[lints]
+workspace = true

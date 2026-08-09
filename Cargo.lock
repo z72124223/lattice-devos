@@ -403,6 +403,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-workspace-git"
+version = "0.1.0"
+dependencies = [
+ "lattice-cjson",
+ "lattice-contracts",
+ "lattice-project-registry",
+ "lattice-writer-lease",
+]
+
+[[package]]
 name = "lattice-writer-lease"
 version = "0.1.0"
 dependencies = [

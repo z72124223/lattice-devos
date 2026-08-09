@@ -20,6 +20,7 @@ members = [
     "crates/lattice-task-ledger",
     "crates/lattice-task-domain",
     "crates/lattice-writer-lease",
+    "crates/lattice-workspace-git",
 ]
 resolver = "3"
 
