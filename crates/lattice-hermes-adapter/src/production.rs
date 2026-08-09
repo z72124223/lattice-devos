@@ -555,16 +555,30 @@ impl CodexProxyOneTurnGate {
                 return Err(malformed("HERMES_CODEX_PROXY_TURN_REPLAY_REJECTED"));
             }
             self.turn_start_count = 1;
-            let Some(output_schema) = &self.output_schema else {
+            let contained_cwd = match value
+                .params
+                .as_ref()
+                .and_then(|params| params.cwd.as_deref())
+            {
+                Some("/work") => true,
+                Some(_) => return Err(cross_binding("HERMES_CODEX_PROXY_CWD_REJECTED")),
+                None => false,
+            };
+            if self.output_schema.is_none() && !contained_cwd {
                 return Ok(None);
             };
             let mut normalized: serde_json::Value = serde_json::from_slice(line)
                 .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?;
-            normalized
+            let params = normalized
                 .get_mut("params")
                 .and_then(serde_json::Value::as_object_mut)
-                .ok_or_else(|| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?
-                .insert("outputSchema".to_owned(), output_schema.clone());
+                .ok_or_else(|| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"))?;
+            if contained_cwd {
+                params.remove("cwd");
+            }
+            if let Some(output_schema) = &self.output_schema {
+                params.insert("outputSchema".to_owned(), output_schema.clone());
+            }
             return serde_json::to_vec(&normalized)
                 .map(Some)
                 .map_err(|_| malformed("HERMES_CODEX_PROXY_JSONL_REJECTED"));
@@ -2697,6 +2711,23 @@ mod proxy_host_tests {
                 .code(),
             "HERMES_CODEX_PROXY_JSONL_REJECTED"
         );
+
+        let mut turn = CodexProxyOneTurnGate::default();
+        assert_eq!(
+            turn.ingest(b"{\"id\":2,\"method\":\"turn/start\",\"params\":{\"cwd\":\"/work\"}}\n")
+                .expect("contained turn cwd is mapped to the broker-owned directory"),
+            b"{\"id\":2,\"method\":\"turn/start\",\"params\":{}}\n"
+        );
+        assert_eq!(turn.turn_start_count(), 1);
+
+        let mut foreign_turn = CodexProxyOneTurnGate::default();
+        assert_eq!(
+            foreign_turn
+                .ingest(b"{\"id\":2,\"method\":\"turn/start\",\"params\":{\"cwd\":\"C:\\\\foreign\"}}\n")
+                .expect_err("foreign turn cwd must fail closed")
+                .code(),
+            "HERMES_CODEX_PROXY_CWD_REJECTED"
+        );
     }
 
     #[test]
@@ -3647,6 +3678,7 @@ mod proxy_host_tests {
         reflection_emitted: bool,
         thread_start_had_cwd: Option<bool>,
         turn_input: Option<String>,
+        turn_start_had_cwd: Option<bool>,
         turn_output_schema: Option<serde_json::Value>,
     }
 
@@ -3823,6 +3855,10 @@ mod proxy_host_tests {
                         .get("params")
                         .and_then(|params| params.get("outputSchema"))
                         .cloned();
+                    let turn_start_had_cwd = request
+                        .get("params")
+                        .and_then(|params| params.get("cwd"))
+                        .is_some();
                     {
                         let mut observation = self
                             .state
@@ -3830,6 +3866,7 @@ mod proxy_host_tests {
                             .lock()
                             .map_err(|_| io::Error::other("fake Codex observation poisoned"))?;
                         observation.turn_input = Some(turn_input);
+                        observation.turn_start_had_cwd = Some(turn_start_had_cwd);
                         observation.turn_output_schema = turn_output_schema;
                         observation.reflection_emitted = !self.state.fail_turn;
                     }
@@ -4104,6 +4141,7 @@ mod proxy_host_tests {
             "unexpected calls in the complete fake Codex lifecycle"
         );
         assert_eq!(observed.thread_start_had_cwd, Some(false));
+        assert_eq!(observed.turn_start_had_cwd, Some(false));
         assert!(observed.reflection_emitted);
         assert!(
             observed
