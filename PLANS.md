@@ -786,7 +786,7 @@ remain future Orchestrator/PostgreSQL responsibilities.
   replay now pass the disposable `-MemoryOnly` harness. The exact Store
   V3+Memory compatibility verifier and `latticed` status composition remain the
   active substeps; TASK-033 stays current.
-- [ ] Step 7: Complete TASK-026 and TASK-027 for Workspace Git 2.0 and exact
+- [x] Step 7: Complete TASK-026 and TASK-027 for Workspace Git 2.0 and exact
   Scope Check 1.1 behavior in disposable repositories; retain the local
   filesystem lock only as defense in depth.
 - [ ] Step 8: Preserve unfinished TASK-028 through TASK-031 controls as

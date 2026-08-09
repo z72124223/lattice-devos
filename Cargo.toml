@@ -17,6 +17,7 @@ members = [
     "crates/lattice-postgres-codebase-memory",
     "crates/lattice-postgres-store",
     "crates/lattice-project-registry",
+    "crates/lattice-scope-check",
     "crates/lattice-task-ledger",
     "crates/lattice-task-domain",
     "crates/lattice-writer-lease",

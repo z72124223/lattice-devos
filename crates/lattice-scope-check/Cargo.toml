@@ -1,0 +1,13 @@
+[package]
+name = "lattice-scope-check"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lattice-cjson = { path = "../lattice-cjson" }
+lattice-workspace-git = { path = "../lattice-workspace-git" }
+
+[lints]
+workspace = true

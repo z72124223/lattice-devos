@@ -385,6 +385,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-scope-check"
+version = "0.1.0"
+dependencies = [
+ "lattice-cjson",
+ "lattice-workspace-git",
+]
+
+[[package]]
 name = "lattice-task-domain"
 version = "0.1.0"
 dependencies = [
