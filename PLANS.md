@@ -24,34 +24,47 @@ Default branch: not established; remote HEAD is currently
 `feature/task-037-full-chain-integration`<br>
 Current branch: `feature/task-037-full-chain-integration`<br>
 Upstream: `origin/feature/task-037-full-chain-integration`<br>
-Current HEAD: `562a963c7185986b9349e24f6928b867beadf52d`<br>
-Workspace: clean at last verification (2026-08-09)
+Implementation checkpoint: `90f44cc17b5c60a339a59926709e8672f576ec29`<br>
+Remote checkpoint `dba4ebe` was preserved by synchronization merge
+`8898a79b10bdc60bee47c45d62a0794dd4cfe408`.<br>
+Workspace: expected clean after the handoff commit (2026-08-09)
 
 Current Goal:
-- Make GitHub a durable handoff source without changing LATTICE product scope.
+- Complete TASK-037 formal `Hermes -> Memory -> Status` acceptance without
+  weakening One Gateway, One Truth, or One Writer.
 
 Completed:
-- Created the private GitHub repository and pushed the current feature branch.
-- Hermes failure-safe hint commit `562a963` is on local and origin.
-- Existing Rust/PostgreSQL/Graphify/Codebase Memory scripted checkpoints remain preserved.
-- Hermes adapter focused/package/Clippy/format checks pass.
+- Added a clean-copy TASK-037 verifier and nineteen bounded implementation
+  commits after `1b97f32` through Node runtime binding commit `90f44cc`.
+- Preserved the remote Linear direction document from `dba4ebe`; its path does
+  not overlap the TASK-037 implementation.
+- Hermes adapter tests pass (65 passed, 7 ignored), runtime composition tests
+  pass (8 passed), format passes, and `git diff --check` passes.
+- Latest acceptance proves correct repository/branch/HEAD binding, a clean
+  starting tree, fail-closed pre-status, and an empty Memory baseline.
 
 In Progress:
-- Formal Hermes -> Memory -> status acceptance is not complete; the prior Run
-  returned `LATTICE_HERMES_REFLECTION_REJECTED` / `HERMES_RUN_FAILED`.
-- Evidence remains under `target/full-chain-acceptance/ea0dba18c00c42bea509c1ba`.
-- The preserved acceptance script binds an older broker SHA; the next run must
-  use a new evidence copy with the current broker SHA.
+- Formal acceptance remains `NEEDS_REVIEW`. Latest evidence is
+  `target/full-chain-acceptance/969785dbfa0e4db4a4d4f69cb3153840`.
+- The Codex broker child was spawned, bound, and post-spawn identity checked,
+  then exited with fixed code `HERMES_PRODUCTION_CHILD_EXITED`. The outer Run
+  returned `LATTICE_HERMES_REFLECTION_REJECTED` with `tool_is_error=true`.
+- Run did not reach post-Run Memory persistence/readback or Status success.
 
 Next:
-- When capability/quota is available, update only the copied acceptance script,
-  create a fresh acceptance ID, run one formal Run, then Status only if Run
-  succeeds. If it fails, stop and treat HINT as non-authoritative.
+- Diagnose the redacted broker child exit without exposing raw stderr or
+  credentials, apply the minimum fix, run focused checks, then perform one
+  formal verifier run. Status may run only after a successful Run.
+- Defer the proposed GPT Web UI -> LATTICE MCP interface until TASK-037 passes.
 
 Blocked / Known Issues:
-- Official Codex live remains `FAILED_DIAGNOSTIC` because of the Windows sandbox helper issue.
-- Full-workspace verification has an intermittent Graphify staging-directory PID collision; targeted Graphify package passed afterward.
-- No remote default/main branch is established; `scripts/audit-workflow.ps1` is absent. Existing README and historical handoff sections are stale; this current section is authoritative.
+- Exact child-exit cause remains unproven. Redacted stderr evidence is 354 bytes
+  with SHA-256
+  `9dc173682b03ca48eaa6e2f1deb5706d4a7a265e4f9bfb4cc4a60ac80ed9797f`.
+- Failure isolation roots are retained; process/listener/profile/temp-home
+  cleanup completed, but success-only isolation cleanup did not apply.
+- No remote default/main branch is established. Existing README and historical
+  handoff sections are stale; this current section is authoritative.
 
 Relevant Issues / PRs:
 - None created yet.

@@ -1,21 +1,76 @@
 # Current GitHub Handoff — 2026-08-09
 
+Status: `NEEDS_REVIEW` for TASK-037. The formal
+`Hermes -> Memory -> Status` acceptance has not passed.
+
 Repository: `z72124223/lattice-devos`<br>
 GitHub URL: `https://github.com/z72124223/lattice-devos`<br>
 Branch / upstream: `feature/task-037-full-chain-integration` /
 `origin/feature/task-037-full-chain-integration`<br>
-HEAD: `562a963c7185986b9349e24f6928b867beadf52d`<br>
-Workspace: clean at last verification.
+Implementation checkpoint: `90f44cc17b5c60a339a59926709e8672f576ec29`<br>
+Remote-only checkpoint preserved: `dba4ebe` (`docs/roadmap/linear-integration.md`)<br>
+Synchronization merge: `8898a79b10bdc60bee47c45d62a0794dd4cfe408`<br>
+Workspace: expected clean after the handoff commit.
 
-The private GitHub repository and current feature branch are pushed. The
-Hermes adapter failure-safe hint change is complete and its focused/package
-checks pass. Formal Hermes -> Memory -> status acceptance is still pending:
-the previous Run returned `LATTICE_HERMES_REFLECTION_REJECTED` /
-`HERMES_RUN_FAILED`. Next, use a fresh evidence copy with the current broker
-SHA, run once, and only query Status after a successful Run. Do not treat a
-failure hint as an authoritative root cause. Official Codex live remains
-`FAILED_DIAGNOSTIC`, and Graphify has a known intermittent staging-directory
-PID collision in full-workspace tests.
+## TASK-037 Current Truth
+
+- Nineteen local commits after `1b97f32` added the formal verifier and bounded
+  Hermes/Codex broker repairs. The changes preserve the two-tool MCP surface,
+  PostgreSQL truth, and the exclusive product-code writer boundary.
+- The latest clean acceptance copy is
+  `target/full-chain-acceptance/969785dbfa0e4db4a4d4f69cb3153840`.
+  Its `params.json` binds the correct branch, repository root, clean starting
+  tree, and exact implementation HEAD `90f44cc`.
+- The pre-Run status correctly failed closed with
+  `LATTICE_DELIVERY_RECONCILIATION_REQUIRED`, and the post-reset Memory probe
+  contained zero analyses, receipts, audits, records, reflections, and OpenClaw
+  commands. This is evidence against the earlier verification-copy binding
+  hypothesis; it is not full-chain success.
+- The Run spawned and bound the Codex broker child and verified its post-spawn
+  identity, then the child exited. Redacted evidence is
+  `HERMES_PRODUCTION_CHILD_EXITED`, stderr byte count `354`, and stderr SHA-256
+  `9dc173682b03ca48eaa6e2f1deb5706d4a7a265e4f9bfb4cc4a60ac80ed9797f`.
+  The outer result is `LATTICE_HERMES_REFLECTION_REJECTED` with
+  `tool_is_error=true`.
+- Because Run failed, no post-Run Memory write/read or Status success query was
+  performed. No PASS marker exists. Processes and listeners stopped, and the
+  OpenClaw profile and temporary delivery Codex home were removed; failure
+  isolation roots were retained for diagnosis.
+
+## Verification At Checkpoint
+
+- `cargo fmt --all -- --check`: exit 0.
+- `cargo test -p lattice-hermes-adapter --locked`: exit 0; 65 passed, 7 ignored.
+- `cargo test -p lattice-runtime --test composition --locked`: exit 0; 8 passed.
+- `git diff --check`: exit 0.
+- `powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File
+  scripts/run-task037-full-chain-verification.ps1`: failed closed at
+  `TASK037_FULLCHAINRUN_TOOL_ERROR`; acceptance ID
+  `969785dbfa0e4db4a4d4f69cb3153840`.
+- Remote CI, primary-branch merge, deployment, and release were not performed.
+
+## Material TASK-037 Files
+
+- `scripts/run-task037-full-chain-verification.ps1`
+- `scripts/run-task019-postgres.ps1`
+- `apps/lattice-runtime/src/composition.rs`
+- `crates/lattice-hermes-adapter/src/{broker,containment,lib,production}.rs`
+- `crates/lattice-hermes-adapter/src/{hermes_sandbox_runner,wsl_outer_runner}.py`
+- `crates/lattice-hermes-adapter/tests/reflection_api.rs`
+- `crates/lattice-graphify-adapter/src/identity.rs`
+- `crates/lattice-graphify-adapter/tests/exact_git_snapshot.rs`
+
+## Exact Next Action
+
+1. Start from this feature branch and inspect the redacted child-exit boundary
+   in acceptance `969785dbfa0e4db4a4d4f69cb3153840`.
+2. Determine why the sealed `codex.cmd` child still exits after the Node PATH
+   repair. Add only fixed, non-secret classification if more evidence is
+   needed; do not persist raw stderr, credentials, prompts, or URLs.
+3. Apply the minimum fix, run focused tests, then run the formal verifier once.
+   Query post-Run Memory and Status only if Run succeeds.
+4. Keep the proposed GPT Web UI -> LATTICE MCP interface deferred until
+   TASK-037 has trustworthy full-chain PASS evidence.
 
 Historical sections below are preserved; this section is the authoritative
 cross-session handoff.
