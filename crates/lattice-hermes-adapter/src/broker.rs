@@ -3031,6 +3031,12 @@ fn codex_child_environment(
         .parent()
         .ok_or_else(|| configuration("HERMES_CODEX_LAUNCHER_PARENT_REJECTED"))?;
     let mut path_entries = vec![launcher_parent.to_path_buf()];
+    let ambient_path = std::env::var_os("PATH");
+    if let Some(node_path_entry) =
+        codex_cmd_ambient_node_path_entry(launcher, launcher_parent, ambient_path.as_deref())?
+    {
+        path_entries.push(node_path_entry);
+    }
     if let Some(root) = std::env::var_os("SystemRoot") {
         path_entries.push(PathBuf::from(root).join("System32"));
     }
@@ -3050,6 +3056,53 @@ fn codex_child_environment(
     environment.insert(OsString::from("TEMP"), temp.as_os_str().to_owned());
     environment.insert(OsString::from("TMP"), temp.as_os_str().to_owned());
     Ok(environment)
+}
+
+#[cfg(windows)]
+fn codex_cmd_ambient_node_path_entry(
+    launcher: &Path,
+    launcher_parent: &Path,
+    ambient_path: Option<&std::ffi::OsStr>,
+) -> HermesAdapterResult<Option<PathBuf>> {
+    let Some(extension) = launcher.extension().and_then(|value| value.to_str()) else {
+        return Ok(None);
+    };
+    if !matches!(extension.to_ascii_lowercase().as_str(), "cmd" | "bat") {
+        return Ok(None);
+    }
+
+    match fs::symlink_metadata(launcher_parent.join("node.exe")) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata_is_reparse(&metadata) => {
+            return Ok(None);
+        }
+        Ok(_) => return Err(configuration("HERMES_CODEX_NODE_RUNTIME_REJECTED")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(configuration("HERMES_CODEX_NODE_RUNTIME_REJECTED")),
+    }
+
+    let Some(ambient_path) = ambient_path else {
+        return Err(configuration("HERMES_CODEX_NODE_RUNTIME_REJECTED"));
+    };
+    for entry in std::env::split_paths(ambient_path) {
+        if entry.as_os_str().is_empty() {
+            continue;
+        }
+        let candidate = entry.join("node.exe");
+        let Ok(metadata) = fs::symlink_metadata(&candidate) else {
+            continue;
+        };
+        if !metadata.file_type().is_file() || metadata_is_reparse(&metadata) {
+            return Err(configuration("HERMES_CODEX_NODE_RUNTIME_REJECTED"));
+        }
+        let canonical = fs::canonicalize(candidate)
+            .map_err(|_| configuration("HERMES_CODEX_NODE_RUNTIME_REJECTED"))?;
+        crate::reject_link_or_reparse_ancestors(&canonical)?;
+        let parent = canonical
+            .parent()
+            .ok_or_else(|| configuration("HERMES_CODEX_NODE_RUNTIME_REJECTED"))?;
+        return Ok(Some(parent.to_path_buf()));
+    }
+    Err(configuration("HERMES_CODEX_NODE_RUNTIME_REJECTED"))
 }
 
 #[cfg(windows)]
@@ -3988,6 +4041,74 @@ mod production_provider_tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn cmd_launcher_without_bundled_node_uses_ambient_node_parent() {
+        let sequence = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "lattice-hermes-node-path-{}-{sequence}",
+            std::process::id()
+        ));
+        let launcher_parent = root.join("codex-bin");
+        let node_parent = root.join("node-bin");
+        fs::create_dir_all(&launcher_parent).expect("launcher parent");
+        fs::create_dir_all(&node_parent).expect("node parent");
+        let launcher = launcher_parent.join("codex.cmd");
+        fs::write(&launcher, b"fixture launcher").expect("fixture launcher");
+        fs::write(node_parent.join("node.exe"), b"fixture node").expect("fixture node");
+        let ambient_path = std::env::join_paths([&node_parent]).expect("ambient path");
+
+        let entry = codex_cmd_ambient_node_path_entry(
+            &launcher,
+            &launcher_parent,
+            Some(ambient_path.as_os_str()),
+        )
+        .expect("ambient node path entry")
+        .expect("cmd launcher requires ambient node");
+
+        assert_eq!(
+            entry,
+            fs::canonicalize(&node_parent).expect("canonical node parent")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cmd_launcher_with_bundled_node_keeps_existing_launcher_parent_path() {
+        let sequence = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("fixture clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "lattice-hermes-bundled-node-{}-{sequence}",
+            std::process::id()
+        ));
+        let launcher_parent = root.join("codex-bin");
+        fs::create_dir_all(&launcher_parent).expect("launcher parent");
+        let launcher = launcher_parent.join("codex.cmd");
+        fs::write(&launcher, b"fixture launcher").expect("fixture launcher");
+        fs::write(launcher_parent.join("node.exe"), b"fixture node").expect("fixture node");
+
+        let entry = codex_cmd_ambient_node_path_entry(&launcher, &launcher_parent, None)
+            .expect("bundled node accepted");
+
+        assert_eq!(entry, None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exe_launcher_does_not_require_ambient_node() {
+        let launcher = PathBuf::from("C:/fixture/codex.exe");
+        let launcher_parent = PathBuf::from("C:/fixture");
+
+        let entry = codex_cmd_ambient_node_path_entry(&launcher, &launcher_parent, None)
+            .expect("exe launcher does not inspect node path");
+
+        assert_eq!(entry, None);
     }
 
     struct ProcessFixture {
