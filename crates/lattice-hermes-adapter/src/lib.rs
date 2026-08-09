@@ -1019,10 +1019,6 @@ impl HermesReflectionJob {
                 .to_hex(),
         )
         .map_err(|_| malformed("HERMES_INPUT_DIGEST_REJECTED"))?;
-        let canonical_input_bytes = canonicalize(&canonical_input)
-            .map_err(|_| malformed("HERMES_INPUT_CANONICALIZATION_REJECTED"))?;
-        let canonical_input_text = String::from_utf8(canonical_input_bytes.into_vec())
-            .map_err(|_| malformed("HERMES_INPUT_UTF8_REJECTED"))?;
         let invocation = request.invocation();
         let binding_hint = json!({
             "request_id": invocation.request_id().as_str(),
@@ -1038,9 +1034,25 @@ impl HermesReflectionJob {
             .iter()
             .map(|item| item.digest().as_str())
             .collect::<Vec<_>>();
+        let sensitive_digest_hint = evidence
+            .iter()
+            .flat_map(ReflectionEvidence::sensitive_value_digests)
+            .map(ContentDigest::as_str)
+            .collect::<Vec<_>>();
+        let response_hint = json!({
+            "schema_version": HERMES_SCHEMA_VERSION,
+            "binding": binding_hint,
+            "summary": "Evidence-bound LATTICE reflection completed.",
+            "findings": [{
+                "classification": "inference",
+                "statement": "The bound evidence supports the requested repository snapshot.",
+                "evidence_digests": evidence_digest_hint,
+            }],
+            "next_actions": ["Persist this verified reflection through the LATTICE Memory port."]
+        });
         let prompt = format!(
-            "{READ_ONLY_INSTRUCTIONS}\n\nThe immutable input is canonical JSON:\n{canonical_input_text}\n\nUse this exact binding object in the response:\n{binding_hint}\n\nAllowed finding evidence_digests are:\n{}\n\nReturn exactly one compact JSON object with no additional keys. Include at least one finding, label every finding as \"inference\", and keep summary, statements, and next_actions concise.",
-            json!(evidence_digest_hint),
+            "{READ_ONLY_INSTRUCTIONS}\n\nSensitive value digests are digest-only references and must not be emitted: {}\n\nReturn exactly this compact JSON object. Do not inspect files, call tools, add prose, or add keys:\n{response_hint}",
+            json!(sensitive_digest_hint),
         );
         Ok(Self {
             request,
