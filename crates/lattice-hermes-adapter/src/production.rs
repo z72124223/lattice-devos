@@ -43,7 +43,7 @@ const CONFIG_SCHEMA: &str = "lattice.hermes.production-config.v2";
 const OFFICIAL_HERMES_CONFIG: &[u8] = br"_config_version: 33
 model:
   provider: openai-api
-  default: gpt-5.5
+  default: gpt-5.3-codex-spark
   openai_runtime: codex_app_server
   api_mode: codex_app_server
   base_url: http://127.0.0.1:9/v1
@@ -1597,8 +1597,8 @@ impl HermesProductionRunnerConfig {
         validate_official_runtime_identity(&containment, runtime_manifest)?;
         broker_receipt.validate_for_containment()?;
         let model = model.into();
-        let codex_provider =
-            broker.into_production_proxy_provider_from_preflight(broker_receipt, "gpt-5.5")?;
+        let codex_provider = broker
+            .into_production_proxy_provider_from_preflight(broker_receipt, "gpt-5.3-codex-spark")?;
         Self::validated(
             containment,
             runtime_manifest,
@@ -2997,10 +2997,10 @@ mod proxy_host_tests {
     #[test]
     fn official_hermes_config_bytes_are_exact_and_cross_bound() {
         let config_text = std::str::from_utf8(OFFICIAL_HERMES_CONFIG).expect("ASCII YAML");
-        assert_eq!(OFFICIAL_HERMES_CONFIG.len(), 242);
+        assert_eq!(OFFICIAL_HERMES_CONFIG.len(), 254);
         assert_eq!(
             encode_sha256(&Sha256::digest(OFFICIAL_HERMES_CONFIG)),
-            "f99ac7ebebe6c475081c728130fc4db1b67bae914aa99e9ca4409721ead2f40c"
+            "1bc83178fc5fbbbb12fb7c9ff512b88c13bda8a55bfadcd572970f9bc06d1a45"
         );
         assert!(PRIVATE_RUNNER_SOURCE.contains(config_text));
         assert!(OUTER_RUNNER_SOURCE.contains(config_text));

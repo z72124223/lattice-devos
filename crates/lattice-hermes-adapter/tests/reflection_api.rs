@@ -180,7 +180,7 @@ fn codex_broker_pins_four_files_and_locks_the_proven_empty_tool_policy() {
     let lock = policy.config_lock_toml();
     assert!(lock.starts_with("version = 1\ncodex_version = \"0.146.0\"\n\n[config]\n"));
     for required in [
-        "model = \"gpt-5.5\"",
+        "model = \"gpt-5.3-codex-spark\"",
         "model_provider = \"openai\"",
         "model_reasoning_effort = \"low\"",
         "approval_policy = \"never\"",
@@ -336,7 +336,7 @@ fn codex_broker_pins_four_files_and_locks_the_proven_empty_tool_policy() {
 fn codex_no_marker_plan_and_receipt_require_joint_empty_tool_evidence() {
     let cwd = std::env::temp_dir().join("lattice-hermes-empty-cwd-contract");
     let nonce = "abababababababababababababababababababababababababababababababab";
-    let plan = CodexNoMarkerCanaryPlan::new(cwd.clone(), nonce, "gpt-5.5")
+    let plan = CodexNoMarkerCanaryPlan::new(cwd.clone(), nonce, "gpt-5.3-codex-spark")
         .expect("fixed canary plan");
     let initialize = plan.initialize_request();
     for capability in [
@@ -438,7 +438,7 @@ fn codex_broker_protocol_reconciles_terminal_before_turn_response() {
     std::fs::create_dir_all(&codex_home).expect("fixture codex home");
     std::fs::create_dir_all(&cwd).expect("fixture cwd");
     let mut protocol =
-        CodexBrokerProtocol::new(codex_home.clone(), cwd.clone(), "gpt-5.5")
+        CodexBrokerProtocol::new(codex_home.clone(), cwd.clone(), "gpt-5.3-codex-spark")
             .expect("bounded fixture protocol");
 
     protocol
@@ -490,7 +490,7 @@ fn codex_broker_protocol_reconciles_terminal_before_turn_response() {
                         "approvalsReviewer": "user",
                         "cwd": cwd,
                         "instructionSources": [],
-                        "model": "gpt-5.5",
+                        "model": "gpt-5.3-codex-spark",
                         "modelProvider": "openai",
                         "multiAgentMode": "explicitRequestOnly",
                         "reasoningEffort": "low",
@@ -776,7 +776,7 @@ fn new_codex_protocol_fixture() -> (CodexBrokerProtocol, std::path::PathBuf) {
     let cwd = fixture_root.join("empty-cwd");
     std::fs::create_dir_all(&codex_home).expect("fixture codex home");
     std::fs::create_dir_all(&cwd).expect("fixture cwd");
-    let protocol = CodexBrokerProtocol::new(codex_home, cwd, "gpt-5.5")
+    let protocol = CodexBrokerProtocol::new(codex_home, cwd, "gpt-5.3-codex-spark")
         .expect("bounded fixture protocol");
     (protocol, fixture_root)
 }
@@ -817,7 +817,7 @@ fn admit_valid_thread(protocol: &mut CodexBrokerProtocol, cwd: &std::path::Path)
                     "approvalsReviewer": "user",
                     "cwd": cwd,
                     "instructionSources": [],
-                    "model": "gpt-5.5",
+                    "model": "gpt-5.3-codex-spark",
                     "modelProvider": "openai",
                     "multiAgentMode": "explicitRequestOnly",
                     "reasoningEffort": "low",
@@ -883,7 +883,7 @@ fn official_codex_0146_zero_model_preflight_is_live_verified() {
         codex_home,
         isolation_root.clone(),
         product_root,
-        "gpt-5.5",
+        "gpt-5.3-codex-spark",
     )
     .expect("sealed broker config");
     let receipt = config

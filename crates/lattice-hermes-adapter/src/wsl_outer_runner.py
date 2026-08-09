@@ -49,7 +49,7 @@ MAX_DIAGNOSTIC_BYTES = 4096
 OFFICIAL_HERMES_CONFIG = b"""_config_version: 33
 model:
   provider: openai-api
-  default: gpt-5.5
+  default: gpt-5.3-codex-spark
   openai_runtime: codex_app_server
   api_mode: codex_app_server
   base_url: http://127.0.0.1:9/v1
