@@ -49,7 +49,7 @@ MAX_DIAGNOSTIC_BYTES = 4096
 OFFICIAL_HERMES_CONFIG = b"""_config_version: 33
 model:
   provider: openai-api
-  default: gpt-5.6-luna
+  default: gpt-5.6-terra
   openai_runtime: codex_app_server
   api_mode: codex_app_server
   base_url: http://127.0.0.1:9/v1

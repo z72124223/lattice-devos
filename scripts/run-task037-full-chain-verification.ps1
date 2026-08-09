@@ -140,6 +140,19 @@ function Get-FileSha256 {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-StringSha256 {
+    param([Parameter(Mandatory = $true)][string]$Text)
+
+    $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($Text)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ConvertTo-LowerHex ($sha256.ComputeHash($bytes))
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
 function Write-JsonEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
