@@ -1023,9 +1023,24 @@ impl HermesReflectionJob {
             .map_err(|_| malformed("HERMES_INPUT_CANONICALIZATION_REJECTED"))?;
         let canonical_input_text = String::from_utf8(canonical_input_bytes.into_vec())
             .map_err(|_| malformed("HERMES_INPUT_UTF8_REJECTED"))?;
+        let invocation = request.invocation();
+        let binding_hint = json!({
+            "request_id": invocation.request_id().as_str(),
+            "task_id": invocation.task_id().as_str(),
+            "attempt_id": invocation.attempt_id().as_str(),
+            "project_snapshot_id": invocation.project_snapshot_id().as_str(),
+            "subject_digest": invocation.subject_digest().as_str(),
+            "session_id": session_id.as_str(),
+            "input_digest": input_digest.as_str(),
+            "model": model.as_str(),
+        });
+        let evidence_digest_hint = evidence
+            .iter()
+            .map(|item| item.digest().as_str())
+            .collect::<Vec<_>>();
         let prompt = format!(
-            "{READ_ONLY_INSTRUCTIONS}\n\nThe immutable input is canonical JSON:\n{canonical_input_text}\n\nReturn this exact object shape with no additional keys:\n{{\"schema_version\":\"{HERMES_SCHEMA_VERSION}\",\"binding\":{{\"request_id\":\"...\",\"task_id\":\"...\",\"attempt_id\":\"...\",\"project_snapshot_id\":\"...\",\"subject_digest\":\"...\",\"session_id\":\"...\",\"input_digest\":\"{}\",\"model\":\"...\"}},\"summary\":\"...\",\"findings\":[{{\"classification\":\"inference\",\"statement\":\"...\",\"evidence_digests\":[\"...\"]}}],\"next_actions\":[\"...\"]}}",
-            input_digest.as_str(),
+            "{READ_ONLY_INSTRUCTIONS}\n\nThe immutable input is canonical JSON:\n{canonical_input_text}\n\nUse this exact binding object in the response:\n{binding_hint}\n\nAllowed finding evidence_digests are:\n{}\n\nReturn exactly one compact JSON object with no additional keys. Include at least one finding, label every finding as \"inference\", and keep summary, statements, and next_actions concise.",
+            json!(evidence_digest_hint),
         );
         Ok(Self {
             request,
@@ -1731,6 +1746,7 @@ fn redacted_run_failure_diagnostic(component: &str, source: &str, detail: &str) 
         "detail_redacted": true,
         "detail_sha256": sha256_text(detail),
         "event": "run_failure_detail",
+        "failure_stage": classify_run_failure_stage(detail),
         "source": source
     })
 }
@@ -2365,7 +2381,50 @@ fn classify_run_failure_hint(detail: &str) -> &'static str {
     ) {
         return "HERMES_RUN_FAILED_HINT_TRANSPORT";
     }
+    if contains_any_ascii_case_insensitive(
+        bytes,
+        &[
+            b"turn timed out",
+            b"compact turn timed out",
+            b"went silent",
+            b"turn/start timed out",
+            b"codex app-server method",
+        ],
+    ) {
+        return "HERMES_RUN_FAILED_HINT_APP_SERVER_TIMEOUT";
+    }
+    if contains_any_ascii_case_insensitive(bytes, &[b"turn ended status="]) {
+        return "HERMES_RUN_FAILED_HINT_APP_SERVER_TURN_STATUS";
+    }
+    if contains_any_ascii_case_insensitive(
+        bytes,
+        &[
+            b"structured output",
+            b"output schema",
+            b"json schema",
+            b"schema validation",
+            b"response format",
+        ],
+    ) {
+        return "HERMES_RUN_FAILED_HINT_SCHEMA";
+    }
+    if contains_any_ascii_case_insensitive(bytes, &[b"codex app-server"]) {
+        return "HERMES_RUN_FAILED_HINT_APP_SERVER";
+    }
     "HERMES_RUN_FAILED"
+}
+
+fn classify_run_failure_stage(detail: &str) -> &'static str {
+    match classify_run_failure_hint(detail) {
+        "HERMES_RUN_FAILED_HINT_AUTH" => "auth",
+        "HERMES_RUN_FAILED_HINT_QUOTA" => "quota",
+        "HERMES_RUN_FAILED_HINT_TRANSPORT" => "transport",
+        "HERMES_RUN_FAILED_HINT_APP_SERVER_TIMEOUT" => "app_server_timeout",
+        "HERMES_RUN_FAILED_HINT_APP_SERVER_TURN_STATUS" => "app_server_turn_status",
+        "HERMES_RUN_FAILED_HINT_SCHEMA" => "schema",
+        "HERMES_RUN_FAILED_HINT_APP_SERVER" => "app_server",
+        _ => "unknown",
+    }
 }
 
 fn contains_any_ascii_case_insensitive(bytes: &[u8], needles: &[&[u8]]) -> bool {

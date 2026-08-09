@@ -1469,6 +1469,26 @@ const FAILED_RUN_HINT_CASES: &[(&str, &str)] = &[
         "Failed to deserialize JSONRPCMessage: expected value at line 1 column 1",
         "HERMES_RUN_FAILED_HINT_TRANSPORT",
     ),
+    (
+        "Codex app-server turn timed out after 300s",
+        "HERMES_RUN_FAILED_HINT_APP_SERVER_TIMEOUT",
+    ),
+    (
+        "codex went silent for 90s after a tool result",
+        "HERMES_RUN_FAILED_HINT_APP_SERVER_TIMEOUT",
+    ),
+    (
+        "turn ended status=failed",
+        "HERMES_RUN_FAILED_HINT_APP_SERVER_TURN_STATUS",
+    ),
+    (
+        "The model produced invalid structured output",
+        "HERMES_RUN_FAILED_HINT_SCHEMA",
+    ),
+    (
+        "redacted proxy_password sample; schema validation failed",
+        "HERMES_RUN_FAILED_HINT_SCHEMA",
+    ),
 ];
 
 const GENERIC_RUN_FAILURE_DETAILS: &[&str] = &[
@@ -1479,7 +1499,6 @@ const GENERIC_RUN_FAILURE_DETAILS: &[&str] = &[
     "filesystem permission denied",
     "provider code 4290",
     "prompt policy: do not access network; model rejected output",
-    "redacted proxy_password sample; schema validation failed",
     "prompt contains unauthorized",
     "JSON parser failed: invalid token at line 1",
     "missing token usage field",
