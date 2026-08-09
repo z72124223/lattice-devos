@@ -1,0 +1,24 @@
+fault_id	injection	required_observation	required_disposition	current_status	forbidden_claim
+F01_MANIFEST_CORRUPT	manifest or binary digest mismatch	zero release mutation	DENY_STAGED	BLOCKED_TASK045	no nonce claim
+F02_SLOT_ALIAS	source and target alias same slot	invalid immutable binding	DENY_STAGED	BLOCKED_TASK045	no active overwrite
+F03_SCHEMA_MIGRATION	non-empty migration set	first MVP compatibility denial	DENY_STAGED	BLOCKED_TASK045	no DDL
+F04_NORMAL_GATEWAY_CLAIM	normal gateway attempts protected claim	wrong lane denial	DENY_APPROVAL	BLOCKED_TASK045	no authority escalation
+F05_APPROVAL_EXPIRED	database time reaches expiry	nonce unavailable without claim	DENY_APPROVAL	BLOCKED_TASK045	no DRAINING
+F06_APPROVAL_REPLAY	nonce reused for another activation	one-use binding mismatch	DENY_APPROVAL	BLOCKED_TASK045	no second claim
+F07_CONCURRENT_CLAIM	two simultaneous guardian claims	exactly one atomic winner	CONVERGE_CLAIMED	BLOCKED_TASK045	no double consume
+F08_CLAIM_ACK_LOSS	claim commit response lost	durable nonce event admission query	REPLAY_OR_RECONCILE	BLOCKED_TASK045	no blind reclaim
+F09_DRAIN_ACTIVE_LEASE	valid writer lease remains	state stays DRAINING	WAIT_DRAIN	BLOCKED_TASK045	no slot switch
+F10_DRAIN_UNKNOWN_EFFECT	unknown external effect remains	unknown outcome receipt retained	WAIT_RECONCILE	BLOCKED_TASK045	no assumed no-effect
+F11_DRAIN_WRITABLE_CHILD	writable Codex child remains	termination proof absent	WAIT_DRAIN	BLOCKED_TASK045	no drained claim
+F12_POWER_BEFORE_POINTER	power loss before pointer write	DB state precedes pointer	RESTORE_FINALIZED_SLOT	RED_NOT_RUN	file is not truth
+F13_POWER_AFTER_POINTER	power loss after pointer write	DB pointer outcome split	REWRITE_OR_RECONCILE	RED_NOT_RUN	no guessed slot
+F14_POINTER_CHECKSUM	boot pointer checksum mismatch	disagreement evidence	RECONCILIATION_REQUIRED	RED_NOT_RUN	no writer start
+F15_CANDIDATE_CRASH_LOOP	candidate exceeds crash threshold	bounded crash samples	ROLLBACK_REQUESTED	RED_NOT_RUN	no relaxed health
+F16_STALE_CONNECTION	old daemon writes through live connection	same transaction epoch denial	DENY_OLD_WRITER	BLOCKED_TASK045	no stale mutation
+F17_CANARY_USER_WRITE	candidate writes user project	admission denial receipt	DENY_CANARY_WRITE	BLOCKED_TASK045	reserved stream only
+F18_CANARY_REPLAY_MISMATCH	reserved append replay disagrees	canary disagreement receipt	ROLLBACK_REQUESTED	RED_NOT_RUN	no finalize
+F19_HEALTH_DISAGREEMENT	candidate and guardian disagree	guardian minimum contract evidence	ROLLBACK_OR_RECONCILE	RED_NOT_RUN	candidate cannot lower threshold
+F20_ROLLBACK_EPOCH	rollback epoch not greater	strict comparison denial	DENY_ROLLBACK_START	BLOCKED_TASK045	no epoch reuse
+F21_ROLLBACK_SLOT_BAD	prior slot corrupt or incompatible	verification disagreement	RECONCILIATION_REQUIRED	RED_NOT_RUN	no unverified binary
+F22_POWER_EACH_EDGE	power loss between every intent and outcome	unique restart state or ambiguity	RESUME_ROLLBACK_OR_RECONCILE	RED_NOT_RUN	no skipped state
+F23_GUARDIAN_UNAVAILABLE	guardian unavailable after claim	durable saga admission and recovery status	STOPPED_OR_RECONCILE	RED_NOT_RUN	normal gateway cannot take over

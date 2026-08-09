@@ -1,0 +1,16 @@
+gate_id	owner	required_binding	current_status	completion_rule
+E01	git-worktree	exact base head tree branch worktree diff	PASS_PHASE_A_ONLY	refresh after implementation sync
+E02	scope-check	TASK-045 TASK-046 TASK-047 allowed paths and full diff	PASS_PHASE_A_ONLY	zero path drift
+E03	dependency-owners	Approval Registry Lease Artifact TASK-038 TASK-043 current receipts	BLOCKED	all current with live and fake labels
+E04	self-upgrade-guardian	pure contract plus protected claim epoch admission evidence	BLOCKED	pure and live gates separately pass
+E05	task-046	F01 through F23 durable drill receipts	BLOCKED	no skipped or waived ambiguity
+E06	test-runtime	focused affected tests bound to candidate commit	BLOCKED	zero exit current evidence
+E07	verification-runtime	full format lint workspace integration matrix	BLOCKED	heavy slot approved and current zero exit
+E08	independent-reviewer	code review identity commit tree findings	MISSING	all actionable findings closed
+E09	security-architecture	independent security architecture reviews and contract versions	MISSING	zero unresolved blocker and no self approval
+E10	remote-ci	provider commit SHA required checks result time	MISSING	commit-bound remote PASS
+E11	workspace-git	merge base target head fresh conflict analysis	MISSING	current no conflict no hidden drift
+E12	responsible-user	exact merge subject authorization	MISSING	explicit unexpired authority
+E13	responsible-user	exact candidate and evidence packet acceptance	MISSING	explicit user acceptance
+E14	protected-release	release subject nonce target slot epoch	OUT_OF_SCOPE	separate protected action only
+E15	deployment-owner	target environment and release authority	OUT_OF_SCOPE	separate deployment ticket only

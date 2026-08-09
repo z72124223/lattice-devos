@@ -1,0 +1,10 @@
+[package]
+name = "task-046-ab-rollback-drills-contract-checkpoint"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+acceptance = []
+
+[workspace]

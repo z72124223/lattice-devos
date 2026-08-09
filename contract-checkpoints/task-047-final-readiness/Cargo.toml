@@ -1,0 +1,10 @@
+[package]
+name = "task-047-final-readiness-contract-checkpoint"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+acceptance = []
+
+[workspace]

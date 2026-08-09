@@ -1,0 +1,13 @@
+requirement_id	owner	required_behavior	current_evidence	claim_boundary
+G01_PROTECTED_SURFACE	approval-verifier	protected release cannot use normal gateway authority	BASELINE_GREEN_PURE	pure denial only
+G02_OS_IDENTITY	self-upgrade-guardian	guardian-owned OS-authenticated local identity	RED_MISSING_OWNER	no credential or service exists
+G03_ATOMIC_CLAIM	self-upgrade-guardian-postgres	consume nonce append claim and enter DRAINING atomically	BLOCKED_TASK038	no protected claim procedure exists
+G04_IMMUTABLE_SLOTS	self-upgrade-guardian	distinct immutable A and B bundle identities	RED_MISSING_OWNER	no slot owner exists
+G05_COMPLETE_DRAIN	self-upgrade-guardian	zero leases effects unknown outcomes and writable children	BLOCKED_TASK038	writer and task composition not accepted
+G06_BOOT_RECONCILIATION	self-upgrade-guardian	PostgreSQL-wins checksum pointer reconciliation	RED_MISSING_OWNER	no boot projection owner exists
+G07_HIGHER_EPOCH	self-upgrade-guardian-postgres	non-wrapping higher daemon epoch and stale connection denial	BLOCKED_TASK038	live lease epoch path not accepted
+G08_CANARY_ADMISSION	self-upgrade-guardian-postgres	CANARY permits reserved health stream only	RED_MISSING_OWNER	no guardian repository exists
+G09_WRITE_CANARY	self-upgrade-guardian	reserved append and replay through normal epoch-checked path	RED_MISSING_OWNER	no canary executor exists
+G10_HEALTH_DISAGREEMENT	self-upgrade-guardian	immutable guardian health contract fails closed	RED_MISSING_OWNER	no health owner exists
+G11_HIGHER_EPOCH_ROLLBACK	self-upgrade-guardian	compatible prior slot starts at epoch greater than failed activation	RED_MISSING_OWNER	no rollback owner exists
+G12_ACTIVE_CONSTITUTION	module-governance	independent active self-upgrade-guardian constitution	BLOCKED_GOVERNANCE	only approved amendment proposal exists
