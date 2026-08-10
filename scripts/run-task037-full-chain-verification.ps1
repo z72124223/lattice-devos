@@ -89,6 +89,20 @@ $script:Task037PhaseGates = @(
     'success_tool_error_delivery',
     'success_tool_error_graph',
     'success_tool_error_hermes',
+    'success_tool_error_hermes_hint_auth',
+    'success_tool_error_hermes_hint_quota',
+    'success_tool_error_hermes_hint_transport',
+    'success_tool_error_hermes_hint_app_server_timeout',
+    'success_tool_error_hermes_hint_app_server_turn_status',
+    'success_tool_error_hermes_hint_schema',
+    'success_tool_error_hermes_hint_app_server',
+    'success_tool_error_hermes_app_server_empty_output',
+    'success_tool_error_hermes_runtime',
+    'success_tool_error_hermes_memory_receipt',
+    'success_tool_error_hermes_production_child_exited',
+    'success_tool_error_hermes_production_deadline_exceeded',
+    'success_tool_error_hermes_diagnostic_rejected',
+    'success_tool_error_hermes_unclassified',
     'success_tool_error_transport',
     'success_tool_error_unclassified',
     'success_launcher_binding',
@@ -554,6 +568,268 @@ function Get-Task037ToolFailureGate {
         ) -ccontains $_ } { return 'success_tool_error_hermes' }
         'LATTICED_STDIO_REJECTED' { return 'success_tool_error_transport' }
         default { return 'success_tool_error_unclassified' }
+    }
+}
+
+function Get-Task037HermesFailureClassificationGate {
+    param([AllowNull()]$Classification)
+
+    if ($Classification -isnot [string]) { return 'success_tool_error_hermes_unclassified' }
+    switch -CaseSensitive ([string]$Classification) {
+        'HERMES_RUN_FAILED_HINT_AUTH' { return 'success_tool_error_hermes_hint_auth' }
+        'HERMES_RUN_FAILED_HINT_QUOTA' { return 'success_tool_error_hermes_hint_quota' }
+        'HERMES_RUN_FAILED_HINT_TRANSPORT' { return 'success_tool_error_hermes_hint_transport' }
+        'HERMES_RUN_FAILED_HINT_APP_SERVER_TIMEOUT' { return 'success_tool_error_hermes_hint_app_server_timeout' }
+        'HERMES_RUN_FAILED_HINT_APP_SERVER_TURN_STATUS' { return 'success_tool_error_hermes_hint_app_server_turn_status' }
+        'HERMES_RUN_FAILED_HINT_SCHEMA' { return 'success_tool_error_hermes_hint_schema' }
+        'HERMES_RUN_FAILED_HINT_APP_SERVER' { return 'success_tool_error_hermes_hint_app_server' }
+        'HERMES_CODEX_APP_SERVER_EMPTY_OUTPUT' { return 'success_tool_error_hermes_app_server_empty_output' }
+        default { return 'success_tool_error_hermes_unclassified' }
+    }
+}
+
+function Get-Task037HermesFailureStage {
+    param([AllowNull()]$Classification)
+
+    if ($Classification -isnot [string]) { return $null }
+    switch -CaseSensitive ([string]$Classification) {
+        'HERMES_RUN_FAILED_HINT_AUTH' { return 'auth' }
+        'HERMES_RUN_FAILED_HINT_QUOTA' { return 'quota' }
+        'HERMES_RUN_FAILED_HINT_TRANSPORT' { return 'transport' }
+        'HERMES_RUN_FAILED_HINT_APP_SERVER_TIMEOUT' { return 'app_server_timeout' }
+        'HERMES_RUN_FAILED_HINT_APP_SERVER_TURN_STATUS' { return 'app_server_turn_status' }
+        'HERMES_RUN_FAILED_HINT_SCHEMA' { return 'schema' }
+        'HERMES_RUN_FAILED_HINT_APP_SERVER' { return 'app_server' }
+        'HERMES_RUN_FAILED' { return 'unknown' }
+        default { return $null }
+    }
+}
+
+function Test-Task037HermesReflectionErrorCode {
+    param([AllowNull()]$ErrorCode)
+
+    if ($ErrorCode -isnot [string]) { return $false }
+    return @(
+        'HERMES_RUN_FAILED',
+        'HERMES_RUN_FAILED_HINT_AUTH',
+        'HERMES_RUN_FAILED_HINT_QUOTA',
+        'HERMES_RUN_FAILED_HINT_TRANSPORT',
+        'HERMES_RUN_FAILED_HINT_APP_SERVER_TIMEOUT',
+        'HERMES_RUN_FAILED_HINT_APP_SERVER_TURN_STATUS',
+        'HERMES_RUN_FAILED_HINT_SCHEMA',
+        'HERMES_RUN_FAILED_HINT_APP_SERVER',
+        'HERMES_CODEX_APP_SERVER_RUN_FAILED',
+        'HERMES_PRODUCTION_CHILD_EXITED',
+        'HERMES_PRODUCTION_DEADLINE_EXCEEDED'
+    ) -ccontains [string]$ErrorCode
+}
+
+function Get-Task037HermesToolFailureGate {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$StderrText)
+
+    $unclassified = 'success_tool_error_hermes_unclassified'
+    $diagnosticRejected = 'success_tool_error_hermes_diagnostic_rejected'
+    try {
+        if ([Text.Encoding]::UTF8.GetByteCount($StderrText) -gt $task037MaxEvidenceFileBytes) {
+            return $diagnosticRejected
+        }
+        $lines = @($StderrText -split '\r?\n')
+        $reflectionLines = @($lines | Where-Object {
+            $_.IndexOf('"event":"reflection_rejected"', [StringComparison]::Ordinal) -ge 0
+        })
+        $detailLines = @($lines | Where-Object {
+            $_.IndexOf('"event":"run_failure_detail"', [StringComparison]::Ordinal) -ge 0
+        })
+        if ($reflectionLines.Count -ne 1 -or $detailLines.Count -gt 1) {
+            return $diagnosticRejected
+        }
+
+        $reflection = ConvertFrom-Task037McpJson -Json ([string]$reflectionLines[0])
+        if ($reflection -isnot [pscustomobject]) { return $diagnosticRejected }
+        Assert-Task037ExactPropertySet `
+            -Value $reflection `
+            -Expected @('component', 'error_code', 'event') `
+            -FailureCode 'TASK037_HERMES_FAILURE_DIAGNOSTIC_REJECTED'
+        if (
+            $reflection.component -isnot [string] -or
+            $reflection.event -isnot [string] -or
+            $reflection.error_code -isnot [string] -or
+            [string]$reflection.component -cne 'Hermes' -or
+            [string]$reflection.event -cne 'reflection_rejected'
+        ) {
+            return $diagnosticRejected
+        }
+        if (-not (Test-Task037HermesReflectionErrorCode -ErrorCode $reflection.error_code)) {
+            return $unclassified
+        }
+
+        $errorCode = [string]$reflection.error_code
+        if ($errorCode -ceq 'HERMES_PRODUCTION_CHILD_EXITED') {
+            if ($detailLines.Count -ne 0) { return $diagnosticRejected }
+            return 'success_tool_error_hermes_production_child_exited'
+        }
+        if ($errorCode -ceq 'HERMES_PRODUCTION_DEADLINE_EXCEEDED') {
+            if ($detailLines.Count -ne 0) { return $diagnosticRejected }
+            return 'success_tool_error_hermes_production_deadline_exceeded'
+        }
+        if ($detailLines.Count -ne 1) { return $diagnosticRejected }
+
+        $detail = ConvertFrom-Task037McpJson -Json ([string]$detailLines[0])
+        if ($detail -isnot [pscustomobject]) { return $diagnosticRejected }
+        if (
+            $detail.component -isnot [string] -or
+            $detail.classification -isnot [string] -or
+            $detail.event -isnot [string] -or
+            [string]$detail.event -cne 'run_failure_detail' -or
+            $detail.source -isnot [string]
+        ) {
+            return $diagnosticRejected
+        }
+
+        $source = [string]$detail.source
+        $classification = [string]$detail.classification
+        switch -CaseSensitive ($source) {
+            'status' {
+                if ($null -ne $detail.PSObject.Properties['detail_present']) {
+                    Assert-Task037ExactPropertySet `
+                        -Value $detail `
+                        -Expected @('classification', 'component', 'detail_present', 'event', 'source') `
+                        -FailureCode 'TASK037_HERMES_FAILURE_DIAGNOSTIC_REJECTED'
+                    if (
+                        [string]$detail.component -cne 'Hermes' -or
+                        $detail.detail_present -isnot [bool] -or
+                        [bool]$detail.detail_present -or
+                        $classification -cne 'HERMES_RUN_FAILED'
+                    ) {
+                        return $diagnosticRejected
+                    }
+                }
+                else {
+                    Assert-Task037ExactPropertySet `
+                        -Value $detail `
+                        -Expected @(
+                            'classification', 'component', 'detail_byte_count', 'detail_redacted',
+                            'detail_sha256', 'event', 'failure_stage', 'source'
+                        ) `
+                        -FailureCode 'TASK037_HERMES_FAILURE_DIAGNOSTIC_REJECTED'
+                    $expectedStage = Get-Task037HermesFailureStage -Classification $classification
+                    if (
+                        [string]$detail.component -cne 'Hermes' -or
+                        -not (Test-Task037JsonInteger -Value $detail.detail_byte_count -Minimum 0 -Maximum 2097152) -or
+                        $detail.detail_redacted -isnot [bool] -or
+                        -not [bool]$detail.detail_redacted -or
+                        $detail.detail_sha256 -isnot [string] -or
+                        [string]$detail.detail_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                        $detail.failure_stage -isnot [string] -or
+                        $null -eq $expectedStage -or
+                        [string]$detail.failure_stage -cne [string]$expectedStage
+                    ) {
+                        return $diagnosticRejected
+                    }
+                }
+            }
+            'events' {
+                Assert-Task037ExactPropertySet `
+                    -Value $detail `
+                    -Expected @(
+                        'classification', 'component', 'detail_byte_count', 'detail_redacted',
+                        'detail_sha256', 'event', 'failure_stage', 'source'
+                    ) `
+                    -FailureCode 'TASK037_HERMES_FAILURE_DIAGNOSTIC_REJECTED'
+                $expectedStage = Get-Task037HermesFailureStage -Classification $classification
+                if (
+                    [string]$detail.component -cne 'Hermes' -or
+                    -not (Test-Task037JsonInteger -Value $detail.detail_byte_count -Minimum 0 -Maximum 2097152) -or
+                    $detail.detail_redacted -isnot [bool] -or
+                    -not [bool]$detail.detail_redacted -or
+                    $detail.detail_sha256 -isnot [string] -or
+                    [string]$detail.detail_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                    $detail.failure_stage -isnot [string] -or
+                    $null -eq $expectedStage -or
+                    [string]$detail.failure_stage -cne [string]$expectedStage
+                ) {
+                    return $diagnosticRejected
+                }
+            }
+            'completed_output' {
+                Assert-Task037ExactPropertySet `
+                    -Value $detail `
+                    -Expected @(
+                        'classification', 'component', 'detail_byte_count', 'detail_redacted',
+                        'detail_sha256', 'event', 'failure_stage', 'source'
+                    ) `
+                    -FailureCode 'TASK037_HERMES_FAILURE_DIAGNOSTIC_REJECTED'
+                $expectedStage = Get-Task037HermesFailureStage -Classification $classification
+                if (
+                    [string]$detail.component -cne 'Codex app-server' -or
+                    -not (Test-Task037JsonInteger -Value $detail.detail_byte_count -Minimum 0 -Maximum 2097152) -or
+                    $detail.detail_redacted -isnot [bool] -or
+                    -not [bool]$detail.detail_redacted -or
+                    $detail.detail_sha256 -isnot [string] -or
+                    [string]$detail.detail_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+                    $detail.failure_stage -isnot [string] -or
+                    $null -eq $expectedStage -or
+                    [string]$detail.failure_stage -cne [string]$expectedStage
+                ) {
+                    return $diagnosticRejected
+                }
+            }
+            'empty' {
+                Assert-Task037ExactPropertySet `
+                    -Value $detail `
+                    -Expected @('classification', 'component', 'event', 'source') `
+                    -FailureCode 'TASK037_HERMES_FAILURE_DIAGNOSTIC_REJECTED'
+                if (
+                    [string]$detail.component -cne 'Codex app-server' -or
+                    $classification -cne 'HERMES_CODEX_APP_SERVER_EMPTY_OUTPUT'
+                ) {
+                    return $diagnosticRejected
+                }
+            }
+            default { return $diagnosticRejected }
+        }
+
+        if ($errorCode -ceq 'HERMES_CODEX_APP_SERVER_RUN_FAILED') {
+            if ([string]$detail.component -cne 'Codex app-server') { return $diagnosticRejected }
+            return Get-Task037HermesFailureClassificationGate -Classification $classification
+        }
+        if ($errorCode -ceq 'HERMES_RUN_FAILED') {
+            if (
+                [string]$detail.component -cne 'Hermes' -or
+                $classification -cne 'HERMES_RUN_FAILED'
+            ) {
+                return $diagnosticRejected
+            }
+            return $unclassified
+        }
+        if ($errorCode -cne $classification -or [string]$detail.component -cne 'Hermes') {
+            return $diagnosticRejected
+        }
+        return Get-Task037HermesFailureClassificationGate -Classification $classification
+    }
+    catch {
+        return $diagnosticRejected
+    }
+}
+
+function Get-Task037HermesComponentFailureGate {
+    param(
+        [AllowNull()]$Code,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$StderrText
+    )
+
+    if ($Code -isnot [string]) { return 'success_tool_error_hermes_unclassified' }
+    switch -CaseSensitive ([string]$Code) {
+        'LATTICE_HERMES_REFLECTION_REJECTED' {
+            return Get-Task037HermesToolFailureGate -StderrText $StderrText
+        }
+        'LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED' {
+            return 'success_tool_error_hermes_runtime'
+        }
+        'LATTICE_HERMES_MEMORY_RECEIPT_REJECTED' {
+            return 'success_tool_error_hermes_memory_receipt'
+        }
+        default { return 'success_tool_error_hermes_unclassified' }
     }
 }
 
@@ -5727,6 +6003,258 @@ finally {
         throw 'TASK037_SELF_TEST_TOOL_FAILURE_GATE_REJECTED'
     }
 
+    $hermesFailureCases = @(
+        [pscustomobject]@{ Classification = 'HERMES_RUN_FAILED_HINT_AUTH'; Stage = 'auth'; Gate = 'success_tool_error_hermes_hint_auth' },
+        [pscustomobject]@{ Classification = 'HERMES_RUN_FAILED_HINT_QUOTA'; Stage = 'quota'; Gate = 'success_tool_error_hermes_hint_quota' },
+        [pscustomobject]@{ Classification = 'HERMES_RUN_FAILED_HINT_TRANSPORT'; Stage = 'transport'; Gate = 'success_tool_error_hermes_hint_transport' },
+        [pscustomobject]@{ Classification = 'HERMES_RUN_FAILED_HINT_APP_SERVER_TIMEOUT'; Stage = 'app_server_timeout'; Gate = 'success_tool_error_hermes_hint_app_server_timeout' },
+        [pscustomobject]@{ Classification = 'HERMES_RUN_FAILED_HINT_APP_SERVER_TURN_STATUS'; Stage = 'app_server_turn_status'; Gate = 'success_tool_error_hermes_hint_app_server_turn_status' },
+        [pscustomobject]@{ Classification = 'HERMES_RUN_FAILED_HINT_SCHEMA'; Stage = 'schema'; Gate = 'success_tool_error_hermes_hint_schema' },
+        [pscustomobject]@{ Classification = 'HERMES_RUN_FAILED_HINT_APP_SERVER'; Stage = 'app_server'; Gate = 'success_tool_error_hermes_hint_app_server' }
+    )
+    foreach ($hermesSource in @('status', 'events')) {
+        foreach ($hermesFailureCase in $hermesFailureCases) {
+            $detailLine = [ordered]@{
+                component = 'Hermes'
+                classification = [string]$hermesFailureCase.Classification
+                detail_byte_count = [int32]12
+                detail_redacted = $true
+                detail_sha256 = ('a' * 64)
+                event = 'run_failure_detail'
+                failure_stage = [string]$hermesFailureCase.Stage
+                source = [string]$hermesSource
+            } | ConvertTo-Json -Compress
+            $reflectionLine = [ordered]@{
+                component = 'Hermes'
+                error_code = [string]$hermesFailureCase.Classification
+                event = 'reflection_rejected'
+            } | ConvertTo-Json -Compress
+            $diagnosticText = $detailLine + "`n" + $reflectionLine + "`n"
+            $hermesGateResult = @(Get-Task037HermesToolFailureGate -StderrText $diagnosticText)
+            if (
+                $hermesGateResult.Count -ne 1 -or
+                $hermesGateResult[0] -isnot [string] -or
+                [string]$hermesGateResult[0] -cne [string]$hermesFailureCase.Gate
+            ) {
+                throw 'TASK037_SELF_TEST_HERMES_FAILURE_GATE_REJECTED'
+            }
+        }
+    }
+
+    $codexDetailLine = [ordered]@{
+        component = 'Codex app-server'
+        classification = 'HERMES_RUN_FAILED_HINT_AUTH'
+        detail_byte_count = [int32]12
+        detail_redacted = $true
+        detail_sha256 = ('b' * 64)
+        event = 'run_failure_detail'
+        failure_stage = 'auth'
+        source = 'completed_output'
+    } | ConvertTo-Json -Compress
+    $codexReflectionLine = [ordered]@{
+        component = 'Hermes'
+        error_code = 'HERMES_CODEX_APP_SERVER_RUN_FAILED'
+        event = 'reflection_rejected'
+    } | ConvertTo-Json -Compress
+    if (
+        (Get-Task037HermesToolFailureGate -StderrText ($codexDetailLine + "`n" + $codexReflectionLine)) -cne
+        'success_tool_error_hermes_hint_auth'
+    ) {
+        throw 'TASK037_SELF_TEST_HERMES_FAILURE_GATE_REJECTED'
+    }
+
+    $emptyDetailLine = [ordered]@{
+        component = 'Codex app-server'
+        classification = 'HERMES_CODEX_APP_SERVER_EMPTY_OUTPUT'
+        event = 'run_failure_detail'
+        source = 'empty'
+    } | ConvertTo-Json -Compress
+    if (
+        (Get-Task037HermesToolFailureGate -StderrText ($emptyDetailLine + "`n" + $codexReflectionLine)) -cne
+        'success_tool_error_hermes_app_server_empty_output'
+    ) {
+        throw 'TASK037_SELF_TEST_HERMES_FAILURE_GATE_REJECTED'
+    }
+
+    $missingDetailLine = [ordered]@{
+        component = 'Hermes'
+        classification = 'HERMES_RUN_FAILED'
+        detail_present = $false
+        event = 'run_failure_detail'
+        source = 'status'
+    } | ConvertTo-Json -Compress
+    $genericReflectionLine = [ordered]@{
+        component = 'Hermes'
+        error_code = 'HERMES_RUN_FAILED'
+        event = 'reflection_rejected'
+    } | ConvertTo-Json -Compress
+    $genericEmptyDetailLine = [ordered]@{
+        component = 'Hermes'
+        classification = 'HERMES_RUN_FAILED'
+        detail_byte_count = [int32]0
+        detail_redacted = $true
+        detail_sha256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+        event = 'run_failure_detail'
+        failure_stage = 'unknown'
+        source = 'events'
+    } | ConvertTo-Json -Compress
+    $unclassifiedDiagnostics = @(
+        ($missingDetailLine + "`n" + $genericReflectionLine),
+        ($genericEmptyDetailLine + "`n" + $genericReflectionLine),
+        ('{"component":"Hermes","error_code":"HERMES_UNKNOWN_CODE","event":"reflection_rejected"}'),
+        ($codexDetailLine + "`n" + ($codexReflectionLine -replace 'HERMES_CODEX_APP_SERVER_RUN_FAILED', 'hermes_codex_app_server_run_failed'))
+    )
+    foreach ($unclassifiedDiagnostic in $unclassifiedDiagnostics) {
+        if (
+            (Get-Task037HermesToolFailureGate -StderrText $unclassifiedDiagnostic) -cne
+            'success_tool_error_hermes_unclassified'
+        ) {
+            throw 'TASK037_SELF_TEST_HERMES_FAILURE_GATE_REJECTED'
+        }
+    }
+
+    $authEventsDetailLine = [ordered]@{
+        component = 'Hermes'
+        classification = 'HERMES_RUN_FAILED_HINT_AUTH'
+        detail_byte_count = [int32]12
+        detail_redacted = $true
+        detail_sha256 = ('c' * 64)
+        event = 'run_failure_detail'
+        failure_stage = 'auth'
+        source = 'events'
+    } | ConvertTo-Json -Compress
+    $authReflectionLine = [ordered]@{
+        component = 'Hermes'
+        error_code = 'HERMES_RUN_FAILED_HINT_AUTH'
+        event = 'reflection_rejected'
+    } | ConvertTo-Json -Compress
+    $quotaReflectionLine = [ordered]@{
+        component = 'Hermes'
+        error_code = 'HERMES_RUN_FAILED_HINT_QUOTA'
+        event = 'reflection_rejected'
+    } | ConvertTo-Json -Compress
+    $extraKeyDetailLine = $authEventsDetailLine.Substring(0, $authEventsDetailLine.Length - 1) + ',"extra":true}'
+    $diagnosticRejectedCases = @(
+        $genericReflectionLine,
+        $codexDetailLine,
+        ($codexDetailLine + "`n" + $codexDetailLine + "`n" + $codexReflectionLine),
+        ($codexDetailLine + "`n" + $codexReflectionLine + "`n" + $codexReflectionLine),
+        (($codexDetailLine -replace 'HERMES_RUN_FAILED_HINT_AUTH', 'HERMES_RUN_FAILED_HINT_QUOTA') + "`n" + $codexReflectionLine),
+        (($missingDetailLine -replace '"source":"status"', '"source":"events"') + "`n" + $genericReflectionLine),
+        (($codexDetailLine -replace '"source":"completed_output"', '"source":"unknown"') + "`n" + $codexReflectionLine),
+        (($codexDetailLine -replace '"detail_sha256":"[0-9a-f]+"', '"detail_sha256":"ABC"') + "`n" + $codexReflectionLine),
+        (($authEventsDetailLine -replace '"detail_byte_count":12', '"detail_byte_count":true') + "`n" + $authReflectionLine),
+        (($authEventsDetailLine -replace '"detail_byte_count":12', '"detail_byte_count":-1') + "`n" + $authReflectionLine),
+        (($authEventsDetailLine -replace '"detail_byte_count":12', '"detail_byte_count":1.5') + "`n" + $authReflectionLine),
+        ($extraKeyDetailLine + "`n" + $authReflectionLine),
+        ($authEventsDetailLine + "`n" + $quotaReflectionLine),
+        ('{"component":true,"error_code":"HERMES_RUN_FAILED_HINT_AUTH","event":"reflection_rejected"}' + "`n" + $authEventsDetailLine),
+        ('{"component":"Other","error_code":"HERMES_RUN_FAILED_HINT_AUTH","event":"reflection_rejected"}' + "`n" + $authEventsDetailLine),
+        ('{"component":"Hermes","error_code":true,"event":"reflection_rejected"}' + "`n" + $authEventsDetailLine),
+        ('{"event":"reflection_rejected"' + "`n" + $codexDetailLine),
+        ('{"message":"\"event\":\"reflection_rejected\""}' + "`n" + $codexDetailLine)
+    )
+    foreach ($diagnosticRejectedCase in $diagnosticRejectedCases) {
+        if (
+            (Get-Task037HermesToolFailureGate -StderrText $diagnosticRejectedCase) -cne
+            'success_tool_error_hermes_diagnostic_rejected'
+        ) {
+            throw 'TASK037_SELF_TEST_HERMES_FAILURE_GATE_REJECTED'
+        }
+    }
+    $oversizeHermesDiagnostic = 'x' * ($task037MaxEvidenceFileBytes + 1)
+    if (
+        (Get-Task037HermesToolFailureGate -StderrText $oversizeHermesDiagnostic) -cne
+        'success_tool_error_hermes_diagnostic_rejected'
+    ) {
+        throw 'TASK037_SELF_TEST_HERMES_FAILURE_GATE_REJECTED'
+    }
+
+    $parserSecretCanary = 'TASK037_SYNTHETIC_HERMES_PARSER_SECRET_CANARY'
+    $parserCanaryResult = @(Get-Task037HermesToolFailureGate -StderrText (
+        $parserSecretCanary + "`n" + $authEventsDetailLine + "`n" + $authReflectionLine
+    ))
+    if (
+        $parserCanaryResult.Count -ne 1 -or
+        $parserCanaryResult[0] -isnot [string] -or
+        [string]$parserCanaryResult[0] -cne 'success_tool_error_hermes_hint_auth' -or
+        [string]$parserCanaryResult[0] -like ('*' + $parserSecretCanary + '*')
+    ) {
+        throw 'TASK037_SELF_TEST_HERMES_FAILURE_GATE_REJECTED'
+    }
+
+    $adapterFailureCases = @(
+        [pscustomobject]@{
+            ErrorCode = 'HERMES_PRODUCTION_CHILD_EXITED'
+            Gate = 'success_tool_error_hermes_production_child_exited'
+        },
+        [pscustomobject]@{
+            ErrorCode = 'HERMES_PRODUCTION_DEADLINE_EXCEEDED'
+            Gate = 'success_tool_error_hermes_production_deadline_exceeded'
+        }
+    )
+    foreach ($adapterFailureCase in $adapterFailureCases) {
+        $adapterReflectionLine = [ordered]@{
+            component = 'Hermes'
+            error_code = [string]$adapterFailureCase.ErrorCode
+            event = 'reflection_rejected'
+        } | ConvertTo-Json -Compress
+        if (
+            (Get-Task037HermesToolFailureGate -StderrText $adapterReflectionLine) -cne
+            [string]$adapterFailureCase.Gate
+        ) {
+            throw 'TASK037_SELF_TEST_HERMES_FAILURE_GATE_REJECTED'
+        }
+    }
+
+    $hermesComponentCases = @(
+        [pscustomobject]@{
+            Code = 'LATTICE_HERMES_REFLECTION_REJECTED'
+            StderrText = $codexDetailLine + "`n" + $codexReflectionLine
+            Gate = 'success_tool_error_hermes_hint_auth'
+        },
+        [pscustomobject]@{
+            Code = 'LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED'
+            StderrText = $codexDetailLine + "`n" + $codexReflectionLine
+            Gate = 'success_tool_error_hermes_runtime'
+        },
+        [pscustomobject]@{
+            Code = 'LATTICE_HERMES_MEMORY_RECEIPT_REJECTED'
+            StderrText = $codexDetailLine + "`n" + $codexReflectionLine
+            Gate = 'success_tool_error_hermes_memory_receipt'
+        },
+        [pscustomobject]@{
+            Code = 'lattice_hermes_reflection_rejected'
+            StderrText = $codexDetailLine + "`n" + $codexReflectionLine
+            Gate = 'success_tool_error_hermes_unclassified'
+        }
+    )
+    foreach ($hermesComponentCase in $hermesComponentCases) {
+        $hermesComponentResult = @(Get-Task037HermesComponentFailureGate `
+            -Code $hermesComponentCase.Code `
+            -StderrText $hermesComponentCase.StderrText)
+        if (
+            $hermesComponentResult.Count -ne 1 -or
+            $hermesComponentResult[0] -isnot [string] -or
+            [string]$hermesComponentResult[0] -cne [string]$hermesComponentCase.Gate
+        ) {
+            throw 'TASK037_SELF_TEST_HERMES_FAILURE_GATE_REJECTED'
+        }
+    }
+
+    $hermesSecretCanary = 'TASK037_SYNTHETIC_HERMES_SECRET_CANARY'
+    $hermesNonParserResult = @(Get-Task037HermesComponentFailureGate `
+        -Code 'LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED' `
+        -StderrText $hermesSecretCanary)
+    if (
+        $hermesNonParserResult.Count -ne 1 -or
+        $hermesNonParserResult[0] -isnot [string] -or
+        [string]$hermesNonParserResult[0] -cne 'success_tool_error_hermes_runtime' -or
+        [string]$hermesNonParserResult[0] -like ('*' + $hermesSecretCanary + '*')
+    ) {
+        throw 'TASK037_SELF_TEST_HERMES_FAILURE_GATE_REJECTED'
+    }
+
     $structuredPayload = '{"status":"OK"}' | ConvertFrom-Json
     $structuredText = $structuredPayload | ConvertTo-Json -Compress
     $structuredContentItem = [pscustomobject]@{ type = 'text'; text = $structuredText }
@@ -7287,6 +7815,9 @@ function Invoke-FullChainInternalPhase {
         }
         if ($toolIsError) {
             $toolFailureGate = Get-Task037ToolFailureGate -Code $toolCodeValue
+            if ($toolFailureGate -ceq 'success_tool_error_hermes') {
+                $toolFailureGate = Get-Task037HermesComponentFailureGate -Code $toolCodeValue -StderrText $stderr
+            }
             Enter-Task037PhaseGate `
                 -Gate $toolFailureGate `
                 -ActiveGate ([ref]$activeGate) `
