@@ -68,7 +68,12 @@ $script:Task037PhaseGates = @(
     'phase_setup',
     'full_chain_gated_start',
     'process_wait',
-    'process_contract',
+    'process_exit_snapshot',
+    'wrapper_reap',
+    'wrapper_exit_match',
+    'openclaw_liveness',
+    'job_cardinality',
+    'child_exit_success',
     'raw_bounds',
     'response_json',
     'mcp_envelope',
@@ -526,6 +531,44 @@ function Complete-Task037PhaseGate {
     if ($null -ne $ActiveGate.Value) {
         $LastCompletedGate.Value = [string]$ActiveGate.Value
         $ActiveGate.Value = $null
+    }
+}
+
+function Invoke-Task037ProcessContractCheck {
+    param(
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [Parameter(Mandatory = $true)][scriptblock]$Check,
+        [Parameter(Mandatory = $true)][ref]$ActiveGate,
+        [Parameter(Mandatory = $true)][ref]$LastCompletedGate
+    )
+
+    $contractGates = @(
+        'process_exit_snapshot',
+        'wrapper_reap',
+        'wrapper_exit_match',
+        'openclaw_liveness',
+        'job_cardinality',
+        'child_exit_success'
+    )
+    if ($contractGates -cnotcontains $Gate) {
+        throw 'TASK037_PHASE_GATE_REJECTED'
+    }
+    Enter-Task037PhaseGate `
+        -Gate $Gate `
+        -ActiveGate $ActiveGate `
+        -LastCompletedGate $LastCompletedGate
+    try {
+        $result = @(& $Check)
+        if (
+            $result.Count -ne 1 -or
+            $result[0] -isnot [bool] -or
+            -not [bool]$result[0]
+        ) {
+            throw 'TASK037_PROCESS_CONTRACT_REJECTED'
+        }
+    }
+    catch {
+        throw 'TASK037_PROCESS_CONTRACT_REJECTED'
     }
 }
 
@@ -5071,6 +5114,103 @@ finally {
         throw 'TASK037_SELF_TEST_MEMORY_REPLAY_REJECTED'
     }
 
+    $processContractGates = @(
+        'process_exit_snapshot',
+        'wrapper_reap',
+        'wrapper_exit_match',
+        'openclaw_liveness',
+        'job_cardinality',
+        'child_exit_success'
+    )
+    for ($failureIndex = 0; $failureIndex -lt $processContractGates.Count; $failureIndex++) {
+        $activeContractGate = 'process_wait'
+        $lastCompletedContractGate = 'full_chain_gated_start'
+        $contractFailure = $null
+        for ($gateIndex = 0; $gateIndex -le $failureIndex; $gateIndex++) {
+            $shouldPass = $gateIndex -lt $failureIndex
+            try {
+                Invoke-Task037ProcessContractCheck `
+                    -Gate $processContractGates[$gateIndex] `
+                    -Check { return [bool]$shouldPass } `
+                    -ActiveGate ([ref]$activeContractGate) `
+                    -LastCompletedGate ([ref]$lastCompletedContractGate)
+            }
+            catch {
+                $contractFailure = $_.Exception.Message
+                break
+            }
+        }
+        $expectedLastCompleted = if ($failureIndex -eq 0) {
+            'process_wait'
+        }
+        else {
+            $processContractGates[$failureIndex - 1]
+        }
+        if (
+            $contractFailure -cne 'TASK037_PROCESS_CONTRACT_REJECTED' -or
+            $activeContractGate -cne $processContractGates[$failureIndex] -or
+            $lastCompletedContractGate -cne $expectedLastCompleted
+        ) {
+            throw 'TASK037_SELF_TEST_PROCESS_CONTRACT_REJECTED'
+        }
+    }
+    $activeContractGate = 'process_wait'
+    $lastCompletedContractGate = 'full_chain_gated_start'
+    foreach ($contractGate in $processContractGates) {
+        Invoke-Task037ProcessContractCheck `
+            -Gate $contractGate `
+            -Check { return $true } `
+            -ActiveGate ([ref]$activeContractGate) `
+            -LastCompletedGate ([ref]$lastCompletedContractGate)
+    }
+    if (
+        $activeContractGate -cne 'child_exit_success' -or
+        $lastCompletedContractGate -cne 'job_cardinality'
+    ) {
+        throw 'TASK037_SELF_TEST_PROCESS_CONTRACT_REJECTED'
+    }
+    $invalidContractChecks = @(
+        { return },
+        { Write-Output $true; Write-Output $true },
+        { return 'true' },
+        { throw 'TASK037_SYNTHETIC_PROCESS_CONTRACT_THROW' }
+    )
+    foreach ($invalidContractCheck in $invalidContractChecks) {
+        $activeContractGate = 'process_wait'
+        $lastCompletedContractGate = 'full_chain_gated_start'
+        $contractFailure = $null
+        try {
+            Invoke-Task037ProcessContractCheck `
+                -Gate 'process_exit_snapshot' `
+                -Check $invalidContractCheck `
+                -ActiveGate ([ref]$activeContractGate) `
+                -LastCompletedGate ([ref]$lastCompletedContractGate)
+        }
+        catch {
+            $contractFailure = $_.Exception.Message
+        }
+        if (
+            $contractFailure -cne 'TASK037_PROCESS_CONTRACT_REJECTED' -or
+            $activeContractGate -cne 'process_exit_snapshot' -or
+            $lastCompletedContractGate -cne 'process_wait'
+        ) {
+            throw 'TASK037_SELF_TEST_PROCESS_CONTRACT_REJECTED'
+        }
+    }
+    $processContract = [pscustomobject]@{ ChildExitCode = 0 }
+    $processContractMetaProbe = [ordered]@{
+        process_exit_code = [int]$processContract.ChildExitCode
+    }
+    $processContractMetaJson = $processContractMetaProbe | ConvertTo-Json -Compress
+    $processContractMetaRoundTrip = $processContractMetaJson | ConvertFrom-Json
+    if (
+        @($processContractMetaRoundTrip.PSObject.Properties).Count -ne 1 -or
+        $processContractMetaRoundTrip.process_exit_code -isnot [int] -or
+        [int]$processContractMetaRoundTrip.process_exit_code -ne 0
+    ) {
+        throw 'TASK037_SELF_TEST_PROCESS_CONTRACT_REJECTED'
+    }
+
     $boolProbeRoot = Join-Path $tempBase ('lattice-task037-bool-probe-' + [Guid]::NewGuid().ToString('N'))
     try {
         New-Item -ItemType Directory -Path $boolProbeRoot -Force:$false | Out-Null
@@ -5819,23 +5959,50 @@ function Invoke-FullChainInternalPhase {
         if (-not $fullChainProcess.WaitForExit($timeoutMilliseconds)) {
             throw ('TASK037_' + $Phase.ToUpperInvariant() + '_TIMEOUT')
         }
-        Enter-Task037PhaseGate `
-            -Gate 'process_contract' `
+        $processContract = [pscustomobject]@{ ChildExitCode = 0 }
+        Invoke-Task037ProcessContractCheck `
+            -Gate 'process_exit_snapshot' `
+            -Check {
+                $processContract.ChildExitCode = [int]$fullChainProcess.ExitCode
+                return $true
+            } `
             -ActiveGate ([ref]$activeGate) `
             -LastCompletedGate ([ref]$lastCompletedGate)
-        $exitCode = $fullChainProcess.ExitCode
-        if (
-            -not $fullChainControllerProcess.WaitForExit(5000) -or
-            [int]$fullChainControllerProcess.ExitCode -ne [int]$exitCode -or
-            $openClawProcess.HasExited -or
-            $openClawControllerProcess.HasExited -or
-            (Get-Task037JobActiveProcessCount -Job $phaseJob) -ne 2
-        ) {
-            throw 'TASK037_FULL_CHAIN_DESCENDANT_CLEANUP_REJECTED'
-        }
-        if ($exitCode -ne 0) {
-            throw ('TASK037_' + $Phase.ToUpperInvariant() + '_EXIT_' + $exitCode)
-        }
+        Invoke-Task037ProcessContractCheck `
+            -Gate 'wrapper_reap' `
+            -Check { return [bool]$fullChainControllerProcess.WaitForExit(5000) } `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
+        Invoke-Task037ProcessContractCheck `
+            -Gate 'wrapper_exit_match' `
+            -Check {
+                return (
+                    [int]$fullChainControllerProcess.ExitCode -eq
+                    [int]$processContract.ChildExitCode
+                )
+            } `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
+        Invoke-Task037ProcessContractCheck `
+            -Gate 'openclaw_liveness' `
+            -Check {
+                return (
+                    -not $openClawProcess.HasExited -and
+                    -not $openClawControllerProcess.HasExited
+                )
+            } `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
+        Invoke-Task037ProcessContractCheck `
+            -Gate 'job_cardinality' `
+            -Check { return (Get-Task037JobActiveProcessCount -Job $phaseJob) -eq 2 } `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
+        Invoke-Task037ProcessContractCheck `
+            -Gate 'child_exit_success' `
+            -Check { return [int]$processContract.ChildExitCode -eq 0 } `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         Enter-Task037PhaseGate `
             -Gate 'raw_bounds' `
             -ActiveGate ([ref]$activeGate) `
@@ -5929,7 +6096,7 @@ function Invoke-FullChainInternalPhase {
             run_mode = $runMode
             tool_name = $toolName
             postgres_run_id = $runId
-            process_exit_code = $exitCode
+            process_exit_code = [int]$processContract.ChildExitCode
             tool_is_error = $toolIsError
             tool_code = $toolCode
             response_sha256 = $null

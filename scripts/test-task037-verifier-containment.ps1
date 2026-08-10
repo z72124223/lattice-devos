@@ -121,12 +121,48 @@ foreach ($required in @(
     'lattice.task037.cleanup.v2',
     'failure_gate = $failureGate',
     'last_completed_gate = $lastCompletedGate',
+    'Invoke-Task037ProcessContractCheck',
+    "'process_exit_snapshot'",
+    "'wrapper_reap'",
+    "'wrapper_exit_match'",
+    "'openclaw_liveness'",
+    "'job_cardinality'",
+    "'child_exit_success'",
+    'process_exit_code = [int]$processContract.ChildExitCode',
     'launcher_path_sha256',
     "'TASK037_LATTICE_COMPONENT_FAILURE'"
 )) {
     if ($source.IndexOf($required, [StringComparison]::Ordinal) -lt 0) {
         throw ('TASK037_CONTAINMENT_REQUIRED_SOURCE_MISSING|' + $required)
     }
+}
+$processContractStart = $source.LastIndexOf(
+    '$processContract = [pscustomobject]@{ ChildExitCode = 0 }',
+    [StringComparison]::Ordinal
+)
+$processContractCursor = $processContractStart
+foreach ($fragment in @(
+    "-Gate 'process_exit_snapshot'",
+    "-Gate 'wrapper_reap'",
+    "-Gate 'wrapper_exit_match'",
+    "-Gate 'openclaw_liveness'",
+    "-Gate 'job_cardinality'",
+    "-Gate 'child_exit_success'",
+    "-Gate 'raw_bounds'",
+    'process_exit_code = [int]$processContract.ChildExitCode'
+)) {
+    if ($processContractCursor -lt 0) {
+        throw 'TASK037_CONTAINMENT_PROCESS_CONTRACT_ORDER_REJECTED'
+    }
+    $processContractCursor = $source.IndexOf(
+        $fragment,
+        $processContractCursor,
+        [StringComparison]::Ordinal
+    )
+    if ($processContractCursor -lt 0) {
+        throw 'TASK037_CONTAINMENT_PROCESS_CONTRACT_ORDER_REJECTED'
+    }
+    $processContractCursor += $fragment.Length
 }
 if ($source.IndexOf('Start-Process -FilePath $fullChainExe', [StringComparison]::Ordinal) -ge 0) {
     throw 'TASK037_CONTAINMENT_DIRECT_FULL_CHAIN_START_REJECTED'
