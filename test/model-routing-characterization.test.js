@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { isDeepStrictEqual } from "node:util";
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const fixturePath = path.join(
@@ -290,8 +291,6 @@ const expectedTask038DependencyEvidence = {
   acceptance_id: "8c21e96b9bc44b1d87de0dea884b9678",
   canonical_latticed_sha256:
     "130ef9f92f2582055d9828828c95526a58f01aa7772e43c4db31062219d278b2",
-  supplied_preimage_sha256:
-    "d40d4c6324af01ef804684088f25da825b9824d87c8ea8c8f761a1607423e911",
   scope: "LOCAL_CANONICAL_MCP_NOT_CHATGPT_TUNNEL",
   readiness: "DEPENDENCY_READY_ONLY",
   source_refs: [
@@ -303,6 +302,23 @@ const expectedTask038DependencyEvidence = {
     `repo@${task038DependencyCommit}:apps/lattice-runtime/src/mcp.rs:29`,
   ],
 };
+const expectedTask038SuppliedPreimageObservation = {
+  kind: "supplied_preimage_sha256",
+  value_type: "sha256",
+  value: "d40d4c6324af01ef804684088f25da825b9824d87c8ea8c8f761a1607423e911",
+  evidence_state: "UNVERIFIED",
+  source_kind: "SCHEDULER_SUPPLIED",
+  required_for_dependency_readiness: false,
+  may_upgrade_readiness: false,
+  may_replace_immutable_evidence: false,
+};
+
+function task038RequiredDependencyIsReady(characterization) {
+  return isDeepStrictEqual(
+    characterization.task_038_dependency_evidence,
+    expectedTask038DependencyEvidence,
+  );
+}
 
 const evidenceEvaluationTime = Date.parse("2026-08-10T02:00:00+08:00");
 
@@ -864,6 +880,32 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
     fixture.task_038_dependency_evidence,
     expectedTask038DependencyEvidence,
   );
+  assert.deepEqual(
+    fixture.task_038_supplied_preimage_observation,
+    expectedTask038SuppliedPreimageObservation,
+  );
+  assert.equal(task038RequiredDependencyIsReady(fixture), true);
+
+  const withoutOptionalSuppliedObservation = structuredClone(fixture);
+  delete withoutOptionalSuppliedObservation.task_038_supplied_preimage_observation;
+  assert.equal(
+    task038RequiredDependencyIsReady(withoutOptionalSuppliedObservation),
+    true,
+  );
+
+  const suppliedObservationCannotUpgrade = structuredClone(fixture);
+  delete suppliedObservationCannotUpgrade.task_038_dependency_evidence;
+  suppliedObservationCannotUpgrade.task_038_supplied_preimage_observation.evidence_state =
+    "VERIFIED";
+  suppliedObservationCannotUpgrade.task_038_supplied_preimage_observation.required_for_dependency_readiness =
+    true;
+  assert.equal(task038RequiredDependencyIsReady(suppliedObservationCannotUpgrade), false);
+
+  const suppliedObservationCannotReplace = structuredClone(fixture);
+  suppliedObservationCannotReplace.task_038_dependency_evidence = structuredClone(
+    suppliedObservationCannotReplace.task_038_supplied_preimage_observation,
+  );
+  assert.equal(task038RequiredDependencyIsReady(suppliedObservationCannotReplace), false);
   assert.deepEqual(fixture.pending_evidence, []);
 
   const fixedSettingRefs = new Set(

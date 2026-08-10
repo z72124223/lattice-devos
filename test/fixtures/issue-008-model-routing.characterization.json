@@ -1563,7 +1563,6 @@
     "contract": "SPEC-003@4/latticed@1.4/task-public-status@lattice.task.status.v1",
     "acceptance_id": "8c21e96b9bc44b1d87de0dea884b9678",
     "canonical_latticed_sha256": "130ef9f92f2582055d9828828c95526a58f01aa7772e43c4db31062219d278b2",
-    "supplied_preimage_sha256": "d40d4c6324af01ef804684088f25da825b9824d87c8ea8c8f761a1607423e911",
     "scope": "LOCAL_CANONICAL_MCP_NOT_CHATGPT_TUNNEL",
     "readiness": "DEPENDENCY_READY_ONLY",
     "source_refs": [
@@ -1574,6 +1573,16 @@
       "repo@2b424ec9a5401a6fbdc4f37d3d401592331afca0:HANDOFF.md:138-139",
       "repo@2b424ec9a5401a6fbdc4f37d3d401592331afca0:apps/lattice-runtime/src/mcp.rs:29"
     ]
+  },
+  "task_038_supplied_preimage_observation": {
+    "kind": "supplied_preimage_sha256",
+    "value_type": "sha256",
+    "value": "d40d4c6324af01ef804684088f25da825b9824d87c8ea8c8f761a1607423e911",
+    "evidence_state": "UNVERIFIED",
+    "source_kind": "SCHEDULER_SUPPLIED",
+    "required_for_dependency_readiness": false,
+    "may_upgrade_readiness": false,
+    "may_replace_immutable_evidence": false
   },
   "pending_evidence": [],
   "next_red": {
