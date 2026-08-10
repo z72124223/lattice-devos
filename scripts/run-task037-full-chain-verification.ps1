@@ -468,6 +468,196 @@ function Invoke-Task037GitText {
     return ($output -join "`n")
 }
 
+function Invoke-Task037ClosedGitText {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitExe,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$IsolationRoot,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Root', 'Branch', 'Head', 'Status')]
+        [string]$Operation,
+        [Parameter(Mandatory = $true)][string]$FailureCode
+    )
+
+    $fixedConfiguration = @(
+        '-c', 'core.fsmonitor=false',
+        '-c', 'core.untrackedCache=false',
+        '-c', 'core.excludesFile=NUL',
+        '-c', 'status.showUntrackedFiles=all'
+    )
+    $arguments = switch ($Operation) {
+        'Root' { @($fixedConfiguration + @('rev-parse', '--show-toplevel')) }
+        'Branch' { @($fixedConfiguration + @('rev-parse', '--abbrev-ref', 'HEAD')) }
+        'Head' { @($fixedConfiguration + @('rev-parse', 'HEAD')) }
+        'Status' {
+            @(
+                $fixedConfiguration + @(
+                    'status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none'
+                )
+            )
+        }
+    }
+    $canonicalGit = Get-CanonicalPath -Path $GitExe
+    $canonicalRepository = Get-CanonicalPath -Path $RepositoryRoot
+    $canonicalIsolation = Get-CanonicalPath -Path $IsolationRoot
+    foreach ($path in @($canonicalGit, $canonicalRepository, $canonicalIsolation)) {
+        Assert-NoReparsePath -Path $path -FailureCode $FailureCode
+    }
+    Assert-RegularFile -Path $canonicalGit
+    foreach ($directory in @(
+        $canonicalRepository,
+        $canonicalIsolation,
+        (Join-Path $canonicalIsolation 'home'),
+        (Join-Path $canonicalIsolation 'temp')
+    )) {
+        $item = Get-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
+        if (
+            $null -eq $item -or
+            -not $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        ) {
+            throw $FailureCode
+        }
+    }
+
+    $windows = Get-CanonicalPath -Path (
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+    )
+    $system32 = Get-CanonicalPath -Path (Join-Path $windows 'System32')
+    $gitDirectory = Get-CanonicalPath -Path (Split-Path -Parent $canonicalGit)
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $canonicalGit
+    $startInfo.Arguments = [string]::Join(' ', $arguments)
+    $startInfo.WorkingDirectory = $canonicalRepository
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $startInfo.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+    $startInfo.EnvironmentVariables.Clear()
+    foreach ($entry in ([ordered]@{
+        SystemRoot = $windows
+        WINDIR = $windows
+        ComSpec = Join-Path $system32 'cmd.exe'
+        PATH = [string]::Join(';', @($gitDirectory, $system32))
+        HOME = Join-Path $canonicalIsolation 'home'
+        USERPROFILE = Join-Path $canonicalIsolation 'home'
+        XDG_CONFIG_HOME = Join-Path $canonicalIsolation 'home'
+        TEMP = Join-Path $canonicalIsolation 'temp'
+        TMP = Join-Path $canonicalIsolation 'temp'
+        GIT_CONFIG_NOSYSTEM = '1'
+        GIT_CONFIG_GLOBAL = 'NUL'
+        GIT_CONFIG_SYSTEM = 'NUL'
+        GIT_TERMINAL_PROMPT = '0'
+        GIT_OPTIONAL_LOCKS = '0'
+        GIT_NO_REPLACE_OBJECTS = '1'
+        NO_COLOR = '1'
+    }).GetEnumerator()) {
+        $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
+    }
+
+    $process = $null
+    try {
+        $process = [Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) { throw $FailureCode }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(15000)) {
+            try { $process.Kill() } catch { }
+            try { $process.WaitForExit() } catch { }
+            throw $FailureCode
+        }
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        if (
+            [int]$process.ExitCode -ne 0 -or
+            -not [string]::IsNullOrEmpty($stderr) -or
+            $stdout.Length -gt 65536 -or
+            $stderr.Length -gt 65536
+        ) {
+            throw $FailureCode
+        }
+        return $stdout.TrimEnd([char[]]"`r`n")
+    }
+    catch {
+        throw $FailureCode
+    }
+    finally {
+        if ($null -ne $process) { $process.Dispose() }
+    }
+}
+
+function Get-Task037ClosedGitSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitExe,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$AuthorizedTempBase,
+        [Parameter(Mandatory = $true)][string]$FailureCode
+    )
+
+    $tempBase = Resolve-Task037AuthorizedTempBase `
+        -AuthorizedTempBase $AuthorizedTempBase `
+        -FailureCode $FailureCode
+    $isolationRoot = Join-Path $tempBase (
+        'lattice-task037-git-inspection-' + [Guid]::NewGuid().ToString('N')
+    )
+    try {
+        New-Item -ItemType Directory -Path $isolationRoot -Force:$false | Out-Null
+        $null = Set-Task037RestrictedDirectoryAcl -Path $isolationRoot
+        foreach ($leaf in @('home', 'temp')) {
+            New-Item -ItemType Directory -Path (Join-Path $isolationRoot $leaf) -Force:$false | Out-Null
+        }
+        $root = Invoke-Task037ClosedGitText `
+            -GitExe $GitExe `
+            -RepositoryRoot $RepositoryRoot `
+            -IsolationRoot $isolationRoot `
+            -Operation Root `
+            -FailureCode $FailureCode
+        $branch = Invoke-Task037ClosedGitText `
+            -GitExe $GitExe `
+            -RepositoryRoot $RepositoryRoot `
+            -IsolationRoot $isolationRoot `
+            -Operation Branch `
+            -FailureCode $FailureCode
+        $head = Invoke-Task037ClosedGitText `
+            -GitExe $GitExe `
+            -RepositoryRoot $RepositoryRoot `
+            -IsolationRoot $isolationRoot `
+            -Operation Head `
+            -FailureCode $FailureCode
+        $status = Invoke-Task037ClosedGitText `
+            -GitExe $GitExe `
+            -RepositoryRoot $RepositoryRoot `
+            -IsolationRoot $isolationRoot `
+            -Operation Status `
+            -FailureCode $FailureCode
+        if (
+            -not (Test-ExactPath -Actual $root -Expected $RepositoryRoot) -or
+            [string]::IsNullOrWhiteSpace($branch) -or
+            $branch.IndexOf("`n", [StringComparison]::Ordinal) -ge 0 -or
+            $head -cnotmatch '^[0-9a-f]{40}$'
+        ) {
+            throw $FailureCode
+        }
+        return [pscustomobject]@{
+            RepositoryRoot = Get-CanonicalPath -Path $root
+            Branch = $branch
+            Head = $head
+            Clean = [string]::IsNullOrEmpty($status)
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $isolationRoot) {
+            $removed = Remove-SafeTempRoot `
+                -Path $isolationRoot `
+                -AuthorizedTempBase $tempBase
+            if (-not $removed) { throw $FailureCode }
+        }
+    }
+}
+
 function Assert-BoundedTask037EvidenceFile {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -2648,6 +2838,7 @@ function Set-Task037ClosedChildEnvironment {
         PATH = $pathValue
         PATHEXT = '.COM;.EXE;.BAT;.CMD'
         PSModulePath = $powerShellModulePath
+        PSModuleAnalysisCachePath = 'NUL'
         OS = 'Windows_NT'
         TEMP = $temp
         TMP = $temp
@@ -2669,7 +2860,15 @@ function Set-Task037ClosedChildEnvironment {
         }
     }
     foreach ($entry in $EnvironmentValues.GetEnumerator()) {
-        if ([string]$entry.Key -notmatch '^[A-Z][A-Z0-9_]{0,127}$' -or $null -eq $entry.Value) {
+        if (
+            [string]$entry.Key -notmatch '^[A-Z][A-Z0-9_]{0,127}$' -or
+            $null -eq $entry.Value -or
+            [string]$entry.Key -in @(
+                'PROGRAMDATA',
+                'ALLUSERSPROFILE',
+                'PSMODULEANALYSISCACHEPATH'
+            )
+        ) {
             throw 'TASK037_CHILD_ENVIRONMENT_VALUE_REJECTED'
         }
         $StartInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
@@ -2683,7 +2882,7 @@ function Start-Task037GatedProcess {
         [IntPtr]$AttestationJob = [IntPtr]::Zero,
         [Parameter(Mandatory = $true)][string]$PowerShellExecutable,
         [Parameter(Mandatory = $true)][string]$Executable,
-        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Arguments,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][Collections.IDictionary]$EnvironmentValues,
         [Parameter(Mandatory = $true)][string]$ChildPidPath,
@@ -2796,21 +2995,30 @@ try {
     $payload = $payloadJson | ConvertFrom-Json
     if ([string]$payload.schema -cne 'lattice.task037.gated-process.v1') { exit 115 }
     $stage = 'ENVIRONMENT'
-    foreach ($name in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
-        [Environment]::SetEnvironmentVariable($name, $null, 'Process')
-    }
+    $payloadNames = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
     foreach ($property in $payload.environment.PSObject.Properties) {
-        [Environment]::SetEnvironmentVariable([string]$property.Name, [string]$property.Value, 'Process')
+        $name = [string]$property.Name
+        if (-not $payloadNames.Add($name)) { exit 118 }
+        [Environment]::SetEnvironmentVariable($name, [string]$property.Value, 'Process')
+    }
+    foreach ($name in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
+        if (-not $payloadNames.Contains([string]$name)) {
+            [Environment]::SetEnvironmentVariable([string]$name, $null, 'Process')
+        }
     }
     $arguments = @($payload.arguments | ForEach-Object { [string]$_ })
     $start = @{
         FilePath = [string]$payload.executable
-        ArgumentList = $arguments
         WorkingDirectory = [string]$payload.working_directory
         RedirectStandardOutput = [string]$payload.stdout_path
         RedirectStandardError = [string]$payload.stderr_path
         WindowStyle = 'Hidden'
         PassThru = $true
+    }
+    if ($arguments.Count -gt 0) {
+        $start.ArgumentList = $arguments
     }
     if (-not [string]::IsNullOrEmpty([string]$payload.stdin_path)) {
         $start.RedirectStandardInput = [string]$payload.stdin_path
@@ -4711,6 +4919,51 @@ finally {
         throw 'TASK037_SELF_TEST_CONTROLLER_TOOL_IDENTITY_REJECTED'
     }
 
+    $repositoryRoot = Get-CanonicalPath -Path (Join-Path $PSScriptRoot '..')
+    $closedGitBaseline = Get-Task037ClosedGitSnapshot `
+        -GitExe $expectedGit `
+        -RepositoryRoot $repositoryRoot `
+        -AuthorizedTempBase $tempBase `
+        -FailureCode 'TASK037_SELF_TEST_CLOSED_GIT_REJECTED'
+    $ambientGitValues = @{}
+    foreach ($name in @('GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_DIR')) {
+        $ambientGitValues[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+    try {
+        [Environment]::SetEnvironmentVariable('GIT_CONFIG_COUNT', '1', 'Process')
+        [Environment]::SetEnvironmentVariable('GIT_CONFIG_KEY_0', 'core.fsmonitor', 'Process')
+        [Environment]::SetEnvironmentVariable(
+            'GIT_CONFIG_VALUE_0',
+            'C:\lattice-task037-forged-fsmonitor.exe',
+            'Process'
+        )
+        [Environment]::SetEnvironmentVariable(
+            'GIT_DIR',
+            'C:\lattice-task037-forged-git-dir',
+            'Process'
+        )
+        $closedGitInjected = Get-Task037ClosedGitSnapshot `
+            -GitExe $expectedGit `
+            -RepositoryRoot $repositoryRoot `
+            -AuthorizedTempBase $tempBase `
+            -FailureCode 'TASK037_SELF_TEST_CLOSED_GIT_REJECTED'
+        if (
+            -not (Test-ExactPath `
+                -Actual $closedGitInjected.RepositoryRoot `
+                -Expected $closedGitBaseline.RepositoryRoot) -or
+            [string]$closedGitInjected.Branch -cne [string]$closedGitBaseline.Branch -or
+            [string]$closedGitInjected.Head -cne [string]$closedGitBaseline.Head -or
+            [bool]$closedGitInjected.Clean -ne [bool]$closedGitBaseline.Clean
+        ) {
+            throw 'TASK037_SELF_TEST_CLOSED_GIT_REJECTED'
+        }
+    }
+    finally {
+        foreach ($name in $ambientGitValues.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $ambientGitValues[$name], 'Process')
+        }
+    }
+
     $cargoConfigProbeRoot = Join-Path $tempBase ('lattice-task037-cargo-config-' + [Guid]::NewGuid().ToString('N'))
     try {
         $cargoConfigProbeRepository = Join-Path $cargoConfigProbeRoot 'parent\repository'
@@ -4738,6 +4991,97 @@ finally {
     finally {
         if (Test-Path -LiteralPath $cargoConfigProbeRoot) {
             Remove-SafeTempRoot -Path $cargoConfigProbeRoot | Out-Null
+        }
+    }
+
+    $emptyArgumentsRoot = Join-Path $tempBase (
+        'lattice-task037-empty-arguments-' + [Guid]::NewGuid().ToString('N')
+    )
+    $emptyArgumentsJob = [IntPtr]::Zero
+    $emptyArgumentsOwned = $null
+    try {
+        New-Item -ItemType Directory -Path $emptyArgumentsRoot -Force:$false | Out-Null
+        $emptyArgumentsReleasePath = Join-Path $emptyArgumentsRoot 'release.signal'
+        $emptyArgumentsInput = Join-Path $emptyArgumentsRoot 'stdin.js'
+        $emptyArgumentsSource = @'
+const fs = require('fs');
+const releasePath = process.env.TASK037_SELFTEST_EMPTY_ARGUMENTS_RELEASE;
+const deadline = Date.now() + 10000;
+const waitCell = new Int32Array(new SharedArrayBuffer(4));
+while (!fs.existsSync(releasePath)) {
+    if (Date.now() >= deadline) process.exit(124);
+    Atomics.wait(waitCell, 0, 0, 10);
+}
+if (fs.readFileSync(releasePath, 'utf8') !== 'release\n') process.exit(125);
+'@
+        [IO.File]::WriteAllText(
+            $emptyArgumentsInput,
+            $emptyArgumentsSource,
+            [Text.UTF8Encoding]::new($false)
+        )
+        $emptyArgumentsJob = New-Task037KillOnCloseJob
+        $emptyArgumentsOwned = Start-Task037GatedProcess `
+            -Job $emptyArgumentsJob `
+            -PowerShellExecutable $powerShellExecutable `
+            -Executable $trustedNode `
+            -Arguments @() `
+            -WorkingDirectory $emptyArgumentsRoot `
+            -EnvironmentValues ([ordered]@{
+                TASK037_SELFTEST_EMPTY_ARGUMENTS_RELEASE = $emptyArgumentsReleasePath
+            }) `
+            -ChildPidPath (Join-Path $emptyArgumentsRoot 'child.pid') `
+            -ChildStdoutPath (Join-Path $emptyArgumentsRoot 'child.stdout') `
+            -ChildStderrPath (Join-Path $emptyArgumentsRoot 'child.stderr') `
+            -WrapperStdoutPath (Join-Path $emptyArgumentsRoot 'wrapper.stdout') `
+            -WrapperStderrPath (Join-Path $emptyArgumentsRoot 'wrapper.stderr') `
+            -RuntimeIsolationRoot (Join-Path $emptyArgumentsRoot 'runtime') `
+            -TrustedProgramData $expectedProgramData `
+            -StandardInputPath $emptyArgumentsInput
+        [IO.File]::WriteAllText(
+            $emptyArgumentsReleasePath,
+            "release`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+        Assert-NoReparsePath `
+            -Path $emptyArgumentsReleasePath `
+            -FailureCode 'TASK037_SELF_TEST_EMPTY_ARGUMENTS_REJECTED'
+        Assert-RegularFile -Path $emptyArgumentsReleasePath
+        if (
+            -not $emptyArgumentsOwned.ChildProcess.WaitForExit(10000) -or
+            [int]$emptyArgumentsOwned.ChildProcess.ExitCode -ne 0 -or
+            -not $emptyArgumentsOwned.Process.WaitForExit(10000)
+        ) {
+            throw 'TASK037_SELF_TEST_EMPTY_ARGUMENTS_REJECTED'
+        }
+        foreach ($outputPath in @(
+            (Join-Path $emptyArgumentsRoot 'child.stdout'),
+            (Join-Path $emptyArgumentsRoot 'child.stderr')
+        )) {
+            Assert-RegularFile -Path $outputPath
+            if ((Get-Item -LiteralPath $outputPath -Force).Length -ne 0) {
+                throw 'TASK037_SELF_TEST_EMPTY_ARGUMENTS_REJECTED'
+            }
+        }
+        Stop-Task037Job -Job $emptyArgumentsJob
+        Complete-Task037GatedProcessEvidence -OwnedProcess $emptyArgumentsOwned
+        if (
+            (Get-Task037JobActiveProcessCount -Job $emptyArgumentsJob) -ne 0 -or
+            (Test-Path -LiteralPath (Join-Path $emptyArgumentsRoot 'Microsoft'))
+        ) {
+            throw 'TASK037_SELF_TEST_EMPTY_ARGUMENTS_REJECTED'
+        }
+    }
+    finally {
+        if ($emptyArgumentsJob -ne [IntPtr]::Zero) {
+            try { Stop-Task037Job -Job $emptyArgumentsJob } catch { }
+            try { Close-Task037Job -Job $emptyArgumentsJob } catch { }
+        }
+        if ($null -ne $emptyArgumentsOwned) {
+            try { $emptyArgumentsOwned.ChildProcess.Dispose() } catch { }
+            try { $emptyArgumentsOwned.Process.Dispose() } catch { }
+        }
+        if (Test-Path -LiteralPath $emptyArgumentsRoot) {
+            Remove-SafeTempRoot -Path $emptyArgumentsRoot | Out-Null
         }
     }
 
@@ -6088,6 +6432,14 @@ function Invoke-Task037SupervisedVerification {
     $controllerRustcExe = $controllerRustToolchain.Rustc
     $controllerRustdocExe = $controllerRustToolchain.Rustdoc
     Assert-RegularFile -Path $controllerNodeExe
+    $preRunGitSnapshot = Get-Task037ClosedGitSnapshot `
+        -GitExe $controllerGitExe `
+        -RepositoryRoot $repositoryRoot `
+        -AuthorizedTempBase $supervisorTempBase `
+        -FailureCode 'TASK037_PRE_RUN_WORKTREE_REJECTED'
+    if (-not [bool]$preRunGitSnapshot.Clean) {
+        throw 'TASK037_WORKTREE_DIRTY_REJECTED'
+    }
     $controllerPath = [string]::Join(';', $controllerToolDirectories)
     $supervision = $null
     $owned = $null
@@ -6218,6 +6570,24 @@ function Invoke-Task037SupervisedVerification {
             }
         }
     }
+    $postRunGitSnapshot = Get-Task037ClosedGitSnapshot `
+        -GitExe $controllerGitExe `
+        -RepositoryRoot $repositoryRoot `
+        -AuthorizedTempBase $supervisorTempBase `
+        -FailureCode 'TASK037_POST_RUN_WORKTREE_REJECTED'
+    if (
+        -not (Test-ExactPath `
+            -Actual $postRunGitSnapshot.RepositoryRoot `
+            -Expected $preRunGitSnapshot.RepositoryRoot) -or
+        [string]$postRunGitSnapshot.Branch -cne [string]$preRunGitSnapshot.Branch -or
+        [string]$postRunGitSnapshot.Head -cne [string]$preRunGitSnapshot.Head
+    ) {
+        throw 'TASK037_POST_RUN_WORKTREE_IDENTITY_REJECTED'
+    }
+    if (-not [bool]$postRunGitSnapshot.Clean) {
+        throw 'TASK037_POST_RUN_WORKTREE_DIRTY_REJECTED'
+    }
+
     if ($null -ne $supervisorFailure) {
         Throw-Task037SafeFailure -Message $supervisorFailure
     }

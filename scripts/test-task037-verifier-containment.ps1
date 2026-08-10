@@ -93,6 +93,20 @@ foreach ($required in @(
     'LATTICE_TASK037_CONTROLLER_PROGRAM_DATA',
     '-TrustedProgramData $programDataAuthority',
     'node-identity-probe.release',
+    '[AllowEmptyCollection()][string[]]$Arguments',
+    'if ($arguments.Count -gt 0)',
+    "PSModuleAnalysisCachePath = 'NUL'",
+    '$payloadNames.Contains([string]$name)',
+    'Get-Task037ClosedGitSnapshot',
+    "[ValidateSet('Root', 'Branch', 'Head', 'Status')]",
+    "GIT_OPTIONAL_LOCKS = '0'",
+    "GIT_NO_REPLACE_OBJECTS = '1'",
+    "'core.fsmonitor=false'",
+    "'core.excludesFile=NUL'",
+    'TASK037_POST_RUN_WORKTREE_IDENTITY_REJECTED',
+    'TASK037_POST_RUN_WORKTREE_DIRTY_REJECTED',
+    'TASK037_SELF_TEST_CLOSED_GIT_REJECTED',
+    'TASK037_SELF_TEST_EMPTY_ARGUMENTS_REJECTED',
     'TASK037_CONTROLLER_PREFLIGHT=PASS',
     'TASK037_SYNTHETIC_ADMISSION_REJECTED',
     'TASK037_SELF_TEST_ADMISSION_RECEIPT_REJECTED',
@@ -158,11 +172,24 @@ finally {
 }
 
 $phaseProbe = $null
+$phaseProbeRoot = Join-Path ([IO.Path]::GetTempPath()) (
+    'lattice-task037-direct-phase-' + [Guid]::NewGuid().ToString('N')
+)
 try {
+    foreach ($directory in @(
+        $phaseProbeRoot,
+        (Join-Path $phaseProbeRoot 'home'),
+        (Join-Path $phaseProbeRoot 'appdata'),
+        (Join-Path $phaseProbeRoot 'localappdata'),
+        (Join-Path $phaseProbeRoot 'temp')
+    )) {
+        New-Item -ItemType Directory -Path $directory -Force:$false | Out-Null
+    }
     $phaseAcceptanceId = 'f' * 32
     $phaseInfo = [Diagnostics.ProcessStartInfo]::new()
     $phaseInfo.FileName = $powerShell
     $phaseInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $harness + '" -InternalPhase FullChainPreStatus'
+    $phaseInfo.WorkingDirectory = $phaseProbeRoot
     $phaseInfo.UseShellExecute = $false
     $phaseInfo.CreateNoWindow = $true
     $phaseInfo.RedirectStandardOutput = $true
@@ -171,9 +198,13 @@ try {
     foreach ($entry in ([ordered]@{
         SystemRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
         WINDIR = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
-        TEMP = [IO.Path]::GetTempPath()
-        TMP = [IO.Path]::GetTempPath()
-        USERPROFILE = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        TEMP = Join-Path $phaseProbeRoot 'temp'
+        TMP = Join-Path $phaseProbeRoot 'temp'
+        USERPROFILE = Join-Path $phaseProbeRoot 'home'
+        HOME = Join-Path $phaseProbeRoot 'home'
+        APPDATA = Join-Path $phaseProbeRoot 'appdata'
+        LOCALAPPDATA = Join-Path $phaseProbeRoot 'localappdata'
+        PSModuleAnalysisCachePath = 'NUL'
         LATTICE_TASK037_ACCEPTANCE_ID = $phaseAcceptanceId
         LATTICE_TASK037_TEMP_ACCEPTANCE_ROOT = Join-Path ([IO.Path]::GetTempPath()) ('lattice-task037-' + $phaseAcceptanceId)
         LATTICE_TASK019_RUN_ID = 'e' * 32
@@ -205,6 +236,15 @@ try {
 }
 finally {
     if ($null -ne $phaseProbe) { $phaseProbe.Dispose() }
+    if (Test-Path -LiteralPath $phaseProbeRoot) {
+        $phaseProbeItems = @(Get-ChildItem -LiteralPath $phaseProbeRoot -Recurse -Force)
+        if (@($phaseProbeItems | Where-Object {
+            $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+        }).Count -ne 0) {
+            throw 'TASK037_DIRECT_PHASE_BINDING_PROBE_REPARSE_REJECTED'
+        }
+        [IO.Directory]::Delete($phaseProbeRoot, $true)
+    }
 }
 
 $publicFailureProbe = $null
