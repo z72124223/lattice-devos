@@ -98,7 +98,9 @@ foreach ($required in @(
     "PSModuleAnalysisCachePath = 'NUL'",
     '$payloadNames.Contains([string]$name)',
     'Get-Task037ClosedGitSnapshot',
-    "[ValidateSet('Root', 'Branch', 'Head', 'Status')]",
+    "'InitializeSynthetic'",
+    "'AddSynthetic'",
+    "'CommitSynthetic'",
     "GIT_OPTIONAL_LOCKS = '0'",
     "GIT_NO_REPLACE_OBJECTS = '1'",
     "'core.fsmonitor=false'",
@@ -110,6 +112,15 @@ foreach ($required in @(
     'TASK037_CONTROLLER_PREFLIGHT=PASS',
     'TASK037_SYNTHETIC_ADMISSION_REJECTED',
     'TASK037_SELF_TEST_ADMISSION_RECEIPT_REJECTED',
+    'Get-Task037RepositoryDirectoryShape',
+    'Assert-Task037RepositoryDirectoryShapeUnchanged',
+    'TASK037_POST_RUN_DIRECTORY_SHAPE_REJECTED',
+    'TASK037_CHILD_SPECIAL_FOLDER_REJECTED',
+    'TASK037_MCP_RESPONSE_JSON_REJECTED',
+    'TASK037_SELF_TEST_PROFILE_OVERRIDE_REJECTED',
+    'lattice.task037.cleanup.v2',
+    'failure_gate = $failureGate',
+    'last_completed_gate = $lastCompletedGate',
     'launcher_path_sha256',
     "'TASK037_LATTICE_COMPONENT_FAILURE'"
 )) {
@@ -179,8 +190,9 @@ try {
     foreach ($directory in @(
         $phaseProbeRoot,
         (Join-Path $phaseProbeRoot 'home'),
-        (Join-Path $phaseProbeRoot 'appdata'),
-        (Join-Path $phaseProbeRoot 'localappdata'),
+        (Join-Path $phaseProbeRoot 'home\AppData'),
+        (Join-Path $phaseProbeRoot 'home\AppData\Roaming'),
+        (Join-Path $phaseProbeRoot 'home\AppData\Local'),
         (Join-Path $phaseProbeRoot 'temp')
     )) {
         New-Item -ItemType Directory -Path $directory -Force:$false | Out-Null
@@ -202,8 +214,8 @@ try {
         TMP = Join-Path $phaseProbeRoot 'temp'
         USERPROFILE = Join-Path $phaseProbeRoot 'home'
         HOME = Join-Path $phaseProbeRoot 'home'
-        APPDATA = Join-Path $phaseProbeRoot 'appdata'
-        LOCALAPPDATA = Join-Path $phaseProbeRoot 'localappdata'
+        APPDATA = Join-Path $phaseProbeRoot 'home\AppData\Roaming'
+        LOCALAPPDATA = Join-Path $phaseProbeRoot 'home\AppData\Local'
         PSModuleAnalysisCachePath = 'NUL'
         LATTICE_TASK037_ACCEPTANCE_ID = $phaseAcceptanceId
         LATTICE_TASK037_TEMP_ACCEPTANCE_ROOT = Join-Path ([IO.Path]::GetTempPath()) ('lattice-task037-' + $phaseAcceptanceId)
@@ -237,6 +249,9 @@ try {
 finally {
     if ($null -ne $phaseProbe) { $phaseProbe.Dispose() }
     if (Test-Path -LiteralPath $phaseProbeRoot) {
+        if (Test-Path -LiteralPath (Join-Path $phaseProbeRoot 'Microsoft')) {
+            throw 'TASK037_DIRECT_PHASE_SPECIAL_FOLDER_REJECTED'
+        }
         $phaseProbeItems = @(Get-ChildItem -LiteralPath $phaseProbeRoot -Recurse -Force)
         if (@($phaseProbeItems | Where-Object {
             $_.Attributes -band [IO.FileAttributes]::ReparsePoint

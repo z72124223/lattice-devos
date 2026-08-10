@@ -64,6 +64,23 @@ $script:Task037AdmissionStages = @(
     'worktree_preflight',
     'inner_pre_acceptance'
 )
+$script:Task037PhaseGates = @(
+    'phase_setup',
+    'full_chain_gated_start',
+    'process_wait',
+    'process_contract',
+    'raw_bounds',
+    'response_json',
+    'mcp_envelope',
+    'ready_evidence',
+    'tool_content',
+    'pre_status_semantics',
+    'success_semantics',
+    'memory_empty',
+    'memory_expected',
+    'status_replay',
+    'evidence_commit'
+)
 
 function Get-CanonicalPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -302,7 +319,7 @@ function Get-FileSha256 {
 }
 
 function Get-StringSha256 {
-    param([Parameter(Mandatory = $true)][string]$Text)
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
 
     $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($Text)
     $sha256 = [Security.Cryptography.SHA256]::Create()
@@ -468,13 +485,65 @@ function Invoke-Task037GitText {
     return ($output -join "`n")
 }
 
+function Test-Task037PhaseGateName {
+    param([AllowNull()]$Gate)
+
+    if ($null -eq $Gate) { return $true }
+    return (
+        $Gate -is [string] -and
+        $script:Task037PhaseGates -ccontains [string]$Gate
+    )
+}
+
+function Enter-Task037PhaseGate {
+    param(
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [Parameter(Mandatory = $true)][ref]$ActiveGate,
+        [Parameter(Mandatory = $true)][ref]$LastCompletedGate
+    )
+
+    if (-not (Test-Task037PhaseGateName -Gate $Gate)) {
+        throw 'TASK037_PHASE_GATE_REJECTED'
+    }
+    if ($null -ne $ActiveGate.Value) {
+        if (-not (Test-Task037PhaseGateName -Gate $ActiveGate.Value)) {
+            throw 'TASK037_PHASE_GATE_REJECTED'
+        }
+        $LastCompletedGate.Value = [string]$ActiveGate.Value
+    }
+    $ActiveGate.Value = $Gate
+}
+
+function Complete-Task037PhaseGate {
+    param(
+        [Parameter(Mandatory = $true)][ref]$ActiveGate,
+        [Parameter(Mandatory = $true)][ref]$LastCompletedGate
+    )
+
+    if (-not (Test-Task037PhaseGateName -Gate $ActiveGate.Value)) {
+        throw 'TASK037_PHASE_GATE_REJECTED'
+    }
+    if ($null -ne $ActiveGate.Value) {
+        $LastCompletedGate.Value = [string]$ActiveGate.Value
+        $ActiveGate.Value = $null
+    }
+}
+
 function Invoke-Task037ClosedGitText {
     param(
         [Parameter(Mandatory = $true)][string]$GitExe,
         [Parameter(Mandatory = $true)][string]$RepositoryRoot,
         [Parameter(Mandatory = $true)][string]$IsolationRoot,
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Root', 'Branch', 'Head', 'Status')]
+        [ValidateSet(
+            'Root',
+            'Branch',
+            'Head',
+            'Status',
+            'InitializeSynthetic',
+            'AddSynthetic',
+            'CommitSynthetic'
+        )]
         [string]$Operation,
         [Parameter(Mandatory = $true)][string]$FailureCode
     )
@@ -493,6 +562,28 @@ function Invoke-Task037ClosedGitText {
             @(
                 $fixedConfiguration + @(
                     'status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none'
+                )
+            )
+        }
+        'InitializeSynthetic' {
+            @(
+                $fixedConfiguration + @(
+                    '-c', 'init.defaultBranch=task037-selftest',
+                    'init', '--quiet', '--initial-branch=task037-selftest', '--template=', '.'
+                )
+            )
+        }
+        'AddSynthetic' {
+            @($fixedConfiguration + @('add', '--', 'baseline.txt'))
+        }
+        'CommitSynthetic' {
+            @(
+                $fixedConfiguration + @(
+                    '-c', 'user.name=task037-selftest',
+                    '-c', 'user.email=task037-selftest@invalid',
+                    '-c', 'commit.gpgSign=false',
+                    'commit', '--quiet', '--no-gpg-sign', '--no-verify',
+                    '-m', 'task037-selftest'
                 )
             )
         }
@@ -655,6 +746,99 @@ function Get-Task037ClosedGitSnapshot {
                 -AuthorizedTempBase $tempBase
             if (-not $removed) { throw $FailureCode }
         }
+    }
+}
+
+function Get-Task037RepositoryDirectoryShape {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [string]$FailureCode = 'TASK037_REPOSITORY_DIRECTORY_SHAPE_REJECTED',
+        [int]$MaxDirectoryCount = 8192,
+        [int64]$MaxSerializedBytes = 4194304
+    )
+
+    try {
+        $root = Get-CanonicalPath -Path $RepositoryRoot
+        $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+        if (
+            -not $rootItem.PSIsContainer -or
+            ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $MaxDirectoryCount -le 0 -or
+            $MaxSerializedBytes -le 0
+        ) {
+            throw $FailureCode
+        }
+        $rootPrefix = $root + [IO.Path]::DirectorySeparatorChar
+        $queue = [Collections.Generic.Queue[string]]::new()
+        $relativePaths = [Collections.Generic.List[string]]::new()
+        $queue.Enqueue($root)
+        while ($queue.Count -gt 0) {
+            $current = $queue.Dequeue()
+            $isRoot = Test-ExactPath -Actual $current -Expected $root
+            foreach ($child in @(Get-ChildItem -LiteralPath $current -Directory -Force -ErrorAction Stop)) {
+                if ($isRoot -and [string]$child.Name -in @('.git', 'target')) {
+                    continue
+                }
+                if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                    throw $FailureCode
+                }
+                $canonicalChild = Get-CanonicalPath -Path $child.FullName
+                if (-not $canonicalChild.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw $FailureCode
+                }
+                $relative = $canonicalChild.Substring($rootPrefix.Length) -replace '\\', '/'
+                if ([string]::IsNullOrWhiteSpace($relative)) {
+                    throw $FailureCode
+                }
+                $relativePaths.Add($relative)
+                if ($relativePaths.Count -gt $MaxDirectoryCount) {
+                    throw $FailureCode
+                }
+                $queue.Enqueue($canonicalChild)
+            }
+        }
+        [string[]]$ordered = @($relativePaths.ToArray())
+        [Array]::Sort($ordered, [StringComparer]::Ordinal)
+        $serialized = [Text.StringBuilder]::new()
+        [int64]$serializedBytes = 0
+        foreach ($relative in $ordered) {
+            $relativeBytes = [Text.Encoding]::UTF8.GetByteCount($relative)
+            $record = (
+                $relativeBytes.ToString([Globalization.CultureInfo]::InvariantCulture) +
+                ':' + $relative + "`n"
+            )
+            $serializedBytes += [Text.Encoding]::UTF8.GetByteCount($record)
+            if ($serializedBytes -gt $MaxSerializedBytes) {
+                throw $FailureCode
+            }
+            $null = $serialized.Append($record)
+        }
+        return [pscustomobject]@{
+            RepositoryRoot = $root
+            DirectoryCount = [int]$ordered.Count
+            DirectoryShapeSha256 = Get-StringSha256 $serialized.ToString()
+        }
+    }
+    catch {
+        throw $FailureCode
+    }
+}
+
+function Assert-Task037RepositoryDirectoryShapeUnchanged {
+    param(
+        [Parameter(Mandatory = $true)]$Before,
+        [Parameter(Mandatory = $true)]$After,
+        [string]$FailureCode = 'TASK037_REPOSITORY_DIRECTORY_SHAPE_REJECTED'
+    )
+
+    if (
+        [string]$Before.DirectoryShapeSha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$After.DirectoryShapeSha256 -notmatch '^[0-9a-f]{64}$' -or
+        -not (Test-ExactPath -Actual ([string]$Before.RepositoryRoot) -Expected ([string]$After.RepositoryRoot)) -or
+        [int]$Before.DirectoryCount -ne [int]$After.DirectoryCount -or
+        [string]$Before.DirectoryShapeSha256 -cne [string]$After.DirectoryShapeSha256
+    ) {
+        throw $FailureCode
     }
 }
 
@@ -2426,8 +2610,10 @@ function Test-Task037StartedPhaseJobsZero {
         if (
             [string]$started.schema_version -cne 'lattice.task037.phase-started.v2' -or
             [string]$started.acceptance_id -cne $AcceptanceId -or
-            [string]$cleanup.schema_version -cne 'lattice.task037.cleanup.v1' -or
+            [string]$cleanup.schema_version -cne 'lattice.task037.cleanup.v2' -or
             [string]$cleanup.acceptance_id -cne $AcceptanceId -or
+            -not (Test-Task037PhaseGateName -Gate $cleanup.failure_gate) -or
+            -not (Test-Task037PhaseGateName -Gate $cleanup.last_completed_gate) -or
             $cleanup.job_active_process_count_zero -isnot [bool] -or
             $cleanup.full_chain_process_stopped -isnot [bool] -or
             $cleanup.openclaw_process_stopped -isnot [bool] -or
@@ -2451,10 +2637,8 @@ function New-OpenClawProfile {
         [Parameter(Mandatory = $true)][string]$PluginRoot
     )
 
-    foreach ($directory in @($ProfileRoot, (Join-Path $ProfileRoot 'appdata'), (Join-Path $ProfileRoot 'localappdata'), (Join-Path $ProfileRoot 'temp'))) {
-        if (-not (Test-Path -LiteralPath $directory)) {
-            New-Item -ItemType Directory -Path $directory -Force:$false | Out-Null
-        }
+    if (-not (Test-Path -LiteralPath $ProfileRoot)) {
+        New-Item -ItemType Directory -Path $ProfileRoot -Force:$false | Out-Null
     }
     $profile = [ordered]@{
         agents = [ordered]@{
@@ -2793,8 +2977,9 @@ function Set-Task037ClosedChildEnvironment {
     foreach ($directory in @(
         $isolation,
         (Join-Path $isolation 'home'),
-        (Join-Path $isolation 'appdata'),
-        (Join-Path $isolation 'localappdata'),
+        (Join-Path $isolation 'home\AppData'),
+        (Join-Path $isolation 'home\AppData\Roaming'),
+        (Join-Path $isolation 'home\AppData\Local'),
         (Join-Path $isolation 'temp')
     )) {
         if (-not (Test-Path -LiteralPath $directory)) {
@@ -2807,8 +2992,8 @@ function Set-Task037ClosedChildEnvironment {
     }
     $userProfile = Join-Path $isolation 'home'
     $temp = Join-Path $isolation 'temp'
-    $appData = Join-Path $isolation 'appdata'
-    $localAppData = Join-Path $isolation 'localappdata'
+    $appData = Join-Path $userProfile 'AppData\Roaming'
+    $localAppData = Join-Path $userProfile 'AppData\Local'
     $programDataValue = $TrustedProgramData
     if ([string]::IsNullOrWhiteSpace($programDataValue)) {
         $programDataValue = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
@@ -2866,7 +3051,13 @@ function Set-Task037ClosedChildEnvironment {
             [string]$entry.Key -in @(
                 'PROGRAMDATA',
                 'ALLUSERSPROFILE',
-                'PSMODULEANALYSISCACHEPATH'
+                'PSMODULEANALYSISCACHEPATH',
+                'USERPROFILE',
+                'HOME',
+                'APPDATA',
+                'LOCALAPPDATA',
+                'TEMP',
+                'TMP'
             )
         ) {
             throw 'TASK037_CHILD_ENVIRONMENT_VALUE_REJECTED'
@@ -3008,6 +3199,29 @@ try {
             [Environment]::SetEnvironmentVariable([string]$name, $null, 'Process')
         }
     }
+    $applicationData = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::ApplicationData
+    )
+    $localApplicationData = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::LocalApplicationData
+    )
+    if (
+        [string]::IsNullOrWhiteSpace($applicationData) -or
+        [string]::IsNullOrWhiteSpace($localApplicationData) -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath($applicationData),
+            [IO.Path]::GetFullPath([string]$payload.environment.APPDATA),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath($localApplicationData),
+            [IO.Path]::GetFullPath([string]$payload.environment.LOCALAPPDATA),
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        [Console]::Error.WriteLine('TASK037_CHILD_SPECIAL_FOLDER_REJECTED')
+        exit 119
+    }
     $arguments = @($payload.arguments | ForEach-Object { [string]$_ })
     $start = @{
         FilePath = [string]$payload.executable
@@ -3147,6 +3361,7 @@ finally {
                     $wrapperFailure = ([string]$wrapperStderrTask.Result).Trim()
                     if (
                         $wrapperFailure -eq 'TASK037_WRAPPER_PAYLOAD_LENGTH_REJECTED' -or
+                        $wrapperFailure -eq 'TASK037_CHILD_SPECIAL_FOLDER_REJECTED' -or
                         $wrapperFailure -match '^TASK037_WRAPPER_PAYLOAD_ALPHABET_REJECTED_[0-9A-F]{4}_[0-9]+_[A-Za-z0-9-]+$'
                     ) {
                         throw $wrapperFailure
@@ -3270,12 +3485,6 @@ function Start-IsolatedOpenClaw {
     )
 
     $environment = @{
-        APPDATA = (Join-Path $ProfileRoot 'appdata')
-        LOCALAPPDATA = (Join-Path $ProfileRoot 'localappdata')
-        HOME = $ProfileRoot
-        USERPROFILE = $ProfileRoot
-        TEMP = (Join-Path $ProfileRoot 'temp')
-        TMP = (Join-Path $ProfileRoot 'temp')
         OPENCLAW_CONFIG_PATH = (Join-Path $ProfileRoot 'openclaw.json')
         OPENCLAW_STATE_DIR = $ProfileRoot
         OPENCLAW_GATEWAY_TOKEN = $GatewayToken
@@ -3349,6 +3558,20 @@ function Get-McpInputBytes {
     return $bytes
 }
 
+function ConvertFrom-Task037McpJson {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Json)
+
+    try {
+        if ([string]::IsNullOrWhiteSpace($Json)) {
+            throw 'TASK037_MCP_RESPONSE_JSON_REJECTED'
+        }
+        return $Json | ConvertFrom-Json
+    }
+    catch {
+        throw 'TASK037_MCP_RESPONSE_JSON_REJECTED'
+    }
+}
+
 function Get-StructuredToolContent {
     param([Parameter(Mandatory = $true)]$Response)
 
@@ -3369,7 +3592,7 @@ function Get-StructuredToolContent {
         -Value $content[0] `
         -Expected @('text', 'type') `
         -FailureCode 'TASK037_TOOL_CONTENT_SHAPE_REJECTED'
-    $textValue = ([string]$content[0].text) | ConvertFrom-Json
+    $textValue = ConvertFrom-Task037McpJson -Json ([string]$content[0].text)
     if (
         ($textValue | ConvertTo-Json -Compress -Depth 20) -cne
         ($result.structuredContent | ConvertTo-Json -Compress -Depth 20)
@@ -4794,6 +5017,45 @@ finally {
         if (Test-Path -LiteralPath $monitorRoot) { Remove-SafeTempRoot -Path $monitorRoot | Out-Null }
     }
 
+    $phaseGateActive = 'phase_setup'
+    $phaseGateLastCompleted = $null
+    Enter-Task037PhaseGate `
+        -Gate 'full_chain_gated_start' `
+        -ActiveGate ([ref]$phaseGateActive) `
+        -LastCompletedGate ([ref]$phaseGateLastCompleted)
+    if (
+        $phaseGateActive -cne 'full_chain_gated_start' -or
+        $phaseGateLastCompleted -cne 'phase_setup'
+    ) {
+        throw 'TASK037_SELF_TEST_PHASE_GATE_REJECTED'
+    }
+    Complete-Task037PhaseGate `
+        -ActiveGate ([ref]$phaseGateActive) `
+        -LastCompletedGate ([ref]$phaseGateLastCompleted)
+    if ($null -ne $phaseGateActive -or $phaseGateLastCompleted -cne 'full_chain_gated_start') {
+        throw 'TASK037_SELF_TEST_PHASE_GATE_REJECTED'
+    }
+    $invalidPhaseGateFailure = $null
+    try {
+        Enter-Task037PhaseGate `
+            -Gate 'forged_phase_gate' `
+            -ActiveGate ([ref]$phaseGateActive) `
+            -LastCompletedGate ([ref]$phaseGateLastCompleted)
+    }
+    catch { $invalidPhaseGateFailure = $_.Exception.Message }
+    if ($invalidPhaseGateFailure -cne 'TASK037_PHASE_GATE_REJECTED') {
+        throw 'TASK037_SELF_TEST_PHASE_GATE_REJECTED'
+    }
+
+    foreach ($invalidMcpJson in @('', '   ', '{')) {
+        $invalidMcpJsonFailure = $null
+        try { $null = ConvertFrom-Task037McpJson -Json $invalidMcpJson }
+        catch { $invalidMcpJsonFailure = $_.Exception.Message }
+        if ($invalidMcpJsonFailure -cne 'TASK037_MCP_RESPONSE_JSON_REJECTED') {
+            throw 'TASK037_SELF_TEST_MCP_JSON_REJECTED'
+        }
+    }
+
     $runProbe = [pscustomobject]@{
         analyses = 1; receipts = 1; retrieval_audits = 1; records = 2; reflections = 1
         openclaw_commands = 1; reflection_receipt_digest = ('a' * 64)
@@ -4818,8 +5080,10 @@ finally {
             acceptance_id = $boolAcceptanceId
         })
         Write-JsonEvidence -Path (Join-Path $boolProbeRoot 'pre-status.cleanup.json') -Value ([ordered]@{
-            schema_version = 'lattice.task037.cleanup.v1'
+            schema_version = 'lattice.task037.cleanup.v2'
             acceptance_id = $boolAcceptanceId
+            failure_gate = 'process_wait'
+            last_completed_gate = 'full_chain_gated_start'
             job_active_process_count_zero = 'false'
             full_chain_process_stopped = 'true'
             openclaw_process_stopped = 'true'
@@ -4898,6 +5162,31 @@ finally {
         [Environment]::SetEnvironmentVariable('NODE_OPTIONS', $ambientNodeOptions, 'Process')
     }
 
+    $profileOverrideRoot = Join-Path $tempBase (
+        'lattice-task037-profile-override-' + [Guid]::NewGuid().ToString('N')
+    )
+    try {
+        $profileOverrideFailure = $null
+        try {
+            $profileOverrideInfo = [Diagnostics.ProcessStartInfo]::new()
+            Set-Task037ClosedChildEnvironment `
+                -StartInfo $profileOverrideInfo `
+                -EnvironmentValues ([ordered]@{ APPDATA = 'C:\forged-appdata' }) `
+                -Executable $powerShellExecutable `
+                -IsolationRoot $profileOverrideRoot `
+                -TrustedProgramData $expectedProgramData
+        }
+        catch { $profileOverrideFailure = $_.Exception.Message }
+        if ($profileOverrideFailure -cne 'TASK037_CHILD_ENVIRONMENT_VALUE_REJECTED') {
+            throw 'TASK037_SELF_TEST_PROFILE_OVERRIDE_REJECTED'
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $profileOverrideRoot) {
+            Remove-SafeTempRoot -Path $profileOverrideRoot | Out-Null
+        }
+    }
+
     $expectedGit = Join-Path `
         ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles) `
         ) `
@@ -4961,6 +5250,91 @@ finally {
     finally {
         foreach ($name in $ambientGitValues.Keys) {
             [Environment]::SetEnvironmentVariable($name, $ambientGitValues[$name], 'Process')
+        }
+    }
+
+    $directoryShapeProbeRoot = Join-Path $tempBase (
+        'lattice-task037-directory-shape-' + [Guid]::NewGuid().ToString('N')
+    )
+    $directoryShapeRepository = Join-Path $directoryShapeProbeRoot 'repository'
+    $directoryShapeIsolation = Join-Path $directoryShapeProbeRoot 'git-isolation'
+    try {
+        New-Item -ItemType Directory -Path $directoryShapeProbeRoot -Force:$false | Out-Null
+        $null = Set-Task037RestrictedDirectoryAcl -Path $directoryShapeProbeRoot
+        foreach ($directory in @(
+            $directoryShapeRepository,
+            $directoryShapeIsolation,
+            (Join-Path $directoryShapeIsolation 'home'),
+            (Join-Path $directoryShapeIsolation 'temp')
+        )) {
+            New-Item -ItemType Directory -Path $directory -Force:$false | Out-Null
+        }
+        [IO.File]::WriteAllText(
+            (Join-Path $directoryShapeRepository 'baseline.txt'),
+            "task037-directory-shape`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+        foreach ($operation in @('InitializeSynthetic', 'AddSynthetic', 'CommitSynthetic')) {
+            $output = Invoke-Task037ClosedGitText `
+                -GitExe $expectedGit `
+                -RepositoryRoot $directoryShapeRepository `
+                -IsolationRoot $directoryShapeIsolation `
+                -Operation $operation `
+                -FailureCode 'TASK037_SELF_TEST_DIRECTORY_SHAPE_REJECTED'
+            if (-not [string]::IsNullOrEmpty($output)) {
+                throw 'TASK037_SELF_TEST_DIRECTORY_SHAPE_REJECTED'
+            }
+        }
+        $closedSyntheticBaseline = Get-Task037ClosedGitSnapshot `
+            -GitExe $expectedGit `
+            -RepositoryRoot $directoryShapeRepository `
+            -AuthorizedTempBase $tempBase `
+            -FailureCode 'TASK037_SELF_TEST_DIRECTORY_SHAPE_REJECTED'
+        if (-not [bool]$closedSyntheticBaseline.Clean) {
+            throw 'TASK037_SELF_TEST_DIRECTORY_SHAPE_REJECTED'
+        }
+        $directoryShapeBaseline = Get-Task037RepositoryDirectoryShape `
+            -RepositoryRoot $directoryShapeRepository `
+            -FailureCode 'TASK037_SELF_TEST_DIRECTORY_SHAPE_REJECTED'
+        New-Item `
+            -ItemType Directory `
+            -Path (Join-Path $directoryShapeRepository 'Microsoft\Windows\PowerShell\ScheduledJobs') `
+            -Force:$false | Out-Null
+        $gitWithEmptyDirectory = Get-Task037ClosedGitSnapshot `
+            -GitExe $expectedGit `
+            -RepositoryRoot $directoryShapeRepository `
+            -AuthorizedTempBase $tempBase `
+            -FailureCode 'TASK037_SELF_TEST_DIRECTORY_SHAPE_REJECTED'
+        if (
+            [string]$gitWithEmptyDirectory.Branch -cne [string]$closedSyntheticBaseline.Branch -or
+            [string]$gitWithEmptyDirectory.Head -cne [string]$closedSyntheticBaseline.Head -or
+            -not [bool]$gitWithEmptyDirectory.Clean
+        ) {
+            throw 'TASK037_SELF_TEST_DIRECTORY_SHAPE_REJECTED'
+        }
+        $directoryShapeWithEmpty = Get-Task037RepositoryDirectoryShape `
+            -RepositoryRoot $directoryShapeRepository `
+            -FailureCode 'TASK037_SELF_TEST_DIRECTORY_SHAPE_REJECTED'
+        $directoryShapeFailure = $null
+        try {
+            Assert-Task037RepositoryDirectoryShapeUnchanged `
+                -Before $directoryShapeBaseline `
+                -After $directoryShapeWithEmpty `
+                -FailureCode 'TASK037_SELF_TEST_DIRECTORY_SHAPE_CHANGED'
+        }
+        catch { $directoryShapeFailure = $_.Exception.Message }
+        if ($directoryShapeFailure -cne 'TASK037_SELF_TEST_DIRECTORY_SHAPE_CHANGED') {
+            throw 'TASK037_SELF_TEST_DIRECTORY_SHAPE_REJECTED'
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $directoryShapeProbeRoot) {
+            $removed = Remove-SafeTempRoot `
+                -Path $directoryShapeProbeRoot `
+                -AuthorizedTempBase $tempBase
+            if (-not $removed) {
+                throw 'TASK037_SELF_TEST_DIRECTORY_SHAPE_CLEANUP_REJECTED'
+            }
         }
     }
 
@@ -5064,6 +5438,19 @@ if (fs.readFileSync(releasePath, 'utf8') !== 'release\n') process.exit(125);
         }
         Stop-Task037Job -Job $emptyArgumentsJob
         Complete-Task037GatedProcessEvidence -OwnedProcess $emptyArgumentsOwned
+        foreach ($specialFolder in @(
+            (Join-Path $emptyArgumentsRoot 'runtime\home\AppData\Roaming'),
+            (Join-Path $emptyArgumentsRoot 'runtime\home\AppData\Local')
+        )) {
+            $specialFolderItem = Get-Item -LiteralPath $specialFolder -Force -ErrorAction SilentlyContinue
+            if (
+                $null -eq $specialFolderItem -or
+                -not $specialFolderItem.PSIsContainer -or
+                ($specialFolderItem.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            ) {
+                throw 'TASK037_SELF_TEST_EMPTY_ARGUMENTS_REJECTED'
+            }
+        }
         if (
             (Get-Task037JobActiveProcessCount -Job $emptyArgumentsJob) -ne 0 -or
             (Test-Path -LiteralPath (Join-Path $emptyArgumentsRoot 'Microsoft'))
@@ -5240,6 +5627,8 @@ function Invoke-FullChainInternalPhase {
     $toolCode = $null
     $responseDigest = $null
     $phaseCleanupFailure = $null
+    $activeGate = 'phase_setup'
+    $lastCompletedGate = $null
     $brokerCredentialSourceBefore = $null
     $brokerCredentialOwnership = $null
     $rawLogRootRemoved = $false
@@ -5399,6 +5788,10 @@ function Invoke-FullChainInternalPhase {
             GIT_CONFIG_SYSTEM = 'NUL'
             GIT_TERMINAL_PROMPT = '0'
         }
+        Enter-Task037PhaseGate `
+            -Gate 'full_chain_gated_start' `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         $fullChainOwned = Start-Task037GatedProcess `
             -Job $phaseJob `
             -PowerShellExecutable $powerShellExecutable `
@@ -5418,10 +5811,18 @@ function Invoke-FullChainInternalPhase {
         $fullChainProcess = $fullChainOwned.ChildProcess
         $fullChainPid = $fullChainOwned.ChildProcessId
         $null = $fullChainProcess.Handle
+        Enter-Task037PhaseGate `
+            -Gate 'process_wait' `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         $timeoutMilliseconds = if ($Phase -eq 'FullChainRun') { 540000 } else { 360000 }
         if (-not $fullChainProcess.WaitForExit($timeoutMilliseconds)) {
             throw ('TASK037_' + $Phase.ToUpperInvariant() + '_TIMEOUT')
         }
+        Enter-Task037PhaseGate `
+            -Gate 'process_contract' `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         $exitCode = $fullChainProcess.ExitCode
         if (
             -not $fullChainControllerProcess.WaitForExit(5000) -or
@@ -5435,14 +5836,26 @@ function Invoke-FullChainInternalPhase {
         if ($exitCode -ne 0) {
             throw ('TASK037_' + $Phase.ToUpperInvariant() + '_EXIT_' + $exitCode)
         }
+        Enter-Task037PhaseGate `
+            -Gate 'raw_bounds' `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         Assert-BoundedTask037EvidenceFile -Path $stdoutPath -Code 'TASK037_FULL_CHAIN_STDOUT_OVERSIZE_REJECTED'
         Assert-BoundedTask037EvidenceFile -Path $stderrPath -Code 'TASK037_FULL_CHAIN_STDERR_OVERSIZE_REJECTED'
         Assert-BoundedTask037EvidenceFile -Path $openClawStdout -Code 'TASK037_OPENCLAW_STDOUT_OVERSIZE_REJECTED'
         Assert-BoundedTask037EvidenceFile -Path $openClawStderr -Code 'TASK037_OPENCLAW_STDERR_OVERSIZE_REJECTED'
         $stdout = [IO.File]::ReadAllText($stdoutPath, [Text.Encoding]::UTF8)
         $stderr = [IO.File]::ReadAllText($stderrPath, [Text.Encoding]::UTF8)
+        Enter-Task037PhaseGate `
+            -Gate 'response_json' `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         $responseLines = @($stdout -split '\r?\n' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-        $responses = @($responseLines | ForEach-Object { $_ | ConvertFrom-Json })
+        $responses = @($responseLines | ForEach-Object { ConvertFrom-Task037McpJson -Json ([string]$_) })
+        Enter-Task037PhaseGate `
+            -Gate 'mcp_envelope' `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         if (
             $responses.Count -ne 2 -or
             ($responses[0].id -isnot [int] -and $responses[0].id -isnot [long]) -or
@@ -5465,6 +5878,10 @@ function Invoke-FullChainInternalPhase {
             -Value $responses[0].result `
             -Expected @('capabilities', 'instructions', 'protocolVersion', 'serverInfo') `
             -FailureCode 'TASK037_MCP_RESPONSE_SHAPE_REJECTED'
+        Enter-Task037PhaseGate `
+            -Gate 'ready_evidence' `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         $readyLines = @($stderr -split '\r?\n' | Where-Object { $_ -like '*"event":"ready"*' -and $_ -like ('*"endpoint":"127.0.0.1:' + $rustPort + '"*') })
         if ($readyLines.Count -ne 1) {
             throw 'TASK037_FULL_CHAIN_READY_EVIDENCE_REJECTED'
@@ -5472,6 +5889,10 @@ function Invoke-FullChainInternalPhase {
         if ($responses[1].result.isError -isnot [bool]) {
             throw 'TASK037_MCP_RESPONSE_SHAPE_REJECTED'
         }
+        Enter-Task037PhaseGate `
+            -Gate 'tool_content' `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         $toolIsError = [bool]$responses[1].result.isError
         $structured = Get-StructuredToolContent -Response $responses[1]
         $errorProperties = @('code', 'status')
@@ -5495,6 +5916,10 @@ function Invoke-FullChainInternalPhase {
             -Value $structured `
             -Expected $(if ($toolIsError) { $errorProperties } else { $successProperties }) `
             -FailureCode 'TASK037_TOOL_CONTENT_SHAPE_REJECTED'
+        Enter-Task037PhaseGate `
+            -Gate $(if ($expectError) { 'pre_status_semantics' } else { 'success_semantics' }) `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         $toolCode = if ($null -ne $structured.PSObject.Properties['code']) { [string]$structured.code } else { $null }
         $meta = [ordered]@{
             schema_version = 'lattice.task037.phase-meta.v1'
@@ -5531,6 +5956,10 @@ function Invoke-FullChainInternalPhase {
             if (-not $toolIsError -or [string]$structured.status -ne 'ERROR' -or $toolCode -notin @('LATTICE_DELIVERY_RECONCILIATION_REQUIRED', 'LATTICE_HERMES_MEMORY_RECEIPT_REJECTED')) {
                 throw 'TASK037_PRE_STATUS_FAIL_CLOSED_REJECTED'
             }
+            Enter-Task037PhaseGate `
+                -Gate 'memory_empty' `
+                -ActiveGate ([ref]$activeGate) `
+                -LastCompletedGate ([ref]$lastCompletedGate)
             $probe = Invoke-PostgresMemoryProbe -RunId $runId -Password $postgresPassword -HostName $hostName -Port $port -OutputPath $memoryProbePath
             if (
                 $probe.analyses -ne 0 -or
@@ -5542,12 +5971,19 @@ function Invoke-FullChainInternalPhase {
             ) {
                 throw 'TASK037_PRE_STATUS_MEMORY_NOT_EMPTY'
             }
+            Enter-Task037PhaseGate `
+                -Gate 'evidence_commit' `
+                -ActiveGate ([ref]$activeGate) `
+                -LastCompletedGate ([ref]$lastCompletedGate)
             $responseDigest = Write-Task037ValidatedPhaseEvidence `
                 -Evidence $structured `
                 -IsError $true `
                 -OutputPath $outputJsonPath `
                 -Meta $meta `
                 -MetaPath $metaPath
+            Complete-Task037PhaseGate `
+                -ActiveGate ([ref]$activeGate) `
+                -LastCompletedGate ([ref]$lastCompletedGate)
             return
         }
         if ($toolIsError) {
@@ -5558,6 +5994,10 @@ function Invoke-FullChainInternalPhase {
             -RunId $runId `
             -DeliveryRoot $deliveryRoot `
             -DeliveryLauncher $deliveryLauncher
+        Enter-Task037PhaseGate `
+            -Gate 'memory_expected' `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         $probe = Invoke-PostgresMemoryProbe -RunId $runId -Password $postgresPassword -HostName $hostName -Port $port -OutputPath $memoryProbePath
         if (
             $probe.analyses -ne 1 -or
@@ -5573,6 +6013,10 @@ function Invoke-FullChainInternalPhase {
             throw 'TASK037_MEMORY_PROBE_REJECTED'
         }
         if ($Phase -eq 'FullChainStatus') {
+            Enter-Task037PhaseGate `
+                -Gate 'status_replay' `
+                -ActiveGate ([ref]$activeGate) `
+                -LastCompletedGate ([ref]$lastCompletedGate)
             $runEvidence = Read-JsonEvidence -Path (Join-Path $evidenceRoot 'run.json')
             $runProbe = Read-JsonEvidence -Path (Join-Path $evidenceRoot 'memory-run.json')
             Assert-Task037MemoryReplayUnchanged -RunProbe $runProbe -StatusProbe $probe
@@ -5585,6 +6029,10 @@ function Invoke-FullChainInternalPhase {
             ) {
                 throw 'TASK037_STATUS_REPLAY_REJECTED'
             }
+            Enter-Task037PhaseGate `
+                -Gate 'evidence_commit' `
+                -ActiveGate ([ref]$activeGate) `
+                -LastCompletedGate ([ref]$lastCompletedGate)
             $responseDigest = Write-Task037ValidatedPhaseEvidence `
                 -Evidence $structured `
                 -IsError $false `
@@ -5626,14 +6074,24 @@ function Invoke-FullChainInternalPhase {
                 broker_binary_sha256 = Get-FileSha256 $brokerExe
             }
             Write-JsonEvidence -Path (Join-Path $evidenceRoot 'final.pending.json') -Value $final
+            Complete-Task037PhaseGate `
+                -ActiveGate ([ref]$activeGate) `
+                -LastCompletedGate ([ref]$lastCompletedGate)
         }
         else {
+            Enter-Task037PhaseGate `
+                -Gate 'evidence_commit' `
+                -ActiveGate ([ref]$activeGate) `
+                -LastCompletedGate ([ref]$lastCompletedGate)
             $responseDigest = Write-Task037ValidatedPhaseEvidence `
                 -Evidence $structured `
                 -IsError $false `
                 -OutputPath $outputJsonPath `
                 -Meta $meta `
                 -MetaPath $metaPath
+            Complete-Task037PhaseGate `
+                -ActiveGate ([ref]$activeGate) `
+                -LastCompletedGate ([ref]$lastCompletedGate)
         }
     }
     catch {
@@ -5824,10 +6282,23 @@ function Invoke-FullChainInternalPhase {
                 $phaseCleanupFailure = 'TASK037_PHASE_CLEANUP_REJECTED'
             }
         }
+        $failureGate = if ($null -eq $failure) { $null } else { $activeGate }
+        if (
+            -not (Test-Task037PhaseGateName -Gate $failureGate) -or
+            -not (Test-Task037PhaseGateName -Gate $lastCompletedGate)
+        ) {
+            if ($null -eq $phaseCleanupFailure) {
+                $phaseCleanupFailure = 'TASK037_PHASE_GATE_REJECTED'
+            }
+            $failureGate = $null
+            $lastCompletedGate = $null
+        }
         $cleanup = [ordered]@{
-            schema_version = 'lattice.task037.cleanup.v1'
+            schema_version = 'lattice.task037.cleanup.v2'
             acceptance_id = $acceptanceId
             phase = $Phase
+            failure_gate = $failureGate
+            last_completed_gate = $lastCompletedGate
             job_active_process_count_zero = $jobProcessCountZero
             full_chain_process_stopped = $fullChainProcessStopped
             openclaw_process_stopped = $openClawProcessStopped
@@ -6440,6 +6911,13 @@ function Invoke-Task037SupervisedVerification {
     if (-not [bool]$preRunGitSnapshot.Clean) {
         throw 'TASK037_WORKTREE_DIRTY_REJECTED'
     }
+    $repositoryScheduledJobRoot = Join-Path $repositoryRoot 'Microsoft'
+    if (Test-Path -LiteralPath $repositoryScheduledJobRoot) {
+        throw 'TASK037_PRE_RUN_DIRECTORY_SHAPE_REJECTED'
+    }
+    $preRunDirectoryShape = Get-Task037RepositoryDirectoryShape `
+        -RepositoryRoot $repositoryRoot `
+        -FailureCode 'TASK037_PRE_RUN_DIRECTORY_SHAPE_REJECTED'
     $controllerPath = [string]::Join(';', $controllerToolDirectories)
     $supervision = $null
     $owned = $null
@@ -6570,6 +7048,16 @@ function Invoke-Task037SupervisedVerification {
             }
         }
     }
+    if (Test-Path -LiteralPath $repositoryScheduledJobRoot) {
+        throw 'TASK037_POST_RUN_DIRECTORY_SHAPE_REJECTED'
+    }
+    $postRunDirectoryShape = Get-Task037RepositoryDirectoryShape `
+        -RepositoryRoot $repositoryRoot `
+        -FailureCode 'TASK037_POST_RUN_DIRECTORY_SHAPE_REJECTED'
+    Assert-Task037RepositoryDirectoryShapeUnchanged `
+        -Before $preRunDirectoryShape `
+        -After $postRunDirectoryShape `
+        -FailureCode 'TASK037_POST_RUN_DIRECTORY_SHAPE_REJECTED'
     $postRunGitSnapshot = Get-Task037ClosedGitSnapshot `
         -GitExe $controllerGitExe `
         -RepositoryRoot $repositoryRoot `
