@@ -31,7 +31,8 @@ foreach ($required in @(
     'content_retained = $false',
     'raw_log_root_removed = $rawLogRootRemoved',
     'OwnerRecordLock = $recordLock',
-    "Get-TrustedTask037Node -Candidate ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_CONTROLLER_NODE_EXE', 'Process'))",
+    "-Candidate ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_CONTROLLER_NODE_EXE', 'Process'))",
+    '-ProgramDataAuthority $programDataAuthority',
     'Assert-Task037ProcessInJob -Job $Job -Process $childProcess',
     'Stop-Task037Job -Job $phaseJob',
     'job_active_process_count_zero = $jobProcessCountZero',
@@ -72,13 +73,27 @@ foreach ($required in @(
     'Write-Task037AdmissionStageReceipt',
     'Read-Task037AdmissionStageReceipt',
     "[switch]`$InternalAdmissionProbe",
+    "[switch]`$HarnessControllerPreflightProbe",
+    "[switch]`$InternalControllerPreflightOnly",
     "[switch]`$HarnessPublicFailureProbe",
     'LATTICE_TASK037_ADMISSION_STARTED_AT_UTC',
     "'recovery_preflight'",
     "'supervision_create'",
     "'gated_controller_start'",
     "'supervisor_binding'",
+    "'git_identity_preflight'",
+    "'node_identity_preflight'",
+    "'node_runtime_preflight'",
+    "'rust_toolchain_preflight'",
+    "'artifact_identity_preflight'",
+    "'worktree_preflight'",
     "'inner_pre_acceptance'",
+    'lattice.task037.admission-stage.v2',
+    'ALLUSERSPROFILE = $programData',
+    'LATTICE_TASK037_CONTROLLER_PROGRAM_DATA',
+    '-TrustedProgramData $programDataAuthority',
+    'node-identity-probe.release',
+    'TASK037_CONTROLLER_PREFLIGHT=PASS',
     'TASK037_SYNTHETIC_ADMISSION_REJECTED',
     'TASK037_SELF_TEST_ADMISSION_RECEIPT_REJECTED',
     'launcher_path_sha256',
@@ -239,6 +254,23 @@ if (
     [string]$output[0] -ne 'TASK037_VERIFIER_CONTAINMENT_SELF_TEST=PASS'
 ) {
     throw ('TASK037_CONTAINMENT_SELF_TEST_REJECTED|' + $LASTEXITCODE)
+}
+
+$preflightOutput = @(
+    & $powerShell `
+        -NoLogo `
+        -NoProfile `
+        -NonInteractive `
+        -ExecutionPolicy Bypass `
+        -File $harness `
+        -HarnessControllerPreflightProbe 2>&1
+)
+if (
+    $LASTEXITCODE -ne 0 -or
+    $preflightOutput.Count -ne 1 -or
+    [string]$preflightOutput[0] -ne 'TASK037_CONTROLLER_PREFLIGHT=PASS'
+) {
+    throw ('TASK037_CONTROLLER_PREFLIGHT_PROBE_REJECTED|' + $LASTEXITCODE)
 }
 
 Write-Output 'TASK037_VERIFIER_CONTAINMENT_TEST=PASS'

@@ -6,6 +6,8 @@ param(
     [switch]$HarnessSelfTest,
     [switch]$InternalController,
     [switch]$InternalAdmissionProbe,
+    [switch]$HarnessControllerPreflightProbe,
+    [switch]$InternalControllerPreflightOnly,
     [switch]$HarnessPublicFailureProbe
 )
 
@@ -54,6 +56,12 @@ $script:Task037AdmissionStages = @(
     'supervision_create',
     'gated_controller_start',
     'supervisor_binding',
+    'git_identity_preflight',
+    'node_identity_preflight',
+    'node_runtime_preflight',
+    'rust_toolchain_preflight',
+    'artifact_identity_preflight',
+    'worktree_preflight',
     'inner_pre_acceptance'
 )
 
@@ -1186,7 +1194,7 @@ function Read-Task037AdmissionStageReceipt {
     $observed = ConvertFrom-Task037AdmissionTimestamp -Value ([string]$receipt.observed_at_utc)
     if (
         [string]$receipt.acceptance_id -cne $AcceptanceId -or
-        [string]$receipt.class -cne 'lattice.task037.admission-stage.v1' -or
+        [string]$receipt.class -cne 'lattice.task037.admission-stage.v2' -or
         [Array]::IndexOf($script:Task037AdmissionStages, $stage) -lt 0 -or
         $observed -lt $started
     ) {
@@ -1206,6 +1214,12 @@ function Write-Task037AdmissionStageReceipt {
             'supervision_create',
             'gated_controller_start',
             'supervisor_binding',
+            'git_identity_preflight',
+            'node_identity_preflight',
+            'node_runtime_preflight',
+            'rust_toolchain_preflight',
+            'artifact_identity_preflight',
+            'worktree_preflight',
             'inner_pre_acceptance'
         )]
         [string]$Stage
@@ -1245,7 +1259,7 @@ function Write-Task037AdmissionStageReceipt {
     )
     $value = [ordered]@{
         acceptance_id = $AcceptanceId
-        class = 'lattice.task037.admission-stage.v1'
+        class = 'lattice.task037.admission-stage.v2'
         stage = $Stage
         started_at_utc = $StartedAtUtc
         observed_at_utc = $observedAtUtc
@@ -2303,7 +2317,11 @@ function Get-TrustedTask037PowerShell {
 }
 
 function Get-TrustedTask037Node {
-    param([Parameter(Mandatory = $true)][string]$Candidate)
+    param(
+        [Parameter(Mandatory = $true)][string]$Candidate,
+        [Parameter(Mandatory = $true)][string]$ProgramDataAuthority,
+        [scriptblock]$RuntimeStageWriter
+    )
 
     $canonical = Get-CanonicalPath -Path $Candidate
     $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
@@ -2322,6 +2340,9 @@ function Get-TrustedTask037Node {
         [string]$signature.SignerCertificate.Subject -notlike 'CN=OpenJS Foundation,*O=OpenJS Foundation*'
     ) {
         throw 'TASK037_NODE_IDENTITY_REJECTED'
+    }
+    if ($null -ne $RuntimeStageWriter) {
+        & $RuntimeStageWriter 'node_runtime_preflight'
     }
     $nodeProbeTempBase = Resolve-Task037AuthorizedTempBase `
         -AuthorizedTempBase ([Environment]::GetEnvironmentVariable(
@@ -2342,12 +2363,47 @@ function Get-TrustedTask037Node {
     $owned = $null
     try {
         New-Item -ItemType Directory -Path $probeRoot -Force:$false | Out-Null
+        $probeScriptPath = Join-Path $probeRoot 'node-identity-probe.js'
+        $probeReleasePath = Join-Path $probeRoot 'node-identity-probe.release'
+        $probeScript = @'
+'use strict';
+const fs = require('node:fs');
+const release = process.argv[2];
+process.stdout.write(`${process.version}\n`);
+const deadline = Date.now() + 10000;
+const timer = setInterval(() => {
+  if (fs.existsSync(release)) {
+    clearInterval(timer);
+    process.exit(0);
+  }
+  if (Date.now() >= deadline) {
+    clearInterval(timer);
+    process.exit(124);
+  }
+}, 10);
+'@
+        $probeScriptBytes = [Text.UTF8Encoding]::new($false).GetBytes($probeScript)
+        $probeScriptStream = [IO.FileStream]::new(
+            $probeScriptPath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None,
+            4096,
+            [IO.FileOptions]::WriteThrough
+        )
+        try {
+            $probeScriptStream.Write($probeScriptBytes, 0, $probeScriptBytes.Length)
+            $probeScriptStream.Flush($true)
+        }
+        finally {
+            $probeScriptStream.Dispose()
+        }
         $job = New-Task037KillOnCloseJob
         $owned = Start-Task037GatedProcess `
             -Job $job `
             -PowerShellExecutable (Get-TrustedTask037PowerShell) `
             -Executable $canonical `
-            -Arguments @('--version') `
+            -Arguments @($probeScriptPath, $probeReleasePath) `
             -WorkingDirectory $probeRoot `
             -EnvironmentValues ([ordered]@{}) `
             -ChildPidPath (Join-Path $probeRoot 'node.pid') `
@@ -2355,7 +2411,24 @@ function Get-TrustedTask037Node {
             -ChildStderrPath (Join-Path $probeRoot 'node.stderr') `
             -WrapperStdoutPath (Join-Path $probeRoot 'wrapper.stdout') `
             -WrapperStderrPath (Join-Path $probeRoot 'wrapper.stderr') `
-            -RuntimeIsolationRoot (Join-Path $probeRoot 'runtime')
+            -RuntimeIsolationRoot (Join-Path $probeRoot 'runtime') `
+            -TrustedProgramData $ProgramDataAuthority
+        $probeReleaseBytes = [Text.UTF8Encoding]::new($false).GetBytes("release`n")
+        $probeReleaseStream = [IO.FileStream]::new(
+            $probeReleasePath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None,
+            4096,
+            [IO.FileOptions]::WriteThrough
+        )
+        try {
+            $probeReleaseStream.Write($probeReleaseBytes, 0, $probeReleaseBytes.Length)
+            $probeReleaseStream.Flush($true)
+        }
+        finally {
+            $probeReleaseStream.Dispose()
+        }
         if (
             -not $owned.ChildProcess.WaitForExit(10000) -or
             -not $owned.Process.WaitForExit(5000)
@@ -2519,7 +2592,8 @@ function Set-Task037ClosedChildEnvironment {
         [Parameter(Mandatory = $true)][Diagnostics.ProcessStartInfo]$StartInfo,
         [Parameter(Mandatory = $true)][Collections.IDictionary]$EnvironmentValues,
         [Parameter(Mandatory = $true)][string]$Executable,
-        [Parameter(Mandatory = $true)][string]$IsolationRoot
+        [Parameter(Mandatory = $true)][string]$IsolationRoot,
+        [string]$TrustedProgramData
     )
 
     $windows = Get-CanonicalPath -Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))
@@ -2545,7 +2619,16 @@ function Set-Task037ClosedChildEnvironment {
     $temp = Join-Path $isolation 'temp'
     $appData = Join-Path $isolation 'appdata'
     $localAppData = Join-Path $isolation 'localappdata'
-    $programData = Get-CanonicalPath -Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData))
+    $programDataValue = $TrustedProgramData
+    if ([string]::IsNullOrWhiteSpace($programDataValue)) {
+        $programDataValue = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    }
+    $programData = Get-CanonicalPath -Path $programDataValue
+    Assert-NoReparsePath -Path $programData -FailureCode 'TASK037_CHILD_ENVIRONMENT_SCOPE_REJECTED'
+    $programDataItem = Get-Item -LiteralPath $programData -Force -ErrorAction SilentlyContinue
+    if ($null -eq $programDataItem -or -not $programDataItem.PSIsContainer) {
+        throw 'TASK037_CHILD_ENVIRONMENT_SCOPE_REJECTED'
+    }
     $programFiles = Get-CanonicalPath -Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles))
     $programFilesX86 = Get-CanonicalPath -Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86))
     $executableDirectory = Get-CanonicalPath -Path (Split-Path -Parent $Executable)
@@ -2572,6 +2655,7 @@ function Set-Task037ClosedChildEnvironment {
         HOME = $userProfile
         APPDATA = $appData
         LOCALAPPDATA = $localAppData
+        ALLUSERSPROFILE = $programData
         ProgramData = $programData
         ProgramFiles = $programFiles
         'ProgramFiles(x86)' = $programFilesX86
@@ -2608,6 +2692,7 @@ function Start-Task037GatedProcess {
         [Parameter(Mandatory = $true)][string]$WrapperStdoutPath,
         [Parameter(Mandatory = $true)][string]$WrapperStderrPath,
         [Parameter(Mandatory = $true)][string]$RuntimeIsolationRoot,
+        [string]$TrustedProgramData,
         [string]$StandardInputPath,
         [scriptblock]$BeforeGate
     )
@@ -2644,7 +2729,8 @@ function Start-Task037GatedProcess {
         -StartInfo $payloadEnvironmentStartInfo `
         -EnvironmentValues $EnvironmentValues `
         -Executable $Executable `
-        -IsolationRoot $RuntimeIsolationRoot
+        -IsolationRoot $RuntimeIsolationRoot `
+        -TrustedProgramData $TrustedProgramData
     $payloadEnvironment = [ordered]@{}
     foreach ($name in @($payloadEnvironmentStartInfo.EnvironmentVariables.Keys | Sort-Object)) {
         $payloadEnvironment[[string]$name] = [string]$payloadEnvironmentStartInfo.EnvironmentVariables[[string]$name]
@@ -2793,7 +2879,8 @@ finally {
             -StartInfo $startInfo `
             -EnvironmentValues $launchEnvironment `
             -Executable $PowerShellExecutable `
-            -IsolationRoot $RuntimeIsolationRoot
+            -IsolationRoot $RuntimeIsolationRoot `
+            -TrustedProgramData $TrustedProgramData
         $process = [Diagnostics.Process]::new()
         $process.StartInfo = $startInfo
         try {
@@ -2970,7 +3057,8 @@ function Start-IsolatedOpenClaw {
         [Parameter(Mandatory = $true)][string]$StderrPath,
         [Parameter(Mandatory = $true)][string]$WrapperStdoutPath,
         [Parameter(Mandatory = $true)][string]$WrapperStderrPath,
-        [Parameter(Mandatory = $true)][string]$RuntimeIsolationRoot
+        [Parameter(Mandatory = $true)][string]$RuntimeIsolationRoot,
+        [Parameter(Mandatory = $true)][string]$TrustedProgramData
     )
 
     $environment = @{
@@ -3012,7 +3100,8 @@ function Start-IsolatedOpenClaw {
         -ChildStderrPath $StderrPath `
         -WrapperStdoutPath $WrapperStdoutPath `
         -WrapperStderrPath $WrapperStderrPath `
-        -RuntimeIsolationRoot $RuntimeIsolationRoot
+        -RuntimeIsolationRoot $RuntimeIsolationRoot `
+        -TrustedProgramData $TrustedProgramData
 }
 
 function Get-McpInputBytes {
@@ -4587,7 +4676,12 @@ finally {
             ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles) `
             ) `
             'nodejs\node.exe'
-        $trustedNode = Get-TrustedTask037Node -Candidate $expectedNode
+        $expectedProgramData = [Environment]::GetFolderPath(
+            [Environment+SpecialFolder]::CommonApplicationData
+        )
+        $trustedNode = Get-TrustedTask037Node `
+            -Candidate $expectedNode `
+            -ProgramDataAuthority $expectedProgramData
         if (-not (Test-ExactPath -Actual $trustedNode -Expected $expectedNode)) {
             throw 'TASK037_SELF_TEST_NODE_CLOSED_ENVIRONMENT_REJECTED'
         }
@@ -4694,7 +4788,15 @@ function Invoke-FullChainInternalPhase {
     foreach ($path in @($fullChainExe, $brokerExe, $runtimeManifest, $deliveryLauncher, $gitExe, $nodeExe, $openClawCli, $wslExe)) {
         Assert-RegularFile -Path $path
     }
-    $nodeExe = Get-TrustedTask037Node -Candidate $nodeExe
+    $programDataAuthority = Get-CanonicalPath -Path (
+        [Environment]::GetEnvironmentVariable(
+            'LATTICE_TASK037_PROGRAM_DATA',
+            'Process'
+        )
+    )
+    $nodeExe = Get-TrustedTask037Node `
+        -Candidate $nodeExe `
+        -ProgramDataAuthority $programDataAuthority
     if ((Get-FileSha256 $runtimeManifest) -ne $hermesRuntimeManifestSha256) {
         throw 'TASK037_HERMES_RUNTIME_MANIFEST_REJECTED'
     }
@@ -4875,7 +4977,8 @@ function Invoke-FullChainInternalPhase {
             -StderrPath $openClawStderr `
             -WrapperStdoutPath $openClawWrapperStdout `
             -WrapperStderrPath $openClawWrapperStderr `
-            -RuntimeIsolationRoot $profileRoot
+            -RuntimeIsolationRoot $profileRoot `
+            -TrustedProgramData $programDataAuthority
         $openClawControllerProcess = $openClawOwned.Process
         $openClawProcess = $openClawOwned.ChildProcess
         $openClawPid = $openClawOwned.ChildProcessId
@@ -4965,6 +5068,7 @@ function Invoke-FullChainInternalPhase {
             -WrapperStdoutPath $fullChainWrapperStdout `
             -WrapperStderrPath $fullChainWrapperStderr `
             -RuntimeIsolationRoot $fullChainEnvironmentRoot `
+            -TrustedProgramData $programDataAuthority `
             -StandardInputPath $inputPath
         $fullChainControllerProcess = $fullChainOwned.Process
         $fullChainProcess = $fullChainOwned.ChildProcess
@@ -5595,8 +5699,40 @@ function Invoke-DefaultVerification {
         -Stage 'supervisor_binding'
     $openClawCli = Get-CanonicalPath -Path (Join-Path $repositoryRoot 'integrations\openclaw-lattice\node_modules\openclaw\openclaw.mjs')
     $wslExe = Get-CanonicalPath -Path (Join-Path $env:SystemRoot 'System32\wsl.exe')
+    $null = Write-Task037AdmissionStageReceipt `
+        -RepositoryTarget $repositoryTarget `
+        -AcceptanceId $acceptanceId `
+        -StartedAtUtc $admissionStartedAtUtc `
+        -Stage 'git_identity_preflight'
     $gitExe = Get-TrustedTask037Git -Candidate ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_CONTROLLER_GIT_EXE', 'Process'))
-    $nodeExe = Get-TrustedTask037Node -Candidate ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_CONTROLLER_NODE_EXE', 'Process'))
+    $null = Write-Task037AdmissionStageReceipt `
+        -RepositoryTarget $repositoryTarget `
+        -AcceptanceId $acceptanceId `
+        -StartedAtUtc $admissionStartedAtUtc `
+        -Stage 'node_identity_preflight'
+    $programDataAuthority = Get-CanonicalPath -Path (
+        [Environment]::GetEnvironmentVariable(
+            'LATTICE_TASK037_CONTROLLER_PROGRAM_DATA',
+            'Process'
+        )
+    )
+    $nodeRuntimeStageWriter = {
+        param([string]$Stage)
+        $null = Write-Task037AdmissionStageReceipt `
+            -RepositoryTarget $repositoryTarget `
+            -AcceptanceId $acceptanceId `
+            -StartedAtUtc $admissionStartedAtUtc `
+            -Stage $Stage
+    }.GetNewClosure()
+    $nodeExe = Get-TrustedTask037Node `
+        -Candidate ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_CONTROLLER_NODE_EXE', 'Process')) `
+        -ProgramDataAuthority $programDataAuthority `
+        -RuntimeStageWriter $nodeRuntimeStageWriter
+    $null = Write-Task037AdmissionStageReceipt `
+        -RepositoryTarget $repositoryTarget `
+        -AcceptanceId $acceptanceId `
+        -StartedAtUtc $admissionStartedAtUtc `
+        -Stage 'rust_toolchain_preflight'
     $cargoHome = Get-CanonicalPath -Path ([Environment]::GetEnvironmentVariable('CARGO_HOME', 'Process'))
     $rustupHome = Get-CanonicalPath -Path ([Environment]::GetEnvironmentVariable('RUSTUP_HOME', 'Process'))
     $rustToolchain = Get-TrustedTask037RustToolchain `
@@ -5621,6 +5757,12 @@ function Invoke-DefaultVerification {
             throw 'TASK037_RUST_TOOLCHAIN_SCOPE_REJECTED'
         }
     }
+    Assert-Task037RustToolchainVersion -Toolchain $rustToolchain
+    $null = Write-Task037AdmissionStageReceipt `
+        -RepositoryTarget $repositoryTarget `
+        -AcceptanceId $acceptanceId `
+        -StartedAtUtc $admissionStartedAtUtc `
+        -Stage 'artifact_identity_preflight'
     foreach ($path in @($acceptanceRoot, $fixtureRoot)) {
         if (Test-Path -LiteralPath $path) {
             throw ('TASK037_FRESH_ROOT_REJECTED|' + $path)
@@ -5633,7 +5775,6 @@ function Invoke-DefaultVerification {
     foreach ($path in @($sourceManifest, $deliveryLauncher, $openClawCli, $wslExe, $gitExe, $nodeExe, $cargoExe)) {
         Assert-RegularFile -Path $path
     }
-    Assert-Task037RustToolchainVersion -Toolchain $rustToolchain
     if ((Get-FileSha256 $sourceManifest) -ne $hermesRuntimeManifestSha256) {
         throw 'TASK037_SOURCE_MANIFEST_REJECTED'
     }
@@ -5644,6 +5785,11 @@ function Invoke-DefaultVerification {
         throw 'TASK037_OPENCLAW_REJECTED'
     }
 
+    $null = Write-Task037AdmissionStageReceipt `
+        -RepositoryTarget $repositoryTarget `
+        -AcceptanceId $acceptanceId `
+        -StartedAtUtc $admissionStartedAtUtc `
+        -Stage 'worktree_preflight'
     Push-Location $repositoryRoot
     try {
         $branch = Invoke-Task037GitText -GitExe $gitExe -Arguments @('rev-parse', '--abbrev-ref', 'HEAD') -FailureCode 'TASK037_GIT_BRANCH_FAILED'
@@ -5665,6 +5811,11 @@ function Invoke-DefaultVerification {
         -AcceptanceId $acceptanceId `
         -StartedAtUtc $admissionStartedAtUtc `
         -Stage 'inner_pre_acceptance'
+
+    if ($InternalControllerPreflightOnly) {
+        Write-Output 'TASK037_CONTROLLER_PREFLIGHT=PASS'
+        return
+    }
 
     New-Item -ItemType Directory -Path $acceptanceRoot -Force:$false | Out-Null
     New-Item -ItemType Directory -Path $evidenceRoot -Force:$false | Out-Null
@@ -5732,6 +5883,7 @@ function Invoke-DefaultVerification {
         LATTICE_TASK037_DELIVERY_ROOT = $deliveryRoot
         LATTICE_TASK037_GIT_EXE = $gitExe
         LATTICE_TASK037_NODE_EXE = $nodeExe
+        LATTICE_TASK037_PROGRAM_DATA = $programDataAuthority
         LATTICE_TASK037_OPENCLAW_CLI = $openClawCli
         LATTICE_TASK037_CODEX_AUTH_HOME = Get-CanonicalPath -Path $CodexAuthHome
         LATTICE_TASK037_TEMP_ACCEPTANCE_ROOT = $tempAcceptanceRoot
@@ -5865,6 +6017,8 @@ function Invoke-DefaultVerification {
 }
 
 function Invoke-Task037SupervisedVerification {
+    param([switch]$ControllerPreflightOnly)
+
     if ([string]::IsNullOrWhiteSpace($CodexAuthHome)) {
         $CodexAuthHome = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.codex'
     }
@@ -5884,6 +6038,9 @@ function Invoke-Task037SupervisedVerification {
     $null = Invoke-Task037RecoveryOnly -RepositoryTarget $repositoryTarget
     $windows = Get-CanonicalPath -Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))
     $system32 = Get-CanonicalPath -Path (Join-Path $windows 'System32')
+    $controllerProgramData = Get-CanonicalPath -Path (
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    )
     $programFiles = Get-CanonicalPath -Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles))
     $userProfile = Get-CanonicalPath -Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile))
     $controllerGitExe = Get-CanonicalPath -Path (Join-Path $programFiles 'Git\cmd\git.exe')
@@ -5905,7 +6062,13 @@ function Invoke-Task037SupervisedVerification {
         (Join-Path $system32 'Wbem'),
         (Get-CanonicalPath -Path $PSHOME)
     ) | Select-Object -Unique
-    foreach ($directory in @($controllerToolDirectories + @($controllerCargoHome, $controllerRustupHome))) {
+    foreach ($directory in @(
+        $controllerToolDirectories + @(
+            $controllerCargoHome,
+            $controllerRustupHome,
+            $controllerProgramData
+        )
+    )) {
         Assert-NoReparsePath -Path $directory -FailureCode 'TASK037_CONTROLLER_TOOL_SCOPE_REJECTED'
         $item = Get-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
         if ($null -eq $item -or -not $item.PSIsContainer) {
@@ -5945,6 +6108,13 @@ function Invoke-Task037SupervisedVerification {
         $controllerWrapperStdout = Join-Path $supervision.TempRoot 'controller.wrapper.stdout'
         $controllerWrapperStderr = Join-Path $supervision.TempRoot 'controller.wrapper.stderr'
         $controllerPid = Join-Path $supervision.TempRoot 'controller.pid'
+        $controllerArguments = @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', $PSCommandPath, '-InternalController', '-CodexAuthHome', $CodexAuthHome
+        )
+        if ($ControllerPreflightOnly) {
+            $controllerArguments += '-InternalControllerPreflightOnly'
+        }
         $beforeControllerGate = {
             $null = Write-Task037AdmissionStageReceipt `
                 -RepositoryTarget $repositoryTarget `
@@ -5957,10 +6127,7 @@ function Invoke-Task037SupervisedVerification {
             -AttestationJob $supervision.AttestationJob `
             -PowerShellExecutable $powerShellExecutable `
             -Executable $powerShellExecutable `
-            -Arguments @(
-                '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-                '-File', $PSCommandPath, '-InternalController', '-CodexAuthHome', $CodexAuthHome
-            ) `
+            -Arguments $controllerArguments `
             -WorkingDirectory $repositoryRoot `
             -EnvironmentValues ([ordered]@{
                 CARGO_HOME = $controllerCargoHome
@@ -5979,6 +6146,7 @@ function Invoke-Task037SupervisedVerification {
                 LATTICE_TASK037_CONTROLLER_CARGO_EXE = $controllerCargoExe
                 LATTICE_TASK037_CONTROLLER_GIT_EXE = $controllerGitExe
                 LATTICE_TASK037_CONTROLLER_NODE_EXE = $controllerNodeExe
+                LATTICE_TASK037_CONTROLLER_PROGRAM_DATA = $controllerProgramData
                 LATTICE_TASK037_CONTROLLER_RUSTC_EXE = $controllerRustcExe
                 LATTICE_TASK037_CONTROLLER_RUSTDOC_EXE = $controllerRustdocExe
                 PATH = $controllerPath
@@ -5993,6 +6161,7 @@ function Invoke-Task037SupervisedVerification {
             -WrapperStdoutPath $controllerWrapperStdout `
             -WrapperStderrPath $controllerWrapperStderr `
             -RuntimeIsolationRoot (Join-Path $supervision.TempRoot 'controller-runtime') `
+            -TrustedProgramData $controllerProgramData `
             -BeforeGate $beforeControllerGate
         if (-not $owned.ChildProcess.WaitForExit(2400000)) {
             throw 'TASK037_INNER_CONTROLLER_TIMEOUT'
@@ -6004,6 +6173,19 @@ function Invoke-Task037SupervisedVerification {
         Complete-Task037GatedProcessEvidence -OwnedProcess $owned
         Assert-BoundedTask037EvidenceFile -Path $controllerStdout -Code 'TASK037_INNER_CONTROLLER_OUTPUT_REJECTED'
         Assert-BoundedTask037EvidenceFile -Path $controllerStderr -Code 'TASK037_INNER_CONTROLLER_OUTPUT_REJECTED'
+        if ($ControllerPreflightOnly) {
+            $preflightStdout = [IO.File]::ReadAllText(
+                $controllerStdout,
+                [Text.Encoding]::UTF8
+            ).TrimEnd([char[]]"`r`n")
+            $preflightStderr = [IO.File]::ReadAllText($controllerStderr, [Text.Encoding]::UTF8)
+            if (
+                $preflightStdout -cne 'TASK037_CONTROLLER_PREFLIGHT=PASS' -or
+                -not [string]::IsNullOrEmpty($preflightStderr)
+            ) {
+                throw 'TASK037_CONTROLLER_PREFLIGHT_OUTPUT_REJECTED'
+            }
+        }
         if ($controllerExitCode -ne 0) {
             throw 'TASK037_INNER_CONTROLLER_REJECTED'
         }
@@ -6038,6 +6220,32 @@ function Invoke-Task037SupervisedVerification {
     }
     if ($null -ne $supervisorFailure) {
         Throw-Task037SafeFailure -Message $supervisorFailure
+    }
+
+    if ($ControllerPreflightOnly) {
+        $admissionReceiptPath = Get-Task037AdmissionReceiptPath `
+            -RepositoryTarget $repositoryTarget `
+            -AcceptanceId $acceptanceId
+        $admissionReceipt = Read-Task037AdmissionStageReceipt `
+            -Path $admissionReceiptPath `
+            -AcceptanceId $acceptanceId
+        $acceptanceRoot = Join-Path $repositoryTarget ('full-chain-acceptance\' + $acceptanceId)
+        $fixtureRoot = Join-Path $repositoryTarget ('lattice-delivery\' + $acceptanceId)
+        if (
+            [string]$admissionReceipt.stage -cne 'inner_pre_acceptance' -or
+            (Test-Path -LiteralPath $acceptanceRoot) -or
+            (Test-Path -LiteralPath $fixtureRoot) -or
+            (Test-Path -LiteralPath $supervision.TempRoot) -or
+            (Test-Path -LiteralPath $supervision.ManifestPath)
+        ) {
+            throw 'TASK037_CONTROLLER_PREFLIGHT_EVIDENCE_REJECTED'
+        }
+        [IO.File]::Delete($admissionReceiptPath)
+        if (Test-Path -LiteralPath $admissionReceiptPath) {
+            throw 'TASK037_CONTROLLER_PREFLIGHT_EVIDENCE_REJECTED'
+        }
+        Write-Output 'TASK037_CONTROLLER_PREFLIGHT=PASS'
+        return
     }
 
     $evidenceRoot = Join-Path (Join-Path $repositoryTarget ('full-chain-acceptance\' + $acceptanceId)) 'evidence'
@@ -6094,10 +6302,18 @@ if ($InternalController) {
 }
 
 try {
+    if ($InternalControllerPreflightOnly) {
+        throw 'TASK037_UNSUPERVISED_CONTROLLER_REJECTED'
+    }
     if ($HarnessPublicFailureProbe) {
         throw 'task037-public-failure-probe-payload'
     }
-    Invoke-Task037SupervisedVerification
+    if ($HarnessControllerPreflightProbe) {
+        Invoke-Task037SupervisedVerification -ControllerPreflightOnly
+    }
+    else {
+        Invoke-Task037SupervisedVerification
+    }
 }
 catch {
     Throw-Task037SafeFailure -Message $_.Exception.Message
