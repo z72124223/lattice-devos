@@ -69,6 +69,18 @@ foreach ($required in @(
     'GIT_CONFIG_NOSYSTEM',
     'Start-Task037CredentialSourceMonitor',
     'Write-Task037ValidatedPhaseEvidence',
+    'Write-Task037AdmissionStageReceipt',
+    'Read-Task037AdmissionStageReceipt',
+    "[switch]`$InternalAdmissionProbe",
+    "[switch]`$HarnessPublicFailureProbe",
+    'LATTICE_TASK037_ADMISSION_STARTED_AT_UTC',
+    "'recovery_preflight'",
+    "'supervision_create'",
+    "'gated_controller_start'",
+    "'supervisor_binding'",
+    "'inner_pre_acceptance'",
+    'TASK037_SYNTHETIC_ADMISSION_REJECTED',
+    'TASK037_SELF_TEST_ADMISSION_RECEIPT_REJECTED',
     'launcher_path_sha256',
     "'TASK037_LATTICE_COMPONENT_FAILURE'"
 )) {
@@ -88,6 +100,7 @@ $bindingNames = @(
     'LATTICE_TASK037_SUPERVISOR_ACCEPTANCE_ID',
     'LATTICE_TASK037_SUPERVISOR_MANIFEST_PATH',
     'LATTICE_TASK037_SUPERVISOR_OWNER_TOKEN',
+    'LATTICE_TASK037_SUPERVISOR_TEMP_BASE',
     'LATTICE_TASK037_SUPERVISOR_TEMP_ROOT'
 )
 $bindingOriginal = @{}
@@ -117,7 +130,7 @@ try {
     $directText = $directStdout.GetAwaiter().GetResult() + $directStderr.GetAwaiter().GetResult()
     if (
         $directProcess.ExitCode -eq 0 -or
-        $directText.IndexOf('TASK037_SUPERVISOR_BINDING_REJECTED', [StringComparison]::Ordinal) -lt 0
+        $directText.IndexOf('TASK037_CONTROLLER_ACCEPTANCE_ID_REJECTED', [StringComparison]::Ordinal) -lt 0
     ) {
         throw 'TASK037_DIRECT_INTERNAL_BINDING_PROBE_REJECTED'
     }
@@ -170,13 +183,45 @@ try {
     $phaseText = $phaseStdout.GetAwaiter().GetResult() + $phaseStderr.GetAwaiter().GetResult()
     if (
         $phaseProbe.ExitCode -eq 0 -or
-        $phaseText.IndexOf('TASK037_SUPERVISOR_BINDING_REJECTED', [StringComparison]::Ordinal) -lt 0
+        $phaseText.IndexOf('TASK037_SUPERVISOR_BINDING_TEMP_BASE_REJECTED', [StringComparison]::Ordinal) -lt 0
     ) {
         throw 'TASK037_DIRECT_PHASE_BINDING_PROBE_REJECTED'
     }
 }
 finally {
     if ($null -ne $phaseProbe) { $phaseProbe.Dispose() }
+}
+
+$publicFailureProbe = $null
+try {
+    $publicFailureInfo = [Diagnostics.ProcessStartInfo]::new()
+    $publicFailureInfo.FileName = $powerShell
+    $publicFailureInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $harness + '" -HarnessPublicFailureProbe'
+    $publicFailureInfo.UseShellExecute = $false
+    $publicFailureInfo.CreateNoWindow = $true
+    $publicFailureInfo.RedirectStandardOutput = $true
+    $publicFailureInfo.RedirectStandardError = $true
+    $publicFailureProbe = [Diagnostics.Process]::new()
+    $publicFailureProbe.StartInfo = $publicFailureInfo
+    if (-not $publicFailureProbe.Start()) { throw 'TASK037_PUBLIC_FAILURE_BOUNDARY_PROBE_REJECTED' }
+    $publicFailureStdout = $publicFailureProbe.StandardOutput.ReadToEndAsync()
+    $publicFailureStderr = $publicFailureProbe.StandardError.ReadToEndAsync()
+    if (-not $publicFailureProbe.WaitForExit(10000)) {
+        $publicFailureProbe.Kill()
+        $publicFailureProbe.WaitForExit()
+        throw 'TASK037_PUBLIC_FAILURE_BOUNDARY_PROBE_REJECTED'
+    }
+    $publicFailureText = $publicFailureStdout.GetAwaiter().GetResult() + $publicFailureStderr.GetAwaiter().GetResult()
+    if (
+        $publicFailureProbe.ExitCode -eq 0 -or
+        $publicFailureText.IndexOf('TASK037_UNCLASSIFIED_FAILURE', [StringComparison]::Ordinal) -lt 0 -or
+        $publicFailureText.IndexOf('task037-public-failure-probe-payload', [StringComparison]::Ordinal) -ge 0
+    ) {
+        throw 'TASK037_PUBLIC_FAILURE_BOUNDARY_PROBE_REJECTED'
+    }
+}
+finally {
+    if ($null -ne $publicFailureProbe) { $publicFailureProbe.Dispose() }
 }
 
 $output = @(
