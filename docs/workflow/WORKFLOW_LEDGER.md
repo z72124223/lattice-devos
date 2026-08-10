@@ -1,5 +1,38 @@
 # Workflow Ledger
 
+## TASK-022 Durable PostgreSQL Project Registry
+
+- Classification: one bounded global Registry durability slice. Project
+  Registry remains the sole semantic owner; PostgreSQL is the durable truth;
+  Store owns only fixed migration/catalog/ACL/transaction mechanics.
+- Repository/worktree:
+  `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\task-022-postgres-project-registry`.
+- Branch/base: `feature/task-022-postgres-project-registry` from
+  `2b424ec9a5401a6fbdc4f37d3d401592331afca0`.
+- Specification/ticket: SPEC-002 v24 AC-36; ADR-020; TASK-022; Project Registry
+  1.2; Postgres Store 1.4.
+
+| Stage | Status | Evidence | Enforcement |
+|---|---|---|---|
+| Repository/rules/state | pass | dedicated task worktree, exact branch/base, live dirty scope inspected; no other worktree touched | machine-observed + documented |
+| Authority arbitration | pass | bare V4 only; frozen V3+Memory v2(+Writer Lease v1) remains separate; V4 extensions unsupported | user-authoritative arbitration + contracts |
+| Pure Registry TDD | pass | 37 tests cover frozen 1.1 vectors, 1.2 planner/checkpoint/record-set/replay/limits/Fake parity | machine-executed |
+| Migration/adapter TDD | pass | Registry adapter 1, migration contract 17, Store package 65 | machine-executed |
+| PostgreSQL live/restart | pass | exact no-flag harness; two marker-owned PG 17.10 initial/restart clusters; StoreOnly bare V4 plus externally owned V3 Memory/Writer Lease profile; composite PASS | machine-executed disposable service |
+| Historical compatibility | pass | exact bare V1/V2/V3 to V4, non-empty Store receipts and Ledger commands/checkpoints replay byte-identically | live migration/replay matrices |
+| Ownership/dependency | pass | Store has no normal/dev Writer Lease edge and invokes no Writer Lease installer; harness calls the owner suite externally | static regression + dependency tree + live gate |
+| Focused/full verification | pass with recorded external lint baseline | full Rust workspace tests, Node 44/44, changed-crate and proportional workspace strict Clippy, format, audit, dependency and hygiene gates pass | machine-enforced locally |
+| Unexcluded workspace Clippy | baseline fail outside task | 11 findings only in unchanged `lattice-hermes-adapter`; candidate Hermes diff is empty and path is outside TASK-022 allowlist | exact attempted command + diff boundary |
+| Independent review | pass | final `APPROVED_WITH_RESIDUALS`; P0/P1/P2/P3 all zero; only unchanged out-of-scope Hermes lint baseline remains recorded | independent read-only reviewer |
+| Commit/publication | pending | no TASK-022 commit or push yet; remote branch was absent at the earlier read-only preflight | Git/remote gate pending |
+| Remote CI/branch protection | unverified | no remote workflow or protected-branch run claimed | remote service not executed |
+
+The optional official TASK-038 Codex hook is not TASK-022 acceptance. Its prior
+attempt stopped at `TASK038_OFFICIAL_CODEX_VERSION_REJECTED`; TASK-022 claims
+only the separate frozen V3 owner/profile regression above.
+
+---
+
 ## TASK-038 ChatGPT MCP Gateway
 
 - Classification: bounded external transport integration and correction of a

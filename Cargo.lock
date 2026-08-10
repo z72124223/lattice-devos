@@ -381,6 +381,7 @@ dependencies = [
  "lattice-cjson",
  "lattice-contracts",
  "lattice-ports",
+ "lattice-project-registry",
  "lattice-task-ledger",
  "postgres",
  "serde_json",

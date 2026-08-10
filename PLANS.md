@@ -22,9 +22,9 @@ GitHub URL: `https://github.com/z72124223/lattice-devos`<br>
 Remote: `origin` -> `https://github.com/z72124223/lattice-devos.git`<br>
 Default branch: not established; remote HEAD is currently
 `feature/task-037-full-chain-integration`<br>
-Current branch: `feature/task-038-chatgpt-mcp`<br>
+Current branch: `feature/task-022-postgres-project-registry`<br>
 Upstream: none; this branch has not been pushed<br>
-Base checkpoint: local Phase 1 commit `512732d`<br>
+Base checkpoint: stable local TASK-038 commit `2b424ec9a5401a6fbdc4f37d3d401592331afca0`<br>
 Latest fetched TASK-037 remote head: `8828d2b`<br>
 
 Current Goal:
@@ -33,7 +33,7 @@ Current Goal:
   can discover/invoke the two bounded task tools. Only after that separate live
   ChatGPT gate resumes TASK-037 production-chain diagnosis/repair.
 
-CURRENT TASK-038 — add `lattice_task_submit` and `lattice_task_status` through
+TASK-038 stable dependency checkpoint — add `lattice_task_submit` and `lattice_task_status` through
 the same `latticed` One Gateway. The first public intent is exactly
 `CONTROLLED_CODEX_CANARY`; LATTICE builds the complete Task Spec 2.1, preserves
 one spec digest, uses PostgreSQL Task Ledger truth and a real PostgreSQL Writer
@@ -148,6 +148,130 @@ Relevant Issue:
 - Issue #2 Passive Supervisor may read those durable projections only after
   TASK-039 defines freshness/observation semantics; it must not bypass the
   existing Orchestrator.
+
+## CURRENT TASK-022 Trajectory — 2026-08-10
+
+### Goal
+
+Complete the durable PostgreSQL Project Registry repository from the exact
+TASK-038 checkpoint without creating another Registry owner, truth source, or
+writer path.
+
+### Global Strategy
+
+Keep Project Registry 1.2 as the only semantic planner and replay verifier.
+The implementation is now behavior-complete locally: immutable migration
+`0005`, the typed PostgreSQL adapter, Fake/Live parity, and exact catalog, ACL,
+concurrency, restart, and recovery behavior have current executable evidence.
+Independent re-review has accepted the exact candidate with no P0 through P3
+finding. The remaining closeout is a clean task-owned commit and the
+user-authorized safe publication of this exact feature branch.
+
+### Non-Goals
+
+- No arbitrary SQL, credential discovery, production database, provider,
+  deployment, release, force push, PR, tag, or primary-branch merge.
+- No second orchestrator, Registry implementation, writer lease owner, truth
+  source, or fabricated project-scoped Store receipt.
+- No changes outside TASK-022 `allowed_paths`.
+
+### Scope
+
+- `lattice-project-registry` pure planner/checkpoint/replay and Fake wrapper.
+- Postgres Store migration/profile/catalog/ACL compatibility, typed Registry
+  adapter, fixed harness, tests, reviews, ledger, plan, and handoff paths listed
+  by TASK-022.
+
+### Confirmed Facts
+
+- Worktree branch `feature/task-022-postgres-project-registry` remains based on
+  `2b424ec9a5401a6fbdc4f37d3d401592331afca0`; the candidate is intentionally
+  dirty until review and the final checkpoint commit.
+- Project Registry 1.2 now has 37 passing pure tests. Migration `0005`,
+  `PostgresProjectRegistry`, adapter/migration tests, and the full marker-owned
+  PostgreSQL matrices are present and pass current focused verification.
+- ADR-020 and the accepted governance re-review freeze the profile pair,
+  function counts/signatures, seeded vacant singleton, retained-byte algorithm,
+  transaction bounds, and `15/28/17/11-ungranted` catalog totals.
+- Arbitration resolved the former review conflict: TASK-038 remains exact
+  global V3 + Memory v2 + Writer Lease v1. TASK-022 advances only bare V3 to
+  bare V4, rejects V3 extensions as migration sources, rejects every V4
+  extension combination, and separately verifies the frozen V3 combined
+  profiles without advertising `V4_MEMORY_*` routes.
+
+### Assumptions
+
+- None. Implementation choices must follow the frozen ticket/ADR/constitutions
+  and become evidence through RED/GREEN tests.
+
+### Open Questions
+
+- None requiring user input. Any newly observed contract conflict stops the
+  implementation and returns to module governance.
+
+### Implementation Steps
+
+- [x] Add the first non-vacant pure Registry plan/apply slice without mutating
+  its verified base, preserving all Registry 1.1 literals. RED was the absent
+  public API; GREEN is the focused test plus the 21-test package.
+- [x] Make the Fake wrapper consume the same planner and
+  complete pure first-seen/replay/changed-ID, retained-state limits,
+  corruption, checkpoint-chain, record-set, and Fake parity matrices. GREEN is
+  36 passing package tests plus locked strict Clippy.
+- [x] Append exact schema-v4 migration/profile/catalog/ACL contract and prove
+  `0001` through `0004` byte identity plus historical receipt compatibility.
+- [x] Implement `PostgresProjectRegistry` through caller-supplied authenticated
+  clients and fixed functions only.
+- [x] Run Fake/Live parity, atomicity, concurrency, timeout, outcome-unknown,
+  corruption, restart, and migration matrices in the owned disposable harness.
+- [x] Obtain the final independent code/security and architecture verdict:
+  `APPROVED_WITH_RESIDUALS`, P0/P1/P2/P3 all zero; the sole residual is the
+  recorded unchanged out-of-scope Hermes lint baseline.
+- [ ] **CURRENT STEP:** Create and safely publish the exact reviewed reversible
+  commit and prove the final remote SHA.
+
+### Verification
+
+Current PASS evidence: pure Registry 37 tests; Registry adapter 1; migration
+contract 17; Store package 65; PostgreSQL 17.10 StoreOnly and MemoryOnly
+initial/restart harnesses plus the exact no-flag composite route and external
+Writer Lease owner profile gate; full Rust workspace tests; Node 44/44;
+`cargo audit`; format/diff; and strict Clippy on both changed crates. The
+proportional workspace lint excluding the unchanged Hermes package passes.
+The unexcluded workspace lint reaches only 11 unchanged
+`lattice-hermes-adapter` findings and therefore remains an explicit
+non-TASK-022 baseline failure. Remote CI and branch protection remain
+unverified unless actually queried.
+
+### Risks
+
+- A future separately governed Memory/Writer Lease schema upgrade must not
+  reuse the rejected `V4_MEMORY_*` labels without its owners' migrations.
+- The 73-scalar staging surface and current-transaction provenance are large;
+  exact signature and partial-stage tests must precede trust.
+- Live outcome-unknown and restart evidence must use only marker-owned
+  disposable resources and cannot be inferred from unit tests.
+
+### Drift Log
+
+- 2026-08-10: TASK-038 produced clean stable commit `2b424ec9`; TASK-022 moved
+  from the read-only waiting slot into its own worktree.
+- 2026-08-10: Removed the stale schema-v4 governance blocker from the active
+  trajectory because current ADR-020 and governance re-review already freeze
+  the required profile pair, scalar counts, and catalog totals.
+- 2026-08-10: First non-vacant plan/apply slice passed; original Registry 1.1
+  golden digests and all prior lifecycle tests remained byte-identical.
+- 2026-08-10: authority arbitration rejected the proposed V4+Memory profiles;
+  the harness now proves bare V4 separately from frozen V3 combined profiles.
+- 2026-08-10: StoreOnly and MemoryOnly PostgreSQL 17.10 initial/restart gates,
+  including non-empty bare V3 Ledger-to-V4 exact replay, passed.
+- 2026-08-10: independent review found and the owner lane repaired exact
+  replay/admission ordering, the forbidden Store-to-Writer-Lease dev edge, and
+  hook/composite harness regressions. The no-flag composite now proves bare V4
+  and the separately owned frozen V3 extension profile on independent clusters.
+- 2026-08-10: final independent code/security/architecture review returned
+  `APPROVED_WITH_RESIDUALS`, P0/P1/P2/P3 all zero. The unchanged out-of-scope
+  Hermes strict-Clippy baseline remains explicitly recorded, not relabelled.
 
 ## User Execution Preference — 2026-07-29
 
@@ -845,43 +969,19 @@ remain future Orchestrator/PostgreSQL responsibilities.
     durable evidence; final code/security and architecture findings are all
     zero, and the marker-owned PostgreSQL 17.10 initial/restart harness plus
     432 Rust and 44 Node tests pass. MVP-1 remains 12/22 tickets (54.5%).
-  - **PAUSED TASK-022:** Implement the first durable Project Registry
-    repository one verified behavior at a time. Project Registry 1.2 remains pure
-    and add one runtime-aware verified global state, command plan/apply,
-    immutable global checkpoint, ordered command replay, and projection/
-    reservation verification shared by Fake and PostgreSQL. Postgres Store 1.4
-    will add exact schema v4 through migration `0005` and a Registry-specific
-    global transaction because
-    registration denial can have no authority snapshot and cross-project
-    accepted/pending identity collisions require one serialization point.
-    TASK-022 must not forge a `ProjectSnapshotId`, reinterpret a per-project
-    `StoreScope`, change Store-v2 receipt hashes, or move identity legality into
-    SQL. Contracts and Ports remain unchanged. SPEC-002 v24, ADR-020, both
-    versioned constitutions, TASK-022, and its workflow audit now agree.
-    The first independent governance review correctly returned CHANGES
-    REQUIRED (P0=0, P1=5, P2=4): the corrected set now freezes an acyclic hash
-    construction order, canonical logical-byte accounting, an independent
-    retained-checkpoint comparison, vacant high-water 0 with a seeded Live
-    singleton, exact `15/28/17/11-ungranted` catalog totals, scalar Registry
-    signatures capped at 73 inputs, and bounded idle/total transaction time.
-    The fresh independent governance re-review passed with P0=P1=P2=P3=0 and
-    released only the governance blocker. The current bounded code action is
-    Registry 1.1 golden characterization followed by focused Registry 1.2 TDD;
-    the first RED/GREEN is complete: both Fake/Live vacant checkpoints,
-    independently recomputed 103-byte logical state, retained-checkpoint
-    reconstruction, and all four Registry 1.1 literal vectors pass in the
-    19-test Project Registry package. The second RED/GREEN is also complete:
-    opaque vacant snapshot export, plain self-consistency verification, and
-    independent retained-checkpoint currentness are distinct and the package
-    now passes 20 tests plus strict crate Clippy. The next bounded RED covers
-    first-registration planning without mutating its verified vacant base; no
-    implementation-complete claim is implied.
-    Read-only schema reconnaissance also found that ADR-020 freezes the leading
-    global-profile pair only for the nine Registry functions, not for the eight
-    Store-v4/Task-Ledger-v2 successors. Pure Registry TDD may continue, but
-    schema-v4 RED/SQL work is blocked until ADR-020, the Postgres Store
-    constitution, and TASK-022 freeze that pair as positions 1-2 plus the exact
-    successor input counts and pass a bounded governance check.
+  - **ACTIVE TASK-022 CLOSEOUT:** Project Registry 1.2 remains the sole pure
+    planner/replay owner and PostgreSQL the sole durable truth. Schema-v4
+    migration `0005`, fixed Registry functions, typed adapter, concurrency,
+    fault, corruption, restart, and historical Store/Ledger replay now have
+    current focused and marker-owned PostgreSQL 17.10 evidence. Authority
+    arbitration confirmed that TASK-038 remains global V3 + Memory v2 + Writer
+    Lease v1: TASK-022 does not advertise or accept V4 extension profiles.
+    StoreOnly proves bare V4; MemoryOnly separately proves both frozen V3
+    combined profiles and rejects them as V4 migration sources. Remaining work
+    is independent re-review, final hygiene/scope evidence, a clean task-owned
+    commit, safe ordinary push, and exact remote-SHA confirmation. Full workspace
+    strict Clippy has one explicit unchanged baseline gate: 11 findings in the
+    out-of-scope `lattice-hermes-adapter`; both changed crates pass strict Clippy.
     AC-06 remains open for real Windows/Git inspection, Workspace Git, and
     Scope Check. Writer Lease, Approval, Artifact, external components,
     production/release/deployment, and the unrelated website remain excluded.

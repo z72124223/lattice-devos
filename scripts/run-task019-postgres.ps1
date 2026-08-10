@@ -5,19 +5,49 @@ param(
     [switch]$RunTask038AcceptanceHook,
     [string]$Task038OfficialCodexExecutable,
     [string]$Task038CodexAuthHome,
-    [switch]$MemoryOnly
+    [switch]$MemoryOnly,
+    [switch]$StoreOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+if ($MemoryOnly -and $StoreOnly) {
+    throw 'TASK019_HARNESS_PROFILE_SELECTION_CONFLICT'
+}
+if ($StoreOnly -and ($RunLatticeDeliveryHook -or $RunFullChainAcceptanceHook -or $RunTask038AcceptanceHook)) {
+    throw 'TASK019_STORE_ONLY_HOOK_FORBIDDEN'
+}
+$extensionHookRequested =
+    $RunLatticeDeliveryHook -or $RunFullChainAcceptanceHook -or $RunTask038AcceptanceHook
+if ($extensionHookRequested -and -not $MemoryOnly -and -not $StoreOnly) {
+    # Preserve the established hook CLI while pinning every extension hook to
+    # the separately governed frozen V3 Memory profile.
+    $MemoryOnly = $true
+}
+
+# Bare schema V4 and the frozen V3 Memory profile are intentionally distinct
+# databases. The no-hook default is the formal composite gate and must never
+# install a V3 extension into the StoreOnly V4 successor.
+if (
+    -not $MemoryOnly -and
+    -not $StoreOnly -and
+    -not $extensionHookRequested
+) {
+    & $PSCommandPath -StoreOnly
+    & $PSCommandPath -MemoryOnly
+    Write-Output 'TASK019_COMPOSITE_PROFILE_HARNESS=PASS'
+    return
+}
+
 $postgresBin = 'C:\Program Files\PostgreSQL\17\bin'
 $requiredExecutables = @(
     'initdb.exe',
     'pg_ctl.exe',
     'pg_isready.exe',
-    'postgres.exe'
+    'postgres.exe',
+    'psql.exe'
 )
 $serviceName = 'postgresql-x64-17'
 $markerName = '.lattice-task019-disposable.json'
@@ -36,6 +66,15 @@ $environmentNames = @(
     'LATTICE_WRITER_LEASE_MIGRATOR_URL',
     'LATTICE_WRITER_LEASE_RUNTIME_URL',
     'LATTICE_WRITER_LEASE_ADMIN_URL',
+    'LATTICE_WRITER_LEASE_DATABASE_NAME',
+    'LATTICE_WRITER_LEASE_DATABASE_IDENTITY_SHA256',
+    'LATTICE_WRITER_LEASE_GLOBAL_MANIFEST_SHA256',
+    'LATTICE_WRITER_LEASE_MEMORY_MANIFEST_SHA256',
+    'LATTICE_WRITER_LEASE_DAEMON_INSTANCE_ID',
+    'LATTICE_WRITER_LEASE_DAEMON_EPOCH',
+    'LATTICE_WRITER_LEASE_AUTHORITY_REVISION',
+    'LATTICE_WRITER_LEASE_ADMISSION_OBSERVATION_SHA256',
+    'LATTICE_WRITER_LEASE_AUTHORITY_HEAD_SHA256',
     'LATTICE_STORE_PROFILE_LIVE',
     'LATTICE_STORE_PROFILE_EXPECTED',
     'LATTICE_STORE_PROFILE_RUNTIME_URL',
@@ -193,7 +232,7 @@ function Test-StoreProfileLiveGateOutput {
         [Parameter(Mandatory = $true)][string]$ExpectedProfile
     )
 
-    $allowedProfiles = @('V3', 'V3_MEMORY_V2', 'V3_MEMORY_V2_WRITER_LEASE_V1')
+    $allowedProfiles = @('V4', 'V3_MEMORY_V2', 'V3_MEMORY_V2_WRITER_LEASE_V1')
     if ($ExpectedProfile -notin $allowedProfiles) {
         return $false
     }
@@ -215,7 +254,7 @@ function Get-StoreProfileForLiveSuitePhase {
     )
 
     if ($Phase -eq 'initial' -and $SuiteName -eq 'store') {
-        return 'V3'
+        return 'V4'
     }
     if ($Phase -eq 'initial' -and $SuiteName -eq 'memory') {
         return 'V3_MEMORY_V2'
@@ -233,14 +272,14 @@ function Invoke-HarnessSelfTest {
         }
     }
     $profilePass = @(
-        'test postgres_setup::tests::live_store_profile ... PASS: Store live profile V3 accepted with exact fail-closed matrix'
+        'test postgres_setup::tests::live_store_profile ... PASS: Store live profile V4 accepted with exact fail-closed matrix'
     )
-    if (-not (Test-StoreProfileLiveGateOutput -ExitCode 0 -Output $profilePass -ExpectedProfile 'V3')) {
+    if (-not (Test-StoreProfileLiveGateOutput -ExitCode 0 -Output $profilePass -ExpectedProfile 'V4')) {
         throw 'TASK019_STORE_PROFILE_OUTPUT_SELF_TEST_REJECTED_PASS'
     }
     foreach ($rejected in @(
-        [pscustomobject]@{ ExitCode = 1; Output = $profilePass; Profile = 'V3' },
-        [pscustomobject]@{ ExitCode = 0; Output = @('SKIP: LATTICE_STORE_PROFILE_LIVE is not enabled'); Profile = 'V3' },
+        [pscustomobject]@{ ExitCode = 1; Output = $profilePass; Profile = 'V4' },
+        [pscustomobject]@{ ExitCode = 0; Output = @('SKIP: LATTICE_STORE_PROFILE_LIVE is not enabled'); Profile = 'V4' },
         [pscustomobject]@{ ExitCode = 0; Output = $profilePass; Profile = 'V3_MEMORY_V2' },
         [pscustomobject]@{ ExitCode = 0; Output = $profilePass; Profile = 'UNKNOWN' }
     )) {
@@ -252,8 +291,9 @@ function Invoke-HarnessSelfTest {
         }
     }
     if (
-        (Get-StoreProfileForLiveSuitePhase -Phase 'initial' -SuiteName 'store') -ne 'V3' -or
+        (Get-StoreProfileForLiveSuitePhase -Phase 'initial' -SuiteName 'store') -ne 'V4' -or
         (Get-StoreProfileForLiveSuitePhase -Phase 'initial' -SuiteName 'memory') -ne 'V3_MEMORY_V2' -or
+        $null -ne (Get-StoreProfileForLiveSuitePhase -Phase 'memory_setup' -SuiteName 'store') -or
         $null -ne (Get-StoreProfileForLiveSuitePhase -Phase 'restart' -SuiteName 'store') -or
         $null -ne (Get-StoreProfileForLiveSuitePhase -Phase 'initial' -SuiteName 'unknown')
     ) {
@@ -299,6 +339,195 @@ function Invoke-NativeChecked {
     if ($null -eq $nativeExitCode -or $nativeExitCode -ne 0) {
         throw "$Operation failed with exit code $nativeExitCode. Native output was suppressed."
     }
+}
+
+function Invoke-HarnessPsqlRows {
+    param(
+        [Parameter(Mandatory = $true)][string]$Psql,
+        [Parameter(Mandatory = $true)][string]$DatabaseName,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][string]$Query,
+        [Parameter(Mandatory = $true)][string]$FailureCode
+    )
+
+    $sqlPath = Join-Path $clusterRoot '.writer-lease-owner.sql'
+    $stdoutPath = Join-Path $clusterRoot '.writer-lease-psql-stdout.log'
+    $stderrPath = Join-Path $clusterRoot '.writer-lease-psql-stderr.log'
+    $originalPassword = [Environment]::GetEnvironmentVariable('PGPASSWORD', 'Process')
+    $process = $null
+    $exitCode = $null
+    $rows = @()
+    try {
+        Set-Content -LiteralPath $sqlPath -Value $Query -Encoding utf8
+        [Environment]::SetEnvironmentVariable('PGPASSWORD', $Password, 'Process')
+        $process = Start-Process -FilePath $Psql -ArgumentList @(
+            '-X', '-q', '-A', '-t', '--no-password', '--set', 'ON_ERROR_STOP=1',
+            '--field-separator=|', '-h', '127.0.0.1', '-p', [string]$Port,
+            '-U', 'lattice_migrator_login', '-d', $DatabaseName, '--file', $sqlPath
+        ) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath `
+            -WindowStyle Hidden -PassThru
+        $null = $process.Handle
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
+        if ($exitCode -eq 0 -and (Test-Path -LiteralPath $stdoutPath -PathType Leaf)) {
+            $rows = @(
+                Get-Content -LiteralPath $stdoutPath -Encoding utf8 |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+            )
+        }
+    }
+    finally {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+        [Environment]::SetEnvironmentVariable('PGPASSWORD', $originalPassword, 'Process')
+        foreach ($path in @($sqlPath, $stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if ($exitCode -ne 0) {
+        throw $FailureCode
+    }
+    return ,$rows
+}
+
+function Invoke-WriterLeaseOwnerLiveGate {
+    param(
+        [Parameter(Mandatory = $true)][string]$Cargo,
+        [Parameter(Mandatory = $true)][string]$Psql,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][string]$RunId
+    )
+
+    if ($RunId -notmatch '^[0-9a-f]{32}$') {
+        throw 'TASK019_WRITER_LEASE_OWNER_RUN_ID_REJECTED'
+    }
+    $databaseName = 'lattice_task019_' + $RunId.Substring(0, 8) + '_base'
+    $daemonInstanceId = 'task022-harness-' + $RunId
+    $activateQuery = @"
+SET ROLE lattice_migrator;
+UPDATE ONLY control.runtime_admission
+SET admission_mode = 'ACTIVE',
+    daemon_instance_id = '$daemonInstanceId',
+    daemon_epoch = 1,
+    authority_revision = 1,
+    observation_digest = pg_catalog.decode(pg_catalog.repeat('a1', 32), 'hex'),
+    authority_head_digest = pg_catalog.decode(pg_catalog.repeat('a2', 32), 'hex'),
+    updated_at = pg_catalog.clock_timestamp()
+WHERE singleton = true;
+SELECT pg_catalog.btrim(e.database_identity_sha256::text),
+       pg_catalog.btrim(e.global_manifest_sha256::text),
+       pg_catalog.btrim(e.extension_manifest_sha256::text),
+       a.daemon_instance_id,
+       a.daemon_epoch::text,
+       a.authority_revision::text,
+       pg_catalog.encode(a.observation_digest, 'hex'),
+       pg_catalog.encode(a.authority_head_digest, 'hex')
+FROM ONLY memory.codebase_memory_extension_identity AS e
+CROSS JOIN ONLY control.runtime_admission AS a
+WHERE e.singleton = true AND a.singleton = true;
+RESET ROLE;
+"@
+    $stopQuery = @"
+SET ROLE lattice_migrator;
+UPDATE ONLY control.runtime_admission
+SET admission_mode = 'STOPPED',
+    daemon_instance_id = NULL,
+    daemon_epoch = NULL,
+    authority_revision = 0,
+    observation_digest = NULL,
+    authority_head_digest = NULL,
+    updated_at = pg_catalog.clock_timestamp()
+WHERE singleton = true;
+RESET ROLE;
+"@
+    $identityRows = Invoke-HarnessPsqlRows -Psql $Psql -DatabaseName $databaseName `
+        -Port $Port -Password $Password -Query $activateQuery `
+        -FailureCode 'TASK019_WRITER_LEASE_OWNER_ACTIVATION_REJECTED'
+    if ($identityRows.Count -ne 1) {
+        throw 'TASK019_WRITER_LEASE_OWNER_IDENTITY_SHAPE_REJECTED'
+    }
+    $identity = @(([string]$identityRows[0]) -split '\|', -1)
+    if (
+        $identity.Count -ne 8 -or
+        $identity[0] -notmatch '^[0-9a-f]{64}$' -or
+        $identity[1] -notmatch '^[0-9a-f]{64}$' -or
+        $identity[2] -notmatch '^[0-9a-f]{64}$' -or
+        $identity[3] -ne $daemonInstanceId -or
+        $identity[4] -ne '1' -or
+        $identity[5] -ne '1' -or
+        $identity[6] -notmatch '^[0-9a-f]{64}$' -or
+        $identity[7] -notmatch '^[0-9a-f]{64}$'
+    ) {
+        throw 'TASK019_WRITER_LEASE_OWNER_IDENTITY_REJECTED'
+    }
+
+    $encodedPassword = [Uri]::EscapeDataString($Password)
+    $values = [ordered]@{
+        LATTICE_WRITER_LEASE_MIGRATOR_URL = ('postgresql://lattice_migrator_login:{0}@127.0.0.1:{1}/{2}' -f $encodedPassword, $Port, $databaseName)
+        LATTICE_WRITER_LEASE_RUNTIME_URL = ('postgresql://lattice_runtime_login:{0}@127.0.0.1:{1}/{2}' -f $encodedPassword, $Port, $databaseName)
+        LATTICE_WRITER_LEASE_ADMIN_URL = ('postgresql://task019_harness:{0}@127.0.0.1:{1}/postgres' -f $encodedPassword, $Port)
+        LATTICE_WRITER_LEASE_DATABASE_NAME = $databaseName
+        LATTICE_WRITER_LEASE_DATABASE_IDENTITY_SHA256 = $identity[0]
+        LATTICE_WRITER_LEASE_GLOBAL_MANIFEST_SHA256 = $identity[1]
+        LATTICE_WRITER_LEASE_MEMORY_MANIFEST_SHA256 = $identity[2]
+        LATTICE_WRITER_LEASE_DAEMON_INSTANCE_ID = $identity[3]
+        LATTICE_WRITER_LEASE_DAEMON_EPOCH = $identity[4]
+        LATTICE_WRITER_LEASE_AUTHORITY_REVISION = $identity[5]
+        LATTICE_WRITER_LEASE_ADMISSION_OBSERVATION_SHA256 = $identity[6]
+        LATTICE_WRITER_LEASE_AUTHORITY_HEAD_SHA256 = $identity[7]
+    }
+    $original = @{}
+    $stdoutPath = Join-Path $clusterRoot '.cargo-writer-lease-owner-stdout.log'
+    $stderrPath = Join-Path $clusterRoot '.cargo-writer-lease-owner-stderr.log'
+    $process = $null
+    $exitCode = $null
+    $testOutput = @()
+    try {
+        foreach ($entry in $values.GetEnumerator()) {
+            $original[[string]$entry.Key] = [Environment]::GetEnvironmentVariable([string]$entry.Key, 'Process')
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+        }
+        $process = Start-Process -FilePath $Cargo -ArgumentList @(
+            'test', '-p', 'lattice-postgres-writer-lease', '--test', 'postgres_live',
+            '--locked', '--', '--nocapture', '--test-threads=1'
+        ) -WorkingDirectory $RepositoryRoot -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru
+        $null = $process.Handle
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                $testOutput += @(Get-Content -LiteralPath $path -Encoding utf8)
+            }
+        }
+    }
+    finally {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+        foreach ($entry in $original.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, 'Process')
+        }
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+        $null = Invoke-HarnessPsqlRows -Psql $Psql -DatabaseName $databaseName `
+            -Port $Port -Password $Password -Query $stopQuery `
+            -FailureCode 'TASK019_WRITER_LEASE_OWNER_STOP_REJECTED'
+    }
+    $text = @($testOutput | ForEach-Object { [string]$_ }) -join "`n"
+    if (
+        $exitCode -ne 0 -or
+        $text -match '(?m)(?:^|[^\S\r\n])SKIP:' -or
+        $text -notmatch '(?m)^test live_postgres_acquire_restarts_and_replays_authority_when_provisioned \.\.\. ok\s*$'
+    ) {
+        throw 'TASK019_WRITER_LEASE_OWNER_LIVE_GATE_REJECTED'
+    }
+    $script:writerLeaseOwnerProfileProved = $true
 }
 
 function Get-PgIsReadyExitCode {
@@ -397,7 +626,7 @@ function Invoke-StoreProfileLiveGate {
         [Parameter(Mandatory = $true)][string]$RunId
     )
 
-    if ($ExpectedProfile -notin @('V3', 'V3_MEMORY_V2', 'V3_MEMORY_V2_WRITER_LEASE_V1')) {
+    if ($ExpectedProfile -notin @('V4', 'V3_MEMORY_V2', 'V3_MEMORY_V2_WRITER_LEASE_V1')) {
         throw 'TASK019_STORE_PROFILE_EXPECTATION_REJECTED'
     }
     if ($RunId -notmatch '^[0-9a-f]{32}$') {
@@ -477,7 +706,10 @@ function Invoke-LiveTest {
     )
 
     $testOutput = @()
-    $liveSuites = if ($MemoryOnly -and $Phase -eq 'restart') {
+    $liveSuites = if ($StoreOnly) {
+        @([pscustomobject]@{ Name = 'store'; Package = 'lattice-postgres-store' })
+    }
+    elseif ($MemoryOnly -and $Phase -eq 'restart') {
         @([pscustomobject]@{ Name = 'memory'; Package = 'lattice-postgres-codebase-memory' })
     }
     else {
@@ -538,7 +770,7 @@ function Invoke-LiveTest {
                 $suiteOutput | ForEach-Object {
                     foreach ($match in [regex]::Matches(
                         [string]$_,
-                        '(?<![A-Z0-9_])(?:TASK019|STORE|POSTGRES_TASK_LEDGER|MEMORY|OPENCLAW)_[A-Z0-9_]{1,63}(?![A-Z0-9_])'
+                        '(?<![A-Z0-9_])(?:TASK019|STORE|POSTGRES_TASK_LEDGER|POSTGRES_PROJECT_REGISTRY|MEMORY|OPENCLAW)_[A-Z0-9_]{1,63}(?![A-Z0-9_])'
                     )) {
                         $match.Value
                     }
@@ -554,7 +786,7 @@ function Invoke-LiveTest {
             throw "$($suite.Name) postgres_live $Phase phase failed with exit code $testExitCode. Allowlisted diagnostics: $safeSummary"
         }
         $testOutput += $suiteOutput
-        $storeProfile = Get-StoreProfileForLiveSuitePhase -Phase $Phase -SuiteName $suite.Name
+        $storeProfile = Get-StoreProfileForLiveSuitePhase -Phase $suitePhase -SuiteName $suite.Name
         if ($null -ne $storeProfile) {
             Invoke-StoreProfileLiveGate `
                 -Cargo $Cargo `
@@ -563,6 +795,24 @@ function Invoke-LiveTest {
                 -Port $port `
                 -Password $oneTimePassword `
                 -RunId $runId
+            if ($MemoryOnly -and $suitePhase -eq 'initial' -and $suite.Name -eq 'memory') {
+                $testOutput += @(
+                    Invoke-WriterLeaseOwnerLiveGate `
+                        -Cargo $Cargo `
+                        -Psql (Join-Path $postgresBin 'psql.exe') `
+                        -RepositoryRoot $RepositoryRoot `
+                        -Port $port `
+                        -Password $oneTimePassword `
+                        -RunId $runId
+                )
+                Invoke-StoreProfileLiveGate `
+                    -Cargo $Cargo `
+                    -RepositoryRoot $RepositoryRoot `
+                    -ExpectedProfile 'V3_MEMORY_V2_WRITER_LEASE_V1' `
+                    -Port $port `
+                    -Password $oneTimePassword `
+                    -RunId $runId
+            }
         }
     }
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_PHASE', $Phase, 'Process')
@@ -792,6 +1042,7 @@ $port = Get-UnreservedLoopbackPort
 $oneTimePassword = $null
 $clusterStarted = $false
 $harnessCompleted = $false
+$writerLeaseOwnerProfileProved = $false
 $installedBefore = $null
 $installedAfter = $null
 $originalEnvironment = @{}
@@ -1087,6 +1338,9 @@ finally {
 
 if (-not $harnessCompleted) {
     throw 'TASK-019 live phases did not complete.'
+}
+if ($writerLeaseOwnerProfileProved) {
+    Write-Output 'TASK019_WRITER_LEASE_OWNER_PROFILE=PASS'
 }
 Write-Output 'TASK019_POSTGRES_HARNESS=PASS'
 Write-Output "POSTGRES_VERSION=$expectedPostgresVersion"

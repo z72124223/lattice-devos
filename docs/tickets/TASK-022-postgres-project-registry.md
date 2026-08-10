@@ -4,7 +4,7 @@ spec_id: SPEC-002
 spec_version: 24
 module_id: postgres-store
 constitution_version: 1.4
-status: paused
+status: in-progress
 parallel_safe: false
 depends_on:
   - TASK-021
@@ -58,7 +58,7 @@ likely_files:
   - crates/lattice-postgres-store/tests/postgres_project_registry.rs
   - crates/lattice-postgres-store/tests/postgres_live.rs
   - db/migrations/0005_project_registry_repository.sql
-branch: feature/v2-rust-postgres-bootstrap
+branch: feature/task-022-postgres-project-registry
 ---
 
 ## Objective
@@ -72,38 +72,38 @@ pretending the global aggregate is a project-scoped `StoreScope`.
 
 ## Acceptance Criteria
 
-- [ ] Project Registry 1.2 exposes one runtime-aware verified global state,
+- [x] Project Registry 1.2 exposes one runtime-aware verified global state,
   `plan -> apply` boundary, and Fake wrapper while preserving every existing
   Fake authority/command receipt digest and TASK-012 behavior.
-- [ ] Before planner extraction, literal golden vectors freeze representative
+- [x] Before planner extraction, literal golden vectors freeze representative
   Registry 1.1 observation, request, authority-receipt, and command-result
   digests. The existing `result_digest` is the terminal semantic commitment;
   checkpoint and record-set vectors are new Registry 1.2 subjects.
-- [ ] One immutable Registry checkpoint binds runtime, non-wrapping global
+- [x] One immutable Registry checkpoint binds runtime, non-wrapping global
   command ordinal, every complete command request/terminal receipt, all current
   project projections, accepted/pending reservations, and deterministic counts.
-- [ ] Vacant high-water is zero, first-seen records are exactly `1..N`, and the
+- [x] Vacant high-water is zero, first-seen records are exactly `1..N`, and the
   103-byte vacant logical-state plus Fake/Live checkpoint digests match the
   literals frozen in ADR-020.
-- [ ] Every first-seen terminal command, including `Denied`, `Blocked`, and an
+- [x] Every first-seen terminal command, including `Denied`, `Blocked`, and an
   exact no-project-change observation, advances the global ordinal/checkpoint
   exactly once. Exact command/request replay changes neither; changed command
   reuse returns no retained receipt.
-- [ ] Exported untrusted snapshots are verified by ordered replay from a vacant
+- [x] Exported untrusted snapshots are verified by ordered replay from a vacant
   state. Plain verification proves self-consistency only; durable currentness
   uses `RegistryCheckpoint::from_retained` and
   `verify_untrusted_registry_snapshot_against_checkpoint`. Missing/reordered/
   duplicated/injected commands, denial-tail rollback, project/authority/
   pending/drift disagreement, reservation collision, count, checkpoint, or
   runtime substitution fails closed.
-- [ ] The pure planner remains the only constructor of registration,
+- [x] The pure planner remains the only constructor of registration,
   observation, suspension, collision blocking, reconciliation, snapshot,
   reservation, receipt, record-set, and checkpoint meaning. It performs no I/O.
-- [ ] Checkpoint command core, logical retained state, record-set persistence
+- [x] Checkpoint command core, logical retained state, record-set persistence
   core, transaction digest, and persistence receipt follow ADR-020's acyclic
   construction order. Checkpoints/record sets exclude all adapter evidence and
   no digest is an input to itself.
-- [ ] The Registry-owned limits are versioned and fail closed: at most 4,096
+- [x] The Registry-owned limits are versioned and fail closed: at most 4,096
   current projects, 65,536 first-seen terminal commands, 67,108,864 retained
   snapshot bytes, and 131,072 UTF-8 bytes in one already-NFC canonical root.
   Retained bytes are the exact canonical logical-state algorithm from ADR-020:
@@ -111,75 +111,117 @@ pretending the global aggregate is a project-scoped `StoreScope`.
   checkpoint/record-set/adapter fields. Exact replay/changed-ID classification
   precedes capacity checks; TASK-022 adds no deletion, compaction, or silent
   truncation policy.
-- [ ] `0001` through `0004` remain byte-identical. Exact transaction-control-
+- [x] `0001` through `0004` remain byte-identical. Exact transaction-control-
   free `0005_project_registry_repository.sql` advances only an exact accepted
   source to global schema v4 and adds the five approved Registry tables.
-- [ ] Schema v4 preserves Store-v2 receipt profile 2 and its first-three-entry
+- [x] Schema v4 preserves Store-v2 receipt profile 2 and its first-three-entry
   manifest commitment. Historical physical Store and Task Ledger domain
   receipts replay byte-identically after v3-to-v4 upgrade.
-- [ ] Schema v4 replaces the runtime write surface with forward-profile-bound
+- [x] Schema v4 replaces the runtime write surface with forward-profile-bound
   Store-v4 and Task-Ledger-v2 fixed functions, retains older functions as
   ungranted catalog history, and adds only the fixed Registry-v1 functions
   frozen by ADR-020.
-- [ ] Exact catalog totals are 15 `control` tables, 28 retained functions, 17
+- [x] Exact catalog totals are 15 `control` tables, 28 retained functions, 17
   runtime-executable successor functions, and all 11 historical functions
   retained without runtime EXECUTE. Registry's nine scalar signatures are
   exactly the ADR-020 manifest and have a maximum of 73 inputs.
-- [ ] Runtime has zero direct SELECT/DML on every protected table. Every
+- [x] Runtime has zero direct SELECT/DML on every protected table. Every
   executable function is exact-signature, migrator-owned, `SECURITY DEFINER`,
   schema-qualified, dynamic-SQL-free, non-leakproof, parallel-unsafe,
   row-security-on, timeout-bounded, and non-grantable only to runtime.
-- [ ] The Registry schema uses fixed authoritative columns. No authoritative
+- [x] The Registry schema uses fixed authoritative columns. No authoritative
   Registry state, command, observation, authority, denial, drift, checkpoint,
   or reservation is stored as `jsonb`, arbitrary maps, opaque canonical blobs,
   or caller-defined SQL.
-- [ ] `0005` seeds one exact Live vacant singleton with high-water/counts zero,
+- [x] `0005` seeds one exact Live vacant singleton with high-water/counts zero,
   retained bytes 103, and the frozen checkpoint digest; the other four tables
   start empty. That singleton is the first-command serialization/checkpoint
   point. Immutable complete observation, project, command, and normalized
   accepted/pending identity-reservation rows are cross-checked against pure
   replay before any authority is returned; missing, extra, or orphaned
   observations fail closed.
-- [ ] A new command runs in one bounded `SERIALIZABLE` transaction with
+- [x] A new command runs in one bounded `SERIALIZABLE` transaction with
   5-second lock, 30-second statement, 30-second idle-in-transaction, and
   45-second monotonic pre-commit limits. Exact
   replay/changed-ID classification precedes mutable admission; new work checks
   the exact ACTIVE daemon authority, admission, global profile, and locked base
   checkpoint in the same transaction.
-- [ ] Fixed command/project staging plus finalization occurs only inside that
+- [x] Fixed command/project staging plus finalization occurs only inside that
   Rust transaction. Finalization accepts only rows written by the current
   transaction, checks the exact plan/base/result/record-set shape, and commits
   command, optional project/reservations, state checkpoint, and persistence
   evidence together or not at all.
-- [ ] A directly committed partial/staged row can never become Registry
+- [x] A directly committed partial/staged row can never become Registry
   authority. It makes the retained state corrupt and fail closed; the adapter
   never silently repairs, completes, or deletes it.
-- [ ] `PostgresProjectRegistry` consumes only a caller-supplied authenticated
+- [x] `PostgresProjectRegistry` consumes only a caller-supplied authenticated
   runtime client and exact verified target. It exposes no SQL, table, raw
   client, DSN, password, environment discovery, generic row, or migration API.
-- [ ] Durable execution returns a semantic Registry receipt only after commit
+- [x] Durable execution returns a semantic Registry receipt only after commit
   plus distinct database identity/global schema/checkpoint evidence. It does
   not fabricate a Store receipt or a project authority snapshot for a global
   registration denial.
-- [ ] Commit failure with no database response returns no receipt, poisons the
+- [x] Commit failure with no database response returns no receipt, poisons the
   adapter, and converges only through a new client plus exact request. Explicit
   database responses remain known retryable or terminal outcomes; bounded
   serialization/deadlock retries occur only before outcome uncertainty.
-- [ ] Concurrent same-command, same-project, cross-project duplicate identity,
+- [x] Concurrent same-command, same-project, cross-project duplicate identity,
   pending-reservation front-run, collision-blocking, and unrelated registration
   matrices serialize to one legal pure-domain history with byte-identical
   replay and no second reservation.
-- [ ] Fresh and exact v1/v2/v3/v4 migration/no-op, non-empty stopped-v3 upgrade,
+- [x] Fresh and exact v1/v2/v3/v4 migration/no-op, non-empty stopped-v3 upgrade,
   ACTIVE denial, rollback, concurrent runner, restart, commit-ack loss,
   timeout, ACL, manifest drift, corruption, partial-stage, and service-safe
   cleanup pass in the marker-owned PostgreSQL 17.10 harness.
-- [ ] Full Rust/Node verification, format, strict Clippy, dependency tree,
+- [x] Full Rust/Node verification, format, strict Clippy, dependency tree,
   `cargo audit`, scope/secret/dynamic-SQL scans, independent code/security and
   architecture reviews, local integration, ledger, and handoff pass before
   completion.
-- [ ] SPEC-002 AC-36 closes only after the direct durable evidence above.
+- [x] SPEC-002 AC-36 closes only after the direct durable evidence above.
   AC-06 remains open for real Windows/Git inspection, Workspace Git, changed-
   path evidence, and Scope Check. MVP-1, MVP-2, and MVP-3 remain open.
+
+### Current closeout evidence - 2026-08-10
+
+- Reviewer P1-1 is `REJECTED_WITH_EXACT_EVIDENCE` by authority arbitration.
+  TASK-038 is frozen at global V3 + Memory v2 + Writer Lease v1. TASK-022
+  accepts only bare V4, preserves exact V3 combined verification separately,
+  rejects V3 extensions as migration sources, and neither advertises nor
+  implements `V4_MEMORY_V2` or `V4_MEMORY_V2_WRITER_LEASE_V1`.
+- Reviewer P1-2 is `ACCEPTED`: current executable evidence now includes Pure
+  Registry 37 tests, Registry adapter 1, migration contract 17, Store package
+  65, full Rust workspace tests, Node 44/44, and the exact no-flag composite
+  marker-owned PostgreSQL 17.10 initial/restart harness. Independent final
+  verdict, clean commit, and remote publication evidence remain closeout gates.
+- Reviewer P2-1 is `ACCEPTED`: this ticket and `PLANS.md` now distinguish the
+  implemented candidate from verified results and no longer claim that the
+  worktree is clean or that migration/adapter artifacts are absent.
+- StoreOnly proves fresh/bare V1/V2/V3 to bare V4, non-empty Store and Ledger
+  replay, catalog/ACL/drift/partial/fault/concurrency, Registry parity, and
+  restart. MemoryOnly separately proves exact V3+Memory v2 and
+  V3+Memory v2+Writer Lease v1 profiles and rejects their V4 migration. The
+  harness invokes the Writer Lease owner's own live suite before Store performs
+  its read-only combined-profile assertion; Store has no normal or dev
+  dependency on the Writer Lease adapter.
+- Independent review's replay-order P1 is `ACCEPTED_AND_FIXED`: caller-supplied
+  STOPPED exact replay remains byte-identical, changed-ID reuse remains a
+  substitution, and only first-seen work is admission-denied. The forbidden
+  Store-to-Writer-Lease dev edge P1 is also `ACCEPTED_AND_FIXED`, with a static
+  regression and `normal,dev` dependency-tree proof.
+- Independent review's hook/composite findings are `ACCEPTED_AND_FIXED`:
+  existing hook-only callers select the frozen V3 Memory profile, StoreOnly
+  plus a hook is rejected, composite execution returns to its caller, and
+  `psql.exe` is preflighted before a cluster is created.
+- `cargo audit`, dependency inspection, format, diff check, and strict Clippy
+  on both changed crates pass. Proportional workspace strict Clippy excluding
+  the unchanged Hermes package passes. Full unexcluded workspace strict Clippy
+  has 11 findings only in the unchanged, out-of-scope
+  `lattice-hermes-adapter`; this baseline failure is not promoted to a
+  TASK-022 pass and remains recorded for final review.
+- The optional official TASK-038 Codex hook remains independently unverified:
+  the attempted hook stopped at `TASK038_OFFICIAL_CODEX_VERSION_REJECTED` before
+  its operational Writer Lease suite. TASK-022's bounded frozen-profile gate is
+  the evidence claimed here; no official Codex acceptance is inferred.
 
 ## Non-Goals
 

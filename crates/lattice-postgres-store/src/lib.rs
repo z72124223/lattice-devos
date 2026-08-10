@@ -3,6 +3,7 @@
 mod live;
 mod migrations;
 mod postgres_setup;
+mod project_registry;
 mod task_ledger;
 
 pub use live::PostgresControlStore;
@@ -15,6 +16,12 @@ pub use migrations::{
 pub use postgres_setup::{
     BootstrapAdmission, MigrationApplyOutcome, PostgresSchemaEvidence, apply_migrations,
     verify_postgres_schema,
+};
+pub use project_registry::{
+    PostgresProjectRegistry, PostgresProjectRegistryError, PostgresProjectRegistryErrorKind,
+    PostgresProjectRegistryExecution, PostgresProjectRegistryLoad,
+    PostgresProjectRegistryPersistenceEvidence, PostgresProjectRegistryPersistenceReceipt,
+    PostgresProjectRegistryResult,
 };
 pub use task_ledger::{
     PostgresTaskLedger, PostgresTaskLedgerError, PostgresTaskLedgerErrorKind,

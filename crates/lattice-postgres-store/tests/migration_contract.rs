@@ -13,7 +13,7 @@ const LIVE_CONTROL_STORE_SHA256: &str =
 #[test]
 fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     let manifest = migration_manifest();
-    assert_eq!(manifest.len(), 4);
+    assert_eq!(manifest.len(), 5);
 
     let draft = &manifest[0];
     assert_eq!(draft.ordinal(), 1);
@@ -81,13 +81,31 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
         task_ledger.transaction_mode(),
         MigrationTransactionMode::RunnerOwned
     );
-    assert_eq!(task_ledger.schema_version(), POSTGRES_SCHEMA_VERSION);
+    assert_eq!(task_ledger.schema_version(), 3);
     assert_eq!(task_ledger.reader_compatibility(), 3..=3);
     assert_eq!(task_ledger.writer_compatibility(), 3..=3);
 
+    let project_registry = &manifest[4];
+    assert_eq!(project_registry.ordinal(), 5);
+    assert_eq!(project_registry.id(), "0005_project_registry_repository");
+    assert_eq!(
+        project_registry.path(),
+        "db/migrations/0005_project_registry_repository.sql"
+    );
+    assert!(project_registry.byte_length() > 0);
+    assert_eq!(project_registry.sha256().len(), 64);
+    assert_eq!(project_registry.status(), MigrationStatus::Executable);
+    assert_eq!(
+        project_registry.transaction_mode(),
+        MigrationTransactionMode::RunnerOwned
+    );
+    assert_eq!(project_registry.schema_version(), POSTGRES_SCHEMA_VERSION);
+    assert_eq!(project_registry.reader_compatibility(), 4..=4);
+    assert_eq!(project_registry.writer_compatibility(), 4..=4);
+
     let evidence = verify_embedded_manifest().expect("embedded manifest");
-    assert_eq!(evidence.entry_count(), 4);
-    assert_eq!(evidence.executable_count(), 3);
+    assert_eq!(evidence.entry_count(), 5);
+    assert_eq!(evidence.executable_count(), 4);
     assert_eq!(evidence.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(evidence.manifest_sha256().as_str().len(), 64);
 }
@@ -300,6 +318,196 @@ fn task_ledger_repository_migration_is_fixed_bounded_and_function_gated() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn project_registry_repository_migration_is_fixed_profile_bound_and_scalar() {
+    let repository = migration_manifest()
+        .iter()
+        .find(|entry| entry.id() == "0005_project_registry_repository")
+        .expect("Project Registry repository migration");
+    let sql = std::str::from_utf8(repository.bytes()).expect("UTF-8 SQL");
+    let uppercase = sql.to_ascii_uppercase();
+    let normalized = sql
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
+
+    for forbidden in [
+        "BEGIN;",
+        "COMMIT;",
+        "ROLLBACK;",
+        "IF NOT EXISTS",
+        "DO $$",
+        "EXECUTE FORMAT",
+        "EXECUTE IMMEDIATE",
+        "CREATE EXTENSION",
+        "CREATE ROLE",
+        "ALTER ROLE",
+        "PASSWORD",
+        "CREATE DATABASE",
+        "DROP TABLE",
+        "DROP SCHEMA",
+        "DROP FUNCTION",
+    ] {
+        assert!(
+            !uppercase.contains(forbidden),
+            "forbidden Project Registry migration surface: {forbidden}"
+        );
+    }
+
+    for table in [
+        "PROJECT_REGISTRY_STATE",
+        "PROJECT_REGISTRY_OBSERVATIONS",
+        "PROJECT_REGISTRY_PROJECTS",
+        "PROJECT_REGISTRY_COMMANDS",
+        "PROJECT_REGISTRY_IDENTITY_RESERVATIONS",
+    ] {
+        assert!(normalized.contains(&format!("CREATE TABLE CONTROL.{table} (")));
+        for operation in ["SELECT", "INSERT", "UPDATE", "DELETE"] {
+            assert!(!normalized.contains(&format!("GRANT {operation} ON CONTROL.{table}")));
+        }
+    }
+    for semantic_value in [
+        "'USER_PROJECT'",
+        "'LATTICE_SYSTEM'",
+        "'RECONCILIATION_REQUIRED'",
+    ] {
+        assert!(
+            normalized.contains(semantic_value),
+            "missing Project Registry semantic value: {semantic_value}"
+        );
+    }
+    for obsolete_value in [
+        "'PRODUCT'",
+        "'PLATFORM'",
+        "'TOOLING'",
+        "'EXPERIMENTAL'",
+        "'IDENTITY_DRIFTED'",
+    ] {
+        assert!(
+            !normalized.contains(obsolete_value),
+            "obsolete Project Registry semantic value: {obsolete_value}"
+        );
+    }
+    assert!(normalized.contains("PRIMARY_REF ~ '^REFS/(HEADS|TAGS)/[A-ZA-Z0-9][A-ZA-Z0-9._/-]*$'"));
+    assert!(
+        !sql.contains("{0,500}"),
+        "PostgreSQL rejects regular-expression repetition bounds above 255"
+    );
+    assert_eq!(uppercase.matches("CREATE TABLE CONTROL.").count(), 5);
+    assert_eq!(uppercase.matches("CREATE FUNCTION CONTROL.").count(), 17);
+    assert_eq!(uppercase.matches("SECURITY DEFINER").count(), 17);
+    assert_eq!(
+        uppercase.matches("SET SEARCH_PATH = PG_CATALOG").count(),
+        17
+    );
+    assert_eq!(uppercase.matches("SET ROW_SECURITY = ON").count(), 17);
+    assert_eq!(uppercase.matches("SET LOCK_TIMEOUT = '5S'").count(), 17);
+    assert_eq!(
+        uppercase.matches("SET STATEMENT_TIMEOUT = '30S'").count(),
+        17
+    );
+
+    let signatures = [
+        ("PROJECT_REGISTRY_PREPARE_V1", 12usize),
+        ("PROJECT_REGISTRY_READ_STATE_V1", 2),
+        ("PROJECT_REGISTRY_READ_OBSERVATIONS_V1", 2),
+        ("PROJECT_REGISTRY_READ_PROJECTS_V1", 2),
+        ("PROJECT_REGISTRY_READ_COMMANDS_V1", 2),
+        ("PROJECT_REGISTRY_READ_RESERVATIONS_V1", 2),
+        ("PROJECT_REGISTRY_STAGE_COMMAND_V1", 73),
+        ("PROJECT_REGISTRY_STAGE_PROJECT_V1", 22),
+        ("PROJECT_REGISTRY_FINALIZE_V1", 27),
+    ];
+    let mut maximum = 0usize;
+    for (function, expected) in signatures {
+        let marker = format!("CREATE FUNCTION CONTROL.{function}(");
+        let arguments = normalized
+            .split_once(&marker)
+            .unwrap_or_else(|| panic!("missing {function}"))
+            .1
+            .split_once(") RETURNS")
+            .unwrap_or_else(|| panic!("unterminated {function}"))
+            .0;
+        let count = arguments.split(',').count();
+        assert_eq!(count, expected, "wrong scalar input count for {function}");
+        maximum = maximum.max(count);
+        assert!(
+            arguments
+                .starts_with(" P_GLOBAL_SCHEMA_VERSION SMALLINT, P_GLOBAL_MANIFEST_SHA256 TEXT")
+        );
+    }
+    assert_eq!(maximum, 73);
+
+    for function in [
+        "STORE_PREPARE_V4",
+        "STORE_FINALIZE_V4",
+        "STORE_CURRENT_HEAD_V4",
+        "TASK_LEDGER_PREPARE_V2",
+        "TASK_LEDGER_READ_HEAD_V2",
+        "TASK_LEDGER_READ_EVENTS_V2",
+        "TASK_LEDGER_READ_COMMANDS_V2",
+        "TASK_LEDGER_FINALIZE_V2",
+    ] {
+        let marker = format!("CREATE FUNCTION CONTROL.{function}(");
+        let arguments = normalized
+            .split_once(&marker)
+            .unwrap_or_else(|| panic!("missing {function}"))
+            .1
+            .split_once(") RETURNS")
+            .unwrap_or_else(|| panic!("unterminated {function}"))
+            .0;
+        assert!(
+            arguments
+                .starts_with(" P_GLOBAL_SCHEMA_VERSION SMALLINT, P_GLOBAL_MANIFEST_SHA256 TEXT")
+        );
+    }
+
+    for historical in [
+        "STORE_PREPARE_V3",
+        "STORE_FINALIZE_V3",
+        "STORE_CURRENT_HEAD_V3",
+        "TASK_LEDGER_PREPARE_V1",
+        "TASK_LEDGER_READ_HEAD_V1",
+        "TASK_LEDGER_READ_EVENTS_V1",
+        "TASK_LEDGER_READ_COMMANDS_V1",
+        "TASK_LEDGER_FINALIZE_V1",
+    ] {
+        assert!(normalized.contains(&format!("REVOKE EXECUTE ON FUNCTION CONTROL.{historical}(")));
+    }
+
+    for required in [
+        "TRUE, 'LIVE', 0, 0, 0, 0, 0, 103",
+        "5BB1F9D9ADF7228BEF7EA45CC029E79D71761C4DFED3ABE086634917DB38C173",
+        "PROJECT_COUNT <= 4096",
+        "COMMAND_COUNT <= 65536",
+        "RETAINED_BYTES <= 67108864",
+        "BETWEEN 1 AND 18446744073709551615",
+        "PG_CATALOG.PG_CURRENT_XACT_ID()::XID",
+        "LATTICE_POSTGRES_MIGRATION_MANIFEST_V1",
+        "V_MANIFEST_ENTRY_COUNT IS DISTINCT FROM 5",
+        "CURRENT_SCHEMA_VERSION = P_GLOBAL_SCHEMA_VERSION",
+        "LATTICE_DEVOS_CONTROL_SCHEMA_V4",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "missing v4 invariant: {required}"
+        );
+    }
+
+    let registry_tables = normalized
+        .split_once("CREATE TABLE CONTROL.PROJECT_REGISTRY_STATE (")
+        .expect("Registry tables")
+        .1
+        .split_once("CREATE FUNCTION CONTROL.STORE_PREPARE_V4(")
+        .expect("Registry tables terminator")
+        .0;
+    assert!(!registry_tables.contains("JSONB"));
+    assert!(!registry_tables.contains("CANONICAL_BLOB"));
+    assert!(!registry_tables.contains("OPAQUE"));
+}
+
+#[test]
 fn executable_migration_has_runner_owned_transaction_and_no_discovery_escape() {
     let executable = migration_manifest()
         .iter()
@@ -507,20 +715,23 @@ fn live_store_migration_is_fixed_function_gated_and_transaction_control_free() {
 }
 
 #[test]
-fn runner_has_closed_fresh_v1_v2_prefix_and_v3_states() {
+fn runner_has_closed_fresh_v1_v2_v3_prefix_and_v4_states() {
     let source = include_str!("../src/postgres_setup.rs");
     for required in [
         "enum InstalledManifestState",
         "Fresh",
         "ExactV1Prefix",
         "ExactV2Prefix",
-        "ExactV3Full",
+        "ExactV3Prefix",
+        "ExactV4Full",
         "classify_installed_manifest_state",
         "verify_v1_upgrade_source",
         "verify_v2_upgrade_source",
+        "verify_v3_upgrade_source",
         "apply_missing_entries",
         "advance_compatibility_from_v1",
         "advance_compatibility_from_v2",
+        "advance_compatibility_from_v3",
         "LOCK TABLE control.physical_heads IN ACCESS EXCLUSIVE MODE",
         "LOCK TABLE control.terminal_transactions IN ACCESS EXCLUSIVE MODE",
         "LOCK TABLE control.runtime_admission IN ACCESS EXCLUSIVE MODE",
@@ -690,7 +901,7 @@ fn setup_errors_are_closed_static_bounded_and_redacted() {
 fn driver_and_schema_support_are_exact_for_this_foundation() {
     assert_eq!(POSTGRES_DRIVER_VERSION, "0.19.14");
     assert_eq!(SUPPORTED_POSTGRES_MAJOR, 17);
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 3);
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 4);
 }
 
 #[test]
@@ -840,4 +1051,23 @@ fn review_regression_harness_cleanup_is_fail_closed_and_preflighted() {
         pass_position > finalizer_position,
         "PASS marker must follow cleanup and installed-service verification"
     );
+}
+
+#[test]
+fn review_regression_store_does_not_depend_on_or_install_writer_lease() {
+    let manifest = include_str!("../Cargo.toml");
+    let setup = include_str!("../src/postgres_setup.rs");
+
+    assert!(!manifest.contains("lattice-postgres-writer-lease"));
+    for forbidden in [
+        "lattice_postgres_writer_lease",
+        "apply_extension",
+        "verify_extension",
+        "install_frozen_writer_lease_profile",
+    ] {
+        assert!(
+            !setup.contains(forbidden),
+            "Store must not import or invoke Writer Lease owner surface: {forbidden}"
+        );
+    }
 }

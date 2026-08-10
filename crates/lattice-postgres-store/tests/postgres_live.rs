@@ -8,18 +8,24 @@ use std::time::Duration;
 
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
 use lattice_contracts::{
-    ContentDigest, DaemonEpoch, ProjectId, ProjectSnapshotId, RuntimeAdmissionMode, RuntimeKind,
-    STORE_CONTRACT_VERSION, StoreAuthorityHead, StoreAuthorityRevision, StoreDaemonInstanceId,
-    StoreDurability, StoreMutationCommitment, StorePhysicalHead, StoreReceiptDisposition,
-    StoreRepositoryOwner, StoreRevision, StoreScope, StoreTransactionId, StoreTransactionRequest,
-    TaskId, TaskLedgerStreamIdentity,
+    ContentDigest, DaemonEpoch, GitRefIdentity, ProjectClass, ProjectId, ProjectLifecycle,
+    ProjectSnapshotId, RuntimeAdmissionMode, RuntimeKind, STORE_CONTRACT_VERSION,
+    StoreAuthorityHead, StoreAuthorityRevision, StoreDaemonInstanceId, StoreDurability,
+    StoreMutationCommitment, StorePhysicalHead, StoreReceiptDisposition, StoreRepositoryOwner,
+    StoreRevision, StoreScope, StoreTransactionId, StoreTransactionRequest, TaskId,
+    TaskLedgerStreamIdentity,
 };
 use lattice_ports::{ControlStore, ControlStoreErrorKind};
 use lattice_postgres_store::{
     DatabaseRole, FakePostgresStore, MigrationApplyOutcome, MigrationStatus, MigrationTarget,
-    PostgresControlStore, PostgresSchemaEvidence, PostgresStoreSetupError,
+    PostgresControlStore, PostgresProjectRegistry, PostgresProjectRegistryErrorKind,
+    PostgresProjectRegistryExecution, PostgresSchemaEvidence, PostgresStoreSetupError,
     PostgresStoreSetupErrorKind, PostgresTaskLedger, PostgresTaskLedgerErrorKind, apply_migrations,
     migration_manifest, verify_embedded_manifest, verify_postgres_schema,
+};
+use lattice_project_registry::{
+    CommandId as RegistryCommandId, ReconciliationDecision,
+    RegistryCommand as ProjectRegistryCommand, RegistryCommandOutcome, RepositoryObservation,
 };
 use lattice_task_ledger::{
     ActionId, ActorId, AppendCommand, CommandId, CommandOutcome, CorrelationId, Diagnostic,
@@ -36,6 +42,8 @@ const LEGACY_V1_MANIFEST_SHA256: &str =
     "9b126a41e542b71d434b5786e35acb66575967d055a6733b9d6bf0b8c9f0eada";
 const STORE_V2_MANIFEST_SHA256: &str =
     "4582edce68a947998a8f4c6895bb37ceec9e842f516471f4d9e2617a6757f129";
+const TASK_LEDGER_V3_MANIFEST_SHA256: &str =
+    "09c431df18ad71a4f44239a5d2ddf6b1774b8ffec06c7f9223f0e41757f3d407";
 
 #[derive(Clone)]
 struct LiveConfig {
@@ -137,12 +145,13 @@ fn marker_owned_postgres_17_foundation() {
 fn run_memory_setup_phase(config: &LiveConfig) {
     let mut admin = config.connect("postgres", "lattice-devos-memory-setup");
     create_fixed_roles(&mut admin, &config.password);
-    let (base, evidence) = prove_first_apply_and_reconciliation(config, &mut admin);
+    let base = provision_database(config, &mut admin, "base", true);
+    install_exact_v3(config, &base);
     set_exact_database_access(&mut admin, base.database_name());
     println!(
         "TASK019_EVIDENCE database_uuid={} manifest_sha256={}",
-        evidence.database_uuid(),
-        evidence.manifest_sha256().as_str()
+        base.expected_database_uuid(),
+        TASK_LEDGER_V3_MANIFEST_SHA256
     );
     println!("TASK019_MEMORY_SETUP_OK");
 }
@@ -152,11 +161,15 @@ fn run_initial_phase(config: &LiveConfig) {
     create_fixed_roles(&mut admin, &config.password);
 
     let (base, evidence) = prove_first_apply_and_reconciliation(config, &mut admin);
+    println!("STORE_TASK022_STAGE_01_PROJECT_REGISTRY");
+    prove_live_project_registry(config, &base);
     prove_exact_v1_upgrade(config, &mut admin);
     prove_concurrent_v1_upgrade(config, &mut admin);
     prove_v1_upgrade_rejection_matrix(config, &mut admin);
     prove_v1_upgrade_transaction_rollback(config, &mut admin);
     prove_exact_nonempty_v2_upgrade_and_replay(config, &mut admin);
+    println!("STORE_TASK022_STAGE_06_V3_LEDGER_UPGRADE");
+    prove_exact_nonempty_v3_ledger_upgrade_and_replay(config, &mut admin);
     prove_commit_response_loss_reconciliation(config, &mut admin);
     prove_post_apply_verification_failure(config, &mut admin);
     prove_concurrent_runners(config, &mut admin);
@@ -183,6 +196,14 @@ fn run_initial_phase(config: &LiveConfig) {
     prove_live_task_ledger_lock_timeout(config, &mut admin);
     println!("STORE_TASK021_STAGE_07_RETAINED_CORRUPTION");
     prove_live_task_ledger_corruption(config, &mut admin);
+    println!("STORE_TASK022_STAGE_02_ATOMIC_ROLLBACK");
+    prove_live_project_registry_atomic_rollback(config, &mut admin);
+    println!("STORE_TASK022_STAGE_03_COMMIT_RESPONSE_LOSS");
+    prove_live_project_registry_commit_response_loss(config, &mut admin);
+    println!("STORE_TASK022_STAGE_04_LOCK_TIMEOUT");
+    prove_live_project_registry_lock_timeout(config, &mut admin);
+    println!("STORE_TASK022_STAGE_05_PARTIAL_AND_CORRUPTION");
+    prove_live_project_registry_corruption(config, &mut admin);
     set_exact_database_access(&mut admin, base.database_name());
     prove_live_control_store(config, &base);
     println!("STORE_TASK021_STAGE_08_BASE_LEDGER");
@@ -191,7 +212,6 @@ fn run_initial_phase(config: &LiveConfig) {
     prove_task038_task_created_jsonb_round_trip(config, &base);
     println!("STORE_TASK021_STAGE_09_XMIN_PROVENANCE");
     prove_task021_transaction_provenance_primitive(config, &base);
-
     println!(
         "TASK019_EVIDENCE database_uuid={} manifest_sha256={}",
         evidence.database_uuid(),
@@ -230,7 +250,668 @@ fn run_restart_phase(config: &LiveConfig) {
     prove_live_control_store_restart(config, &target);
     println!("STORE_TASK021_RESTART_STAGE_01_EXACT_REPLAY");
     prove_live_task_ledger_restart(config, &target);
+    println!("STORE_TASK022_RESTART_STAGE_01_PROJECT_REGISTRY");
+    prove_live_project_registry_restart(config, &target);
     println!("TASK019_RESTART_OK");
+}
+
+fn registry_observation() -> RepositoryObservation {
+    registry_observation_fixture("C:/lattice/registry-live", ['2', '3', '4', '5'])
+}
+
+fn registry_observation_fixture(root: &str, digests: [char; 4]) -> RepositoryObservation {
+    RepositoryObservation::new(
+        root,
+        live_digest(digests[0]),
+        live_digest(digests[1]),
+        live_digest(digests[2]),
+        GitRefIdentity::new("refs/heads/main", live_digest(digests[3])).expect("registry ref"),
+    )
+    .expect("registry observation")
+}
+
+fn registry_registration(command_id: &str, project_id: &str) -> ProjectRegistryCommand {
+    registry_registration_with(command_id, project_id, registry_observation())
+}
+
+fn registry_registration_with(
+    command_id: &str,
+    project_id: &str,
+    observation: RepositoryObservation,
+) -> ProjectRegistryCommand {
+    ProjectRegistryCommand::register(
+        RegistryCommandId::new(command_id).expect("registry command id"),
+        ProjectId::new(project_id).expect("registry project id"),
+        ProjectClass::UserProject,
+        observation,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn prove_live_project_registry(config: &LiveConfig, target: &MigrationTarget) {
+    set_live_admission(config, target, true);
+    let runtime = config.role_client(
+        target.database_name(),
+        DatabaseRole::Runtime,
+        REQUIRED_APPLICATION_NAME,
+    );
+    let mut registry = PostgresProjectRegistry::new(runtime, target)
+        .unwrap_or_else(|error| panic!("STORE_TASK022_CONSTRUCTOR_FAILED {}", error.code()));
+    let vacant = registry
+        .load()
+        .unwrap_or_else(|error| panic!("STORE_TASK022_VACANT_LOAD_FAILED {}", error.code()));
+    assert!(
+        vacant.state().is_vacant(),
+        "STORE_TASK022_VACANT_STATE_INVALID"
+    );
+    assert_eq!(vacant.persistence().schema_version(), 4);
+
+    let registration = registry_registration("registry-live-register", "registry-live");
+    let first = registry
+        .execute(registration.clone(), live_authority('a', 'b'))
+        .unwrap_or_else(|error| panic!("STORE_TASK022_REGISTER_FAILED {}", error.code()));
+    assert!(!first.is_exact_retry());
+    assert_eq!(first.result_checkpoint().command_ordinal(), 1);
+    assert!(matches!(
+        first.semantic_receipt().outcome(),
+        RegistryCommandOutcome::Applied
+    ));
+    assert!(first.semantic_receipt().authority().is_some());
+    assert_eq!(
+        first.persistence_receipt().persistence().schema_version(),
+        4
+    );
+
+    let replay = registry
+        .execute(registration.clone(), live_authority('a', 'b'))
+        .unwrap_or_else(|error| panic!("STORE_TASK022_REPLAY_FAILED {}", error.code()));
+    assert!(replay.is_exact_retry());
+    assert_eq!(replay.persistence_receipt(), first.persistence_receipt());
+
+    let stopped_authority = live_authority_with_admission(RuntimeAdmissionMode::Stopped, 'a', 'b');
+    let stopped_replay = registry
+        .execute(registration, stopped_authority.clone())
+        .unwrap_or_else(|error| panic!("STORE_TASK022_STOPPED_REPLAY_FAILED {}", error.code()));
+    assert!(stopped_replay.is_exact_retry());
+    assert_eq!(stopped_replay.semantic_receipt(), first.semantic_receipt());
+    assert_eq!(
+        stopped_replay.persistence_receipt(),
+        first.persistence_receipt()
+    );
+    let stopped_changed = registry
+        .execute(
+            registry_registration("registry-live-register", "registry-conflict-stopped"),
+            stopped_authority.clone(),
+        )
+        .expect_err("changed command reuse must precede stopped admission");
+    assert_eq!(
+        stopped_changed.kind(),
+        PostgresProjectRegistryErrorKind::CommandSubstitution
+    );
+    let stopped_new = registry
+        .execute(
+            registry_registration("registry-live-stopped-new", "registry-stopped-new"),
+            stopped_authority,
+        )
+        .expect_err("first-seen command must require active admission");
+    assert_eq!(
+        stopped_new.kind(),
+        PostgresProjectRegistryErrorKind::AdmissionDenied
+    );
+
+    let exact_observation = registry
+        .execute(
+            ProjectRegistryCommand::observe(
+                RegistryCommandId::new("registry-live-observe-exact").expect("registry command id"),
+                ProjectId::new("registry-live").expect("registry project id"),
+                first
+                    .semantic_receipt()
+                    .authority()
+                    .expect("registered authority")
+                    .head(),
+                registry_observation(),
+            ),
+            live_authority('a', 'b'),
+        )
+        .unwrap_or_else(|error| panic!("STORE_TASK022_OBSERVE_EXACT_FAILED {}", error.code()));
+    assert!(matches!(
+        exact_observation.semantic_receipt().outcome(),
+        RegistryCommandOutcome::Applied
+    ));
+    assert_eq!(exact_observation.result_checkpoint().command_ordinal(), 2);
+    let moved = registry_observation_fixture("D:/lattice/registry-live", ['b', '3', '4', '5']);
+    let drifted = registry
+        .execute(
+            ProjectRegistryCommand::observe(
+                RegistryCommandId::new("registry-live-observe-move").expect("registry command id"),
+                ProjectId::new("registry-live").expect("registry project id"),
+                first
+                    .semantic_receipt()
+                    .authority()
+                    .expect("registered authority")
+                    .head(),
+                moved.clone(),
+            ),
+            live_authority('a', 'b'),
+        )
+        .unwrap_or_else(|error| panic!("STORE_TASK022_OBSERVE_MOVE_FAILED {}", error.code()));
+    let drifted_authority = drifted
+        .semantic_receipt()
+        .authority()
+        .expect("drifted authority")
+        .clone();
+    assert_eq!(
+        drifted_authority.lifecycle(),
+        ProjectLifecycle::ReconciliationRequired
+    );
+    let pending_front_run = registry
+        .execute(
+            registry_registration_with(
+                "registry-live-pending-front-run",
+                "registry-pending-front-run",
+                moved.clone(),
+            ),
+            live_authority('a', 'b'),
+        )
+        .unwrap_or_else(|error| panic!("STORE_TASK022_PENDING_FRONT_RUN_FAILED {}", error.code()));
+    assert!(matches!(
+        pending_front_run.semantic_receipt().outcome(),
+        RegistryCommandOutcome::Denied(_)
+    ));
+    assert!(pending_front_run.semantic_receipt().authority().is_none());
+    let reconciled = registry
+        .execute(
+            ProjectRegistryCommand::reconcile(
+                RegistryCommandId::new("registry-live-accept-move").expect("registry command id"),
+                ProjectId::new("registry-live").expect("registry project id"),
+                drifted_authority.head(),
+                moved.clone(),
+                ReconciliationDecision::AcceptMove,
+                live_digest('6'),
+            ),
+            live_authority('a', 'b'),
+        )
+        .unwrap_or_else(|error| panic!("STORE_TASK022_RECONCILE_FAILED {}", error.code()));
+    let active = reconciled
+        .semantic_receipt()
+        .authority()
+        .expect("reconciled authority")
+        .clone();
+    assert_eq!(active.lifecycle(), ProjectLifecycle::Active);
+    let suspended = registry
+        .execute(
+            ProjectRegistryCommand::suspend(
+                RegistryCommandId::new("registry-live-suspend").expect("registry command id"),
+                ProjectId::new("registry-live").expect("registry project id"),
+                active.head(),
+                live_digest('7'),
+            ),
+            live_authority('a', 'b'),
+        )
+        .unwrap_or_else(|error| panic!("STORE_TASK022_SUSPEND_FAILED {}", error.code()));
+    let suspended_authority = suspended
+        .semantic_receipt()
+        .authority()
+        .expect("suspended authority")
+        .clone();
+    assert_eq!(suspended_authority.lifecycle(), ProjectLifecycle::Suspended);
+    let reactivated = registry
+        .execute(
+            ProjectRegistryCommand::reconcile(
+                RegistryCommandId::new("registry-live-reactivate").expect("registry command id"),
+                ProjectId::new("registry-live").expect("registry project id"),
+                suspended_authority.head(),
+                moved,
+                ReconciliationDecision::Reactivate,
+                live_digest('8'),
+            ),
+            live_authority('a', 'b'),
+        )
+        .unwrap_or_else(|error| panic!("STORE_TASK022_REACTIVATE_FAILED {}", error.code()));
+    assert_eq!(
+        reactivated
+            .semantic_receipt()
+            .authority()
+            .expect("reactivated authority")
+            .lifecycle(),
+        ProjectLifecycle::Active
+    );
+
+    let conflict = registry
+        .execute(
+            registry_registration("registry-live-register", "registry-conflict"),
+            live_authority('a', 'b'),
+        )
+        .expect_err("changed command id reuse");
+    assert_eq!(
+        conflict.kind(),
+        PostgresProjectRegistryErrorKind::CommandSubstitution
+    );
+
+    let denial = registry
+        .execute(
+            registry_registration("registry-live-duplicate", "registry-duplicate"),
+            live_authority('a', 'b'),
+        )
+        .unwrap_or_else(|error| panic!("STORE_TASK022_DENIAL_FAILED {}", error.code()));
+    assert!(matches!(
+        denial.semantic_receipt().outcome(),
+        RegistryCommandOutcome::Denied(_)
+    ));
+    assert!(denial.semantic_receipt().authority().is_none());
+    assert_eq!(denial.result_checkpoint().command_ordinal(), 8);
+    let loaded = registry
+        .load()
+        .unwrap_or_else(|error| panic!("STORE_TASK022_POST_LOAD_FAILED {}", error.code()));
+    assert_eq!(loaded.retained_checkpoint().command_ordinal(), 8);
+    assert_eq!(loaded.retained_checkpoint().project_count(), 1);
+
+    let same = registry_registration_with(
+        "registry-concurrent-same",
+        "registry-concurrent-same",
+        registry_observation_fixture("C:/lattice/registry-concurrent-same", ['6', '7', '8', '9']),
+    );
+    let (same_left, same_right) = run_concurrent_registry_commands(
+        config,
+        target,
+        same.clone(),
+        same,
+        "STORE_TASK022_CONCURRENT_SAME",
+    );
+    assert_eq!(same_left.semantic_receipt(), same_right.semantic_receipt());
+    assert_eq!(
+        same_left.persistence_receipt(),
+        same_right.persistence_receipt()
+    );
+    assert_ne!(same_left.is_exact_retry(), same_right.is_exact_retry());
+
+    let cross_observation =
+        registry_observation_fixture("C:/lattice/registry-concurrent-cross", ['a', 'b', 'c', 'd']);
+    let (cross_left, cross_right) = run_concurrent_registry_commands(
+        config,
+        target,
+        registry_registration_with(
+            "registry-concurrent-cross-a",
+            "registry-concurrent-a",
+            cross_observation.clone(),
+        ),
+        registry_registration_with(
+            "registry-concurrent-cross-b",
+            "registry-concurrent-b",
+            cross_observation,
+        ),
+        "STORE_TASK022_CONCURRENT_CROSS",
+    );
+    let cross_outcomes = [
+        cross_left.semantic_receipt().outcome(),
+        cross_right.semantic_receipt().outcome(),
+    ];
+    assert_eq!(
+        cross_outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, RegistryCommandOutcome::Applied))
+            .count(),
+        1
+    );
+    assert_eq!(
+        cross_outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, RegistryCommandOutcome::Denied(_)))
+            .count(),
+        1
+    );
+
+    let (unrelated_left, unrelated_right) = run_concurrent_registry_commands(
+        config,
+        target,
+        registry_registration_with(
+            "registry-concurrent-unrelated-a",
+            "registry-unrelated-a",
+            registry_observation_fixture("C:/lattice/registry-unrelated-a", ['e', 'f', '1', '2']),
+        ),
+        registry_registration_with(
+            "registry-concurrent-unrelated-b",
+            "registry-unrelated-b",
+            registry_observation_fixture("C:/lattice/registry-unrelated-b", ['5', '9', 'd', '6']),
+        ),
+        "STORE_TASK022_CONCURRENT_UNRELATED",
+    );
+    assert!(matches!(
+        unrelated_left.semantic_receipt().outcome(),
+        RegistryCommandOutcome::Applied
+    ));
+    assert!(matches!(
+        unrelated_right.semantic_receipt().outcome(),
+        RegistryCommandOutcome::Applied
+    ));
+    let concurrent = registry
+        .load()
+        .unwrap_or_else(|error| panic!("STORE_TASK022_CONCURRENT_LOAD_FAILED {}", error.code()));
+    assert_eq!(concurrent.retained_checkpoint().command_ordinal(), 13);
+    assert_eq!(concurrent.retained_checkpoint().project_count(), 5);
+    assert_eq!(concurrent.retained_checkpoint().reservation_count(), 15);
+    set_live_admission(config, target, false);
+}
+
+fn run_concurrent_registry_commands(
+    config: &LiveConfig,
+    target: &MigrationTarget,
+    left_command: ProjectRegistryCommand,
+    right_command: ProjectRegistryCommand,
+    failure_code: &'static str,
+) -> (
+    PostgresProjectRegistryExecution,
+    PostgresProjectRegistryExecution,
+) {
+    let barrier = Arc::new(Barrier::new(2));
+    let spawn = |command: ProjectRegistryCommand, barrier: Arc<Barrier>| {
+        let config = config.clone();
+        let target = target.clone();
+        thread::spawn(move || {
+            let runtime = config.role_client(
+                target.database_name(),
+                DatabaseRole::Runtime,
+                REQUIRED_APPLICATION_NAME,
+            );
+            let mut registry = PostgresProjectRegistry::new(runtime, &target)
+                .unwrap_or_else(|error| panic!("{failure_code}_CONSTRUCTOR {}", error.code()));
+            barrier.wait();
+            registry
+                .execute(command, live_authority('a', 'b'))
+                .unwrap_or_else(|error| panic!("{failure_code}_EXECUTE {}", error.code()))
+        })
+    };
+    let left = spawn(left_command, Arc::clone(&barrier));
+    let right = spawn(right_command, barrier);
+    (
+        left.join()
+            .unwrap_or_else(|_| panic!("{failure_code}_LEFT_JOIN")),
+        right
+            .join()
+            .unwrap_or_else(|_| panic!("{failure_code}_RIGHT_JOIN")),
+    )
+}
+
+fn prove_live_project_registry_restart(config: &LiveConfig, target: &MigrationTarget) {
+    let runtime = config.role_client(
+        target.database_name(),
+        DatabaseRole::Runtime,
+        REQUIRED_APPLICATION_NAME,
+    );
+    let mut registry = PostgresProjectRegistry::new(runtime, target).unwrap_or_else(|error| {
+        panic!("STORE_TASK022_RESTART_CONSTRUCTOR_FAILED {}", error.code())
+    });
+    let loaded = registry
+        .load()
+        .unwrap_or_else(|error| panic!("STORE_TASK022_RESTART_LOAD_FAILED {}", error.code()));
+    assert_eq!(loaded.retained_checkpoint().command_ordinal(), 13);
+    assert_eq!(loaded.retained_checkpoint().project_count(), 5);
+    let replay = registry
+        .execute(
+            registry_registration("registry-live-register", "registry-live"),
+            live_authority('a', 'b'),
+        )
+        .unwrap_or_else(|error| panic!("STORE_TASK022_RESTART_REPLAY_FAILED {}", error.code()));
+    assert!(replay.is_exact_retry());
+    assert_eq!(replay.result_checkpoint().command_ordinal(), 1);
+    assert_eq!(
+        registry
+            .load()
+            .expect("post-restart replay load")
+            .retained_checkpoint()
+            .command_ordinal(),
+        13
+    );
+}
+
+fn new_live_project_registry(
+    config: &LiveConfig,
+    target: &MigrationTarget,
+) -> PostgresProjectRegistry {
+    let runtime = config.role_client(
+        target.database_name(),
+        DatabaseRole::Runtime,
+        REQUIRED_APPLICATION_NAME,
+    );
+    PostgresProjectRegistry::new(runtime, target)
+        .unwrap_or_else(|error| panic!("STORE_TASK022_CONSTRUCTOR_FAILED {}", error.code()))
+}
+
+fn prove_live_project_registry_atomic_rollback(config: &LiveConfig, admin: &mut Client) {
+    let target = migrated_database(config, admin, "reg_rollback");
+    set_live_admission(config, &target, true);
+    let mut registry = new_live_project_registry(config, &target);
+    let mut fixture = config.connect(target.database_name(), "task022-registry-rollback-fixture");
+    fixture
+        .batch_execute(
+            "CREATE SEQUENCE public.task022_registry_rollback_counter; \
+             REVOKE ALL ON SEQUENCE public.task022_registry_rollback_counter FROM PUBLIC, \
+                 lattice_migrator, lattice_runtime, lattice_guardian, lattice_readonly, \
+                 lattice_migrator_login, lattice_runtime_login, \
+                 lattice_guardian_login, lattice_readonly_login; \
+             CREATE FUNCTION public.task022_fail_registry_insert() RETURNS trigger \
+             LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$ \
+             BEGIN \
+               PERFORM pg_catalog.nextval( \
+                   'public.task022_registry_rollback_counter'::pg_catalog.regclass \
+               ); \
+               RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'task022 registry insert fixture'; \
+             END $$; \
+             REVOKE ALL ON FUNCTION public.task022_fail_registry_insert() FROM PUBLIC, \
+                 lattice_migrator, lattice_runtime, lattice_guardian, lattice_readonly, \
+                 lattice_migrator_login, lattice_runtime_login, \
+                 lattice_guardian_login, lattice_readonly_login; \
+             CREATE TRIGGER task022_fail_registry_insert \
+             BEFORE INSERT ON control.project_registry_commands FOR EACH ROW \
+             EXECUTE FUNCTION public.task022_fail_registry_insert()",
+        )
+        .unwrap_or_else(|_| panic!("STORE_TASK022_ROLLBACK_FIXTURE_FAILED"));
+    let failed = registry
+        .execute(
+            registry_registration("registry-rollback-command", "registry-rollback"),
+            live_authority('a', 'b'),
+        )
+        .expect_err("injected command insert failure must roll back");
+    assert_eq!(
+        failed.kind(),
+        PostgresProjectRegistryErrorKind::TransactionFailed
+    );
+    assert_eq!(
+        project_registry_counts(config, &target),
+        [0, 0, 0, 0, 0],
+        "STORE_TASK022_ATOMIC_ROLLBACK_MUTATED"
+    );
+    assert!(
+        registry
+            .load()
+            .unwrap_or_else(|error| panic!("STORE_TASK022_ROLLBACK_LOAD_FAILED {}", error.code()))
+            .state()
+            .is_vacant(),
+        "STORE_TASK022_ROLLBACK_NOT_VACANT"
+    );
+    fixture
+        .batch_execute(
+            "DROP TRIGGER task022_fail_registry_insert ON control.project_registry_commands; \
+             DROP FUNCTION public.task022_fail_registry_insert(); \
+             DROP SEQUENCE public.task022_registry_rollback_counter",
+        )
+        .unwrap_or_else(|_| panic!("STORE_TASK022_ROLLBACK_FIXTURE_CLEANUP_FAILED"));
+    let applied = registry
+        .execute(
+            registry_registration("registry-rollback-command", "registry-rollback"),
+            live_authority('a', 'b'),
+        )
+        .unwrap_or_else(|error| panic!("STORE_TASK022_ROLLBACK_RECOVERY_FAILED {}", error.code()));
+    assert!(!applied.is_exact_retry());
+    assert_eq!(project_registry_counts(config, &target), [1, 1, 1, 1, 3]);
+}
+
+fn prove_live_project_registry_commit_response_loss(config: &LiveConfig, admin: &mut Client) {
+    let target = migrated_database(config, admin, "reg_ack");
+    set_live_admission(config, &target, true);
+    let request = registry_registration("registry-lost-ack-command", "registry-lost-ack");
+    let proxy = CommitResponseDropProxy::start_at_commit(&config.host, config.port, 3);
+    let mut proxied = config.clone();
+    proxied.port = proxy.port();
+    let mut uncertain = new_live_project_registry(&proxied, &target);
+    let unknown = uncertain
+        .execute(request.clone(), live_authority('a', 'b'))
+        .expect_err("lost Registry commit response must not return authority");
+    assert_eq!(
+        unknown.kind(),
+        PostgresProjectRegistryErrorKind::CommitOutcomeUnknown
+    );
+    let poisoned = uncertain
+        .execute(request.clone(), live_authority('a', 'b'))
+        .expect_err("uncertain Registry adapter must remain poisoned");
+    assert_eq!(
+        poisoned.kind(),
+        PostgresProjectRegistryErrorKind::CommitOutcomeUnknown
+    );
+    drop(uncertain);
+    assert!(proxy.finish(), "STORE_TASK022_COMMIT_RESPONSE_NOT_DROPPED");
+
+    let mut reconciler = new_live_project_registry(config, &target);
+    let replay = reconciler
+        .execute(request, live_authority('a', 'b'))
+        .unwrap_or_else(|error| panic!("STORE_TASK022_COMMIT_RECONCILE_FAILED {}", error.code()));
+    assert!(replay.is_exact_retry());
+    assert_eq!(replay.result_checkpoint().command_ordinal(), 1);
+    assert_eq!(project_registry_counts(config, &target), [1, 1, 1, 1, 3]);
+}
+
+fn prove_live_project_registry_lock_timeout(config: &LiveConfig, admin: &mut Client) {
+    let target = migrated_database(config, admin, "reg_lock");
+    set_live_admission(config, &target, true);
+    let mut registry = new_live_project_registry(config, &target);
+    let command = registry_registration("registry-lock-command", "registry-lock");
+    let mut fixture = config.connect(target.database_name(), "task022-registry-lock-fixture");
+    let mut lock = fixture
+        .transaction()
+        .unwrap_or_else(|_| panic!("STORE_TASK022_LOCK_TRANSACTION_FAILED"));
+    lock.query_one(
+        "SELECT singleton FROM ONLY control.project_registry_state \
+         WHERE singleton = true FOR UPDATE",
+        &[],
+    )
+    .unwrap_or_else(|_| panic!("STORE_TASK022_LOCK_FIXTURE_FAILED"));
+    let timed_out = registry
+        .execute(command.clone(), live_authority('a', 'b'))
+        .expect_err("locked Registry singleton must time out");
+    assert_eq!(
+        timed_out.kind(),
+        PostgresProjectRegistryErrorKind::Unavailable
+    );
+    assert_eq!(project_registry_counts(config, &target), [0, 0, 0, 0, 0]);
+    lock.rollback()
+        .unwrap_or_else(|_| panic!("STORE_TASK022_LOCK_RELEASE_FAILED"));
+    let applied = registry
+        .execute(command, live_authority('a', 'b'))
+        .unwrap_or_else(|error| panic!("STORE_TASK022_LOCK_RECOVERY_FAILED {}", error.code()));
+    assert!(!applied.is_exact_retry());
+}
+
+fn prove_live_project_registry_corruption(config: &LiveConfig, admin: &mut Client) {
+    let stage_target = migrated_database(config, admin, "reg_stage");
+    let mut stage_registry = new_live_project_registry(config, &stage_target);
+    let mut stage_fixture = config.connect(
+        stage_target.database_name(),
+        "task022-registry-partial-stage-fixture",
+    );
+    stage_fixture
+        .execute(
+            "UPDATE ONLY control.project_registry_state \
+             SET stage_command_id = 'registry-direct-stage', stage_ordinal = 1, \
+                 stage_base_checkpoint_digest = checkpoint_digest, \
+                 stage_result_checkpoint_digest = pg_catalog.decode(pg_catalog.repeat('11', 32), 'hex'), \
+                 stage_record_set_digest = pg_catalog.decode(pg_catalog.repeat('22', 32), 'hex'), \
+                 stage_observation = false, stage_project = false, \
+                 stage_reservation_delete_count = 0, stage_reservation_insert_count = 0 \
+             WHERE singleton = true",
+            &[],
+        )
+        .unwrap_or_else(|_| panic!("STORE_TASK022_PARTIAL_STAGE_FIXTURE_FAILED"));
+    let partial = stage_registry
+        .load()
+        .expect_err("directly committed partial Registry stage must fail closed");
+    assert_eq!(
+        partial.kind(),
+        PostgresProjectRegistryErrorKind::RetainedRowCorrupt
+    );
+    assert_eq!(
+        project_registry_counts(config, &stage_target),
+        [0, 0, 0, 0, 0]
+    );
+
+    let checkpoint_target = migrated_database(config, admin, "reg_checkpoint");
+    let mut checkpoint_registry = new_live_project_registry(config, &checkpoint_target);
+    let mut checkpoint_fixture = config.connect(
+        checkpoint_target.database_name(),
+        "task022-registry-checkpoint-fixture",
+    );
+    checkpoint_fixture
+        .execute(
+            "UPDATE ONLY control.project_registry_state \
+             SET checkpoint_digest = pg_catalog.decode(pg_catalog.repeat('33', 32), 'hex') \
+             WHERE singleton = true",
+            &[],
+        )
+        .unwrap_or_else(|_| panic!("STORE_TASK022_CHECKPOINT_FIXTURE_FAILED"));
+    let checkpoint = checkpoint_registry
+        .load()
+        .expect_err("substituted Registry checkpoint must fail closed");
+    assert_eq!(
+        checkpoint.kind(),
+        PostgresProjectRegistryErrorKind::RetainedRowCorrupt
+    );
+
+    let reservation_target = migrated_database(config, admin, "reg_reserve");
+    set_live_admission(config, &reservation_target, true);
+    let mut reservation_registry = new_live_project_registry(config, &reservation_target);
+    reservation_registry
+        .execute(
+            registry_registration("registry-reservation-command", "registry-reservation"),
+            live_authority('a', 'b'),
+        )
+        .unwrap_or_else(|error| panic!("STORE_TASK022_RESERVATION_SETUP_FAILED {}", error.code()));
+    let mut reservation_fixture = config.connect(
+        reservation_target.database_name(),
+        "task022-registry-reservation-fixture",
+    );
+    reservation_fixture
+        .execute(
+            "DELETE FROM ONLY control.project_registry_identity_reservations \
+             WHERE (dimension, identity_digest) IN ( \
+                 SELECT dimension, identity_digest \
+                 FROM ONLY control.project_registry_identity_reservations \
+                 ORDER BY dimension, identity_digest LIMIT 1 \
+             )",
+            &[],
+        )
+        .unwrap_or_else(|_| panic!("STORE_TASK022_RESERVATION_FIXTURE_FAILED"));
+    let reservation = reservation_registry
+        .load()
+        .expect_err("missing Registry reservation must fail closed");
+    assert_eq!(
+        reservation.kind(),
+        PostgresProjectRegistryErrorKind::RetainedRowCorrupt
+    );
+}
+
+fn project_registry_counts(config: &LiveConfig, target: &MigrationTarget) -> [i64; 5] {
+    let mut fixture = config.connect(target.database_name(), "task022-registry-counts");
+    let row = fixture
+        .query_one(
+            "SELECT command_ordinal, \
+                 (SELECT count(*) FROM ONLY control.project_registry_observations), \
+                 (SELECT count(*) FROM ONLY control.project_registry_projects), \
+                 (SELECT count(*) FROM ONLY control.project_registry_commands), \
+                 (SELECT count(*) FROM ONLY control.project_registry_identity_reservations) \
+             FROM ONLY control.project_registry_state WHERE singleton = true",
+            &[],
+        )
+        .unwrap_or_else(|_| panic!("STORE_TASK022_COUNT_FIXTURE_FAILED"));
+    [row.get(0), row.get(1), row.get(2), row.get(3), row.get(4)]
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1628,8 +2309,8 @@ fn assert_global_task_ledger_persistence(
     let embedded = verify_embedded_manifest().unwrap_or_else(|error| panic!("{}", error.code()));
     assert_eq!(
         persistence.schema_version(),
-        3,
-        "STORE_TASK021_GLOBAL_SCHEMA_NOT_V3"
+        4,
+        "STORE_TASK021_GLOBAL_SCHEMA_NOT_V4"
     );
     assert_eq!(
         persistence.schema_version(),
@@ -2920,7 +3601,7 @@ fn prove_first_apply_and_reconciliation(
     assert_eq!(
         must_setup(apply_migrations(&mut first, &target)),
         MigrationApplyOutcome::Applied {
-            executable_count: 3
+            executable_count: 4
         }
     );
     let evidence = must_setup(verify_postgres_schema(
@@ -2996,7 +3677,7 @@ fn assert_history_manifest_recomputation(client: &mut Client, expected_manifest:
         )
         .unwrap_or_else(|_| panic!("STORE_TASK021_MANIFEST_RECOMPUTE_QUERY_FAILED"));
     assert_eq!(row.get::<_, String>(0), expected_manifest);
-    assert_eq!(row.get::<_, i64>(1), 4);
+    assert_eq!(row.get::<_, i64>(1), 5);
 }
 
 fn prove_exact_v1_upgrade(config: &LiveConfig, admin: &mut Client) {
@@ -3010,7 +3691,7 @@ fn prove_exact_v1_upgrade(config: &LiveConfig, admin: &mut Client) {
     assert_eq!(
         must_setup(apply_migrations(&mut migrator, &target)),
         MigrationApplyOutcome::Applied {
-            executable_count: 2
+            executable_count: 3
         }
     );
     let evidence = must_setup(verify_postgres_schema(
@@ -3018,7 +3699,7 @@ fn prove_exact_v1_upgrade(config: &LiveConfig, admin: &mut Client) {
         &target,
         DatabaseRole::Migrator,
     ));
-    assert_eq!(evidence.schema_version(), 3);
+    assert_eq!(evidence.schema_version(), 4);
 }
 
 fn prove_concurrent_v1_upgrade(config: &LiveConfig, admin: &mut Client) {
@@ -3049,7 +3730,7 @@ fn prove_concurrent_v1_upgrade(config: &LiveConfig, admin: &mut Client) {
                 .unwrap_or_else(|_| panic!("STORE_TASK020_V1_CONCURRENT_RUNNER_PANICKED")),
         ) {
             MigrationApplyOutcome::Applied {
-                executable_count: 2,
+                executable_count: 3,
             } => applied += 1,
             MigrationApplyOutcome::AlreadyCurrent => current += 1,
             MigrationApplyOutcome::Applied { .. } => {
@@ -3166,7 +3847,7 @@ fn prove_v1_upgrade_transaction_rollback(config: &LiveConfig, admin: &mut Client
     assert_eq!(
         must_setup(apply_migrations(&mut retry, &target)),
         MigrationApplyOutcome::Applied {
-            executable_count: 2
+            executable_count: 3
         }
     );
     assert_eq!(
@@ -3176,7 +3857,7 @@ fn prove_v1_upgrade_transaction_rollback(config: &LiveConfig, admin: &mut Client
             DatabaseRole::Migrator,
         ))
         .schema_version(),
-        3
+        4
     );
 }
 
@@ -3193,7 +3874,7 @@ fn prove_exact_nonempty_v2_upgrade_and_replay(config: &LiveConfig, admin: &mut C
     assert_eq!(
         must_setup(apply_migrations(&mut migrator, &target)),
         MigrationApplyOutcome::Applied {
-            executable_count: 1
+            executable_count: 2
         }
     );
     assert_eq!(
@@ -3203,7 +3884,7 @@ fn prove_exact_nonempty_v2_upgrade_and_replay(config: &LiveConfig, admin: &mut C
             DatabaseRole::Migrator,
         ))
         .schema_version(),
-        3
+        4
     );
     drop(migrator);
 
@@ -3224,6 +3905,9 @@ fn prove_exact_nonempty_v2_upgrade_and_replay(config: &LiveConfig, admin: &mut C
              SET LOCAL synchronous_commit = on",
         )
         .unwrap_or_else(|_| panic!("STORE_TASK021_V2_REPLAY_HARDEN_FAILED"));
+    let global_manifest = must_setup(verify_embedded_manifest());
+    let global_schema_version = i16::try_from(global_manifest.schema_version())
+        .unwrap_or_else(|_| panic!("STORE_TASK021_V2_REPLAY_SCHEMA_VERSION_INVALID"));
     let row = transaction
         .query_one(
             "SELECT prepare_status, database_uuid::text, \
@@ -3231,8 +3915,9 @@ fn prove_exact_nonempty_v2_upgrade_and_replay(config: &LiveConfig, admin: &mut C
                     manifest_sha256, head_found, before_revision, after_revision, \
                     terminal_disposition, encode(terminal_transaction_digest, 'hex'), \
                     encode(terminal_receipt_digest, 'hex') \
-             FROM control.store_prepare_v3(\
-                 2::smallint, 'v2-replay-transaction', 'v2-project', 'v2-snapshot', \
+             FROM control.store_prepare_v4(\
+                 $1::smallint, $2::text, 2::smallint, \
+                 'v2-replay-transaction', 'v2-project', 'v2-snapshot', \
                  'TASK_LEDGER', decode(repeat('11', 32), 'hex'), \
                  decode(repeat('31', 32), 'hex'), 'LIVE', 'v2-daemon', 1, \
                  'ACTIVE', 1, decode(repeat('32', 32), 'hex'), \
@@ -3243,7 +3928,10 @@ fn prove_exact_nonempty_v2_upgrade_and_replay(config: &LiveConfig, admin: &mut C
                  NULL, NULL, decode(repeat('41', 32), 'hex'), \
                  decode(repeat('42', 32), 'hex')\
              )",
-            &[],
+            &[
+                &global_schema_version,
+                &global_manifest.manifest_sha256().as_str(),
+            ],
         )
         .unwrap_or_else(|_| panic!("STORE_TASK021_V2_REPLAY_CALL_FAILED"));
     assert_eq!(row.get::<_, String>(0), "REPLAY");
@@ -3263,6 +3951,92 @@ fn prove_exact_nonempty_v2_upgrade_and_replay(config: &LiveConfig, admin: &mut C
     transaction
         .commit()
         .unwrap_or_else(|_| panic!("STORE_TASK021_V2_REPLAY_COMMIT_FAILED"));
+}
+
+fn prove_exact_nonempty_v3_ledger_upgrade_and_replay(config: &LiveConfig, admin: &mut Client) {
+    let target = provision_database(config, admin, "three_ledger", true);
+    install_exact_v3(config, &target);
+    set_exact_database_access(admin, target.database_name());
+    set_live_admission(config, &target, true);
+
+    let identity = live_task_identity("ledger-v3-upgrade", "TASK-022");
+    let vacant = VerifiedStream::vacant(identity.clone(), RuntimeKind::Live)
+        .expect("STORE_TASK022_V3_LEDGER_VACANT_INVALID");
+    let command = live_task_command(
+        vacant.head().clone(),
+        "ledger-v3-upgrade-command",
+        LedgerEventKind::TaskCreated,
+        LedgerOutcome::Recorded,
+        '8',
+    );
+    let authority = live_authority('a', 'b');
+    let mut v3_ledger = new_live_task_ledger(config, &target);
+    println!("STORE_TASK022_V3_LEDGER_01_ADAPTER_READY");
+    let before_execution = v3_ledger
+        .execute(command.clone(), authority.clone())
+        .unwrap_or_else(|error| panic!("{}", error.code()));
+    println!("STORE_TASK022_V3_LEDGER_02_SEEDED");
+    assert_eq!(before_execution.persistence().schema_version(), 3);
+    let before = v3_ledger
+        .load_stream(identity.clone())
+        .unwrap_or_else(|error| panic!("{}", error.code()));
+    let before_counts = task_ledger_counts(config, &target, &identity);
+    assert_eq!(before_counts, [1, 1, 1, 1, 1, 0]);
+    drop(v3_ledger);
+
+    set_live_admission(config, &target, false);
+    let mut migrator = config.role_client(
+        target.database_name(),
+        DatabaseRole::Migrator,
+        REQUIRED_APPLICATION_NAME,
+    );
+    assert_eq!(
+        must_setup(apply_migrations(&mut migrator, &target)),
+        MigrationApplyOutcome::Applied {
+            executable_count: 1
+        }
+    );
+    println!("STORE_TASK022_V3_LEDGER_03_MIGRATED");
+    assert_eq!(
+        must_setup(verify_postgres_schema(
+            &mut migrator,
+            &target,
+            DatabaseRole::Migrator,
+        ))
+        .schema_version(),
+        4
+    );
+    drop(migrator);
+
+    let mut v4_ledger = new_live_task_ledger(config, &target);
+    println!("STORE_TASK022_V3_LEDGER_04_V4_ADAPTER_READY");
+    let after = v4_ledger
+        .load_stream(identity.clone())
+        .unwrap_or_else(|error| panic!("{}", error.code()));
+    assert_eq!(after.persistence().schema_version(), 4);
+    assert_eq!(after.stream(), before.stream());
+    assert_eq!(after.retained_checkpoint(), before.retained_checkpoint());
+    assert_eq!(after.physical_head(), before.physical_head());
+    assert_eq!(
+        task_ledger_counts(config, &target, &identity),
+        before_counts
+    );
+
+    let replay = v4_ledger
+        .execute(command, authority)
+        .unwrap_or_else(|error| panic!("{}", error.code()));
+    assert!(replay.is_exact_retry());
+    assert_eq!(replay.receipt(), before_execution.receipt());
+    assert_eq!(
+        replay.result_checkpoint(),
+        before_execution.result_checkpoint()
+    );
+    assert_eq!(replay.store_receipt(), before_execution.store_receipt());
+    assert_eq!(
+        task_ledger_counts(config, &target, &identity),
+        before_counts
+    );
+    println!("STORE_TASK022_V3_LEDGER_05_REPLAYED");
 }
 
 fn seed_historical_v2_receipt(config: &LiveConfig, target: &MigrationTarget) {
@@ -3376,6 +4150,10 @@ fn install_exact_v2(config: &LiveConfig, target: &MigrationTarget) {
     install_exact_prefix(config, target, 3, STORE_V2_MANIFEST_SHA256, 2);
 }
 
+fn install_exact_v3(config: &LiveConfig, target: &MigrationTarget) {
+    install_exact_prefix(config, target, 4, TASK_LEDGER_V3_MANIFEST_SHA256, 3);
+}
+
 fn install_exact_prefix(
     config: &LiveConfig,
     target: &MigrationTarget,
@@ -3384,8 +4162,8 @@ fn install_exact_prefix(
     schema_version: i16,
 ) {
     let manifest = migration_manifest();
-    assert_eq!(manifest.len(), 4);
-    assert!(matches!(prefix_len, 2 | 3));
+    assert_eq!(manifest.len(), 5);
+    assert!(matches!(prefix_len, 2..=4));
     let mut client = config.role_client(
         target.database_name(),
         DatabaseRole::Migrator,
@@ -3797,7 +4575,7 @@ fn prove_concurrent_runners(config: &LiveConfig, admin: &mut Client) {
                 .unwrap_or_else(|_| panic!("TASK019_CONCURRENT_RUNNER_PANICKED")),
         ) {
             MigrationApplyOutcome::Applied {
-                executable_count: 3,
+                executable_count: 4,
             } => applied += 1,
             MigrationApplyOutcome::AlreadyCurrent => current += 1,
             MigrationApplyOutcome::Applied { .. } => panic!("TASK019_CONCURRENT_COUNT_INVALID"),
@@ -4368,8 +5146,8 @@ fn prove_history_shape_drift(config: &LiveConfig, admin: &mut Client) {
                  migration_status, transaction_mode, schema_version, min_reader, \
                  max_reader, min_writer, max_writer \
              ) VALUES ( \
-                 5, '0005_unknown', 'db/migrations/0005_unknown.sql', 1, repeat('1', 64), \
-                 'EXECUTABLE', 'RUNNER_OWNED', 3, 3, 3, 3, 3 \
+                 6, '0006_unknown', 'db/migrations/0006_unknown.sql', 1, repeat('1', 64), \
+                 'EXECUTABLE', 'RUNNER_OWNED', 4, 4, 4, 4, 4 \
              )",
         )
         .unwrap_or_else(|_| panic!("TASK019_HISTORY_UNKNOWN_FIXTURE_FAILED"));
@@ -4404,24 +5182,32 @@ fn prove_runtime_manifest_boundaries_fail_closed(config: &LiveConfig, target: &M
         DatabaseRole::Runtime,
         REQUIRED_APPLICATION_NAME,
     );
-    let current = runtime
+    let global_manifest = must_setup(verify_embedded_manifest());
+    let global_schema_version = i16::try_from(global_manifest.schema_version())
+        .unwrap_or_else(|_| panic!("STORE_TASK021_MANIFEST_SCHEMA_VERSION_INVALID"));
+    let global_manifest_sha256 = global_manifest.manifest_sha256().as_str();
+    let current_error = runtime
         .query(
-            "SELECT * FROM control.store_current_head_v3(\
-                 'manifest-project', 'manifest-snapshot', 'TASK_LEDGER', \
+            "SELECT * FROM control.store_current_head_v4(\
+                 $1::smallint, $2::text, 'manifest-project', 'manifest-snapshot', 'TASK_LEDGER', \
                  pg_catalog.decode(pg_catalog.repeat('11', 32), 'hex')\
              )",
-            &[],
+            &[&global_schema_version, &global_manifest_sha256],
         )
-        .unwrap_or_else(|_| panic!("STORE_TASK021_MANIFEST_CURRENT_HEAD_QUERY_FAILED"));
-    assert!(
-        current.is_empty(),
-        "STORE_TASK021_MANIFEST_CURRENT_HEAD_ACCEPTED_DRIFT"
+        .expect_err("STORE_TASK021_MANIFEST_CURRENT_HEAD_ACCEPTED_DRIFT");
+    assert_eq!(
+        current_error
+            .as_db_error()
+            .map(|database| database.code().code()),
+        Some("LST01"),
+        "STORE_TASK021_MANIFEST_CURRENT_HEAD_QUERY_FAILED"
     );
 
     for (sql, marker) in [
         (
-            "SELECT * FROM control.store_prepare_v3(\
-                 2::smallint, 'manifest-drift-transaction', 'manifest-project', \
+            "SELECT * FROM control.store_prepare_v4(\
+                 $1::smallint, $2::text, 2::smallint, \
+                 'manifest-drift-transaction', 'manifest-project', \
                  'manifest-snapshot', 'TASK_LEDGER', \
                  pg_catalog.decode(pg_catalog.repeat('11', 32), 'hex'), \
                  pg_catalog.decode(pg_catalog.repeat('12', 32), 'hex'), \
@@ -4441,7 +5227,8 @@ fn prove_runtime_manifest_boundaries_fail_closed(config: &LiveConfig, target: &M
             "STORE_TASK021_MANIFEST_PREPARE_ACCEPTED_DRIFT",
         ),
         (
-            "SELECT * FROM control.task_ledger_prepare_v1(\
+            "SELECT * FROM control.task_ledger_prepare_v2(\
+                 $1::smallint, $2::text, \
                  pg_catalog.decode(pg_catalog.repeat('23', 32), 'hex'), \
                  'manifest-drift-command'\
              )",
@@ -4460,7 +5247,9 @@ fn prove_runtime_manifest_boundaries_fail_closed(config: &LiveConfig, target: &M
                  SET LOCAL synchronous_commit = on",
             )
             .unwrap_or_else(|_| panic!("STORE_TASK021_MANIFEST_HARDEN_FAILED"));
-        let error = transaction.query_one(sql, &[]).expect_err(marker);
+        let error = transaction
+            .query_one(sql, &[&global_schema_version, &global_manifest_sha256])
+            .expect_err(marker);
         assert_eq!(
             error.as_db_error().map(|database| database.code().code()),
             Some("LST01"),
