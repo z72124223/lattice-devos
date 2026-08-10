@@ -5,7 +5,11 @@ use lattice_contracts::{
     TaskLedgerStreamIdentity, WriterLeaseAuthorityHead, WriterLeaseAuthorityReceipt,
     WriterLeaseIdentity,
 };
-use lattice_ports::{TaskLifecycleErrorKind, TaskLifecyclePort};
+use lattice_ports::{
+    HermesTaskReflectionCandidatePort, HermesTaskReflectionHistoryPort, TaskLifecycleErrorKind,
+    TaskLifecyclePort, TaskReflectionEventKind, TaskReflectionHistoryQuery,
+    TaskReflectionQueuePort,
+};
 use lattice_postgres_codebase_memory::verify_embedded_extension_manifest;
 use lattice_postgres_store::{MigrationTarget, PostgresTaskLedger, PostgresTaskLedgerErrorKind};
 use lattice_postgres_writer_lease::{
@@ -13,7 +17,9 @@ use lattice_postgres_writer_lease::{
 };
 use lattice_runtime::delivery_ledger::DeliveryDatabaseBinding;
 use lattice_runtime::task_control::PostgresTaskLifecycle;
-use lattice_task_domain::TaskState;
+use lattice_task_domain::{
+    ReflectionCandidateKind, ReflectionFailureKind, ReflectionState, TaskState,
+};
 use lattice_task_ledger::{
     ActionId, ActorId, AppendCommand, CommandId, CommandOutcome as LedgerCommandOutcome,
     CorrelationId, LedgerEventKind, LedgerOutcome, ReasonCode,
@@ -85,6 +91,19 @@ fn store_authority() -> StoreAuthorityHead {
     .expect("store authority")
 }
 
+fn gh9_store_authority() -> StoreAuthorityHead {
+    StoreAuthorityHead::new(
+        RuntimeKind::Live,
+        StoreDaemonInstanceId::new("daemon-live-1").expect("daemon"),
+        DaemonEpoch::new(7).expect("epoch"),
+        RuntimeAdmissionMode::Active,
+        StoreAuthorityRevision::new(3).expect("revision"),
+        digest('a'),
+        digest('b'),
+    )
+    .expect("GH-9 store authority")
+}
+
 fn append(
     head: lattice_contracts::TaskLedgerStreamHead,
     command_id: &str,
@@ -149,6 +168,288 @@ fn substitute_task_identity(
     )
     .expect("substituted structural receipt")
     .head()
+}
+
+fn gh9_binding() -> SubjectBinding {
+    SubjectBinding::new(
+        ProjectId::new("gh9-reflection-evolution").expect("project"),
+        ProjectSnapshotId::new("gh9-reflection-snapshot").expect("snapshot"),
+        TaskId::new("GH-9-REFLECTION-EVOLUTION").expect("task"),
+        "1",
+        digest('d'),
+    )
+    .expect("GH-9 binding")
+}
+
+fn gh9_identity(binding: &SubjectBinding) -> TaskLedgerStreamIdentity {
+    TaskLedgerStreamIdentity::new(
+        binding.project_id().clone(),
+        binding.project_snapshot_id().clone(),
+        binding.task_id().clone(),
+        binding.task_revision(),
+        binding.task_spec_digest().clone(),
+        "TWD",
+    )
+    .expect("GH-9 identity")
+}
+
+fn gh9_ingress_peer() -> TaskIngressPeerEvidence {
+    TaskIngressPeerEvidence::new_local_canonical_mcp_acceptance_live(
+        GatewayInstanceId::new("gh9-local-acceptance").expect("gateway"),
+        "1.0.0",
+        digest('3'),
+        digest('4'),
+        GatewayChannelId::new("stdio").expect("channel"),
+        digest('5'),
+        digest('6'),
+    )
+    .expect("GH-9 ingress peer")
+}
+
+fn gh9_delivery_binding(run_id: &str) -> DeliveryDatabaseBinding {
+    DeliveryDatabaseBinding::new(
+        required_environment("LATTICE_TASK019_HOST"),
+        required_environment("LATTICE_TASK019_PORT")
+            .parse::<u16>()
+            .expect("port"),
+        run_id,
+    )
+    .expect("GH-9 delivery binding")
+}
+
+fn gh9_lifecycle(run_id: &str, binding: &SubjectBinding) -> PostgresTaskLifecycle {
+    PostgresTaskLifecycle::connect_with_ingress_peer(
+        &gh9_delivery_binding(run_id),
+        &required_environment("LATTICE_TASK019_PASSWORD"),
+        Instant::now() + Duration::from_secs(30),
+        gh9_identity(binding),
+        gh9_store_authority(),
+        gh9_ingress_peer(),
+    )
+    .expect("GH-9 lifecycle")
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn reflection_core_and_journal_replay_across_postgres_restart_when_provisioned() {
+    if std::env::var("LATTICE_GH9_REFLECTION_LIVE").ok().as_deref() != Some("1") {
+        eprintln!("SKIP: LATTICE_GH9_REFLECTION_LIVE is not configured");
+        return;
+    }
+    assert_eq!(required_environment("LATTICE_TASK019_LIVE"), "1");
+    let phase = required_environment("LATTICE_TASK019_PHASE");
+    assert!(matches!(phase.as_str(), "initial" | "restart"));
+    let run_id = required_environment("LATTICE_TASK019_RUN_ID");
+    assert_eq!(run_id.len(), 32);
+    let database = format!("lattice_task019_{}_base", &run_id[..8]);
+    let migration_target = MigrationTarget::new(database.clone(), run_id.clone()).expect("target");
+    let binding = gh9_binding();
+    let identity = gh9_identity(&binding);
+    let result_digest = digest('2');
+    let candidate_digest = digest('c');
+    let failure_digest = digest('f');
+
+    if phase == "initial" {
+        let runtime = connect_as(&database, "lattice_runtime");
+        let mut ledger = PostgresTaskLedger::new(runtime, &migration_target).expect("ledger");
+        let vacant = ledger.load_stream(identity.clone()).expect("vacant stream");
+        assert!(vacant.stream().events().is_empty());
+        let memory_manifest = verify_embedded_extension_manifest().expect("memory manifest");
+        let extension_target = ExtensionTarget::new(
+            database.clone(),
+            vacant.persistence().database_identity_digest().clone(),
+            vacant.persistence().manifest_digest().clone(),
+            memory_manifest.manifest_sha256().clone(),
+        )
+        .expect("writer extension target");
+        let mut migrator = connect_as(&database, "lattice_migrator");
+        assert!(matches!(
+            apply_extension(&mut migrator, &extension_target).expect("apply writer extension"),
+            ExtensionApplyOutcome::Installed | ExtensionApplyOutcome::AlreadyCurrent
+        ));
+        verify_extension(&mut migrator, &extension_target).expect("writer extension profile");
+
+        let mut lifecycle = gh9_lifecycle(&run_id, &binding);
+        lifecycle
+            .admit(&binding, "gh9-reflection-submit")
+            .expect("admit GH-9 Task");
+        lifecycle
+            .transition(
+                &binding,
+                TaskState::Draft,
+                TaskState::AwaitingExecutionApproval,
+                None,
+            )
+            .expect("execution approval");
+        lifecycle
+            .transition(
+                &binding,
+                TaskState::AwaitingExecutionApproval,
+                TaskState::Preparing,
+                None,
+            )
+            .expect("prepare Task");
+
+        let writer_runtime = connect_as(&database, "lattice_runtime");
+        let mut writer = PostgresWriterLease::new(
+            writer_runtime,
+            extension_target,
+            &gh9_store_authority(),
+            600,
+        )
+        .expect("writer repository");
+        let acquired = writer
+            .execute(WriterLeaseRepositoryCommand::Acquire(
+                WriterLeaseAcquireRequest {
+                    command_id: "gh9-writer-acquire".to_owned(),
+                    expected_head: None,
+                    project_id: binding.project_id().clone(),
+                    project_snapshot_id: binding.project_snapshot_id().clone(),
+                    task_id: binding.task_id().clone(),
+                    task_revision: binding.task_revision().to_owned(),
+                    task_spec_digest: binding.task_spec_digest().clone(),
+                    attempt_id: AttemptId::new("gh9-attempt-1").expect("attempt"),
+                    lease_id: "gh9-lease-1".to_owned(),
+                    lease_holder_id: "gh9-controlled-writer".to_owned(),
+                    worktree_id: "gh9-reflection-evolution".to_owned(),
+                    holder_process_id: HolderProcessId::new(std::process::id().into())
+                        .expect("pid"),
+                    holder_process_start_identity: digest('e'),
+                },
+            ))
+            .expect("acquire writer");
+        let writer_authority = acquired.after.expect("writer authority");
+        for (from, to) in [
+            (TaskState::Preparing, TaskState::Executing),
+            (TaskState::Executing, TaskState::Verifying),
+            (TaskState::Verifying, TaskState::Reviewing),
+            (TaskState::Reviewing, TaskState::AwaitingMergeApproval),
+            (TaskState::AwaitingMergeApproval, TaskState::Merging),
+        ] {
+            lifecycle
+                .transition(&binding, from, to, Some(&writer_authority))
+                .expect("writer-owned transition");
+        }
+        lifecycle
+            .record_result(&binding, &result_digest, &writer_authority)
+            .expect("record core result");
+        writer
+            .execute(WriterLeaseRepositoryCommand::Release(
+                WriterLeaseReleaseRequest {
+                    command_id: "gh9-writer-release".to_owned(),
+                    project_id: binding.project_id().clone(),
+                    expected_head: writer_authority,
+                },
+            ))
+            .expect("release writer");
+        let completed = lifecycle
+            .transition(&binding, TaskState::Merging, TaskState::Completed, None)
+            .expect("complete core Task");
+        let completed_core_head = completed.core_head_digest().clone();
+
+        lifecycle
+            .ensure_pending(&binding)
+            .expect("queue Reflection");
+        lifecycle
+            .claim_pending(&binding, "gh9-reflection-claim:0")
+            .expect("claim Reflection");
+        let history_query = TaskReflectionHistoryQuery::latest(1).expect("history query");
+        let history = lifecycle
+            .read_authorized_history(&binding, history_query)
+            .expect("authorized history");
+        lifecycle
+            .append_candidate(
+                &binding,
+                "gh9-reflection-candidate:0",
+                ReflectionCandidateKind::Observation,
+                history_query,
+                history.history_digest(),
+                &candidate_digest,
+            )
+            .expect("append digest-only candidate");
+        lifecycle
+            .record_failure(
+                &binding,
+                "gh9-reflection-failure:0",
+                ReflectionFailureKind::HermesFailure,
+                &failure_digest,
+            )
+            .expect("record Hermes failure");
+        let exact_retry = lifecycle
+            .append_candidate(
+                &binding,
+                "gh9-reflection-candidate:0",
+                ReflectionCandidateKind::Observation,
+                history_query,
+                history.history_digest(),
+                &candidate_digest,
+            )
+            .expect("candidate exact retry after later state");
+        assert_eq!(exact_retry.state(), ReflectionState::Failed);
+
+        let replayed_core = lifecycle.load(&binding).expect("replay core");
+        let replayed_reflection = lifecycle
+            .load_reflection(&binding)
+            .expect("replay Reflection");
+        let replayed_history = lifecycle
+            .read_authorized_history(
+                &binding,
+                TaskReflectionHistoryQuery::latest(
+                    lattice_ports::MAX_TASK_REFLECTION_HISTORY_EVENTS,
+                )
+                .expect("full history query"),
+            )
+            .expect("replay history");
+        assert_eq!(replayed_core.state(), TaskState::Completed);
+        assert_eq!(replayed_core.result_digest(), Some(&result_digest));
+        assert_eq!(replayed_core.core_head_digest(), &completed_core_head);
+        assert_eq!(replayed_reflection.state(), ReflectionState::Failed);
+        assert_eq!(replayed_reflection.core_head_digest(), &completed_core_head);
+        assert_eq!(replayed_history.events().len(), 4);
+        assert_eq!(
+            replayed_history.events().last().map(|event| event.kind()),
+            Some(TaskReflectionEventKind::Failure(
+                ReflectionFailureKind::HermesFailure,
+            ))
+        );
+        println!("GH9_REFLECTION_INITIAL_OK core=COMPLETED reflection=REFLECTION_FAILED events=4");
+        return;
+    }
+
+    let mut lifecycle = gh9_lifecycle(&run_id, &binding);
+    let before_core = lifecycle.load(&binding).expect("fresh-process core replay");
+    let before_reflection = lifecycle
+        .load_reflection(&binding)
+        .expect("fresh-process Reflection replay");
+    let before_history = lifecycle
+        .read_authorized_history(
+            &binding,
+            TaskReflectionHistoryQuery::latest(lattice_ports::MAX_TASK_REFLECTION_HISTORY_EVENTS)
+                .expect("history query"),
+        )
+        .expect("fresh-process history replay");
+    let stable_journal_head = before_core.ledger_head_digest().clone();
+    assert_eq!(before_core.state(), TaskState::Completed);
+    assert_eq!(before_core.result_digest(), Some(&result_digest));
+    assert_eq!(before_reflection.state(), ReflectionState::Failed);
+    assert_eq!(before_reflection.generation(), 0);
+    assert_eq!(before_history.events().len(), 4);
+    assert_eq!(
+        before_history.core_head_digest(),
+        before_core.core_head_digest()
+    );
+    assert_eq!(before_history.journal_head_digest(), &stable_journal_head);
+    assert!(before_history.events().iter().any(|event| {
+        event.kind() == TaskReflectionEventKind::Failure(ReflectionFailureKind::HermesFailure)
+    }));
+
+    let after_core = lifecycle.load(&binding).expect("repeat core replay");
+    let after_reflection = lifecycle
+        .load_reflection(&binding)
+        .expect("repeat Reflection replay");
+    assert_eq!(after_core.ledger_head_digest(), &stable_journal_head);
+    assert_eq!(after_reflection.journal_head_digest(), &stable_journal_head);
+    println!("GH9_REFLECTION_RESTART_OK core=COMPLETED reflection=REFLECTION_FAILED events=4");
 }
 
 #[test]

@@ -80,6 +80,18 @@ pub enum TaskDomainError {
         /// Target state.
         to: TaskState,
     },
+    /// A textual Reflection state is unknown.
+    UnknownReflectionState {
+        /// Rejected state.
+        state: String,
+    },
+    /// Two known Reflection states do not have a legal edge.
+    InvalidReflectionTransition {
+        /// Source state.
+        from: crate::ReflectionState,
+        /// Target state.
+        to: crate::ReflectionState,
+    },
     /// A graph edge references a task absent from the graph.
     UnknownTaskDependency {
         /// Owning task.
@@ -113,6 +125,8 @@ impl TaskDomainError {
             Self::DuplicateTaskFieldValue { .. } => "DUPLICATE_TASK_FIELD_VALUE",
             Self::UnknownTaskState { .. } => "UNKNOWN_TASK_STATE",
             Self::InvalidStateTransition { .. } => "INVALID_STATE_TRANSITION",
+            Self::UnknownReflectionState { .. } => "UNKNOWN_REFLECTION_STATE",
+            Self::InvalidReflectionTransition { .. } => "INVALID_REFLECTION_TRANSITION",
             Self::UnknownTaskDependency { .. } => "UNKNOWN_TASK_DEPENDENCY",
             Self::TaskDependencyCycle { .. } => "TASK_DEPENDENCY_CYCLE",
             Self::Canonical(error) => error.code(),
@@ -169,6 +183,15 @@ impl fmt::Display for TaskDomainError {
                     to.as_str()
                 )
             }
+            Self::UnknownReflectionState { state } => {
+                write!(formatter, "unknown reflection state: {state}")
+            }
+            Self::InvalidReflectionTransition { from, to } => write!(
+                formatter,
+                "reflection state cannot transition from {} to {}",
+                from.as_str(),
+                to.as_str()
+            ),
             Self::UnknownTaskDependency {
                 task_id,
                 dependency,

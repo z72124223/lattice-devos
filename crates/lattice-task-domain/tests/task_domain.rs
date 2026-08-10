@@ -4,9 +4,10 @@ use lattice_cjson::{HashDomain, canonical_sha256};
 use lattice_contracts::{ProjectSnapshotId, TaskId};
 use lattice_task_domain::{
     AcceptanceCriterion, ApprovalRequirement, ApprovalRequirements, Capability, CapabilityRequest,
-    DeploymentPolicy, EvidenceType, NetworkPolicy, RequiredCheck, RiskClass, RuntimeProfile,
-    ScopeOperation, TASK_SPEC_SCHEMA_VERSION, TaskBudget, TaskScope, TaskSpec, TaskSpecInput,
-    TaskState, is_transition_allowed, transition, v1_compat, validate_task_graph,
+    DeploymentPolicy, EvidenceType, NetworkPolicy, ReflectionState, RequiredCheck, RiskClass,
+    RuntimeProfile, ScopeOperation, TASK_SPEC_SCHEMA_VERSION, TaskBudget, TaskScope, TaskSpec,
+    TaskSpecInput, TaskState, is_reflection_transition_allowed, is_transition_allowed,
+    reflection_transition, transition, v1_compat, validate_task_graph,
 };
 
 fn task_id(value: &str) -> TaskId {
@@ -540,6 +541,48 @@ fn freezes_the_complete_v1_transition_matrix_and_stable_errors() {
     let next = transition(TaskState::Draft, TaskState::AwaitingExecutionApproval)
         .expect("legal transition");
     assert_eq!(next, TaskState::AwaitingExecutionApproval);
+}
+
+#[test]
+fn reflection_lifecycle_is_independent_and_closed() {
+    use ReflectionState::{Degraded, Failed, Pending, RetryPending};
+
+    let expected = [
+        (Pending, Failed),
+        (Pending, Degraded),
+        (Failed, RetryPending),
+        (Failed, Degraded),
+        (RetryPending, Pending),
+        (Degraded, RetryPending),
+        (Degraded, Failed),
+    ];
+    for from in ReflectionState::ALL {
+        for to in ReflectionState::ALL {
+            assert_eq!(
+                is_reflection_transition_allowed(from, to),
+                expected.contains(&(from, to)),
+                "unexpected Reflection edge {from:?} -> {to:?}"
+            );
+        }
+    }
+
+    assert_eq!(
+        reflection_transition(Pending, Failed).expect("pending may fail"),
+        Failed
+    );
+    assert_eq!(
+        reflection_transition(Failed, Pending)
+            .expect_err("failed work requires an explicit retry state")
+            .code(),
+        "INVALID_REFLECTION_TRANSITION"
+    );
+    assert_eq!(
+        ReflectionState::parse("COMPLETED")
+            .expect_err("core state is not a Reflection state")
+            .code(),
+        "UNKNOWN_REFLECTION_STATE"
+    );
+    assert_eq!(TaskState::Completed.as_str(), "COMPLETED");
 }
 
 #[test]

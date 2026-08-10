@@ -2,6 +2,7 @@
 
 mod error;
 mod graph;
+mod reflection;
 mod spec;
 mod state;
 mod types;
@@ -9,6 +10,10 @@ mod validation;
 
 pub use error::TaskDomainError;
 pub use graph::validate_task_graph;
+pub use reflection::{
+    ReflectionCandidateKind, ReflectionFailureKind, ReflectionState,
+    is_reflection_transition_allowed, reflection_transition,
+};
 pub use spec::{TASK_SPEC_SCHEMA_ID, TASK_SPEC_SCHEMA_VERSION, TaskSpec};
 pub use state::{TaskState, is_transition_allowed, transition, v1_compat};
 pub use types::{

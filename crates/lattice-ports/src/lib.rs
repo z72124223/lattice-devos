@@ -15,7 +15,9 @@ use lattice_contracts::{
     StorePhysicalHead, StoreScope, StoreTransactionReceipt, StoreTransactionRequest,
     WorkspaceChangeEvidence,
 };
-use lattice_task_domain::TaskState;
+use lattice_task_domain::{
+    ReflectionCandidateKind, ReflectionFailureKind, ReflectionState, TaskState,
+};
 
 /// Result type returned by every LATTICE port.
 pub type PortResult<T> = Result<T, PortError>;
@@ -38,6 +40,12 @@ pub type GraphMemoryPortResult<T> = Result<T, GraphMemoryPortError>;
 
 /// Result returned by the authoritative Task lifecycle repository boundary.
 pub type TaskLifecycleResult<T> = Result<T, TaskLifecycleError>;
+
+/// Result returned by the independent Reflection journal boundary.
+pub type TaskReflectionResult<T> = Result<T, TaskReflectionError>;
+
+/// Maximum number of typed Reflection history entries returned in one read.
+pub const MAX_TASK_REFLECTION_HISTORY_EVENTS: usize = 64;
 
 /// Result returned by the single bounded task execution port.
 pub type ControlledTaskExecutionResult<T> = Result<T, ControlledTaskExecutionError>;
@@ -162,6 +170,7 @@ pub struct TaskLifecycleEvidence {
     admitted: bool,
     state: TaskState,
     ledger_head_digest: lattice_contracts::ContentDigest,
+    core_head_digest: Option<lattice_contracts::ContentDigest>,
     result_digest: Option<lattice_contracts::ContentDigest>,
 }
 
@@ -179,6 +188,28 @@ impl TaskLifecycleEvidence {
             admitted,
             state,
             ledger_head_digest,
+            core_head_digest: None,
+            result_digest,
+        }
+    }
+
+    /// Constructs a lifecycle projection whose current journal head may be
+    /// newer than its last authoritative core event.
+    #[must_use]
+    pub const fn new_with_core_head(
+        binding: lattice_contracts::SubjectBinding,
+        admitted: bool,
+        state: TaskState,
+        ledger_head_digest: lattice_contracts::ContentDigest,
+        core_head_digest: lattice_contracts::ContentDigest,
+        result_digest: Option<lattice_contracts::ContentDigest>,
+    ) -> Self {
+        Self {
+            binding,
+            admitted,
+            state,
+            ledger_head_digest,
+            core_head_digest: Some(core_head_digest),
             result_digest,
         }
     }
@@ -201,6 +232,15 @@ impl TaskLifecycleEvidence {
     #[must_use]
     pub const fn ledger_head_digest(&self) -> &lattice_contracts::ContentDigest {
         &self.ledger_head_digest
+    }
+
+    /// Returns the verified head immediately after the last authoritative core
+    /// Task event. Independent Reflection events cannot advance this value.
+    #[must_use]
+    pub fn core_head_digest(&self) -> &lattice_contracts::ContentDigest {
+        self.core_head_digest
+            .as_ref()
+            .unwrap_or(&self.ledger_head_digest)
     }
 
     #[must_use]
@@ -258,6 +298,488 @@ pub trait TaskLifecyclePort {
         &mut self,
         binding: &lattice_contracts::SubjectBinding,
     ) -> TaskLifecycleResult<TaskLifecycleEvidence>;
+}
+
+/// Closed durable Reflection repository failure classes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskReflectionErrorKind {
+    /// The typed command or state edge was rejected.
+    Rejected,
+    /// The fixed repository was unavailable.
+    Unavailable,
+    /// A mutation may have committed but its result is unknown.
+    Ambiguous,
+    /// Verified durable history violated the closed Reflection contract.
+    Corrupt,
+}
+
+/// Secret-free Reflection repository failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskReflectionError {
+    kind: TaskReflectionErrorKind,
+    code: &'static str,
+}
+
+impl TaskReflectionError {
+    /// Constructs one fixed Reflection failure.
+    #[must_use]
+    pub const fn new(kind: TaskReflectionErrorKind, code: &'static str) -> Self {
+        Self { kind, code }
+    }
+
+    /// Returns the closed failure class.
+    #[must_use]
+    pub const fn kind(&self) -> TaskReflectionErrorKind {
+        self.kind
+    }
+
+    /// Returns the fixed machine-facing code.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl fmt::Display for TaskReflectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.code)
+    }
+}
+
+impl Error for TaskReflectionError {}
+
+/// Closed semantic kind of one immutable Reflection journal event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskReflectionEventKind {
+    /// One exact work generation was durably queued.
+    Pending,
+    /// One exact work generation was claimed.
+    Claimed,
+    /// One fixed failure category was recorded.
+    Failure(ReflectionFailureKind),
+    /// A later retry generation was authorized.
+    RetryPending,
+    /// Core output remains usable without successful Reflection.
+    Degraded,
+    /// Hermes appended a non-authoritative digest-only candidate.
+    Candidate(ReflectionCandidateKind),
+}
+
+/// Digest-only proof material exposed by one authorized history event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TaskReflectionEventReference {
+    /// The event has no external evidence leaf.
+    None,
+    /// The event commits one bounded evidence digest.
+    Evidence(lattice_contracts::ContentDigest),
+    /// A non-authoritative candidate and the exact history window it used.
+    Candidate {
+        /// Digest of the bounded candidate value retained outside this port.
+        candidate_digest: lattice_contracts::ContentDigest,
+        /// Digest of the exact authorized history window.
+        history_digest: lattice_contracts::ContentDigest,
+        /// Exact bounded page that authorized the candidate.
+        history_query: TaskReflectionHistoryQuery,
+    },
+}
+
+/// Stable keyset query for one bounded Reflection-history page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TaskReflectionHistoryQuery {
+    before_sequence: Option<u64>,
+    limit: u16,
+}
+
+impl TaskReflectionHistoryQuery {
+    /// Constructs an exclusive sequence cursor with a fixed bounded limit.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero cursor, zero limit, or a limit above
+    /// [`MAX_TASK_REFLECTION_HISTORY_EVENTS`].
+    pub fn new(before_sequence: Option<u64>, limit: usize) -> TaskReflectionResult<Self> {
+        if before_sequence == Some(0) {
+            return Err(TaskReflectionError::new(
+                TaskReflectionErrorKind::Rejected,
+                "LATTICE_REFLECTION_HISTORY_CURSOR_REJECTED",
+            ));
+        }
+        if limit == 0 || limit > MAX_TASK_REFLECTION_HISTORY_EVENTS {
+            return Err(TaskReflectionError::new(
+                TaskReflectionErrorKind::Rejected,
+                "LATTICE_REFLECTION_HISTORY_LIMIT_REJECTED",
+            ));
+        }
+        let limit = u16::try_from(limit).map_err(|_| {
+            TaskReflectionError::new(
+                TaskReflectionErrorKind::Rejected,
+                "LATTICE_REFLECTION_HISTORY_LIMIT_REJECTED",
+            )
+        })?;
+        Ok(Self {
+            before_sequence,
+            limit,
+        })
+    }
+
+    /// Constructs the newest bounded page.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero or a limit above [`MAX_TASK_REFLECTION_HISTORY_EVENTS`].
+    pub fn latest(limit: usize) -> TaskReflectionResult<Self> {
+        Self::new(None, limit)
+    }
+
+    /// Returns the exclusive sequence cursor, or `None` for the newest page.
+    #[must_use]
+    pub const fn before_sequence(self) -> Option<u64> {
+        self.before_sequence
+    }
+
+    /// Returns the validated page limit.
+    #[must_use]
+    pub const fn limit(self) -> usize {
+        self.limit as usize
+    }
+}
+
+/// One bounded typed projection of an immutable Reflection journal event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskReflectionHistoryEvent {
+    sequence: u64,
+    generation: u64,
+    kind: TaskReflectionEventKind,
+    reference: TaskReflectionEventReference,
+    subject_digest: lattice_contracts::ContentDigest,
+    event_digest: lattice_contracts::ContentDigest,
+}
+
+impl TaskReflectionHistoryEvent {
+    /// Constructs one event projection after verified replay.
+    #[must_use]
+    pub const fn new(
+        sequence: u64,
+        generation: u64,
+        kind: TaskReflectionEventKind,
+        reference: TaskReflectionEventReference,
+        subject_digest: lattice_contracts::ContentDigest,
+        event_digest: lattice_contracts::ContentDigest,
+    ) -> Self {
+        Self {
+            sequence,
+            generation,
+            kind,
+            reference,
+            subject_digest,
+            event_digest,
+        }
+    }
+
+    /// Returns the authoritative Task Ledger sequence.
+    #[must_use]
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Returns the deterministic Reflection generation.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Returns the closed semantic event kind.
+    #[must_use]
+    pub const fn kind(&self) -> TaskReflectionEventKind {
+        self.kind
+    }
+
+    /// Returns only digest commitments, never raw evidence or candidate text.
+    #[must_use]
+    pub const fn reference(&self) -> &TaskReflectionEventReference {
+        &self.reference
+    }
+
+    /// Returns the authoritative typed subject commitment.
+    #[must_use]
+    pub const fn subject_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.subject_digest
+    }
+
+    /// Returns the immutable Task Ledger event commitment.
+    #[must_use]
+    pub const fn event_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.event_digest
+    }
+}
+
+/// Replay-derived independent Reflection projection for one exact Task.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskReflectionEvidence {
+    binding: lattice_contracts::SubjectBinding,
+    state: ReflectionState,
+    generation: u64,
+    core_head_digest: lattice_contracts::ContentDigest,
+    journal_head_digest: lattice_contracts::ContentDigest,
+    pending_admission_digest: Option<lattice_contracts::ContentDigest>,
+    claim_digest: Option<lattice_contracts::ContentDigest>,
+}
+
+impl TaskReflectionEvidence {
+    /// Constructs one fully replayed Reflection projection.
+    #[must_use]
+    pub const fn new(
+        binding: lattice_contracts::SubjectBinding,
+        state: ReflectionState,
+        generation: u64,
+        core_head_digest: lattice_contracts::ContentDigest,
+        journal_head_digest: lattice_contracts::ContentDigest,
+        pending_admission_digest: Option<lattice_contracts::ContentDigest>,
+        claim_digest: Option<lattice_contracts::ContentDigest>,
+    ) -> Self {
+        Self {
+            binding,
+            state,
+            generation,
+            core_head_digest,
+            journal_head_digest,
+            pending_admission_digest,
+            claim_digest,
+        }
+    }
+
+    /// Returns the exact Task binding.
+    #[must_use]
+    pub const fn binding(&self) -> &lattice_contracts::SubjectBinding {
+        &self.binding
+    }
+
+    /// Returns the independent Reflection state.
+    #[must_use]
+    pub const fn state(&self) -> ReflectionState {
+        self.state
+    }
+
+    /// Returns the deterministic queue generation.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Returns the immutable completed-core anchor.
+    #[must_use]
+    pub const fn core_head_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.core_head_digest
+    }
+
+    /// Returns the current complete append-only journal head.
+    #[must_use]
+    pub const fn journal_head_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.journal_head_digest
+    }
+
+    /// Returns the immutable admission for the current generation.
+    #[must_use]
+    pub const fn pending_admission_digest(&self) -> Option<&lattice_contracts::ContentDigest> {
+        self.pending_admission_digest.as_ref()
+    }
+
+    /// Returns the current exact claim commitment, when claimed.
+    #[must_use]
+    pub const fn claim_digest(&self) -> Option<&lattice_contracts::ContentDigest> {
+        self.claim_digest.as_ref()
+    }
+}
+
+/// Bounded authorized Reflection history without raw payloads or database authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskReflectionHistory {
+    binding: lattice_contracts::SubjectBinding,
+    core_head_digest: lattice_contracts::ContentDigest,
+    journal_head_digest: lattice_contracts::ContentDigest,
+    history_digest: lattice_contracts::ContentDigest,
+    query: TaskReflectionHistoryQuery,
+    next_before_sequence: Option<u64>,
+    events: Vec<TaskReflectionHistoryEvent>,
+}
+
+impl TaskReflectionHistory {
+    /// Constructs one bounded history after exact replay and hashing.
+    #[must_use]
+    pub const fn new(
+        binding: lattice_contracts::SubjectBinding,
+        core_head_digest: lattice_contracts::ContentDigest,
+        journal_head_digest: lattice_contracts::ContentDigest,
+        history_digest: lattice_contracts::ContentDigest,
+        query: TaskReflectionHistoryQuery,
+        next_before_sequence: Option<u64>,
+        events: Vec<TaskReflectionHistoryEvent>,
+    ) -> Self {
+        Self {
+            binding,
+            core_head_digest,
+            journal_head_digest,
+            history_digest,
+            query,
+            next_before_sequence,
+            events,
+        }
+    }
+
+    /// Returns the exact Task binding.
+    #[must_use]
+    pub const fn binding(&self) -> &lattice_contracts::SubjectBinding {
+        &self.binding
+    }
+
+    /// Returns the immutable completed-core anchor.
+    #[must_use]
+    pub const fn core_head_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.core_head_digest
+    }
+
+    /// Returns the current complete journal head.
+    #[must_use]
+    pub const fn journal_head_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.journal_head_digest
+    }
+
+    /// Returns the commitment to the exact returned history window.
+    #[must_use]
+    pub const fn history_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.history_digest
+    }
+
+    /// Returns the exact query bound into this page commitment.
+    #[must_use]
+    pub const fn query(&self) -> TaskReflectionHistoryQuery {
+        self.query
+    }
+
+    /// Returns the exclusive cursor for the next older page.
+    #[must_use]
+    pub const fn next_before_sequence(&self) -> Option<u64> {
+        self.next_before_sequence
+    }
+
+    /// Returns chronologically ordered typed events.
+    #[must_use]
+    pub fn events(&self) -> &[TaskReflectionHistoryEvent] {
+        &self.events
+    }
+}
+
+/// Known-Task Reflection queue and lifecycle mutation capability.
+///
+/// This first-slice port intentionally has no cross-Task listing or claim-next
+/// operation. A caller must already hold the exact Task binding. Queue, claim,
+/// retry, degraded, and candidate operations are confined to an independently
+/// completed core Task. Direct core-failure and fixed-output-rejection records
+/// are durable, bounded, read-only history and cannot acquire a claim through
+/// this port.
+pub trait TaskReflectionQueuePort {
+    /// Idempotently appends one durable pending generation after core completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn ensure_pending(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+    ) -> TaskReflectionResult<TaskReflectionEvidence>;
+
+    /// Claims the current pending generation by exact command identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn claim_pending(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        command_id: &str,
+    ) -> TaskReflectionResult<TaskReflectionEvidence>;
+
+    /// Appends one typed failure without changing the core Task projection.
+    ///
+    /// Core `Failed`/`Blocked`/`Cancelled` failures and fixed-output rejection
+    /// are terminal evidence. A Hermes failure instead requires an exact claim
+    /// in the post-completion queue lane.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn record_failure(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        command_id: &str,
+        kind: ReflectionFailureKind,
+        evidence_digest: &lattice_contracts::ContentDigest,
+    ) -> TaskReflectionResult<TaskReflectionEvidence>;
+
+    /// Authorizes a later retry generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn mark_retry_pending(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        command_id: &str,
+    ) -> TaskReflectionResult<TaskReflectionEvidence>;
+
+    /// Marks the Reflection projection degraded without changing core success.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn mark_degraded(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        command_id: &str,
+        evidence_digest: &lattice_contracts::ContentDigest,
+    ) -> TaskReflectionResult<TaskReflectionEvidence>;
+
+    /// Replays one exact known-Task Reflection projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn load_reflection(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+    ) -> TaskReflectionResult<TaskReflectionEvidence>;
+}
+
+/// Hermes-only bounded read capability over one exact known Task.
+pub trait HermesTaskReflectionHistoryPort {
+    /// Reads at most the fixed maximum number of typed digest-only events.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn read_authorized_history(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        query: TaskReflectionHistoryQuery,
+    ) -> TaskReflectionResult<TaskReflectionHistory>;
+}
+
+/// Hermes-only append capability for non-authoritative candidate digests.
+pub trait HermesTaskReflectionCandidatePort {
+    /// Appends a closed candidate kind bound to the current exact claim.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn append_candidate(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        command_id: &str,
+        kind: ReflectionCandidateKind,
+        history_query: TaskReflectionHistoryQuery,
+        history_digest: &lattice_contracts::ContentDigest,
+        candidate_digest: &lattice_contracts::ContentDigest,
+    ) -> TaskReflectionResult<TaskReflectionEvidence>;
 }
 
 /// Stable fail-closed categories shared across port and inbound-service boundaries.
@@ -1067,4 +1589,36 @@ pub trait HermesPort {
     ///
     /// Returns a typed failure when interruption or final outcome is unknown.
     fn interrupt(&mut self, request_id: &RequestId) -> PortResult<()>;
+}
+
+#[cfg(test)]
+mod reflection_contract_tests {
+    use super::{MAX_TASK_REFLECTION_HISTORY_EVENTS, TaskReflectionHistoryQuery};
+
+    #[test]
+    fn history_query_is_bounded_and_cursor_exact() {
+        let latest = TaskReflectionHistoryQuery::latest(1).expect("latest page");
+        assert_eq!(latest.before_sequence(), None);
+        assert_eq!(latest.limit(), 1);
+
+        let older = TaskReflectionHistoryQuery::new(Some(9), 7).expect("older page");
+        assert_eq!(older.before_sequence(), Some(9));
+        assert_eq!(older.limit(), 7);
+
+        for rejected in [
+            TaskReflectionHistoryQuery::latest(0),
+            TaskReflectionHistoryQuery::latest(MAX_TASK_REFLECTION_HISTORY_EVENTS + 1),
+        ] {
+            assert_eq!(
+                rejected.expect_err("invalid page").code(),
+                "LATTICE_REFLECTION_HISTORY_LIMIT_REJECTED"
+            );
+        }
+        assert_eq!(
+            TaskReflectionHistoryQuery::new(Some(0), 1)
+                .expect_err("zero cursor")
+                .code(),
+            "LATTICE_REFLECTION_HISTORY_CURSOR_REJECTED"
+        );
+    }
 }
