@@ -1457,6 +1457,16 @@
     },
     {
       "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo@2b424ec9a5401a6fbdc4f37d3d401592331afca0:crates/lattice-codex-adapter/tests/delivery_port.rs:202-203",
+      "setting": "TASK-038 controlled Codex model and low effort acceptance fixture"
+    },
+    {
+      "classification": "acceptance_reproducibility_pin",
+      "source_ref": "repo@2b424ec9a5401a6fbdc4f37d3d401592331afca0:scripts/run-task038-task-submit.ps1:453-454",
+      "setting": "TASK-038 canonical-local harness Codex model and low effort pin"
+    },
+    {
+      "classification": "acceptance_reproducibility_pin",
       "source_ref": "repo:scripts/run-lattice-delivery.ps1:43",
       "setting": "delivery verification model and effort"
     },
@@ -1546,18 +1556,28 @@
       "setting": "closed provider kind boundary requiring an approved future contract"
     }
   ],
-  "pending_evidence": [
-    {
-      "scope": "TASK-038 fixed model and reasoning settings",
-      "evidence_state": "UNVERIFIED",
-      "disposition": "WAIT_TASK038_STABLE",
-      "source_ref": "runtime:task-038-dirty-worktree-observation-2026-08-10",
-      "observed_at": "2026-08-10T02:00:00+08:00",
-      "reason": "The dirty worktree has no stable blob or line address and is not authoritative evidence."
-    }
-  ],
+  "task_038_dependency_evidence": {
+    "evidence_state": "VERIFIED",
+    "commit": "2b424ec9a5401a6fbdc4f37d3d401592331afca0",
+    "parent": "512732d5b71a5d373363b77bb23a29e4a8ae3b1b",
+    "contract": "SPEC-003@4/latticed@1.4/task-public-status@lattice.task.status.v1",
+    "acceptance_id": "8c21e96b9bc44b1d87de0dea884b9678",
+    "canonical_latticed_sha256": "130ef9f92f2582055d9828828c95526a58f01aa7772e43c4db31062219d278b2",
+    "supplied_preimage_sha256": "d40d4c6324af01ef804684088f25da825b9824d87c8ea8c8f761a1607423e911",
+    "scope": "LOCAL_CANONICAL_MCP_NOT_CHATGPT_TUNNEL",
+    "readiness": "DEPENDENCY_READY_ONLY",
+    "source_refs": [
+      "repo@2b424ec9a5401a6fbdc4f37d3d401592331afca0:HANDOFF.md:84",
+      "repo@2b424ec9a5401a6fbdc4f37d3d401592331afca0:HANDOFF.md:86",
+      "repo@2b424ec9a5401a6fbdc4f37d3d401592331afca0:HANDOFF.md:89",
+      "repo@2b424ec9a5401a6fbdc4f37d3d401592331afca0:HANDOFF.md:92-93",
+      "repo@2b424ec9a5401a6fbdc4f37d3d401592331afca0:HANDOFF.md:138-139",
+      "repo@2b424ec9a5401a6fbdc4f37d3d401592331afca0:apps/lattice-runtime/src/mcp.rs:29"
+    ]
+  },
+  "pending_evidence": [],
   "next_red": {
-    "status": "WAITING_FOR_TASK038_CONTRACT",
+    "status": "READY_FOR_HEAVY_SLOT",
     "behavior": "A pure resolver consumes a versioned capability snapshot and a requested profile, emits resolved evidence with deterministic reason codes, and returns ROUTE_CAPABILITY_EVIDENCE_MISSING without selecting a provider when a required field is UNKNOWN.",
     "blocked_paths": [
       "root Cargo.toml and Cargo.lock",
@@ -1565,8 +1585,7 @@
       "MCP and orchestrator contracts",
       "PostgreSQL paths",
       "task-domain paths",
-      "writer and session contracts",
-      "TASK-038 dirty paths"
+      "writer and session contracts"
     ],
     "forbidden_payloads": [
       "hidden reasoning content",

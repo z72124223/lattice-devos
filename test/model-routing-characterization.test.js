@@ -280,6 +280,30 @@ const resolvedActualIdentityFields = [
   "reasoning_effort",
 ];
 
+const task038DependencyCommit = "2b424ec9a5401a6fbdc4f37d3d401592331afca0";
+const expectedTask038DependencyEvidence = {
+  evidence_state: "VERIFIED",
+  commit: task038DependencyCommit,
+  parent: "512732d5b71a5d373363b77bb23a29e4a8ae3b1b",
+  contract:
+    "SPEC-003@4/latticed@1.4/task-public-status@lattice.task.status.v1",
+  acceptance_id: "8c21e96b9bc44b1d87de0dea884b9678",
+  canonical_latticed_sha256:
+    "130ef9f92f2582055d9828828c95526a58f01aa7772e43c4db31062219d278b2",
+  supplied_preimage_sha256:
+    "d40d4c6324af01ef804684088f25da825b9824d87c8ea8c8f761a1607423e911",
+  scope: "LOCAL_CANONICAL_MCP_NOT_CHATGPT_TUNNEL",
+  readiness: "DEPENDENCY_READY_ONLY",
+  source_refs: [
+    `repo@${task038DependencyCommit}:HANDOFF.md:84`,
+    `repo@${task038DependencyCommit}:HANDOFF.md:86`,
+    `repo@${task038DependencyCommit}:HANDOFF.md:89`,
+    `repo@${task038DependencyCommit}:HANDOFF.md:92-93`,
+    `repo@${task038DependencyCommit}:HANDOFF.md:138-139`,
+    `repo@${task038DependencyCommit}:apps/lattice-runtime/src/mcp.rs:29`,
+  ],
+};
+
 const evidenceEvaluationTime = Date.parse("2026-08-10T02:00:00+08:00");
 
 function evidenceDecision(observation) {
@@ -827,20 +851,20 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
   assert.ok(fixture.fixed_setting_inventory.length > 0);
   for (const setting of fixture.fixed_setting_inventory) {
     assert.ok(allowedClassifications.has(setting.classification));
-    assert.match(setting.source_ref, /^(repo|official|runtime):/);
-    assert.doesNotMatch(setting.source_ref, /worktree:feature\/task-038|run-task038/i);
+    assert.match(
+      setting.source_ref,
+      /^(?:repo(?:@[0-9a-f]{40})?|official|runtime):/,
+    );
+    assert.doesNotMatch(setting.source_ref, /worktree:feature\/task-038/i);
+    if (/run-task038/i.test(setting.source_ref)) {
+      assert.match(setting.source_ref, new RegExp(`^repo@${task038DependencyCommit}:`));
+    }
   }
-  assert.deepEqual(fixture.pending_evidence, [
-    {
-      scope: "TASK-038 fixed model and reasoning settings",
-      evidence_state: "UNVERIFIED",
-      disposition: "WAIT_TASK038_STABLE",
-      source_ref: "runtime:task-038-dirty-worktree-observation-2026-08-10",
-      observed_at: "2026-08-10T02:00:00+08:00",
-      reason:
-        "The dirty worktree has no stable blob or line address and is not authoritative evidence.",
-    },
-  ]);
+  assert.deepEqual(
+    fixture.task_038_dependency_evidence,
+    expectedTask038DependencyEvidence,
+  );
+  assert.deepEqual(fixture.pending_evidence, []);
 
   const fixedSettingRefs = new Set(
     fixture.fixed_setting_inventory.map(({ source_ref }) => source_ref),
@@ -851,6 +875,8 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
     "repo:crates/lattice-hermes-adapter/tests/hermes_sandbox_runner_fixture.py:399",
     "repo:apps/lattice-runtime/src/composition.rs:98",
     "repo:apps/lattice-runtime/src/composition.rs:100",
+    `repo@${task038DependencyCommit}:crates/lattice-codex-adapter/tests/delivery_port.rs:202-203`,
+    `repo@${task038DependencyCommit}:scripts/run-task038-task-submit.ps1:453-454`,
   ]) {
     assert.ok(fixedSettingRefs.has(requiredRef), `missing fixed-setting evidence: ${requiredRef}`);
   }
@@ -868,6 +894,36 @@ test("Issue #8 routing characterization is provider-neutral and fail-closed", as
     ).classification,
     "temporary_implementation_constraint",
   );
+  assert.deepEqual(fixture.next_red, {
+    status: "READY_FOR_HEAVY_SLOT",
+    behavior:
+      "A pure resolver consumes a versioned capability snapshot and a requested profile, emits resolved evidence with deterministic reason codes, and returns ROUTE_CAPABILITY_EVIDENCE_MISSING without selecting a provider when a required field is UNKNOWN.",
+    blocked_paths: [
+      "root Cargo.toml and Cargo.lock",
+      "apps/lattice-runtime",
+      "MCP and orchestrator contracts",
+      "PostgreSQL paths",
+      "task-domain paths",
+      "writer and session contracts",
+    ],
+    forbidden_payloads: [
+      "hidden reasoning content",
+      "complete private prompts",
+      "authentication material",
+    ],
+  });
+  const reconciledDependencyState = JSON.stringify({
+    pending_evidence: fixture.pending_evidence,
+    next_red: fixture.next_red,
+  });
+  for (const retiredMarker of [
+    ["WAIT", "TASK038", "STABLE"].join("_"),
+    ["WAITING", "FOR", "TASK038", "CONTRACT"].join("_"),
+    ["task", "038", "dirty", "worktree"].join("-"),
+    `TASK-038 ${["dirty", "paths"].join(" ")}`,
+  ]) {
+    assert.equal(reconciledDependencyState.includes(retiredMarker), false);
+  }
 
   assertNoSensitivePayload(fixture);
   for (const key of [
