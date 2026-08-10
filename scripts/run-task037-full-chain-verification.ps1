@@ -83,6 +83,22 @@ $script:Task037PhaseGates = @(
     'tool_content',
     'pre_status_semantics',
     'success_semantics',
+    'phase_meta_projection',
+    'success_tool_result',
+    'success_tool_error_configuration',
+    'success_tool_error_delivery',
+    'success_tool_error_graph',
+    'success_tool_error_hermes',
+    'success_tool_error_transport',
+    'success_tool_error_unclassified',
+    'success_launcher_binding',
+    'success_delivery_contract',
+    'success_graph_contract',
+    'success_hermes_contract',
+    'success_digest_contract',
+    'success_finding_items',
+    'success_action_items',
+    'success_answer_bytes',
     'memory_empty',
     'memory_expected',
     'status_replay',
@@ -500,6 +516,45 @@ function Test-Task037PhaseGateName {
         $Gate -is [string] -and
         $script:Task037PhaseGates -ccontains [string]$Gate
     )
+}
+
+function Get-Task037ToolFailureGate {
+    param([AllowNull()]$Code)
+
+    if ($Code -isnot [string]) { return 'success_tool_error_unclassified' }
+    switch -CaseSensitive ([string]$Code) {
+        { @(
+            'LATTICED_CONFIGURATION_REJECTED',
+            'LATTICED_DATABASE_SECRET_MISSING',
+            'LATTICED_DATABASE_CONNECT_REJECTED',
+            'LATTICED_LEDGER_CONFIGURATION_REJECTED',
+            'LATTICED_WORKSPACE_CONFIGURATION_REJECTED',
+            'LATTICED_CODEX_CONFIGURATION_REJECTED',
+            'LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED',
+            'LATTICE_SCRIPTED_FIXTURE_REJECTED'
+        ) -ccontains $_ } { return 'success_tool_error_configuration' }
+        { @(
+            'LATTICE_DELIVERY_CONTRACT_REJECTED',
+            'LATTICE_DELIVERY_INTENT_REJECTED',
+            'LATTICE_DELIVERY_OUTCOME_PERSIST_REJECTED',
+            'LATTICE_DELIVERY_RECEIPT_REJECTED',
+            'LATTICE_DELIVERY_RECEIPT_MISMATCH',
+            'LATTICE_DELIVERY_FAILED',
+            'LATTICE_DELIVERY_RECONCILIATION_REQUIRED'
+        ) -ccontains $_ } { return 'success_tool_error_delivery' }
+        { @(
+            'LATTICE_GRAPH_MEMORY_CONFIGURATION_REJECTED',
+            'LATTICE_GRAPH_MEMORY_RUN_REJECTED',
+            'LATTICE_GRAPH_MEMORY_RECEIPT_REJECTED'
+        ) -ccontains $_ } { return 'success_tool_error_graph' }
+        { @(
+            'LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED',
+            'LATTICE_HERMES_REFLECTION_REJECTED',
+            'LATTICE_HERMES_MEMORY_RECEIPT_REJECTED'
+        ) -ccontains $_ } { return 'success_tool_error_hermes' }
+        'LATTICED_STDIO_REJECTED' { return 'success_tool_error_transport' }
+        default { return 'success_tool_error_unclassified' }
+    }
 }
 
 function Enter-Task037PhaseGate {
@@ -1488,6 +1543,24 @@ function Get-Task037JobActiveProcessCount {
     catch {
         throw 'TASK037_JOB_ACCOUNTING_REJECTED'
     }
+}
+
+function Test-Task037JsonInteger {
+    param(
+        [AllowNull()]$Value,
+        [Parameter(Mandatory = $true)][int64]$Minimum,
+        [Parameter(Mandatory = $true)][int64]$Maximum
+    )
+
+    if ($Value -isnot [int32]) { return $false }
+    $integer = [int32]$Value
+    return $integer -ge $Minimum -and $integer -le $Maximum
+}
+
+function Test-Task037JsonArray {
+    param([AllowNull()]$Value)
+
+    return $Value -is [object[]]
 }
 
 function Get-Task037JobProcessCountSnapshot {
@@ -4093,15 +4166,25 @@ function Get-StructuredToolContent {
     param([Parameter(Mandatory = $true)]$Response)
 
     $result = $Response.result
+    if ($result -isnot [pscustomobject]) {
+        throw 'TASK037_TOOL_CONTENT_SHAPE_REJECTED'
+    }
     Assert-Task037ExactPropertySet `
         -Value $result `
         -Expected @('content', 'structuredContent', 'isError') `
         -FailureCode 'TASK037_TOOL_CONTENT_SHAPE_REJECTED'
-    $content = @($result.content)
+    if ($result.content -isnot [object[]]) {
+        throw 'TASK037_TOOL_CONTENT_SHAPE_REJECTED'
+    }
+    $content = $result.content
     if (
         $content.Count -ne 1 -or
-        [string]$content[0].type -ne 'text' -or
-        $null -eq $result.structuredContent
+        $content[0] -isnot [pscustomobject] -or
+        $content[0].type -isnot [string] -or
+        [string]$content[0].type -cne 'text' -or
+        $content[0].text -isnot [string] -or
+        $result.structuredContent -isnot [pscustomobject] -or
+        $result.isError -isnot [bool]
     ) {
         throw 'TASK037_TOOL_CONTENT_SHAPE_REJECTED'
     }
@@ -4109,7 +4192,10 @@ function Get-StructuredToolContent {
         -Value $content[0] `
         -Expected @('text', 'type') `
         -FailureCode 'TASK037_TOOL_CONTENT_SHAPE_REJECTED'
-    $textValue = ConvertFrom-Task037McpJson -Json ([string]$content[0].text)
+    $textValue = ConvertFrom-Task037McpJson -Json $content[0].text
+    if ($textValue -isnot [pscustomobject]) {
+        throw 'TASK037_TOOL_CONTENT_SHAPE_REJECTED'
+    }
     if (
         ($textValue | ConvertTo-Json -Compress -Depth 20) -cne
         ($result.structuredContent | ConvertTo-Json -Compress -Depth 20)
@@ -4322,94 +4408,192 @@ function Assert-FullChainSuccess {
         [Parameter(Mandatory = $true)]$Evidence,
         [Parameter(Mandatory = $true)][string]$RunId,
         [Parameter(Mandatory = $true)][string]$DeliveryRoot,
-        [Parameter(Mandatory = $true)][string]$DeliveryLauncher
+        [Parameter(Mandatory = $true)][string]$DeliveryLauncher,
+        [Parameter(Mandatory = $true)][ref]$ActiveGate,
+        [Parameter(Mandatory = $true)][ref]$LastCompletedGate
     )
 
-    $repositoryPath = Get-CanonicalPath -Path ([string]$Evidence.repository_path)
+    Enter-Task037PhaseGate `
+        -Gate 'success_launcher_binding' `
+        -ActiveGate $ActiveGate `
+        -LastCompletedGate $LastCompletedGate
+    if ($Evidence.launcher_path -isnot [string]) {
+        throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
+    }
+    Assert-Task037TrustedLauncherPath -Actual $Evidence.launcher_path -Expected $DeliveryLauncher
+
+    Enter-Task037PhaseGate `
+        -Gate 'success_delivery_contract' `
+        -ActiveGate $ActiveGate `
+        -LastCompletedGate $LastCompletedGate
+    if ($Evidence.repository_path -isnot [string]) {
+        throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
+    }
+    $repositoryPath = Get-CanonicalPath -Path $Evidence.repository_path
     $expectedRepositoryPath = Get-CanonicalPath -Path (Join-Path $DeliveryRoot 'repo')
-    Assert-Task037TrustedLauncherPath -Actual ([string]$Evidence.launcher_path) -Expected $DeliveryLauncher
     $expectedRequestId = 'task032-request-' + $RunId
-    $changedPaths = @($Evidence.changed_paths)
-    $findings = @($Evidence.hermes_findings)
-    $nextActions = @($Evidence.hermes_next_actions)
+    $deliveryStrings = [ordered]@{
+        status = 'COMPLETED'
+        profile = 'task032-codex-postgres-v1'
+        entrypoint = 'codex-app-mcp'
+        entrypoint_classification = 'official-codex-app-live'
+        entrypoint_runtime_kind = 'Live'
+        request_id = $expectedRequestId
+        codex_runtime = 'OFFICIAL_CODEX_APP_SERVER'
+        version = $officialCodexVersion
+        launcher_sha256 = $officialCodexSha256
+        test = 'FIXED_TEST_PASSED'
+        test_command_id = 'git-diff-no-index-exact-answer-v1'
+    }
+    foreach ($name in @($deliveryStrings.Keys)) {
+        $value = $Evidence.PSObject.Properties[$name].Value
+        if ($value -isnot [string] -or [string]$value -cne [string]$deliveryStrings[$name]) {
+            throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
+        }
+    }
     if (
-        [string]$Evidence.status -ne 'COMPLETED' -or
-        [string]$Evidence.component -notin @('lattice-delivery', 'delivery-ledger') -or
-        [string]$Evidence.profile -ne 'task032-codex-postgres-v1' -or
-        [string]$Evidence.entrypoint -ne 'codex-app-mcp' -or
-        [string]$Evidence.entrypoint_classification -ne 'official-codex-app-live' -or
-        [string]$Evidence.entrypoint_runtime_kind -ne 'Live' -or
-        [string]$Evidence.hermes_status -ne 'INFERENCE_CANDIDATE' -or
-        [string]$Evidence.hermes_schema_version -ne 'lattice.hermes.reflection.v1' -or
-        [string]$Evidence.hermes_provenance_status -ne 'PERSISTED_STRUCTURED_INFERENCE' -or
-        [string]$Evidence.request_id -ne $expectedRequestId -or
-        [string]$Evidence.codex_runtime -ne 'OFFICIAL_CODEX_APP_SERVER' -or
-        [string]$Evidence.version -ne $officialCodexVersion -or
-        [string]$Evidence.launcher_sha256 -cne $officialCodexSha256 -or
-        [int]$Evidence.schema_file_count -le 0 -or
-        $changedPaths.Count -ne 1 -or [string]$changedPaths[0] -cne 'answer.txt' -or
-        [string]$Evidence.test -cne 'FIXED_TEST_PASSED' -or
-        [string]$Evidence.test_command_id -cne 'git-diff-no-index-exact-answer-v1' -or
-        [string]$Evidence.graph_project_id -ne 'task032-delivery' -or
-        [string]$Evidence.graph_status -ne 'COMPLETED' -or
-        [int]$Evidence.graph_record_count -le 0 -or
-        [int]$Evidence.graph_result_count -le 0 -or
-        -not (Test-ExactPath -Actual $repositoryPath -Expected $expectedRepositoryPath) -or
-        [string]$Evidence.configuration_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.intent_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.outcome_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.receipt_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.schema_bundle_sha256 -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.baseline_commit -notmatch '^[0-9a-f]{40}$' -or
-        [string]$Evidence.parent_sha -notmatch '^[0-9a-f]{40}$' -or
-        [string]$Evidence.commit_sha -notmatch '^[0-9a-f]{40}$' -or
-        [string]$Evidence.graph_commit_sha -notmatch '^[0-9a-f]{40}$' -or
-        [string]$Evidence.graph_query_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.graph_analysis_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.graph_persistence_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.graph_retrieval_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.graph_database_identity_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.graph_extension_manifest_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.full_chain_receipt_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.hermes_reflection_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.hermes_identity_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.hermes_input_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.hermes_graph_receipt_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]$Evidence.graph_receipt_digest -notmatch '^[0-9a-f]{64}$' -or
-        [string]::IsNullOrWhiteSpace([string]$Evidence.thread_id) -or
-        [string]::IsNullOrWhiteSpace([string]$Evidence.turn_id) -or
-        ([string]$Evidence.thread_id).Length -gt 256 -or
-        ([string]$Evidence.turn_id).Length -gt 256 -or
-        $findings.Count -lt 1 -or $findings.Count -gt 16 -or
-        $nextActions.Count -lt 1 -or $nextActions.Count -gt 16 -or
-        [string]::IsNullOrWhiteSpace([string]$Evidence.hermes_summary) -or
-        ([string]$Evidence.hermes_summary).Length -gt 8192
+        $Evidence.component -isnot [string] -or
+        @('lattice-delivery', 'delivery-ledger') -cnotcontains [string]$Evidence.component -or
+        -not (Test-Task037JsonInteger -Value $Evidence.schema_file_count -Minimum 1 -Maximum ([int32]::MaxValue)) -or
+        -not (Test-Task037JsonArray -Value $Evidence.changed_paths)
     ) {
         throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
     }
+    $changedPaths = $Evidence.changed_paths
+    if (
+        $changedPaths.Count -ne 1 -or
+        $changedPaths[0] -isnot [string] -or
+        [string]$changedPaths[0] -cne 'answer.txt' -or
+        -not (Test-ExactPath -Actual $repositoryPath -Expected $expectedRepositoryPath)
+    ) {
+        throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
+    }
+
+    Enter-Task037PhaseGate `
+        -Gate 'success_graph_contract' `
+        -ActiveGate $ActiveGate `
+        -LastCompletedGate $LastCompletedGate
+    if (
+        $Evidence.graph_project_id -isnot [string] -or
+        [string]$Evidence.graph_project_id -cne 'task032-delivery' -or
+        $Evidence.graph_status -isnot [string] -or
+        [string]$Evidence.graph_status -cne 'COMPLETED' -or
+        -not (Test-Task037JsonInteger -Value $Evidence.graph_record_count -Minimum 1 -Maximum ([int32]::MaxValue)) -or
+        -not (Test-Task037JsonInteger -Value $Evidence.graph_result_count -Minimum 1 -Maximum ([int32]::MaxValue))
+    ) {
+        throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
+    }
+
+    Enter-Task037PhaseGate `
+        -Gate 'success_hermes_contract' `
+        -ActiveGate $ActiveGate `
+        -LastCompletedGate $LastCompletedGate
+    $hermesStrings = [ordered]@{
+        hermes_status = 'INFERENCE_CANDIDATE'
+        hermes_schema_version = 'lattice.hermes.reflection.v1'
+        hermes_provenance_status = 'PERSISTED_STRUCTURED_INFERENCE'
+    }
+    foreach ($name in @($hermesStrings.Keys)) {
+        $value = $Evidence.PSObject.Properties[$name].Value
+        if ($value -isnot [string] -or [string]$value -cne [string]$hermesStrings[$name]) {
+            throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
+        }
+    }
+    if (
+        $Evidence.thread_id -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($Evidence.thread_id) -or
+        $Evidence.thread_id.Length -gt 256 -or
+        $Evidence.turn_id -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($Evidence.turn_id) -or
+        $Evidence.turn_id.Length -gt 256 -or
+        $Evidence.hermes_summary -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($Evidence.hermes_summary) -or
+        $Evidence.hermes_summary.Length -gt 8192 -or
+        -not (Test-Task037JsonArray -Value $Evidence.hermes_findings) -or
+        -not (Test-Task037JsonArray -Value $Evidence.hermes_next_actions)
+    ) {
+        throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
+    }
+    $findings = $Evidence.hermes_findings
+    $nextActions = $Evidence.hermes_next_actions
+    if (
+        $findings.Count -lt 1 -or $findings.Count -gt 16 -or
+        $nextActions.Count -lt 1 -or $nextActions.Count -gt 16
+    ) {
+        throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
+    }
+
+    Enter-Task037PhaseGate `
+        -Gate 'success_digest_contract' `
+        -ActiveGate $ActiveGate `
+        -LastCompletedGate $LastCompletedGate
+    $sha256Fields = @(
+        'configuration_digest', 'intent_digest', 'outcome_digest', 'receipt_digest',
+        'schema_bundle_sha256', 'graph_query_digest', 'graph_analysis_digest',
+        'graph_persistence_digest', 'graph_retrieval_digest',
+        'graph_database_identity_digest', 'graph_extension_manifest_digest',
+        'full_chain_receipt_digest', 'hermes_reflection_digest', 'hermes_identity_digest',
+        'hermes_input_digest', 'hermes_graph_receipt_digest', 'graph_receipt_digest'
+    )
+    foreach ($name in $sha256Fields) {
+        $value = $Evidence.PSObject.Properties[$name].Value
+        if ($value -isnot [string] -or [string]$value -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
+        }
+    }
+    foreach ($name in @('baseline_commit', 'parent_sha', 'commit_sha', 'graph_commit_sha')) {
+        $value = $Evidence.PSObject.Properties[$name].Value
+        if ($value -isnot [string] -or [string]$value -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
+        }
+    }
+
+    Enter-Task037PhaseGate `
+        -Gate 'success_finding_items' `
+        -ActiveGate $ActiveGate `
+        -LastCompletedGate $LastCompletedGate
     foreach ($finding in $findings) {
+        if ($finding -isnot [pscustomobject]) {
+            throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
+        }
         Assert-Task037ExactPropertySet `
             -Value $finding `
             -Expected @('evidence_digest', 'statement') `
             -FailureCode 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
         if (
-            [string]$finding.evidence_digest -notmatch '^[0-9a-f]{64}$' -or
-            [string]::IsNullOrWhiteSpace([string]$finding.statement) -or
-            ([string]$finding.statement).Length -gt 8192
+            $finding.evidence_digest -isnot [string] -or
+            [string]$finding.evidence_digest -cnotmatch '^[0-9a-f]{64}$' -or
+            $finding.statement -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($finding.statement) -or
+            $finding.statement.Length -gt 8192
         ) {
             throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
         }
     }
+
+    Enter-Task037PhaseGate `
+        -Gate 'success_action_items' `
+        -ActiveGate $ActiveGate `
+        -LastCompletedGate $LastCompletedGate
     foreach ($action in $nextActions) {
-        if ([string]::IsNullOrWhiteSpace([string]$action) -or ([string]$action).Length -gt 8192) {
+        if (
+            $action -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($action) -or
+            $action.Length -gt 8192
+        ) {
             throw 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED'
         }
     }
+
+    Enter-Task037PhaseGate `
+        -Gate 'success_answer_bytes' `
+        -ActiveGate $ActiveGate `
+        -LastCompletedGate $LastCompletedGate
     $answerPath = Join-Path $repositoryPath 'answer.txt'
     Assert-RegularFile -Path $answerPath
     $expectedAnswer = [System.Text.Encoding]::ASCII.GetBytes("LATTICE_DELIVERY_OK`n")
     $answer = [System.IO.File]::ReadAllBytes($answerPath)
-    if ([Convert]::ToBase64String($answer) -ne [Convert]::ToBase64String($expectedAnswer)) {
+    if ([Convert]::ToBase64String($answer) -cne [Convert]::ToBase64String($expectedAnswer)) {
         throw 'TASK037_DELIVERY_ANSWER_BYTES_REJECTED'
     }
 }
@@ -5509,6 +5693,236 @@ finally {
     Assert-Task037TrustedLauncherPath `
         -Actual 'C:\synthetic\trusted\codex.exe' `
         -Expected 'C:\synthetic\trusted\codex.exe'
+
+    $toolFailureCases = @(
+        [pscustomobject]@{ Code = 'LATTICED_CONFIGURATION_REJECTED'; Gate = 'success_tool_error_configuration' },
+        [pscustomobject]@{ Code = 'LATTICE_DELIVERY_FAILED'; Gate = 'success_tool_error_delivery' },
+        [pscustomobject]@{ Code = 'LATTICE_GRAPH_MEMORY_RUN_REJECTED'; Gate = 'success_tool_error_graph' },
+        [pscustomobject]@{ Code = 'LATTICE_HERMES_REFLECTION_REJECTED'; Gate = 'success_tool_error_hermes' },
+        [pscustomobject]@{ Code = 'LATTICED_STDIO_REJECTED'; Gate = 'success_tool_error_transport' },
+        [pscustomobject]@{ Code = 'lattice_hermes_reflection_rejected'; Gate = 'success_tool_error_unclassified' },
+        [pscustomobject]@{ Code = 'TASK037_UNKNOWN_TOOL_FAILURE'; Gate = 'success_tool_error_unclassified' }
+    )
+    foreach ($toolFailureCase in $toolFailureCases) {
+        $toolFailureGate = Get-Task037ToolFailureGate -Code $toolFailureCase.Code
+        if (
+            $toolFailureGate -cne [string]$toolFailureCase.Gate
+        ) {
+            throw 'TASK037_SELF_TEST_TOOL_FAILURE_GATE_REJECTED'
+        }
+        $toolFailureActiveGate = 'phase_meta_projection'
+        $toolFailureLastCompletedGate = 'success_semantics'
+        Enter-Task037PhaseGate `
+            -Gate $toolFailureGate `
+            -ActiveGate ([ref]$toolFailureActiveGate) `
+            -LastCompletedGate ([ref]$toolFailureLastCompletedGate)
+        if (
+            $toolFailureActiveGate -cne [string]$toolFailureCase.Gate -or
+            $toolFailureLastCompletedGate -cne 'phase_meta_projection'
+        ) {
+            throw 'TASK037_SELF_TEST_TOOL_FAILURE_GATE_REJECTED'
+        }
+    }
+    if ((Get-Task037ToolFailureGate -Code $true) -cne 'success_tool_error_unclassified') {
+        throw 'TASK037_SELF_TEST_TOOL_FAILURE_GATE_REJECTED'
+    }
+
+    $structuredPayload = '{"status":"OK"}' | ConvertFrom-Json
+    $structuredText = $structuredPayload | ConvertTo-Json -Compress
+    $structuredContentItem = [pscustomobject]@{ type = 'text'; text = $structuredText }
+    $structuredResponse = [pscustomobject]@{
+        result = [pscustomobject]@{
+            content = [object[]]@($structuredContentItem)
+            structuredContent = $structuredPayload
+            isError = $false
+        }
+    }
+    $parsedStructured = Get-StructuredToolContent -Response $structuredResponse
+    if ($parsedStructured.status -isnot [string] -or [string]$parsedStructured.status -cne 'OK') {
+        throw 'TASK037_SELF_TEST_TOOL_CONTENT_TYPE_REJECTED'
+    }
+    foreach ($invalidStructuredResponse in @(
+        [pscustomobject]@{
+            result = [pscustomobject]@{
+                content = $structuredContentItem
+                structuredContent = $structuredPayload
+                isError = $false
+            }
+        },
+        [pscustomobject]@{
+            result = [pscustomobject]@{
+                content = [object[]]@([pscustomobject]@{ type = 'text'; text = $true })
+                structuredContent = $structuredPayload
+                isError = $false
+            }
+        },
+        [pscustomobject]@{
+            result = [pscustomobject]@{
+                content = [object[]]@($structuredContentItem)
+                structuredContent = $true
+                isError = $false
+            }
+        }
+    )) {
+        $invalidToolContentFailure = $null
+        try { $null = Get-StructuredToolContent -Response $invalidStructuredResponse }
+        catch { $invalidToolContentFailure = $_.Exception.Message }
+        if ($invalidToolContentFailure -cne 'TASK037_TOOL_CONTENT_SHAPE_REJECTED') {
+            throw 'TASK037_SELF_TEST_TOOL_CONTENT_TYPE_REJECTED'
+        }
+    }
+
+    $semanticRoot = Join-Path $tempBase ('lattice-task037-success-semantics-' + [Guid]::NewGuid().ToString('N'))
+    try {
+        $semanticDeliveryRoot = Join-Path $semanticRoot 'delivery'
+        $semanticRepository = Join-Path $semanticDeliveryRoot 'repo'
+        $semanticLauncher = Join-Path $semanticRoot 'codex.exe'
+        New-Item -ItemType Directory -Path $semanticRepository -Force:$false | Out-Null
+        [IO.File]::WriteAllBytes(
+            (Join-Path $semanticRepository 'answer.txt'),
+            [Text.Encoding]::ASCII.GetBytes("LATTICE_DELIVERY_OK`n")
+        )
+        $syntheticSuccess = [pscustomobject][ordered]@{
+            baseline_commit = ('a' * 40)
+            changed_paths = [object[]]@('answer.txt')
+            codex_runtime = 'OFFICIAL_CODEX_APP_SERVER'
+            commit_sha = ('b' * 40)
+            component = 'lattice-delivery'
+            configuration_digest = ('a' * 64)
+            entrypoint = 'codex-app-mcp'
+            entrypoint_classification = 'official-codex-app-live'
+            entrypoint_runtime_kind = 'Live'
+            full_chain_receipt_digest = ('b' * 64)
+            graph_analysis_digest = ('c' * 64)
+            graph_commit_sha = ('c' * 40)
+            graph_database_identity_digest = ('d' * 64)
+            graph_extension_manifest_digest = ('e' * 64)
+            graph_persistence_digest = ('f' * 64)
+            graph_project_id = 'task032-delivery'
+            graph_query_digest = ('1' * 64)
+            graph_receipt_digest = ('2' * 64)
+            graph_record_count = [int32]1
+            graph_result_count = [int32]1
+            graph_retrieval_digest = ('3' * 64)
+            graph_status = 'COMPLETED'
+            hermes_findings = [object[]]@([pscustomobject]@{
+                evidence_digest = ('4' * 64)
+                statement = 'bounded finding'
+            })
+            hermes_graph_receipt_digest = ('5' * 64)
+            hermes_identity_digest = ('6' * 64)
+            hermes_input_digest = ('7' * 64)
+            hermes_next_actions = [object[]]@('bounded action')
+            hermes_provenance_status = 'PERSISTED_STRUCTURED_INFERENCE'
+            hermes_reflection_digest = ('8' * 64)
+            hermes_schema_version = 'lattice.hermes.reflection.v1'
+            hermes_status = 'INFERENCE_CANDIDATE'
+            hermes_summary = 'bounded summary'
+            intent_digest = ('9' * 64)
+            launcher_path = $semanticLauncher
+            launcher_sha256 = $officialCodexSha256
+            outcome_digest = ('a' * 64)
+            parent_sha = ('d' * 40)
+            profile = 'task032-codex-postgres-v1'
+            receipt_digest = ('b' * 64)
+            repository_path = $semanticRepository
+            request_id = 'task032-request-synthetic'
+            schema_bundle_sha256 = ('c' * 64)
+            schema_file_count = [int32]1
+            status = 'COMPLETED'
+            test = 'FIXED_TEST_PASSED'
+            test_command_id = 'git-diff-no-index-exact-answer-v1'
+            thread_id = 'synthetic-thread'
+            turn_id = 'synthetic-turn'
+            version = $officialCodexVersion
+        }
+        $semanticActiveGate = 'success_tool_result'
+        $semanticLastCompletedGate = 'phase_meta_projection'
+        Assert-FullChainSuccess `
+            -Evidence $syntheticSuccess `
+            -RunId 'synthetic' `
+            -DeliveryRoot $semanticDeliveryRoot `
+            -DeliveryLauncher $semanticLauncher `
+            -ActiveGate ([ref]$semanticActiveGate) `
+            -LastCompletedGate ([ref]$semanticLastCompletedGate)
+        if (
+            $semanticActiveGate -cne 'success_answer_bytes' -or
+            $semanticLastCompletedGate -cne 'success_action_items'
+        ) {
+            throw 'TASK037_SELF_TEST_SUCCESS_SEMANTICS_REJECTED'
+        }
+
+        $successSemanticCases = @(
+            [pscustomobject]@{ Gate = 'success_launcher_binding'; Last = 'success_tool_result'; Mutate = { param($e) $e.launcher_path = 'C:\synthetic\wrong.exe' } },
+            [pscustomobject]@{ Gate = 'success_delivery_contract'; Last = 'success_launcher_binding'; Mutate = { param($e) $e.status = 'completed' } },
+            [pscustomobject]@{ Gate = 'success_delivery_contract'; Last = 'success_launcher_binding'; Mutate = { param($e) $e.schema_file_count = $true } },
+            [pscustomobject]@{ Gate = 'success_delivery_contract'; Last = 'success_launcher_binding'; Mutate = { param($e) $e.schema_file_count = '1' } },
+            [pscustomobject]@{ Gate = 'success_delivery_contract'; Last = 'success_launcher_binding'; Mutate = { param($e) $e.schema_file_count = 0.6 } },
+            [pscustomobject]@{ Gate = 'success_delivery_contract'; Last = 'success_launcher_binding'; Mutate = { param($e) $e.changed_paths = 'answer.txt' } },
+            [pscustomobject]@{ Gate = 'success_graph_contract'; Last = 'success_delivery_contract'; Mutate = { param($e) $e.graph_record_count = '1' } },
+            [pscustomobject]@{ Gate = 'success_hermes_contract'; Last = 'success_graph_contract'; Mutate = { param($e) $e.hermes_status = 'inference_candidate' } },
+            [pscustomobject]@{ Gate = 'success_hermes_contract'; Last = 'success_graph_contract'; Mutate = { param($e) $e.thread_id = $true } },
+            [pscustomobject]@{ Gate = 'success_hermes_contract'; Last = 'success_graph_contract'; Mutate = { param($e) $e.hermes_findings = $e.hermes_findings[0] } },
+            [pscustomobject]@{ Gate = 'success_hermes_contract'; Last = 'success_graph_contract'; Mutate = { param($e) $e.hermes_next_actions = 'bounded action' } },
+            [pscustomobject]@{ Gate = 'success_digest_contract'; Last = 'success_hermes_contract'; Mutate = { param($e) $e.configuration_digest = ('A' * 64) } },
+            [pscustomobject]@{ Gate = 'success_finding_items'; Last = 'success_digest_contract'; Mutate = { param($e) $e.hermes_findings[0].statement = $true } },
+            [pscustomobject]@{ Gate = 'success_action_items'; Last = 'success_finding_items'; Mutate = { param($e) $e.hermes_next_actions[0] = $true } }
+        )
+        foreach ($semanticCase in $successSemanticCases) {
+            $caseEvidence = ($syntheticSuccess | ConvertTo-Json -Compress -Depth 20) | ConvertFrom-Json
+            & $semanticCase.Mutate $caseEvidence
+            $caseActiveGate = 'success_tool_result'
+            $caseLastCompletedGate = 'phase_meta_projection'
+            $caseFailure = $null
+            try {
+                Assert-FullChainSuccess `
+                    -Evidence $caseEvidence `
+                    -RunId 'synthetic' `
+                    -DeliveryRoot $semanticDeliveryRoot `
+                    -DeliveryLauncher $semanticLauncher `
+                    -ActiveGate ([ref]$caseActiveGate) `
+                    -LastCompletedGate ([ref]$caseLastCompletedGate)
+            }
+            catch { $caseFailure = $_.Exception.Message }
+            if (
+                $caseFailure -cne 'TASK037_FULL_CHAIN_EVIDENCE_REJECTED' -or
+                $caseActiveGate -cne [string]$semanticCase.Gate -or
+                $caseLastCompletedGate -cne [string]$semanticCase.Last
+            ) {
+                throw 'TASK037_SELF_TEST_SUCCESS_SEMANTICS_REJECTED'
+            }
+        }
+
+        [IO.File]::WriteAllBytes(
+            (Join-Path $semanticRepository 'answer.txt'),
+            [Text.Encoding]::ASCII.GetBytes("WRONG`n")
+        )
+        $answerActiveGate = 'success_tool_result'
+        $answerLastCompletedGate = 'phase_meta_projection'
+        $answerFailure = $null
+        try {
+            Assert-FullChainSuccess `
+                -Evidence $syntheticSuccess `
+                -RunId 'synthetic' `
+                -DeliveryRoot $semanticDeliveryRoot `
+                -DeliveryLauncher $semanticLauncher `
+                -ActiveGate ([ref]$answerActiveGate) `
+                -LastCompletedGate ([ref]$answerLastCompletedGate)
+        }
+        catch { $answerFailure = $_.Exception.Message }
+        if (
+            $answerFailure -cne 'TASK037_DELIVERY_ANSWER_BYTES_REJECTED' -or
+            $answerActiveGate -cne 'success_answer_bytes' -or
+            $answerLastCompletedGate -cne 'success_action_items'
+        ) {
+            throw 'TASK037_SELF_TEST_SUCCESS_SEMANTICS_REJECTED'
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $semanticRoot) {
+            Remove-SafeTempRoot -Path $semanticRoot | Out-Null
+        }
+    }
 
     $monitorRoot = Join-Path $tempBase ('lattice-task037-source-monitor-' + [Guid]::NewGuid().ToString('N'))
     try {
@@ -6789,7 +7203,26 @@ function Invoke-FullChainInternalPhase {
             -Gate $(if ($expectError) { 'pre_status_semantics' } else { 'success_semantics' }) `
             -ActiveGate ([ref]$activeGate) `
             -LastCompletedGate ([ref]$lastCompletedGate)
-        $toolCode = if ($null -ne $structured.PSObject.Properties['code']) { [string]$structured.code } else { $null }
+        $toolCodeValue = if ($null -ne $structured.PSObject.Properties['code']) { $structured.code } else { $null }
+        $toolCode = if ($toolCodeValue -is [string]) { [string]$toolCodeValue } else { $null }
+        if (
+            $expectError -and (
+                -not $toolIsError -or
+                $structured.status -isnot [string] -or
+                [string]$structured.status -cne 'ERROR' -or
+                $toolCodeValue -isnot [string] -or
+                @(
+                    'LATTICE_DELIVERY_RECONCILIATION_REQUIRED',
+                    'LATTICE_HERMES_MEMORY_RECEIPT_REJECTED'
+                ) -cnotcontains [string]$toolCodeValue
+            )
+        ) {
+            throw 'TASK037_PRE_STATUS_FAIL_CLOSED_REJECTED'
+        }
+        Enter-Task037PhaseGate `
+            -Gate 'phase_meta_projection' `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         $meta = [ordered]@{
             schema_version = 'lattice.task037.phase-meta.v1'
             acceptance_id = $acceptanceId
@@ -6822,9 +7255,6 @@ function Invoke-FullChainInternalPhase {
             }
         }
         if ($expectError) {
-            if (-not $toolIsError -or [string]$structured.status -ne 'ERROR' -or $toolCode -notin @('LATTICE_DELIVERY_RECONCILIATION_REQUIRED', 'LATTICE_HERMES_MEMORY_RECEIPT_REJECTED')) {
-                throw 'TASK037_PRE_STATUS_FAIL_CLOSED_REJECTED'
-            }
             Enter-Task037PhaseGate `
                 -Gate 'memory_empty' `
                 -ActiveGate ([ref]$activeGate) `
@@ -6856,13 +7286,24 @@ function Invoke-FullChainInternalPhase {
             return
         }
         if ($toolIsError) {
+            $toolFailureGate = Get-Task037ToolFailureGate -Code $toolCodeValue
+            Enter-Task037PhaseGate `
+                -Gate $toolFailureGate `
+                -ActiveGate ([ref]$activeGate) `
+                -LastCompletedGate ([ref]$lastCompletedGate)
             throw ('TASK037_' + $Phase.ToUpperInvariant() + '_TOOL_ERROR')
         }
+        Enter-Task037PhaseGate `
+            -Gate 'success_tool_result' `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         Assert-FullChainSuccess `
             -Evidence $structured `
             -RunId $runId `
             -DeliveryRoot $deliveryRoot `
-            -DeliveryLauncher $deliveryLauncher
+            -DeliveryLauncher $deliveryLauncher `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
         Enter-Task037PhaseGate `
             -Gate 'memory_expected' `
             -ActiveGate ([ref]$activeGate) `

@@ -129,6 +129,28 @@ foreach ($required in @(
     "'openclaw_liveness'",
     "'job_cardinality'",
     "'child_exit_success'",
+    "'phase_meta_projection'",
+    "'success_tool_result'",
+    "'success_tool_error_configuration'",
+    "'success_tool_error_delivery'",
+    "'success_tool_error_graph'",
+    "'success_tool_error_hermes'",
+    "'success_tool_error_transport'",
+    "'success_tool_error_unclassified'",
+    "'success_launcher_binding'",
+    "'success_delivery_contract'",
+    "'success_graph_contract'",
+    "'success_hermes_contract'",
+    "'success_digest_contract'",
+    "'success_finding_items'",
+    "'success_action_items'",
+    "'success_answer_bytes'",
+    'Get-Task037ToolFailureGate',
+    'Test-Task037JsonInteger',
+    'Test-Task037JsonArray',
+    '$result.content -isnot [object[]]',
+    'TASK037_SELF_TEST_TOOL_CONTENT_TYPE_REJECTED',
+    'TASK037_SELF_TEST_SUCCESS_SEMANTICS_REJECTED',
     'Release-Task037ExitedProcessHandles',
     'Wait-Task037JobProcessBaseline',
     'Get-Task037JobProcessCountSnapshot',
@@ -180,6 +202,63 @@ foreach ($fragment in @(
 }
 if ($source.IndexOf('Start-Process -FilePath $fullChainExe', [StringComparison]::Ordinal) -ge 0) {
     throw 'TASK037_CONTAINMENT_DIRECT_FULL_CHAIN_START_REJECTED'
+}
+
+$successCallStart = $source.LastIndexOf(
+    '$toolCodeValue = if (',
+    [StringComparison]::Ordinal
+)
+$successCallCursor = $successCallStart
+foreach ($fragment in @(
+    "-Gate 'phase_meta_projection'",
+    'Get-Task037ToolFailureGate -Code $toolCodeValue',
+    '-Gate $toolFailureGate',
+    "throw ('TASK037_' + `$Phase.ToUpperInvariant() + '_TOOL_ERROR')",
+    "-Gate 'success_tool_result'",
+    'Assert-FullChainSuccess',
+    "-Gate 'memory_expected'"
+)) {
+    if ($successCallCursor -lt 0) {
+        throw 'TASK037_CONTAINMENT_SUCCESS_CALL_ORDER_REJECTED'
+    }
+    $successCallCursor = $source.IndexOf(
+        $fragment,
+        $successCallCursor,
+        [StringComparison]::Ordinal
+    )
+    if ($successCallCursor -lt 0) {
+        throw 'TASK037_CONTAINMENT_SUCCESS_CALL_ORDER_REJECTED'
+    }
+    $successCallCursor += $fragment.Length
+}
+
+$successFunctionStart = $source.IndexOf(
+    'function Assert-FullChainSuccess {',
+    [StringComparison]::Ordinal
+)
+$successFunctionCursor = $successFunctionStart
+foreach ($fragment in @(
+    "-Gate 'success_launcher_binding'",
+    "-Gate 'success_delivery_contract'",
+    "-Gate 'success_graph_contract'",
+    "-Gate 'success_hermes_contract'",
+    "-Gate 'success_digest_contract'",
+    "-Gate 'success_finding_items'",
+    "-Gate 'success_action_items'",
+    "-Gate 'success_answer_bytes'"
+)) {
+    if ($successFunctionCursor -lt 0) {
+        throw 'TASK037_CONTAINMENT_SUCCESS_GATE_ORDER_REJECTED'
+    }
+    $successFunctionCursor = $source.IndexOf(
+        $fragment,
+        $successFunctionCursor,
+        [StringComparison]::Ordinal
+    )
+    if ($successFunctionCursor -lt 0) {
+        throw 'TASK037_CONTAINMENT_SUCCESS_GATE_ORDER_REJECTED'
+    }
+    $successFunctionCursor += $fragment.Length
 }
 if ($source.IndexOf("Get-Command 'cargo.exe'", [StringComparison]::Ordinal) -ge 0) {
     throw 'TASK037_CONTAINMENT_AMBIENT_CARGO_LOOKUP_REJECTED'
