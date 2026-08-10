@@ -1227,7 +1227,7 @@ packaging modules do not activate functional provider modules.
   harness, 432 Rust tests, 44 Node tests, strict format/Clippy, 109-dependency
   RustSec audit, independent code/security and architecture reviews, and local
   integration all pass.
-- [ ] AC-36: Project Registry 1.2 exposes one zero-I/O, runtime-aware vacant/
+- [x] AC-36: Project Registry 1.2 exposes one zero-I/O, runtime-aware vacant/
   plan/apply/export/verify boundary shared by Fake and PostgreSQL. Vacant
   checkpoint high-water is `0`; first-seen command records are exactly `1..N`.
   Every first-seen terminal `Denied`, `Blocked`, applied mutation, or exact

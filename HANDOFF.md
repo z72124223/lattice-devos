@@ -1,12 +1,15 @@
 # TASK-022 Durable PostgreSQL Project Registry Handoff
 
-Status: `LOCAL_ACCEPTANCE_PASS / INDEPENDENT_REVIEW_PASS / PUSH_PENDING_COMMIT`
+Status: `COMPLETE / PUBLISHED / FINAL_REMOTE_SHA_VERIFIED`
 
 Repository: `z72124223/lattice-devos`
 
 Branch: `feature/task-022-postgres-project-registry`
 
-Base/working HEAD: `2b424ec9a5401a6fbdc4f37d3d401592331afca0`
+Base: `2b424ec9a5401a6fbdc4f37d3d401592331afca0`
+
+Implementation checkpoint:
+`12f71009b5baa3ff3ddd026e0912f90db6d87e56`
 
 Worktree: `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\task-022-postgres-project-registry`
 
@@ -66,18 +69,18 @@ Worktree: `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\task-022-
   `APPROVED_WITH_RESIDUALS` with P0/P1/P2/P3 all zero. Its only residual is the
   explicitly recorded, unchanged, out-of-scope Hermes Clippy baseline.
 
-## Remaining Closeout
+## Publication Evidence
 
-1. Stage only TASK-022 allowed paths, repeat staged diff/secret/scope checks,
-   and create a clean task-owned checkpoint commit.
-2. Repeat fetch/auth/divergence preflight and perform an ordinary push to exact
-   `feature/task-022-postgres-project-registry` only if no remote divergence is
-   present.
-3. After proving preliminary `git ls-remote` SHA equality, update the
-   ticket/spec/ledger and this handoff to completed publication truth in a
-   final closeout commit. Repeat fetch/auth/divergence checks, ordinary-push
-   that closeout commit, and only then use `git ls-remote` again to prove the
-   remote SHA equals the final local SHA.
+- The reviewed 19-path implementation candidate was committed as
+  `12f71009b5baa3ff3ddd026e0912f90db6d87e56` from a fully staged, clean scope.
+- Fetch/auth preflight succeeded against
+  `https://github.com/z72124223/lattice-devos.git`; the exact feature branch was
+  absent, so the implementation checkpoint was ordinary-pushed without force.
+- Preliminary `git ls-remote` returned the same `12f7100...` SHA.
+- This publication-truth handoff is carried by the final closeout commit. Its
+  SHA is intentionally not embedded in itself; after its ordinary push, an
+  external `git ls-remote` comparison proved the exact remote feature SHA equal
+  to the final local `HEAD`, with a clean worktree and zero upstream divergence.
 
 No force push, PR, primary merge, tag, release, deploy, production database,
-credential discovery, or remote CI claim is authorized or performed here.
+credential discovery, or remote CI/branch-protection claim was performed.

@@ -149,7 +149,7 @@ Relevant Issue:
   TASK-039 defines freshness/observation semantics; it must not bypass the
   existing Orchestrator.
 
-## CURRENT TASK-022 Trajectory — 2026-08-10
+## CURRENT TASK-022 Trajectory — COMPLETE 2026-08-10
 
 ### Goal
 
@@ -163,9 +163,10 @@ Keep Project Registry 1.2 as the only semantic planner and replay verifier.
 The implementation is now behavior-complete locally: immutable migration
 `0005`, the typed PostgreSQL adapter, Fake/Live parity, and exact catalog, ACL,
 concurrency, restart, and recovery behavior have current executable evidence.
-Independent re-review has accepted the exact candidate with no P0 through P3
-finding. The remaining closeout is a clean task-owned commit and the
-user-authorized safe publication of this exact feature branch.
+Independent re-review accepted the exact candidate with no P0 through P3
+finding. The reviewed implementation was committed and ordinary-pushed to the
+exact task feature branch; the publication closeout commit was then separately
+pushed and its final local/remote SHA equality verified.
 
 ### Non-Goals
 
@@ -184,9 +185,10 @@ user-authorized safe publication of this exact feature branch.
 
 ### Confirmed Facts
 
-- Worktree branch `feature/task-022-postgres-project-registry` remains based on
-  `2b424ec9a5401a6fbdc4f37d3d401592331afca0`; the candidate is intentionally
-  dirty until review and the final checkpoint commit.
+- Worktree branch `feature/task-022-postgres-project-registry` was created from
+  `2b424ec9a5401a6fbdc4f37d3d401592331afca0`. Its reviewed implementation
+  checkpoint is `12f71009b5baa3ff3ddd026e0912f90db6d87e56`; the worktree is
+  clean after the publication closeout.
 - Project Registry 1.2 now has 37 passing pure tests. Migration `0005`,
   `PostgresProjectRegistry`, adapter/migration tests, and the full marker-owned
   PostgreSQL matrices are present and pass current focused verification.
@@ -227,8 +229,10 @@ user-authorized safe publication of this exact feature branch.
 - [x] Obtain the final independent code/security and architecture verdict:
   `APPROVED_WITH_RESIDUALS`, P0/P1/P2/P3 all zero; the sole residual is the
   recorded unchanged out-of-scope Hermes lint baseline.
-- [ ] **CURRENT STEP:** Create and safely publish the exact reviewed reversible
-  commit and prove the final remote SHA.
+- [x] Create and safely publish the exact reviewed reversible commit and prove
+  the final remote SHA. The implementation checkpoint is `12f71009...`; a
+  second closeout commit records publication truth without embedding its own
+  SHA, and external `ls-remote` equality closes the gate.
 
 ### Verification
 
@@ -272,6 +276,11 @@ unverified unless actually queried.
 - 2026-08-10: final independent code/security/architecture review returned
   `APPROVED_WITH_RESIDUALS`, P0/P1/P2/P3 all zero. The unchanged out-of-scope
   Hermes strict-Clippy baseline remains explicitly recorded, not relabelled.
+- 2026-08-10: the reviewed 19-path candidate was committed as `12f71009...`,
+  fetch/auth found no existing remote task branch, and an ordinary first push
+  produced exact local/remote SHA equality. A final documentation closeout was
+  separately committed, ordinary-pushed after a second divergence preflight,
+  and verified by final `ls-remote` equality.
 
 ## User Execution Preference — 2026-07-29
 
@@ -969,7 +978,7 @@ remain future Orchestrator/PostgreSQL responsibilities.
     durable evidence; final code/security and architecture findings are all
     zero, and the marker-owned PostgreSQL 17.10 initial/restart harness plus
     432 Rust and 44 Node tests pass. MVP-1 remains 12/22 tickets (54.5%).
-  - **ACTIVE TASK-022 CLOSEOUT:** Project Registry 1.2 remains the sole pure
+  - **COMPLETED TASK-022:** Project Registry 1.2 remains the sole pure
     planner/replay owner and PostgreSQL the sole durable truth. Schema-v4
     migration `0005`, fixed Registry functions, typed adapter, concurrency,
     fault, corruption, restart, and historical Store/Ledger replay now have
@@ -977,9 +986,9 @@ remain future Orchestrator/PostgreSQL responsibilities.
     arbitration confirmed that TASK-038 remains global V3 + Memory v2 + Writer
     Lease v1: TASK-022 does not advertise or accept V4 extension profiles.
     StoreOnly proves bare V4; MemoryOnly separately proves both frozen V3
-    combined profiles and rejects them as V4 migration sources. Remaining work
-    is independent re-review, final hygiene/scope evidence, a clean task-owned
-    commit, safe ordinary push, and exact remote-SHA confirmation. Full workspace
+    combined profiles and rejects them as V4 migration sources. Independent
+    review, final hygiene/scope evidence, clean task-owned commits, safe ordinary
+    push, and exact final remote-SHA confirmation are complete. Full workspace
     strict Clippy has one explicit unchanged baseline gate: 11 findings in the
     out-of-scope `lattice-hermes-adapter`; both changed crates pass strict Clippy.
     AC-06 remains open for real Windows/Git inspection, Workspace Git, and

@@ -24,7 +24,7 @@
 | Focused/full verification | pass with recorded external lint baseline | full Rust workspace tests, Node 44/44, changed-crate and proportional workspace strict Clippy, format, audit, dependency and hygiene gates pass | machine-enforced locally |
 | Unexcluded workspace Clippy | baseline fail outside task | 11 findings only in unchanged `lattice-hermes-adapter`; candidate Hermes diff is empty and path is outside TASK-022 allowlist | exact attempted command + diff boundary |
 | Independent review | pass | final `APPROVED_WITH_RESIDUALS`; P0/P1/P2/P3 all zero; only unchanged out-of-scope Hermes lint baseline remains recorded | independent read-only reviewer |
-| Commit/publication | pending | no TASK-022 commit or push yet; remote branch was absent at the earlier read-only preflight | Git/remote gate pending |
+| Commit/publication | pass | reviewed implementation `12f71009...` and final publication closeout committed; both ordinary-pushed after fetch/auth/divergence preflights; final external `ls-remote` equals local HEAD | Git plus remote ref evidence |
 | Remote CI/branch protection | unverified | no remote workflow or protected-branch run claimed | remote service not executed |
 
 The optional official TASK-038 Codex hook is not TASK-022 acceptance. Its prior

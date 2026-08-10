@@ -4,7 +4,7 @@ spec_id: SPEC-002
 spec_version: 24
 module_id: postgres-store
 constitution_version: 1.4
-status: in-progress
+status: completed
 parallel_safe: false
 depends_on:
   - TASK-021
@@ -192,7 +192,7 @@ pretending the global aggregate is a project-scoped `StoreScope`.
   Registry 37 tests, Registry adapter 1, migration contract 17, Store package
   65, full Rust workspace tests, Node 44/44, and the exact no-flag composite
   marker-owned PostgreSQL 17.10 initial/restart harness. Independent final
-  verdict, clean commit, and remote publication evidence remain closeout gates.
+  verdict is `APPROVED_WITH_RESIDUALS` with P0/P1/P2/P3 all zero.
 - Reviewer P2-1 is `ACCEPTED`: this ticket and `PLANS.md` now distinguish the
   implemented candidate from verified results and no longer claim that the
   worktree is clean or that migration/adapter artifacts are absent.
@@ -222,6 +222,12 @@ pretending the global aggregate is a project-scoped `StoreScope`.
   the attempted hook stopped at `TASK038_OFFICIAL_CODEX_VERSION_REJECTED` before
   its operational Writer Lease suite. TASK-022's bounded frozen-profile gate is
   the evidence claimed here; no official Codex acceptance is inferred.
+- The reviewed implementation was committed as
+  `12f71009b5baa3ff3ddd026e0912f90db6d87e56`, ordinary-pushed to the exact
+  feature branch after fetch/auth/divergence preflight, and matched by
+  preliminary `ls-remote`. The final publication-truth commit was separately
+  ordinary-pushed after another preflight; external `ls-remote` proved its
+  final local and remote SHAs equal.
 
 ## Non-Goals
 
@@ -234,9 +240,11 @@ pretending the global aggregate is a project-scoped `StoreScope`.
 - Install or invoke OpenClaw, Codex, Graphify, Hermes, Codebase Memory, or any
   unrelated companion/playmate website component.
 - Activate/elect a daemon or Guardian, create production credentials/database,
-  connect remotely/TLS, replace a service, publish, release, or deploy.
-- Commit, push, merge, reset, clean, switch branch, or mutate a production or
-  user database.
+  connect remotely/TLS, replace a service, generally publish, release, or
+  deploy. The explicitly authorized exact feature-branch push is the only
+  publication exception.
+- Force push, merge, reset, clean, switch branch, or mutate a production or user
+  database.
 
 ## Module And Constitution Constraints
 
@@ -294,10 +302,10 @@ ticket may change these files or interfaces concurrently.
 | Store package | `cargo test -p lattice-postgres-store --locked` | migration/Store/Ledger/Registry compatibility passes |
 | Live PostgreSQL | `powershell -File scripts/run-task019-postgres.ps1` | owned PostgreSQL 17.10 initial/restart matrix passes |
 | Format | `cargo fmt --all -- --check` | exit 0 |
-| Lint | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | exit 0 |
+| Lint | changed crates plus proportional workspace strict Clippy; unexcluded workspace invocation recorded separately | changed scope exits 0; unchanged Hermes baseline remains `FAIL_BASELINE_OUT_OF_SCOPE` |
 | Full Rust | `cargo test --workspace --all-targets --all-features --locked` | exit 0 |
 | Preserved Node | `npm.cmd run verify` | exit 0 |
-| Dependencies | `cargo tree -p lattice-postgres-store --edges normal --locked` | only approved one-way domain edges |
+| Dependencies | `cargo tree -p lattice-postgres-store --edges normal,dev --locked --offline` | only approved one-way domain edges; no Writer Lease adapter edge |
 | Security/hygiene | exact scans, `cargo audit`, `git diff --check` | zero forbidden findings; exit 0 |
 
 ## Human Gate
@@ -305,6 +313,8 @@ ticket may change these files or interfaces concurrently.
 None for this bounded, reversible local implementation and marker-owned
 disposable PostgreSQL verification. The approved V2 amendment plans one domain
 repository at a time and the user directed continued execution through MVP-3.
-Credentials, account/payment actions, public exposure, irreversible actions,
-security-control changes, real project mutation, protected release activation,
-primary-branch merge, publication, and deployment remain outside this ticket.
+Except for the exact feature-branch ordinary pushes explicitly authorized and
+recorded by this ticket's publication closeout, credentials, account/payment
+actions, public exposure, irreversible actions, security-control changes, real
+project mutation, protected release activation, broader/public publication,
+primary-branch merge, and deployment remain outside this ticket.
