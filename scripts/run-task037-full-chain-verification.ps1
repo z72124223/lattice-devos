@@ -4,7 +4,9 @@ param(
     [string]$InternalPhase,
     [string]$CodexAuthHome,
     [switch]$HarnessSelfTest,
-    [switch]$InternalController
+    [switch]$InternalController,
+    [switch]$InternalAdmissionProbe,
+    [switch]$HarnessPublicFailureProbe
 )
 
 Set-StrictMode -Version Latest
@@ -47,6 +49,13 @@ $codexMarkerBytes = [System.Text.Encoding]::UTF8.GetBytes("lattice.codex-home.v1
 $postgresBin = 'C:\Program Files\PostgreSQL\17\bin'
 $task037MaxEvidenceFileBytes = 1048576
 $script:Task037KnownSecrets = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$script:Task037AdmissionStages = @(
+    'recovery_preflight',
+    'supervision_create',
+    'gated_controller_start',
+    'supervisor_binding',
+    'inner_pre_acceptance'
+)
 
 function Get-CanonicalPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -1056,13 +1065,57 @@ function Close-Task037Job {
     }
 }
 
+function Get-Task037TrustedTempBase {
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        throw 'TASK037_RECOVERY_SCOPE_REJECTED'
+    }
+    $base = Get-CanonicalPath -Path (Join-Path $localAppData 'Temp')
+    Assert-NoReparsePath -Path $base -FailureCode 'TASK037_RECOVERY_SCOPE_REJECTED'
+    $item = Get-Item -LiteralPath $base -Force -ErrorAction SilentlyContinue
+    if (
+        $null -eq $item -or
+        -not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+    ) {
+        throw 'TASK037_RECOVERY_SCOPE_REJECTED'
+    }
+    return $base
+}
+
 function Get-Task037SupervisedTempRoot {
-    param([Parameter(Mandatory = $true)][string]$AcceptanceId)
+    param(
+        [Parameter(Mandatory = $true)][string]$AcceptanceId,
+        [string]$TempBase
+    )
 
     if ($AcceptanceId -notmatch '^[0-9a-f]{32}$') {
         throw 'TASK037_RECOVERY_BINDING_REJECTED'
     }
-    return Get-CanonicalPath -Path (Join-Path ([IO.Path]::GetTempPath()) ('lattice-task037-' + $AcceptanceId))
+    $trustedBase = Get-Task037TrustedTempBase
+    $base = if ([string]::IsNullOrWhiteSpace($TempBase)) {
+        $trustedBase
+    }
+    else {
+        Get-CanonicalPath -Path $TempBase
+    }
+    if (-not (Test-ExactPath -Actual $base -Expected $trustedBase)) {
+        throw 'TASK037_RECOVERY_SCOPE_REJECTED'
+    }
+    return Get-Task037BoundTempRoot -AcceptanceId $AcceptanceId -TempBase $base
+}
+
+function Get-Task037BoundTempRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$AcceptanceId,
+        [Parameter(Mandatory = $true)][string]$TempBase
+    )
+
+    if ($AcceptanceId -notmatch '^[0-9a-f]{32}$') {
+        throw 'TASK037_RECOVERY_BINDING_REJECTED'
+    }
+    $base = Get-CanonicalPath -Path $TempBase
+    return Get-CanonicalPath -Path (Join-Path $base ('lattice-task037-' + $AcceptanceId))
 }
 
 function Get-Task037RecoveryManifestPath {
@@ -1075,6 +1128,176 @@ function Get-Task037RecoveryManifestPath {
         throw 'TASK037_RECOVERY_BINDING_REJECTED'
     }
     return Join-Path (Join-Path $RepositoryTarget 'full-chain-recovery') ($AcceptanceId + '.json')
+}
+
+function Get-Task037AdmissionReceiptPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryTarget,
+        [Parameter(Mandatory = $true)][string]$AcceptanceId
+    )
+
+    if ($AcceptanceId -notmatch '^[0-9a-f]{32}$') {
+        throw 'TASK037_ADMISSION_RECEIPT_REJECTED'
+    }
+    return Join-Path (Join-Path $RepositoryTarget 'full-chain-admission') ($AcceptanceId + '.json')
+}
+
+function ConvertFrom-Task037AdmissionTimestamp {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    try {
+        $parsed = [DateTimeOffset]::ParseExact(
+            $Value,
+            'O',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::None
+        )
+    }
+    catch {
+        throw 'TASK037_ADMISSION_RECEIPT_REJECTED'
+    }
+    if (
+        $parsed.Offset -ne [TimeSpan]::Zero -or
+        $parsed.ToString('O', [Globalization.CultureInfo]::InvariantCulture) -cne $Value
+    ) {
+        throw 'TASK037_ADMISSION_RECEIPT_REJECTED'
+    }
+    return $parsed
+}
+
+function Read-Task037AdmissionStageReceipt {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$AcceptanceId
+    )
+
+    Assert-RegularFile -Path $Path
+    if ((Get-Item -LiteralPath $Path).Length -gt 4096) {
+        throw 'TASK037_ADMISSION_RECEIPT_REJECTED'
+    }
+    try { $receipt = Read-JsonEvidence -Path $Path }
+    catch { throw 'TASK037_ADMISSION_RECEIPT_REJECTED' }
+    Assert-Task037ExactPropertySet `
+        -Value $receipt `
+        -Expected @('acceptance_id', 'class', 'observed_at_utc', 'stage', 'started_at_utc') `
+        -FailureCode 'TASK037_ADMISSION_RECEIPT_REJECTED'
+    $stage = [string]$receipt.stage
+    $started = ConvertFrom-Task037AdmissionTimestamp -Value ([string]$receipt.started_at_utc)
+    $observed = ConvertFrom-Task037AdmissionTimestamp -Value ([string]$receipt.observed_at_utc)
+    if (
+        [string]$receipt.acceptance_id -cne $AcceptanceId -or
+        [string]$receipt.class -cne 'lattice.task037.admission-stage.v1' -or
+        [Array]::IndexOf($script:Task037AdmissionStages, $stage) -lt 0 -or
+        $observed -lt $started
+    ) {
+        throw 'TASK037_ADMISSION_RECEIPT_REJECTED'
+    }
+    return $receipt
+}
+
+function Write-Task037AdmissionStageReceipt {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryTarget,
+        [Parameter(Mandatory = $true)][string]$AcceptanceId,
+        [Parameter(Mandatory = $true)][string]$StartedAtUtc,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet(
+            'recovery_preflight',
+            'supervision_create',
+            'gated_controller_start',
+            'supervisor_binding',
+            'inner_pre_acceptance'
+        )]
+        [string]$Stage
+    )
+
+    $null = ConvertFrom-Task037AdmissionTimestamp -Value $StartedAtUtc
+    $path = Get-Task037AdmissionReceiptPath `
+        -RepositoryTarget $RepositoryTarget `
+        -AcceptanceId $AcceptanceId
+    $parent = Split-Path -Parent $path
+    if (-not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force:$false | Out-Null
+        $null = Set-Task037RestrictedDirectoryAcl -Path $parent
+    }
+    Assert-NoReparsePath -Path $parent -FailureCode 'TASK037_ADMISSION_RECEIPT_REJECTED'
+    $null = Get-Task037RestrictedAclEvidence -Path $parent -RequireProtected
+
+    $desiredIndex = [Array]::IndexOf($script:Task037AdmissionStages, $Stage)
+    $existing = $null
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $existing = Read-Task037AdmissionStageReceipt -Path $path -AcceptanceId $AcceptanceId
+        $existingIndex = [Array]::IndexOf($script:Task037AdmissionStages, [string]$existing.stage)
+        if (
+            $desiredIndex -ne ($existingIndex + 1) -or
+            [string]$existing.started_at_utc -cne $StartedAtUtc
+        ) {
+            throw 'TASK037_ADMISSION_RECEIPT_REJECTED'
+        }
+    }
+    elseif ($desiredIndex -ne 0) {
+        throw 'TASK037_ADMISSION_RECEIPT_REJECTED'
+    }
+
+    $observedAtUtc = [DateTimeOffset]::UtcNow.ToString(
+        'O',
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    $value = [ordered]@{
+        acceptance_id = $AcceptanceId
+        class = 'lattice.task037.admission-stage.v1'
+        stage = $Stage
+        started_at_utc = $StartedAtUtc
+        observed_at_utc = $observedAtUtc
+    }
+    $json = ($value | ConvertTo-Json -Depth 4) + [Environment]::NewLine
+    Assert-Task037NoKnownSecretText -Text $json
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+    $pending = $path + '.pending-' + [Guid]::NewGuid().ToString('N')
+    $backup = $path + '.backup-' + [Guid]::NewGuid().ToString('N')
+    $stream = $null
+    try {
+        $stream = [IO.FileStream]::new(
+            $pending,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None,
+            4096,
+            [IO.FileOptions]::WriteThrough
+        )
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+        $stream.Dispose()
+        $stream = $null
+        if ($null -eq $existing) {
+            [IO.File]::Move($pending, $path)
+        }
+        else {
+            [IO.File]::Replace($pending, $path, $backup, $true)
+            [IO.File]::Delete($backup)
+            if (Test-Path -LiteralPath $backup) {
+                throw 'TASK037_ADMISSION_RECEIPT_REJECTED'
+            }
+        }
+    }
+    catch {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if (Test-Path -LiteralPath $pending -PathType Leaf) {
+            try { [IO.File]::Delete($pending) } catch { }
+        }
+        if (Test-Path -LiteralPath $backup -PathType Leaf) {
+            try { [IO.File]::Delete($backup) } catch { }
+        }
+        throw 'TASK037_ADMISSION_RECEIPT_REJECTED'
+    }
+    $written = Read-Task037AdmissionStageReceipt -Path $path -AcceptanceId $AcceptanceId
+    if (
+        [string]$written.stage -cne $Stage -or
+        [string]$written.started_at_utc -cne $StartedAtUtc
+    ) {
+        throw 'TASK037_ADMISSION_RECEIPT_REJECTED'
+    }
+    return $path
 }
 
 function Write-Task037DurableRecoveryManifest {
@@ -1123,10 +1346,13 @@ function Remove-Task037SupervisedTempRoot {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$AcceptanceId,
-        [Parameter(Mandatory = $true)][string]$OwnerToken
+        [Parameter(Mandatory = $true)][string]$OwnerToken,
+        [string]$TempBase
     )
 
-    $expectedRoot = Get-Task037SupervisedTempRoot -AcceptanceId $AcceptanceId
+    $expectedRoot = Get-Task037SupervisedTempRoot `
+        -AcceptanceId $AcceptanceId `
+        -TempBase $TempBase
     if (-not (Test-ExactPath -Actual $Root -Expected $expectedRoot)) {
         throw 'TASK037_RECOVERY_SCOPE_REJECTED'
     }
@@ -1250,7 +1476,8 @@ function Test-Task037ExactProcessIdentityAlive {
 function Read-Task037RecoveryManifest {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$RepositoryTarget
+        [Parameter(Mandatory = $true)][string]$RepositoryTarget,
+        [switch]$RequireTrustedTempBase
     )
 
     Assert-RegularFile -Path $Path
@@ -1259,18 +1486,35 @@ function Read-Task037RecoveryManifest {
         -Value $record `
         -Expected @(
             'acceptance_id', 'controller_process_id', 'controller_process_start_ticks',
-            'marker_sha256', 'owner_token', 'schema_version'
+            'marker_sha256', 'owner_token', 'schema_version', 'temp_base', 'temp_root'
         ) `
         -FailureCode 'TASK037_RECOVERY_MANIFEST_REJECTED'
     $acceptanceId = [string]$record.acceptance_id
     $expectedPath = Get-Task037RecoveryManifestPath -RepositoryTarget $RepositoryTarget -AcceptanceId $acceptanceId
+    try {
+        $tempBase = Get-CanonicalPath -Path ([string]$record.temp_base)
+        $tempRoot = Get-CanonicalPath -Path ([string]$record.temp_root)
+        $expectedTempRoot = Get-Task037BoundTempRoot `
+            -AcceptanceId $acceptanceId `
+            -TempBase $tempBase
+    }
+    catch {
+        throw 'TASK037_RECOVERY_MANIFEST_REJECTED'
+    }
     if (
-        [string]$record.schema_version -cne 'lattice.task037.recovery.v1' -or
+        [string]$record.schema_version -cne 'lattice.task037.recovery.v2' -or
         -not (Test-ExactPath -Actual $Path -Expected $expectedPath) -or
+        -not (Test-ExactPath -Actual $tempRoot -Expected $expectedTempRoot) -or
         [string]$record.owner_token -notmatch '^[0-9a-f]{64}$' -or
         [string]$record.marker_sha256 -notmatch '^[0-9a-f]{64}$' -or
         [int]$record.controller_process_id -le 0 -or
         [int64]$record.controller_process_start_ticks -le 0
+    ) {
+        throw 'TASK037_RECOVERY_MANIFEST_REJECTED'
+    }
+    if (
+        $RequireTrustedTempBase -and
+        -not (Test-ExactPath -Actual $tempBase -Expected (Get-Task037TrustedTempBase))
     ) {
         throw 'TASK037_RECOVERY_MANIFEST_REJECTED'
     }
@@ -1286,17 +1530,35 @@ function Assert-Task037SupervisorBinding {
 
     $ownerToken = [Environment]::GetEnvironmentVariable('LATTICE_TASK037_SUPERVISOR_OWNER_TOKEN', 'Process')
     $manifestPath = [Environment]::GetEnvironmentVariable('LATTICE_TASK037_SUPERVISOR_MANIFEST_PATH', 'Process')
+    $tempBaseValue = [Environment]::GetEnvironmentVariable('LATTICE_TASK037_SUPERVISOR_TEMP_BASE', 'Process')
     $expectedManifest = Get-Task037RecoveryManifestPath -RepositoryTarget $RepositoryTarget -AcceptanceId $AcceptanceId
-    $expectedTempRoot = Get-Task037SupervisedTempRoot -AcceptanceId $AcceptanceId
+    if ([string]::IsNullOrWhiteSpace($tempBaseValue)) {
+        throw 'TASK037_SUPERVISOR_BINDING_TEMP_BASE_REJECTED'
+    }
+    if ($ownerToken -notmatch '^[0-9a-f]{64}$') {
+        throw 'TASK037_SUPERVISOR_BINDING_OWNER_TOKEN_REJECTED'
+    }
     if (
-        $ownerToken -notmatch '^[0-9a-f]{64}$' -or
         [string]::IsNullOrWhiteSpace($manifestPath) -or
-        -not (Test-ExactPath -Actual $manifestPath -Expected $expectedManifest) -or
-        -not (Test-ExactPath -Actual $TempRoot -Expected $expectedTempRoot)
+        -not (Test-ExactPath -Actual $manifestPath -Expected $expectedManifest)
     ) {
-        throw 'TASK037_SUPERVISOR_BINDING_REJECTED'
+        throw 'TASK037_SUPERVISOR_BINDING_MANIFEST_PATH_REJECTED'
     }
     $record = Read-Task037RecoveryManifest -Path $expectedManifest -RepositoryTarget $RepositoryTarget
+    if (-not (Test-ExactPath -Actual $tempBaseValue -Expected ([string]$record.temp_base))) {
+        throw 'TASK037_SUPERVISOR_BINDING_TEMP_BASE_REJECTED'
+    }
+    if (
+        -not (Test-ExactPath -Actual $TempRoot -Expected ([string]$record.temp_root)) -or
+        -not (Test-ExactPath `
+            -Actual ([string]$record.temp_root) `
+            -Expected (Get-Task037BoundTempRoot `
+                -AcceptanceId $AcceptanceId `
+                -TempBase ([string]$record.temp_base)))
+    ) {
+        throw 'TASK037_SUPERVISOR_BINDING_TEMP_ROOT_REJECTED'
+    }
+    $expectedTempRoot = Get-CanonicalPath -Path ([string]$record.temp_root)
     $markerPath = Join-Path $expectedTempRoot '.lattice-task037-cleanup-root-v1'
     $expectedMarker = "lattice.task037.cleanup-root.v1|$AcceptanceId|$ownerToken`n"
     if (
@@ -1308,7 +1570,7 @@ function Assert-Task037SupervisorBinding {
         (Get-FileSha256 $markerPath) -cne [string]$record.marker_sha256 -or
         [IO.File]::ReadAllText($markerPath, [Text.Encoding]::UTF8) -cne $expectedMarker
     ) {
-        throw 'TASK037_SUPERVISOR_BINDING_REJECTED'
+        throw 'TASK037_SUPERVISOR_BINDING_AUTHORITY_REJECTED'
     }
     foreach ($path in @($expectedManifest, $markerPath)) {
         $probe = $null
@@ -1318,9 +1580,76 @@ function Assert-Task037SupervisorBinding {
         }
         catch [IO.IOException] { $writeDenied = $true }
         finally { if ($null -ne $probe) { $probe.Dispose() } }
-        if (-not $writeDenied) { throw 'TASK037_SUPERVISOR_BINDING_REJECTED' }
+        if (-not $writeDenied) { throw 'TASK037_SUPERVISOR_BINDING_LOCK_REJECTED' }
     }
-    Assert-Task037CurrentProcessInNamedJob -Name ('LatticeTask037-' + $ownerToken)
+    try {
+        Assert-Task037CurrentProcessInNamedJob -Name ('LatticeTask037-' + $ownerToken)
+    }
+    catch {
+        throw 'TASK037_SUPERVISOR_BINDING_JOB_REJECTED'
+    }
+}
+
+function Resolve-Task037AuthorizedTempBase {
+    param(
+        [string]$AuthorizedTempBase,
+        [Parameter(Mandatory = $true)][string]$FailureCode
+    )
+
+    $acceptanceId = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_SUPERVISOR_ACCEPTANCE_ID',
+        'Process'
+    )
+    $manifestPath = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_SUPERVISOR_MANIFEST_PATH',
+        'Process'
+    )
+    $ownerToken = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_SUPERVISOR_OWNER_TOKEN',
+        'Process'
+    )
+    $boundTempBase = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_SUPERVISOR_TEMP_BASE',
+        'Process'
+    )
+    $tempRoot = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_SUPERVISOR_TEMP_ROOT',
+        'Process'
+    )
+    $bindingValues = @($acceptanceId, $manifestPath, $ownerToken, $boundTempBase, $tempRoot)
+    $hasBinding = @($bindingValues | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -ne 0
+    if ($hasBinding) {
+        try {
+            if (
+                [string]::IsNullOrWhiteSpace($AuthorizedTempBase) -or
+                @($bindingValues | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0
+            ) {
+                throw $FailureCode
+            }
+            $canonical = Get-CanonicalPath -Path $AuthorizedTempBase
+            Assert-Task037SupervisorBinding `
+                -RepositoryTarget (Get-CanonicalPath -Path (Join-Path $PSScriptRoot '..\target')) `
+                -AcceptanceId $acceptanceId `
+                -TempRoot $tempRoot
+            if (-not (Test-ExactPath -Actual $canonical -Expected $boundTempBase)) {
+                throw $FailureCode
+            }
+            return $canonical
+        }
+        catch {
+            throw $FailureCode
+        }
+    }
+
+    $trustedBase = Get-Task037TrustedTempBase
+    if ([string]::IsNullOrWhiteSpace($AuthorizedTempBase)) {
+        return $trustedBase
+    }
+    $canonical = Get-CanonicalPath -Path $AuthorizedTempBase
+    if (-not (Test-ExactPath -Actual $canonical -Expected $trustedBase)) {
+        throw $FailureCode
+    }
+    return $canonical
 }
 
 function Invoke-Task037RecoveryOnly {
@@ -1333,14 +1662,18 @@ function Invoke-Task037RecoveryOnly {
     if ($manifests.Count -gt 64) { throw 'TASK037_RECOVERY_SCOPE_REJECTED' }
     $removed = 0
     foreach ($manifest in $manifests) {
-        $record = Read-Task037RecoveryManifest -Path $manifest.FullName -RepositoryTarget $RepositoryTarget
+        $record = Read-Task037RecoveryManifest `
+            -Path $manifest.FullName `
+            -RepositoryTarget $RepositoryTarget `
+            -RequireTrustedTempBase
         if (Test-Task037ExactProcessIdentityAlive `
             -ProcessId ([int]$record.controller_process_id) `
             -ProcessStartTicks ([int64]$record.controller_process_start_ticks)
         ) {
             throw 'TASK037_RECOVERY_ACTIVE_OWNER_REJECTED'
         }
-        $tempRoot = Get-Task037SupervisedTempRoot -AcceptanceId ([string]$record.acceptance_id)
+        $tempBase = Get-CanonicalPath -Path ([string]$record.temp_base)
+        $tempRoot = Get-CanonicalPath -Path ([string]$record.temp_root)
         $markerPath = Join-Path $tempRoot '.lattice-task037-cleanup-root-v1'
         if (
             (Test-Path -LiteralPath $tempRoot) -and
@@ -1351,7 +1684,8 @@ function Invoke-Task037RecoveryOnly {
         if (-not (Remove-Task037SupervisedTempRoot `
             -Root $tempRoot `
             -AcceptanceId ([string]$record.acceptance_id) `
-            -OwnerToken ([string]$record.owner_token)
+            -OwnerToken ([string]$record.owner_token) `
+            -TempBase $tempBase
         )) {
             throw 'TASK037_RECOVERY_CLEANUP_REJECTED'
         }
@@ -1367,10 +1701,19 @@ function Invoke-Task037RecoveryOnly {
 function New-Task037CleanupSupervision {
     param(
         [Parameter(Mandatory = $true)][string]$RepositoryTarget,
-        [Parameter(Mandatory = $true)][string]$AcceptanceId
+        [Parameter(Mandatory = $true)][string]$AcceptanceId,
+        [string]$TempBase
     )
 
-    $tempRoot = Get-Task037SupervisedTempRoot -AcceptanceId $AcceptanceId
+    $canonicalTempBase = if ([string]::IsNullOrWhiteSpace($TempBase)) {
+        Get-Task037TrustedTempBase
+    }
+    else {
+        Get-CanonicalPath -Path $TempBase
+    }
+    $tempRoot = Get-Task037SupervisedTempRoot `
+        -AcceptanceId $AcceptanceId `
+        -TempBase $canonicalTempBase
     if (Test-Path -LiteralPath $tempRoot) { throw 'TASK037_SUPERVISOR_ROOT_NOT_FRESH' }
     $ownerToken = New-RandomHex -Bytes 32
     $jobName = 'LatticeTask037-' + $ownerToken
@@ -1395,12 +1738,14 @@ function New-Task037CleanupSupervision {
         $null = Get-Task037RestrictedAclEvidence -Path $markerPath
         $controller = [Diagnostics.Process]::GetCurrentProcess()
         Write-Task037DurableRecoveryManifest -Path $manifestPath -Value ([ordered]@{
-            schema_version = 'lattice.task037.recovery.v1'
+            schema_version = 'lattice.task037.recovery.v2'
             acceptance_id = $AcceptanceId
             owner_token = $ownerToken
             marker_sha256 = Get-FileSha256 $markerPath
             controller_process_id = [int]$controller.Id
             controller_process_start_ticks = [int64]$controller.StartTime.ToUniversalTime().Ticks
+            temp_base = $canonicalTempBase
+            temp_root = $tempRoot
         })
         $manifestLock = [IO.File]::Open($manifestPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
         $markerLock = [IO.File]::Open($markerPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -1410,6 +1755,7 @@ function New-Task037CleanupSupervision {
             AcceptanceId = $AcceptanceId
             OwnerToken = $ownerToken
             TempRoot = $tempRoot
+            TempBase = $canonicalTempBase
             MarkerPath = $markerPath
             MarkerLock = $markerLock
             ManifestPath = $manifestPath
@@ -1467,7 +1813,8 @@ function Complete-Task037CleanupSupervision {
     if (-not (Remove-Task037SupervisedTempRoot `
         -Root $Supervision.TempRoot `
         -AcceptanceId $Supervision.AcceptanceId `
-        -OwnerToken $Supervision.OwnerToken
+        -OwnerToken $Supervision.OwnerToken `
+        -TempBase $Supervision.TempBase
     )) {
         throw 'TASK037_SUPERVISOR_ROOT_CLEANUP_REJECTED'
     }
@@ -1498,9 +1845,18 @@ function Remove-SafeTempRoot {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [switch]$CredentialHome,
-        $Ownership
+        $Ownership,
+        [string]$AuthorizedTempBase
     )
 
+    $canonical = Get-CanonicalPath -Path $Path
+    $tempBase = Resolve-Task037AuthorizedTempBase `
+        -AuthorizedTempBase $AuthorizedTempBase `
+        -FailureCode 'TASK037_TEMP_CLEANUP_SCOPE_REJECTED'
+    $prefix = $tempBase + [IO.Path]::DirectorySeparatorChar + 'lattice-'
+    if (-not $canonical.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'TASK037_TEMP_CLEANUP_SCOPE_REJECTED'
+    }
     if (-not (Test-Path -LiteralPath $Path)) {
         if ($CredentialHome -and $null -ne $Ownership) {
             if ($null -ne $Ownership.OwnerRecordLock) {
@@ -1515,12 +1871,6 @@ function Remove-SafeTempRoot {
             }
         }
         return $true
-    }
-    $canonical = Get-CanonicalPath -Path $Path
-    $tempBase = Get-CanonicalPath -Path ([IO.Path]::GetTempPath())
-    $prefix = $tempBase + [IO.Path]::DirectorySeparatorChar + 'lattice-'
-    if (-not $canonical.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'TASK037_TEMP_CLEANUP_SCOPE_REJECTED'
     }
     $rootItem = Get-Item -LiteralPath $canonical -Force -ErrorAction SilentlyContinue
     if (
@@ -1710,7 +2060,8 @@ function Copy-CodexCredentialFiles {
         [Parameter(Mandatory = $true)][string]$DestinationHome,
         [Parameter(Mandatory = $true)][string]$OwnerToken,
         [Parameter(Mandatory = $true)][string]$OwnerRecordPath,
-        [switch]$ForBroker
+        [switch]$ForBroker,
+        [string]$AuthorizedTempBase
     )
 
     if ($OwnerToken -notmatch '^[a-z0-9][a-z0-9-]{0,127}$') {
@@ -1719,7 +2070,9 @@ function Copy-CodexCredentialFiles {
     $sourceEvidence = Get-CodexCredentialSourceEvidence -SourceHome $SourceHome
     $destination = Get-CanonicalPath -Path $DestinationHome
     $ownerRecord = Get-CanonicalPath -Path $OwnerRecordPath
-    $tempBase = Get-CanonicalPath -Path ([IO.Path]::GetTempPath())
+    $tempBase = Resolve-Task037AuthorizedTempBase `
+        -AuthorizedTempBase $AuthorizedTempBase `
+        -FailureCode 'TASK037_CODEX_HOME_SCOPE_REJECTED'
     $repositoryRoot = Get-CanonicalPath -Path (Join-Path $PSScriptRoot '..')
     $repositoryPrefix = $repositoryRoot + [IO.Path]::DirectorySeparatorChar
     $ambientCodexHome = [Environment]::GetEnvironmentVariable('CODEX_HOME', 'Process')
@@ -1970,7 +2323,21 @@ function Get-TrustedTask037Node {
     ) {
         throw 'TASK037_NODE_IDENTITY_REJECTED'
     }
-    $probeRoot = Join-Path ([IO.Path]::GetTempPath()) ('lattice-task037-node-probe-' + [Guid]::NewGuid().ToString('N'))
+    $nodeProbeTempBase = Resolve-Task037AuthorizedTempBase `
+        -AuthorizedTempBase ([Environment]::GetEnvironmentVariable(
+            'LATTICE_TASK037_SUPERVISOR_TEMP_BASE',
+            'Process'
+        )) `
+        -FailureCode 'TASK037_NODE_IDENTITY_REJECTED'
+    $probeRoot = Get-CanonicalPath -Path (
+        Join-Path ([IO.Path]::GetTempPath()) ('lattice-task037-node-probe-' + [Guid]::NewGuid().ToString('N'))
+    )
+    if (-not $probeRoot.StartsWith(
+        $nodeProbeTempBase + [IO.Path]::DirectorySeparatorChar + 'lattice-',
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw 'TASK037_NODE_IDENTITY_REJECTED'
+    }
     $job = [IntPtr]::Zero
     $owned = $null
     try {
@@ -2014,7 +2381,9 @@ function Get-TrustedTask037Node {
             try { $owned.Process.Dispose() } catch { }
         }
         if (Test-Path -LiteralPath $probeRoot) {
-            Remove-SafeTempRoot -Path $probeRoot | Out-Null
+            Remove-SafeTempRoot `
+                -Path $probeRoot `
+                -AuthorizedTempBase $nodeProbeTempBase | Out-Null
         }
     }
     return $canonical
@@ -3088,7 +3457,7 @@ function Write-Task037ValidatedPhaseEvidence {
 
 function Invoke-Task037HarnessSelfTest {
     $powerShellExecutable = Get-TrustedTask037PowerShell
-    $tempBase = Get-CanonicalPath -Path ([IO.Path]::GetTempPath())
+    $tempBase = Get-Task037TrustedTempBase
     $repositoryRoot = Get-CanonicalPath -Path (Join-Path $PSScriptRoot '..')
 
     $aclProbeRoot = Join-Path $tempBase ('lattice-task037-acl-selftest-' + [Guid]::NewGuid().ToString('N'))
@@ -3417,7 +3786,8 @@ finally {
         catch { throw 'TASK037_SELF_TEST_JOB_EFFECT_DACL_REJECTED' }
         $bindingEnvironmentNames = @(
             'LATTICE_TASK037_SUPERVISOR_MANIFEST_PATH',
-            'LATTICE_TASK037_SUPERVISOR_OWNER_TOKEN'
+            'LATTICE_TASK037_SUPERVISOR_OWNER_TOKEN',
+            'LATTICE_TASK037_SUPERVISOR_TEMP_BASE'
         )
         $bindingEnvironmentOriginal = @{}
         foreach ($name in $bindingEnvironmentNames) {
@@ -3430,6 +3800,9 @@ finally {
             [Environment]::SetEnvironmentVariable(
                 'LATTICE_TASK037_SUPERVISOR_OWNER_TOKEN', $supervised.OwnerToken, 'Process'
             )
+            [Environment]::SetEnvironmentVariable(
+                'LATTICE_TASK037_SUPERVISOR_TEMP_BASE', (Split-Path -Parent $supervised.TempRoot), 'Process'
+            )
             $wrongJobFailure = $null
             try {
                 Assert-Task037SupervisorBinding `
@@ -3438,8 +3811,27 @@ finally {
                     -TempRoot $supervised.TempRoot
             }
             catch { $wrongJobFailure = $_.Exception.Message }
-            if ($wrongJobFailure -cne 'TASK037_SUPERVISOR_BINDING_REJECTED') {
+            if ($wrongJobFailure -cne 'TASK037_SUPERVISOR_BINDING_JOB_REJECTED') {
                 throw 'TASK037_SELF_TEST_EXACT_JOB_BINDING_REJECTED'
+            }
+            $alternateBindingBase = Join-Path $tempBase ('lattice-task037-binding-alt-' + [Guid]::NewGuid().ToString('N'))
+            [Environment]::SetEnvironmentVariable(
+                'LATTICE_TASK037_SUPERVISOR_TEMP_BASE', $alternateBindingBase, 'Process'
+            )
+            $alternateBindingFailure = $null
+            try {
+                Assert-Task037SupervisorBinding `
+                    -RepositoryTarget (Join-Path $repositoryRoot 'target') `
+                    -AcceptanceId $supervisedAcceptanceId `
+                    -TempRoot (Join-Path $alternateBindingBase ('lattice-task037-' + $supervisedAcceptanceId))
+            }
+            catch { $alternateBindingFailure = $_.Exception.Message }
+            if (
+                $alternateBindingFailure -cne 'TASK037_SUPERVISOR_BINDING_TEMP_BASE_REJECTED' -or
+                -not (Test-Path -LiteralPath $supervised.MarkerPath -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $supervised.ManifestPath -PathType Leaf)
+            ) {
+                throw 'TASK037_SELF_TEST_ALTERNATE_ROOT_BINDING_REJECTED'
             }
         }
         finally {
@@ -3516,6 +3908,208 @@ finally {
         }
     }
 
+    $admissionAcceptanceId = [Guid]::NewGuid().ToString('N')
+    $admissionStartedAtUtc = [DateTimeOffset]::UtcNow.ToString(
+        'O',
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    $admissionRepositoryTarget = Get-CanonicalPath -Path (Join-Path $repositoryRoot 'target')
+    $admissionReceiptPath = Get-Task037AdmissionReceiptPath `
+        -RepositoryTarget $admissionRepositoryTarget `
+        -AcceptanceId $admissionAcceptanceId
+    $admissionSupervision = $null
+    $admissionOwned = $null
+    $admissionRelease = $null
+    $admissionCredentialSource = $null
+    $admissionCredentialDestination = $null
+    $admissionCredentialOwnerRecord = $null
+    try {
+        $null = Write-Task037AdmissionStageReceipt `
+            -RepositoryTarget $admissionRepositoryTarget `
+            -AcceptanceId $admissionAcceptanceId `
+            -StartedAtUtc $admissionStartedAtUtc `
+            -Stage 'recovery_preflight'
+        $admissionSupervision = New-Task037CleanupSupervision `
+            -RepositoryTarget $admissionRepositoryTarget `
+            -AcceptanceId $admissionAcceptanceId
+        $admissionCredentialSource = Join-Path $admissionSupervision.TempRoot 'admission-credential-source'
+        $admissionCredentialDestination = Join-Path $admissionSupervision.TempRoot 'admission-execution-home'
+        $admissionCredentialOwnerRecord = Join-Path $admissionRepositoryTarget (
+            'task037-admission-probe-owner-' + $admissionAcceptanceId + '.json'
+        )
+        New-Item -ItemType Directory -Path $admissionCredentialSource -Force:$false | Out-Null
+        [IO.File]::WriteAllText(
+            (Join-Path $admissionCredentialSource 'auth.json'),
+            "{}`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+        $null = Write-Task037AdmissionStageReceipt `
+            -RepositoryTarget $admissionRepositoryTarget `
+            -AcceptanceId $admissionAcceptanceId `
+            -StartedAtUtc $admissionStartedAtUtc `
+            -Stage 'supervision_create'
+        $admissionReleaseName = 'LatticeTask037AdmissionRelease-' + $admissionAcceptanceId
+        $admissionReleaseCreated = $false
+        $admissionRelease = [Threading.EventWaitHandle]::new(
+            $false,
+            [Threading.EventResetMode]::ManualReset,
+            $admissionReleaseName,
+            [ref]$admissionReleaseCreated
+        )
+        if (-not $admissionReleaseCreated) {
+            throw 'TASK037_SELF_TEST_ADMISSION_RECEIPT_REJECTED'
+        }
+        $beforeAdmissionGate = {
+            $null = Write-Task037AdmissionStageReceipt `
+                -RepositoryTarget $admissionRepositoryTarget `
+                -AcceptanceId $admissionAcceptanceId `
+                -StartedAtUtc $admissionStartedAtUtc `
+                -Stage 'gated_controller_start'
+        }.GetNewClosure()
+        $admissionOwned = Start-Task037GatedProcess `
+            -Job $admissionSupervision.Job `
+            -AttestationJob $admissionSupervision.AttestationJob `
+            -PowerShellExecutable $powerShellExecutable `
+            -Executable $powerShellExecutable `
+            -Arguments @(
+                '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                '-File', $PSCommandPath, '-InternalAdmissionProbe'
+            ) `
+            -WorkingDirectory $repositoryRoot `
+            -EnvironmentValues ([ordered]@{
+                LATTICE_TASK037_SUPERVISOR_ACCEPTANCE_ID = $admissionAcceptanceId
+                LATTICE_TASK037_SUPERVISOR_MANIFEST_PATH = $admissionSupervision.ManifestPath
+                LATTICE_TASK037_SUPERVISOR_OWNER_TOKEN = $admissionSupervision.OwnerToken
+                LATTICE_TASK037_SUPERVISOR_TEMP_BASE = $tempBase
+                LATTICE_TASK037_SUPERVISOR_TEMP_ROOT = $admissionSupervision.TempRoot
+                LATTICE_TASK037_ADMISSION_STARTED_AT_UTC = $admissionStartedAtUtc
+                LATTICE_TASK037_ADMISSION_PROBE_RELEASE = $admissionReleaseName
+                LATTICE_TASK037_ADMISSION_PROBE_CREDENTIAL_SOURCE = $admissionCredentialSource
+                LATTICE_TASK037_ADMISSION_PROBE_CREDENTIAL_DESTINATION = $admissionCredentialDestination
+                LATTICE_TASK037_ADMISSION_PROBE_CREDENTIAL_OWNER_RECORD = $admissionCredentialOwnerRecord
+            }) `
+            -ChildPidPath (Join-Path $admissionSupervision.TempRoot 'admission.child.pid') `
+            -ChildStdoutPath (Join-Path $admissionSupervision.TempRoot 'admission.child.stdout') `
+            -ChildStderrPath (Join-Path $admissionSupervision.TempRoot 'admission.child.stderr') `
+            -WrapperStdoutPath (Join-Path $admissionSupervision.TempRoot 'admission.wrapper.stdout') `
+            -WrapperStderrPath (Join-Path $admissionSupervision.TempRoot 'admission.wrapper.stderr') `
+            -RuntimeIsolationRoot (Join-Path $admissionSupervision.TempRoot 'admission-runtime') `
+            -BeforeGate $beforeAdmissionGate
+        $null = $admissionRelease.Set()
+        if (
+            -not $admissionOwned.ChildProcess.WaitForExit(30000) -or
+            [int]$admissionOwned.ChildProcess.ExitCode -eq 0 -or
+            -not $admissionOwned.Process.WaitForExit(10000)
+        ) {
+            throw 'TASK037_SELF_TEST_ADMISSION_RECEIPT_REJECTED'
+        }
+        Complete-Task037GatedProcessEvidence -OwnedProcess $admissionOwned
+        if (
+            (Get-Task037JobActiveProcessCount -Job $admissionSupervision.Job) -ne 0 -or
+            (Get-Task037JobActiveProcessCount -Job $admissionSupervision.AttestationJob) -ne 0
+        ) {
+            throw 'TASK037_SELF_TEST_ADMISSION_RECEIPT_REJECTED'
+        }
+        $admissionSourceAuth = Join-Path $admissionCredentialSource 'auth.json'
+        if (Test-Path -LiteralPath $admissionSourceAuth -PathType Leaf) {
+            [IO.File]::Delete($admissionSourceAuth)
+        }
+        if (
+            (Test-Path -LiteralPath $admissionSourceAuth) -or
+            @(Get-ChildItem -LiteralPath $admissionCredentialSource -Force).Count -ne 0
+        ) {
+            throw 'TASK037_SELF_TEST_ADMISSION_RECEIPT_REJECTED'
+        }
+        [IO.Directory]::Delete($admissionCredentialSource)
+        $admissionProvisioningSentinel = Join-Path `
+            $admissionSupervision.TempRoot `
+            'admission-provisioning-complete.v1'
+        Assert-RegularFile -Path $admissionProvisioningSentinel
+        if ([IO.File]::ReadAllText(
+            $admissionProvisioningSentinel,
+            [Text.Encoding]::UTF8
+        ) -cne "lattice.task037.admission-provisioning.v1|$admissionAcceptanceId`n") {
+            throw 'TASK037_SELF_TEST_ADMISSION_RECEIPT_REJECTED'
+        }
+        $admissionReceipt = Read-Task037AdmissionStageReceipt `
+            -Path $admissionReceiptPath `
+            -AcceptanceId $admissionAcceptanceId
+        $safeAdmissionFailure = Get-SafeFailureEvidence `
+            -Message 'TASK037_SYNTHETIC_ADMISSION_REJECTED'
+        if (
+            [string]$admissionReceipt.stage -cne 'supervisor_binding' -or
+            [string]$admissionReceipt.started_at_utc -cne $admissionStartedAtUtc -or
+            [string]$safeAdmissionFailure.code -cne 'TASK037_CONTROLLED_FAILURE'
+        ) {
+            throw 'TASK037_SELF_TEST_ADMISSION_RECEIPT_REJECTED'
+        }
+        Complete-Task037CleanupSupervision -Supervision $admissionSupervision
+        if (
+            (Test-Path -LiteralPath $admissionSupervision.TempRoot) -or
+            (Test-Path -LiteralPath $admissionSupervision.ManifestPath) -or
+            -not (Test-Path -LiteralPath $admissionReceiptPath -PathType Leaf) -or
+            (Test-Path -LiteralPath $admissionCredentialSource) -or
+            (Test-Path -LiteralPath $admissionCredentialDestination) -or
+            (Test-Path -LiteralPath $admissionCredentialOwnerRecord) -or
+            (Test-Path -LiteralPath (
+                Join-Path $admissionRepositoryTarget ('full-chain-acceptance\' + $admissionAcceptanceId)
+            ))
+        ) {
+            throw 'TASK037_SELF_TEST_ADMISSION_RECEIPT_REJECTED'
+        }
+    }
+    finally {
+        if ($null -ne $admissionRelease) { try { $admissionRelease.Dispose() } catch { } }
+        if ($null -ne $admissionOwned) {
+            try { $admissionOwned.ChildProcess.Dispose() } catch { }
+            try { $admissionOwned.Process.Dispose() } catch { }
+        }
+        if ($null -ne $admissionSupervision) {
+            if ($admissionSupervision.Job -ne [IntPtr]::Zero) {
+                try { Stop-Task037Job -Job $admissionSupervision.Job } catch { }
+                try { Close-Task037Job -Job $admissionSupervision.Job } catch { }
+            }
+            if ($admissionSupervision.AttestationJob -ne [IntPtr]::Zero) {
+                try { Close-Task037Job -Job $admissionSupervision.AttestationJob } catch { }
+            }
+            if ($null -ne $admissionSupervision.MarkerLock) {
+                try { $admissionSupervision.MarkerLock.Dispose() } catch { }
+            }
+            if ($null -ne $admissionSupervision.ManifestLock) {
+                try { $admissionSupervision.ManifestLock.Dispose() } catch { }
+            }
+        }
+        if (Test-Path -LiteralPath $admissionReceiptPath -PathType Leaf) {
+            try { [IO.File]::Delete($admissionReceiptPath) } catch { }
+        }
+        if (
+            -not [string]::IsNullOrWhiteSpace($admissionCredentialOwnerRecord) -and
+            (Test-Path -LiteralPath $admissionCredentialOwnerRecord -PathType Leaf)
+        ) {
+            try { [IO.File]::Delete($admissionCredentialOwnerRecord) } catch { }
+        }
+        if (
+            $null -ne $admissionSupervision -and
+            -not [string]::IsNullOrWhiteSpace($admissionCredentialSource) -and
+            (Test-Path -LiteralPath $admissionCredentialSource)
+        ) {
+            $sourceAuth = Join-Path $admissionCredentialSource 'auth.json'
+            if (Test-Path -LiteralPath $sourceAuth -PathType Leaf) {
+                try { [IO.File]::Delete($sourceAuth) } catch { }
+            }
+            if (Test-Path -LiteralPath $admissionCredentialSource) {
+                try { [IO.Directory]::Delete($admissionCredentialSource, $true) } catch { }
+            }
+        }
+        $admissionDirectory = Split-Path -Parent $admissionReceiptPath
+        if (
+            (Test-Path -LiteralPath $admissionDirectory -PathType Container) -and
+            @(Get-ChildItem -LiteralPath $admissionDirectory -Force).Count -eq 0
+        ) {
+            try { [IO.Directory]::Delete($admissionDirectory) } catch { }
+        }
+    }
+
     $recoveryAcceptanceId = [Guid]::NewGuid().ToString('N')
     $recoveryToken = New-RandomHex -Bytes 32
     $recoveryRoot = Get-Task037SupervisedTempRoot -AcceptanceId $recoveryAcceptanceId
@@ -3533,20 +4127,107 @@ finally {
     New-Item -ItemType Directory -Path $recoveryDelivery -Force:$false | Out-Null
     [IO.File]::WriteAllText((Join-Path $recoveryDelivery 'auth.json'), '{"synthetic":"recovery"}', [Text.UTF8Encoding]::new($false))
     Write-Task037DurableRecoveryManifest -Path $recoveryManifest -Value ([ordered]@{
-        schema_version = 'lattice.task037.recovery.v1'
+        schema_version = 'lattice.task037.recovery.v2'
         acceptance_id = $recoveryAcceptanceId
         owner_token = $recoveryToken
         marker_sha256 = Get-FileSha256 $recoveryMarker
         controller_process_id = 2147483647
         controller_process_start_ticks = 1
+        temp_base = $tempBase
+        temp_root = $recoveryRoot
     })
-    $recovered = Invoke-Task037RecoveryOnly -RepositoryTarget (Join-Path $repositoryRoot 'target')
-    if (
-        $recovered -lt 1 -or
-        (Test-Path -LiteralPath $recoveryRoot) -or
-        (Test-Path -LiteralPath $recoveryManifest)
-    ) {
-        throw 'TASK037_SELF_TEST_RECOVERY_REJECTED'
+    $alternateTemp = Join-Path $tempBase ('lattice-task037-alternate-temp-' + [Guid]::NewGuid().ToString('N'))
+    $alternateCanary = Join-Path $alternateTemp 'must-survive.txt'
+    $originalTemp = [Environment]::GetEnvironmentVariable('TEMP', 'Process')
+    $originalTmp = [Environment]::GetEnvironmentVariable('TMP', 'Process')
+    try {
+        New-Item -ItemType Directory -Path $alternateTemp -Force:$false | Out-Null
+        [IO.File]::WriteAllText($alternateCanary, 'must-survive', [Text.UTF8Encoding]::new($false))
+        [Environment]::SetEnvironmentVariable('TEMP', $alternateTemp, 'Process')
+        [Environment]::SetEnvironmentVariable('TMP', $alternateTemp, 'Process')
+        $recovered = Invoke-Task037RecoveryOnly -RepositoryTarget (Join-Path $repositoryRoot 'target')
+        if (
+            $recovered -lt 1 -or
+            (Test-Path -LiteralPath $recoveryRoot) -or
+            (Test-Path -LiteralPath $recoveryManifest) -or
+            -not (Test-Path -LiteralPath $alternateCanary -PathType Leaf) -or
+            [IO.File]::ReadAllText($alternateCanary, [Text.Encoding]::UTF8) -cne 'must-survive'
+        ) {
+            throw 'TASK037_SELF_TEST_RECOVERY_REJECTED'
+        }
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable('TEMP', $originalTemp, 'Process')
+        [Environment]::SetEnvironmentVariable('TMP', $originalTmp, 'Process')
+        if (Test-Path -LiteralPath $alternateTemp) {
+            try {
+                Remove-SafeTempRoot `
+                    -Path $alternateTemp `
+                    -AuthorizedTempBase $tempBase | Out-Null
+            }
+            catch { }
+        }
+    }
+
+    $crossTempAcceptanceId = [Guid]::NewGuid().ToString('N')
+    $crossTempSupervision = $null
+    $crossTempAlternate = Join-Path $tempBase ('lattice-task037-cross-temp-' + [Guid]::NewGuid().ToString('N'))
+    $crossTempCanary = Join-Path $crossTempAlternate 'must-survive.txt'
+    $crossTempOriginalTemp = [Environment]::GetEnvironmentVariable('TEMP', 'Process')
+    $crossTempOriginalTmp = [Environment]::GetEnvironmentVariable('TMP', 'Process')
+    try {
+        $crossTempSupervision = New-Task037CleanupSupervision `
+            -RepositoryTarget (Join-Path $repositoryRoot 'target') `
+            -AcceptanceId $crossTempAcceptanceId `
+            -TempBase $tempBase
+        New-Item -ItemType Directory -Path $crossTempAlternate -Force:$false | Out-Null
+        [IO.File]::WriteAllText($crossTempCanary, 'must-survive', [Text.UTF8Encoding]::new($false))
+        [Environment]::SetEnvironmentVariable('TEMP', $crossTempAlternate, 'Process')
+        [Environment]::SetEnvironmentVariable('TMP', $crossTempAlternate, 'Process')
+        Complete-Task037CleanupSupervision -Supervision $crossTempSupervision
+        if (
+            (Test-Path -LiteralPath $crossTempSupervision.TempRoot) -or
+            (Test-Path -LiteralPath $crossTempSupervision.ManifestPath) -or
+            -not (Test-Path -LiteralPath $crossTempCanary -PathType Leaf) -or
+            [IO.File]::ReadAllText($crossTempCanary, [Text.Encoding]::UTF8) -cne 'must-survive'
+        ) {
+            throw 'TASK037_SELF_TEST_CROSS_TEMP_CLEANUP_REJECTED'
+        }
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable('TEMP', $crossTempOriginalTemp, 'Process')
+        [Environment]::SetEnvironmentVariable('TMP', $crossTempOriginalTmp, 'Process')
+        if ($null -ne $crossTempSupervision) {
+            if ($crossTempSupervision.Job -ne [IntPtr]::Zero) {
+                try { Stop-Task037Job -Job $crossTempSupervision.Job } catch { }
+                try { Close-Task037Job -Job $crossTempSupervision.Job } catch { }
+            }
+            if ($crossTempSupervision.AttestationJob -ne [IntPtr]::Zero) {
+                try { Close-Task037Job -Job $crossTempSupervision.AttestationJob } catch { }
+            }
+            if ($null -ne $crossTempSupervision.MarkerLock) {
+                try { $crossTempSupervision.MarkerLock.Dispose() } catch { }
+            }
+            if ($null -ne $crossTempSupervision.ManifestLock) {
+                try { $crossTempSupervision.ManifestLock.Dispose() } catch { }
+            }
+            if (Test-Path -LiteralPath $crossTempSupervision.TempRoot) {
+                try {
+                    $null = Remove-Task037SupervisedTempRoot `
+                        -Root $crossTempSupervision.TempRoot `
+                        -AcceptanceId $crossTempSupervision.AcceptanceId `
+                        -OwnerToken $crossTempSupervision.OwnerToken `
+                        -TempBase $tempBase
+                }
+                catch { }
+            }
+            if (Test-Path -LiteralPath $crossTempSupervision.ManifestPath -PathType Leaf) {
+                try { [IO.File]::Delete($crossTempSupervision.ManifestPath) } catch { }
+            }
+        }
+        if (Test-Path -LiteralPath $crossTempAlternate) {
+            try { Remove-SafeTempRoot -Path $crossTempAlternate -AuthorizedTempBase $tempBase | Out-Null } catch { }
+        }
     }
 
     $secretFirstAcceptanceId = [Guid]::NewGuid().ToString('N')
@@ -3654,12 +4335,14 @@ finally {
         $forgedCanary = Join-Path $forgedCanaryRoot 'canary.txt'
         [IO.File]::WriteAllText($forgedCanary, 'must-survive', [Text.UTF8Encoding]::new($false))
         Write-Task037DurableRecoveryManifest -Path $forgedManifest -Value ([ordered]@{
-            schema_version = 'lattice.task037.recovery.v1'
+            schema_version = 'lattice.task037.recovery.v2'
             acceptance_id = $forgedAcceptanceId
             owner_token = $forgedToken
             marker_sha256 = Get-FileSha256 $forgedMarker
             controller_process_id = 2147483647
             controller_process_start_ticks = 1
+            temp_base = $tempBase
+            temp_root = $forgedRoot
             destination = $forgedCanaryRoot
         })
         $forgedFailure = $null
@@ -4031,8 +4714,14 @@ function Invoke-FullChainInternalPhase {
         'FullChainStatus' { 'status' }
     }
     $phaseId = $acceptanceId + '-' + $phaseName + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
-    $tempBase = Get-CanonicalPath -Path ([IO.Path]::GetTempPath())
-    $expectedTempAcceptanceRoot = Get-CanonicalPath -Path (Join-Path $tempBase ('lattice-task037-' + $acceptanceId))
+    $tempBaseValue = [Environment]::GetEnvironmentVariable('LATTICE_TASK037_SUPERVISOR_TEMP_BASE', 'Process')
+    if ([string]::IsNullOrWhiteSpace($tempBaseValue)) {
+        throw 'TASK037_SUPERVISOR_BINDING_TEMP_BASE_REJECTED'
+    }
+    $tempBase = Get-CanonicalPath -Path $tempBaseValue
+    $expectedTempAcceptanceRoot = Get-Task037BoundTempRoot `
+        -AcceptanceId $acceptanceId `
+        -TempBase $tempBase
     if (-not (Test-ExactPath -Actual $tempAcceptanceRoot -Expected $expectedTempAcceptanceRoot)) {
         throw 'TASK037_SUPERVISOR_BINDING_REJECTED'
     }
@@ -4163,7 +4852,8 @@ function Invoke-FullChainInternalPhase {
             -DestinationHome $brokerCodexHome `
             -OwnerToken ($phaseId + '-broker') `
             -OwnerRecordPath $brokerOwnerRecordPath `
-            -ForBroker
+            -ForBroker `
+            -AuthorizedTempBase $tempBase
         $powerShellExecutable = Get-TrustedTask037PowerShell
         $phaseJob = New-Task037KillOnCloseJob
 
@@ -4595,17 +5285,24 @@ function Invoke-FullChainInternalPhase {
                     if (Test-Path -LiteralPath (Join-Path $brokerCodexHome 'auth.json')) {
                         throw 'TASK037_PHASE_CREDENTIAL_CLEANUP_REJECTED'
                     }
-                    $brokerCodexHomeRemoved = Remove-SafeTempRoot -Path $brokerCodexHome
+                    $brokerCodexHomeRemoved = Remove-SafeTempRoot `
+                        -Path $brokerCodexHome `
+                        -AuthorizedTempBase $tempBase
                 }
                 else {
                     $brokerCodexHomeRemoved = Remove-SafeTempRoot `
                         -Path $brokerCodexHome `
                         -CredentialHome `
-                        -Ownership $brokerCredentialOwnership
+                        -Ownership $brokerCredentialOwnership `
+                        -AuthorizedTempBase $tempBase
                 }
             }
             catch { $phaseCleanupFailure = 'TASK037_PHASE_CREDENTIAL_CLEANUP_REJECTED' }
-            try { $profileRemoved = Remove-SafeTempRoot -Path $profileRoot }
+            try {
+                $profileRemoved = Remove-SafeTempRoot `
+                    -Path $profileRoot `
+                    -AuthorizedTempBase $tempBase
+            }
             catch { $phaseCleanupFailure = 'TASK037_PHASE_PROFILE_CLEANUP_REJECTED' }
             try {
                 if ($null -ne $brokerCredentialSourceBefore) {
@@ -4614,9 +5311,17 @@ function Invoke-FullChainInternalPhase {
                 }
             }
             catch { $phaseCleanupFailure = 'TASK037_PHASE_CREDENTIAL_SOURCE_REJECTED' }
-            try { $hermesIsolationRemoved = Remove-SafeTempRoot -Path $hermesIsolationRoot }
+            try {
+                $hermesIsolationRemoved = Remove-SafeTempRoot `
+                    -Path $hermesIsolationRoot `
+                    -AuthorizedTempBase $tempBase
+            }
             catch { $phaseCleanupFailure = 'TASK037_PHASE_ISOLATION_CLEANUP_REJECTED' }
-            try { $brokerIsolationRemoved = Remove-SafeTempRoot -Path $brokerIsolationRoot }
+            try {
+                $brokerIsolationRemoved = Remove-SafeTempRoot `
+                    -Path $brokerIsolationRoot `
+                    -AuthorizedTempBase $tempBase
+            }
             catch { $phaseCleanupFailure = 'TASK037_PHASE_ISOLATION_CLEANUP_REJECTED' }
         }
         $logEvidence = @()
@@ -4642,7 +5347,9 @@ function Invoke-FullChainInternalPhase {
                 }
             }
             try {
-                $rawLogRootRemoved = Remove-SafeTempRoot -Path $rawLogRoot
+                $rawLogRootRemoved = Remove-SafeTempRoot `
+                    -Path $rawLogRoot `
+                    -AuthorizedTempBase $tempBase
             }
             catch {
                 if ($null -eq $phaseCleanupFailure) {
@@ -4700,6 +5407,135 @@ function Invoke-FullChainInternalPhase {
     }
 }
 
+function Invoke-Task037InternalAdmissionProbe {
+    if (-not $InternalAdmissionProbe) {
+        throw 'TASK037_SYNTHETIC_ADMISSION_REJECTED'
+    }
+    $repositoryRoot = Get-CanonicalPath -Path (Join-Path $PSScriptRoot '..')
+    $repositoryTarget = Get-CanonicalPath -Path (Join-Path $repositoryRoot 'target')
+    $acceptanceId = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_SUPERVISOR_ACCEPTANCE_ID',
+        'Process'
+    )
+    $tempRootValue = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_SUPERVISOR_TEMP_ROOT',
+        'Process'
+    )
+    $startedAtUtc = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_ADMISSION_STARTED_AT_UTC',
+        'Process'
+    )
+    if (
+        $acceptanceId -notmatch '^[0-9a-f]{32}$' -or
+        [string]::IsNullOrWhiteSpace($tempRootValue) -or
+        [string]::IsNullOrWhiteSpace($startedAtUtc)
+    ) {
+        throw 'TASK037_SYNTHETIC_ADMISSION_REJECTED'
+    }
+    $tempRoot = Get-CanonicalPath -Path $tempRootValue
+    Assert-Task037SupervisorBinding `
+        -RepositoryTarget $repositoryTarget `
+        -AcceptanceId $acceptanceId `
+        -TempRoot $tempRoot
+    $null = Write-Task037AdmissionStageReceipt `
+        -RepositoryTarget $repositoryTarget `
+        -AcceptanceId $acceptanceId `
+        -StartedAtUtc $startedAtUtc `
+        -Stage 'supervisor_binding'
+
+    $credentialSource = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_ADMISSION_PROBE_CREDENTIAL_SOURCE',
+        'Process'
+    )
+    $credentialDestination = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_ADMISSION_PROBE_CREDENTIAL_DESTINATION',
+        'Process'
+    )
+    $credentialOwnerRecord = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_ADMISSION_PROBE_CREDENTIAL_OWNER_RECORD',
+        'Process'
+    )
+    $tempBase = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_SUPERVISOR_TEMP_BASE',
+        'Process'
+    )
+    if (
+        [string]::IsNullOrWhiteSpace($credentialSource) -or
+        [string]::IsNullOrWhiteSpace($credentialDestination) -or
+        [string]::IsNullOrWhiteSpace($credentialOwnerRecord) -or
+        [string]::IsNullOrWhiteSpace($tempBase)
+    ) {
+        throw 'TASK037_SYNTHETIC_ADMISSION_REJECTED'
+    }
+    try {
+        $credentialOwnership = Copy-CodexCredentialFiles `
+            -SourceHome $credentialSource `
+            -DestinationHome $credentialDestination `
+            -OwnerToken ($acceptanceId + '-probe') `
+            -OwnerRecordPath $credentialOwnerRecord `
+            -ForBroker `
+            -AuthorizedTempBase $tempBase
+        if (-not (Remove-SafeTempRoot `
+            -Path $credentialDestination `
+            -CredentialHome `
+            -Ownership $credentialOwnership `
+            -AuthorizedTempBase $tempBase
+        )) {
+            throw 'TASK037_SYNTHETIC_ADMISSION_REJECTED'
+        }
+        if (
+            (Test-Path -LiteralPath $credentialDestination) -or
+            (Test-Path -LiteralPath $credentialOwnerRecord)
+        ) {
+            throw 'TASK037_SYNTHETIC_ADMISSION_REJECTED'
+        }
+        $sentinelPath = Join-Path $tempRoot 'admission-provisioning-complete.v1'
+        $sentinelBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+            "lattice.task037.admission-provisioning.v1|$acceptanceId`n"
+        )
+        $sentinelStream = [IO.FileStream]::new(
+            $sentinelPath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None,
+            4096,
+            [IO.FileOptions]::WriteThrough
+        )
+        try {
+            $sentinelStream.Write($sentinelBytes, 0, $sentinelBytes.Length)
+            $sentinelStream.Flush($true)
+        }
+        finally {
+            $sentinelStream.Dispose()
+        }
+    }
+    catch {
+        throw 'TASK037_SYNTHETIC_ADMISSION_REJECTED'
+    }
+
+    $releaseName = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_ADMISSION_PROBE_RELEASE',
+        'Process'
+    )
+    $release = $null
+    try {
+        if ($releaseName -notmatch '^LatticeTask037AdmissionRelease-[0-9a-f]{32}$') {
+            throw 'TASK037_SYNTHETIC_ADMISSION_REJECTED'
+        }
+        $release = [Threading.EventWaitHandle]::OpenExisting($releaseName)
+        if (-not $release.WaitOne(30000)) {
+            throw 'TASK037_SYNTHETIC_ADMISSION_REJECTED'
+        }
+    }
+    catch {
+        throw 'TASK037_SYNTHETIC_ADMISSION_REJECTED'
+    }
+    finally {
+        if ($null -ne $release) { $release.Dispose() }
+    }
+    throw 'TASK037_SYNTHETIC_ADMISSION_REJECTED'
+}
+
 function Invoke-DefaultVerification {
     if (-not $InternalController) {
         throw 'TASK037_UNSUPERVISED_CONTROLLER_REJECTED'
@@ -4711,23 +5547,39 @@ function Invoke-DefaultVerification {
     $repositoryTarget = Get-CanonicalPath -Path (Join-Path $repositoryRoot 'target')
     $acceptanceId = [Environment]::GetEnvironmentVariable('LATTICE_TASK037_SUPERVISOR_ACCEPTANCE_ID', 'Process')
     $tempAcceptanceRootValue = [Environment]::GetEnvironmentVariable('LATTICE_TASK037_SUPERVISOR_TEMP_ROOT', 'Process')
-    if ($acceptanceId -notmatch '^[0-9a-f]{32}$' -or [string]::IsNullOrWhiteSpace($tempAcceptanceRootValue)) {
-        throw 'TASK037_SUPERVISOR_BINDING_REJECTED'
+    $admissionStartedAtUtc = [Environment]::GetEnvironmentVariable(
+        'LATTICE_TASK037_ADMISSION_STARTED_AT_UTC',
+        'Process'
+    )
+    if ($acceptanceId -notmatch '^[0-9a-f]{32}$') {
+        throw 'TASK037_CONTROLLER_ACCEPTANCE_ID_REJECTED'
+    }
+    if ([string]::IsNullOrWhiteSpace($tempAcceptanceRootValue)) {
+        throw 'TASK037_CONTROLLER_TEMP_ROOT_REJECTED'
+    }
+    if ([string]::IsNullOrWhiteSpace($admissionStartedAtUtc)) {
+        throw 'TASK037_ADMISSION_RECEIPT_REJECTED'
     }
     $tempAcceptanceRoot = Get-CanonicalPath -Path $tempAcceptanceRootValue
-    $expectedTempAcceptanceRoot = Get-CanonicalPath -Path (Join-Path ([IO.Path]::GetTempPath()) ('lattice-task037-' + $acceptanceId))
+    $tempBaseValue = [Environment]::GetEnvironmentVariable('LATTICE_TASK037_SUPERVISOR_TEMP_BASE', 'Process')
+    if ([string]::IsNullOrWhiteSpace($tempBaseValue)) {
+        throw 'TASK037_CONTROLLER_TEMP_ROOT_REJECTED'
+    }
+    $expectedTempAcceptanceRoot = Get-Task037BoundTempRoot `
+        -AcceptanceId $acceptanceId `
+        -TempBase $tempBaseValue
     if (
         $acceptanceId -notmatch '^[0-9a-f]{32}$' -or
         -not (Test-ExactPath -Actual $tempAcceptanceRoot -Expected $expectedTempAcceptanceRoot)
     ) {
-        throw 'TASK037_SUPERVISOR_BINDING_REJECTED'
+        throw 'TASK037_CONTROLLER_TEMP_ROOT_REJECTED'
     }
     $acceptanceRoot = Get-CanonicalPath -Path (Join-Path $repositoryTarget ('full-chain-acceptance\' + $acceptanceId))
     $fixtureRoot = Get-CanonicalPath -Path (Join-Path $repositoryTarget ('lattice-delivery\' + $acceptanceId))
     $evidenceRoot = Join-Path $acceptanceRoot 'evidence'
     $runtimeManifest = Join-Path $acceptanceRoot 'offline-runtime-manifest.json'
     $sourceManifest = Get-CanonicalPath -Path (Join-Path $repositoryTarget 'full-chain-acceptance\4fe82cdeaa154c28bbe18f6a\offline-runtime-manifest.json')
-    $tempBase = Get-CanonicalPath -Path ([IO.Path]::GetTempPath())
+    $tempBase = Get-CanonicalPath -Path $tempBaseValue
     $deliveryCodexHome = Join-Path $tempAcceptanceRoot 'delivery-codex-home'
     $schemaDirectory = Join-Path $fixtureRoot 'schema'
     $deliveryRoot = Join-Path $fixtureRoot 'delivery'
@@ -4736,6 +5588,11 @@ function Invoke-DefaultVerification {
         -RepositoryTarget $repositoryTarget `
         -AcceptanceId $acceptanceId `
         -TempRoot $tempAcceptanceRoot
+    $null = Write-Task037AdmissionStageReceipt `
+        -RepositoryTarget $repositoryTarget `
+        -AcceptanceId $acceptanceId `
+        -StartedAtUtc $admissionStartedAtUtc `
+        -Stage 'supervisor_binding'
     $openClawCli = Get-CanonicalPath -Path (Join-Path $repositoryRoot 'integrations\openclaw-lattice\node_modules\openclaw\openclaw.mjs')
     $wslExe = Get-CanonicalPath -Path (Join-Path $env:SystemRoot 'System32\wsl.exe')
     $gitExe = Get-TrustedTask037Git -Candidate ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_CONTROLLER_GIT_EXE', 'Process'))
@@ -4802,6 +5659,12 @@ function Invoke-DefaultVerification {
     if (Test-Path -LiteralPath $deliveryCodexHome) {
         throw ('TASK037_FRESH_TEMP_REJECTED|' + $deliveryCodexHome)
     }
+
+    $null = Write-Task037AdmissionStageReceipt `
+        -RepositoryTarget $repositoryTarget `
+        -AcceptanceId $acceptanceId `
+        -StartedAtUtc $admissionStartedAtUtc `
+        -Stage 'inner_pre_acceptance'
 
     New-Item -ItemType Directory -Path $acceptanceRoot -Force:$false | Out-Null
     New-Item -ItemType Directory -Path $evidenceRoot -Force:$false | Out-Null
@@ -4892,7 +5755,8 @@ function Invoke-DefaultVerification {
             -SourceHome $CodexAuthHome `
             -DestinationHome $deliveryCodexHome `
             -OwnerToken ($acceptanceId + '-delivery') `
-            -OwnerRecordPath $deliveryOwnerRecordPath
+            -OwnerRecordPath $deliveryOwnerRecordPath `
+            -AuthorizedTempBase $tempBase
         foreach ($entry in $environmentValues.GetEnumerator()) {
             [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, 'Process')
         }
@@ -4927,13 +5791,16 @@ function Invoke-DefaultVerification {
                     if (Test-Path -LiteralPath (Join-Path $deliveryCodexHome 'auth.json')) {
                         throw 'TASK037_DELIVERY_CODEX_HOME_CLEANUP_REJECTED'
                     }
-                    $deliveryCodexHomeRemoved = Remove-SafeTempRoot -Path $deliveryCodexHome
+                    $deliveryCodexHomeRemoved = Remove-SafeTempRoot `
+                        -Path $deliveryCodexHome `
+                        -AuthorizedTempBase $tempBase
                 }
                 else {
                     $deliveryCodexHomeRemoved = Remove-SafeTempRoot `
                         -Path $deliveryCodexHome `
                         -CredentialHome `
-                        -Ownership $deliveryCredentialOwnership
+                        -Ownership $deliveryCredentialOwnership `
+                        -AuthorizedTempBase $tempBase
                 }
             }
             catch {
@@ -5003,6 +5870,17 @@ function Invoke-Task037SupervisedVerification {
     }
     $repositoryRoot = Get-CanonicalPath -Path (Join-Path $PSScriptRoot '..')
     $repositoryTarget = Get-CanonicalPath -Path (Join-Path $repositoryRoot 'target')
+    $supervisorTempBase = Get-Task037TrustedTempBase
+    $acceptanceId = [Guid]::NewGuid().ToString('N')
+    $admissionStartedAtUtc = [DateTimeOffset]::UtcNow.ToString(
+        'O',
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+    $null = Write-Task037AdmissionStageReceipt `
+        -RepositoryTarget $repositoryTarget `
+        -AcceptanceId $acceptanceId `
+        -StartedAtUtc $admissionStartedAtUtc `
+        -Stage 'recovery_preflight'
     $null = Invoke-Task037RecoveryOnly -RepositoryTarget $repositoryTarget
     $windows = Get-CanonicalPath -Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows))
     $system32 = Get-CanonicalPath -Path (Join-Path $windows 'System32')
@@ -5048,20 +5926,32 @@ function Invoke-Task037SupervisedVerification {
     $controllerRustdocExe = $controllerRustToolchain.Rustdoc
     Assert-RegularFile -Path $controllerNodeExe
     $controllerPath = [string]::Join(';', $controllerToolDirectories)
-    $acceptanceId = [Guid]::NewGuid().ToString('N')
     $supervision = $null
     $owned = $null
     $supervisorFailure = $null
     try {
         $supervision = New-Task037CleanupSupervision `
             -RepositoryTarget $repositoryTarget `
-            -AcceptanceId $acceptanceId
+            -AcceptanceId $acceptanceId `
+            -TempBase $supervisorTempBase
+        $null = Write-Task037AdmissionStageReceipt `
+            -RepositoryTarget $repositoryTarget `
+            -AcceptanceId $acceptanceId `
+            -StartedAtUtc $admissionStartedAtUtc `
+            -Stage 'supervision_create'
         $powerShellExecutable = Get-TrustedTask037PowerShell
         $controllerStdout = Join-Path $supervision.TempRoot 'controller.stdout'
         $controllerStderr = Join-Path $supervision.TempRoot 'controller.stderr'
         $controllerWrapperStdout = Join-Path $supervision.TempRoot 'controller.wrapper.stdout'
         $controllerWrapperStderr = Join-Path $supervision.TempRoot 'controller.wrapper.stderr'
         $controllerPid = Join-Path $supervision.TempRoot 'controller.pid'
+        $beforeControllerGate = {
+            $null = Write-Task037AdmissionStageReceipt `
+                -RepositoryTarget $repositoryTarget `
+                -AcceptanceId $acceptanceId `
+                -StartedAtUtc $admissionStartedAtUtc `
+                -Stage 'gated_controller_start'
+        }.GetNewClosure()
         $owned = Start-Task037GatedProcess `
             -Job $supervision.Job `
             -AttestationJob $supervision.AttestationJob `
@@ -5083,7 +5973,9 @@ function Invoke-Task037SupervisedVerification {
                 LATTICE_TASK037_SUPERVISOR_ACCEPTANCE_ID = $acceptanceId
                 LATTICE_TASK037_SUPERVISOR_MANIFEST_PATH = $supervision.ManifestPath
                 LATTICE_TASK037_SUPERVISOR_OWNER_TOKEN = $supervision.OwnerToken
+                LATTICE_TASK037_SUPERVISOR_TEMP_BASE = $supervisorTempBase
                 LATTICE_TASK037_SUPERVISOR_TEMP_ROOT = $supervision.TempRoot
+                LATTICE_TASK037_ADMISSION_STARTED_AT_UTC = $admissionStartedAtUtc
                 LATTICE_TASK037_CONTROLLER_CARGO_EXE = $controllerCargoExe
                 LATTICE_TASK037_CONTROLLER_GIT_EXE = $controllerGitExe
                 LATTICE_TASK037_CONTROLLER_NODE_EXE = $controllerNodeExe
@@ -5100,7 +5992,8 @@ function Invoke-Task037SupervisedVerification {
             -ChildStderrPath $controllerStderr `
             -WrapperStdoutPath $controllerWrapperStdout `
             -WrapperStderrPath $controllerWrapperStderr `
-            -RuntimeIsolationRoot (Join-Path $supervision.TempRoot 'controller-runtime')
+            -RuntimeIsolationRoot (Join-Path $supervision.TempRoot 'controller-runtime') `
+            -BeforeGate $beforeControllerGate
         if (-not $owned.ChildProcess.WaitForExit(2400000)) {
             throw 'TASK037_INNER_CONTROLLER_TIMEOUT'
         }
@@ -5185,6 +6078,11 @@ if ($HarnessSelfTest) {
     return
 }
 
+if ($InternalAdmissionProbe) {
+    Invoke-Task037InternalAdmissionProbe
+    return
+}
+
 if (-not [string]::IsNullOrEmpty($InternalPhase)) {
     Invoke-FullChainInternalPhase -Phase $InternalPhase
     return
@@ -5195,4 +6093,12 @@ if ($InternalController) {
     return
 }
 
-Invoke-Task037SupervisedVerification
+try {
+    if ($HarnessPublicFailureProbe) {
+        throw 'task037-public-failure-probe-payload'
+    }
+    Invoke-Task037SupervisedVerification
+}
+catch {
+    Throw-Task037SafeFailure -Message $_.Exception.Message
+}
