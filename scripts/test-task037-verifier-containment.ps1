@@ -125,9 +125,22 @@ foreach ($required in @(
     "'process_exit_snapshot'",
     "'wrapper_reap'",
     "'wrapper_exit_match'",
+    "'process_handle_release'",
     "'openclaw_liveness'",
     "'job_cardinality'",
     "'child_exit_success'",
+    'Release-Task037ExitedProcessHandles',
+    'Wait-Task037JobProcessBaseline',
+    'Get-Task037JobProcessCountSnapshot',
+    'Get-Task037CoherentJobProcessSnapshot',
+    'Get-Task037OpenClawJobBaseline',
+    'Test-Task037ProcessIdSetSubset',
+    'Test-Task037ProcessIdentityCohortLiveInJob',
+    'ProcessStartTicks',
+    'RequiredProcessIdentities',
+    '[LatticeTask037JobObjectInterop]::ProcessCounts',
+    '[LatticeTask037JobObjectInterop]::ProcessIds',
+    'JobObjectBasicProcessIdList = 3',
     'process_exit_code = [int]$processContract.ChildExitCode',
     'launcher_path_sha256',
     "'TASK037_LATTICE_COMPONENT_FAILURE'"
@@ -137,7 +150,7 @@ foreach ($required in @(
     }
 }
 $processContractStart = $source.LastIndexOf(
-    '$processContract = [pscustomobject]@{ ChildExitCode = 0 }',
+    '$processContract = [pscustomobject]@{',
     [StringComparison]::Ordinal
 )
 $processContractCursor = $processContractStart
@@ -146,8 +159,9 @@ foreach ($fragment in @(
     "-Gate 'wrapper_reap'",
     "-Gate 'wrapper_exit_match'",
     "-Gate 'openclaw_liveness'",
-    "-Gate 'job_cardinality'",
     "-Gate 'child_exit_success'",
+    "-Gate 'process_handle_release'",
+    "-Gate 'job_cardinality'",
     "-Gate 'raw_bounds'",
     'process_exit_code = [int]$processContract.ChildExitCode'
 )) {

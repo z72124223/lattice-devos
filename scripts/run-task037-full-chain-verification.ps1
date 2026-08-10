@@ -66,14 +66,16 @@ $script:Task037AdmissionStages = @(
 )
 $script:Task037PhaseGates = @(
     'phase_setup',
+    'openclaw_job_baseline',
     'full_chain_gated_start',
     'process_wait',
     'process_exit_snapshot',
     'wrapper_reap',
     'wrapper_exit_match',
     'openclaw_liveness',
-    'job_cardinality',
     'child_exit_success',
+    'process_handle_release',
+    'job_cardinality',
     'raw_bounds',
     'response_json',
     'mcp_envelope',
@@ -547,8 +549,9 @@ function Invoke-Task037ProcessContractCheck {
         'wrapper_reap',
         'wrapper_exit_match',
         'openclaw_liveness',
-        'job_cardinality',
-        'child_exit_success'
+        'child_exit_success',
+        'process_handle_release',
+        'job_cardinality'
     )
     if ($contractGates -cnotcontains $Gate) {
         throw 'TASK037_PHASE_GATE_REJECTED'
@@ -1070,6 +1073,7 @@ using System.Security.Principal;
 public static class LatticeTask037JobObjectInterop
 {
     private const UInt32 JobObjectExtendedLimitInformation = 9;
+    private const UInt32 JobObjectBasicProcessIdList = 3;
     private const UInt32 JobObjectLimitKillOnJobClose = 0x00002000;
     private const UInt32 JobObjectAssignProcess = 0x0001;
     private const UInt32 JobObjectSetAttributes = 0x0002;
@@ -1165,6 +1169,14 @@ public static class LatticeTask037JobObjectInterop
         IntPtr job,
         UInt32 informationClass,
         out BasicAccountingInformation information,
+        UInt32 informationLength,
+        IntPtr returnLength);
+
+    [DllImport("kernel32.dll", EntryPoint = "QueryInformationJobObject", SetLastError = true)]
+    private static extern bool QueryInformationJobObjectBuffer(
+        IntPtr job,
+        UInt32 informationClass,
+        IntPtr information,
         UInt32 informationLength,
         IntPtr returnLength);
 
@@ -1340,6 +1352,64 @@ public static class LatticeTask037JobObjectInterop
         return information.ActiveProcesses;
     }
 
+    public static UInt64 ProcessCounts(IntPtr job)
+    {
+        BasicAccountingInformation information;
+        UInt32 size = (UInt32)Marshal.SizeOf(typeof(BasicAccountingInformation));
+        if (job == IntPtr.Zero ||
+            !QueryInformationJobObject(job, 1, out information, size, IntPtr.Zero))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        return ((UInt64)information.TotalProcesses << 32) | (UInt64)information.ActiveProcesses;
+    }
+
+    public static UInt64[] ProcessIds(IntPtr job, UInt32 capacity)
+    {
+        if (job == IntPtr.Zero || capacity == 0 || capacity > 64)
+        {
+            throw new ArgumentOutOfRangeException("capacity");
+        }
+        int size = checked(8 + checked((int)capacity * IntPtr.Size));
+        IntPtr buffer = Marshal.AllocHGlobal(size);
+        try
+        {
+            if (!QueryInformationJobObjectBuffer(
+                    job,
+                    JobObjectBasicProcessIdList,
+                    buffer,
+                    (UInt32)size,
+                    IntPtr.Zero))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            UInt32 assigned = unchecked((UInt32)Marshal.ReadInt32(buffer, 0));
+            UInt32 listed = unchecked((UInt32)Marshal.ReadInt32(buffer, 4));
+            if (assigned != listed || listed > capacity)
+            {
+                throw new InvalidOperationException("job process list is incomplete");
+            }
+            var result = new UInt64[listed];
+            for (UInt32 index = 0; index < listed; index++)
+            {
+                int offset = checked(8 + checked((int)index * IntPtr.Size));
+                UInt64 value = IntPtr.Size == 8
+                    ? unchecked((UInt64)Marshal.ReadInt64(buffer, offset))
+                    : unchecked((UInt32)Marshal.ReadInt32(buffer, offset));
+                if (value == 0 || value > UInt32.MaxValue)
+                {
+                    throw new InvalidOperationException("job process id is invalid");
+                }
+                result[index] = value;
+            }
+            return result;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
     public static void Terminate(IntPtr job)
     {
         if (job == IntPtr.Zero || !TerminateJobObject(job, 1))
@@ -1418,6 +1488,410 @@ function Get-Task037JobActiveProcessCount {
     catch {
         throw 'TASK037_JOB_ACCOUNTING_REJECTED'
     }
+}
+
+function Get-Task037JobProcessCountSnapshot {
+    param([Parameter(Mandatory = $true)][IntPtr]$Job)
+
+    try {
+        $packed = [uint64][LatticeTask037JobObjectInterop]::ProcessCounts($Job)
+        return [pscustomobject]@{
+            TotalProcesses = [uint32]($packed -shr 32)
+            ActiveProcesses = [uint32]($packed -band [uint64]4294967295)
+        }
+    }
+    catch {
+        throw 'TASK037_JOB_ACCOUNTING_REJECTED'
+    }
+}
+
+function Test-Task037ValidProcessIdSet {
+    param([AllowEmptyCollection()][uint32[]]$ProcessIds = @())
+
+    $seen = [Collections.Generic.HashSet[uint32]]::new()
+    foreach ($processId in $ProcessIds) {
+        if ($processId -eq 0 -or -not $seen.Add([uint32]$processId)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-Task037ProcessIdSetEqual {
+    param(
+        [AllowEmptyCollection()][uint32[]]$Left = @(),
+        [AllowEmptyCollection()][uint32[]]$Right = @()
+    )
+
+    if (
+        $Left.Count -ne $Right.Count -or
+        -not (Test-Task037ValidProcessIdSet -ProcessIds $Left) -or
+        -not (Test-Task037ValidProcessIdSet -ProcessIds $Right)
+    ) {
+        return $false
+    }
+    $rightSet = [Collections.Generic.HashSet[uint32]]::new()
+    foreach ($processId in $Right) { $null = $rightSet.Add([uint32]$processId) }
+    foreach ($processId in $Left) {
+        if (-not $rightSet.Contains([uint32]$processId)) { return $false }
+    }
+    return $true
+}
+
+function Test-Task037ProcessIdSetSubset {
+    param(
+        [AllowEmptyCollection()][uint32[]]$Candidate = @(),
+        [AllowEmptyCollection()][uint32[]]$Allowed = @()
+    )
+
+    if (
+        -not (Test-Task037ValidProcessIdSet -ProcessIds $Candidate) -or
+        -not (Test-Task037ValidProcessIdSet -ProcessIds $Allowed)
+    ) {
+        return $false
+    }
+    $allowedSet = [Collections.Generic.HashSet[uint32]]::new()
+    foreach ($processId in $Allowed) { $null = $allowedSet.Add([uint32]$processId) }
+    foreach ($processId in $Candidate) {
+        if (-not $allowedSet.Contains([uint32]$processId)) { return $false }
+    }
+    return $true
+}
+
+function Get-Task037CoherentJobProcessSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][IntPtr]$Job,
+        [ValidateRange(1, 5000)][int]$TimeoutMilliseconds = 250
+    )
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    while ($stopwatch.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+        try {
+            $before = Get-Task037JobProcessCountSnapshot -Job $Job
+            $rawProcessIds = @([LatticeTask037JobObjectInterop]::ProcessIds($Job, 64))
+            $after = Get-Task037JobProcessCountSnapshot -Job $Job
+            $processIds = [uint32[]]@($rawProcessIds | ForEach-Object { [uint32]$_ } | Sort-Object)
+            if (
+                [uint32]$before.TotalProcesses -eq [uint32]$after.TotalProcesses -and
+                [uint32]$before.ActiveProcesses -eq [uint32]$after.ActiveProcesses -and
+                $processIds.Count -eq [uint32]$before.ActiveProcesses -and
+                (Test-Task037ValidProcessIdSet -ProcessIds $processIds)
+            ) {
+                return [pscustomobject]@{
+                    TotalProcesses = [uint32]$before.TotalProcesses
+                    ActiveProcesses = [uint32]$before.ActiveProcesses
+                    ProcessIds = $processIds
+                }
+            }
+        }
+        catch { }
+        if ($stopwatch.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+            Start-Sleep -Milliseconds 5
+        }
+    }
+    throw 'TASK037_JOB_ACCOUNTING_REJECTED'
+}
+
+function Test-Task037ProcessIdentityCohortLiveInJob {
+    param(
+        [Parameter(Mandatory = $true)][IntPtr]$Job,
+        [AllowEmptyCollection()][object[]]$Identities = @()
+    )
+
+    try {
+        foreach ($identity in $Identities) {
+            if (
+                $null -eq $identity -or
+                $identity.PSObject.Properties.Name -cnotcontains 'Process' -or
+                $identity.PSObject.Properties.Name -cnotcontains 'ProcessId' -or
+                $identity.PSObject.Properties.Name -cnotcontains 'ProcessStartTicks' -or
+                $identity.ProcessId -isnot [uint32] -or
+                $identity.ProcessStartTicks -isnot [int64] -or
+                [uint32]$identity.ProcessId -eq 0 -or
+                [int64]$identity.ProcessStartTicks -le 0
+            ) {
+                return $false
+            }
+            $process = $identity.Process
+            if (
+                $null -eq $process -or
+                $process -isnot [Diagnostics.Process] -or
+                [uint32]$process.Id -ne [uint32]$identity.ProcessId -or
+                [int64]$process.StartTime.ToUniversalTime().Ticks -ne
+                    [int64]$identity.ProcessStartTicks -or
+                $process.HasExited -or
+                -not [LatticeTask037JobObjectInterop]::IsMember($Job, $process.Handle)
+            ) {
+                return $false
+            }
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-Task037OpenClawJobBaseline {
+    param(
+        [Parameter(Mandatory = $true)][IntPtr]$Job,
+        [Parameter(Mandatory = $true)][Diagnostics.Process]$OpenClawProcess,
+        [Parameter(Mandatory = $true)][Diagnostics.Process]$OpenClawControllerProcess,
+        [ValidateRange(1, 30000)][int]$TimeoutMilliseconds = 5000
+    )
+
+    try {
+        if ($OpenClawProcess.Id -eq $OpenClawControllerProcess.Id) {
+            throw 'TASK037_OPENCLAW_JOB_BASELINE_REJECTED'
+        }
+        $requiredProcessIds = [uint32[]]@(
+            [uint32]$OpenClawProcess.Id,
+            [uint32]$OpenClawControllerProcess.Id
+        )
+        $primaryIdentities = @(
+            [pscustomobject]@{
+                Process = $OpenClawProcess
+                ProcessId = [uint32]$OpenClawProcess.Id
+                ProcessStartTicks = [int64]$OpenClawProcess.StartTime.ToUniversalTime().Ticks
+            },
+            [pscustomobject]@{
+                Process = $OpenClawControllerProcess
+                ProcessId = [uint32]$OpenClawControllerProcess.Id
+                ProcessStartTicks = [int64]$OpenClawControllerProcess.StartTime.ToUniversalTime().Ticks
+            }
+        )
+        $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+        $previous = $null
+        $stableSnapshot = $null
+        while ($stopwatch.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+            if (-not (Test-Task037ProcessIdentityCohortLiveInJob `
+                -Job $Job `
+                -Identities $primaryIdentities)) {
+                throw 'TASK037_OPENCLAW_JOB_BASELINE_REJECTED'
+            }
+            $remainingMilliseconds = [Math]::Max(
+                1,
+                [Math]::Min(250, $TimeoutMilliseconds - [int]$stopwatch.ElapsedMilliseconds)
+            )
+            $snapshot = Get-Task037CoherentJobProcessSnapshot `
+                -Job $Job `
+                -TimeoutMilliseconds $remainingMilliseconds
+            if (
+                [uint32]$snapshot.ActiveProcesses -lt 2 -or
+                [uint32]$snapshot.ActiveProcesses -gt 16 -or
+                -not (Test-Task037ProcessIdSetSubset `
+                    -Candidate $requiredProcessIds `
+                    -Allowed $snapshot.ProcessIds)
+            ) {
+                throw 'TASK037_OPENCLAW_JOB_BASELINE_REJECTED'
+            }
+            if (
+                $null -ne $previous -and
+                [uint32]$snapshot.TotalProcesses -eq [uint32]$previous.TotalProcesses -and
+                (Test-Task037ProcessIdSetEqual `
+                    -Left $snapshot.ProcessIds `
+                    -Right $previous.ProcessIds)
+            ) {
+                $stableSnapshot = $snapshot
+                break
+            }
+            $previous = $snapshot
+            Start-Sleep -Milliseconds 100
+        }
+        if ($null -eq $stableSnapshot) {
+            throw 'TASK037_OPENCLAW_JOB_BASELINE_REJECTED'
+        }
+
+        $extraProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
+        $identities = [Collections.Generic.List[object]]::new()
+        try {
+            foreach ($processId in $stableSnapshot.ProcessIds) {
+                $process = $null
+                if ([uint32]$processId -eq [uint32]$OpenClawProcess.Id) {
+                    $process = $OpenClawProcess
+                }
+                elseif ([uint32]$processId -eq [uint32]$OpenClawControllerProcess.Id) {
+                    $process = $OpenClawControllerProcess
+                }
+                else {
+                    $process = [Diagnostics.Process]::GetProcessById([int]$processId)
+                    $null = $process.Handle
+                    $extraProcesses.Add($process)
+                }
+                $identities.Add([pscustomobject]@{
+                    Process = $process
+                    ProcessId = [uint32]$process.Id
+                    ProcessStartTicks = [int64]$process.StartTime.ToUniversalTime().Ticks
+                })
+            }
+            if (-not (Test-Task037ProcessIdentityCohortLiveInJob `
+                -Job $Job `
+                -Identities $identities.ToArray())) {
+                throw 'TASK037_OPENCLAW_JOB_BASELINE_REJECTED'
+            }
+            if ($stopwatch.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
+                throw 'TASK037_OPENCLAW_JOB_BASELINE_REJECTED'
+            }
+            $remainingMilliseconds = [Math]::Max(
+                1,
+                [Math]::Min(250, $TimeoutMilliseconds - [int]$stopwatch.ElapsedMilliseconds)
+            )
+            $confirmed = Get-Task037CoherentJobProcessSnapshot `
+                -Job $Job `
+                -TimeoutMilliseconds $remainingMilliseconds
+            if (
+                [uint32]$confirmed.TotalProcesses -ne [uint32]$stableSnapshot.TotalProcesses -or
+                -not (Test-Task037ProcessIdSetEqual `
+                    -Left $confirmed.ProcessIds `
+                    -Right $stableSnapshot.ProcessIds) -or
+                -not (Test-Task037ProcessIdentityCohortLiveInJob `
+                    -Job $Job `
+                    -Identities $identities.ToArray())
+            ) {
+                throw 'TASK037_OPENCLAW_JOB_BASELINE_REJECTED'
+            }
+            return [pscustomobject]@{
+                TotalProcesses = [uint32]$confirmed.TotalProcesses
+                ActiveProcesses = [uint32]$confirmed.ActiveProcesses
+                ProcessIds = [uint32[]]@($confirmed.ProcessIds)
+                ProcessIdentities = [object[]]$identities.ToArray()
+                ExtraProcesses = [Diagnostics.Process[]]$extraProcesses.ToArray()
+            }
+        }
+        catch {
+            foreach ($extraProcess in $extraProcesses) {
+                try { $extraProcess.Dispose() } catch { }
+            }
+            throw 'TASK037_OPENCLAW_JOB_BASELINE_REJECTED'
+        }
+    }
+    catch {
+        throw 'TASK037_OPENCLAW_JOB_BASELINE_REJECTED'
+    }
+    throw 'TASK037_OPENCLAW_JOB_BASELINE_REJECTED'
+}
+
+function Wait-Task037JobProcessBaseline {
+    param(
+        [Parameter(Mandatory = $true)][IntPtr]$Job,
+        [Parameter(Mandatory = $true)]$InitialSnapshot,
+        [AllowEmptyCollection()][uint32[]]$BaselineProcessIds = @(),
+        [AllowEmptyCollection()][object[]]$RequiredProcessIdentities = @(),
+        [ValidateRange(1, 30000)][int]$TimeoutMilliseconds = 5000
+    )
+
+    try {
+        $requiredIdentityProcessIds = [uint32[]]@(
+            $RequiredProcessIdentities | ForEach-Object { [uint32]$_.ProcessId }
+        )
+        if (
+            $null -eq $InitialSnapshot -or
+            $InitialSnapshot.PSObject.Properties.Name -cnotcontains 'TotalProcesses' -or
+            $InitialSnapshot.PSObject.Properties.Name -cnotcontains 'ActiveProcesses' -or
+            $InitialSnapshot.PSObject.Properties.Name -cnotcontains 'ProcessIds' -or
+            -not (Test-Task037ValidProcessIdSet -ProcessIds $BaselineProcessIds) -or
+            -not (Test-Task037ProcessIdSetEqual `
+                -Left $requiredIdentityProcessIds `
+                -Right $BaselineProcessIds) -or
+            -not (Test-Task037ValidProcessIdSet -ProcessIds $InitialSnapshot.ProcessIds) -or
+            [uint32]$InitialSnapshot.ActiveProcesses -ne @($InitialSnapshot.ProcessIds).Count -or
+            -not (Test-Task037ProcessIdSetSubset `
+                -Candidate $BaselineProcessIds `
+                -Allowed $InitialSnapshot.ProcessIds)
+        ) {
+            return $false
+        }
+        $expectedTotalProcesses = [uint32]$InitialSnapshot.TotalProcesses
+        $previousProcessIds = [uint32[]]@($InitialSnapshot.ProcessIds)
+        $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+        while ($stopwatch.ElapsedMilliseconds -lt $TimeoutMilliseconds) {
+            if (-not (Test-Task037ProcessIdentityCohortLiveInJob `
+                -Job $Job `
+                -Identities $RequiredProcessIdentities)) {
+                return $false
+            }
+            $remainingMilliseconds = [Math]::Max(
+                1,
+                [Math]::Min(250, $TimeoutMilliseconds - [int]$stopwatch.ElapsedMilliseconds)
+            )
+            $snapshot = Get-Task037CoherentJobProcessSnapshot `
+                -Job $Job `
+                -TimeoutMilliseconds $remainingMilliseconds
+            if (
+                [uint32]$snapshot.TotalProcesses -ne $expectedTotalProcesses -or
+                -not (Test-Task037ProcessIdSetSubset `
+                    -Candidate $BaselineProcessIds `
+                    -Allowed $snapshot.ProcessIds) -or
+                -not (Test-Task037ProcessIdSetSubset `
+                    -Candidate $snapshot.ProcessIds `
+                    -Allowed $previousProcessIds)
+            ) {
+                return $false
+            }
+            if (Test-Task037ProcessIdSetEqual `
+                -Left $snapshot.ProcessIds `
+                -Right $BaselineProcessIds) {
+                Start-Sleep -Milliseconds 10
+                if ($stopwatch.ElapsedMilliseconds -ge $TimeoutMilliseconds) { return $false }
+                if (-not (Test-Task037ProcessIdentityCohortLiveInJob `
+                    -Job $Job `
+                    -Identities $RequiredProcessIdentities)) {
+                    return $false
+                }
+                $remainingMilliseconds = [Math]::Max(
+                    1,
+                    [Math]::Min(250, $TimeoutMilliseconds - [int]$stopwatch.ElapsedMilliseconds)
+                )
+                $confirmed = Get-Task037CoherentJobProcessSnapshot `
+                    -Job $Job `
+                    -TimeoutMilliseconds $remainingMilliseconds
+                return (
+                    [uint32]$confirmed.TotalProcesses -eq $expectedTotalProcesses -and
+                    (Test-Task037ProcessIdSetEqual `
+                        -Left $confirmed.ProcessIds `
+                        -Right $BaselineProcessIds) -and
+                    (Test-Task037ProcessIdentityCohortLiveInJob `
+                        -Job $Job `
+                        -Identities $RequiredProcessIdentities)
+                )
+            }
+            $previousProcessIds = [uint32[]]@($snapshot.ProcessIds)
+            Start-Sleep -Milliseconds 10
+        }
+        return $false
+    }
+    catch {
+        return $false
+    }
+}
+
+function Release-Task037ExitedProcessHandles {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $succeeded = $true
+    foreach ($propertyName in @('ChildProcess', 'ControllerProcess')) {
+        if ($State.PSObject.Properties.Name -cnotcontains $propertyName) {
+            $succeeded = $false
+            continue
+        }
+        $process = $State.$propertyName
+        try {
+            if ($null -eq $process -or $process -isnot [Diagnostics.Process]) {
+                $succeeded = $false
+            }
+            else {
+                if (-not $process.HasExited) { $succeeded = $false }
+                $process.Dispose()
+            }
+        }
+        catch {
+            $succeeded = $false
+        }
+        finally {
+            $State.$propertyName = $null
+        }
+    }
+    return [bool]$succeeded
 }
 
 function Assert-Task037ProcessInJob {
@@ -5119,8 +5593,9 @@ finally {
         'wrapper_reap',
         'wrapper_exit_match',
         'openclaw_liveness',
-        'job_cardinality',
-        'child_exit_success'
+        'child_exit_success',
+        'process_handle_release',
+        'job_cardinality'
     )
     for ($failureIndex = 0; $failureIndex -lt $processContractGates.Count; $failureIndex++) {
         $activeContractGate = 'process_wait'
@@ -5164,8 +5639,8 @@ finally {
             -LastCompletedGate ([ref]$lastCompletedContractGate)
     }
     if (
-        $activeContractGate -cne 'child_exit_success' -or
-        $lastCompletedContractGate -cne 'job_cardinality'
+        $activeContractGate -cne 'job_cardinality' -or
+        $lastCompletedContractGate -cne 'process_handle_release'
     ) {
         throw 'TASK037_SELF_TEST_PROCESS_CONTRACT_REJECTED'
     }
@@ -5513,6 +5988,8 @@ finally {
     )
     $emptyArgumentsJob = [IntPtr]::Zero
     $emptyArgumentsOwned = $null
+    $emptyArgumentsLateOwned = $null
+    $emptyArgumentsBaseline = $null
     try {
         New-Item -ItemType Directory -Path $emptyArgumentsRoot -Force:$false | Out-Null
         $emptyArgumentsReleasePath = Join-Path $emptyArgumentsRoot 'release.signal'
@@ -5551,6 +6028,139 @@ if (fs.readFileSync(releasePath, 'utf8') !== 'release\n') process.exit(125);
             -RuntimeIsolationRoot (Join-Path $emptyArgumentsRoot 'runtime') `
             -TrustedProgramData $expectedProgramData `
             -StandardInputPath $emptyArgumentsInput
+        $emptyArgumentsLiveSnapshot = Get-Task037CoherentJobProcessSnapshot -Job $emptyArgumentsJob
+        $emptyArgumentsBaseline = Get-Task037OpenClawJobBaseline `
+            -Job $emptyArgumentsJob `
+            -OpenClawProcess $emptyArgumentsOwned.ChildProcess `
+            -OpenClawControllerProcess $emptyArgumentsOwned.Process `
+            -TimeoutMilliseconds 1000
+        $emptyArgumentsForgedIdentity = [pscustomobject]@{
+            Process = $emptyArgumentsBaseline.ProcessIdentities[0].Process
+            ProcessId = [uint32]$emptyArgumentsBaseline.ProcessIdentities[0].ProcessId
+            ProcessStartTicks = [int64]$emptyArgumentsBaseline.ProcessIdentities[0].ProcessStartTicks + 1
+        }
+        if (
+            [uint32]$emptyArgumentsLiveSnapshot.ActiveProcesses -lt 2 -or
+            -not (Test-Task037ProcessIdSetEqual `
+                -Left $emptyArgumentsBaseline.ProcessIds `
+                -Right $emptyArgumentsLiveSnapshot.ProcessIds) -or
+            (Test-Task037ProcessIdentityCohortLiveInJob `
+                -Job $emptyArgumentsJob `
+                -Identities @($emptyArgumentsForgedIdentity)) -or
+            -not (Wait-Task037JobProcessBaseline `
+                -Job $emptyArgumentsJob `
+                -InitialSnapshot $emptyArgumentsLiveSnapshot `
+                -BaselineProcessIds $emptyArgumentsLiveSnapshot.ProcessIds `
+                -RequiredProcessIdentities $emptyArgumentsBaseline.ProcessIdentities `
+                -TimeoutMilliseconds 1000) -or
+            (Wait-Task037JobProcessBaseline `
+                -Job $emptyArgumentsJob `
+                -InitialSnapshot $emptyArgumentsLiveSnapshot `
+                -BaselineProcessIds @() `
+                -TimeoutMilliseconds 50)
+        ) {
+            throw 'TASK037_SELF_TEST_JOB_DRAIN_BARRIER_REJECTED'
+        }
+        $emptyArgumentsForgedTotal = [pscustomobject]@{
+            TotalProcesses = [uint32]($emptyArgumentsLiveSnapshot.TotalProcesses + 1)
+            ActiveProcesses = [uint32]$emptyArgumentsLiveSnapshot.ActiveProcesses
+            ProcessIds = [uint32[]]@($emptyArgumentsLiveSnapshot.ProcessIds)
+        }
+        $emptyArgumentsMissingProcessIds = [uint32[]]@(
+            $emptyArgumentsLiveSnapshot.ProcessIds |
+                Select-Object -First ($emptyArgumentsLiveSnapshot.ProcessIds.Count - 1)
+        )
+        $emptyArgumentsForgedSet = [pscustomobject]@{
+            TotalProcesses = [uint32]$emptyArgumentsLiveSnapshot.TotalProcesses
+            ActiveProcesses = [uint32]$emptyArgumentsMissingProcessIds.Count
+            ProcessIds = $emptyArgumentsMissingProcessIds
+        }
+        if (
+            (Wait-Task037JobProcessBaseline `
+                -Job $emptyArgumentsJob `
+                -InitialSnapshot $emptyArgumentsForgedTotal `
+                -BaselineProcessIds @() `
+                -TimeoutMilliseconds 50) -or
+            (Wait-Task037JobProcessBaseline `
+                -Job $emptyArgumentsJob `
+                -InitialSnapshot $emptyArgumentsForgedSet `
+                -BaselineProcessIds @() `
+                -TimeoutMilliseconds 50) -or
+            (Test-Task037ValidProcessIdSet -ProcessIds @(
+                [uint32]$emptyArgumentsLiveSnapshot.ProcessIds[0],
+                [uint32]$emptyArgumentsLiveSnapshot.ProcessIds[0]
+            ))
+        ) {
+            throw 'TASK037_SELF_TEST_JOB_DRAIN_AUTHORITY_REJECTED'
+        }
+
+        $emptyArgumentsLateReleasePath = Join-Path $emptyArgumentsRoot 'late-release.signal'
+        $emptyArgumentsLateOwned = Start-Task037GatedProcess `
+            -Job $emptyArgumentsJob `
+            -PowerShellExecutable $powerShellExecutable `
+            -Executable $trustedNode `
+            -Arguments @() `
+            -WorkingDirectory $emptyArgumentsRoot `
+            -EnvironmentValues ([ordered]@{
+                TASK037_SELFTEST_EMPTY_ARGUMENTS_RELEASE = $emptyArgumentsLateReleasePath
+            }) `
+            -ChildPidPath (Join-Path $emptyArgumentsRoot 'late-child.pid') `
+            -ChildStdoutPath (Join-Path $emptyArgumentsRoot 'late-child.stdout') `
+            -ChildStderrPath (Join-Path $emptyArgumentsRoot 'late-child.stderr') `
+            -WrapperStdoutPath (Join-Path $emptyArgumentsRoot 'late-wrapper.stdout') `
+            -WrapperStderrPath (Join-Path $emptyArgumentsRoot 'late-wrapper.stderr') `
+            -RuntimeIsolationRoot (Join-Path $emptyArgumentsRoot 'late-runtime') `
+            -TrustedProgramData $expectedProgramData `
+            -StandardInputPath $emptyArgumentsInput
+        if (Wait-Task037JobProcessBaseline `
+            -Job $emptyArgumentsJob `
+            -InitialSnapshot $emptyArgumentsLiveSnapshot `
+            -BaselineProcessIds $emptyArgumentsBaseline.ProcessIds `
+            -RequiredProcessIdentities $emptyArgumentsBaseline.ProcessIdentities `
+            -TimeoutMilliseconds 50) {
+            throw 'TASK037_SELF_TEST_JOB_DRAIN_TOTAL_INCREASE_REJECTED'
+        }
+        [IO.File]::WriteAllText(
+            $emptyArgumentsLateReleasePath,
+            "release`n",
+            [Text.UTF8Encoding]::new($false)
+        )
+        Assert-NoReparsePath `
+            -Path $emptyArgumentsLateReleasePath `
+            -FailureCode 'TASK037_SELF_TEST_JOB_DRAIN_TOTAL_INCREASE_REJECTED'
+        Assert-RegularFile -Path $emptyArgumentsLateReleasePath
+        if (
+            -not $emptyArgumentsLateOwned.ChildProcess.WaitForExit(10000) -or
+            [int]$emptyArgumentsLateOwned.ChildProcess.ExitCode -ne 0 -or
+            -not $emptyArgumentsLateOwned.Process.WaitForExit(10000)
+        ) {
+            throw 'TASK037_SELF_TEST_JOB_DRAIN_TOTAL_INCREASE_REJECTED'
+        }
+        Complete-Task037GatedProcessEvidence -OwnedProcess $emptyArgumentsLateOwned
+        $emptyArgumentsLateReleaseState = [pscustomobject]@{
+            ChildProcess = $emptyArgumentsLateOwned.ChildProcess
+            ControllerProcess = $emptyArgumentsLateOwned.Process
+        }
+        if (-not (Release-Task037ExitedProcessHandles -State $emptyArgumentsLateReleaseState)) {
+            throw 'TASK037_SELF_TEST_JOB_DRAIN_TOTAL_INCREASE_REJECTED'
+        }
+        $emptyArgumentsLateOwned.ChildProcess = $null
+        $emptyArgumentsLateOwned.Process = $null
+        $emptyArgumentsLiveAfterLateProcess = Get-Task037CoherentJobProcessSnapshot -Job $emptyArgumentsJob
+        if (
+            [uint32]$emptyArgumentsLiveAfterLateProcess.TotalProcesses -le
+                [uint32]$emptyArgumentsLiveSnapshot.TotalProcesses -or
+            -not (Test-Task037ProcessIdSetEqual `
+                -Left $emptyArgumentsLiveAfterLateProcess.ProcessIds `
+                -Right $emptyArgumentsBaseline.ProcessIds) -or
+            -not (Test-Task037ProcessIdentityCohortLiveInJob `
+                -Job $emptyArgumentsJob `
+                -Identities $emptyArgumentsBaseline.ProcessIdentities)
+        ) {
+            throw 'TASK037_SELF_TEST_JOB_DRAIN_TOTAL_INCREASE_REJECTED'
+        }
+        $emptyArgumentsLiveSnapshot = $emptyArgumentsLiveAfterLateProcess
+
         [IO.File]::WriteAllText(
             $emptyArgumentsReleasePath,
             "release`n",
@@ -5560,6 +6170,13 @@ if (fs.readFileSync(releasePath, 'utf8') !== 'release\n') process.exit(125);
             -Path $emptyArgumentsReleasePath `
             -FailureCode 'TASK037_SELF_TEST_EMPTY_ARGUMENTS_REJECTED'
         Assert-RegularFile -Path $emptyArgumentsReleasePath
+        if (-not (Wait-Task037JobProcessBaseline `
+            -Job $emptyArgumentsJob `
+            -InitialSnapshot $emptyArgumentsLiveSnapshot `
+            -BaselineProcessIds @() `
+            -TimeoutMilliseconds 10000)) {
+            throw 'TASK037_SELF_TEST_JOB_DRAIN_REJECTED'
+        }
         if (
             -not $emptyArgumentsOwned.ChildProcess.WaitForExit(10000) -or
             [int]$emptyArgumentsOwned.ChildProcess.ExitCode -ne 0 -or
@@ -5576,8 +6193,38 @@ if (fs.readFileSync(releasePath, 'utf8') !== 'release\n') process.exit(125);
                 throw 'TASK037_SELF_TEST_EMPTY_ARGUMENTS_REJECTED'
             }
         }
-        Stop-Task037Job -Job $emptyArgumentsJob
+        $emptyArgumentsDrainSnapshot = Get-Task037CoherentJobProcessSnapshot -Job $emptyArgumentsJob
+        if (
+            [uint32]$emptyArgumentsDrainSnapshot.TotalProcesses -ne
+                [uint32]$emptyArgumentsLiveSnapshot.TotalProcesses -or
+            [uint32]$emptyArgumentsDrainSnapshot.ActiveProcesses -ne 0 -or
+            (Test-Task037ProcessIdentityCohortLiveInJob `
+                -Job $emptyArgumentsJob `
+                -Identities $emptyArgumentsBaseline.ProcessIdentities)
+        ) {
+            throw 'TASK037_SELF_TEST_JOB_DRAIN_REJECTED'
+        }
         Complete-Task037GatedProcessEvidence -OwnedProcess $emptyArgumentsOwned
+        $emptyArgumentsReleaseState = [pscustomobject]@{
+            ChildProcess = $emptyArgumentsOwned.ChildProcess
+            ControllerProcess = $emptyArgumentsOwned.Process
+        }
+        if (-not (Release-Task037ExitedProcessHandles -State $emptyArgumentsReleaseState)) {
+            throw 'TASK037_SELF_TEST_PROCESS_HANDLE_RELEASE_REJECTED'
+        }
+        $emptyArgumentsOwned.ChildProcess = $null
+        $emptyArgumentsOwned.Process = $null
+        foreach ($extraProcess in @($emptyArgumentsBaseline.ExtraProcesses)) {
+            try { $extraProcess.Dispose() }
+            catch { throw 'TASK037_SELF_TEST_PROCESS_HANDLE_RELEASE_REJECTED' }
+        }
+        $emptyArgumentsBaseline.ExtraProcesses = @()
+        if (-not (Wait-Task037JobProcessBaseline `
+            -Job $emptyArgumentsJob `
+            -InitialSnapshot $emptyArgumentsDrainSnapshot `
+            -BaselineProcessIds @())) {
+            throw 'TASK037_SELF_TEST_PROCESS_HANDLE_RELEASE_REJECTED'
+        }
         foreach ($specialFolder in @(
             (Join-Path $emptyArgumentsRoot 'runtime\home\AppData\Roaming'),
             (Join-Path $emptyArgumentsRoot 'runtime\home\AppData\Local')
@@ -5606,6 +6253,15 @@ if (fs.readFileSync(releasePath, 'utf8') !== 'release\n') process.exit(125);
         if ($null -ne $emptyArgumentsOwned) {
             try { $emptyArgumentsOwned.ChildProcess.Dispose() } catch { }
             try { $emptyArgumentsOwned.Process.Dispose() } catch { }
+        }
+        if ($null -ne $emptyArgumentsLateOwned) {
+            try { $emptyArgumentsLateOwned.ChildProcess.Dispose() } catch { }
+            try { $emptyArgumentsLateOwned.Process.Dispose() } catch { }
+        }
+        if ($null -ne $emptyArgumentsBaseline) {
+            foreach ($extraProcess in @($emptyArgumentsBaseline.ExtraProcesses)) {
+                try { $extraProcess.Dispose() } catch { }
+            }
         }
         if (Test-Path -LiteralPath $emptyArgumentsRoot) {
             Remove-SafeTempRoot -Path $emptyArgumentsRoot | Out-Null
@@ -5753,12 +6409,15 @@ function Invoke-FullChainInternalPhase {
     $jobProcessCountZero = $false
     $openClawOwned = $null
     $fullChainOwned = $null
+    $fullChainEvidenceCompleted = $false
     $openClawControllerProcess = $null
     $fullChainControllerProcess = $null
     $openClawProcess = $null
     $fullChainProcess = $null
     $openClawPid = 0
     $fullChainPid = 0
+    $openClawJobBaseline = $null
+    $openClawBaselineExtraProcesses = @()
     $wsPort = 0
     $rustPort = 0
     $failure = $null
@@ -5870,6 +6529,16 @@ function Invoke-FullChainInternalPhase {
             throw 'TASK037_OPENCLAW_GATEWAY_NOT_READY'
         }
 
+        Enter-Task037PhaseGate `
+            -Gate 'openclaw_job_baseline' `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
+        $openClawJobBaseline = Get-Task037OpenClawJobBaseline `
+            -Job $phaseJob `
+            -OpenClawProcess $openClawProcess `
+            -OpenClawControllerProcess $openClawControllerProcess
+        $openClawBaselineExtraProcesses = @($openClawJobBaseline.ExtraProcesses)
+
         $attestationTag = Get-AttestationTag `
             -Key $openClawAttestationKey `
             -LaunchRecordId $launchRecordId `
@@ -5959,7 +6628,13 @@ function Invoke-FullChainInternalPhase {
         if (-not $fullChainProcess.WaitForExit($timeoutMilliseconds)) {
             throw ('TASK037_' + $Phase.ToUpperInvariant() + '_TIMEOUT')
         }
-        $processContract = [pscustomobject]@{ ChildExitCode = 0 }
+        $processContract = [pscustomobject]@{
+            ChildExitCode = 0
+            ChildProcess = $fullChainProcess
+            ControllerProcess = $fullChainControllerProcess
+            DrainSnapshot = $null
+            EvidenceCompleted = $false
+        }
         Invoke-Task037ProcessContractCheck `
             -Gate 'process_exit_snapshot' `
             -Check {
@@ -5994,13 +6669,40 @@ function Invoke-FullChainInternalPhase {
             -ActiveGate ([ref]$activeGate) `
             -LastCompletedGate ([ref]$lastCompletedGate)
         Invoke-Task037ProcessContractCheck `
-            -Gate 'job_cardinality' `
-            -Check { return (Get-Task037JobActiveProcessCount -Job $phaseJob) -eq 2 } `
-            -ActiveGate ([ref]$activeGate) `
-            -LastCompletedGate ([ref]$lastCompletedGate)
-        Invoke-Task037ProcessContractCheck `
             -Gate 'child_exit_success' `
             -Check { return [int]$processContract.ChildExitCode -eq 0 } `
+            -ActiveGate ([ref]$activeGate) `
+            -LastCompletedGate ([ref]$lastCompletedGate)
+        try {
+            Invoke-Task037ProcessContractCheck `
+                -Gate 'process_handle_release' `
+                -Check {
+                    Complete-Task037GatedProcessEvidence -OwnedProcess $fullChainOwned
+                    $processContract.EvidenceCompleted = $true
+                    $processContract.DrainSnapshot = Get-Task037CoherentJobProcessSnapshot -Job $phaseJob
+                    return Release-Task037ExitedProcessHandles -State $processContract
+                } `
+                -ActiveGate ([ref]$activeGate) `
+                -LastCompletedGate ([ref]$lastCompletedGate)
+        }
+        finally {
+            $fullChainProcess = $processContract.ChildProcess
+            $fullChainControllerProcess = $processContract.ControllerProcess
+            $fullChainEvidenceCompleted = [bool]$processContract.EvidenceCompleted
+            if ($null -ne $fullChainOwned) {
+                $fullChainOwned.ChildProcess = $processContract.ChildProcess
+                $fullChainOwned.Process = $processContract.ControllerProcess
+            }
+        }
+        Invoke-Task037ProcessContractCheck `
+            -Gate 'job_cardinality' `
+            -Check {
+                return Wait-Task037JobProcessBaseline `
+                    -Job $phaseJob `
+                    -InitialSnapshot $processContract.DrainSnapshot `
+                    -BaselineProcessIds $openClawJobBaseline.ProcessIds `
+                    -RequiredProcessIdentities $openClawJobBaseline.ProcessIdentities
+            } `
             -ActiveGate ([ref]$activeGate) `
             -LastCompletedGate ([ref]$lastCompletedGate)
         Enter-Task037PhaseGate `
@@ -6318,11 +7020,28 @@ function Invoke-FullChainInternalPhase {
                 $phaseCleanupFailure = 'TASK037_PHASE_PROCESS_REAP_REJECTED'
             }
         }
-        foreach ($owned in @($fullChainOwned, $openClawOwned)) {
-            if ($null -eq $owned) { continue }
-            try { Complete-Task037GatedProcessEvidence -OwnedProcess $owned }
+        if (-not $fullChainEvidenceCompleted -and $null -ne $fullChainOwned) {
+            try { Complete-Task037GatedProcessEvidence -OwnedProcess $fullChainOwned }
             catch { $phaseCleanupFailure = 'TASK037_PHASE_PROCESS_EVIDENCE_REJECTED' }
         }
+        if ($null -ne $openClawOwned) {
+            try { Complete-Task037GatedProcessEvidence -OwnedProcess $openClawOwned }
+            catch { $phaseCleanupFailure = 'TASK037_PHASE_PROCESS_EVIDENCE_REJECTED' }
+        }
+        foreach ($extraProcess in @($openClawBaselineExtraProcesses)) {
+            try {
+                if (-not $extraProcess.WaitForExit(5000)) {
+                    $phaseCleanupFailure = 'TASK037_PHASE_PROCESS_REAP_REJECTED'
+                }
+            }
+            catch {
+                $phaseCleanupFailure = 'TASK037_PHASE_PROCESS_REAP_REJECTED'
+            }
+            finally {
+                try { $extraProcess.Dispose() } catch { }
+            }
+        }
+        $openClawBaselineExtraProcesses = @()
         if ($null -ne $fullChainProcess) {
             $fullChainProcessStopped = $fullChainProcess.HasExited
             $fullChainProcess.Dispose()
