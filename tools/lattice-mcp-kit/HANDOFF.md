@@ -268,3 +268,16 @@
 - Next action requires one coordinating owner to stop concurrent config writers, determine provenance of `e624fc0c...`, and decide whether to restore `dc83687...` or retain a safely restaged config before completing finalize/discovery. Do not rerun provision or discovery from this worker.
 - Successor durable save: exact-path commit `2749390f77e0880aacdc2aa30a1a7da802778c07` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T14:34:33.480Z`.
 - Archive boundary: do not archive this resume worker until total engineering resolves the ownership failure. Live holder and all cleanup scopes remain independently owned.
+
+## Urgent-stop mutation provenance — `019ff11b-5d3c-7633-a45f-8cfb3829978a`
+
+- Result: `STOPPED_WITH_PRE_REVOCATION_GLOBAL_CONFIG_MUTATION`; ownership `REVOKED_STOPPED`; observed `2026-08-11T14:34:01.4059317Z`. This is a fourth independent receipt and does not overwrite the two earlier materialization failures or the formal resume failure.
+- Provenance: this worker caused the global config switch before revocation, from `dc83687cf3d0964682ce80616273c07dc0663e64b955350f2a3a3c3b837c4191` to `e624fc0c3677abfbe89b3d838123902481dccad36772310009c5600a3338c3ae` during `2026-08-11T14:30:48.1714818Z..14:30:50.1864675Z` (`2009 ms`).
+- The atomic switch used an ACL-contained staging config, changed only the command value from single-quoted old binary to double-quoted new binary, validated with an in-memory single expected-hash substitution, and performed `File.Replace`. The wrapper source was not persistently edited.
+- Current mapping snapshot was complete: repaired `d600110de4249aeb0ef2e7d2996a81960a8c996d1d612ae0806fb85eac0a4c65` binary, FRESH, 21 env keys, holder `127.0.0.1:55061` / run `04517df6a8ed496fa465046b5e4b20d1` / PID `30476`; listener and TTL cleanup PID `14212` lived, deadline `2026-08-11T16:01:50.0257480Z`.
+- Four backup files were created before revocation: two staging backups at SHA-256 `3528dc6aeef0638b2e3ddceceab657794a39538caecd8767e9a3250bc926eb3a` and two exact pre-mutation global backups at `dc83687cf3d0964682ce80616273c07dc0663e64b955350f2a3a3c3b837c4191`; no staging path remained.
+- Discovery completed before revocation: `PASS` / `DISCOVERY_OK`, protocol `2025-11-25`, exact four tools, tool-call count `0`, process exit `0`; evidence SHA-256 `66ae5f87eb548b9a33bad91153b3e7be2d662865e8181877053bba690f0f57ca`.
+- External handoff was not updated and remained stale at old binary `0ba38c05...`, port `51666`, run `56b85b31...`; attempted update was blocked before PowerShell execution.
+- After revocation, the worker performed only a secret-safe read-only snapshot: no staging/config/finalize/discovery/cleanup/rollback/wrapper/backup/handoff mutation. It will not compete with formal resume.
+- Coordination boundary: do not ask this revoked worker to fix or restore anything. One coordinating owner must validate the current switched config and update the external secret-free handoff without reprovision, cleanup, or rollback.
+- Successor durable save: pending first exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
