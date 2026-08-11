@@ -645,3 +645,11 @@
 - Session 1 completed exact-four discovery and made exactly one `lattice_task_submit`. Transport returned `isError=false`, but domain `status=FAILED`, `task_state=FAILED`, and `result_digest=null` for new task ref `470d3e1085acae6fa11ee9ff8b79cd5c22769e2f386fe9056bf090c87d054482`.
 - First failure is `LATTICE_FRESH_SUBMIT_DOMAIN_FAILED / C_TASK_SUBMIT_DOMAIN`. Session 2 and independent status equality were correctly `NOT_RUN`; no retry, delivery call, mutation, cleanup, rollback, or protected-script content access occurred.
 - Stage 1 durable receipt commit is `80bf6a2be85c2ce42b05ebfcc369932ea883ec43`; expected and live remote SHA matched at `2026-08-11T20:35:47.4122842Z`. Stage 2 confirmation commit `29f00da4ecaccca9e90c9965673416e3d4216f75` and fresh live remote SHA matched at `2026-08-11T20:36:48.3833270Z`, so `safe_to_archive=true`; authoritative receipt fields remain unchanged. Central archived the worker at `2026-08-11T20:37:52.9802448Z` (`set_thread_archived_result=success`).
+
+## Fresh submit domain diagnosis — `019ff28b-eeb1-7f62-be6d-2e9620aa5836`
+
+- Result is `DIAGNOSIS_KNOWN_WAITING_SAVER_TWO_STAGE_REMOTE_EQUALITY`, certainty `KNOWN`; this diagnosis is not a P0 PASS.
+- Exact failure is `CODEX_APP_SERVER_INVALID_CODEX_HOME / CODEX` for task `470d3e1085acae6fa11ee9ff8b79cd5c22769e2f386fe9056bf090c87d054482`. The isolated Codex-home `config.toml` is `365` bytes while the source-owned exact value is `174` bytes; the required bytes are an exact prefix and the first differing offset is `174`.
+- Transport, PostgreSQL durability, and workspace preparation are not the initiating failure. Codex identity/app-server/model execution was not entered; remediation is root-layer repair/reprovision only and must not relax the exact predicate.
+- Diagnosis made no test/build/MCP/submit/status/delivery, holder lifecycle, DB mutation, repository edit, push, cleanup, rollback, or 64272 action. The protected dirty script had one reported read-only scan incident but was not modified, staged, reset, or cleaned.
+- Two-stage saver durability is pending; `safe_to_archive=false` until both fresh live `git ls-remote` equalities pass.
