@@ -752,4 +752,4 @@
 - Preflight passed. One session initialized, negotiated protocol `2025-11-25`, observed exact-four tools, and made exactly one `lattice_task_submit` call with no retry.
 - Transport succeeded with `isError=false` and exact-six structured content, but domain `status=FAILED`, `task_state=FAILED`, and `result_digest=null`; acceptance gate C failed.
 - Conditional status session was not run because submit did not complete. No delivery calls, cleanup, rollback, holder/candidate stop, config change, PostgreSQL connection, port 64272 action, source edit, or protected-script access occurred.
-- Stage 1 and stage 2 saver equality are pending.
+- Stage 1 receipt commit `595695178c870262db4a0b28e865fff3ebf7868a` matched fresh live remote at `2026-08-11T22:44:01.2452789Z`; stage 2 is confirmation-only. Outer saver state advances to `safe_to_archive=true`, while the authoritative verdict remains `FRESH_SUBMIT_DOMAIN_FAILED`.
