@@ -711,3 +711,12 @@
 - No retry or second status session was run. Config, handoff, prepared-home config, holder candidate, and protected dirty script remained unchanged.
 - No build/test/new PG/manual DB/64272, cleanup, rollback, delete, merge, deploy, release, or default-branch action occurred.
 - Stage 1 durable substituted-request failure receipt commit `3e89585a710a0d338457cf9acf5ad9cb85e97436` matched live remote at `2026-08-11T21:58:03.3833022Z`; stage 2 confirmation commit `aa1256ace0f71752b413e09d1df74662a8284918` matched live remote at `2026-08-11T21:58:35.8819422Z`. Central archived the verifier at `2026-08-11T21:59:09.5937689Z`; outer saver state is `safe_to_archive=true`. Authoritative `safe_to_archive=false`, verdict `FRESH_SUBMIT_FAILED`, `LATTICE_TASK_REQUEST_SUBSTITUTED`, and P0 acceptance false remain unchanged.
+
+## Offline stdio verifier diagnosis — `019ff2d3-2008-7f73-9e27-945b25bc9eb8`
+
+- Verdict is `DIAGNOSIS_ONLY_NOT_P0_PASS`; current fresh-window live acceptance PASS is not claimed.
+- Medium-certainty client diagnosis: the read loop can reissue `ReadLineAsync` after a 500 ms wait while the prior read remains pending, allowing concurrent reads and an uncaught client runtime failure.
+- Exact exception text was not captured. Submit-frame write count remains `UNKNOWN_0_OR_1` and must not be inferred as zero or one.
+- Failure remains `STDIO_ORCHESTRATOR_NONZERO_NO_RESPONSE` at `SUBMIT_RESPONSE_CAPTURE`; initialize/list/submit flow evidence retains its probable, unobserved, and unknown classifications.
+- No MCP, Codex, PostgreSQL, network mutation, config/home mutation, holder inspection/action, cleanup/rollback, or protected-script access occurred. The holder deadline is treated as expired without inspection.
+- The proposed client correction was diagnosis-only and was not implemented. Stage 1 and stage 2 remote equality are pending.
