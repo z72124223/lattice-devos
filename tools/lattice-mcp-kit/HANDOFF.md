@@ -474,3 +474,14 @@
 - Next action: any discovery continuation or fresh verifier requires a separately bounded window. This diagnosis must not be promoted to discovery readiness.
 - Successor durable save: exact-path commit `21515c1b9af1c15e81df6683a017790024e478b2` (tree `b3108117c441fa47482241da4ce58bd5fe75043d`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved first durable local/remote SHA equality at `2026-08-11T16:56:45.1719225Z`.
 - Archive boundary: central confirmed this initialize-diagnosis worker archived after final remote confirmation `62aa9761026a02c69ba461ab0e13be2e8e6f3b92`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:57:44.2241234Z`. Current config, holder, external handoff, and successor-worker state remain outside saver authority.
+
+## New holder ready; switch/discovery not run — `019ff1c2-97fa-79f0-8ebb-7234b258ec4c`
+
+- Result is exactly `PASS_HOLDER_READY`; it is not MCP switch/discovery readiness. Started `2026-08-11T16:58:09.0000000Z`, ended `2026-08-11T17:04:01.4410095Z`, elapsed `352441 ms`.
+- The validated provision wrapper ran exactly once and durably exited `0`. Its inherited TTL-child streams left stdout/stderr content locked, so content was not captured and no wrapper rerun occurred; actual READY holder evidence is authoritative.
+- New holder: `127.0.0.1:52575`, run `f112f8fbc17344ed978ea8fe284e9705`, database `lattice_task019_f112f8fb_base`, system identifier `7672820385534622536`, postmaster PID `28476`, TTL PID `29244`, deadline `2026-08-11T17:47:00.2169479Z`; `2578` seconds remained at evidence.
+- Old `49156` holder was read-only classified `READY_BUT_BELOW_8_MINUTE_GATE` with `253` seconds at preflight and had crossed its deadline by final read. No connection, stop, delete, cleanup, or rollback action was taken.
+- Selected port `52575` was absent from the 34-port occupied snapshot and from effective exclusions `5432/64272/55432/49156/55061/51666/63238`; `64272` was only observed occupied and never connected.
+- Boundary: no MCP initialize/discovery/tool call, submit/status/delivery, config/binary/external-handoff switch write, credential-file read, raw credential/env value save, source/helper change, second provision, or protected dirty-script read/write.
+- Next action after durable save: central may archive this worker and separately authorize switch/discovery with a 60-second initialize timeout against `127.0.0.1:52575`.
+- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check.
