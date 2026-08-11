@@ -669,3 +669,12 @@
 - Previous failed helper artifact was not read, reused, invoked, modified, or deleted. No new-home path or files were created; old home, global config, external handoff, holder, and canonical source evidence remained unchanged.
 - Worker made no repository edit/commit/push, Codex/MCP/DB/64272 action, holder lifecycle action, build, test, cleanup, rollback, or protected-script content access.
 - Stage 1 durable HOME-PREPARE failure receipt commit is `40e1de22ddc2552f58a5f77656955083af383ad1` and matched live remote at `2026-08-11T21:20:13.3474843Z`; stage 2 confirmation commit is `90001ce5c669fc0a33dcca4c15bafc714ed2bc7d` and matched live remote at `2026-08-11T21:20:48.4855505Z`. Central archived the worker at `2026-08-11T21:21:11.5992805Z`; outer saver state is `safe_to_archive=true`, while the authoritative receipt remains unchanged with `safe_to_archive=false`. `HOME_PREPARED_ONLY`, discovery, and P0 PASS remain unclaimed.
+
+## HOME-PREPARED-ONLY — `019ff2b4-0543-79b2-9117-b10b305bdbd7`
+
+- Result and classification are `HOME_PREPARED_ONLY`; this is not discovery, P0 PASS, or `CONFIG-HOME-SWITCH`.
+- New isolated home `6035356d59694957b16c45ed28f1ff77` was created at the exact absent path with four verified items; canonical config is 174 bytes with SHA-256 `1a9bc2b325476a4679e5ad9202329c97952ed8ea958162bd0ffadd2196833189`.
+- Credential source and old home remained unchanged; global config, external handoff, holder, source, binary, and protected dirty script were not mutated by the worker.
+- Four pre-target-selection incidents were recorded as zero-mutation local inspection/tooling incidents. The obsolete failure receipt was cancelled and was never written, committed, or pushed by saver.
+- Codex/MCP/DB/build/test, holder lifecycle, port 64272, cleanup, rollback, merge, deploy, release, and default-branch action counts are zero.
+- Stage 1 and stage 2 saver remote equality are pending; authoritative receipt remains `safe_to_archive=false` until both complete.
