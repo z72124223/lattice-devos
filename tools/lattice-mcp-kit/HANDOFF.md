@@ -562,3 +562,10 @@
 - Read-only inspection located `GitRunner::output` at `git_delivery.rs:1392` and the git-init call at `192-199`; malformed-regex aggregate failures retained no remote/commit output and caused no write.
 - Original goal remains `ACTIVE_NOT_COMPLETED`; no rollback/reset/clean/revert is needed or authorized. Worker receipt reports `safe_to_archive=true`.
 - First durable cancellation receipt commit is `2925063bf0ee4c44b7cc85944c560e3af5c2f3fe` (tree `3224f264784bc7438192782e568efd2ab3690188`); live `git ls-remote` equality was verified at `2026-08-11T18:33:57.4306662Z`. Central archived the worker at `2026-08-11T18:34:38.235Z`.
+## Short-root discovery identity failure — `019ff219-8ac1-78e1-898b-00589092f113`
+
+- Window ran `2026-08-11T18:33:17.000Z`–`2026-08-11T18:48:21.122Z` (`904122 ms`). Outcome is `FAILED_FIRST_TRUE_CONNECTIVITY_FAILURE_PRESERVED`; READY is false.
+- Whole-file SHA drift was semantically cleared: command/stdio/args, 21 keys, binary, FRESH, holder/authority/ingress and all 20 non-root env values matched. Only `LATTICE_DELIVERY_ROOT` was atomically switched to short user-owned LocalAppData base `P0D-019ff2198ac178e2`; projected maximum Git-template path is `175 <= 220`.
+- Config switched to `65b659a416929de4d8cda0ffb815b99eaa021e9260e231911e998737288ffa89`; secret-free external handoff status is `DISCOVERY_FAILED_PRESERVED` with SHA-256 `9d90084799ff936752a6840d925e80522ac516c982ab80f5a8f9ffccf8c311b2`.
+- The one no-BOM Discovery attempt exited before initialize response with `LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED / DISCOVERY_PROCESS_STARTUP`; `tool_call_count=0`, no retry, submit/status/delivery NOT_RUN.
+- No rollback or cleanup occurred; short root and current config were preserved. Durable saver metadata is pending first commit/push and live `git ls-remote` equality; `safe_to_archive=false`.
