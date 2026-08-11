@@ -381,3 +381,18 @@
 - Next action: saver publishes this exact failure. Any separate worker must re-check config/handoff expected hashes and holder TTL >= 8 minutes, create fresh staging, and must not ask this worker to retry.
 - Successor durable save: exact-path commit `ab2a0abd10bac3334e354f7f49963b6e4ba102c7` (tree `5a22b073fc6f111c8ca9070bdb93153edf324fcd`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:48:51.9270038Z`.
 - Archive boundary: central confirmed this failed switch worker archived after remote confirmation `0de86da75c5694115be41e9bed0e1179a07ef427`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T15:50:03.2340791Z`. This archive does not authorize diagnosis/config/staging/backup/binary/holder/external-handoff/root/cleanup/rollback mutation.
+
+## Switch staging script diagnosis-only — `019ff184-07b3-7352-b5fd-01702d38f33b`
+
+- Result: `DIAGNOSIS_ONLY_COMPLETE_REMEDIATION_NOT_IMPLEMENTED`; started `2026-08-11T15:49:49.0000000Z`, finished `2026-08-11T15:56:29.6881523Z`, elapsed `400688 ms`; changed paths `[]`, tests `NOT_RUN_BY_SCOPE`.
+- Fixed diagnosis remains `P0_RUNTIME_SWITCH_STAGING_VALIDATION_SCRIPT_ERROR` / `B_GLOBAL_CONFIG_STAGING_VALIDATION`; failed switch durable evidence and archive chain were remotely confirmed through `29727a3...`.
+- Operative source is the archived worker's 75-line inline PowerShell command; no matching repo wrapper/helper exists outside excluded protected/saver paths.
+- Exact blocker: static parse reports `0` errors, but both parenthesized `if($hasBom){3}else{0}` occurrences are `CommandAst("if")`. Runtime therefore throws `CommandNotFoundException` at the first inline `if` before `UTF8Encoding.GetString` runs.
+- Offending line: `$stageDecoded=$utf8.GetString($stageReload,(if($hasBom){3}else{0}),$stageReload.Length-(if($hasBom){3}else{0}))`. This is a runtime expression-assumption failure, not quoting/regex/.NET/JSON/TOML validation.
+- The staging file was written/reloaded and its length check passed, but all later command/env/FRESH/PG/args/hash structural checks were unreachable. `ErrorActionPreference=Stop` terminated before line-70 `File.Replace`; atomic backup/switch remained `NOT_CREATED/NOT_RUN`.
+- Minimal later correction: after fresh preflight/staging, retain `$offset=if($hasBom){3}else{0}` and replace only the re-decode line with `$stageDecoded=$utf8.GetString($stageReload,$offset,$stageReload.Length-$offset)`. Static parse yields zero errors and zero if-CommandAst; execution was `NOT_RUN_BY_DIAGNOSIS_SCOPE`.
+- Preserve every existing guard and ordering. Never read/delete/reuse/install the failed staging/backup; create fresh run-specific artifacts. Before any switch, re-check hashes and require holder TTL >= 8 minutes, otherwise stop without provision.
+- Protected boundaries held: no live/config/staging/backup/binary/holder/PG/runtime access or mutation, wrapper/source/repo change, build/test, tool call, cleanup/root/protected-state action, release/default branch, unrelated program, or secret recording.
+- Authoritative binary is reference-only: `10279424` bytes, SHA-256 `5ec06821...`; diagnosis did not access or modify it.
+- Successor durable save: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Archive boundary: do not archive this diagnosis thread until its exact receipt is remotely durable and central later confirms archival.
