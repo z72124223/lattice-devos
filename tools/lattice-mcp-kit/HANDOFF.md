@@ -307,5 +307,5 @@
 - Postcheck preserved config, holder/listener, TTL process/deadline, external handoff, and dirty state. No cleanup or rollback ran.
 - Protected boundaries held: no delivery calls, build/test/provision/finalize, config/handoff/PG mutation, cleanup/stop/kill/delete/rollback, `64272`, protected-script access, saver-path edit, unrelated P0 work, or verifier commit/push.
 - Next action: saver publishes this exact failure receipt; verifier must not retry submit/status or cleanup/rollback. Any domain-`FAILED` diagnosis belongs to a separately authorized worker after durable save.
-- Successor durable save: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: exact-path commit `3bc901f2110c06f04136b29653868ee7edb5c13d` (tree `f0a055da948d6a602e0569547f8185a9613fcffe`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:03:03.8321412Z`.
 - Archive boundary: do not archive the verifier until this exact receipt is remotely durable and central later confirms archival.
