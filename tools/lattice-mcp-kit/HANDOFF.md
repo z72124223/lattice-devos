@@ -694,3 +694,11 @@
 - This worker made no config, handoff, prepared-home, old-home, repository, database, holder, source, build, test, cleanup, rollback, reset, merge, deploy, or release mutation/action.
 - Prepared home remained valid and externally observed config/handoff already pointed to it, but strict step C required stop without retry, adoption, cleanup, or rollback.
 - Stage 1 durable pre-mutation drift failure receipt commit is `5931a29309c22166ce32d155fa2f103841c4d0c8`; expected and live remote SHA matched at `2026-08-11T21:52:47.9080683Z`. This saver-only update is stage 2 confirmation; after its fresh live `git ls-remote` equality passes, outer saver state is `safe_to_archive=true`. The authoritative receipt remains `FAILED_PREMUTATION`, `success_claim=NONE`, and attributes no peer mutation to this worker.
+
+## Fresh-window live verifier first failure — `019ff2cd-e28b-7990-a966-7dd1ccc35650`
+
+- Verdict is `FAIL`; current fresh-window live acceptance PASS is not claimed.
+- The verifier stopped at `SUBMIT_RESPONSE_CAPTURE` with `STDIO_ORCHESTRATOR_NONZERO_NO_RESPONSE`; discovery exact-four was not proven and the submit path may have written zero or one request.
+- No retry or status call was permitted. Status equality, domain response, task reference, result digest, and ledger head remain unobserved.
+- No cleanup, rollback, holder stop, database connection, port 64272 action, protected-script access, TASK-037/GH-9/Hermes/reflection, merge, deploy, release, or default-branch action occurred.
+- Required CONFIG-HOME-SWITCH stage-1 baseline `b42a3407414fde08a40a24ee1d1784ef98fe5bd3` is an ancestor of the saver branch. Stage 1 and stage 2 receipt remote equality are pending.
