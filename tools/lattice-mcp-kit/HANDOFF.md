@@ -266,5 +266,5 @@
 - Current observed config mapped the repaired binary and holder in FRESH mode with exactly 21 env key names; no secret values are recorded. Four run-specific backup files were observed with their exact hashes in the ledger.
 - Discovery was `NOT_RUN`; initialize/tools-list were not received; tool-call count `0`.
 - Next action requires one coordinating owner to stop concurrent config writers, determine provenance of `e624fc0c...`, and decide whether to restore `dc83687...` or retain a safely restaged config before completing finalize/discovery. Do not rerun provision or discovery from this worker.
-- Successor durable save: pending first exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: exact-path commit `2749390f77e0880aacdc2aa30a1a7da802778c07` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T14:34:33.480Z`.
 - Archive boundary: do not archive this resume worker until total engineering resolves the ownership failure. Live holder and all cleanup scopes remain independently owned.
