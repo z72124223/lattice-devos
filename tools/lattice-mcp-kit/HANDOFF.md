@@ -243,3 +243,15 @@
 - Next action: after this failure receipt is remotely durable, central must dispatch one bounded resume-from-live-holder worker before TTL expiry. Do not rerun provision, cleanup/kill either holder/residual, or create the fresh verifier yet.
 - Successor durable save: exact-path commit `4e6584141705ef0d2299a18144a843e32f30c89f` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T14:26:10.416Z`.
 - Archive boundary: do not archive this failed/partial worker until total engineering handles the failure. The live holder and both cleanup scopes remain independently owned.
+
+## Runtime materialization continuation 2 — `019ff11b-5d3c-7633-a45f-8cfb3829978a`
+
+- Continuation result: `FAILED_AT_GLOBAL_MCP_STAGING_CONFIG_UNCHANGED`, not READY; ran from `2026-08-11T14:25:19.5918660Z` to `2026-08-11T14:28:46.8575854Z`, elapsed `207266 ms`.
+- It reused, and did not reprovision, live holder `127.0.0.1:55061`, run `04517df6a8ed496fa465046b5e4b20d1`, PID `30476`; listener ownership passed, TTL cleanup PID `14212` lived, and deadline remained `2026-08-11T16:01:50.0257480Z`.
+- Failure: `LATTICE_P0_CONFIG_KEY_REJECTED` at `global_mcp_staging_command_update`. The current command assignment is a TOML single-quoted string, while the one-time setter intentionally matched only double quotes, so it failed before staging/global writes.
+- Fail-closed evidence: no staging file or backup directory, no attempted/replaced global config, and no rollback command. Config before/after stayed exactly `dc83687cf3d0964682ce80616273c07dc0663e64b955350f2a3a3c3b837c4191`.
+- Discovery was `NOT_RUN_DUE_FIRST_CONFIG_FAILURE`; tool-call count `0`. This differs from the prior provision-receipt capture timeout because it reused the ready holder and reached config staging.
+- Protected boundaries held: no repository/saver-path mutation or push, no protected script content access, no old PID/root residual or `64272` mutation, and no submit/status/delivery call.
+- Next action is the already-dispatched bounded resume-from-live-holder worker: perform one single-quote-aware value-only command transform, validate/switch config atomically, discovery-only, and update the external secret-free handoff. Do not reprovision or cleanup.
+- Successor durable save: pending first exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Archive boundary: original materialization worker remains unarchived until the new resume handoff is safely captured.
