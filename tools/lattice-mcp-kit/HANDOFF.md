@@ -653,3 +653,11 @@
 - Transport, PostgreSQL durability, and workspace preparation are not the initiating failure. Codex identity/app-server/model execution was not entered; remediation is root-layer repair/reprovision only and must not relax the exact predicate.
 - Diagnosis made no test/build/MCP/submit/status/delivery, holder lifecycle, DB mutation, repository edit, push, cleanup, rollback, or 64272 action. The protected dirty script had one reported read-only scan incident but was not modified, staged, reset, or cleaned.
 - Stage 1 durable diagnosis receipt commit is `5639f0a5742e7b6dfc031e839340c983b3bc7d9e`; expected and live remote SHA matched at `2026-08-11T20:49:54.5787202Z`. Stage 2 confirmation commit `4f5c881f502adc44ba9a0475b0d357792689aae1` and fresh live remote SHA matched at `2026-08-11T20:50:52.9170181Z`, so `safe_to_archive=true`. The diagnosis remains not a P0 PASS; authoritative receipt and boundary incident remain unchanged. Central archived the worker at `2026-08-11T20:51:17.9069510Z` (`set_thread_archived_result=success`).
+
+## Codex-home remediation helper parse failure — `019ff298-d0bb-73f2-9f20-150cdae960bc`
+
+- Result is `FIRST_FAILURE_STOPPED`, not P0 PASS. First failure is `LATTICE_HOME_REMEDIATION_HELPER_PARSE_REJECTED / EXTERNAL_HELPER_PARSE`.
+- The single authorized helper invocation exited at PowerShell parse time before any helper statement ran; body execution, retry, new-home creation, config switch, handoff update, rollback, and cleanup all remained false or zero.
+- Holder preflight passed with `3523` seconds remaining. Existing Codex-home config remained `365` bytes / `7b6fe3b1...`; required canonical config remains `174` bytes / `1a9bc2b3...`.
+- Worker made no repository edit/commit/push, Codex or MCP launch, database action, holder lifecycle action, source edit, build, test, 64272 action, cleanup, or rollback. The protected dirty script was not read or modified.
+- Two-stage saver durability is pending; `safe_to_archive=false` until both fresh live `git ls-remote` equalities pass.
