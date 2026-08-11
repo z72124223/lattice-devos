@@ -1,0 +1,57 @@
+# LATTICE MCP Kit: direct stdio client
+
+This reusable PowerShell client launches a specified LATTICE MCP executable over stdio, performs MCP initialization, requires the current exact four-tool catalog, and writes one redacted result directory per invocation.
+
+## Current tool catalog
+
+- `lattice_delivery_run`
+- `lattice_delivery_status`
+- `lattice_task_submit`
+- `lattice_task_status`
+
+Discovery fails closed with `TOOL_SET_MISMATCH` if the executable advertises anything other than this exact set.
+
+## Actions
+
+- `Discovery` initializes MCP and verifies the exact tool catalog without calling a tool.
+- `TaskSubmit` calls `lattice_task_submit` with the fixed `CONTROLLED_CODEX_CANARY` intent and a bounded `client_request_id`.
+- `TaskStatus` calls `lattice_task_status` with a lowercase 64-character `task_ref`.
+- `Call` is the generic low-level action and requires an explicit tool name and JSON arguments.
+
+Each invocation starts a fresh child process. For cross-session use, retain the `task_ref` returned by `TaskSubmit`, then pass it to a later `TaskStatus` invocation. The client does not treat its own process or output directory as durable task truth.
+
+## Child environment
+
+`-EnvironmentFile` accepts a UTF-8 JSON object whose keys are uppercase environment-variable names. These values are applied only to the spawned child process; the current PowerShell environment is not modified. Sensitive inherited variables are removed before the supplied child environment is added, and supplied sensitive values are redacted from saved output.
+
+`environment.fresh.example.json` contains placeholders for a fresh authorized run. `environment.resume-discovery.placeholder.json` is a non-secret fail-closed discovery/resume probe. Never replace placeholders with real credentials in a committed file.
+
+## Usage
+
+```powershell
+$client = Join-Path $PSScriptRoot 'Invoke-LatticeMcp.ps1'
+$binary = '<absolute-path-to-latticed.exe>'
+
+& $client `
+  -BinaryPath $binary `
+  -Action Discovery `
+  -EnvironmentFile (Join-Path $PSScriptRoot 'environment.resume-discovery.placeholder.json')
+
+$submit = & $client `
+  -BinaryPath $binary `
+  -Action TaskSubmit `
+  -ClientRequestId ('direct-stdio-' + [Guid]::NewGuid().ToString('N').Substring(0, 16)) `
+  -EnvironmentFile '<runtime-environment.json>' |
+    ConvertFrom-Json
+
+$taskRef = [string]$submit.call.result.structuredContent.task_ref
+
+# This may be run later from a different PowerShell or Codex session.
+& $client `
+  -BinaryPath $binary `
+  -Action TaskStatus `
+  -TaskRef $taskRef `
+  -EnvironmentFile '<runtime-environment.json>'
+```
+
+By default, redacted `stdout.jsonl`, `stderr.log`, and `summary.json` files are written below `results/session-...`. A tool response with `isError=true` is reported as `TOOL_ERROR`; it is not a successful acceptance result.
