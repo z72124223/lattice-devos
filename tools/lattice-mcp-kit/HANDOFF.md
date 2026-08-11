@@ -597,3 +597,11 @@
 - LocalAppData candidates can meet the `<=220` path budget, but root-only config cannot also equal the unchanged launcher target and fixed seven-file bundle policy. The smallest short-root-preserving remediation is narrow source decoupling using existing launcher ancestry while retaining every fixed identity check.
 - This diagnosis was read-only: no binary/MCP, config/root/handoff/source, PG/64272, rollback/cleanup, protected-script content, merge/deploy/release/default-branch, or third-path action occurred.
 - First durable diagnosis receipt commit is `7fbfb3370baa03e8e56b6705ff0bdc120aaa18fb` (tree `5cfcad4c9f50d8487efce7e2a81f8b92ee394304`); live `git ls-remote` equality was verified at `2026-08-11T19:28:05.6403865Z`. Receipt now reports `safe_to_archive=true`. Central archived the diagnosis at `2026-08-11T19:29:04.187Z` (`set_thread_archived_result=success`).
+
+## Official-bundle source decoupling — `019ff24d-aec2-73d2-a56c-1cd60cb4a5c7`
+
+- Functional source commit `0e93c7b8685f7783db274ff36425b82ed3cee4c4` (tree `c32afa981c8221fb5db3f9c3f806579c76db2eef`, parent `7bc95d5ba8a9cf46a85997489e92ba603743aad4`) changes only `apps/lattice-runtime/src/composition.rs`.
+- Official bundle trust is now derived from validated launcher ancestry; `LATTICE_DELIVERY_ROOT` remains solely the workspace base. Seven-file and launcher identity checks remain intact; no env/schema/Fresh/ResumeExisting/task_ref/credential/Git/ingress contract changed.
+- Focused TDD evidence: expected RED exit `101`, final GREEN exit `0` (`1 passed, 0 failed, 75 filtered`); `cargo fmt --check -p lattice-runtime` and owned-path whitespace checks both exited `0`. Read-only diff-risk check found no issue.
+- Source commit was pushed directly to `feature/p0-clean-seed-rebuild`; first live `git ls-remote` equality and reachability were proven at `2026-08-11T19:37:22.1037268Z`.
+- This is source remediation only. Live acceptance is not claimed; BUILD-ONLY and SWITCH/DISCOVERY remain separate phases. Saver receipt durability metadata is pending.
