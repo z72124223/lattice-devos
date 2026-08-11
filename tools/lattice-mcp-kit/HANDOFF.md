@@ -295,3 +295,17 @@
 - Next action: saver publishes this exact receipt and signals central after remote equality; central may then create exactly one truly fresh verifier. This reconciliation worker must not call submit/status or create it.
 - Successor durable save: exact-path commit `2528ed3f41c6772e0fba571b02d65877ffbbb5c1` (tree `cefe894f7f0108f859caab103e2905668d558e9c`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T14:54:30.3590040Z`.
 - Archive boundary: central confirmed this completed reconciliation task archived; actual saver-observed `archived_at_utc=2026-08-11T14:56:08.6313386Z`. This archive applies only to the completed task and does not authorize holder/config/verifier mutation.
+
+## Fresh verifier domain-status failure — `019ff152-28a4-70a3-99a3-005e456e1684`
+
+- Result: `CURRENT_LIVE_ACCEPTANCE_FAIL`; started `2026-08-11T14:55:31.000Z`, finished `2026-08-11T15:00:40.540Z`, elapsed `309540 ms`; first failure stage `UNIQUE_FRESH_SUBMIT`, classification `DOMAIN_STATUS_FAILED`.
+- Preflight passed against remote `5c34869b9c1857c7e4c86a033e8dfd1462ff721c`, config `e624fc0c...`, binary `d600110d...`, external handoff `72ec5bfa...`, and live holder `127.0.0.1:55061` / PID `30476` / TTL PID `14212`; only the protected script remained dirty and its content was not read or touched.
+- Fresh discovery exposed the exact four tools and typed submit/status schemas; pre-submit LATTICE tool-call count was `0`. Protocol `2025-11-25` came from authoritative READY evidence and was not surfaced by the fresh catalog.
+- The single submit used client request `fresh-codex-p0-msosd410-9vef04zky7f`; transport completed with `isError=false`, but the structured domain result was `status=FAILED`, `task_state=FAILED`, `result_digest=null`, ledger head `024eb29f9fbfe75d82a0bb7ff9600fc510696e5aa6b439407ce1f653769db96a`.
+- Returned task ref `f2bbbd846d91afc81c4ef4a347e01debe275733c95db02d91d22799bed32404e` was new and did not equal the old unacceptable ref `ab8724dd...`; acceptance still failed because status was not `COMPLETED`.
+- Strict first-failure stop held: no independent session was started, `lattice_task_status` call count was `0`, and protocol/equality checks are `NOT_RUN`; no live PASS is claimed.
+- Postcheck preserved config, holder/listener, TTL process/deadline, external handoff, and dirty state. No cleanup or rollback ran.
+- Protected boundaries held: no delivery calls, build/test/provision/finalize, config/handoff/PG mutation, cleanup/stop/kill/delete/rollback, `64272`, protected-script access, saver-path edit, unrelated P0 work, or verifier commit/push.
+- Next action: saver publishes this exact failure receipt; verifier must not retry submit/status or cleanup/rollback. Any domain-`FAILED` diagnosis belongs to a separately authorized worker after durable save.
+- Successor durable save: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Archive boundary: do not archive the verifier until this exact receipt is remotely durable and central later confirms archival.
