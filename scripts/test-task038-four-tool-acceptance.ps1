@@ -151,7 +151,7 @@ foreach ($required in @(
     '236b1d6f8362da19d298d65fd652e045cd413a02',
     'lattice.mcp.acceptance-dispatch.v1',
     'lattice.task038.mcp-acceptance-dispatch-evidence.v1',
-    'lattice.task038.production-negative-effect-observation.v1',
+    'TASK038_ACCEPT_PRODUCTION_NEGATIVE_EFFECT_AUTHORITY_NOT_AVAILABLE',
     'lattice.task038.production-session-effect-observation.v1',
     'lattice.task038.database-binding.v1',
     'LATTICE_TASK038_P006_CURRENT_CANDIDATE_ACCEPTANCE_V1',
@@ -160,6 +160,24 @@ foreach ($required in @(
     'abe89b0767a8cd0f956059aa5a5a93cd1042efc6194d000c2501da3e23babbd2'
 )) {
     if (-not $runnerText.Contains($required)) { throw 'TASK038_ACCEPT_TEST_PRODUCTION_CONTRACT_NOT_MATERIALIZED' }
+}
+if ($runnerText.Contains('LATTICE_TASK038_P006_REMEDIATION_REVIEW_V1')) {
+    throw 'TASK038_ACCEPT_TEST_SELF_AUTHORED_REVIEW_NOT_REMOVED'
+}
+foreach ($required in @('independent_review_evaluation', 'NOT_EVALUATED', 'NON_LIVE_PARSER_ONLY', 'TASK038_ACCEPT_TUNNEL_LIFECYCLE_AUTHORITY_NOT_AVAILABLE')) {
+    if (-not $runnerText.Contains($required)) { throw 'TASK038_ACCEPT_TEST_EXTERNAL_REVIEW_LIFECYCLE_GATE_MISSING' }
+}
+if ($runnerText.Contains('authoritative_observation = $true')) {
+    throw 'TASK038_ACCEPT_TEST_SYNTHETIC_AUTHORITATIVE_ZERO_NOT_REMOVED'
+}
+if (-not $runnerText.Contains('TASK038_ACCEPT_PRODUCTION_NEGATIVE_EFFECT_AUTHORITY_NOT_AVAILABLE')) {
+    throw 'TASK038_ACCEPT_TEST_PRODUCTION_NEGATIVE_EFFECT_GATE_MISSING'
+}
+if ($runnerText.Contains('fresh_marker_checked = $true')) {
+    throw 'TASK038_ACCEPT_TEST_REWRITABLE_MARKER_FRESHNESS_CLAIM_NOT_REMOVED'
+}
+foreach ($required in @('Assert-PostgresRestartChronology', 'Assert-PostgresHolderReceiptAuthority', 'TASK038_ACCEPT_POSTGRES_HOLDER_RECEIPT_NOT_AVAILABLE')) {
+    if (-not $runnerText.Contains($required)) { throw 'TASK038_ACCEPT_TEST_POSTGRES_HOLDER_AUTHORITY_GATE_MISSING' }
 }
 if ((Get-GateClassification -ExitCode 0 -Lines @('SKIP: live prerequisite unavailable')) -cne 'NOT_RUN') {
     throw 'TASK038_ACCEPT_TEST_SKIP_NOT_RUN_REJECTED'
@@ -240,20 +258,89 @@ foreach ($name in @(
     'Get-CanonicalPath', 'Get-StringSha256', 'Get-FileSha256', 'Assert-ExactJsonKeys',
     'Test-JsonInteger', 'Initialize-FileIdentityInterop', 'Get-NativeFileIdentity',
     'Get-NativeDirectoryIdentity', 'Get-AuthoritativeNativeFileIdentity', 'Get-LifecycleProcessIdentityParts',
-    'Read-McpAcceptanceEvidence', 'Read-TunnelLifecycleReceipt', 'Get-DirectoryFootprint',
+    'Get-ApprovedRustToolchainReceipt', 'Set-ClosedRustBuildEnvironment', 'Assert-CandidateBuildOutputAbsent',
+    'Read-McpAcceptanceEvidence', 'Read-TunnelLifecycleReceipt', 'Assert-LiveTunnelLifecycleAuthority', 'Get-DirectoryFootprint',
     'ConvertTo-CanonicalJson', 'Get-DomainSeparatedCommitment', 'New-ZeroProductionSessionEffectReceipt',
+    'Assert-ProductionNegativeEffectAuthority',
     'Invoke-RepositoryGitText', 'Get-DeliveryGitEffectReceipt', 'New-SubmitProductionSessionEffectReceipt',
-    'Assert-PostgresPortPolicy', 'Get-PostgresDatabaseBinding'
+    'Assert-PostgresPortPolicy', 'Assert-PostgresRestartChronology', 'Assert-PostgresHolderReceiptAuthority', 'Get-PostgresDatabaseBinding'
 )) { . (Import-RunnerFunction -Name $name) }
 . $script:NativeIdentityHelper
 $script:P005LifecycleCommit = '392c39cbbc8d416b5d89b872b0be119336946247'
 $script:ExpectedTools = @('lattice_delivery_run', 'lattice_delivery_status', 'lattice_task_status', 'lattice_task_submit')
+$script:ApprovedRustToolchain = 'stable-x86_64-pc-windows-msvc'
+$script:ApprovedCargoVersion = 'cargo 1.97.1 (c980f4866 2026-06-30)'
+$script:ApprovedRustcVersion = 'rustc 1.97.1 (8bab26f4f 2026-07-14)'
+$script:ApprovedCargoShimSha256 = '86478e53f769379d7f0ebfa7c9aa97cb76ca92233f79aa2cc0dbee2efaac73c7'
+$script:ApprovedCargoSha256 = 'ddfbad20b31b918d3439d070945ec59bbfe037a6ec0ab5b584459e69c8b37d1b'
+$script:ApprovedRustcSha256 = 'cf79cfd77b0a144c56a0a6af6bf10bcdf095a73718cd4bf2b9d4fe2d2cbded55'
+$script:ApprovedCargoShimNativeIdentity = 'lattice.win-file-id.v1:fcc833adc8336554:000000000000000000760000000647ed:f'
+$script:ApprovedCargoNativeIdentity = 'lattice.win-file-id.v1:fcc833adc8336554:00000000000000000017000000092ef3:f'
+$script:ApprovedRustcNativeIdentity = 'lattice.win-file-id.v1:fcc833adc8336554:00000000000000000001000000175377:f'
+
+$approvedToolchain = Get-ApprovedRustToolchainReceipt
+if (
+    [string]$approvedToolchain.schema_version -cne 'lattice.task038.approved-rust-toolchain.v1' -or
+    [string]$approvedToolchain.toolchain -cne 'stable-x86_64-pc-windows-msvc' -or
+    [string]$approvedToolchain.cargo_sha256 -cne 'ddfbad20b31b918d3439d070945ec59bbfe037a6ec0ab5b584459e69c8b37d1b' -or
+    [string]$approvedToolchain.rustc_sha256 -cne 'cf79cfd77b0a144c56a0a6af6bf10bcdf095a73718cd4bf2b9d4fe2d2cbded55' -or
+    [string]$approvedToolchain.cargo_version -cne 'cargo 1.97.1 (c980f4866 2026-06-30)' -or
+    [string]$approvedToolchain.rustc_version -cne 'rustc 1.97.1 (8bab26f4f 2026-07-14)'
+) { throw 'TASK038_ACCEPT_TEST_APPROVED_TOOLCHAIN_RECEIPT_REJECTED' }
+$closedBuildStartInfo = [Diagnostics.ProcessStartInfo]::new()
+$closedBuildStartInfo.UseShellExecute = $false
+$closedBuildStartInfo.EnvironmentVariables['RUSTC_WRAPPER'] = 'malicious-wrapper.exe'
+$closedBuildStartInfo.EnvironmentVariables['RUSTC_WORKSPACE_WRAPPER'] = 'malicious-workspace-wrapper.exe'
+$closedBuildStartInfo.EnvironmentVariables['RUSTFLAGS'] = '-C linker=malicious-linker.exe'
+$closedBuildStartInfo.EnvironmentVariables['CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER'] = 'malicious-linker.exe'
+Set-ClosedRustBuildEnvironment -StartInfo $closedBuildStartInfo -Toolchain $approvedToolchain -SourceDateEpoch '1786400000'
+if (
+    $closedBuildStartInfo.EnvironmentVariables.ContainsKey('RUSTC_WRAPPER') -or
+    $closedBuildStartInfo.EnvironmentVariables.ContainsKey('RUSTC_WORKSPACE_WRAPPER') -or
+    $closedBuildStartInfo.EnvironmentVariables.ContainsKey('RUSTFLAGS') -or
+    $closedBuildStartInfo.EnvironmentVariables.ContainsKey('CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER') -or
+    [string]$closedBuildStartInfo.EnvironmentVariables['RUSTC'] -cne [string]$approvedToolchain.rustc_path -or
+    [string]$closedBuildStartInfo.EnvironmentVariables['RUSTUP_TOOLCHAIN'] -cne [string]$approvedToolchain.toolchain -or
+    [string]$closedBuildStartInfo.EnvironmentVariables['SOURCE_DATE_EPOCH'] -cne '1786400000'
+) { throw 'TASK038_ACCEPT_TEST_CLOSED_BUILD_ENVIRONMENT_REJECTED' }
+
+$maliciousCargoRoot = Join-Path $testRoot 'malicious-path-cargo'
+[IO.Directory]::CreateDirectory($maliciousCargoRoot) | Out-Null
+[IO.File]::WriteAllBytes((Join-Path $maliciousCargoRoot 'cargo.exe'), [byte[]](0x4d, 0x5a, 0x00, 0x00))
+$originalPath = [Environment]::GetEnvironmentVariable('PATH', 'Process')
+try {
+    [Environment]::SetEnvironmentVariable('PATH', ($maliciousCargoRoot + [IO.Path]::PathSeparator + $originalPath), 'Process')
+    $maliciousCargoRejected = $false
+    try { $null = Get-ApprovedRustToolchainReceipt }
+    catch { $maliciousCargoRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_BUILD_PATH_CARGO_REJECTED') }
+    if (-not $maliciousCargoRejected) { throw 'TASK038_ACCEPT_TEST_MALICIOUS_PATH_CARGO_NOT_REJECTED' }
+}
+finally { [Environment]::SetEnvironmentVariable('PATH', $originalPath, 'Process') }
+
+$originalWrapper = [Environment]::GetEnvironmentVariable('RUSTC_WRAPPER', 'Process')
+try {
+    [Environment]::SetEnvironmentVariable('RUSTC_WRAPPER', (Join-Path $maliciousCargoRoot 'wrapper.exe'), 'Process')
+    $wrapperRejected = $false
+    try { $null = Get-ApprovedRustToolchainReceipt }
+    catch { $wrapperRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_BUILD_SUBSTITUTION_REJECTED') }
+    if (-not $wrapperRejected) { throw 'TASK038_ACCEPT_TEST_MALICIOUS_WRAPPER_NOT_REJECTED' }
+}
+finally { [Environment]::SetEnvironmentVariable('RUSTC_WRAPPER', $originalWrapper, 'Process') }
+
+$staleBinary = Join-Path $testRoot 'stale-target\debug\latticed.exe'
+[IO.Directory]::CreateDirectory((Split-Path -Parent $staleBinary)) | Out-Null
+[IO.File]::WriteAllBytes($staleBinary, [byte[]](0x4d, 0x5a, 0x00, 0x00))
+$staleBinaryRejected = $false
+try { Assert-CandidateBuildOutputAbsent -Path $staleBinary }
+catch { $staleBinaryRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_CANDIDATE_BUILD_OUTPUT_NOT_FRESH') }
+if (-not $staleBinaryRejected) { throw 'TASK038_ACCEPT_TEST_STALE_BUILD_OUTPUT_NOT_REJECTED' }
 
 function Write-LifecycleFixture {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$Mutation,
-        [Parameter(Mandatory = $true)][string]$ExpectedExeSha256
+        [Parameter(Mandatory = $true)][string]$ExpectedExeSha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedExeNativeIdentity
     )
 
     [IO.Directory]::CreateDirectory($Root) | Out-Null
@@ -267,8 +354,10 @@ function Write-LifecycleFixture {
     if ($Mutation -ceq 'order') { $eventTypes[1] = 'PIPE_CLOSED' }
     $previous = '0' * 64
     $records = [Collections.Generic.List[object]]::new()
+    $baseTime = [DateTimeOffset]::UtcNow.AddSeconds(-10)
+    if ($Mutation -ceq 'stale') { $baseTime = [DateTimeOffset]::UtcNow.AddHours(-2) }
     for ($index = 0; $index -lt 6; $index++) {
-        $observed = ('2026-08-11T08:00:0{0}Z' -f $index)
+        $observed = $baseTime.AddSeconds($index).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ', [Globalization.CultureInfo]::InvariantCulture)
         $exitCode = if ($index -lt 4) { $null } else { 0 }
         $exitText = if ($null -eq $exitCode) { 'null' } else { '0' }
         $identity = [ordered]@{
@@ -318,12 +407,19 @@ function Write-LifecycleFixture {
     $eventText = [string]::Join("`n", @($records | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 12 })) + "`n"
     [IO.File]::WriteAllText($eventPath, $eventText, $script:Utf8)
     $eventIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $eventPath -Directory $false
+    $profileIdentity = 'lattice.win-file-id.v1:0000000000000001:00000000000000000000000000000001:f'
+    $tunnelIdentity = 'lattice.win-file-id.v1:0000000000000002:00000000000000000000000000000002:f'
+    $latticedIdentity = $ExpectedExeNativeIdentity
+    if ($Mutation -ceq 'repeated-component-identity') {
+        $profileIdentity = $eventIdentity; $tunnelIdentity = $eventIdentity; $latticedIdentity = $eventIdentity
+    }
     $outer = [ordered]@{
         schema = 'lattice.task038.tunnel-outer-lifecycle.v1'; mode = 'Run'; process_id = 22222; tunnel_client_exit_code = 0
-        started_at_utc = '2026-08-11T08:00:00Z'; exited_at_utc = '2026-08-11T08:00:06Z'
+        started_at_utc = $baseTime.ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ', [Globalization.CultureInfo]::InvariantCulture)
+        exited_at_utc = $baseTime.AddSeconds(6).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ', [Globalization.CultureInfo]::InvariantCulture)
         create_suspended = $true; job_assigned_before_resume = $true; descendant_processes_after_cleanup = 0
-        profile_raw_sha256 = '8' * 64; profile_byte_count = 100; profile_strict_utf8 = $true; profile_native_identity = $eventIdentity
-        latticed_native_identity = $eventIdentity; tunnel_client_native_identity = $eventIdentity
+        profile_raw_sha256 = '8' * 64; profile_byte_count = 100; profile_strict_utf8 = $true; profile_native_identity = $profileIdentity
+        latticed_native_identity = $latticedIdentity; tunnel_client_native_identity = $tunnelIdentity
         lifecycle_event_path = $eventPath; lifecycle_event_raw_sha256 = Get-FileSha256 -Path $eventPath
         lifecycle_event_byte_count = (Get-Item -LiteralPath $eventPath).Length; lifecycle_event_strict_utf8 = $true
         lifecycle_event_native_identity = $eventIdentity; lifecycle_session_id = $outerSession; lifecycle_config_generation = 7
@@ -343,15 +439,24 @@ function Write-LifecycleFixture {
 }
 
 $expectedLifecycleExe = 'd' * 64
-$validLifecyclePath = Write-LifecycleFixture -Root (Join-Path $testRoot 'lifecycle-valid') -Mutation 'none' -ExpectedExeSha256 $expectedLifecycleExe
-$validLifecycle = Read-TunnelLifecycleReceipt -Path $validLifecyclePath -ExpectedInnerExeSha256 $expectedLifecycleExe
-if (-not [bool]$validLifecycle.exact_schema_hash_order_idempotency_session_config_exe_checked) {
+$expectedLifecycleNativeIdentity = 'lattice.win-file-id.v1:0000000000000003:00000000000000000000000000000003:f'
+$validLifecyclePath = Write-LifecycleFixture -Root (Join-Path $testRoot 'lifecycle-valid') -Mutation 'none' -ExpectedExeSha256 $expectedLifecycleExe -ExpectedExeNativeIdentity $expectedLifecycleNativeIdentity
+$validLifecycle = Read-TunnelLifecycleReceipt -Path $validLifecyclePath -ExpectedInnerExeSha256 $expectedLifecycleExe -ExpectedInnerExeNativeIdentity $expectedLifecycleNativeIdentity
+if (
+    -not [bool]$validLifecycle.exact_schema_hash_order_idempotency_session_config_exe_checked -or
+    [string]$validLifecycle.authority_scope -cne 'NON_LIVE_PARSER_ONLY' -or
+    [bool]$validLifecycle.live_authority_evaluated
+) {
     throw 'TASK038_ACCEPT_TEST_LIFECYCLE_VALID_REJECTED'
 }
-foreach ($mutation in @('schema', 'order', 'session', 'config', 'exe', 'idempotency', 'hash', 'outer-hash', 'extra-key')) {
-    $path = Write-LifecycleFixture -Root (Join-Path $testRoot ('lifecycle-' + $mutation)) -Mutation $mutation -ExpectedExeSha256 $expectedLifecycleExe
+$liveLifecycleRejected = $false
+try { Assert-LiveTunnelLifecycleAuthority -ParsedReceipt $validLifecycle }
+catch { $liveLifecycleRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_TUNNEL_LIFECYCLE_AUTHORITY_NOT_AVAILABLE') }
+if (-not $liveLifecycleRejected) { throw 'TASK038_ACCEPT_TEST_PARSER_ONLY_LIFECYCLE_GRANTED_LIVE_AUTHORITY' }
+foreach ($mutation in @('schema', 'order', 'session', 'config', 'exe', 'idempotency', 'hash', 'outer-hash', 'extra-key', 'repeated-component-identity', 'stale')) {
+    $path = Write-LifecycleFixture -Root (Join-Path $testRoot ('lifecycle-' + $mutation)) -Mutation $mutation -ExpectedExeSha256 $expectedLifecycleExe -ExpectedExeNativeIdentity $expectedLifecycleNativeIdentity
     $rejected = $false
-    try { $null = Read-TunnelLifecycleReceipt -Path $path -ExpectedInnerExeSha256 $expectedLifecycleExe }
+    try { $null = Read-TunnelLifecycleReceipt -Path $path -ExpectedInnerExeSha256 $expectedLifecycleExe -ExpectedInnerExeNativeIdentity $expectedLifecycleNativeIdentity }
     catch { $rejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_TUNNEL_LIFECYCLE_RECEIPT_REJECTED') }
     if (-not $rejected) { throw ('TASK038_ACCEPT_TEST_LIFECYCLE_MUTATION_NOT_REJECTED_' + $mutation) }
 }
@@ -447,6 +552,7 @@ if ([string]$deliveryEffect.changed_path -cne 'answer.txt' -or [int]$deliveryEff
 }
 $effectSession = [pscustomobject]@{
     AcceptanceEvidence = [pscustomobject]@{
+        schema = 'lattice.task038.mcp-acceptance-dispatch-evidence.v1'
         session_id = 'f' * 32; raw_sha256 = '1' * 64; final_event_sha256 = '2' * 64
         dispatch_accepted_count = 3; normal_close_complete = $true
     }
@@ -476,12 +582,46 @@ try { $null = New-SubmitProductionSessionEffectReceipt -Before $submitEffectBefo
 catch { $submitMutationRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_PRODUCTION_SESSION_EFFECT_REJECTED') }
 if (-not $submitMutationRejected) { throw 'TASK038_ACCEPT_TEST_SUBMIT_EFFECT_MUTATION_NOT_REJECTED' }
 $effectSession.AcceptanceEvidence.dispatch_accepted_count = 2
-$zeroEffect = New-ZeroProductionSessionEffectReceipt -Phase 'read-only' -Before $submitEffectBefore -After $submitEffectBefore -Session $effectSession
-if (-not [bool]$zeroEffect.exact_zero_effect_observed) { throw 'TASK038_ACCEPT_TEST_ZERO_EFFECT_RECEIPT_REJECTED' }
+$snapshotOnlyRejected = $false
+try { $null = New-ZeroProductionSessionEffectReceipt -Phase 'read-only' -Before $submitEffectBefore -After $submitEffectBefore -Session $effectSession }
+catch { $snapshotOnlyRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_PRODUCTION_SESSION_EFFECT_AUTHORITY_NOT_AVAILABLE') }
+if (-not $snapshotOnlyRejected) { throw 'TASK038_ACCEPT_TEST_SNAPSHOT_ONLY_ZERO_GRANTED_AUTHORITY' }
+$transientRoot = Join-Path $testRoot 'transient-effect-disappears-before-snapshot'
+[IO.Directory]::CreateDirectory($transientRoot) | Out-Null
+$transientBefore = Get-DirectoryFootprint -Root $transientRoot
+$transientFile = Join-Path $transientRoot 'transient.txt'
+[IO.File]::WriteAllText($transientFile, 'transient', $script:Utf8)
+$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+$listener.Start()
+$transientProcess = [Diagnostics.Process]::Start((Join-Path $PSHOME 'powershell.exe'), '-NoLogo -NoProfile -NonInteractive -Command "exit 0"')
+if ($null -eq $transientProcess -or -not $transientProcess.WaitForExit(10000) -or $transientProcess.ExitCode -ne 0) {
+    throw 'TASK038_ACCEPT_TEST_TRANSIENT_PROCESS_FIXTURE_REJECTED'
+}
+$transientProcess.Dispose()
+$listener.Stop()
+Remove-Item -LiteralPath $transientFile -Force
+$transientAfter = Get-DirectoryFootprint -Root $transientRoot
+if ((ConvertTo-CanonicalJson -Value $transientBefore) -cne (ConvertTo-CanonicalJson -Value $transientAfter)) {
+    throw 'TASK038_ACCEPT_TEST_TRANSIENT_EFFECT_FIXTURE_NOT_EPHEMERAL'
+}
+$transientAuthorityRejected = $false
+try { $null = New-ZeroProductionSessionEffectReceipt -Phase 'transient-effect-regression' -Before $transientBefore -After $transientAfter -Session $effectSession }
+catch { $transientAuthorityRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_PRODUCTION_SESSION_EFFECT_AUTHORITY_NOT_AVAILABLE') }
+if (-not $transientAuthorityRejected) { throw 'TASK038_ACCEPT_TEST_TRANSIENT_EFFECT_DISAPPEARANCE_NOT_REJECTED' }
 $zeroMutationRejected = $false
 try { $null = New-ZeroProductionSessionEffectReceipt -Phase 'read-only' -Before $submitEffectBefore -After $submitEffectAfter -Session $effectSession }
 catch { $zeroMutationRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_PRODUCTION_SESSION_EFFECT_REJECTED') }
 if (-not $zeroMutationRejected) { throw 'TASK038_ACCEPT_TEST_ZERO_EFFECT_MUTATION_NOT_REJECTED' }
+$effectSession.AcceptanceEvidence.dispatch_accepted_count = 0
+$missingNegativeAuthorityRejected = $false
+try {
+    $null = Assert-ProductionNegativeEffectAuthority `
+        -Session $effectSession `
+        -ProbeName '02n01-unknown-tool' `
+        -ExpectedRejectedClassification 'MCP_INVALID_PARAMS'
+}
+catch { $missingNegativeAuthorityRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_PRODUCTION_NEGATIVE_EFFECT_AUTHORITY_NOT_AVAILABLE') }
+if (-not $missingNegativeAuthorityRejected) { throw 'TASK038_ACCEPT_TEST_MISSING_NEGATIVE_EFFECT_AUTHORITY_NOT_REJECTED' }
 foreach ($reservedPort in @(5432, 64272, 55432)) {
     $rejected = $false
     try { Assert-PostgresPortPolicy -Port $reservedPort }
@@ -492,6 +632,35 @@ $nonDynamicPortRejected = $false
 try { Assert-PostgresPortPolicy -Port 1025 }
 catch { $nonDynamicPortRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_POSTGRES_PORT_REJECTED') }
 if (-not $nonDynamicPortRejected) { throw 'TASK038_ACCEPT_TEST_NON_DYNAMIC_PORT_NOT_REJECTED' }
+$acceptanceStartedAt = [DateTimeOffset]::UtcNow.AddSeconds(-20)
+$markerCreatedAt = $acceptanceStartedAt.AddSeconds(-10)
+$initialStartedAt = $acceptanceStartedAt.AddSeconds(-8)
+$restartStartedAt = $acceptanceStartedAt.AddSeconds(2)
+$observedAt = $acceptanceStartedAt.AddSeconds(10)
+$chronology = Assert-PostgresRestartChronology `
+    -MarkerCreatedAtUtc $markerCreatedAt.ToString('o') `
+    -InitialPostmasterStartedAt $initialStartedAt.ToString('o') `
+    -RestartPostmasterStartedAt $restartStartedAt.ToString('o') `
+    -AcceptanceStartedAtUtc $acceptanceStartedAt `
+    -ObservedAtUtc $observedAt
+if (-not [bool]$chronology.restart_precedes_acceptance_protocol) {
+    throw 'TASK038_ACCEPT_TEST_POSTGRES_RESTART_CHRONOLOGY_VALID_REJECTED'
+}
+$reusedPostmasterRejected = $false
+try {
+    $null = Assert-PostgresRestartChronology `
+        -MarkerCreatedAtUtc $acceptanceStartedAt.ToString('o') `
+        -InitialPostmasterStartedAt $acceptanceStartedAt.AddHours(-2).ToString('o') `
+        -RestartPostmasterStartedAt $acceptanceStartedAt.AddHours(-1).ToString('o') `
+        -AcceptanceStartedAtUtc $acceptanceStartedAt `
+        -ObservedAtUtc $observedAt
+}
+catch { $reusedPostmasterRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_POSTGRES_RESTART_CHRONOLOGY_REJECTED') }
+if (-not $reusedPostmasterRejected) { throw 'TASK038_ACCEPT_TEST_REUSED_POSTMASTER_RECENT_MARKER_NOT_REJECTED' }
+$holderReceiptRejected = $false
+try { Assert-PostgresHolderReceiptAuthority -Binding ([pscustomobject]@{ holder_restart_receipt_authority = 'NOT_AVAILABLE' }) }
+catch { $holderReceiptRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_POSTGRES_HOLDER_RECEIPT_NOT_AVAILABLE') }
+if (-not $holderReceiptRejected) { throw 'TASK038_ACCEPT_TEST_POSTGRES_HOLDER_RECEIPT_NOT_REQUIRED' }
 $fakeBinary = Join-Path $testRoot 'latticed-fake.exe'
 $fakeState = Join-Path $testRoot 'state.txt'
 $fakeCounters = Join-Path $testRoot 'counters.txt'
@@ -828,8 +997,8 @@ foreach ($case in @($positiveFinal.negative_protocol_cases)) {
         [int]$case.protocol_error_code -ne -32602 -or
         [long]$case.service_dispatch_observed -ne 0 -or
         [long]$case.external_effect_observed -ne 0 -or
-        -not [bool]$case.authoritative_observation -or
-        [string]$case.observation_scope -cne 'HARNESS_FAKE_ONLY_NOT_PRODUCTION'
+        [bool]$case.authoritative_observation -or
+        [string]$case.observation_scope -cne 'HARNESS_FAKE_PARSER_ONLY_NOT_LIVE'
     ) {
         throw 'TASK038_ACCEPT_TEST_NEGATIVE_PROTOCOL_REJECTED'
     }

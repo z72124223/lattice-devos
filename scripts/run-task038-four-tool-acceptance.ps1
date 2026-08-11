@@ -88,6 +88,15 @@ $script:PostgresVersion = '17.10'
 $script:PostgresSha256 = '882a5a073a88817f6c6d4c8827df1e4269ff226d52cf6f47c9883e91088c6345'
 $script:PsqlSha256 = 'e43adb9c5032e7efc63eebb44c5d32b142b34e5f4207666fed2dc7a51d43b630'
 $script:PgCtlSha256 = 'abe89b0767a8cd0f956059aa5a5a93cd1042efc6194d000c2501da3e23babbd2'
+$script:ApprovedRustToolchain = 'stable-x86_64-pc-windows-msvc'
+$script:ApprovedCargoVersion = 'cargo 1.97.1 (c980f4866 2026-06-30)'
+$script:ApprovedRustcVersion = 'rustc 1.97.1 (8bab26f4f 2026-07-14)'
+$script:ApprovedCargoShimSha256 = '86478e53f769379d7f0ebfa7c9aa97cb76ca92233f79aa2cc0dbee2efaac73c7'
+$script:ApprovedCargoSha256 = 'ddfbad20b31b918d3439d070945ec59bbfe037a6ec0ab5b584459e69c8b37d1b'
+$script:ApprovedRustcSha256 = 'cf79cfd77b0a144c56a0a6af6bf10bcdf095a73718cd4bf2b9d4fe2d2cbded55'
+$script:ApprovedCargoShimNativeIdentity = 'lattice.win-file-id.v1:fcc833adc8336554:000000000000000000760000000647ed:f'
+$script:ApprovedCargoNativeIdentity = 'lattice.win-file-id.v1:fcc833adc8336554:00000000000000000017000000092ef3:f'
+$script:ApprovedRustcNativeIdentity = 'lattice.win-file-id.v1:fcc833adc8336554:00000000000000000001000000175377:f'
 $script:ReviewTargetBlobs = [ordered]@{
     'scripts/run-task038-four-tool-acceptance.ps1' = '6d9fab7d38cead46bbfb08dcdaa144c9302f261b'
     'scripts/test-task038-four-tool-acceptance.ps1' = '385ada4dbc7177e40215d893efebf9597114a6dc'
@@ -185,6 +194,7 @@ $script:PublicStatusFields = @(
     'task_state'
 )
 $script:Utf8 = [Text.UTF8Encoding]::new($false)
+$script:AcceptanceStartedAtUtc = [DateTimeOffset]::UtcNow
 $script:CompletedStages = [Collections.Generic.List[string]]::new()
 $script:SessionEvidence = [Collections.Generic.List[object]]::new()
 $script:FailureCode = $null
@@ -209,7 +219,7 @@ $script:TunnelLifecycleIntegrationChecked = $false
 $script:CandidateBuildEvidence = $null
 $script:LatticedNativeIdentity = $null
 $script:CandidateLinkage = $null
-$script:CandidateReviewCommitment = $null
+$script:IndependentReviewEvaluation = 'NOT_EVALUATED'
 $script:CandidateAcceptanceCommitment = $null
 $script:TunnelLifecycleReceipt = $null
 $script:HarnessCounterPath = $null
@@ -382,6 +392,135 @@ function Assert-CandidateBinaryUnchanged {
     }
 }
 
+function Get-ApprovedRustToolchainReceipt {
+    $substitutionPattern = '\A(?:RUSTC(?:_|$)|RUSTDOC(?:_|$)|RUSTFLAGS$|RUSTUP_(?:TOOLCHAIN|HOME)$|RUSTC_BOOTSTRAP$|CARGO_HOME$|CARGO_TARGET_DIR$|CARGO_ENCODED_RUSTFLAGS$|CARGO_BUILD_|CARGO_TARGET_|CARGO_PROFILE_|CC$|CXX$|AR$|LD$|LINKER$|SCCACHE_)'
+    $substitutionInputs = @(Get-ChildItem Env: | Where-Object {
+        $_.Name -cmatch $substitutionPattern -and -not [string]::IsNullOrWhiteSpace([string]$_.Value)
+    })
+    if ($substitutionInputs.Count -ne 0) {
+        throw 'TASK038_ACCEPT_BUILD_SUBSTITUTION_REJECTED'
+    }
+
+    $userProfilePath = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    $cargoHome = Get-CanonicalPath -Path (Join-Path $userProfilePath '.cargo')
+    $rustupHome = Get-CanonicalPath -Path (Join-Path $userProfilePath '.rustup')
+    $cargoShim = Get-CanonicalPath -Path (Join-Path $cargoHome 'bin\cargo.exe')
+    $toolchainRoot = Get-CanonicalPath -Path (Join-Path $rustupHome ('toolchains\' + $script:ApprovedRustToolchain))
+    $cargo = Get-CanonicalPath -Path (Join-Path $toolchainRoot 'bin\cargo.exe')
+    $rustc = Get-CanonicalPath -Path (Join-Path $toolchainRoot 'bin\rustc.exe')
+
+    $pathCargo = $null
+    foreach ($pathEntry in @(([Environment]::GetEnvironmentVariable('PATH', 'Process') -split [regex]::Escape([string][IO.Path]::PathSeparator)))) {
+        if ([string]::IsNullOrWhiteSpace($pathEntry)) { continue }
+        try { $candidate = Get-CanonicalPath -Path (Join-Path $pathEntry 'cargo.exe') }
+        catch { continue }
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { $pathCargo = $candidate; break }
+    }
+    if ([string]::IsNullOrWhiteSpace($pathCargo) -or $pathCargo -cne $cargoShim) {
+        throw 'TASK038_ACCEPT_BUILD_PATH_CARGO_REJECTED'
+    }
+    foreach ($path in @($cargoShim, $cargo, $rustc)) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if (
+            $null -eq $item -or $item.PSIsContainer -or
+            -not ($item -is [IO.FileInfo]) -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        ) { throw 'TASK038_ACCEPT_CANDIDATE_BUILD_TOOL_REJECTED' }
+    }
+    if (
+        (Get-FileSha256 -Path $cargoShim) -cne $script:ApprovedCargoShimSha256 -or
+        (Get-FileSha256 -Path $cargo) -cne $script:ApprovedCargoSha256 -or
+        (Get-FileSha256 -Path $rustc) -cne $script:ApprovedRustcSha256 -or
+        (Get-AuthoritativeNativeFileIdentity -Path $cargoShim) -cne $script:ApprovedCargoShimNativeIdentity -or
+        (Get-AuthoritativeNativeFileIdentity -Path $cargo) -cne $script:ApprovedCargoNativeIdentity -or
+        (Get-AuthoritativeNativeFileIdentity -Path $rustc) -cne $script:ApprovedRustcNativeIdentity
+    ) { throw 'TASK038_ACCEPT_CANDIDATE_BUILD_TOOL_REJECTED' }
+    foreach ($configPath in @((Join-Path $cargoHome 'config'), (Join-Path $cargoHome 'config.toml'))) {
+        if (Test-Path -LiteralPath $configPath) { throw 'TASK038_ACCEPT_BUILD_CONFIG_SUBSTITUTION_REJECTED' }
+    }
+
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $cargoVersionOutput = @(& $cargo '--version' 2>&1 | ForEach-Object { [string]$_ })
+        $cargoVersionExit = [int]$LASTEXITCODE
+        $rustcVersionOutput = @(& $rustc '--version' 2>&1 | ForEach-Object { [string]$_ })
+        $rustcVersionExit = [int]$LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previous }
+    $cargoVersion = ([string]::Join("`n", $cargoVersionOutput)).Trim()
+    $rustcVersion = ([string]::Join("`n", $rustcVersionOutput)).Trim()
+    if (
+        $cargoVersionExit -ne 0 -or $rustcVersionExit -ne 0 -or
+        $cargoVersion -cne $script:ApprovedCargoVersion -or
+        $rustcVersion -cne $script:ApprovedRustcVersion
+    ) { throw 'TASK038_ACCEPT_CANDIDATE_BUILD_TOOL_REJECTED' }
+
+    return [ordered]@{
+        schema_version = 'lattice.task038.approved-rust-toolchain.v1'
+        toolchain = $script:ApprovedRustToolchain
+        cargo_home = $cargoHome
+        rustup_home = $rustupHome
+        cargo_shim_path = $cargoShim
+        cargo_shim_sha256 = $script:ApprovedCargoShimSha256
+        cargo_shim_native_identity = $script:ApprovedCargoShimNativeIdentity
+        cargo_path = $cargo
+        cargo_sha256 = $script:ApprovedCargoSha256
+        cargo_native_identity = $script:ApprovedCargoNativeIdentity
+        cargo_version = $cargoVersion
+        rustc_path = $rustc
+        rustc_sha256 = $script:ApprovedRustcSha256
+        rustc_native_identity = $script:ApprovedRustcNativeIdentity
+        rustc_version = $rustcVersion
+        inherited_build_substitution_inputs = @()
+        cargo_home_config_present = $false
+    }
+}
+
+function Assert-CandidateBuildOutputAbsent {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (Test-Path -LiteralPath $Path) {
+        throw 'TASK038_ACCEPT_CANDIDATE_BUILD_OUTPUT_NOT_FRESH'
+    }
+}
+
+function Assert-NoCargoConfigInAncestorChain {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $current = Get-CanonicalPath -Path $Root
+    while (-not [string]::IsNullOrWhiteSpace($current)) {
+        foreach ($relative in @('.cargo\config', '.cargo\config.toml')) {
+            if (Test-Path -LiteralPath (Join-Path $current $relative)) {
+                throw 'TASK038_ACCEPT_BUILD_CONFIG_SUBSTITUTION_REJECTED'
+            }
+        }
+        $parent = Split-Path -Parent $current
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -ceq $current) { break }
+        $current = $parent
+    }
+}
+
+function Set-ClosedRustBuildEnvironment {
+    param(
+        [Parameter(Mandatory = $true)][Diagnostics.ProcessStartInfo]$StartInfo,
+        [Parameter(Mandatory = $true)]$Toolchain,
+        [Parameter(Mandatory = $true)][string]$SourceDateEpoch
+    )
+
+    $substitutionPattern = '\A(?:RUSTC(?:_|$)|RUSTDOC(?:_|$)|RUSTFLAGS$|RUSTUP_(?:TOOLCHAIN|HOME)$|RUSTC_BOOTSTRAP$|CARGO_HOME$|CARGO_TARGET_DIR$|CARGO_ENCODED_RUSTFLAGS$|CARGO_BUILD_|CARGO_TARGET_|CARGO_PROFILE_|CC$|CXX$|AR$|LD$|LINKER$|SCCACHE_)'
+    foreach ($name in @($StartInfo.EnvironmentVariables.Keys | ForEach-Object { [string]$_ })) {
+        if ($name -cmatch $substitutionPattern) { $StartInfo.EnvironmentVariables.Remove($name) }
+    }
+    $StartInfo.EnvironmentVariables['RUSTC'] = [string]$Toolchain.rustc_path
+    $StartInfo.EnvironmentVariables['RUSTUP_TOOLCHAIN'] = [string]$Toolchain.toolchain
+    $StartInfo.EnvironmentVariables['RUSTUP_HOME'] = [string]$Toolchain.rustup_home
+    $StartInfo.EnvironmentVariables['CARGO_HOME'] = [string]$Toolchain.cargo_home
+    $StartInfo.EnvironmentVariables['CARGO_INCREMENTAL'] = '0'
+    $StartInfo.EnvironmentVariables['CARGO_TERM_COLOR'] = 'never'
+    $StartInfo.EnvironmentVariables['SOURCE_DATE_EPOCH'] = $SourceDateEpoch
+}
+
 function New-ExactCandidateBuild {
     param(
         [Parameter(Mandatory = $true)][string]$Commit,
@@ -393,6 +532,11 @@ function New-ExactCandidateBuild {
     $targetRoot = Join-Path $script:EvidenceDirectory 'candidate-target'
     [IO.Directory]::CreateDirectory($materializedRoot) | Out-Null
     [IO.Directory]::CreateDirectory($targetRoot) | Out-Null
+
+    $toolchain = Get-ApprovedRustToolchainReceipt
+    Assert-NoCargoConfigInAncestorChain -Root $materializedRoot
+    $candidateBinary = Get-CanonicalPath -Path (Join-Path $targetRoot 'debug\latticed.exe')
+    Assert-CandidateBuildOutputAbsent -Path $candidateBinary
 
     $previous = $ErrorActionPreference
     try {
@@ -423,18 +567,19 @@ function New-ExactCandidateBuild {
         throw 'TASK038_ACCEPT_CANDIDATE_MATERIALIZATION_REJECTED'
     }
 
-    $cargo = Get-Command cargo.exe -CommandType Application -ErrorAction SilentlyContinue
-    if ($null -eq $cargo -or -not (Test-Path -LiteralPath $cargo.Source -PathType Leaf)) {
-        throw 'TASK038_ACCEPT_CANDIDATE_BUILD_TOOL_REJECTED'
-    }
+    $cargo = [string]$toolchain.cargo_path
+    $sourceDateEpoch = Invoke-GitText -Arguments @('show', '-s', '--format=%ct', $Commit)
+    if ($sourceDateEpoch -cnotmatch '\A[1-9][0-9]{0,19}\z') { throw 'TASK038_ACCEPT_CANDIDATE_BUILD_REJECTED' }
+    $buildArguments = 'build --locked --offline --package lattice-runtime --bin latticed --target-dir "' + $targetRoot.Replace('"', '\"') + '"'
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $cargo.Source
-    $startInfo.Arguments = 'build --locked --package lattice-runtime --bin latticed --target-dir "' + $targetRoot.Replace('"', '\"') + '"'
+    $startInfo.FileName = $cargo
+    $startInfo.Arguments = $buildArguments
     $startInfo.WorkingDirectory = $materializedRoot
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    Set-ClosedRustBuildEnvironment -StartInfo $startInfo -Toolchain $toolchain -SourceDateEpoch $sourceDateEpoch
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     try {
@@ -451,7 +596,6 @@ function New-ExactCandidateBuild {
         if ($process.ExitCode -ne 0 -or $stdout.Length -gt 1048576 -or $stderr.Length -gt 1048576) {
             throw 'TASK038_ACCEPT_CANDIDATE_BUILD_REJECTED'
         }
-        $candidateBinary = Get-CanonicalPath -Path (Join-Path $targetRoot 'debug\latticed.exe')
         $candidateItem = Get-Item -LiteralPath $candidateBinary -Force -ErrorAction SilentlyContinue
         if (
             $null -eq $candidateItem -or
@@ -467,9 +611,27 @@ function New-ExactCandidateBuild {
             source_commit = $Commit
             source_tree = $Tree
             source_archive_sha256 = Get-FileSha256 -Path $archivePath
-            cargo_sha256 = Get-FileSha256 -Path $cargo.Source
-            cargo_native_identity = Get-AuthoritativeNativeFileIdentity -Path $cargo.Source
+            source_date_epoch = $sourceDateEpoch
+            toolchain = $toolchain
+            toolchain_commitment = Get-DomainSeparatedCommitment -Domain 'LATTICE_TASK038_APPROVED_RUST_TOOLCHAIN_V1' -Value $toolchain
+            build_command = $buildArguments
+            build_environment = [ordered]@{
+                rustc = [string]$toolchain.rustc_path
+                rustup_toolchain = [string]$toolchain.toolchain
+                rustup_home = [string]$toolchain.rustup_home
+                cargo_home = [string]$toolchain.cargo_home
+                cargo_incremental = '0'
+                cargo_term_color = 'never'
+                source_date_epoch = $sourceDateEpoch
+                wrappers_scrubbed = $true
+                substitution_inputs_rejected = $true
+            }
+            cargo_sha256 = [string]$toolchain.cargo_sha256
+            cargo_native_identity = [string]$toolchain.cargo_native_identity
+            rustc_sha256 = [string]$toolchain.rustc_sha256
+            rustc_native_identity = [string]$toolchain.rustc_native_identity
             build_locked = $true
+            build_offline = $true
             build_package = 'lattice-runtime'
             build_binary = 'latticed'
             binary_path = $candidateBinary
@@ -665,8 +827,9 @@ function Get-CandidateLinkage {
         candidate_commit = $CandidateCommit
         candidate_tree = $CandidateTree
         candidate_exact_blobs = Get-GitBlobMap -Commit $CandidateCommit -Paths $script:CandidateBindingPaths
-        independent_review_source_thread = $script:ReviewReceiptSourceThread
-        independent_review_target = $reviewTarget
+        historical_review_source_thread_trace = $script:ReviewReceiptSourceThread
+        historical_review_target_trace = $reviewTarget
+        current_independent_review_evaluation = $script:IndependentReviewEvaluation
         p005_lifecycle_checkpoint = $p005Lifecycle
         p005_production_checkpoint = $p005Production
         p007_checkpoint = $p007
@@ -707,7 +870,8 @@ function Get-LifecycleProcessIdentityParts {
 function Read-TunnelLifecycleReceipt {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$ExpectedInnerExeSha256
+        [Parameter(Mandatory = $true)][string]$ExpectedInnerExeSha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedInnerExeNativeIdentity
     )
 
     $failureCode = 'TASK038_ACCEPT_TUNNEL_LIFECYCLE_RECEIPT_REJECTED'
@@ -753,6 +917,8 @@ function Read-TunnelLifecycleReceipt {
         $outer.exited_at_utc -isnot [string] -or
         -not [DateTimeOffset]::TryParse([string]$outer.exited_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$outerExitedAt) -or
         $outerExitedAt -lt $outerStartedAt -or
+        $outerStartedAt -lt [DateTimeOffset]::UtcNow.AddMinutes(-5) -or
+        $outerExitedAt -gt [DateTimeOffset]::UtcNow.AddSeconds(30) -or
         $outer.create_suspended -isnot [bool] -or -not [bool]$outer.create_suspended -or
         $outer.job_assigned_before_resume -isnot [bool] -or -not [bool]$outer.job_assigned_before_resume -or
         -not (Test-JsonInteger -Value $outer.descendant_processes_after_cleanup) -or [int]$outer.descendant_processes_after_cleanup -ne 0 -or
@@ -762,6 +928,10 @@ function Read-TunnelLifecycleReceipt {
         $outer.profile_native_identity -isnot [string] -or [string]$outer.profile_native_identity -cnotmatch '\Alattice\.win-file-id\.v1:[0-9a-f:]+:f\z' -or
         $outer.latticed_native_identity -isnot [string] -or [string]$outer.latticed_native_identity -cnotmatch '\Alattice\.win-file-id\.v1:[0-9a-f:]+:f\z' -or
         $outer.tunnel_client_native_identity -isnot [string] -or [string]$outer.tunnel_client_native_identity -cnotmatch '\Alattice\.win-file-id\.v1:[0-9a-f:]+:f\z' -or
+        [string]$outer.latticed_native_identity -cne $ExpectedInnerExeNativeIdentity -or
+        [string]$outer.profile_native_identity -ceq [string]$outer.latticed_native_identity -or
+        [string]$outer.profile_native_identity -ceq [string]$outer.tunnel_client_native_identity -or
+        [string]$outer.latticed_native_identity -ceq [string]$outer.tunnel_client_native_identity -or
         $outer.lifecycle_event_path -isnot [string] -or
         $outer.lifecycle_event_raw_sha256 -isnot [string] -or [string]$outer.lifecycle_event_raw_sha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
         -not (Test-JsonInteger -Value $outer.lifecycle_event_byte_count) -or [long]$outer.lifecycle_event_byte_count -lt 1 -or
@@ -798,6 +968,11 @@ function Read-TunnelLifecycleReceipt {
     if (
         -not (Test-Path -LiteralPath $eventPath -PathType Leaf) -or
         $observedEventIdentity -cne [string]$outer.lifecycle_event_native_identity
+    ) { throw $failureCode }
+    if (
+        [string]$outer.profile_native_identity -ceq $observedEventIdentity -or
+        [string]$outer.latticed_native_identity -ceq $observedEventIdentity -or
+        [string]$outer.tunnel_client_native_identity -ceq $observedEventIdentity
     ) { throw $failureCode }
     $eventBytes = [IO.File]::ReadAllBytes($eventPath)
     if (
@@ -856,6 +1031,7 @@ function Read-TunnelLifecycleReceipt {
             $record.observed_at_utc -isnot [string] -or [string]$record.observed_at_utc -cnotmatch '\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z\z' -or
             -not [DateTimeOffset]::TryParse([string]$record.observed_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$observedAt) -or
             $observedAt -lt $previousObservedAt -or
+            $observedAt -lt $outerStartedAt -or $observedAt -gt $outerExitedAt -or
             $record.previous_event_sha256 -isnot [string] -or [string]$record.previous_event_sha256 -cne $previousEventSha256 -or
             $record.idempotency_key -isnot [string] -or [string]$record.idempotency_key -cnotmatch '\A[0-9a-f]{64}\z' -or
             $record.event_sha256 -isnot [string] -or [string]$record.event_sha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
@@ -916,9 +1092,30 @@ function Read-TunnelLifecycleReceipt {
         lifecycle_safe_config_sha256 = [string]$outer.lifecycle_safe_config_sha256
         lifecycle_inner_process_exe_sha256 = [string]$outer.lifecycle_inner_process_exe_sha256
         exact_schema_hash_order_idempotency_session_config_exe_checked = $true
+        authority_scope = 'NON_LIVE_PARSER_ONLY'
+        live_authority_evaluated = $false
+        os_process_observation_anchored = $false
+        profile_path_anchored = $false
+        tunnel_client_path_anchored = $false
         downstream_checkpoint = $script:P005LifecycleCommit
         downstream_checkpoint_not_retroactive_review_proof = $true
     }
+}
+
+function Assert-LiveTunnelLifecycleAuthority {
+    param([Parameter(Mandatory = $true)]$ParsedReceipt)
+
+    if (
+        $null -eq $ParsedReceipt -or
+        [string]$ParsedReceipt.authority_scope -cne 'NON_LIVE_PARSER_ONLY' -or
+        [bool]$ParsedReceipt.live_authority_evaluated
+    ) { throw 'TASK038_ACCEPT_TUNNEL_LIFECYCLE_RECEIPT_REJECTED' }
+
+    # The checked-in tunnel output has no independently authenticated receipt
+    # that binds the profile path, tunnel-client file, built latticed file and
+    # OS PID/creation observation. Parsing its self-consistent JSON cannot
+    # create that authority.
+    throw 'TASK038_ACCEPT_TUNNEL_LIFECYCLE_AUTHORITY_NOT_AVAILABLE'
 }
 
 function Invoke-PostgresRestart {
@@ -1618,7 +1815,7 @@ function Invoke-McpSession {
                     phase = $Name
                     input_sha256 = Get-StringSha256 -Value $inputText
                     expected_dispatch_tools = @($ExpectedDispatchTools)
-                    review_commitment = [string]$script:CandidateReviewCommitment
+                    independent_review_evaluation = $script:IndependentReviewEvaluation
                 })
             foreach ($environmentName in $acceptanceEnvironment) {
                 $previousAcceptanceEnvironment[$environmentName] = [Environment]::GetEnvironmentVariable($environmentName, 'Process')
@@ -2163,20 +2360,11 @@ function New-ZeroProductionSessionEffectReceipt {
         [int]$Session.Summary.network_tcp_owner_rows_after_cleanup -ne 0 -or
         [int]$Session.Summary.network_udp_owner_rows_after_cleanup -ne 0
     ) { throw 'TASK038_ACCEPT_PRODUCTION_SESSION_EFFECT_REJECTED' }
-    return [ordered]@{
-        schema_version = 'lattice.task038.production-session-effect-observation.v1'
-        phase = $Phase
-        session_id = [string]$Session.AcceptanceEvidence.session_id
-        dispatch_evidence_raw_sha256 = [string]$Session.AcceptanceEvidence.raw_sha256
-        dispatch_final_event_sha256 = [string]$Session.AcceptanceEvidence.final_event_sha256
-        dispatch_accepted_count = [int]$Session.AcceptanceEvidence.dispatch_accepted_count
-        before_commitment = $beforeCommitment
-        after_commitment = $afterCommitment
-        observed_effect_delta = [ordered]@{
-            database = 0L; filesystem = 0L; process = 0L; network = 0L; codex = 0L; related = 0L
-        }
-        exact_zero_effect_observed = $true
-    }
+    # Snapshot equality and post-cleanup absence cannot observe a process,
+    # socket, write or Codex effect that started and disappeared between the
+    # two samples. The current Rust evidence stream proves dispatch ordering
+    # only, so it cannot be promoted into an authoritative zero receipt.
+    throw 'TASK038_ACCEPT_PRODUCTION_SESSION_EFFECT_AUTHORITY_NOT_AVAILABLE'
 }
 
 function Invoke-RepositoryGitText {
@@ -2261,6 +2449,30 @@ function New-SubmitProductionSessionEffectReceipt {
     }
 }
 
+function Assert-ProductionNegativeEffectAuthority {
+    param(
+        [Parameter(Mandatory = $true)]$Session,
+        [Parameter(Mandatory = $true)][string]$ProbeName,
+        [Parameter(Mandatory = $true)][string]$ExpectedRejectedClassification
+    )
+
+    if (
+        $ProbeName -cnotmatch '\A02n(?:0[1-9]|1[0-2])-[a-z0-9-]{1,64}\z' -or
+        $ExpectedRejectedClassification -cne 'MCP_INVALID_PARAMS' -or
+        $null -eq $Session.AcceptanceEvidence -or
+        [string]$Session.AcceptanceEvidence.schema -cne 'lattice.task038.mcp-acceptance-dispatch-evidence.v1' -or
+        [int]$Session.AcceptanceEvidence.dispatch_accepted_count -ne 0 -or
+        -not [bool]$Session.AcceptanceEvidence.normal_close_complete
+    ) { throw 'TASK038_ACCEPT_OBSERVED_EFFECT_RECEIPT_REJECTED' }
+
+    # P0-05 currently emits only SESSION_OPEN / DISPATCH_ACCEPTED /
+    # SESSION_CLOSED. It has no production record binding this rejected
+    # request/probe to dispatch, database, filesystem, process, network and
+    # Codex counters. A caller object or snapshot-derived zero is not an
+    # authority substitute.
+    throw 'TASK038_ACCEPT_PRODUCTION_NEGATIVE_EFFECT_AUTHORITY_NOT_AVAILABLE'
+}
+
 function Invoke-NegativeProtocolCase {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -2270,7 +2482,6 @@ function Invoke-NegativeProtocolCase {
     )
 
     if ($Mode -eq 'FULL') {
-        $effectBefore = Get-ProductionEffectSnapshot
         $counterBefore = $null
     }
     else {
@@ -2286,41 +2497,10 @@ function Invoke-NegativeProtocolCase {
     $null = Get-McpResponse -Responses @($session.Responses) -Id 1
     $error = Get-McpProtocolError -Responses @($session.Responses) -Id 2 -ExpectedCode -32602 -ExpectedMessage $ExpectedMessage
     if ($Mode -eq 'FULL') {
-        if (
-            $null -eq $session.AcceptanceEvidence -or
-            [string]$session.AcceptanceEvidence.schema -cne 'lattice.task038.mcp-acceptance-dispatch-evidence.v1' -or
-            [int]$session.AcceptanceEvidence.dispatch_accepted_count -ne 0 -or
-            -not [bool]$session.AcceptanceEvidence.normal_close_complete
-        ) { throw 'TASK038_ACCEPT_OBSERVED_EFFECT_RECEIPT_REJECTED' }
-        $effectAfter = Get-ProductionEffectSnapshot
-        if ((ConvertTo-CanonicalJson -Value $effectBefore) -cne (ConvertTo-CanonicalJson -Value $effectAfter)) {
-            throw 'TASK038_ACCEPT_OBSERVED_EFFECT_RECEIPT_REJECTED'
-        }
-        if (
-            [int]$session.Summary.job_active_processes_after_exit -ne 0 -or
-            [int]$session.Summary.process_session_pid_present_after_cleanup -ne 0 -or
-            [int]$session.Summary.network_tcp_owner_rows_after_cleanup -ne 0 -or
-            [int]$session.Summary.network_udp_owner_rows_after_cleanup -ne 0
-        ) { throw 'TASK038_ACCEPT_OBSERVED_EFFECT_RECEIPT_REJECTED' }
-        $counterDelta = [ordered]@{
-            dispatch = 0L
-            database = 0L
-            filesystem = 0L
-            process = 0L
-            network = 0L
-            codex = 0L
-            effect = 0L
-        }
-        $observationScope = 'PRODUCTION_SERVER_DISPATCH_DB_FS_PROCESS_NETWORK_CODEX'
-        $effectReceipt = [ordered]@{
-            schema_version = 'lattice.task038.production-negative-effect-observation.v1'
-            dispatch_evidence_raw_sha256 = [string]$session.AcceptanceEvidence.raw_sha256
-            dispatch_final_event_sha256 = [string]$session.AcceptanceEvidence.final_event_sha256
-            before_commitment = Get-DomainSeparatedCommitment -Domain 'LATTICE_TASK038_NEGATIVE_EFFECT_SNAPSHOT_V1' -Value $effectBefore
-            after_commitment = Get-DomainSeparatedCommitment -Domain 'LATTICE_TASK038_NEGATIVE_EFFECT_SNAPSHOT_V1' -Value $effectAfter
-            exact_match = $true
-            observed_counter_delta = $counterDelta
-        }
+        Assert-ProductionNegativeEffectAuthority `
+            -Session $session `
+            -ProbeName $Name `
+            -ExpectedRejectedClassification 'MCP_INVALID_PARAMS'
     }
     else {
         $counterAfter = Get-HarnessObservedCounters
@@ -2333,7 +2513,7 @@ function Invoke-NegativeProtocolCase {
         if ([long]$counterDelta.dispatch -ne 0 -or [long]$counterDelta.effect -ne 0) {
             throw 'TASK038_ACCEPT_OBSERVED_EFFECT_RECEIPT_REJECTED'
         }
-        $observationScope = 'HARNESS_FAKE_ONLY_NOT_PRODUCTION'
+        $observationScope = 'HARNESS_FAKE_PARSER_ONLY_NOT_LIVE'
         $effectReceipt = $null
     }
     $evidence = [ordered]@{
@@ -2345,7 +2525,7 @@ function Invoke-NegativeProtocolCase {
         service_dispatch_observed = [long]$counterDelta.dispatch
         external_effect_observed = [long]$counterDelta.effect
         observed_counter_delta = $counterDelta
-        authoritative_observation = $true
+        authoritative_observation = $false
         observation_scope = $observationScope
         production_effect_receipt = $effectReceipt
         independent_process_id = [int]$session.Summary.process_id
@@ -2509,6 +2689,56 @@ function Assert-PostgresPortPolicy {
     }
 }
 
+function Assert-PostgresRestartChronology {
+    param(
+        [Parameter(Mandatory = $true)][string]$MarkerCreatedAtUtc,
+        [Parameter(Mandatory = $true)][string]$InitialPostmasterStartedAt,
+        [Parameter(Mandatory = $true)][string]$RestartPostmasterStartedAt,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$AcceptanceStartedAtUtc,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$ObservedAtUtc
+    )
+
+    $markerCreatedAt = [DateTimeOffset]::MinValue
+    $initialStartedAt = [DateTimeOffset]::MinValue
+    $restartStartedAt = [DateTimeOffset]::MinValue
+    if (
+        -not [DateTimeOffset]::TryParse($MarkerCreatedAtUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$markerCreatedAt) -or
+        -not [DateTimeOffset]::TryParse($InitialPostmasterStartedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$initialStartedAt) -or
+        -not [DateTimeOffset]::TryParse($RestartPostmasterStartedAt, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$restartStartedAt) -or
+        $markerCreatedAt -gt $initialStartedAt -or
+        $initialStartedAt -ge $restartStartedAt -or
+        $restartStartedAt -lt $AcceptanceStartedAtUtc.AddMinutes(-2) -or
+        $restartStartedAt -gt $ObservedAtUtc -or
+        $ObservedAtUtc -gt [DateTimeOffset]::UtcNow.AddSeconds(30)
+    ) { throw 'TASK038_ACCEPT_POSTGRES_RESTART_CHRONOLOGY_REJECTED' }
+
+    return [ordered]@{
+        marker_created_at_utc = $markerCreatedAt.ToUniversalTime().ToString('o')
+        initial_postmaster_started_at = $initialStartedAt.ToUniversalTime().ToString('o')
+        restart_postmaster_started_at = $restartStartedAt.ToUniversalTime().ToString('o')
+        acceptance_started_at_utc = $AcceptanceStartedAtUtc.ToUniversalTime().ToString('o')
+        observed_at_utc = $ObservedAtUtc.ToUniversalTime().ToString('o')
+        marker_precedes_initial = $true
+        initial_precedes_restart = $true
+        restart_precedes_acceptance_protocol = $true
+    }
+}
+
+function Assert-PostgresHolderReceiptAuthority {
+    param([Parameter(Mandatory = $true)]$Binding)
+
+    if (
+        $null -eq $Binding -or
+        [string]$Binding.holder_restart_receipt_authority -cne 'NOT_AVAILABLE'
+    ) { throw 'TASK038_ACCEPT_POSTGRES_BINDING_REJECTED' }
+
+    # TASK-019's mutable JSON marker has no append-only or independently
+    # authenticated holder receipt binding marker creation, the restart,
+    # listener PID/creation identity and the current acceptance run. Rewriting
+    # that marker must never mint freshness authority.
+    throw 'TASK038_ACCEPT_POSTGRES_HOLDER_RECEIPT_NOT_AVAILABLE'
+}
+
 function Get-PostgresDatabaseBinding {
     param([Parameter(Mandatory = $true)][string]$Password)
 
@@ -2610,6 +2840,32 @@ function Get-PostgresDatabaseBinding {
         [string]$runtime.system_identifier -cne [string]$marker.system_identifier -or
         [string]$runtime.postmaster_started_at -cne [string]$marker.restart_postmaster_started_at
     ) { throw 'TASK038_ACCEPT_POSTGRES_RUNTIME_BINDING_REJECTED' }
+    $observedAtUtc = [DateTimeOffset]::UtcNow
+    $chronology = Assert-PostgresRestartChronology `
+        -MarkerCreatedAtUtc ([string]$marker.created_at_utc) `
+        -InitialPostmasterStartedAt ([string]$marker.initial_postmaster_started_at) `
+        -RestartPostmasterStartedAt ([string]$marker.restart_postmaster_started_at) `
+        -AcceptanceStartedAtUtc $script:AcceptanceStartedAtUtc `
+        -ObservedAtUtc $observedAtUtc
+    try {
+        $listenerPid = [int]$listeners[0].OwningProcess
+        $listenerProcess = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + $listenerPid) -ErrorAction Stop
+        if ($null -eq $listenerProcess) { throw $failureCode }
+        $listenerExecutable = Get-CanonicalPath -Path ([string]$listenerProcess.ExecutablePath)
+        $listenerCommandLine = [string]$listenerProcess.CommandLine
+        $listenerCreatedAtUtc = [DateTimeOffset]([DateTime]$listenerProcess.CreationDate).ToUniversalTime()
+        $runtimeStartedAt = [DateTimeOffset]::MinValue
+        if (
+            $listenerExecutable -cne $expectedPostgres -or
+            [string]::IsNullOrWhiteSpace($listenerCommandLine) -or
+            $listenerCommandLine.IndexOf($expectedData, [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+            -not [DateTimeOffset]::TryParse([string]$runtime.postmaster_started_at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AllowWhiteSpaces, [ref]$runtimeStartedAt) -or
+            [Math]::Abs(($listenerCreatedAtUtc - $runtimeStartedAt.ToUniversalTime()).TotalSeconds) -gt 10 -or
+            (Get-FileSha256 -Path $listenerExecutable) -cne $script:PostgresSha256 -or
+            (Get-LatticeWindowsNativePathIdentityToken -Path $listenerExecutable -Directory $false) -cne $postgresNativeIdentity
+        ) { throw $failureCode }
+    }
+    catch { throw 'TASK038_ACCEPT_POSTGRES_LISTENER_IDENTITY_REJECTED' }
     try { $markerNativeIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $markerPath -Directory $false }
     catch { throw 'TASK038_ACCEPT_POSTGRES_NATIVE_IDENTITY_REJECTED' }
     return [ordered]@{
@@ -2628,9 +2884,15 @@ function Get-PostgresDatabaseBinding {
         psql_executable_raw_sha256 = $script:PsqlSha256
         pg_ctl_executable_raw_sha256 = $script:PgCtlSha256
         postgres_executable_raw_sha256 = $script:PostgresSha256
-        listener_owning_process = [int]$listeners[0].OwningProcess
+        listener_owning_process = $listenerPid
+        listener_process_created_at_utc = $listenerCreatedAtUtc.ToString('o')
+        listener_executable_path = $listenerExecutable
+        listener_executable_native_identity = $postgresNativeIdentity
+        listener_data_directory_bound = $true
+        restart_chronology = $chronology
         marker_restart_identity_verified = $true
-        fresh_marker_checked = $true
+        fresh_marker_checked = $false
+        holder_restart_receipt_authority = 'NOT_AVAILABLE'
     }
 }
 
@@ -2817,22 +3079,13 @@ try {
     }
     if ($Mode -eq 'FULL') {
         $script:CandidateLinkage = Get-CandidateLinkage -CandidateCommit $resolvedCommit -CandidateTree $sourceTree
-        $reviewCommitmentInput = [ordered]@{
-            review_receipt_source = $script:ReviewReceiptSourceThread
-            review_target_commit = $script:ReviewTargetCommit
-            review_target_tree = $script:ReviewTargetTree
-            finding_ids = @('P1-A','P1-B','P1-C','P1-D','P2')
-            candidate_linkage = $script:CandidateLinkage
-            tool_schema_contract_sha256 = $script:ToolSchemaContractCommitment
-            tool_error_contract_sha256 = $script:SafeToolCodeCommitment
-        }
-        $script:CandidateReviewCommitment = Get-DomainSeparatedCommitment `
-            -Domain 'LATTICE_TASK038_P006_REMEDIATION_REVIEW_V1' `
-            -Value $reviewCommitmentInput
         Write-SafeJson -Path (Join-Path $script:EvidenceDirectory 'candidate-linkage.json') -Value ([ordered]@{
             linkage = $script:CandidateLinkage
-            review_commitment = $script:CandidateReviewCommitment
-            commitment_domain = 'LATTICE_TASK038_P006_REMEDIATION_REVIEW_V1'
+            independent_review = [ordered]@{
+                evaluation = $script:IndependentReviewEvaluation
+                external_receipt_consumed = $false
+                authority_source = $null
+            }
         })
         $script:CompletedStages.Add('candidate_linkage')
         if ([string]::IsNullOrWhiteSpace($TunnelLifecycleReceiptPath)) {
@@ -2857,10 +3110,11 @@ try {
         $script:CompletedStages.Add('candidate_build')
         $script:TunnelLifecycleReceipt = Read-TunnelLifecycleReceipt `
             -Path $TunnelLifecycleReceiptPath `
-            -ExpectedInnerExeSha256 $actualBinarySha
-        $script:TunnelLifecycleIntegrationChecked = $true
+            -ExpectedInnerExeSha256 $actualBinarySha `
+            -ExpectedInnerExeNativeIdentity $script:LatticedNativeIdentity
         Write-SafeJson -Path (Join-Path $script:EvidenceDirectory 'tunnel-lifecycle-validation.json') -Value $script:TunnelLifecycleReceipt
-        $script:CompletedStages.Add('tunnel_lifecycle_exact_validation')
+        $script:CompletedStages.Add('tunnel_lifecycle_non_live_parser_only')
+        Assert-LiveTunnelLifecycleAuthority -ParsedReceipt $script:TunnelLifecycleReceipt
     }
     else {
         if (-not (Test-Path -LiteralPath $script:Latticed -PathType Leaf)) {
@@ -2910,7 +3164,7 @@ try {
         tunnel_lifecycle_integration_checked = $script:TunnelLifecycleIntegrationChecked
         tool_schema_contract_sha256 = $script:ToolSchemaContractCommitment
         tool_error_contract_sha256 = $script:SafeToolCodeCommitment
-        current_candidate_review_commitment = $(if ($Mode -eq 'FULL') { $script:CandidateReviewCommitment } else { $null })
+        independent_review_evaluation = $script:IndependentReviewEvaluation
         current_candidate_acceptance_commitment = $(if ($Mode -eq 'FULL') { $script:CandidateAcceptanceCommitment } else { $null })
         source_subject = $sourceSubject
         source_worktree_tracked_clean = [string]::IsNullOrEmpty($sourceStatus)
@@ -2951,7 +3205,8 @@ try {
         $null = Get-DirectoryFootprint -Root $script:ProductionDeliveryRoot
         $script:PostgresBinding = Get-PostgresDatabaseBinding -Password $databasePassword
         Write-SafeJson -Path (Join-Path $script:EvidenceDirectory 'database-binding.json') -Value $script:PostgresBinding
-        $script:CompletedStages.Add('postgres_native_fresh_binding')
+        $script:CompletedStages.Add('postgres_native_binding_non_authoritative_marker')
+        Assert-PostgresHolderReceiptAuthority -Binding $script:PostgresBinding
         $script:PostgresBefore = Get-PostgresProcessEvidence -Password $databasePassword
         $script:DatabaseBefore = Get-DatabaseFootprint -Password $databasePassword -TaskRef ''
         if (
@@ -3217,7 +3472,7 @@ try {
         $acceptanceCommitmentInput = [ordered]@{
             candidate_linkage = $script:CandidateLinkage
             candidate_build = $script:CandidateBuildEvidence
-            remediation_review_commitment = $script:CandidateReviewCommitment
+            independent_review_evaluation = $script:IndependentReviewEvaluation
             tunnel_lifecycle = $script:TunnelLifecycleReceipt
             postgres_binding = $script:PostgresBinding
             postgres_before = $script:PostgresBefore
@@ -3241,7 +3496,7 @@ try {
             commitment_domain = 'LATTICE_TASK038_P006_CURRENT_CANDIDATE_ACCEPTANCE_V1'
             candidate_commit = $resolvedCommit
             candidate_tree = $sourceTree
-            review_commitment = $script:CandidateReviewCommitment
+            independent_review_evaluation = $script:IndependentReviewEvaluation
             acceptance_commitment = $script:CandidateAcceptanceCommitment
             input = $acceptanceCommitmentInput
         })
@@ -3308,7 +3563,7 @@ finally {
             clean_seed_ancestry_checked = ($Mode -eq 'FULL' -and $null -eq $script:FailureCode)
             current_candidate_identity_checked = ($Mode -eq 'FULL' -and $null -eq $script:FailureCode)
             tunnel_lifecycle_integration_checked = ($Mode -eq 'FULL' -and $script:TunnelLifecycleIntegrationChecked -and $null -eq $script:FailureCode)
-            current_candidate_review_commitment = $(if ($Mode -eq 'FULL') { $script:CandidateReviewCommitment } else { $null })
+            independent_review_evaluation = $script:IndependentReviewEvaluation
             current_candidate_acceptance_commitment = $(if ($Mode -eq 'FULL') { $script:CandidateAcceptanceCommitment } else { $null })
             candidate_linkage = $(if ($Mode -eq 'FULL') { $script:CandidateLinkage } else { $null })
             candidate_build = $(if ($Mode -eq 'FULL') { $script:CandidateBuildEvidence } else { $null })
