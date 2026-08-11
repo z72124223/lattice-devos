@@ -541,3 +541,10 @@
 - The single direct-stdio Discovery invocation exited `0`, negotiated `2025-11-25`, and returned exactly `lattice_delivery_run,lattice_delivery_status,lattice_task_status,lattice_task_submit` with typed schemas. `tool_call_count=0`; no submit/status/delivery call occurred.
 - External secret-free handoff is READY with SHA-256 `1aa6c277d1538ced6cc5976e173517df284135e062021246340edb0b698954f0`.
 - First durable saver receipt commit is `950c813e5167e3c4dfea4b8fe9b927e4a46337d5` (tree `042ffd8394e6ec4dd3d48a8f5e6e6fb4e9c05525`); live `git ls-remote` equality was verified at `2026-08-11T18:12:32.6398022Z`. Central archived the worker at `2026-08-11T18:13:37.3763203Z`.
+## Fresh verifier domain failure — `019ff207-8c88-7e00-b114-920c03687206`
+
+- Window ran from `2026-08-11T18:13:40.0000000Z` to `2026-08-11T18:19:49.8232998Z` (`369823 ms`). Outcome is `FAIL_FRESH_TASK_SUBMIT_DOMAIN_NOT_COMPLETED`, not a transport failure.
+- Preflight and exact-four discovery passed. The single `lattice_task_submit` transport returned `isError=false` but domain `status=FAILED`, `task_state=FAILED`, `result_digest=null`; new task ref `1f71f06485aa23f1390a5f4d433b7db36b29de2cf2c86ea25e1eef25e2fbd539`.
+- First failure is `LATTICE_P0_FRESH_TASK_SUBMIT_DOMAIN_NOT_COMPLETED` at `C_FRESH_TASK_SUBMIT_DOMAIN_VALIDATION`. Independent status was correctly `NOT_RUN` after the mandatory first-mismatch stop.
+- Postcheck preserved config `be9104230e74a321577147751c02cd40e06729776f53345a4cdbf4d5b7cff272`, READY external handoff `1aa6c277d1538ced6cc5976e173517df284135e062021246340edb0b698954f0`, and live holder run `faa5b2b496524142b79bdc457b5863bf`.
+- Durable saver metadata is pending first feature-branch commit/push and live `git ls-remote` equality; `safe_to_archive=false`.
