@@ -30,6 +30,8 @@ if (@($parseErrors).Count -ne 0) {
 $text = [IO.File]::ReadAllText($harness)
 $environmentHelper = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'task038-local-process-environment.ps1'))
 . $environmentHelper
+$nativeIdentityHelper = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'windows-native-path-identity.ps1'))
+. $nativeIdentityHelper
 $requiredFragments = @(
     'task038-local-process-environment.ps1',
     'OfficialCodexExecutable',
@@ -38,6 +40,12 @@ $requiredFragments = @(
     'PostgresPort',
     'PostgresRunId',
     'PostgresDataDirectory',
+    'windows-native-path-identity.ps1',
+    "ValidateScript({ `$_ -cmatch '\A[0-9a-f]{32}\z' })",
+    'Read-Task038StrictUtf8Text',
+    'Get-Task019ProductionDatabaseName',
+    'Assert-Task038PostgresNativeIdentity',
+    '@(5432, 64272, 55432)',
     'LATTICE_TASK038_POSTGRES_PASSWORD',
     'LATTICE_WRITER_LEASE_MIGRATOR_URL',
     'LATTICE_WRITER_LEASE_RUNTIME_URL',
@@ -72,8 +80,14 @@ $requiredFragments = @(
     'Stop-Task038ProcessTree',
     'ActiveProcessCount',
     'TerminateJobObject',
-    'LATTICE_TASK038_JOB_GATE',
-    'job_assigned_before_latticed_start',
+    'CreateProcessW',
+    'CREATE_SUSPENDED',
+    'ResumeThread',
+    'Start-Task038SuspendedProcess',
+    'Resume-Task038SuspendedProcess',
+    'create_suspended',
+    'job_assigned_before_resume',
+    'resumed_after_job_assignment',
     'job_active_processes_after_cleanup',
     "GetFolderPath([Environment+SpecialFolder]::Windows)",
     'TASK038_POWERSHELL_SIGNATURE_REJECTED',
@@ -118,6 +132,24 @@ $requiredFragments = @(
 foreach ($fragment in $requiredFragments) {
     if ($text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
         throw ('TASK038_LOCAL_REQUIRED_FRAGMENT_MISSING|' + $fragment)
+    }
+}
+
+$caseSensitiveRunIdValidator = "ValidateScript({ `$_ -cmatch '\A[0-9a-f]{32}\z' })"
+if (
+    $text.Split(
+        [string[]]@($caseSensitiveRunIdValidator),
+        [StringSplitOptions]::None
+    ).Count - 1 -ne 4
+) {
+    throw 'TASK038_LOCAL_RUN_ID_VALIDATION_REJECTED'
+}
+foreach ($forbiddenRunIdValidation in @(
+    "ValidatePattern('^[0-9a-f]{32}$')",
+    "-match '^\[0-9a-f\]{32}$'"
+)) {
+    if ($text.IndexOf($forbiddenRunIdValidation, [StringComparison]::Ordinal) -ge 0) {
+        throw 'TASK038_LOCAL_RUN_ID_CASE_INSENSITIVE_VALIDATION_REJECTED'
     }
 }
 
@@ -215,6 +247,38 @@ function Get-HarnessFunctionAst {
     return $matches[0]
 }
 
+$latticedSessionText = (Get-HarnessFunctionAst -Name 'Invoke-LatticedSession').Extent.Text
+$createSuspendedIndex = $latticedSessionText.IndexOf(
+    '$suspendedProcess = Start-Task038SuspendedProcess -StartInfo $startInfo',
+    [StringComparison]::Ordinal
+)
+$assignJobIndex = $latticedSessionText.IndexOf(
+    'Add-Task038ProcessToJob -Job $jobHandle -Process $process',
+    [StringComparison]::Ordinal
+)
+$resumeIndex = $latticedSessionText.IndexOf(
+    'Resume-Task038SuspendedProcess -SuspendedProcess $suspendedProcess',
+    [StringComparison]::Ordinal
+)
+$stopJobIndex = $latticedSessionText.IndexOf(
+    'Stop-Task038Job -Job $jobHandle',
+    [StringComparison]::Ordinal
+)
+$pipeWaitIndex = $latticedSessionText.IndexOf(
+    '$stdoutTask.Wait(5000)',
+    $stopJobIndex,
+    [StringComparison]::Ordinal
+)
+if (
+    $createSuspendedIndex -lt 0 -or
+    $assignJobIndex -le $createSuspendedIndex -or
+    $resumeIndex -le $assignJobIndex -or
+    $stopJobIndex -le $resumeIndex -or
+    $pipeWaitIndex -le $stopJobIndex
+) {
+    throw 'TASK038_LOCAL_SUSPENDED_JOB_PIPE_ORDER_REJECTED'
+}
+
 $restartText = (Get-HarnessFunctionAst -Name 'Restart-DisposablePostgres').Extent.Text
 if ($restartText -match '(?i)Invoke-NativeText') {
     throw 'TASK038_RESTART_PIPE_CAPTURE_REJECTED'
@@ -304,6 +368,8 @@ foreach ($name in @(
     'Assert-NoReparsePath',
     'Get-StringSha256',
     'Get-FileSha256',
+    'Read-Task038StrictUtf8Text',
+    'Get-Task019ProductionDatabaseName',
     'Get-Task038FailureClassification',
     'Write-Task038ExclusiveBytes',
     'Assert-SecretFreeText',
@@ -324,6 +390,8 @@ foreach ($name in @(
     'Initialize-Task038JobObjectInterop',
     'New-Task038KillOnCloseJob',
     'Add-Task038ProcessToJob',
+    'Start-Task038SuspendedProcess',
+    'Resume-Task038SuspendedProcess',
     'Close-Task038Job',
     'Stop-Task038Job',
     'Stop-Task038ProcessTree',
@@ -341,6 +409,77 @@ if (-not (Test-Path -LiteralPath $probeRoot -PathType Container)) {
 }
 
 try {
+    $validRunId = '0123456789abcdef0123456789abcdef'
+    if ((Get-Task019ProductionDatabaseName -RunId $validRunId) -cne 'lattice_task019_01234567_base') {
+        throw 'TASK038_DATABASE_RUN_ID_VALIDATION_REJECTED'
+    }
+    foreach ($invalidRunId in @(
+        '0123456789ABCDEF0123456789ABCDEF',
+        '0123456789abcdef0123456789abcde',
+        '0123456789abcdef0123456789abcdeg',
+        ' 0123456789abcdef0123456789abcdef',
+        '0123456789abcdef0123456789abcdef ',
+        "0123456789abcdef0123456789abcdef`n"
+    )) {
+        $invalidRejected = $false
+        try {
+            $null = Get-Task019ProductionDatabaseName -RunId $invalidRunId
+        }
+        catch {
+            $invalidRejected = $_.FullyQualifiedErrorId -like '*ParameterArgumentValidationError*'
+        }
+        if (-not $invalidRejected) {
+            throw 'TASK038_DATABASE_RUN_ID_VALIDATION_REJECTED'
+        }
+    }
+
+    $strictUtf8ValidPath = Join-Path $probeRoot 'strict-utf8-valid.json'
+    $strictUtf8InvalidPath = Join-Path $probeRoot 'strict-utf8-invalid.json'
+    $strictUtf8BomPath = Join-Path $probeRoot 'strict-utf8-bom.json'
+    [IO.File]::WriteAllBytes(
+        $strictUtf8ValidPath,
+        [Text.UTF8Encoding]::new($false, $true).GetBytes('{"identity":"0123456789abcdef"}')
+    )
+    [IO.File]::WriteAllBytes($strictUtf8InvalidPath, [byte[]]@(0x7b, 0x22, 0x80, 0x22, 0x7d))
+    [IO.File]::WriteAllBytes($strictUtf8BomPath, [byte[]]@(0xef, 0xbb, 0xbf, 0x7b, 0x7d))
+    if ((Read-Task038StrictUtf8Text -Path $strictUtf8ValidPath -FailureCode 'STRICT_UTF8_REJECTED') -cne '{"identity":"0123456789abcdef"}') {
+        throw 'TASK038_STRICT_UTF8_PROBE_REJECTED'
+    }
+    foreach ($invalidUtf8Path in @($strictUtf8InvalidPath, $strictUtf8BomPath)) {
+        $strictUtf8Rejected = $false
+        try {
+            $null = Read-Task038StrictUtf8Text -Path $invalidUtf8Path -FailureCode 'STRICT_UTF8_REJECTED'
+        }
+        catch {
+            $strictUtf8Rejected = [string]$_.Exception.Message -ceq 'STRICT_UTF8_REJECTED'
+        }
+        if (-not $strictUtf8Rejected) {
+            throw 'TASK038_STRICT_UTF8_PROBE_REJECTED'
+        }
+    }
+    foreach ($strictUtf8Path in @($strictUtf8ValidPath, $strictUtf8InvalidPath, $strictUtf8BomPath)) {
+        [IO.File]::Delete($strictUtf8Path)
+    }
+
+    $nativeRoot = Join-Path $probeRoot 'native-containment'
+    $nativeMarker = Join-Path $nativeRoot '.identity-marker'
+    [IO.Directory]::CreateDirectory($nativeRoot) | Out-Null
+    [IO.File]::WriteAllText($nativeMarker, "identity-v1`n", [Text.UTF8Encoding]::new($false))
+    $nativeSnapshot = New-LatticeWindowsNativeContainmentSnapshot `
+        -ParentPath $probeRoot `
+        -RootPath $nativeRoot `
+        -MarkerPath $nativeMarker
+    Assert-LatticeWindowsNativeContainmentSnapshot `
+        -Snapshot $nativeSnapshot `
+        -FailureCode 'TASK038_NATIVE_IDENTITY_PROBE_REJECTED'
+    [IO.File]::Delete($nativeMarker)
+    [IO.File]::WriteAllText($nativeMarker, "identity-v1`n", [Text.UTF8Encoding]::new($false))
+    if (Test-LatticeWindowsNativeContainmentSnapshot -Snapshot $nativeSnapshot) {
+        throw 'TASK038_NATIVE_IDENTITY_REPLACEMENT_PROBE_REJECTED'
+    }
+    [IO.File]::Delete($nativeMarker)
+    [IO.Directory]::Delete($nativeRoot, $false)
+
     $stableFootprintRoot = Join-Path $probeRoot 'stable-footprint'
     [IO.Directory]::CreateDirectory($stableFootprintRoot) | Out-Null
     try {

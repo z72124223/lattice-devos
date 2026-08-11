@@ -10,7 +10,7 @@ param(
     [ValidateRange(1, 65535)]
     [int]$PostgresPort,
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('^[0-9a-f]{32}$')]
+    [ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })]
     [string]$PostgresRunId,
     [Parameter(Mandatory = $true)]
     [string]$PsqlExecutable,
@@ -39,6 +39,16 @@ if (
     throw 'TASK038_CHILD_ENVIRONMENT_HELPER_REJECTED'
 }
 . $environmentHelper
+$nativeIdentityHelper = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'windows-native-path-identity.ps1'))
+$nativeIdentityHelperItem = Get-Item -LiteralPath $nativeIdentityHelper -Force -ErrorAction SilentlyContinue
+if (
+    $null -eq $nativeIdentityHelperItem -or
+    $nativeIdentityHelperItem.PSIsContainer -or
+    ($nativeIdentityHelperItem.Attributes -band [IO.FileAttributes]::ReparsePoint)
+) {
+    throw 'TASK038_WINDOWS_NATIVE_IDENTITY_HELPER_REJECTED'
+}
+. $nativeIdentityHelper
 
 function Get-CanonicalPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -172,6 +182,54 @@ function Get-FileSha256 {
 
     Assert-RegularFile -Path $Path -FailureCode 'TASK038_FILE_DIGEST_TARGET_REJECTED'
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Read-Task038StrictUtf8Text {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$FailureCode
+    )
+
+    Assert-RegularFile -Path $Path -FailureCode $FailureCode
+    try {
+        $bytes = [IO.File]::ReadAllBytes($Path)
+        if (
+            $bytes.Length -ge 3 -and
+            $bytes[0] -eq 0xef -and
+            $bytes[1] -eq 0xbb -and
+            $bytes[2] -eq 0xbf
+        ) {
+            throw $FailureCode
+        }
+        return [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+    }
+    catch {
+        throw $FailureCode
+    }
+}
+
+function Get-Task019ProductionDatabaseName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })]
+        [string]$RunId
+    )
+
+    return 'lattice_task019_' + $RunId.Substring(0, 8) + '_base'
+}
+
+function Assert-Task038PostgresNativeIdentity {
+    param([Parameter(Mandatory = $true)][string]$FailureCode)
+
+    Assert-LatticeWindowsNativeContainmentSnapshot `
+        -Snapshot $script:PostgresContainmentSnapshot `
+        -FailureCode $FailureCode
+    if (-not (Test-LatticeWindowsNativePathIdentity `
+        -Path $script:PostgresData `
+        -Directory $true `
+        -ExpectedToken $script:PostgresDataIdentity)) {
+        throw $FailureCode
+    }
 }
 
 function Get-Task038FailureClassification {
@@ -360,7 +418,7 @@ function New-FreshCodexExecutionHome {
     param(
         [Parameter(Mandatory = $true)][string]$CredentialSource,
         [Parameter(Mandatory = $true)][string]$RepositoryRoot,
-        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$AcceptanceId
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })][string]$AcceptanceId
     )
 
     $source = Get-CanonicalPath -Path $CredentialSource
@@ -542,7 +600,7 @@ function Remove-FreshCodexExecutionHome {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$ExpectedParent,
-        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$AcceptanceId
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })][string]$AcceptanceId
     )
 
     $parent = Get-CanonicalPath -Path $ExpectedParent
@@ -1390,8 +1448,15 @@ function Initialize-Task038JobObjectInterop {
     try {
         Add-Type -ErrorAction Stop -TypeDefinition @'
 using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 public static class LatticeTask038JobObjectInterop
 {
@@ -1538,6 +1603,282 @@ public static class LatticeTask038JobObjectInterop
         }
     }
 }
+
+public sealed class LatticeTask038SuspendedProcess : IDisposable
+{
+    private IntPtr threadHandle;
+    private bool resumed;
+
+    internal LatticeTask038SuspendedProcess(
+        Process process,
+        IntPtr threadHandle,
+        StreamWriter standardInput,
+        StreamReader standardOutput,
+        StreamReader standardError)
+    {
+        Process = process;
+        this.threadHandle = threadHandle;
+        StandardInput = standardInput;
+        StandardOutput = standardOutput;
+        StandardError = standardError;
+    }
+
+    public Process Process { get; private set; }
+    public StreamWriter StandardInput { get; private set; }
+    public StreamReader StandardOutput { get; private set; }
+    public StreamReader StandardError { get; private set; }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern UInt32 ResumeThread(IntPtr thread);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public void Resume()
+    {
+        if (resumed || threadHandle == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("Suspended process already resumed.");
+        }
+        if (ResumeThread(threadHandle) == UInt32.MaxValue)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        resumed = true;
+        if (!CloseHandle(threadHandle))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        threadHandle = IntPtr.Zero;
+    }
+
+    public void Dispose()
+    {
+        if (threadHandle != IntPtr.Zero)
+        {
+            CloseHandle(threadHandle);
+            threadHandle = IntPtr.Zero;
+        }
+        if (StandardInput != null) { StandardInput.Dispose(); StandardInput = null; }
+        if (StandardOutput != null) { StandardOutput.Dispose(); StandardOutput = null; }
+        if (StandardError != null) { StandardError.Dispose(); StandardError = null; }
+        if (Process != null) { Process.Dispose(); Process = null; }
+    }
+}
+
+public static class LatticeTask038SuspendedProcessFactory
+{
+    private const UInt32 CREATE_SUSPENDED = 0x00000004;
+    private const UInt32 CREATE_NO_WINDOW = 0x08000000;
+    private const UInt32 CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+    private const UInt32 STARTF_USESTDHANDLES = 0x00000100;
+    private const UInt32 HANDLE_FLAG_INHERIT = 0x00000001;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes
+    {
+        public Int32 Length;
+        public IntPtr SecurityDescriptor;
+        [MarshalAs(UnmanagedType.Bool)] public bool InheritHandle;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct StartupInfo
+    {
+        public Int32 Size;
+        public string Reserved;
+        public string Desktop;
+        public string Title;
+        public UInt32 X;
+        public UInt32 Y;
+        public UInt32 XSize;
+        public UInt32 YSize;
+        public UInt32 XCountChars;
+        public UInt32 YCountChars;
+        public UInt32 FillAttribute;
+        public UInt32 Flags;
+        public UInt16 ShowWindow;
+        public UInt16 Reserved2;
+        public IntPtr Reserved2Pointer;
+        public IntPtr StandardInput;
+        public IntPtr StandardOutput;
+        public IntPtr StandardError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInformation
+    {
+        public IntPtr Process;
+        public IntPtr Thread;
+        public UInt32 ProcessId;
+        public UInt32 ThreadId;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreatePipe(
+        out IntPtr readPipe,
+        out IntPtr writePipe,
+        ref SecurityAttributes pipeAttributes,
+        UInt32 size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetHandleInformation(IntPtr handle, UInt32 mask, UInt32 flags);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateProcessW(
+        string applicationName,
+        StringBuilder commandLine,
+        IntPtr processAttributes,
+        IntPtr threadAttributes,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
+        UInt32 creationFlags,
+        IntPtr environment,
+        string currentDirectory,
+        ref StartupInfo startupInfo,
+        out ProcessInformation processInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateProcess(IntPtr process, UInt32 exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    private static void CloseIfPresent(ref IntPtr handle)
+    {
+        if (handle != IntPtr.Zero)
+        {
+            CloseHandle(handle);
+            handle = IntPtr.Zero;
+        }
+    }
+
+    private static IntPtr BuildEnvironmentBlock(StringDictionary environment)
+    {
+        var values = new List<string>();
+        foreach (DictionaryEntry entry in environment)
+        {
+            string name = Convert.ToString(entry.Key);
+            string value = Convert.ToString(entry.Value);
+            if (String.IsNullOrEmpty(name) || name.IndexOf('=') >= 0 ||
+                name.IndexOf('\0') >= 0 || value.IndexOf('\0') >= 0)
+            {
+                throw new InvalidOperationException("Invalid child environment entry.");
+            }
+            values.Add(name + "=" + value);
+        }
+        values.Sort(StringComparer.OrdinalIgnoreCase);
+        string block = String.Join("\0", values.ToArray()) + "\0\0";
+        return Marshal.StringToHGlobalUni(block);
+    }
+
+    public static LatticeTask038SuspendedProcess Start(
+        string executable,
+        string arguments,
+        StringDictionary environment)
+    {
+        if (String.IsNullOrWhiteSpace(executable) || executable.IndexOf('"') >= 0 || environment == null)
+        {
+            throw new ArgumentException("Invalid suspended-process input.");
+        }
+
+        IntPtr childStdinRead = IntPtr.Zero;
+        IntPtr parentStdinWrite = IntPtr.Zero;
+        IntPtr parentStdoutRead = IntPtr.Zero;
+        IntPtr childStdoutWrite = IntPtr.Zero;
+        IntPtr parentStderrRead = IntPtr.Zero;
+        IntPtr childStderrWrite = IntPtr.Zero;
+        IntPtr environmentBlock = IntPtr.Zero;
+        var processInformation = new ProcessInformation();
+        bool created = false;
+        try
+        {
+            var attributes = new SecurityAttributes {
+                Length = Marshal.SizeOf(typeof(SecurityAttributes)),
+                SecurityDescriptor = IntPtr.Zero,
+                InheritHandle = true
+            };
+            if (!CreatePipe(out childStdinRead, out parentStdinWrite, ref attributes, 0) ||
+                !SetHandleInformation(parentStdinWrite, HANDLE_FLAG_INHERIT, 0) ||
+                !CreatePipe(out parentStdoutRead, out childStdoutWrite, ref attributes, 0) ||
+                !SetHandleInformation(parentStdoutRead, HANDLE_FLAG_INHERIT, 0) ||
+                !CreatePipe(out parentStderrRead, out childStderrWrite, ref attributes, 0) ||
+                !SetHandleInformation(parentStderrRead, HANDLE_FLAG_INHERIT, 0))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            var startupInfo = new StartupInfo {
+                Size = Marshal.SizeOf(typeof(StartupInfo)),
+                Flags = STARTF_USESTDHANDLES,
+                StandardInput = childStdinRead,
+                StandardOutput = childStdoutWrite,
+                StandardError = childStderrWrite
+            };
+            environmentBlock = BuildEnvironmentBlock(environment);
+            var commandLine = new StringBuilder("\"" + executable + "\" " + (arguments ?? String.Empty));
+            if (!CreateProcessW(
+                executable,
+                commandLine,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                true,
+                CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                environmentBlock,
+                null,
+                ref startupInfo,
+                out processInformation))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            created = true;
+            CloseIfPresent(ref childStdinRead);
+            CloseIfPresent(ref childStdoutWrite);
+            CloseIfPresent(ref childStderrWrite);
+
+            var stdinHandle = new SafeFileHandle(parentStdinWrite, true);
+            parentStdinWrite = IntPtr.Zero;
+            var stdoutHandle = new SafeFileHandle(parentStdoutRead, true);
+            parentStdoutRead = IntPtr.Zero;
+            var stderrHandle = new SafeFileHandle(parentStderrRead, true);
+            parentStderrRead = IntPtr.Zero;
+            var strictUtf8 = new UTF8Encoding(false, true);
+            var standardInput = new StreamWriter(new FileStream(stdinHandle, FileAccess.Write, 4096, false), strictUtf8);
+            standardInput.AutoFlush = true;
+            var standardOutput = new StreamReader(new FileStream(stdoutHandle, FileAccess.Read, 4096, false), strictUtf8, false, 4096, false);
+            var standardError = new StreamReader(new FileStream(stderrHandle, FileAccess.Read, 4096, false), strictUtf8, false, 4096, false);
+            var process = Process.GetProcessById((Int32)processInformation.ProcessId);
+            CloseIfPresent(ref processInformation.Process);
+            IntPtr thread = processInformation.Thread;
+            processInformation.Thread = IntPtr.Zero;
+            return new LatticeTask038SuspendedProcess(process, thread, standardInput, standardOutput, standardError);
+        }
+        catch
+        {
+            if (created && processInformation.Process != IntPtr.Zero)
+            {
+                TerminateProcess(processInformation.Process, 1);
+            }
+            throw;
+        }
+        finally
+        {
+            if (environmentBlock != IntPtr.Zero) { Marshal.FreeHGlobal(environmentBlock); }
+            CloseIfPresent(ref childStdinRead);
+            CloseIfPresent(ref parentStdinWrite);
+            CloseIfPresent(ref parentStdoutRead);
+            CloseIfPresent(ref childStdoutWrite);
+            CloseIfPresent(ref parentStderrRead);
+            CloseIfPresent(ref childStderrWrite);
+            CloseIfPresent(ref processInformation.Process);
+            CloseIfPresent(ref processInformation.Thread);
+        }
+    }
+}
 '@
     }
     catch {
@@ -1566,6 +1907,40 @@ function Add-Task038ProcessToJob {
     }
     catch {
         throw 'TASK038_LATTICED_JOB_ASSIGN_REJECTED'
+    }
+}
+
+function Start-Task038SuspendedProcess {
+    param([Parameter(Mandatory = $true)][Diagnostics.ProcessStartInfo]$StartInfo)
+
+    if (
+        $StartInfo.UseShellExecute -or
+        -not $StartInfo.RedirectStandardInput -or
+        -not $StartInfo.RedirectStandardOutput -or
+        -not $StartInfo.RedirectStandardError
+    ) {
+        throw 'TASK038_LATTICED_START_REJECTED'
+    }
+    try {
+        return [LatticeTask038SuspendedProcessFactory]::Start(
+            $StartInfo.FileName,
+            $StartInfo.Arguments,
+            $StartInfo.EnvironmentVariables
+        )
+    }
+    catch {
+        throw 'TASK038_LATTICED_START_REJECTED'
+    }
+}
+
+function Resume-Task038SuspendedProcess {
+    param([Parameter(Mandatory = $true)][LatticeTask038SuspendedProcess]$SuspendedProcess)
+
+    try {
+        $SuspendedProcess.Resume()
+    }
+    catch {
+        throw 'TASK038_LATTICED_RESUME_REJECTED'
     }
 }
 
@@ -1657,17 +2032,12 @@ function Invoke-LatticedSession {
         -Path $pidParent `
         -Boundary $script:RepositoryRoot `
         -FailureCode 'TASK038_LATTICED_PID_EVIDENCE_REJECTED'
-    $gateName = 'LatticeTask038-' + [Guid]::NewGuid().ToString('N')
     $wrapperSource = @'
 $ErrorActionPreference = 'Stop'
-$gate = $null
 $child = $null
 try {
-    $gateName = [Environment]::GetEnvironmentVariable('LATTICE_TASK038_JOB_GATE', 'Process')
     $executable = [Environment]::GetEnvironmentVariable('LATTICE_TASK038_WRAPPED_EXECUTABLE', 'Process')
     $pidPath = [Environment]::GetEnvironmentVariable('LATTICE_TASK038_WRAPPED_PID_PATH', 'Process')
-    $gate = [Threading.EventWaitHandle]::OpenExisting($gateName)
-    if (-not $gate.WaitOne(30000)) { exit 111 }
     $inputText = [Console]::In.ReadToEnd()
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $executable
@@ -1679,7 +2049,6 @@ try {
     $startInfo.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
     $startInfo.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
     foreach ($name in @(
-        'LATTICE_TASK038_JOB_GATE',
         'LATTICE_TASK038_WRAPPED_EXECUTABLE',
         'LATTICE_TASK038_WRAPPED_PID_PATH'
     )) {
@@ -1713,7 +2082,6 @@ catch {
 }
 finally {
     if ($null -ne $child) { $child.Dispose() }
-    if ($null -ne $gate) { $gate.Dispose() }
 }
 '@
     $wrapperEncodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapperSource))
@@ -1733,7 +2101,6 @@ finally {
         LATTICE_STORE_AUTHORITY_REVISION = [string]$Authority.authority_revision
         LATTICE_STORE_OBSERVATION_DIGEST = [string]$Authority.observation_digest
         LATTICE_STORE_AUTHORITY_HEAD_DIGEST = [string]$Authority.head_digest
-        LATTICE_TASK038_JOB_GATE = $gateName
         LATTICE_TASK038_WRAPPED_EXECUTABLE = $script:Latticed
         LATTICE_TASK038_WRAPPED_PID_PATH = $latticedPidPath
     }
@@ -1759,8 +2126,8 @@ finally {
     $startInfo.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
     Set-Task038ClosedChildEnvironment -StartInfo $startInfo -EnvironmentValues $environmentValues
 
-    $process = [Diagnostics.Process]::new()
-    $process.StartInfo = $startInfo
+    $process = $null
+    $suspendedProcess = $null
     $startedAt = [DateTime]::UtcNow
     $originalConsoleInputEncoding = [Console]::InputEncoding
     $started = $false
@@ -1775,51 +2142,24 @@ finally {
     $cleanupFailure = $null
     $jobHandle = [IntPtr]::Zero
     $jobAssigned = $false
+    $resumedAfterJobAssignment = $false
     $jobProcessCountZero = $false
-    $jobGate = $null
     try {
-        $gateCreated = $false
-        try {
-            $jobGate = [Threading.EventWaitHandle]::new(
-                $false,
-                [Threading.EventResetMode]::ManualReset,
-                $gateName,
-                [ref]$gateCreated
-            )
-        }
-        catch {
-            throw 'TASK038_LATTICED_JOB_GATE_REJECTED'
-        }
-        if (-not $gateCreated) {
-            throw 'TASK038_LATTICED_JOB_GATE_REJECTED'
-        }
         [Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
         $jobHandle = New-Task038KillOnCloseJob
-        try {
-            if (-not $process.Start()) {
-                throw 'TASK038_LATTICED_START_REJECTED'
-            }
-        }
-        catch {
-            throw 'TASK038_LATTICED_START_REJECTED'
-        }
+        $suspendedProcess = Start-Task038SuspendedProcess -StartInfo $startInfo
+        $process = $suspendedProcess.Process
         $started = $true
         $controllerProcessId = [int]$process.Id
         Add-Task038ProcessToJob -Job $jobHandle -Process $process
         $jobAssigned = $true
+        Resume-Task038SuspendedProcess -SuspendedProcess $suspendedProcess
+        $resumedAfterJobAssignment = $true
         try {
-            if (-not $jobGate.Set()) {
-                throw 'TASK038_LATTICED_JOB_GATE_REJECTED'
-            }
-        }
-        catch {
-            throw 'TASK038_LATTICED_JOB_GATE_REJECTED'
-        }
-        try {
-            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-            $stderrTask = $process.StandardError.ReadToEndAsync()
-            $process.StandardInput.Write($InputText)
-            $process.StandardInput.Close()
+            $stdoutTask = $suspendedProcess.StandardOutput.ReadToEndAsync()
+            $stderrTask = $suspendedProcess.StandardError.ReadToEndAsync()
+            $suspendedProcess.StandardInput.Write($InputText)
+            $suspendedProcess.StandardInput.Close()
         }
         catch {
             throw 'TASK038_LATTICED_STDIN_REJECTED'
@@ -1880,7 +2220,9 @@ finally {
                     Assert-RegularFile `
                         -Path $latticedPidPath `
                         -FailureCode 'TASK038_LATTICED_PID_EVIDENCE_REJECTED'
-                    $pidText = [IO.File]::ReadAllText($latticedPidPath, [Text.Encoding]::UTF8).Trim()
+                    $pidText = (Read-Task038StrictUtf8Text `
+                        -Path $latticedPidPath `
+                        -FailureCode 'TASK038_LATTICED_PID_EVIDENCE_REJECTED').Trim()
                     if (-not [int]::TryParse($pidText, [ref]$childProcessId) -or $childProcessId -le 0) {
                         throw 'TASK038_LATTICED_PID_EVIDENCE_REJECTED'
                     }
@@ -1905,14 +2247,13 @@ finally {
                 $cleanupFailure = 'TASK038_LATTICED_PID_EVIDENCE_CLEANUP_REJECTED'
             }
         }
-        if ($null -ne $jobGate) {
-            try { $jobGate.Dispose() } catch {
+        if ($null -ne $suspendedProcess) {
+            try { $suspendedProcess.Dispose() } catch {
                 if ($null -eq $cleanupFailure) {
-                    $cleanupFailure = 'TASK038_LATTICED_JOB_GATE_CLEANUP_REJECTED'
+                    $cleanupFailure = 'TASK038_LATTICED_PROCESS_CLEANUP_REJECTED'
                 }
             }
         }
-        $process.Dispose()
     }
     if ($null -ne $cleanupFailure) {
         if ($null -ne $primaryFailure) {
@@ -1923,7 +2264,12 @@ finally {
     if ($null -ne $primaryFailure) {
         throw $primaryFailure
     }
-    if ($childProcessId -le 0 -or -not $jobAssigned -or -not $jobProcessCountZero) {
+    if (
+        $childProcessId -le 0 -or
+        -not $jobAssigned -or
+        -not $resumedAfterJobAssignment -or
+        -not $jobProcessCountZero
+    ) {
         throw 'TASK038_LATTICED_PID_EVIDENCE_REJECTED'
     }
     Assert-SecretFreeText -Text ($stdout + "`n" + $stderr) -FailureCode 'TASK038_LATTICED_OUTPUT_SECRET_REJECTED'
@@ -1941,7 +2287,9 @@ finally {
         run_mode = $RunMode
         process_id = $childProcessId
         controller_process_id = $controllerProcessId
-        job_assigned_before_latticed_start = $true
+        create_suspended = $true
+        job_assigned_before_resume = $true
+        resumed_after_job_assignment = $true
         job_active_processes_after_cleanup = 0
         started_at_utc = $startedAt.ToString('o')
         exited_at_utc = [DateTime]::UtcNow.ToString('o')
@@ -2390,10 +2738,14 @@ foreach ($cargoVariable in @('CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET')) {
     }
 }
 
-if ($PostgresPort -eq 5432) {
-    throw 'TASK038_LOCAL_POSTGRES_DEFAULT_PORT_REJECTED'
+$reservedPostgresPorts = [Collections.Generic.HashSet[int]]::new()
+foreach ($reservedPort in @(5432, 64272, 55432)) {
+    [void]$reservedPostgresPorts.Add($reservedPort)
 }
-$databaseName = 'lattice_task019_' + $PostgresRunId.Substring(0, 8) + '_base'
+if ($reservedPostgresPorts.Contains($PostgresPort)) {
+    throw 'TASK038_LOCAL_POSTGRES_RESERVED_PORT_REJECTED'
+}
+$databaseName = Get-Task019ProductionDatabaseName -RunId $PostgresRunId
 $databasePassword = Get-RequiredSecretEnvironment -Name $DatabaseSecretVariable -MinimumLength 16 -FailureCode 'TASK038_DATABASE_SECRET_REQUIRED'
 $migratorDsn = Get-RequiredSecretEnvironment -Name $MigratorDsnVariable -MinimumLength 24 -FailureCode 'TASK038_MIGRATOR_DSN_REQUIRED'
 $runtimeDsn = Get-RequiredSecretEnvironment -Name $RuntimeDsnVariable -MinimumLength 24 -FailureCode 'TASK038_RUNTIME_DSN_REQUIRED'
@@ -2425,20 +2777,32 @@ $clusterRoot = Get-CanonicalPath -Path (Split-Path -Parent $script:PostgresData)
 $clusterMarkerPath = Join-Path $clusterRoot '.lattice-task019-disposable.json'
 Assert-RegularFile -Path $clusterMarkerPath -FailureCode 'TASK038_POSTGRES_MARKER_REJECTED'
 try {
-    $clusterMarker = [IO.File]::ReadAllText($clusterMarkerPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    $clusterMarkerRawSha256 = Get-FileSha256 -Path $clusterMarkerPath
+    $clusterMarker = Read-Task038StrictUtf8Text `
+        -Path $clusterMarkerPath `
+        -FailureCode 'TASK038_POSTGRES_MARKER_REJECTED' |
+        ConvertFrom-Json
 }
 catch {
     throw 'TASK038_POSTGRES_MARKER_REJECTED'
 }
 if (
-    [string]$clusterMarker.kind -ne 'LATTICE_TASK019_DISPOSABLE_POSTGRES_V1' -or
-    [string]$clusterMarker.run_id -ne $PostgresRunId -or
-    [string]$clusterMarker.postgres_version -ne '17.10' -or
+    [string]$clusterMarker.kind -cne 'LATTICE_TASK019_DISPOSABLE_POSTGRES_V1' -or
+    [string]$clusterMarker.run_id -cne $PostgresRunId -or
+    [string]$clusterMarker.postgres_version -cne '17.10' -or
     -not (Test-ExactPath -Actual ([string]$clusterMarker.root) -Expected $clusterRoot) -or
     -not (Test-ExactPath -Actual ([string]$clusterMarker.repository_target) -Expected $repositoryTarget)
 ) {
     throw 'TASK038_POSTGRES_MARKER_REJECTED'
 }
+$script:PostgresContainmentSnapshot = New-LatticeWindowsNativeContainmentSnapshot `
+    -ParentPath $repositoryTarget `
+    -RootPath $clusterRoot `
+    -MarkerPath $clusterMarkerPath
+$script:PostgresDataIdentity = Get-LatticeWindowsNativePathIdentityToken `
+    -Path $script:PostgresData `
+    -Directory $true
+Assert-Task038PostgresNativeIdentity -FailureCode 'TASK038_POSTGRES_NATIVE_IDENTITY_REJECTED'
 $postgresServerLog = Get-CanonicalPath -Path (Join-Path $clusterRoot 'postgres.log')
 
 $script:Cargo = Get-CanonicalPath -Path (@(Get-Command 'cargo.exe' -CommandType Application -ErrorAction Stop)[0].Source)
@@ -2564,6 +2928,7 @@ New-Item -ItemType Directory -Path $evidenceRoot -Force:$false | Out-Null
 $deliveryRoot = Join-Path $fixtureRoot 'delivery'
 $schemaDirectory = Join-Path $fixtureRoot 'schema'
 
+Assert-Task038PostgresNativeIdentity -FailureCode 'TASK038_POSTGRES_NATIVE_IDENTITY_REJECTED'
 $identity = Get-DatabaseIdentity -Password $databasePassword -DatabaseName $databaseName
 $authority = Enable-StoreAuthority -Password $databasePassword -DatabaseName $databaseName -AcceptanceId $acceptanceId
 Invoke-WriterLeaseLiveSuite -Identity $identity -Authority $authority -DatabaseName $databaseName -MigratorDsn $migratorDsn -RuntimeDsn $runtimeDsn -AdminDsn $adminDsn -EvidencePath (Join-Path $evidenceRoot 'writer-lease-live.json')
@@ -2577,6 +2942,11 @@ Write-JsonEvidence -Path (Join-Path $evidenceRoot 'database-binding.json') -Valu
     postgres_host = $PostgresHost
     postgres_port = $PostgresPort
     postgres_run_id = $PostgresRunId
+    cluster_marker_raw_sha256 = $clusterMarkerRawSha256
+    cluster_parent_native_identity = [string]$script:PostgresContainmentSnapshot.parent_identity
+    cluster_root_native_identity = [string]$script:PostgresContainmentSnapshot.root_identity
+    cluster_marker_native_identity = [string]$script:PostgresContainmentSnapshot.marker_identity
+    postgres_data_native_identity = [string]$script:PostgresDataIdentity
     identity = $identity
     authority = $authority
     task_ingress_kind = 'LOCAL_CANONICAL_MCP_ACCEPTANCE'
@@ -2659,7 +3029,9 @@ catch {
     }
     throw $classification
 }
+Assert-Task038PostgresNativeIdentity -FailureCode 'TASK038_POSTGRES_NATIVE_IDENTITY_REJECTED'
 Restart-DisposablePostgres -DataDirectory $script:PostgresData -ServerLog $postgresServerLog
+Assert-Task038PostgresNativeIdentity -FailureCode 'TASK038_POSTGRES_NATIVE_IDENTITY_REJECTED'
 try {
     $postgresAfterRestart = Get-PostgresProcessEvidence -Password $databasePassword -DatabaseName $databaseName
 }
