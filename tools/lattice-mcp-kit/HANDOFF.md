@@ -554,4 +554,4 @@
 - First server-owned failure is `GIT_INIT_FAILED / WORKSPACE_PREPARE` for task `1f71f06485aa23f1390a5f4d433b7db36b29de2cf2c86ea25e1eef25e2fbd539`. Transport, MCP framing, credential/DB admission, prior root-absence failure, and Codex execution were excluded.
 - Root cause is the full task identity appended beneath an already deep Windows delivery base: task root `217` chars, separate git-dir `233` chars, template hook targets `261-265` chars, while the owned Git subprocess lacks process-scoped `core.longpaths=true`.
 - Minimal reversible remediation is a preferably Windows-gated process-scoped `-c core.longpaths=true` in `GitRunner::output`, plus one deep-base/full-task-ref regression; do not change task identity, database, global Git config, holder, or MCP contract.
-- Durable saver metadata is pending first commit/push and live `git ls-remote` equality; `safe_to_archive=false`.
+- First durable diagnosis receipt commit is `5bd527454fa164625f144c836d7f9ef668e76ac2` (tree `7aac5067fab2106daf8b2dae7531eac329675c2f`); live `git ls-remote` equality was verified at `2026-08-11T18:31:02.7909771Z`. `safe_to_archive=true`.
