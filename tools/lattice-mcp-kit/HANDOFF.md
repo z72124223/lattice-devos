@@ -409,5 +409,5 @@
 - This remediates the diagnosed script shape only. It does not perform atomic switch, backup, runtime/holder/PG/config/handoff/discovery, or live acceptance; current state is not READY.
 - Protected boundaries held: no subagent, live config/runtime/PG/TTL/tool/build/cleanup/protected-state action, failed-artifact reuse, protected script access, saver-path edit by worker, push/merge/deploy/release/default branch, or unrelated program.
 - Source publication and saver receipt are pending the exclusive saver; source commit must remain an ancestor of the final remote receipt head.
-- Successor durable save: pending ledger/handoff receipt commit, push, live `git ls-remote` equality, and source-ancestor verification; remote fields remain `null` until confirmed.
+- Successor durable save: exact-path commit `68f980d9b091dd9e853f8c034111e08fc80e52f6` (tree `830ce175deae79a89ffe9b8936bac75a283d71a2`) was pushed to `origin/feature/p0-clean-seed-rebuild`; live `git ls-remote` equality and source `5106314db78c6faa7a6420a74e12738324dc670c` ancestry were proven at `2026-08-11T16:08:18.4857839Z`.
 - Archive boundary: do not archive this script-remediation worker until its receipt is remotely durable and central later confirms archival.
