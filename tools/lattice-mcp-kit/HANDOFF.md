@@ -411,3 +411,12 @@
 - Source publication and saver receipt are pending the exclusive saver; source commit must remain an ancestor of the final remote receipt head.
 - Successor durable save: exact-path commit `68f980d9b091dd9e853f8c034111e08fc80e52f6` (tree `830ce175deae79a89ffe9b8936bac75a283d71a2`) was pushed to `origin/feature/p0-clean-seed-rebuild`; live `git ls-remote` equality and source `5106314db78c6faa7a6420a74e12738324dc670c` ancestry were proven at `2026-08-11T16:08:18.4857839Z`.
 - Archive boundary: central confirmed this script-remediation worker archived after remote confirmation `f9aeea6e78f25f196cb0fc8ac742b17a25a77a41`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:09:21.6647159Z`. This archive does not authorize helper/live config/staging/backup/binary/holder/external-handoff/root/cleanup/rollback or successor-worker mutation.
+
+## Duplicate holder worker cancelled before action — `019ff197-7c87-7d01-93b4-6680a5b6032f`
+
+- Result: `CANCELLED_DUPLICATE_BEFORE_ACTION`; started `2026-08-11T16:11:07.0000000Z`, finished `2026-08-11T16:12:14.0000000Z`, elapsed `67000 ms`.
+- Fixed classification: `ORCHESTRATOR_DUPLICATE_DISPATCH_CANCELLED_BEFORE_ACTION` at `DISPATCH_OWNERSHIP`; central had already repurposed `019ff196-8fe4-7b91-ac93-ec50110bd2d2` as the single authoritative holder-preflight/provision-only worker.
+- The duplicate called `create_goal`, then made `0` command/tool calls; changed paths `[]`, provision count `0`, and all holder/PG/process/config/handoff/discovery/submit/status/build/cleanup/rollback work is `NOT_RUN`.
+- Protected `64272` was not touched. The duplicate was archived successfully at `2026-08-11T16:12:24.4842839Z`.
+- Next action: continue only authoritative holder worker `019ff196-8fe4-7b91-ac93-ec50110bd2d2`; this cancellation grants no live authority.
+- Successor durable save: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
