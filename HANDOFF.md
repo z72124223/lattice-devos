@@ -1,7 +1,7 @@
-# Current GitHub Handoff — 2026-08-10
+# Current GitHub Handoff — 2026-08-11
 
 Status: `WAIT_EXTERNAL / PUSH_PENDING_AUTH / CHATGPT_TUNNEL_PENDING` for
-SPEC-003 v4 / TASK-038. Canonical-local acceptance is complete at stable
+SPEC-003 v5 / TASK-038. Canonical-local acceptance is complete at stable
 checkpoint `2b424ec9a5401a6fbdc4f37d3d401592331afca0`; only the external GitHub
 authentication and real ChatGPT Secure MCP Tunnel gates remain.
 Phase 2. Production `latticed`, real PostgreSQL Writer Lease/fencing, governed
@@ -16,6 +16,20 @@ Upstream: none; local stable checkpoint `2b424ec9` not yet pushed<br>
 Base: local Phase 1 checkpoint `512732d`<br>
 Worktree:
 `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\chatgpt-mcp`
+
+## Current Engineering Tool Amendment
+
+- The responsible user's direct text `也解除憲法 以及其他窗口 對於外部工具的使用恢復正常`
+  revoked the special engineering-tool constitution at
+  `2026-08-11T06:37:17.362Z` / `2026-08-11T14:37:17+08:00`.
+- Normal Codex/platform permissions, `AGENTS.md`, repository instructions,
+  existing task authority, and safety boundaries now govern tool use. The
+  revocation is not acceptance evidence; current claims require current
+  verification.
+- P0-01 provenance is unchanged: seed `2b424ec9`; `04c2381` is semantic
+  only; `b4cbe19` is semantic trace only; excluded commits are `a86747d`,
+  `f9ae267`, and `740ac13`; `26b3f71` is contaminated;
+  `GH9_RUNTIME_INCLUDED=false`; `TASK037_INCLUDED=false`.
 
 ## User-Corrected Execution Order
 
@@ -45,7 +59,7 @@ exists.
 
 ## Approved Phase 2 Boundary
 
-- ADR-023, SPEC-003 v4, and TASK-038 select closed process-start ingress
+- ADR-023, SPEC-003 v5, and TASK-038 select closed process-start ingress
   evidence. Production Secure MCP Tunnel and local canonical acceptance use
   distinct non-substitutable commitments. MCP `clientInfo`, model text, and
   caller identity fields cannot grant authority.
@@ -84,9 +98,9 @@ exists.
 ## Current Governance Checkpoint
 
 - New ADR: `docs/adr/ADR-023-bounded-mcp-task-dispatch-and-postgres-writer-lease.md`.
-- SPEC-003 is version 4; TASK-038 remains `in-progress` only because the real
+- SPEC-003 is version 5; TASK-038 remains `in-progress` only because the real
   ChatGPT tunnel/session gate is still open.
-- Versioned constitutions: `latticed` 1.4, Contracts 1.12, Ports 1.8,
+- Versioned constitutions: `latticed` 1.9, Contracts 1.12, Ports 1.9,
   Task Domain 2.2, Orchestrator 2.3, Writer Lease 1.1, PostgreSQL Writer Lease
   1.0, Postgres Store 1.6, and Codex Adapter 1.2.
 - Canonical-local acceptance ID: `8c21e96b9bc44b1d87de0dea884b9678`.

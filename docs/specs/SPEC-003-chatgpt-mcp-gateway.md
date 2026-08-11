@@ -4,7 +4,7 @@ status: ready
 version: 5
 modules:
   - module_id: latticed
-    constitution_version: 1.7
+    constitution_version: 1.9
   - module_id: lattice-contracts
     constitution_version: 1.12
   - module_id: lattice-ports
@@ -246,7 +246,7 @@ projection without rerunning external effects.
 
 ## Module Impact
 
-- `latticed` 1.7: the canonical public tool list expands from two to four; both task tools
+- `latticed` 1.9: the canonical public tool list expands from two to four; both task tools
   map into the existing `FullChainService` / Orchestrator composition under
   one fixed server actor.
   Its Task lifecycle edge wrapper implements `TaskLifecyclePort` over the

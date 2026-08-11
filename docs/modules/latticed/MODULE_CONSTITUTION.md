@@ -1,7 +1,7 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 1.7
+version: 1.9
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-11
@@ -198,6 +198,44 @@ driven:
 5. Basic acceptance is not merge, release, deployment, public exposure, or
    long-term production approval; those later actions retain their own gates.
 
+## Engineering Tool Policy Revocation
+
+The responsible user revoked the version 1.8 special engineering-tool
+constitution. It no longer creates a tool ban, a special scoped-open gate, or a
+tool-specific evidence-invalidity rule for any current or future window.
+
+The amendment sequence is retained exactly for auditability:
+
+- At `2026-08-11T06:32:41.387Z` / `2026-08-11T14:32:41+08:00`, direct user
+  text `解除禁用所有外部工具` validated the intermediate
+  `ALL_EXTERNAL_TOOLS_ALLOWED` lift for
+  `EXISTING_AUTHORIZED_PROJECT_TASKS_ONLY`. Its canonicalization is
+  `RFC8785-JCS-UTF8` and its `lifted_scope_sha256` is
+  `be9acacd1b3bb0a25519f7d7ae12285143531f2bd7229ce69d73abc87d116e31`.
+- At `2026-08-11T06:37:17.362Z` / `2026-08-11T14:37:17+08:00`, the later
+  direct user text `也解除憲法 以及其他窗口 對於外部工具的使用恢復正常`
+  revoked the special engineering-tool constitution itself and superseded the
+  need for `policy_lift_authority_ref`, `PAUSED_BY_TOOL_POLICY`, or any special
+  scoped-open gate. Both receipts came from source thread
+  `019fef39-6c03-76f0-9115-0171c7d44f10`; the intermediate receipt identifies
+  user message `item-164`.
+
+Current engineering windows therefore use shell, PowerShell, Git, Cargo, npm,
+Node.js, PostgreSQL/MCP tooling, browser/web capabilities, plugins, and other
+available tools normally when they are relevant to an existing authorized
+project task. Normal Codex and platform permissions, `AGENTS.md`, repository
+instructions, task scope, and safety rules remain controlling. This amendment
+does not authorize secret disclosure, unscoped destructive action, payment or
+account changes without explicit authority, or merge, deployment, release, or
+default-branch changes without explicit authority.
+
+The amendment itself is not a `PASS`. Earlier dynamic evidence remains
+historical when time or candidate drift makes it stale and requires current
+reverification for a current claim, but it is not invalid or paused merely
+because an external tool produced it. The product's microkernel, One Writer,
+credential, exact-tool, GH-9 non-composition, and TASK-037 isolation rules are
+unchanged.
+
 ## Provider-Neutral Correction Rule
 
 Validation is never removed merely because a provider returned incomplete or
@@ -374,6 +412,12 @@ raw provenance, create a secret-scanned canonical UTF-8 copy, and retain all
 JSON and lifecycle checks. No provider, key, permission, tool, schema, writer,
 or product authority is added.
 
+Version 1.8 introduced a special engineering-tool constitution that prohibited
+external processes and assigned tool-policy-specific evidence states. Version
+1.9 records the responsible user's later direct revocation of that special
+constitution. Normal task-scoped tool use and evidence rules resume; the
+product architecture and protected action boundaries do not change.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -416,3 +460,5 @@ excuse implementation drift or a ChatGPT platform limitation.
 | 1.5 | 2026-08-11 | ADR-024, Issues #4/#5/#9/#10 | Make real ChatGPT round-trip the P0 product gate, adopt microkernel + Port-first/MCP-provider boundaries, preserve four closed tools, and keep GH-9 Reflection uncomposed until later authorization | Responsible user architecture amendment |
 | 1.6 | 2026-08-11 | SPEC-003 v5, ADR-023 credential/acceptance order, TASK-038 | Approve direct process-private key inheritance from pinned tunnel-client to canonical `latticed`, preserve the user-required Platform `All` setting, and require basic controlled acceptance before optional hardening with material ambiguity routed to human review | Responsible user explicit direction |
 | 1.7 | 2026-08-11 | Responsible-user provider-neutral correction and Q-001=A direction | Require one bounded correction and full revalidation for invalid/incomplete output from Codex or any future AI provider; use deterministic provenance-bound UTF-8 canonicalization rather than AI repair for non-AI logs | Responsible user explicit direction |
+| 1.8 | 2026-08-11 | Responsible-user constitutional engineering tool-policy amendment | Restrict every current and future engineering window to Codex App built-in thread and internal non-external-process capabilities; classify earlier output as historical pre-policy evidence; require `PAUSED_BY_TOOL_POLICY` when compliant evidence is unavailable; invalidate violating evidence for acceptance/publication/completion; reserve future changes to explicit user amendment | Responsible user explicit constitutional amendment |
+| 1.9 | 2026-08-11 | Direct-user tool lift and special engineering-tool constitution revocation, effective 06:32:41.387Z then 06:37:17.362Z | Revoke the version 1.8 external-tool prohibition and all special scoped-open/tool-evidence gates; restore normal task-authorized tool use under Codex/platform/repository rules while preserving secret, destructive, payment/account, merge/deploy/release/default-branch, microkernel, One Writer, credential, GH-9, and TASK-037 boundaries; require current evidence for current claims and do not treat revocation itself as PASS | Responsible user direct amendment |

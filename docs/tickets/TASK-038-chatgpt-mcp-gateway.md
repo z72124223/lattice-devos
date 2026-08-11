@@ -3,7 +3,7 @@ ticket_id: TASK-038
 spec_id: SPEC-003
 spec_version: 5
 module_id: latticed
-constitution_version: 1.7
+constitution_version: 1.9
 status: in-progress
 parallel_safe: false
 depends_on:
@@ -208,7 +208,7 @@ changes, TASK-037 repair, push, merge, deployment, release, or public exposure.
 
 ## Module And Constitution Constraints
 
-- `latticed` 1.7 is the only official MCP/composition/Gateway writer entry.
+- `latticed` 1.9 is the only official MCP/composition/Gateway writer entry.
 - Contracts 1.12 and Ports 1.9 expose neutral closed values/traits only. Ports
   1.9 Reflection traits remain uncomposed; this ticket does not resume GH-9,
   TASK-037 Formal, Hermes, or any unattended worker.

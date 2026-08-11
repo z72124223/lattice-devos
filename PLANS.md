@@ -15,7 +15,7 @@ The governing invariant remains:
 
 > **One Gateway. One Truth. One Writer.**
 
-## Current GitHub Handoff — 2026-08-10
+## Current GitHub Handoff — 2026-08-11
 
 Repository: `z72124223/lattice-devos`<br>
 GitHub URL: `https://github.com/z72124223/lattice-devos`<br>
@@ -26,6 +26,19 @@ Current branch: `feature/task-038-chatgpt-mcp`<br>
 Upstream: none; this branch has not been pushed<br>
 Base checkpoint: local Phase 1 commit `512732d`<br>
 Latest fetched TASK-037 remote head: `8828d2b`<br>
+
+Current Engineering Tool Amendment:
+- The responsible user's direct text `也解除憲法 以及其他窗口 對於外部工具的使用恢復正常`
+  revoked the special engineering-tool constitution at
+  `2026-08-11T06:37:17.362Z` / `2026-08-11T14:37:17+08:00`.
+- Engineering windows use relevant external tools normally under Codex/platform
+  permissions, `AGENTS.md`, repository instructions, existing task authority,
+  and preserved safety boundaries. The revocation is not a `PASS`; current
+  claims still require current evidence.
+- P0-01 provenance remains exact: seed `2b424ec9`; `04c2381` is semantic
+  only; `b4cbe19` is semantic trace only; `a86747d`, `f9ae267`, and `740ac13`
+  are excluded; `26b3f71` is contaminated;
+  `GH9_RUNTIME_INCLUDED=false`; `TASK037_INCLUDED=false`.
 
 Current Goal:
 - TASK-038 is `WAIT_EXTERNAL / PUSH_PENDING_AUTH` at stable checkpoint
@@ -80,7 +93,7 @@ Completed Evidence Retained:
   fails before a new Task Ledger mutation.
 
 Current Phase 2 Decision:
-- ADR-023 and SPEC-003 v4 select process-start-owned closed ingress evidence.
+- ADR-023 and SPEC-003 v5 select process-start-owned closed ingress evidence.
   Production Secure MCP Tunnel and local canonical acceptance use distinct
   non-substitutable commitments. MCP `clientInfo` and caller-supplied identity
   never grant authority.
