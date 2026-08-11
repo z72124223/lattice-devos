@@ -693,4 +693,4 @@
 - Initial current-read matched the expected config, but concurrent peer `019ff2c4-6e14-7fe2-bb08-710ad9dbc74d` changed config and handoff before this worker's first mutation. Those external mutations are not attributed to this worker.
 - This worker made no config, handoff, prepared-home, old-home, repository, database, holder, source, build, test, cleanup, rollback, reset, merge, deploy, or release mutation/action.
 - Prepared home remained valid and externally observed config/handoff already pointed to it, but strict step C required stop without retry, adoption, cleanup, or rollback.
-- Stage 1 and stage 2 saver remote equality are pending; authoritative receipt remains `safe_to_archive=false`.
+- Stage 1 durable pre-mutation drift failure receipt commit is `5931a29309c22166ce32d155fa2f103841c4d0c8`; expected and live remote SHA matched at `2026-08-11T21:52:47.9080683Z`. This saver-only update is stage 2 confirmation; after its fresh live `git ls-remote` equality passes, outer saver state is `safe_to_archive=true`. The authoritative receipt remains `FAILED_PREMUTATION`, `success_claim=NONE`, and attributes no peer mutation to this worker.
