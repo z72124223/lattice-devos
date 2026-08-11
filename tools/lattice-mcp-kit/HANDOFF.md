@@ -719,4 +719,4 @@
 - Exact exception text was not captured. Submit-frame write count remains `UNKNOWN_0_OR_1` and must not be inferred as zero or one.
 - Failure remains `STDIO_ORCHESTRATOR_NONZERO_NO_RESPONSE` at `SUBMIT_RESPONSE_CAPTURE`; initialize/list/submit flow evidence retains its probable, unobserved, and unknown classifications.
 - No MCP, Codex, PostgreSQL, network mutation, config/home mutation, holder inspection/action, cleanup/rollback, or protected-script access occurred. The holder deadline is treated as expired without inspection.
-- The proposed client correction was diagnosis-only and was not implemented. Stage 1 and stage 2 remote equality are pending.
+- The proposed client correction was diagnosis-only and was not implemented. Stage 1 receipt commit `3ef2fd6f6a3776d5bfd35fba8a3e1d6af1357e3b` matched fresh live remote at `2026-08-11T22:03:22.8646740Z`; stage 2 is confirmation-only.
