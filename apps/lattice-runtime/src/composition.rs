@@ -537,7 +537,6 @@ impl LatticedDeliveryConfig {
                 &launcher,
                 &version,
                 &launcher_sha256,
-                &delivery_root,
             )?)
         } else {
             None
@@ -628,7 +627,7 @@ struct OfficialBundleFacts {
     provenance: OfficialBundleEvidenceProvenance,
     version: String,
     declared_launcher_sha256: String,
-    delivery_target_root: PathBuf,
+    official_target_root: PathBuf,
     launcher_target_root: Option<PathBuf>,
     files: Vec<OfficialBundleFileFacts>,
 }
@@ -691,6 +690,10 @@ impl OfficialBundleEvidenceProvider for SyntheticOfficialBundleEvidenceProvider 
 impl SyntheticOfficialBundleEvidenceProvider {
     fn complete(policy: &OfficialBundlePolicy) -> Self {
         let target_root = PathBuf::from(r"C:\lattice\target");
+        Self::complete_at(policy, &target_root)
+    }
+
+    fn complete_at(policy: &OfficialBundlePolicy, target_root: &Path) -> Self {
         let files = OFFICIAL_BUNDLE_FILE_ROLES
             .iter()
             .copied()
@@ -724,8 +727,8 @@ impl SyntheticOfficialBundleEvidenceProvider {
                     .file_policy(OfficialBundleFileRole::Launcher)
                     .sha256
                     .to_owned(),
-                delivery_target_root: target_root.clone(),
-                launcher_target_root: Some(target_root),
+                official_target_root: target_root.to_path_buf(),
+                launcher_target_root: Some(target_root.to_path_buf()),
                 files,
             },
         }
@@ -793,33 +796,12 @@ impl OfficialBundlePolicy {
             })
     }
 
-    fn delivery_target_root(delivery_root: &Path) -> Result<PathBuf, OfficialIdentityRejection> {
-        if delivery_root.file_name() != Some(OsStr::new("delivery")) {
-            return Err(OfficialIdentityRejection::Layout);
-        }
-        let fixture_root = delivery_root
-            .parent()
-            .ok_or(OfficialIdentityRejection::Layout)?;
-        let fixture_id = fixture_root
-            .file_name()
-            .and_then(OsStr::to_str)
-            .ok_or(OfficialIdentityRejection::Layout)?;
-        if !is_lower_hex(fixture_id, 32) {
-            return Err(OfficialIdentityRejection::Layout);
-        }
-        let lattice_delivery_root = fixture_root
-            .parent()
-            .ok_or(OfficialIdentityRejection::Layout)?;
-        if lattice_delivery_root.file_name() != Some(OsStr::new("lattice-delivery")) {
-            return Err(OfficialIdentityRejection::Layout);
-        }
-        let target_root = lattice_delivery_root
-            .parent()
-            .ok_or(OfficialIdentityRejection::Layout)?;
-        if target_root.file_name() != Some(OsStr::new("target")) {
-            return Err(OfficialIdentityRejection::Layout);
-        }
-        Ok(target_root.to_path_buf())
+    fn launcher_target_root(launcher: &Path) -> Result<PathBuf, OfficialIdentityRejection> {
+        launcher
+            .ancestors()
+            .nth(9)
+            .map(Path::to_path_buf)
+            .ok_or(OfficialIdentityRejection::Layout)
     }
 
     fn evaluate(
@@ -839,7 +821,7 @@ impl OfficialBundlePolicy {
             .launcher_target_root
             .as_deref()
             .ok_or(OfficialIdentityRejection::TargetSplit)?;
-        if !same_declared_path(&facts.delivery_target_root, launcher_target_root) {
+        if !same_declared_path(&facts.official_target_root, launcher_target_root) {
             return Err(OfficialIdentityRejection::TargetSplit);
         }
         if facts.files.len() != OFFICIAL_BUNDLE_FILE_ROLES.len() {
@@ -856,7 +838,7 @@ impl OfficialBundlePolicy {
                 .iter()
                 .find(|file| file.role == file_policy.role)
                 .ok_or(OfficialIdentityRejection::MissingFile(file_policy.role))?;
-            let expected_path = self.expected_path(&facts.delivery_target_root, file_policy.role);
+            let expected_path = self.expected_path(&facts.official_target_root, file_policy.role);
             if !same_declared_path(&file.declared_path, &expected_path)
                 || !same_declared_path(&file.expected_path, &expected_path)
                 || file.canonical_path != file.canonical_expected_path
@@ -901,11 +883,9 @@ impl RealPinnedOfficialBundle {
         launcher: &Path,
         version: &str,
         launcher_sha256: &str,
-        delivery_root: &Path,
     ) -> Result<Self, OfficialIdentityRejection> {
-        let target_root = OfficialBundlePolicy::delivery_target_root(delivery_root)?;
-        let launcher_target_root = launcher.ancestors().nth(9).map(Path::to_path_buf);
-        let launcher_boundary = launcher_target_root.as_deref().unwrap_or(&target_root);
+        let target_root = OfficialBundlePolicy::launcher_target_root(launcher)?;
+        let launcher_target_root = Some(target_root.clone());
         let mut files = Vec::with_capacity(OFFICIAL_BUNDLE_FILE_ROLES.len());
         let mut pinned_files = Vec::with_capacity(OFFICIAL_BUNDLE_FILE_ROLES.len());
         for role in OFFICIAL_BUNDLE_FILE_ROLES {
@@ -915,16 +895,11 @@ impl RealPinnedOfficialBundle {
             } else {
                 expected_path.clone()
             };
-            let boundary = if role == OfficialBundleFileRole::Launcher {
-                launcher_boundary
-            } else {
-                &target_root
-            };
             if let Some((facts, pinned)) = capture_official_file(
                 role,
                 declared_path,
                 expected_path,
-                boundary,
+                &target_root,
                 policy.file_policy(role).max_bytes,
             ) {
                 files.push(facts);
@@ -936,7 +911,7 @@ impl RealPinnedOfficialBundle {
                 provenance: OfficialBundleEvidenceProvenance::RealWindowsFilesystem,
                 version: version.to_owned(),
                 declared_launcher_sha256: launcher_sha256.to_owned(),
-                delivery_target_root: target_root,
+                official_target_root: target_root,
                 launcher_target_root,
                 files,
             },
@@ -973,7 +948,7 @@ impl LaunchReadyOfficialBundle {
         real_bundle: RealPinnedOfficialBundle,
         validated: ValidatedOfficialBundleFacts,
     ) -> Result<Self, OfficialIdentityRejection> {
-        let target_root = &real_bundle.facts.delivery_target_root;
+        let target_root = &real_bundle.facts.official_target_root;
         let install_root = target_root
             .join("codex-official")
             .join(policy.package_version);
@@ -1031,18 +1006,11 @@ fn validate_official_codex_identity(
     launcher: &Path,
     version: &str,
     launcher_sha256: &str,
-    delivery_root: &Path,
 ) -> Result<LaunchReadyOfficialBundle, LatticedError> {
     let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
     let policy = OfficialBundlePolicy::production();
-    let real_bundle = RealPinnedOfficialBundle::capture(
-        policy,
-        launcher,
-        version,
-        launcher_sha256,
-        delivery_root,
-    )
-    .map_err(|_| rejected())?;
+    let real_bundle = RealPinnedOfficialBundle::capture(policy, launcher, version, launcher_sha256)
+        .map_err(|_| rejected())?;
     let validated = policy.evaluate(&real_bundle).map_err(|_| rejected())?;
     LaunchReadyOfficialBundle::from_real(policy, real_bundle, validated).map_err(|_| rejected())
 }
@@ -5259,6 +5227,38 @@ mod tests {
 
         assert_eq!(
             policy.evaluate(&replacement_mix),
+            Err(OfficialIdentityRejection::FileIdentityChanged(
+                OfficialBundleFileRole::CommandRunner
+            ))
+        );
+    }
+
+    #[test]
+    fn official_bundle_target_root_is_launcher_owned_for_short_external_delivery_base() {
+        let policy = OfficialBundlePolicy::production();
+        let official_target_root = PathBuf::from(r"C:\lattice-official\target");
+        let launcher =
+            policy.expected_path(&official_target_root, OfficialBundleFileRole::Launcher);
+        let user_owned_delivery_base = PathBuf::from(r"C:\d");
+        let derived_target_root = OfficialBundlePolicy::launcher_target_root(&launcher)
+            .expect("official target root from validated launcher ancestry");
+
+        assert_eq!(derived_target_root, official_target_root);
+        assert_ne!(derived_target_root, user_owned_delivery_base);
+
+        let valid =
+            SyntheticOfficialBundleEvidenceProvider::complete_at(policy, &derived_target_root);
+        assert!(policy.evaluate(&valid).is_ok());
+
+        let mut identity_drift = valid;
+        identity_drift
+            .file_mut(OfficialBundleFileRole::CommandRunner)
+            .observed_identity = Some(OfficialFileIdentity {
+            volume_serial_number: 7,
+            file_index: 999,
+        });
+        assert_eq!(
+            policy.evaluate(&identity_drift),
             Err(OfficialIdentityRejection::FileIdentityChanged(
                 OfficialBundleFileRole::CommandRunner
             ))
