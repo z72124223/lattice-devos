@@ -420,3 +420,13 @@
 - Protected `64272` was not touched. The duplicate was archived successfully at `2026-08-11T16:12:24.4842839Z`.
 - Next action: continue only authoritative holder worker `019ff196-8fe4-7b91-ac93-ec50110bd2d2`; this cancellation grants no live authority.
 - Successor durable save: exact-path commit `8894ba8dbfd695c59a9901ce7cf24e4bbd85696e` (tree `afe8f8f685fd90bddd1e1488ede549ee01b59a78`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:13:32.1837562Z`.
+
+## Holder-resume request cancelled before action — `019ff196-8fe4-7b91-ac93-ec50110bd2d2`
+
+- Receipt schema `lattice.safe-to-archive.v1`; classification `CANCELLED/BLOCKED_AFTER_SCOPE_REPLACEMENT_BEFORE_ACTION`; scope is only the latest holder-resume request. Start/end are `NOT_CAPTURED`, elapsed `0 ms`.
+- Original goal remained `BLOCKED`. A resumed `create_goal` was attempted once but rejected as `REJECTED_UNFINISHED_BLOCKED_GOAL`; no resumed goal was created and replacement scope never executed.
+- Fixed failure: `CENTRAL_FINAL_REVOCATION_BEFORE_HOLDER_ACTION` at `REPLACEMENT_GOAL_CREATE`; central revoked the resume before operational execution.
+- Changed paths `[]`; runtime, holder, PG, wrapper, provision, bind, old-holder read, connection, config, handoff, discovery, tool, cleanup, rollback, binary/helper/switch, and repository action counts are all `0`.
+- This receipt does not reclassify historical actions from earlier closed scope. It records one coordination-only create-goal attempt and no task runtime or mutation.
+- Next action: archive this old thread and use a clean new holder-provision-only worker. `safe_to_archive=true`, `self_archived=false`.
+- Successor durable save: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
