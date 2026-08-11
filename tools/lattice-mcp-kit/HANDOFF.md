@@ -380,4 +380,4 @@
 - Artifact state: exact before-config backup and an unvalidated staging file exist at the recorded run-specific paths. Do not reuse the staging file.
 - Next action: saver publishes this exact failure. Any separate worker must re-check config/handoff expected hashes and holder TTL >= 8 minutes, create fresh staging, and must not ask this worker to retry.
 - Successor durable save: exact-path commit `ab2a0abd10bac3334e354f7f49963b6e4ba102c7` (tree `5a22b073fc6f111c8ca9070bdb93153edf324fcd`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:48:51.9270038Z`.
-- Archive boundary: do not archive this failed switch worker until its exact receipt is remotely durable and central later confirms archival.
+- Archive boundary: central confirmed this failed switch worker archived after remote confirmation `0de86da75c5694115be41e9bed0e1179a07ef427`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T15:50:03.2340791Z`. This archive does not authorize diagnosis/config/staging/backup/binary/holder/external-handoff/root/cleanup/rollback mutation.
