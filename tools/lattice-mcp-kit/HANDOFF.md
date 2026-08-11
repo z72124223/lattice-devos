@@ -213,5 +213,5 @@
 - Secondary failure is separately recorded as `P0_CLEANUP_ROOT_LOCKED` at `cleanup_root_delete`: one cleanup attempt stopped PID `28752` and removed the `51666` listener, then exited `1` because `ttl-cleanup-20260811T131901456Z.err` remained open.
 - Actual cleanup residual at `2026-08-11T13:35:02.2384642Z`: PostgreSQL PID `28752` is not alive; port `51666` has no listener; TTL cleanup PID `32132` is alive; holder root and locked `.err` remain. `holder_preserved=false`.
 - Do not retry submit or independent status, retry cleanup, force-kill, manually delete the root, or execute rollback from this verifier. Central should assign a new bounded remediation for deterministic task-ref reuse.
-- Successor durable save: pending first exact-path commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: first exact-path commit `2b8446e68f3a8ea440f79a985c58aec9c3aaef36` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T13:36:59.101Z`.
 - Archive boundary: verifier must not be archived until this exact receipt is remotely durable and central confirms archival.
