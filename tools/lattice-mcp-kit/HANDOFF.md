@@ -686,3 +686,11 @@
 - External secret-free handoff atomically advanced to `HOME_REMEDIATED_READY_FOR_FRESH_VERIFIER`; config and handoff each mutated once, with rollback backups retained and no rollback or cleanup executed.
 - Worker started no Codex/MCP process and made no initialize, discovery, tool, submit, status, PostgreSQL, build, test, holder lifecycle, or port 64272 call. Protected dirty script and saver files were untouched by worker.
 - Stage 1 durable CONFIG-HOME-SWITCH receipt commit is `b42a3407414fde08a40a24ee1d1784ef98fe5bd3` and matched live remote at `2026-08-11T21:49:36.5600163Z`; stage 2 confirmation commit is `6150bbe6d8158c85b9eb3b1d036a792e73117c6a` and matched live remote at `2026-08-11T21:50:28.9700233Z`. Central archived the worker at `2026-08-11T21:50:56.3808435Z`; outer saver state is `safe_to_archive=true`, while the authoritative key-value receipt remains unchanged with `worker_safe_to_archive=false`. `READY_FOR_FRESH_VERIFIER` remains the current handoff status, not P0 acceptance.
+
+## CONFIG-HOME-SWITCH pre-mutation drift failure — `019ff2c7-00d5-7962-9bf1-e39195f5c1c8`
+
+- Outcome is `FAILED_PREMUTATION` with `success_claim=NONE`; failure code is `CONFIG_SEMANTIC_DRIFT_BEFORE_TARGET_MUTATION` at stage C.
+- Initial current-read matched the expected config, but concurrent peer `019ff2c4-6e14-7fe2-bb08-710ad9dbc74d` changed config and handoff before this worker's first mutation. Those external mutations are not attributed to this worker.
+- This worker made no config, handoff, prepared-home, old-home, repository, database, holder, source, build, test, cleanup, rollback, reset, merge, deploy, or release mutation/action.
+- Prepared home remained valid and externally observed config/handoff already pointed to it, but strict step C required stop without retry, adoption, cleanup, or rollback.
+- Stage 1 and stage 2 saver remote equality are pending; authoritative receipt remains `safe_to_archive=false`.
