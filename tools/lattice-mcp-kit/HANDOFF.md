@@ -203,3 +203,15 @@
 - Repository boundary: protected dirty `scripts/test-task038-four-tool-acceptance.ps1` remains unstaged and unmodified. P0 only; no TASK-037/GH-9/Hermes/reflection/reset/clean/PR/merge/deploy/release/default-branch change.
 - Successor durable save: first exact-path commit `b4d81abcdc9d7740517304696f0fd5641604a8e7` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T13:25:15.789Z`. Central was signaled immediately without waiting for this second-stage confirmation.
 - Archive boundary: holder/config writer task was archived successfully; saver immediately captured actual `archived_at_utc=2026-08-11T13:28:06.4093034Z`. Archival affects only the completed Codex task and does not stop, clean up, or roll back live PostgreSQL `127.0.0.1:51666` PID `28752`. Active verifier `019ff100-d07a-7ee1-bfb8-ae0f6b733abe` remains independently owned and must not be archived or modified.
+
+## Fresh verifier bounded checkpoint — `019ff100-d07a-7ee1-bfb8-ae0f6b733abe`
+
+- Window ran from `2026-08-11T13:26:40.0000000Z` to `2026-08-11T13:35:02.2384642Z`, elapsed `502238 ms`. Discovery passed with exact four tools and typed submit/status schemas.
+- Exactly one submit used client request `codex-p0-fresh-20260811132840-019ff100` and returned `isError=false`, status `COMPLETED`, but reused prior task ref `ab8724dd51419cf190ad491f1f8973894bca56dc0c3aed55ebc3723f6214177d`; result digest `6a661ba5f9f7c16d996c970b13df3244eef82af2a7e4ff07c9c164766057c512`, ledger head `9d0ff171fa7293e6ffce15da7ac9ce9810816758d5ad5f4b9e77b9d629867bc7`.
+- Primary failure is `P0_FRESH_TASK_REF_REUSED` at `submit_identity`: the required new task ref was not created. This is distinct from earlier status-only, ingress commitment mismatch, and TTL/listener preflight failures.
+- Independent status was `NOT_RUN`. There was no retry, second submit, rollback, protected-64272 mutation, or verifier commit/push.
+- Secondary failure is separately recorded as `P0_CLEANUP_ROOT_LOCKED` at `cleanup_root_delete`: one cleanup attempt stopped PID `28752` and removed the `51666` listener, then exited `1` because `ttl-cleanup-20260811T131901456Z.err` remained open.
+- Actual cleanup residual at `2026-08-11T13:35:02.2384642Z`: PostgreSQL PID `28752` is not alive; port `51666` has no listener; TTL cleanup PID `32132` is alive; holder root and locked `.err` remain. `holder_preserved=false`.
+- Do not retry submit or independent status, retry cleanup, force-kill, manually delete the root, or execute rollback from this verifier. Central should assign a new bounded remediation for deterministic task-ref reuse.
+- Successor durable save: pending first exact-path commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Archive boundary: verifier must not be archived until this exact receipt is remotely durable and central confirms archival.
