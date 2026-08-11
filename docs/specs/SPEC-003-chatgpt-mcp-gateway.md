@@ -1,14 +1,14 @@
 ---
 spec_id: SPEC-003
 status: ready
-version: 4
+version: 5
 modules:
   - module_id: latticed
-    constitution_version: 1.4
+    constitution_version: 1.7
   - module_id: lattice-contracts
     constitution_version: 1.12
   - module_id: lattice-ports
-    constitution_version: 1.8
+    constitution_version: 1.9
   - module_id: orchestrator-runtime
     constitution_version: 2.3
   - module_id: writer-lease
@@ -50,6 +50,18 @@ retain the existing discovery/call behavior. These two tools remain unchanged:
 
 - `lattice_delivery_run`: closed empty object;
 - `lattice_delivery_status`: closed empty object.
+
+Pinned tunnel-client 0.0.11 inherits its environment into the stdio child, and
+that is the required design for the trusted Secure MCP Tunnel runtime. The
+exact production profile directly invokes the digest-pinned canonical
+`latticed`; `CONTROL_PLANE_API_KEY` remains visible to both trusted processes
+as process-private input. The profile commitment binds tunnel-client,
+canonical `latticed`, and profile hashes. The key grants authentication to the
+control-plane path only. Canonical `latticed` must exclude it from the
+supervised Codex child and every workspace, Git object, evidence, diagnostic,
+log, result, database record, downstream adapter, and unrelated process. Any
+profile, hash, path, reparse, child-environment, exit, or reap ambiguity fails
+closed.
 
 ### Phase 2 Task Tools
 
@@ -204,12 +216,37 @@ projection without rerunning external effects.
 - PostgreSQL Writer Lease uses the independent exact
   `db/extensions/writer-lease/v1.sql`; no Fake/synthetic acceptance path.
 - Only public allowlisted status fields may cross MCP.
-- All secrets remain process-private and absent from schemas, results, errors,
-  ordinary logs, audit rows, and test evidence.
+- All secrets remain confined to their explicitly authorized process trust
+  boundary and absent from schemas, results, errors, ordinary logs, audit rows,
+  and test evidence.
+- The tunnel bearer is private to the trusted pinned tunnel-client/canonical
+  `latticed` runtime boundary and is provably absent from every later child and
+  output surface.
+- The responsible-user-selected OpenAI Platform permission for the retained
+  private P0 Runtime key is `All` and is a required external prerequisite.
+  Project automation must not alter, rotate, recreate, or delete that key
+  without a later explicit user instruction. This does not widen LATTICE's
+  four-tool/schema/authority surface.
+- Basic real controlled acceptance runs before optional hardening or broader
+  integration cleanup. Only current evidence of retained plaintext disclosure,
+  data loss outside the owned disposable scope, unauthorized external action,
+  or result invalidity blocks that run. Post-acceptance material risks require
+  an explicit scenario and `HUMAN_REVIEW_REQUIRED` decision before a new gate
+  or corrective tradeoff is imposed. Acceptance does not authorize merge,
+  release, deployment, public exposure, or production promotion.
+- Invalid or incomplete closed output from Codex or a future AI provider keeps
+  the original validator and receives one bounded same-provider correction
+  request before a typed failure. The correction cannot widen Task input,
+  credentials, paths, commands, tools, writer authority, or external effects.
+- Non-AI tunnel diagnostics are never delegated to an AI for repair. A raw log
+  snapshot is retained only by SHA-256 and byte count; invalid UTF-8 is mapped
+  deterministically into a separate canonical copy with replacement count and
+  canonical digest. Only secret-free, valid JSONL that passes the exact
+  lifecycle classifier may influence reconnect or acceptance.
 
 ## Module Impact
 
-- `latticed` 1.4: the canonical public tool list expands from two to four; both task tools
+- `latticed` 1.7: the canonical public tool list expands from two to four; both task tools
   map into the existing `FullChainService` / Orchestrator composition under
   one fixed server actor.
   Its Task lifecycle edge wrapper implements `TaskLifecyclePort` over the
@@ -360,6 +397,20 @@ acceptance merely by this specification amendment.
 - [ ] A refreshed real Secure MCP Tunnel / ChatGPT session discovers and invokes
       both task tools, and a separate new ChatGPT request/session reads the same
       durable result. Local canonical evidence cannot satisfy this item.
+- [x] The pinned tunnel profile directly launches digest-bound canonical
+      `latticed`; both trusted tunnel processes receive
+      `CONTROL_PLANE_API_KEY`, while the supervised Codex child and all
+      downstream/output surfaces do not. Stdio, exit, cancellation, and
+      owned-tree cleanup remain bounded.
+- [x] The user-owned P0 Runtime key retains OpenAI Platform `All`; no project
+      automation mutates that setting or persists its plaintext/tracking ID.
+- [x] Invalid tunnel-log UTF-8 uses a separate deterministic, secret-scanned
+      canonical copy with raw/canonical digests, byte counts, replacement count,
+      and JSON/lifecycle fail-closed tests; the raw file is never rewritten.
+- [ ] Provider adapters must retain the complete response validator and add one
+      bounded same-provider correction before typed failure for invalid or
+      incomplete AI output. TASK-038 records this provider-neutral rule but does
+      not claim the future-provider integration is already implemented.
 - [x] TASK-037 remains explicitly open until its later production verifier
       proves `Hermes -> Memory -> Status`; TASK-038 evidence does not imply it.
 
@@ -392,6 +443,18 @@ chain repair. The user selected the fixed tunnel/profile actor and the single
 versioned local implementation and its bounded PostgreSQL/Codex/Git acceptance;
 it does not authorize public exposure, push, merge, deployment, release,
 payment, account changes, secret disclosure, or broader task templates.
+
+On 2026-08-11 the responsible user explicitly required the retained private P0
+Runtime key to keep OpenAI Platform permission `All`, required canonical
+LATTICE/`latticed` to receive that key inside the direct trusted tunnel runtime
+boundary, and prohibited project automation from changing or deleting it
+without a later explicit instruction. This authority supersedes the uncommitted
+same-window scrub-bridge proposal; it does not weaken the downstream boundary
+that excludes the key from Codex, helpers, workspaces, Git, logs, databases,
+results, or evidence, and it does not by itself satisfy live runtime evidence.
+The same decision corrected engineering order: prove the smallest real P0 path
+first, then review residual risks; when a material tradeoff is unclear, request
+human review instead of inventing another pre-acceptance gate.
 
 ## Open Questions
 

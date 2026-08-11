@@ -1,9 +1,9 @@
 ---
 ticket_id: TASK-038
 spec_id: SPEC-003
-spec_version: 4
+spec_version: 5
 module_id: latticed
-constitution_version: 1.4
+constitution_version: 1.7
 status: in-progress
 parallel_safe: false
 depends_on:
@@ -105,7 +105,7 @@ branch: feature/task-038-chatgpt-mcp
 
 ## Objective
 
-Deliver SPEC-003 v4 Phase 2: ChatGPT discovers and invokes bounded
+Deliver SPEC-003 v5 Phase 2: ChatGPT discovers and invokes bounded
 `lattice_task_submit` / `lattice_task_status`; one fixed server-owned
 tunnel/profile actor can submit only `CONTROLLED_CODEX_CANARY`; the same
 `latticed` Gateway/Orchestrator constructs a complete Task Spec 2.1, persists
@@ -182,6 +182,20 @@ claim TASK-037 or full downstream production acceptance.
       `lattice_task_submit`, and a separate new ChatGPT request/session reads
       the same terminal result through `lattice_task_status`. Canonical local
       MCP evidence cannot satisfy this item.
+- [x] The production tunnel profile directly binds exact tunnel-client and
+      canonical `latticed` hashes. The control-plane key reaches both trusted
+      runtime processes but is absent from the supervised Codex child and all
+      later/output surfaces.
+- [x] The retained user-owned P0 Runtime key preserves its required OpenAI
+      Platform `All` permission; the implementation neither changes that
+      setting nor stores the plaintext or full tracking identifier in Git.
+- [x] Tunnel diagnostics preserve raw SHA-256/byte count, create a separate
+      deterministic UTF-8 copy, retain replacement/canonical commitments, scan
+      secrets, and fail closed on malformed JSON or lifecycle substitution.
+- [ ] Provider adapters retain the original validator and add one bounded
+      correction request for invalid/incomplete closed output before typed
+      failure. This ticket records the rule without claiming all future provider
+      integrations already implement it.
 - [x] TASK-037 remains open until its later production verifier independently
       proves `Hermes -> Memory -> Status`.
 
@@ -194,9 +208,10 @@ changes, TASK-037 repair, push, merge, deployment, release, or public exposure.
 
 ## Module And Constitution Constraints
 
-- `latticed` 1.4 is the only official MCP/composition/Gateway writer entry.
-- Contracts 1.12 and Ports 1.8 expose neutral closed values/traits only; Ports'
-  only new dependency is Task Domain 2.2's closed `TaskState` value.
+- `latticed` 1.7 is the only official MCP/composition/Gateway writer entry.
+- Contracts 1.12 and Ports 1.9 expose neutral closed values/traits only. Ports
+  1.9 Reflection traits remain uncomposed; this ticket does not resume GH-9,
+  TASK-037 Formal, Hermes, or any unattended worker.
 - Task Domain 2.2 owns and exports the complete validated canonical subject/
   document; no caller rebuilds a reduced Task Spec carrier.
 - Orchestrator 2.3 alone orders task effects and appends workflow events.
@@ -261,6 +276,23 @@ the existing private tunnel, supplied configuration, disposable PostgreSQL,
 isolated Git, and controlled Codex. It does not authorize broader templates,
 public exposure, push, primary-branch merge, deployment, release, payment,
 account changes, or secret disclosure.
+
+On 2026-08-11 the responsible user explicitly approved the direct managed
+tunnel launcher -> pinned tunnel-client -> canonical `latticed`
+process-private credential boundary and required the retained P0 Runtime key's
+OpenAI Platform permission to remain `All`. Automation may not restrict,
+rotate, recreate, delete, or otherwise change that key without a later explicit
+instruction. This approval supersedes the uncommitted scrub-bridge proposal,
+does not authorize secret exposure after canonical `latticed`, and does not by
+itself satisfy live tunnel or provider-state evidence.
+
+The responsible user also requires basic controlled P0 acceptance before
+optional hardening. Only a demonstrated retained-secret disclosure,
+out-of-scope data loss, unauthorized external action, or invalid acceptance
+result blocks the run. Review-discovered material tradeoffs are labeled
+`HUMAN_REVIEW_REQUIRED` and returned to the user before a new gate or
+correction is imposed; acceptance still grants no merge, release, deployment,
+public exposure, or production-promotion authority.
 
 ## Current Evidence State
 

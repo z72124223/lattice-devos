@@ -3,14 +3,44 @@ param(
     [switch]$RunLatticeDeliveryHook,
     [switch]$RunFullChainAcceptanceHook,
     [switch]$RunTask038AcceptanceHook,
+    [switch]$RunTask038TunnelHook,
     [string]$Task038OfficialCodexExecutable,
     [string]$Task038CodexAuthHome,
+    [string]$Task038TunnelClientExecutable,
+    [string]$Task038TunnelProfileDirectory,
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')]
+    [string]$Task038TunnelProfileName = 'lattice-local',
+    [string]$Task038EvidenceDirectory,
+    [string]$Task038CanonicalAcceptanceReceipt,
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string]$Task038CanonicalAcceptanceReceiptSha256,
     [switch]$MemoryOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+$nativeIdentityHelperPath = Join-Path $PSScriptRoot 'windows-native-path-identity.ps1'
+$nativeIdentityHelperItem = Get-Item -LiteralPath $nativeIdentityHelperPath -Force -ErrorAction SilentlyContinue
+if (
+    $null -eq $nativeIdentityHelperItem -or
+    $nativeIdentityHelperItem.PSIsContainer -or
+    -not ($nativeIdentityHelperItem -is [IO.FileInfo]) -or
+    ($nativeIdentityHelperItem.Attributes -band [IO.FileAttributes]::ReparsePoint)
+) {
+    throw 'TASK019_WINDOWS_NATIVE_IDENTITY_HELPER_REJECTED'
+}
+try {
+    $nativeIdentityHelperSource = [Text.UTF8Encoding]::new($false, $true).GetString(
+        [IO.File]::ReadAllBytes($nativeIdentityHelperItem.FullName)
+    )
+    . ([scriptblock]::Create($nativeIdentityHelperSource))
+    Initialize-LatticeWindowsNativePathIdentity
+}
+catch {
+    throw 'TASK019_WINDOWS_NATIVE_IDENTITY_HELPER_REJECTED'
+}
 
 $postgresBin = 'C:\Program Files\PostgreSQL\17\bin'
 $requiredExecutables = @(
@@ -154,6 +184,96 @@ function Get-LatticeFullChainAcceptanceHookPath {
     return $expectedPath
 }
 
+function Test-NoReparseTree {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction SilentlyContinue
+    if (
+        $null -eq $rootItem -or
+        -not $rootItem.PSIsContainer -or
+        -not ($rootItem -is [System.IO.DirectoryInfo]) -or
+        ($rootItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+    ) {
+        return $false
+    }
+    $pending = [Collections.Generic.Queue[System.IO.DirectoryInfo]]::new()
+    $pending.Enqueue($rootItem)
+    try {
+        while ($pending.Count -gt 0) {
+            $directory = $pending.Dequeue()
+            foreach ($item in $directory.EnumerateFileSystemInfos()) {
+                if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    return $false
+                }
+                if ($item -is [System.IO.DirectoryInfo]) {
+                    $pending.Enqueue($item)
+                }
+            }
+        }
+    }
+    catch {
+        return $false
+    }
+    return $true
+}
+
+function Remove-Task038DisposableCodexAuth {
+    param(
+        [Parameter(Mandatory = $true)][string]$ClusterRoot,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot
+    )
+
+    $canonicalCluster = Get-CanonicalPath -Path $ClusterRoot
+    $codexHomePath = Get-CanonicalPath -Path (Join-Path $canonicalCluster 'task038-tunnel-codex-home')
+    Assert-NoReparseAncestor -Path $codexHomePath -Boundary $RepositoryRoot
+    $homeItem = Get-Item -LiteralPath $codexHomePath -Force -ErrorAction SilentlyContinue
+    if ($null -eq $homeItem) { return }
+    if (
+        -not $homeItem.PSIsContainer -or
+        -not ($homeItem -is [System.IO.DirectoryInfo]) -or
+        ($homeItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
+        -not (Test-ExactPath -Actual (Split-Path -Parent $codexHomePath) -Expected $canonicalCluster)
+    ) {
+        throw 'TASK038_TUNNEL_CODEX_AUTH_CLEANUP_REJECTED'
+    }
+    $homeMarker = Join-Path $codexHomePath '.lattice-codex-home-v1'
+    $ownerMarker = Join-Path $codexHomePath '.lattice-task038-tunnel-owner-v1'
+    foreach ($marker in @($homeMarker, $ownerMarker)) {
+        $markerItem = Get-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+        if (
+            $null -eq $markerItem -or
+            $markerItem.PSIsContainer -or
+            -not ($markerItem -is [System.IO.FileInfo]) -or
+            ($markerItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+        ) {
+            throw 'TASK038_TUNNEL_CODEX_AUTH_CLEANUP_REJECTED'
+        }
+    }
+    if (
+        [IO.File]::ReadAllText($homeMarker, [Text.Encoding]::UTF8) -cne "lattice.codex-home.v1`n" -or
+        [IO.File]::ReadAllText($ownerMarker, [Text.Encoding]::UTF8) -cnotmatch
+            '^lattice\.task038-tunnel-home\.v1:[0-9a-f]{32}\r?\n$'
+    ) {
+        throw 'TASK038_TUNNEL_CODEX_AUTH_CLEANUP_REJECTED'
+    }
+    $authPath = Join-Path $codexHomePath 'auth.json'
+    if (-not (Test-Path -LiteralPath $authPath)) { return }
+    Assert-NoReparseAncestor -Path $authPath -Boundary $RepositoryRoot
+    $authItem = Get-Item -LiteralPath $authPath -Force -ErrorAction SilentlyContinue
+    if (
+        $null -eq $authItem -or
+        $authItem.PSIsContainer -or
+        -not ($authItem -is [System.IO.FileInfo]) -or
+        ($authItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+    ) {
+        throw 'TASK038_TUNNEL_CODEX_AUTH_CLEANUP_REJECTED'
+    }
+    [IO.File]::Delete($authPath)
+    if (Test-Path -LiteralPath $authPath) {
+        throw 'TASK038_TUNNEL_CODEX_AUTH_CLEANUP_REJECTED'
+    }
+}
+
 function Get-LatticeTask038AcceptanceHookPath {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptDirectory,
@@ -176,6 +296,28 @@ function Get-LatticeTask038AcceptanceHookPath {
         -not (Test-ExactPath -Actual $item.FullName -Expected $expectedPath)
     ) {
         throw 'TASK038_ACCEPTANCE_HOOK_NOT_REGULAR_LEAF'
+    }
+    return $expectedPath
+}
+
+function Get-LatticeTask038TunnelHookPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptDirectory,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot
+    )
+
+    $canonicalScriptDirectory = Get-CanonicalPath -Path $ScriptDirectory
+    $expectedPath = Get-CanonicalPath -Path (Join-Path $canonicalScriptDirectory 'start-chatgpt-mcp-tunnel.ps1')
+    Assert-NoReparseAncestor -Path $expectedPath -Boundary $RepositoryRoot
+    $item = Get-Item -LiteralPath $expectedPath -Force -ErrorAction SilentlyContinue
+    if (
+        $null -eq $item -or $item.PSIsContainer -or
+        -not ($item -is [System.IO.FileInfo]) -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
+        -not (Test-Path -LiteralPath $expectedPath -PathType Leaf) -or
+        -not (Test-ExactPath -Actual $item.FullName -Expected $expectedPath)
+    ) {
+        throw 'TASK038_TUNNEL_HOOK_NOT_REGULAR_LEAF'
     }
     return $expectedPath
 }
@@ -631,13 +773,312 @@ function Stop-TestCluster {
     return (Test-ClusterStopped -PgCtl $PgCtl -DataDirectory $DataDirectory)
 }
 
+# Complexity justification: pg_ctl and tunnel-client create descendants whose lifetime can
+# outlive a forcibly terminated harness, so the harness finally block is not sufficient.
+# A detached tunnel runtime was rejected because it cannot preserve the same disposable
+# PostgreSQL truth across the single authorized reconnect; a Rust async worker was rejected
+# because it would add a protocol/state-machine change. This narrow watchdog owns cleanup
+# only for the exact fresh cluster marker and exact pinned tunnel-client process tree.
+function Start-Task038TunnelWatchdog {
+    param(
+        [Parameter(Mandatory = $true)][string]$PowerShell,
+        [Parameter(Mandatory = $true)][string]$TunnelClient,
+        [Parameter(Mandatory = $true)][string]$PgCtl,
+        [Parameter(Mandatory = $true)][string]$ClusterRoot,
+        [Parameter(Mandatory = $true)][string]$DataDirectory,
+        [Parameter(Mandatory = $true)][string]$MarkerPath,
+        [Parameter(Mandatory = $true)][string]$RepositoryTarget,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$RunId,
+        [Parameter(Mandatory = $true)][int]$ParentProcessId,
+        [Parameter(Mandatory = $true)][AllowNull()]$ContainmentSnapshot
+    )
+
+    Assert-LatticeWindowsNativeContainmentSnapshot `
+        -Snapshot $ContainmentSnapshot `
+        -FailureCode 'TASK038_TUNNEL_WATCHDOG_CONTAINMENT_REJECTED'
+    $source = $nativeIdentityHelperSource + [Environment]::NewLine + @'
+$ErrorActionPreference = 'SilentlyContinue'
+$parentPid = [int][Environment]::GetEnvironmentVariable('TASK038_WATCHDOG_PARENT_PID', 'Process')
+$tunnelClient = [IO.Path]::GetFullPath([Environment]::GetEnvironmentVariable('TASK038_WATCHDOG_TUNNEL_CLIENT', 'Process'))
+$pgCtl = [Environment]::GetEnvironmentVariable('TASK038_WATCHDOG_PG_CTL', 'Process')
+$clusterRoot = [IO.Path]::GetFullPath([Environment]::GetEnvironmentVariable('TASK038_WATCHDOG_CLUSTER_ROOT', 'Process'))
+$dataDirectory = [IO.Path]::GetFullPath([Environment]::GetEnvironmentVariable('TASK038_WATCHDOG_DATA', 'Process'))
+$markerPath = [IO.Path]::GetFullPath([Environment]::GetEnvironmentVariable('TASK038_WATCHDOG_MARKER', 'Process'))
+$repositoryTarget = [IO.Path]::GetFullPath([Environment]::GetEnvironmentVariable('TASK038_WATCHDOG_REPOSITORY_TARGET', 'Process'))
+$runId = [Environment]::GetEnvironmentVariable('TASK038_WATCHDOG_RUN_ID', 'Process')
+$containmentBase64 = [Environment]::GetEnvironmentVariable('TASK038_WATCHDOG_CONTAINMENT_B64', 'Process')
+try {
+    $containment = [Text.UTF8Encoding]::new($false, $true).GetString(
+        [Convert]::FromBase64String($containmentBase64)
+    ) | ConvertFrom-Json
+    Assert-LatticeWindowsNativeContainmentSnapshot `
+        -Snapshot $containment `
+        -FailureCode 'TASK038_TUNNEL_WATCHDOG_CONTAINMENT_REJECTED'
+}
+catch { exit 0 }
+$parentStartTimeUtcTicks = [long][Environment]::GetEnvironmentVariable('TASK038_WATCHDOG_PARENT_START_UTC_TICKS', 'Process')
+while ($true) {
+    $parent = Get-Process -Id $parentPid -ErrorAction SilentlyContinue
+    if ($null -eq $parent) { break }
+    try {
+        if ($parent.StartTime.ToUniversalTime().Ticks -ne $parentStartTimeUtcTicks) { break }
+    }
+    catch { break }
+    Start-Sleep -Seconds 2
+}
+if (-not (Test-LatticeWindowsNativeContainmentSnapshot -Snapshot $containment)) { exit 0 }
+if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { exit 0 }
+try { $marker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { exit 0 }
+$expectedParent = [IO.Path]::GetFullPath((Join-Path $repositoryTarget 'task019-postgres'))
+if (
+    [string]$marker.kind -cne 'LATTICE_TASK019_DISPOSABLE_POSTGRES_V1' -or
+    [string]$marker.run_id -cne $runId -or
+    -not [string]::Equals([IO.Path]::GetFullPath([string]$marker.root), $clusterRoot, [StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals([IO.Path]::GetFullPath([string]$marker.repository_target), $repositoryTarget, [StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals([IO.Path]::GetFullPath((Split-Path -Parent $clusterRoot)), $expectedParent, [StringComparison]::OrdinalIgnoreCase)
+) { exit 0 }
+function Test-WatchdogNoReparseTree {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction SilentlyContinue
+    if (
+        $null -eq $rootItem -or
+        -not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)
+    ) { return $false }
+    $pending = [Collections.Generic.Queue[IO.DirectoryInfo]]::new()
+    $pending.Enqueue($rootItem)
+    try {
+        while ($pending.Count -gt 0) {
+            foreach ($item in $pending.Dequeue().EnumerateFileSystemInfos()) {
+                if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+                if ($item -is [IO.DirectoryInfo]) { $pending.Enqueue($item) }
+            }
+        }
+    }
+    catch { return $false }
+    return $true
+}
+$pidRoot = Join-Path $clusterRoot 'task038-tunnel-pids'
+$allTreesStopped = $true
+# The managed launcher creates the tunnel root suspended, assigns it to a
+# KILL_ON_JOB_CLOSE Job Object, and only then resumes it. Give Windows a bounded
+# interval to close that parent-owned job before taking the cleanup snapshot.
+Start-Sleep -Seconds 2
+$processRows = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+$candidatePids = [Collections.Generic.HashSet[int]]::new()
+if ($processRows.Count -lt 1) {
+    $allTreesStopped = $false
+}
+if (Test-Path -LiteralPath $pidRoot -PathType Container) {
+    $pidFiles = @(Get-ChildItem -LiteralPath $pidRoot -Filter 'task038-tunnel-session-*.pid' -File -Force -ErrorAction SilentlyContinue)
+    foreach ($pidFile in $pidFiles) {
+        $tunnelPid = 0
+        $pidText = ''
+        try { $pidText = [IO.File]::ReadAllText($pidFile.FullName).Trim() } catch {
+            $allTreesStopped = $false
+            continue
+        }
+        if (-not [int]::TryParse($pidText, [ref]$tunnelPid) -or $tunnelPid -lt 1) {
+            $allTreesStopped = $false
+            continue
+        }
+        [void]$candidatePids.Add($tunnelPid)
+    }
+}
+else {
+    $allTreesStopped = $false
+}
+foreach ($processRow in $processRows) {
+    if (
+        [int]$processRow.ParentProcessId -eq $parentPid -and
+        -not [string]::IsNullOrWhiteSpace([string]$processRow.ExecutablePath) -and
+        [string]::Equals([IO.Path]::GetFullPath([string]$processRow.ExecutablePath), $tunnelClient, [StringComparison]::OrdinalIgnoreCase)
+    ) {
+        [void]$candidatePids.Add([int]$processRow.ProcessId)
+    }
+}
+# With a valid process snapshot, zero candidates is a proved NOT_STARTED or
+# already-STOPPED session. Any root created before Job assignment still retains
+# the dead harness PID as ParentProcessId and is added above by exact executable
+# path; once assigned, parent death closes the Job and reaps the full tree.
+foreach ($tunnelPid in $candidatePids) {
+        $rootProcess = @($processRows | Where-Object { [int]$_.ProcessId -eq $tunnelPid })
+        if ($rootProcess.Count -eq 0) {
+            if (@($processRows | Where-Object { [int]$_.ParentProcessId -eq $tunnelPid }).Count -gt 0) {
+                $allTreesStopped = $false
+            }
+            continue
+        }
+        if (
+            $rootProcess.Count -ne 1 -or
+            [string]::IsNullOrWhiteSpace([string]$rootProcess[0].ExecutablePath) -or
+            -not [string]::Equals([IO.Path]::GetFullPath([string]$rootProcess[0].ExecutablePath), $tunnelClient, [StringComparison]::OrdinalIgnoreCase)
+        ) {
+            $allTreesStopped = $false
+            continue
+        }
+        $descendantIds = [Collections.Generic.List[int]]::new()
+        $frontier = @($tunnelPid)
+        while ($frontier.Count -gt 0) {
+            $next = [Collections.Generic.List[int]]::new()
+            foreach ($processRow in $processRows) {
+                if (
+                    [int]$processRow.ParentProcessId -in $frontier -and
+                    -not $descendantIds.Contains([int]$processRow.ProcessId)
+                ) {
+                    $descendantIds.Add([int]$processRow.ProcessId)
+                    $next.Add([int]$processRow.ProcessId)
+                }
+            }
+            $frontier = @($next)
+        }
+        Stop-Process -Id $tunnelPid -Force -ErrorAction SilentlyContinue
+        foreach ($descendantId in $descendantIds) {
+            Stop-Process -Id $descendantId -Force -ErrorAction SilentlyContinue
+        }
+        $remainingIds = @($tunnelPid) + @($descendantIds)
+        $stopDeadline = [DateTime]::UtcNow.AddSeconds(15)
+        do {
+            $remaining = @($remainingIds | Where-Object {
+                $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue)
+            })
+            if ($remaining.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 100
+        } while ([DateTime]::UtcNow -lt $stopDeadline)
+        if ($remaining.Count -ne 0) {
+            $allTreesStopped = $false
+        }
+}
+if ($allTreesStopped) {
+    $afterRows = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    if ($afterRows.Count -lt 1) {
+        $allTreesStopped = $false
+    }
+    else {
+        foreach ($processRow in $afterRows) {
+            if (
+                [int]$processRow.ParentProcessId -eq $parentPid -and
+                -not [string]::IsNullOrWhiteSpace([string]$processRow.ExecutablePath) -and
+                [string]::Equals([IO.Path]::GetFullPath([string]$processRow.ExecutablePath), $tunnelClient, [StringComparison]::OrdinalIgnoreCase)
+            ) {
+                $allTreesStopped = $false
+            }
+        }
+    }
+}
+$clusterStopped = -not (Test-Path -LiteralPath $dataDirectory -PathType Container)
+if ($allTreesStopped -and -not $clusterStopped) {
+    & $pgCtl '-D' $dataDirectory '-m' 'fast' '-w' '-t' '30' 'stop' *> $null
+    & $pgCtl '-D' $dataDirectory 'status' *> $null
+    $clusterStopped = ($LASTEXITCODE -eq 3)
+}
+if ($allTreesStopped -and -not (Test-LatticeWindowsNativeContainmentSnapshot -Snapshot $containment)) {
+    $allTreesStopped = $false
+}
+$codexHome = Join-Path $clusterRoot 'task038-tunnel-codex-home'
+if (Test-Path -LiteralPath $codexHome) {
+    $homeItem = Get-Item -LiteralPath $codexHome -Force -ErrorAction SilentlyContinue
+    $homeMarker = Join-Path $codexHome '.lattice-codex-home-v1'
+    $ownerMarker = Join-Path $codexHome '.lattice-task038-tunnel-owner-v1'
+    $homeMarkerItem = Get-Item -LiteralPath $homeMarker -Force -ErrorAction SilentlyContinue
+    $ownerMarkerItem = Get-Item -LiteralPath $ownerMarker -Force -ErrorAction SilentlyContinue
+    if (
+        $null -eq $homeItem -or -not $homeItem.PSIsContainer -or
+        ($homeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        $null -eq $homeMarkerItem -or $homeMarkerItem.PSIsContainer -or
+        ($homeMarkerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        $null -eq $ownerMarkerItem -or $ownerMarkerItem.PSIsContainer -or
+        ($ownerMarkerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        [IO.File]::ReadAllText($homeMarker, [Text.Encoding]::UTF8) -cne "lattice.codex-home.v1`n" -or
+        [IO.File]::ReadAllText($ownerMarker, [Text.Encoding]::UTF8) -cnotmatch
+            '^lattice\.task038-tunnel-home\.v1:[0-9a-f]{32}\r?\n$'
+    ) {
+        $allTreesStopped = $false
+    }
+    else {
+        $authPath = Join-Path $codexHome 'auth.json'
+        if (Test-Path -LiteralPath $authPath) {
+            $authItem = Get-Item -LiteralPath $authPath -Force -ErrorAction SilentlyContinue
+            if (
+                $null -eq $authItem -or $authItem.PSIsContainer -or
+                ($authItem.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            ) {
+                $allTreesStopped = $false
+            }
+            else {
+                [IO.File]::Delete($authPath)
+                if (Test-Path -LiteralPath $authPath) { $allTreesStopped = $false }
+            }
+        }
+    }
+}
+$tunnelRuntimeRoot = Join-Path $clusterRoot 'task038-tunnel-runtime'
+if (
+    $allTreesStopped -and
+    (Test-LatticeWindowsNativeContainmentSnapshot -Snapshot $containment) -and
+    (Test-Path -LiteralPath $tunnelRuntimeRoot -PathType Container) -and
+    (Test-WatchdogNoReparseTree -Root $tunnelRuntimeRoot)
+) {
+    Remove-Item -LiteralPath $tunnelRuntimeRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+if (
+    $allTreesStopped -and $clusterStopped -and
+    (Test-LatticeWindowsNativeContainmentSnapshot -Snapshot $containment) -and
+    (Test-Path -LiteralPath $clusterRoot -PathType Container) -and
+    (Test-WatchdogNoReparseTree -Root $clusterRoot)
+) {
+    Remove-Item -LiteralPath $clusterRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+'@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($source))
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $PowerShell
+    $startInfo.Arguments = ('-NoProfile -NonInteractive -EncodedCommand ' + $encoded)
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    foreach ($name in @($startInfo.EnvironmentVariables.Keys)) {
+        if (
+            [string]$name -like 'LATTICE_*' -or
+            [string]$name -eq 'CONTROL_PLANE_API_KEY' -or
+            [string]$name -eq 'PGPASSWORD' -or
+            [string]$name -match '(?i)(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|DSN)'
+        ) {
+            $startInfo.EnvironmentVariables.Remove([string]$name)
+        }
+    }
+    $startInfo.EnvironmentVariables['TASK038_WATCHDOG_PARENT_PID'] = [string]$ParentProcessId
+    $startInfo.EnvironmentVariables['TASK038_WATCHDOG_PARENT_START_UTC_TICKS'] = [string](Get-Process -Id $ParentProcessId -ErrorAction Stop).StartTime.ToUniversalTime().Ticks
+    $startInfo.EnvironmentVariables['TASK038_WATCHDOG_TUNNEL_CLIENT'] = [IO.Path]::GetFullPath($TunnelClient)
+    $startInfo.EnvironmentVariables['TASK038_WATCHDOG_PG_CTL'] = $PgCtl
+    $startInfo.EnvironmentVariables['TASK038_WATCHDOG_CLUSTER_ROOT'] = $ClusterRoot
+    $startInfo.EnvironmentVariables['TASK038_WATCHDOG_DATA'] = $DataDirectory
+    $startInfo.EnvironmentVariables['TASK038_WATCHDOG_MARKER'] = $MarkerPath
+    $startInfo.EnvironmentVariables['TASK038_WATCHDOG_REPOSITORY_TARGET'] = $RepositoryTarget
+    $startInfo.EnvironmentVariables['TASK038_WATCHDOG_RUN_ID'] = $RunId
+    $containmentJson = $ContainmentSnapshot | ConvertTo-Json -Depth 5 -Compress
+    $startInfo.EnvironmentVariables['TASK038_WATCHDOG_CONTAINMENT_B64'] = [Convert]::ToBase64String(
+        [Text.UTF8Encoding]::new($false).GetBytes($containmentJson)
+    )
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+        $process.Dispose()
+        throw 'TASK038_TUNNEL_WATCHDOG_START_REJECTED'
+    }
+    return $process
+}
+
 function Remove-VerifiedSafeServerLog {
     param(
         [Parameter(Mandatory = $true)][string]$LogPath,
         [Parameter(Mandatory = $true)][string]$RepositoryRoot,
-        [Parameter(Mandatory = $true)][string]$OneTimePassword
+        [Parameter(Mandatory = $true)][string]$OneTimePassword,
+        [Parameter(Mandatory = $true)]$ContainmentSnapshot
     )
 
+    Assert-LatticeWindowsNativeContainmentSnapshot `
+        -Snapshot $ContainmentSnapshot `
+        -FailureCode 'TASK019_CLEANUP_CONTAINMENT_REJECTED'
     if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) {
         return
     }
@@ -690,8 +1131,14 @@ function Remove-VerifiedSafeServerLog {
 }
 
 function Remove-HarnessOutputFiles {
-    param([Parameter(Mandatory = $true)][string]$Root)
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)]$ContainmentSnapshot
+    )
 
+    Assert-LatticeWindowsNativeContainmentSnapshot `
+        -Snapshot $ContainmentSnapshot `
+        -FailureCode 'TASK019_CLEANUP_CONTAINMENT_REJECTED'
     foreach ($outputPath in @(
         (Join-Path $Root '.native-stdout.log'),
         (Join-Path $Root '.native-stderr.log'),
@@ -712,7 +1159,8 @@ function Test-SafeCleanupTarget {
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$ExpectedParent,
         [Parameter(Mandatory = $true)][string]$RepositoryTarget,
-        [Parameter(Mandatory = $true)][string]$RunId
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)]$ContainmentSnapshot
     )
 
     if ($RunId -notmatch '^[0-9a-f]{32}$') {
@@ -752,6 +1200,15 @@ function Test-SafeCleanupTarget {
     }
 
     $markerPath = Join-Path $canonicalRoot $markerName
+    if ($null -eq $ContainmentSnapshot) { return $false }
+    if (
+        -not (Test-ExactPath -Actual ([string]$ContainmentSnapshot.parent_path) -Expected $canonicalParent) -or
+        -not (Test-ExactPath -Actual ([string]$ContainmentSnapshot.root_path) -Expected $canonicalRoot) -or
+        -not (Test-ExactPath -Actual ([string]$ContainmentSnapshot.marker_path) -Expected $markerPath) -or
+        -not (Test-LatticeWindowsNativeContainmentSnapshot -Snapshot $ContainmentSnapshot)
+    ) {
+        return $false
+    }
     $markerItem = Get-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
     if ($null -eq $markerItem -or ($markerItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
         return $false
@@ -776,7 +1233,8 @@ function Test-SafeCleanupTarget {
         [string]$marker.run_id -eq $RunId -and
         (Test-ExactPath -Actual ([string]$marker.root) -Expected $canonicalRoot) -and
         (Test-ExactPath -Actual ([string]$marker.parent) -Expected $canonicalParent) -and
-        (Test-ExactPath -Actual ([string]$marker.repository_target) -Expected $canonicalRepositoryTarget)
+        (Test-ExactPath -Actual ([string]$marker.repository_target) -Expected $canonicalRepositoryTarget) -and
+        (Test-NoReparseTree -Root $canonicalRoot)
     )
 }
 
@@ -798,8 +1256,16 @@ $originalEnvironment = @{}
 $deliveryHookPath = $null
 $fullChainHookPath = $null
 $task038HookPath = $null
+$task038TunnelHookPath = $null
+$task038TunnelWatchdog = $null
+$cleanupContainment = $null
 
-$selectedHookCount = @($RunLatticeDeliveryHook, $RunFullChainAcceptanceHook, $RunTask038AcceptanceHook) |
+$selectedHookCount = @(
+    $RunLatticeDeliveryHook,
+    $RunFullChainAcceptanceHook,
+    $RunTask038AcceptanceHook,
+    $RunTask038TunnelHook
+) |
     Where-Object { [bool]$_ }
 if (@($selectedHookCount).Count -gt 1) {
     throw 'TASK019_HOOK_MODE_REJECTED'
@@ -810,11 +1276,26 @@ if ($RunLatticeDeliveryHook) {
 if ($RunFullChainAcceptanceHook) {
     $fullChainHookPath = Get-LatticeFullChainAcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
 }
-if ($RunTask038AcceptanceHook) {
+if ($RunTask038AcceptanceHook -or $RunTask038TunnelHook) {
     if ([string]::IsNullOrWhiteSpace($Task038OfficialCodexExecutable) -or [string]::IsNullOrWhiteSpace($Task038CodexAuthHome)) {
         throw 'TASK038_ACCEPTANCE_INPUT_REJECTED'
     }
-    $task038HookPath = Get-LatticeTask038AcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+    if (
+        $RunTask038TunnelHook -and
+        ([string]::IsNullOrWhiteSpace($Task038TunnelClientExecutable) -or
+         [string]::IsNullOrWhiteSpace($Task038TunnelProfileDirectory) -or
+         [string]::IsNullOrWhiteSpace($Task038EvidenceDirectory) -or
+         [string]::IsNullOrWhiteSpace($Task038CanonicalAcceptanceReceipt) -or
+         [string]::IsNullOrWhiteSpace($Task038CanonicalAcceptanceReceiptSha256))
+    ) {
+        throw 'TASK038_TUNNEL_RUNTIME_INPUT_REJECTED'
+    }
+    if ($RunTask038TunnelHook) {
+        $task038TunnelHookPath = Get-LatticeTask038TunnelHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+    }
+    else {
+        $task038HookPath = Get-LatticeTask038AcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+    }
 }
 
 Invoke-HarnessSelfTest
@@ -864,6 +1345,10 @@ try {
         postgres_version = $expectedPostgresVersion
     }
     $marker | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $clusterRoot $markerName) -Encoding utf8
+    $cleanupContainment = New-LatticeWindowsNativeContainmentSnapshot `
+        -ParentPath $clusterParent `
+        -RootPath $clusterRoot `
+        -MarkerPath (Join-Path $clusterRoot $markerName)
 
     $oneTimePassword = New-OneTimePassword
     try {
@@ -920,8 +1405,8 @@ try {
         throw 'Could not prove the disposable PostgreSQL cluster stopped after the initial phase.'
     }
     $clusterStarted = $false
-    Remove-HarnessOutputFiles -Root $clusterRoot
-    Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword
+    Remove-HarnessOutputFiles -Root $clusterRoot -ContainmentSnapshot $cleanupContainment
+    Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword -ContainmentSnapshot $cleanupContainment
 
     $clusterStarted = $true
     $null = Invoke-NativeChecked -Executable $pgCtl -Arguments @(
@@ -944,8 +1429,8 @@ try {
             throw 'Could not prove the disposable PostgreSQL cluster stopped after the delivery-run phase.'
         }
         $clusterStarted = $false
-        Remove-HarnessOutputFiles -Root $clusterRoot
-        Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword
+        Remove-HarnessOutputFiles -Root $clusterRoot -ContainmentSnapshot $cleanupContainment
+        Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword -ContainmentSnapshot $cleanupContainment
 
         $clusterStarted = $true
         $null = Invoke-NativeChecked -Executable $pgCtl -Arguments @(
@@ -970,8 +1455,8 @@ try {
             throw 'Could not prove the disposable PostgreSQL cluster stopped after the full-chain pre-status phase.'
         }
         $clusterStarted = $false
-        Remove-HarnessOutputFiles -Root $clusterRoot
-        Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword
+        Remove-HarnessOutputFiles -Root $clusterRoot -ContainmentSnapshot $cleanupContainment
+        Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword -ContainmentSnapshot $cleanupContainment
 
         $clusterStarted = $true
         $null = Invoke-NativeChecked -Executable $pgCtl -Arguments @(
@@ -992,8 +1477,8 @@ try {
             throw 'Could not prove the disposable PostgreSQL cluster stopped after the full-chain run phase.'
         }
         $clusterStarted = $false
-        Remove-HarnessOutputFiles -Root $clusterRoot
-        Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword
+        Remove-HarnessOutputFiles -Root $clusterRoot -ContainmentSnapshot $cleanupContainment
+        Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword -ContainmentSnapshot $cleanupContainment
 
         $clusterStarted = $true
         $null = Invoke-NativeChecked -Executable $pgCtl -Arguments @(
@@ -1010,7 +1495,7 @@ try {
         $fullChainHookPath = Get-LatticeFullChainAcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
         & $fullChainHookPath -InternalPhase 'FullChainStatus'
     }
-    elseif ($RunTask038AcceptanceHook) {
+    elseif ($RunTask038AcceptanceHook -or $RunTask038TunnelHook) {
         $task038HookPath = Get-LatticeTask038AcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
         $task038DatabaseName = 'lattice_task019_' + $runId.Substring(0, 8) + '_base'
         $encodedPassword = [Uri]::EscapeDataString($oneTimePassword)
@@ -1023,20 +1508,48 @@ try {
         foreach ($entry in $task038Environment.GetEnumerator()) {
             [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
         }
-        & $task038HookPath `
-            -OfficialCodexExecutable $Task038OfficialCodexExecutable `
-            -CodexAuthHome $Task038CodexAuthHome `
-            -PostgresPort $port `
-            -PostgresRunId $runId `
-            -PsqlExecutable (Join-Path $postgresBin 'psql.exe') `
-            -PostgresDataDirectory $dataDirectory
-        Invoke-StoreProfileLiveGate `
-            -Cargo $cargoCommand.Source `
-            -RepositoryRoot $repositoryRoot `
-            -ExpectedProfile 'V3_MEMORY_V2_WRITER_LEASE_V1' `
-            -Port $port `
-            -Password $oneTimePassword `
-            -RunId $runId
+        if ($RunTask038TunnelHook) {
+            $task038TunnelWatchdog = Start-Task038TunnelWatchdog `
+                -PowerShell (Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)) 'System32\WindowsPowerShell\v1.0\powershell.exe') `
+                -TunnelClient $Task038TunnelClientExecutable `
+                -PgCtl $pgCtl `
+                -ClusterRoot $clusterRoot `
+                -DataDirectory $dataDirectory `
+                -MarkerPath (Join-Path $clusterRoot $markerName) `
+                -RepositoryTarget $repositoryTarget `
+                -RunId $runId `
+                -ParentProcessId $PID `
+                -ContainmentSnapshot $cleanupContainment
+            $task038TunnelHookPath = Get-LatticeTask038TunnelHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+            & $task038TunnelHookPath `
+                -Mode ManagedRun `
+                -TunnelClientExecutable $Task038TunnelClientExecutable `
+                -ProfileDirectory $Task038TunnelProfileDirectory `
+                -ProfileName $Task038TunnelProfileName `
+                -OfficialCodexExecutable $Task038OfficialCodexExecutable `
+                -CodexAuthHome $Task038CodexAuthHome `
+                -PsqlExecutable (Join-Path $postgresBin 'psql.exe') `
+                -PostgresDataDirectory $dataDirectory `
+                -ManagedEvidenceDirectory $Task038EvidenceDirectory `
+                -CanonicalAcceptanceReceipt $Task038CanonicalAcceptanceReceipt `
+                -CanonicalAcceptanceReceiptSha256 $Task038CanonicalAcceptanceReceiptSha256
+        }
+        else {
+            & $task038HookPath `
+                -OfficialCodexExecutable $Task038OfficialCodexExecutable `
+                -CodexAuthHome $Task038CodexAuthHome `
+                -PostgresPort $port `
+                -PostgresRunId $runId `
+                -PsqlExecutable (Join-Path $postgresBin 'psql.exe') `
+                -PostgresDataDirectory $dataDirectory
+            Invoke-StoreProfileLiveGate `
+                -Cargo $cargoCommand.Source `
+                -RepositoryRoot $repositoryRoot `
+                -ExpectedProfile 'V3_MEMORY_V2_WRITER_LEASE_V1' `
+                -Port $port `
+                -Password $oneTimePassword `
+                -RunId $runId
+        }
         foreach ($entry in $task038Environment.GetEnumerator()) {
             [Environment]::SetEnvironmentVariable([string]$entry.Key, $originalEnvironment[[string]$entry.Key], 'Process')
         }
@@ -1052,6 +1565,14 @@ finally {
         if (Test-Path -LiteralPath $passwordFile) {
             Remove-Item -LiteralPath $passwordFile -Force -ErrorAction SilentlyContinue
         }
+        if (Test-Path -LiteralPath $clusterRoot -PathType Container) {
+            Assert-LatticeWindowsNativeContainmentSnapshot `
+                -Snapshot $cleanupContainment `
+                -FailureCode 'TASK019_CLEANUP_CONTAINMENT_REJECTED'
+            Remove-Task038DisposableCodexAuth `
+                -ClusterRoot $clusterRoot `
+                -RepositoryRoot $repositoryRoot
+        }
         if ($clusterStarted) {
             if (-not (Stop-TestCluster -PgCtl $pgCtl -DataDirectory $dataDirectory)) {
                 throw "Disposable cluster could not be proved stopped; preserving $clusterRoot"
@@ -1062,12 +1583,19 @@ finally {
             throw "Disposable cluster status is not safely stopped; preserving $clusterRoot"
         }
 
-        Remove-HarnessOutputFiles -Root $clusterRoot
-        Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword
+        if (Test-Path -LiteralPath $clusterRoot -PathType Container) {
+            Remove-HarnessOutputFiles -Root $clusterRoot -ContainmentSnapshot $cleanupContainment
+            Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword -ContainmentSnapshot $cleanupContainment
+        }
         $oneTimePassword = $null
 
         if (Test-Path -LiteralPath $clusterRoot) {
-            $cleanupTargetIsExact = Test-SafeCleanupTarget -Root $clusterRoot -ExpectedParent $clusterParent -RepositoryTarget $repositoryTarget -RunId $runId
+            $cleanupTargetIsExact = Test-SafeCleanupTarget `
+                -Root $clusterRoot `
+                -ExpectedParent $clusterParent `
+                -RepositoryTarget $repositoryTarget `
+                -RunId $runId `
+                -ContainmentSnapshot $cleanupContainment
             if (-not $cleanupTargetIsExact) {
                 throw "Disposable cluster cleanup gate did not pass; preserving $clusterRoot"
             }
@@ -1078,6 +1606,19 @@ finally {
         }
     }
     finally {
+        if ($null -ne $task038TunnelWatchdog) {
+            try {
+                if (-not $task038TunnelWatchdog.HasExited) {
+                    $task038TunnelWatchdog.Kill()
+                }
+                if (-not $task038TunnelWatchdog.WaitForExit(5000)) {
+                    throw 'TASK038_TUNNEL_WATCHDOG_NOT_REAPED'
+                }
+            }
+            finally {
+                $task038TunnelWatchdog.Dispose()
+            }
+        }
         $installedAfter = Get-InstalledPostgresSnapshot -PgIsReady $pgIsReady
         if (-not (Test-SameInstalledPostgresSnapshot -Before $installedBefore -After $installedAfter)) {
             throw 'Installed postgresql-x64-17 service or its read-only 127.0.0.1:5432 readiness snapshot changed during the harness.'

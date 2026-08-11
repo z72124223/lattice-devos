@@ -71,6 +71,7 @@ pub(crate) fn scrub_protected_environment(command: &mut Command) {
         "GIT_ASKPASS",
         "SSH_ASKPASS",
         "LATTICE_TASK019_PASSWORD",
+        "CONTROL_PLANE_API_KEY",
     ] {
         command.env_remove(name);
     }
@@ -563,6 +564,7 @@ mod environment_tests {
             "PGPASSWORD",
             "DATABASE_URL",
             "API_KEY",
+            "CONTROL_PLANE_API_KEY",
             "TOKEN",
             "SECRET",
             "PASSWORD",
@@ -593,6 +595,7 @@ mod environment_tests {
         let mut command = Command::new("unused");
         command
             .env("LATTICE_TASK019_PASSWORD", "must-not-leak")
+            .env("CONTROL_PLANE_API_KEY", "must-not-leak")
             .env("LATTICE_SAFE_VALUE", "retained");
         scrub_protected_environment(&mut command);
 
@@ -604,7 +607,12 @@ mod environment_tests {
             .get_envs()
             .find(|(name, _)| *name == OsStr::new("LATTICE_SAFE_VALUE"))
             .expect("safe value remains explicit");
+        let control_plane_key = command
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new("CONTROL_PLANE_API_KEY"))
+            .expect("control-plane key removal is explicit");
         assert!(password.1.is_none());
+        assert!(control_plane_key.1.is_none());
         assert_eq!(safe.1, Some(OsStr::new("retained")));
     }
 }

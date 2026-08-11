@@ -5,8 +5,8 @@
   discovery and two-session invocation remain incomplete
 - Date: 2026-08-09
 - Decision owner: user
-- Related: SPEC-003 v4, ADR-005, ADR-006, ADR-012, ADR-015, ADR-019,
-  ADR-021, TASK-037, TASK-038
+- Related: SPEC-003 v5, ADR-005, ADR-006, ADR-012, ADR-015, ADR-019,
+  ADR-021, TASK-037, TASK-038; credential-boundary amendment 2026-08-11
 
 ## Context
 
@@ -28,6 +28,45 @@ Writer Lease. Formal Codex execution therefore requires a real lease repository
 and monotonic fencing evidence before the writer is reachable.
 
 ## Decision
+
+### Trusted LATTICE Runtime Credential Boundary
+
+The responsible user requires `CONTROL_PLANE_API_KEY` to remain visible to
+canonical `latticed`. Pinned tunnel-client 0.0.11 inherits its environment into
+the stdio child, so the selected design treats the digest-pinned tunnel-client
+and digest-pinned canonical `latticed` as one trusted Secure MCP Tunnel runtime
+boundary and keeps the direct profile command. The bearer grants
+control-plane authentication only; it grants no tool, workflow, task,
+database, writer, lease, approval, or persistence authority.
+
+The simpler direct child is preferred over a PowerShell scrub bridge, tunnel
+client fork, new protocol, second gateway, or Rust async worker. An
+intermediary would add a process, stdio proxy, failure mode, and digest without
+meeting the approved requirement that LATTICE receive the key. The existing
+closed-child environment mechanism remains mandatory after canonical
+`latticed`: the supervised Codex child and every workspace, Git object,
+evidence, diagnostic, log, result, database record, downstream adapter, and
+unrelated process must not receive the bearer. Tunnel-client, canonical
+`latticed`, and profile digests plus owned-tree cleanup remain mandatory.
+
+### Acceptance Before Optional Hardening
+
+The responsible user requires the smallest real controlled P0 to run before
+defense-in-depth or broader integration findings create new gates. A current
+demonstrated plaintext disclosure, out-of-scope data loss, unauthorized
+external action, or invalid result still stops the affected run. Other
+residual risks are reviewed after basic acceptance; a material tradeoff is
+recorded as `HUMAN_REVIEW_REQUIRED` and returned to the responsible user before
+engineering imposes a new gate or correction. This ordering does not merge,
+release, deploy, publicly expose, or promote the candidate.
+
+The responsible user separately selected OpenAI Platform `All` for the
+retained private P0 Runtime key and classified it as an operational project
+requirement. Agents therefore preserve that external permission and do not
+restrict, rotate, recreate, or delete the key absent a later explicit user
+instruction. The selection is not imported as LATTICE authority: the public
+surface remains the same four closed tools, and the bearer remains isolated to
+the trusted tunnel-client/canonical-`latticed` runtime boundary.
 
 ### One Gateway And Fixed Ingress Identity
 
