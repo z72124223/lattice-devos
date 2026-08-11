@@ -745,3 +745,11 @@
 - Process exited 0 with empty stderr; exact-four is true. No tools/call, submit, status, or delivery call occurred, and there was no retry after the actual process launch.
 - The withdrawn prelaunch failure receipt was never saved, committed, pushed, or archived. Central classified its zero-process lock incident as `PRELAUNCH_LOCAL_ORCHESTRATION_INCIDENT`.
 - Config, handoff, holder listener, binary, client, prepared config, protected script, and non-saver paths remained preserved. Stage 1 receipt commit `090408477ec4fb07a8709820b9ab4a61bb9d3d04` matched fresh live remote at `2026-08-11T22:34:35.5531614Z`; stage 2 confirmation commit `7ff0fad5679bcffa92cda2094b94d71f156c1e05` matched fresh live remote at `2026-08-11T22:35:17.5323918Z`. Central archived the worker at `2026-08-11T22:35:58.1904430Z`; outer saver state is `safe_to_archive=true`. Discovery-only PASS remains ready for a fresh verifier, P0 PASS remains unclaimed, and withdrawn receipt count remains zero.
+
+## Fresh live submit domain failure — `019ff2f8-0bd0-7a60-aca5-5a834033c708`
+
+- Verdict is `FRESH_SUBMIT_DOMAIN_FAILED`; current fresh-window live acceptance PASS is not claimed.
+- Preflight passed. One session initialized, negotiated protocol `2025-11-25`, observed exact-four tools, and made exactly one `lattice_task_submit` call with no retry.
+- Transport succeeded with `isError=false` and exact-six structured content, but domain `status=FAILED`, `task_state=FAILED`, and `result_digest=null`; acceptance gate C failed.
+- Conditional status session was not run because submit did not complete. No delivery calls, cleanup, rollback, holder/candidate stop, config change, PostgreSQL connection, port 64272 action, source edit, or protected-script access occurred.
+- Stage 1 and stage 2 saver equality are pending.
