@@ -451,3 +451,14 @@
 - Current action was only delivery of the cancellation receipt. `safe_to_archive=true`, `self_archived=false`.
 - Successor durable save: exact-path commit `93a3e36b517cda83f18efe7aa748dc3aa71194ed` (tree `faf627c7084bc042eeb3e3542d5aeeff2878a422`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:28:28.3579882Z`.
 - Archive boundary: central confirmed this redundant worker archived after final remote confirmation `0d7670f61d1cb8bce6a82eb50eaf6cae307d8cf2`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:29:22.8887630Z`. This does not authorize active switch-worker or live-state mutation.
+
+## Switch preserved; direct-stdio initialize timed out — `019ff1a6-4309-7122-bbe9-116c34307c81`
+
+- Result is exactly `FAILED_FIRST_REAL_FAILURE_CONFIG_SWITCH_PRESERVED`; readiness is false. Started `2026-08-11T16:27:24.0000000Z`, finished `2026-08-11T16:44:05.1384676Z`, elapsed `1001138 ms`.
+- Fixed failure is `LATTICE_P0_DISCOVERY_TIMEOUT` at `D_DIRECT_STDIO_INITIALIZE`: the exact `5ec06821...` binary received one initialize request but returned no stdout JSON within `30000 ms`. No initialized notification, tools/list, or tools/call message followed; retry count is `0`, and no rollback occurred.
+- Holder validation passed for `127.0.0.1:49156`, run `5b9a861ddd104146afa06fd40c051e46`, PID `29688`, TTL PID `3892`. At failure truth, `1216` seconds remained before `2026-08-11T17:04:01.3148589Z`.
+- Durable helper verification, command staging, PG binding, atomic config switch, and external handoff update succeeded. Current config SHA is `63881ec515b9a8f8959e0084c2ff9e249b9636ff648f2f0fc477571c8365b467`; current handoff status is `DISCOVERY_FAILED_CURRENT_CONFIG_ACTIVE` with readiness false.
+- Discovery truth: a new ephemeral, not-durably-identified direct-stdio session was used; PID was `NOT_DURABLY_CAPTURED`; request/response counts were initialize `1/0`, initialized notification `0`, tools/list `0/0`, tools/call `0`; stderr capture started but content was `NOT_CAPTURED_OR_PERSISTED_BEFORE_FAILURE`; exit code is `UNKNOWN_NOT_CAPTURED`; final process state is `NO_EXACT_5EC_BINARY_PROCESS_REMAINING`.
+- Boundary: no build/test, PG provision/restart/stop/kill/cleanup, old-holder/root/PID32132/64272 action, submit/status/delivery call, repo push by worker, saver-path edit by worker, rollback, merge/deploy/release/default-branch, TASK-037/GH-9/Hermes/reflection.
+- Next action: do not open a fresh verifier, roll back, or clean up. Any bounded initialize-timeout remediation must be separately authorized and preserve current config/holder truth without reusing failed artifacts.
+- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check.
