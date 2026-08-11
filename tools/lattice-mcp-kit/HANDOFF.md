@@ -2,7 +2,7 @@
 
 ## Status
 
-`NEEDS_REVIEW` — four earlier completed windows are saved on GitHub; a fifth read-only diagnostic receipt is recorded locally and awaits its first verified push. The overall GPT/Codex → LATTICE live goal remains active.
+`NEEDS_REVIEW` — all five completed windows in this batch are saved on GitHub and await central archival. The overall GPT/Codex → LATTICE live goal remains active.
 
 ## Objective and scope
 
@@ -17,6 +17,7 @@
 - Verified the asset commit has tree `6b4542a8eaa87cdd8aec079c58804ed051478486` and exactly five new paths below `tools/lattice-mcp-kit/direct-stdio/`.
 - Pushed the first durable ledger checkpoint `8d34d62cb43d82308ed13f1df7ead13802cb1685` to `origin/feature/p0-clean-seed-rebuild` and verified exact remote/local SHA equality at `2026-08-11T11:59:24.897Z`.
 - Recorded the read-only Canary FAILED diagnostic as a distinct fifth window: it confirmed the earlier known failure `CODEX_APP_SERVER_CODEX_HOME_OWNERSHIP_MISSING`; later `STOPPING / RECONCILIATION_REQUIRED` live state is explicitly not part of that diagnostic result.
+- Pushed the fifth window's first durable checkpoint `6b9e728dd52436ce43a1f711a576cd2e6b5c002c` and verified exact remote/local SHA equality at `2026-08-11T12:02:13.455Z`.
 - Preserved the unrelated modified `scripts/test-task038-four-tool-acceptance.ps1` without reading, editing, staging, resetting, or cleaning it.
 
 ## Files changed
@@ -35,7 +36,7 @@
 | Commit ancestry and exact asset paths | verified | `git merge-base --is-ancestor`; `git diff-tree` |
 | Local ledger/handoff commit | verified | `8d34d62cb43d82308ed13f1df7ead13802cb1685`; exact two-path staging only |
 | GitHub branch save | verified | `origin/feature/p0-clean-seed-rebuild` exactly matched `8d34d62cb43d82308ed13f1df7ead13802cb1685` |
-| Fifth-window first durable save | pending | current ledger/handoff confirmation commit and remote equality check |
+| Fifth-window first durable save | verified | `origin/feature/p0-clean-seed-rebuild` exactly matched `6b9e728dd52436ce43a1f711a576cd2e6b5c002c` |
 | Draft PR | follow-up, non-blocking | `gh` 2.97.0 is installed but unauthenticated |
 | Central archive request | pending | send only after remote SHA confirmation |
 
@@ -48,6 +49,8 @@
   - `git ls-remote --heads origin feature/p0-clean-seed-rebuild`: exit 0 with no matching ref before publication.
   - `git push -u origin feature/p0-clean-seed-rebuild`: exit 0; new branch created.
   - post-push `git ls-remote --heads origin feature/p0-clean-seed-rebuild`: exit 0; SHA exactly equaled local `8d34d62cb43d82308ed13f1df7ead13802cb1685`.
+  - second-batch `git push origin feature/p0-clean-seed-rebuild`: exit 0; fast-forwarded to `6b9e728dd52436ce43a1f711a576cd2e6b5c002c`.
+  - second-batch `git ls-remote --heads origin feature/p0-clean-seed-rebuild`: exit 0; SHA exactly equaled local `6b9e728dd52436ce43a1f711a576cd2e6b5c002c`.
   - `gh --version`: exit 0; version 2.97.0.
   - `gh auth status`: exit 1; no authenticated GitHub CLI host.
 - Tests/build/lint: window-specific results are preserved verbatim in the ledger; this saver will additionally parse every JSONL line and run `git diff --check`.
@@ -70,9 +73,9 @@
 
 ## Next action
 
-1. Parse the updated JSONL, run `git diff --check`, stage only this ledger and handoff, and commit the confirmation metadata.
-2. Push the confirmation commit and verify `git ls-remote` equals local HEAD.
-3. Send the exact archive-safe task IDs plus final remote branch/SHA to the central coordinator; do not archive the still-active Live Integration or switch watcher.
+1. Parse the updated JSONL, run `git diff --check`, stage only this ledger and handoff, and commit the fifth-window confirmation metadata.
+2. Push the final confirmation commit and verify `git ls-remote` equals local HEAD.
+3. Send the five exact archive-safe task IDs plus final remote branch/SHA to the central coordinator; do not archive the still-active Live Integration or switch watcher.
 
 ## Restart context
 
