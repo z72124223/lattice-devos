@@ -613,3 +613,11 @@
 - Source commit/tree/parent/ancestry gates all passed. Build invocation count is `0`, binary does not exist, target was not created, and worker source/dirty/remote mutation counts are all `0`.
 - No runtime readiness or live acceptance is claimed. A new clean BUILD-ONLY worker must explicitly allow both fully qualified saver paths; this worker must not resume.
 - Stage 1 durable receipt commit is `0c71da3e8a44b91add876d18c15853e49ca90470`; expected and live remote SHA matched at `2026-08-11T19:43:34.3863338Z`. Stage 2 confirmation commit `aa87dd57d0e939d0405fe77697b31d69856c369a` and fresh live remote SHA matched at `2026-08-11T19:44:21.2046332Z`, so the separate saver state is `safe_to_archive=true`; authoritative receipt fields remain unchanged. Central archived the worker at `2026-08-11T19:44:39.870Z` (`set_thread_archived_result=success`).
+
+## BUILD-ONLY binary materialized — `019ff25b-d55e-7880-9de0-dfd7842c94ae`
+
+- Result is `BUILD_ONLY_SUCCESS_BINARY_MATERIALIZED` from source commit `0e93c7b8685f7783db274ff36425b82ed3cee4c4` and tree `c32afa981c8221fb5db3f9c3f806579c76db2eef`; build inputs equal source and post-source commits touch only the two saver paths.
+- Exactly one locked isolated build completed exit `0` in `42752 ms`. Materialized binary is `10277376` bytes with SHA-256 `cf7b46cb4989253df8c36b5933e5ee5bf9a1b1e70ae01e89807045d8c0210f94`.
+- The binary was not launched. The worker made no repository commit/push and did not edit ledger/HANDOFF; the protected dirty path was observed only by Git status.
+- Runtime readiness and live acceptance are not claimed. The next phase remains a separate SWITCH/DISCOVERY worker.
+- Two-stage saver remote durability is pending.
