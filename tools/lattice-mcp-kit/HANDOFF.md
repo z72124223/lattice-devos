@@ -84,3 +84,14 @@
 - Current branch: `feature/p0-clean-seed-rebuild`.
 - Relevant plan: active P0 GPT/Codex → LATTICE live completion goal coordinated by task `019fef39-6c03-76f0-9115-0171c7d44f10`.
 - First command or file to inspect: `git status -sb`, then `tools/lattice-mcp-kit/WINDOW_LEDGER.jsonl`.
+
+## Successor saver checkpoint — predecessor window `019ff0ab-96b4-7ca0-8a0d-677b864961e3`
+
+- Source window status: `completed_pending_central_save`; started `2026-08-11T11:53:27.000Z`, finished `2026-08-11T12:06:54.695Z`, elapsed `807695 ms`.
+- Source scope: saved five completed P0 window receipts/assets to GitHub, verified remote equality, created Draft PR `#11`, recorded central archive evidence, and preserved active-task boundaries.
+- Source artifacts: `tools/lattice-mcp-kit/WINDOW_LEDGER.jsonl`; `tools/lattice-mcp-kit/HANDOFF.md`.
+- Source final local commit/tree: `eecd7a85348f34d7b119979d608ec23baace5156` / `5c5059464651fea15728613d637cd67e1366774d`.
+- Remote branch: `feature/p0-clean-seed-rebuild`; Draft PR: <https://github.com/z72124223/lattice-devos/pull/11>.
+- Successor durable save: pending first exact-path commit and remote SHA equality verification; `remote_sha=null`, `github_saved_at_utc=null`, `archived_at_utc=null`.
+- Archive boundary: after remote confirmation, send the exact safe-to-archive receipt for this predecessor window to the central coordinator. Do not archive or modify Live Integration, its watcher, or a future fresh verifier.
+- Protected dirty boundary: keep `scripts/test-task038-four-tool-acceptance.ps1` unstaged, unread, and unmodified; no reset or clean.
