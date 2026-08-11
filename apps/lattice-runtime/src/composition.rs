@@ -14,7 +14,14 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, FILE_SHARE_READ, GetFileInformationByHandle,
+};
 
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
 use lattice_codebase_memory::digest_query_text;
@@ -166,23 +173,96 @@ const OFFICIAL_HERMES_RUNTIME_BYTE_COUNT: u64 = 722_643_145;
 const OPENCLAW_ADAPTER_VERSION: &str = "1.0.0";
 const FIXED_GATEWAY_TASK_REVISION: &str = "1";
 const SCRIPTED_SERVER_BYTES: &[u8] = include_bytes!("fixtures/task032-scripted-codex.ps1");
-const OFFICIAL_CODEX_VERSION: &str = "codex-cli 0.146.0";
-const OFFICIAL_CODEX_LAUNCHER_SHA256: &str =
-    "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb";
-const OFFICIAL_SANDBOX_SETUP_SHA256: &str =
-    "c12d225b34e7f82cdab6bbc714797abed661f40e158104694953889750121cef";
-const OFFICIAL_COMMAND_RUNNER_SHA256: &str =
-    "0102fa1820ecd03bb03a991fd2303a1a484118f7da8a71864f88ec94bca61d6d";
-const OFFICIAL_CODE_MODE_HOST_SHA256: &str =
-    "6ef1de0e04d859f8f4f6d4d64f0f3ceeec28658423d91de160f5e804280d1c36";
-const OFFICIAL_RG_SHA256: &str = "14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680";
-const OFFICIAL_PACKAGE_MANIFEST_SHA256: &str =
-    "aaa0646d6b615da94187b51efd50c69621a00867761161ae55cc16cfd545bec7";
-const OFFICIAL_MANAGED_PACKAGE_MANIFEST_SHA256: &str =
-    "24dd8c63a4d2b7bc2ded86c887974f842093ce4f2ed8473267a91e036c38da20";
 const MAX_OFFICIAL_LAUNCHER_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_OFFICIAL_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_OFFICIAL_MANIFEST_BYTES: u64 = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OfficialBundleFileRole {
+    Launcher,
+    SandboxSetup,
+    CommandRunner,
+    CodeModeHost,
+    Rg,
+    PackageManifest,
+    ManagedPackageManifest,
+}
+
+const OFFICIAL_BUNDLE_FILE_ROLES: [OfficialBundleFileRole; 7] = [
+    OfficialBundleFileRole::Launcher,
+    OfficialBundleFileRole::SandboxSetup,
+    OfficialBundleFileRole::CommandRunner,
+    OfficialBundleFileRole::CodeModeHost,
+    OfficialBundleFileRole::Rg,
+    OfficialBundleFileRole::PackageManifest,
+    OfficialBundleFileRole::ManagedPackageManifest,
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OfficialBundleFilePolicy {
+    role: OfficialBundleFileRole,
+    relative_path: &'static str,
+    sha256: &'static str,
+    max_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OfficialBundlePolicy {
+    version: &'static str,
+    package_version: &'static str,
+    target: &'static str,
+    files: [OfficialBundleFilePolicy; 7],
+}
+
+const OFFICIAL_BUNDLE_POLICY: OfficialBundlePolicy = OfficialBundlePolicy {
+    version: "codex-cli 0.146.0",
+    package_version: "0.146.0",
+    target: "x86_64-pc-windows-msvc",
+    files: [
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::Launcher,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
+            sha256: "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb",
+            max_bytes: MAX_OFFICIAL_LAUNCHER_BYTES,
+        },
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::SandboxSetup,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex-resources/codex-windows-sandbox-setup.exe",
+            sha256: "c12d225b34e7f82cdab6bbc714797abed661f40e158104694953889750121cef",
+            max_bytes: MAX_OFFICIAL_RESOURCE_BYTES,
+        },
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::CommandRunner,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex-resources/codex-command-runner.exe",
+            sha256: "0102fa1820ecd03bb03a991fd2303a1a484118f7da8a71864f88ec94bca61d6d",
+            max_bytes: MAX_OFFICIAL_RESOURCE_BYTES,
+        },
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::CodeModeHost,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex-code-mode-host.exe",
+            sha256: "6ef1de0e04d859f8f4f6d4d64f0f3ceeec28658423d91de160f5e804280d1c36",
+            max_bytes: MAX_OFFICIAL_RESOURCE_BYTES,
+        },
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::Rg,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex-path/rg.exe",
+            sha256: "14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680",
+            max_bytes: MAX_OFFICIAL_RESOURCE_BYTES,
+        },
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::PackageManifest,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex-package.json",
+            sha256: "aaa0646d6b615da94187b51efd50c69621a00867761161ae55cc16cfd545bec7",
+            max_bytes: MAX_OFFICIAL_MANIFEST_BYTES,
+        },
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::ManagedPackageManifest,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex/package.json",
+            sha256: "24dd8c63a4d2b7bc2ded86c887974f842093ce4f2ed8473267a91e036c38da20",
+            max_bytes: MAX_OFFICIAL_MANIFEST_BYTES,
+        },
+    ],
+};
 
 /// Static, secret-free composition failure classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -289,7 +369,7 @@ pub struct LatticedDeliveryConfig {
     git_executable: PathBuf,
     timeout: Duration,
     runtime: DeliveryRuntime,
-    pinned_codex_resources: Option<PinnedCodexResources>,
+    official_bundle: Option<LaunchReadyOfficialBundle>,
 }
 
 impl LatticedDeliveryConfig {
@@ -316,7 +396,7 @@ impl LatticedDeliveryConfig {
         }
         let version = version.into();
         let launcher_sha256 = launcher_sha256.into();
-        let pinned_codex_resources = if runtime == DeliveryRuntime::OfficialCodexAppServer {
+        let official_bundle = if runtime == DeliveryRuntime::OfficialCodexAppServer {
             Some(validate_official_codex_identity(
                 &launcher,
                 &version,
@@ -338,7 +418,9 @@ impl LatticedDeliveryConfig {
             DELIVERY_PROMPT,
             timeout,
             runtime,
-            pinned_codex_resources.clone(),
+            official_bundle
+                .as_ref()
+                .map(|bundle| bundle.resources().clone()),
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::CodexConfiguration))?;
         DeliveryWorkspaceGitAdapterConfig::new(
@@ -357,7 +439,7 @@ impl LatticedDeliveryConfig {
             git_executable,
             timeout,
             runtime,
-            pinned_codex_resources,
+            official_bundle,
         })
     }
 
@@ -372,8 +454,440 @@ impl LatticedDeliveryConfig {
             git_executable: PathBuf::new(),
             timeout,
             runtime: DeliveryRuntime::OfficialCodexAppServer,
-            pinned_codex_resources: None,
+            official_bundle: None,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OfficialBundleEvidenceProvenance {
+    RealWindowsFilesystem,
+    #[cfg(test)]
+    SyntheticTest,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OfficialFileIdentity {
+    volume_serial_number: u64,
+    file_index: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OfficialBundleFileFacts {
+    role: OfficialBundleFileRole,
+    declared_path: PathBuf,
+    expected_path: PathBuf,
+    canonical_path: PathBuf,
+    canonical_expected_path: PathBuf,
+    is_regular_file: bool,
+    reparse_component_count: u32,
+    byte_count: u64,
+    sha256: Option<String>,
+    captured_identity: Option<OfficialFileIdentity>,
+    observed_identity: Option<OfficialFileIdentity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OfficialBundleFacts {
+    provenance: OfficialBundleEvidenceProvenance,
+    version: String,
+    declared_launcher_sha256: String,
+    delivery_target_root: PathBuf,
+    launcher_target_root: Option<PathBuf>,
+    files: Vec<OfficialBundleFileFacts>,
+}
+
+mod official_bundle_provider_sealed {
+    pub trait Sealed {}
+}
+
+trait OfficialBundleEvidenceProvider: official_bundle_provider_sealed::Sealed {
+    fn facts(&self) -> &OfficialBundleFacts;
+}
+
+#[derive(Debug)]
+struct PinnedOfficialFile {
+    path: PathBuf,
+    boundary: PathBuf,
+    identity: OfficialFileIdentity,
+    handle: fs::File,
+}
+
+#[derive(Clone, Debug)]
+struct RealPinnedOfficialBundle {
+    facts: OfficialBundleFacts,
+    pinned_files: Arc<[PinnedOfficialFile]>,
+}
+
+impl PartialEq for RealPinnedOfficialBundle {
+    fn eq(&self, other: &Self) -> bool {
+        self.facts == other.facts
+    }
+}
+
+impl Eq for RealPinnedOfficialBundle {}
+
+impl official_bundle_provider_sealed::Sealed for RealPinnedOfficialBundle {}
+
+impl OfficialBundleEvidenceProvider for RealPinnedOfficialBundle {
+    fn facts(&self) -> &OfficialBundleFacts {
+        &self.facts
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SyntheticOfficialBundleEvidenceProvider {
+    facts: OfficialBundleFacts,
+}
+
+#[cfg(test)]
+impl official_bundle_provider_sealed::Sealed for SyntheticOfficialBundleEvidenceProvider {}
+
+#[cfg(test)]
+impl OfficialBundleEvidenceProvider for SyntheticOfficialBundleEvidenceProvider {
+    fn facts(&self) -> &OfficialBundleFacts {
+        &self.facts
+    }
+}
+
+#[cfg(test)]
+impl SyntheticOfficialBundleEvidenceProvider {
+    fn complete(policy: &OfficialBundlePolicy) -> Self {
+        let target_root = PathBuf::from(r"C:\lattice\target");
+        let files = OFFICIAL_BUNDLE_FILE_ROLES
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, role)| {
+                let path = policy.expected_path(&target_root, role);
+                let identity = OfficialFileIdentity {
+                    volume_serial_number: 7,
+                    file_index: (index + 1) as u64,
+                };
+                OfficialBundleFileFacts {
+                    role,
+                    declared_path: path.clone(),
+                    expected_path: path.clone(),
+                    canonical_path: path.clone(),
+                    canonical_expected_path: path,
+                    is_regular_file: true,
+                    reparse_component_count: 0,
+                    byte_count: 1,
+                    sha256: Some(policy.file_policy(role).sha256.to_owned()),
+                    captured_identity: Some(identity),
+                    observed_identity: Some(identity),
+                }
+            })
+            .collect();
+        Self {
+            facts: OfficialBundleFacts {
+                provenance: OfficialBundleEvidenceProvenance::SyntheticTest,
+                version: policy.version.to_owned(),
+                declared_launcher_sha256: policy
+                    .file_policy(OfficialBundleFileRole::Launcher)
+                    .sha256
+                    .to_owned(),
+                delivery_target_root: target_root.clone(),
+                launcher_target_root: Some(target_root),
+                files,
+            },
+        }
+    }
+
+    fn remove(&mut self, role: OfficialBundleFileRole) {
+        self.facts.files.retain(|file| file.role != role);
+    }
+
+    fn file_mut(&mut self, role: OfficialBundleFileRole) -> &mut OfficialBundleFileFacts {
+        self.facts
+            .files
+            .iter_mut()
+            .find(|file| file.role == role)
+            .expect("complete synthetic bundle facts")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OfficialIdentityRejection {
+    Layout,
+    Version,
+    DeclaredLauncherDigest,
+    TargetSplit,
+    MissingFile(OfficialBundleFileRole),
+    UnexpectedFileFacts,
+    PathMismatch(OfficialBundleFileRole),
+    ReparsePath(OfficialBundleFileRole),
+    NotRegularFile(OfficialBundleFileRole),
+    OversizedFile(OfficialBundleFileRole),
+    UnreadableFile(OfficialBundleFileRole),
+    DigestMismatch(OfficialBundleFileRole),
+    FileIdentityUnavailable(OfficialBundleFileRole),
+    FileIdentityChanged(OfficialBundleFileRole),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ValidatedOfficialBundleFacts;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LaunchReadyOfficialBundle {
+    resources: PinnedCodexResources,
+    real_bundle: RealPinnedOfficialBundle,
+    _validated: ValidatedOfficialBundleFacts,
+}
+
+impl OfficialBundlePolicy {
+    const fn production() -> &'static Self {
+        &OFFICIAL_BUNDLE_POLICY
+    }
+
+    fn file_policy(&self, role: OfficialBundleFileRole) -> &OfficialBundleFilePolicy {
+        self.files
+            .iter()
+            .find(|policy| policy.role == role)
+            .expect("complete fixed official bundle policy")
+    }
+
+    fn expected_path(&self, target_root: &Path, role: OfficialBundleFileRole) -> PathBuf {
+        self.file_policy(role)
+            .relative_path
+            .split('/')
+            .fold(target_root.to_path_buf(), |path, component| {
+                path.join(component)
+            })
+    }
+
+    fn delivery_target_root(delivery_root: &Path) -> Result<PathBuf, OfficialIdentityRejection> {
+        if delivery_root.file_name() != Some(OsStr::new("delivery")) {
+            return Err(OfficialIdentityRejection::Layout);
+        }
+        let fixture_root = delivery_root
+            .parent()
+            .ok_or(OfficialIdentityRejection::Layout)?;
+        let fixture_id = fixture_root
+            .file_name()
+            .and_then(OsStr::to_str)
+            .ok_or(OfficialIdentityRejection::Layout)?;
+        if !is_lower_hex(fixture_id, 32) {
+            return Err(OfficialIdentityRejection::Layout);
+        }
+        let lattice_delivery_root = fixture_root
+            .parent()
+            .ok_or(OfficialIdentityRejection::Layout)?;
+        if lattice_delivery_root.file_name() != Some(OsStr::new("lattice-delivery")) {
+            return Err(OfficialIdentityRejection::Layout);
+        }
+        let target_root = lattice_delivery_root
+            .parent()
+            .ok_or(OfficialIdentityRejection::Layout)?;
+        if target_root.file_name() != Some(OsStr::new("target")) {
+            return Err(OfficialIdentityRejection::Layout);
+        }
+        Ok(target_root.to_path_buf())
+    }
+
+    fn evaluate(
+        &self,
+        provider: &impl OfficialBundleEvidenceProvider,
+    ) -> Result<ValidatedOfficialBundleFacts, OfficialIdentityRejection> {
+        let facts = provider.facts();
+        if facts.version != self.version {
+            return Err(OfficialIdentityRejection::Version);
+        }
+        if facts.declared_launcher_sha256
+            != self.file_policy(OfficialBundleFileRole::Launcher).sha256
+        {
+            return Err(OfficialIdentityRejection::DeclaredLauncherDigest);
+        }
+        let launcher_target_root = facts
+            .launcher_target_root
+            .as_deref()
+            .ok_or(OfficialIdentityRejection::TargetSplit)?;
+        if !same_declared_path(&facts.delivery_target_root, launcher_target_root) {
+            return Err(OfficialIdentityRejection::TargetSplit);
+        }
+        if facts.files.len() != OFFICIAL_BUNDLE_FILE_ROLES.len() {
+            for role in OFFICIAL_BUNDLE_FILE_ROLES {
+                if facts.files.iter().all(|file| file.role != role) {
+                    return Err(OfficialIdentityRejection::MissingFile(role));
+                }
+            }
+            return Err(OfficialIdentityRejection::UnexpectedFileFacts);
+        }
+        for file_policy in &self.files {
+            let file = facts
+                .files
+                .iter()
+                .find(|file| file.role == file_policy.role)
+                .ok_or(OfficialIdentityRejection::MissingFile(file_policy.role))?;
+            let expected_path = self.expected_path(&facts.delivery_target_root, file_policy.role);
+            if !same_declared_path(&file.declared_path, &expected_path)
+                || !same_declared_path(&file.expected_path, &expected_path)
+                || file.canonical_path != file.canonical_expected_path
+            {
+                return Err(OfficialIdentityRejection::PathMismatch(file_policy.role));
+            }
+            if file.reparse_component_count != 0 {
+                return Err(OfficialIdentityRejection::ReparsePath(file_policy.role));
+            }
+            if !file.is_regular_file {
+                return Err(OfficialIdentityRejection::NotRegularFile(file_policy.role));
+            }
+            if file.byte_count > file_policy.max_bytes {
+                return Err(OfficialIdentityRejection::OversizedFile(file_policy.role));
+            }
+            let sha256 = file
+                .sha256
+                .as_deref()
+                .ok_or(OfficialIdentityRejection::UnreadableFile(file_policy.role))?;
+            if sha256 != file_policy.sha256 {
+                return Err(OfficialIdentityRejection::DigestMismatch(file_policy.role));
+            }
+            let captured = file.captured_identity.ok_or(
+                OfficialIdentityRejection::FileIdentityUnavailable(file_policy.role),
+            )?;
+            let observed = file.observed_identity.ok_or(
+                OfficialIdentityRejection::FileIdentityUnavailable(file_policy.role),
+            )?;
+            if captured != observed {
+                return Err(OfficialIdentityRejection::FileIdentityChanged(
+                    file_policy.role,
+                ));
+            }
+        }
+        Ok(ValidatedOfficialBundleFacts)
+    }
+}
+
+impl RealPinnedOfficialBundle {
+    fn capture(
+        policy: &OfficialBundlePolicy,
+        launcher: &Path,
+        version: &str,
+        launcher_sha256: &str,
+        delivery_root: &Path,
+    ) -> Result<Self, OfficialIdentityRejection> {
+        let target_root = OfficialBundlePolicy::delivery_target_root(delivery_root)?;
+        let launcher_target_root = launcher.ancestors().nth(9).map(Path::to_path_buf);
+        let launcher_boundary = launcher_target_root.as_deref().unwrap_or(&target_root);
+        let mut files = Vec::with_capacity(OFFICIAL_BUNDLE_FILE_ROLES.len());
+        let mut pinned_files = Vec::with_capacity(OFFICIAL_BUNDLE_FILE_ROLES.len());
+        for role in OFFICIAL_BUNDLE_FILE_ROLES {
+            let expected_path = policy.expected_path(&target_root, role);
+            let declared_path = if role == OfficialBundleFileRole::Launcher {
+                launcher.to_path_buf()
+            } else {
+                expected_path.clone()
+            };
+            let boundary = if role == OfficialBundleFileRole::Launcher {
+                launcher_boundary
+            } else {
+                &target_root
+            };
+            if let Some((facts, pinned)) = capture_official_file(
+                role,
+                declared_path,
+                expected_path,
+                boundary,
+                policy.file_policy(role).max_bytes,
+            ) {
+                files.push(facts);
+                pinned_files.push(pinned);
+            }
+        }
+        Ok(Self {
+            facts: OfficialBundleFacts {
+                provenance: OfficialBundleEvidenceProvenance::RealWindowsFilesystem,
+                version: version.to_owned(),
+                declared_launcher_sha256: launcher_sha256.to_owned(),
+                delivery_target_root: target_root,
+                launcher_target_root,
+                files,
+            },
+            pinned_files: Arc::from(pinned_files),
+        })
+    }
+
+    fn ensure_current(&self) -> Result<(), OfficialIdentityRejection> {
+        for pinned in &*self.pinned_files {
+            let role = file_role_for_path(&self.facts, &pinned.path)
+                .ok_or(OfficialIdentityRejection::UnexpectedFileFacts)?;
+            let handle_identity = official_file_identity(&pinned.handle)
+                .ok_or(OfficialIdentityRejection::FileIdentityUnavailable(role))?;
+            let path_identity = fs::File::open(&pinned.path)
+                .ok()
+                .and_then(|current| official_file_identity(&current))
+                .ok_or(OfficialIdentityRejection::FileIdentityUnavailable(role))?;
+            let reparse_count = reparse_component_count(&pinned.path, &pinned.boundary)
+                .ok_or(OfficialIdentityRejection::ReparsePath(role))?;
+            if handle_identity != pinned.identity || path_identity != pinned.identity {
+                return Err(OfficialIdentityRejection::FileIdentityChanged(role));
+            }
+            if reparse_count != 0 {
+                return Err(OfficialIdentityRejection::ReparsePath(role));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LaunchReadyOfficialBundle {
+    fn from_real(
+        policy: &OfficialBundlePolicy,
+        real_bundle: RealPinnedOfficialBundle,
+        validated: ValidatedOfficialBundleFacts,
+    ) -> Result<Self, OfficialIdentityRejection> {
+        let target_root = &real_bundle.facts.delivery_target_root;
+        let install_root = target_root
+            .join("codex-official")
+            .join(policy.package_version);
+        let managed_package_root = install_root
+            .join("node_modules")
+            .join("@openai")
+            .join("codex");
+        let bundle_root = install_root
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-win32-x64")
+            .join("vendor")
+            .join(policy.target);
+        let resources = PinnedCodexResources::new(
+            managed_package_root,
+            bundle_root.join("codex-resources"),
+            PinnedCodexResourceDigests::new(
+                policy
+                    .file_policy(OfficialBundleFileRole::SandboxSetup)
+                    .sha256,
+                policy
+                    .file_policy(OfficialBundleFileRole::CommandRunner)
+                    .sha256,
+                policy
+                    .file_policy(OfficialBundleFileRole::CodeModeHost)
+                    .sha256,
+                policy.file_policy(OfficialBundleFileRole::Rg).sha256,
+                policy
+                    .file_policy(OfficialBundleFileRole::PackageManifest)
+                    .sha256,
+                policy
+                    .file_policy(OfficialBundleFileRole::ManagedPackageManifest)
+                    .sha256,
+            )
+            .map_err(|_| OfficialIdentityRejection::Layout)?,
+        )
+        .map_err(|_| OfficialIdentityRejection::Layout)?;
+        Ok(Self {
+            resources,
+            real_bundle,
+            _validated: validated,
+        })
+    }
+
+    fn resources(&self) -> &PinnedCodexResources {
+        &self.resources
+    }
+
+    fn ensure_current(&self) -> Result<(), OfficialIdentityRejection> {
+        self.real_bundle.ensure_current()
     }
 }
 
@@ -382,104 +896,19 @@ fn validate_official_codex_identity(
     version: &str,
     launcher_sha256: &str,
     delivery_root: &Path,
-) -> Result<PinnedCodexResources, LatticedError> {
+) -> Result<LaunchReadyOfficialBundle, LatticedError> {
     let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
-    if version != OFFICIAL_CODEX_VERSION
-        || launcher_sha256 != OFFICIAL_CODEX_LAUNCHER_SHA256
-        || delivery_root.file_name() != Some(OsStr::new("delivery"))
-    {
-        return Err(rejected());
-    }
-    let fixture_root = delivery_root.parent().ok_or_else(rejected)?;
-    let fixture_id = fixture_root
-        .file_name()
-        .and_then(OsStr::to_str)
-        .ok_or_else(rejected)?;
-    if !is_lower_hex(fixture_id, 32) {
-        return Err(rejected());
-    }
-    let lattice_delivery_root = fixture_root.parent().ok_or_else(rejected)?;
-    if lattice_delivery_root.file_name() != Some(OsStr::new("lattice-delivery")) {
-        return Err(rejected());
-    }
-    let target_root = lattice_delivery_root.parent().ok_or_else(rejected)?;
-    if target_root.file_name() != Some(OsStr::new("target")) {
-        return Err(rejected());
-    }
-    let install_root = target_root.join("codex-official").join("0.146.0");
-    let managed_package_root = install_root
-        .join("node_modules")
-        .join("@openai")
-        .join("codex");
-    let managed_package_manifest = managed_package_root.join("package.json");
-    let expected_launcher = install_root
-        .join("node_modules")
-        .join("@openai")
-        .join("codex-win32-x64")
-        .join("vendor")
-        .join("x86_64-pc-windows-msvc")
-        .join("bin")
-        .join("codex.exe");
-    let bundle_root = expected_launcher
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(rejected)?;
-    let sandbox_setup = bundle_root
-        .join("codex-resources")
-        .join("codex-windows-sandbox-setup.exe");
-    let command_runner = bundle_root
-        .join("codex-resources")
-        .join("codex-command-runner.exe");
-    let code_mode_host = bundle_root.join("bin").join("codex-code-mode-host.exe");
-    let rg = bundle_root.join("codex-path").join("rg.exe");
-    let package_manifest = bundle_root.join("codex-package.json");
-    if !same_declared_path(launcher, &expected_launcher) {
-        return Err(rejected());
-    }
-    for path in [
-        expected_launcher.as_path(),
-        sandbox_setup.as_path(),
-        command_runner.as_path(),
-        code_mode_host.as_path(),
-        rg.as_path(),
-        package_manifest.as_path(),
-        managed_package_manifest.as_path(),
-    ] {
-        reject_reparse_path(path, target_root)?;
-    }
-    let canonical_expected = fs::canonicalize(&expected_launcher).map_err(|_| rejected())?;
-    let canonical_launcher = fs::canonicalize(launcher).map_err(|_| rejected())?;
-    if canonical_launcher != canonical_expected
-        || official_file_sha256(&canonical_launcher, MAX_OFFICIAL_LAUNCHER_BYTES)?
-            != OFFICIAL_CODEX_LAUNCHER_SHA256
-        || official_file_sha256(&sandbox_setup, MAX_OFFICIAL_RESOURCE_BYTES)?
-            != OFFICIAL_SANDBOX_SETUP_SHA256
-        || official_file_sha256(&command_runner, MAX_OFFICIAL_RESOURCE_BYTES)?
-            != OFFICIAL_COMMAND_RUNNER_SHA256
-        || official_file_sha256(&code_mode_host, MAX_OFFICIAL_RESOURCE_BYTES)?
-            != OFFICIAL_CODE_MODE_HOST_SHA256
-        || official_file_sha256(&rg, MAX_OFFICIAL_RESOURCE_BYTES)? != OFFICIAL_RG_SHA256
-        || official_file_sha256(&package_manifest, MAX_OFFICIAL_MANIFEST_BYTES)?
-            != OFFICIAL_PACKAGE_MANIFEST_SHA256
-        || official_file_sha256(&managed_package_manifest, MAX_OFFICIAL_MANIFEST_BYTES)?
-            != OFFICIAL_MANAGED_PACKAGE_MANIFEST_SHA256
-    {
-        return Err(rejected());
-    }
-    PinnedCodexResources::new(
-        managed_package_root,
-        bundle_root.join("codex-resources"),
-        PinnedCodexResourceDigests::new(
-            OFFICIAL_SANDBOX_SETUP_SHA256,
-            OFFICIAL_COMMAND_RUNNER_SHA256,
-            OFFICIAL_CODE_MODE_HOST_SHA256,
-            OFFICIAL_RG_SHA256,
-            OFFICIAL_PACKAGE_MANIFEST_SHA256,
-            OFFICIAL_MANAGED_PACKAGE_MANIFEST_SHA256,
-        )
-        .map_err(|_| rejected())?,
+    let policy = OfficialBundlePolicy::production();
+    let real_bundle = RealPinnedOfficialBundle::capture(
+        policy,
+        launcher,
+        version,
+        launcher_sha256,
+        delivery_root,
     )
-    .map_err(|_| rejected())
+    .map_err(|_| rejected())?;
+    let validated = policy.evaluate(&real_bundle).map_err(|_| rejected())?;
+    LaunchReadyOfficialBundle::from_real(policy, real_bundle, validated).map_err(|_| rejected())
 }
 
 #[cfg(windows)]
@@ -495,18 +924,25 @@ fn same_declared_path(actual: &Path, expected: &Path) -> bool {
     actual == expected
 }
 
-fn reject_reparse_path(path: &Path, boundary: &Path) -> Result<(), LatticedError> {
-    let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
+fn reparse_component_count(path: &Path, boundary: &Path) -> Option<u32> {
     let mut current = path;
+    let mut count = 0_u32;
     loop {
-        let metadata = fs::symlink_metadata(current).map_err(|_| rejected())?;
+        let metadata = fs::symlink_metadata(current).ok()?;
         if metadata_is_reparse(&metadata) {
-            return Err(rejected());
+            count = count.checked_add(1)?;
         }
         if current == boundary {
-            return Ok(());
+            return Some(count);
         }
-        current = current.parent().ok_or_else(rejected)?;
+        current = current.parent()?;
+    }
+}
+
+fn reject_reparse_path(path: &Path, boundary: &Path) -> Result<(), LatticedError> {
+    match reparse_component_count(path, boundary) {
+        Some(0) => Ok(()),
+        Some(_) | None => Err(LatticedError::new(LatticedErrorKind::OfficialLiveBlocked)),
     }
 }
 
@@ -521,17 +957,60 @@ fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
-fn official_file_sha256(path: &Path, max_bytes: u64) -> Result<String, LatticedError> {
-    let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
-    let metadata = fs::symlink_metadata(path).map_err(|_| rejected())?;
-    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
-        return Err(rejected());
-    }
-    let mut file = fs::File::open(path).map_err(|_| rejected())?;
+fn capture_official_file(
+    role: OfficialBundleFileRole,
+    declared_path: PathBuf,
+    expected_path: PathBuf,
+    boundary: &Path,
+    max_bytes: u64,
+) -> Option<(OfficialBundleFileFacts, PinnedOfficialFile)> {
+    let reparse_component_count = reparse_component_count(&declared_path, boundary)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    options.share_mode(FILE_SHARE_READ);
+    let mut handle = options.open(&declared_path).ok()?;
+    let handle_metadata = handle.metadata().ok()?;
+    let captured_identity = official_file_identity(&handle);
+    let observed_identity = fs::File::open(&declared_path)
+        .ok()
+        .and_then(|observed| official_file_identity(&observed));
+    let sha256 = (handle_metadata.len() <= max_bytes)
+        .then(|| official_file_sha256_from_handle(&mut handle))
+        .flatten();
+    let canonical_path = fs::canonicalize(&declared_path).ok()?;
+    let canonical_expected_path =
+        fs::canonicalize(&expected_path).unwrap_or_else(|_| expected_path.clone());
+    let facts = OfficialBundleFileFacts {
+        role,
+        declared_path: declared_path.clone(),
+        expected_path,
+        canonical_path,
+        canonical_expected_path,
+        is_regular_file: handle_metadata.is_file(),
+        reparse_component_count,
+        byte_count: handle_metadata.len(),
+        sha256,
+        captured_identity,
+        observed_identity,
+    };
+    let identity = captured_identity?;
+    Some((
+        facts,
+        PinnedOfficialFile {
+            path: declared_path,
+            boundary: boundary.to_path_buf(),
+            identity,
+            handle,
+        },
+    ))
+}
+
+fn official_file_sha256_from_handle(file: &mut fs::File) -> Option<String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
-        let read = file.read(&mut buffer).map_err(|_| rejected())?;
+        let read = file.read(&mut buffer).ok()?;
         if read == 0 {
             break;
         }
@@ -540,9 +1019,47 @@ fn official_file_sha256(path: &Path, max_bytes: u64) -> Result<String, LatticedE
     let mut output = String::with_capacity(64);
     for byte in hasher.finalize() {
         use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").map_err(|_| rejected())?;
+        write!(&mut output, "{byte:02x}").ok()?;
     }
-    Ok(output)
+    Some(output)
+}
+
+fn official_file_sha256(path: &Path, max_bytes: u64) -> Result<String, LatticedError> {
+    let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
+    let metadata = fs::symlink_metadata(path).map_err(|_| rejected())?;
+    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
+        return Err(rejected());
+    }
+    let mut file = fs::File::open(path).map_err(|_| rejected())?;
+    official_file_sha256_from_handle(&mut file).ok_or_else(rejected)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn official_file_identity(file: &fs::File) -> Option<OfficialFileIdentity> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &raw mut information) } == 0
+    {
+        return None;
+    }
+    Some(OfficialFileIdentity {
+        volume_serial_number: u64::from(information.dwVolumeSerialNumber),
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+    })
+}
+
+#[cfg(not(windows))]
+fn official_file_identity(_file: &fs::File) -> Option<OfficialFileIdentity> {
+    None
+}
+
+fn file_role_for_path(facts: &OfficialBundleFacts, path: &Path) -> Option<OfficialBundleFileRole> {
+    facts
+        .files
+        .iter()
+        .find(|file| same_declared_path(&file.declared_path, path))
+        .map(|file| file.role)
 }
 
 /// One shared service used by the canonical `latticed` MCP process and the
@@ -709,6 +1226,11 @@ impl LatticedDeliveryService {
             .delivery
             .as_ref()
             .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?;
+        if let Some(bundle) = &config.official_bundle {
+            bundle
+                .ensure_current()
+                .map_err(|_| LatticedError::new(LatticedErrorKind::OfficialLiveBlocked))?;
+        }
         let scripted_graph_paths = if requires_scripted_fixture_validation(config.runtime) {
             Some(validate_scripted_fixture(config)?)
         } else {
@@ -771,7 +1293,10 @@ impl LatticedDeliveryService {
             DELIVERY_PROMPT,
             config.timeout,
             config.runtime,
-            config.pinned_codex_resources.clone(),
+            config
+                .official_bundle
+                .as_ref()
+                .map(|bundle| bundle.resources().clone()),
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::CodexConfiguration))?;
         let mut codex = CodexDeliveryAdapter::with_deadline(codex_config, effect_deadline);
@@ -4340,6 +4865,111 @@ mod tests {
 
     use super::*;
     use lattice_ports::{DeliveryFailureCertainty, DeliveryPortError};
+
+    #[test]
+    fn synthetic_official_bundle_facts_exercise_only_the_pure_fixed_policy() {
+        let policy = OfficialBundlePolicy::production();
+        let complete = SyntheticOfficialBundleEvidenceProvider::complete(policy);
+
+        assert!(policy.evaluate(&complete).is_ok());
+        assert_eq!(
+            complete.facts().provenance,
+            OfficialBundleEvidenceProvenance::SyntheticTest
+        );
+
+        let mut missing_sandbox = complete.clone();
+        missing_sandbox.remove(OfficialBundleFileRole::SandboxSetup);
+        assert_eq!(
+            policy.evaluate(&missing_sandbox),
+            Err(OfficialIdentityRejection::MissingFile(
+                OfficialBundleFileRole::SandboxSetup
+            ))
+        );
+
+        let mut missing_runner = complete.clone();
+        missing_runner.remove(OfficialBundleFileRole::CommandRunner);
+        assert_eq!(
+            policy.evaluate(&missing_runner),
+            Err(OfficialIdentityRejection::MissingFile(
+                OfficialBundleFileRole::CommandRunner
+            ))
+        );
+    }
+
+    #[test]
+    fn synthetic_official_bundle_facts_reject_manifest_drift_and_target_split() {
+        let policy = OfficialBundlePolicy::production();
+
+        let mut manifest_drift = SyntheticOfficialBundleEvidenceProvider::complete(policy);
+        manifest_drift
+            .file_mut(OfficialBundleFileRole::PackageManifest)
+            .sha256 = Some("0".repeat(64));
+        assert_eq!(
+            policy.evaluate(&manifest_drift),
+            Err(OfficialIdentityRejection::DigestMismatch(
+                OfficialBundleFileRole::PackageManifest
+            ))
+        );
+
+        let mut target_split = SyntheticOfficialBundleEvidenceProvider::complete(policy);
+        target_split.facts.launcher_target_root = Some(PathBuf::from(r"D:\foreign\target"));
+        assert_eq!(
+            policy.evaluate(&target_split),
+            Err(OfficialIdentityRejection::TargetSplit)
+        );
+    }
+
+    #[test]
+    fn synthetic_official_bundle_facts_reject_file_id_replacement_capture_mix() {
+        let policy = OfficialBundlePolicy::production();
+        let mut replacement_mix = SyntheticOfficialBundleEvidenceProvider::complete(policy);
+        replacement_mix
+            .file_mut(OfficialBundleFileRole::CommandRunner)
+            .observed_identity = Some(OfficialFileIdentity {
+            volume_serial_number: 7,
+            file_index: 999,
+        });
+
+        assert_eq!(
+            policy.evaluate(&replacement_mix),
+            Err(OfficialIdentityRejection::FileIdentityChanged(
+                OfficialBundleFileRole::CommandRunner
+            ))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_pinned_file_handle_blocks_replacement_for_guard_lifetime() {
+        static NEXT_PINNED_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+        let unique = NEXT_PINNED_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!(
+            "lattice-official-pinned-file-{}-{unique}",
+            process::id()
+        ));
+        let path = root.join("codex-command-runner.exe");
+        fs::create_dir_all(&root).expect("create pinned-file fixture root");
+        fs::write(&path, b"captured official file facts").expect("write pinned-file fixture");
+
+        let (facts, pinned) = capture_official_file(
+            OfficialBundleFileRole::CommandRunner,
+            path.clone(),
+            path.clone(),
+            &root,
+            MAX_OFFICIAL_RESOURCE_BYTES,
+        )
+        .expect("capture pinned-file facts and handle");
+        let replacement_while_pinned = fs::write(&path, b"replacement");
+        let content_while_pinned = fs::read(&path).expect("read pinned-file fixture");
+        drop(pinned);
+        let replacement_after_drop = fs::write(&path, b"replacement");
+        fs::remove_dir_all(&root).expect("remove pinned-file fixture root");
+
+        assert_eq!(facts.captured_identity, facts.observed_identity);
+        assert!(replacement_while_pinned.is_err());
+        assert_eq!(content_while_pinned, b"captured official file facts");
+        assert!(replacement_after_drop.is_ok());
+    }
 
     fn test_content_digest(fill: char) -> ContentDigest {
         ContentDigest::from_sha256(fill.to_string().repeat(64)).expect("test digest")

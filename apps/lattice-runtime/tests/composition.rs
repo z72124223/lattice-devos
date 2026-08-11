@@ -296,6 +296,7 @@ fn official_codex_rejects_arbitrary_or_content_mismatched_launchers_before_effec
     )
     .expect_err("an arbitrary launcher path must fail before any database effect");
     assert_eq!(arbitrary.kind(), LatticedErrorKind::OfficialLiveBlocked);
+    assert_eq!(arbitrary.code(), "LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED");
 
     let unique = NEXT_SCRIPTED_GATE_FIXTURE.fetch_add(1, Ordering::Relaxed);
     let repository_root = std::env::temp_dir().join(format!(
@@ -335,6 +336,10 @@ fn official_codex_rejects_arbitrary_or_content_mismatched_launchers_before_effec
     .expect_err("self-claimed identity cannot authorize mismatched launcher bytes");
     fs::remove_dir_all(&repository_root).expect("remove owned official gate fixture");
     assert_eq!(mismatched.kind(), LatticedErrorKind::OfficialLiveBlocked);
+    assert_eq!(
+        mismatched.code(),
+        "LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED"
+    );
 }
 
 #[test]
