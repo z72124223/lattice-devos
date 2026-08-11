@@ -351,3 +351,18 @@
 - Next action: save this failure only. Any retry requires a newly authorized worker/turn, a fresh isolated target, and a long enough execution window; never reuse this partial target. Do not ask this worker to rerun.
 - Successor durable save: exact-path commit `5cbbba803784f9b9f4bca1753bd12f496c08735f` (tree `aaa5e7b8474fbad8cf299186fe4551b79340df3d`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:34:12.6425004Z`.
 - Archive boundary: central confirmed this failed worker archived after remote confirmation `8b663ea233077fe55ab2c8185fa6b1dd29478e40`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T15:35:19.7569771Z`. This archive does not authorize partial-target/build-only/holder/config/handoff/root/cleanup/rollback mutation.
+
+## Build-only materialization recovery — `019ff176-69e0-7853-af27-cdd34d1e7d59`
+
+- Result: `BUILD_ONLY_SUCCESS_BINARY_MATERIALIZED`; started `2026-08-11T15:35:09.0000000Z`, finished `2026-08-11T15:37:26.9862026Z`, elapsed `137.9862026 s`; `runtime_ready_claimed=false` and no failure code/stage.
+- Authority was narrowed before any revoked action: runtime/holder/PG/config/backup/external-handoff/discovery work is `REVOKED_AND_NOT_RUN`.
+- Source binding: commit `851ffd56...`, tree `3c31ea3f...`; current saver-only advances did not affect build inputs. Only the protected script was dirty and its content was not read or touched.
+- Previous partial target was observed only: no matching cargo/rustc, no binary, `542` files / `193126147` bytes, not deleted/cleaned/reused/adopted.
+- Exactly one new build used a never-existing isolated target and a `180000 ms` bound; it completed exit `0` in `38347 ms` with Cargo reporting `38.29 s`.
+- Verified binary: `10279424` bytes, SHA-256 `5ec06821eb06d6b1da40c7bdf7bd094453a7081808720ef622ffb2afb127dc58`, last write `2026-08-11T15:37:11.1854282Z`, verified `2026-08-11T15:37:26.9862026Z`.
+- Previous timeout comparison: the prior worker stopped at executor timeout without a binary; this worker used a fresh target and the one authorized build completed. This proves only binary materialization, not runtime readiness.
+- Tests: cargo build `PASS`; cargo test/full suite/npm `NOT_RUN_BY_SCOPE`; direct-stdio discovery `NOT_RUN_AUTHORITY_REVOKED`.
+- Protected boundaries held: no repo/saver/protected-script mutation by worker, holder/PG query, global config or external handoff read/write, discovery/live tool call, cleanup/rollback/provision/process action, protected state, release/default branch, or unrelated program.
+- Next action: saver publishes this binary receipt. Any holder/config/handoff/discovery work requires a separate newly authorized worker; this worker must not perform runtime steps.
+- Successor durable save: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Archive boundary: do not archive this build-only worker until its exact receipt is remotely durable and central later confirms archival.
