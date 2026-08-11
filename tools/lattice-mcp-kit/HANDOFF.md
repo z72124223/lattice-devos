@@ -523,3 +523,14 @@
 - Process deviation is preserved: one broad filename-only `rg -l` scan included the protected dirty script path; contents were not shown, edited, staged, reset, cleaned, committed, or otherwise acted on.
 - Successor durable save: exact-path commit `255245583dc60628f63c503cd965a55a18d46497` (tree `0ee0675e35b4cd2d337f0c34e4b7fbc54430a4a6`, parent/source `41bca3c631f43a164791c8e70db5340212f49e5c`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved first durable local/remote SHA equality at `2026-08-11T17:46:23.6646761Z`.
 - Archive boundary: central confirmed this no-BOM/LF source-remediation worker archived after final remote confirmation `c259521e844f5b2411cf81369bdaa86c853d7057`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T17:47:27.8225715Z`. Source paths, config, expired holder, external handoff, and successor holder-worker state remain outside saver authority.
+
+## Two-hour holder ready — `019ff1f0-09a4-7d41-b076-db41140b7f18`
+
+- Exact captured receipt is now durably queued as `PASS_HOLDER_READY`; checked at `2026-08-11T17:52:19.9259179Z`. The earlier response-only capture was not GitHub persistence.
+- Additive worker timing metadata: started `2026-08-11T17:48:02.000Z`, finished `2026-08-11T17:52:19.9259179Z`, elapsed `257925 ms`, status `completed_pending_saver_commit_and_remote_equality`; scope remained one read-only old-holder classification plus exactly one TTL-7200 provision and secret-safe HOLDER_READY verification.
+- Wrapper invocation count `1`, requested TTL `7200` seconds. Parent capture gap is `GAP_NON_BLOCKING_STDOUT_AND_MARKER_DURABLE`; stdout contained one JSON line equal to marker safe fields, stderr bytes `0`.
+- Old holder `127.0.0.1:52575` / run `f112f8fbc17344ed978ea8fe284e9705` is classified `DEADLINE_ELAPSED_MARKER_ROOT_ABSENT_PIDS_DEAD_NO_LISTENER`; it was not connected and no lifecycle action was taken.
+- New holder: `127.0.0.1:56503`, run `faa5b2b496524142b79bdc457b5863bf`, database `lattice_task019_faa5b2b4_base`, PostgreSQL `17.10`, system identifier `7672833000919291588`, postmaster PID `16248`, TTL PID `11336`, deadline `2026-08-11T19:50:54.8010275Z`; marker/status/listener/PIDs were READY/live in the receipt.
+- Selected port is outside required exclusions `5432/64272/55432/52575/49156/55061/51666/63238`; no forbidden action is recorded.
+- Saver did not rerun wrapper, connect holder, perform MCP/config/external-handoff/provision/cleanup actions, touch source paths, or read/modify/stage the protected dirty script.
+- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check.
