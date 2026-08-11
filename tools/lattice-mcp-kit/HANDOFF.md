@@ -533,4 +533,4 @@
 - New holder: `127.0.0.1:56503`, run `faa5b2b496524142b79bdc457b5863bf`, database `lattice_task019_faa5b2b4_base`, PostgreSQL `17.10`, system identifier `7672833000919291588`, postmaster PID `16248`, TTL PID `11336`, deadline `2026-08-11T19:50:54.8010275Z`; marker/status/listener/PIDs were READY/live in the receipt.
 - Selected port is outside required exclusions `5432/64272/55432/52575/49156/55061/51666/63238`; no forbidden action is recorded.
 - Saver did not rerun wrapper, connect holder, perform MCP/config/external-handoff/provision/cleanup actions, touch source paths, or read/modify/stage the protected dirty script.
-- First durable saver receipt commit is `c5a2dfb171bd6c028107d18ecaa897eb21caeb42` (tree `0aae2e41334f7ecec89046c2d31cbaacd188a6b1`); live `git ls-remote` equality was verified at `2026-08-11T17:55:22.0043186Z`. Archive remains pending (`archived_at_utc=null`).
+- First durable saver receipt commit is `c5a2dfb171bd6c028107d18ecaa897eb21caeb42` (tree `0aae2e41334f7ecec89046c2d31cbaacd188a6b1`); live `git ls-remote` equality was verified at `2026-08-11T17:55:22.0043186Z`. Central archived the worker at `2026-08-11T17:58:14.0304470Z`.
