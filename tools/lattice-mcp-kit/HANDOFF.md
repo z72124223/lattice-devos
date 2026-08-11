@@ -157,4 +157,4 @@
 - No task ref was returned, so `lattice_task_status` was not called. Expected prior task ref/result digest remain `ab8724dd51419cf190ad491f1f8973894bca56dc0c3aed55ebc3723f6214177d` / `c8d4cc65e7e4b4834276900afae08eff1223d8f488251a69283126ca74689c22`; `consistency_verified=false`, `zero_new_execution_verified=false`.
 - Cleanup and rollback paths exist and do not target `64272`; candidate remains active; neither cleanup nor rollback was executed.
 - Conclusion: fresh acceptance failed at ingress profile commitment before a task ref was issued. Preserve this exact fixed code for the next bounded remediation; do not claim success or retry from this verifier.
-- Successor durable save: pending first exact-path commit and remote SHA equality verification; `remote_sha=null`, `github_saved_at_utc=null`, `archived_at_utc=null`.
+- Successor durable save: first exact-path commit `88cc11d78d487a05a438208733a6fa4d01c5e090` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:38:59.554Z`; `archived_at_utc=null`.
