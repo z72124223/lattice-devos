@@ -254,7 +254,7 @@
 - Protected boundaries held: no repository/saver-path mutation or push, no protected script content access, no old PID/root residual or `64272` mutation, and no submit/status/delivery call.
 - Next action is the already-dispatched bounded resume-from-live-holder worker: perform one single-quote-aware value-only command transform, validate/switch config atomically, discovery-only, and update the external secret-free handoff. Do not reprovision or cleanup.
 - Successor durable save: exact-path commit `dbcd684536d864c764b41c40dfd0e9cdd75e7d50` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T14:30:30.133Z`.
-- Archive boundary: original materialization worker remains unarchived until the new resume handoff is safely captured.
+- Archive boundary: original materialization worker was archived successfully; saver immediately captured actual `archived_at_utc=2026-08-11T14:39:36.9190562Z`. Archival affects only the Codex worker and does not mutate holder/config/handoff/backup/cleanup/rollback state.
 
 ## Bounded resume concurrency failure — `019ff138-f37f-78c0-a0d5-4165efbbb8a8`
 
@@ -267,7 +267,7 @@
 - Discovery was `NOT_RUN`; initialize/tools-list were not received; tool-call count `0`.
 - Next action requires one coordinating owner to stop concurrent config writers, determine provenance of `e624fc0c...`, and decide whether to restore `dc83687...` or retain a safely restaged config before completing finalize/discovery. Do not rerun provision or discovery from this worker.
 - Successor durable save: exact-path commit `2749390f77e0880aacdc2aa30a1a7da802778c07` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T14:34:33.480Z`.
-- Archive boundary: do not archive this resume worker until total engineering resolves the ownership failure. Live holder and all cleanup scopes remain independently owned.
+- Archive boundary: formal resume worker was archived successfully; saver immediately captured actual `archived_at_utc=2026-08-11T14:39:36.9240579Z`. Archival affects only the Codex worker; live holder and all cleanup scopes remain independently owned.
 
 ## Urgent-stop mutation provenance — `019ff11b-5d3c-7633-a45f-8cfb3829978a`
 
