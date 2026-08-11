@@ -720,3 +720,11 @@
 - Failure remains `STDIO_ORCHESTRATOR_NONZERO_NO_RESPONSE` at `SUBMIT_RESPONSE_CAPTURE`; initialize/list/submit flow evidence retains its probable, unobserved, and unknown classifications.
 - No MCP, Codex, PostgreSQL, network mutation, config/home mutation, holder inspection/action, cleanup/rollback, or protected-script access occurred. The holder deadline is treated as expired without inspection.
 - The proposed client correction was diagnosis-only and was not implemented. Stage 1 receipt commit `3ef2fd6f6a3776d5bfd35fba8a3e1d6af1357e3b` matched fresh live remote at `2026-08-11T22:03:22.8646740Z`; stage 2 confirmation commit `a88522f750eb239f63ecbe25f9e4a0d3d903e408` matched fresh live remote at `2026-08-11T22:04:41.6134748Z`. Central archived the diagnosis at `2026-08-11T22:05:31.7270448Z`; outer saver state is `safe_to_archive=true`. Verdict remains non-PASS, certainty remains `MEDIUM`, and submit write count remains `UNKNOWN_0_OR_1`.
+
+## Holder ready — `019ff2d3-6842-7ec3-9839-8d0dd54bca35`
+
+- Functional classification is `PASS_HOLDER_READY`; the exact canonical wrapper receipt reports `READY` for run `feb0534b39484da6997b7235f1d49d9d` at `127.0.0.1:58503`.
+- Canonical LF-terminated receipt SHA-256 is `0dbef44acd4ca0f75c022bdc8a815ff3c6ed75123351bd398f37beb30513cb98`; single wrapper invocation and no rerun are preserved.
+- Parent exit code remained unavailable after parent exit because the TTL child inherited the pipe; durable recovered receipt and read-only functional gates established semantic `READY`.
+- Verification time is `2026-08-11T22:05:57.3829998Z` with 6734 seconds remaining. PostgreSQL 17.10, exact listener/postmaster ownership, TTL cleanup identity, deadline, exclusions, and secret-safety checks passed.
+- Worker performed no MCP/discovery/submit/status, no manual database query beyond wrapper readiness, no port 64272 action, cleanup/rollback, global config, source, or handoff write. Stage 1 and stage 2 saver equality are pending.
