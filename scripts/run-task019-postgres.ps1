@@ -10,6 +10,8 @@ param(
     [string]$Task038TunnelProfileDirectory,
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')]
     [string]$Task038TunnelProfileName = 'lattice-local',
+    [ValidateRange(60, 1800)]
+    [int]$HolderTtlSeconds = 900,
     [switch]$MemoryOnly
 )
 
@@ -82,6 +84,13 @@ $environmentNames = @(
     'LATTICE_STORE_AUTHORITY_REVISION'
     'LATTICE_STORE_OBSERVATION_DIGEST'
     'LATTICE_STORE_AUTHORITY_HEAD_DIGEST'
+    'LATTICE_TASK019_HOLDER_RECEIPT_PATH'
+    'LATTICE_TASK019_HOLDER_SESSION_ID'
+    'LATTICE_TASK019_HOLDER_NONCE'
+    'LATTICE_TASK019_HOLDER_NONCE_COMMITMENT'
+    'LATTICE_TASK019_HOLDER_CONSUMER_SESSION_ID'
+    'LATTICE_TASK019_HOLDER_DEADLINE_UTC'
+    'LATTICE_P0_CONSUMER_SESSION_ID'
 )
 
 function Get-CanonicalPath {
@@ -431,6 +440,61 @@ function Get-StringSha256 {
     finally {
         $algorithm.Dispose()
     }
+}
+
+function Get-Task019HmacSha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+
+    $algorithm = [Security.Cryptography.HMACSHA256]::new(
+        [Text.UTF8Encoding]::new($false).GetBytes($Key)
+    )
+    try {
+        return ([BitConverter]::ToString($algorithm.ComputeHash(
+            [Text.UTF8Encoding]::new($false).GetBytes($Value)
+        ))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $algorithm.Dispose() }
+}
+
+function Set-Task019OwnerOnlyAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][bool]$Directory
+    )
+
+    try {
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        if ($Directory) {
+            $security = [Security.AccessControl.DirectorySecurity]::new()
+            $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+                $sid,
+                [Security.AccessControl.FileSystemRights]::FullControl,
+                [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+                [Security.AccessControl.PropagationFlags]::None,
+                [Security.AccessControl.AccessControlType]::Allow
+            )
+            $security.SetOwner($sid)
+            $security.SetAccessRuleProtection($true, $false)
+            [void]$security.AddAccessRule($rule)
+            [IO.Directory]::SetAccessControl($Path, $security)
+        }
+        else {
+            $security = [Security.AccessControl.FileSecurity]::new()
+            $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+                $sid,
+                [Security.AccessControl.FileSystemRights]::FullControl,
+                [Security.AccessControl.AccessControlType]::Allow
+            )
+            $security.SetOwner($sid)
+            $security.SetAccessRuleProtection($true, $false)
+            [void]$security.AddAccessRule($rule)
+            [IO.File]::SetAccessControl($Path, $security)
+        }
+    }
+    catch { throw 'TASK019_HOLDER_ACL_REJECTED' }
 }
 
 function Enable-Task038TunnelStoreAuthority {
@@ -980,6 +1044,10 @@ $deliveryHookPath = $null
 $fullChainHookPath = $null
 $task038HookPath = $null
 $task038TunnelHookPath = $null
+$holderReceipt = $null
+$holderFinalEvidence = $null
+$holderConsumerStarted = $false
+$holderConsumerExited = $false
 
 $selectedHookCount = @(
     $RunLatticeDeliveryHook,
@@ -1048,6 +1116,231 @@ function Get-Task019PostgresProcessIdentity {
     return [pscustomobject]@{
         system_identifier = [string]$Matches[1]
         postmaster_started_at = [string]$Matches[2]
+    }
+}
+
+function Get-Task019PostmasterRuntimeEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Psql,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][string]$DataDirectory,
+        [Parameter(Mandatory = $true)][string]$PostgresExecutable,
+        [Parameter(Mandatory = $true)][string]$ExpectedNativeIdentity,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+
+    $identity = Get-Task019PostgresProcessIdentity -Psql $Psql -Port $Port -Password $Password -RunId $RunId
+    try {
+        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction Stop | Where-Object {
+            [string]$_.LocalAddress -in @('127.0.0.1', '::ffff:127.0.0.1')
+        })
+    }
+    catch { throw 'TASK019_POSTMASTER_LISTENER_REJECTED' }
+    if ($listeners.Count -ne 1 -or [int]$listeners[0].OwningProcess -lt 1) {
+        throw 'TASK019_POSTMASTER_LISTENER_REJECTED'
+    }
+    try {
+        $processId = [int]$listeners[0].OwningProcess
+        $process = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + $processId) -ErrorAction Stop
+        $executable = Get-CanonicalPath -Path ([string]$process.ExecutablePath)
+        $createdAt = ([DateTimeOffset]([DateTime]$process.CreationDate)).ToUniversalTime()
+        if (
+            $null -eq $process -or
+            $executable -cne (Get-CanonicalPath -Path $PostgresExecutable) -or
+            [string]$process.CommandLine -notlike ('*' + (Get-CanonicalPath -Path $DataDirectory) + '*') -or
+            (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ExpectedSha256 -or
+            (Get-LatticeWindowsNativePathIdentityToken -Path $executable -Directory $false) -cne $ExpectedNativeIdentity
+        ) { throw 'TASK019_POSTMASTER_PROCESS_IDENTITY_REJECTED' }
+    }
+    catch { throw 'TASK019_POSTMASTER_PROCESS_IDENTITY_REJECTED' }
+    return [pscustomobject][ordered]@{
+        system_identifier = [string]$identity.system_identifier
+        postmaster_started_at = [string]$identity.postmaster_started_at
+        listener_process_id = [long]$processId
+        listener_process_creation_time = $createdAt.ToFileTime().ToString()
+        listener_process_creation_time_source = 'WINDOWS_PROCESS_TIMES'
+        listener_process_created_at_utc = $createdAt.ToString('o')
+        listener_executable_path = $executable
+        listener_executable_sha256 = $ExpectedSha256
+        listener_executable_native_identity = $ExpectedNativeIdentity
+        listener_data_directory = Get-CanonicalPath -Path $DataDirectory
+        listener_host = '127.0.0.1'
+        listener_port = [long]$Port
+    }
+}
+
+function New-Task019HolderReceipt {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryTarget,
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][string]$ClusterRoot,
+        [Parameter(Mandatory = $true)][string]$DataDirectory,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][int]$TtlSeconds,
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$ToolIdentity
+    )
+
+    if ($RunId -cnotmatch '\A[0-9a-f]{32}\z' -or $Port -in @(5432, 64272, 55432)) {
+        throw 'TASK019_HOLDER_CONFIG_REJECTED'
+    }
+    $root = Get-CanonicalPath -Path (Join-Path $RepositoryTarget 'task019-holder-receipts')
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        New-Item -ItemType Directory -Path $root -Force:$false | Out-Null
+    }
+    Assert-NoReparseAncestor -Path $root -Boundary (Split-Path -Parent $RepositoryTarget)
+    Set-Task019OwnerOnlyAcl -Path $root -Directory $true
+    $path = Get-CanonicalPath -Path (Join-Path $root ($RunId + '.jsonl'))
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open(
+            $path,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::ReadWrite
+        )
+        Set-Task019OwnerOnlyAcl -Path $path -Directory $false
+        $nonce = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
+        $consumerSessionId = [Guid]::NewGuid().ToString('N')
+        $sessionId = [Guid]::NewGuid().ToString('N')
+        $createdAt = [DateTimeOffset]::UtcNow
+        $deadline = $createdAt.AddSeconds($TtlSeconds)
+        $owner = Get-Process -Id $PID -ErrorAction Stop
+        $ownerExecutable = Get-CanonicalPath -Path ([string]$owner.Path)
+        $receipt = [pscustomobject][ordered]@{
+            stream = $stream
+            path = $path
+            native_identity = Get-LatticeWindowsNativePathIdentityToken -Path $path -Directory $false
+            nonce = $nonce
+            nonce_commitment = Get-StringSha256 -Value (@(
+                'lattice.task019.postgres-holder-nonce.v1', $sessionId, $consumerSessionId,
+                $RunId, [string]$Port, $nonce
+            ) -join "`n")
+            session_id = $sessionId
+            consumer_session_id = $consumerSessionId
+            run_id = $RunId
+            cluster_root = Get-CanonicalPath -Path $ClusterRoot
+            data_directory = Get-CanonicalPath -Path $DataDirectory
+            port = [long]$Port
+            excluded_ports = @(5432, 64272, 55432)
+            created_at_utc = $createdAt.ToString('o')
+            deadline_utc = $deadline.ToString('o')
+            ordinal = 0L
+            previous_hmac_sha256 = '0' * 64
+            tool_identity = $ToolIdentity
+            owner_process_id = [long]$PID
+            owner_process_creation_time = $owner.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()
+            owner_process_executable = $ownerExecutable
+            owner_process_executable_sha256 = (Get-FileHash -LiteralPath $ownerExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+            owner_process_executable_native_identity = Get-LatticeWindowsNativePathIdentityToken -Path $ownerExecutable -Directory $false
+            closed = $false
+        }
+        Add-Task019HolderEvent -Receipt $receipt -EventType 'HOLDER_OPEN' -Payload ([ordered]@{
+            owner_process_id = [long]$receipt.owner_process_id
+            owner_process_creation_time = [string]$receipt.owner_process_creation_time
+            owner_process_creation_time_source = 'WINDOWS_PROCESS_TIMES'
+            owner_process_executable = [string]$receipt.owner_process_executable
+            owner_process_executable_sha256 = [string]$receipt.owner_process_executable_sha256
+            owner_process_executable_native_identity = [string]$receipt.owner_process_executable_native_identity
+            cluster_root = [string]$receipt.cluster_root
+            data_directory = [string]$receipt.data_directory
+            host = '127.0.0.1'
+            port = [long]$receipt.port
+            excluded_ports = @($receipt.excluded_ports)
+            ttl_seconds = [long]$TtlSeconds
+            deadline_utc = [string]$receipt.deadline_utc
+            tool_identity = $receipt.tool_identity
+            authority_receipt_path = [string]$receipt.path
+            authority_receipt_native_identity = [string]$receipt.native_identity
+        })
+        return $receipt
+    }
+    catch {
+        if ($null -ne $stream) { $stream.Dispose() }
+        throw 'TASK019_HOLDER_RECEIPT_REJECTED'
+    }
+}
+
+function Add-Task019HolderEvent {
+    param(
+        [Parameter(Mandatory = $true)]$Receipt,
+        [Parameter(Mandatory = $true)][ValidateSet(
+            'HOLDER_OPEN', 'MARKER_CREATED', 'INITIAL_POSTMASTER_READY',
+            'INITIAL_POSTMASTER_STOPPED', 'RESTART_POSTMASTER_READY',
+            'CONSUMER_STARTED', 'CONSUMER_EXITED', 'HOLDER_STOP_REQUESTED',
+            'HOLDER_STOPPED', 'CLEANUP_REQUESTED', 'CLEANUP_COMPLETED', 'RECEIPT_CLOSED'
+        )][string]$EventType,
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$Payload
+    )
+
+    if (
+        [bool]$Receipt.closed -or $null -eq $Receipt.stream -or -not $Receipt.stream.CanWrite -or
+        -not (Test-LatticeWindowsNativePathIdentity -Path ([string]$Receipt.path) -Directory $false -ExpectedToken ([string]$Receipt.native_identity))
+    ) { throw 'TASK019_HOLDER_RECEIPT_REJECTED' }
+    if ($EventType -in @('RESTART_POSTMASTER_READY', 'CONSUMER_STARTED') -and [DateTimeOffset]::UtcNow -gt [DateTimeOffset]::Parse([string]$Receipt.deadline_utc)) {
+        throw 'TASK019_HOLDER_TTL_EXPIRED'
+    }
+    $Receipt.ordinal = [long]$Receipt.ordinal + 1L
+    $observedAt = [DateTimeOffset]::UtcNow.ToString('o')
+    $payloadJson = $Payload | ConvertTo-Json -Compress -Depth 20
+    $payloadSha256 = Get-StringSha256 -Value $payloadJson
+    $hmacInput = @(
+        'lattice.task019.postgres-holder-hmac.v1', [string]$Receipt.previous_hmac_sha256,
+        [string]$Receipt.session_id, [string]$Receipt.consumer_session_id,
+        [string]$Receipt.run_id, [string]$Receipt.port, [string]$Receipt.nonce_commitment,
+        [string]$Receipt.ordinal, $EventType, $observedAt, $payloadSha256
+    ) -join "`n"
+    $eventHmac = Get-Task019HmacSha256 -Key ([string]$Receipt.nonce) -Value $hmacInput
+    $record = [ordered]@{
+        schema = 'lattice.task019.postgres-holder-authority.v1'
+        event_type = $EventType
+        session_id = [string]$Receipt.session_id
+        consumer_session_id = [string]$Receipt.consumer_session_id
+        run_id = [string]$Receipt.run_id
+        host = '127.0.0.1'
+        port = [long]$Receipt.port
+        excluded_ports = @($Receipt.excluded_ports)
+        deadline_utc = [string]$Receipt.deadline_utc
+        nonce_commitment = [string]$Receipt.nonce_commitment
+        ordinal = [long]$Receipt.ordinal
+        observed_at_utc = $observedAt
+        payload = $Payload
+        payload_sha256 = $payloadSha256
+        previous_hmac_sha256 = [string]$Receipt.previous_hmac_sha256
+        event_hmac_sha256 = $eventHmac
+    }
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes((($record | ConvertTo-Json -Compress -Depth 24) + "`n"))
+    $Receipt.stream.Write($bytes, 0, $bytes.Length)
+    $Receipt.stream.Flush($true)
+    $Receipt.previous_hmac_sha256 = $eventHmac
+}
+
+function Close-Task019HolderReceipt {
+    param([Parameter(Mandatory = $true)]$Receipt)
+
+    if (-not [bool]$Receipt.closed) {
+        Add-Task019HolderEvent -Receipt $Receipt -EventType 'RECEIPT_CLOSED' -Payload ([ordered]@{
+            final_event_count_before_close = [long]$Receipt.ordinal
+            cleanup_complete = $true
+        })
+        $Receipt.closed = $true
+        $Receipt.stream.Flush($true)
+        $Receipt.stream.Dispose()
+        $Receipt.nonce = $null
+    }
+    return [pscustomobject][ordered]@{
+        path = [string]$Receipt.path
+        native_identity = [string]$Receipt.native_identity
+        raw_sha256 = (Get-FileHash -LiteralPath ([string]$Receipt.path) -Algorithm SHA256).Hash.ToLowerInvariant()
+        byte_count = [long](Get-Item -LiteralPath ([string]$Receipt.path)).Length
+        event_count = [long]$Receipt.ordinal
+        final_hmac_sha256 = [string]$Receipt.previous_hmac_sha256
+        session_id = [string]$Receipt.session_id
+        consumer_session_id = [string]$Receipt.consumer_session_id
+        nonce_commitment = [string]$Receipt.nonce_commitment
+        deadline_utc = [string]$Receipt.deadline_utc
+        authority_scope = 'LIVE_HOLDER_PROCESS_PRIVATE_HMAC'
     }
 }
 
@@ -1164,6 +1457,25 @@ try {
 
     New-Item -ItemType Directory -Path $clusterRoot -Force:$false | Out-Null
     Assert-NoReparseAncestor -Path $clusterRoot -Boundary $repositoryRoot
+    $holderReceipt = New-Task019HolderReceipt `
+        -RepositoryTarget $repositoryTarget `
+        -RunId $runId `
+        -ClusterRoot $clusterRoot `
+        -DataDirectory $dataDirectory `
+        -Port $port `
+        -TtlSeconds $HolderTtlSeconds `
+        -ToolIdentity ([ordered]@{
+            postgres_version = $expectedPostgresVersion
+            postgres_path = $postgres
+            postgres_sha256 = $expectedPostgresExecutableSha256
+            postgres_native_identity = $postgresExecutableNativeIdentity
+            psql_path = $psql
+            psql_sha256 = $expectedPsqlExecutableSha256
+            psql_native_identity = $psqlExecutableNativeIdentity
+            pg_ctl_path = $pgCtl
+            pg_ctl_sha256 = $expectedPgCtlExecutableSha256
+            pg_ctl_native_identity = $pgCtlExecutableNativeIdentity
+        })
     $marker = [ordered]@{
         kind = 'LATTICE_TASK019_DISPOSABLE_POSTGRES_V1'
         run_id = $runId
@@ -1184,6 +1496,13 @@ try {
         -ParentPath $clusterParent `
         -RootPath $clusterRoot `
         -MarkerPath $markerPath
+    Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'MARKER_CREATED' -Payload ([ordered]@{
+        marker_path = $markerPath
+        marker_native_identity = Get-LatticeWindowsNativePathIdentityToken -Path $markerPath -Directory $false
+        marker_raw_sha256 = (Get-FileHash -LiteralPath $markerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        marker_created_at_utc = [string]$marker.created_at_utc
+        marker_identity_materialized = $false
+    })
 
     $oneTimePassword = New-OneTimePassword
     try {
@@ -1248,11 +1567,15 @@ try {
             throw 'TASK019_POSTGRES_EXECUTABLE_IDENTITY_REJECTED'
         }
     }
-    $postgresProcessIdentity = Get-Task019PostgresProcessIdentity `
+    $postgresProcessIdentity = Get-Task019PostmasterRuntimeEvidence `
         -Psql $psql `
         -Port $port `
         -Password $oneTimePassword `
-        -RunId $runId
+        -RunId $runId `
+        -DataDirectory $dataDirectory `
+        -PostgresExecutable $postgres `
+        -ExpectedNativeIdentity $postgresExecutableNativeIdentity `
+        -ExpectedSha256 $expectedPostgresExecutableSha256
     $marker['identity_materialized'] = $true
     $marker['system_identifier'] = [string]$postgresProcessIdentity.system_identifier
     $marker['initial_postmaster_started_at'] = [string]$postgresProcessIdentity.postmaster_started_at
@@ -1270,6 +1593,21 @@ try {
     if (-not (Test-LatticeWindowsNativeContainmentSnapshot -Snapshot $cleanupContainment)) {
         throw 'TASK019_POSTGRES_IDENTITY_MARKER_REJECTED'
     }
+    Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'INITIAL_POSTMASTER_READY' -Payload ([ordered]@{
+        system_identifier = [string]$postgresProcessIdentity.system_identifier
+        postmaster_started_at = [string]$postgresProcessIdentity.postmaster_started_at
+        listener_process_id = [long]$postgresProcessIdentity.listener_process_id
+        listener_process_creation_time = [string]$postgresProcessIdentity.listener_process_creation_time
+        listener_process_creation_time_source = [string]$postgresProcessIdentity.listener_process_creation_time_source
+        listener_process_created_at_utc = [string]$postgresProcessIdentity.listener_process_created_at_utc
+        listener_executable_path = [string]$postgresProcessIdentity.listener_executable_path
+        listener_executable_sha256 = [string]$postgresProcessIdentity.listener_executable_sha256
+        listener_executable_native_identity = [string]$postgresProcessIdentity.listener_executable_native_identity
+        listener_data_directory = [string]$postgresProcessIdentity.listener_data_directory
+        listener_host = [string]$postgresProcessIdentity.listener_host
+        listener_port = [long]$postgresProcessIdentity.listener_port
+        data_native_identity = [string]$marker.data_native_identity
+    })
     $initialOutput = Invoke-LiveTest -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'initial'
     $restartEvidence = Get-RestartEvidence -TestOutput $initialOutput
 
@@ -1277,6 +1615,14 @@ try {
         throw 'Could not prove the disposable PostgreSQL cluster stopped after the initial phase.'
     }
     $clusterStarted = $false
+    if (@(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue).Count -ne 0) {
+        throw 'TASK019_POSTMASTER_LISTENER_STILL_PRESENT'
+    }
+    Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'INITIAL_POSTMASTER_STOPPED' -Payload ([ordered]@{
+        initial_listener_process_id = [long]$postgresProcessIdentity.listener_process_id
+        pg_ctl_status_stopped = $true
+        port_listener_absent = $true
+    })
     Remove-HarnessOutputFiles -Root $clusterRoot
     Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot -OneTimePassword $oneTimePassword
 
@@ -1289,14 +1635,22 @@ try {
         'start'
     ) -Operation 'PostgreSQL test-cluster restart'
     Set-HarnessEnvironment -Phase 'restart' -HostName '127.0.0.1' -Port $port -Password $oneTimePassword -RunId $runId
-    $restartedPostgresIdentity = Get-Task019PostgresProcessIdentity `
+    $restartedPostgresIdentity = Get-Task019PostmasterRuntimeEvidence `
         -Psql $psql `
         -Port $port `
         -Password $oneTimePassword `
-        -RunId $runId
+        -RunId $runId `
+        -DataDirectory $dataDirectory `
+        -PostgresExecutable $postgres `
+        -ExpectedNativeIdentity $postgresExecutableNativeIdentity `
+        -ExpectedSha256 $expectedPostgresExecutableSha256
     if (
         [string]$restartedPostgresIdentity.system_identifier -cne [string]$marker.system_identifier -or
-        [string]$restartedPostgresIdentity.postmaster_started_at -ceq [string]$marker.initial_postmaster_started_at
+        [string]$restartedPostgresIdentity.postmaster_started_at -ceq [string]$marker.initial_postmaster_started_at -or
+        (
+            [long]$restartedPostgresIdentity.listener_process_id -eq [long]$postgresProcessIdentity.listener_process_id -and
+            [string]$restartedPostgresIdentity.listener_process_creation_time -ceq [string]$postgresProcessIdentity.listener_process_creation_time
+        )
     ) {
         throw 'TASK019_POSTGRES_RESTART_IDENTITY_REJECTED'
     }
@@ -1306,9 +1660,54 @@ try {
     if (-not (Test-LatticeWindowsNativeContainmentSnapshot -Snapshot $cleanupContainment)) {
         throw 'TASK019_POSTGRES_IDENTITY_MARKER_REJECTED'
     }
+    Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'RESTART_POSTMASTER_READY' -Payload ([ordered]@{
+        system_identifier = [string]$restartedPostgresIdentity.system_identifier
+        initial_postmaster_started_at = [string]$postgresProcessIdentity.postmaster_started_at
+        restart_postmaster_started_at = [string]$restartedPostgresIdentity.postmaster_started_at
+        initial_listener_process_id = [long]$postgresProcessIdentity.listener_process_id
+        initial_listener_process_creation_time = [string]$postgresProcessIdentity.listener_process_creation_time
+        listener_process_id = [long]$restartedPostgresIdentity.listener_process_id
+        listener_process_creation_time = [string]$restartedPostgresIdentity.listener_process_creation_time
+        listener_process_creation_time_source = [string]$restartedPostgresIdentity.listener_process_creation_time_source
+        listener_process_created_at_utc = [string]$restartedPostgresIdentity.listener_process_created_at_utc
+        listener_executable_path = [string]$restartedPostgresIdentity.listener_executable_path
+        listener_executable_sha256 = [string]$restartedPostgresIdentity.listener_executable_sha256
+        listener_executable_native_identity = [string]$restartedPostgresIdentity.listener_executable_native_identity
+        listener_data_directory = [string]$restartedPostgresIdentity.listener_data_directory
+        listener_host = [string]$restartedPostgresIdentity.listener_host
+        listener_port = [long]$restartedPostgresIdentity.listener_port
+        marker_raw_sha256 = (Get-FileHash -LiteralPath $markerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        marker_native_identity = Get-LatticeWindowsNativePathIdentityToken -Path $markerPath -Directory $false
+        restart_identity_distinct = $true
+    })
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_UUID', $restartEvidence.DatabaseId, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_MANIFEST', $restartEvidence.ManifestHash, 'Process')
     $null = Invoke-LiveTest -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'restart'
+
+    if (@($selectedHookCount).Count -eq 1) {
+        foreach ($entry in ([ordered]@{
+            LATTICE_TASK019_HOLDER_RECEIPT_PATH = [string]$holderReceipt.path
+            LATTICE_TASK019_HOLDER_SESSION_ID = [string]$holderReceipt.session_id
+            LATTICE_TASK019_HOLDER_NONCE = [string]$holderReceipt.nonce
+            LATTICE_TASK019_HOLDER_NONCE_COMMITMENT = [string]$holderReceipt.nonce_commitment
+            LATTICE_TASK019_HOLDER_CONSUMER_SESSION_ID = [string]$holderReceipt.consumer_session_id
+            LATTICE_TASK019_HOLDER_DEADLINE_UTC = [string]$holderReceipt.deadline_utc
+        }).GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+        }
+        Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'CONSUMER_STARTED' -Payload ([ordered]@{
+            consumer_session_id = [string]$holderReceipt.consumer_session_id
+            consumer_kind = $(if ($RunTask038AcceptanceHook) { 'TASK038_LOCAL_ACCEPTANCE' } elseif ($RunTask038TunnelHook) { 'TASK038_TUNNEL' } elseif ($RunFullChainAcceptanceHook) { 'TASK037_FULL_CHAIN' } else { 'LATTICE_DELIVERY' })
+            restart_postmaster_started_at = [string]$restartedPostgresIdentity.postmaster_started_at
+            listener_process_id = [long]$restartedPostgresIdentity.listener_process_id
+            listener_process_creation_time = [string]$restartedPostgresIdentity.listener_process_creation_time
+            listener_executable_sha256 = [string]$restartedPostgresIdentity.listener_executable_sha256
+            listener_data_directory = [string]$restartedPostgresIdentity.listener_data_directory
+            holder_process_id = [long]$holderReceipt.owner_process_id
+            holder_process_creation_time = [string]$holderReceipt.owner_process_creation_time
+        })
+        $holderConsumerStarted = $true
+    }
 
     if ($RunLatticeDeliveryHook) {
         $deliveryHookPath = Get-LatticeDeliveryHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
@@ -1385,6 +1784,11 @@ try {
         & $fullChainHookPath -InternalPhase 'FullChainStatus'
     }
     elseif ($RunTask038TunnelHook) {
+        [Environment]::SetEnvironmentVariable(
+            'LATTICE_P0_CONSUMER_SESSION_ID',
+            [string]$holderReceipt.consumer_session_id,
+            'Process'
+        )
         $task038TunnelHookPath = Get-LatticeTask038TunnelHookPath `
             -ScriptDirectory $PSScriptRoot `
             -RepositoryRoot $repositoryRoot
@@ -1450,6 +1854,15 @@ try {
             [Environment]::SetEnvironmentVariable([string]$entry.Key, $originalEnvironment[[string]$entry.Key], 'Process')
         }
     }
+    if ($holderConsumerStarted) {
+        Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'CONSUMER_EXITED' -Payload ([ordered]@{
+            consumer_session_id = [string]$holderReceipt.consumer_session_id
+            consumer_exit_classification = 'COMPLETED'
+            restart_listener_process_id = [long]$restartedPostgresIdentity.listener_process_id
+            restart_listener_still_present = (@(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction Stop).Count -eq 1)
+        })
+        $holderConsumerExited = $true
+    }
     $harnessCompleted = $true
 }
 finally {
@@ -1461,6 +1874,14 @@ finally {
         if (Test-Path -LiteralPath $passwordFile) {
             Remove-Item -LiteralPath $passwordFile -Force -ErrorAction SilentlyContinue
         }
+        if ($harnessCompleted -and $null -ne $holderReceipt) {
+            Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'HOLDER_STOP_REQUESTED' -Payload ([ordered]@{
+                holder_process_id = [long]$holderReceipt.owner_process_id
+                listener_process_id = [long]$restartedPostgresIdentity.listener_process_id
+                consumer_started = [bool]$holderConsumerStarted
+                consumer_exited = [bool]$holderConsumerExited
+            })
+        }
         if ($clusterStarted) {
             if (-not (Stop-TestCluster -PgCtl $pgCtl -DataDirectory $dataDirectory)) {
                 throw "Disposable cluster could not be proved stopped; preserving $clusterRoot"
@@ -1469,6 +1890,13 @@ finally {
         }
         elseif ((Test-Path -LiteralPath $dataDirectory) -and -not (Test-ClusterStopped -PgCtl $pgCtl -DataDirectory $dataDirectory)) {
             throw "Disposable cluster status is not safely stopped; preserving $clusterRoot"
+        }
+        if ($harnessCompleted -and $null -ne $holderReceipt) {
+            Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'HOLDER_STOPPED' -Payload ([ordered]@{
+                pg_ctl_status_stopped = $true
+                listener_absent = (@(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue).Count -eq 0)
+                data_directory = $dataDirectory
+            })
         }
 
         Remove-HarnessOutputFiles -Root $clusterRoot
@@ -1485,13 +1913,32 @@ finally {
             if (-not $cleanupTargetIsExact) {
                 throw "Disposable cluster cleanup gate did not pass; preserving $clusterRoot"
             }
+            if ($harnessCompleted -and $null -ne $holderReceipt) {
+                Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'CLEANUP_REQUESTED' -Payload ([ordered]@{
+                    cluster_root = $clusterRoot
+                    cleanup_containment_verified = $true
+                    marker_native_identity = [string]$cleanupContainment.marker_identity
+                })
+            }
             Remove-Item -LiteralPath $clusterRoot -Recurse -Force
             if (Test-Path -LiteralPath $clusterRoot) {
                 throw "Disposable cluster cleanup could not be proved complete; preserving $clusterRoot"
             }
         }
+        if ($harnessCompleted -and $null -ne $holderReceipt) {
+            Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'CLEANUP_COMPLETED' -Payload ([ordered]@{
+                cluster_root = $clusterRoot
+                cluster_root_absent = (-not (Test-Path -LiteralPath $clusterRoot))
+                listener_absent = (@(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue).Count -eq 0)
+            })
+            $holderFinalEvidence = Close-Task019HolderReceipt -Receipt $holderReceipt
+        }
     }
     finally {
+        if ($null -ne $holderReceipt -and -not [bool]$holderReceipt.closed) {
+            try { $holderReceipt.stream.Dispose() } catch {}
+            $holderReceipt.nonce = $null
+        }
         if ($fullSerializationMutexOwned -and $null -ne $fullSerializationMutex) {
             $fullSerializationMutex.ReleaseMutex()
             $fullSerializationMutexOwned = $false
@@ -1514,3 +1961,9 @@ Write-Output 'TASK019_POSTGRES_HARNESS=PASS'
 Write-Output "POSTGRES_VERSION=$expectedPostgresVersion"
 Write-Output 'ENDPOINT=127.0.0.1:<dynamic-excludes-5432-64272-55432>'
 Write-Output 'PHASES=initial,restart'
+if ($null -ne $holderFinalEvidence) {
+    Write-Output ('HOLDER_RECEIPT_PATH=' + [string]$holderFinalEvidence.path)
+    Write-Output ('HOLDER_RECEIPT_RAW_SHA256=' + [string]$holderFinalEvidence.raw_sha256)
+    Write-Output ('HOLDER_RECEIPT_FINAL_HMAC_SHA256=' + [string]$holderFinalEvidence.final_hmac_sha256)
+    Write-Output ('HOLDER_RECEIPT_EVENT_COUNT=' + [string]$holderFinalEvidence.event_count)
+}

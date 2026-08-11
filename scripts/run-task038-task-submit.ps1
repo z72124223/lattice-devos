@@ -189,6 +189,22 @@ function Get-FileSha256 {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-HmacStringSha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$Key,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+
+    $algorithm = [Security.Cryptography.HMACSHA256]::new(
+        [Text.UTF8Encoding]::new($false).GetBytes($Key)
+    )
+    try {
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Value)
+        return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $algorithm.Dispose() }
+}
+
 function Read-Task038StrictUtf8Text {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -252,6 +268,169 @@ function Assert-Task038PostgresNativeIdentity {
     }
 }
 
+function Read-Task019PostgresHolderAuthority {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReceiptPath,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })][string]$SessionId,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{64}\z' })][string]$Nonce,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{64}\z' })][string]$NonceCommitment,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })][string]$ConsumerSessionId,
+        [Parameter(Mandatory = $true)][string]$DeadlineUtc,
+        [Parameter(Mandatory = $true)][string]$ClusterMarkerPath,
+        [Parameter(Mandatory = $true)][string]$ClusterMarkerRawSha256
+    )
+
+    $failureCode = 'TASK038_POSTGRES_HOLDER_AUTHORITY_REJECTED'
+    Assert-RegularFile -Path $ReceiptPath -FailureCode $failureCode
+    $receiptNativeIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $ReceiptPath -Directory $false
+    $deadline = [DateTimeOffset]::MinValue
+    if (
+        -not [DateTimeOffset]::TryParse($DeadlineUtc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$deadline) -or
+        [DateTimeOffset]::UtcNow -gt $deadline
+    ) { throw 'TASK038_POSTGRES_HOLDER_TTL_REJECTED' }
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($ReceiptPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        if ($stream.Length -lt 1 -or $stream.Length -gt 1048576) { throw $failureCode }
+        $bytes = [byte[]]::new([int]$stream.Length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -lt 1) { throw $failureCode }
+            $offset += $read
+        }
+    }
+    catch { throw $failureCode }
+    finally { if ($null -ne $stream) { $stream.Dispose() } }
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) {
+        throw $failureCode
+    }
+    try { $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) }
+    catch { throw $failureCode }
+    if (-not $text.EndsWith("`n", [StringComparison]::Ordinal) -or $text.Contains("`r")) { throw $failureCode }
+    $parts = @($text.Split([string[]]@("`n"), [StringSplitOptions]::None))
+    if ($parts.Count -lt 2 -or $parts[-1] -cne '') { throw $failureCode }
+    $lines = @($parts[0..($parts.Count - 2)])
+    if (@($lines | Where-Object { $_ -ceq '' }).Count -ne 0) { throw $failureCode }
+    $expectedTypes = @(
+        'HOLDER_OPEN', 'MARKER_CREATED', 'INITIAL_POSTMASTER_READY',
+        'INITIAL_POSTMASTER_STOPPED', 'RESTART_POSTMASTER_READY', 'CONSUMER_STARTED'
+    )
+    if ($lines.Count -ne $expectedTypes.Count) { throw $failureCode }
+    $previous = '0' * 64
+    $previousObservedAt = [DateTimeOffset]::MinValue
+    $records = [Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        try { $record = $lines[$index] | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw $failureCode }
+        $observedAt = [DateTimeOffset]::MinValue
+        $payloadJson = $record.payload | ConvertTo-Json -Compress -Depth 20
+        $payloadSha256 = Get-StringSha256 -Value $payloadJson
+        if (
+            [string]$record.schema -cne 'lattice.task019.postgres-holder-authority.v1' -or
+            [string]$record.event_type -cne $expectedTypes[$index] -or
+            [string]$record.session_id -cne $SessionId -or
+            [string]$record.consumer_session_id -cne $ConsumerSessionId -or
+            [string]$record.run_id -cne $PostgresRunId -or
+            [string]$record.host -cne '127.0.0.1' -or
+            [long]$record.port -ne [long]$PostgresPort -or
+            (@($record.excluded_ports | ForEach-Object { [long]$_ }) -join ',') -cne '5432,64272,55432' -or
+            [string]$record.deadline_utc -cne $DeadlineUtc -or
+            [string]$record.nonce_commitment -cne $NonceCommitment -or
+            [long]$record.ordinal -ne ($index + 1) -or
+            [string]$record.payload_sha256 -cne $payloadSha256 -or
+            [string]$record.previous_hmac_sha256 -cne $previous -or
+            -not [DateTimeOffset]::TryParse([string]$record.observed_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind, [ref]$observedAt) -or
+            $observedAt -lt $previousObservedAt -or $observedAt -gt [DateTimeOffset]::UtcNow.AddSeconds(30)
+        ) { throw $failureCode }
+        $hmacInput = @(
+            'lattice.task019.postgres-holder-hmac.v1', $previous, $SessionId,
+            $ConsumerSessionId, $PostgresRunId, [string]$PostgresPort, $NonceCommitment,
+            [string]($index + 1), $expectedTypes[$index], [string]$record.observed_at_utc,
+            $payloadSha256
+        ) -join "`n"
+        $expectedHmac = Get-HmacStringSha256 -Key $Nonce -Value $hmacInput
+        if ([string]$record.event_hmac_sha256 -cne $expectedHmac) { throw $failureCode }
+        $previous = $expectedHmac
+        $previousObservedAt = $observedAt
+        $records.Add($record)
+    }
+    $holder = $records[0].payload
+    $marker = $records[1].payload
+    $initial = $records[2].payload
+    $stopped = $records[3].payload
+    $restart = $records[4].payload
+    $consumer = $records[5].payload
+    $currentOwner = Get-Process -Id $PID -ErrorAction Stop
+    $currentOwnerExecutable = Get-CanonicalPath -Path ([string]$currentOwner.Path)
+    if (
+        [long]$holder.owner_process_id -ne [long]$PID -or
+        [string]$holder.owner_process_creation_time -cne $currentOwner.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() -or
+        -not (Test-ExactPath -Actual ([string]$holder.owner_process_executable) -Expected $currentOwnerExecutable) -or
+        [string]$holder.owner_process_executable_sha256 -cne (Get-FileSha256 -Path $currentOwnerExecutable) -or
+        [string]$holder.owner_process_executable_native_identity -cne (Get-LatticeWindowsNativePathIdentityToken -Path $currentOwnerExecutable -Directory $false) -or
+        -not (Test-ExactPath -Actual ([string]$holder.cluster_root) -Expected (Split-Path -Parent $script:PostgresData)) -or
+        -not (Test-ExactPath -Actual ([string]$holder.data_directory) -Expected $script:PostgresData) -or
+        -not (Test-ExactPath -Actual ([string]$holder.authority_receipt_path) -Expected $ReceiptPath) -or
+        [string]$holder.authority_receipt_native_identity -cne $receiptNativeIdentity -or
+        [string]$holder.tool_identity.postgres_version -cne '17.10' -or
+        [string]$holder.tool_identity.postgres_sha256 -cne $expectedPostgresExecutableSha256 -or
+        [string]$holder.tool_identity.psql_sha256 -cne $expectedPsqlExecutableSha256 -or
+        [string]$holder.tool_identity.pg_ctl_sha256 -cne $expectedPgCtlExecutableSha256 -or
+        [string]$holder.tool_identity.postgres_native_identity -cne $script:PostgresExecutableNativeIdentity -or
+        [string]$holder.tool_identity.psql_native_identity -cne $script:PsqlNativeIdentity -or
+        [string]$holder.tool_identity.pg_ctl_native_identity -cne $script:PgCtlNativeIdentity -or
+        -not (Test-ExactPath -Actual ([string]$marker.marker_path) -Expected $ClusterMarkerPath) -or
+        [string]$restart.marker_raw_sha256 -cne $ClusterMarkerRawSha256 -or
+        [string]$restart.marker_native_identity -cne (Get-LatticeWindowsNativePathIdentityToken -Path $ClusterMarkerPath -Directory $false) -or
+        [string]$initial.system_identifier -cne [string]$restart.system_identifier -or
+        [string]$initial.postmaster_started_at -ceq [string]$restart.restart_postmaster_started_at -or
+        -not [bool]$stopped.pg_ctl_status_stopped -or -not [bool]$stopped.port_listener_absent -or
+        ([long]$initial.listener_process_id -eq [long]$restart.listener_process_id -and [string]$initial.listener_process_creation_time -ceq [string]$restart.listener_process_creation_time) -or
+        [string]$consumer.consumer_session_id -cne $ConsumerSessionId -or
+        [long]$consumer.holder_process_id -ne [long]$PID -or
+        [long]$consumer.listener_process_id -ne [long]$restart.listener_process_id -or
+        [string]$consumer.listener_process_creation_time -cne [string]$restart.listener_process_creation_time
+    ) { throw $failureCode }
+    try {
+        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $PostgresPort -ErrorAction Stop | Where-Object {
+            [string]$_.LocalAddress -in @('127.0.0.1', '::ffff:127.0.0.1')
+        })
+        if ($listeners.Count -ne 1 -or [long]$listeners[0].OwningProcess -ne [long]$restart.listener_process_id) {
+            throw $failureCode
+        }
+        $listenerProcess = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + [long]$restart.listener_process_id) -ErrorAction Stop
+        if (
+            -not (Test-ExactPath -Actual ([string]$listenerProcess.ExecutablePath) -Expected $script:PostgresExecutable) -or
+            [string]$listenerProcess.CommandLine -notlike ('*' + $script:PostgresData + '*') -or
+            ([DateTimeOffset]([DateTime]$listenerProcess.CreationDate)).ToUniversalTime().ToFileTime().ToString() -cne [string]$restart.listener_process_creation_time
+        ) { throw $failureCode }
+    }
+    catch { throw $failureCode }
+    return [pscustomobject][ordered]@{
+        schema = 'lattice.task038.postgres-holder-authority.v1'
+        authority_scope = 'LIVE_HOLDER_PROCESS_PRIVATE_HMAC'
+        receipt_path = $ReceiptPath
+        receipt_native_identity = $receiptNativeIdentity
+        receipt_prefix_raw_sha256 = Get-StringSha256 -Value $text
+        receipt_prefix_event_count = [long]$lines.Count
+        final_prefix_hmac_sha256 = $previous
+        session_id = $SessionId
+        consumer_session_id = $ConsumerSessionId
+        nonce_commitment = $NonceCommitment
+        deadline_utc = $DeadlineUtc
+        holder_process_id = [long]$PID
+        restart_listener_process_id = [long]$restart.listener_process_id
+        restart_listener_process_creation_time = [string]$restart.listener_process_creation_time
+        restart_postmaster_started_at = [string]$restart.restart_postmaster_started_at
+        restart_precedes_consumer = $true
+        current_os_listener_bound = $true
+        marker_rewrite_rejected = $true
+        reused_postmaster_rejected = $true
+        fake_postgres_tool_rejected = $true
+    }
+}
+
 function Get-Task038FailureClassification {
     param([Parameter(Mandatory = $true)]$ErrorRecord)
 
@@ -269,7 +448,7 @@ function Get-Task038FailureClassification {
 function Write-Task038ExclusiveBytes {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][byte[]]$Bytes,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Bytes,
         [Parameter(Mandatory = $true)][string]$FailureCode
     )
 
@@ -1898,6 +2077,255 @@ function Read-Task038McpAcceptanceEvidence {
     }
 }
 
+function New-Task038McpObservedEffectEvidenceSink {
+    param(
+        [Parameter(Mandatory = $true)][string]$AcceptanceEvidencePath,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })][string]$SessionId
+    )
+
+    $acceptanceRoot = Get-CanonicalPath -Path (Split-Path -Parent $AcceptanceEvidencePath)
+    $root = Get-CanonicalPath -Path (Join-Path $acceptanceRoot 'mcp-observed-effects')
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        New-Item -ItemType Directory -Path $root -Force:$false | Out-Null
+        Set-Task038OwnerOnlyAcl -Path $root -Directory $true
+    }
+    Assert-NoReparseAncestor `
+        -Path $root `
+        -Boundary $script:RepositoryRoot `
+        -FailureCode 'TASK038_MCP_OBSERVED_EFFECT_PATH_REJECTED'
+    $path = Get-CanonicalPath -Path (Join-Path $root ($SessionId + '.jsonl'))
+    Write-Task038ExclusiveBytes `
+        -Path $path `
+        -Bytes ([byte[]]::new(0)) `
+        -FailureCode 'TASK038_MCP_OBSERVED_EFFECT_NOT_FRESH'
+    Set-Task038OwnerOnlyAcl -Path $path -Directory $false
+    return [pscustomobject]@{
+        path = $path
+        native_identity = Get-LatticeWindowsNativePathIdentityToken -Path $path -Directory $false
+        nonce = ([Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N'))
+    }
+}
+
+function Read-Task038McpObservedEffectEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedNativeIdentity,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })][string]$SessionId,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{64}\z' })][string]$SafeConfigSha256,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{64}\z' })][string]$Nonce,
+        [Parameter(Mandatory = $true)][int]$ProcessId
+    )
+
+    $failureCode = 'TASK038_MCP_OBSERVED_EFFECT_EVIDENCE_REJECTED'
+    if (-not (Test-LatticeWindowsNativePathIdentity -Path $Path -Directory $false -ExpectedToken $ExpectedNativeIdentity)) {
+        throw $failureCode
+    }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if (
+        $bytes.Length -lt 1 -or $bytes.Length -gt 1048576 -or
+        ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf)
+    ) { throw $failureCode }
+    try { $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) }
+    catch { throw $failureCode }
+    if (-not $text.EndsWith("`n", [StringComparison]::Ordinal) -or $text.Contains("`r")) {
+        throw $failureCode
+    }
+    $parts = @($text.Split([string[]]@("`n"), [StringSplitOptions]::None))
+    if ($parts.Count -lt 2 -or $parts[-1] -cne '') { throw $failureCode }
+    $lines = @($parts[0..($parts.Count - 2)])
+    if (@($lines | Where-Object { $_ -ceq '' }).Count -ne 0) { throw $failureCode }
+    if ($lines.Count -lt 2) { throw $failureCode }
+    $nonceCommitment = Get-StringSha256 -Value (@(
+        'lattice.mcp.observed-effect-nonce.v1', $SessionId, $SafeConfigSha256, $Nonce
+    ) -join "`n")
+    $counterNames = @('dispatch', 'database', 'filesystem', 'process', 'network', 'codex')
+    $sessionCounters = [ordered]@{}
+    $probeCounters = [ordered]@{}
+    foreach ($name in $counterNames) { $sessionCounters[$name] = 0L; $probeCounters[$name] = 0L }
+    $previousHmac = '0' * 64
+    $previousObservedNanos = [decimal]0
+    $nowNanos = [decimal](([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) * 1000000)
+    $activeProbe = $false
+    $probeIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $rejected = [Collections.Generic.List[object]]::new()
+    $completed = [Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        try { $record = $lines[$index] | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw $failureCode }
+        $expectedKeys = @(
+            'classification', 'effect_kind', 'event_sha256', 'nonce_commitment', 'observed_at_unix_nanos',
+            'ordinal', 'previous_event_sha256', 'probe_counters', 'probe_id', 'process_id',
+            'record_type', 'request_id_sha256', 'safe_config_sha256', 'schema', 'session_counters',
+            'session_id', 'tool_name'
+        ) | Sort-Object
+        $actualKeys = @($record.PSObject.Properties.Name | Sort-Object)
+        if (($expectedKeys -join "`n") -cne ($actualKeys -join "`n")) { throw $failureCode }
+        $recordType = [string]$record.record_type
+        $closesProbe = $false
+        switch ($recordType) {
+            'SESSION_OPEN' {
+                if ($index -ne 0 -or $activeProbe -or $null -ne $record.classification -or $null -ne $record.effect_kind) {
+                    throw $failureCode
+                }
+            }
+            'PROBE_OPEN' {
+                if (
+                    $activeProbe -or $null -ne $record.classification -or $null -ne $record.effect_kind -or
+                    [string]$record.probe_id -cnotmatch '\A[0-9a-f]{64}\z' -or
+                    -not $probeIds.Add([string]$record.probe_id)
+                ) {
+                    throw $failureCode
+                }
+                $activeProbe = $true
+                foreach ($name in $counterNames) { $probeCounters[$name] = 0L }
+            }
+            'DISPATCH_ACCEPTED' {
+                if (-not $activeProbe -or [string]$record.classification -cne 'MCP_DISPATCH_ACCEPTED' -or $null -ne $record.effect_kind) {
+                    throw $failureCode
+                }
+                $probeCounters.dispatch++; $sessionCounters.dispatch++
+                if ([long]$probeCounters.dispatch -ne 1) { throw $failureCode }
+            }
+            'EFFECT_OBSERVED' {
+                $effectKind = [string]$record.effect_kind
+                if (-not $activeProbe -or $effectKind -cnotmatch '\A(?:database|filesystem|process|network|codex)\z' -or $null -ne $record.classification) {
+                    throw $failureCode
+                }
+                $probeCounters[$effectKind]++; $sessionCounters[$effectKind]++
+            }
+            'PROBE_REJECTED' {
+                if (
+                    -not $activeProbe -or
+                    [string]$record.classification -cnotmatch '\A(?:MCP_INVALID_PARAMS|MCP_UNKNOWN_TOOL|MCP_INVOCATION_LIMIT|MCP_NOT_READY)\z' -or
+                    $null -ne $record.effect_kind -or
+                    @($counterNames | Where-Object { [long]$probeCounters[$_] -ne 0 }).Count -ne 0
+                ) { throw $failureCode }
+                $rejected.Add([ordered]@{
+                    probe_id = [string]$record.probe_id
+                    tool_name = [string]$record.tool_name
+                    request_id_sha256 = [string]$record.request_id_sha256
+                    classification = [string]$record.classification
+                    observed_zero_counters = $true
+                })
+                $closesProbe = $true
+            }
+            'PROBE_COMPLETED' {
+                if (
+                    -not $activeProbe -or [long]$probeCounters.dispatch -ne 1 -or
+                    [string]$record.classification -cnotmatch '\A(?:MCP_RESULT|MCP_TOOL_ERROR)\z' -or
+                    $null -ne $record.effect_kind
+                ) { throw $failureCode }
+                $completed.Add([ordered]@{
+                    probe_id = [string]$record.probe_id
+                    tool_name = [string]$record.tool_name
+                    request_id_sha256 = [string]$record.request_id_sha256
+                    classification = [string]$record.classification
+                    counters = [ordered]@{
+                        dispatch = [long]$probeCounters.dispatch
+                        database = [long]$probeCounters.database
+                        filesystem = [long]$probeCounters.filesystem
+                        process = [long]$probeCounters.process
+                        network = [long]$probeCounters.network
+                        codex = [long]$probeCounters.codex
+                    }
+                })
+                $closesProbe = $true
+            }
+            'SESSION_CLOSED' {
+                if (
+                    $index -ne ($lines.Count - 1) -or $activeProbe -or
+                    $null -ne $record.classification -or $null -ne $record.effect_kind
+                ) { throw $failureCode }
+            }
+            default { throw $failureCode }
+        }
+        $probeBound = $activeProbe -or $recordType -in @('PROBE_REJECTED', 'PROBE_COMPLETED')
+        if ($probeBound) {
+            if (
+                [string]$record.probe_id -cnotmatch '\A[0-9a-f]{64}\z' -or
+                [string]$record.tool_name -cnotmatch '\A[a-z0-9_-]{1,64}\z' -or
+                [string]$record.request_id_sha256 -cnotmatch '\A[0-9a-f]{64}\z'
+            ) { throw $failureCode }
+        }
+        elseif ($null -ne $record.probe_id -or $null -ne $record.tool_name -or $null -ne $record.request_id_sha256) {
+            throw $failureCode
+        }
+        foreach ($name in $counterNames) {
+            if (
+                -not ($record.probe_counters.$name -is [ValueType]) -or
+                -not ($record.session_counters.$name -is [ValueType]) -or
+                [long]$record.probe_counters.$name -ne [long]$probeCounters[$name] -or
+                [long]$record.session_counters.$name -ne [long]$sessionCounters[$name]
+            ) { throw $failureCode }
+        }
+        $observedNanos = [decimal]0
+        if (-not [decimal]::TryParse([string]$record.observed_at_unix_nanos, [ref]$observedNanos)) { throw $failureCode }
+        if (
+            [string]$record.schema -cne 'lattice.mcp.observed-effect.v1' -or
+            [string]$record.session_id -cne $SessionId -or
+            [string]$record.safe_config_sha256 -cne $SafeConfigSha256 -or
+            [string]$record.nonce_commitment -cne $nonceCommitment -or
+            [long]$record.process_id -ne $ProcessId -or
+            [long]$record.ordinal -ne ($index + 1) -or
+            [string]$record.previous_event_sha256 -cne $previousHmac -or
+            $observedNanos -lt $previousObservedNanos -or
+            $observedNanos -lt ($nowNanos - [decimal]900000000000) -or
+            $observedNanos -gt ($nowNanos + [decimal]30000000000)
+        ) { throw $failureCode }
+        $probeCounterField = @($counterNames | ForEach-Object { [string][long]$probeCounters[$_] }) -join ':'
+        $sessionCounterField = @($counterNames | ForEach-Object { [string][long]$sessionCounters[$_] }) -join ':'
+        $hmacInput = @(
+            'lattice.mcp.observed-effect-hash.v1', $previousHmac, $SessionId,
+            $SafeConfigSha256, $nonceCommitment, [string]($index + 1), $recordType,
+            $(if ($null -eq $record.probe_id) { 'null' } else { [string]$record.probe_id }),
+            $(if ($null -eq $record.tool_name) { 'null' } else { [string]$record.tool_name }),
+            $(if ($null -eq $record.request_id_sha256) { 'null' } else { [string]$record.request_id_sha256 }),
+            $(if ($null -eq $record.classification) { 'null' } else { [string]$record.classification }),
+            $(if ($null -eq $record.effect_kind) { 'null' } else { [string]$record.effect_kind }),
+            $probeCounterField, $sessionCounterField, [string]$record.observed_at_unix_nanos
+        ) -join "`n"
+        $expectedHmac = Get-HmacStringSha256 -Key $Nonce -Value $hmacInput
+        if ([string]$record.event_sha256 -cne $expectedHmac) { throw $failureCode }
+        $previousHmac = $expectedHmac
+        $previousObservedNanos = $observedNanos
+        if ($closesProbe) {
+            $activeProbe = $false
+            foreach ($name in $counterNames) { $probeCounters[$name] = 0L }
+        }
+    }
+    if ($activeProbe -or [string](($lines[-1] | ConvertFrom-Json).record_type) -cne 'SESSION_CLOSED') {
+        throw $failureCode
+    }
+    return [pscustomobject]@{
+        schema = 'lattice.task038.mcp-observed-effect-evidence.v1'
+        path = $Path
+        native_identity = $ExpectedNativeIdentity
+        raw_sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        byte_count = [long]$bytes.Length
+        strict_utf8 = $true
+        session_id = $SessionId
+        safe_config_sha256 = $SafeConfigSha256
+        nonce_commitment = $nonceCommitment
+        process_id = $ProcessId
+        event_count = [long]$lines.Count
+        rejected_probe_count = [long]$rejected.Count
+        completed_probe_count = [long]$completed.Count
+        session_counters = [ordered]@{
+            dispatch = [long]$sessionCounters.dispatch
+            database = [long]$sessionCounters.database
+            filesystem = [long]$sessionCounters.filesystem
+            process = [long]$sessionCounters.process
+            network = [long]$sessionCounters.network
+            codex = [long]$sessionCounters.codex
+        }
+        rejected_probes = @($rejected)
+        completed_probes = @($completed)
+        final_hmac_sha256 = $previousHmac
+        normal_close_complete = $true
+        authority_scope = 'PROCESS_PRIVATE_HMAC_OBSERVED_AT_EFFECT_BOUNDARY'
+    }
+}
+
 function Initialize-Task038SuspendedProcessInterop {
     if ($null -ne ('LatticeTask038SuspendedProcessFactory' -as [type])) {
         return
@@ -2349,6 +2777,9 @@ function Invoke-LatticedSession {
         -Path $pidParent `
         -Boundary $script:RepositoryRoot `
         -FailureCode 'TASK038_LATTICED_PID_EVIDENCE_REJECTED'
+    $observedEffectSink = New-Task038McpObservedEffectEvidenceSink `
+        -AcceptanceEvidencePath $AcceptanceEvidencePath `
+        -SessionId $AcceptanceSessionId
     $wrapperSource = @'
 $ErrorActionPreference = 'Stop'
 $child = $null
@@ -2421,6 +2852,8 @@ finally {
         LATTICE_MCP_ACCEPTANCE_EVIDENCE_PATH = $AcceptanceEvidencePath
         LATTICE_MCP_ACCEPTANCE_SESSION_ID = $AcceptanceSessionId
         LATTICE_MCP_ACCEPTANCE_SAFE_CONFIG_SHA256 = $AcceptanceSafeConfigSha256
+        LATTICE_MCP_OBSERVED_EFFECT_PATH = [string]$observedEffectSink.path
+        LATTICE_MCP_OBSERVED_EFFECT_NONCE = [string]$observedEffectSink.nonce
         LATTICE_TASK038_WRAPPED_EXECUTABLE = $script:Latticed
         LATTICE_TASK038_WRAPPED_PID_PATH = $latticedPidPath
     }
@@ -2608,6 +3041,14 @@ finally {
         -SafeConfigSha256 $AcceptanceSafeConfigSha256 `
         -ProcessId $childProcessId `
         -ExpectedDispatchCount $ExpectedDispatchCount
+    $observedEffectEvidence = Read-Task038McpObservedEffectEvidence `
+        -Path ([string]$observedEffectSink.path) `
+        -ExpectedNativeIdentity ([string]$observedEffectSink.native_identity) `
+        -SessionId $AcceptanceSessionId `
+        -SafeConfigSha256 $AcceptanceSafeConfigSha256 `
+        -Nonce ([string]$observedEffectSink.nonce) `
+        -ProcessId $childProcessId
+    $observedEffectSink.nonce = $null
     Write-McpResponseSummary -Path $OutputPath -ResponseText $stdout
     Write-JsonEvidence -Path $MetaPath -Value ([ordered]@{
         schema_version = 'lattice.task038.local-mcp-process.v1'
@@ -2633,11 +3074,22 @@ finally {
         acceptance_final_event_sha256 = [string]$acceptanceEvidence.final_event_sha256
         acceptance_normal_close_complete = [bool]$acceptanceEvidence.normal_close_complete
         acceptance_evidence_native_identity = [string]$acceptanceEvidence.native_identity
+        observed_effect_evidence_schema = [string]$observedEffectEvidence.schema
+        observed_effect_evidence_raw_sha256 = [string]$observedEffectEvidence.raw_sha256
+        observed_effect_evidence_byte_count = [long]$observedEffectEvidence.byte_count
+        observed_effect_nonce_commitment = [string]$observedEffectEvidence.nonce_commitment
+        observed_effect_event_count = [long]$observedEffectEvidence.event_count
+        observed_effect_rejected_probe_count = [long]$observedEffectEvidence.rejected_probe_count
+        observed_effect_completed_probe_count = [long]$observedEffectEvidence.completed_probe_count
+        observed_effect_session_counters = $observedEffectEvidence.session_counters
+        observed_effect_final_hmac_sha256 = [string]$observedEffectEvidence.final_hmac_sha256
+        observed_effect_authority_scope = [string]$observedEffectEvidence.authority_scope
     })
     return [pscustomobject]@{
         ProcessId = $childProcessId
         Output = $stdout
         AcceptanceEvidence = $acceptanceEvidence
+        ObservedEffectEvidence = $observedEffectEvidence
     }
 }
 
@@ -3309,6 +3761,33 @@ if (Test-Path -LiteralPath $fixtureRoot) {
 New-Item -ItemType Directory -Path $fixtureRoot -Force:$false | Out-Null
 $evidenceRoot = Join-Path $fixtureRoot 'evidence'
 New-Item -ItemType Directory -Path $evidenceRoot -Force:$false | Out-Null
+$holderEnvironment = [ordered]@{}
+foreach ($name in @(
+    'LATTICE_TASK019_HOLDER_RECEIPT_PATH',
+    'LATTICE_TASK019_HOLDER_SESSION_ID',
+    'LATTICE_TASK019_HOLDER_NONCE',
+    'LATTICE_TASK019_HOLDER_NONCE_COMMITMENT',
+    'LATTICE_TASK019_HOLDER_CONSUMER_SESSION_ID',
+    'LATTICE_TASK019_HOLDER_DEADLINE_UTC'
+)) {
+    $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+    if ([string]::IsNullOrWhiteSpace($value) -or $value.IndexOfAny([char[]]@("`r", "`n", [char]0)) -ge 0) {
+        throw 'TASK038_POSTGRES_HOLDER_AUTHORITY_REQUIRED'
+    }
+    $holderEnvironment[$name] = $value
+}
+$postgresHolderAuthority = Read-Task019PostgresHolderAuthority `
+    -ReceiptPath ([string]$holderEnvironment.LATTICE_TASK019_HOLDER_RECEIPT_PATH) `
+    -SessionId ([string]$holderEnvironment.LATTICE_TASK019_HOLDER_SESSION_ID) `
+    -Nonce ([string]$holderEnvironment.LATTICE_TASK019_HOLDER_NONCE) `
+    -NonceCommitment ([string]$holderEnvironment.LATTICE_TASK019_HOLDER_NONCE_COMMITMENT) `
+    -ConsumerSessionId ([string]$holderEnvironment.LATTICE_TASK019_HOLDER_CONSUMER_SESSION_ID) `
+    -DeadlineUtc ([string]$holderEnvironment.LATTICE_TASK019_HOLDER_DEADLINE_UTC) `
+    -ClusterMarkerPath $clusterMarkerPath `
+    -ClusterMarkerRawSha256 $clusterMarkerRawSha256
+[Environment]::SetEnvironmentVariable('LATTICE_TASK019_HOLDER_NONCE', $null, 'Process')
+$holderEnvironment.LATTICE_TASK019_HOLDER_NONCE = $null
+Write-JsonEvidence -Path (Join-Path $evidenceRoot 'postgres-holder-authority.json') -Value $postgresHolderAuthority
 $candidateSourceLinkage = Get-Task038CandidateSourceLinkage -Repository $script:RepositoryRoot
 $candidateLatticedSha256 = Get-FileSha256 -Path $script:Latticed
 $candidateSourceLinkage['canonical_latticed_sha256'] = $candidateLatticedSha256
@@ -3358,6 +3837,7 @@ Write-JsonEvidence -Path (Join-Path $evidenceRoot 'database-binding.json') -Valu
     postgres_executable_native_identity = $script:PostgresExecutableNativeIdentity
     excluded_ports = @(5432, 64272, 55432)
     marker_restart_identity_verified = $true
+    holder_restart_receipt_authority = $postgresHolderAuthority
     identity = $identity
     authority = $authority
     task_ingress_kind = 'LOCAL_CANONICAL_MCP_ACCEPTANCE'
@@ -3423,6 +3903,16 @@ $submitSession = Invoke-LatticedSession `
     -AcceptanceSessionId $submitAcceptanceSessionId `
     -AcceptanceSafeConfigSha256 $submitAcceptanceSafeConfigSha256 `
     -ExpectedDispatchCount 3
+if (
+    [long]$submitSession.ObservedEffectEvidence.completed_probe_count -ne 3 -or
+    [long]$submitSession.ObservedEffectEvidence.rejected_probe_count -ne 0 -or
+    [long]$submitSession.ObservedEffectEvidence.session_counters.dispatch -ne 3 -or
+    [long]$submitSession.ObservedEffectEvidence.session_counters.database -lt 1 -or
+    [long]$submitSession.ObservedEffectEvidence.session_counters.filesystem -lt 1 -or
+    [long]$submitSession.ObservedEffectEvidence.session_counters.process -lt 1 -or
+    [long]$submitSession.ObservedEffectEvidence.session_counters.network -lt 1 -or
+    [long]$submitSession.ObservedEffectEvidence.session_counters.codex -lt 1
+) { throw 'TASK038_SUBMIT_OBSERVED_EFFECT_AUTHORITY_REJECTED' }
 Assert-CredentialSourceUnchanged `
     -Root $script:CodexCredentialSource `
     -ExpectedFootprint $credentialSourceBefore `
@@ -3539,6 +4029,16 @@ $statusSession = Invoke-LatticedSession `
     -AcceptanceSessionId $statusAcceptanceSessionId `
     -AcceptanceSafeConfigSha256 $statusAcceptanceSafeConfigSha256 `
     -ExpectedDispatchCount 1
+if (
+    [long]$statusSession.ObservedEffectEvidence.completed_probe_count -ne 1 -or
+    [long]$statusSession.ObservedEffectEvidence.rejected_probe_count -ne 0 -or
+    [long]$statusSession.ObservedEffectEvidence.session_counters.dispatch -ne 1 -or
+    [long]$statusSession.ObservedEffectEvidence.session_counters.database -lt 1 -or
+    [long]$statusSession.ObservedEffectEvidence.session_counters.network -lt 1 -or
+    [long]$statusSession.ObservedEffectEvidence.session_counters.filesystem -ne 0 -or
+    [long]$statusSession.ObservedEffectEvidence.session_counters.process -ne 0 -or
+    [long]$statusSession.ObservedEffectEvidence.session_counters.codex -ne 0
+) { throw 'TASK038_STATUS_OBSERVED_EFFECT_AUTHORITY_REJECTED' }
 Assert-CredentialSourceUnchanged `
     -Root $script:CodexCredentialSource `
     -ExpectedFootprint $credentialSourceBefore `
@@ -3672,10 +4172,17 @@ $final = [ordered]@{
     candidate_source_linkage_raw_sha256 = $candidateSourceLinkageRawSha256
     production_effect_observation_schema = 'lattice.task038.production-effect-observation.v1'
     production_effect_observation_raw_sha256 = $effectObservationRawSha256
+    postgres_holder_authority = $postgresHolderAuthority
     submit_dispatch_evidence_raw_sha256 = [string]$submitSession.AcceptanceEvidence.raw_sha256
     submit_dispatch_final_event_sha256 = [string]$submitSession.AcceptanceEvidence.final_event_sha256
+    submit_observed_effect_evidence_raw_sha256 = [string]$submitSession.ObservedEffectEvidence.raw_sha256
+    submit_observed_effect_final_hmac_sha256 = [string]$submitSession.ObservedEffectEvidence.final_hmac_sha256
+    submit_observed_effect_session_counters = $submitSession.ObservedEffectEvidence.session_counters
     status_dispatch_evidence_raw_sha256 = [string]$statusSession.AcceptanceEvidence.raw_sha256
     status_dispatch_final_event_sha256 = [string]$statusSession.AcceptanceEvidence.final_event_sha256
+    status_observed_effect_evidence_raw_sha256 = [string]$statusSession.ObservedEffectEvidence.raw_sha256
+    status_observed_effect_final_hmac_sha256 = [string]$statusSession.ObservedEffectEvidence.final_hmac_sha256
+    status_observed_effect_session_counters = $statusSession.ObservedEffectEvidence.session_counters
     official_codex_sha256 = $launcherSha256
     writer_lease_live_suite_passed_without_skip = $true
     legacy_discovery_and_submit = $true

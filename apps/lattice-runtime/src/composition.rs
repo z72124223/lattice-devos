@@ -30,18 +30,21 @@ use lattice_codex_adapter::{
     PinnedCodexResourceDigests, PinnedCodexResources,
 };
 use lattice_contracts::{
-    AttemptId, CONTRACT_VERSION, CompletedDeliveryEvidence, Component, ContentDigest,
-    DeliveryProfile, DeliveryReceipt, DeliveryRunRequest, DeliveryRuntime, DeliveryStage,
-    DeliveryTerminalStatus, GatewayActorId, GatewayActorKind, GatewayAdapterId, GatewayChannelId,
+    AttemptId, CONTRACT_VERSION, CodexDeliveryEvidence, CodexDeliveryRequest,
+    CompletedDeliveryEvidence, Component, ContentDigest, DeliveryOutcomeEvidence,
+    DeliveryOutcomeRequest, DeliveryProfile, DeliveryReceipt, DeliveryRunRequest, DeliveryRuntime,
+    DeliveryStage, DeliveryStatusRequest, DeliveryTerminalStatus, DurableIntentEvidence,
+    FixedTestEvidence, GatewayActorId, GatewayActorKind, GatewayAdapterId, GatewayChannelId,
     GatewayClientKind, GatewayDenialCode, GatewayInstanceId, GatewayPeerContext, GatewayReply,
     GatewayReplyBody, GatewayRequest, GatewayRequestBody, GatewaySessionId,
     GatewayStatusObservation, GatewayStatusTarget, GatewayTaskProjection, GatewayTaskState,
-    GitObjectId, GraphMemoryReceipt, GraphMemoryRunRequest, HermesEvidence,
+    GitCommitEvidence, GitObjectId, GraphMemoryReceipt, GraphMemoryRunRequest, HermesEvidence,
     HermesReflectionCandidate, HermesReflectionContent, HermesReflectionFinding,
     HermesReflectionReceipt, HermesResearchRequest, HolderProcessId, Invocation, MemoryQuery,
-    ProjectId, ProjectSnapshotId, RequestId, RuntimeAdmissionMode, RuntimeKind, StoreAuthorityHead,
-    StoreAuthorityRevision, StoreDaemonInstanceId, SubjectBinding, TaskId, TaskIngressPeerEvidence,
-    TaskSpecSubmission, WriterLeaseAuthorityHead,
+    PreparedWorkspaceEvidence, ProjectId, ProjectSnapshotId, RequestId, RuntimeAdmissionMode,
+    RuntimeKind, StoreAuthorityHead, StoreAuthorityRevision, StoreDaemonInstanceId, SubjectBinding,
+    TaskId, TaskIngressPeerEvidence, TaskSpecSubmission, WorkspaceChangeEvidence,
+    WriterLeaseAuthorityHead,
 };
 use lattice_gateway_ipc::{build_reply, task_spec_document_digest};
 use lattice_graphify_adapter::{
@@ -70,11 +73,12 @@ use lattice_orchestrator::{
 };
 use lattice_ports::{
     ControlledTaskExecutionError, ControlledTaskExecutionErrorKind, ControlledTaskExecutionPort,
-    DeliveryFailureCertainty, GatewayService, GatewayServiceError, GatewayServiceResult,
+    DeliveryCodexPort, DeliveryFailureCertainty, DeliveryLedgerPort, DeliveryPortError,
+    DeliveryPortResult, GatewayService, GatewayServiceError, GatewayServiceResult,
     GraphMemoryFailureCertainty, GraphMemoryPortError, GraphMemoryStage, HermesPort,
     HermesReflectionMemoryPort, PortError, PortErrorKind, PortResult, TaskLifecycleError,
     TaskLifecycleErrorKind, TaskLifecycleEvidence, TaskLifecyclePort, TaskLifecycleResult,
-    WriterAuthorityGuardPort,
+    TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
 };
 use lattice_postgres_codebase_memory::{
     ExtensionTarget, PostgresCodebaseMemory, verify_embedded_extension_manifest,
@@ -101,8 +105,8 @@ use crate::git_delivery::{
     BASELINE_COMMIT_SHA, DeliveryWorkspaceGitAdapter, DeliveryWorkspaceGitAdapterConfig,
 };
 use crate::mcp::{
-    self, DeliveryToolArguments, DeliveryToolService, TaskStatusArguments, TaskSubmitArguments,
-    ToolExecutionError,
+    self, DeliveryToolArguments, DeliveryToolService, ObservedEffectKind, TaskStatusArguments,
+    TaskSubmitArguments, ToolExecutionError, record_observed_effect,
 };
 use crate::task_control::{PostgresTaskLifecycle, TaskPersistenceFoundation};
 
@@ -356,6 +360,136 @@ impl fmt::Display for LatticedError {
 }
 
 impl Error for LatticedError {}
+
+fn observed_port_effect(kind: ObservedEffectKind, stage: DeliveryStage) -> DeliveryPortResult<()> {
+    record_observed_effect(kind).map_err(|_| {
+        DeliveryPortError::new(
+            stage,
+            PortErrorKind::Malformed,
+            DeliveryFailureCertainty::Known,
+            "LATTICE_MCP_OBSERVED_EFFECT_REJECTED",
+        )
+    })
+}
+
+fn observed_database_attempt(stage: DeliveryStage) -> DeliveryPortResult<()> {
+    observed_port_effect(ObservedEffectKind::Database, stage)?;
+    observed_port_effect(ObservedEffectKind::Network, stage)
+}
+
+struct ObservedLedger<L> {
+    inner: L,
+}
+
+impl<L: DeliveryLedgerPort> DeliveryLedgerPort for ObservedLedger<L> {
+    fn record_intent(
+        &mut self,
+        request: &DeliveryRunRequest,
+    ) -> DeliveryPortResult<DurableIntentEvidence> {
+        observed_database_attempt(DeliveryStage::Intent)?;
+        self.inner.record_intent(request)
+    }
+
+    fn record_outcome(
+        &mut self,
+        request: &DeliveryOutcomeRequest,
+    ) -> DeliveryPortResult<DeliveryOutcomeEvidence> {
+        observed_database_attempt(DeliveryStage::Outcome)?;
+        self.inner.record_outcome(request)
+    }
+
+    fn load_receipt(
+        &mut self,
+        request: &DeliveryStatusRequest,
+    ) -> DeliveryPortResult<DeliveryReceipt> {
+        observed_database_attempt(DeliveryStage::Receipt)?;
+        self.inner.load_receipt(request)
+    }
+}
+
+struct ObservedWorkspace<W> {
+    inner: W,
+}
+
+impl<W: WorkspaceGitPort> WorkspaceGitPort for ObservedWorkspace<W> {
+    fn prepare(
+        &mut self,
+        request: &DeliveryRunRequest,
+        intent: &DurableIntentEvidence,
+    ) -> DeliveryPortResult<PreparedWorkspaceEvidence> {
+        observed_port_effect(
+            ObservedEffectKind::Filesystem,
+            DeliveryStage::WorkspacePrepare,
+        )?;
+        observed_port_effect(ObservedEffectKind::Process, DeliveryStage::WorkspacePrepare)?;
+        self.inner.prepare(request, intent)
+    }
+
+    fn inspect_changes(
+        &mut self,
+        request: &DeliveryRunRequest,
+        intent: &DurableIntentEvidence,
+        workspace: &PreparedWorkspaceEvidence,
+        codex: &CodexDeliveryEvidence,
+    ) -> DeliveryPortResult<WorkspaceChangeEvidence> {
+        observed_port_effect(
+            ObservedEffectKind::Filesystem,
+            DeliveryStage::ScopeVerification,
+        )?;
+        observed_port_effect(
+            ObservedEffectKind::Process,
+            DeliveryStage::ScopeVerification,
+        )?;
+        self.inner
+            .inspect_changes(request, intent, workspace, codex)
+    }
+
+    fn commit(
+        &mut self,
+        request: &DeliveryRunRequest,
+        workspace: &PreparedWorkspaceEvidence,
+        changes: &WorkspaceChangeEvidence,
+        test: &FixedTestEvidence,
+    ) -> DeliveryPortResult<GitCommitEvidence> {
+        observed_port_effect(ObservedEffectKind::Filesystem, DeliveryStage::GitCommit)?;
+        observed_port_effect(ObservedEffectKind::Process, DeliveryStage::GitCommit)?;
+        self.inner.commit(request, workspace, changes, test)
+    }
+}
+
+impl<W: TestRunnerPort> TestRunnerPort for ObservedWorkspace<W> {
+    fn run_fixed(
+        &mut self,
+        request: &DeliveryRunRequest,
+        workspace: &PreparedWorkspaceEvidence,
+        changes: &WorkspaceChangeEvidence,
+    ) -> DeliveryPortResult<FixedTestEvidence> {
+        observed_port_effect(ObservedEffectKind::Filesystem, DeliveryStage::FixedTest)?;
+        observed_port_effect(ObservedEffectKind::Process, DeliveryStage::FixedTest)?;
+        self.inner.run_fixed(request, workspace, changes)
+    }
+}
+
+struct ObservedCodex<C> {
+    inner: C,
+}
+
+impl<C: DeliveryCodexPort> DeliveryCodexPort for ObservedCodex<C> {
+    fn run_delivery(
+        &mut self,
+        request: CodexDeliveryRequest,
+    ) -> DeliveryPortResult<CodexDeliveryEvidence> {
+        observed_port_effect(ObservedEffectKind::Codex, DeliveryStage::Codex)?;
+        observed_port_effect(ObservedEffectKind::Process, DeliveryStage::Codex)?;
+        self.inner.run_delivery(request)
+    }
+
+    fn interrupt_delivery(&mut self, request_id: &RequestId) -> DeliveryPortResult<()> {
+        observed_port_effect(ObservedEffectKind::Codex, DeliveryStage::Codex)?;
+        observed_port_effect(ObservedEffectKind::Process, DeliveryStage::Codex)?;
+        self.inner.interrupt_delivery(request_id)
+    }
+}
 
 /// Fixed process-owned inputs for one executable delivery profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1238,6 +1372,9 @@ impl LatticedDeliveryService {
         };
         let finalization_deadline = deadline(self.timeout)?;
         let effect_deadline = effect_deadline(finalization_deadline)?;
+        record_observed_effect(ObservedEffectKind::Database)
+            .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
         let ledger = match (identity, writer_authority) {
             (Some(identity), Some(authority)) => DeliveryLedger::connect_for_identity_and_writer(
                 &self.database,
@@ -1262,25 +1399,28 @@ impl LatticedDeliveryService {
         }
         .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
         let repository = config.delivery_root.join("repo");
-        let mut ledger = PostgresDeliveryLedgerAdapter::for_delivery(
-            ledger,
-            request.clone(),
-            path_text(&config.launcher)?,
-            config.version.clone(),
-            config.launcher_sha256.clone(),
-            path_text(&config.schema_directory)?,
-            path_text(&config.codex_home)?,
-            path_text(&repository)?,
-        )
-        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+        let mut ledger = ObservedLedger {
+            inner: PostgresDeliveryLedgerAdapter::for_delivery(
+                ledger,
+                request.clone(),
+                path_text(&config.launcher)?,
+                config.version.clone(),
+                config.launcher_sha256.clone(),
+                path_text(&config.schema_directory)?,
+                path_text(&config.codex_home)?,
+                path_text(&repository)?,
+            )
+            .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?,
+        };
         let workspace_config = DeliveryWorkspaceGitAdapterConfig::new(
             config.delivery_root.clone(),
             config.git_executable.clone(),
             config.timeout,
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::WorkspaceConfiguration))?;
-        let mut workspace_git =
-            DeliveryWorkspaceGitAdapter::with_deadline(workspace_config, effect_deadline);
+        let mut workspace_git = ObservedWorkspace {
+            inner: DeliveryWorkspaceGitAdapter::with_deadline(workspace_config, effect_deadline),
+        };
         let identity = CodexIdentityExpectation::new(
             config.launcher.clone(),
             config.version.clone(),
@@ -1299,7 +1439,9 @@ impl LatticedDeliveryService {
                 .map(|bundle| bundle.resources().clone()),
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::CodexConfiguration))?;
-        let mut codex = CodexDeliveryAdapter::with_deadline(codex_config, effect_deadline);
+        let mut codex = ObservedCodex {
+            inner: CodexDeliveryAdapter::with_deadline(codex_config, effect_deadline),
+        };
         let delivery_result = match (writer_authority, writer_guard) {
             (Some(authority), Some(guard)) => run_delivery_governed(
                 request,
@@ -1417,6 +1559,9 @@ impl LatticedDeliveryService {
         identity: Option<lattice_contracts::TaskLedgerStreamIdentity>,
         continuation: DeliveryContinuation,
     ) -> Result<Value, LatticedError> {
+        record_observed_effect(ObservedEffectKind::Database)
+            .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
         let ledger = match identity {
             Some(identity) => DeliveryLedger::connect_for_identity(
                 &self.database,
@@ -2351,6 +2496,14 @@ const fn controlled_execution_error_kind(
 fn task_lifecycle<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
 ) -> TaskLifecycleResult<PostgresTaskLifecycle> {
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| {
+            TaskLifecycleError::new(
+                TaskLifecycleErrorKind::Corrupt,
+                "LATTICE_MCP_OBSERVED_EFFECT_REJECTED",
+            )
+        })?;
     PostgresTaskLifecycle::connect_with_ingress_peer(
         &core.delivery.database,
         &core.delivery.password,
@@ -2467,6 +2620,9 @@ fn task_writer_lease<H: FullChainHermesPort>(
         memory_manifest.manifest_sha256().clone(),
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
     let client = connect_fixed_runtime_client(
         &core.delivery.database,
         &core.delivery.password,

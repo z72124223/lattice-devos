@@ -527,6 +527,12 @@ public static class Task038FakeTunnelClient
         & $launcher -Mode Run -TunnelClientExecutable $fakeClient -ProfileDirectory $profileDirectory
     }
     Set-Task038ValidRuntimeEnvironment
+    $consumerSessionId = [Guid]::NewGuid().ToString('N')
+    [Environment]::SetEnvironmentVariable(
+        'LATTICE_P0_CONSUMER_SESSION_ID',
+        $consumerSessionId,
+        'Process'
+    )
     [Environment]::SetEnvironmentVariable('LATTICE_TASK_INGRESS_KIND', 'fixture-hostile-kind', 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK_INGRESS_PROFILE_SHA256', 'fixture-hostile-profile', 'Process')
 
@@ -693,7 +699,22 @@ public static class Task038FakeTunnelClient
         [long]$outerReceipt.lifecycle_inner_process_id -lt 1 -or
         [string]$outerReceipt.lifecycle_inner_process_creation_time_source -cne 'WINDOWS_PROCESS_TIMES' -or
         [string]$outerReceipt.lifecycle_inner_process_exe_sha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
-        [int]$outerReceipt.lifecycle_inner_exit_code -ne 0
+        [int]$outerReceipt.lifecycle_inner_exit_code -ne 0 -or
+        [string]$outerReceipt.authority_scope -cne 'LAUNCH_OWNED_PROCESS_EVIDENCE' -or
+        [string]$outerReceipt.authority_consumer_session_id -cne $consumerSessionId -or
+        [string]$outerReceipt.authority_nonce_commitment -cnotmatch '\A[0-9a-f]{64}\z' -or
+        [string]$outerReceipt.authority_receipt_raw_sha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
+        [string]$outerReceipt.authority_final_hmac_sha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
+        [long]$outerReceipt.authority_event_count -ne 5 -or
+        [long]$outerReceipt.tunnel_client_process_id -ne [long]$outerReceipt.process_id -or
+        [string]$outerReceipt.tunnel_client_process_creation_time_source -cne 'WINDOWS_PROCESS_TIMES' -or
+        [string]$outerReceipt.tunnel_client_process_creation_time -cnotmatch '\A[0-9]{1,32}\z' -or
+        [string]$outerReceipt.tunnel_client_process_executable_sha256 -cne (Get-FileHash -LiteralPath $fakeRunClient -Algorithm SHA256).Hash.ToLowerInvariant() -or
+        -not [bool]$outerReceipt.authority_sink_launch_owned -or
+        -not [bool]$outerReceipt.authority_job_identity_bound -or
+        -not [bool]$outerReceipt.authority_pipe_identity_bound -or
+        -not [bool]$outerReceipt.authority_current_os_observation_bound -or
+        $null -ne $outerReceipt.authority_private_nonce
     ) {
         throw 'TASK038_OUTER_RECEIPT_CONTENT_REJECTED'
     }
@@ -717,6 +738,23 @@ public static class Task038FakeTunnelClient
     ) {
         throw 'TASK038_LIFECYCLE_CREDENTIAL_DISCLOSURE_REJECTED'
     }
+    $authorityReceiptPath = [string]$outerReceipt.authority_receipt_path
+    if (-not (Test-Path -LiteralPath $authorityReceiptPath -PathType Leaf)) {
+        throw 'TASK038_TUNNEL_AUTHORITY_RECEIPT_MISSING'
+    }
+    Assert-Equal `
+        -Expected ([string]$outerReceipt.authority_receipt_raw_sha256) `
+        -Actual ((Get-FileHash -LiteralPath $authorityReceiptPath -Algorithm SHA256).Hash.ToLowerInvariant()) `
+        -FailureCode 'TASK038_TUNNEL_AUTHORITY_RAW_SHA_REJECTED'
+    $authorityText = [Text.UTF8Encoding]::new($false, $true).GetString(
+        [IO.File]::ReadAllBytes($authorityReceiptPath)
+    )
+    if (
+        $authorityText.Contains('test-runtime-key-not-a-secret') -or
+        $authorityText.Contains('fixture-password-private')
+    ) {
+        throw 'TASK038_TUNNEL_AUTHORITY_SECRET_DISCLOSURE_REJECTED'
+    }
     $descendantPid = [int]([IO.File]::ReadAllText($descendantPidPath).Trim())
     Start-Sleep -Milliseconds 200
     if ($null -ne (Get-Process -Id $descendantPid -ErrorAction SilentlyContinue)) {
@@ -733,7 +771,11 @@ public static class Task038FakeTunnelClient
         -not [bool]$pidReuseReceipt.lifecycle_chain_complete -or
         [bool]$pidReuseReceipt.lifecycle_normal_close_complete -or
         [string]$pidReuseReceipt.lifecycle_classification -cne 'UNKNOWN' -or
-        [bool]$pidReuseReceipt.leak_claimed
+        [bool]$pidReuseReceipt.leak_claimed -or
+        [string]$pidReuseReceipt.authority_session_id -ceq [string]$outerReceipt.authority_session_id -or
+        [string]$pidReuseReceipt.authority_nonce_commitment -ceq [string]$outerReceipt.authority_nonce_commitment -or
+        [string]$pidReuseReceipt.authority_receipt_path -ceq [string]$outerReceipt.authority_receipt_path -or
+        [string]$pidReuseReceipt.authority_scope -cne 'LAUNCH_OWNED_PROCESS_EVIDENCE'
     ) {
         throw 'TASK038_PID_REUSE_EVIDENCE_REJECTED'
     }
@@ -789,7 +831,8 @@ public static class Task038FakeTunnelClient
         'LATTICE_STORE_OBSERVATION_DIGEST', 'LATTICE_STORE_AUTHORITY_HEAD_DIGEST',
         'LATTICE_DELIVERY_LAUNCHER', 'LATTICE_DELIVERY_LAUNCHER_VERSION',
         'LATTICE_DELIVERY_LAUNCHER_SHA256', 'LATTICE_DELIVERY_SCHEMA_DIR',
-        'LATTICE_DELIVERY_CODEX_HOME', 'LATTICE_DELIVERY_ROOT', 'LATTICE_DELIVERY_GIT_EXE'
+        'LATTICE_DELIVERY_CODEX_HOME', 'LATTICE_DELIVERY_ROOT', 'LATTICE_DELIVERY_GIT_EXE',
+        'LATTICE_P0_CONSUMER_SESSION_ID'
     )) {
         $overlapEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
     }
@@ -881,6 +924,13 @@ public static class Task038FakeTunnelClient
         'lattice.tunnel-client.lifecycle-anomaly-idempotency.v1',
         'lattice.tunnel-client.lifecycle-anomaly-hash.v1',
         'lattice.task038.tunnel-safe-config.v1',
+        'lattice.task038.tunnel-launch-authority.v1',
+        'LATTICE_P0_CONSUMER_SESSION_ID',
+        '[IO.FileShare]::Read',
+        'PROCESS_SPAWN_BOUND',
+        'INNER_CHAIN_BOUND',
+        'PROCESS_REAPED',
+        'LAUNCH_OWNED_PROCESS_EVIDENCE',
         '1048576'
     )) {
         if ($launcherText.IndexOf($requiredClosure, [StringComparison]::Ordinal) -lt 0) {

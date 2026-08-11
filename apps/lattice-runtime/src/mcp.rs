@@ -1,5 +1,7 @@
 //! Bounded MCP stdio surface for the canonical `latticed` entry.
 
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::env;
 use std::error::Error;
 use std::fmt;
@@ -71,8 +73,15 @@ const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 const ACCEPTANCE_EVIDENCE_PATH_ENV: &str = "LATTICE_MCP_ACCEPTANCE_EVIDENCE_PATH";
 const ACCEPTANCE_SESSION_ID_ENV: &str = "LATTICE_MCP_ACCEPTANCE_SESSION_ID";
 const ACCEPTANCE_SAFE_CONFIG_SHA256_ENV: &str = "LATTICE_MCP_ACCEPTANCE_SAFE_CONFIG_SHA256";
+const OBSERVED_EFFECT_EVIDENCE_PATH_ENV: &str = "LATTICE_MCP_OBSERVED_EFFECT_PATH";
+const OBSERVED_EFFECT_NONCE_ENV: &str = "LATTICE_MCP_OBSERVED_EFFECT_NONCE";
 const ACCEPTANCE_EVIDENCE_SCHEMA: &str = "lattice.mcp.acceptance-dispatch.v1";
 const ACCEPTANCE_EVIDENCE_HASH_DOMAIN: &str = "lattice.mcp.acceptance-dispatch-hash.v1";
+const OBSERVED_EFFECT_EVIDENCE_SCHEMA: &str = "lattice.mcp.observed-effect.v1";
+const OBSERVED_EFFECT_HASH_DOMAIN: &str = "lattice.mcp.observed-effect-hash.v1";
+const OBSERVED_EFFECT_NONCE_DOMAIN: &str = "lattice.mcp.observed-effect-nonce.v1";
+const OBSERVED_EFFECT_PROBE_DOMAIN: &str = "lattice.mcp.observed-effect-probe.v1";
+const OBSERVED_EFFECT_MAX_AGE_NANOS: u128 = 15 * 60 * 1_000_000_000;
 
 struct AcceptanceEvidence {
     file: File,
@@ -216,6 +225,777 @@ impl AcceptanceEvidence {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ObservedEffectCounters {
+    dispatch: u64,
+    database: u64,
+    filesystem: u64,
+    process: u64,
+    network: u64,
+    codex: u64,
+}
+
+impl ObservedEffectCounters {
+    fn increment(&mut self, kind: ObservedEffectKind) -> io::Result<()> {
+        let value = match kind {
+            ObservedEffectKind::Dispatch => &mut self.dispatch,
+            ObservedEffectKind::Database => &mut self.database,
+            ObservedEffectKind::Filesystem => &mut self.filesystem,
+            ObservedEffectKind::Process => &mut self.process,
+            ObservedEffectKind::Network => &mut self.network,
+            ObservedEffectKind::Codex => &mut self.codex,
+        };
+        *value = value
+            .checked_add(1)
+            .ok_or_else(|| acceptance_evidence_error("observed effect counter overflow"))?;
+        Ok(())
+    }
+
+    fn as_value(self) -> Value {
+        json!({
+            "dispatch": self.dispatch,
+            "database": self.database,
+            "filesystem": self.filesystem,
+            "process": self.process,
+            "network": self.network,
+            "codex": self.codex,
+        })
+    }
+
+    fn hash_field(self) -> String {
+        [
+            self.dispatch.to_string(),
+            self.database.to_string(),
+            self.filesystem.to_string(),
+            self.process.to_string(),
+            self.network.to_string(),
+            self.codex.to_string(),
+        ]
+        .join(":")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ObservedEffectKind {
+    Dispatch,
+    Database,
+    Filesystem,
+    Process,
+    Network,
+    Codex,
+}
+
+impl ObservedEffectKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dispatch => "dispatch",
+            Self::Database => "database",
+            Self::Filesystem => "filesystem",
+            Self::Process => "process",
+            Self::Network => "network",
+            Self::Codex => "codex",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "dispatch" => Some(Self::Dispatch),
+            "database" => Some(Self::Database),
+            "filesystem" => Some(Self::Filesystem),
+            "process" => Some(Self::Process),
+            "network" => Some(Self::Network),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObservedProbe {
+    probe_id: String,
+    tool_name: String,
+    request_id_sha256: String,
+    counters: ObservedEffectCounters,
+}
+
+struct ObservedEffectEvidence {
+    file: File,
+    path: PathBuf,
+    session_id: String,
+    safe_config_sha256: String,
+    nonce: String,
+    nonce_commitment: String,
+    ordinal: u64,
+    session_counters: ObservedEffectCounters,
+    previous_event_sha256: String,
+    probe: Option<ObservedProbe>,
+    closed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifiedObservedEffectEvidence {
+    schema: &'static str,
+    rejected_probe_count: u64,
+    dispatch_count: u64,
+    database_effect_count: u64,
+    filesystem_effect_count: u64,
+    process_effect_count: u64,
+    network_effect_count: u64,
+    codex_effect_count: u64,
+    normal_close_complete: bool,
+}
+
+impl ObservedEffectEvidence {
+    fn from_process_environment() -> io::Result<Option<Self>> {
+        let path = env::var_os(OBSERVED_EFFECT_EVIDENCE_PATH_ENV);
+        let nonce = env::var_os(OBSERVED_EFFECT_NONCE_ENV);
+        if path.is_none() && nonce.is_none() {
+            return Ok(None);
+        }
+        let path = path
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| acceptance_evidence_error("incomplete observed effect path"))?;
+        let nonce = nonce
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| acceptance_evidence_error("incomplete observed effect nonce"))?;
+        let session_id = env::var(ACCEPTANCE_SESSION_ID_ENV)
+            .map_err(|_| acceptance_evidence_error("missing observed effect session"))?;
+        let safe_config_sha256 = env::var(ACCEPTANCE_SAFE_CONFIG_SHA256_ENV)
+            .map_err(|_| acceptance_evidence_error("missing observed effect safe config"))?;
+        Self::open(&PathBuf::from(path), session_id, safe_config_sha256, nonce).map(Some)
+    }
+
+    fn open(
+        path: &Path,
+        session_id: String,
+        safe_config_sha256: String,
+        nonce: String,
+    ) -> io::Result<Self> {
+        if !path.is_absolute()
+            || !valid_lower_hex(&session_id, 32)
+            || !valid_lower_hex(&safe_config_sha256, 64)
+            || !valid_lower_hex(&nonce, 64)
+        {
+            return Err(acceptance_evidence_error(
+                "invalid observed effect configuration",
+            ));
+        }
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != 0 {
+            return Err(acceptance_evidence_error(
+                "observed effect sink is not a fresh regular file",
+            ));
+        }
+        let file = OpenOptions::new().read(true).append(true).open(path)?;
+        if !file.metadata()?.is_file() || file.metadata()?.len() != 0 {
+            return Err(acceptance_evidence_error(
+                "observed effect sink changed before open",
+            ));
+        }
+        let nonce_commitment = sha256_hex(
+            [
+                OBSERVED_EFFECT_NONCE_DOMAIN,
+                &session_id,
+                &safe_config_sha256,
+                &nonce,
+            ]
+            .join("\n")
+            .as_bytes(),
+        );
+        let mut evidence = Self {
+            file,
+            path: path.to_path_buf(),
+            session_id,
+            safe_config_sha256,
+            nonce,
+            nonce_commitment,
+            ordinal: 0,
+            session_counters: ObservedEffectCounters::default(),
+            previous_event_sha256: "0".repeat(64),
+            probe: None,
+            closed: false,
+        };
+        evidence.append("SESSION_OPEN", None, None)?;
+        Ok(evidence)
+    }
+
+    fn begin_probe(
+        &mut self,
+        correlation: &str,
+        tool_name: &str,
+        request_id: &Value,
+    ) -> io::Result<()> {
+        if self.closed
+            || self.probe.is_some()
+            || correlation.is_empty()
+            || correlation.len() > 96
+            || !correlation
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || tool_name.is_empty()
+            || tool_name.len() > 64
+            || !tool_name.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_'
+            })
+        {
+            return Err(acceptance_evidence_error("invalid observed effect probe"));
+        }
+        let request_id_bytes = serde_json::to_vec(request_id)
+            .map_err(|error| acceptance_evidence_error(&error.to_string()))?;
+        let request_id_sha256 = sha256_hex(&request_id_bytes);
+        let probe_id = sha256_hex(
+            [
+                OBSERVED_EFFECT_PROBE_DOMAIN,
+                &self.session_id,
+                correlation,
+                tool_name,
+                &request_id_sha256,
+            ]
+            .join("\n")
+            .as_bytes(),
+        );
+        self.probe = Some(ObservedProbe {
+            probe_id,
+            tool_name: tool_name.to_owned(),
+            request_id_sha256,
+            counters: ObservedEffectCounters::default(),
+        });
+        self.append("PROBE_OPEN", None, None)
+    }
+
+    fn accept_dispatch(&mut self) -> io::Result<()> {
+        self.increment(ObservedEffectKind::Dispatch)?;
+        self.append("DISPATCH_ACCEPTED", Some("MCP_DISPATCH_ACCEPTED"), None)
+    }
+
+    fn record_effect(&mut self, kind: ObservedEffectKind) -> io::Result<()> {
+        if kind == ObservedEffectKind::Dispatch {
+            return Err(acceptance_evidence_error("invalid observed effect kind"));
+        }
+        self.increment(kind)?;
+        self.append("EFFECT_OBSERVED", None, Some(kind))
+    }
+
+    fn reject_probe(&mut self, classification: &str) -> io::Result<()> {
+        if !matches!(
+            classification,
+            "MCP_INVALID_PARAMS" | "MCP_UNKNOWN_TOOL" | "MCP_INVOCATION_LIMIT" | "MCP_NOT_READY"
+        ) {
+            return Err(acceptance_evidence_error(
+                "invalid observed effect rejection classification",
+            ));
+        }
+        self.append("PROBE_REJECTED", Some(classification), None)?;
+        self.probe = None;
+        Ok(())
+    }
+
+    fn complete_probe(&mut self, classification: &str) -> io::Result<()> {
+        if !matches!(classification, "MCP_RESULT" | "MCP_TOOL_ERROR") {
+            return Err(acceptance_evidence_error(
+                "invalid observed effect completion classification",
+            ));
+        }
+        self.append("PROBE_COMPLETED", Some(classification), None)?;
+        self.probe = None;
+        Ok(())
+    }
+
+    fn close(&mut self) -> io::Result<()> {
+        if self.closed || self.probe.is_some() {
+            return Err(acceptance_evidence_error(
+                "observed effect session is incomplete",
+            ));
+        }
+        self.append("SESSION_CLOSED", None, None)?;
+        self.closed = true;
+        self.file.sync_all()?;
+        let bytes = std::fs::read(&self.path)?;
+        verify_observed_effect_evidence(
+            &bytes,
+            &self.session_id,
+            &self.safe_config_sha256,
+            &self.nonce,
+            SystemTime::now(),
+        )?;
+        Ok(())
+    }
+
+    fn increment(&mut self, kind: ObservedEffectKind) -> io::Result<()> {
+        let probe = self
+            .probe
+            .as_mut()
+            .ok_or_else(|| acceptance_evidence_error("observed effect probe is absent"))?;
+        probe.counters.increment(kind)?;
+        self.session_counters.increment(kind)
+    }
+
+    fn append(
+        &mut self,
+        record_type: &str,
+        classification: Option<&str>,
+        effect_kind: Option<ObservedEffectKind>,
+    ) -> io::Result<()> {
+        self.ordinal = self
+            .ordinal
+            .checked_add(1)
+            .ok_or_else(|| acceptance_evidence_error("observed effect ordinal overflow"))?;
+        let observed_at_unix_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| acceptance_evidence_error(&error.to_string()))?
+            .as_nanos()
+            .to_string();
+        let (probe_id, tool_name, request_id_sha256, probe_counters) = self.probe.as_ref().map_or(
+            (None, None, None, ObservedEffectCounters::default()),
+            |probe| {
+                (
+                    Some(probe.probe_id.as_str()),
+                    Some(probe.tool_name.as_str()),
+                    Some(probe.request_id_sha256.as_str()),
+                    probe.counters,
+                )
+            },
+        );
+        let event_sha256 = observed_effect_event_sha256(
+            &self.nonce,
+            &self.previous_event_sha256,
+            &self.session_id,
+            &self.safe_config_sha256,
+            &self.nonce_commitment,
+            self.ordinal,
+            record_type,
+            probe_id,
+            tool_name,
+            request_id_sha256,
+            classification,
+            effect_kind,
+            probe_counters,
+            self.session_counters,
+            &observed_at_unix_nanos,
+        );
+        let record = json!({
+            "schema": OBSERVED_EFFECT_EVIDENCE_SCHEMA,
+            "record_type": record_type,
+            "session_id": self.session_id,
+            "probe_id": probe_id,
+            "safe_config_sha256": self.safe_config_sha256,
+            "nonce_commitment": self.nonce_commitment,
+            "process_id": std::process::id(),
+            "ordinal": self.ordinal,
+            "tool_name": tool_name,
+            "request_id_sha256": request_id_sha256,
+            "classification": classification,
+            "effect_kind": effect_kind.map(ObservedEffectKind::as_str),
+            "probe_counters": probe_counters.as_value(),
+            "session_counters": self.session_counters.as_value(),
+            "observed_at_unix_nanos": observed_at_unix_nanos,
+            "previous_event_sha256": self.previous_event_sha256,
+            "event_sha256": event_sha256,
+        });
+        let mut bytes = serde_json::to_vec(&record)
+            .map_err(|error| acceptance_evidence_error(&error.to_string()))?;
+        bytes.push(b'\n');
+        self.file.write_all(&bytes)?;
+        self.file.sync_all()?;
+        self.previous_event_sha256 = event_sha256;
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observed_effect_event_sha256(
+    nonce: &str,
+    previous_event_sha256: &str,
+    session_id: &str,
+    safe_config_sha256: &str,
+    nonce_commitment: &str,
+    ordinal: u64,
+    record_type: &str,
+    probe_id: Option<&str>,
+    tool_name: Option<&str>,
+    request_id_sha256: Option<&str>,
+    classification: Option<&str>,
+    effect_kind: Option<ObservedEffectKind>,
+    probe_counters: ObservedEffectCounters,
+    session_counters: ObservedEffectCounters,
+    observed_at_unix_nanos: &str,
+) -> String {
+    hmac_sha256_hex(
+        nonce.as_bytes(),
+        [
+            OBSERVED_EFFECT_HASH_DOMAIN,
+            previous_event_sha256,
+            session_id,
+            safe_config_sha256,
+            nonce_commitment,
+            &ordinal.to_string(),
+            record_type,
+            probe_id.unwrap_or("null"),
+            tool_name.unwrap_or("null"),
+            request_id_sha256.unwrap_or("null"),
+            classification.unwrap_or("null"),
+            effect_kind.map_or("null", ObservedEffectKind::as_str),
+            &probe_counters.hash_field(),
+            &session_counters.hash_field(),
+            observed_at_unix_nanos,
+        ]
+        .join("\n")
+        .as_bytes(),
+    )
+}
+
+fn counters_from_value(value: &Value) -> io::Result<ObservedEffectCounters> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| acceptance_evidence_error("invalid observed effect counters"))?;
+    if object.len() != 6
+        || ![
+            "dispatch",
+            "database",
+            "filesystem",
+            "process",
+            "network",
+            "codex",
+        ]
+        .iter()
+        .all(|key| object.contains_key(*key))
+    {
+        return Err(acceptance_evidence_error(
+            "invalid observed effect counter keys",
+        ));
+    }
+    let read = |key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| acceptance_evidence_error("invalid observed effect counter"))
+    };
+    Ok(ObservedEffectCounters {
+        dispatch: read("dispatch")?,
+        database: read("database")?,
+        filesystem: read("filesystem")?,
+        process: read("process")?,
+        network: read("network")?,
+        codex: read("codex")?,
+    })
+}
+
+fn nullable_string<'a>(record: &'a Map<String, Value>, key: &str) -> io::Result<Option<&'a str>> {
+    match record.get(key) {
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value)),
+        _ => Err(acceptance_evidence_error(
+            "invalid observed effect nullable string",
+        )),
+    }
+}
+
+fn verify_observed_effect_evidence(
+    bytes: &[u8],
+    expected_session_id: &str,
+    expected_safe_config_sha256: &str,
+    nonce: &str,
+    now: SystemTime,
+) -> io::Result<VerifiedObservedEffectEvidence> {
+    if bytes.is_empty()
+        || bytes.len() > 1_048_576
+        || bytes.starts_with(&[0xef, 0xbb, 0xbf])
+        || bytes.last() != Some(&b'\n')
+        || bytes.contains(&b'\r')
+        || !valid_lower_hex(expected_session_id, 32)
+        || !valid_lower_hex(expected_safe_config_sha256, 64)
+        || !valid_lower_hex(nonce, 64)
+    {
+        return Err(acceptance_evidence_error(
+            "invalid observed effect evidence bytes",
+        ));
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| acceptance_evidence_error(&error.to_string()))?;
+    let expected_nonce_commitment = sha256_hex(
+        [
+            OBSERVED_EFFECT_NONCE_DOMAIN,
+            expected_session_id,
+            expected_safe_config_sha256,
+            nonce,
+        ]
+        .join("\n")
+        .as_bytes(),
+    );
+    let now_nanos = now
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| acceptance_evidence_error(&error.to_string()))?
+        .as_nanos();
+    let mut previous_event_sha256 = "0".repeat(64);
+    let mut previous_observed_nanos = 0_u128;
+    let mut expected_session_counters = ObservedEffectCounters::default();
+    let mut expected_probe_counters = ObservedEffectCounters::default();
+    let mut active_probe = false;
+    let mut saw_open = false;
+    let mut saw_close = false;
+    let mut rejected_probe_count = 0_u64;
+    let mut observed_probe_ids = HashSet::new();
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.len() < 2 {
+        return Err(acceptance_evidence_error(
+            "observed effect evidence is incomplete",
+        ));
+    }
+    for (index, line) in lines.iter().enumerate() {
+        let value = serde_json::from_str::<Value>(line)
+            .map_err(|error| acceptance_evidence_error(&error.to_string()))?;
+        let record = value
+            .as_object()
+            .ok_or_else(|| acceptance_evidence_error("invalid observed effect record"))?;
+        let expected_keys = [
+            "schema",
+            "record_type",
+            "session_id",
+            "probe_id",
+            "safe_config_sha256",
+            "nonce_commitment",
+            "process_id",
+            "ordinal",
+            "tool_name",
+            "request_id_sha256",
+            "classification",
+            "effect_kind",
+            "probe_counters",
+            "session_counters",
+            "observed_at_unix_nanos",
+            "previous_event_sha256",
+            "event_sha256",
+        ];
+        if record.len() != expected_keys.len()
+            || !expected_keys.iter().all(|key| record.contains_key(*key))
+        {
+            return Err(acceptance_evidence_error(
+                "invalid observed effect record keys",
+            ));
+        }
+        let string = |key: &str| {
+            record
+                .get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| acceptance_evidence_error("invalid observed effect string"))
+        };
+        let record_type = string("record_type")?;
+        let ordinal = record
+            .get("ordinal")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| acceptance_evidence_error("invalid observed effect ordinal"))?;
+        let observed_at_unix_nanos = string("observed_at_unix_nanos")?;
+        let observed_nanos = observed_at_unix_nanos
+            .parse::<u128>()
+            .map_err(|error| acceptance_evidence_error(&error.to_string()))?;
+        if string("schema")? != OBSERVED_EFFECT_EVIDENCE_SCHEMA
+            || string("session_id")? != expected_session_id
+            || string("safe_config_sha256")? != expected_safe_config_sha256
+            || string("nonce_commitment")? != expected_nonce_commitment
+            || record.get("process_id").and_then(Value::as_u64)
+                != Some(u64::from(std::process::id()))
+            || ordinal != (index as u64 + 1)
+            || observed_nanos < previous_observed_nanos
+            || observed_nanos > now_nanos.saturating_add(30_000_000_000)
+            || now_nanos.saturating_sub(observed_nanos) > OBSERVED_EFFECT_MAX_AGE_NANOS
+            || string("previous_event_sha256")? != previous_event_sha256
+        {
+            return Err(acceptance_evidence_error(
+                "observed effect binding rejected",
+            ));
+        }
+        let probe_id = nullable_string(record, "probe_id")?;
+        let tool_name = nullable_string(record, "tool_name")?;
+        let request_id_sha256 = nullable_string(record, "request_id_sha256")?;
+        let classification = nullable_string(record, "classification")?;
+        let effect_kind_text = nullable_string(record, "effect_kind")?;
+        let effect_kind = effect_kind_text.and_then(ObservedEffectKind::parse);
+        if effect_kind_text.is_some() && effect_kind.is_none() {
+            return Err(acceptance_evidence_error("unknown observed effect kind"));
+        }
+        let closes_probe = match record_type {
+            "SESSION_OPEN" if index == 0 && !saw_open => {
+                if classification.is_some() || effect_kind.is_some() {
+                    return Err(acceptance_evidence_error(
+                        "invalid observed effect session open fields",
+                    ));
+                }
+                saw_open = true;
+                false
+            }
+            "PROBE_OPEN" if saw_open && !active_probe && !saw_close => {
+                if classification.is_some() || effect_kind.is_some() {
+                    return Err(acceptance_evidence_error(
+                        "invalid observed effect probe open fields",
+                    ));
+                }
+                let probe_id = probe_id
+                    .ok_or_else(|| acceptance_evidence_error("missing observed effect probe id"))?;
+                if !observed_probe_ids.insert(probe_id.to_owned()) {
+                    return Err(acceptance_evidence_error(
+                        "duplicate observed effect probe rejected",
+                    ));
+                }
+                active_probe = true;
+                expected_probe_counters = ObservedEffectCounters::default();
+                false
+            }
+            "DISPATCH_ACCEPTED" if active_probe => {
+                if classification != Some("MCP_DISPATCH_ACCEPTED") || effect_kind.is_some() {
+                    return Err(acceptance_evidence_error(
+                        "invalid observed effect dispatch fields",
+                    ));
+                }
+                expected_probe_counters.increment(ObservedEffectKind::Dispatch)?;
+                expected_session_counters.increment(ObservedEffectKind::Dispatch)?;
+                if expected_probe_counters.dispatch != 1 {
+                    return Err(acceptance_evidence_error(
+                        "duplicate observed effect dispatch rejected",
+                    ));
+                }
+                false
+            }
+            "EFFECT_OBSERVED" if active_probe => {
+                if classification.is_some() {
+                    return Err(acceptance_evidence_error(
+                        "invalid observed effect classification",
+                    ));
+                }
+                let kind = effect_kind
+                    .ok_or_else(|| acceptance_evidence_error("missing observed effect kind"))?;
+                if kind == ObservedEffectKind::Dispatch {
+                    return Err(acceptance_evidence_error(
+                        "dispatch encoded as external effect",
+                    ));
+                }
+                expected_probe_counters.increment(kind)?;
+                expected_session_counters.increment(kind)?;
+                false
+            }
+            "PROBE_REJECTED" if active_probe => {
+                if !matches!(
+                    classification,
+                    Some(
+                        "MCP_INVALID_PARAMS"
+                            | "MCP_UNKNOWN_TOOL"
+                            | "MCP_INVOCATION_LIMIT"
+                            | "MCP_NOT_READY"
+                    )
+                ) || effect_kind.is_some()
+                    || expected_probe_counters != ObservedEffectCounters::default()
+                {
+                    return Err(acceptance_evidence_error(
+                        "invalid rejected probe classification or counters",
+                    ));
+                }
+                rejected_probe_count = rejected_probe_count
+                    .checked_add(1)
+                    .ok_or_else(|| acceptance_evidence_error("rejected probe overflow"))?;
+                true
+            }
+            "PROBE_COMPLETED"
+                if active_probe
+                    && matches!(classification, Some("MCP_RESULT" | "MCP_TOOL_ERROR"))
+                    && effect_kind.is_none()
+                    && expected_probe_counters.dispatch == 1 =>
+            {
+                true
+            }
+            "SESSION_CLOSED" if index == lines.len() - 1 && !active_probe && !saw_close => {
+                if classification.is_some() || effect_kind.is_some() {
+                    return Err(acceptance_evidence_error(
+                        "invalid observed effect session close fields",
+                    ));
+                }
+                saw_close = true;
+                false
+            }
+            _ => {
+                return Err(acceptance_evidence_error(
+                    "observed effect record order rejected",
+                ));
+            }
+        };
+        let expected_probe_binding =
+            active_probe || matches!(record_type, "PROBE_REJECTED" | "PROBE_COMPLETED");
+        if expected_probe_binding {
+            if probe_id.is_none()
+                || tool_name.is_none()
+                || request_id_sha256.is_none_or(|value| !valid_lower_hex(value, 64))
+            {
+                return Err(acceptance_evidence_error(
+                    "observed effect probe binding rejected",
+                ));
+            }
+        } else if probe_id.is_some() || tool_name.is_some() || request_id_sha256.is_some() {
+            return Err(acceptance_evidence_error(
+                "unexpected observed effect probe binding",
+            ));
+        }
+        let probe_counters = counters_from_value(
+            record
+                .get("probe_counters")
+                .ok_or_else(|| acceptance_evidence_error("missing probe counters"))?,
+        )?;
+        let session_counters = counters_from_value(
+            record
+                .get("session_counters")
+                .ok_or_else(|| acceptance_evidence_error("missing session counters"))?,
+        )?;
+        if probe_counters != expected_probe_counters
+            || session_counters != expected_session_counters
+        {
+            return Err(acceptance_evidence_error(
+                "observed effect counters rejected",
+            ));
+        }
+        let event_sha256 = observed_effect_event_sha256(
+            nonce,
+            &previous_event_sha256,
+            expected_session_id,
+            expected_safe_config_sha256,
+            &expected_nonce_commitment,
+            ordinal,
+            record_type,
+            probe_id,
+            tool_name,
+            request_id_sha256,
+            classification,
+            effect_kind,
+            probe_counters,
+            session_counters,
+            observed_at_unix_nanos,
+        );
+        if string("event_sha256")? != event_sha256 {
+            return Err(acceptance_evidence_error(
+                "observed effect hash chain rejected",
+            ));
+        }
+        previous_event_sha256 = event_sha256;
+        previous_observed_nanos = observed_nanos;
+        if closes_probe {
+            active_probe = false;
+            expected_probe_counters = ObservedEffectCounters::default();
+        }
+    }
+    if !saw_open || !saw_close || active_probe {
+        return Err(acceptance_evidence_error(
+            "observed effect evidence did not close",
+        ));
+    }
+    Ok(VerifiedObservedEffectEvidence {
+        schema: OBSERVED_EFFECT_EVIDENCE_SCHEMA,
+        rejected_probe_count,
+        dispatch_count: expected_session_counters.dispatch,
+        database_effect_count: expected_session_counters.database,
+        filesystem_effect_count: expected_session_counters.filesystem,
+        process_effect_count: expected_session_counters.process,
+        network_effect_count: expected_session_counters.network,
+        codex_effect_count: expected_session_counters.codex,
+        normal_close_complete: true,
+    })
+}
+
 fn acceptance_evidence_error(message: &str) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
@@ -237,6 +1017,91 @@ fn sha256_hex(bytes: &[u8]) -> String {
         write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
     }
     output
+}
+
+fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    const BLOCK_BYTES: usize = 64;
+    let mut normalized = [0_u8; BLOCK_BYTES];
+    if key.len() > BLOCK_BYTES {
+        normalized[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        normalized[..key.len()].copy_from_slice(key);
+    }
+    let mut inner_pad = [0x36_u8; BLOCK_BYTES];
+    let mut outer_pad = [0x5c_u8; BLOCK_BYTES];
+    for index in 0..BLOCK_BYTES {
+        inner_pad[index] ^= normalized[index];
+        outer_pad[index] ^= normalized[index];
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_pad);
+    inner.update(message);
+    let inner_digest = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(outer_pad);
+    outer.update(inner_digest);
+    let digest = outer.finalize();
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    output
+}
+
+thread_local! {
+    static OBSERVED_EFFECT_EVIDENCE: RefCell<Option<ObservedEffectEvidence>> = const {
+        RefCell::new(None)
+    };
+}
+
+fn install_observed_effect_evidence() -> io::Result<bool> {
+    let evidence = ObservedEffectEvidence::from_process_environment()?;
+    let enabled = evidence.is_some();
+    OBSERVED_EFFECT_EVIDENCE.with(|slot| {
+        let mut slot = slot
+            .try_borrow_mut()
+            .map_err(|_| acceptance_evidence_error("observed effect recorder is busy"))?;
+        if slot.is_some() {
+            return Err(acceptance_evidence_error(
+                "observed effect recorder already installed",
+            ));
+        }
+        *slot = evidence;
+        Ok(enabled)
+    })
+}
+
+fn with_observed_effect_evidence(
+    operation: impl FnOnce(&mut ObservedEffectEvidence) -> io::Result<()>,
+) -> io::Result<()> {
+    OBSERVED_EFFECT_EVIDENCE.with(|slot| {
+        let mut slot = slot
+            .try_borrow_mut()
+            .map_err(|_| acceptance_evidence_error("observed effect recorder is busy"))?;
+        match slot.as_mut() {
+            Some(evidence) => operation(evidence),
+            None => Ok(()),
+        }
+    })
+}
+
+fn close_observed_effect_evidence(enabled: bool) -> io::Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    OBSERVED_EFFECT_EVIDENCE.with(|slot| {
+        let mut slot = slot
+            .try_borrow_mut()
+            .map_err(|_| acceptance_evidence_error("observed effect recorder is busy"))?;
+        let mut evidence = slot
+            .take()
+            .ok_or_else(|| acceptance_evidence_error("observed effect recorder is absent"))?;
+        evidence.close()
+    })
+}
+
+pub(crate) fn record_observed_effect(kind: ObservedEffectKind) -> io::Result<()> {
+    with_observed_effect_evidence(|evidence| evidence.record_effect(kind))
 }
 
 /// Returns the process-owned commitment to the authorization-relevant MCP
@@ -565,6 +1430,7 @@ pub struct McpServer<S> {
     tool_invocations: usize,
     acceptance_evidence: Option<AcceptanceEvidence>,
     acceptance_evidence_error: Option<io::Error>,
+    observed_effect_enabled: bool,
 }
 
 impl<S: DeliveryToolService> McpServer<S> {
@@ -579,6 +1445,7 @@ impl<S: DeliveryToolService> McpServer<S> {
             tool_invocations: 0,
             acceptance_evidence: None,
             acceptance_evidence_error: None,
+            observed_effect_enabled: false,
         }
     }
 
@@ -593,11 +1460,13 @@ impl<S: DeliveryToolService> McpServer<S> {
             tool_invocations: 0,
             acceptance_evidence: None,
             acceptance_evidence_error: None,
+            observed_effect_enabled: false,
         }
     }
 
     fn enable_acceptance_evidence(&mut self) -> io::Result<()> {
         self.acceptance_evidence = AcceptanceEvidence::from_process_environment()?;
+        self.observed_effect_enabled = install_observed_effect_evidence()?;
         Ok(())
     }
 
@@ -606,10 +1475,28 @@ impl<S: DeliveryToolService> McpServer<S> {
     }
 
     fn close_acceptance_evidence(&mut self) -> io::Result<()> {
+        close_observed_effect_evidence(self.observed_effect_enabled)?;
+        self.observed_effect_enabled = false;
         if let Some(evidence) = self.acceptance_evidence.as_mut() {
             evidence.close()?;
         }
         Ok(())
+    }
+
+    fn reject_observed_probe(
+        &mut self,
+        id: Value,
+        classification: &str,
+        code: i32,
+        message: &'static str,
+    ) -> Value {
+        if let Err(error) =
+            with_observed_effect_evidence(|evidence| evidence.reject_probe(classification))
+        {
+            self.acceptance_evidence_error = Some(error);
+            return protocol_error(id, -32603, "Acceptance evidence rejected");
+        }
+        protocol_error(id, code, message)
     }
 
     /// Handles one decoded JSON-RPC message. Notifications return no value.
@@ -743,26 +1630,63 @@ impl<S: DeliveryToolService> McpServer<S> {
     }
 
     fn call_tool(&mut self, id: Value, params: Option<&Value>, protocol: RequestProtocol) -> Value {
+        let observed_tool_name = params
+            .and_then(Value::as_object)
+            .and_then(|params| params.get("name"))
+            .and_then(Value::as_str)
+            .filter(|name| {
+                matches!(
+                    *name,
+                    DELIVERY_RUN_TOOL | DELIVERY_STATUS_TOOL | TASK_SUBMIT_TOOL | TASK_STATUS_TOOL
+                )
+            })
+            .unwrap_or("unknown");
+        if let Err(error) = with_observed_effect_evidence(|evidence| {
+            evidence.begin_probe("mcp-tools-call", observed_tool_name, &id)
+        }) {
+            self.acceptance_evidence_error = Some(error);
+            return protocol_error(id, -32603, "Acceptance evidence rejected");
+        }
         if protocol == RequestProtocol::Legacy && self.lifecycle != Lifecycle::Ready {
-            return protocol_error(id, -32002, "Server not initialized");
+            return self.reject_observed_probe(
+                id,
+                "MCP_NOT_READY",
+                -32002,
+                "Server not initialized",
+            );
         }
         let Some(params) = params.and_then(Value::as_object) else {
-            return protocol_error(id, -32602, "Invalid tools/call params");
+            return self.reject_observed_probe(
+                id,
+                "MCP_INVALID_PARAMS",
+                -32602,
+                "Invalid tools/call params",
+            );
         };
         if params
             .keys()
             .any(|key| key != "name" && key != "arguments" && key != "_meta")
             || !metadata_object_or_absent(params.get("_meta"))
         {
-            return protocol_error(id, -32602, "Invalid tools/call params");
+            return self.reject_observed_probe(
+                id,
+                "MCP_INVALID_PARAMS",
+                -32602,
+                "Invalid tools/call params",
+            );
         }
         let Some(name) = params.get("name").and_then(Value::as_str) else {
-            return protocol_error(id, -32602, "Invalid tools/call params");
+            return self.reject_observed_probe(
+                id,
+                "MCP_INVALID_PARAMS",
+                -32602,
+                "Invalid tools/call params",
+            );
         };
         if !self.tool_surface.allows_task_control()
             && matches!(name, TASK_SUBMIT_TOOL | TASK_STATUS_TOOL)
         {
-            return protocol_error(id, -32602, "Unknown tool");
+            return self.reject_observed_probe(id, "MCP_UNKNOWN_TOOL", -32602, "Unknown tool");
         }
         let operation = match name {
             DELIVERY_RUN_TOOL if empty_object_or_absent(params.get("arguments")) => {
@@ -772,31 +1696,57 @@ impl<S: DeliveryToolService> McpServer<S> {
                 ToolOperation::DeliveryStatus
             }
             DELIVERY_RUN_TOOL | DELIVERY_STATUS_TOOL => {
-                return protocol_error(id, -32602, "Tool accepts no arguments");
+                return self.reject_observed_probe(
+                    id,
+                    "MCP_INVALID_PARAMS",
+                    -32602,
+                    "Tool accepts no arguments",
+                );
             }
             TASK_SUBMIT_TOOL => {
                 let Some(arguments) = TaskSubmitArguments::from_value(params.get("arguments"))
                 else {
-                    return protocol_error(id, -32602, "Invalid task submit arguments");
+                    return self.reject_observed_probe(
+                        id,
+                        "MCP_INVALID_PARAMS",
+                        -32602,
+                        "Invalid task submit arguments",
+                    );
                 };
                 ToolOperation::TaskSubmit(arguments)
             }
             TASK_STATUS_TOOL => {
                 let Some(arguments) = TaskStatusArguments::from_value(params.get("arguments"))
                 else {
-                    return protocol_error(id, -32602, "Invalid task status arguments");
+                    return self.reject_observed_probe(
+                        id,
+                        "MCP_INVALID_PARAMS",
+                        -32602,
+                        "Invalid task status arguments",
+                    );
                 };
                 ToolOperation::TaskStatus(arguments)
             }
-            _ => return protocol_error(id, -32602, "Unknown tool"),
+            _ => {
+                return self.reject_observed_probe(id, "MCP_UNKNOWN_TOOL", -32602, "Unknown tool");
+            }
         };
         if self.tool_invocations >= MAX_TOOL_INVOCATIONS_PER_SESSION {
-            return protocol_error(id, -32029, "Tool invocation limit exceeded");
+            return self.reject_observed_probe(
+                id,
+                "MCP_INVOCATION_LIMIT",
+                -32029,
+                "Tool invocation limit exceeded",
+            );
         }
         self.tool_invocations += 1;
         if let Some(evidence) = self.acceptance_evidence.as_mut()
             && let Err(error) = evidence.record_dispatch(name, &id)
         {
+            self.acceptance_evidence_error = Some(error);
+            return protocol_error(id, -32603, "Acceptance evidence rejected");
+        }
+        if let Err(error) = with_observed_effect_evidence(ObservedEffectEvidence::accept_dispatch) {
             self.acceptance_evidence_error = Some(error);
             return protocol_error(id, -32603, "Acceptance evidence rejected");
         }
@@ -813,6 +1763,17 @@ impl<S: DeliveryToolService> McpServer<S> {
                 closed_task_public_status(self.service.task_status(&arguments))
             }
         };
+        let observed_classification = if result.is_ok() {
+            "MCP_RESULT"
+        } else {
+            "MCP_TOOL_ERROR"
+        };
+        if let Err(error) = with_observed_effect_evidence(|evidence| {
+            evidence.complete_probe(observed_classification)
+        }) {
+            self.acceptance_evidence_error = Some(error);
+            return protocol_error(id, -32603, "Acceptance evidence rejected");
+        }
         let mut result = tool_result(result);
         if protocol == RequestProtocol::Stateless {
             let result = result.as_object_mut().expect("tool result is an object");
@@ -1410,7 +2371,10 @@ fn unsupported_protocol_error(id: Value, requested: &str) -> Value {
 
 #[cfg(test)]
 mod acceptance_evidence_tests {
-    use super::{ACCEPTANCE_EVIDENCE_SCHEMA, AcceptanceEvidence};
+    use super::{
+        ACCEPTANCE_EVIDENCE_SCHEMA, AcceptanceEvidence, OBSERVED_EFFECT_EVIDENCE_SCHEMA,
+        ObservedEffectEvidence, ObservedEffectKind, verify_observed_effect_evidence,
+    };
     use serde_json::{Value, json};
     use std::fs::File;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1489,5 +2453,188 @@ mod acceptance_evidence_tests {
         );
         assert!(uppercase.is_err());
         std::fs::remove_file(uppercase_path).expect("remove uppercase sink");
+    }
+
+    #[test]
+    fn observed_effect_evidence_distinguishes_rejected_zero_from_transient_effects() {
+        let path = fresh_sink("observed-effects");
+        let session_id = "1123456789abcdef0123456789abcdef".to_owned();
+        let safe_config_sha256 = "12".repeat(32);
+        let nonce = "34".repeat(32);
+        let mut evidence = ObservedEffectEvidence::open(
+            &path,
+            session_id.clone(),
+            safe_config_sha256.clone(),
+            nonce.clone(),
+        )
+        .expect("open observed-effect evidence");
+
+        evidence
+            .begin_probe(
+                "02n01-invalid-task-submit",
+                "lattice_task_submit",
+                &json!(2),
+            )
+            .expect("begin rejected probe");
+        evidence
+            .reject_probe("MCP_INVALID_PARAMS")
+            .expect("record rejected probe");
+
+        evidence
+            .begin_probe("03-transient-effect", "lattice_task_submit", &json!(3))
+            .expect("begin effect probe");
+        evidence.accept_dispatch().expect("record dispatch");
+        evidence
+            .record_effect(ObservedEffectKind::Database)
+            .expect("record database connect attempt");
+        evidence
+            .record_effect(ObservedEffectKind::Filesystem)
+            .expect("record filesystem write attempt");
+        evidence
+            .record_effect(ObservedEffectKind::Process)
+            .expect("record transient process start");
+        evidence
+            .record_effect(ObservedEffectKind::Network)
+            .expect("record transient network connect");
+        evidence
+            .record_effect(ObservedEffectKind::Codex)
+            .expect("record transient Codex request");
+        evidence
+            .complete_probe("MCP_TOOL_ERROR")
+            .expect("complete effect probe");
+        evidence.close().expect("close observed-effect evidence");
+        drop(evidence);
+
+        let bytes = std::fs::read(&path).expect("read observed-effect evidence");
+        let verified = verify_observed_effect_evidence(
+            &bytes,
+            &session_id,
+            &safe_config_sha256,
+            &nonce,
+            SystemTime::now(),
+        )
+        .expect("verify observed-effect evidence");
+        assert_eq!(verified.schema, OBSERVED_EFFECT_EVIDENCE_SCHEMA);
+        assert_eq!(verified.rejected_probe_count, 1);
+        assert_eq!(verified.dispatch_count, 1);
+        assert_eq!(verified.database_effect_count, 1);
+        assert_eq!(verified.filesystem_effect_count, 1);
+        assert_eq!(verified.process_effect_count, 1);
+        assert_eq!(verified.network_effect_count, 1);
+        assert_eq!(verified.codex_effect_count, 1);
+        assert!(verified.normal_close_complete);
+
+        let records = String::from_utf8(bytes.clone())
+            .expect("strict UTF-8")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("valid effect JSONL"))
+            .collect::<Vec<_>>();
+        let rejected = records
+            .iter()
+            .find(|record| record["record_type"] == "PROBE_REJECTED")
+            .expect("rejected probe receipt");
+        assert_eq!(rejected["classification"], "MCP_INVALID_PARAMS");
+        assert_eq!(rejected["probe_counters"]["dispatch"], 0);
+        assert_eq!(rejected["probe_counters"]["database"], 0);
+        assert_eq!(rejected["probe_counters"]["filesystem"], 0);
+        assert_eq!(rejected["probe_counters"]["process"], 0);
+        assert_eq!(rejected["probe_counters"]["network"], 0);
+        assert_eq!(rejected["probe_counters"]["codex"], 0);
+
+        let mut reordered = records.clone();
+        reordered.swap(1, 2);
+        let reordered_bytes = reordered
+            .iter()
+            .flat_map(|record| {
+                let mut bytes = serde_json::to_vec(record).expect("serialize mutation");
+                bytes.push(b'\n');
+                bytes
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            verify_observed_effect_evidence(
+                &reordered_bytes,
+                &session_id,
+                &safe_config_sha256,
+                &nonce,
+                SystemTime::now(),
+            )
+            .is_err()
+        );
+        assert!(
+            verify_observed_effect_evidence(
+                &bytes,
+                "2123456789abcdef0123456789abcdef",
+                &safe_config_sha256,
+                &nonce,
+                SystemTime::now(),
+            )
+            .is_err()
+        );
+        assert!(
+            verify_observed_effect_evidence(
+                &bytes,
+                &session_id,
+                &safe_config_sha256,
+                &"56".repeat(32),
+                SystemTime::now(),
+            )
+            .is_err()
+        );
+
+        let mut missing = records.clone();
+        missing.remove(2);
+        let missing_bytes = missing
+            .iter()
+            .flat_map(|record| {
+                let mut bytes = serde_json::to_vec(record).expect("serialize missing mutation");
+                bytes.push(b'\n');
+                bytes
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            verify_observed_effect_evidence(
+                &missing_bytes,
+                &session_id,
+                &safe_config_sha256,
+                &nonce,
+                SystemTime::now(),
+            )
+            .is_err()
+        );
+
+        let mut duplicated = records.clone();
+        duplicated.insert(2, records[2].clone());
+        let duplicated_bytes = duplicated
+            .iter()
+            .flat_map(|record| {
+                let mut bytes = serde_json::to_vec(record).expect("serialize duplicate mutation");
+                bytes.push(b'\n');
+                bytes
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            verify_observed_effect_evidence(
+                &duplicated_bytes,
+                &session_id,
+                &safe_config_sha256,
+                &nonce,
+                SystemTime::now(),
+            )
+            .is_err()
+        );
+
+        assert!(
+            verify_observed_effect_evidence(
+                &bytes,
+                &session_id,
+                &safe_config_sha256,
+                &nonce,
+                UNIX_EPOCH + std::time::Duration::from_secs(1),
+            )
+            .is_err()
+        );
+
+        std::fs::remove_file(path).expect("remove observed-effect sink");
     }
 }

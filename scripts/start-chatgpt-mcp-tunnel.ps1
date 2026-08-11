@@ -306,6 +306,30 @@ function Get-LiveTaskIngressProfileDigest {
     return $digest
 }
 
+function Get-Task038HmacSha256 {
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$Key,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+
+    $algorithm = [Security.Cryptography.HMACSHA256]::new($Key)
+    try {
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Value)
+        return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
+function New-Task038PrivateNonce {
+    $bytes = [byte[]]::new(32)
+    $algorithm = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $algorithm.GetBytes($bytes) }
+    finally { $algorithm.Dispose() }
+    return $bytes
+}
+
 function ConvertTo-Task038WindowsCommandLineArgument {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
 
@@ -344,7 +368,17 @@ namespace Lattice.Task038
         private IntPtr jobHandle;
         private IntPtr rootProcessHandle;
         private Int32 rootProcessId;
+        private UInt64 rootProcessCreationFileTime;
+        private string rootProcessImagePath;
         private bool closed;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FILETIME
+        {
+            public UInt32 Low;
+            public UInt32 High;
+            public UInt64 Value { get { return ((UInt64)High << 32) | Low; } }
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct STARTUPINFO
@@ -479,14 +513,38 @@ namespace Lattice.Task038
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool GetExitCodeProcess(IntPtr process, out UInt32 exitCode);
 
-        private TunnelOwnedProcess(IntPtr job, IntPtr process, Int32 processId)
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetProcessTimes(
+            IntPtr process,
+            out FILETIME creation,
+            out FILETIME exit,
+            out FILETIME kernel,
+            out FILETIME user);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool QueryFullProcessImageName(
+            IntPtr process,
+            UInt32 flags,
+            StringBuilder imagePath,
+            ref UInt32 size);
+
+        private TunnelOwnedProcess(
+            IntPtr job,
+            IntPtr process,
+            Int32 processId,
+            UInt64 creationFileTime,
+            string imagePath)
         {
             jobHandle = job;
             rootProcessHandle = process;
             rootProcessId = processId;
+            rootProcessCreationFileTime = creationFileTime;
+            rootProcessImagePath = imagePath;
         }
 
         public Int32 ProcessId { get { return rootProcessId; } }
+        public string CreationFileTime { get { return rootProcessCreationFileTime.ToString(); } }
+        public string ImagePath { get { return rootProcessImagePath; } }
 
         public Int32 WaitForExitAndGetCode()
         {
@@ -569,9 +627,24 @@ namespace Lattice.Task038
                 processCreated = true;
                 if (!AssignProcessToJobObject(job, created.hProcess))
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "TASK038_TUNNEL_JOB_ASSIGN_REJECTED");
+                FILETIME creation;
+                FILETIME exit;
+                FILETIME kernel;
+                FILETIME user;
+                if (!GetProcessTimes(created.hProcess, out creation, out exit, out kernel, out user))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "TASK038_TUNNEL_PROCESS_IDENTITY_REJECTED");
+                UInt32 imagePathCapacity = 32768;
+                var imagePath = new StringBuilder((Int32)imagePathCapacity);
+                if (!QueryFullProcessImageName(created.hProcess, 0, imagePath, ref imagePathCapacity))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "TASK038_TUNNEL_PROCESS_IDENTITY_REJECTED");
                 if (ResumeThread(created.hThread) == UInt32.MaxValue)
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "TASK038_TUNNEL_CLIENT_RESUME_REJECTED");
-                var result = new TunnelOwnedProcess(job, created.hProcess, (Int32)created.dwProcessId);
+                var result = new TunnelOwnedProcess(
+                    job,
+                    created.hProcess,
+                    (Int32)created.dwProcessId,
+                    creation.Value,
+                    imagePath.ToString());
                 job = IntPtr.Zero;
                 created.hProcess = IntPtr.Zero;
                 return result;
@@ -687,7 +760,8 @@ function Invoke-Task038OwnedTunnelClient {
         [Parameter(Mandatory = $true)][string]$TunnelClient,
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
-        [Parameter(Mandatory = $true)][Diagnostics.ProcessStartInfo]$StartInfo
+        [Parameter(Mandatory = $true)][Diagnostics.ProcessStartInfo]$StartInfo,
+        $AuthoritySink
     )
 
     if ([IO.Path]::GetExtension($TunnelClient) -cne '.exe') {
@@ -699,6 +773,9 @@ function Invoke-Task038OwnedTunnelClient {
     }) -join ' '
     $ownedTree = $null
     $exitCode = $null
+    $processId = $null
+    $processCreationTime = $null
+    $processImagePath = $null
     $startedAt = [DateTime]::UtcNow
     try {
         $ownedTree = [Lattice.Task038.TunnelOwnedProcess]::Start(
@@ -708,6 +785,27 @@ function Invoke-Task038OwnedTunnelClient {
             $StartInfo.EnvironmentVariables
         )
         $processId = [int]$ownedTree.ProcessId
+        $processCreationTime = [string]$ownedTree.CreationFileTime
+        $processImagePath = Get-CanonicalPath -Path ([string]$ownedTree.ImagePath)
+        if ($null -ne $AuthoritySink) {
+            if (
+                $processCreationTime -cnotmatch '\A[0-9]{1,32}\z' -or
+                $processImagePath -cne [string]$AuthoritySink.tunnel_client_path -or
+                (Get-FileSha256 -Path $processImagePath -FailureCode 'TASK038_TUNNEL_PROCESS_IDENTITY_REJECTED') -cne [string]$AuthoritySink.tunnel_client_sha256 -or
+                (Get-LatticeWindowsNativePathIdentityToken -Path $processImagePath -Directory $false) -cne [string]$AuthoritySink.tunnel_client_native_identity
+            ) { throw 'TASK038_TUNNEL_PROCESS_IDENTITY_REJECTED' }
+            Add-Task038LaunchAuthorityEvent -Sink $AuthoritySink -EventType 'PROCESS_SPAWN_BOUND' -Payload ([ordered]@{
+                process_id = [long]$processId
+                process_creation_time = $processCreationTime
+                process_creation_time_source = 'WINDOWS_PROCESS_TIMES'
+                process_executable_path = $processImagePath
+                process_executable_sha256 = [string]$AuthoritySink.tunnel_client_sha256
+                process_executable_native_identity = [string]$AuthoritySink.tunnel_client_native_identity
+                create_suspended = $true
+                job_assigned_before_resume = $true
+                job_owner_process_id = [long]$PID
+            })
+        }
         $exitCode = [int]$ownedTree.WaitForExitAndGetCode()
     }
     finally {
@@ -715,6 +813,16 @@ function Invoke-Task038OwnedTunnelClient {
             try {
                 if (-not $ownedTree.TerminateAndWait(15000)) {
                     throw 'TASK038_TUNNEL_PROCESS_TREE_NOT_REAPED'
+                }
+                if ($null -ne $AuthoritySink -and $null -ne $exitCode) {
+                    Add-Task038LaunchAuthorityEvent -Sink $AuthoritySink -EventType 'PROCESS_REAPED' -Payload ([ordered]@{
+                        process_id = [long]$processId
+                        process_creation_time = [string]$processCreationTime
+                        process_executable_sha256 = [string]$AuthoritySink.tunnel_client_sha256
+                        exit_code = [int]$exitCode
+                        job_active_process_count = 0L
+                        descendant_processes_after_cleanup = 0L
+                    })
                 }
             }
             finally {
@@ -725,6 +833,9 @@ function Invoke-Task038OwnedTunnelClient {
     return [pscustomobject][ordered]@{
         exit_code = $exitCode
         process_id = $processId
+        process_creation_time = $processCreationTime
+        process_creation_time_source = 'WINDOWS_PROCESS_TIMES'
+        process_executable_path = $processImagePath
         started_at_utc = $startedAt.ToString('o')
         exited_at_utc = [DateTime]::UtcNow.ToString('o')
         create_suspended = $true
@@ -1005,6 +1116,245 @@ function Set-Task038OwnerOnlyAcl {
     }
     catch {
         throw 'TASK038_TUNNEL_LIFECYCLE_ACL_REJECTED'
+    }
+}
+
+function New-Task038LaunchAuthoritySink {
+    param(
+        [Parameter(Mandatory = $true)][string]$DeliveryRoot,
+        [Parameter(Mandatory = $true)][string]$ConsumerSessionId,
+        [Parameter(Mandatory = $true)][long]$ConfigGeneration,
+        [Parameter(Mandatory = $true)][string]$SafeConfigSha256,
+        [Parameter(Mandatory = $true)]$ProfileEvidence,
+        [Parameter(Mandatory = $true)][string]$TunnelClient
+    )
+
+    if (
+        $ConsumerSessionId -cnotmatch '\A[0-9a-f]{32}\z' -or
+        $ConfigGeneration -lt 1 -or
+        $SafeConfigSha256 -cnotmatch '\A[0-9a-f]{64}\z'
+    ) { throw 'TASK038_TUNNEL_LAUNCH_AUTHORITY_CONFIG_REJECTED' }
+    $root = Get-CanonicalPath -Path $DeliveryRoot
+    $authorityRoot = Join-Path $root 'tunnel-launch-authority'
+    [IO.Directory]::CreateDirectory($authorityRoot) | Out-Null
+    Assert-NoReparsePath -Path $authorityRoot -FailureCode 'TASK038_TUNNEL_LAUNCH_AUTHORITY_PATH_REJECTED'
+    Set-Task038OwnerOnlyAcl -Path $authorityRoot -Directory $true
+    $sessionId = [Guid]::NewGuid().ToString('N')
+    $path = Join-Path $authorityRoot ($sessionId + '.jsonl')
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open(
+            $path,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::Read
+        )
+        Set-Task038OwnerOnlyAcl -Path $path -Directory $false
+        $nativeIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $path -Directory $false
+        $nonce = New-Task038PrivateNonce
+        $nonceCommitment = Get-StringSha256 -Value (@(
+            'lattice.task038.tunnel-launch-authority-nonce.v1',
+            $sessionId,
+            $ConsumerSessionId,
+            $SafeConfigSha256,
+            [Convert]::ToBase64String($nonce)
+        ) -join "`n")
+        $owner = Get-Process -Id $PID -ErrorAction Stop
+        $ownerPath = Get-CanonicalPath -Path ([string]$owner.Path)
+        $sink = [pscustomobject][ordered]@{
+            stream = $stream
+            path = $path
+            native_identity = $nativeIdentity
+            nonce = $nonce
+            nonce_commitment = $nonceCommitment
+            session_id = $sessionId
+            consumer_session_id = $ConsumerSessionId
+            config_generation = $ConfigGeneration
+            safe_config_sha256 = $SafeConfigSha256
+            ordinal = 0L
+            previous_hmac_sha256 = ('0' * 64)
+            owner_process_id = [long]$PID
+            owner_process_creation_time = $owner.StartTime.ToUniversalTime().ToFileTimeUtc().ToString()
+            owner_process_executable_path = $ownerPath
+            owner_process_executable_sha256 = Get-FileSha256 -Path $ownerPath -FailureCode 'TASK038_TUNNEL_LAUNCH_AUTHORITY_OWNER_REJECTED'
+            owner_process_executable_native_identity = Get-LatticeWindowsNativePathIdentityToken -Path $ownerPath -Directory $false
+            profile_path = [string]$ProfileEvidence.profile_path
+            profile_raw_sha256 = [string]$ProfileEvidence.profile_raw_sha256
+            profile_native_identity = [string]$ProfileEvidence.profile_native_identity
+            tunnel_client_path = $TunnelClient
+            tunnel_client_sha256 = [string]$ProfileEvidence.tunnel_client_sha256
+            tunnel_client_native_identity = [string]$ProfileEvidence.tunnel_client_native_identity
+            latticed_path = [string]$ProfileEvidence.latticed_executable
+            latticed_sha256 = [string]$ProfileEvidence.latticed_sha256
+            latticed_native_identity = [string]$ProfileEvidence.latticed_native_identity
+        }
+        Add-Task038LaunchAuthorityEvent -Sink $sink -EventType 'AUTHORITY_OPEN' -Payload ([ordered]@{
+            owner_process_id = [long]$sink.owner_process_id
+            owner_process_creation_time = [string]$sink.owner_process_creation_time
+            owner_process_creation_time_source = 'WINDOWS_PROCESS_TIMES'
+            owner_process_executable_path = [string]$sink.owner_process_executable_path
+            owner_process_executable_sha256 = [string]$sink.owner_process_executable_sha256
+            owner_process_executable_native_identity = [string]$sink.owner_process_executable_native_identity
+            profile_path = [string]$sink.profile_path
+            profile_raw_sha256 = [string]$sink.profile_raw_sha256
+            profile_native_identity = [string]$sink.profile_native_identity
+            tunnel_client_path = [string]$sink.tunnel_client_path
+            tunnel_client_sha256 = [string]$sink.tunnel_client_sha256
+            tunnel_client_native_identity = [string]$sink.tunnel_client_native_identity
+            latticed_path = [string]$sink.latticed_path
+            latticed_sha256 = [string]$sink.latticed_sha256
+            latticed_native_identity = [string]$sink.latticed_native_identity
+            authority_sink_native_identity = [string]$sink.native_identity
+        })
+        return $sink
+    }
+    catch {
+        if ($null -ne $stream) { $stream.Dispose() }
+        throw 'TASK038_TUNNEL_LAUNCH_AUTHORITY_REJECTED'
+    }
+}
+
+function Add-Task038LaunchAuthorityEvent {
+    param(
+        [Parameter(Mandatory = $true)]$Sink,
+        [Parameter(Mandatory = $true)][ValidateSet('AUTHORITY_OPEN', 'PROCESS_SPAWN_BOUND', 'PROCESS_REAPED', 'INNER_CHAIN_BOUND', 'AUTHORITY_CLOSED')][string]$EventType,
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$Payload
+    )
+
+    if (
+        $null -eq $Sink.stream -or
+        -not $Sink.stream.CanWrite -or
+        -not (Test-LatticeWindowsNativePathIdentity -Path ([string]$Sink.path) -Directory $false -ExpectedToken ([string]$Sink.native_identity))
+    ) { throw 'TASK038_TUNNEL_LAUNCH_AUTHORITY_REJECTED' }
+    $Sink.ordinal = [long]$Sink.ordinal + 1L
+    $observedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+    $payloadJson = $Payload | ConvertTo-Json -Compress -Depth 16
+    $payloadSha256 = Get-StringSha256 -Value $payloadJson
+    $hmacInput = @(
+        'lattice.task038.tunnel-launch-authority-hmac.v1',
+        [string]$Sink.previous_hmac_sha256,
+        [string]$Sink.session_id,
+        [string]$Sink.consumer_session_id,
+        [string]$Sink.config_generation,
+        [string]$Sink.safe_config_sha256,
+        [string]$Sink.nonce_commitment,
+        [string]$Sink.ordinal,
+        $EventType,
+        $observedAtUtc,
+        $payloadSha256
+    ) -join "`n"
+    $eventHmac = Get-Task038HmacSha256 -Key ([byte[]]$Sink.nonce) -Value $hmacInput
+    $record = [ordered]@{
+        schema = 'lattice.task038.tunnel-launch-authority.v1'
+        event_type = $EventType
+        session_id = [string]$Sink.session_id
+        consumer_session_id = [string]$Sink.consumer_session_id
+        config_generation = [long]$Sink.config_generation
+        safe_config_sha256 = [string]$Sink.safe_config_sha256
+        nonce_commitment = [string]$Sink.nonce_commitment
+        ordinal = [long]$Sink.ordinal
+        observed_at_utc = $observedAtUtc
+        payload = $Payload
+        payload_sha256 = $payloadSha256
+        previous_hmac_sha256 = [string]$Sink.previous_hmac_sha256
+        event_hmac_sha256 = $eventHmac
+    }
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes(
+        (($record | ConvertTo-Json -Compress -Depth 20) + "`n")
+    )
+    $Sink.stream.Write($bytes, 0, $bytes.Length)
+    $Sink.stream.Flush($true)
+    $Sink.previous_hmac_sha256 = $eventHmac
+}
+
+function Complete-Task038LaunchAuthoritySink {
+    param([Parameter(Mandatory = $true)]$Sink)
+
+    Add-Task038LaunchAuthorityEvent -Sink $Sink -EventType 'AUTHORITY_CLOSED' -Payload ([ordered]@{
+        authority_event_count_before_close = [long]$Sink.ordinal
+        current_owner_process_id = [long]$PID
+        authority_sink_launch_owned = $true
+    })
+    try {
+        $Sink.stream.Flush($true)
+        if ($Sink.stream.Length -lt 1 -or $Sink.stream.Length -gt 1048576) {
+            throw 'TASK038_TUNNEL_LAUNCH_AUTHORITY_REJECTED'
+        }
+        $bytes = [byte[]]::new([int]$Sink.stream.Length)
+        $Sink.stream.Position = 0
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $Sink.stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -lt 1) { throw 'TASK038_TUNNEL_LAUNCH_AUTHORITY_REJECTED' }
+            $offset += $read
+        }
+        $Sink.stream.Position = $Sink.stream.Length
+        if (
+            $bytes.Length -lt 1 -or $bytes.Length -gt 1048576 -or
+            ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf)
+        ) { throw 'TASK038_TUNNEL_LAUNCH_AUTHORITY_REJECTED' }
+        $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        if (-not $text.EndsWith("`n", [StringComparison]::Ordinal) -or $text.Contains("`r")) {
+            throw 'TASK038_TUNNEL_LAUNCH_AUTHORITY_REJECTED'
+        }
+        $parts = @($text.Split([string[]]@("`n"), [StringSplitOptions]::None))
+        if ($parts.Count -lt 2 -or $parts[-1] -cne '') {
+            throw 'TASK038_TUNNEL_LAUNCH_AUTHORITY_REJECTED'
+        }
+        $lines = @($parts[0..($parts.Count - 2)])
+        if (@($lines | Where-Object { $_ -ceq '' }).Count -ne 0) {
+            throw 'TASK038_TUNNEL_LAUNCH_AUTHORITY_REJECTED'
+        }
+        $expectedTypes = @('AUTHORITY_OPEN', 'PROCESS_SPAWN_BOUND', 'PROCESS_REAPED', 'INNER_CHAIN_BOUND', 'AUTHORITY_CLOSED')
+        if ($lines.Count -ne $expectedTypes.Count) { throw 'TASK038_TUNNEL_LAUNCH_AUTHORITY_REJECTED' }
+        $previous = '0' * 64
+        for ($index = 0; $index -lt $lines.Count; $index++) {
+            $record = $lines[$index] | ConvertFrom-Json -ErrorAction Stop
+            $payloadJson = $record.payload | ConvertTo-Json -Compress -Depth 16
+            $payloadSha256 = Get-StringSha256 -Value $payloadJson
+            $hmacInput = @(
+                'lattice.task038.tunnel-launch-authority-hmac.v1', $previous,
+                [string]$Sink.session_id, [string]$Sink.consumer_session_id,
+                [string]$Sink.config_generation, [string]$Sink.safe_config_sha256,
+                [string]$Sink.nonce_commitment, [string]($index + 1), $expectedTypes[$index],
+                [string]$record.observed_at_utc, $payloadSha256
+            ) -join "`n"
+            $expectedHmac = Get-Task038HmacSha256 -Key ([byte[]]$Sink.nonce) -Value $hmacInput
+            if (
+                [string]$record.schema -cne 'lattice.task038.tunnel-launch-authority.v1' -or
+                [string]$record.event_type -cne $expectedTypes[$index] -or
+                [string]$record.session_id -cne [string]$Sink.session_id -or
+                [string]$record.consumer_session_id -cne [string]$Sink.consumer_session_id -or
+                [long]$record.config_generation -ne [long]$Sink.config_generation -or
+                [string]$record.safe_config_sha256 -cne [string]$Sink.safe_config_sha256 -or
+                [string]$record.nonce_commitment -cne [string]$Sink.nonce_commitment -or
+                [long]$record.ordinal -ne ($index + 1) -or
+                [string]$record.payload_sha256 -cne $payloadSha256 -or
+                [string]$record.previous_hmac_sha256 -cne $previous -or
+                [string]$record.event_hmac_sha256 -cne $expectedHmac
+            ) { throw 'TASK038_TUNNEL_LAUNCH_AUTHORITY_REJECTED' }
+            $previous = $expectedHmac
+        }
+        if (-not (Test-LatticeWindowsNativePathIdentity -Path ([string]$Sink.path) -Directory $false -ExpectedToken ([string]$Sink.native_identity))) {
+            throw 'TASK038_TUNNEL_LAUNCH_AUTHORITY_REJECTED'
+        }
+        return [pscustomobject][ordered]@{
+            scope = 'LAUNCH_OWNED_PROCESS_EVIDENCE'
+            path = [string]$Sink.path
+            native_identity = [string]$Sink.native_identity
+            raw_sha256 = Get-ByteArraySha256 -Bytes $bytes
+            byte_count = [long]$bytes.Length
+            strict_utf8 = $true
+            event_count = [long]$lines.Count
+            final_hmac_sha256 = $previous
+            nonce_commitment = [string]$Sink.nonce_commitment
+            session_id = [string]$Sink.session_id
+            consumer_session_id = [string]$Sink.consumer_session_id
+        }
+    }
+    finally {
+        $Sink.stream.Dispose()
+        [Array]::Clear([byte[]]$Sink.nonce, 0, ([byte[]]$Sink.nonce).Length)
     }
 }
 
@@ -1370,6 +1720,8 @@ function Get-Task038LifecycleEvidence {
         inner_process_creation_time = $stableIdentityParts[1]
         inner_process_creation_time_source = $stableIdentityParts[2]
         inner_process_exe_sha256 = $stableIdentityParts[3]
+        inner_session_command_sha256 = $stableCommandSha256
+        inner_endpoint_ref = $stableEndpointRef
         exit_code = if ($null -eq $exitCode) { $null } else { [int]$exitCode }
         lifecycle_threshold_decision = 'C_CALIBRATION_FIRST'
         lifecycle_threshold_profile = $null
@@ -1391,6 +1743,25 @@ $runtimeEnvironment = $null
 $lifecycleSink = $null
 $lifecycleEvidence = $null
 $lifecycleSafeConfig = $null
+$launchAuthoritySink = $null
+$launchAuthorityEvidence = $null
+
+trap {
+    if ($null -ne $launchAuthoritySink -and $null -ne $launchAuthoritySink.stream) {
+        try { $launchAuthoritySink.stream.Dispose() } catch {}
+        if ($null -ne $launchAuthoritySink.nonce) {
+            try {
+                [Array]::Clear(
+                    [byte[]]$launchAuthoritySink.nonce,
+                    0,
+                    ([byte[]]$launchAuthoritySink.nonce).Length
+                )
+            }
+            catch {}
+        }
+    }
+    throw $_.Exception
+}
 
 $arguments = switch ($Mode) {
     'Init' {
@@ -1464,6 +1835,20 @@ $arguments = switch ($Mode) {
 
 $clientExitCode = 1
 if ($Mode -in @('Run', 'ManagedRun')) {
+    $consumerSessionId = [Environment]::GetEnvironmentVariable(
+        'LATTICE_P0_CONSUMER_SESSION_ID',
+        'Process'
+    )
+    if ($consumerSessionId -cnotmatch '\A[0-9a-f]{32}\z') {
+        throw 'TASK038_TUNNEL_CONSUMER_SESSION_REQUIRED'
+    }
+    $launchAuthoritySink = New-Task038LaunchAuthoritySink `
+        -DeliveryRoot ([string]$runtimeEnvironment.LATTICE_DELIVERY_ROOT) `
+        -ConsumerSessionId $consumerSessionId `
+        -ConfigGeneration ([long]$lifecycleSink.config_generation) `
+        -SafeConfigSha256 ([string]$lifecycleSink.safe_config_sha256) `
+        -ProfileEvidence $profileEvidence `
+        -TunnelClient $tunnelClient
     $runtimeEnvironment['LATTICE_TASK_INGRESS_KIND'] = $taskIngressKind
     $runtimeEnvironment['LATTICE_TASK_INGRESS_PROFILE_SHA256'] = $taskIngressProfileDigest
     $runtimeEnvironment['TUNNEL_CLIENT_LIFECYCLE_EVENT_PATH'] = [string]$lifecycleSink.event_path
@@ -1486,13 +1871,34 @@ if ($Mode -in @('Run', 'ManagedRun')) {
         -TunnelClient $tunnelClient `
         -Arguments $arguments `
         -WorkingDirectory $profileRoot `
-        -StartInfo $startInfo
+        -StartInfo $startInfo `
+        -AuthoritySink $launchAuthoritySink
     $clientExitCode = [int]$runResult.exit_code
     $lifecycleEvidence = Get-Task038LifecycleEvidence `
         -Sink $lifecycleSink `
         -ExpectedInnerExeSha256 ([string]$profileEvidence.latticed_sha256) `
         -ControlPlaneApiKey ([string]$runtimeEnvironment.CONTROL_PLANE_API_KEY) `
         -PostgresPassword ([string]$runtimeEnvironment.LATTICE_TASK019_PASSWORD)
+    Add-Task038LaunchAuthorityEvent -Sink $launchAuthoritySink -EventType 'INNER_CHAIN_BOUND' -Payload ([ordered]@{
+        lifecycle_session_id = [string]$lifecycleEvidence.session_id
+        lifecycle_config_generation = [long]$lifecycleEvidence.config_generation
+        lifecycle_safe_config_sha256 = [string]$lifecycleEvidence.safe_config_sha256
+        lifecycle_event_native_identity = [string]$lifecycleEvidence.event_native_identity
+        lifecycle_event_raw_sha256 = [string]$lifecycleEvidence.event_raw_sha256
+        lifecycle_final_event_sha256 = [string]$lifecycleEvidence.final_event_sha256
+        lifecycle_event_sequence = @('SPAWN', 'OPEN', 'CLOSE_REQUESTED', 'PIPE_CLOSED', 'EXITED', 'REAPED')
+        inner_process_id = [long]$lifecycleEvidence.inner_process_id
+        inner_process_creation_time = [string]$lifecycleEvidence.inner_process_creation_time
+        inner_process_creation_time_source = [string]$lifecycleEvidence.inner_process_creation_time_source
+        inner_process_exe_sha256 = [string]$lifecycleEvidence.inner_process_exe_sha256
+        inner_session_command_sha256 = [string]$lifecycleEvidence.inner_session_command_sha256
+        inner_endpoint_ref = [string]$lifecycleEvidence.inner_endpoint_ref
+        inner_exit_code = $lifecycleEvidence.exit_code
+        normal_close_complete = [bool]$lifecycleEvidence.normal_close_complete
+        lifecycle_classification = 'UNKNOWN'
+        threshold_profile = $null
+    })
+    $launchAuthorityEvidence = Complete-Task038LaunchAuthoritySink -Sink $launchAuthoritySink
     Write-Output (([ordered]@{
         schema = 'lattice.task038.tunnel-outer-lifecycle.v1'
         mode = $Mode
@@ -1540,6 +1946,27 @@ if ($Mode -in @('Run', 'ManagedRun')) {
         }
         lifecycle_classification = 'UNKNOWN'
         leak_claimed = $false
+        authority_scope = [string]$launchAuthorityEvidence.scope
+        authority_consumer_session_id = [string]$launchAuthorityEvidence.consumer_session_id
+        authority_session_id = [string]$launchAuthorityEvidence.session_id
+        authority_nonce_commitment = [string]$launchAuthorityEvidence.nonce_commitment
+        authority_receipt_path = [string]$launchAuthorityEvidence.path
+        authority_receipt_native_identity = [string]$launchAuthorityEvidence.native_identity
+        authority_receipt_raw_sha256 = [string]$launchAuthorityEvidence.raw_sha256
+        authority_receipt_byte_count = [long]$launchAuthorityEvidence.byte_count
+        authority_receipt_strict_utf8 = [bool]$launchAuthorityEvidence.strict_utf8
+        authority_event_count = [long]$launchAuthorityEvidence.event_count
+        authority_final_hmac_sha256 = [string]$launchAuthorityEvidence.final_hmac_sha256
+        authority_private_nonce = $null
+        authority_sink_launch_owned = $true
+        authority_job_identity_bound = $true
+        authority_pipe_identity_bound = $true
+        authority_current_os_observation_bound = $true
+        tunnel_client_process_id = [long]$runResult.process_id
+        tunnel_client_process_creation_time = [string]$runResult.process_creation_time
+        tunnel_client_process_creation_time_source = [string]$runResult.process_creation_time_source
+        tunnel_client_process_executable_path = [string]$runResult.process_executable_path
+        tunnel_client_process_executable_sha256 = [string]$profileEvidence.tunnel_client_sha256
     }) | ConvertTo-Json -Compress)
 }
 else {

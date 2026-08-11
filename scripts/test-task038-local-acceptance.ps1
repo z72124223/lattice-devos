@@ -135,6 +135,22 @@ $postgresTunnelFragments = @(
     '882a5a073a88817f6c6d4c8827df1e4269ff226d52cf6f47c9883e91088c6345'
     'e43adb9c5032e7efc63eebb44c5d32b142b34e5f4207666fed2dc7a51d43b630'
     'abe89b0767a8cd0f956059aa5a5a93cd1042efc6194d000c2501da3e23babbd2'
+    'HolderTtlSeconds'
+    'lattice.task019.postgres-holder-authority.v1'
+    'HOLDER_OPEN'
+    'MARKER_CREATED'
+    'INITIAL_POSTMASTER_READY'
+    'INITIAL_POSTMASTER_STOPPED'
+    'RESTART_POSTMASTER_READY'
+    'CONSUMER_STARTED'
+    'CONSUMER_EXITED'
+    'HOLDER_STOPPED'
+    'CLEANUP_COMPLETED'
+    'LATTICE_TASK019_HOLDER_RECEIPT_PATH'
+    'LATTICE_TASK019_HOLDER_NONCE'
+    'LATTICE_TASK019_HOLDER_CONSUMER_SESSION_ID'
+    'Get-Task019PostmasterRuntimeEvidence'
+    '[IO.FileShare]::ReadWrite'
 )
 foreach ($fragment in $postgresTunnelFragments) {
     if ($postgresHarnessText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
@@ -190,6 +206,10 @@ $requiredFragments = @(
     'Assert-ToolResultEnvelope',
     'Write-McpResponseSummary',
     'Read-Task038McpAcceptanceEvidence',
+    'Read-Task038McpObservedEffectEvidence',
+    'LATTICE_MCP_OBSERVED_EFFECT_PATH',
+    'LATTICE_MCP_OBSERVED_EFFECT_NONCE',
+    'PROCESS_PRIVATE_HMAC_OBSERVED_AT_EFFECT_BOUNDARY',
     'Get-Task038FailureClassification',
     'Stop-Task038Job',
     'Stop-Task038ProcessTree',
@@ -273,7 +293,7 @@ if (
     $text.Split(
         [string[]]@($caseSensitiveRunIdValidator),
         [StringSplitOptions]::None
-    ).Count - 1 -ne 7
+    ).Count - 1 -ne 11
 ) {
     throw 'TASK038_LOCAL_RUN_ID_VALIDATION_REJECTED'
 }
@@ -500,6 +520,7 @@ foreach ($name in @(
     'Assert-NoReparseAncestor',
     'Assert-NoReparsePath',
     'Get-StringSha256',
+    'Get-HmacStringSha256',
     'Get-FileSha256',
     'Read-Task038StrictUtf8Text',
     'Get-Task019ProductionDatabaseName',
@@ -511,6 +532,8 @@ foreach ($name in @(
     'Set-Task038OwnerOnlyAcl',
     'New-Task038McpAcceptanceEvidenceSink',
     'Read-Task038McpAcceptanceEvidence',
+    'New-Task038McpObservedEffectEvidenceSink',
+    'Read-Task038McpObservedEffectEvidence',
     'Get-Task038CandidateSourceLinkage',
     'Get-DirectoryFootprint',
     'Get-StableDirectoryFootprint',
@@ -968,11 +991,17 @@ finally {
         (Join-Path $probeRoot 'early-exit-response-summary.json'),
         (Join-Path $probeRoot 'early-exit-meta.json'),
         (Join-Path $probeRoot 'timeout-dispatch.jsonl'),
-        (Join-Path $probeRoot 'early-exit-dispatch.jsonl')
+        (Join-Path $probeRoot 'early-exit-dispatch.jsonl'),
+        (Join-Path $probeRoot 'mcp-observed-effects\11111111111111111111111111111111.jsonl'),
+        (Join-Path $probeRoot 'mcp-observed-effects\33333333333333333333333333333333.jsonl')
     )) {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             Remove-Item -LiteralPath $path -Force
         }
+    }
+    $observedEffectProbeRoot = Join-Path $probeRoot 'mcp-observed-effects'
+    if (Test-Path -LiteralPath $observedEffectProbeRoot -PathType Container) {
+        [IO.Directory]::Delete($observedEffectProbeRoot, $false)
     }
     if (Test-Path -LiteralPath $probeRoot -PathType Container) {
         $remaining = @(Get-ChildItem -LiteralPath $probeRoot -Force)
