@@ -25,7 +25,7 @@
 
 | Path | Why | Verification |
 |---|---|---|
-| `tools/lattice-mcp-kit/WINDOW_LEDGER.jsonl` | Durable per-window timing, scope, artifacts, local commit/tree, tests, remote-save, and archive fields | Each line parses as one JSON object; remote checkpoint/time are confirmed and archive time remains null |
+| `tools/lattice-mcp-kit/WINDOW_LEDGER.jsonl` | Durable per-window timing, scope, artifacts, local commit/tree, tests, remote-save, and archive fields | Each line parses as one JSON object; remote checkpoint/time and central-confirmed archive timestamp are populated |
 | `tools/lattice-mcp-kit/HANDOFF.md` | Evidence-backed GitHub saver and archive-coordination state | Re-read after write; no secrets or unsupported completion claims |
 
 ## Workflow ledger
