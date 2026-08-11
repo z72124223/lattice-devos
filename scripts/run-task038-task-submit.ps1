@@ -20,6 +20,10 @@ param(
     [string]$MigratorDsnVariable = 'LATTICE_WRITER_LEASE_MIGRATOR_URL',
     [string]$RuntimeDsnVariable = 'LATTICE_WRITER_LEASE_RUNTIME_URL',
     [string]$AdminDsnVariable = 'LATTICE_WRITER_LEASE_ADMIN_URL',
+    [string]$CheckpointLatticedExecutable,
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string]$CheckpointLatticedSha256,
+    [string]$CheckpointHoldDirectory,
     [ValidateRange(60, 300)]
     [int]$TimeoutSeconds = 300
 )
@@ -2537,16 +2541,33 @@ Assert-CredentialSourceUnchanged `
     -ExpectedFootprint $credentialSourceBefore `
     -ExpectedAuthSha256 $credentialSourceAuthSha256
 $cargoHostTarget = 'x86_64-pc-windows-msvc'
-$build = Invoke-NativeText -Executable $script:Cargo -WorkingDirectory $script:RepositoryRoot -Arguments @(
-    'build', '-p', 'lattice-runtime', '--bin', 'latticed', '--locked',
-    '--target-dir', $task038CargoTarget, '--target', $cargoHostTarget
-)
-Assert-SecretFreeText -Text $build.Text -FailureCode 'TASK038_BUILD_OUTPUT_SECRET_REJECTED'
-if ($build.ExitCode -ne 0) {
-    throw ('TASK038_LATTICED_BUILD_REJECTED|' + (Get-StringSha256 -Value $build.Text))
+if ([string]::IsNullOrWhiteSpace($CheckpointHoldDirectory)) {
+    $build = Invoke-NativeText -Executable $script:Cargo -WorkingDirectory $script:RepositoryRoot -Arguments @(
+        'build', '-p', 'lattice-runtime', '--bin', 'latticed', '--locked',
+        '--target-dir', $task038CargoTarget, '--target', $cargoHostTarget
+    )
+    Assert-SecretFreeText -Text $build.Text -FailureCode 'TASK038_BUILD_OUTPUT_SECRET_REJECTED'
+    if ($build.ExitCode -ne 0) {
+        throw ('TASK038_LATTICED_BUILD_REJECTED|' + (Get-StringSha256 -Value $build.Text))
+    }
+    $script:Latticed = Get-CanonicalPath -Path (Join-Path $task038CargoTarget ($cargoHostTarget + '\debug\latticed.exe'))
 }
-$script:Latticed = Get-CanonicalPath -Path (Join-Path $task038CargoTarget ($cargoHostTarget + '\debug\latticed.exe'))
+else {
+    if (
+        [string]::IsNullOrWhiteSpace($CheckpointLatticedExecutable) -or
+        [string]::IsNullOrWhiteSpace($CheckpointLatticedSha256)
+    ) {
+        throw 'TASK038_CHECKPOINT_LATTICED_INPUT_REJECTED'
+    }
+    $script:Latticed = Get-CanonicalPath -Path $CheckpointLatticedExecutable
+}
 Assert-RegularFile -Path $script:Latticed -FailureCode 'TASK038_LATTICED_REJECTED'
+if (
+    -not [string]::IsNullOrWhiteSpace($CheckpointHoldDirectory) -and
+    (Get-FileSha256 -Path $script:Latticed) -cne $CheckpointLatticedSha256.ToLowerInvariant()
+) {
+    throw 'TASK038_CHECKPOINT_LATTICED_IDENTITY_REJECTED'
+}
 
 $script:IngressProfileDigest = Get-StringSha256 -Value 'lattice-task038-local-canonical-mcp-acceptance-profile-v1'
 $fixtureParent = Get-CanonicalPath -Path (Join-Path $repositoryTarget 'lattice-delivery')
@@ -2563,6 +2584,41 @@ $evidenceRoot = Join-Path $fixtureRoot 'evidence'
 New-Item -ItemType Directory -Path $evidenceRoot -Force:$false | Out-Null
 $deliveryRoot = Join-Path $fixtureRoot 'delivery'
 $schemaDirectory = Join-Path $fixtureRoot 'schema'
+
+$officialDiagnosticScript = Get-CanonicalPath -Path (Join-Path $PSScriptRoot 'run-lattice-delivery.ps1')
+Assert-RegularFile -Path $officialDiagnosticScript -FailureCode 'TASK038_OFFICIAL_CODEX_DIAGNOSTIC_REJECTED'
+$officialDiagnostic = Invoke-NativeText -Executable $script:PowerShell -WorkingDirectory $script:RepositoryRoot -Arguments @(
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', $officialDiagnosticScript,
+    '-DiagnoseOfficialCodex',
+    '-OfficialLauncherPath', $script:OfficialCodex,
+    '-OfficialCodexHomePath', $script:CodexHome
+)
+Assert-SecretFreeText -Text $officialDiagnostic.Text -FailureCode 'TASK038_OFFICIAL_CODEX_DIAGNOSTIC_SECRET_REJECTED'
+$officialDiagnosticLines = @($officialDiagnostic.Text -split "`r?`n")
+if (
+    $officialDiagnostic.ExitCode -ne 0 -or
+    $officialDiagnosticLines.Count -ne 2 -or
+    $officialDiagnosticLines[0] -cne 'LATTICE_OFFICIAL_CODEX_DIAGNOSTIC=PASS'
+) {
+    throw 'TASK038_OFFICIAL_CODEX_DIAGNOSTIC_REJECTED'
+}
+try { $officialDiagnosticEvidence = $officialDiagnosticLines[1] | ConvertFrom-Json }
+catch { throw 'TASK038_OFFICIAL_CODEX_DIAGNOSTIC_REJECTED' }
+if (
+    [string]$officialDiagnosticEvidence.status -cne 'PASS' -or
+    [string]$officialDiagnosticEvidence.component -cne 'official-codex-windows-diagnostic' -or
+    [string]$officialDiagnosticEvidence.bundle.launcher.path -cne $script:OfficialCodex -or
+    [string]$officialDiagnosticEvidence.bundle.launcher.sha256 -cne $launcherSha256 -or
+    [string]$officialDiagnosticEvidence.codex_home.path -cne $script:CodexHome
+) {
+    throw 'TASK038_OFFICIAL_CODEX_DIAGNOSTIC_REJECTED'
+}
+Write-JsonEvidence `
+    -Path (Join-Path $evidenceRoot 'official-codex-diagnostic.json') `
+    -Value $officialDiagnosticEvidence
 
 $identity = Get-DatabaseIdentity -Password $databasePassword -DatabaseName $databaseName
 $authority = Enable-StoreAuthority -Password $databasePassword -DatabaseName $databaseName -AcceptanceId $acceptanceId
@@ -2599,6 +2655,122 @@ if (
     throw 'TASK038_DATABASE_NOT_FRESH'
 }
 Write-JsonEvidence -Path (Join-Path $evidenceRoot 'database-before.json') -Value $before
+
+if (-not [string]::IsNullOrWhiteSpace($CheckpointHoldDirectory)) {
+    $holdRoot = Get-CanonicalPath -Path $CheckpointHoldDirectory
+    $allowedHoldParent = Get-CanonicalPath -Path (Join-Path $repositoryTarget 'task038-checkpoint-runtime')
+    if (-not (Test-ExactPath -Actual (Split-Path -Parent $holdRoot) -Expected $allowedHoldParent)) {
+        throw 'TASK038_CHECKPOINT_HOLD_PATH_REJECTED'
+    }
+    if (-not (Test-Path -LiteralPath $allowedHoldParent -PathType Container)) {
+        New-Item -ItemType Directory -Path $allowedHoldParent -Force:$false | Out-Null
+    }
+    Assert-NoReparseAncestor `
+        -Path $allowedHoldParent `
+        -Boundary $script:RepositoryRoot `
+        -FailureCode 'TASK038_CHECKPOINT_HOLD_PATH_REJECTED'
+    if (Test-Path -LiteralPath $holdRoot) {
+        throw 'TASK038_CHECKPOINT_HOLD_NOT_FRESH'
+    }
+    New-Item -ItemType Directory -Path $holdRoot -Force:$false | Out-Null
+    Assert-NoReparsePath -Path $holdRoot -FailureCode 'TASK038_CHECKPOINT_HOLD_PATH_REJECTED'
+
+    $sourceHead = (Invoke-NativeText -Executable $script:Git -WorkingDirectory $script:RepositoryRoot -Arguments @('rev-parse', 'HEAD')).Text.Trim()
+    $sourceTree = (Invoke-NativeText -Executable $script:Git -WorkingDirectory $script:RepositoryRoot -Arguments @('rev-parse', 'HEAD^{tree}')).Text.Trim()
+    $sourceStatus = (Invoke-NativeText -Executable $script:Git -WorkingDirectory $script:RepositoryRoot -Arguments @('status', '--porcelain=v1')).Text
+    if (
+        $sourceHead -notmatch '^[0-9a-f]{40}$' -or
+        $sourceTree -notmatch '^[0-9a-f]{40}$' -or
+        -not [string]::IsNullOrWhiteSpace($sourceStatus)
+    ) {
+        throw 'TASK038_CHECKPOINT_SOURCE_IDENTITY_REJECTED'
+    }
+
+    $environmentValues = [ordered]@{
+        LATTICE_FULL_CHAIN_RUN_MODE = 'FRESH'
+        LATTICE_TASK_INGRESS_KIND = 'LOCAL_CANONICAL_MCP_ACCEPTANCE'
+        LATTICE_TASK_INGRESS_PROFILE_SHA256 = $script:IngressProfileDigest
+        LATTICE_DELIVERY_CODEX_MODE = 'OFFICIAL_CODEX_APP_SERVER'
+        LATTICE_DELIVERY_TIMEOUT_SECONDS = [string]$TimeoutSeconds
+        LATTICE_TASK019_HOST = $PostgresHost
+        LATTICE_TASK019_PORT = [string]$PostgresPort
+        LATTICE_TASK019_RUN_ID = $PostgresRunId
+        LATTICE_TASK019_PASSWORD = $databasePassword
+        LATTICE_STORE_DAEMON_INSTANCE_ID = [string]$authority.daemon_instance_id
+        LATTICE_STORE_DAEMON_EPOCH = [string]$authority.daemon_epoch
+        LATTICE_STORE_AUTHORITY_REVISION = [string]$authority.authority_revision
+        LATTICE_STORE_OBSERVATION_DIGEST = [string]$authority.observation_digest
+        LATTICE_STORE_AUTHORITY_HEAD_DIGEST = [string]$authority.head_digest
+        LATTICE_DELIVERY_LAUNCHER = $script:OfficialCodex
+        LATTICE_DELIVERY_LAUNCHER_VERSION = $codexVersion.Text.Trim()
+        LATTICE_DELIVERY_LAUNCHER_SHA256 = $launcherSha256
+        LATTICE_DELIVERY_SCHEMA_DIR = $schemaDirectory
+        LATTICE_DELIVERY_CODEX_HOME = $script:CodexHome
+        LATTICE_DELIVERY_ROOT = $deliveryRoot
+        LATTICE_DELIVERY_GIT_EXE = $script:Git
+    }
+    $secretEnvironmentPath = Join-Path $holdRoot 'mcp-environment.secret.json'
+    $manifestPath = Join-Path $holdRoot 'runtime.json'
+    $readyPath = Join-Path $holdRoot 'ready'
+    $stopPath = Join-Path $holdRoot 'stop'
+    [IO.File]::WriteAllText(
+        $secretEnvironmentPath,
+        ($environmentValues | ConvertTo-Json -Depth 4),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $security = [Security.AccessControl.FileSecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $security.SetOwner($identity.User)
+    $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+        $identity.User,
+        [Security.AccessControl.FileSystemRights]::FullControl,
+        [Security.AccessControl.AccessControlType]::Allow
+    ))
+    Set-Acl -LiteralPath $secretEnvironmentPath -AclObject $security
+    Write-JsonEvidence -Path $manifestPath -Value ([ordered]@{
+        schema_version = 'lattice.task038.checkpoint-runtime.v1'
+        status = 'READY'
+        holder_pid = $PID
+        latticed_executable = $script:Latticed
+        latticed_sha256 = Get-FileSha256 -Path $script:Latticed
+        source_repository = $script:RepositoryRoot
+        source_commit = $sourceHead
+        source_tree = $sourceTree
+        psql_executable = $script:Psql
+        pg_ctl_executable = $script:PgCtl
+        postgres_host = $PostgresHost
+        postgres_port = $PostgresPort
+        postgres_run_id = $PostgresRunId
+        postgres_database = $databaseName
+        postgres_data_directory = $script:PostgresData
+        postgres_password_environment = 'LATTICE_TASK019_PASSWORD'
+        environment_file = $secretEnvironmentPath
+        ready_path = $readyPath
+        stop_path = $stopPath
+    })
+    [IO.File]::WriteAllBytes($readyPath, [Text.UTF8Encoding]::new($false).GetBytes("TASK038_CHECKPOINT_RUNTIME=READY`n"))
+    $holdDeadline = [DateTime]::UtcNow.AddHours(8)
+    while (-not (Test-Path -LiteralPath $stopPath -PathType Leaf)) {
+        if ([DateTime]::UtcNow -ge $holdDeadline) {
+            throw 'TASK038_CHECKPOINT_HOLD_TIMEOUT'
+        }
+        $statusResult = Invoke-NativeText -Executable $script:PgCtl -Arguments @('-D', $script:PostgresData, 'status')
+        if ($statusResult.ExitCode -ne 0) {
+            throw 'TASK038_CHECKPOINT_POSTGRES_NOT_READY'
+        }
+        Start-Sleep -Seconds 2
+    }
+    Assert-RegularFile -Path $stopPath -FailureCode 'TASK038_CHECKPOINT_STOP_REJECTED'
+    if ([IO.File]::ReadAllText($stopPath, [Text.Encoding]::UTF8) -cne "TASK038_CHECKPOINT_RUNTIME=STOP`n") {
+        throw 'TASK038_CHECKPOINT_STOP_REJECTED'
+    }
+    if (Test-Path -LiteralPath $secretEnvironmentPath) {
+        [IO.File]::Delete($secretEnvironmentPath)
+    }
+    Write-Output 'TASK038_CHECKPOINT_RUNTIME=STOPPED'
+    return
+}
 
 $sameClientRequestId = 'task038-' + $acceptanceId
 $differentClientRequestId = $sameClientRequestId + '-different'

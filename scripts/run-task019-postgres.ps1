@@ -14,6 +14,10 @@ param(
     [string]$Task038CanonicalAcceptanceReceipt,
     [ValidatePattern('^[0-9a-fA-F]{64}$')]
     [string]$Task038CanonicalAcceptanceReceiptSha256,
+    [string]$Task038CheckpointLatticedExecutable,
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string]$Task038CheckpointLatticedSha256,
+    [string]$Task038CheckpointHoldDirectory,
     [switch]$MemoryOnly
 )
 
@@ -1541,7 +1545,10 @@ try {
                 -PostgresPort $port `
                 -PostgresRunId $runId `
                 -PsqlExecutable (Join-Path $postgresBin 'psql.exe') `
-                -PostgresDataDirectory $dataDirectory
+                -PostgresDataDirectory $dataDirectory `
+                -CheckpointLatticedExecutable $Task038CheckpointLatticedExecutable `
+                -CheckpointLatticedSha256 $Task038CheckpointLatticedSha256 `
+                -CheckpointHoldDirectory $Task038CheckpointHoldDirectory
             Invoke-StoreProfileLiveGate `
                 -Cargo $cargoCommand.Source `
                 -RepositoryRoot $repositoryRoot `
