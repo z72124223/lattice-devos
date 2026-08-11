@@ -159,3 +159,18 @@
 - Conclusion: fresh acceptance failed at ingress profile commitment before a task ref was issued. Preserve this exact fixed code for the next bounded remediation; do not claim success or retry from this verifier.
 - Successor durable save: first exact-path commit `88cc11d78d487a05a438208733a6fa4d01c5e090` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:38:59.554Z`; central confirmed `archived_at_utc=2026-08-11T12:40:35.1034794Z`.
 - Archive boundary: central archived only fresh verifier 2 `019ff0cf-8265-7082-bed2-b4f9db33395e`. Global MCP FRESH-switch remediation `019ff0d5-7553-7bd1-8ee1-9db36123e61a` remains active and must not be archived or modified by this saver.
+
+## FRESH MCP config checkpoint — `019ff0d5-7553-7bd1-8ee1-9db36123e61a`
+
+- Window status: `READY_FOR_FRESH_CODEX_WINDOW`; started `2026-08-11T12:40:56.137Z`, finished `2026-08-11T12:57:07.1951521Z`, elapsed `971058 ms`.
+- Runtime source `5155f626405faa2fa9e01ad6ceba7329eb9e6b93`; binary `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\p0-clean-seed-rebuild\target\p0-runtime-remediation\debug\latticed.exe`, SHA-256 `0ba38c05e572a08f999e07cc8f4942756956421b37e6b41f99947931a3572bfc`.
+- Atomic mutation: global LATTICE MCP changed from `RESUME_EXISTING` to `FRESH` and gained the exact seven source-required delivery fields; current env key count is `21`. The other 13 assignment lines and command are byte-equivalent, transport remains stdio, and args remain `0`.
+- Config SHA-256 before/after: `0cea6db5f78105e96185a1aadbee2890893da42be63bf410edf80fe5ded8c5df` / `68e67812486308c46ba397ccdae3803387275b6737a14c030db741eb0e0b61ed`; exact rollback backup retains the before hash.
+- Canonical holder-lifetime binding ID `e69e603e1c4f4785a3d7d0bf35971567`; execution home `C:\Users\f7212\Documents\Codex\2026-07-29\task038-execution-homes\e69e603e1c4f4785a3d7d0bf35971567`; fixture root `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\p0-clean-seed-rebuild\target\lattice-delivery\e69e603e1c4f4785a3d7d0bf35971567`.
+- Binding evidence follows canonical builder semantics at `scripts/run-task038-task-submit.ps1:616-795`; execution-home config SHA-256 `1a9bc2b325476a4679e5ad9202329c97952ed8ea958162bd0ffadd2196833189`, four fixed files, credential source unchanged, no reparse.
+- Direct-stdio preflight: `DISCOVERY_OK`, exact `lattice_delivery_run`, `lattice_delivery_status`, `lattice_task_status`, `lattice_task_submit`; `tool_call_count=0`, process exit `0`.
+- PostgreSQL remained unmodified at `127.0.0.1:63238`, PID `760`, owned listener; TTL valid at finish with `241` seconds remaining, expiring `2026-08-11T13:01:09.0516926Z`.
+- External secret-free handoff records rollback and cleanup targets; retain execution home and fixture root through verifier/holder lifetime.
+- Boundary truth: two broad `rg` searches scanned the protected script because Windows exclusion globs did not apply; no matching content was displayed, and the file was not edited or staged. Subsequent searches were explicit-file only.
+- Not done: no submit/status/delivery_run, PostgreSQL connect/write/stop/restart, Rust source change, push/PR/merge/deploy/release/default-branch change.
+- Successor durable save: pending first exact-path commit and remote SHA equality verification; `remote_sha=null`, `github_saved_at_utc=null`, `archived_at_utc=null`.
