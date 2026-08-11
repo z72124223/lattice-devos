@@ -629,3 +629,11 @@
 - Fresh holder is `127.0.0.1:50205`, run `9f27d3ac638343a6a64418a5c7987160`, PostgreSQL 17, postmaster PID `29372`, TTL PID `22652`, deadline `2026-08-11T21:54:43.9863591Z`; remaining time at verification was `7073.610` seconds.
 - Marker/listener/database/system identifier/authority/manifests/TTL/excluded-port/stderr checks all passed. No raw credential or env value was saved.
 - Stage 1 durable receipt commit is `1b56bb44dba85c3be17299f45c0e0590cb6c1fef`; expected and live remote SHA matched at `2026-08-11T19:59:07.4861900Z`. Stage 2 confirmation commit `40babf71d87743fb30bfb8e01265093bbc03198d` and fresh live remote SHA matched at `2026-08-11T19:59:44.9762254Z`, so the separate saver state is `safe_to_archive=true`; authoritative HOLDER_READY receipt remains unchanged. Central archived the worker at `2026-08-11T20:00:04.586Z` (`set_thread_archived_result=success`).
+
+## SWITCH/DISCOVERY READY — `019ff269-dd78-7ba0-bbd1-9ce3583c1b5c`
+
+- Result is `READY_FOR_FRESH_CODEX_WINDOW`; the source-decoupled binary SHA-256 is `cf7b46cb4989253df8c36b5933e5ee5bf9a1b1e70ae01e89807045d8c0210f94` and holder binding is `127.0.0.1:50205` / run `9f27d3ac638343a6a64418a5c7987160`.
+- Atomic config and secret-free handoff postchecks passed. Current config SHA-256 is `31a85201bd24b600e88dac786b7d93fe4af27acd20f744f140834b35aa12bf39`; handoff is `READY_FOR_FRESH_CODEX_WINDOW` with SHA-256 `dd8a903b7a528417b7d69c771b5bf6c55b77efa14222cd20466f5c43b96a4b9f`.
+- The single no-BOM discovery completed exit `0`, protocol `2025-11-25`, exact four typed tools, `tool_call_count=0`, and no retry. Corrected discovery/outer stderr SHA-256 is the standard empty-content digest.
+- No submit/status/delivery call, rollback, cleanup, PG provision/restart/stop, 64272 action, protected-script content read, repository commit, or worker push occurred.
+- After two-stage saver remote equality, central may open a separate fresh Codex verifier. This worker stops; saver durability is pending.
