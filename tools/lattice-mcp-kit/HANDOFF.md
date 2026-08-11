@@ -92,6 +92,6 @@
 - Source artifacts: `tools/lattice-mcp-kit/WINDOW_LEDGER.jsonl`; `tools/lattice-mcp-kit/HANDOFF.md`.
 - Source final local commit/tree: `eecd7a85348f34d7b119979d608ec23baace5156` / `5c5059464651fea15728613d637cd67e1366774d`.
 - Remote branch: `feature/p0-clean-seed-rebuild`; Draft PR: <https://github.com/z72124223/lattice-devos/pull/11>.
-- Successor durable save: pending first exact-path commit and remote SHA equality verification; `remote_sha=null`, `github_saved_at_utc=null`, `archived_at_utc=null`.
+- Successor durable save: first exact-path commit `f65e7036adc1428b06a47efae80c1ce315cf135d` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:09:53.579Z`; `archived_at_utc=null`.
 - Archive boundary: after remote confirmation, send the exact safe-to-archive receipt for this predecessor window to the central coordinator. Do not archive or modify Live Integration, its watcher, or a future fresh verifier.
 - Protected dirty boundary: keep `scripts/test-task038-four-tool-acceptance.ps1` unstaged, unread, and unmodified; no reset or clean.
