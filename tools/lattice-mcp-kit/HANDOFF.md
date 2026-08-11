@@ -677,4 +677,4 @@
 - Credential source and old home remained unchanged; global config, external handoff, holder, source, binary, and protected dirty script were not mutated by the worker.
 - Four pre-target-selection incidents were recorded as zero-mutation local inspection/tooling incidents. The obsolete failure receipt was cancelled and was never written, committed, or pushed by saver.
 - Codex/MCP/DB/build/test, holder lifecycle, port 64272, cleanup, rollback, merge, deploy, release, and default-branch action counts are zero.
-- Stage 1 and stage 2 saver remote equality are pending; authoritative receipt remains `safe_to_archive=false` until both complete.
+- Stage 1 durable HOME_PREPARED_ONLY receipt commit is `1e065b44e729f8ca4a8e036b21f84ea08172c20d`; expected and live remote SHA matched at `2026-08-11T21:38:00.9339790Z`. This saver-only update is the stage 2 confirmation; after its second fresh live `git ls-remote` equality passes, outer saver state is `safe_to_archive=true`. The authoritative receipt remains unchanged with `safe_to_archive=false`; discovery, P0 PASS, and `CONFIG-HOME-SWITCH` remain unclaimed.
