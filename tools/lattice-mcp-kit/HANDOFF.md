@@ -334,5 +334,5 @@
 - Rejected alternatives: time/random roots weaken deterministic replay; rewriting global root per process expands ownership; reusing the static root repeats the proven failure.
 - Protected boundaries held: no protected-script/saver-path mutation by the worker, existing-root deletion/adoption/cleanup, global config/PG/credential/holder/protected-state work, unrelated programs, push/merge/deploy/release/default branch, full suite/build, or live tool call.
 - Source publication: commit `851ffd56e92e32abdf3a5ae9ab7374297ebe7f10` was pushed unchanged to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` equality was proven at `2026-08-11T15:27:20.2257975Z` before saver receipt commits.
-- Saver durable receipt: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; receipt remote fields remain `null` until confirmed.
+- Saver durable receipt: exact-path commit `a31f1c79f5134eb018fcf6288276e0a393ee0c4c` (tree `a9d3ee5c10450eed040f1836a9117e43bdd9e565`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:28:34.0000519Z`.
 - Archive boundary: do not archive this source worker until its implementation receipt is remotely durable and central later confirms archival.
