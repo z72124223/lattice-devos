@@ -228,3 +228,18 @@
 - Live acceptance remains `NOT_RUN`; this source remediation is not a P0 PASS. A separate brand-new verifier must perform Fresh submit/status after GitHub publication.
 - Successor durable save: exact-path ledger/handoff commit `432472745d40d1047515ea197e74f2ff63994d6f` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality and source commit `abe4b7bafd916d8d6db0195fd10dec6e1b012bcf` reachability at `2026-08-11T13:51:45.993Z`.
 - Archive boundary: remediation worker was archived successfully; saver immediately captured actual `archived_at_utc=2026-08-11T13:55:46.6061227Z`. Runtime-materialization worker `019ff11b-5d3c-7633-a45f-8cfb3829978a` remains active and independently owned. Cleanup residual remains a separate prohibited scope.
+
+## Runtime materialization failure checkpoint — `019ff11b-5d3c-7633-a45f-8cfb3829978a`
+
+- Window result: `FAILED_AT_PROVISION_RECEIPT_CAPTURE_READY_HOLDER_PRESERVED`, not READY; started `2026-08-11T13:55:42.000Z`, finished `2026-08-11T14:23:27.887Z`, elapsed `1665887 ms`.
+- Source commit/tree `abe4b7bafd916d8d6db0195fd10dec6e1b012bcf` / `de22bde7d251c007ba50d61358f9c8fcf11bd7f8` is an ancestor of recorded remote head `0c6544e912c757ddda73694fc17caf0ca778b706`; build inputs matched source.
+- New isolated binary build passed in `42653 ms`: `10268160` bytes, SHA-256 `d600110de4249aeb0ef2e7d2996a81960a8c996d1d612ae0806fb85eac0a4c65`.
+- Primary failure: `P0_POSTGRES_PROVISION_RECEIPT_CAPTURE_TIMEOUT` at `postgres_provision_receipt_capture`. The one controlled provision call hit the 20-minute shell capture limit with exit `124`; no exit-0 wrapper receipt was captured, so finalize/config/discovery did not run.
+- Read-only evidence nevertheless found a live marker-READY holder at `127.0.0.1:55061`, run ID `04517df6a8ed496fa465046b5e4b20d1`, PID `30476`, system identifier `7672773976043398424`; listener ownership, authority marker, and database marker passed.
+- Holder TTL: `7200` seconds, deadline `2026-08-11T16:01:50.0257480Z`, `5902` seconds remaining at receipt; cleanup PID `14212` was alive. Excluded ports: `5432`, `64272`, `55432`, `63238`, `51666`.
+- Capture diagnosis is an inference: the TTL cleanup child inherited stdout/stderr, consistent with shell capture staying open after the wrapper wrote READY. No rerun was performed.
+- Global MCP config was not mutated; before/after hash stayed `dc83687cf3d0964682ce80616273c07dc0663e64b955350f2a3a3c3b837c4191`; no backup, rollback command, handoff update, or discovery occurred. Tool-call count is `0`.
+- Protected boundaries held: no saver-path or repository commit/push, submit/status/delivery, old PID `32132`, old residual, protected script content, or protected `64272` mutation. Cleanup was not executed.
+- Next action: after this failure receipt is remotely durable, central must dispatch one bounded resume-from-live-holder worker before TTL expiry. Do not rerun provision, cleanup/kill either holder/residual, or create the fresh verifier yet.
+- Successor durable save: pending first exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Archive boundary: do not archive this failed/partial worker until total engineering handles the failure. The live holder and both cleanup scopes remain independently owned.
