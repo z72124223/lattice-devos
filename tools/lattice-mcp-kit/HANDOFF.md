@@ -737,3 +737,11 @@
 - External secret-free handoff advanced atomically to `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` with next action `RUN_FRESH_DISCOVERY_ONLY`; rollback and cleanup were not executed.
 - Worker launched no MCP/Codex process, ran no initialize/discovery/tool/submit/status, made no PostgreSQL connection or port 64272 action, and did not touch saver paths or the protected dirty script.
 - Stage 1 receipt commit `431cfd3ea25d78d5bb073a9c744dcc714856ae26` matched fresh live remote at `2026-08-11T22:21:52.7204515Z`; stage 2 confirmation commit `6dac983e0f75cefcb989201a32790c06ff714edb` matched fresh live remote at `2026-08-11T22:22:33.2748008Z`. Central archived the worker at `2026-08-11T22:23:17.7079693Z`; authoritative `worker_safe_to_archive=false` remains unchanged while outer saver state is `safe_to_archive=true`. Discovery remains not run and P0 PASS remains unclaimed.
+
+## Corrected discovery-only final — `019ff2ec-4a2e-7252-b572-eaccdab86db8`
+
+- Scope is `DISCOVERY-ONLY`; status is `DISCOVERY_ONLY_PASS_READY_FOR_FRESH_VERIFIER`. This is successful discovery evidence, not P0 PASS.
+- One actual latticed process initialized, negotiated protocol `2025-11-25`, sent initialized, and returned exact case-sensitive four tools: `lattice_delivery_run`, `lattice_delivery_status`, `lattice_task_submit`, and `lattice_task_status`.
+- Process exited 0 with empty stderr; exact-four is true. No tools/call, submit, status, or delivery call occurred, and there was no retry after the actual process launch.
+- The withdrawn prelaunch failure receipt was never saved, committed, pushed, or archived. Central classified its zero-process lock incident as `PRELAUNCH_LOCAL_ORCHESTRATION_INCIDENT`.
+- Config, handoff, holder listener, binary, client, prepared config, protected script, and non-saver paths remained preserved. Stage 1 and stage 2 saver equality are pending.
