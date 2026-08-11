@@ -576,3 +576,9 @@
 - Root cause is accidental coupling of workspace `LATTICE_DELIVERY_ROOT` with the official bundle trust-anchor layout. Transport/framing, binary, credential/PG/ingress/task domain, root metadata and port 64272 are excluded or not reached.
 - One-field root rollback is smallest for identity-only recovery but restores the long-path problem. For the short-root P0 goal, the smallest source change is deriving official target root from existing launcher ancestry while preserving all fixed bundle checks.
 - No process, DB, discovery/tool call, build/test, config/root/source/handoff write, rollback, cleanup, global Git config or protected-script read occurred. First durable receipt commit is `05f736a488fef2062610d89c23222238d5171952` (tree `874ba9b599fbb9c2e7e9db81479fcade2eaca465`); live `git ls-remote` equality was verified at `2026-08-11T19:00:47.4386722Z`. Central archived the diagnosis at `2026-08-11T19:01:50.776Z`.
+## Official-bundle source decoupling cancelled — `019ff233-bed6-7de3-9ece-d0a934cd03bb`
+
+- Status is `CANCELLED_AFTER_READ_ONLY_INVENTORY`; central replaced source decoupling with a ROOT-LAYOUT CONFIG-ONLY direction that this worker was not authorized to execute.
+- The required local goal remains active and incomplete. No source/test edit, stage, commit, push, test/build/live discovery/submit/status, config/root/holder/runtime action, reset/clean/revert, or protected dirty-script content access occurred.
+- Read-only checkout/remote/baseline/diagnosis evidence was verified; `composition.rs` was announced as the intended sole source/test path but was never edited.
+- No source-remediation receipt or commit exists because cancellation arrived before edit/test. Durable saver metadata is pending; `safe_to_archive=false`.
