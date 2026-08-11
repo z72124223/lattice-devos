@@ -364,5 +364,5 @@
 - Tests: cargo build `PASS`; cargo test/full suite/npm `NOT_RUN_BY_SCOPE`; direct-stdio discovery `NOT_RUN_AUTHORITY_REVOKED`.
 - Protected boundaries held: no repo/saver/protected-script mutation by worker, holder/PG query, global config or external handoff read/write, discovery/live tool call, cleanup/rollback/provision/process action, protected state, release/default branch, or unrelated program.
 - Next action: saver publishes this binary receipt. Any holder/config/handoff/discovery work requires a separate newly authorized worker; this worker must not perform runtime steps.
-- Successor durable save: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: exact-path commit `9a1c643d2c8880c613a3f1e2ea13fef4f718ff64` (tree `81b46fcdd8198274ae1183ca7c69bd56590362ed`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:39:32.5836229Z`.
 - Archive boundary: do not archive this build-only worker until its exact receipt is remotely durable and central later confirms archival.
