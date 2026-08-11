@@ -214,4 +214,4 @@
 - Actual cleanup residual at `2026-08-11T13:35:02.2384642Z`: PostgreSQL PID `28752` is not alive; port `51666` has no listener; TTL cleanup PID `32132` is alive; holder root and locked `.err` remain. `holder_preserved=false`.
 - Do not retry submit or independent status, retry cleanup, force-kill, manually delete the root, or execute rollback from this verifier. Central should assign a new bounded remediation for deterministic task-ref reuse.
 - Successor durable save: first exact-path commit `2b8446e68f3a8ea440f79a985c58aec9c3aaef36` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T13:36:59.101Z`.
-- Archive boundary: verifier must not be archived until this exact receipt is remotely durable and central confirms archival.
+- Archive boundary: verifier task was archived successfully; saver immediately captured actual `archived_at_utc=2026-08-11T13:38:40.7448993Z`. Cleanup residual remains untouched and belongs to a separate bounded task.
