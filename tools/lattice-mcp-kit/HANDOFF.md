@@ -555,3 +555,10 @@
 - Root cause is the full task identity appended beneath an already deep Windows delivery base: task root `217` chars, separate git-dir `233` chars, template hook targets `261-265` chars, while the owned Git subprocess lacks process-scoped `core.longpaths=true`.
 - Minimal reversible remediation is a preferably Windows-gated process-scoped `-c core.longpaths=true` in `GitRunner::output`, plus one deep-base/full-task-ref regression; do not change task identity, database, global Git config, holder, or MCP contract.
 - First durable diagnosis receipt commit is `5bd527454fa164625f144c836d7f9ef668e76ac2` (tree `7aac5067fab2106daf8b2dae7531eac329675c2f`); live `git ls-remote` equality was verified at `2026-08-11T18:31:02.7909771Z`. Central archived the diagnosis at `2026-08-11T18:31:56.190Z`.
+## GitRunner remediation cancelled — `019ff218-3a7f-7812-8a26-e05a1c700643`
+
+- Status is `CANCELLED_AFTER_READ_ONLY_INSPECTION`; central replaced the GitRunner source-remediation scope with a short user-owned LocalAppData delivery base.
+- No source/test edit, stage, commit, push, test, or build occurred. No config, holder, runtime, PG, MCP, saver-file, or protected-script-content mutation/read occurred.
+- Read-only inspection located `GitRunner::output` at `git_delivery.rs:1392` and the git-init call at `192-199`; malformed-regex aggregate failures retained no remote/commit output and caused no write.
+- Original goal remains `ACTIVE_NOT_COMPLETED`; no rollback/reset/clean/revert is needed or authorized. Worker receipt reports `safe_to_archive=true`.
+- Durable saver metadata is pending first commit/push and live `git ls-remote` equality; `archived_at_utc=null`.
