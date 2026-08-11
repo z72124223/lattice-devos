@@ -450,3 +450,4 @@
 - Changed paths `[]`; holder-runtime reads, PostgreSQL connections, runtime actions, file writes, child agents, and engineering changes are all `0`.
 - Current action was only delivery of the cancellation receipt. `safe_to_archive=true`, `self_archived=false`.
 - Successor durable save: exact-path commit `93a3e36b517cda83f18efe7aa748dc3aa71194ed` (tree `faf627c7084bc042eeb3e3542d5aeeff2878a422`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:28:28.3579882Z`.
+- Archive boundary: central confirmed this redundant worker archived after final remote confirmation `0d7670f61d1cb8bce6a82eb50eaf6cae307d8cf2`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:29:22.8887630Z`. This does not authorize active switch-worker or live-state mutation.
