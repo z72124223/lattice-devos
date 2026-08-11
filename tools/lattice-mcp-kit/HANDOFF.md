@@ -379,5 +379,5 @@
 - Protected boundaries held: no build/test/binary mutation, provision/PG/process/cleanup/rollback, LATTICE tool call, root or protected-state action, saver/repo commit by worker, merge/deploy/release/default branch, unrelated program, or secret recording.
 - Artifact state: exact before-config backup and an unvalidated staging file exist at the recorded run-specific paths. Do not reuse the staging file.
 - Next action: saver publishes this exact failure. Any separate worker must re-check config/handoff expected hashes and holder TTL >= 8 minutes, create fresh staging, and must not ask this worker to retry.
-- Successor durable save: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: exact-path commit `ab2a0abd10bac3334e354f7f49963b6e4ba102c7` (tree `5a22b073fc6f111c8ca9070bdb93153edf324fcd`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:48:51.9270038Z`.
 - Archive boundary: do not archive this failed switch worker until its exact receipt is remotely durable and central later confirms archival.
