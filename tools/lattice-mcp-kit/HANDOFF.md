@@ -322,3 +322,17 @@
 - Scope evidence: changed paths `[]`, tests `NOT_RUN_BY_SCOPE`, no source/config/script/PG/handoff/ledger edits, stage/commit/push, live tool call, build/test, holder/restart/cleanup/rollback, or protected-state action; checkout ended at `b79426e...` with only the protected script dirty.
 - Successor durable save: exact-path commit `e4346609c3b2b3437219a31e189eb713b62cdd18` (tree `8ae6813eb773a2c9ad0299f318b0b103bd0960bc`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:15:52.0715053Z`.
 - Archive boundary: central confirmed this diagnosis worker archived after remote confirmation `93e6c4034d2ec0601bd7b69bd5d7c8629be13703`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T15:16:56.9899804Z`. This archive does not authorize holder/config/root/cleanup/rollback or source-remediation mutation.
+
+## Fresh unique workspace source remediation — `019ff165-c671-7e71-b71c-c76ba69ee795`
+
+- Result: `SOURCE_REMEDIATION_COMMITTED_AWAITING_SAVER_PUSH`; started `2026-08-11T15:16:57.0000000Z`, finished `2026-08-11T15:26:07.1712058Z`, elapsed `550171 ms`; no failure code/stage.
+- Exact source scope: only `apps/lattice-runtime/src/composition.rs`; source commit `851ffd56e92e32abdf3a5ae9ab7374297ebe7f10`, tree `3c31ea3f88056a2b3751f032f07776a20b6da0cf`, parent `9a14a2f1a006b5f5dff3c45418d7cd47478f663e`.
+- Behavior: configured `LATTICE_DELIVERY_ROOT` remains untouched and becomes a parent/base. Actual Fresh execution derives a deterministic task-scoped child from the existing task-ref identity and verifies that child absent immediately before workspace adapter assembly. ResumeExisting does not execute or create a child.
+- Focused TDD: RED exited `1` only for missing helper; final GREEN passed `1/1` with `74` filtered; final `cargo fmt --check -p lattice-runtime` and owned-path `git diff --check` both exited `0`.
+- Previous failure comparison: this source change targets durable `ROOT_MUST_BE_ABSENT` / `WORKSPACE_PREPARE` while retaining no-adopt fail-closed behavior. It does not claim the prior live failure cleared; runtime materialization/live acceptance remains separate.
+- Preserved contracts: deterministic admission/task-ref inputs, configured root, public schema, Task Spec, PostgreSQL, credential, holder, lease/fence ownership, exact retry, and ResumeExisting replay. A pre-existing child still fails closed; no cleanup/reuse occurs.
+- Rejected alternatives: time/random roots weaken deterministic replay; rewriting global root per process expands ownership; reusing the static root repeats the proven failure.
+- Protected boundaries held: no protected-script/saver-path mutation by the worker, existing-root deletion/adoption/cleanup, global config/PG/credential/holder/protected-state work, unrelated programs, push/merge/deploy/release/default branch, full suite/build, or live tool call.
+- Source publication: commit `851ffd56e92e32abdf3a5ae9ab7374297ebe7f10` was pushed unchanged to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` equality was proven at `2026-08-11T15:27:20.2257975Z` before saver receipt commits.
+- Saver durable receipt: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; receipt remote fields remain `null` until confirmed.
+- Archive boundary: do not archive this source worker until its implementation receipt is remotely durable and central later confirms archival.
