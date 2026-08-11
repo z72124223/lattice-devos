@@ -612,4 +612,4 @@
 - The observed post-source paths are exactly the expected fully qualified saver-owned paths: `tools/lattice-mcp-kit/HANDOFF.md` and `tools/lattice-mcp-kit/WINDOW_LEDGER.jsonl`; they do not alter source/tree build input.
 - Source commit/tree/parent/ancestry gates all passed. Build invocation count is `0`, binary does not exist, target was not created, and worker source/dirty/remote mutation counts are all `0`.
 - No runtime readiness or live acceptance is claimed. A new clean BUILD-ONLY worker must explicitly allow both fully qualified saver paths; this worker must not resume.
-- Two-stage saver remote durability is pending.
+- Stage 1 durable receipt commit is `0c71da3e8a44b91add876d18c15853e49ca90470`; expected and live remote SHA matched at `2026-08-11T19:43:34.3863338Z`. This stage-2 confirmation commit carries the separate saver `safe_to_archive=true` state only if its own fresh `git ls-remote` equality passes; the authoritative receipt fields remain unchanged.
