@@ -281,3 +281,17 @@
 - After revocation, the worker performed only a secret-safe read-only snapshot: no staging/config/finalize/discovery/cleanup/rollback/wrapper/backup/handoff mutation. It will not compete with formal resume.
 - Coordination boundary: do not ask this revoked worker to fix or restore anything. One coordinating owner must validate the current switched config and update the external secret-free handoff without reprovision, cleanup, or rollback.
 - Successor durable save: exact-path commit `086da8ea51f8f4b91ef21193ab22ea37774466fc` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T14:36:51.075Z`.
+
+## Bounded reconciliation READY — `019ff143-b1d1-7251-b22e-6bdca4531493`
+
+- Result: `READY_FOR_FRESH_CODEX_WINDOW`; started `2026-08-11T14:39:52.0000000+00:00`, finished `2026-08-11T14:51:35.8931121+00:00`, elapsed `703893 ms`; no failure code/stage.
+- Preflight passed for config `e624fc0c3677abfbe89b3d838123902481dccad36772310009c5600a3338c3ae`, repaired binary `d600110de4249aeb0ef2e7d2996a81960a8c996d1d612ae0806fb85eac0a4c65`, and live holder `127.0.0.1:55061` / PID `30476` / run `04517df6a8ed496fa465046b5e4b20d1`. FRESH, implicit stdio, zero args, and 21 env keys matched; no raw env values recorded.
+- Remote-head correction passed: known saver archive-only advance from `fe78ee9a...` to `027052d...`, exact changed paths were only ledger/handoff, with no runtime or external-handoff mutation in that advance.
+- External secret-free handoff was atomically updated from SHA-256 `3e615a8edf51c82146a89c82dfab24febf3196700eec72b4d416600711e845fa` to `72ec5bfa343c668816a37d99ee474bc35be8201c16f646d16b876c7552d46d3a` at `2026-08-11T14:47:28.4295646+00:00`; current mapping and secret-free checks passed. Two exact pre-reconciliation backups retain the before hash.
+- Discovery passed: `DISCOVERY_OK`, protocol `2025-11-25`, exact four tools, tool-call count `0`, child exit `0`, no forced termination; evidence SHA-256 `5ecfb7794781a9fe16c21e3bea6164646f21191b9e0871e604135d3ba26e62c3`.
+- Postchecks passed for unchanged config hash, holder marker/listener/system identity/TTL, and current secret-free handoff. Holder had `4260` seconds remaining at `2026-08-11T14:50:49.7866444+00:00`.
+- Non-state incident: initial `File.Replace` null-backup call was rejected without destination mutation; validated staging was then atomically installed with an explicit backup path. The suite was not rerun.
+- Protected boundaries held: no global config rewrite by this worker, wrapper/build/test/provision/finalize/reprovision, submit/status/delivery, cleanup/rollback, holder/TTL stop, old residual, `64272`, protected script, saver paths, repo commit/push, verifier creation, or secret recording.
+- Next action: saver publishes this exact receipt and signals central after remote equality; central may then create exactly one truly fresh verifier. This reconciliation worker must not call submit/status or create it.
+- Successor durable save: pending first exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Archive boundary: do not archive reconciliation until its exact receipt is remotely durable and central later confirms archival.
