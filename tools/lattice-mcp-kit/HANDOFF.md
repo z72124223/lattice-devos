@@ -293,5 +293,5 @@
 - Non-state incident: initial `File.Replace` null-backup call was rejected without destination mutation; validated staging was then atomically installed with an explicit backup path. The suite was not rerun.
 - Protected boundaries held: no global config rewrite by this worker, wrapper/build/test/provision/finalize/reprovision, submit/status/delivery, cleanup/rollback, holder/TTL stop, old residual, `64272`, protected script, saver paths, repo commit/push, verifier creation, or secret recording.
 - Next action: saver publishes this exact receipt and signals central after remote equality; central may then create exactly one truly fresh verifier. This reconciliation worker must not call submit/status or create it.
-- Successor durable save: pending first exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: exact-path commit `2528ed3f41c6772e0fba571b02d65877ffbbb5c1` (tree `cefe894f7f0108f859caab103e2905668d558e9c`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T14:54:30.3590040Z`.
 - Archive boundary: do not archive reconciliation until its exact receipt is remotely durable and central later confirms archival.
