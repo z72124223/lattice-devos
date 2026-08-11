@@ -12,7 +12,8 @@ $script:CleanSeedCommit = '2b424ec9a5401a6fbdc4f37d3d401592331afca0'
 $script:CleanSeedTree = '9c4cad5b4b3e3362521643b6dd283d31cde29345'
 $script:P007Commit = 'db56d471a1eec2dece06523661e3b571d345cbb2'
 $script:P007Tree = '4bd6102f6a83b5984bcc993b74a090a33dcbcea9'
-$script:P005Commit = '30ab9d7349d8897b9eaa78a918a5ae6d49d2eda4'
+$script:P005Commit = '236b1d6f8362da19d298d65fd652e045cd413a02'
+$script:P005Tree = '3d2a01383be7b27871e86fe2df42fe0fc8728be9'
 $script:ExpectedToolErrorContractSha256 = 'f9d506179a8d6528c1a5291b704b3f7c4bfbe1bfa447027619a6ea0aaed7dc71'
 $script:BridgeRunner = Join-Path $PSScriptRoot 'run-task038-task-submit.ps1'
 $script:NativeIdentityHelper = Join-Path $PSScriptRoot 'windows-native-path-identity.ps1'
@@ -39,19 +40,24 @@ function Invoke-Runner {
         [Parameter(Mandatory = $true)][string]$Commit,
         [Parameter(Mandatory = $true)][string]$Mode,
         [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [switch]$IncludeCallerBinary,
         [hashtable]$AdditionalArguments = @{}
     )
 
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:Runner,
-        '-LatticedExecutable', $Binary,
-        '-ExpectedBinarySha256', $BinarySha,
         '-ExpectedSourceCommit', $Commit,
         '-SourceRepository', $script:RepoRoot,
         '-Mode', $Mode,
         '-SessionTimeoutSeconds', '30',
         '-EvidenceRoot', $EvidenceRoot
     )
+    if ($Mode -cne 'FULL' -or $IncludeCallerBinary) {
+        $arguments += @('-LatticedExecutable', $Binary, '-ExpectedBinarySha256', $BinarySha)
+    }
+    if ($Mode -ceq 'PROTOCOL_ONLY' -and -not [string]::IsNullOrWhiteSpace($script:HarnessObservedCounterPath)) {
+        $arguments += @('-HarnessObservedCounterPath', $script:HarnessObservedCounterPath)
+    }
     foreach ($name in @($AdditionalArguments.Keys | Sort-Object)) {
         $arguments += '-' + $name
         if ($AdditionalArguments[$name] -isnot [Management.Automation.SwitchParameter]) {
@@ -111,8 +117,9 @@ if ($p007Resolved -cne $script:P007Commit -or $p007Tree -cne $script:P007Tree -o
     throw 'TASK038_ACCEPT_TEST_P007_IDENTITY_NOT_MATERIALIZED'
 }
 $p005Resolved = (& git -C $script:RepoRoot rev-parse ($script:P005Commit + '^{commit}')).Trim().ToLowerInvariant()
+$p005Tree = (& git -C $script:RepoRoot rev-parse ($script:P005Commit + '^{tree}')).Trim().ToLowerInvariant()
 $null = & git -C $script:RepoRoot merge-base --is-ancestor $script:P005Commit HEAD
-if ($p005Resolved -cne $script:P005Commit -or $LASTEXITCODE -ne 0) {
+if ($p005Resolved -cne $script:P005Commit -or $p005Tree -cne $script:P005Tree -or $LASTEXITCODE -ne 0) {
     throw 'TASK038_ACCEPT_TEST_P005_BRIDGE_NOT_MATERIALIZED'
 }
 foreach ($scriptPath in @($script:BridgeRunner, $script:NativeIdentityHelper)) {
@@ -127,6 +134,7 @@ $bridgeText = Get-Content -LiteralPath $script:BridgeRunner -Raw -Encoding UTF8
 $identityText = Get-Content -LiteralPath $script:NativeIdentityHelper -Raw -Encoding UTF8
 $compositionText = Get-Content -LiteralPath $script:RuntimeComposition -Raw -Encoding UTF8
 $mcpText = Get-Content -LiteralPath $script:McpSource -Raw -Encoding UTF8
+$runnerText = Get-Content -LiteralPath $script:Runner -Raw -Encoding UTF8
 foreach ($required in @('windows-native-path-identity.ps1','LATTICE_TASK_INGRESS_KIND','LATTICE_TASK_INGRESS_PROFILE_SHA256','LOCAL_CANONICAL_MCP_ACCEPTANCE','lattice_task_submit','lattice_task_status')) {
     if (-not $bridgeText.Contains($required)) { throw 'TASK038_ACCEPT_TEST_P005_BRIDGE_NOT_MATERIALIZED' }
 }
@@ -138,6 +146,20 @@ foreach ($required in @('OFFICIAL_BUNDLE_FILE_ROLES','GetFileInformationByHandle
 }
 foreach ($required in @('lattice_delivery_run','lattice_delivery_status','lattice_task_submit','lattice_task_status')) {
     if (-not $mcpText.Contains($required)) { throw 'TASK038_ACCEPT_TEST_FOUR_TOOL_SOURCE_NOT_MATERIALIZED' }
+}
+foreach ($required in @(
+    '236b1d6f8362da19d298d65fd652e045cd413a02',
+    'lattice.mcp.acceptance-dispatch.v1',
+    'lattice.task038.mcp-acceptance-dispatch-evidence.v1',
+    'lattice.task038.production-negative-effect-observation.v1',
+    'lattice.task038.production-session-effect-observation.v1',
+    'lattice.task038.database-binding.v1',
+    'LATTICE_TASK038_P006_CURRENT_CANDIDATE_ACCEPTANCE_V1',
+    '882a5a073a88817f6c6d4c8827df1e4269ff226d52cf6f47c9883e91088c6345',
+    'e43adb9c5032e7efc63eebb44c5d32b142b34e5f4207666fed2dc7a51d43b630',
+    'abe89b0767a8cd0f956059aa5a5a93cd1042efc6194d000c2501da3e23babbd2'
+)) {
+    if (-not $runnerText.Contains($required)) { throw 'TASK038_ACCEPT_TEST_PRODUCTION_CONTRACT_NOT_MATERIALIZED' }
 }
 if ((Get-GateClassification -ExitCode 0 -Lines @('SKIP: live prerequisite unavailable')) -cne 'NOT_RUN') {
     throw 'TASK038_ACCEPT_TEST_SKIP_NOT_RUN_REJECTED'
@@ -202,9 +224,278 @@ foreach ($caseName in $invalidRunIds.Keys) {
 
 $testRoot = Join-Path $script:RepoRoot ('target\task038-four-tool-acceptance-test\' + [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($testRoot) | Out-Null
+
+function Import-RunnerFunction {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $functionAst = $runnerAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $Name
+    }, $true)
+    if ($null -eq $functionAst) { throw ('TASK038_ACCEPT_TEST_RUNNER_FUNCTION_MISSING_' + $Name) }
+    return [scriptblock]::Create($functionAst.Extent.Text)
+}
+
+foreach ($name in @(
+    'Get-CanonicalPath', 'Get-StringSha256', 'Get-FileSha256', 'Assert-ExactJsonKeys',
+    'Test-JsonInteger', 'Initialize-FileIdentityInterop', 'Get-NativeFileIdentity',
+    'Get-NativeDirectoryIdentity', 'Get-AuthoritativeNativeFileIdentity', 'Get-LifecycleProcessIdentityParts',
+    'Read-McpAcceptanceEvidence', 'Read-TunnelLifecycleReceipt', 'Get-DirectoryFootprint',
+    'ConvertTo-CanonicalJson', 'Get-DomainSeparatedCommitment', 'New-ZeroProductionSessionEffectReceipt',
+    'Invoke-RepositoryGitText', 'Get-DeliveryGitEffectReceipt', 'New-SubmitProductionSessionEffectReceipt',
+    'Assert-PostgresPortPolicy', 'Get-PostgresDatabaseBinding'
+)) { . (Import-RunnerFunction -Name $name) }
+. $script:NativeIdentityHelper
+$script:P005LifecycleCommit = '392c39cbbc8d416b5d89b872b0be119336946247'
+$script:ExpectedTools = @('lattice_delivery_run', 'lattice_delivery_status', 'lattice_task_status', 'lattice_task_submit')
+
+function Write-LifecycleFixture {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Mutation,
+        [Parameter(Mandatory = $true)][string]$ExpectedExeSha256
+    )
+
+    [IO.Directory]::CreateDirectory($Root) | Out-Null
+    $eventPath = Join-Path $Root 'events.jsonl'
+    $outerSession = '1' * 32
+    $rawSession = if ($Mutation -ceq 'session') { '2' * 32 } else { $outerSession }
+    $outerConfig = '3' * 64
+    $rawConfig = if ($Mutation -ceq 'config') { '4' * 64 } else { $outerConfig }
+    $rawExe = if ($Mutation -ceq 'exe') { '5' * 64 } else { $ExpectedExeSha256 }
+    $eventTypes = @('SPAWN', 'OPEN', 'CLOSE_REQUESTED', 'PIPE_CLOSED', 'EXITED', 'REAPED')
+    if ($Mutation -ceq 'order') { $eventTypes[1] = 'PIPE_CLOSED' }
+    $previous = '0' * 64
+    $records = [Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt 6; $index++) {
+        $observed = ('2026-08-11T08:00:0{0}Z' -f $index)
+        $exitCode = if ($index -lt 4) { $null } else { 0 }
+        $exitText = if ($null -eq $exitCode) { 'null' } else { '0' }
+        $identity = [ordered]@{
+            pid = 12345
+            creation_time = '134000000000000000'
+            creation_time_source = 'WINDOWS_PROCESS_TIMES'
+            exe_sha256 = $rawExe
+        }
+        $idempotency = Get-StringSha256 -Value (@(
+            'lattice.tunnel-client.lifecycle-idempotency.v1', $rawSession, '7', $rawConfig,
+            ('6' * 64), ('hmac-sha256:' + ('7' * 64)), $eventTypes[$index],
+            '12345', '134000000000000000', 'WINDOWS_PROCESS_TIMES', $rawExe, $exitText
+        ) -join "`n")
+        $eventSha = Get-StringSha256 -Value (@(
+            'lattice.tunnel-client.lifecycle-event-hash.v1', $previous, $idempotency,
+            [string]($index + 1), $observed
+        ) -join "`n")
+        $record = [ordered]@{
+            schema = $(if ($Mutation -ceq 'schema' -and $index -eq 0) { 'mutated' } else { 'lattice.tunnel-client.lifecycle-event.v1' })
+            record_type = 'LIFECYCLE'
+            component = 'mcpclient'
+            event_type = $eventTypes[$index]
+            session_id = $rawSession
+            process_identity = $identity
+            config_generation = 7
+            safe_config_sha256 = $rawConfig
+            session_command_sha256 = '6' * 64
+            endpoint_ref = 'hmac-sha256:' + ('7' * 64)
+            lifecycle_strategy = [ordered]@{
+                transport = 'STDIO'; endpoint_kind = 'ANONYMOUS_PIPE'; spawn_mode = 'DIRECT'
+                create_suspended_owned = $false; job_assignment_ownership = 'EXTERNAL_OWNER'
+            }
+            ordinal = $index + 1
+            observed_at_utc = $observed
+            exit_code = $exitCode
+            previous_event_sha256 = $previous
+            idempotency_key = $(if ($Mutation -ceq 'idempotency' -and $index -eq 2) { '0' * 64 } else { $idempotency })
+            event_sha256 = $(if ($Mutation -ceq 'hash' -and $index -eq 3) { '0' * 64 } else { $eventSha })
+            lifecycle_classification = 'UNKNOWN'
+            threshold_profile_version = $null
+            thresholds = [ordered]@{ pipe_milliseconds = $null; exit_milliseconds = $null; reap_milliseconds = $null; confirm_milliseconds = $null }
+        }
+        if ($Mutation -ceq 'extra-key' -and $index -eq 0) { $record['unexpected'] = $true }
+        $records.Add($record)
+        $previous = $eventSha
+    }
+    $eventText = [string]::Join("`n", @($records | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 12 })) + "`n"
+    [IO.File]::WriteAllText($eventPath, $eventText, $script:Utf8)
+    $eventIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $eventPath -Directory $false
+    $outer = [ordered]@{
+        schema = 'lattice.task038.tunnel-outer-lifecycle.v1'; mode = 'Run'; process_id = 22222; tunnel_client_exit_code = 0
+        started_at_utc = '2026-08-11T08:00:00Z'; exited_at_utc = '2026-08-11T08:00:06Z'
+        create_suspended = $true; job_assigned_before_resume = $true; descendant_processes_after_cleanup = 0
+        profile_raw_sha256 = '8' * 64; profile_byte_count = 100; profile_strict_utf8 = $true; profile_native_identity = $eventIdentity
+        latticed_native_identity = $eventIdentity; tunnel_client_native_identity = $eventIdentity
+        lifecycle_event_path = $eventPath; lifecycle_event_raw_sha256 = Get-FileSha256 -Path $eventPath
+        lifecycle_event_byte_count = (Get-Item -LiteralPath $eventPath).Length; lifecycle_event_strict_utf8 = $true
+        lifecycle_event_native_identity = $eventIdentity; lifecycle_session_id = $outerSession; lifecycle_config_generation = 7
+        lifecycle_safe_config_schema = 'lattice.task038.tunnel-safe-config.v1'; lifecycle_safe_config_sha256 = $outerConfig
+        lifecycle_safe_config_byte_count = 100; lifecycle_event_count = 6; lifecycle_anomaly_count = 0; lifecycle_anomaly_codes = @()
+        lifecycle_chain_complete = $true; lifecycle_normal_close_complete = $true
+        lifecycle_final_event_sha256 = $(if ($Mutation -ceq 'outer-hash') { '9' * 64 } else { $previous })
+        lifecycle_inner_process_id = 12345; lifecycle_inner_process_creation_time = '134000000000000000'
+        lifecycle_inner_process_creation_time_source = 'WINDOWS_PROCESS_TIMES'; lifecycle_inner_process_exe_sha256 = $rawExe
+        lifecycle_inner_exit_code = 0; lifecycle_threshold_decision = 'C_CALIBRATION_FIRST'; lifecycle_threshold_profile = $null
+        lifecycle_thresholds = [ordered]@{ pipe_milliseconds = $null; exit_milliseconds = $null; reap_milliseconds = $null; confirm_milliseconds = $null }
+        lifecycle_classification = 'UNKNOWN'; leak_claimed = $false
+    }
+    $receiptPath = Join-Path $Root 'outer.json'
+    [IO.File]::WriteAllText($receiptPath, (($outer | ConvertTo-Json -Compress -Depth 12) + "`n"), $script:Utf8)
+    return $receiptPath
+}
+
+$expectedLifecycleExe = 'd' * 64
+$validLifecyclePath = Write-LifecycleFixture -Root (Join-Path $testRoot 'lifecycle-valid') -Mutation 'none' -ExpectedExeSha256 $expectedLifecycleExe
+$validLifecycle = Read-TunnelLifecycleReceipt -Path $validLifecyclePath -ExpectedInnerExeSha256 $expectedLifecycleExe
+if (-not [bool]$validLifecycle.exact_schema_hash_order_idempotency_session_config_exe_checked) {
+    throw 'TASK038_ACCEPT_TEST_LIFECYCLE_VALID_REJECTED'
+}
+foreach ($mutation in @('schema', 'order', 'session', 'config', 'exe', 'idempotency', 'hash', 'outer-hash', 'extra-key')) {
+    $path = Write-LifecycleFixture -Root (Join-Path $testRoot ('lifecycle-' + $mutation)) -Mutation $mutation -ExpectedExeSha256 $expectedLifecycleExe
+    $rejected = $false
+    try { $null = Read-TunnelLifecycleReceipt -Path $path -ExpectedInnerExeSha256 $expectedLifecycleExe }
+    catch { $rejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_TUNNEL_LIFECYCLE_RECEIPT_REJECTED') }
+    if (-not $rejected) { throw ('TASK038_ACCEPT_TEST_LIFECYCLE_MUTATION_NOT_REJECTED_' + $mutation) }
+}
+
+function Write-DispatchFixture {
+    param([Parameter(Mandatory = $true)][string]$Root, [Parameter(Mandatory = $true)][string]$Mutation)
+
+    [IO.Directory]::CreateDirectory($Root) | Out-Null
+    $path = Join-Path $Root 'dispatch.jsonl'
+    $expectedSession = 'a' * 32
+    $rawSession = if ($Mutation -ceq 'session') { 'b' * 32 } else { $expectedSession }
+    $expectedConfig = 'c' * 64
+    $rawConfig = if ($Mutation -ceq 'config') { 'd' * 64 } else { $expectedConfig }
+    $types = @('SESSION_OPEN', 'DISPATCH_ACCEPTED', 'SESSION_CLOSED')
+    if ($Mutation -ceq 'order') { $types[0] = 'SESSION_CLOSED' }
+    $previous = '0' * 64
+    $records = [Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt 3; $index++) {
+        $isDispatch = $index -eq 1
+        $count = if ($isDispatch) { 1 } elseif ($index -eq 2) { 1 } else { 0 }
+        $tool = if ($isDispatch) { $(if ($Mutation -ceq 'tool') { 'lattice_delivery_run' } else { 'lattice_task_status' }) } else { $null }
+        $request = if ($isDispatch) { 'e' * 64 } else { $null }
+        $hash = Get-StringSha256 -Value (@(
+            'lattice.mcp.acceptance-dispatch-hash.v1', $previous, $rawSession, $rawConfig,
+            $types[$index], [string]($index + 1), '12345', $(if ($null -eq $tool) { 'null' } else { $tool }),
+            $(if ($null -eq $request) { 'null' } else { $request }), [string]$count, [string](1000 + $index)
+        ) -join "`n")
+        $record = [ordered]@{
+            schema = $(if ($Mutation -ceq 'schema' -and $index -eq 0) { 'mutated' } else { 'lattice.mcp.acceptance-dispatch.v1' })
+            record_type = $types[$index]; session_id = $rawSession; safe_config_sha256 = $rawConfig
+            process_id = 12345; ordinal = $index + 1; tool_name = $tool; request_id_sha256 = $request
+            dispatch_accepted_count = $count; observed_at_unix_nanos = [string](1000 + $index)
+            previous_event_sha256 = $previous
+            event_sha256 = $(if ($Mutation -ceq 'hash' -and $index -eq 1) { '0' * 64 } else { $hash })
+        }
+        if ($Mutation -ceq 'extra-key' -and $index -eq 0) { $record['unexpected'] = $true }
+        $records.Add($record)
+        $previous = $hash
+    }
+    if ($Mutation -ceq 'missing-close') { $records.RemoveAt(2) }
+    [IO.File]::WriteAllText($path, ([string]::Join("`n", @($records | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 8 })) + "`n"), $script:Utf8)
+    return [ordered]@{
+        sink = [ordered]@{
+            path = $path
+            native_identity = Get-AuthoritativeNativeFileIdentity -Path $path
+            root_path = $Root
+            root_native_identity = Get-LatticeWindowsNativePathIdentityToken -Path $Root -Directory $true
+        }
+        session = $expectedSession
+        config = $expectedConfig
+    }
+}
+
+$validDispatch = Write-DispatchFixture -Root (Join-Path $testRoot 'dispatch-valid') -Mutation 'none'
+$validDispatchReceipt = Read-McpAcceptanceEvidence -Sink $validDispatch.sink -SessionId $validDispatch.session -SafeConfigSha256 $validDispatch.config -ProcessId 12345 -ExpectedDispatchTools @('lattice_task_status')
+if ([int]$validDispatchReceipt.dispatch_accepted_count -ne 1 -or -not [bool]$validDispatchReceipt.normal_close_complete) {
+    throw 'TASK038_ACCEPT_TEST_DISPATCH_VALID_REJECTED'
+}
+foreach ($mutation in @('schema', 'order', 'session', 'config', 'tool', 'hash', 'extra-key', 'missing-close')) {
+    $fixture = Write-DispatchFixture -Root (Join-Path $testRoot ('dispatch-' + $mutation)) -Mutation $mutation
+    $rejected = $false
+    try { $null = Read-McpAcceptanceEvidence -Sink $fixture.sink -SessionId $fixture.session -SafeConfigSha256 $fixture.config -ProcessId 12345 -ExpectedDispatchTools @('lattice_task_status') }
+    catch { $rejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_MCP_EVIDENCE_REJECTED') }
+    if (-not $rejected) { throw ('TASK038_ACCEPT_TEST_DISPATCH_MUTATION_NOT_REJECTED_' + $mutation) }
+}
+
+$footprintRoot = Join-Path $testRoot 'effect-footprint'
+[IO.Directory]::CreateDirectory($footprintRoot) | Out-Null
+$footprintFile = Join-Path $footprintRoot 'probe.txt'
+[IO.File]::WriteAllText($footprintFile, 'before', $script:Utf8)
+$footprintBefore = Get-DirectoryFootprint -Root $footprintRoot
+[IO.File]::WriteAllText($footprintFile, 'after', $script:Utf8)
+$footprintAfter = Get-DirectoryFootprint -Root $footprintRoot
+if ([string]$footprintBefore.digest -ceq [string]$footprintAfter.digest) {
+    throw 'TASK038_ACCEPT_TEST_EFFECT_FOOTPRINT_MUTATION_NOT_OBSERVED'
+}
+
+$deliveryFixtureRoot = Join-Path $testRoot 'delivery-effect'
+$deliveryFixtureRepo = Join-Path $deliveryFixtureRoot 'repo'
+[IO.Directory]::CreateDirectory($deliveryFixtureRepo) | Out-Null
+$null = & git -C $deliveryFixtureRepo init --quiet
+$null = & git -C $deliveryFixtureRepo config user.name 'TASK038 Test'
+$null = & git -C $deliveryFixtureRepo config user.email 'task038@example.invalid'
+$null = & git -c commit.gpgsign=false -C $deliveryFixtureRepo commit --quiet --allow-empty -m 'initial'
+[IO.File]::WriteAllBytes((Join-Path $deliveryFixtureRepo 'answer.txt'), [Text.Encoding]::ASCII.GetBytes("LATTICE_DELIVERY_OK`n"))
+$null = & git -C $deliveryFixtureRepo add -- answer.txt
+$null = & git -c commit.gpgsign=false -C $deliveryFixtureRepo commit --quiet -m 'bounded answer'
+if ($LASTEXITCODE -ne 0) { throw 'TASK038_ACCEPT_TEST_DELIVERY_EFFECT_FIXTURE_REJECTED' }
+$script:ProductionDeliveryRoot = $deliveryFixtureRoot
+$deliveryEffect = Get-DeliveryGitEffectReceipt
+if ([string]$deliveryEffect.changed_path -cne 'answer.txt' -or [int]$deliveryEffect.commit_count -ne 2) {
+    throw 'TASK038_ACCEPT_TEST_DELIVERY_EFFECT_RECEIPT_REJECTED'
+}
+$effectSession = [pscustomobject]@{
+    AcceptanceEvidence = [pscustomobject]@{
+        session_id = 'f' * 32; raw_sha256 = '1' * 64; final_event_sha256 = '2' * 64
+        dispatch_accepted_count = 3; normal_close_complete = $true
+    }
+    Summary = [pscustomobject]@{
+        job_active_processes_after_exit = 0; process_session_pid_present_after_cleanup = 0
+        network_tcp_owner_rows_after_cleanup = 0; network_udp_owner_rows_after_cleanup = 0
+    }
+}
+$sourceEffect = [ordered]@{ head = '3' * 40; tree = '4' * 40; status_sha256 = '5' * 64; status_empty = $true }
+$submitEffectBefore = [ordered]@{
+    source_git = $sourceEffect
+    codex_home = [ordered]@{ root_native_identity = 'codex-root'; digest = '6' * 64 }
+    delivery_root = [ordered]@{ root_native_identity = 'delivery-root'; digest = '7' * 64 }
+    database = [ordered]@{ codex_intents = 0 }
+}
+$submitEffectAfter = [ordered]@{
+    source_git = $sourceEffect
+    codex_home = [ordered]@{ root_native_identity = 'codex-root'; digest = '8' * 64 }
+    delivery_root = [ordered]@{ root_native_identity = 'delivery-root'; digest = '9' * 64 }
+    database = [ordered]@{ codex_intents = 1 }
+}
+$submitEffect = New-SubmitProductionSessionEffectReceipt -Before $submitEffectBefore -After $submitEffectAfter -Session $effectSession
+if (-not [bool]$submitEffect.exact_bounded_effect_observed) { throw 'TASK038_ACCEPT_TEST_SUBMIT_EFFECT_RECEIPT_REJECTED' }
+$effectSession.AcceptanceEvidence.dispatch_accepted_count = 2
+$submitMutationRejected = $false
+try { $null = New-SubmitProductionSessionEffectReceipt -Before $submitEffectBefore -After $submitEffectAfter -Session $effectSession }
+catch { $submitMutationRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_PRODUCTION_SESSION_EFFECT_REJECTED') }
+if (-not $submitMutationRejected) { throw 'TASK038_ACCEPT_TEST_SUBMIT_EFFECT_MUTATION_NOT_REJECTED' }
+$effectSession.AcceptanceEvidence.dispatch_accepted_count = 2
+$zeroEffect = New-ZeroProductionSessionEffectReceipt -Phase 'read-only' -Before $submitEffectBefore -After $submitEffectBefore -Session $effectSession
+if (-not [bool]$zeroEffect.exact_zero_effect_observed) { throw 'TASK038_ACCEPT_TEST_ZERO_EFFECT_RECEIPT_REJECTED' }
+$zeroMutationRejected = $false
+try { $null = New-ZeroProductionSessionEffectReceipt -Phase 'read-only' -Before $submitEffectBefore -After $submitEffectAfter -Session $effectSession }
+catch { $zeroMutationRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_PRODUCTION_SESSION_EFFECT_REJECTED') }
+if (-not $zeroMutationRejected) { throw 'TASK038_ACCEPT_TEST_ZERO_EFFECT_MUTATION_NOT_REJECTED' }
+foreach ($reservedPort in @(5432, 64272, 55432)) {
+    $rejected = $false
+    try { Assert-PostgresPortPolicy -Port $reservedPort }
+    catch { $rejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_POSTGRES_PORT_REJECTED') }
+    if (-not $rejected) { throw ('TASK038_ACCEPT_TEST_RESERVED_PORT_NOT_REJECTED_' + $reservedPort) }
+}
+$nonDynamicPortRejected = $false
+try { Assert-PostgresPortPolicy -Port 1025 }
+catch { $nonDynamicPortRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_POSTGRES_PORT_REJECTED') }
+if (-not $nonDynamicPortRejected) { throw 'TASK038_ACCEPT_TEST_NON_DYNAMIC_PORT_NOT_REJECTED' }
 $fakeBinary = Join-Path $testRoot 'latticed-fake.exe'
 $fakeState = Join-Path $testRoot 'state.txt'
 $fakeCounters = Join-Path $testRoot 'counters.txt'
+$script:HarnessObservedCounterPath = $fakeCounters
 $descendantPid = Join-Path $testRoot 'descendant-pid.txt'
 $source = @'
 using System;
@@ -359,6 +650,11 @@ public static class Task038StrictFakeMcp
         File.WriteAllLines(path, output.ToArray());
     }
 
+    private static void MutateRejectedCall(string tool)
+    {
+        if (Environment.GetEnvironmentVariable("TASK038_ACCEPT_FAKE_NEGATIVE_EFFECT") == "1") Increment(tool, true);
+    }
+
     private static bool DeliveryArguments(object value) { Dictionary<string, object> arguments = Object(value); return arguments != null && arguments.Count == 0; }
     private static bool SubmitArguments(object value, out string requestId)
     {
@@ -435,7 +731,7 @@ public static class Task038StrictFakeMcp
             bool modern = Modern(parameters);
             if (name == "lattice_delivery_run" || name == "lattice_delivery_status")
             {
-                if (!DeliveryArguments(arguments)) { Console.WriteLine(Error(id, -32602, "Tool accepts no arguments")); continue; }
+                if (!DeliveryArguments(arguments)) { MutateRejectedCall(name == "lattice_delivery_run" ? "delivery_run" : "delivery_status"); Console.WriteLine(Error(id, -32602, "Tool accepts no arguments")); continue; }
                 Increment(name == "lattice_delivery_run" ? "delivery_run" : "delivery_status", false);
                 string code = Environment.GetEnvironmentVariable("TASK038_ACCEPT_FAKE_ERROR_CODE") ?? "LATTICED_DATABASE_CONNECT_REJECTED";
                 Console.WriteLine(ToolResult(id, true, ErrorStructured(code), modern));
@@ -444,7 +740,7 @@ public static class Task038StrictFakeMcp
             if (name == "lattice_task_submit")
             {
                 string requestId;
-                if (!SubmitArguments(arguments, out requestId)) { Console.WriteLine(Error(id, -32602, "Invalid task submit arguments")); continue; }
+                if (!SubmitArguments(arguments, out requestId)) { MutateRejectedCall("task_submit"); Console.WriteLine(Error(id, -32602, "Invalid task submit arguments")); continue; }
                 bool effect = !File.Exists(state);
                 Increment("task_submit", effect);
                 if (effect) File.WriteAllText(state, requestId);
@@ -455,7 +751,7 @@ public static class Task038StrictFakeMcp
             if (name == "lattice_task_status")
             {
                 string taskRef;
-                if (!StatusArguments(arguments, out taskRef)) { Console.WriteLine(Error(id, -32602, "Invalid task status arguments")); continue; }
+                if (!StatusArguments(arguments, out taskRef)) { MutateRejectedCall("task_status"); Console.WriteLine(Error(id, -32602, "Invalid task status arguments")); continue; }
                 Increment("task_status", false);
                 Console.WriteLine(taskRef == new string('0', 64) || !File.Exists(state) ? ToolResult(id, true, ErrorStructured("LATTICE_TASK_REFERENCE_REJECTED"), modern) : ToolResult(id, false, StatusJson, modern));
                 continue;
@@ -469,6 +765,16 @@ public static class Task038StrictFakeMcp
 
 Add-Type -TypeDefinition $source -Language CSharp -ReferencedAssemblies 'System.Web.Extensions.dll' -OutputAssembly $fakeBinary -OutputType ConsoleApplication
 $binarySha = (Get-FileHash -LiteralPath $fakeBinary -Algorithm SHA256).Hash.ToLowerInvariant()
+$script:SourceRoot = $script:RepoRoot
+$script:Psql = $fakeBinary
+$PostgresRunId = '0123456789abcdef0123456789abcdef'
+$PostgresPort = 49152
+$PgCtlExecutable = $fakeBinary
+$PostgresDataDirectory = $testRoot
+$fakePsqlRejected = $false
+try { $null = Get-PostgresDatabaseBinding -Password ('x' * 32) }
+catch { $fakePsqlRejected = ([string]$_.Exception.Message -ceq 'TASK038_ACCEPT_POSTGRES_BINDING_REJECTED') }
+if (-not $fakePsqlRejected) { throw 'TASK038_ACCEPT_TEST_CALLER_FAKE_PSQL_NOT_REJECTED' }
 $commit = (& git -C $script:RepoRoot rev-parse HEAD).Trim().ToLowerInvariant()
 if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') { throw 'TASK038_ACCEPT_TEST_SOURCE_COMMIT_REJECTED' }
 $tree = (& git -C $script:RepoRoot rev-parse ($commit + '^{tree}')).Trim().ToLowerInvariant()
@@ -482,6 +788,15 @@ if ($LASTEXITCODE -ne 0 -or $tree -notmatch '^[0-9a-f]{40}$') { throw 'TASK038_A
 [Environment]::SetEnvironmentVariable('TASK038_ACCEPT_FAKE_ERROR_MUTATION', $null, 'Process')
 [Environment]::SetEnvironmentVariable('TASK038_ACCEPT_FAKE_DESCENDANT_ESCAPE', $null, 'Process')
 [Environment]::SetEnvironmentVariable('TASK038_ACCEPT_FAKE_DESCENDANT_PID', $descendantPid, 'Process')
+[Environment]::SetEnvironmentVariable('TASK038_ACCEPT_FAKE_NEGATIVE_EFFECT', $null, 'Process')
+[IO.File]::WriteAllLines($fakeCounters, @(
+    'dispatch=0',
+    'effect=0',
+    'delivery_run=0',
+    'delivery_status=0',
+    'task_submit=0',
+    'task_status=0'
+), $script:Utf8)
 
 $positiveEvidence = Join-Path $testRoot 'positive-evidence'
 $positive = Invoke-Runner -Binary $fakeBinary -BinarySha $binarySha -Commit $commit -Mode 'PROTOCOL_ONLY' -EvidenceRoot $positiveEvidence
@@ -509,7 +824,13 @@ $expectedCases = @(
 ) | Sort-Object
 if (@(Compare-Object $expectedCases $caseNames).Count -ne 0) { throw 'TASK038_ACCEPT_TEST_NEGATIVE_CASE_SET_REJECTED' }
 foreach ($case in @($positiveFinal.negative_protocol_cases)) {
-    if ([int]$case.protocol_error_code -ne -32602 -or [int]$case.service_dispatch_expected -ne 0 -or [int]$case.external_effect_expected -ne 0) {
+    if (
+        [int]$case.protocol_error_code -ne -32602 -or
+        [long]$case.service_dispatch_observed -ne 0 -or
+        [long]$case.external_effect_observed -ne 0 -or
+        -not [bool]$case.authoritative_observation -or
+        [string]$case.observation_scope -cne 'HARNESS_FAKE_ONLY_NOT_PRODUCTION'
+    ) {
         throw 'TASK038_ACCEPT_TEST_NEGATIVE_PROTOCOL_REJECTED'
     }
 }
@@ -524,6 +845,12 @@ if (
     [int]$counterValues.delivery_run -ne 0 -or [int]$counterValues.delivery_status -ne 1 -or
     [int]$counterValues.task_submit -ne 3 -or [int]$counterValues.task_status -ne 2
 ) { throw 'TASK038_ACCEPT_TEST_DISPATCH_EFFECT_COUNTER_REJECTED' }
+
+[Environment]::SetEnvironmentVariable('TASK038_ACCEPT_FAKE_NEGATIVE_EFFECT', '1', 'Process')
+$negativeEffectEvidence = Join-Path $testRoot 'negative-protocol-observed-effect'
+$negativeEffect = Invoke-Runner -Binary $fakeBinary -BinarySha $binarySha -Commit $commit -Mode 'PROTOCOL_ONLY' -EvidenceRoot $negativeEffectEvidence
+Assert-FixedFailure -Run $negativeEffect -EvidenceRoot $negativeEffectEvidence -FailureCode 'TASK038_ACCEPT_OBSERVED_EFFECT_RECEIPT_REJECTED'
+[Environment]::SetEnvironmentVariable('TASK038_ACCEPT_FAKE_NEGATIVE_EFFECT', $null, 'Process')
 
 $allEvidenceText = [string]::Join("`n", @(Get-ChildItem -LiteralPath $positiveEvidence -File | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 }))
 if ($allEvidenceText -cmatch 'TASK038_NON_SECRET_SENTINEL') { throw 'TASK038_ACCEPT_TEST_ARGUMENT_ECHO_REJECTED' }
@@ -595,25 +922,44 @@ $preSeedEvidence = Join-Path $testRoot 'pre-clean-seed-ancestry'
 $preSeed = Invoke-Runner -Binary $fakeBinary -BinarySha $binarySha -Commit '512732d5b71a5d373363b77bb23a29e4a8ae3b1b' -Mode 'FULL' -EvidenceRoot $preSeedEvidence
 Assert-FixedFailure -Run $preSeed -EvidenceRoot $preSeedEvidence -FailureCode 'TASK038_ACCEPT_CLEAN_SEED_ANCESTRY_REJECTED'
 
-$treeMutationEvidence = Join-Path $testRoot 'candidate-tree-mutation'
-$treeMutation = Invoke-Runner -Binary $fakeBinary -BinarySha $binarySha -Commit $commit -Mode 'FULL' -EvidenceRoot $treeMutationEvidence -AdditionalArguments @{
-    ExpectedSourceTree = '0000000000000000000000000000000000000000'
+$callerBinaryEvidence = Join-Path $testRoot 'caller-binary-cannot-prove-candidate'
+$callerBinary = Invoke-Runner -Binary $fakeBinary -BinarySha $binarySha -Commit $commit -Mode 'FULL' -EvidenceRoot $callerBinaryEvidence -IncludeCallerBinary -AdditionalArguments @{
+    ExpectedSourceTree = $tree
     ExpectedToolSchemaContractSha256 = [string]$positiveFinal.tool_schema_contract_sha256
     ExpectedToolErrorContractSha256 = [string]$positiveFinal.tool_error_contract_sha256
     CurrentCandidateReviewCommitment = ('1' * 64)
     CurrentCandidateAcceptanceCommitment = ('2' * 64)
 }
+Assert-FixedFailure -Run $callerBinary -EvidenceRoot $callerBinaryEvidence -FailureCode 'TASK038_ACCEPT_CALLER_BINARY_TRUST_REJECTED'
+
+$arbitraryCommitmentEvidence = Join-Path $testRoot 'caller-commitments-forbidden'
+$arbitraryCommitment = Invoke-Runner -Binary $fakeBinary -BinarySha $binarySha -Commit $commit -Mode 'FULL' -EvidenceRoot $arbitraryCommitmentEvidence -AdditionalArguments @{
+    ExpectedSourceTree = $tree
+    ExpectedToolSchemaContractSha256 = [string]$positiveFinal.tool_schema_contract_sha256
+    ExpectedToolErrorContractSha256 = [string]$positiveFinal.tool_error_contract_sha256
+    CurrentCandidateReviewCommitment = ('1' * 64)
+    CurrentCandidateAcceptanceCommitment = ('2' * 64)
+}
+Assert-FixedFailure -Run $arbitraryCommitment -EvidenceRoot $arbitraryCommitmentEvidence -FailureCode 'TASK038_ACCEPT_CALLER_COMMITMENT_REJECTED'
+
+$treeMutationEvidence = Join-Path $testRoot 'candidate-tree-mutation'
+$treeMutation = Invoke-Runner -Binary $fakeBinary -BinarySha $binarySha -Commit $commit -Mode 'FULL' -EvidenceRoot $treeMutationEvidence -AdditionalArguments @{
+    RequirePostgresRestart = [Management.Automation.SwitchParameter]::Present
+    ExpectedSourceTree = '0000000000000000000000000000000000000000'
+    ExpectedToolSchemaContractSha256 = [string]$positiveFinal.tool_schema_contract_sha256
+    ExpectedToolErrorContractSha256 = [string]$positiveFinal.tool_error_contract_sha256
+}
 Assert-FixedFailure -Run $treeMutation -EvidenceRoot $treeMutationEvidence -FailureCode 'TASK038_ACCEPT_CURRENT_CANDIDATE_TREE_REJECTED'
 
-$reviewMissingEvidence = Join-Path $testRoot 'candidate-review-missing'
-$reviewMissing = Invoke-Runner -Binary $fakeBinary -BinarySha $binarySha -Commit $commit -Mode 'FULL' -EvidenceRoot $reviewMissingEvidence -AdditionalArguments @{
+$restartMissingEvidence = Join-Path $testRoot 'full-restart-is-mandatory'
+$restartMissing = Invoke-Runner -Binary $fakeBinary -BinarySha $binarySha -Commit $commit -Mode 'FULL' -EvidenceRoot $restartMissingEvidence -AdditionalArguments @{
     ExpectedSourceTree = $tree
     ExpectedToolSchemaContractSha256 = [string]$positiveFinal.tool_schema_contract_sha256
     ExpectedToolErrorContractSha256 = [string]$positiveFinal.tool_error_contract_sha256
 }
-Assert-FixedFailure -Run $reviewMissing -EvidenceRoot $reviewMissingEvidence -FailureCode 'TASK038_ACCEPT_CURRENT_CANDIDATE_REVIEW_COMMITMENT_REJECTED'
+Assert-FixedFailure -Run $restartMissing -EvidenceRoot $restartMissingEvidence -FailureCode 'TASK038_ACCEPT_POSTGRES_RESTART_REQUIRED'
 
-$replayedReceiptEvidence = Join-Path $testRoot 'candidate-replayed-review-acceptance'
+$replayedReceiptEvidence = Join-Path $testRoot 'candidate-caller-commitment-replay'
 $replayedReceipt = Invoke-Runner -Binary $fakeBinary -BinarySha $binarySha -Commit $commit -Mode 'FULL' -EvidenceRoot $replayedReceiptEvidence -AdditionalArguments @{
     ExpectedSourceTree = $tree
     ExpectedToolSchemaContractSha256 = [string]$positiveFinal.tool_schema_contract_sha256
@@ -621,20 +967,20 @@ $replayedReceipt = Invoke-Runner -Binary $fakeBinary -BinarySha $binarySha -Comm
     CurrentCandidateReviewCommitment = ('1' * 64)
     CurrentCandidateAcceptanceCommitment = ('1' * 64)
 }
-Assert-FixedFailure -Run $replayedReceipt -EvidenceRoot $replayedReceiptEvidence -FailureCode 'TASK038_ACCEPT_CURRENT_CANDIDATE_REVIEW_COMMITMENT_REJECTED'
+Assert-FixedFailure -Run $replayedReceipt -EvidenceRoot $replayedReceiptEvidence -FailureCode 'TASK038_ACCEPT_CALLER_COMMITMENT_REJECTED'
 
 $lifecycleMissingEvidence = Join-Path $testRoot 'tunnel-lifecycle-not-materialized'
 $lifecycleMissing = Invoke-Runner -Binary $fakeBinary -BinarySha $binarySha -Commit $commit -Mode 'FULL' -EvidenceRoot $lifecycleMissingEvidence -AdditionalArguments @{
+    RequirePostgresRestart = [Management.Automation.SwitchParameter]::Present
     ExpectedSourceTree = $tree
     ExpectedToolSchemaContractSha256 = [string]$positiveFinal.tool_schema_contract_sha256
     ExpectedToolErrorContractSha256 = [string]$positiveFinal.tool_error_contract_sha256
-    CurrentCandidateReviewCommitment = ('1' * 64)
-    CurrentCandidateAcceptanceCommitment = ('2' * 64)
 }
-Assert-FixedFailure -Run $lifecycleMissing -EvidenceRoot $lifecycleMissingEvidence -FailureCode 'TASK038_ACCEPT_TUNNEL_LIFECYCLE_NOT_MATERIALIZED'
+Assert-FixedFailure -Run $lifecycleMissing -EvidenceRoot $lifecycleMissingEvidence -FailureCode 'TASK038_ACCEPT_TUNNEL_LIFECYCLE_RECEIPT_REQUIRED'
 
 [Environment]::SetEnvironmentVariable('TASK038_ACCEPT_FAKE_STATE', $null, 'Process')
 [Environment]::SetEnvironmentVariable('TASK038_ACCEPT_FAKE_COUNTERS', $null, 'Process')
 [Environment]::SetEnvironmentVariable('TASK038_ACCEPT_FAKE_DESCENDANT_PID', $null, 'Process')
+[Environment]::SetEnvironmentVariable('TASK038_ACCEPT_FAKE_NEGATIVE_EFFECT', $null, 'Process')
 Write-Output 'TASK038_FOUR_TOOL_ACCEPTANCE_TEST=PASS'
 Write-Output ('TEST_EVIDENCE_ROOT=' + $testRoot)

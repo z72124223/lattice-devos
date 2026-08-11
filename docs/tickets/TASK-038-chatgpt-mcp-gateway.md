@@ -65,8 +65,10 @@ allowed_paths:
   - scripts/run-task019-postgres.ps1
   - scripts/run-task037-full-chain-verification.ps1
   - scripts/run-task038-task-submit.ps1
+  - scripts/run-task038-four-tool-acceptance.ps1
   - scripts/task038-local-process-environment.ps1
   - scripts/test-task038-local-acceptance.ps1
+  - scripts/test-task038-four-tool-acceptance.ps1
   - scripts/test-task038-child-environment.ps1
   - scripts/start-chatgpt-mcp-tunnel.ps1
   - scripts/test-chatgpt-mcp-tunnel-entrypoint.ps1
