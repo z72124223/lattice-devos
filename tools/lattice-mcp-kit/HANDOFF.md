@@ -776,3 +776,10 @@
 - The fresh isolated binary is 10,278,400 bytes with SHA-256 `c79e2ee9bfe1abec5cf38405c6cca721157feb6b69ce578eba0c1c336f32004f`; it was not launched. No target reuse, retry, or prior-target deletion occurred.
 - Build head `00dd4d0c7ff87c1606362a87f6a9bcb12a0df24d` differs from the source only through the two saver-owned receipt paths. Protected dirty script remained preserved.
 - Receipt stage 1 commit `13de8143e3354a03ff9090c6de50f17d05fca3bb` and confirmation stage 2 commit `3ae56f16151e172e5258208a3c7344b933055f81` each equal their fresh remote reads. Central archived BUILD_ONLY at `2026-08-11T23:18:43.8207141Z`; outer saver `safe_to_archive=true`, while BUILD_ONLY PASS still does not claim runtime or P0 live acceptance.
+
+## Binary-switch-only pre-mutation failure — `019ff31e-eef7-7dc1-81b0-16f3064c8fd4`
+
+- Worker stopped before mutation with `FAILED_PRE_MUTATION` / `PRECHECK_IMPLEMENTATION_ERROR`: Python was unavailable and the current PowerShell/.NET lacked `System.Security.Cryptography.SHA256.HashData`.
+- No retry, staging, backup, atomic replace, config change, external-handoff update, PostgreSQL connection, MCP launch/call, or port 64272 action occurred.
+- Binary, source, and holder verification remained incomplete or not reached; no success or P0 claim is made. Central may dispatch a fresh worker only if a new retry is authorized.
+- Receipt stage 1 and stage 2 saver equalities are pending; authoritative `safe_to_archive=false`.
