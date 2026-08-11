@@ -145,4 +145,16 @@
 - External secret-free handoff `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-p0-live-handoff.json` was updated at `2026-08-11T12:32:07.771Z`; commit/tree/head, new binary, global switch, key set, Git/remote/config/backup equality were current-read verified.
 - PostgreSQL, holder, and `64272` were unchanged. Fresh-window success is not claimed by remediation; central created new verifier `019ff0cf-8265-7082-bed2-b4f9db33395e` for that acceptance.
 - Mutation boundary: no merge, deployment, release, default-branch change, or final modification to this repo HANDOFF by remediation; protected script remained unread, unmodified, unstaged, and uncleaned.
-- Successor durable save: first exact-path commit `66664e10453463471810d22f60e6117ca2ed7749` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:35:13.612Z`; `archived_at_utc=null`.
+- Successor durable save: first exact-path commit `66664e10453463471810d22f60e6117ca2ed7749` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:35:13.612Z`; central confirmed `archived_at_utc=2026-08-11T12:36:51.394Z`.
+- Archive boundary: central archived only runtime remediation `019ff0c2-d0fd-7e40-8a07-726fe722982e`. Fresh verifier 2 `019ff0cf-8265-7082-bed2-b4f9db33395e` remains unarchived until its failure receipt is remotely saved.
+
+## Fresh verifier 2 checkpoint — `019ff0cf-8265-7082-bed2-b4f9db33395e`
+
+- Window status: `FAILED`; `DONE=false`; started `2026-08-11T12:33:32.222Z`, finished `2026-08-11T12:36:31.476Z`, elapsed `179254 ms`.
+- Preflight passed: handoff `READY_FOR_FRESH_CODEX_WINDOW`, switch active, global enabled, command exact, environment key names only, and PostgreSQL `127.0.0.1:63238` with PID `760`, owned listener, and valid TTL.
+- Catalog was exactly `lattice_delivery_run`, `lattice_delivery_status`, `lattice_task_submit`, and `lattice_task_status`; source commit `5155f626405faa2fa9e01ad6ceba7329eb9e6b93`, binary SHA-256 `0ba38c05e572a08f999e07cc8f4942756956421b37e6b41f99947931a3572bfc`.
+- One and only one `lattice_task_submit` used client request `codex-p0-fresh-20260811123332222-0efw7ib9jm` with `CONTROLLED_CODEX_CANARY`; it returned `isError=true`, code `LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH`, status `ERROR`.
+- No task ref was returned, so `lattice_task_status` was not called. Expected prior task ref/result digest remain `ab8724dd51419cf190ad491f1f8973894bca56dc0c3aed55ebc3723f6214177d` / `c8d4cc65e7e4b4834276900afae08eff1223d8f488251a69283126ca74689c22`; `consistency_verified=false`, `zero_new_execution_verified=false`.
+- Cleanup and rollback paths exist and do not target `64272`; candidate remains active; neither cleanup nor rollback was executed.
+- Conclusion: fresh acceptance failed at ingress profile commitment before a task ref was issued. Preserve this exact fixed code for the next bounded remediation; do not claim success or retry from this verifier.
+- Successor durable save: pending first exact-path commit and remote SHA equality verification; `remote_sha=null`, `github_saved_at_utc=null`, `archived_at_utc=null`.
