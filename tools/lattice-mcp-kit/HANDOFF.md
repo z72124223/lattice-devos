@@ -442,3 +442,11 @@
 - Boundary: no second wrapper, config/binary/helper/external-handoff switch, discovery/submit/status/delivery, build/test, cleanup/rollback/root deletion, `64272` action, repository mutation, merge/deploy/release, or protected dirty-script content read/change. A mistaken pre-correction read-only `Get-Process` query for PID `32132` occurred once and caused no mutation.
 - Successor durable save: exact-path commit `b7b041a232ad85019f6fd9404b3694ab7e71af8d` (tree `918811b5c5e5b46cd928831b7bf14c3f2c72d153`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:23:47.0345706Z`.
 - Archive boundary: central confirmed this clean-holder worker archived after final remote confirmation `dc8cf9cf11cdf45dd63d3f91820bebc225a445e7`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:25:51.0800300Z`. The actual live holder `127.0.0.1:49156` / PID `29688` / TTL PID `3892` and all live state remain outside saver authority.
+
+## Redundant worker cancelled before action — `019ff1a5-794c-7c80-8e01-fbe42d9068ec`
+
+- Result is exactly `CANCELLED_REDUNDANT_BEFORE_ACTION`; revoked by central thread `019fef39-6c03-76f0-9115-0171c7d44f10`.
+- Before cancellation arrived, the worker had called `create_goal` and read reply-skill instructions read-only. No holder/runtime/PG/marker/process/config/handoff/discovery state was read and no live state was changed.
+- Changed paths `[]`; holder-runtime reads, PostgreSQL connections, runtime actions, file writes, child agents, and engineering changes are all `0`.
+- Current action was only delivery of the cancellation receipt. `safe_to_archive=true`, `self_archived=false`.
+- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check.
