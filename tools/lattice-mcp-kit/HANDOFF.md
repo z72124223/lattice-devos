@@ -728,3 +728,12 @@
 - Parent exit code remained unavailable after parent exit because the TTL child inherited the pipe; durable recovered receipt and read-only functional gates established semantic `READY`.
 - Verification time is `2026-08-11T22:05:57.3829998Z` with 6734 seconds remaining. PostgreSQL 17.10, exact listener/postmaster ownership, TTL cleanup identity, deadline, exclusions, and secret-safety checks passed.
 - Worker performed no MCP/discovery/submit/status, no manual database query beyond wrapper readiness, no port 64272 action, cleanup/rollback, global config, source, or handoff write. Stage 1 receipt commit `d6d974aeee0ed222ef343157b299f0adf72b9d34` matched fresh live remote at `2026-08-11T22:08:03.8277047Z`; stage 2 confirmation commit `ee5f080e6c49cc6e07d2e2a789e8860a8f4ff1e8` matched fresh live remote at `2026-08-11T22:08:43.6391566Z`. Central archived the worker at `2026-08-11T22:09:20.4579092Z`; outer saver state is `safe_to_archive=true`.
+
+## New-holder config switch only — `019ff2df-8c00-7310-92f9-7553cf5447ca`
+
+- Scope is `CONFIG-SWITCH-ONLY`; status is `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY`. Discovery for the new holder is explicitly `NOT_RUN_FOR_NEW_HOLDER`, so this is not P0 PASS.
+- The active config was atomically rebound to receipt holder run `feb0534b39484da6997b7235f1d49d9d` at `127.0.0.1:58503`; eight of nine PG-holder target values changed because loopback host was already equal.
+- Command, implicit stdio, zero args, prepared home, binary, twelve non-PG environment values, and all non-target raw bytes were preserved. No credential value was recorded.
+- External secret-free handoff advanced atomically to `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` with next action `RUN_FRESH_DISCOVERY_ONLY`; rollback and cleanup were not executed.
+- Worker launched no MCP/Codex process, ran no initialize/discovery/tool/submit/status, made no PostgreSQL connection or port 64272 action, and did not touch saver paths or the protected dirty script.
+- Stage 1 and stage 2 saver equality are pending. Authoritative `worker_safe_to_archive=false` remains unchanged.
