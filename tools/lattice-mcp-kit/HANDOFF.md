@@ -463,3 +463,13 @@
 - Next action: do not open a fresh verifier, roll back, or clean up. Any bounded initialize-timeout remediation must be separately authorized and preserve current config/holder truth without reusing failed artifacts.
 - Successor durable save: corrected exact-path commit `79ace2a2837db173cb2c7efaab1853cdb0170197` (tree `978bd9b0f91c8665c9b9e756a48d5fa82288a97f`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:47:12.1419589Z`.
 - Archive boundary: central confirmed this switch/discovery failure worker archived after final remote confirmation `870c2fbaa76a0f443031178b51ade7d46b3abee5`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:48:20.7622182Z`. Current config, holder, external handoff, cleanup/rollback, and successor-worker state remain outside saver authority.
+
+## Initialize diagnosis: slow but responds — `019ff1ba-4479-7ba1-b4ce-df065658628e`
+
+- Diagnosis result is `PASS` with code `LATTICE_P0_INITIALIZE_SLOW_BUT_RESPONDS`; it is not post-initialize discovery or fresh-readiness evidence. Started `2026-08-11T16:53:42.133Z`, ended `2026-08-11T16:54:11.257Z`, elapsed `29122 ms`.
+- One exact `5ec06821...` binary process and one LF-framed initialize request produced a valid JSON-RPC result after `28793 ms`; negotiated protocol was `2025-11-25`, server `latticed` `1.0.0`, stderr was empty, and the process was terminated after first evidence.
+- The earlier 30-second zero-response did not reproduce. Current diagnosis excludes startup/early-exit, stdio framing/output, stderr, and DB-connect failure for this one run; extra intermittency remains `UNKNOWN` and must not be inferred away.
+- Preflight matched config `63881ec515b9a8f8959e0084c2ff9e249b9636ff648f2f0fc477571c8365b467`, exact binary, stdio/zero args, 21 key names only, and READY holder `127.0.0.1:49156` / PID `29688` / TTL PID `3892`. No raw MCP env or credential value is recorded in this receipt.
+- No initialized notification, tools/list, tools/call, submit/status/delivery, retry, verifier, build/test, PG/config/handoff/staging/backup/source/saver-file mutation, cleanup/rollback, or `64272` action occurred. One earlier read-only tool-output env exposure incident is disclosed; its raw values are excluded.
+- Next action: any discovery continuation or fresh verifier requires a separately bounded window. This diagnosis must not be promoted to discovery readiness.
+- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check.
