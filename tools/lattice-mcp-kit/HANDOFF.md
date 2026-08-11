@@ -569,3 +569,10 @@
 - Config switched to `65b659a416929de4d8cda0ffb815b99eaa021e9260e231911e998737288ffa89`; secret-free external handoff status is `DISCOVERY_FAILED_PRESERVED` with SHA-256 `9d90084799ff936752a6840d925e80522ac516c982ab80f5a8f9ffccf8c311b2`.
 - The one no-BOM Discovery attempt exited before initialize response with `LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED / DISCOVERY_PROCESS_STARTUP`; `tool_call_count=0`, no retry, submit/status/delivery NOT_RUN.
 - No rollback or cleanup occurred; short root and current config were preserved. First durable receipt commit is `6d0d4ef3ed3fdb9f71a3551e434ab6ddc6b4f04d` (tree `cc09ae1357cb2fbf804e6657218a25981bc8ab4d`); live `git ls-remote` equality was verified at `2026-08-11T18:49:52.0900403Z`. Central archived the worker at `2026-08-11T18:51:05.047Z`.
+## Offline official-identity diagnosis — `019ff229-d7bc-7790-80fa-a44eef95ca08`
+
+- Diagnosis at `2026-08-11T18:59:20.944Z`: `PASS_OFFLINE_EXACT_FIRST_PREDICATE_IDENTIFIED`, certainty `KNOWN`.
+- Exact first predicate is `delivery_root.file_name() != Some(OsStr::new("delivery"))` at `composition.rs:796-799`; current leaf `P0D-019ff2198ac178e2` causes `OfficialIdentityRejection::Layout` before filesystem metadata or MCP stdin.
+- Root cause is accidental coupling of workspace `LATTICE_DELIVERY_ROOT` with the official bundle trust-anchor layout. Transport/framing, binary, credential/PG/ingress/task domain, root metadata and port 64272 are excluded or not reached.
+- One-field root rollback is smallest for identity-only recovery but restores the long-path problem. For the short-root P0 goal, the smallest source change is deriving official target root from existing launcher ancestry while preserving all fixed bundle checks.
+- No process, DB, discovery/tool call, build/test, config/root/source/handoff write, rollback, cleanup, global Git config or protected-script read occurred. Durable saver metadata is pending; `safe_to_archive=false`.
