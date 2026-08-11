@@ -241,5 +241,5 @@
 - Global MCP config was not mutated; before/after hash stayed `dc83687cf3d0964682ce80616273c07dc0663e64b955350f2a3a3c3b837c4191`; no backup, rollback command, handoff update, or discovery occurred. Tool-call count is `0`.
 - Protected boundaries held: no saver-path or repository commit/push, submit/status/delivery, old PID `32132`, old residual, protected script content, or protected `64272` mutation. Cleanup was not executed.
 - Next action: after this failure receipt is remotely durable, central must dispatch one bounded resume-from-live-holder worker before TTL expiry. Do not rerun provision, cleanup/kill either holder/residual, or create the fresh verifier yet.
-- Successor durable save: pending first exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: exact-path commit `4e6584141705ef0d2299a18144a843e32f30c89f` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T14:26:10.416Z`.
 - Archive boundary: do not archive this failed/partial worker until total engineering handles the failure. The live holder and both cleanup scopes remain independently owned.
