@@ -366,3 +366,18 @@
 - Next action: saver publishes this binary receipt. Any holder/config/handoff/discovery work requires a separate newly authorized worker; this worker must not perform runtime steps.
 - Successor durable save: exact-path commit `9a1c643d2c8880c613a3f1e2ea13fef4f718ff64` (tree `81b46fcdd8198274ae1183ca7c69bd56590362ed`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:39:32.5836229Z`.
 - Archive boundary: central confirmed this build-only worker archived after remote confirmation `f3fb17884d6b705a214aa1e54a4e92700223785f`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T15:40:50.1319644Z`. This archive does not authorize binary/runtime/switch/discovery/holder/config/external-handoff/root/cleanup/rollback mutation.
+
+## Runtime switch/discovery staging-validation failure — `019ff17b-79bc-72a2-9f64-276b0b589a6b`
+
+- Result: `FAILED_FIRST_FAILURE`; started `2026-08-11T15:40:39.0000000Z`, stopped `2026-08-11T15:45:55.9808097Z`; failure `P0_RUNTIME_SWITCH_STAGING_VALIDATION_SCRIPT_ERROR` at `B_GLOBAL_CONFIG_STAGING_VALIDATION`.
+- Root cause: a PowerShell re-decode expression passed inline `if(...)` inside a .NET call; PowerShell treated `if` as an unavailable command. The worker stopped before `File.Replace` and did not rerun.
+- Repo/source/binary checks passed: current head/remote `47302d0...`, source inputs unchanged since `851ffd56...`; verified binary remains `10279424` bytes / SHA-256 `5ec06821...`, untouched and not rebuilt.
+- Holder and PG identity passed: `127.0.0.1:55061`, PID `30476`, run `04517...`, system id `7672773976043398424`, TTL PID `14212`, and `953` seconds remained at postcheck. No holder mutation occurred.
+- Config before/after remained `e624fc0c...`; FRESH, holder mapping, 21 env keys, zero args, and implicit stdio matched. Exact backup and a staging file were created, but structural validation failed before completion; no atomic backup/switch, and the new command is inactive.
+- External handoff remained `72ec5bfa...`, still READY for the old binary; no backup or atomic replace ran. Discovery/schema/direct-stdio are `NOT_RUN_DUE_TO_CONFIG_STAGING_VALIDATION_FAILURE`; LATTICE tool-call count `0`.
+- This differs from the build timeout because the authoritative recovered binary exists; it differs from the Fresh domain failure because no discovery or tool call started. The first failure was worker-side staging orchestration before replacement.
+- Protected boundaries held: no build/test/binary mutation, provision/PG/process/cleanup/rollback, LATTICE tool call, root or protected-state action, saver/repo commit by worker, merge/deploy/release/default branch, unrelated program, or secret recording.
+- Artifact state: exact before-config backup and an unvalidated staging file exist at the recorded run-specific paths. Do not reuse the staging file.
+- Next action: saver publishes this exact failure. Any separate worker must re-check config/handoff expected hashes and holder TTL >= 8 minutes, create fresh staging, and must not ask this worker to retry.
+- Successor durable save: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Archive boundary: do not archive this failed switch worker until its exact receipt is remotely durable and central later confirms archival.
