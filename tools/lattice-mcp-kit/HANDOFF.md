@@ -280,4 +280,4 @@
 - External handoff was not updated and remained stale at old binary `0ba38c05...`, port `51666`, run `56b85b31...`; attempted update was blocked before PowerShell execution.
 - After revocation, the worker performed only a secret-safe read-only snapshot: no staging/config/finalize/discovery/cleanup/rollback/wrapper/backup/handoff mutation. It will not compete with formal resume.
 - Coordination boundary: do not ask this revoked worker to fix or restore anything. One coordinating owner must validate the current switched config and update the external secret-free handoff without reprovision, cleanup, or rollback.
-- Successor durable save: pending first exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: exact-path commit `086da8ea51f8f4b91ef21193ab22ea37774466fc` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T14:36:51.075Z`.
