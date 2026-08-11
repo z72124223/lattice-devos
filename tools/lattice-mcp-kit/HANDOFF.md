@@ -534,3 +534,10 @@
 - Selected port is outside required exclusions `5432/64272/55432/52575/49156/55061/51666/63238`; no forbidden action is recorded.
 - Saver did not rerun wrapper, connect holder, perform MCP/config/external-handoff/provision/cleanup actions, touch source paths, or read/modify/stage the protected dirty script.
 - First durable saver receipt commit is `c5a2dfb171bd6c028107d18ecaa897eb21caeb42` (tree `0aae2e41334f7ecec89046c2d31cbaacd188a6b1`); live `git ls-remote` equality was verified at `2026-08-11T17:55:22.0043186Z`. Central archived the worker at `2026-08-11T17:58:14.0304470Z`.
+## Switch and exact-four discovery READY — `019ff1f8-6d3e-7a32-b724-c6963ad89208`
+
+- Result is `READY_FOR_FRESH_CODEX_WINDOW / READY_EXACT_FOUR_DISCOVERY_ONLY`; holder `127.0.0.1:56503` / run `faa5b2b496524142b79bdc457b5863bf` remained live with `6005` seconds of TTL at READY handoff.
+- Atomic config switch succeeded from `402505b168c59ab59ca3f62fc3a7fd5a431e1280423389f74aa7a660d7984881` to `be9104230e74a321577147751c02cd40e06729776f53345a4cdbf4d5b7cff272`; backup hash equals the before hash. No rollback or cleanup was executed.
+- The single direct-stdio Discovery invocation exited `0`, negotiated `2025-11-25`, and returned exactly `lattice_delivery_run,lattice_delivery_status,lattice_task_status,lattice_task_submit` with typed schemas. `tool_call_count=0`; no submit/status/delivery call occurred.
+- External secret-free handoff is READY with SHA-256 `1aa6c277d1538ced6cc5976e173517df284135e062021246340edb0b698954f0`.
+- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check; `archived_at_utc=null`.
