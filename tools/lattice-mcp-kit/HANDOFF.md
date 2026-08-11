@@ -605,3 +605,11 @@
 - Focused TDD evidence: expected RED exit `101`, final GREEN exit `0` (`1 passed, 0 failed, 75 filtered`); `cargo fmt --check -p lattice-runtime` and owned-path whitespace checks both exited `0`. Read-only diff-risk check found no issue.
 - Source commit was pushed directly to `feature/p0-clean-seed-rebuild`; first live `git ls-remote` equality and reachability were proven at `2026-08-11T19:37:22.1037268Z`.
 - This is source remediation only. Live acceptance is not claimed; BUILD-ONLY and SWITCH/DISCOVERY remain separate phases. First durable receipt commit is `03cb7e1b9396c66124898c0c0d185e8ba02141d9` (tree `9f41a387f15303d298123c554cec759386258ff9`, parent `0e93c7b8685f7783db274ff36425b82ed3cee4c4`); live `git ls-remote` equality was verified at `2026-08-11T19:38:32.1722859Z`. Receipt now reports `safe_to_archive=true`. Central archived the source worker at `2026-08-11T19:39:25.535Z` (`set_thread_archived_result=success`).
+
+## BUILD-ONLY false-drift failure — `019ff256-b68b-7b42-b4ce-ffad5dc39b48`
+
+- Authoritative receipt version `2` supersedes version `1` by `CENTRAL_FINAL_CLASSIFICATION`. Result is `STOPPED_PREBUILD_FIRST_FAILURE`; failure is `P0_BUILD_ONLY_FALSE_DRIFT_ON_SAVER_PATHS / SOURCE_DRIFT_GATE`.
+- The observed post-source paths are exactly the expected fully qualified saver-owned paths: `tools/lattice-mcp-kit/HANDOFF.md` and `tools/lattice-mcp-kit/WINDOW_LEDGER.jsonl`; they do not alter source/tree build input.
+- Source commit/tree/parent/ancestry gates all passed. Build invocation count is `0`, binary does not exist, target was not created, and worker source/dirty/remote mutation counts are all `0`.
+- No runtime readiness or live acceptance is claimed. A new clean BUILD-ONLY worker must explicitly allow both fully qualified saver paths; this worker must not resume.
+- Two-stage saver remote durability is pending.
