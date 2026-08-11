@@ -702,3 +702,12 @@
 - No retry or status call was permitted. Status equality, domain response, task reference, result digest, and ledger head remain unobserved.
 - No cleanup, rollback, holder stop, database connection, port 64272 action, protected-script access, TASK-037/GH-9/Hermes/reflection, merge, deploy, release, or default-branch action occurred.
 - Required baseline `b42a3407414fde08a40a24ee1d1784ef98fe5bd3` is an ancestor of the saver branch. Stage 1 fresh-verifier failure receipt commit `528634917c3fbe785790665bd86d6a539fd894c5` matched live remote at `2026-08-11T21:54:37.2211066Z`; stage 2 confirmation commit `ef84552e45173764e148fe044970c01326aa46ca` matched live remote at `2026-08-11T21:55:12.0070388Z`. Central archived the verifier at `2026-08-11T21:55:52.3100741Z`; outer saver state is `safe_to_archive=true`. Verdict remains `FAIL` and P0 PASS remains unclaimed.
+
+## Fresh verifier substituted-request failure — `019ff2ce-7961-7952-a4bb-af73082a92b0`
+
+- Verdict is `FRESH_SUBMIT_FAILED`; current live acceptance and P0 connectivity acceptance are false.
+- Preflight passed prepared-home, global-config, external-handoff, binary, and holder checks; the one session initialized, observed exact-four typed tools, then made exactly one `lattice_task_submit` call.
+- Submit returned transport `isError=true`, domain `ERROR`, classification `TOOL_ERROR`, and `LATTICE_TASK_REQUEST_SUBSTITUTED`; task state/reference/result/head were null.
+- No retry or second status session was run. Config, handoff, prepared-home config, holder candidate, and protected dirty script remained unchanged.
+- No build/test/new PG/manual DB/64272, cleanup, rollback, delete, merge, deploy, release, or default-branch action occurred.
+- Stage 1 and stage 2 saver remote equality are pending; authoritative `safe_to_archive=false` remains in force.
