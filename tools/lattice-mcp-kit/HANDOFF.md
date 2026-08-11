@@ -637,3 +637,11 @@
 - The single no-BOM discovery completed exit `0`, protocol `2025-11-25`, exact four typed tools, `tool_call_count=0`, and no retry. Corrected discovery/outer stderr SHA-256 is the standard empty-content digest.
 - No submit/status/delivery call, rollback, cleanup, PG provision/restart/stop, 64272 action, protected-script content read, repository commit, or worker push occurred.
 - Stage 1 durable READY receipt commit is `398f8a8409401849261d4cc74a3733e5f85ffa13`; expected and live remote SHA matched at `2026-08-11T20:16:59.4168533Z`. Stage 2 confirmation commit `413a86327d2845f56b88edb7406581d2356aed85` and fresh live remote SHA matched at `2026-08-11T20:17:36.6946216Z`, so the separate saver state is `safe_to_archive=true`; authoritative and correction receipts remain unchanged. Central archived the worker at `2026-08-11T20:18:02.508Z` (`set_thread_archived_result=success`).
+
+## Fresh verifier first failure — `019ff27b-ef58-78e2-b692-fe18f433541b`
+
+- Window ran from `2026-08-11T20:20:46.000Z` to `2026-08-11T20:29:17.335Z` (`511335 ms`). Overall result is `FIRST_FAILURE_STOPPED`; current live acceptance and P0 connectivity acceptance are both false.
+- Preflight passed for source `0e93c7b8685f7783db274ff36425b82ed3cee4c4`, binary `cf7b46cb4989253df8c36b5933e5ee5bf9a1b1e70ae01e89807045d8c0210f94`, config `31a85201bd24b600e88dac786b7d93fe4af27acd20f744f140834b35aa12bf39`, READY handoff `dd8a903b7a528417b7d69c771b5bf6c55b77efa14222cd20466f5c43b96a4b9f`, and live holder `127.0.0.1:50205` / run `9f27d3ac638343a6a64418a5c7987160`.
+- Session 1 completed exact-four discovery and made exactly one `lattice_task_submit`. Transport returned `isError=false`, but domain `status=FAILED`, `task_state=FAILED`, and `result_digest=null` for new task ref `470d3e1085acae6fa11ee9ff8b79cd5c22769e2f386fe9056bf090c87d054482`.
+- First failure is `LATTICE_FRESH_SUBMIT_DOMAIN_FAILED / C_TASK_SUBMIT_DOMAIN`. Session 2 and independent status equality were correctly `NOT_RUN`; no retry, delivery call, mutation, cleanup, rollback, or protected-script content access occurred.
+- Two-stage saver durability is pending; `safe_to_archive=false` until both fresh live `git ls-remote` equalities pass.
