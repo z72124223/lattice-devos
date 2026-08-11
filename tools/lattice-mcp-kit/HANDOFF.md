@@ -201,5 +201,5 @@
 - Secret-free handoff `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-p0-live-handoff.json` has SHA-256 `3e615a8edf51c82146a89c82dfab24febf3196700eec72b4d416600711e845fa` and status `READY_FOR_FRESH_CODEX_WINDOW`; it contains no new credential.
 - Not done: no `lattice_task_submit`, `lattice_task_status`, or `lattice_delivery_run`; no verifier was created. Central should immediately create one genuinely fresh Codex verifier after the first durable remote checkpoint.
 - Repository boundary: protected dirty `scripts/test-task038-four-tool-acceptance.ps1` remains unstaged and unmodified. P0 only; no TASK-037/GH-9/Hermes/reflection/reset/clean/PR/merge/deploy/release/default-branch change.
-- Successor durable save: pending first exact-path commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: first exact-path commit `b4d81abcdc9d7740517304696f0fd5641604a8e7` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T13:25:15.789Z`. Central was signaled immediately without waiting for this second-stage confirmation.
 - Archive boundary: holder/config writer must remain unarchived until its exact receipt is remotely durable and central later confirms archival. The future verifier is independently owned.
