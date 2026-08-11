@@ -336,3 +336,18 @@
 - Source publication: commit `851ffd56e92e32abdf3a5ae9ab7374297ebe7f10` was pushed unchanged to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` equality was proven at `2026-08-11T15:27:20.2257975Z` before saver receipt commits.
 - Saver durable receipt: exact-path commit `a31f1c79f5134eb018fcf6288276e0a393ee0c4c` (tree `a9d3ee5c10450eed040f1836a9117e43bdd9e565`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:28:34.0000519Z`.
 - Archive boundary: central confirmed this source worker archived after remote confirmation `f61110587526f6f563056190e532e8760af5eda8`; saver immediately captured `archived_at_utc=2026-08-11T15:29:45.3139584Z`. This archive does not authorize runtime materialization/holder/config/root/cleanup/rollback mutation.
+
+## Runtime materialization first-build timeout — `019ff171-87e8-7560-ab8e-38025d759db3`
+
+- Result: bounded failure, never READY; started `2026-08-11T15:29:48.0000000Z`, finished `2026-08-11T15:31:27.1895931Z`, elapsed `99.19 s`; failure `P0_MATERIALIZATION_BUILD_EXECUTOR_TIMEOUT` at `A_BUILD_FIRST_ATTEMPT`.
+- Source binding passed: commit `851ffd56...`, tree `3c31ea3f...`; preflight HEAD/remote `f611105...`, receipt HEAD/remote `74041cc...`, with advances confined to saver ledger/handoff. Runtime build inputs exactly matched source.
+- The first isolated cargo build targeted `lattice-isolated-targets/latticed-851ffd56-20260811T1532Z`; executor reported a `5.024 s` timeout, wrapper exit `124`, cargo completion code unknown. Target activity spanned `7.685 s`, producing `542` files / `193126147` bytes, but no `latticed.exe`; no cargo/rustc residual process remained.
+- Holder stage was not entered. Minimal post-failure evidence only: PID `30476` existed and owned the sole `127.0.0.1:55061` listener; TTL/identity/marker/psql validation was `NOT_RUN`.
+- Config remained byte-identical at `e624fc0c...`; no backup, structural validation, staging, or atomic switch ran. Fresh/PG/credential/21-env mapping was not separately read because stage B was never entered.
+- External handoff remained byte-identical at `72ec5bfa...`; no backup or atomic replace ran. Discovery/schema/direct-stdio were `NOT_RUN_DUE_TO_BUILD_FAILURE`; LATTICE tool-call count `0`.
+- Test evidence: locked no-deps cargo metadata exited `0`; build is `FAIL_EXECUTOR_TIMEOUT_NO_CARGO_COMPLETION_CODE`; cargo test/full suite/npm/discovery are `NOT_RUN`.
+- This is distinct from `ROOT_MUST_BE_ABSENT/WORKSPACE_PREPARE`: it stopped before runtime/holder/config/discovery, with no root deletion/adoption/reuse.
+- Protected boundaries held: protected script/saver/source/config untouched by worker; no repo commit/push, live tool call, holder/PG/protected-state/root cleanup action, merge/deploy/release/default-branch change, or unrelated program.
+- Next action: save this failure only. Any retry requires a newly authorized worker/turn, a fresh isolated target, and a long enough execution window; never reuse this partial target. Do not ask this worker to rerun.
+- Successor durable save: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Archive boundary: do not archive this failed worker until its exact receipt is remotely durable and central later confirms archival.
