@@ -661,3 +661,11 @@
 - Holder preflight passed with `3523` seconds remaining. Existing Codex-home config remained `365` bytes / `7b6fe3b1...`; required canonical config remains `174` bytes / `1a9bc2b3...`.
 - Worker made no repository edit/commit/push, Codex or MCP launch, database action, holder lifecycle action, source edit, build, test, 64272 action, cleanup, or rollback. The protected dirty script was not read or modified.
 - Stage 1 durable failure receipt commit is `40110ec2da127f6494c5cdf4c22745b659c4f271`; expected and live remote SHA matched at `2026-08-11T21:10:14.8090160Z`. Stage 2 confirmation commit `ed80d3a1fc6d4292fbd2ab5e0f48e368b60f37ca` and fresh live remote SHA matched at `2026-08-11T21:10:54.4549355Z`, so outer saver state is `safe_to_archive=true`; authoritative `safe_to_archive=false` and all receipt fields remain unchanged. This remains a first-failure receipt, not P0 PASS. Central archived the worker at `2026-08-11T21:11:22.1463662Z` (`set_thread_archived_result=success`).
+
+## HOME-PREPARE pre-create alias failure — `019ff2ab-0cb3-71e1-be39-fd7eaf8e1fcc`
+
+- Result is `FIRST_FAILURE_STOPPED` and classification is `HOME_PREPARE_FAILED_BEFORE_PROVISION`; neither `HOME_PREPARED_ONLY` nor P0 PASS is claimed.
+- The first sequential pre-create command parsed and ran read-only checks, but short name `H` resolved to PowerShell alias `Get-History`; parameter `Id` rejected the holder marker path. Execution stopped before acceptance-id generation or any filesystem mutation.
+- Previous failed helper artifact was not read, reused, invoked, modified, or deleted. No new-home path or files were created; old home, global config, external handoff, holder, and canonical source evidence remained unchanged.
+- Worker made no repository edit/commit/push, Codex/MCP/DB/64272 action, holder lifecycle action, build, test, cleanup, rollback, or protected-script content access.
+- Two-stage saver durability is pending; `safe_to_archive=false` until both fresh live `git ls-remote` equalities pass.
