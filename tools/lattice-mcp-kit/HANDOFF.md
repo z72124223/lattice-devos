@@ -775,4 +775,4 @@
 - `cargo build -p lattice-runtime --bin latticed --locked` passed in one invocation against source commit `0b59b79a60208be364a6f5c43c442b900c245e7d`; build inputs were source-bound with no source drift.
 - The fresh isolated binary is 10,278,400 bytes with SHA-256 `c79e2ee9bfe1abec5cf38405c6cca721157feb6b69ce578eba0c1c336f32004f`; it was not launched. No target reuse, retry, or prior-target deletion occurred.
 - Build head `00dd4d0c7ff87c1606362a87f6a9bcb12a0df24d` differs from the source only through the two saver-owned receipt paths. Protected dirty script remained preserved.
-- Receipt stage 1 and stage 2 saver equalities are pending; BUILD_ONLY PASS does not claim runtime or P0 live acceptance.
+- Receipt stage 1 commit `13de8143e3354a03ff9090c6de50f17d05fca3bb` equals the fresh remote read at `2026-08-11T23:17:01.3739152Z`. Stage 2 is this confirmation-only saver advance; BUILD_ONLY PASS does not claim runtime or P0 live acceptance.
