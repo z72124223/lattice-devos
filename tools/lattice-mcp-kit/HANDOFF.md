@@ -173,4 +173,5 @@
 - External secret-free handoff records rollback and cleanup targets; retain execution home and fixture root through verifier/holder lifetime.
 - Boundary truth: two broad `rg` searches scanned the protected script because Windows exclusion globs did not apply; no matching content was displayed, and the file was not edited or staged. Subsequent searches were explicit-file only.
 - Not done: no submit/status/delivery_run, PostgreSQL connect/write/stop/restart, Rust source change, push/PR/merge/deploy/release/default-branch change.
-- Successor durable save: first exact-path commit `c113aa3a1cc16946476d0454d696916a43d922b5` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:59:12.337Z`; `archived_at_utc=null`.
+- Successor durable save: first exact-path commit `c113aa3a1cc16946476d0454d696916a43d922b5` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:59:12.337Z`; central confirmed `archived_at_utc=2026-08-11T13:01:17.5775961Z`.
+- Archive boundary: central archived only FRESH config remediation `019ff0d5-7553-7bd1-8ee1-9db36123e61a`. Verifier 3 `019ff0e7-f650-7922-b014-78a4fb5ed020` remains active and must not be archived or modified by this saver.
