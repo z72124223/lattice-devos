@@ -660,4 +660,4 @@
 - The single authorized helper invocation exited at PowerShell parse time before any helper statement ran; body execution, retry, new-home creation, config switch, handoff update, rollback, and cleanup all remained false or zero.
 - Holder preflight passed with `3523` seconds remaining. Existing Codex-home config remained `365` bytes / `7b6fe3b1...`; required canonical config remains `174` bytes / `1a9bc2b3...`.
 - Worker made no repository edit/commit/push, Codex or MCP launch, database action, holder lifecycle action, source edit, build, test, 64272 action, cleanup, or rollback. The protected dirty script was not read or modified.
-- Two-stage saver durability is pending; `safe_to_archive=false` until both fresh live `git ls-remote` equalities pass.
+- Stage 1 durable failure receipt commit is `40110ec2da127f6494c5cdf4c22745b659c4f271`; expected and live remote SHA matched at `2026-08-11T21:10:14.8090160Z`. This saver-only update is the stage 2 confirmation; after its fresh live `git ls-remote` equality passes, outer saver state is `safe_to_archive=true`. This remains a first-failure receipt, not P0 PASS; authoritative receipt fields remain unchanged.
