@@ -186,5 +186,5 @@
 - Cleanup and rollback paths were present and excluded protected port `64272`; neither cleanup nor rollback was executed. The verifier did not connect, stop, or delete protected port `64272`, and did not read, modify, or stage the protected script.
 - Secret-redaction incident: a metadata inspection emitted raw MCP environment values in tool output before filtering; the durable receipt intentionally records only key names and no values.
 - Candidate remains active. Do not retry from this verifier and do not stop any PostgreSQL holder. New holder/config writer `019ff0eb-485f-7ba0-94dc-d7903c385287` remains active and must not be archived or modified by this saver.
-- Successor durable save: pending first exact-path commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: first exact-path commit `39913f829a36075e0a2daaa91ee3616bc5515543` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T13:04:44.010Z`.
 - Archive boundary: verifier 3 must not be archived until its exact receipt is remotely durable and central confirms archival.
