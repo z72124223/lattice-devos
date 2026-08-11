@@ -98,14 +98,14 @@
 
 ## Watcher checkpoint — `019ff0a7-f47c-7bc2-a343-439562131b18`
 
-- Window status: `completed_pending_central_save`; started `2026-08-11T11:51:45.6793391+00:00`, finished `2026-08-11T12:13:51.1399058+00:00`, elapsed `1325461 ms`.
+- Window status: `completed`; started `2026-08-11T11:51:45.6793391+00:00`, finished `2026-08-11T12:13:51.1399058+00:00`, elapsed `1325461 ms`.
 - Preflight 1: `PASS` — `handoff_status=READY_FOR_FRESH_CODEX_WINDOW`; `global_mcp.switch_active=true`.
 - Preflight 2: `PASS` — current MCP `enabled=true`; `transport=stdio`; `command_matches_candidate=true`.
 - Preflight 3: `PASS` — fresh PostgreSQL port `63238` is not `64272`; TTL valid; PID `760` and its listener exist and ownership matches.
 - Created fresh verifier: `019ff0bd-14c1-7d40-b104-65c4fdd6fc82`; watcher then stopped monitoring it.
 - Runtime source commit: `2b2f112bc3289f206bc85968db6a39ee6bdf576e`; handoff/current Git head at watcher completion: `81fee735ffa935b00966c0ba2a8c283f64384106`.
 - Mutation boundary: no repository, global MCP, or PostgreSQL change; no rollback. The verifier and Live Integration remain independently active.
-- Successor durable save: first exact-path commit `6dedddbc2805da59d6e502f8f1bfdab22bf777fc` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:16:13.448Z`; `archived_at_utc=null`.
+- Successor durable save: first exact-path commit `6dedddbc2805da59d6e502f8f1bfdab22bf777fc` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:16:13.448Z`; central confirmed `archived_at_utc=2026-08-11T12:18:15.787Z`.
 
 ## Live Integration checkpoint — `019ff08e-f969-75e3-a3ba-bbd3b096ed00`
 
@@ -116,4 +116,5 @@
 - Durable result identity: task ref `ab8724dd51419cf190ad491f1f8973894bca56dc0c3aed55ebc3723f6214177d`; result digest `c8d4cc65e7e4b4834276900afae08eff1223d8f488251a69283126ca74689c22`; ledger head `21098246fb32a1a1beb39a18cafef491c89cfa4a4e84bb9fb00b550a4bfe3c0e`.
 - Reversible global MCP switch is active; fresh verifier `019ff0bd-14c1-7d40-b104-65c4fdd6fc82` remains independently active.
 - Secret-free artifacts: `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-p0-live-handoff.json` and backup projections under `C:\Users\f7212\.codex\backups\lattice-p0-ae02434e9be9465c8aec29a5ce80eef8`. No opaque configuration content or secret is recorded here.
-- Successor durable save: first exact-path commit `6dedddbc2805da59d6e502f8f1bfdab22bf777fc` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:16:13.448Z`; `archived_at_utc=null`.
+- Successor durable save: first exact-path commit `6dedddbc2805da59d6e502f8f1bfdab22bf777fc` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:16:13.448Z`; central confirmed `archived_at_utc=2026-08-11T12:18:15.787Z`.
+- Archive boundary: central archived only watcher `019ff0a7-f47c-7bc2-a343-439562131b18` and Live Integration `019ff08e-f969-75e3-a3ba-bbd3b096ed00`. Fresh verifier `019ff0bd-14c1-7d40-b104-65c4fdd6fc82` and the next runtime remediation task remain active.
