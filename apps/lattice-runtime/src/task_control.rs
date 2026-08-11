@@ -29,6 +29,11 @@ const RESULT_ACTION: &str = "TASK_RESULT";
 const RESULT_REASON: &str = "TASK038_FULL_CHAIN_RESULT";
 const RESULT_COMMAND_ID: &str = "task038-result";
 
+#[must_use]
+pub(crate) fn task_admission_command_id(client_request_id: &str) -> String {
+    format!("mcp-submit:{client_request_id}")
+}
+
 /// Live Task lifecycle adapter over the same authoritative Task Ledger stream
 /// used by the delivery, graph, Hermes, and memory chain.
 pub struct PostgresTaskLifecycle {
@@ -170,6 +175,29 @@ impl PostgresTaskLifecycle {
         })
     }
 
+    /// Returns the exact durable TaskCreated command after replay validation.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for a missing, corrupt, or cross-bound admission stream.
+    pub(crate) fn verified_admission_command_id(
+        &mut self,
+        binding: &SubjectBinding,
+    ) -> TaskLifecycleResult<String> {
+        let ingress_peer = self.required_ingress_peer()?;
+        let stream = self.load_verified(binding)?;
+        let evidence = replay_lifecycle(&stream, binding, &ingress_peer)?;
+        if !evidence.admitted() {
+            return Err(rejected("LATTICE_TASK_ADMISSION_MISSING"));
+        }
+        stream
+            .events()
+            .iter()
+            .find(|event| event.kind() == LedgerEventKind::TaskCreated)
+            .map(|event| event.command_id().as_str().to_owned())
+            .ok_or_else(|| corrupt("LATTICE_TASK_ADMISSION_MISSING"))
+    }
+
     fn execute(
         &mut self,
         binding: &SubjectBinding,
@@ -205,7 +233,7 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
         let ingress_peer = self.required_ingress_peer()?;
         let stream = self.load_verified(binding)?;
         let current = replay_lifecycle(&stream, binding, &ingress_peer)?;
-        let command_id = format!("mcp-submit:{client_request_id}");
+        let command_id = task_admission_command_id(client_request_id);
         if let Some(created) = stream
             .events()
             .iter()

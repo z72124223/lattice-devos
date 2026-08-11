@@ -2653,7 +2653,51 @@ fn controlled_task_request<H: FullChainHermesPort>(
     .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))
 }
 
-fn task_public_status(evidence: &TaskLifecycleEvidence) -> Value {
+fn controlled_task_reference(
+    binding: &SubjectBinding,
+    admission_command_id: &str,
+    run_id: &str,
+    ingress_profile_digest: &ContentDigest,
+) -> Result<ContentDigest, LatticedError> {
+    let value = CanonicalValue::Object(vec![
+        (
+            "admission_command_id".to_owned(),
+            CanonicalValue::String(admission_command_id.to_owned()),
+        ),
+        (
+            "ingress_profile_digest".to_owned(),
+            CanonicalValue::String(ingress_profile_digest.as_str().to_owned()),
+        ),
+        (
+            "run_id".to_owned(),
+            CanonicalValue::String(run_id.to_owned()),
+        ),
+        (
+            "task_spec_digest".to_owned(),
+            CanonicalValue::String(binding.task_spec_digest().as_str().to_owned()),
+        ),
+    ]);
+    digest("lattice.task.public-reference", &value)
+}
+
+fn verified_controlled_task_reference<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    binding: &SubjectBinding,
+) -> Result<ContentDigest, LatticedError> {
+    let mut lifecycle =
+        task_lifecycle(core).map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
+    let admission_command_id = lifecycle
+        .verified_admission_command_id(binding)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
+    controlled_task_reference(
+        binding,
+        &admission_command_id,
+        core.delivery.database.run_id(),
+        core.task_ingress_peer.profile_digest(),
+    )
+}
+
+fn task_public_status(evidence: &TaskLifecycleEvidence, task_ref: &ContentDigest) -> Value {
     let task_state = if evidence.admitted() {
         evidence.state().as_str()
     } else {
@@ -2686,7 +2730,7 @@ fn task_public_status(evidence: &TaskLifecycleEvidence) -> Value {
         "result_digest": evidence.result_digest().map(ContentDigest::as_str),
         "schema_version": "lattice.task.status.v1",
         "status": status,
-        "task_ref": evidence.binding().task_spec_digest().as_str(),
+        "task_ref": task_ref.as_str(),
         "task_state": task_state,
     })
 }
@@ -2778,6 +2822,7 @@ fn verify_completed_writer_history(
 fn verified_task_status<H: FullChainHermesPort>(
     core: &mut FullChainCore<H>,
     evidence: &TaskLifecycleEvidence,
+    task_ref: &ContentDigest,
 ) -> Result<Value, LatticedError> {
     if evidence.state() == TaskState::Completed {
         let mut lifecycle =
@@ -2795,7 +2840,7 @@ fn verified_task_status<H: FullChainHermesPort>(
             return Err(LatticedError::new(LatticedErrorKind::ReceiptMismatch));
         }
     }
-    Ok(task_public_status(evidence))
+    Ok(task_public_status(evidence, task_ref))
 }
 
 const fn controlled_task_error_code(error: &ControlledTaskOrchestratorError) -> &'static str {
@@ -2885,7 +2930,9 @@ impl<H: FullChainHermesPort> FullChainService<H> {
             "delivery-run-controlled-compatibility",
             ExistingCompletionPolicy::AcceptOrExecute,
         )?;
-        verified_task_status(core, &evidence)
+        let task_ref = verified_controlled_task_reference(core, evidence.binding())
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        verified_task_status(core, &evidence, &task_ref)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
         core.run_task_downstream_json(entry, &binding)
             .map_err(|error| ToolExecutionError::new(error.code()))
@@ -3126,7 +3173,9 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             arguments.client_request_id(),
             existing_completion_policy,
         )?;
-        verified_task_status(&mut core, &evidence)
+        let task_ref = verified_controlled_task_reference(&core, evidence.binding())
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        verified_task_status(&mut core, &evidence, &task_ref)
             .map_err(|error| ToolExecutionError::new(error.code()))
     }
 
@@ -3139,15 +3188,25 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             .lock()
             .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Transport.code()))?;
         let binding = core.submission.binding().clone();
-        if arguments.task_ref() != binding.task_spec_digest().as_str() {
-            return Err(ToolExecutionError::new("LATTICE_TASK_REFERENCE_REJECTED"));
-        }
         let mut lifecycle =
             task_lifecycle(&core).map_err(|error| ToolExecutionError::new(error.code()))?;
         let evidence = lifecycle
             .load(&binding)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
-        verified_task_status(&mut core, &evidence)
+        let admission_command_id = lifecycle
+            .verified_admission_command_id(&binding)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let task_ref = controlled_task_reference(
+            &binding,
+            &admission_command_id,
+            core.delivery.database.run_id(),
+            core.task_ingress_peer.profile_digest(),
+        )
+        .map_err(|error| ToolExecutionError::new(error.code()))?;
+        if arguments.task_ref() != task_ref.as_str() {
+            return Err(ToolExecutionError::new("LATTICE_TASK_REFERENCE_REJECTED"));
+        }
+        verified_task_status(&mut core, &evidence, &task_ref)
             .map_err(|error| ToolExecutionError::new(error.code()))
     }
 }
@@ -5373,6 +5432,55 @@ mod tests {
     }
 
     #[test]
+    fn fresh_task_reference_binds_client_request_and_does_not_reuse_fixed_spec_digest() {
+        let binding = fixed_gateway_submission()
+            .expect("fixed controlled canary")
+            .binding()
+            .clone();
+        let profile_digest = test_content_digest('a');
+        let first = controlled_task_reference(
+            &binding,
+            "mcp-submit:fresh-request-1",
+            "fresh-run-1",
+            &profile_digest,
+        )
+        .expect("first fresh task reference");
+        let retry = controlled_task_reference(
+            &binding,
+            "mcp-submit:fresh-request-1",
+            "fresh-run-1",
+            &profile_digest,
+        )
+        .expect("deterministic fresh task reference retry");
+        let second = controlled_task_reference(
+            &binding,
+            "mcp-submit:fresh-request-2",
+            "fresh-run-1",
+            &profile_digest,
+        )
+        .expect("second fresh task reference");
+
+        assert_eq!(retry, first);
+        assert_ne!(&first, binding.task_spec_digest());
+        assert_ne!(&second, binding.task_spec_digest());
+        assert_ne!(second, first);
+        let public_status = task_public_status(
+            &TaskLifecycleEvidence::new(
+                binding,
+                true,
+                TaskState::Executing,
+                test_content_digest('7'),
+                None,
+            ),
+            &first,
+        );
+        assert_eq!(
+            public_status.get("task_ref").and_then(Value::as_str),
+            Some(first.as_str())
+        );
+    }
+
+    #[test]
     fn merging_recovery_requires_exact_acquired_or_released_writer_history() {
         assert!(expected_merging_writer_history(true, 1, 1, 1));
         assert!(expected_merging_writer_history(false, 1, 2, 2));
@@ -5459,7 +5567,7 @@ mod tests {
             test_content_digest('7'),
             None,
         );
-        let status = task_public_status(&evidence);
+        let status = task_public_status(&evidence, &test_content_digest('9'));
 
         assert_eq!(
             status.get("status").and_then(Value::as_str),
