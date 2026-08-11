@@ -753,3 +753,12 @@
 - Transport succeeded with `isError=false` and exact-six structured content, but domain `status=FAILED`, `task_state=FAILED`, and `result_digest=null`; acceptance gate C failed.
 - Conditional status session was not run because submit did not complete. No delivery calls, cleanup, rollback, holder/candidate stop, config change, PostgreSQL connection, port 64272 action, source edit, or protected-script access occurred.
 - Stage 1 receipt commit `595695178c870262db4a0b28e865fff3ebf7868a` matched fresh live remote at `2026-08-11T22:44:01.2452789Z`; stage 2 confirmation commit `b2de62a11d076bfdf03749453544e1b5a8884c1f` matched fresh live remote at `2026-08-11T22:44:46.0167341Z`. Central archived the verifier at `2026-08-11T22:45:28.7676981Z`; outer saver state is `safe_to_archive=true`. Authoritative verdict remains `FRESH_SUBMIT_DOMAIN_FAILED`, status remains not run, and current Fresh live acceptance PASS remains unclaimed.
+
+## Server-owned fresh-submit failure diagnosis — `019ff300-9659-7330-ba4c-256641621d7f`
+
+- Diagnosis outcome is `EXACT_FIRST_FAILURE_DIAGNOSED` with known verdict `CODEX_SCHEMA_OUTPUT_EXISTS`; current Fresh live acceptance PASS remains unclaimed.
+- Durable stream sequence 6 is the first failure: stage `CODEX`, kind `Unavailable`, certainty `Known`. Transport, PostgreSQL credentials, workspace preparation, launcher, app-server turn, and model start are excluded as initiating causes.
+- Root cause is the static, pre-existing 275-file schema bundle being passed unchanged as `schema_output_dir`; the fail-closed identity preflight requires that output path to be absent.
+- Minimal remediation is proposed only: derive one task-scoped absent schema-output child from the deterministic delivery root while preserving the existing fail-closed check and the current bundle. No remediation was implemented and no tests were run.
+- Diagnosis used read-only PostgreSQL sessions with zero SQL mutations. No MCP/Codex/submit/status/delivery call, source/config/handoff/holder mutation, cleanup, rollback, or protected-script access occurred.
+- Stage 1 and stage 2 saver equality are pending. Authoritative `safe_to_archive=false` remains unchanged.
