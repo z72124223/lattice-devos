@@ -790,3 +790,10 @@
 - Config changed once from SHA-256 `f76de812e18dde1ab20ef9eda613146488b363423c40785bbfb23898c6c20c55` to `7859634f68744d3244768eb50af29434a8b40974ebf56af9540bf068f4baea40`; all environment assignments and non-command semantics remained byte-equivalent, with no rollback.
 - External handoff advanced atomically to `SCHEMA_OUTPUT_FIX_BINARY_SWITCHED_AWAITING_SAVER` with SHA-256 `98fb8291432958d6432a342dab9d875d9551d9833c5dc5bcf8bb5dc3032f6ce8`; holder `127.0.0.1:58503` was live at the worker's final preflight.
 - Worker made no MCP, PostgreSQL, port 64272, source/build/test, cleanup, rollback, merge, deploy, or release action. Receipt stage 1 commit `e408e25107cbf146e0e63de9278223c4cdd59055` and confirmation stage 2 commit `f3c5dc5c1f5116d77a6eba9d213531c21a5279b6` each equal their fresh remote reads. Central archived the worker at `2026-08-11T23:32:46.2330098Z`; outer saver `safe_to_archive=true`. This remains a binary-switch receipt, not a P0 live-acceptance claim.
+
+## Discovery-only pre-launch failure — `019ff32b-b25b-74c2-9220-43eebafb886e`
+
+- Worker stopped at `DISCOVERY_WRAPPER_INVOCATION_SUBMISSION` with `FAILED_PRE_LAUNCH` / `EXECUTION_POLICY_REJECTED`: the shell command was blocked by policy before wrapper invocation.
+- Preflight was incomplete; wrapper, latticed, initialize, tools/list, and tool-call counts are all zero. Protocol and exact-four discovery remain `NOT_RUN`; no retry occurred.
+- No config/handoff/source/binary mutation, PostgreSQL connection/provision, port 64272 touch, cleanup, rollback, ephemeral environment file, raw credential output, or protected-script access occurred.
+- Receipt stage 1 and stage 2 saver equalities are pending; authoritative `safe_to_archive=false` and no discovery/P0 success is claimed.
