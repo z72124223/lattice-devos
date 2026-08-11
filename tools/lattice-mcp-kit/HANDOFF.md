@@ -87,11 +87,11 @@
 
 ## Successor saver checkpoint — predecessor window `019ff0ab-96b4-7ca0-8a0d-677b864961e3`
 
-- Source window status: `completed_pending_central_save`; started `2026-08-11T11:53:27.000Z`, finished `2026-08-11T12:06:54.695Z`, elapsed `807695 ms`.
+- Source window status: `completed`; started `2026-08-11T11:53:27.000Z`, finished `2026-08-11T12:06:54.695Z`, elapsed `807695 ms`.
 - Source scope: saved five completed P0 window receipts/assets to GitHub, verified remote equality, created Draft PR `#11`, recorded central archive evidence, and preserved active-task boundaries.
 - Source artifacts: `tools/lattice-mcp-kit/WINDOW_LEDGER.jsonl`; `tools/lattice-mcp-kit/HANDOFF.md`.
 - Source final local commit/tree: `eecd7a85348f34d7b119979d608ec23baace5156` / `5c5059464651fea15728613d637cd67e1366774d`.
 - Remote branch: `feature/p0-clean-seed-rebuild`; Draft PR: <https://github.com/z72124223/lattice-devos/pull/11>.
-- Successor durable save: first exact-path commit `f65e7036adc1428b06a47efae80c1ce315cf135d` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:09:53.579Z`; `archived_at_utc=null`.
-- Archive boundary: after remote confirmation, send the exact safe-to-archive receipt for this predecessor window to the central coordinator. Do not archive or modify Live Integration, its watcher, or a future fresh verifier.
+- Successor durable save: first exact-path commit `f65e7036adc1428b06a47efae80c1ce315cf135d` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:09:53.579Z`; central confirmed `archived_at_utc=2026-08-11T12:11:17.979Z`.
+- Archive boundary: central archived only predecessor window `019ff0ab-96b4-7ca0-8a0d-677b864961e3`. Live Integration, its watcher, and a future fresh verifier remain active and must not be archived or modified by this saver.
 - Protected dirty boundary: keep `scripts/test-task038-four-tool-acceptance.ps1` unstaged, unread, and unmodified; no reset or clean.
