@@ -783,3 +783,10 @@
 - No retry, staging, backup, atomic replace, config change, external-handoff update, PostgreSQL connection, MCP launch/call, or port 64272 action occurred.
 - Binary, source, and holder verification remained incomplete or not reached; no success or P0 claim is made. Central may dispatch a fresh worker only if a new retry is authorized.
 - Receipt stage 1 commit `2bb405c3dc3ab17def4c1ee7a0f1c6a76f5e520e` and confirmation stage 2 commit `94d05224a75b3227f38bf61f931538de505781ff` each equal their fresh remote reads. Central archived the pre-mutation failure at `2026-08-11T23:23:16.1766298Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## Binary-switch-only success — `019ff322-f1cb-7100-86db-404dfdb1666b`
+
+- Worker atomically switched the configured command to the source-remediated binary SHA-256 `c79e2ee9bfe1abec5cf38405c6cca721157feb6b69ce578eba0c1c336f32004f`; the source tree is `d2a32044c3aaeb04552e2a0ac77d6033072b3f79`.
+- Config changed once from SHA-256 `f76de812e18dde1ab20ef9eda613146488b363423c40785bbfb23898c6c20c55` to `7859634f68744d3244768eb50af29434a8b40974ebf56af9540bf068f4baea40`; all environment assignments and non-command semantics remained byte-equivalent, with no rollback.
+- External handoff advanced atomically to `SCHEMA_OUTPUT_FIX_BINARY_SWITCHED_AWAITING_SAVER` with SHA-256 `98fb8291432958d6432a342dab9d875d9551d9833c5dc5bcf8bb5dc3032f6ce8`; holder `127.0.0.1:58503` was live at the worker's final preflight.
+- Worker made no MCP, PostgreSQL, port 64272, source/build/test, cleanup, rollback, merge, deploy, or release action. Receipt stage 1 and stage 2 saver equalities are pending; this is not a P0 live-acceptance claim.
