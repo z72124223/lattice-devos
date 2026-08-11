@@ -589,3 +589,11 @@
 - The one no-BOM Discovery child exited `2` before initialize response with `LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED / DISCOVERY_PROCESS_STARTUP`. This proves the prior leaf predicate was corrected but does not isolate the later predicate; no retry or tool call occurred.
 - External secret-free handoff remains `DISCOVERY_FAILED_PRESERVED` with SHA-256 `4eb355e904a0a9fa1612a74e89307d98fe66de57b1a0c5f1200f4e22298495a0`; holder `127.0.0.1:56503` remained live.
 - No source/binary/PG mutation, submit/status/delivery, rollback, cleanup, root reuse/delete, 64272 or protected-script content access occurred. First durable receipt commit is `c040dda421e36ed110b5853502800ee38efb568d` (tree `1a3f40c2caa69e71a276f8a371fc3eb371a7e25f`); live `git ls-remote` equality was verified at `2026-08-11T19:13:43.2673017Z`. Central archived the worker at `2026-08-11T19:14:38.915Z`.
+
+## Official-bundle next-predicate diagnosis — `019ff23f-faae-71c2-9cef-0cb7eb8034d7`
+
+- Diagnosis outcome is `PASS_OFFLINE_EXACT_NEXT_PREDICATE_IDENTIFIED`, certainty `KNOWN`; the exact next mismatch is `!is_lower_hex(fixture_id, 32)` at `composition.rs:807-808`.
+- The exact `delivery` leaf now passes, but its parent `P0R-<16-lowerhex>` is not the required 32-character lowercase hexadecimal fixture ID. The public failure remains `LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED / DISCOVERY_PROCESS_STARTUP`.
+- LocalAppData candidates can meet the `<=220` path budget, but root-only config cannot also equal the unchanged launcher target and fixed seven-file bundle policy. The smallest short-root-preserving remediation is narrow source decoupling using existing launcher ancestry while retaining every fixed identity check.
+- This diagnosis was read-only: no binary/MCP, config/root/handoff/source, PG/64272, rollback/cleanup, protected-script content, merge/deploy/release/default-branch, or third-path action occurred.
+- Saver durability metadata is pending the first remote-equal commit.
