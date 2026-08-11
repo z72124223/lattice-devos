@@ -620,4 +620,4 @@
 - Exactly one locked isolated build completed exit `0` in `42752 ms`. Materialized binary is `10277376` bytes with SHA-256 `cf7b46cb4989253df8c36b5933e5ee5bf9a1b1e70ae01e89807045d8c0210f94`.
 - The binary was not launched. The worker made no repository commit/push and did not edit ledger/HANDOFF; the protected dirty path was observed only by Git status.
 - Runtime readiness and live acceptance are not claimed. The next phase remains a separate SWITCH/DISCOVERY worker.
-- Two-stage saver remote durability is pending.
+- Stage 1 durable receipt commit is `16672a223f00fb61a874de65f5c1a760e7ad707c`; expected and live remote SHA matched at `2026-08-11T19:49:34.6584901Z`. This stage-2 confirmation commit carries the separate saver `safe_to_archive=true` state only if its own fresh `git ls-remote` equality passes; the authoritative BUILD_ONLY receipt remains unchanged.
