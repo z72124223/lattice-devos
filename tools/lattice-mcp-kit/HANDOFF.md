@@ -472,4 +472,4 @@
 - Preflight matched config `63881ec515b9a8f8959e0084c2ff9e249b9636ff648f2f0fc477571c8365b467`, exact binary, stdio/zero args, 21 key names only, and READY holder `127.0.0.1:49156` / PID `29688` / TTL PID `3892`. No raw MCP env or credential value is recorded in this receipt.
 - No initialized notification, tools/list, tools/call, submit/status/delivery, retry, verifier, build/test, PG/config/handoff/staging/backup/source/saver-file mutation, cleanup/rollback, or `64272` action occurred. One earlier read-only tool-output env exposure incident is disclosed; its raw values are excluded.
 - Next action: any discovery continuation or fresh verifier requires a separately bounded window. This diagnosis must not be promoted to discovery readiness.
-- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check.
+- Successor durable save: exact-path commit `21515c1b9af1c15e81df6683a017790024e478b2` (tree `b3108117c441fa47482241da4ce58bd5fe75043d`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved first durable local/remote SHA equality at `2026-08-11T16:56:45.1719225Z`.
