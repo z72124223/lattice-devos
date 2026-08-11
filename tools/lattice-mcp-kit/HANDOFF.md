@@ -253,5 +253,5 @@
 - Discovery was `NOT_RUN_DUE_FIRST_CONFIG_FAILURE`; tool-call count `0`. This differs from the prior provision-receipt capture timeout because it reused the ready holder and reached config staging.
 - Protected boundaries held: no repository/saver-path mutation or push, no protected script content access, no old PID/root residual or `64272` mutation, and no submit/status/delivery call.
 - Next action is the already-dispatched bounded resume-from-live-holder worker: perform one single-quote-aware value-only command transform, validate/switch config atomically, discovery-only, and update the external secret-free handoff. Do not reprovision or cleanup.
-- Successor durable save: pending first exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: exact-path commit `dbcd684536d864c764b41c40dfd0e9cdd75e7d50` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T14:30:30.133Z`.
 - Archive boundary: original materialization worker remains unarchived until the new resume handoff is safely captured.
