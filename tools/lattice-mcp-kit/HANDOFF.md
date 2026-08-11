@@ -628,4 +628,4 @@
 - The wrapper was invoked exactly once with TTL `7200`. A non-blocking parent exit-code capture gap remains, while durable READY stdout, empty stderr, inactive parent, and independent read-only post-state passed every functional READY gate.
 - Fresh holder is `127.0.0.1:50205`, run `9f27d3ac638343a6a64418a5c7987160`, PostgreSQL 17, postmaster PID `29372`, TTL PID `22652`, deadline `2026-08-11T21:54:43.9863591Z`; remaining time at verification was `7073.610` seconds.
 - Marker/listener/database/system identifier/authority/manifests/TTL/excluded-port/stderr checks all passed. No raw credential or env value was saved.
-- Worker repository/config/binary/handoff/discovery/submit/status/delivery and cleanup/rollback action counts are zero. Stop boundary is `HOLDER_READY`. Two-stage saver remote durability is pending.
+- Stage 1 durable receipt commit is `1b56bb44dba85c3be17299f45c0e0590cb6c1fef`; expected and live remote SHA matched at `2026-08-11T19:59:07.4861900Z`. This stage-2 confirmation commit carries the separate saver `safe_to_archive=true` state only if its own fresh `git ls-remote` equality passes; the authoritative HOLDER_READY receipt remains unchanged.
