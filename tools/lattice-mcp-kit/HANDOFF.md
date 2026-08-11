@@ -349,5 +349,5 @@
 - This is distinct from `ROOT_MUST_BE_ABSENT/WORKSPACE_PREPARE`: it stopped before runtime/holder/config/discovery, with no root deletion/adoption/reuse.
 - Protected boundaries held: protected script/saver/source/config untouched by worker; no repo commit/push, live tool call, holder/PG/protected-state/root cleanup action, merge/deploy/release/default-branch change, or unrelated program.
 - Next action: save this failure only. Any retry requires a newly authorized worker/turn, a fresh isolated target, and a long enough execution window; never reuse this partial target. Do not ask this worker to rerun.
-- Successor durable save: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: exact-path commit `5cbbba803784f9b9f4bca1753bd12f496c08735f` (tree `aaa5e7b8474fbad8cf299186fe4551b79340df3d`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:34:12.6425004Z`.
 - Archive boundary: do not archive this failed worker until its exact receipt is remotely durable and central later confirms archival.
