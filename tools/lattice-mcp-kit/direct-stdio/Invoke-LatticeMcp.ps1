@@ -209,13 +209,13 @@ function Get-RemainingMilliseconds {
 
 function Write-JsonLine {
     param(
-        [Parameter(Mandatory = $true)][Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)][IO.TextWriter]$Writer,
         [Parameter(Mandatory = $true)]$Message
     )
 
     $line = $Message | ConvertTo-Json -Compress -Depth 50
-    $Process.StandardInput.WriteLine($line)
-    $Process.StandardInput.Flush()
+    $Writer.WriteLine($line)
+    $Writer.Flush()
 }
 
 function Read-JsonLine {
@@ -334,16 +334,33 @@ try {
     $startInfo.CreateNoWindow = $true
     $startInfo.StandardOutputEncoding = $script:Utf8
     $startInfo.StandardErrorEncoding = $script:Utf8
+    $hasStandardInputEncoding = $null -ne $startInfo.PSObject.Properties['StandardInputEncoding']
+    if ($hasStandardInputEncoding) {
+        $startInfo.StandardInputEncoding = $script:Utf8
+    }
     Set-ClosedChildEnvironment -StartInfo $startInfo -Values $environmentValues
 
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
-    if (-not $process.Start()) { throw 'PROCESS_START_REJECTED' }
+    $originalConsoleInputEncoding = $null
+    try {
+        if (-not $hasStandardInputEncoding) {
+            $originalConsoleInputEncoding = [Console]::InputEncoding
+            [Console]::InputEncoding = $script:Utf8
+        }
+        if (-not $process.Start()) { throw 'PROCESS_START_REJECTED' }
+    }
+    finally {
+        if ($null -ne $originalConsoleInputEncoding) {
+            [Console]::InputEncoding = $originalConsoleInputEncoding
+        }
+    }
     $processStarted = $true
     $processId = $process.Id
+    $process.StandardInput.NewLine = "`n"
     $stderrTask = $process.StandardError.ReadToEndAsync()
 
-    Write-JsonLine -Process $process -Message ([ordered]@{
+    Write-JsonLine -Writer $process.StandardInput -Message ([ordered]@{
         jsonrpc = '2.0'
         id = 1
         method = 'initialize'
@@ -356,11 +373,11 @@ try {
     $initializeResponse = Read-JsonLine -Process $process -Stopwatch $stopwatch -Timeout $TimeoutSeconds
     Assert-JsonRpcSuccess -Response $initializeResponse -Stage 'initialize'
 
-    Write-JsonLine -Process $process -Message ([ordered]@{
+    Write-JsonLine -Writer $process.StandardInput -Message ([ordered]@{
         jsonrpc = '2.0'
         method = 'notifications/initialized'
     })
-    Write-JsonLine -Process $process -Message ([ordered]@{
+    Write-JsonLine -Writer $process.StandardInput -Message ([ordered]@{
         jsonrpc = '2.0'
         id = 2
         method = 'tools/list'
@@ -382,7 +399,7 @@ try {
         $success = $true
     }
     else {
-        Write-JsonLine -Process $process -Message ([ordered]@{
+        Write-JsonLine -Writer $process.StandardInput -Message ([ordered]@{
             jsonrpc = '2.0'
             id = 3
             method = 'tools/call'
