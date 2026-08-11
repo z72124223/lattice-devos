@@ -12,6 +12,27 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+$nativeIdentityHelperPath = Join-Path $PSScriptRoot 'windows-native-path-identity.ps1'
+$nativeIdentityHelperItem = Get-Item -LiteralPath $nativeIdentityHelperPath -Force -ErrorAction SilentlyContinue
+if (
+    $null -eq $nativeIdentityHelperItem -or
+    $nativeIdentityHelperItem.PSIsContainer -or
+    -not ($nativeIdentityHelperItem -is [IO.FileInfo]) -or
+    ($nativeIdentityHelperItem.Attributes -band [IO.FileAttributes]::ReparsePoint)
+) {
+    throw 'TASK019_WINDOWS_NATIVE_IDENTITY_HELPER_REJECTED'
+}
+try {
+    $nativeIdentityHelperSource = [Text.UTF8Encoding]::new($false, $true).GetString(
+        [IO.File]::ReadAllBytes($nativeIdentityHelperItem.FullName)
+    )
+    . ([scriptblock]::Create($nativeIdentityHelperSource))
+    Initialize-LatticeWindowsNativePathIdentity
+}
+catch {
+    throw 'TASK019_WINDOWS_NATIVE_IDENTITY_HELPER_REJECTED'
+}
+
 $postgresBin = 'C:\Program Files\PostgreSQL\17\bin'
 $requiredExecutables = @(
     'initdb.exe',
@@ -23,6 +44,10 @@ $serviceName = 'postgresql-x64-17'
 $markerName = '.lattice-task019-disposable.json'
 $expectedPostgresVersion = '17.10'
 $harnessUser = 'task019_harness'
+$reservedPostgresPorts = [Collections.Generic.HashSet[int]]::new()
+foreach ($reservedPort in @(5432, 64272, 55432)) {
+    $null = $reservedPostgresPorts.Add([int]$reservedPort)
+}
 $environmentNames = @(
     'LATTICE_TASK019_LIVE',
     'LATTICE_TASK019_PHASE',
@@ -365,7 +390,7 @@ function Get-UnreservedLoopbackPort {
         finally {
             $listener.Stop()
         }
-    } while ($candidate -eq 5432)
+    } while ($reservedPostgresPorts.Contains([int]$candidate))
 
     return [int]$candidate
 }
@@ -712,10 +737,11 @@ function Test-SafeCleanupTarget {
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$ExpectedParent,
         [Parameter(Mandatory = $true)][string]$RepositoryTarget,
-        [Parameter(Mandatory = $true)][string]$RunId
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)]$ContainmentSnapshot
     )
 
-    if ($RunId -notmatch '^[0-9a-f]{32}$') {
+    if ($RunId -cnotmatch '\A[0-9a-f]{32}\z') {
         return $false
     }
 
@@ -757,6 +783,15 @@ function Test-SafeCleanupTarget {
         return $false
     }
 
+    if (
+        -not (Test-ExactPath -Actual ([string]$ContainmentSnapshot.parent_path) -Expected $canonicalParent) -or
+        -not (Test-ExactPath -Actual ([string]$ContainmentSnapshot.root_path) -Expected $canonicalRoot) -or
+        -not (Test-ExactPath -Actual ([string]$ContainmentSnapshot.marker_path) -Expected $markerPath) -or
+        -not (Test-LatticeWindowsNativeContainmentSnapshot -Snapshot $ContainmentSnapshot)
+    ) {
+        return $false
+    }
+
     try {
         $marker = Get-Content -LiteralPath $markerPath -Raw -Encoding utf8 | ConvertFrom-Json
     }
@@ -795,6 +830,9 @@ $harnessCompleted = $false
 $installedBefore = $null
 $installedAfter = $null
 $originalEnvironment = @{}
+$cleanupContainment = $null
+$fullSerializationMutex = $null
+$fullSerializationMutexOwned = $false
 $deliveryHookPath = $null
 $fullChainHookPath = $null
 $task038HookPath = $null
@@ -853,6 +891,19 @@ if ($versionExitCode -ne 0 -or (($versionOutput -join "`n") -notmatch "postgres 
 $installedBefore = Get-InstalledPostgresSnapshot -PgIsReady $pgIsReady
 
 try {
+    if (@($selectedHookCount).Count -eq 1) {
+        $fullSerializationMutex = [Threading.Mutex]::new($false, 'Local\Lattice.Task019.SerializedFull.v1')
+        try {
+            $fullSerializationMutexOwned = $fullSerializationMutex.WaitOne(0)
+        }
+        catch [Threading.AbandonedMutexException] {
+            $fullSerializationMutexOwned = $true
+        }
+        if (-not $fullSerializationMutexOwned) {
+            throw 'TASK019_FULL_SERIALIZATION_REJECTED'
+        }
+    }
+
     New-Item -ItemType Directory -Path $clusterRoot -Force:$false | Out-Null
     Assert-NoReparseAncestor -Path $clusterRoot -Boundary $repositoryRoot
     $marker = [ordered]@{
@@ -863,7 +914,13 @@ try {
         repository_target = $repositoryTarget
         postgres_version = $expectedPostgresVersion
     }
-    $marker | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $clusterRoot $markerName) -Encoding utf8
+    $markerPath = Join-Path $clusterRoot $markerName
+    $markerBytes = [Text.UTF8Encoding]::new($false).GetBytes((($marker | ConvertTo-Json -Depth 4) + "`n"))
+    [IO.File]::WriteAllBytes($markerPath, $markerBytes)
+    $cleanupContainment = New-LatticeWindowsNativeContainmentSnapshot `
+        -ParentPath $clusterParent `
+        -RootPath $clusterRoot `
+        -MarkerPath $markerPath
 
     $oneTimePassword = New-OneTimePassword
     try {
@@ -1067,7 +1124,12 @@ finally {
         $oneTimePassword = $null
 
         if (Test-Path -LiteralPath $clusterRoot) {
-            $cleanupTargetIsExact = Test-SafeCleanupTarget -Root $clusterRoot -ExpectedParent $clusterParent -RepositoryTarget $repositoryTarget -RunId $runId
+            $cleanupTargetIsExact = Test-SafeCleanupTarget `
+                -Root $clusterRoot `
+                -ExpectedParent $clusterParent `
+                -RepositoryTarget $repositoryTarget `
+                -RunId $runId `
+                -ContainmentSnapshot $cleanupContainment
             if (-not $cleanupTargetIsExact) {
                 throw "Disposable cluster cleanup gate did not pass; preserving $clusterRoot"
             }
@@ -1078,6 +1140,14 @@ finally {
         }
     }
     finally {
+        if ($fullSerializationMutexOwned -and $null -ne $fullSerializationMutex) {
+            $fullSerializationMutex.ReleaseMutex()
+            $fullSerializationMutexOwned = $false
+        }
+        if ($null -ne $fullSerializationMutex) {
+            $fullSerializationMutex.Dispose()
+            $fullSerializationMutex = $null
+        }
         $installedAfter = Get-InstalledPostgresSnapshot -PgIsReady $pgIsReady
         if (-not (Test-SameInstalledPostgresSnapshot -Before $installedBefore -After $installedAfter)) {
             throw 'Installed postgresql-x64-17 service or its read-only 127.0.0.1:5432 readiness snapshot changed during the harness.'
@@ -1090,5 +1160,5 @@ if (-not $harnessCompleted) {
 }
 Write-Output 'TASK019_POSTGRES_HARNESS=PASS'
 Write-Output "POSTGRES_VERSION=$expectedPostgresVersion"
-Write-Output 'ENDPOINT=127.0.0.1:<ephemeral-non-5432>'
+Write-Output 'ENDPOINT=127.0.0.1:<dynamic-excludes-5432-64272-55432>'
 Write-Output 'PHASES=initial,restart'
