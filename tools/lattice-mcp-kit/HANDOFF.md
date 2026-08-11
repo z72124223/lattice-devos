@@ -582,3 +582,10 @@
 - The required local goal remains active and incomplete. No source/test edit, stage, commit, push, test/build/live discovery/submit/status, config/root/holder/runtime action, reset/clean/revert, or protected dirty-script content access occurred.
 - Read-only checkout/remote/baseline/diagnosis evidence was verified; `composition.rs` was announced as the intended sole source/test path but was never edited.
 - No source-remediation receipt or commit exists because cancellation arrived before edit/test. First durable cancellation receipt commit is `5e6d18fec62e03879e2cb8e1db8e7280f7085e43` (tree `8b931b1e9917d9f386a3f3badbfbbacf7cc9f738`); live `git ls-remote` equality was verified at `2026-08-11T19:04:30.2160040Z`. Central archived the worker at `2026-08-11T19:05:19.473Z`.
+## Exact-leaf ROOT-LAYOUT discovery failure — `019ff234-e93e-7f52-bba3-6ca89bcd5d7b`
+
+- Window ran `2026-08-11T19:03:11.0000000Z`–`2026-08-11T19:11:32.0221621Z` (`501022 ms`). Outcome is `FAILED_FIRST_TRUE_CONNECTIVITY_FAILURE_PRESERVED`; READY is false.
+- Configured root `P0R-019ff234e93e7f52\delivery` has byte-exact `delivery` leaf and projected maximum path `184 <= 220`. Only `LATTICE_DELIVERY_ROOT` changed; config SHA is `593e0f5c60f2d7359ebe4d0a501d6eede9d5de673e16f8257b1d1f04b065a46a`.
+- The one no-BOM Discovery child exited `2` before initialize response with `LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED / DISCOVERY_PROCESS_STARTUP`. This proves the prior leaf predicate was corrected but does not isolate the later predicate; no retry or tool call occurred.
+- External secret-free handoff remains `DISCOVERY_FAILED_PRESERVED` with SHA-256 `4eb355e904a0a9fa1612a74e89307d98fe66de57b1a0c5f1200f4e22298495a0`; holder `127.0.0.1:56503` remained live.
+- No source/binary/PG mutation, submit/status/delivery, rollback, cleanup, root reuse/delete, 64272 or protected-script content access occurred. Durable saver metadata is pending; `safe_to_archive=false`.
