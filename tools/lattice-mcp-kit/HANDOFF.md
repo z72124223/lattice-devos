@@ -561,4 +561,4 @@
 - No source/test edit, stage, commit, push, test, or build occurred. No config, holder, runtime, PG, MCP, saver-file, or protected-script-content mutation/read occurred.
 - Read-only inspection located `GitRunner::output` at `git_delivery.rs:1392` and the git-init call at `192-199`; malformed-regex aggregate failures retained no remote/commit output and caused no write.
 - Original goal remains `ACTIVE_NOT_COMPLETED`; no rollback/reset/clean/revert is needed or authorized. Worker receipt reports `safe_to_archive=true`.
-- Durable saver metadata is pending first commit/push and live `git ls-remote` equality; `archived_at_utc=null`.
+- First durable cancellation receipt commit is `2925063bf0ee4c44b7cc85944c560e3af5c2f3fe` (tree `3224f264784bc7438192782e568efd2ab3690188`); live `git ls-remote` equality was verified at `2026-08-11T18:33:57.4306662Z`. `archived_at_utc=null`.
