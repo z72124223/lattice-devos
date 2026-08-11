@@ -769,3 +769,10 @@
 - The source commit changes only `apps/lattice-runtime/src/composition.rs`, with tree `d2a32044c3aaeb04552e2a0ac77d6033072b3f79` and parent `7ecab4d7089ce7cfb04ff777fce95da6b9c5df7f`. Fresh source remote equality passed at `2026-08-11T23:08:41.0685387Z`.
 - Focused red/green regression passed, final `cargo fmt --check` and diff checks passed; no full suite, review, security run, runtime build, launch, MCP, Codex, PostgreSQL, config, holder, cleanup, or rollback action occurred.
 - Receipt stage 1 commit `595e37f067940f4bbd09ab744ca1d2b96f41d11c` and confirmation stage 2 commit `f1cd8d890b279d01e862fb2f4459213e8140040e` each equal their fresh remote reads. Central archived the source-remediation worker at `2026-08-11T23:12:48.0596768Z`; current fresh-window live acceptance PASS remains unclaimed, authoritative `safe_to_archive=false`, and outer saver `safe_to_archive=true`.
+
+## Build-only binary materialization — `019ff317-5ad3-7581-8b53-e2eb4ce81150`
+
+- `cargo build -p lattice-runtime --bin latticed --locked` passed in one invocation against source commit `0b59b79a60208be364a6f5c43c442b900c245e7d`; build inputs were source-bound with no source drift.
+- The fresh isolated binary is 10,278,400 bytes with SHA-256 `c79e2ee9bfe1abec5cf38405c6cca721157feb6b69ce578eba0c1c336f32004f`; it was not launched. No target reuse, retry, or prior-target deletion occurred.
+- Build head `00dd4d0c7ff87c1606362a87f6a9bcb12a0df24d` differs from the source only through the two saver-owned receipt paths. Protected dirty script remained preserved.
+- Receipt stage 1 and stage 2 saver equalities are pending; BUILD_ONLY PASS does not claim runtime or P0 live acceptance.
