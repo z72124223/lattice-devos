@@ -1303,12 +1303,14 @@ impl LatticedDeliveryService {
         if expected.binding() != binding {
             return Err(LatticedError::new(LatticedErrorKind::Contract));
         }
-        let mut config = self
-            .delivery
-            .as_ref()
-            .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?
-            .clone();
-        config.delivery_root = delivery_root.to_path_buf();
+        let config = controlled_task_delivery_config(
+            self.delivery
+                .as_ref()
+                .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?,
+            delivery_root,
+            FullChainRunMode::Fresh,
+        )
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?;
         let request = request_for_task_delivery(self.database.run_id(), &config, binding)?;
         let identity = task_ledger_identity(binding)?;
         self.run_request_json(
@@ -2256,6 +2258,22 @@ enum FullChainEntry {
 enum FullChainRunMode {
     Fresh,
     ResumeExisting,
+}
+
+const CONTROLLED_TASK_SCHEMA_OUTPUT_CHILD: &str = "codex-schema-output";
+
+fn controlled_task_delivery_config(
+    configured: &LatticedDeliveryConfig,
+    delivery_root: &Path,
+    run_mode: FullChainRunMode,
+) -> Option<LatticedDeliveryConfig> {
+    if run_mode == FullChainRunMode::ResumeExisting {
+        return None;
+    }
+    let mut config = configured.clone();
+    config.delivery_root = delivery_root.to_path_buf();
+    config.schema_directory = delivery_root.join(CONTROLLED_TASK_SCHEMA_OUTPUT_CHILD);
+    Some(config)
 }
 
 fn controlled_submit_delivery_root(
@@ -5522,6 +5540,77 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(resumed, existing);
         fs::remove_dir_all(&base).expect("remove controlled delivery fixture");
+    }
+
+    #[test]
+    fn controlled_task_schema_output_is_absent_deterministic_and_task_scoped() {
+        static NEXT_SCHEMA_BASE: AtomicUsize = AtomicUsize::new(0);
+        let unique = NEXT_SCHEMA_BASE.fetch_add(1, Ordering::Relaxed);
+        let base = env::temp_dir().join(format!(
+            "lattice-controlled-schema-base-{}-{unique}",
+            process::id()
+        ));
+        let configured_schema_bundle = base.join("configured-schema-bundle");
+        let task_base = base.join("tasks");
+        fs::create_dir_all(&configured_schema_bundle).expect("create configured schema bundle");
+        fs::create_dir_all(&task_base).expect("create task base");
+        for index in 0..275 {
+            fs::write(
+                configured_schema_bundle.join(format!("schema-{index:03}.json")),
+                b"configured-read-only-schema",
+            )
+            .expect("write configured schema fixture");
+        }
+
+        let mut configured = LatticedDeliveryConfig::status_process(Duration::from_secs(30));
+        configured.schema_directory = configured_schema_bundle.clone();
+        configured.delivery_root = task_base.clone();
+        let first_identity = test_content_digest('1');
+        let second_identity = test_content_digest('2');
+        let first_root =
+            controlled_submit_delivery_root(&task_base, &first_identity, FullChainRunMode::Fresh)
+                .expect("first task root");
+        let retry_root =
+            controlled_submit_delivery_root(&task_base, &first_identity, FullChainRunMode::Fresh)
+                .expect("same task retry root");
+        let second_root =
+            controlled_submit_delivery_root(&task_base, &second_identity, FullChainRunMode::Fresh)
+                .expect("second task root");
+        let first =
+            controlled_task_delivery_config(&configured, &first_root, FullChainRunMode::Fresh)
+                .expect("first fresh task config");
+        let retry =
+            controlled_task_delivery_config(&configured, &retry_root, FullChainRunMode::Fresh)
+                .expect("same task retry config");
+        let second =
+            controlled_task_delivery_config(&configured, &second_root, FullChainRunMode::Fresh)
+                .expect("second fresh task config");
+        let resumed = controlled_task_delivery_config(
+            &configured,
+            &base.join("existing-task-root"),
+            FullChainRunMode::ResumeExisting,
+        );
+        let first_expected = first_root.join(CONTROLLED_TASK_SCHEMA_OUTPUT_CHILD);
+        let second_expected = second_root.join(CONTROLLED_TASK_SCHEMA_OUTPUT_CHILD);
+        let configured_file_count = fs::read_dir(&configured_schema_bundle)
+            .expect("read configured schema bundle")
+            .count();
+        let configured_bundle_unchanged = configured.schema_directory == configured_schema_bundle;
+        let first_output_was_absent = !first.schema_directory.exists();
+        let retry_output_was_absent = !retry.schema_directory.exists();
+        let second_output_was_absent = !second.schema_directory.exists();
+        fs::remove_dir_all(&base).expect("remove controlled schema fixture");
+
+        assert!(configured_bundle_unchanged);
+        assert_eq!(configured_file_count, 275);
+        assert_eq!(first.schema_directory, first_expected);
+        assert_eq!(retry.schema_directory, first_expected);
+        assert_eq!(second.schema_directory, second_expected);
+        assert_ne!(first.schema_directory, second.schema_directory);
+        assert!(first_output_was_absent);
+        assert!(retry_output_was_absent);
+        assert!(second_output_was_absent);
+        assert!(resumed.is_none());
     }
 
     #[test]
