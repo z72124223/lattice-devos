@@ -497,4 +497,4 @@
 - Stdout SHA is `a32de6af36090423b1bd656789374b5407d1009427353f1311a752515543cf85`; corrected authoritative empty-stderr SHA is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
 - Wrapper post-processing hit a StrictMode serialization bug after stdout capture, so process PID/exit remain null with capture status `WRAPPER_SUMMARY_SERIALIZATION_FAILED_AFTER_STDOUT_CAPTURE`.
 - Saver did not retry discovery, call LATTICE tools, roll back config, clean the holder, or record any raw credential/env value.
-- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check.
+- Successor durable save: saver record commit `4592b2299c9951308c034f167e25efecd13c2946` (tree `1f0c230a0fafebeaf408f69ab2ed3c338772c224`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved first durable local/remote SHA equality at `2026-08-11T17:26:54.2013909Z`. At that immutable commit, `WINDOW_LEDGER.jsonl` SHA was `d9f459ccd42d2be4bc8f643dc732750bc479ce388e36b1c54e89c287a0c312ba` and the exact saver record-line SHA was `29dc62ec977dd98be46648e166e4240379f84a651c7cd5bf820f93d629fb07d9`.
