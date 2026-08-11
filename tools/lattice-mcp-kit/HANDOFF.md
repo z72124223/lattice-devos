@@ -710,4 +710,4 @@
 - Submit returned transport `isError=true`, domain `ERROR`, classification `TOOL_ERROR`, and `LATTICE_TASK_REQUEST_SUBSTITUTED`; task state/reference/result/head were null.
 - No retry or second status session was run. Config, handoff, prepared-home config, holder candidate, and protected dirty script remained unchanged.
 - No build/test/new PG/manual DB/64272, cleanup, rollback, delete, merge, deploy, release, or default-branch action occurred.
-- Stage 1 and stage 2 saver remote equality are pending; authoritative `safe_to_archive=false` remains in force.
+- Stage 1 durable substituted-request failure receipt commit is `3e89585a710a0d338457cf9acf5ad9cb85e97436`; expected and live remote SHA matched at `2026-08-11T21:58:03.3833022Z`. This saver-only update is stage 2 confirmation; after its fresh live `git ls-remote` equality passes, outer saver state is `safe_to_archive=true`. Authoritative `safe_to_archive=false`, verdict `FRESH_SUBMIT_FAILED`, and P0 acceptance false remain unchanged.
