@@ -762,3 +762,10 @@
 - Minimal remediation is proposed only: derive one task-scoped absent schema-output child from the deterministic delivery root while preserving the existing fail-closed check and the current bundle. No remediation was implemented and no tests were run.
 - Diagnosis used read-only PostgreSQL sessions with zero SQL mutations. No MCP/Codex/submit/status/delivery call, source/config/handoff/holder mutation, cleanup, rollback, or protected-script access occurred.
 - Stage 1 durable receipt commit `03cdcdd7e1e401e3e197bbe313cd8f17f70c4f0a` and stage 2 confirmation commit `3d0042ebfc053f9c435700057cbd30675ec906e3` each equal their fresh remote reads. Central archived the diagnosis at `2026-08-11T22:59:52.0096260Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## Schema-output path source remediation — `019ff30d-8a70-7de0-8105-db5083a16823`
+
+- Source commit `0b59b79a60208be364a6f5c43c442b900c245e7d` scopes the Codex schema-output path to deterministic `task-<task_ref>/codex-schema-output`; the configured 275-file schema bundle remains a read-only process input commitment.
+- The source commit changes only `apps/lattice-runtime/src/composition.rs`, with tree `d2a32044c3aaeb04552e2a0ac77d6033072b3f79` and parent `7ecab4d7089ce7cfb04ff777fce95da6b9c5df7f`. Fresh source remote equality passed at `2026-08-11T23:08:41.0685387Z`.
+- Focused red/green regression passed, final `cargo fmt --check` and diff checks passed; no full suite, review, security run, runtime build, launch, MCP, Codex, PostgreSQL, config, holder, cleanup, or rollback action occurred.
+- Receipt stage 1 and stage 2 saver equalities are pending. Current fresh-window live acceptance PASS remains unclaimed and authoritative `safe_to_archive=false`.
