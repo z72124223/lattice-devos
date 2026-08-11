@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Init', 'Doctor', 'Run')]
+    [ValidateSet('Init', 'Doctor', 'Run', 'ManagedRun')]
     [string]$Mode = 'Doctor',
     [Parameter(Mandatory = $true)]
     [string]$TunnelClientExecutable,
@@ -1438,10 +1438,32 @@ $arguments = switch ($Mode) {
         @('run', '--profile', $ProfileName, '--profile-dir', $profileRoot)
         break
     }
+    'ManagedRun' {
+        if ([string]::IsNullOrWhiteSpace($env:CONTROL_PLANE_API_KEY)) {
+            throw 'TASK038_TUNNEL_RUNTIME_KEY_REQUIRED'
+        }
+        $runtimeEnvironment = Get-Task038TunnelRuntimeEnvironment
+        $taskIngressKind = 'CHATGPT_SECURE_MCP_TUNNEL'
+        $profileEvidence = Get-LiveTaskIngressProfileDigest `
+            -ProfileRoot $profileRoot `
+            -ProfileName $ProfileName `
+            -TunnelClient $tunnelClient `
+            -PassThru
+        $taskIngressProfileDigest = [string]$profileEvidence.digest
+        $lifecycleSafeConfig = Get-Task038SafeConfigProjection `
+            -RuntimeEnvironment $runtimeEnvironment `
+            -IngressProfileSha256 $taskIngressProfileDigest
+        $lifecycleSink = New-Task038LifecycleSink `
+            -DeliveryRoot ([string]$runtimeEnvironment.LATTICE_DELIVERY_ROOT) `
+            -ConfigGeneration ([long]$runtimeEnvironment.LATTICE_STORE_AUTHORITY_REVISION) `
+            -SafeConfigSha256 ([string]$lifecycleSafeConfig.digest)
+        @('run', '--profile', $ProfileName, '--profile-dir', $profileRoot)
+        break
+    }
 }
 
 $clientExitCode = 1
-if ($Mode -eq 'Run') {
+if ($Mode -in @('Run', 'ManagedRun')) {
     $runtimeEnvironment['LATTICE_TASK_INGRESS_KIND'] = $taskIngressKind
     $runtimeEnvironment['LATTICE_TASK_INGRESS_PROFILE_SHA256'] = $taskIngressProfileDigest
     $runtimeEnvironment['TUNNEL_CLIENT_LIFECYCLE_EVENT_PATH'] = [string]$lifecycleSink.event_path
@@ -1473,6 +1495,7 @@ if ($Mode -eq 'Run') {
         -PostgresPassword ([string]$runtimeEnvironment.LATTICE_TASK019_PASSWORD)
     Write-Output (([ordered]@{
         schema = 'lattice.task038.tunnel-outer-lifecycle.v1'
+        mode = $Mode
         process_id = [int]$runResult.process_id
         tunnel_client_exit_code = [int]$runResult.exit_code
         started_at_utc = [string]$runResult.started_at_utc

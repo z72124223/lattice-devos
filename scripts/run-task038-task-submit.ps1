@@ -28,6 +28,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+$expectedPostgresBin = 'C:\Program Files\PostgreSQL\17\bin'
+$expectedPostgresExecutableSha256 = '882a5a073a88817f6c6d4c8827df1e4269ff226d52cf6f47c9883e91088c6345'
+$expectedPsqlExecutableSha256 = 'e43adb9c5032e7efc63eebb44c5d32b142b34e5f4207666fed2dc7a51d43b630'
+$expectedPgCtlExecutableSha256 = 'abe89b0767a8cd0f956059aa5a5a93cd1042efc6194d000c2501da3e23babbd2'
+
 $script:SecretValues = [Collections.Generic.List[string]]::new()
 $environmentHelper = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'task038-local-process-environment.ps1'))
 $environmentHelperItem = Get-Item -LiteralPath $environmentHelper -Force -ErrorAction SilentlyContinue
@@ -229,6 +234,21 @@ function Assert-Task038PostgresNativeIdentity {
         -Directory $true `
         -ExpectedToken $script:PostgresDataIdentity)) {
         throw $FailureCode
+    }
+    foreach ($entry in @(
+        @($script:Psql, $script:PsqlNativeIdentity, $expectedPsqlExecutableSha256),
+        @($script:PgCtl, $script:PgCtlNativeIdentity, $expectedPgCtlExecutableSha256),
+        @($script:PostgresExecutable, $script:PostgresExecutableNativeIdentity, $expectedPostgresExecutableSha256)
+    )) {
+        if (
+            -not (Test-LatticeWindowsNativePathIdentity `
+                -Path ([string]$entry[0]) `
+                -Directory $false `
+                -ExpectedToken ([string]$entry[1])) -or
+            (Get-FileSha256 -Path ([string]$entry[0])) -cne [string]$entry[2]
+        ) {
+            throw $FailureCode
+        }
     }
 }
 
@@ -1603,6 +1623,297 @@ public static class LatticeTask038JobObjectInterop
         }
     }
 }
+'@
+    }
+    catch {
+        throw 'TASK038_LATTICED_JOB_OBJECT_REJECTED'
+    }
+}
+
+function Get-Task038CandidateSourceLinkage {
+    param([Parameter(Mandatory = $true)][string]$Repository)
+
+    $commit = Invoke-GitText `
+        -Repository $Repository `
+        -Arguments @('rev-parse', '--verify', 'HEAD') `
+        -FailureCode 'TASK038_CANDIDATE_COMMIT_REJECTED'
+    $tree = Invoke-GitText `
+        -Repository $Repository `
+        -Arguments @('rev-parse', 'HEAD^{tree}') `
+        -FailureCode 'TASK038_CANDIDATE_TREE_REJECTED'
+    $status = Invoke-GitText `
+        -Repository $Repository `
+        -Arguments @('status', '--porcelain=v1', '--untracked-files=all') `
+        -FailureCode 'TASK038_CANDIDATE_STATUS_REJECTED'
+    if (
+        $commit -cnotmatch '\A[0-9a-f]{40}\z' -or
+        $tree -cnotmatch '\A[0-9a-f]{40}\z' -or
+        -not [string]::IsNullOrEmpty($status)
+    ) {
+        throw 'TASK038_CANDIDATE_SOURCE_REJECTED'
+    }
+    $ownedPaths = [ordered]@{
+        p0_05 = @(
+            'apps/lattice-runtime/src/mcp.rs',
+            'apps/lattice-runtime/tests/mcp.rs',
+            'scripts/windows-native-path-identity.ps1',
+            'scripts/run-task019-postgres.ps1',
+            'scripts/run-task038-task-submit.ps1',
+            ('scripts/start-' + 'chatgpt-mcp-tunnel.ps1'),
+            'scripts/test-task038-local-acceptance.ps1',
+            'scripts/test-chatgpt-mcp-tunnel-entrypoint.ps1'
+        )
+        p0_07 = @(
+            'Cargo.lock',
+            'apps/lattice-runtime/Cargo.toml',
+            'apps/lattice-runtime/src/composition.rs',
+            'apps/lattice-runtime/tests/composition.rs'
+        )
+        p0_06 = @(
+            'scripts/run-task038-four-tool-acceptance.ps1',
+            'scripts/test-task038-four-tool-acceptance.ps1'
+        )
+    }
+    $entries = [Collections.Generic.List[object]]::new()
+    foreach ($owner in $ownedPaths.Keys) {
+        foreach ($path in $ownedPaths[$owner]) {
+            $blob = Invoke-GitText `
+                -Repository $Repository `
+                -Arguments @('rev-parse', ($commit + ':' + $path)) `
+                -FailureCode 'TASK038_CANDIDATE_BLOB_REJECTED'
+            $lastChangeCommit = Invoke-GitText `
+                -Repository $Repository `
+                -Arguments @('log', '-1', '--format=%H', '--', $path) `
+                -FailureCode 'TASK038_CANDIDATE_PATH_COMMIT_REJECTED'
+            if (
+                $blob -cnotmatch '\A[0-9a-f]{40}\z' -or
+                $lastChangeCommit -cnotmatch '\A[0-9a-f]{40}\z'
+            ) {
+                throw 'TASK038_CANDIDATE_LINKAGE_REJECTED'
+            }
+            $entries.Add([ordered]@{
+                owner = [string]$owner
+                path = [string]$path
+                blob = $blob
+                last_change_commit = $lastChangeCommit
+            })
+        }
+    }
+    $entryCommitment = Get-StringSha256 -Value (@($entries) | ConvertTo-Json -Compress -Depth 6)
+    return [ordered]@{
+        schema_version = 'lattice.task038.candidate-source-linkage.v1'
+        source_commit = $commit
+        source_tree = $tree
+        source_status_clean = $true
+        exact_path_count = [int]$entries.Count
+        exact_path_entries = @($entries)
+        exact_path_entries_sha256 = $entryCommitment
+    }
+}
+
+function Set-Task038OwnerOnlyAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][bool]$Directory
+    )
+
+    try {
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        if ($Directory) {
+            $security = [Security.AccessControl.DirectorySecurity]::new()
+            $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+                $sid,
+                [Security.AccessControl.FileSystemRights]::FullControl,
+                [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+                [Security.AccessControl.PropagationFlags]::None,
+                [Security.AccessControl.AccessControlType]::Allow
+            )
+            $security.SetOwner($sid)
+            $security.SetAccessRuleProtection($true, $false)
+            [void]$security.AddAccessRule($rule)
+            [IO.Directory]::SetAccessControl($Path, $security)
+        }
+        else {
+            $security = [Security.AccessControl.FileSecurity]::new()
+            $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+                $sid,
+                [Security.AccessControl.FileSystemRights]::FullControl,
+                [Security.AccessControl.AccessControlType]::Allow
+            )
+            $security.SetOwner($sid)
+            $security.SetAccessRuleProtection($true, $false)
+            [void]$security.AddAccessRule($rule)
+            [IO.File]::SetAccessControl($Path, $security)
+        }
+    }
+    catch {
+        throw 'TASK038_MCP_ACCEPTANCE_EVIDENCE_ACL_REJECTED'
+    }
+}
+
+function New-Task038McpAcceptanceEvidenceSink {
+    param(
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })][string]$SessionId
+    )
+
+    $root = Get-CanonicalPath -Path (Join-Path $EvidenceRoot 'mcp-dispatch')
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        New-Item -ItemType Directory -Path $root -Force:$false | Out-Null
+        Set-Task038OwnerOnlyAcl -Path $root -Directory $true
+    }
+    Assert-NoReparseAncestor `
+        -Path $root `
+        -Boundary $script:RepositoryRoot `
+        -FailureCode 'TASK038_MCP_ACCEPTANCE_EVIDENCE_PATH_REJECTED'
+    $path = Get-CanonicalPath -Path (Join-Path $root ($SessionId + '.jsonl'))
+    Write-Task038ExclusiveBytes `
+        -Path $path `
+        -Bytes ([byte[]]::new(0)) `
+        -FailureCode 'TASK038_MCP_ACCEPTANCE_EVIDENCE_NOT_FRESH'
+    Set-Task038OwnerOnlyAcl -Path $path -Directory $false
+    return [pscustomobject]@{
+        path = $path
+        native_identity = Get-LatticeWindowsNativePathIdentityToken -Path $path -Directory $false
+    }
+}
+
+function Read-Task038McpAcceptanceEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedNativeIdentity,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })][string]$SessionId,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{64}\z' })][string]$SafeConfigSha256,
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][ValidateRange(0, 64)][int]$ExpectedDispatchCount
+    )
+
+    $failureCode = 'TASK038_MCP_ACCEPTANCE_EVIDENCE_REJECTED'
+    if (-not (Test-LatticeWindowsNativePathIdentity `
+            -Path $Path `
+            -Directory $false `
+            -ExpectedToken $ExpectedNativeIdentity)) {
+        throw $failureCode
+    }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if (
+        $bytes.Length -lt 1 -or
+        $bytes.Length -gt 1048576 -or
+        ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf)
+    ) {
+        throw $failureCode
+    }
+    try { $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) }
+    catch { throw $failureCode }
+    if (-not $text.EndsWith("`n", [StringComparison]::Ordinal) -or $text.Contains("`r")) {
+        throw $failureCode
+    }
+    $lines = @($text.Split([string[]]@("`n"), [StringSplitOptions]::None))
+    if ($lines[-1] -cne '') { throw $failureCode }
+    $lines = @($lines[0..($lines.Count - 2)])
+    if ($lines.Count -ne ($ExpectedDispatchCount + 2)) { throw $failureCode }
+    $previousEventSha256 = '0' * 64
+    $dispatchCount = 0
+    $records = [Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        try { $record = $lines[$index] | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw $failureCode }
+        $keys = @($record.PSObject.Properties.Name | Sort-Object)
+        $expectedKeys = @(
+            'dispatch_accepted_count', 'event_sha256', 'observed_at_unix_nanos',
+            'ordinal', 'previous_event_sha256', 'process_id', 'record_type',
+            'request_id_sha256', 'safe_config_sha256', 'schema', 'session_id', 'tool_name'
+        ) | Sort-Object
+        if (($keys -join "`n") -cne ($expectedKeys -join "`n")) { throw $failureCode }
+        $expectedType = if ($index -eq 0) {
+            'SESSION_OPEN'
+        }
+        elseif ($index -eq $lines.Count - 1) {
+            'SESSION_CLOSED'
+        }
+        else {
+            'DISPATCH_ACCEPTED'
+        }
+        if ($expectedType -ceq 'DISPATCH_ACCEPTED') { $dispatchCount++ }
+        if (
+            [string]$record.schema -cne 'lattice.mcp.acceptance-dispatch.v1' -or
+            [string]$record.record_type -cne $expectedType -or
+            [string]$record.session_id -cne $SessionId -or
+            [string]$record.safe_config_sha256 -cne $SafeConfigSha256 -or
+            [long]$record.process_id -ne $ProcessId -or
+            [long]$record.ordinal -ne ($index + 1) -or
+            [long]$record.dispatch_accepted_count -ne $dispatchCount -or
+            [string]$record.observed_at_unix_nanos -cnotmatch '\A[1-9][0-9]*\z' -or
+            [string]$record.previous_event_sha256 -cne $previousEventSha256 -or
+            [string]$record.event_sha256 -cnotmatch '\A[0-9a-f]{64}\z'
+        ) {
+            throw $failureCode
+        }
+        if ($expectedType -ceq 'DISPATCH_ACCEPTED') {
+            if (
+                [string]$record.tool_name -cnotmatch '\A(?:lattice_delivery_run|lattice_delivery_status|lattice_task_submit|lattice_task_status)\z' -or
+                [string]$record.request_id_sha256 -cnotmatch '\A[0-9a-f]{64}\z'
+            ) { throw $failureCode }
+            $toolName = [string]$record.tool_name
+            $requestIdSha256 = [string]$record.request_id_sha256
+        }
+        else {
+            if ($null -ne $record.tool_name -or $null -ne $record.request_id_sha256) { throw $failureCode }
+            $toolName = 'null'
+            $requestIdSha256 = 'null'
+        }
+        $hashInput = @(
+            'lattice.mcp.acceptance-dispatch-hash.v1',
+            $previousEventSha256,
+            $SessionId,
+            $SafeConfigSha256,
+            $expectedType,
+            [string]($index + 1),
+            [string]$ProcessId,
+            $toolName,
+            $requestIdSha256,
+            [string]$dispatchCount,
+            [string]$record.observed_at_unix_nanos
+        ) -join "`n"
+        $eventSha256 = Get-StringSha256 -Value $hashInput
+        if ([string]$record.event_sha256 -cne $eventSha256) { throw $failureCode }
+        $previousEventSha256 = $eventSha256
+        $records.Add($record)
+    }
+    return [pscustomobject]@{
+        schema = 'lattice.task038.mcp-acceptance-dispatch-evidence.v1'
+        path = $Path
+        raw_sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        byte_count = [long]$bytes.Length
+        strict_utf8 = $true
+        session_id = $SessionId
+        safe_config_sha256 = $SafeConfigSha256
+        process_id = $ProcessId
+        record_count = [int]$lines.Count
+        dispatch_accepted_count = $dispatchCount
+        final_event_sha256 = $previousEventSha256
+        normal_close_complete = $true
+        native_identity = $ExpectedNativeIdentity
+        records = @($records)
+    }
+}
+
+function Initialize-Task038SuspendedProcessInterop {
+    if ($null -ne ('LatticeTask038SuspendedProcessFactory' -as [type])) {
+        return
+    }
+    try {
+        Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Collections.Specialized;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 public sealed class LatticeTask038SuspendedProcess : IDisposable
 {
@@ -1882,7 +2193,7 @@ public static class LatticeTask038SuspendedProcessFactory
 '@
     }
     catch {
-        throw 'TASK038_LATTICED_JOB_OBJECT_REJECTED'
+        throw 'TASK038_LATTICED_PROCESS_INTEROP_REJECTED'
     }
 }
 
@@ -1913,6 +2224,7 @@ function Add-Task038ProcessToJob {
 function Start-Task038SuspendedProcess {
     param([Parameter(Mandatory = $true)][Diagnostics.ProcessStartInfo]$StartInfo)
 
+    Initialize-Task038SuspendedProcessInterop
     if (
         $StartInfo.UseShellExecute -or
         -not $StartInfo.RedirectStandardInput -or
@@ -2020,7 +2332,12 @@ function Invoke-LatticedSession {
         [Parameter(Mandatory = $true)][string]$DeliveryRoot,
         [Parameter(Mandatory = $true)][string]$SchemaDirectory,
         [Parameter(Mandatory = $true)][string]$LauncherSha256,
-        [Parameter(Mandatory = $true)][string]$LauncherVersion
+        [Parameter(Mandatory = $true)][string]$LauncherVersion,
+        [Parameter(Mandatory = $true)][string]$AcceptanceEvidencePath,
+        [Parameter(Mandatory = $true)][string]$AcceptanceEvidenceNativeIdentity,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })][string]$AcceptanceSessionId,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{64}\z' })][string]$AcceptanceSafeConfigSha256,
+        [Parameter(Mandatory = $true)][ValidateRange(0, 64)][int]$ExpectedDispatchCount
     )
 
     $latticedPidPath = Get-CanonicalPath -Path ($MetaPath + '.latticed-pid.tmp')
@@ -2101,6 +2418,9 @@ finally {
         LATTICE_STORE_AUTHORITY_REVISION = [string]$Authority.authority_revision
         LATTICE_STORE_OBSERVATION_DIGEST = [string]$Authority.observation_digest
         LATTICE_STORE_AUTHORITY_HEAD_DIGEST = [string]$Authority.head_digest
+        LATTICE_MCP_ACCEPTANCE_EVIDENCE_PATH = $AcceptanceEvidencePath
+        LATTICE_MCP_ACCEPTANCE_SESSION_ID = $AcceptanceSessionId
+        LATTICE_MCP_ACCEPTANCE_SAFE_CONFIG_SHA256 = $AcceptanceSafeConfigSha256
         LATTICE_TASK038_WRAPPED_EXECUTABLE = $script:Latticed
         LATTICE_TASK038_WRAPPED_PID_PATH = $latticedPidPath
     }
@@ -2281,6 +2601,13 @@ finally {
         if ([string]::IsNullOrEmpty($code)) { $code = 'NO_ALLOWLISTED_CODE' }
         throw ('TASK038_LATTICED_SESSION_REJECTED|' + $code + '|' + (Get-StringSha256 -Value $stderr))
     }
+    $acceptanceEvidence = Read-Task038McpAcceptanceEvidence `
+        -Path $AcceptanceEvidencePath `
+        -ExpectedNativeIdentity $AcceptanceEvidenceNativeIdentity `
+        -SessionId $AcceptanceSessionId `
+        -SafeConfigSha256 $AcceptanceSafeConfigSha256 `
+        -ProcessId $childProcessId `
+        -ExpectedDispatchCount $ExpectedDispatchCount
     Write-McpResponseSummary -Path $OutputPath -ResponseText $stdout
     Write-JsonEvidence -Path $MetaPath -Value ([ordered]@{
         schema_version = 'lattice.task038.local-mcp-process.v1'
@@ -2297,8 +2624,21 @@ finally {
         response_sha256 = Get-StringSha256 -Value $stdout
         stderr_sha256 = Get-StringSha256 -Value $stderr
         hermes_or_openclaw_environment_supplied = $false
+        acceptance_dispatch_evidence_schema = [string]$acceptanceEvidence.schema
+        acceptance_session_id = [string]$acceptanceEvidence.session_id
+        acceptance_safe_config_sha256 = [string]$acceptanceEvidence.safe_config_sha256
+        acceptance_evidence_raw_sha256 = [string]$acceptanceEvidence.raw_sha256
+        acceptance_evidence_byte_count = [long]$acceptanceEvidence.byte_count
+        acceptance_dispatch_accepted_count = [int]$acceptanceEvidence.dispatch_accepted_count
+        acceptance_final_event_sha256 = [string]$acceptanceEvidence.final_event_sha256
+        acceptance_normal_close_complete = [bool]$acceptanceEvidence.normal_close_complete
+        acceptance_evidence_native_identity = [string]$acceptanceEvidence.native_identity
     })
-    return [pscustomobject]@{ ProcessId = $childProcessId; Output = $stdout }
+    return [pscustomobject]@{
+        ProcessId = $childProcessId
+        Output = $stdout
+        AcceptanceEvidence = $acceptanceEvidence
+    }
 }
 
 function Get-McpResponses {
@@ -2755,16 +3095,39 @@ Assert-LocalPostgresDsn -Value $runtimeDsn -ExpectedDatabase $databaseName -Fail
 Assert-LocalPostgresDsn -Value $adminDsn -ExpectedDatabase $databaseName -AllowMaintenanceDatabase -FailureCode 'TASK038_ADMIN_DSN_REJECTED'
 
 $script:Psql = Get-CanonicalPath -Path $PsqlExecutable
+if (-not (Test-ExactPath -Actual $script:Psql -Expected (Join-Path $expectedPostgresBin 'psql.exe'))) {
+    throw 'TASK038_PSQL_IDENTITY_REJECTED'
+}
 Assert-RegularFile -Path $script:Psql -FailureCode 'TASK038_PSQL_REJECTED'
+$script:PsqlNativeIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $script:Psql -Directory $false
+if ((Get-FileSha256 -Path $script:Psql) -cne $expectedPsqlExecutableSha256) {
+    throw 'TASK038_PSQL_IDENTITY_REJECTED'
+}
 $psqlVersion = Invoke-NativeText -Executable $script:Psql -Arguments @('--version')
 if ($psqlVersion.ExitCode -ne 0 -or $psqlVersion.Text -notmatch '^psql \(PostgreSQL\) 17\.10(?:\s|$)') {
     throw 'TASK038_POSTGRES_VERSION_REJECTED'
 }
 $script:PgCtl = Get-CanonicalPath -Path (Join-Path (Split-Path -Parent $script:Psql) 'pg_ctl.exe')
 Assert-RegularFile -Path $script:PgCtl -FailureCode 'TASK038_PG_CTL_REJECTED'
+$script:PgCtlNativeIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $script:PgCtl -Directory $false
+if ((Get-FileSha256 -Path $script:PgCtl) -cne $expectedPgCtlExecutableSha256) {
+    throw 'TASK038_PG_CTL_IDENTITY_REJECTED'
+}
 $pgCtlVersion = Invoke-NativeText -Executable $script:PgCtl -Arguments @('--version')
 if ($pgCtlVersion.ExitCode -ne 0 -or $pgCtlVersion.Text -notmatch '^pg_ctl \(PostgreSQL\) 17\.10(?:\s|$)') {
     throw 'TASK038_PG_CTL_VERSION_REJECTED'
+}
+$script:PostgresExecutable = Get-CanonicalPath -Path (Join-Path (Split-Path -Parent $script:Psql) 'postgres.exe')
+Assert-RegularFile -Path $script:PostgresExecutable -FailureCode 'TASK038_POSTGRES_EXECUTABLE_REJECTED'
+$script:PostgresExecutableNativeIdentity = Get-LatticeWindowsNativePathIdentityToken `
+    -Path $script:PostgresExecutable `
+    -Directory $false
+if ((Get-FileSha256 -Path $script:PostgresExecutable) -cne $expectedPostgresExecutableSha256) {
+    throw 'TASK038_POSTGRES_EXECUTABLE_IDENTITY_REJECTED'
+}
+$postgresVersion = Invoke-NativeText -Executable $script:PostgresExecutable -Arguments @('--version')
+if ($postgresVersion.ExitCode -ne 0 -or $postgresVersion.Text -notmatch '^postgres \(PostgreSQL\) 17\.10(?:\s|$)') {
+    throw 'TASK038_POSTGRES_EXECUTABLE_VERSION_REJECTED'
 }
 
 $script:PostgresData = Get-CanonicalPath -Path $PostgresDataDirectory
@@ -2790,6 +3153,24 @@ if (
     [string]$clusterMarker.kind -cne 'LATTICE_TASK019_DISPOSABLE_POSTGRES_V1' -or
     [string]$clusterMarker.run_id -cne $PostgresRunId -or
     [string]$clusterMarker.postgres_version -cne '17.10' -or
+    [string]$clusterMarker.host -cne '127.0.0.1' -or
+    [int]$clusterMarker.port -ne $PostgresPort -or
+    -not [bool]$clusterMarker.identity_materialized -or
+    -not [bool]$clusterMarker.restart_identity_verified -or
+    [string]$clusterMarker.system_identifier -cnotmatch '\A[0-9]{1,20}\z' -or
+    [string]::IsNullOrWhiteSpace([string]$clusterMarker.initial_postmaster_started_at) -or
+    [string]::IsNullOrWhiteSpace([string]$clusterMarker.restart_postmaster_started_at) -or
+    [string]$clusterMarker.initial_postmaster_started_at -ceq [string]$clusterMarker.restart_postmaster_started_at -or
+    (@($clusterMarker.excluded_ports | ForEach-Object { [int]$_ }) -join ',') -cne '5432,64272,55432' -or
+    -not (Test-ExactPath -Actual ([string]$clusterMarker.psql_executable_path) -Expected $script:Psql) -or
+    -not (Test-ExactPath -Actual ([string]$clusterMarker.pg_ctl_executable_path) -Expected $script:PgCtl) -or
+    -not (Test-ExactPath -Actual ([string]$clusterMarker.postgres_executable_path) -Expected $script:PostgresExecutable) -or
+    [string]$clusterMarker.psql_executable_raw_sha256 -cne $expectedPsqlExecutableSha256 -or
+    [string]$clusterMarker.pg_ctl_executable_raw_sha256 -cne $expectedPgCtlExecutableSha256 -or
+    [string]$clusterMarker.postgres_executable_raw_sha256 -cne $expectedPostgresExecutableSha256 -or
+    [string]$clusterMarker.psql_executable_native_identity -cne $script:PsqlNativeIdentity -or
+    [string]$clusterMarker.pg_ctl_executable_native_identity -cne $script:PgCtlNativeIdentity -or
+    [string]$clusterMarker.postgres_executable_native_identity -cne $script:PostgresExecutableNativeIdentity -or
     -not (Test-ExactPath -Actual ([string]$clusterMarker.root) -Expected $clusterRoot) -or
     -not (Test-ExactPath -Actual ([string]$clusterMarker.repository_target) -Expected $repositoryTarget)
 ) {
@@ -2802,6 +3183,9 @@ $script:PostgresContainmentSnapshot = New-LatticeWindowsNativeContainmentSnapsho
 $script:PostgresDataIdentity = Get-LatticeWindowsNativePathIdentityToken `
     -Path $script:PostgresData `
     -Directory $true
+if ([string]$clusterMarker.data_native_identity -cne $script:PostgresDataIdentity) {
+    throw 'TASK038_POSTGRES_MARKER_REJECTED'
+}
 Assert-Task038PostgresNativeIdentity -FailureCode 'TASK038_POSTGRES_NATIVE_IDENTITY_REJECTED'
 $postgresServerLog = Get-CanonicalPath -Path (Join-Path $clusterRoot 'postgres.log')
 
@@ -2925,10 +3309,25 @@ if (Test-Path -LiteralPath $fixtureRoot) {
 New-Item -ItemType Directory -Path $fixtureRoot -Force:$false | Out-Null
 $evidenceRoot = Join-Path $fixtureRoot 'evidence'
 New-Item -ItemType Directory -Path $evidenceRoot -Force:$false | Out-Null
+$candidateSourceLinkage = Get-Task038CandidateSourceLinkage -Repository $script:RepositoryRoot
+$candidateLatticedSha256 = Get-FileSha256 -Path $script:Latticed
+$candidateSourceLinkage['canonical_latticed_sha256'] = $candidateLatticedSha256
+$candidateSourceLinkage['cluster_marker_raw_sha256'] = $clusterMarkerRawSha256
+$candidateSourceLinkage['postgres_system_identifier'] = [string]$clusterMarker.system_identifier
+$candidateSourceLinkagePath = Join-Path $evidenceRoot 'candidate-source-linkage.json'
+Write-JsonEvidence -Path $candidateSourceLinkagePath -Value $candidateSourceLinkage
+$candidateSourceLinkageRawSha256 = Get-FileSha256 -Path $candidateSourceLinkagePath
 $deliveryRoot = Join-Path $fixtureRoot 'delivery'
 $schemaDirectory = Join-Path $fixtureRoot 'schema'
 
 Assert-Task038PostgresNativeIdentity -FailureCode 'TASK038_POSTGRES_NATIVE_IDENTITY_REJECTED'
+$postgresRuntimeBinding = Get-PostgresProcessEvidence -Password $databasePassword -DatabaseName $databaseName
+if (
+    [string]$postgresRuntimeBinding.system_identifier -cne [string]$clusterMarker.system_identifier -or
+    [string]$postgresRuntimeBinding.postmaster_started_at -cne [string]$clusterMarker.restart_postmaster_started_at
+) {
+    throw 'TASK038_POSTGRES_RUNTIME_BINDING_REJECTED'
+}
 $identity = Get-DatabaseIdentity -Password $databasePassword -DatabaseName $databaseName
 $authority = Enable-StoreAuthority -Password $databasePassword -DatabaseName $databaseName -AcceptanceId $acceptanceId
 Invoke-WriterLeaseLiveSuite -Identity $identity -Authority $authority -DatabaseName $databaseName -MigratorDsn $migratorDsn -RuntimeDsn $runtimeDsn -AdminDsn $adminDsn -EvidencePath (Join-Path $evidenceRoot 'writer-lease-live.json')
@@ -2947,6 +3346,18 @@ Write-JsonEvidence -Path (Join-Path $evidenceRoot 'database-binding.json') -Valu
     cluster_root_native_identity = [string]$script:PostgresContainmentSnapshot.root_identity
     cluster_marker_native_identity = [string]$script:PostgresContainmentSnapshot.marker_identity
     postgres_data_native_identity = [string]$script:PostgresDataIdentity
+    postgres_runtime_binding = $postgresRuntimeBinding
+    psql_executable_path = $script:Psql
+    psql_executable_raw_sha256 = $expectedPsqlExecutableSha256
+    psql_executable_native_identity = $script:PsqlNativeIdentity
+    pg_ctl_executable_path = $script:PgCtl
+    pg_ctl_executable_raw_sha256 = $expectedPgCtlExecutableSha256
+    pg_ctl_executable_native_identity = $script:PgCtlNativeIdentity
+    postgres_executable_path = $script:PostgresExecutable
+    postgres_executable_raw_sha256 = $expectedPostgresExecutableSha256
+    postgres_executable_native_identity = $script:PostgresExecutableNativeIdentity
+    excluded_ports = @(5432, 64272, 55432)
+    marker_restart_identity_verified = $true
     identity = $identity
     authority = $authority
     task_ingress_kind = 'LOCAL_CANONICAL_MCP_ACCEPTANCE'
@@ -2980,7 +3391,38 @@ $legacyFrames = @(
     [ordered]@{ jsonrpc = '2.0'; id = 4; method = 'tools/call'; params = [ordered]@{ name = 'lattice_task_submit'; arguments = [ordered]@{ client_request_id = $sameClientRequestId; intent = 'CONTROLLED_CODEX_CANARY' } } },
     [ordered]@{ jsonrpc = '2.0'; id = 5; method = 'tools/call'; params = [ordered]@{ name = 'lattice_task_submit'; arguments = [ordered]@{ client_request_id = $differentClientRequestId; intent = 'CONTROLLED_CODEX_CANARY' } } }
 )
-$submitSession = Invoke-LatticedSession -InputText (New-McpInput -Frames $legacyFrames) -RunMode 'FRESH' -OutputPath (Join-Path $evidenceRoot 'submit.response-summary.json') -MetaPath (Join-Path $evidenceRoot 'submit.process.json') -Authority $authority -DatabasePassword $databasePassword -DeliveryRoot $deliveryRoot -SchemaDirectory $schemaDirectory -LauncherSha256 $launcherSha256 -LauncherVersion $codexVersion.Text.Trim()
+$submitInput = New-McpInput -Frames $legacyFrames
+$submitAcceptanceSessionId = [Guid]::NewGuid().ToString('N')
+$submitAcceptanceSink = New-Task038McpAcceptanceEvidenceSink `
+    -EvidenceRoot $evidenceRoot `
+    -SessionId $submitAcceptanceSessionId
+$submitAcceptanceSafeConfigSha256 = Get-StringSha256 -Value (@(
+    'lattice.task038.mcp-acceptance-safe-config.v1',
+    $acceptanceId,
+    'FRESH',
+    (Get-StringSha256 -Value $submitInput),
+    $candidateSourceLinkageRawSha256,
+    $candidateLatticedSha256,
+    $clusterMarkerRawSha256,
+    [string]$clusterMarker.system_identifier,
+    [string]$authority.authority_revision
+) -join "`n")
+$submitSession = Invoke-LatticedSession `
+    -InputText $submitInput `
+    -RunMode 'FRESH' `
+    -OutputPath (Join-Path $evidenceRoot 'submit.response-summary.json') `
+    -MetaPath (Join-Path $evidenceRoot 'submit.process.json') `
+    -Authority $authority `
+    -DatabasePassword $databasePassword `
+    -DeliveryRoot $deliveryRoot `
+    -SchemaDirectory $schemaDirectory `
+    -LauncherSha256 $launcherSha256 `
+    -LauncherVersion $codexVersion.Text.Trim() `
+    -AcceptanceEvidencePath ([string]$submitAcceptanceSink.path) `
+    -AcceptanceEvidenceNativeIdentity ([string]$submitAcceptanceSink.native_identity) `
+    -AcceptanceSessionId $submitAcceptanceSessionId `
+    -AcceptanceSafeConfigSha256 $submitAcceptanceSafeConfigSha256 `
+    -ExpectedDispatchCount 3
 Assert-CredentialSourceUnchanged `
     -Root $script:CodexCredentialSource `
     -ExpectedFootprint $credentialSourceBefore `
@@ -3065,7 +3507,38 @@ $statusFrames = @(
     [ordered]@{ jsonrpc = '2.0'; id = 2; method = 'tools/list'; params = [ordered]@{ _meta = $modernMeta } },
     [ordered]@{ jsonrpc = '2.0'; id = 3; method = 'tools/call'; params = [ordered]@{ name = 'lattice_task_status'; arguments = [ordered]@{ task_ref = [string]$submitted.task_ref }; _meta = $modernMeta } }
 )
-$statusSession = Invoke-LatticedSession -InputText (New-McpInput -Frames $statusFrames) -RunMode 'RESUME_EXISTING' -OutputPath (Join-Path $evidenceRoot 'status.response-summary.json') -MetaPath (Join-Path $evidenceRoot 'status.process.json') -Authority $authority -DatabasePassword $databasePassword -DeliveryRoot $deliveryRoot -SchemaDirectory $schemaDirectory -LauncherSha256 $launcherSha256 -LauncherVersion $codexVersion.Text.Trim()
+$statusInput = New-McpInput -Frames $statusFrames
+$statusAcceptanceSessionId = [Guid]::NewGuid().ToString('N')
+$statusAcceptanceSink = New-Task038McpAcceptanceEvidenceSink `
+    -EvidenceRoot $evidenceRoot `
+    -SessionId $statusAcceptanceSessionId
+$statusAcceptanceSafeConfigSha256 = Get-StringSha256 -Value (@(
+    'lattice.task038.mcp-acceptance-safe-config.v1',
+    $acceptanceId,
+    'RESUME_EXISTING',
+    (Get-StringSha256 -Value $statusInput),
+    $candidateSourceLinkageRawSha256,
+    $candidateLatticedSha256,
+    $clusterMarkerRawSha256,
+    [string]$clusterMarker.system_identifier,
+    [string]$authority.authority_revision
+) -join "`n")
+$statusSession = Invoke-LatticedSession `
+    -InputText $statusInput `
+    -RunMode 'RESUME_EXISTING' `
+    -OutputPath (Join-Path $evidenceRoot 'status.response-summary.json') `
+    -MetaPath (Join-Path $evidenceRoot 'status.process.json') `
+    -Authority $authority `
+    -DatabasePassword $databasePassword `
+    -DeliveryRoot $deliveryRoot `
+    -SchemaDirectory $schemaDirectory `
+    -LauncherSha256 $launcherSha256 `
+    -LauncherVersion $codexVersion.Text.Trim() `
+    -AcceptanceEvidencePath ([string]$statusAcceptanceSink.path) `
+    -AcceptanceEvidenceNativeIdentity ([string]$statusAcceptanceSink.native_identity) `
+    -AcceptanceSessionId $statusAcceptanceSessionId `
+    -AcceptanceSafeConfigSha256 $statusAcceptanceSafeConfigSha256 `
+    -ExpectedDispatchCount 1
 Assert-CredentialSourceUnchanged `
     -Root $script:CodexCredentialSource `
     -ExpectedFootprint $credentialSourceBefore `
@@ -3099,6 +3572,88 @@ if (($databaseAfterSubmit | ConvertTo-Json -Compress -Depth 8) -ne ($databaseAft
     throw 'TASK038_FRESH_STATUS_DATABASE_FOOTPRINT_REJECTED'
 }
 
+$submitProcessPresentAfter = $null -ne (Get-Process -Id ([int]$submitSession.ProcessId) -ErrorAction SilentlyContinue)
+$statusProcessPresentAfter = $null -ne (Get-Process -Id ([int]$statusSession.ProcessId) -ErrorAction SilentlyContinue)
+$tcpOwnersAfter = @(Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object {
+    [int]$_.OwningProcess -in @([int]$submitSession.ProcessId, [int]$statusSession.ProcessId)
+}).Count
+$udpOwnersAfter = @(Get-NetUDPEndpoint -ErrorAction SilentlyContinue | Where-Object {
+    [int]$_.OwningProcess -in @([int]$submitSession.ProcessId, [int]$statusSession.ProcessId)
+}).Count
+if ($submitProcessPresentAfter -or $statusProcessPresentAfter -or $tcpOwnersAfter -ne 0 -or $udpOwnersAfter -ne 0) {
+    throw 'TASK038_SESSION_EFFECT_CLEANUP_REJECTED'
+}
+$effectObservationPath = Join-Path $evidenceRoot 'production-effect-observation.json'
+$effectEvidenceFiles = [ordered]@{}
+foreach ($name in @(
+    'candidate-source-linkage.json',
+    'database-binding.json',
+    'database-before.json',
+    'database-after-submit.json',
+    'database-after-status.json',
+    'git-after-submit.json',
+    'git-after-status.json',
+    'codex-home-after-submit.json',
+    'codex-home-after-status.json',
+    'submit.process.json',
+    'status.process.json'
+)) {
+    $path = Join-Path $evidenceRoot $name
+    $effectEvidenceFiles[$name] = Get-FileSha256 -Path $path
+}
+$effectObservation = [ordered]@{
+    schema_version = 'lattice.task038.production-effect-observation.v1'
+    acceptance_id = $acceptanceId
+    candidate_source_linkage_raw_sha256 = $candidateSourceLinkageRawSha256
+    source_commit = [string]$candidateSourceLinkage.source_commit
+    source_tree = [string]$candidateSourceLinkage.source_tree
+    canonical_latticed_sha256 = $candidateLatticedSha256
+    postgres_run_id = $PostgresRunId
+    postgres_system_identifier = [string]$clusterMarker.system_identifier
+    postgres_port = $PostgresPort
+    postgres_marker_raw_sha256 = $clusterMarkerRawSha256
+    process_private_dispatch_sink = $true
+    dispatch_sessions = @(
+        [ordered]@{
+            phase = 'SUBMIT'
+            session_id = [string]$submitSession.AcceptanceEvidence.session_id
+            safe_config_sha256 = [string]$submitSession.AcceptanceEvidence.safe_config_sha256
+            raw_sha256 = [string]$submitSession.AcceptanceEvidence.raw_sha256
+            final_event_sha256 = [string]$submitSession.AcceptanceEvidence.final_event_sha256
+            dispatch_accepted_count = [int]$submitSession.AcceptanceEvidence.dispatch_accepted_count
+            normal_close_complete = [bool]$submitSession.AcceptanceEvidence.normal_close_complete
+        },
+        [ordered]@{
+            phase = 'STATUS'
+            session_id = [string]$statusSession.AcceptanceEvidence.session_id
+            safe_config_sha256 = [string]$statusSession.AcceptanceEvidence.safe_config_sha256
+            raw_sha256 = [string]$statusSession.AcceptanceEvidence.raw_sha256
+            final_event_sha256 = [string]$statusSession.AcceptanceEvidence.final_event_sha256
+            dispatch_accepted_count = [int]$statusSession.AcceptanceEvidence.dispatch_accepted_count
+            normal_close_complete = [bool]$statusSession.AcceptanceEvidence.normal_close_complete
+        }
+    )
+    database_before_sha256 = [string]$effectEvidenceFiles['database-before.json']
+    database_after_submit_sha256 = [string]$effectEvidenceFiles['database-after-submit.json']
+    database_after_status_sha256 = [string]$effectEvidenceFiles['database-after-status.json']
+    filesystem_git_after_submit_sha256 = [string]$effectEvidenceFiles['git-after-submit.json']
+    filesystem_git_after_status_sha256 = [string]$effectEvidenceFiles['git-after-status.json']
+    filesystem_codex_home_after_submit_sha256 = [string]$effectEvidenceFiles['codex-home-after-submit.json']
+    filesystem_codex_home_after_status_sha256 = [string]$effectEvidenceFiles['codex-home-after-status.json']
+    process_job_active_count_after_cleanup = 0
+    process_session_pids_present_after_cleanup = 0
+    network_tcp_owner_rows_after_cleanup = $tcpOwnersAfter
+    network_udp_owner_rows_after_cleanup = $udpOwnersAfter
+    codex_invocation_count = [int]$databaseAfterStatus.codex_intents
+    downstream_graphify_hermes_memory_effect_delta = 0
+    status_database_footprint_unchanged = $true
+    status_git_footprint_unchanged = $true
+    status_codex_home_footprint_unchanged = $true
+    evidence_file_sha256 = $effectEvidenceFiles
+}
+Write-JsonEvidence -Path $effectObservationPath -Value $effectObservation
+$effectObservationRawSha256 = Get-FileSha256 -Path $effectObservationPath
+
 $finalPath = Join-Path $evidenceRoot 'final.json'
 $final = [ordered]@{
     schema_version = 'lattice.task038.local-canonical-mcp-acceptance.v1'
@@ -3111,6 +3666,16 @@ $final = [ordered]@{
     result_digest = [string]$status.result_digest
     ledger_head_digest = [string]$status.ledger_head_digest
     canonical_latticed_sha256 = Get-FileSha256 -Path $script:Latticed
+    candidate_source_commit = [string]$candidateSourceLinkage.source_commit
+    candidate_source_tree = [string]$candidateSourceLinkage.source_tree
+    candidate_source_exact_path_entries_sha256 = [string]$candidateSourceLinkage.exact_path_entries_sha256
+    candidate_source_linkage_raw_sha256 = $candidateSourceLinkageRawSha256
+    production_effect_observation_schema = 'lattice.task038.production-effect-observation.v1'
+    production_effect_observation_raw_sha256 = $effectObservationRawSha256
+    submit_dispatch_evidence_raw_sha256 = [string]$submitSession.AcceptanceEvidence.raw_sha256
+    submit_dispatch_final_event_sha256 = [string]$submitSession.AcceptanceEvidence.final_event_sha256
+    status_dispatch_evidence_raw_sha256 = [string]$statusSession.AcceptanceEvidence.raw_sha256
+    status_dispatch_final_event_sha256 = [string]$statusSession.AcceptanceEvidence.final_event_sha256
     official_codex_sha256 = $launcherSha256
     writer_lease_live_suite_passed_without_skip = $true
     legacy_discovery_and_submit = $true

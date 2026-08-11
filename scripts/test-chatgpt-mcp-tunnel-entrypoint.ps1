@@ -662,6 +662,7 @@ public static class Task038FakeTunnelClient
     Assert-Equal -Expected $expectedProfileDigest -Actual ([IO.File]::ReadAllText($ingressProfilePath).Trim()) -FailureCode 'TASK038_RUN_INGRESS_PROFILE_REJECTED'
     $outerReceipt = $runOutput[-1] | ConvertFrom-Json -ErrorAction Stop
     Assert-Equal -Expected 'lattice.task038.tunnel-outer-lifecycle.v1' -Actual ([string]$outerReceipt.schema) -FailureCode 'TASK038_OUTER_RECEIPT_SCHEMA_REJECTED'
+    Assert-Equal -Expected 'Run' -Actual ([string]$outerReceipt.mode) -FailureCode 'TASK038_OUTER_RECEIPT_MODE_REJECTED'
     Assert-Equal -Expected 'C_CALIBRATION_FIRST' -Actual ([string]$outerReceipt.lifecycle_threshold_decision) -FailureCode 'TASK038_LIFECYCLE_DECISION_REJECTED'
     Assert-Equal -Expected 'UNKNOWN' -Actual ([string]$outerReceipt.lifecycle_classification) -FailureCode 'TASK038_LIFECYCLE_CLASSIFICATION_REJECTED'
     if (
@@ -766,9 +767,10 @@ public static class Task038FakeTunnelClient
     [Environment]::SetEnvironmentVariable('LATTICE_STORE_AUTHORITY_REVISION', '1', 'Process')
 
     [Environment]::SetEnvironmentVariable('LATTICE_STORE_AUTHORITY_REVISION', '2', 'Process')
-    $generationOutput = @(& $launcher -Mode Run -TunnelClientExecutable $fakeRunClient -ProfileDirectory $profileDirectory)
+    $generationOutput = @(& $launcher -Mode ManagedRun -TunnelClientExecutable $fakeRunClient -ProfileDirectory $profileDirectory)
     $generationReceipt = $generationOutput[-1] | ConvertFrom-Json -ErrorAction Stop
     if (
+        [string]$generationReceipt.mode -cne 'ManagedRun' -or
         [long]$generationReceipt.lifecycle_config_generation -ne 2 -or
         [string]$generationReceipt.lifecycle_session_id -ceq [string]$outerReceipt.lifecycle_session_id -or
         [string]$generationReceipt.lifecycle_event_path -ceq [string]$outerReceipt.lifecycle_event_path -or

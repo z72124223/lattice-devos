@@ -28,6 +28,120 @@ if (@($parseErrors).Count -ne 0) {
 }
 
 $text = [IO.File]::ReadAllText($harness)
+$strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+function Read-Task038CandidateSource {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$FailureCode
+    )
+
+    $candidatePath = [IO.Path]::GetFullPath($Path)
+    $candidateItem = Get-Item -LiteralPath $candidatePath -Force -ErrorAction SilentlyContinue
+    if (
+        $null -eq $candidateItem -or
+        $candidateItem.PSIsContainer -or
+        -not ($candidateItem -is [IO.FileInfo]) -or
+        ($candidateItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        -not [string]::Equals($candidateItem.FullName, $candidatePath, [StringComparison]::OrdinalIgnoreCase)
+    ) {
+        throw ($FailureCode + '_SOURCE_REJECTED')
+    }
+    $bytes = [IO.File]::ReadAllBytes($candidatePath)
+    if (
+        $bytes.Length -ge 3 -and
+        $bytes[0] -eq 0xEF -and
+        $bytes[1] -eq 0xBB -and
+        $bytes[2] -eq 0xBF
+    ) {
+        throw ($FailureCode + '_UTF8_BOM_REJECTED')
+    }
+    try {
+        $source = $strictUtf8.GetString($bytes)
+    }
+    catch {
+        throw ($FailureCode + '_UTF8_REJECTED')
+    }
+    $candidateTokens = $null
+    $candidateParseErrors = $null
+    [void][Management.Automation.Language.Parser]::ParseFile(
+        $candidatePath,
+        [ref]$candidateTokens,
+        [ref]$candidateParseErrors
+    )
+    if (@($candidateParseErrors).Count -ne 0) {
+        throw ($FailureCode + '_PARSE_REJECTED')
+    }
+    return $source
+}
+
+$tunnelLauncher = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'start-chatgpt-mcp-tunnel.ps1'))
+$tunnelLauncherText = Read-Task038CandidateSource `
+    -Path $tunnelLauncher `
+    -FailureCode 'TASK038_TUNNEL_LIFECYCLE'
+$postgresHarness = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'run-task019-postgres.ps1'))
+$postgresHarnessText = Read-Task038CandidateSource `
+    -Path $postgresHarness `
+    -FailureCode 'TASK038_TUNNEL_POSTGRES_HOOK'
+
+$lifecycleMaterializationFragments = @(
+    'TUNNEL_CLIENT_LIFECYCLE_EVENT_PATH',
+    'TUNNEL_CLIENT_LIFECYCLE_SESSION_ID',
+    'TUNNEL_CLIENT_LIFECYCLE_CONFIG_GENERATION',
+    'TUNNEL_CLIENT_LIFECYCLE_SAFE_CONFIG_SHA256',
+    'lattice.tunnel-client.lifecycle-event.v1',
+    'lattice.tunnel-client.lifecycle-anomaly.v1',
+    "'SPAWN', 'OPEN', 'CLOSE_REQUESTED', 'PIPE_CLOSED', 'EXITED', 'REAPED'",
+    "lifecycle_classification -cne 'UNKNOWN'",
+    'threshold_profile_version',
+    'pipe_milliseconds',
+    'exit_milliseconds',
+    'reap_milliseconds',
+    'confirm_milliseconds',
+    'C_CALIBRATION_FIRST',
+    'CreateJobObject',
+    'CREATE_SUSPENDED',
+    'AssignProcessToJobObject',
+    'ResumeThread',
+    '[Text.UTF8Encoding]::new($false, $true)',
+    '$bytes[0] -eq 0xef',
+    '$eventTypes[$eventIndex]',
+    'TASK038_TUNNEL_LIFECYCLE_EVIDENCE_REJECTED'
+)
+foreach ($fragment in $lifecycleMaterializationFragments) {
+    if ($tunnelLauncherText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw ('TASK038_TUNNEL_LIFECYCLE_NOT_MATERIALIZED|' + $fragment)
+    }
+}
+if ($tunnelLauncherText.IndexOf('SKIP', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    throw 'TASK038_TUNNEL_SKIP_PATH_REJECTED'
+}
+
+$postgresTunnelFragments = @(
+    'RunTask038TunnelHook',
+    'Enable-Task038TunnelStoreAuthority',
+    "-Mode 'ManagedRun'",
+    "ValidateScript({ `$_ -cmatch '\A[0-9a-f]{32}\z' })",
+    "`$RunId -cnotmatch '\A[0-9a-f]{32}\z'",
+    '@(5432, 64272, 55432)',
+    'LATTICE_STORE_DAEMON_INSTANCE_ID',
+    'LATTICE_STORE_AUTHORITY_REVISION',
+    'LATTICE_STORE_AUTHORITY_HEAD_DIGEST'
+    'identity_materialized'
+    'restart_identity_verified'
+    'system_identifier'
+    'postgres_executable_native_identity'
+    'psql_executable_native_identity'
+    'pg_ctl_executable_native_identity'
+    '882a5a073a88817f6c6d4c8827df1e4269ff226d52cf6f47c9883e91088c6345'
+    'e43adb9c5032e7efc63eebb44c5d32b142b34e5f4207666fed2dc7a51d43b630'
+    'abe89b0767a8cd0f956059aa5a5a93cd1042efc6194d000c2501da3e23babbd2'
+)
+foreach ($fragment in $postgresTunnelFragments) {
+    if ($postgresHarnessText.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw ('TASK038_TUNNEL_POSTGRES_HOOK_NOT_MATERIALIZED|' + $fragment)
+    }
+}
+
 $environmentHelper = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'task038-local-process-environment.ps1'))
 . $environmentHelper
 $nativeIdentityHelper = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'windows-native-path-identity.ps1'))
@@ -75,6 +189,7 @@ $requiredFragments = @(
     'Assert-StatelessDiscoverResponse',
     'Assert-ToolResultEnvelope',
     'Write-McpResponseSummary',
+    'Read-Task038McpAcceptanceEvidence',
     'Get-Task038FailureClassification',
     'Stop-Task038Job',
     'Stop-Task038ProcessTree',
@@ -128,6 +243,24 @@ $requiredFragments = @(
     'LOCAL_CANONICAL_MCP_NOT_CHATGPT_TUNNEL',
     'chatgpt_tunnel_claimed = $false',
     'LATTICED_LOCAL_MCP_ACCEPTANCE=PASS'
+    'LATTICE_MCP_ACCEPTANCE_EVIDENCE_PATH'
+    'LATTICE_MCP_ACCEPTANCE_SESSION_ID'
+    'LATTICE_MCP_ACCEPTANCE_SAFE_CONFIG_SHA256'
+    'lattice.mcp.acceptance-dispatch.v1'
+    'SESSION_OPEN'
+    'DISPATCH_ACCEPTED'
+    'SESSION_CLOSED'
+    'Read-Task038McpAcceptanceEvidence'
+    'lattice.task038.production-effect-observation.v1'
+    'lattice.task038.candidate-source-linkage.v1'
+    'exact_path_entries_sha256'
+    'process_job_active_count_after_cleanup = 0'
+    'network_tcp_owner_rows_after_cleanup'
+    'network_udp_owner_rows_after_cleanup'
+    'candidate_source_linkage_raw_sha256'
+    'TASK038_MCP_ACCEPTANCE_EVIDENCE_REJECTED'
+    'TASK038_CANDIDATE_SOURCE_REJECTED'
+    'TASK038_POSTGRES_RUNTIME_BINDING_REJECTED'
 )
 foreach ($fragment in $requiredFragments) {
     if ($text.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
@@ -140,7 +273,7 @@ if (
     $text.Split(
         [string[]]@($caseSensitiveRunIdValidator),
         [StringSplitOptions]::None
-    ).Count - 1 -ne 4
+    ).Count - 1 -ne 7
 ) {
     throw 'TASK038_LOCAL_RUN_ID_VALIDATION_REJECTED'
 }
@@ -375,6 +508,10 @@ foreach ($name in @(
     'Assert-SecretFreeText',
     'Write-JsonEvidence',
     'Write-McpResponseSummary',
+    'Set-Task038OwnerOnlyAcl',
+    'New-Task038McpAcceptanceEvidenceSink',
+    'Read-Task038McpAcceptanceEvidence',
+    'Get-Task038CandidateSourceLinkage',
     'Get-DirectoryFootprint',
     'Get-StableDirectoryFootprint',
     'New-FreshCodexExecutionHome',
@@ -388,6 +525,7 @@ foreach ($name in @(
     'Assert-ToolResultEnvelope',
     'Get-ToolStructuredContent',
     'Initialize-Task038JobObjectInterop',
+    'Initialize-Task038SuspendedProcessInterop',
     'New-Task038KillOnCloseJob',
     'Add-Task038ProcessToJob',
     'Start-Task038SuspendedProcess',
@@ -702,6 +840,11 @@ try {
     )
     $timeoutRejected = $false
     $processProbeFailure = 'NONE'
+    $timeoutEvidencePath = Join-Path $probeRoot 'timeout-dispatch.jsonl'
+    [IO.File]::WriteAllBytes($timeoutEvidencePath, [byte[]]::new(0))
+    $timeoutEvidenceIdentity = Get-LatticeWindowsNativePathIdentityToken `
+        -Path $timeoutEvidencePath `
+        -Directory $false
     try {
         $null = Invoke-LatticedSession `
             -InputText $sessionInput `
@@ -713,7 +856,12 @@ try {
             -DeliveryRoot $probeRoot `
             -SchemaDirectory $probeRoot `
             -LauncherSha256 ('d' * 64) `
-            -LauncherVersion 'task038-process-probe'
+            -LauncherVersion 'task038-process-probe' `
+            -AcceptanceEvidencePath $timeoutEvidencePath `
+            -AcceptanceEvidenceNativeIdentity $timeoutEvidenceIdentity `
+            -AcceptanceSessionId ('1' * 32) `
+            -AcceptanceSafeConfigSha256 ('2' * 64) `
+            -ExpectedDispatchCount 0
     }
     catch {
         $processProbeFailure = Get-Task038FailureClassification -ErrorRecord $_
@@ -755,17 +903,38 @@ try {
         "[IO.File]::WriteAllText('$earlyExitPidPath',[string]`$child.Id);" +
         "exit`r`n"
     )
-    $null = Invoke-LatticedSession `
-        -InputText $earlyExitInput `
-        -RunMode 'RESUME_EXISTING' `
-        -OutputPath (Join-Path $probeRoot 'early-exit-response-summary.json') `
-        -MetaPath (Join-Path $probeRoot 'early-exit-meta.json') `
-        -Authority $fakeAuthority `
-        -DatabasePassword 'TASK038_PROCESS_PROBE_PASSWORD' `
-        -DeliveryRoot $probeRoot `
-        -SchemaDirectory $probeRoot `
-        -LauncherSha256 ('d' * 64) `
-        -LauncherVersion 'task038-process-probe'
+    $earlyEvidencePath = Join-Path $probeRoot 'early-exit-dispatch.jsonl'
+    [IO.File]::WriteAllBytes($earlyEvidencePath, [byte[]]::new(0))
+    $earlyEvidenceIdentity = Get-LatticeWindowsNativePathIdentityToken `
+        -Path $earlyEvidencePath `
+        -Directory $false
+    $earlyEvidenceRejected = $false
+    $earlyEvidenceFailure = 'NONE'
+    try {
+        $null = Invoke-LatticedSession `
+            -InputText $earlyExitInput `
+            -RunMode 'RESUME_EXISTING' `
+            -OutputPath (Join-Path $probeRoot 'early-exit-response-summary.json') `
+            -MetaPath (Join-Path $probeRoot 'early-exit-meta.json') `
+            -Authority $fakeAuthority `
+            -DatabasePassword 'TASK038_PROCESS_PROBE_PASSWORD' `
+            -DeliveryRoot $probeRoot `
+            -SchemaDirectory $probeRoot `
+            -LauncherSha256 ('d' * 64) `
+            -LauncherVersion 'task038-process-probe' `
+            -AcceptanceEvidencePath $earlyEvidencePath `
+            -AcceptanceEvidenceNativeIdentity $earlyEvidenceIdentity `
+            -AcceptanceSessionId ('3' * 32) `
+            -AcceptanceSafeConfigSha256 ('4' * 64) `
+            -ExpectedDispatchCount 0
+    }
+    catch {
+        $earlyEvidenceFailure = Get-Task038FailureClassification -ErrorRecord $_
+        $earlyEvidenceRejected = ($earlyEvidenceFailure -eq 'TASK038_MCP_ACCEPTANCE_EVIDENCE_REJECTED')
+    }
+    if (-not $earlyEvidenceRejected) {
+        throw ('TASK038_MCP_ACCEPTANCE_EVIDENCE_FAIL_CLOSED_PROBE_REJECTED|' + $earlyEvidenceFailure)
+    }
     Start-Sleep -Seconds 4
     if (
         (Test-Path -LiteralPath $earlyExitSentinel) -or
@@ -797,7 +966,9 @@ finally {
         (Join-Path $probeRoot 'process-probe-response-summary.json'),
         (Join-Path $probeRoot 'process-probe-meta.json'),
         (Join-Path $probeRoot 'early-exit-response-summary.json'),
-        (Join-Path $probeRoot 'early-exit-meta.json')
+        (Join-Path $probeRoot 'early-exit-meta.json'),
+        (Join-Path $probeRoot 'timeout-dispatch.jsonl'),
+        (Join-Path $probeRoot 'early-exit-dispatch.jsonl')
     )) {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             Remove-Item -LiteralPath $path -Force

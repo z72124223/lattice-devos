@@ -1,12 +1,18 @@
 //! Bounded MCP stdio surface for the canonical `latticed` entry.
 
+use std::env;
 use std::error::Error;
 use std::fmt;
+use std::fmt::Write as _;
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
 use lattice_contracts::{ContentDigest, SubjectBinding};
 use serde_json::{Map, Value, json};
+use sha2::{Digest as _, Sha256};
 
 /// Legacy stateful MCP protocol version implemented by this server.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -61,6 +67,177 @@ const META_CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
 const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 const META_LOG_LEVEL: &str = "io.modelcontextprotocol/logLevel";
 const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
+
+const ACCEPTANCE_EVIDENCE_PATH_ENV: &str = "LATTICE_MCP_ACCEPTANCE_EVIDENCE_PATH";
+const ACCEPTANCE_SESSION_ID_ENV: &str = "LATTICE_MCP_ACCEPTANCE_SESSION_ID";
+const ACCEPTANCE_SAFE_CONFIG_SHA256_ENV: &str = "LATTICE_MCP_ACCEPTANCE_SAFE_CONFIG_SHA256";
+const ACCEPTANCE_EVIDENCE_SCHEMA: &str = "lattice.mcp.acceptance-dispatch.v1";
+const ACCEPTANCE_EVIDENCE_HASH_DOMAIN: &str = "lattice.mcp.acceptance-dispatch-hash.v1";
+
+struct AcceptanceEvidence {
+    file: File,
+    session_id: String,
+    safe_config_sha256: String,
+    ordinal: u64,
+    dispatch_accepted_count: u64,
+    previous_event_sha256: String,
+}
+
+impl AcceptanceEvidence {
+    fn from_process_environment() -> io::Result<Option<Self>> {
+        let path = env::var_os(ACCEPTANCE_EVIDENCE_PATH_ENV);
+        let session_id = env::var_os(ACCEPTANCE_SESSION_ID_ENV);
+        let safe_config_sha256 = env::var_os(ACCEPTANCE_SAFE_CONFIG_SHA256_ENV);
+        if path.is_none() && session_id.is_none() && safe_config_sha256.is_none() {
+            return Ok(None);
+        }
+        let path = path
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| acceptance_evidence_error("incomplete or non-UTF-8 evidence path"))?;
+        let session_id = session_id
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| acceptance_evidence_error("incomplete or non-UTF-8 session id"))?;
+        let safe_config_sha256 = safe_config_sha256
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| acceptance_evidence_error("incomplete or non-UTF-8 safe config"))?;
+        Self::open(&PathBuf::from(path), session_id, safe_config_sha256).map(Some)
+    }
+
+    fn open(path: &Path, session_id: String, safe_config_sha256: String) -> io::Result<Self> {
+        if !path.is_absolute()
+            || path
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .starts_with(r"\\.\pipe\")
+            || !valid_lower_hex(&session_id, 32)
+            || !valid_lower_hex(&safe_config_sha256, 64)
+        {
+            return Err(acceptance_evidence_error("invalid evidence configuration"));
+        }
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != 0 {
+            return Err(acceptance_evidence_error(
+                "evidence sink is not a fresh regular file",
+            ));
+        }
+        let file = OpenOptions::new().append(true).open(path)?;
+        if !file.metadata()?.is_file() || file.metadata()?.len() != 0 {
+            return Err(acceptance_evidence_error(
+                "evidence sink changed before open",
+            ));
+        }
+        let mut evidence = Self {
+            file,
+            session_id,
+            safe_config_sha256,
+            ordinal: 0,
+            dispatch_accepted_count: 0,
+            previous_event_sha256: "0".repeat(64),
+        };
+        evidence.append("SESSION_OPEN", None, None)?;
+        Ok(evidence)
+    }
+
+    fn record_dispatch(&mut self, tool_name: &str, request_id: &Value) -> io::Result<()> {
+        self.dispatch_accepted_count = self
+            .dispatch_accepted_count
+            .checked_add(1)
+            .ok_or_else(|| acceptance_evidence_error("dispatch counter overflow"))?;
+        let request_id_bytes = serde_json::to_vec(request_id)
+            .map_err(|error| acceptance_evidence_error(&error.to_string()))?;
+        let request_id_sha256 = sha256_hex(&request_id_bytes);
+        self.append(
+            "DISPATCH_ACCEPTED",
+            Some(tool_name),
+            Some(&request_id_sha256),
+        )
+    }
+
+    fn close(&mut self) -> io::Result<()> {
+        self.append("SESSION_CLOSED", None, None)
+    }
+
+    fn append(
+        &mut self,
+        record_type: &str,
+        tool_name: Option<&str>,
+        request_id_sha256: Option<&str>,
+    ) -> io::Result<()> {
+        self.ordinal = self
+            .ordinal
+            .checked_add(1)
+            .ok_or_else(|| acceptance_evidence_error("event ordinal overflow"))?;
+        let observed_at_unix_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| acceptance_evidence_error(&error.to_string()))?
+            .as_nanos()
+            .to_string();
+        let tool_name_hash_field = tool_name.unwrap_or("null");
+        let request_id_hash_field = request_id_sha256.unwrap_or("null");
+        let ordinal = self.ordinal.to_string();
+        let process_id = std::process::id().to_string();
+        let dispatch_accepted_count = self.dispatch_accepted_count.to_string();
+        let hash_input = [
+            ACCEPTANCE_EVIDENCE_HASH_DOMAIN,
+            &self.previous_event_sha256,
+            &self.session_id,
+            &self.safe_config_sha256,
+            record_type,
+            &ordinal,
+            &process_id,
+            tool_name_hash_field,
+            request_id_hash_field,
+            &dispatch_accepted_count,
+            &observed_at_unix_nanos,
+        ]
+        .join("\n");
+        let event_sha256 = sha256_hex(hash_input.as_bytes());
+        let record = json!({
+            "schema": ACCEPTANCE_EVIDENCE_SCHEMA,
+            "record_type": record_type,
+            "session_id": self.session_id,
+            "safe_config_sha256": self.safe_config_sha256,
+            "process_id": std::process::id(),
+            "ordinal": self.ordinal,
+            "tool_name": tool_name,
+            "request_id_sha256": request_id_sha256,
+            "dispatch_accepted_count": self.dispatch_accepted_count,
+            "observed_at_unix_nanos": observed_at_unix_nanos,
+            "previous_event_sha256": self.previous_event_sha256,
+            "event_sha256": event_sha256,
+        });
+        let mut bytes = serde_json::to_vec(&record)
+            .map_err(|error| acceptance_evidence_error(&error.to_string()))?;
+        bytes.push(b'\n');
+        self.file.write_all(&bytes)?;
+        self.file.sync_all()?;
+        self.previous_event_sha256 = event_sha256;
+        Ok(())
+    }
+}
+
+fn acceptance_evidence_error(message: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("LATTICE_MCP_ACCEPTANCE_EVIDENCE_REJECTED:{message}"),
+    )
+}
+
+fn valid_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    output
+}
 
 /// Returns the process-owned commitment to the authorization-relevant MCP
 /// protocol and closed tool schemas. Descriptions are intentionally excluded;
@@ -386,6 +563,8 @@ pub struct McpServer<S> {
     lifecycle: Lifecycle,
     tool_surface: ToolSurface,
     tool_invocations: usize,
+    acceptance_evidence: Option<AcceptanceEvidence>,
+    acceptance_evidence_error: Option<io::Error>,
 }
 
 impl<S: DeliveryToolService> McpServer<S> {
@@ -398,6 +577,8 @@ impl<S: DeliveryToolService> McpServer<S> {
             lifecycle: Lifecycle::AwaitingInitialize,
             tool_surface: ToolSurface::CanonicalTaskControl,
             tool_invocations: 0,
+            acceptance_evidence: None,
+            acceptance_evidence_error: None,
         }
     }
 
@@ -410,7 +591,25 @@ impl<S: DeliveryToolService> McpServer<S> {
             lifecycle: Lifecycle::AwaitingInitialize,
             tool_surface: ToolSurface::LegacyDeliveryObserver,
             tool_invocations: 0,
+            acceptance_evidence: None,
+            acceptance_evidence_error: None,
         }
+    }
+
+    fn enable_acceptance_evidence(&mut self) -> io::Result<()> {
+        self.acceptance_evidence = AcceptanceEvidence::from_process_environment()?;
+        Ok(())
+    }
+
+    fn take_acceptance_evidence_error(&mut self) -> Option<io::Error> {
+        self.acceptance_evidence_error.take()
+    }
+
+    fn close_acceptance_evidence(&mut self) -> io::Result<()> {
+        if let Some(evidence) = self.acceptance_evidence.as_mut() {
+            evidence.close()?;
+        }
+        Ok(())
     }
 
     /// Handles one decoded JSON-RPC message. Notifications return no value.
@@ -595,6 +794,12 @@ impl<S: DeliveryToolService> McpServer<S> {
             return protocol_error(id, -32029, "Tool invocation limit exceeded");
         }
         self.tool_invocations += 1;
+        if let Some(evidence) = self.acceptance_evidence.as_mut()
+            && let Err(error) = evidence.record_dispatch(name, &id)
+        {
+            self.acceptance_evidence_error = Some(error);
+            return protocol_error(id, -32603, "Acceptance evidence rejected");
+        }
         let result = match operation {
             ToolOperation::DeliveryRun if !self.tool_surface.allows_delivery_run() => {
                 Err(ToolExecutionError::new(LEGACY_DELIVERY_RUN_DISABLED))
@@ -649,7 +854,9 @@ pub fn serve<S: DeliveryToolService, R: BufRead, W: Write>(
     reader: R,
     writer: W,
 ) -> io::Result<()> {
-    serve_server(McpServer::new(service, binding), reader, writer)
+    let mut server = McpServer::new(service, binding);
+    server.enable_acceptance_evidence()?;
+    serve_server(server, reader, writer)
 }
 
 /// Serves the legacy read-only delivery observer over the supplied streams.
@@ -664,11 +871,9 @@ pub fn serve_legacy_delivery_observer<S: DeliveryToolService, R: BufRead, W: Wri
     reader: R,
     writer: W,
 ) -> io::Result<()> {
-    serve_server(
-        McpServer::new_legacy_delivery_observer(service, binding),
-        reader,
-        writer,
-    )
+    let mut server = McpServer::new_legacy_delivery_observer(service, binding);
+    server.enable_acceptance_evidence()?;
+    serve_server(server, reader, writer)
 }
 
 fn serve_server<S: DeliveryToolService, R: BufRead, W: Write>(
@@ -678,7 +883,10 @@ fn serve_server<S: DeliveryToolService, R: BufRead, W: Write>(
 ) -> io::Result<()> {
     loop {
         let response = match read_bounded_frame(&mut reader)? {
-            StdioFrame::EndOfStream => return Ok(()),
+            StdioFrame::EndOfStream => {
+                server.close_acceptance_evidence()?;
+                return Ok(());
+            }
             StdioFrame::Oversized => Some(protocol_error(Value::Null, -32600, "Message too large")),
             StdioFrame::Unterminated => {
                 Some(protocol_error(Value::Null, -32600, "Unterminated message"))
@@ -688,6 +896,9 @@ fn serve_server<S: DeliveryToolService, R: BufRead, W: Write>(
                 Err(_) => Some(protocol_error(Value::Null, -32700, "Parse error")),
             },
         };
+        if let Some(error) = server.take_acceptance_evidence_error() {
+            return Err(error);
+        }
         if let Some(response) = response {
             serde_json::to_writer(&mut writer, &response)?;
             writer.write_all(b"\n")?;
@@ -1195,4 +1406,88 @@ fn unsupported_protocol_error(id: Value, requested: &str) -> Value {
     response.insert("id".to_owned(), id);
     response.insert("error".to_owned(), Value::Object(error));
     Value::Object(response)
+}
+
+#[cfg(test)]
+mod acceptance_evidence_tests {
+    use super::{ACCEPTANCE_EVIDENCE_SCHEMA, AcceptanceEvidence};
+    use serde_json::{Value, json};
+    use std::fs::File;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn fresh_sink(label: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "lattice-mcp-acceptance-{label}-{}-{unique}.jsonl",
+            std::process::id()
+        ));
+        File::create(&path).expect("create fresh acceptance sink");
+        path
+    }
+
+    #[test]
+    fn dispatch_evidence_is_a_durable_open_dispatch_close_hash_chain() {
+        let path = fresh_sink("chain");
+        let session_id = "0123456789abcdef0123456789abcdef".to_owned();
+        let safe_config_sha256 = "ab".repeat(32);
+        let mut evidence =
+            AcceptanceEvidence::open(&path, session_id.clone(), safe_config_sha256.clone())
+                .expect("open acceptance evidence");
+        evidence
+            .record_dispatch("lattice_task_status", &json!(17))
+            .expect("record accepted dispatch");
+        evidence.close().expect("close acceptance evidence");
+        drop(evidence);
+
+        let text = std::fs::read_to_string(&path).expect("read acceptance evidence");
+        assert!(text.ends_with('\n'));
+        let records = text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("valid JSONL record"))
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["schema"], ACCEPTANCE_EVIDENCE_SCHEMA);
+        assert_eq!(records[0]["record_type"], "SESSION_OPEN");
+        assert_eq!(records[1]["record_type"], "DISPATCH_ACCEPTED");
+        assert_eq!(records[1]["tool_name"], "lattice_task_status");
+        assert_eq!(records[2]["record_type"], "SESSION_CLOSED");
+        assert_eq!(records[2]["dispatch_accepted_count"], 1);
+        assert_eq!(records[0]["previous_event_sha256"], "0".repeat(64));
+        assert_eq!(
+            records[1]["previous_event_sha256"],
+            records[0]["event_sha256"]
+        );
+        assert_eq!(
+            records[2]["previous_event_sha256"],
+            records[1]["event_sha256"]
+        );
+        assert_eq!(records[2]["session_id"], session_id);
+        assert_eq!(records[2]["safe_config_sha256"], safe_config_sha256);
+        std::fs::remove_file(path).expect("remove test sink");
+    }
+
+    #[test]
+    fn dispatch_evidence_rejects_nonfresh_or_noncanonical_configuration() {
+        let nonfresh_path = fresh_sink("nonfresh");
+        std::fs::write(&nonfresh_path, b"existing\n").expect("seed nonfresh sink");
+        let nonfresh = AcceptanceEvidence::open(
+            &nonfresh_path,
+            "0123456789abcdef0123456789abcdef".to_owned(),
+            "cd".repeat(32),
+        );
+        assert!(nonfresh.is_err());
+        std::fs::remove_file(nonfresh_path).expect("remove nonfresh sink");
+
+        let uppercase_path = fresh_sink("uppercase");
+        let uppercase = AcceptanceEvidence::open(
+            &uppercase_path,
+            "0123456789abcdef0123456789abcdeF".to_owned(),
+            "ef".repeat(32),
+        );
+        assert!(uppercase.is_err());
+        std::fs::remove_file(uppercase_path).expect("remove uppercase sink");
+    }
 }

@@ -3,8 +3,13 @@ param(
     [switch]$RunLatticeDeliveryHook,
     [switch]$RunFullChainAcceptanceHook,
     [switch]$RunTask038AcceptanceHook,
+    [switch]$RunTask038TunnelHook,
     [string]$Task038OfficialCodexExecutable,
     [string]$Task038CodexAuthHome,
+    [string]$Task038TunnelClientExecutable,
+    [string]$Task038TunnelProfileDirectory,
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')]
+    [string]$Task038TunnelProfileName = 'lattice-local',
     [switch]$MemoryOnly
 )
 
@@ -39,10 +44,14 @@ $requiredExecutables = @(
     'pg_ctl.exe',
     'pg_isready.exe',
     'postgres.exe'
+    'psql.exe'
 )
 $serviceName = 'postgresql-x64-17'
 $markerName = '.lattice-task019-disposable.json'
 $expectedPostgresVersion = '17.10'
+$expectedPostgresExecutableSha256 = '882a5a073a88817f6c6d4c8827df1e4269ff226d52cf6f47c9883e91088c6345'
+$expectedPsqlExecutableSha256 = 'e43adb9c5032e7efc63eebb44c5d32b142b34e5f4207666fed2dc7a51d43b630'
+$expectedPgCtlExecutableSha256 = 'abe89b0767a8cd0f956059aa5a5a93cd1042efc6194d000c2501da3e23babbd2'
 $harnessUser = 'task019_harness'
 $reservedPostgresPorts = [Collections.Generic.HashSet[int]]::new()
 foreach ($reservedPort in @(5432, 64272, 55432)) {
@@ -65,6 +74,14 @@ $environmentNames = @(
     'LATTICE_STORE_PROFILE_EXPECTED',
     'LATTICE_STORE_PROFILE_RUNTIME_URL',
     'LATTICE_STORE_PROFILE_MIGRATOR_URL'
+    'LATTICE_FULL_CHAIN_RUN_MODE'
+    'LATTICE_DELIVERY_CODEX_MODE'
+    'LATTICE_DELIVERY_TIMEOUT_SECONDS'
+    'LATTICE_STORE_DAEMON_INSTANCE_ID'
+    'LATTICE_STORE_DAEMON_EPOCH'
+    'LATTICE_STORE_AUTHORITY_REVISION'
+    'LATTICE_STORE_OBSERVATION_DIGEST'
+    'LATTICE_STORE_AUTHORITY_HEAD_DIGEST'
 )
 
 function Get-CanonicalPath {
@@ -201,6 +218,32 @@ function Get-LatticeTask038AcceptanceHookPath {
         -not (Test-ExactPath -Actual $item.FullName -Expected $expectedPath)
     ) {
         throw 'TASK038_ACCEPTANCE_HOOK_NOT_REGULAR_LEAF'
+    }
+    return $expectedPath
+}
+
+function Get-LatticeTask038TunnelHookPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptDirectory,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot
+    )
+
+    $canonicalScriptDirectory = Get-CanonicalPath -Path $ScriptDirectory
+    $expectedPath = Get-CanonicalPath -Path (Join-Path $canonicalScriptDirectory 'start-chatgpt-mcp-tunnel.ps1')
+    if (-not (Test-ExactPath -Actual (Split-Path -Parent $expectedPath) -Expected $canonicalScriptDirectory)) {
+        throw 'TASK038_TUNNEL_HOOK_NOT_EXACT_SIBLING'
+    }
+    Assert-NoReparseAncestor -Path $expectedPath -Boundary $RepositoryRoot
+    $item = Get-Item -LiteralPath $expectedPath -Force -ErrorAction SilentlyContinue
+    if (
+        $null -eq $item -or
+        $item.PSIsContainer -or
+        -not ($item -is [IO.FileInfo]) -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        -not (Test-Path -LiteralPath $expectedPath -PathType Leaf) -or
+        -not (Test-ExactPath -Actual $item.FullName -Expected $expectedPath)
+    ) {
+        throw 'TASK038_TUNNEL_HOOK_NOT_REGULAR_LEAF'
     }
     return $expectedPath
 }
@@ -377,6 +420,106 @@ function New-OneTimePassword {
     }
 }
 
+function Get-StringSha256 {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Value)
+        return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Enable-Task038TunnelStoreAuthority {
+    param(
+        [Parameter(Mandatory = $true)][string]$Psql,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })][string]$RunId
+    )
+
+    if ($RunId -cnotmatch '\A[0-9a-f]{32}\z') {
+        throw 'TASK038_TUNNEL_STORE_AUTHORITY_REJECTED'
+    }
+    $unixSeconds = [long](([DateTime]::UtcNow - [DateTime]'1970-01-01T00:00:00Z').TotalSeconds)
+    $authority = [ordered]@{
+        daemon_instance_id = 'task038-tunnel-' + $RunId
+        daemon_epoch = $unixSeconds
+        authority_revision = $unixSeconds
+        observation_digest = Get-StringSha256 -Value ('task038-tunnel-observation|' + $RunId)
+        head_digest = Get-StringSha256 -Value ('task038-tunnel-authority|' + $RunId + '|' + $unixSeconds)
+    }
+    $query = @"
+SET ROLE lattice_migrator;
+UPDATE ONLY control.runtime_admission
+SET admission_mode = 'ACTIVE',
+    daemon_instance_id = '$($authority.daemon_instance_id)',
+    daemon_epoch = $($authority.daemon_epoch),
+    authority_revision = $($authority.authority_revision),
+    observation_digest = decode('$($authority.observation_digest)', 'hex'),
+    authority_head_digest = decode('$($authority.head_digest)', 'hex'),
+    updated_at = clock_timestamp()
+WHERE singleton = true;
+SELECT admission_mode, daemon_instance_id, daemon_epoch::text,
+       authority_revision::text, encode(observation_digest, 'hex'),
+       encode(authority_head_digest, 'hex')
+FROM ONLY control.runtime_admission WHERE singleton = true;
+"@
+    $privateNames = @('PGPASSWORD', 'PGCONNECT_TIMEOUT', 'PGSSLMODE', 'PGSERVICE', 'PGSERVICEFILE', 'PGPASSFILE', 'PGOPTIONS')
+    $original = @{}
+    foreach ($name in $privateNames) {
+        $original[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+    $output = @()
+    $exitCode = $null
+    try {
+        [Environment]::SetEnvironmentVariable('PGPASSWORD', $Password, 'Process')
+        [Environment]::SetEnvironmentVariable('PGCONNECT_TIMEOUT', '5', 'Process')
+        [Environment]::SetEnvironmentVariable('PGSSLMODE', 'disable', 'Process')
+        foreach ($name in @('PGSERVICE', 'PGSERVICEFILE', 'PGPASSFILE', 'PGOPTIONS')) {
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        }
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = @(& $Psql `
+                '--no-psqlrc' '--no-password' '--quiet' '--tuples-only' '--no-align' `
+                '--field-separator' '|' '-h' '127.0.0.1' '-p' ([string]$Port) `
+                '-U' $harnessUser '-d' $databaseName '-v' 'ON_ERROR_STOP=1' '-c' $query 2>&1 |
+                ForEach-Object { [string]$_ })
+            $exitCode = [int]$LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+    }
+    finally {
+        foreach ($name in $privateNames) {
+            [Environment]::SetEnvironmentVariable($name, $original[$name], 'Process')
+        }
+    }
+    $text = $output -join "`n"
+    if ($text.IndexOf($Password, [StringComparison]::Ordinal) -ge 0) {
+        throw 'TASK038_TUNNEL_STORE_AUTHORITY_OUTPUT_REJECTED'
+    }
+    $expected = @(
+        'ACTIVE',
+        [string]$authority.daemon_instance_id,
+        [string]$authority.daemon_epoch,
+        [string]$authority.authority_revision,
+        [string]$authority.observation_digest,
+        [string]$authority.head_digest
+    ) -join '|'
+    $rows = @($output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($exitCode -ne 0 -or $rows.Count -ne 1 -or [string]$rows[0] -cne $expected) {
+        throw 'TASK038_TUNNEL_STORE_AUTHORITY_REJECTED'
+    }
+    return [pscustomobject]$authority
+}
+
 function Get-UnreservedLoopbackPort {
     do {
         $listener = [System.Net.Sockets.TcpListener]::new(
@@ -425,7 +568,7 @@ function Invoke-StoreProfileLiveGate {
     if ($ExpectedProfile -notin @('V3', 'V3_MEMORY_V2', 'V3_MEMORY_V2_WRITER_LEASE_V1')) {
         throw 'TASK019_STORE_PROFILE_EXPECTATION_REJECTED'
     }
-    if ($RunId -notmatch '^[0-9a-f]{32}$') {
+    if ($RunId -cnotmatch '\A[0-9a-f]{32}\z') {
         throw 'TASK019_STORE_PROFILE_RUN_ID_REJECTED'
     }
 
@@ -836,8 +979,14 @@ $fullSerializationMutexOwned = $false
 $deliveryHookPath = $null
 $fullChainHookPath = $null
 $task038HookPath = $null
+$task038TunnelHookPath = $null
 
-$selectedHookCount = @($RunLatticeDeliveryHook, $RunFullChainAcceptanceHook, $RunTask038AcceptanceHook) |
+$selectedHookCount = @(
+    $RunLatticeDeliveryHook,
+    $RunFullChainAcceptanceHook,
+    $RunTask038AcceptanceHook,
+    $RunTask038TunnelHook
+) |
     Where-Object { [bool]$_ }
 if (@($selectedHookCount).Count -gt 1) {
     throw 'TASK019_HOOK_MODE_REJECTED'
@@ -853,6 +1002,103 @@ if ($RunTask038AcceptanceHook) {
         throw 'TASK038_ACCEPTANCE_INPUT_REJECTED'
     }
     $task038HookPath = Get-LatticeTask038AcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
+}
+
+function Get-Task019PostgresProcessIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string]$Psql,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][string]$RunId
+    )
+
+    if ($RunId -cnotmatch '\A[0-9a-f]{32}\z') {
+        throw 'TASK019_POSTGRES_PROCESS_IDENTITY_REJECTED'
+    }
+    $databaseName = 'lattice_task019_' + $RunId.Substring(0, 8) + '_base'
+    $originalPassword = [Environment]::GetEnvironmentVariable('PGPASSWORD', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('PGPASSWORD', $Password, 'Process')
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $rows = @(& $Psql `
+                '--no-psqlrc' '--no-password' '--quiet' '--tuples-only' '--no-align' `
+                '--field-separator' '|' '-h' '127.0.0.1' '-p' ([string]$Port) `
+                '-U' $harnessUser '-d' 'postgres' '-v' 'ON_ERROR_STOP=1' `
+                '-c' "SELECT system_identifier::text, pg_postmaster_start_time()::text FROM pg_control_system();" `
+                2>&1 | ForEach-Object { [string]$_ })
+            $exitCode = [int]$LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable('PGPASSWORD', $originalPassword, 'Process')
+    }
+    $rows = @($rows | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if (
+        $exitCode -ne 0 -or
+        $rows.Count -ne 1 -or
+        [string]$rows[0] -cnotmatch '\A([0-9]{1,20})\|(.+)\z'
+    ) {
+        throw 'TASK019_POSTGRES_PROCESS_IDENTITY_REJECTED'
+    }
+    return [pscustomobject]@{
+        system_identifier = [string]$Matches[1]
+        postmaster_started_at = [string]$Matches[2]
+    }
+}
+
+function Write-Task019IdentityMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Value
+    )
+
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes((($Value | ConvertTo-Json -Depth 8) + "`n"))
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Truncate, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    }
+    catch {
+        throw 'TASK019_POSTGRES_IDENTITY_MARKER_REJECTED'
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+if ($RunTask038TunnelHook) {
+    if (
+        [string]::IsNullOrWhiteSpace($Task038TunnelClientExecutable) -or
+        [string]::IsNullOrWhiteSpace($Task038TunnelProfileDirectory)
+    ) {
+        throw 'TASK038_TUNNEL_RUNTIME_INPUT_REJECTED'
+    }
+    foreach ($name in @(
+        'CONTROL_PLANE_API_KEY',
+        'LATTICE_DELIVERY_LAUNCHER',
+        'LATTICE_DELIVERY_LAUNCHER_VERSION',
+        'LATTICE_DELIVERY_LAUNCHER_SHA256',
+        'LATTICE_DELIVERY_SCHEMA_DIR',
+        'LATTICE_DELIVERY_CODEX_HOME',
+        'LATTICE_DELIVERY_ROOT',
+        'LATTICE_DELIVERY_GIT_EXE'
+    )) {
+        $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+        if (
+            [string]::IsNullOrWhiteSpace($value) -or
+            $value.IndexOfAny([char[]]@("`r", "`n", [char]0)) -ge 0
+        ) {
+            throw 'TASK038_TUNNEL_RUNTIME_INPUT_REJECTED'
+        }
+    }
+    $task038TunnelHookPath = Get-LatticeTask038TunnelHookPath `
+        -ScriptDirectory $PSScriptRoot `
+        -RepositoryRoot $repositoryRoot
 }
 
 Invoke-HarnessSelfTest
@@ -873,7 +1119,19 @@ $initdb = Join-Path $postgresBin 'initdb.exe'
 $pgCtl = Join-Path $postgresBin 'pg_ctl.exe'
 $pgIsReady = Join-Path $postgresBin 'pg_isready.exe'
 $postgres = Join-Path $postgresBin 'postgres.exe'
+$psql = Join-Path $postgresBin 'psql.exe'
 $cargoCommand = Get-Command 'cargo.exe' -ErrorAction Stop
+
+$postgresExecutableNativeIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $postgres -Directory $false
+$psqlExecutableNativeIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $psql -Directory $false
+$pgCtlExecutableNativeIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $pgCtl -Directory $false
+if (
+    (Get-FileHash -LiteralPath $postgres -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedPostgresExecutableSha256 -or
+    (Get-FileHash -LiteralPath $psql -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedPsqlExecutableSha256 -or
+    (Get-FileHash -LiteralPath $pgCtl -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedPgCtlExecutableSha256
+) {
+    throw 'TASK019_POSTGRES_EXECUTABLE_IDENTITY_REJECTED'
+}
 
 $previousErrorActionPreference = $ErrorActionPreference
 try {
@@ -909,10 +1167,15 @@ try {
     $marker = [ordered]@{
         kind = 'LATTICE_TASK019_DISPOSABLE_POSTGRES_V1'
         run_id = $runId
+        created_at_utc = [DateTime]::UtcNow.ToString('o')
         root = $clusterRoot
         parent = $clusterParent
         repository_target = $repositoryTarget
         postgres_version = $expectedPostgresVersion
+        host = '127.0.0.1'
+        port = $port
+        excluded_ports = @(5432, 64272, 55432)
+        identity_materialized = $false
     }
     $markerPath = Join-Path $clusterRoot $markerName
     $markerBytes = [Text.UTF8Encoding]::new($false).GetBytes((($marker | ConvertTo-Json -Depth 4) + "`n"))
@@ -970,6 +1233,43 @@ try {
         'start'
     ) -Operation 'PostgreSQL test-cluster start'
     Set-HarnessEnvironment -Phase 'initial' -HostName '127.0.0.1' -Port $port -Password $oneTimePassword -RunId $runId
+    foreach ($entry in @(
+        @($postgres, $postgresExecutableNativeIdentity, $expectedPostgresExecutableSha256),
+        @($psql, $psqlExecutableNativeIdentity, $expectedPsqlExecutableSha256),
+        @($pgCtl, $pgCtlExecutableNativeIdentity, $expectedPgCtlExecutableSha256)
+    )) {
+        if (
+            -not (Test-LatticeWindowsNativePathIdentity `
+                -Path ([string]$entry[0]) `
+                -Directory $false `
+                -ExpectedToken ([string]$entry[1])) -or
+            (Get-FileHash -LiteralPath ([string]$entry[0]) -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$entry[2]
+        ) {
+            throw 'TASK019_POSTGRES_EXECUTABLE_IDENTITY_REJECTED'
+        }
+    }
+    $postgresProcessIdentity = Get-Task019PostgresProcessIdentity `
+        -Psql $psql `
+        -Port $port `
+        -Password $oneTimePassword `
+        -RunId $runId
+    $marker['identity_materialized'] = $true
+    $marker['system_identifier'] = [string]$postgresProcessIdentity.system_identifier
+    $marker['initial_postmaster_started_at'] = [string]$postgresProcessIdentity.postmaster_started_at
+    $marker['data_native_identity'] = Get-LatticeWindowsNativePathIdentityToken -Path $dataDirectory -Directory $true
+    $marker['postgres_executable_path'] = $postgres
+    $marker['postgres_executable_raw_sha256'] = $expectedPostgresExecutableSha256
+    $marker['postgres_executable_native_identity'] = $postgresExecutableNativeIdentity
+    $marker['psql_executable_path'] = $psql
+    $marker['psql_executable_raw_sha256'] = $expectedPsqlExecutableSha256
+    $marker['psql_executable_native_identity'] = $psqlExecutableNativeIdentity
+    $marker['pg_ctl_executable_path'] = $pgCtl
+    $marker['pg_ctl_executable_raw_sha256'] = $expectedPgCtlExecutableSha256
+    $marker['pg_ctl_executable_native_identity'] = $pgCtlExecutableNativeIdentity
+    Write-Task019IdentityMarker -Path $markerPath -Value $marker
+    if (-not (Test-LatticeWindowsNativeContainmentSnapshot -Snapshot $cleanupContainment)) {
+        throw 'TASK019_POSTGRES_IDENTITY_MARKER_REJECTED'
+    }
     $initialOutput = Invoke-LiveTest -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'initial'
     $restartEvidence = Get-RestartEvidence -TestOutput $initialOutput
 
@@ -989,6 +1289,23 @@ try {
         'start'
     ) -Operation 'PostgreSQL test-cluster restart'
     Set-HarnessEnvironment -Phase 'restart' -HostName '127.0.0.1' -Port $port -Password $oneTimePassword -RunId $runId
+    $restartedPostgresIdentity = Get-Task019PostgresProcessIdentity `
+        -Psql $psql `
+        -Port $port `
+        -Password $oneTimePassword `
+        -RunId $runId
+    if (
+        [string]$restartedPostgresIdentity.system_identifier -cne [string]$marker.system_identifier -or
+        [string]$restartedPostgresIdentity.postmaster_started_at -ceq [string]$marker.initial_postmaster_started_at
+    ) {
+        throw 'TASK019_POSTGRES_RESTART_IDENTITY_REJECTED'
+    }
+    $marker['restart_postmaster_started_at'] = [string]$restartedPostgresIdentity.postmaster_started_at
+    $marker['restart_identity_verified'] = $true
+    Write-Task019IdentityMarker -Path $markerPath -Value $marker
+    if (-not (Test-LatticeWindowsNativeContainmentSnapshot -Snapshot $cleanupContainment)) {
+        throw 'TASK019_POSTGRES_IDENTITY_MARKER_REJECTED'
+    }
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_UUID', $restartEvidence.DatabaseId, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_MANIFEST', $restartEvidence.ManifestHash, 'Process')
     $null = Invoke-LiveTest -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'restart'
@@ -1066,6 +1383,41 @@ try {
 
         $fullChainHookPath = Get-LatticeFullChainAcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
         & $fullChainHookPath -InternalPhase 'FullChainStatus'
+    }
+    elseif ($RunTask038TunnelHook) {
+        $task038TunnelHookPath = Get-LatticeTask038TunnelHookPath `
+            -ScriptDirectory $PSScriptRoot `
+            -RepositoryRoot $repositoryRoot
+        $authority = Enable-Task038TunnelStoreAuthority `
+            -Psql (Join-Path $postgresBin 'psql.exe') `
+            -Port $port `
+            -Password $oneTimePassword `
+            -RunId $runId
+        $tunnelEnvironment = [ordered]@{
+            LATTICE_FULL_CHAIN_RUN_MODE = 'FRESH'
+            LATTICE_DELIVERY_CODEX_MODE = 'OFFICIAL_CODEX_APP_SERVER'
+            LATTICE_DELIVERY_TIMEOUT_SECONDS = '300'
+            LATTICE_STORE_DAEMON_INSTANCE_ID = [string]$authority.daemon_instance_id
+            LATTICE_STORE_DAEMON_EPOCH = [string]$authority.daemon_epoch
+            LATTICE_STORE_AUTHORITY_REVISION = [string]$authority.authority_revision
+            LATTICE_STORE_OBSERVATION_DIGEST = [string]$authority.observation_digest
+            LATTICE_STORE_AUTHORITY_HEAD_DIGEST = [string]$authority.head_digest
+        }
+        foreach ($entry in $tunnelEnvironment.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+        }
+        & $task038TunnelHookPath `
+            -Mode 'ManagedRun' `
+            -TunnelClientExecutable $Task038TunnelClientExecutable `
+            -ProfileDirectory $Task038TunnelProfileDirectory `
+            -ProfileName $Task038TunnelProfileName
+        Invoke-StoreProfileLiveGate `
+            -Cargo $cargoCommand.Source `
+            -RepositoryRoot $repositoryRoot `
+            -ExpectedProfile 'V3_MEMORY_V2_WRITER_LEASE_V1' `
+            -Port $port `
+            -Password $oneTimePassword `
+            -RunId $runId
     }
     elseif ($RunTask038AcceptanceHook) {
         $task038HookPath = Get-LatticeTask038AcceptanceHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
