@@ -431,3 +431,13 @@
 - Next action: archive this old thread and use a clean new holder-provision-only worker. `safe_to_archive=true`, `self_archived=false`.
 - Successor durable save: exact-path commit `abe4ba4834e81e8760ab7451d637515874219468` (tree `797548da39ca4c9c2ef3d6a6531eeb280bbffc23`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:16:46.3566355Z`.
 - Archive boundary: central confirmed this old zero-action holder thread archived after remote confirmation `6c8bb5e60436c1d7ce44a8ebfea65090ed733451`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:17:39.1808821Z`. This does not authorize clean-holder-worker or live-state mutation.
+
+## Clean holder provision actual READY with incomplete parent receipt — `019ff19b-dbca-75b2-88e5-df5218e9f16a`
+
+- Result is exactly `FAILED_FIRST_FAILURE_WITH_ACTUAL_NEW_HOLDER_READY`, not a complete parent-receipt pass. Started `2026-08-11T16:16:04.000Z`, finished `2026-08-11T16:22:12.556Z`, elapsed `368556 ms`.
+- Fixed failure is `P0_HOLDER_PARENT_RECEIPT_NOT_DURABLY_CAPTURED` at `WRAPPER_PARENT_RECEIPT_CAPTURE_AFTER_HAS_EXITED`: the one wrapper parent was observed exited, but inherited log handles caused the outer monitor to exit before durably capturing parent PID/exit code and the in-memory pre-snapshot port list. The wrapper was not rerun.
+- Old `127.0.0.1:55061` / run `04517df6a8ed496fa465046b5e4b20d1` is classified `EXPIRED_AND_TTL_CLEANED_STATE_ABSENT`: marker, PID `30476`, listener, and corrected TTL cleanup PID `14212` are absent; no old-holder psql or mutation action occurred.
+- Actual new holder is READY at `127.0.0.1:49156`, run `5b9a861ddd104146afa06fd40c051e46`, database `lattice_task019_5b9a861d_base`, system identifier `7672809321324394560`, PostgreSQL `17.10`, postmaster PID `29688`, TTL cleanup PID `3892`, deadline `2026-08-11T17:04:01.3148589Z`; listener ownership and secret-free psql identity passed. This actual-state proof does not fill the parent-receipt evidence gap.
+- Explicit forbidden ports were `5432`, `64272`, `55432`, and `55061`; chosen `49156` is not in that list. Whether it was in the non-durable pre-snapshot remains `UNKNOWN_RECEIPT_GAP`.
+- Boundary: no second wrapper, config/binary/helper/external-handoff switch, discovery/submit/status/delivery, build/test, cleanup/rollback/root deletion, `64272` action, repository mutation, merge/deploy/release, or protected dirty-script content read/change. A mistaken pre-correction read-only `Get-Process` query for PID `32132` occurred once and caused no mutation.
+- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check.
