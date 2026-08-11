@@ -621,3 +621,11 @@
 - The binary was not launched. The worker made no repository commit/push and did not edit ledger/HANDOFF; the protected dirty path was observed only by Git status.
 - Runtime readiness and live acceptance are not claimed. The next phase remains a separate SWITCH/DISCOVERY worker.
 - Stage 1 durable receipt commit is `16672a223f00fb61a874de65f5c1a760e7ad707c`; expected and live remote SHA matched at `2026-08-11T19:49:34.6584901Z`. Stage 2 confirmation commit `76de45e17453a642b941943a00aa4087298c9d9c` and fresh live remote SHA matched at `2026-08-11T19:50:08.8667264Z`, so the separate saver state is `safe_to_archive=true`; authoritative BUILD_ONLY receipt remains unchanged. Central archived the worker at `2026-08-11T19:50:27.125Z` (`set_thread_archived_result=success`).
+
+## HOLDER_READY — `019ff260-ec6c-7b63-b146-80f7164af1c4`
+
+- Functional classification is `PASS_HOLDER_READY`. Old run `faa5b2b496524142b79bdc457b5863bf` was classified `EXPIRED_INSUFFICIENT` without PostgreSQL connection or lifecycle action.
+- The wrapper was invoked exactly once with TTL `7200`. A non-blocking parent exit-code capture gap remains, while durable READY stdout, empty stderr, inactive parent, and independent read-only post-state passed every functional READY gate.
+- Fresh holder is `127.0.0.1:50205`, run `9f27d3ac638343a6a64418a5c7987160`, PostgreSQL 17, postmaster PID `29372`, TTL PID `22652`, deadline `2026-08-11T21:54:43.9863591Z`; remaining time at verification was `7073.610` seconds.
+- Marker/listener/database/system identifier/authority/manifests/TTL/excluded-port/stderr checks all passed. No raw credential or env value was saved.
+- Worker repository/config/binary/handoff/discovery/submit/status/delivery and cleanup/rollback action counts are zero. Stop boundary is `HOLDER_READY`. Two-stage saver remote durability is pending.
