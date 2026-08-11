@@ -449,4 +449,4 @@
 - Before cancellation arrived, the worker had called `create_goal` and read reply-skill instructions read-only. No holder/runtime/PG/marker/process/config/handoff/discovery state was read and no live state was changed.
 - Changed paths `[]`; holder-runtime reads, PostgreSQL connections, runtime actions, file writes, child agents, and engineering changes are all `0`.
 - Current action was only delivery of the cancellation receipt. `safe_to_archive=true`, `self_archived=false`.
-- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check.
+- Successor durable save: exact-path commit `93a3e36b517cda83f18efe7aa748dc3aa71194ed` (tree `faf627c7084bc042eeb3e3542d5aeeff2878a422`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:28:28.3579882Z`.
