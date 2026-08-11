@@ -797,3 +797,10 @@
 - Preflight was incomplete; wrapper, latticed, initialize, tools/list, and tool-call counts are all zero. Protocol and exact-four discovery remain `NOT_RUN`; no retry occurred.
 - No config/handoff/source/binary mutation, PostgreSQL connection/provision, port 64272 touch, cleanup, rollback, ephemeral environment file, raw credential output, or protected-script access occurred.
 - Receipt stage 1 commit `a0bd7822db20e14f526fb1457f243844e55b07c5` equals the fresh remote read at `2026-08-11T23:41:48.6334279Z`; confirmation stage 2 commit `e5b63f66ae1810d7712aa650981569e16815e8f9` equals the fresh remote read at `2026-08-11T23:43:00.3231128Z`. Central archived the worker at `2026-08-11T23:44:16.8747734Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`, and no discovery/P0 success is claimed.
+
+## Corrected discovery-only PASS — 019ff336-3583-7d93-bd09-4c8957c048f2
+
+- Preflight passed against the source-remediated binary/config and holder 127.0.0.1:58503. One plain wrapper invocation launched one latticed process and closed normally with exit code 0; no retry or manual cleanup occurred.
+- Protocol 2025-11-25 negotiated successfully. Initialize and tools/list each completed once, and the exact case-sensitive four-tool set was observed.
+- This was discovery only: tool-call, submit, status, and delivery counts are all zero. No PostgreSQL connection, port 64272 action, config/handoff/source/binary mutation, cleanup, rollback, or protected-script access occurred.
+- Receipt stage 1 and stage 2 saver equalities are pending. Authoritative safe_to_archive=false remains unchanged; DISCOVERY_ONLY_PASS does not claim current full P0 live acceptance.
