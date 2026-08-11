@@ -521,4 +521,4 @@
 - Current wrapper SHA `5a2f0acf68cf15abbc86d785b25278cd022435a63fa4ed7a05766684f06cca30`; fixture SHA `f000b643428d7545ddd78ae40d7b90ee1e4ca63935820b3a08cfc1b1bae686c2`.
 - StrictMode error-summary remediation remains deliberately separate. No server tolerance, logging/metadata, config, runtime, PostgreSQL, listener, or global-state change was bundled.
 - Process deviation is preserved: one broad filename-only `rg -l` scan included the protected dirty script path; contents were not shown, edited, staged, reset, cleaned, committed, or otherwise acted on.
-- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check.
+- Successor durable save: exact-path commit `255245583dc60628f63c503cd965a55a18d46497` (tree `0ee0675e35b4cd2d337f0c34e4b7fbc54430a4a6`, parent/source `41bca3c631f43a164791c8e70db5340212f49e5c`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved first durable local/remote SHA equality at `2026-08-11T17:46:23.6646761Z`.
