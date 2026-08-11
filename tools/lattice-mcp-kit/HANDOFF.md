@@ -810,4 +810,4 @@
 - One provision-wrapper invocation produced HOLDER_READY for run 5c95659541b5428b8249d3ed062dd1f1 at 127.0.0.1:51021, with PostgreSQL 17 ownership checks and a 7,200-second TTL.
 - Receipt verification recorded the postmaster/listener and TTL cleanup identities as matching, with 7,101 seconds remaining. Credentials were not output.
 - No retry, post-wrapper PostgreSQL connection, old-holder action, global-config action, or MCP action occurred.
-- Receipt stage 1 and stage 2 saver equalities are pending; authoritative safe_to_archive=false until saver durability is proven.
+- Receipt stage 1 commit `0cafffdbdbfd0cb32ac5232720bfbe969acd2fdb` equals the fresh remote read at `2026-08-11T23:57:43.1021011Z`. Stage 2 is this confirmation-only saver advance; authoritative `safe_to_archive=false` remains unchanged and outer saver durability becomes `safe_to_archive=true` after fresh remote equality.
