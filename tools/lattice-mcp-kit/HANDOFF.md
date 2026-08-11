@@ -548,3 +548,10 @@
 - First failure is `LATTICE_P0_FRESH_TASK_SUBMIT_DOMAIN_NOT_COMPLETED` at `C_FRESH_TASK_SUBMIT_DOMAIN_VALIDATION`. Independent status was correctly `NOT_RUN` after the mandatory first-mismatch stop.
 - Postcheck preserved config `be9104230e74a321577147751c02cd40e06729776f53345a4cdbf4d5b7cff272`, READY external handoff `1aa6c277d1538ced6cc5976e173517df284135e062021246340edb0b698954f0`, and live holder run `faa5b2b496524142b79bdc457b5863bf`.
 - First durable receipt commit is `f601579dedb50bea141196536ef68ce8f3464ef3` (tree `5747f37e22d01f72d047850edd4e96ac9824f213`); live `git ls-remote` equality was verified at `2026-08-11T18:22:22.3148269Z`. Central archived the verifier at `2026-08-11T18:23:26.741Z`.
+## Fresh submit domain diagnosis — `019ff210-6eee-7a81-95a0-d6608544e4c7`
+
+- Diagnosis at `2026-08-11T18:29:30.3058443Z`: `DIAGNOSED_FIRST_SERVER_OWNED_DOMAIN_FAILURE`, certainty `KNOWN`.
+- First server-owned failure is `GIT_INIT_FAILED / WORKSPACE_PREPARE` for task `1f71f06485aa23f1390a5f4d433b7db36b29de2cf2c86ea25e1eef25e2fbd539`. Transport, MCP framing, credential/DB admission, prior root-absence failure, and Codex execution were excluded.
+- Root cause is the full task identity appended beneath an already deep Windows delivery base: task root `217` chars, separate git-dir `233` chars, template hook targets `261-265` chars, while the owned Git subprocess lacks process-scoped `core.longpaths=true`.
+- Minimal reversible remediation is a preferably Windows-gated process-scoped `-c core.longpaths=true` in `GitRunner::output`, plus one deep-base/full-task-ref regression; do not change task identity, database, global Git config, holder, or MCP contract.
+- Durable saver metadata is pending first commit/push and live `git ls-remote` equality; `safe_to_archive=false`.
