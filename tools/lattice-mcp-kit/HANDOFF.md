@@ -486,3 +486,15 @@
 - Next action after durable save: central may archive this worker and separately authorize switch/discovery with a 60-second initialize timeout against `127.0.0.1:52575`.
 - Successor durable save: exact-path commit `bf5f02dd2d54b5e1d84155040dc3e7e998f08026` (tree `0b44bc4e40e033350a7f7d7c6dc0b9062560ab2f`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved first durable local/remote SHA equality at `2026-08-11T17:06:33.5880167Z`.
 - Archive boundary: central confirmed this holder-ready worker archived after final remote confirmation `3fa7c3c920c4fb96f30f04899f085792caaf7652`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T17:07:38.4507261Z`. Holder `127.0.0.1:52575`, config, external handoff, cleanup/rollback, and successor-worker state remain outside saver authority.
+
+## Switch active; initialize returned parse error — `019ff1cb-bb7c-7cd3-a1b1-8073fea91b33`
+
+- Authoritative secret-free receipt SHA `72327461504bfe4ccf117f5811b969a010f3df64b4743652a7af7e5e1395ee5a` and external live-handoff SHA `1ea8a3bf4b41d229c7b2b3eaa6beccd8a8ec3210ebbef7eb690e1bf6f26cfbce` were verified before persistence.
+- Status remains `DISCOVERY_FAILED_CURRENT_CONFIG_ACTIVE`, readiness false, with `LATTICE_P0_INITIALIZE_PARSE_ERROR` at `DIRECT_STDIO_INITIALIZE_RESPONSE`. This is not discovery success.
+- Current config SHA is `402505b168c59ab59ca3f62fc3a7fd5a431e1280423389f74aa7a660d7984881`; backup SHA is `63881ec515b9a8f8959e0084c2ff9e249b9636ff648f2f0fc477571c8365b467`; exact binary SHA is `5ec06821eb06d6b1da40c7bdf7bd094453a7081808720ef622ffb2afb127dc58`.
+- Holder binding is `127.0.0.1:52575`, run `f112f8fbc17344ed978ea8fe284e9705`. One discovery process was attempted with `60000 ms` initialize timeout; response was JSON-RPC `-32700 Parse error`.
+- No initialized notification, tools/list, or tools/call followed; tool-call count `0`, retry/rollback/holder cleanup false, and exact binary processes remaining `0`.
+- Stdout SHA is `a32de6af36090423b1bd656789374b5407d1009427353f1311a752515543cf85`; corrected authoritative empty-stderr SHA is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+- Wrapper post-processing hit a StrictMode serialization bug after stdout capture, so process PID/exit remain null with capture status `WRAPPER_SUMMARY_SERIALIZATION_FAILED_AFTER_STDOUT_CAPTURE`.
+- Saver did not retry discovery, call LATTICE tools, roll back config, clean the holder, or record any raw credential/env value.
+- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check.
