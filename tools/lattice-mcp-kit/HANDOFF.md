@@ -678,3 +678,11 @@
 - Four pre-target-selection incidents were recorded as zero-mutation local inspection/tooling incidents. The obsolete failure receipt was cancelled and was never written, committed, or pushed by saver.
 - Codex/MCP/DB/build/test, holder lifecycle, port 64272, cleanup, rollback, merge, deploy, release, and default-branch action counts are zero.
 - Stage 1 durable HOME_PREPARED_ONLY receipt commit is `1e065b44e729f8ca4a8e036b21f84ea08172c20d` and matched live remote at `2026-08-11T21:38:00.9339790Z`; stage 2 confirmation commit is `b3f19a5355a3598e28f2eff13164bd58d29a4e61` and matched live remote at `2026-08-11T21:38:53.7926640Z`. Central archived the worker at `2026-08-11T21:40:04.7769246Z`; outer saver state is `safe_to_archive=true`, while the authoritative receipt remains unchanged with `safe_to_archive=false`. Discovery, P0 PASS, and `CONFIG-HOME-SWITCH` remain unclaimed.
+
+## CONFIG-HOME-SWITCH-ONLY ready — `019ff2c4-6e14-7fe2-bb08-710ad9dbc74d`
+
+- Status is `HOME_REMEDIATED_READY_FOR_FRESH_VERIFIER`; this receipt does not claim discovery or P0 acceptance.
+- Global config atomically switched the single Codex-home assignment to prepared home `6035356d59694957b16c45ed28f1ff77`; all outside-home bytes, command/stdio/args, remaining 21-key environment semantics, binary, and Fresh PostgreSQL identity were preserved.
+- External secret-free handoff atomically advanced to `HOME_REMEDIATED_READY_FOR_FRESH_VERIFIER`; config and handoff each mutated once, with rollback backups retained and no rollback or cleanup executed.
+- Worker started no Codex/MCP process and made no initialize, discovery, tool, submit, status, PostgreSQL, build, test, holder lifecycle, or port 64272 call. Protected dirty script and saver files were untouched by worker.
+- Stage 1 and stage 2 saver remote equality are pending; worker remains `safe_to_archive=false`. Fresh verifier may open only after stage 1 live remote equality.
