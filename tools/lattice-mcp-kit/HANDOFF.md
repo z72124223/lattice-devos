@@ -132,3 +132,17 @@
 - Mutation boundary: no repository edit, reset/clean, remote write, deployment, new task, or reviewer.
 - Successor durable save: first exact-path commit `142b5b9fd66c1055a9a0347f1f7f6d9eb00ad1e5` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:21:21.353Z`; central confirmed `archived_at_utc=2026-08-11T12:23:32.022Z`.
 - Archive boundary: central archived only fresh verifier `019ff0bd-14c1-7d40-b104-65c4fdd6fc82`. Runtime remediation and its future verifier remain active; this saver must not modify or archive them.
+
+## Runtime remediation checkpoint — `019ff0c2-d0fd-7e40-8a07-726fe722982e`
+
+- Window status: `DONE/READY_FOR_NEW_FRESH_VERIFIER`; started `2026-08-11T12:19:05.915Z`, Phase A green `2026-08-11T12:26:51.316Z`, finished `2026-08-11T12:33:01.095Z`, elapsed `835180 ms` (`835.180 s`).
+- Exact owned source: `apps/lattice-runtime/src/composition.rs`; commit/tree `5155f626405faa2fa9e01ad6ceba7329eb9e6b93` / `ee7f35a1756cd8021fa81326717aa11e48b38c6d`, parent `94328a3d1d3b6b35fda4975c2e35b3abb492ab13`; remote equality was verified by the remediation task.
+- Behavior: ResumeExisting `task_submit` now requires exact-binding admitted `COMPLETED` evidence with a result digest, then reverifies Writer Lease history and durable receipt equality before public replay. Missing, unadmitted, incomplete, failed, stopping, mismatched, or unreadable evidence fails before execution. Fresh execution and ResumeExisting `delivery_run` status-only behavior remain unchanged.
+- TDD and verification: expected RED exit `101`; focused ResumeExisting `2/2`, Fresh `1/1`; isolated runtime lib `73/73`, composition `10/10`, MCP contract `30/30`, dispatch `5/5`, task_control `1/1`; format, scoped diff check, and isolated build exit `0`.
+- Advisory baseline: strict Clippy remains blocked by 11 unchanged `lattice-hermes-adapter` findings and 3 unchanged `mcp.rs` `too_many_lines` findings; no remediation-owned finding was emitted. Read-only review found no issue; independence was not proven.
+- New isolated binary: `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\p0-clean-seed-rebuild\target\p0-runtime-remediation\debug\latticed.exe`, `10258432` bytes, SHA-256 `0ba38c05e572a08f999e07cc8f4942756956421b37e6b41f99947931a3572bfc`. The locked old binary was not waited on, stopped, or overwritten.
+- Global MCP switch: enabled STDIO, `0` args, exact 14-key set; all 14 values compare equal to pre-switch without recording them; command and actual binary hash match the new isolated binary. Existing durable rollback backup was retained; new pre-remediation backup SHA-256 is `9f0a749d80920d6bf69a0911c7677a1cc86dbdea62ed679eab321ec656347897`.
+- External secret-free handoff `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-p0-live-handoff.json` was updated at `2026-08-11T12:32:07.771Z`; commit/tree/head, new binary, global switch, key set, Git/remote/config/backup equality were current-read verified.
+- PostgreSQL, holder, and `64272` were unchanged. Fresh-window success is not claimed by remediation; central created new verifier `019ff0cf-8265-7082-bed2-b4f9db33395e` for that acceptance.
+- Mutation boundary: no merge, deployment, release, default-branch change, or final modification to this repo HANDOFF by remediation; protected script remained unread, unmodified, unstaged, and uncleaned.
+- Successor durable save: pending first exact-path commit and remote SHA equality verification; `remote_sha=null`, `github_saved_at_utc=null`, `archived_at_utc=null`.
