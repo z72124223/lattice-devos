@@ -396,3 +396,18 @@
 - Authoritative binary is reference-only: `10279424` bytes, SHA-256 `5ec06821...`; diagnosis did not access or modify it.
 - Successor durable save: exact-path commit `49165a80f3afd9c5496f804855eda0fe356dd9dd` (tree `d99bec970e66f7f6dfea63f442dccb12a9c1c4d4`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:58:35.7437632Z`.
 - Archive boundary: central confirmed this diagnosis thread archived after remote confirmation `86bb4d55a58315eb3d5fcf7edc77b7654df3ae1c`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:00:00.9486875Z`. This archive does not authorize script-remediation or live config/staging/backup/holder/external-handoff/root/cleanup/rollback mutation.
+
+## Reusable MCP command staging validator remediation — `019ff18c-f85c-7fe0-9ac7-a5bbc369b7fb`
+
+- Result: `SCRIPT_REMEDIATION_COMPLETE_AWAITING_SAVER_REMOTE_DURABILITY`; started `2026-08-11T15:59:50.0000000Z`, ended `2026-08-11T16:06:15.1994644Z`, elapsed `385.199 s`; no failure code, stage `REPOSITORY_SCRIPT_REMEDIATION`.
+- Exact source scope: new helper `tools/lattice-mcp-kit/New-LatticeMcpCommandStaging.ps1` only; commit `5106314db78c6faa7a6420a74e12738324dc670c`, tree `4f909ea7512eef7f8dc3642fbd4ff0573b49574e`, parent `4899815a1f4378c618f170404f944c03d2d3e271`.
+- Ownership: existing tunnel/delivery/direct-stdio scripts own other surfaces, so a narrow repository helper owns command staging only. It accepts explicit source/destination/command/hash/server/key-count inputs, requires a fresh destination, and never replaces source.
+- Fix: compute BOM `$offset` once and reuse it in `$stageDecoded=$script:Utf8Strict.GetString($stageReload,$offset,$stageReload.Length-$offset)`; no inline-if CommandAst remains.
+- Windows PowerShell 5.1 AST gate passed: parser errors `0`, if-CommandAst count `0`. Focused non-live fixture passed two cases: literal/no-BOM offset `0`, basic/BOM offset `3`; each had 21 env keys and unchanged non-command bytes.
+- Other test state: PSScriptAnalyzer `NOT_AVAILABLE`, git diff check `PASS`, full suite/build/cargo/npm/live `NOT_RUN_BY_SCOPE`.
+- Preserved guards: same quote form, exactly one command/env section, 21 unique env-like keys, no args/transport override, non-command byte equality, expected path/hash, and source never replaced.
+- This remediates the diagnosed script shape only. It does not perform atomic switch, backup, runtime/holder/PG/config/handoff/discovery, or live acceptance; current state is not READY.
+- Protected boundaries held: no subagent, live config/runtime/PG/TTL/tool/build/cleanup/protected-state action, failed-artifact reuse, protected script access, saver-path edit by worker, push/merge/deploy/release/default branch, or unrelated program.
+- Source publication and saver receipt are pending the exclusive saver; source commit must remain an ancestor of the final remote receipt head.
+- Successor durable save: pending ledger/handoff receipt commit, push, live `git ls-remote` equality, and source-ancestor verification; remote fields remain `null` until confirmed.
+- Archive boundary: do not archive this script-remediation worker until its receipt is remotely durable and central later confirms archival.
