@@ -430,3 +430,4 @@
 - This receipt does not reclassify historical actions from earlier closed scope. It records one coordination-only create-goal attempt and no task runtime or mutation.
 - Next action: archive this old thread and use a clean new holder-provision-only worker. `safe_to_archive=true`, `self_archived=false`.
 - Successor durable save: exact-path commit `abe4ba4834e81e8760ab7451d637515874219468` (tree `797548da39ca4c9c2ef3d6a6531eeb280bbffc23`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:16:46.3566355Z`.
+- Archive boundary: central confirmed this old zero-action holder thread archived after remote confirmation `6c8bb5e60436c1d7ce44a8ebfea65090ed733451`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:17:39.1808821Z`. This does not authorize clean-holder-worker or live-state mutation.
