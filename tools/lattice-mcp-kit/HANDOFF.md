@@ -596,4 +596,4 @@
 - The exact `delivery` leaf now passes, but its parent `P0R-<16-lowerhex>` is not the required 32-character lowercase hexadecimal fixture ID. The public failure remains `LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED / DISCOVERY_PROCESS_STARTUP`.
 - LocalAppData candidates can meet the `<=220` path budget, but root-only config cannot also equal the unchanged launcher target and fixed seven-file bundle policy. The smallest short-root-preserving remediation is narrow source decoupling using existing launcher ancestry while retaining every fixed identity check.
 - This diagnosis was read-only: no binary/MCP, config/root/handoff/source, PG/64272, rollback/cleanup, protected-script content, merge/deploy/release/default-branch, or third-path action occurred.
-- Saver durability metadata is pending the first remote-equal commit.
+- First durable diagnosis receipt commit is `7fbfb3370baa03e8e56b6705ff0bdc120aaa18fb` (tree `5cfcad4c9f50d8487efce7e2a81f8b92ee394304`); live `git ls-remote` equality was verified at `2026-08-11T19:28:05.6403865Z`. Receipt now reports `safe_to_archive=true`.
