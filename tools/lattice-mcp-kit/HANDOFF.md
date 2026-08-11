@@ -188,3 +188,18 @@
 - Candidate remains active. Do not retry from this verifier and do not stop any PostgreSQL holder. New holder/config writer `019ff0eb-485f-7ba0-94dc-d7903c385287` remains active and must not be archived or modified by this saver.
 - Successor durable save: first exact-path commit `39913f829a36075e0a2daaa91ee3616bc5515543` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T13:04:44.010Z`.
 - Archive boundary: central archived verifier 3 at `2026-08-11T13:06:00.6098228Z`. New holder/config writer `019ff0eb-485f-7ba0-94dc-d7903c385287` remains active and must not be archived or modified by this saver.
+
+## Connectivity-first holder/config checkpoint — `019ff0eb-485f-7ba0-94dc-d7903c385287`
+
+- Window status: `READY_FOR_FRESH_CODEX_WINDOW`; `READY=true`; started `2026-08-11T13:06:58.5774308Z`, finished `2026-08-11T13:21:53.5089945Z`, elapsed `894932 ms`.
+- New PostgreSQL 17.10 holder: `127.0.0.1:51666`, run ID `56b85b31fdfc447f9347ead0170a807a`, PID `28752`, database `lattice_task019_56b85b31_base`, system identifier `7672759870255195048`; listener ownership, database connection, and authority preflight passed.
+- Credential was rotated and remains `OPAQUE_DPAPI_CURRENT_USER`; no credential value is recorded. Old credential is invalid after switch. Excluded ports are `5432`, `64272`, `55432`, and `63238`; protected `127.0.0.1:64272` PID `18236` is unchanged.
+- Refreshed TTL: `2700` seconds from `2026-08-11T13:19:01.4831107Z`, expires `2026-08-11T14:04:01.4831107Z`; valid at receipt `2026-08-11T13:23:52.433Z` with `2409` seconds remaining; cleanup PID `32132`.
+- Global config switched from SHA-256 `68e67812486308c46ba397ccdae3803387275b6737a14c030db741eb0e0b61ed` to `dc83687cf3d0964682ce80616273c07dc0663e64b955350f2a3a3c3b837c4191`. Nine PG/authority env fields changed; 12 non-PG env fields, FRESH mode, seven delivery fields, ingress binding, command, implicit stdio, and zero args were preserved.
+- Both exact and atomic backups hash to the before-config hash. Rollback is config-file-only; it cannot revive the invalid old 63238 holder or credential.
+- Direct-stdio preflight: `DISCOVERY_OK`, protocol `2025-11-25`, exact `lattice_delivery_run`, `lattice_delivery_status`, `lattice_task_status`, `lattice_task_submit`; `tool_call_count=0`, exit `0`, evidence SHA-256 `50f5f0ed7272b6d806617057c5c8eead8d3db682e61ab5740f2482a7dd41cff0`.
+- Secret-free handoff `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-p0-live-handoff.json` has SHA-256 `3e615a8edf51c82146a89c82dfab24febf3196700eec72b4d416600711e845fa` and status `READY_FOR_FRESH_CODEX_WINDOW`; it contains no new credential.
+- Not done: no `lattice_task_submit`, `lattice_task_status`, or `lattice_delivery_run`; no verifier was created. Central should immediately create one genuinely fresh Codex verifier after the first durable remote checkpoint.
+- Repository boundary: protected dirty `scripts/test-task038-four-tool-acceptance.ps1` remains unstaged and unmodified. P0 only; no TASK-037/GH-9/Hermes/reflection/reset/clean/PR/merge/deploy/release/default-branch change.
+- Successor durable save: pending first exact-path commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Archive boundary: holder/config writer must remain unarchived until its exact receipt is remotely durable and central later confirms archival. The future verifier is independently owned.
