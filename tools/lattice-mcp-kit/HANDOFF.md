@@ -145,4 +145,4 @@
 - External secret-free handoff `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-p0-live-handoff.json` was updated at `2026-08-11T12:32:07.771Z`; commit/tree/head, new binary, global switch, key set, Git/remote/config/backup equality were current-read verified.
 - PostgreSQL, holder, and `64272` were unchanged. Fresh-window success is not claimed by remediation; central created new verifier `019ff0cf-8265-7082-bed2-b4f9db33395e` for that acceptance.
 - Mutation boundary: no merge, deployment, release, default-branch change, or final modification to this repo HANDOFF by remediation; protected script remained unread, unmodified, unstaged, and uncleaned.
-- Successor durable save: pending first exact-path commit and remote SHA equality verification; `remote_sha=null`, `github_saved_at_utc=null`, `archived_at_utc=null`.
+- Successor durable save: first exact-path commit `66664e10453463471810d22f60e6117ca2ed7749` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:35:13.612Z`; `archived_at_utc=null`.
