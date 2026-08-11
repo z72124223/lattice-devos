@@ -215,3 +215,16 @@
 - Do not retry submit or independent status, retry cleanup, force-kill, manually delete the root, or execute rollback from this verifier. Central should assign a new bounded remediation for deterministic task-ref reuse.
 - Successor durable save: first exact-path commit `2b8446e68f3a8ea440f79a985c58aec9c3aaef36` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T13:36:59.101Z`.
 - Archive boundary: verifier task was archived successfully; saver immediately captured actual `archived_at_utc=2026-08-11T13:38:40.7448993Z`. Cleanup residual remains untouched and belongs to a separate bounded task.
+
+## Fresh deterministic task-ref remediation checkpoint — `019ff10d-7ece-7071-8e2a-309bd4a16d6e`
+
+- Window status: `SOURCE_REMEDIATION_READY_NOT_LIVE_ACCEPTANCE`; started `2026-08-11T13:40:35.0000000Z`, finished `2026-08-11T13:49:11.9516774Z`, elapsed `516952 ms`.
+- Root cause: the public task ref was the immutable fixed Task Spec digest. The durable admission command/client request, run binding, and ingress profile did not participate, so a new Fresh execution could reuse old canonical ref `ab8724dd51419cf190ad491f1f8973894bca56dc0c3aed55ebc3723f6214177d`.
+- Minimal owned change: `apps/lattice-runtime/src/composition.rs` and `apps/lattice-runtime/src/task_control.rs`; commit/tree `abe4b7bafd916d8d6db0195fd10dec6e1b012bcf` / `de22bde7d251c007ba50d61358f9c8fcf11bd7f8`, parent/upstream-before-save `31bb7ca7fb7d444dacd9d595a02dad2567fcbebb`.
+- Implementation: a domain-separated lowercase SHA-256 public reference binds the fixed Task Spec digest, verified durable `TaskCreated` admission command (and therefore client request ID), run ID, and ingress profile digest. A new Status process replays that verified command and deterministically recomputes the same reference.
+- Verification: expected RED exit `101` for missing `controlled_task_reference`; GREEN `1/1`; final GREEN `1/1` with `73` filtered; focused format and diff checks exit `0`; commit scope guard matched exactly the two Rust files.
+- Preserved boundaries: no public JSON or PostgreSQL schema, Task Spec, One Writer, lease/fencing, config, script, live MCP/tool call, PostgreSQL, PID `32132`, or cleanup residual change. Protected script remained unread, unmodified, unstaged, and uncommitted by the worker.
+- Tradeoff: Status must replay `TaskCreated` before comparing a syntactically valid ref, and pre-remediation refs are not aliases for the derived reference. Alternatives that vary/persist first-class identity would expand Task Domain, Ledger, Writer Lease, status, or PostgreSQL ownership.
+- Live acceptance remains `NOT_RUN`; this source remediation is not a P0 PASS. A separate brand-new verifier must perform Fresh submit/status after GitHub publication.
+- Successor durable save: pending first exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Archive boundary: remediation worker must not be archived until its source commit and exact receipt are remotely durable and central confirms archival. Cleanup residual remains a separate prohibited scope.
