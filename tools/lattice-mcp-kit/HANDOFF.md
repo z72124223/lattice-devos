@@ -804,3 +804,10 @@
 - Protocol 2025-11-25 negotiated successfully. Initialize and tools/list each completed once, and the exact case-sensitive four-tool set was observed.
 - This was discovery only: tool-call, submit, status, and delivery counts are all zero. No PostgreSQL connection, port 64272 action, config/handoff/source/binary mutation, cleanup, rollback, or protected-script access occurred.
 - Receipt stage 1 commit `a6607154036e15ee46c2d21bfdcceea5c45c66b9` equals the fresh remote read at `2026-08-11T23:51:43.9661536Z`; confirmation stage 2 commit `19bc567bb0261d974ea2232a83bf77f577f7c2c9` equals the fresh remote read at `2026-08-11T23:52:15.4273200Z`. Central archived the worker at `2026-08-11T23:53:11.7680167Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`, and `DISCOVERY_ONLY_PASS` still does not claim current full P0 live acceptance.
+
+## Holder-ready provisioning — 019ff33e-5fc3-7dc3-8bfc-80543c7d6b3a
+
+- One provision-wrapper invocation produced HOLDER_READY for run 5c95659541b5428b8249d3ed062dd1f1 at 127.0.0.1:51021, with PostgreSQL 17 ownership checks and a 7,200-second TTL.
+- Receipt verification recorded the postmaster/listener and TTL cleanup identities as matching, with 7,101 seconds remaining. Credentials were not output.
+- No retry, post-wrapper PostgreSQL connection, old-holder action, global-config action, or MCP action occurred.
+- Receipt stage 1 and stage 2 saver equalities are pending; authoritative safe_to_archive=false until saver durability is proven.
