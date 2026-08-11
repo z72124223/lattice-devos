@@ -429,4 +429,4 @@
 - Changed paths `[]`; runtime, holder, PG, wrapper, provision, bind, old-holder read, connection, config, handoff, discovery, tool, cleanup, rollback, binary/helper/switch, and repository action counts are all `0`.
 - This receipt does not reclassify historical actions from earlier closed scope. It records one coordination-only create-goal attempt and no task runtime or mutation.
 - Next action: archive this old thread and use a clean new holder-provision-only worker. `safe_to_archive=true`, `self_archived=false`.
-- Successor durable save: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: exact-path commit `abe4ba4834e81e8760ab7451d637515874219468` (tree `797548da39ca4c9c2ef3d6a6531eeb280bbffc23`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:16:46.3566355Z`.
