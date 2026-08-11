@@ -484,4 +484,4 @@
 - Selected port `52575` was absent from the 34-port occupied snapshot and from effective exclusions `5432/64272/55432/49156/55061/51666/63238`; `64272` was only observed occupied and never connected.
 - Boundary: no MCP initialize/discovery/tool call, submit/status/delivery, config/binary/external-handoff switch write, credential-file read, raw credential/env value save, source/helper change, second provision, or protected dirty-script read/write.
 - Next action after durable save: central may archive this worker and separately authorize switch/discovery with a 60-second initialize timeout against `127.0.0.1:52575`.
-- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check.
+- Successor durable save: exact-path commit `bf5f02dd2d54b5e1d84155040dc3e7e998f08026` (tree `0b44bc4e40e033350a7f7d7c6dc0b9062560ab2f`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved first durable local/remote SHA equality at `2026-08-11T17:06:33.5880167Z`.
