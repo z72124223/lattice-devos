@@ -511,3 +511,14 @@
 - Protected boundaries: no binary/MCP process, discovery retry, config read/write, raw env/credential read, runtime/PG/listener/64272 action, source/wrapper/runner write, protected dirty-script read/write, saver-file write by worker, commit, or push.
 - Successor durable save: exact-path commit `3b1730c8890ea7a03478a27aecbf5dabcd891a2b` (tree `dc10770b074f7ad9952a3a597db8c91311394b9e`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved first durable local/remote SHA equality at `2026-08-11T17:37:50.2277961Z`. At that immutable commit, `WINDOW_LEDGER.jsonl` SHA was `22f8a63b002b14615489ce0ebb2f95ffe68ecd3dbafeddb6549cb5055499ea15` and the receipt-line SHA was `d17d0a9200277d26672805ed5cc1a282c82951616e4917d3bc17457dafe6ac18`.
 - Archive boundary: central confirmed this offline initialize-parse diagnosis archived after final remote confirmation `64988454bec4c180e0d34bf85ac6914d5d86f1e7`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T17:39:02.1519766Z`. Wrapper source, config, holder, external handoff, live state, and successor remediation remain outside saver authority.
+
+## Direct-stdio no-BOM/LF source remediation — `019ff1e8-a475-7183-93a3-5f9646263316`
+
+- Result: PASS source remediation only; source commit `41bca3c631f43a164791c8e70db5340212f49e5c` (tree `6f206ae676c8743d7ede4b6d8d121cf91eca554f`, parent `877d88450ed97f2261cde181c4ed318b624c134a`) was already pushed and remote-equal before saver work.
+- Exactly two source paths changed: `Invoke-LatticeMcp.ps1` and new `Test-StdinFrameEncoding.ps1`. Saver did not modify either path.
+- Implementation prefers no-BOM `StandardInputEncoding` when available; PS5.1 fallback temporarily sets/restores `Console.InputEncoding` around Process.Start; stdin newline is explicit LF; all four JSON-RPC writes use the same TextWriter path.
+- Offline fixture `DIRECT_STDIO_STDIN_ENCODING_OFFLINE=PASS`: initialize and tools/list begin `0x7B`, contain no BOM, end LF without CR, strict UTF-8 decode and JSON parse, and preserve method/id. Both scripts have zero AST parser errors; no live runtime/build/full suite was run.
+- Current wrapper SHA `5a2f0acf68cf15abbc86d785b25278cd022435a63fa4ed7a05766684f06cca30`; fixture SHA `f000b643428d7545ddd78ae40d7b90ee1e4ca63935820b3a08cfc1b1bae686c2`.
+- StrictMode error-summary remediation remains deliberately separate. No server tolerance, logging/metadata, config, runtime, PostgreSQL, listener, or global-state change was bundled.
+- Process deviation is preserved: one broad filename-only `rg -l` scan included the protected dirty script path; contents were not shown, edited, staged, reset, cleaned, committed, or otherwise acted on.
+- Durable saver metadata is pending the two-stage feature-branch push and independent `git ls-remote` equality check.
