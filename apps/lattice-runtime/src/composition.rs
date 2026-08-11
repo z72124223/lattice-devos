@@ -2817,6 +2817,52 @@ pub struct FullChainService<H> {
     inner: Arc<Mutex<FullChainCore<H>>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExistingCompletionPolicy {
+    Ignore,
+    AcceptOrExecute,
+    Require,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlledWriterDecision {
+    Execute,
+    ReplayExisting,
+}
+
+fn controlled_writer_decision(
+    policy: ExistingCompletionPolicy,
+    binding: &SubjectBinding,
+    existing: Option<&TaskLifecycleEvidence>,
+) -> Result<ControlledWriterDecision, ToolExecutionError> {
+    if policy == ExistingCompletionPolicy::Ignore {
+        return Ok(ControlledWriterDecision::Execute);
+    }
+    let existing =
+        existing.ok_or_else(|| ToolExecutionError::new("LATTICE_TASK_RECONCILIATION_REQUIRED"))?;
+    if existing.binding() != binding {
+        return Err(ToolExecutionError::new(
+            "LATTICE_TASK_RECONCILIATION_REQUIRED",
+        ));
+    }
+    if !existing.admitted() {
+        return if policy == ExistingCompletionPolicy::AcceptOrExecute {
+            Ok(ControlledWriterDecision::Execute)
+        } else {
+            Err(ToolExecutionError::new(
+                "LATTICE_TASK_RECONCILIATION_REQUIRED",
+            ))
+        };
+    }
+    if existing.state() == TaskState::Completed && existing.result_digest().is_some() {
+        Ok(ControlledWriterDecision::ReplayExisting)
+    } else {
+        Err(ToolExecutionError::new(
+            "LATTICE_TASK_RECONCILIATION_REQUIRED",
+        ))
+    }
+}
+
 impl<H> Clone for FullChainService<H> {
     fn clone(&self) -> Self {
         Self {
@@ -2834,8 +2880,11 @@ impl<H: FullChainHermesPort> FullChainService<H> {
             return Err(ToolExecutionError::new("LATTICE_DELIVERY_RUN_STATUS_ONLY"));
         }
         let binding = core.submission.binding().clone();
-        let evidence =
-            Self::run_controlled_writer(core, "delivery-run-controlled-compatibility", true)?;
+        let evidence = Self::run_controlled_writer(
+            core,
+            "delivery-run-controlled-compatibility",
+            ExistingCompletionPolicy::AcceptOrExecute,
+        )?;
         verified_task_status(core, &evidence)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
         core.run_task_downstream_json(entry, &binding)
@@ -2845,7 +2894,7 @@ impl<H: FullChainHermesPort> FullChainService<H> {
     fn run_controlled_writer(
         core: &mut FullChainCore<H>,
         client_request_id: &str,
-        accept_existing_completion: bool,
+        existing_completion_policy: ExistingCompletionPolicy,
     ) -> Result<TaskLifecycleEvidence, ToolExecutionError> {
         let binding = core.submission.binding().clone();
         let mut lifecycle =
@@ -2855,23 +2904,25 @@ impl<H: FullChainHermesPort> FullChainService<H> {
             .map_err(|error| ToolExecutionError::new(error.code()))?;
         let mut writer_lease = task_writer_lease(core, &foundation)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
-        if accept_existing_completion {
-            let existing = lifecycle
-                .load(&binding)
-                .map_err(|error| ToolExecutionError::new(error.code()))?;
-            if existing.admitted() {
-                return if existing.state() == TaskState::Completed
-                    && existing.result_digest().is_some()
-                {
-                    verify_completed_writer_history(&mut writer_lease, &existing)
-                        .map_err(|error| ToolExecutionError::new(error.code()))?;
-                    Ok(existing)
-                } else {
-                    Err(ToolExecutionError::new(
-                        "LATTICE_TASK_RECONCILIATION_REQUIRED",
-                    ))
-                };
+        let existing = if existing_completion_policy == ExistingCompletionPolicy::Ignore {
+            None
+        } else {
+            Some(
+                lifecycle
+                    .load(&binding)
+                    .map_err(|error| ToolExecutionError::new(error.code()))?,
+            )
+        };
+        match controlled_writer_decision(existing_completion_policy, &binding, existing.as_ref())? {
+            ControlledWriterDecision::ReplayExisting => {
+                let existing = existing.ok_or_else(|| {
+                    ToolExecutionError::new("LATTICE_TASK_RECONCILIATION_REQUIRED")
+                })?;
+                verify_completed_writer_history(&mut writer_lease, &existing)
+                    .map_err(|error| ToolExecutionError::new(error.code()))?;
+                return Ok(existing);
             }
+            ControlledWriterDecision::Execute => {}
         }
         let preexisting = lifecycle
             .load(&binding)
@@ -3066,11 +3117,15 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             .inner
             .lock()
             .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Transport.code()))?;
-        if core.run_mode != FullChainRunMode::Fresh {
-            return Err(ToolExecutionError::new("LATTICE_TASK_SUBMIT_STATUS_ONLY"));
-        }
-        let evidence =
-            Self::run_controlled_writer(&mut core, arguments.client_request_id(), false)?;
+        let existing_completion_policy = match core.run_mode {
+            FullChainRunMode::Fresh => ExistingCompletionPolicy::Ignore,
+            FullChainRunMode::ResumeExisting => ExistingCompletionPolicy::Require,
+        };
+        let evidence = Self::run_controlled_writer(
+            &mut core,
+            arguments.client_request_id(),
+            existing_completion_policy,
+        )?;
         verified_task_status(&mut core, &evidence)
             .map_err(|error| ToolExecutionError::new(error.code()))
     }
@@ -5211,6 +5266,109 @@ mod tests {
         assert_eq!(
             LatticedErrorKind::TaskReconciliationRequired.code(),
             "LATTICE_TASK_RECONCILIATION_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn resume_existing_task_submit_replays_only_completed_evidence() {
+        let binding = fixed_gateway_submission()
+            .expect("fixed controlled canary")
+            .binding()
+            .clone();
+        let completed = TaskLifecycleEvidence::new(
+            binding.clone(),
+            true,
+            TaskState::Completed,
+            test_content_digest('7'),
+            Some(test_content_digest('8')),
+        );
+
+        assert_eq!(
+            controlled_writer_decision(
+                ExistingCompletionPolicy::Require,
+                &binding,
+                Some(&completed),
+            ),
+            Ok(ControlledWriterDecision::ReplayExisting)
+        );
+    }
+
+    #[test]
+    fn resume_existing_task_submit_never_selects_execution_for_invalid_evidence() {
+        let binding = fixed_gateway_submission()
+            .expect("fixed controlled canary")
+            .binding()
+            .clone();
+        let mismatched_binding = SubjectBinding::new(
+            binding.project_id().clone(),
+            binding.project_snapshot_id().clone(),
+            binding.task_id().clone(),
+            FIXED_GATEWAY_TASK_REVISION,
+            test_content_digest('9'),
+        )
+        .expect("mismatched test binding");
+        let cases = [
+            TaskLifecycleEvidence::new(
+                binding.clone(),
+                false,
+                TaskState::Draft,
+                test_content_digest('7'),
+                None,
+            ),
+            TaskLifecycleEvidence::new(
+                binding.clone(),
+                true,
+                TaskState::Executing,
+                test_content_digest('7'),
+                None,
+            ),
+            TaskLifecycleEvidence::new(
+                binding.clone(),
+                true,
+                TaskState::Failed,
+                test_content_digest('7'),
+                Some(test_content_digest('8')),
+            ),
+            TaskLifecycleEvidence::new(
+                binding.clone(),
+                true,
+                TaskState::Stopping,
+                test_content_digest('7'),
+                Some(test_content_digest('8')),
+            ),
+            TaskLifecycleEvidence::new(
+                mismatched_binding,
+                true,
+                TaskState::Completed,
+                test_content_digest('7'),
+                Some(test_content_digest('8')),
+            ),
+        ];
+
+        for existing in cases {
+            let error = controlled_writer_decision(
+                ExistingCompletionPolicy::Require,
+                &binding,
+                Some(&existing),
+            )
+            .expect_err("resume must not select a new controlled execution");
+            assert_eq!(error.code(), "LATTICE_TASK_RECONCILIATION_REQUIRED");
+        }
+        let missing = controlled_writer_decision(ExistingCompletionPolicy::Require, &binding, None)
+            .expect_err("missing evidence must not select execution");
+        assert_eq!(missing.code(), "LATTICE_TASK_RECONCILIATION_REQUIRED");
+    }
+
+    #[test]
+    fn fresh_task_submit_still_selects_controlled_execution() {
+        let binding = fixed_gateway_submission()
+            .expect("fixed controlled canary")
+            .binding()
+            .clone();
+
+        assert_eq!(
+            controlled_writer_decision(ExistingCompletionPolicy::Ignore, &binding, None),
+            Ok(ControlledWriterDecision::Execute)
         );
     }
 
