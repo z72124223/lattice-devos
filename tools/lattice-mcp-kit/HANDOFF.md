@@ -394,5 +394,5 @@
 - Preserve every existing guard and ordering. Never read/delete/reuse/install the failed staging/backup; create fresh run-specific artifacts. Before any switch, re-check hashes and require holder TTL >= 8 minutes, otherwise stop without provision.
 - Protected boundaries held: no live/config/staging/backup/binary/holder/PG/runtime access or mutation, wrapper/source/repo change, build/test, tool call, cleanup/root/protected-state action, release/default branch, unrelated program, or secret recording.
 - Authoritative binary is reference-only: `10279424` bytes, SHA-256 `5ec06821...`; diagnosis did not access or modify it.
-- Successor durable save: pending exact-path ledger/handoff commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Successor durable save: exact-path commit `49165a80f3afd9c5496f804855eda0fe356dd9dd` (tree `d99bec970e66f7f6dfea63f442dccb12a9c1c4d4`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:58:35.7437632Z`.
 - Archive boundary: do not archive this diagnosis thread until its exact receipt is remotely durable and central later confirms archival.
