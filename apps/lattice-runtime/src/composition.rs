@@ -108,7 +108,9 @@ use crate::mcp::{
     self, DeliveryToolArguments, DeliveryToolService, ObservedEffectKind, TaskStatusArguments,
     TaskSubmitArguments, ToolExecutionError, record_observed_effect,
 };
-use crate::task_control::{PostgresTaskLifecycle, TaskPersistenceFoundation};
+use crate::task_control::{
+    PostgresTaskLifecycle, TaskPersistenceFoundation, task_admission_command_id,
+};
 
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 3_600;
@@ -1297,13 +1299,15 @@ impl LatticedDeliveryService {
         let config = self
             .delivery
             .as_ref()
-            .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?;
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?
+            .clone();
         validate_scripted_execution_lane(config.runtime)?;
         let request = self
             .request
             .clone()
             .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?;
         self.run_request_json(
+            &config,
             &request,
             None,
             None,
@@ -1325,18 +1329,22 @@ impl LatticedDeliveryService {
         store_authority: &StoreAuthorityHead,
         writer_authority: &WriterLeaseAuthorityHead,
         writer_guard: &mut dyn WriterAuthorityGuardPort,
+        delivery_root: &Path,
     ) -> Result<Value, LatticedError> {
         let expected = fixed_gateway_submission()?;
         if expected.binding() != binding {
             return Err(LatticedError::new(LatticedErrorKind::Contract));
         }
-        let config = self
+        let mut config = self
             .delivery
             .as_ref()
-            .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?;
-        let request = request_for_task_delivery(self.database.run_id(), config, binding)?;
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?
+            .clone();
+        config.delivery_root = delivery_root.to_path_buf();
+        let request = request_for_task_delivery(self.database.run_id(), &config, binding)?;
         let identity = task_ledger_identity(binding)?;
         self.run_request_json(
+            &config,
             &request,
             Some(identity),
             Some(store_authority),
@@ -1349,6 +1357,7 @@ impl LatticedDeliveryService {
     #[allow(clippy::too_many_lines)]
     fn run_request_json(
         &mut self,
+        config: &LatticedDeliveryConfig,
         request: &DeliveryRunRequest,
         identity: Option<lattice_contracts::TaskLedgerStreamIdentity>,
         store_authority: Option<&StoreAuthorityHead>,
@@ -1356,10 +1365,6 @@ impl LatticedDeliveryService {
         writer_guard: Option<&mut dyn WriterAuthorityGuardPort>,
         continuation: DeliveryContinuation,
     ) -> Result<Value, LatticedError> {
-        let config = self
-            .delivery
-            .as_ref()
-            .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?;
         if let Some(bundle) = &config.official_bundle {
             bundle
                 .ensure_current()
@@ -2285,6 +2290,23 @@ enum FullChainRunMode {
     ResumeExisting,
 }
 
+fn controlled_submit_delivery_root(
+    configured_root: &Path,
+    task_identity: &ContentDigest,
+    run_mode: FullChainRunMode,
+) -> Result<PathBuf, LatticedError> {
+    if run_mode == FullChainRunMode::ResumeExisting {
+        return Ok(configured_root.to_path_buf());
+    }
+    let delivery_root = configured_root.join(format!("task-{}", task_identity.as_str()));
+    match fs::symlink_metadata(&delivery_root) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(delivery_root),
+        Ok(_) | Err(_) => Err(LatticedError::new(
+            LatticedErrorKind::WorkspaceConfiguration,
+        )),
+    }
+}
+
 fn parse_full_chain_run_mode(value: Option<&str>) -> Result<FullChainRunMode, LatticedError> {
     match value {
         None | Some("FRESH") => Ok(FullChainRunMode::Fresh),
@@ -2355,6 +2377,7 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         binding: &SubjectBinding,
         writer_authority: &WriterLeaseAuthorityHead,
         writer_guard: &mut dyn WriterAuthorityGuardPort,
+        delivery_root: &Path,
     ) -> Result<Value, LatticedError> {
         match self.run_mode {
             FullChainRunMode::Fresh => self.delivery.run_task_json(
@@ -2362,6 +2385,7 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
                 &self.store_authority,
                 writer_authority,
                 writer_guard,
+                delivery_root,
             ),
             FullChainRunMode::ResumeExisting => self.delivery.status_task_json(binding),
         }
@@ -2451,6 +2475,7 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
 
 struct FullChainTaskExecution<'a, H> {
     core: &'a mut FullChainCore<H>,
+    task_identity: ContentDigest,
 }
 
 impl<H: FullChainHermesPort> ControlledTaskExecutionPort for FullChainTaskExecution<'_, H> {
@@ -2460,9 +2485,31 @@ impl<H: FullChainHermesPort> ControlledTaskExecutionPort for FullChainTaskExecut
         writer_authority: &WriterLeaseAuthorityHead,
         writer_guard: &mut dyn WriterAuthorityGuardPort,
     ) -> Result<ContentDigest, ControlledTaskExecutionError> {
+        let delivery_root = controlled_submit_delivery_root(
+            &self
+                .core
+                .delivery
+                .delivery
+                .as_ref()
+                .ok_or_else(|| {
+                    ControlledTaskExecutionError::new(
+                        ControlledTaskExecutionErrorKind::Known,
+                        LatticedErrorKind::Configuration.code(),
+                    )
+                })?
+                .delivery_root,
+            &self.task_identity,
+            self.core.run_mode,
+        )
+        .map_err(|error| {
+            ControlledTaskExecutionError::new(
+                controlled_execution_error_kind(error.kind()),
+                error.code(),
+            )
+        })?;
         let value = self
             .core
-            .run_task_json(binding, writer_authority, writer_guard)
+            .run_task_json(binding, writer_authority, writer_guard, &delivery_root)
             .map_err(|error| {
                 let kind = controlled_execution_error_kind(error.kind());
                 ControlledTaskExecutionError::new(kind, error.code())
@@ -2978,8 +3025,18 @@ impl<H: FullChainHermesPort> FullChainService<H> {
             .map_err(|error| ToolExecutionError::new(error.code()))?;
         let request = controlled_task_request(core, client_request_id)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let task_identity = controlled_task_reference(
+            &binding,
+            &task_admission_command_id(client_request_id),
+            core.delivery.database.run_id(),
+            core.task_ingress_peer.profile_digest(),
+        )
+        .map_err(|error| ToolExecutionError::new(error.code()))?;
         let outcome = {
-            let mut execution = FullChainTaskExecution { core };
+            let mut execution = FullChainTaskExecution {
+                core,
+                task_identity,
+            };
             run_controlled_task(&request, &mut lifecycle, &mut writer_lease, &mut execution)
         };
         match outcome {
@@ -5429,6 +5486,42 @@ mod tests {
             controlled_writer_decision(ExistingCompletionPolicy::Ignore, &binding, None),
             Ok(ControlledWriterDecision::Execute)
         );
+    }
+
+    #[test]
+    fn controlled_submit_delivery_root_selection_is_task_scoped_and_resume_safe() {
+        static NEXT_DELIVERY_BASE: AtomicUsize = AtomicUsize::new(0);
+        let unique = NEXT_DELIVERY_BASE.fetch_add(1, Ordering::Relaxed);
+        let base = env::temp_dir().join(format!(
+            "lattice-controlled-delivery-base-{}-{unique}",
+            process::id()
+        ));
+        fs::create_dir_all(&base).expect("create configured delivery base");
+        let first_identity = test_content_digest('1');
+        let second_identity = test_content_digest('2');
+
+        let first =
+            controlled_submit_delivery_root(&base, &first_identity, FullChainRunMode::Fresh)
+                .expect("first fresh task root");
+        let second =
+            controlled_submit_delivery_root(&base, &second_identity, FullChainRunMode::Fresh)
+                .expect("second fresh task root");
+        let existing = base.join("existing-task-root");
+        fs::create_dir(&existing).expect("create existing resume root");
+        let resumed = controlled_submit_delivery_root(
+            &existing,
+            &first_identity,
+            FullChainRunMode::ResumeExisting,
+        )
+        .expect("resume existing task root");
+
+        assert_eq!(first.parent(), Some(base.as_path()));
+        assert_eq!(second.parent(), Some(base.as_path()));
+        assert!(!first.exists());
+        assert!(!second.exists());
+        assert_ne!(first, second);
+        assert_eq!(resumed, existing);
+        fs::remove_dir_all(&base).expect("remove controlled delivery fixture");
     }
 
     #[test]
