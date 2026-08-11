@@ -175,3 +175,16 @@
 - Not done: no submit/status/delivery_run, PostgreSQL connect/write/stop/restart, Rust source change, push/PR/merge/deploy/release/default-branch change.
 - Successor durable save: first exact-path commit `c113aa3a1cc16946476d0454d696916a43d922b5` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:59:12.337Z`; central confirmed `archived_at_utc=2026-08-11T13:01:17.5775961Z`.
 - Archive boundary: central archived only FRESH config remediation `019ff0d5-7553-7bd1-8ee1-9db36123e61a`. Verifier 3 `019ff0e7-f650-7922-b014-78a4fb5ed020` remains active and must not be archived or modified by this saver.
+
+## Fresh verifier 3 checkpoint — `019ff0e7-f650-7922-b014-78a4fb5ed020`
+
+- Window status: `FAILED/PREFLIGHT`; `done=false`; started `2026-08-11T13:01:44.500Z`, finished `2026-08-11T13:01:45.765Z`, elapsed `1265 ms`.
+- Fixed preflight codes: `P0_PREFLIGHT_TTL_EXPIRED` and `P0_PREFLIGHT_PG_LISTENER_UNAVAILABLE`. This is a preflight failure, not a submit failure.
+- Handoff, active switch, enabled STDIO transport, zero args, exact command, exact binary/config hashes, exact 21-key environment name set, and FRESH mode all passed. No environment value is recorded.
+- PostgreSQL preflight expected `127.0.0.1:63238` / PID `760`, but the TTL had expired at `2026-08-11T13:01:09.0516926Z`; no listener or live process was observed at verifier start.
+- Discovery was not run because preflight failed. `lattice_task_submit` was not attempted (`call_count=0`), no task ref exists, independent status was not run, and digest equality was not evaluated.
+- Cleanup and rollback paths were present and excluded protected port `64272`; neither cleanup nor rollback was executed. The verifier did not connect, stop, or delete protected port `64272`, and did not read, modify, or stage the protected script.
+- Secret-redaction incident: a metadata inspection emitted raw MCP environment values in tool output before filtering; the durable receipt intentionally records only key names and no values.
+- Candidate remains active. Do not retry from this verifier and do not stop any PostgreSQL holder. New holder/config writer `019ff0eb-485f-7ba0-94dc-d7903c385287` remains active and must not be archived or modified by this saver.
+- Successor durable save: pending first exact-path commit, push, and independent `git ls-remote` equality; remote fields remain `null` until confirmed.
+- Archive boundary: verifier 3 must not be archived until its exact receipt is remotely durable and central confirms archival.
