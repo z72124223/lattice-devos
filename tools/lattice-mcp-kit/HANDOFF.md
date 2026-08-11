@@ -130,4 +130,5 @@
 - Fresh PostgreSQL remains on `63238`, not `64272`; PID `760`, owned listener, and TTL were valid at the final check. Cleanup/rollback commands and exact targets exist and exclude `64272`; neither cleanup nor rollback was executed.
 - Conclusion: connectivity and status read are proven, but the required new-submit/new-independent-status pair is blocked by `RESUME_EXISTING`. This is not a reproducible PostgreSQL connection failure; do not rollback. Runtime remediation is required outside this saver.
 - Mutation boundary: no repository edit, reset/clean, remote write, deployment, new task, or reviewer.
-- Successor durable save: first exact-path commit `142b5b9fd66c1055a9a0347f1f7f6d9eb00ad1e5` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:21:21.353Z`; `archived_at_utc=null`.
+- Successor durable save: first exact-path commit `142b5b9fd66c1055a9a0347f1f7f6d9eb00ad1e5` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:21:21.353Z`; central confirmed `archived_at_utc=2026-08-11T12:23:32.022Z`.
+- Archive boundary: central archived only fresh verifier `019ff0bd-14c1-7d40-b104-65c4fdd6fc82`. Runtime remediation and its future verifier remain active; this saver must not modify or archive them.
