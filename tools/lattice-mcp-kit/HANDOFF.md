@@ -1047,3 +1047,8 @@
 - Old holder was classified read-only as insufficient runway and was not mutated. No global-config/external-handoff/runtime/PG outside wrapper/source/cleanup/protected-script action occurred; saver durability pending.
 - Stage 1 receipt commit `945fe46894007ac87849ef36671e294a8b291ae6` equalled fresh remote at `2026-08-12T05:59:21.6077711Z`; Stage 2 confirmation pending.
 - Central archive succeeded at `2026-08-12T06:00:29.5896831Z`; 59431 holder readiness metadata and prior durability equality remain recorded.
+
+## Config PG-binding pre-mutation gate rejection — 019ff48f-ceb8-7e30-bb5f-75a67341da43
+
+- Authoritative status: `GATE_REJECTED` at `lattice_env_assignment_token_valid`; this is `LOCAL_ORCHESTRATION_PREMUTATION_GATE_REJECTION`, not `CONFIG_PG_BINDING_DONE`.
+- File.Replace/config/handoff mutations are zero and no candidate/backup/staging/success receipt exists. Saver durability pending.
