@@ -1151,3 +1151,4 @@
 - One `TaskSubmit` and one wholly independent `TaskStatus` session completed, with zero retries. Both returned `COMPLETED`; the five fields task ref, status, task state, result digest, and ledger-head digest are exactly equal.
 - Two wrapper processes/sessions and exactly two tool calls were used. Submit and status each received response id 3 after one serialized, written, flushed tool request; immutable postcheck passed.
 - No duplicate/successor/diagnosis/reconciliation/holder/discovery task, operational mutation, cleanup, rollback, delete, port 64272, protected-script access, build, test, merge, deployment, or release action occurred. `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `47841b66fe2c92ff2ba8c66a62368274d403ac5d` at `2026-08-12T09:18:30.0883694Z`; Stage 2 is confirmation-only.
