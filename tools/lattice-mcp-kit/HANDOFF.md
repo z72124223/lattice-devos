@@ -1061,3 +1061,8 @@
 - File.Replace/config/handoff mutations are zero; original backup, candidate, staging, replace backup, and success receipt are absent. Saver durability pending.
 - Stage 1 receipt commit `8d049bb3613115cecfa5aa0a6b97b3fa51895404` equalled fresh remote at `2026-08-12T06:27:20.1153121Z`; Stage 2 confirmation pending.
 - Central archive succeeded at `2026-08-12T06:28:38.4422171Z`; corrected gate rejection remains pre-mutation with File.Replace zero and no candidate/backup/staging/success receipt.
+
+## Corrected config PG-binding v2 gate rejection — 019ff4a9-7eda-74a2-862b-9fa1b7977ecb
+
+- Authoritative status: `GATE_REJECTED` at `lattice_env_quoted_key_value_tokens`; the required parser/duplicate/key-set/count checks passed, then an over-strict quoted-key in-body requirement rejected the run. This is not `CONFIG_PG_BINDING_DONE`.
+- No correction/retry followed. File.Replace/config/handoff mutations are zero and backup/candidate/staging/replace-backup/success receipt are absent; saver durability pending.
