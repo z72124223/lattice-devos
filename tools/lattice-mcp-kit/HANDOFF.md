@@ -1170,3 +1170,9 @@
 - README contract, mandatory TaskContractFile, closed-registry/timeout-no-retry, diff, and exact five-path staging checks passed. No live MCP/task/runtime/holder/PostgreSQL/Codex/binary inspection or mutation occurred; protected dirty script remains unread, unmodified, and unstaged. `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `04b4905548f050713195664f283ea308fd8d0b5e` at `2026-08-12T10:44:45.0911757Z`; Stage 2 is confirmation-only.
 - Archive backfill: task `019ff58b-0804-7903-970f-a09c792cb524` was archived at `2026-08-12T10:46:22.3343375Z` as `DONE`. Typed-contract evidence remains AST 4/4, resolver 16 cases, coordinator 10 cases, `submit/status/retry/cleanup=3/2/0/0`, controlled-canary-only registry, zero live actions, and protected-script preservation.
+
+## Post-P0 MCP Kit Slice 3 source ??019ff597-18a2-7873-9d2b-a5742e4de5a6
+
+- Source commit `adf84062844a7bd871ebe7c9955ca29876848f45` (tree `d5a30de5c82c5cb4d964d652e8f49ce038d385a6`, parent `69a37876bd82f3831b29bc58f2f8ac0a810312c2`) was pushed once and matches the fresh remote head.
+- Added conformance runner and v1 manifest; updated the task-contract test and README. AST (2 files), strict UTF-8/no-BOM manifest/schema/version/SHA, task-contract 16-case test (1 accepted/15 rejected), and unchanged fresh-acceptance regression (10 cases; wrapper/submit/status/retry/cleanup `5/3/2/0/0`) passed.
+- README checks passed (10 checks, 3 referenced files). Cached diff and exact four-path staging passed; unrelated resolver/fresh-acceptance blobs remain unchanged. No live MCP/discovery/submit/status/delivery/runtime/database/holder/config actions occurred. Protected dirty script remains unread, unmodified, and unstaged; `archived_at_utc=null` pending saver durability.
