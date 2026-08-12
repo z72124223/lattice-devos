@@ -866,3 +866,10 @@
 - This is the first true failure. No retry, second submit, status session, delivery call, source/build/test, config/handoff/holder/PostgreSQL mutation, or action outside the wrapper occurred; the candidate and holder remain active.
 - Cross-session equality is NOT_RUN because Session 1 did not return domain COMPLETED. Current fresh-window live acceptance is not claimed.
 - Receipt stage 1 commit `d2347825074012b21a782090525e895e54ccc652` equals the fresh remote read at `2026-08-12T01:06:04.0091420Z`; confirmation stage 2 commit `f5cc686999d6e3d10c6a57814350a9511ddc2ce2` equals the fresh remote read at `2026-08-12T01:06:38.0602617Z`. Central archived the verifier at `2026-08-12T01:07:45.5481372Z`; authoritative safe_to_archive=false, MCP_CLIENT_TIMEOUT/call=null, and P0 PASS not claimed remain unchanged while outer saver safe_to_archive=true.
+
+## Offline submit-timeout diagnosis — 019ff382-9de1-75e2-a4df-b05b32191945
+
+- Fixed classification: id=3 was serialized, written, and flushed once; no complete response arrived before the shared session deadline. The first failure is MCP_CLIENT_TIMEOUT at TASK_SUBMIT_RESPONSE_WAIT_AFTER_STDIN_FLUSH.
+- Retry is unsafe because a new task may exist. The diagnosis did not query PostgreSQL; a future separately authorized reconciliation must use only the exact client_request_id before any submit retry.
+- The client boundary is a shared session stopwatch consumed by setup, discovery, and submit response wait; the next remediation would use explicit per-stage budgets and secret-safe outbound write/flush evidence.
+- Diagnosis is offline/read-only and not P0 PASS: no MCP launch/call, PostgreSQL query, repository mutation, cleanup/kill, or protected-script read. Receipt stage 1 and stage 2 saver equalities are pending; authoritative safe_to_archive=false.
