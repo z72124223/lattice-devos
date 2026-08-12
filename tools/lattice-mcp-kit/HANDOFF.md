@@ -1112,3 +1112,4 @@
 - All ready gates passed: marker/provision status, identity, exclusive postmaster listener, TTL cleanup, allowed port, PostgreSQL version, and secret-safe credential structure. Wrapper invocation count was one and exited zero.
 - No global config, external handoff, source, old-holder, direct PostgreSQL, MCP, discovery, submit/status/delivery, cleanup, or protected-script action occurred. `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `00ba3cbb3df9f004dcfafb25d9849e5a54c9c65b` at `2026-08-12T07:52:21.9172667Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff4ef-f89b-7cc0-97ed-adb5175be203` was archived at `2026-08-12T07:53:25.3244789Z` as `HOLDER_READY` for `127.0.0.1:51199` (run `3456886feaa04e4c8b18051463a4566a`).
