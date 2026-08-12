@@ -1136,3 +1136,4 @@
 - Postprocessing incidents were confined to optional-property access, compact boolean false negative, and a summary-label interpretation; the receipt was recovered from the existing single-session artifacts without a second session or wrapper retry.
 - No verifier/successor was created and no PostgreSQL, operational mutation, cleanup, protected-script, or port 64272 action occurred. This is not P0 pass; `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `e84b70bf352b56e82fa1b29a06817e15119f90fc` at `2026-08-12T08:42:21.9358494Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff511-0ff8-7ac3-85a4-ee66bb04200b` was archived at `2026-08-12T08:43:42.3134050Z` as `PASS_WITH_POSTPROCESSING_INCIDENTS`; authoritative discovery remains `DISCOVERY_OK`, with exact four tools and zero tool calls. P0 pass remains false.
