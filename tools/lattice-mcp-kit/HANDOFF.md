@@ -896,3 +896,9 @@
 - No poll, submit, replay, config/source/PG mutation, holder mutation, cleanup, rollback, or protected-script access occurred. Saver durability pending.
 - Stage 1 durable commit b98a3a1048cd21c99c6055c2873b39ce9a4a4a2a equals the fresh remote at 2026-08-12T01:43:44.0915952Z; stage 2 confirmation is pending.
 - Stage 2 confirmation commit 703e43c84aba93dbf205495cddaad4b07e7891d0 equals the fresh remote at 2026-08-12T01:44:08.0695282Z. Central archived this status-only evidence at 2026-08-12T01:45:15.3482649Z; RECONCILIATION_REQUIRED, EXECUTING, and result_digest=null remain unchanged while outer saver safe_to_archive=true.
+
+## Read-only stuck execution diagnosis — 019ff3a5-be04-7873-997e-cbd54176c3d5
+
+- Diagnosis: `MCP_CLIENT_TIMEOUT_KILLED_SYNCHRONOUS_EXECUTOR_ORPHANED_DURABLE_TASK`, high causal certainty. Client wrapper termination killed the synchronous executor after durable `EFFECT_INTENT`, leaving the task orphaned at the last known `RECONCILIATION_REQUIRED` / `EXECUTING` state.
+- The only scoped DB select failed (`missing FROM-clause entry for table t`); no successful fresh row or claim about later terminal events exists. The holder became unavailable after TTL.
+- This is read-only and not P0 PASS. No recovery/replay is authorized; current source needs recovery design changes. Saver durability pending.
