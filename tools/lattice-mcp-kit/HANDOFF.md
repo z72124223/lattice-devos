@@ -903,3 +903,4 @@
 - The only scoped DB select failed (`missing FROM-clause entry for table t`); no successful fresh row or claim about later terminal events exists. The holder became unavailable after TTL.
 - This is read-only and not P0 PASS. No recovery/replay is authorized; current source needs recovery design changes. Saver durability pending.
 - Stage 1 durable diagnosis commit ad5313f8281a80d822c2d7bb971432c2e7543772 equals fresh remote at 2026-08-12T01:57:46.5380971Z; stage 2 confirmation pending.
+- Stage 2 confirmation commit cb5990719b23a5ba79da22b6159a633a3e2e58f4 equals fresh remote at 2026-08-12T01:58:10.5208815Z. Central archived at 2026-08-12T01:59:06.6610914Z; the one SELECT parse-failure and zero successful fresh DB row evidence gap remains unchanged while outer saver safe_to_archive=true.
