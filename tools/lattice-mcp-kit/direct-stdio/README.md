@@ -58,7 +58,15 @@ By default, redacted `stdout.jsonl`, `stderr.log`, and `summary.json` files are 
 
 ## Fresh acceptance coordinator
 
-`Invoke-LatticeFreshAcceptance.ps1` records a secret-free request intent, submits exactly once, and only after a completed submit starts one independent status session. It requires exact equality of `task_ref`, `status`, `task_state`, `result_digest`, and `ledger_head_digest`. It never retries, polls, replays, cleans up, or reads the environment file contents.
+`Invoke-LatticeFreshAcceptance.ps1` requires an absolute `TaskContractFile`, resolves it through the versioned closed registry, verifies the contract-file hash from the normalized projection, and only then records a secret-free request intent. It submits exactly once, and only after a completed submit starts one wholly independent status session. It requires exact equality of `task_ref`, `status`, `task_state`, `result_digest`, and `ledger_head_digest`. It never retries, polls, replays, cleans up, or reads the environment file contents.
+
+The minimal UTF-8-without-BOM contract is:
+
+```json
+{"schema":"lattice.task-contract.v1","task_type":"controlled_codex_canary","parameters":{}}
+```
+
+The current closed registry contains exactly one type: `controlled_codex_canary`, mapped to the fixed `CONTROLLED_CODEX_CANARY` intent for `lattice_task_submit`. Future types require an explicit source mapping plus focused schema and coordinator tests. Contract fields can never dispatch arbitrary shell, command, SQL, path, file-write, environment, credential, or free-form task payload data. The generic low-level client action is not reachable from this typed contract coordinator.
 
 ```powershell
 $coordinator = Join-Path $PSScriptRoot 'Invoke-LatticeFreshAcceptance.ps1'
@@ -66,6 +74,7 @@ $coordinator = Join-Path $PSScriptRoot 'Invoke-LatticeFreshAcceptance.ps1'
 & $coordinator `
   -BinaryPath 'C:\absolute\path\to\latticed.exe' `
   -EnvironmentFile 'C:\absolute\path\to\runtime-environment.json' `
+  -TaskContractFile 'C:\absolute\path\to\task-contract.json' `
   -OutputRoot 'C:\absolute\fresh-worker-output'
 ```
 
@@ -74,5 +83,6 @@ The output root must not already exist. Initialization, submit, and status timeo
 Run the deterministic offline fake-wrapper test without starting LATTICE, MCP, PostgreSQL, or the live wrapper process:
 
 ```powershell
+& (Join-Path $PSScriptRoot 'Test-LatticeTaskContract.ps1')
 & (Join-Path $PSScriptRoot 'Test-LatticeFreshAcceptance.ps1')
 ```

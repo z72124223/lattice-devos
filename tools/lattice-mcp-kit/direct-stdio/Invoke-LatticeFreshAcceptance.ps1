@@ -6,6 +6,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$EnvironmentFile,
 
+    [Parameter(Mandatory = $true)]
+    [string]$TaskContractFile,
+
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$')]
     [string]$ClientRequestId = ('fresh-accept-' + [Guid]::NewGuid().ToString('N').Substring(0, 16)),
 
@@ -127,9 +130,15 @@ $counts = [ordered]@{
     submit_count = 0
     status_count = 0
     retry_count = 0
+    cleanup_count = 0
 }
 
 try {
+    if (-not [IO.Path]::IsPathRooted($TaskContractFile)) { throw 'TASK_CONTRACT_PATH_NOT_ABSOLUTE' }
+    try { $contractFile = [IO.Path]::GetFullPath($TaskContractFile) }
+    catch { throw 'TASK_CONTRACT_PATH_REJECTED' }
+    if (-not (Test-Path -LiteralPath $contractFile -PathType Leaf)) { throw 'TASK_CONTRACT_FILE_NOT_FOUND' }
+
     if (-not [IO.Path]::IsPathRooted($BinaryPath)) { throw 'BINARY_PATH_NOT_ABSOLUTE' }
     $binary = [IO.Path]::GetFullPath($BinaryPath)
     $environment = [IO.Path]::GetFullPath($EnvironmentFile)
@@ -140,6 +149,45 @@ try {
     if (-not (Test-Path -LiteralPath $wrapper -PathType Leaf)) { throw 'WRAPPER_NOT_FOUND' }
     if (Test-Path -LiteralPath $root) { throw 'OUTPUT_ROOT_MUST_BE_ABSENT' }
 
+    $resolver = Join-Path $PSScriptRoot 'Resolve-LatticeTaskContract.ps1'
+    if (-not (Test-Path -LiteralPath $resolver -PathType Leaf)) { throw 'TASK_CONTRACT_RESOLVER_NOT_FOUND' }
+    $resolutionText = ((@(& $resolver -TaskContractFile $contractFile)) | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($resolutionText)) { throw 'TASK_CONTRACT_RESOLUTION_MISSING' }
+    try { $resolution = $resolutionText | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw 'TASK_CONTRACT_RESOLUTION_JSON_REJECTED' }
+
+    $expectedResolutionFields = @('contract_schema', 'contract_type', 'contract_file_sha256', 'mcp_tool', 'intent', 'submit_fields')
+    $resolutionFields = @($resolution.PSObject.Properties.Name)
+    if ($resolutionFields.Count -ne $expectedResolutionFields.Count) { throw 'TASK_CONTRACT_RESOLUTION_FIELDS_REJECTED' }
+    for ($index = 0; $index -lt $expectedResolutionFields.Count; $index++) {
+        if ($resolutionFields[$index] -cne $expectedResolutionFields[$index]) { throw 'TASK_CONTRACT_RESOLUTION_FIELDS_REJECTED' }
+    }
+    if ([string]$resolution.contract_schema -cne 'lattice.task-contract.v1' -or
+        [string]$resolution.contract_type -cne 'controlled_codex_canary' -or
+        [string]$resolution.mcp_tool -cne 'lattice_task_submit' -or
+        [string]$resolution.intent -cne 'CONTROLLED_CODEX_CANARY') {
+        throw 'TASK_CONTRACT_RESOLUTION_MAPPING_REJECTED'
+    }
+    if ([string]$resolution.contract_file_sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'TASK_CONTRACT_RESOLUTION_HASH_REJECTED'
+    }
+    $submitFields = @($resolution.submit_fields)
+    if ($submitFields.Count -ne 2 -or [string]$submitFields[0] -cne 'client_request_id' -or [string]$submitFields[1] -cne 'intent') {
+        throw 'TASK_CONTRACT_RESOLUTION_SUBMIT_FIELDS_REJECTED'
+    }
+    $expectedResolution = [ordered]@{
+        contract_schema = 'lattice.task-contract.v1'
+        contract_type = 'controlled_codex_canary'
+        contract_file_sha256 = [string]$resolution.contract_file_sha256
+        mcp_tool = 'lattice_task_submit'
+        intent = 'CONTROLLED_CODEX_CANARY'
+        submit_fields = @('client_request_id', 'intent')
+    } | ConvertTo-Json -Compress -Depth 5
+    if ($resolutionText -cne $expectedResolution) { throw 'TASK_CONTRACT_RESOLUTION_NORMALIZATION_REJECTED' }
+    if ((Get-Sha256 -Path $contractFile) -cne [string]$resolution.contract_file_sha256) {
+        throw 'TASK_CONTRACT_RESOLUTION_HASH_MISMATCH'
+    }
+
     $null = New-Item -ItemType Directory -Path $root
     $rootCreated = $true
     $summaryPath = Join-Path $root 'coordinator-summary.json'
@@ -148,7 +196,9 @@ try {
         schema = 'lattice.fresh-acceptance-intent.v1'
         action = 'TaskSubmit'
         client_request_id = $ClientRequestId
-        intent = 'CONTROLLED_CODEX_CANARY'
+        contract_type = [string]$resolution.contract_type
+        contract_file_sha256 = [string]$resolution.contract_file_sha256
+        intent = [string]$resolution.intent
         retry = $false
     }
     [IO.File]::WriteAllText($intentPath, (($intent | ConvertTo-Json -Compress -Depth 10) + "`n"), $script:Utf8)
@@ -161,7 +211,19 @@ try {
         $parsedIntent = [Text.UTF8Encoding]::new($false, $true).GetString($intentBytes) | ConvertFrom-Json -ErrorAction Stop
     }
     catch { throw 'INTENT_JSON_REJECTED' }
-    if ([string]$parsedIntent.client_request_id -cne $ClientRequestId -or $parsedIntent.retry -isnot [bool] -or [bool]$parsedIntent.retry) {
+    $expectedIntentFields = @('schema', 'action', 'client_request_id', 'contract_type', 'contract_file_sha256', 'intent', 'retry')
+    $intentFields = @($parsedIntent.PSObject.Properties.Name)
+    if ($intentFields.Count -ne $expectedIntentFields.Count) { throw 'INTENT_CONTENT_MISMATCH' }
+    for ($index = 0; $index -lt $expectedIntentFields.Count; $index++) {
+        if ($intentFields[$index] -cne $expectedIntentFields[$index]) { throw 'INTENT_CONTENT_MISMATCH' }
+    }
+    if ([string]$parsedIntent.schema -cne 'lattice.fresh-acceptance-intent.v1' -or
+        [string]$parsedIntent.action -cne 'TaskSubmit' -or
+        [string]$parsedIntent.client_request_id -cne $ClientRequestId -or
+        [string]$parsedIntent.contract_type -cne 'controlled_codex_canary' -or
+        [string]$parsedIntent.contract_file_sha256 -cne [string]$resolution.contract_file_sha256 -or
+        [string]$parsedIntent.intent -cne 'CONTROLLED_CODEX_CANARY' -or
+        $parsedIntent.retry -isnot [bool] -or [bool]$parsedIntent.retry) {
         throw 'INTENT_CONTENT_MISMATCH'
     }
     if ((Get-Sha256 -Path $intentPath) -cne $intentSha256) { throw 'INTENT_HASH_MISMATCH' }
