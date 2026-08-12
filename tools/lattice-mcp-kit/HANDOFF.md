@@ -991,3 +991,8 @@
 - No config or external-handoff replacement, PostgreSQL connection, MCP/runtime call, cleanup, rollback, or successor occurred. This is a failure receipt, not a PG-binding switch or P0 acceptance; saver durability pending.
 - Stage 1 receipt commit `415c27c515174b9f942cd6c9e202c14d268af7c7` equalled fresh remote at `2026-08-12T04:25:45.3028038Z`; Stage 2 confirmation pending.
 - Central archive succeeded at `2026-08-12T04:26:57.9311978Z`. The preserved incident truth is one unintended protected-script line read, with no modification or staging; candidate/backup/staging/atomic-replace counts remain zero.
+
+## PG-binding-only first rejected gate — 019ff43a-3e09-7493-aa1c-09b1f782d08f
+
+- Authoritative status: `STOPPED_FIRST_REJECTED_GATE` at `ENV_LITERAL_UNIQUE_LATTICE_DELIVERY_SCHEMA_DIR` during pre-mutation config extraction. No correction or retry followed.
+- No candidate, backup, staging, atomic replacement, PostgreSQL/MCP action, or protected-script access occurred. Failure receipt durability pending.
