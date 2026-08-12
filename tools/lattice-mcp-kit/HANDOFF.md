@@ -1088,3 +1088,4 @@
 - Authoritative classification: `PREFLIGHT_FAIL`; first failure was `PREFLIGHT_WRAPPER_SOURCE_COMMIT_MISMATCH actual=41bca3c631f43a164791c8e70db5340212f49e5c`.
 - Earlier config, handoff, environment-count, and wrapper-SHA gates passed. The required wrapper source commit was `3f1d2ae98615e0899196c1f81c4b430066b2508f`; all subsequent gates were not run under first-failure stop.
 - No retry, artifact, wrapper/MCP session/tool call, PostgreSQL connection, mutation, cleanup, or protected-script access occurred. This is not discovery success or P0 acceptance; `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `18627999a69b232306852b532bdce52b9c65dd51` at `2026-08-12T07:20:23.3911812Z`; Stage 2 is confirmation-only.
