@@ -830,4 +830,4 @@
 - Preflight and environment artifact creation passed, but the one plain Discovery wrapper invocation launched a binary whose SHA-256 differed from the authoritative configured binary.
 - The child exited 2 before initialize response with PROCESS_EXITED_BEFORE_RESPONSE / MCP_STDOUT_EOF_BEFORE_RESPONSE. Exact-four discovery was not observed and tool-call count remained zero.
 - No retry, cleanup, further inspection, tool invocation, PostgreSQL connection, mutation, rollback, or archive action occurred; evidence and environment artifacts were retained.
-- Receipt stage 1 and stage 2 saver equalities are pending; authoritative safe_to_archive=false and live acceptance is not claimed.
+- Receipt stage 1 commit `e11ad0b577f4adfd913b94681d66a686e8c9828b` equals the fresh remote read at `2026-08-12T00:26:34.4128259Z`. Stage 2 is this confirmation-only saver advance; authoritative `safe_to_archive=false` and live-acceptance-not-claimed remain unchanged, while outer saver durability becomes `safe_to_archive=true` after fresh remote equality.
