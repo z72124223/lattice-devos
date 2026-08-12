@@ -1075,3 +1075,9 @@
 - The parser accepts quoted-or-bare keys with basic-or-literal string values; quote-style and formatting gates are explicitly omitted. Prior parser-shape incidents were local zero-mutation corrections. No handoff/runtime/PG/source/cleanup/protected-script action occurred; saver durability pending.
 - Stage 1 receipt commit `2e5d7a77810a507be6863ccc1eff056543b08f96` equalled fresh remote at `2026-08-12T06:54:34.1749176Z`; Stage 2 confirmation pending.
 - Central archive succeeded at `2026-08-12T06:55:48.4606437Z`; final config binding records one File.Replace, 9 PG binding changes, 12 byte-equivalent non-PG lines, and zero handoff/runtime/MCP/PG connection actions.
+## Handoff projection correction-only completion — 019ff4c2-8beb-7581-8eac-7747390311ce
+
+- Authoritative result: `HANDOFF_PROJECTION_CORRECTION_ONLY_DONE`; receipt SHA-256 `29ada395178d89f10e5246a0d99985b7b212d6b5550ea0e6317ce99eb118d404`.
+- One `File.Replace` corrected the two stale wrapper-identity projections (`wrapper_sha256`, `current_blob`) for holder `127.0.0.1:59431`; config remained `b63853523cabe27886d67d783228dc3653cbec551ab7a1d5033ac6f304baa47b`.
+- Transaction: 71 explicit target paths, zero unexpected paths and zero retries. Prepared-home literal and normalized equality remain true; no runtime, MCP, PostgreSQL, cleanup, or protected-script action occurred.
+- Final projection remains `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` with next boundary `DISCOVERY_ONLY`. This is not a P0 acceptance claim. Saver Stage 1/Stage 2 durability follows; `archived_at_utc=null`.
