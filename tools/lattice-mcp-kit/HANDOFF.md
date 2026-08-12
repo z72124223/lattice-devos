@@ -818,3 +818,9 @@
 - Nine holder assignments were targeted and eight values changed; all 12 non-PG environment assignments and command/binary/stdio/args/FRESH/home/delivery/schema/Git/launcher semantics were preserved.
 - No MCP launch, initialize, discovery, tool call, PostgreSQL connection, port 64272 action, source/build/test, provisioning, cleanup, rollback, or protected-script access occurred.
 - Receipt stage 1 commit `1bd139e04d4a1272b89ee402c092b170bacb492b` equals the fresh remote read at `2026-08-12T00:12:36.7402921Z`; confirmation stage 2 commit `475b539a6ad59c322f2d4269fc84dc56ba6cb26d` equals the fresh remote read at `2026-08-12T00:13:02.4768537Z`. Central archived the worker at `2026-08-12T00:13:54.6914530Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## New-holder discovery preflight failure — 019ff351-6ea6-7241-84e0-5280fb086299
+
+- Worker stopped at PREFLIGHT_CONFIG_SAFE_PARSE with LOCAL_PYTHON_RUNTIME_NOT_FOUND_DURING_CONFIG_SAFE_PARSE; the configured SHA matched, but the local Python runtime was unavailable.
+- Binary, external handoff, holder, and wrapper checks were NOT_RUN. No environment artifact, wrapper process, initialize, tools/list, tool call, PostgreSQL connection, port 64272 action, mutation, cleanup, rollback, or retry occurred.
+- Live acceptance was not claimed. Receipt stage 1 and stage 2 saver equalities are pending; authoritative safe_to_archive=false until saver durability is proven.
