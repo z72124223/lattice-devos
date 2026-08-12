@@ -851,4 +851,4 @@
 - The bounded locator was cancelled before content inspection after the authoritative `direct-stdio/Invoke-LatticeMcp.ps1` path arrived; certainty is CONFIRMED.
 - Completed work was read-only repository and filename inventory. No post-revocation locator/content/receipt reads, wrapper or binary execution, MCP/runtime/PostgreSQL/config/source/build/test, cleanup, rollback, delete, kill, or port 64272 action occurred.
 - `changed_paths=[]`, `operational_actions=0`, and the authoritative result is `AUTHORITATIVE_PATH_SUPERSEDED_FURTHER_DISCOVERY`.
-- Receipt stage 1 and stage 2 saver equalities are pending; authoritative `safe_to_archive=false`.
+- Receipt stage 1 commit `12ab49a5f3bab80649fbe7e34104de65f3d096db` equals the fresh remote read at `2026-08-12T00:43:46.6045338Z`. Stage 2 is this confirmation-only saver advance; authoritative `safe_to_archive=false` remains unchanged while outer saver durability becomes `safe_to_archive=true` after fresh remote equality.
