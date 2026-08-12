@@ -831,3 +831,10 @@
 - The child exited 2 before initialize response with PROCESS_EXITED_BEFORE_RESPONSE / MCP_STDOUT_EOF_BEFORE_RESPONSE. Exact-four discovery was not observed and tool-call count remained zero.
 - No retry, cleanup, further inspection, tool invocation, PostgreSQL connection, mutation, rollback, or archive action occurred; evidence and environment artifacts were retained.
 - Receipt stage 1 commit `e11ad0b577f4adfd913b94681d66a686e8c9828b` equals the fresh remote read at `2026-08-12T00:26:34.4128259Z`; confirmation stage 2 commit `7b24531f728bc70dde98597cd2df01f7ed7b709f` equals the fresh remote read at `2026-08-12T00:27:02.7927845Z`. Central archived the worker at `2026-08-12T00:28:20.0302572Z`; authoritative `safe_to_archive=false` and live-acceptance-not-claimed remain unchanged while outer saver `safe_to_archive=true`.
+
+## Discovery binary-path mismatch diagnosis — 019ff35e-2c01-70e1-b61d-ca87f92e6c9a
+
+- Diagnosis identified the exact first predicate as the mandatory caller-to-wrapper -BinaryPath binding: the caller supplied a stale materialization binary SHA d600… instead of the current configured isolated binary SHA c79e….
+- Config mismatch, omitted/default selection, stale environment binary selection, and wrapper rewrite/bug were excluded. The summary proves receipt-equivalent binary/action/argument/output shape but not a byte-for-byte literal outer invocation.
+- Minimal next-worker boundary changes only caller input: parse the current config command, bind that exact value to the one wrapper invocation, and require summary path/hash equality before interpreting discovery.
+- Diagnosis was read-only: no MCP/process, mutation, PG/holder, cleanup, rollback, port 64272, artifact deletion, or protected-script access. Receipt stage 1 and stage 2 saver equalities are pending; authoritative safe_to_archive=false.
