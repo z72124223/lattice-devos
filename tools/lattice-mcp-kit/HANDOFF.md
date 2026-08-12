@@ -879,4 +879,4 @@
 - Exact command reconciliation found one durable admission for the timed-out request: task_ref `91e6a296…d796ddb6`, task state EXECUTING, durable sequence 5, and public status RECONCILIATION_REQUIRED.
 - Durable evidence ends at EFFECT_INTENT; it does not prove external completion, failure, or a transient state. No submit/status call or mutation was performed in this read-only task.
 - Exact replay is source-defined as zero-new-execution at this state, but the one smaller next boundary is a fresh status-only session for the known task_ref; do not submit/replay first.
-- This is not P0 PASS. Receipt stage 1 and stage 2 saver equalities are pending; authoritative safe_to_archive=false.
+- This is not P0 PASS. Receipt stage 1 commit `7a9ac06d62b411d25330b60b5e9daf25c4ee6e30` equals the fresh remote read at `2026-08-12T01:27:26.9799148Z`. Stage 2 is this confirmation-only saver advance; authoritative safe_to_archive=false remains unchanged while outer saver durability becomes safe_to_archive=true after fresh remote equality.
