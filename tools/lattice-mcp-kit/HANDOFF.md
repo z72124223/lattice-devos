@@ -1019,3 +1019,8 @@
 - No artifact, wrapper/latticed session, MCP request, PostgreSQL connection, operational mutation, cleanup, or protected-script access occurred. No discovery or P0 acceptance is claimed; saver durability pending.
 - Stage 1 receipt commit `45f20047dc91335f6446bc43746e421e25b6b1c7` equalled fresh remote at `2026-08-12T05:28:11.7324026Z`; Stage 2 confirmation pending.
 - Central archive succeeded at `2026-08-12T05:29:26.2054998Z`; central archive metadata preserves its authoritative wrapper SHA mismatch and zero command/session/tool/PG mutation counts.
+
+## Handoff wrapper-hash correction rejected — 019ff473-81ee-7702-8cb0-9794ecb02cd9
+
+- Authoritative result: `REJECTED_AT_FIRST_MISMATCH` / `WRAPPER_SHA256_PRECONDITION_MISMATCH`. The expected and observed wrapper SHA-256 values differ; no correction, retry, or write followed.
+- The worker correction has no source change to publish (`github_remote_equality_stage1/2=NOT_APPLICABLE_NO_CORRECTION`), but its saver receipt durability is recorded separately. No operational action occurred.
