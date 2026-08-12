@@ -948,3 +948,4 @@
 - First failure: `marker.status must equal READY` was rejected because the marker status field is absent. Classification remains PRE_MUTATION_VERIFIER_FIELD_ASSUMPTION_FAILURE; no alternate-field rerun or continuation followed the stop directive.
 - Config/handoff were unchanged; zero live writes, cleanup/rollback, MCP/PG/runtime action, or protected-script access. This is not P0 PASS; saver durability pending.
 - Stage 1 receipt commit 1c340e75c742f60ee791ab0772819d3ca8e0de8a (tree f0cc2f4efaa6c5612eaa75400a3b56d70b896926) equals fresh remote at 2026-08-12T03:16:57.5630958Z; stage 2 pending.
+- Central archive success at 2026-08-12T03:18:15.566Z; rejected marker.status assumption and correct authoritative provision_status field remain recorded; live config/handoff/holder/repo writes were zero.
