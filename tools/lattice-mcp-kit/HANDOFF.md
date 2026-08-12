@@ -1033,3 +1033,8 @@
 - The worker correction-stage remote equality remains `NOT_RUN_REJECTED_GATE`. No MCP/runtime, PostgreSQL, cleanup, source, or protected-script action occurred; saver durability pending.
 - Saver Stage 1 receipt commit `84ee611eb003a28f9357f68d9c42fe43f7b36d04` equalled fresh remote at `2026-08-12T05:41:31.2670132Z`; saver Stage 2 confirmation pending.
 - Central archive succeeded at `2026-08-12T05:42:24.4719689Z`; prepared-home exact mismatch and all zero operational-action counts remain authoritative.
+
+## Offline handoff projection diagnosis — 019ff47f-27e4-77f0-aaaf-fea0d47d0484
+
+- Diagnosis-only result: only `/direct_stdio_client/wrapper_sha256` and `/direct_stdio_client/current_blob` are stale handoff values. Current wrapper bytes/blob and source ancestry pass; there is no wrapper drift or config drift.
+- Prepared-home values themselves pass literal and normalized equality; the failure signal is `FIELD_NAME_MISMATCH_OR_DUPLICATE` with medium certainty for the uninspected consumer mechanism. No implementation or operational action occurred; saver durability pending.
