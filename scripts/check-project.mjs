@@ -35,6 +35,46 @@ function relative(file) {
 const files = await walk(root);
 const errors = [];
 
+const engineeringProtocolPath = "docs/contracts/ENGINEERING_PROTOCOL_V1.md";
+const engineeringProtocolFile = files.find(
+  (candidate) => relative(candidate) === engineeringProtocolPath,
+);
+if (!engineeringProtocolFile) {
+  errors.push(`${engineeringProtocolPath}: missing engineering protocol.`);
+} else {
+  const protocol = await readFile(engineeringProtocolFile, "utf8");
+  const requiredProtocolContent = [
+    "protocol_id: LATTICE_ENGINEERING_PROTOCOL",
+    "version: 1.0.0",
+    "canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md",
+    "## Start Gate",
+    "## Repairable Failure Rule",
+    "repair it within the authorized scope, and rerun the\nsame failed check",
+    "## Completion Gate",
+    "## Preserved Boundaries",
+  ];
+  for (const required of requiredProtocolContent) {
+    if (!protocol.includes(required)) {
+      errors.push(
+        `${engineeringProtocolPath}: missing required contract content '${required.replaceAll("\n", " ")}'.`,
+      );
+    }
+  }
+}
+
+const agentsFile = files.find((candidate) => relative(candidate) === "AGENTS.md");
+if (!agentsFile) {
+  errors.push("AGENTS.md: missing repository instructions.");
+} else {
+  const agents = await readFile(agentsFile, "utf8");
+  if (!agents.includes(`\`${engineeringProtocolPath}\``)) {
+    errors.push(`AGENTS.md: must point to ${engineeringProtocolPath}.`);
+  }
+  if (!agents.includes("Before editing") || !agents.includes("Before claiming completion")) {
+    errors.push("AGENTS.md: must require engineering protocol checks before editing and completion.");
+  }
+}
+
 for (const file of files.filter((candidate) => candidate.endsWith(".js") || candidate.endsWith(".mjs"))) {
   const result = spawnSync(process.execPath, ["--check", file], {
     cwd: root,

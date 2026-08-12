@@ -63,6 +63,19 @@ These rules add to, and do not weaken, the global Codex workflow.
 
 ## Development Workflow
 
+### Engineering Protocol Entry
+
+- Before editing, read the versioned engineering protocol at
+  `docs/contracts/ENGINEERING_PROTOCOL_V1.md` and apply its start gate within
+  the current instruction and authority hierarchy.
+- Before claiming completion, reread that protocol, inspect the final diff,
+  and run `npm.cmd run check` plus the focused checks required by the changed
+  behavior.
+- Treat reproducible ordinary compile, test, formatting, configuration, and
+  development-PostgreSQL failures as repairable: diagnose, fix within the
+  authorized scope, and rerun the same failed check instead of closing the
+  task. Stop only at the boundaries named by the protocol.
+
 1. Read `PLANS.md`, the active specification/ticket, applicable ADRs, and every
    affected module constitution before editing.
 2. Keep exactly one current ticket after the V2 approval gate.

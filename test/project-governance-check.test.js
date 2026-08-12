@@ -6,6 +6,34 @@ import path from "node:path";
 import test from "node:test";
 
 const checkScript = path.resolve("scripts/check-project.mjs");
+const engineeringProtocol = `---
+protocol_id: LATTICE_ENGINEERING_PROTOCOL
+version: 1.0.0
+status: active
+canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md
+---
+
+# Fixture Engineering Protocol
+
+## Start Gate
+Read before work.
+
+## Repairable Failure Rule
+A reproducible ordinary failure is repairable evidence. Diagnose it,
+repair it within the authorized scope, and rerun the
+same failed check.
+
+## Completion Gate
+Verify before completion.
+
+## Preserved Boundaries
+Preserve authority and safety boundaries.
+`;
+const agents = `# Fixture Instructions
+
+Before editing, read \`docs/contracts/ENGINEERING_PROTOCOL_V1.md\`.
+Before claiming completion, reread it and run the focused checks.
+`;
 const constitution = `---
 module_id: fixture
 name: Fixture
@@ -52,6 +80,9 @@ None.
 async function runFixture({
   tickets,
   plans,
+  protocol = engineeringProtocol,
+  repairProtocol,
+  agentsContent = agents,
   constitutionPath = path.join(
     "docs",
     "modules",
@@ -63,8 +94,19 @@ async function runFixture({
   try {
     const constitutionFile = path.join(root, constitutionPath);
     await mkdir(path.dirname(constitutionFile), { recursive: true });
+    await mkdir(path.join(root, "docs", "contracts"), { recursive: true });
     await mkdir(path.join(root, "docs", "tickets"), { recursive: true });
     await writeFile(constitutionFile, constitution, "utf8");
+    if (protocol !== null) {
+      await writeFile(
+        path.join(root, "docs", "contracts", "ENGINEERING_PROTOCOL_V1.md"),
+        protocol,
+        "utf8",
+      );
+    }
+    if (agentsContent !== null) {
+      await writeFile(path.join(root, "AGENTS.md"), agentsContent, "utf8");
+    }
     await writeFile(path.join(root, "PLANS.md"), plans, "utf8");
     for (const [name, ticketId, moduleId = "fixture"] of tickets) {
       await writeFile(
@@ -73,10 +115,23 @@ async function runFixture({
         "utf8",
       );
     }
-    return spawnSync(process.execPath, [checkScript], {
+    const initial = spawnSync(process.execPath, [checkScript], {
       cwd: root,
       encoding: "utf8",
     });
+    if (repairProtocol === undefined) {
+      return initial;
+    }
+    await writeFile(
+      path.join(root, "docs", "contracts", "ENGINEERING_PROTOCOL_V1.md"),
+      repairProtocol,
+      "utf8",
+    );
+    const rerun = spawnSync(process.execPath, [checkScript], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    return { initial, rerun };
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -93,6 +148,45 @@ test("project check rejects duplicate ticket IDs", async () => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /duplicate ticket_id 'TASK-017'/u);
+});
+
+test("project check requires the readable versioned engineering protocol", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    protocol: null,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /missing engineering protocol/u);
+});
+
+test("project check requires AGENTS to point to the engineering protocol", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    agentsContent: "# Fixture Instructions\n",
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /AGENTS\.md: must point to docs\/contracts\/ENGINEERING_PROTOCOL_V1\.md/u);
+});
+
+test("an ordinary protocol error can be repaired and the same check rerun", async () => {
+  const broken = engineeringProtocol.replace(
+    "repair it within the authorized scope, and rerun the\nsame failed check.",
+    "close the task immediately.",
+  );
+  const { initial, rerun } = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    protocol: broken,
+    repairProtocol: engineeringProtocol,
+  });
+  assert.equal(initial.status, 1);
+  assert.match(initial.stderr, /missing required contract content/u);
+  assert.equal(rerun.status, 0, rerun.stderr);
+  assert.match(rerun.stdout, /check=ok/u);
 });
 
 test("project check requires exactly one current-task marker", async () => {
