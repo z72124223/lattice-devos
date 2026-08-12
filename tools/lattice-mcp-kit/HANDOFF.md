@@ -1162,3 +1162,9 @@
 - Protected acceptance script remained unread, unmodified, and unstaged; no default-branch, merge, deployment, release, or child-agent action occurred. `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `1e116ba72f91c35f5ba1d0a0142308613bc9b096` at `2026-08-12T09:33:11.7464926Z`; Stage 2 is confirmation-only.
 - Archive backfill: task `019ff547-ab21-7952-befd-27afb1fa79eb` was archived at `2026-08-12T09:36:26.4860897Z` as `DONE`. It preserves the three listed Slice 1 source paths, AST 2/2 and offline 3/3 evidence (`submit/status/retry/cleanup=3/2/0/0`), zero live actions, and the protected dirty script’s unread/unmodified/unstaged state.
+
+## Post-P0 MCP Kit Slice 2 source ??019ff58b-0804-7903-970f-a09c792cb524
+
+- Source commit `26f6d7a351c12158fd0c4616f393db8730b16f6f` (tree `77cd9a91a5b47ec8079478f644ff0e2deb755546`, parent `cbefb8ed9a0336ca20c097e638fba56d24a46307`) is the remote head and reaches Slice 1 (`78740fa33c9978942156056715e5534040c6959f`). Registry claim: `ONLY_CONTROLLED_CODEX_CANARY`.
+- Five direct-stdio paths changed. Four AST parses, the 16-case resolver test (1 accepted/15 rejected), and the 10-case fresh-acceptance test passed. Seven dangerous contracts were rejected before wrapper launch; fake wrapper/submit/status/retry/cleanup counts were `5/3/2/0/0`.
+- README contract, mandatory TaskContractFile, closed-registry/timeout-no-retry, diff, and exact five-path staging checks passed. No live MCP/task/runtime/holder/PostgreSQL/Codex/binary inspection or mutation occurred; protected dirty script remains unread, unmodified, and unstaged. `archived_at_utc=null` pending saver durability.
