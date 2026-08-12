@@ -926,3 +926,4 @@
 - First failure `POSTMASTER_DATA_ROOT_MISMATCH` at pre-mutation final holder validation. The extra non-authoritative containment check failed before artifacts or live-file mutation; zero writes and no retry.
 - Config and handoff remained byte-identical; no runtime/MCP/PG connection or action, cleanup, rollback, port 64272, or protected-script access. Not a P0 PASS; saver durability pending.
 - Stage 1 receipt commit 43bc832e71f83216f80b7b5fbbcd4edf0fdcae06 equals fresh remote at 2026-08-12T02:39:56.1326093Z; stage 2 pending.
+- Central archive success at 2026-08-12T02:41:53.250Z; PRE_MUTATION_ORCHESTRATION_FAILURE/POSTMASTER_DATA_ROOT_MISMATCH, zero mutation, no retry, and unchanged config/handoff hashes remain preserved.
