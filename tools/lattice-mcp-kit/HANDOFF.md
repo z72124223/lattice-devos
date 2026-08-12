@@ -845,3 +845,10 @@
 - Config, binary-path, holder, Command A, and Command B checks were NOT_RUN. No artifact, wrapper/latticed process, initialize, tools/list, tool call, source/build/test, config, holder/PG, cleanup, rollback, delete, or kill action occurred.
 - One read-only recursive-listing incident preceded the corrected direct-path check and caused no mutation. Discovery and full P0 acceptance were not claimed.
 - Receipt stage 1 commit `6390b94ac748addccced08e0cb7706fe7c238147` equals the fresh remote read at `2026-08-12T00:39:30.4237839Z`; confirmation stage 2 commit `5157f6e0bc8d3be27eb30ae20e2da959b8ae9374` equals the fresh remote read at `2026-08-12T00:39:59.4878946Z`. Central archived the worker at `2026-08-12T00:40:59.9345814Z`; authoritative `safe_to_archive=false`, discovery PASS not claimed, and full P0 acceptance not claimed remain unchanged while outer saver `safe_to_archive=true`.
+
+## Locator cancelled after authoritative path — 019ff36a-2f6a-7040-af83-ee2b2dfde50f
+
+- The bounded locator was cancelled before content inspection after the authoritative `direct-stdio/Invoke-LatticeMcp.ps1` path arrived; certainty is CONFIRMED.
+- Completed work was read-only repository and filename inventory. No post-revocation locator/content/receipt reads, wrapper or binary execution, MCP/runtime/PostgreSQL/config/source/build/test, cleanup, rollback, delete, kill, or port 64272 action occurred.
+- `changed_paths=[]`, `operational_actions=0`, and the authoritative result is `AUTHORITATIVE_PATH_SUPERSEDED_FURTHER_DISCOVERY`.
+- Receipt stage 1 and stage 2 saver equalities are pending; authoritative `safe_to_archive=false`.
