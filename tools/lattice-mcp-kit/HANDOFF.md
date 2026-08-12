@@ -1145,3 +1145,9 @@
 - Full current P0 live acceptance is not proven; `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `494fd49f3f3f42b26f19d959549a8eb5d7e686eb` at `2026-08-12T09:01:56.8913295Z`; Stage 2 is confirmation-only.
 - Archive backfill: task `019ff525-4506-70e3-9fd1-0da27c8721d4` was archived at `2026-08-12T09:03:23.2573486Z` as `NO_OPERATIONAL_ACTION_ORCHESTRATION_FAILURE`; parse-error count is 11 and all request/runtime/session/submit/status/retry counts remain zero. P0 pass remains false.
+## Fresh P0 live verification pass — 019ff537-4754-7e60-bc5c-9a3150deda93
+
+- Authoritative receipt integrity verified before persistence: SHA-256 `8375dd291feb4338b7b3a77aeab5e56db990a936cd0df053b05941e1b62d107f`, 22339 bytes. Result: `PASS`; `p0_pass=true`; first failure is null.
+- One `TaskSubmit` and one wholly independent `TaskStatus` session completed, with zero retries. Both returned `COMPLETED`; the five fields task ref, status, task state, result digest, and ledger-head digest are exactly equal.
+- Two wrapper processes/sessions and exactly two tool calls were used. Submit and status each received response id 3 after one serialized, written, flushed tool request; immutable postcheck passed.
+- No duplicate/successor/diagnosis/reconciliation/holder/discovery task, operational mutation, cleanup, rollback, delete, port 64272, protected-script access, build, test, merge, deployment, or release action occurred. `archived_at_utc=null` pending saver durability.
