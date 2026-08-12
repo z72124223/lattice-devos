@@ -918,3 +918,4 @@
 - One provisioning invocation produced READY holder run `902b79ad90f4446eabf0613e8b0122f8` at `127.0.0.1:61152`; marker, PostgreSQL 17.10, owned listener, and 7200-second TTL checks passed.
 - No repository path was modified by the worker; no MCP/discovery/submit/status call, global config, PG binding, binary, or credential mutation occurred. Protected dirty script remained untouched.
 - This is HOLDER_READY, not P0 PASS. `archived_at_utc` remains null pending central archive; saver durability pending.
+- Stage 1 receipt commit f35fa39f145d20abaab1a42153ead1d4821f4d6c equals fresh remote at 2026-08-12T02:28:51.6219885Z; stage 2 confirmation pending.
