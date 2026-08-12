@@ -964,3 +964,9 @@ fn outcome_persistence_after_durable_intent(
         "OUTCOME_PERSISTENCE_AFTER_DURABLE_INTENT_UNKNOWN",
     ))
 }
+mod autonomy;
+
+pub use autonomy::{
+    AutonomyDecision, AutonomyDecisionReason, AutonomyIntent, AutonomyIntentVersion,
+    AutonomyReceipt, ModelRecommendation, TaskKind, VerificationRecommendation, classify_autonomy,
+};

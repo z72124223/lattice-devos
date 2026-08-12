@@ -1,7 +1,7 @@
 ---
 module_id: orchestrator-runtime
 name: Orchestrator and Runtime Port
-version: 2.3
+version: 2.4
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-09
@@ -35,6 +35,8 @@ composition root.
 - Timeout, stop, cancellation, reconciliation, and daemon-epoch ordering.
 - Pure scripted workflow scenarios and typed call-order state; no concrete
   adapter, transport, driver, process, filesystem, test, or Git state.
+- Versioned, explainable autonomy-control recommendation/receipt types for an
+  already agreed task boundary; the receipt is not durable task truth.
 
 Task Domain owns Task Spec/state legality; Task Ledger/PostgreSQL owns durable
 truth; Policy owns decisions; Gateway IPC owns protocol; Approval Verifier owns
@@ -73,6 +75,9 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
 - Stop on the first failed gate; ambiguous effects enter reconciliation.
 - Revoke writer authority before verification/review and require a separate
   exact merge approval before integration.
+- Recommend only the existing governed Codex writer or no model; return a
+  typed user decision for missing preapproval, new authority, or high-risk/
+  irreversible work without invoking a model or changing lifecycle state.
 
 ## Invariants
 
@@ -114,6 +119,9 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
 18. The canary cannot fabricate a live Project Registry fact or be generalized
     into project selection/free-form work. Those surfaces require the normal
     independently current Registry and Policy composition first.
+19. Autonomy-control recommendation is non-authoritative: it cannot schedule,
+    create, persist, approve, or transition a task, and its receipt requires
+    existing Ledger binding before it can become durable evidence.
 
 ## Allowed Dependencies
 
@@ -146,6 +154,10 @@ filesystem, Git, database driver, task cache, rate store, second application
 entry, or alternate writer path. Existing delivery/graph-memory callers remain
 compatible but cannot be used to bypass the new Task Spec/lease binding.
 
+Version 2.4 adds a pure, versioned decision classifier for already agreed task
+intent. It preserves all Task Spec, Policy, Ledger, lease/fence, MCP, and
+composition boundaries and does not claim model or scheduler control.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -175,3 +187,4 @@ SPEC/ADR update, architecture review, and responsible-user authorization.
 | 2.1 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Pure injected delivery ordering and explicit separation from `latticed` composition/MCP/concrete adapters | User approval in preceding implementation window |
 | 2.2 | 2026-08-05 | SPEC-002 v26, ADR-022, TASK-033 | Pure exact snapshot -> Graphify -> validate -> PostgreSQL Memory -> retrieval ordering | User TASK-033 direction |
 | 2.3 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Bounded Gateway Submit/Status, one Task Spec digest, PostgreSQL task control, and real Writer Lease/fencing before Codex | User TASK-038-first direction |
+| 2.4 | 2026-08-12 | Autonomous execution-control user direction | Pure versioned intent classification, safe writer/verification recommendation, and non-durable state receipt | Current user task |
