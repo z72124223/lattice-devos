@@ -838,3 +838,10 @@
 - Config mismatch, omitted/default selection, stale environment binary selection, and wrapper rewrite/bug were excluded. The summary proves receipt-equivalent binary/action/argument/output shape but not a byte-for-byte literal outer invocation.
 - Minimal next-worker boundary changes only caller input: parse the current config command, bind that exact value to the one wrapper invocation, and require summary path/hash equality before interpreting discovery.
 - Diagnosis was read-only: no MCP/process, mutation, PG/holder, cleanup, rollback, port 64272, artifact deletion, or protected-script access. Receipt stage 1 commit `b26e8ebf223841e44652fea7e0f9bbf5959c69f6` equals the fresh remote read at `2026-08-12T00:34:00.0833458Z`; confirmation stage 2 commit `bf1b548ee706a35c0f9e6d6e4660a003b197f348` equals the fresh remote read at `2026-08-12T00:34:51.4029364Z`. Central archived the diagnosis at `2026-08-12T00:36:41.5730454Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## Corrected discovery-only wrapper-path preflight failure — 019ff366-40aa-7c63-a3d0-6e3f80ce7d00
+
+- The worker returned FAIL at `preflight.wrapper_presence`: the exact required wrapper path `tools/lattice-mcp-kit/Invoke-LatticeMcp.ps1` was absent.
+- Config, binary-path, holder, Command A, and Command B checks were NOT_RUN. No artifact, wrapper/latticed process, initialize, tools/list, tool call, source/build/test, config, holder/PG, cleanup, rollback, delete, or kill action occurred.
+- One read-only recursive-listing incident preceded the corrected direct-path check and caused no mutation. Discovery and full P0 acceptance were not claimed.
+- Receipt stage 1 and stage 2 saver equalities are pending; authoritative `safe_to_archive=false`.
