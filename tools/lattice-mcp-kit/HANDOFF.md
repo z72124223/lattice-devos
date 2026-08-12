@@ -1098,3 +1098,9 @@
 - No retry, submit/status/delivery, PostgreSQL connection, operational mutation, cleanup, or protected-script access occurred. This remains discovery-only and not a P0 acceptance claim; `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `346de44c6874d47acccd61c98441035a10f74e9c` at `2026-08-12T07:32:40.1855060Z`; Stage 2 is confirmation-only.
 - Archive backfill: task `019ff4d9-bcc2-7aa0-b729-e81f678ab152` was archived at `2026-08-12T07:34:22.3940541Z` as `DISCOVERY_ONLY_PASS` (protocol `2025-11-25`, exact four tools, zero tool calls). It does not claim P0 pass; the worker created no verifier and performed zero operational mutations.
+## Fresh verifier pre-request failure — 019ff4e5-fb8a-7e00-bb7b-57cc52009322
+
+- The authoritative final receipt SHA-256 was verified before persistence: `fb9084fdd36aa79b0dd6ed505043f9228744f4e840725ed99435c6b19cbf8b97`. The earlier preexecution receipt is withdrawn, superseded, and was not used.
+- Result: `FAIL` at `PREFLIGHT_FAILURE_PRE_REQUEST_RECORD_WRITE_ABORTED`. A private environment artifact was created, but PowerShell failed during pre-request record construction; no wrapper or MCP request started and unknown dynamic paths were not enumerated.
+- Submit/status remain unstarted: wrapper, process, session, initialize, tools/list, submit write, and status call counts are all zero. Task outcome is `UNKNOWN`; no P0 acceptance is claimed.
+- No retry, operational mutation, PostgreSQL action, cleanup/rollback, or protected-script access occurred; `archived_at_utc=null` pending saver durability.
