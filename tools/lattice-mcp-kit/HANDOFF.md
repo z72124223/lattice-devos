@@ -1153,3 +1153,10 @@
 - No duplicate/successor/diagnosis/reconciliation/holder/discovery task, operational mutation, cleanup, rollback, delete, port 64272, protected-script access, build, test, merge, deployment, or release action occurred. `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `47841b66fe2c92ff2ba8c66a62368274d403ac5d` at `2026-08-12T09:18:30.0883694Z`; Stage 2 is confirmation-only.
 - Archive backfill: task `019ff537-4754-7e60-bc5c-9a3150deda93` was archived at `2026-08-12T09:20:00.9419318Z` with verdict `P0_PASS`: one completed submit, one completed independent status, zero retries, and five-field equality. Candidate config/handoff/holder preservation remains true.
+
+## Post-P0 MCP Kit Slice 1 source ??019ff547-ab21-7952-befd-27afb1fa79eb
+
+- Source commit `78740fa33c9978942156056715e5534040c6959f` (tree `647a68492c15aa3bd8911d8d33507e75a372e643`, parent `2632d219561439f46c9989d36be4880549d07ffe`) was pushed once; its fresh remote SHA matched and is reachable.
+- Changed only `Invoke-LatticeFreshAcceptance.ps1`, `Test-LatticeFreshAcceptance.ps1`, and the direct-stdio README. Coordinator/test AST parsing and the focused offline test passed: 3 cases, 5 fake-wrapper invocations, 3 submits, 2 statuses, and zero retry or cleanup.
+- README checks passed for absolute binary/environment examples, `90/900/180` defaults, no-retry semantics, and offline-test command. No live process/session/discovery/submit/status/retry/PostgreSQL/latticed/MCP action occurred.
+- Protected acceptance script remained unread, unmodified, and unstaged; no default-branch, merge, deployment, release, or child-agent action occurred. `archived_at_utc=null` pending saver durability.
