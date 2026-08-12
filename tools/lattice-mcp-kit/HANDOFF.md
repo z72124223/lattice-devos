@@ -949,3 +949,8 @@
 - Config/handoff were unchanged; zero live writes, cleanup/rollback, MCP/PG/runtime action, or protected-script access. This is not P0 PASS; saver durability pending.
 - Stage 1 receipt commit 1c340e75c742f60ee791ab0772819d3ca8e0de8a (tree f0cc2f4efaa6c5612eaa75400a3b56d70b896926) equals fresh remote at 2026-08-12T03:16:57.5630958Z; stage 2 pending.
 - Central archive success at 2026-08-12T03:18:15.566Z; rejected marker.status assumption and correct authoritative provision_status field remain recorded; live config/handoff/holder/repo writes were zero.
+
+## Handoff atomic API parameter failure — 019ff3fa-f046-7d00-9b21-5b478396182f
+
+- First failure `PRE_MUTATION_ATOMIC_API_PARAMETER_FAILURE`: one File.Replace call rejected a blank/null destination backup parameter. No live handoff mutation, second atomic API call, correction, or retry followed.
+- Config/handoff hashes remained exact; backup and staging are preserved with no cleanup/rollback. No MCP, PostgreSQL, or protected-script action occurred. Saver durability pending.
