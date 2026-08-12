@@ -1144,3 +1144,4 @@
 - All operational counts are zero: request/environment artifact, wrapper, latticed, MCP, initialize/tools/list/tool calls, submit/status, retry, cleanup, PostgreSQL, port 64272, and protected-script access. No child/successor/diagnosis/reconciliation/holder/discovery worker was created.
 - Full current P0 live acceptance is not proven; `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `494fd49f3f3f42b26f19d959549a8eb5d7e686eb` at `2026-08-12T09:01:56.8913295Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff525-4506-70e3-9fd1-0da27c8721d4` was archived at `2026-08-12T09:03:23.2573486Z` as `NO_OPERATIONAL_ACTION_ORCHESTRATION_FAILURE`; parse-error count is 11 and all request/runtime/session/submit/status/retry counts remain zero. P0 pass remains false.
