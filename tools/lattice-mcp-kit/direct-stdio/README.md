@@ -66,11 +66,11 @@ The minimal UTF-8-without-BOM contract is:
 {"schema":"lattice.task-contract.v1","task_type":"controlled_codex_canary","parameters":{}}
 ```
 
-The current closed registry contains exactly one type: `controlled_codex_canary`, mapped to the fixed `CONTROLLED_CODEX_CANARY` intent for `lattice_task_submit`. Future types require an explicit source mapping plus focused schema and coordinator tests. Contract fields can never dispatch arbitrary shell, command, SQL, path, file-write, environment, credential, or free-form task payload data. The generic low-level client action is not reachable from this typed contract coordinator.
+The adjacent source-owned `Get-LatticeTaskContractRegistry.ps1` emits the normalized closed registry consumed by the resolver. It currently contains exactly one mapping: `controlled_codex_canary` to the fixed `CONTROLLED_CODEX_CANARY` intent for `lattice_task_submit`. The typed boundary permits no arbitrary task dispatch, shell, command, SQL, path, file-write, environment, credential, or payload. The generic low-level client action is not reachable from this typed contract coordinator.
 
 ## Offline typed-contract conformance
 
-`task-contract.conformance.v1.json` is the UTF-8-without-BOM, version 1 source of positive and exact-rejection vectors for the closed typed-contract boundary. `Invoke-LatticeTaskContractConformance.ps1` materializes every vector as a fresh temporary fixture, invokes the resolver exactly once per case, and emits one secret-free summary.
+`task-contract.conformance.v1.json` is the UTF-8-without-BOM, version 1 source of positive and exact-rejection vectors for the closed typed-contract boundary. `Invoke-LatticeTaskContractConformance.ps1` invokes and hashes the adjacent normalized registry, materializes every vector as a fresh temporary fixture, invokes the resolver exactly once per case, and emits one secret-free summary. Its automatic coverage gate requires exactly one accepted positive vector for every registry type and rejects duplicate, unknown, or uncovered positive types.
 
 ```powershell
 $conformance = Join-Path $PSScriptRoot 'Invoke-LatticeTaskContractConformance.ps1'
@@ -80,7 +80,7 @@ $conformance = Join-Path $PSScriptRoot 'Invoke-LatticeTaskContractConformance.ps
   -ConformanceFile (Join-Path $PSScriptRoot 'task-contract.conformance.v1.json')
 ```
 
-Every future source-owned typed contract requires both an explicit resolver mapping and new positive and negative conformance vectors. The current registry remains exactly one canary type, `controlled_codex_canary`, mapped only to `CONTROLLED_CODEX_CANARY`. Neither the manifest nor the resolver permits arbitrary shell, command, SQL, path, file-write, environment, credential, or free-form task payloads.
+Every future source-owned typed contract requires an explicit registry entry, closed resolver parameter handling, positive and negative conformance vectors, and actual product/server support. The current registry remains exactly one canary type, `controlled_codex_canary`, mapped only to `CONTROLLED_CODEX_CANARY`. Neither the registry, manifest, nor resolver permits arbitrary task dispatch, shell, command, SQL, path, file-write, environment, credential, or payload.
 
 ```powershell
 $coordinator = Join-Path $PSScriptRoot 'Invoke-LatticeFreshAcceptance.ps1'
