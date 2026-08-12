@@ -1104,3 +1104,4 @@
 - Result: `FAIL` at `PREFLIGHT_FAILURE_PRE_REQUEST_RECORD_WRITE_ABORTED`. A private environment artifact was created, but PowerShell failed during pre-request record construction; no wrapper or MCP request started and unknown dynamic paths were not enumerated.
 - Submit/status remain unstarted: wrapper, process, session, initialize, tools/list, submit write, and status call counts are all zero. Task outcome is `UNKNOWN`; no P0 acceptance is claimed.
 - No retry, operational mutation, PostgreSQL action, cleanup/rollback, or protected-script access occurred; `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `af6e223261f9cd09f8218b975ad7a68423cd93b7` at `2026-08-12T07:44:46.0034721Z`; Stage 2 is confirmation-only.
