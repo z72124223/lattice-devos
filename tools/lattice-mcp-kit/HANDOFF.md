@@ -1128,3 +1128,4 @@
 - `/direct_stdio_client/current_blob` is preserved as Git blob OID `bb569f731fb3fdb3eca61a9922bed55d37ab9a25`, not a commit. Wrapper identity and all stated preservation gates remain exact; raw secrets were not recorded.
 - `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `cb8b4a6f09abd61f3c50726a848ee4f22e2a531a` at `2026-08-12T08:20:47.1399962Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff504-2afd-7321-b944-8bb5d6eed136` was archived at `2026-08-12T08:21:52.6368284Z`; handoff remains `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` at SHA-256 `a3a75fbd…`.
