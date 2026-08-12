@@ -1096,3 +1096,4 @@
 - `DISCOVERY_OK`: one discovery wrapper/session, protocol `2025-11-25`, the exact four typed tools, zero tool calls, and clean child exit. All observed binary paths and SHA-256 values matched.
 - The historical wrapper commit is explicitly not required to equal the current reference; the exact current wrapper blob/hash and all immutable postchecks matched. Holder pre/postchecks passed.
 - No retry, submit/status/delivery, PostgreSQL connection, operational mutation, cleanup, or protected-script access occurred. This remains discovery-only and not a P0 acceptance claim; `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `346de44c6874d47acccd61c98441035a10f74e9c` at `2026-08-12T07:32:40.1855060Z`; Stage 2 is confirmation-only.
