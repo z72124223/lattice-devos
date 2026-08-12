@@ -1160,3 +1160,4 @@
 - Changed only `Invoke-LatticeFreshAcceptance.ps1`, `Test-LatticeFreshAcceptance.ps1`, and the direct-stdio README. Coordinator/test AST parsing and the focused offline test passed: 3 cases, 5 fake-wrapper invocations, 3 submits, 2 statuses, and zero retry or cleanup.
 - README checks passed for absolute binary/environment examples, `90/900/180` defaults, no-retry semantics, and offline-test command. No live process/session/discovery/submit/status/retry/PostgreSQL/latticed/MCP action occurred.
 - Protected acceptance script remained unread, unmodified, and unstaged; no default-branch, merge, deployment, release, or child-agent action occurred. `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `1e116ba72f91c35f5ba1d0a0142308613bc9b096` at `2026-08-12T09:33:11.7464926Z`; Stage 2 is confirmation-only.
