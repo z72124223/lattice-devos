@@ -1003,3 +1003,4 @@
 
 - Authoritative status: `CONFIG_PG_BINDING_DONE`. One atomic config replacement installed the 9 PG-holder bindings for holder `127.0.0.1:52874`; the 12 non-PG lines and command/args/stdio/fresh bindings remained byte-equivalent.
 - External handoff was not read or changed. No PostgreSQL, MCP/runtime, source, build/test, cleanup, port 64272, or protected-script action occurred. Saver durability pending; this receipt is not P0 acceptance.
+- Stage 1 receipt commit `4acd6300a1aa88baffe05aaf77bd08d31398c853` equalled fresh remote at `2026-08-12T04:58:44.1436826Z`; Stage 2 confirmation pending.
