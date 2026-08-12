@@ -817,4 +817,4 @@
 - Worker completed PG-BINDING-ONLY with status DONE, atomically updating one config and one external-handoff file to holder run 5c95659541b5428b8249d3ed062dd1f1 at 127.0.0.1:51021.
 - Nine holder assignments were targeted and eight values changed; all 12 non-PG environment assignments and command/binary/stdio/args/FRESH/home/delivery/schema/Git/launcher semantics were preserved.
 - No MCP launch, initialize, discovery, tool call, PostgreSQL connection, port 64272 action, source/build/test, provisioning, cleanup, rollback, or protected-script access occurred.
-- Receipt stage 1 and stage 2 saver equalities are pending; authoritative safe_to_archive=false until saver durability is proven.
+- Receipt stage 1 commit `1bd139e04d4a1272b89ee402c092b170bacb492b` equals the fresh remote read at `2026-08-12T00:12:36.7402921Z`. Stage 2 is this confirmation-only saver advance; authoritative `safe_to_archive=false` remains unchanged and outer saver durability becomes `safe_to_archive=true` after fresh remote equality.
