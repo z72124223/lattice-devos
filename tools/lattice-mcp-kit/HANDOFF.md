@@ -1082,3 +1082,4 @@
 - Transaction: 71 explicit target paths, zero unexpected paths and zero retries. Prepared-home literal and normalized equality remain true; no runtime, MCP, PostgreSQL, cleanup, or protected-script action occurred.
 - Final projection remains `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` with next boundary `DISCOVERY_ONLY`. This is not a P0 acceptance claim. Saver Stage 1/Stage 2 durability follows; `archived_at_utc=null`.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `7bfd9c4f1bdba0fd6a01005c77a76ee2484212a4` at `2026-08-12T07:14:01.0085413Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff4c2-8beb-7581-8eac-7747390311ce` was archived at `2026-08-12T07:15:09.5511443Z`. It preserves `HANDOFF_PROJECTION_CORRECTION_DONE`, handoff SHA-256 `f6f09205fb2953c70a88630ea128a62c03fb60196b8ea8908685a5196ce2d320`, one `File.Replace`, and zero non-target or operational actions.
