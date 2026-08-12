@@ -912,3 +912,9 @@
 - Full P0 acceptance is not claimed. `archived_at_utc` remains null pending central archive; saver two-stage durability pending.
 - Stage 1 receipt commit a90696e31a63bd310b08875b325aca8315978008 equals fresh remote at 2026-08-12T02:12:49.9918457Z; stage 2 confirmation pending.
 - Stage 2 confirmation commit ecf802b21a9ab43c2e27c27b4107f41ee42651eb equals fresh remote at 2026-08-12T02:13:12.4628502Z. Central archived at 2026-08-12T02:14:03.9357065Z; source commit 3f1d2ae98615e0899196c1f81c4b430066b2508f and focused scope remain unchanged.
+
+## Holder provision-only readiness — 019ff3c0-0ee1-7b60-b219-bcf1184a3f79
+
+- One provisioning invocation produced READY holder run `902b79ad90f4446eabf0613e8b0122f8` at `127.0.0.1:61152`; marker, PostgreSQL 17.10, owned listener, and 7200-second TTL checks passed.
+- No repository path was modified by the worker; no MCP/discovery/submit/status call, global config, PG binding, binary, or credential mutation occurred. Protected dirty script remained untouched.
+- This is HOLDER_READY, not P0 PASS. `archived_at_utc` remains null pending central archive; saver durability pending.
