@@ -1121,3 +1121,9 @@
 - `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `190910b88aef0e9c4a370ebe645e0fbf3006a398` at `2026-08-12T08:05:54.3318612Z`; Stage 2 is confirmation-only.
 - Archive backfill: task `019ff4f6-e7ea-7842-a94a-e4a1e0dbe969` was archived at `2026-08-12T08:07:36.5091929Z` as `CONFIG_PG_BINDING_DONE` for `127.0.0.1:51199`; config SHA-256 changed from `b6385352…` to `b809db8c…`.
+## Handoff projection correction complete — 019ff504-2afd-7321-b944-8bb5d6eed136
+
+- Shared receipt SHA-256 was verified before persistence: `c01e549cd72ce7df975afc119c3a4e4d722d4bc372a8eb04614fa55a3bbd26f1`. Result: `HANDOFF_PROJECTION_CORRECTION_DONE` for holder `127.0.0.1:51199`.
+- One atomic `File.Replace`, with no retry, changed 72 explicit canonical projection paths and zero unexpected paths. Handoff SHA-256 changed from `f6f09205…` to `a3a75fbd…`; config remained `b809db8c…`.
+- `/direct_stdio_client/current_blob` is preserved as Git blob OID `bb569f731fb3fdb3eca61a9922bed55d37ab9a25`, not a commit. Wrapper identity and all stated preservation gates remain exact; raw secrets were not recorded.
+- `archived_at_utc=null` pending saver durability.
