@@ -888,3 +888,9 @@
 - Requested task ref `91e6a2963b02a6b73e259ec8474a07eb410fe4c1c5ccd17e4245c162d796ddb6` is not presented as a live response. Full fresh submit+status acceptance and P0 PASS are not claimed; baseline `026a983f627ed8e34298ad5c56557aded51b2af0` is an ancestor-only gate.
 - Stage 1 durable receipt commit `3aa8e57bc1fdc289f4a891e5ca20e3231ab61d04` equals the fresh remote read at `2026-08-12T01:37:56.0537210Z`. Confirmation-only stage 2 is pending.
 - Stage 2 confirmation commit 7a8bd1e8c288be4c7ce41fc0b3b6eaa7f0418e37 equals the fresh remote read at 2026-08-12T01:38:21.5926191Z. Central archived this zero-runtime prelaunch failure at 2026-08-12T01:39:20.7301711Z; authoritative TRANSPORT_FAILURE and initialize/status/submit counts 0 remain unchanged while outer saver safe_to_archive=true.
+
+## Corrected minimal status-only verifier — 019ff39f-9d67-7562-902f-83caca8ce391
+
+- One fresh TaskStatus session completed successfully: protocol 2025-11-25, response IDs 1/2/3, exact one status call, no submit/delivery/retry, and child exit 0.
+- Current response is `RECONCILIATION_REQUIRED` / `EXECUTING` for task ref `91e6a2963b02a6b73e259ec8474a07eb410fe4c1c5ccd17e4245c162d796ddb6`; result_digest is null. It cannot claim full P0 PASS.
+- No poll, submit, replay, config/source/PG mutation, holder mutation, cleanup, rollback, or protected-script access occurred. Saver durability pending.
