@@ -934,3 +934,9 @@
 - No live config/handoff mutation, atomic replace, cleanup, rollback, MCP/PG action, or protected-script access occurred. Earlier staging artifacts remain in place per no-cleanup; no continued binding after the stop directive.
 - Stage 1 receipt commit 5607b2a4421b756e67b27bb32e8a33cf4dd1e060 equals fresh remote at 2026-08-12T02:51:54.1669966Z; stage 2 pending.
 - Central archive success at 2026-08-12T02:53:47.810Z; rejected credential username assumption, unchanged live config/handoff, preserved staging, and no cleanup/rollback remain recorded.
+
+## PG binding coordination race — 019ff3e4-bf81-7e12-b2e6-ff6bf3a23a44
+
+- Authoritative classification: `CONFIG_SWITCH_SUCCEEDED_HANDOFF_NOT_UPDATED_DUE_COORDINATION_RACE` — this is not pre-mutation. Config was atomically replaced once and current hash equals candidate `3aa6b262...`; nine PG bindings match, eight values changed, and all non-PG/command/binary/stdio invariants were preserved.
+- Handoff remains exactly at the old hash `0c37f438...` with zero atomic updates. No MCP, discovery, submit, status, delivery, PostgreSQL action, cleanup, rollback, port 64272, or protected-script access occurred.
+- This receipt is not P0 PASS. archived_at remains null; saver durability pending.
