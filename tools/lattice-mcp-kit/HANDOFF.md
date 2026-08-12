@@ -976,3 +976,4 @@
 - First failure is `POWERSHELL_AUTOMATIC_VARIABLE_NAME_COLLISION`: function parameter `Pid` collided with read-only `$PID` during the holder-listener query. Listener check and all execution work are NOT_RUN after first failure.
 - No wrapper invocation/MCP session/tool call, artifact, config/handoff/source/binary/holder/PG mutation, cleanup, rollback, or protected-script access occurred. This is not Discovery PASS or P0 PASS; saver durability pending.
 - Stage 1 receipt commit db90fd92df293371f3c5816ad0f56fe01a1ac09a equals fresh remote at 2026-08-12T04:06:21.9753215Z; stage 2 pending.
+- Central archive success at 2026-08-12T04:08:11.3991086Z; PRECHECK POWERSHELL_PID_READONLY_NAME_COLLISION and command/wrapper/MCP/initialize/tools-list/tool-call counts all 0 remain recorded.
