@@ -970,3 +970,9 @@ pub use autonomy::{
     AutonomyDecision, AutonomyDecisionReason, AutonomyIntent, AutonomyIntentVersion,
     AutonomyReceipt, ModelRecommendation, TaskKind, VerificationRecommendation, classify_autonomy,
 };
+mod window_closure;
+
+pub use window_closure::{
+    DurableHandoffReceipt, HandoffFieldStatus, KeepWindowOpenReason, WindowClosureDecision,
+    WindowKind, classify_window_closure,
+};
