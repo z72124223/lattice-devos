@@ -998,3 +998,8 @@
 - No candidate, backup, staging, atomic replacement, PostgreSQL/MCP action, or protected-script access occurred. Failure receipt durability pending.
 - Stage 1 receipt commit `d06e5ba5a32595c0333bd0507c8059835b6d789b` equalled fresh remote at `2026-08-12T04:43:15.5017094Z`; Stage 2 confirmation pending.
 - Central archive succeeded at `2026-08-12T04:44:18.9623691Z`; the rejected schema-dir literal gate and all zero-action counts remain authoritative.
+
+## Config PG-binding-only completion — 019ff44a-1aee-7843-8f67-ae0772212bee
+
+- Authoritative status: `CONFIG_PG_BINDING_DONE`. One atomic config replacement installed the 9 PG-holder bindings for holder `127.0.0.1:52874`; the 12 non-PG lines and command/args/stdio/fresh bindings remained byte-equivalent.
+- External handoff was not read or changed. No PostgreSQL, MCP/runtime, source, build/test, cleanup, port 64272, or protected-script action occurred. Saver durability pending; this receipt is not P0 acceptance.
