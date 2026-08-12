@@ -997,3 +997,4 @@
 - Authoritative status: `STOPPED_FIRST_REJECTED_GATE` at `ENV_LITERAL_UNIQUE_LATTICE_DELIVERY_SCHEMA_DIR` during pre-mutation config extraction. No correction or retry followed.
 - No candidate, backup, staging, atomic replacement, PostgreSQL/MCP action, or protected-script access occurred. Failure receipt durability pending.
 - Stage 1 receipt commit `d06e5ba5a32595c0333bd0507c8059835b6d789b` equalled fresh remote at `2026-08-12T04:43:15.5017094Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T04:44:18.9623691Z`; the rejected schema-dir literal gate and all zero-action counts remain authoritative.
