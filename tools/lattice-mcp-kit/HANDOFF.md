@@ -904,3 +904,9 @@
 - This is read-only and not P0 PASS. No recovery/replay is authorized; current source needs recovery design changes. Saver durability pending.
 - Stage 1 durable diagnosis commit ad5313f8281a80d822c2d7bb971432c2e7543772 equals fresh remote at 2026-08-12T01:57:46.5380971Z; stage 2 confirmation pending.
 - Stage 2 confirmation commit cb5990719b23a5ba79da22b6159a633a3e2e58f4 equals fresh remote at 2026-08-12T01:58:10.5208815Z. Central archived at 2026-08-12T01:59:06.6610914Z; the one SELECT parse-failure and zero successful fresh DB row evidence gap remains unchanged while outer saver safe_to_archive=true.
+
+## Direct-stdio tool-call timeout source remediation — 019ff3b2-9c6f-73c2-83e8-ff5d5ced3d1c
+
+- Source commit `3f1d2ae98615e0899196c1f81c4b430066b2508f` (tree `45627179c174595017e152f2d08b0936bcdda59f`, parent `716108e403d8e81496811cd2c8a73ebc182073ba`) is already remotely durable.
+- Scope is exactly the direct-stdio wrapper and focused timeout fixture. RED reproduced the shared-deadline timeout; GREEN passed offline/default-compatibility/900-binding/stop-path checks. No live MCP, holder, PG, config, handoff, or recovery action occurred.
+- Full P0 acceptance is not claimed. `archived_at_utc` remains null pending central archive; saver two-stage durability pending.
