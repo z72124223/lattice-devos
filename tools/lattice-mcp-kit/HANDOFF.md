@@ -811,3 +811,10 @@
 - Receipt verification recorded the postmaster/listener and TTL cleanup identities as matching, with 7,101 seconds remaining. Credentials were not output.
 - No retry, post-wrapper PostgreSQL connection, old-holder action, global-config action, or MCP action occurred.
 - Receipt stage 1 commit `0cafffdbdbfd0cb32ac5232720bfbe969acd2fdb` equals the fresh remote read at `2026-08-11T23:57:43.1021011Z`; confirmation stage 2 commit `713a67c53d27dac84a3590430f0e16e0c9cfa9c5` equals the fresh remote read at `2026-08-11T23:58:09.9592539Z`. Central archived the worker at `2026-08-11T23:59:07.6143157Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## PostgreSQL binding-only switch — 019ff343-cc8f-7eb2-8a31-e3bcf1060423
+
+- Worker completed PG-BINDING-ONLY with status DONE, atomically updating one config and one external-handoff file to holder run 5c95659541b5428b8249d3ed062dd1f1 at 127.0.0.1:51021.
+- Nine holder assignments were targeted and eight values changed; all 12 non-PG environment assignments and command/binary/stdio/args/FRESH/home/delivery/schema/Git/launcher semantics were preserved.
+- No MCP launch, initialize, discovery, tool call, PostgreSQL connection, port 64272 action, source/build/test, provisioning, cleanup, rollback, or protected-script access occurred.
+- Receipt stage 1 and stage 2 saver equalities are pending; authoritative safe_to_archive=false until saver durability is proven.
