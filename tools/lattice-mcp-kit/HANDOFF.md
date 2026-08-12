@@ -1068,3 +1068,8 @@
 - No correction/retry followed. File.Replace/config/handoff mutations are zero and backup/candidate/staging/replace-backup/success receipt are absent; saver durability pending.
 - Stage 1 receipt commit `45f47d926d0f2dd4638d3f9a84f471a692be2e9b` equalled fresh remote at `2026-08-12T06:40:43.6581194Z`; Stage 2 confirmation pending.
 - Central archive succeeded at `2026-08-12T06:42:12.3627509Z`; over-strict local orchestration gate classification, passed required parser checks, and zero operational actions remain authoritative.
+
+## Final corrected config PG-binding completion — 019ff4b5-ed12-7913-b930-8b6ca66a667b
+
+- Authoritative status: `CONFIG_PG_BINDING_DONE`. One File.Replace installed the 59431 holder projection: 9 PG bindings, 12 byte-equivalent non-PG lines, and 21 env assignments; installed bytes equal the candidate.
+- The parser accepts quoted-or-bare keys with basic-or-literal string values; quote-style and formatting gates are explicitly omitted. Prior parser-shape incidents were local zero-mutation corrections. No handoff/runtime/PG/source/cleanup/protected-script action occurred; saver durability pending.
