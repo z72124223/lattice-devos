@@ -1143,3 +1143,4 @@
 - Authoritative result: `NO_OPERATIONAL_ACTION_ORCHESTRATION_FAILURE`, stopping at `WORKER_FRAGMENT_SYNTAX_CHECK` / `POWERSHELL_SYNTAX_ERROR_COUNT_11`. Operational launch and retry were both prohibited after the first true failure.
 - All operational counts are zero: request/environment artifact, wrapper, latticed, MCP, initialize/tools/list/tool calls, submit/status, retry, cleanup, PostgreSQL, port 64272, and protected-script access. No child/successor/diagnosis/reconciliation/holder/discovery worker was created.
 - Full current P0 live acceptance is not proven; `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `494fd49f3f3f42b26f19d959549a8eb5d7e686eb` at `2026-08-12T09:01:56.8913295Z`; Stage 2 is confirmation-only.
