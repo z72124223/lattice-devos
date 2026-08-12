@@ -963,3 +963,8 @@
 - The worker directory, original backup, and staging were created before the authoritative stop due to an incorrect incidental-failure continuation; no cleanup/rollback occurred. No MCP/PG/runtime or protected-script action occurred. Saver durability pending.
 - Stage 1 receipt commit 6607f9e24b9d6e7b01456b2eb3039d30b49ddb63 (tree 3f9c7b7d2096c8d7048a28519caa0913da215c1f) equals fresh remote at 2026-08-12T03:40:28.8965195Z; stage 2 pending.
 - Central archive success at 2026-08-12T03:42:44.008Z; New-Item LiteralPath failure, two creation attempts/one success, backup and staging copies, and zero File.Replace calls remain recorded.
+
+## PowerShell-compatible handoff-only receipt — 019ff411-5349-7e61-8177-f57898133dad
+
+- Preflight and staging validation passed; one File.Replace with three distinct nonempty paths installed handoff status `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` and next boundary `DISCOVERY_ONLY`. Config remained unchanged.
+- No discovery, submit, status, delivery, PostgreSQL, cleanup/rollback, or protected-script action occurred. This is handoff-only, not P0 PASS; saver durability pending.
