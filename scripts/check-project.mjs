@@ -45,13 +45,14 @@ if (!engineeringProtocolFile) {
   const protocol = await readFile(engineeringProtocolFile, "utf8");
   const requiredProtocolContent = [
     "protocol_id: LATTICE_ENGINEERING_PROTOCOL",
-    "version: 1.0.0",
+    "version: 1.0.1",
     "canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md",
-    "## Start Gate",
-    "## Repairable Failure Rule",
-    "repair it within the authorized scope, and rerun the\nsame failed check",
-    "## Completion Gate",
-    "## Preserved Boundaries",
+    "## Mandatory Entry",
+    "## Mandatory Delivery",
+    "repair it within the authorized scope and rerun the same failed check",
+    "## Knowledge Routing",
+    "Personal preferences, historical cases, and detailed decision logic belong in LATTICE, Hermes, and the knowledge graph",
+    "## Authority Boundary",
   ];
   for (const required of requiredProtocolContent) {
     if (!protocol.includes(required)) {

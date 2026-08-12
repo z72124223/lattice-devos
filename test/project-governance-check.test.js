@@ -8,25 +8,23 @@ import test from "node:test";
 const checkScript = path.resolve("scripts/check-project.mjs");
 const engineeringProtocol = `---
 protocol_id: LATTICE_ENGINEERING_PROTOCOL
-version: 1.0.0
+version: 1.0.1
 status: active
 canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md
 ---
 
 # Fixture Engineering Protocol
 
-## Start Gate
+## Mandatory Entry
 Read before work.
 
-## Repairable Failure Rule
-A reproducible ordinary failure is repairable evidence. Diagnose it,
-repair it within the authorized scope, and rerun the
-same failed check.
+## Mandatory Delivery
+If an ordinary reproducible check fails, repair it within the authorized scope and rerun the same failed check.
 
-## Completion Gate
-Verify before completion.
+## Knowledge Routing
+Personal preferences, historical cases, and detailed decision logic belong in LATTICE, Hermes, and the knowledge graph.
 
-## Preserved Boundaries
+## Authority Boundary
 Preserve authority and safety boundaries.
 `;
 const agents = `# Fixture Instructions
@@ -172,9 +170,23 @@ test("project check requires AGENTS to point to the engineering protocol", async
   assert.match(result.stderr, /AGENTS\.md: must point to docs\/contracts\/ENGINEERING_PROTOCOL_V1\.md/u);
 });
 
+test("project check requires detailed knowledge to route outside the protocol", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    protocol: engineeringProtocol.replace(
+      "Personal preferences, historical cases, and detailed decision logic belong in LATTICE, Hermes, and the knowledge graph.",
+      "Keep every rule here.",
+    ),
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /missing required contract content/u);
+});
+
 test("an ordinary protocol error can be repaired and the same check rerun", async () => {
   const broken = engineeringProtocol.replace(
-    "repair it within the authorized scope, and rerun the\nsame failed check.",
+    "repair it within the authorized scope and rerun the same failed check.",
     "close the task immediately.",
   );
   const { initial, rerun } = await runFixture({
