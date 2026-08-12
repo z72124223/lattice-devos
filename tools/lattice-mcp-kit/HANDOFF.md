@@ -902,3 +902,4 @@
 - Diagnosis: `MCP_CLIENT_TIMEOUT_KILLED_SYNCHRONOUS_EXECUTOR_ORPHANED_DURABLE_TASK`, high causal certainty. Client wrapper termination killed the synchronous executor after durable `EFFECT_INTENT`, leaving the task orphaned at the last known `RECONCILIATION_REQUIRED` / `EXECUTING` state.
 - The only scoped DB select failed (`missing FROM-clause entry for table t`); no successful fresh row or claim about later terminal events exists. The holder became unavailable after TTL.
 - This is read-only and not P0 PASS. No recovery/replay is authorized; current source needs recovery design changes. Saver durability pending.
+- Stage 1 durable diagnosis commit ad5313f8281a80d822c2d7bb971432c2e7543772 equals fresh remote at 2026-08-12T01:57:46.5380971Z; stage 2 confirmation pending.
