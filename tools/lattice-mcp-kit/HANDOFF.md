@@ -844,4 +844,4 @@
 - The worker returned FAIL at `preflight.wrapper_presence`: the exact required wrapper path `tools/lattice-mcp-kit/Invoke-LatticeMcp.ps1` was absent.
 - Config, binary-path, holder, Command A, and Command B checks were NOT_RUN. No artifact, wrapper/latticed process, initialize, tools/list, tool call, source/build/test, config, holder/PG, cleanup, rollback, delete, or kill action occurred.
 - One read-only recursive-listing incident preceded the corrected direct-path check and caused no mutation. Discovery and full P0 acceptance were not claimed.
-- Receipt stage 1 and stage 2 saver equalities are pending; authoritative `safe_to_archive=false`.
+- Receipt stage 1 commit `6390b94ac748addccced08e0cb7706fe7c238147` equals the fresh remote read at `2026-08-12T00:39:30.4237839Z`. Stage 2 is this confirmation-only saver advance; authoritative `safe_to_archive=false` remains unchanged while outer saver durability becomes `safe_to_archive=true` after fresh remote equality.
