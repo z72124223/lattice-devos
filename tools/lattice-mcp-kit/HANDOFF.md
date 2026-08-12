@@ -895,3 +895,4 @@
 - Current response is `RECONCILIATION_REQUIRED` / `EXECUTING` for task ref `91e6a2963b02a6b73e259ec8474a07eb410fe4c1c5ccd17e4245c162d796ddb6`; result_digest is null. It cannot claim full P0 PASS.
 - No poll, submit, replay, config/source/PG mutation, holder mutation, cleanup, rollback, or protected-script access occurred. Saver durability pending.
 - Stage 1 durable commit b98a3a1048cd21c99c6055c2873b39ce9a4a4a2a equals the fresh remote at 2026-08-12T01:43:44.0915952Z; stage 2 confirmation is pending.
+- Stage 2 confirmation commit 703e43c84aba93dbf205495cddaad4b07e7891d0 equals the fresh remote at 2026-08-12T01:44:08.0695282Z. Central archived this status-only evidence at 2026-08-12T01:45:15.3482649Z; RECONCILIATION_REQUIRED, EXECUTING, and result_digest=null remain unchanged while outer saver safe_to_archive=true.
