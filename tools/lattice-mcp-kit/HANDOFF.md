@@ -1106,3 +1106,8 @@
 - No retry, operational mutation, PostgreSQL action, cleanup/rollback, or protected-script access occurred; `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `af6e223261f9cd09f8218b975ad7a68423cd93b7` at `2026-08-12T07:44:46.0034721Z`; Stage 2 is confirmation-only.
 - Archive backfill: task `019ff4e5-fb8a-7e00-bb7b-57cc52009322` was archived at `2026-08-12T07:45:55.2436088Z` after `PREFLIGHT_FAILURE_PRE_REQUEST_RECORD_WRITE_ABORTED`; wrapper/submit/status counts and operational mutations remain zero, and P0 pass remains false.
+## Holder ready — 019ff4ef-f89b-7cc0-97ed-adb5175be203
+
+- Authoritative state: `HOLDER_READY`. The former holder was retained but excluded for insufficient runway; the new holder is `127.0.0.1:51199`, run `3456886feaa04e4c8b18051463a4566a`, database `lattice_task019_3456886f_base`, PostgreSQL 17.10, with an approximately 7200-second TTL.
+- All ready gates passed: marker/provision status, identity, exclusive postmaster listener, TTL cleanup, allowed port, PostgreSQL version, and secret-safe credential structure. Wrapper invocation count was one and exited zero.
+- No global config, external handoff, source, old-holder, direct PostgreSQL, MCP, discovery, submit/status/delivery, cleanup, or protected-script action occurred. `archived_at_utc=null` pending saver durability.
