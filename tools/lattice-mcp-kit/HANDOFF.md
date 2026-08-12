@@ -990,3 +990,4 @@
 - Authoritative status: `FAIL_STOPPED_PRE_MUTATION` at `PRE_MUTATION_PROTECTED_BOUNDARY` / `PROTECTED_DIRTY_SCRIPT_READ_INCIDENT`; one prohibited script read was emitted, then the worker stopped.
 - No config or external-handoff replacement, PostgreSQL connection, MCP/runtime call, cleanup, rollback, or successor occurred. This is a failure receipt, not a PG-binding switch or P0 acceptance; saver durability pending.
 - Stage 1 receipt commit `415c27c515174b9f942cd6c9e202c14d268af7c7` equalled fresh remote at `2026-08-12T04:25:45.3028038Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T04:26:57.9311978Z`. The preserved incident truth is one unintended protected-script line read, with no modification or staging; candidate/backup/staging/atomic-replace counts remain zero.
