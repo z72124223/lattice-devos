@@ -1090,3 +1090,9 @@
 - No retry, artifact, wrapper/MCP session/tool call, PostgreSQL connection, mutation, cleanup, or protected-script access occurred. This is not discovery success or P0 acceptance; `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `18627999a69b232306852b532bdce52b9c65dd51` at `2026-08-12T07:20:23.3911812Z`; Stage 2 is confirmation-only.
 - Archive backfill: task `019ff4d3-fd35-7081-a19c-fd5bf51f9286` was archived at `2026-08-12T07:21:21.3968786Z` as `PREFLIGHT_FAIL` from the wrapper-source-commit mismatch. It retains zero wrapper, runtime, MCP/tools, PostgreSQL, config, and handoff mutations.
+## Corrected discovery-only result — 019ff4d9-bcc2-7aa0-b729-e81f678ab152
+
+- Shared receipt SHA-256 was verified before persistence: `3bf1bb0983b434ef2a6933f70337c3cc6a948116468c5c5a7f08362e4d0d12d3`.
+- `DISCOVERY_OK`: one discovery wrapper/session, protocol `2025-11-25`, the exact four typed tools, zero tool calls, and clean child exit. All observed binary paths and SHA-256 values matched.
+- The historical wrapper commit is explicitly not required to equal the current reference; the exact current wrapper blob/hash and all immutable postchecks matched. Holder pre/postchecks passed.
+- No retry, submit/status/delivery, PostgreSQL connection, operational mutation, cleanup, or protected-script access occurred. This remains discovery-only and not a P0 acceptance claim; `archived_at_utc=null` pending saver durability.
