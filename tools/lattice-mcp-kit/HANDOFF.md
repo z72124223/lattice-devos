@@ -920,3 +920,8 @@
 - This is HOLDER_READY, not P0 PASS. `archived_at_utc` remains null pending central archive; saver durability pending.
 - Stage 1 receipt commit f35fa39f145d20abaab1a42153ead1d4821f4d6c equals fresh remote at 2026-08-12T02:28:51.6219885Z; stage 2 confirmation pending.
 - Central archive success at 2026-08-12T02:30:59.083Z; HOLDER_READY holder 127.0.0.1:61152/run 902b79ad90f4446eabf0613e8b0122f8 remains recorded. Stage 2 remote equality commit 4d3565ee7fe5f756b5e7ca3093037a40965e2478 is preserved.
+
+## PG binding pre-mutation failure — 019ff3cf-9dc3-7023-9d52-047e475b7105
+
+- First failure `POSTMASTER_DATA_ROOT_MISMATCH` at pre-mutation final holder validation. The extra non-authoritative containment check failed before artifacts or live-file mutation; zero writes and no retry.
+- Config and handoff remained byte-identical; no runtime/MCP/PG connection or action, cleanup, rollback, port 64272, or protected-script access. Not a P0 PASS; saver durability pending.
