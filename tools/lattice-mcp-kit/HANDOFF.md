@@ -956,3 +956,8 @@
 - Config/handoff hashes remained exact; backup and staging are preserved with no cleanup/rollback. No MCP, PostgreSQL, or protected-script action occurred. Saver durability pending.
 - Stage 1 receipt commit 938dfa7f4bac12277cbc82a746f759884ecba32d equals fresh remote at 2026-08-12T03:30:53.3271177Z; stage 2 pending.
 - Central archive success at 2026-08-12T03:32:32.896Z; File.Replace null backup parameter, one atomic call, zero live mutation, unchanged config/handoff hashes, and preserved staging remain recorded.
+
+## Handoff reconcile directory-creation parameter failure — 019ff407-fba7-7411-89ad-faf27fb69f99
+
+- Exact stop is `PRE_MUTATION_DIRECTORY_CREATION_PARAMETER_FAILURE`: New-Item rejected unsupported `-LiteralPath`. Do not infer a successful handoff replacement; File.Replace was never invoked and live handoff/config remain unchanged.
+- The worker directory, original backup, and staging were created before the authoritative stop due to an incorrect incidental-failure continuation; no cleanup/rollback occurred. No MCP/PG/runtime or protected-script action occurred. Saver durability pending.
