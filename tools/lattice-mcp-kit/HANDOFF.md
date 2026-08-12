@@ -1054,3 +1054,8 @@
 - File.Replace/config/handoff mutations are zero and no candidate/backup/staging/success receipt exists. Saver durability pending.
 - Stage 1 receipt commit `b1de7738affa5b5276b786bcb6ff6f92d1359b59` equalled fresh remote at `2026-08-12T06:13:23.3166147Z`; Stage 2 confirmation pending.
 - Central archive succeeded at `2026-08-12T06:14:04.6818828Z`; gate rejection, unchanged config, and zero operational-state actions remain authoritative.
+
+## Corrected config PG-binding gate rejection — 019ff49c-2dca-7031-a330-9d681f139760
+
+- Authoritative status: `GATE_REJECTED` at `lattice_main_assignment_keys_unique` / `LOCAL_ORCHESTRATION_PREMUTATION_GATE_REJECTION`; this is not `CONFIG_PG_BINDING_DONE`.
+- File.Replace/config/handoff mutations are zero; original backup, candidate, staging, replace backup, and success receipt are absent. Saver durability pending.
