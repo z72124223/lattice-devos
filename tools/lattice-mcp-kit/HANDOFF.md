@@ -954,3 +954,4 @@
 
 - First failure `PRE_MUTATION_ATOMIC_API_PARAMETER_FAILURE`: one File.Replace call rejected a blank/null destination backup parameter. No live handoff mutation, second atomic API call, correction, or retry followed.
 - Config/handoff hashes remained exact; backup and staging are preserved with no cleanup/rollback. No MCP, PostgreSQL, or protected-script action occurred. Saver durability pending.
+- Stage 1 receipt commit 938dfa7f4bac12277cbc82a746f759884ecba32d equals fresh remote at 2026-08-12T03:30:53.3271177Z; stage 2 pending.
