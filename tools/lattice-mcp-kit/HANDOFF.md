@@ -1111,3 +1111,4 @@
 - Authoritative state: `HOLDER_READY`. The former holder was retained but excluded for insufficient runway; the new holder is `127.0.0.1:51199`, run `3456886feaa04e4c8b18051463a4566a`, database `lattice_task019_3456886f_base`, PostgreSQL 17.10, with an approximately 7200-second TTL.
 - All ready gates passed: marker/provision status, identity, exclusive postmaster listener, TTL cleanup, allowed port, PostgreSQL version, and secret-safe credential structure. Wrapper invocation count was one and exited zero.
 - No global config, external handoff, source, old-holder, direct PostgreSQL, MCP, discovery, submit/status/delivery, cleanup, or protected-script action occurred. `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `00ba3cbb3df9f004dcfafb25d9849e5a54c9c65b` at `2026-08-12T07:52:21.9172667Z`; Stage 2 is confirmation-only.
