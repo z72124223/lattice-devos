@@ -1040,3 +1040,8 @@
 - Prepared-home values themselves pass literal and normalized equality; the failure signal is `FIELD_NAME_MISMATCH_OR_DUPLICATE` with medium certainty for the uninspected consumer mechanism. No implementation or operational action occurred; saver durability pending.
 - Stage 1 receipt commit `69cdea7ed51842c8c2469498268ab83648997fb7` equalled fresh remote at `2026-08-12T05:50:03.7852302Z`; Stage 2 confirmation pending.
 - Central archive succeeded at `2026-08-12T05:51:00.9657984Z`; stale handoff wrapper identity only, with prepared-home equality and no config drift, remains authoritative.
+
+## Holder provision-only readiness — 019ff486-e8a3-7690-b3d7-89c396a074f2
+
+- New READY holder run `586b099ea65d44eda5ec795299a60bc2` is at `127.0.0.1:59431`, PostgreSQL 17.10, with exclusive listener and fresh 7200-second TTL. All holder-ready gates passed.
+- Old holder was classified read-only as insufficient runway and was not mutated. No global-config/external-handoff/runtime/PG outside wrapper/source/cleanup/protected-script action occurred; saver durability pending.
