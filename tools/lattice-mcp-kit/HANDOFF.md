@@ -1127,3 +1127,4 @@
 - One atomic `File.Replace`, with no retry, changed 72 explicit canonical projection paths and zero unexpected paths. Handoff SHA-256 changed from `f6f09205…` to `a3a75fbd…`; config remained `b809db8c…`.
 - `/direct_stdio_client/current_blob` is preserved as Git blob OID `bb569f731fb3fdb3eca61a9922bed55d37ab9a25`, not a commit. Wrapper identity and all stated preservation gates remain exact; raw secrets were not recorded.
 - `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `cb8b4a6f09abd61f3c50726a848ee4f22e2a531a` at `2026-08-12T08:20:47.1399962Z`; Stage 2 is confirmation-only.
