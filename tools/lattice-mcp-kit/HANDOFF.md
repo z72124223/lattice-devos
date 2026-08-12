@@ -927,3 +927,8 @@
 - Config and handoff remained byte-identical; no runtime/MCP/PG connection or action, cleanup, rollback, port 64272, or protected-script access. Not a P0 PASS; saver durability pending.
 - Stage 1 receipt commit 43bc832e71f83216f80b7b5fbbcd4edf0fdcae06 equals fresh remote at 2026-08-12T02:39:56.1326093Z; stage 2 pending.
 - Central archive success at 2026-08-12T02:41:53.250Z; PRE_MUTATION_ORCHESTRATION_FAILURE/POSTMASTER_DATA_ROOT_MISMATCH, zero mutation, no retry, and unchanged config/handoff hashes remain preserved.
+
+## Corrected PG binding validation assumption failure — 019ff3d9-ae82-7151-b05f-9b7d2573a64f
+
+- First failure is `HOLDER_CREDENTIAL_SEMANTICS_REJECTED`: the exact username assumption was non-authoritative. Classification remains PRE_MUTATION_VALIDATION_ASSUMPTION_FAILURE.
+- No live config/handoff mutation, atomic replace, cleanup, rollback, MCP/PG action, or protected-script access occurred. Earlier staging artifacts remain in place per no-cleanup; no continued binding after the stop directive.
