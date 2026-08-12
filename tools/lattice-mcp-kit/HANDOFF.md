@@ -824,3 +824,10 @@
 - Worker stopped at PREFLIGHT_CONFIG_SAFE_PARSE with LOCAL_PYTHON_RUNTIME_NOT_FOUND_DURING_CONFIG_SAFE_PARSE; the configured SHA matched, but the local Python runtime was unavailable.
 - Binary, external handoff, holder, and wrapper checks were NOT_RUN. No environment artifact, wrapper process, initialize, tools/list, tool call, PostgreSQL connection, port 64272 action, mutation, cleanup, rollback, or retry occurred.
 - Live acceptance was not claimed. Receipt stage 1 commit `201606534a38af8bb8577213e25cbafaf9f52eb5` equals the fresh remote read at `2026-08-12T00:17:28.6429299Z`; confirmation stage 2 commit `457d52f69e118d26ea9a56480139e7ae08877410` equals the fresh remote read at `2026-08-12T00:17:57.8013524Z`. Central archived the worker at `2026-08-12T00:18:48.3097011Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## Discovery execution failure — 019ff355-e9fe-7b93-91a4-d8e4af7d030e
+
+- Preflight and environment artifact creation passed, but the one plain Discovery wrapper invocation launched a binary whose SHA-256 differed from the authoritative configured binary.
+- The child exited 2 before initialize response with PROCESS_EXITED_BEFORE_RESPONSE / MCP_STDOUT_EOF_BEFORE_RESPONSE. Exact-four discovery was not observed and tool-call count remained zero.
+- No retry, cleanup, further inspection, tool invocation, PostgreSQL connection, mutation, rollback, or archive action occurred; evidence and environment artifacts were retained.
+- Receipt stage 1 and stage 2 saver equalities are pending; authoritative safe_to_archive=false and live acceptance is not claimed.
