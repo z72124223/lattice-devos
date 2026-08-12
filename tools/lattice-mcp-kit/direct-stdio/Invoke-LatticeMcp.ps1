@@ -23,6 +23,9 @@ param(
     [ValidateRange(1, 3600)]
     [int]$TimeoutSeconds = 30,
 
+    [ValidateRange(1, 3600)]
+    [int]$ToolCallTimeoutSeconds = $TimeoutSeconds,
+
     [string]$OutputDirectory = (Join-Path $PSScriptRoot 'results')
 )
 
@@ -275,6 +278,7 @@ $sessionDirectory = $null
 $process = $null
 $stderrTask = $null
 $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+$toolCallStopwatch = $null
 $classification = 'CLIENT_SETUP_FAILED'
 $success = $false
 $processStarted = $false
@@ -405,7 +409,8 @@ try {
             method = 'tools/call'
             params = [ordered]@{ name = $ToolName; arguments = $callArguments }
         })
-        $callResponse = Read-JsonLine -Process $process -Stopwatch $stopwatch -Timeout $TimeoutSeconds
+        $toolCallStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        $callResponse = Read-JsonLine -Process $process -Stopwatch $toolCallStopwatch -Timeout $ToolCallTimeoutSeconds
         Assert-JsonRpcSuccess -Response $callResponse -Stage 'tools/call'
         if ([bool]$callResponse.result.isError) {
             $classification = 'TOOL_ERROR'
@@ -429,6 +434,7 @@ catch {
     $success = $false
 }
 finally {
+    if ($null -ne $toolCallStopwatch) { $toolCallStopwatch.Stop() }
     $stopwatch.Stop()
     if ($null -ne $process) {
         if (-not $process.HasExited) {
