@@ -984,3 +984,8 @@
 - Parent stdout JSON capture was imperfect but independently verified from marker/PID/listener/deadline evidence. No direct PG/MCP/discovery/submit/status/config/source/cleanup action occurred. Saver durability pending.
 - Stage 1 receipt commit `5f9d52700ab2215609f9e27ee400863ef24318a5` equalled fresh remote at `2026-08-12T04:14:53.5345059Z`; Stage 2 confirmation is pending.
 - Central archive succeeded at `2026-08-12T04:16:42.7011766Z`; both prior saver commits (`5f9d52700ab2215609f9e27ee400863ef24318a5`, `4b90b22f56e875849ba5df2bf98d9767ec360999`) had remote equality.
+
+## PG-binding-only protected-boundary stop — 019ff430-dfb9-75d1-ab8a-344ab7274720
+
+- Authoritative status: `FAIL_STOPPED_PRE_MUTATION` at `PRE_MUTATION_PROTECTED_BOUNDARY` / `PROTECTED_DIRTY_SCRIPT_READ_INCIDENT`; one prohibited script read was emitted, then the worker stopped.
+- No config or external-handoff replacement, PostgreSQL connection, MCP/runtime call, cleanup, rollback, or successor occurred. This is a failure receipt, not a PG-binding switch or P0 acceptance; saver durability pending.
