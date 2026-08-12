@@ -873,3 +873,10 @@
 - Retry is unsafe because a new task may exist. The diagnosis did not query PostgreSQL; a future separately authorized reconciliation must use only the exact client_request_id before any submit retry.
 - The client boundary is a shared session stopwatch consumed by setup, discovery, and submit response wait; the next remediation would use explicit per-stage budgets and secret-safe outbound write/flush evidence.
 - Diagnosis is offline/read-only and not P0 PASS: no MCP launch/call, PostgreSQL query, repository mutation, cleanup/kill, or protected-script read. Receipt stage 1 commit `87716c86e4d796427e7ddbff78331f707013e0dd` equals the fresh remote read at `2026-08-12T01:15:23.1679019Z`; confirmation stage 2 commit `09d3cc464ebb7b16935f860e41e786065186342d` equals the fresh remote read at `2026-08-12T01:16:00.3201366Z`. Central archived the diagnosis at `2026-08-12T01:17:04.3765010Z`; id3 class C, submit_write_count=1, retry_safe=false, and authoritative safe_to_archive=false remain unchanged while outer saver safe_to_archive=true.
+
+## Read-only client-request-id reconciliation — 019ff38b-193b-7043-8c79-437a7b8e1f32
+
+- Exact command reconciliation found one durable admission for the timed-out request: task_ref `91e6a296…d796ddb6`, task state EXECUTING, durable sequence 5, and public status RECONCILIATION_REQUIRED.
+- Durable evidence ends at EFFECT_INTENT; it does not prove external completion, failure, or a transient state. No submit/status call or mutation was performed in this read-only task.
+- Exact replay is source-defined as zero-new-execution at this state, but the one smaller next boundary is a fresh status-only session for the known task_ref; do not submit/replay first.
+- This is not P0 PASS. Receipt stage 1 and stage 2 saver equalities are pending; authoritative safe_to_archive=false.
