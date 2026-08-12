@@ -886,3 +886,4 @@
 - The authoritative receipt is `TRANSPORT_FAILURE` at `CONFIG_PREFLIGHT_BEFORE_CONFIG_PARSE_AND_BEFORE_PROCESS_LAUNCH`: `PREFLIGHT_PATH_LITERAL_INVALID` (`Test-Path : Illegal characters in path.`). The calling layer altered the Windows path literal before config parsing.
 - First failure stop: zero process/MCP sessions, initialize, tools/list, status, submit, delivery, replay, retry, artifact, config/source/PG mutation, holder cleanup, or port 64272 access. No current public task status was obtained.
 - Requested task ref `91e6a2963b02a6b73e259ec8474a07eb410fe4c1c5ccd17e4245c162d796ddb6` is not presented as a live response. Full fresh submit+status acceptance and P0 PASS are not claimed; baseline `026a983f627ed8e34298ad5c56557aded51b2af0` is an ancestor-only gate.
+- Stage 1 durable receipt commit `3aa8e57bc1fdc289f4a891e5ca20e3231ab61d04` equals the fresh remote read at `2026-08-12T01:37:56.0537210Z`. Confirmation-only stage 2 is pending.
