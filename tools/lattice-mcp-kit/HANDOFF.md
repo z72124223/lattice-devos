@@ -1178,3 +1178,9 @@
 - README checks passed (10 checks, 3 referenced files). Cached diff and exact four-path staging passed; unrelated resolver/fresh-acceptance blobs remain unchanged. No live MCP/discovery/submit/status/delivery/runtime/database/holder/config actions occurred. Protected dirty script remains unread, unmodified, and unstaged; `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `838136fd05f60736ead66a75464b6a2c75b7ebf4` at `2026-08-12T10:59:29.3314470Z`; Stage 2 is confirmation-only.
 - Archive backfill: task `019ff597-18a2-7873-9d2b-a5742e4de5a6` was archived at `2026-08-12T11:01:03.6739216Z` as `DONE`. Evidence remains AST/manifest pass, conformance 16/16 (1 accepted/15 rejected; 16 resolver invocations), existing regression 10/10, README/diff scope pass, zero live actions, and protected-script preservation.
+
+## Post-P0 MCP Kit Slice 4 source ??019ff5a5-275a-75c3-9dac-39a5daf4a13c
+
+- Source commit `d5b5a7cff1ec31eb0b676be08e4a63f23310fc0d` (tree `3a6af649019ede2bac93ae98054733b13933456b`, parent `3512f12f303a04fc8b8e15f288fcd1f4f67d0a64`) was pushed once and matches the remote head.
+- Five direct-stdio files implement a closed typed-task registry with the single `CONTROLLED_CODEX_CANARY` mapping. AST passed for four scripts; registry schema/UTF-8-no-BOM/type/mapping and SHA checks passed.
+- Conformance passed 16 cases (1 accepted/15 rejected), including duplicate/unknown/uncovered vectors; coordinator regression passed 10 cases with wrapper/submit/status/retry/cleanup `5/3/2/0/0`. Manifest remained byte-identical; README 5/5 and diff checks passed. No runtime/MCP/PostgreSQL/holder/cleanup/child-worker action occurred; protected dirty script remains unread, unmodified, and unstaged. `archived_at_utc=null` pending saver durability.
