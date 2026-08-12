@@ -823,4 +823,4 @@
 
 - Worker stopped at PREFLIGHT_CONFIG_SAFE_PARSE with LOCAL_PYTHON_RUNTIME_NOT_FOUND_DURING_CONFIG_SAFE_PARSE; the configured SHA matched, but the local Python runtime was unavailable.
 - Binary, external handoff, holder, and wrapper checks were NOT_RUN. No environment artifact, wrapper process, initialize, tools/list, tool call, PostgreSQL connection, port 64272 action, mutation, cleanup, rollback, or retry occurred.
-- Live acceptance was not claimed. Receipt stage 1 and stage 2 saver equalities are pending; authoritative safe_to_archive=false until saver durability is proven.
+- Live acceptance was not claimed. Receipt stage 1 commit `201606534a38af8bb8577213e25cbafaf9f52eb5` equals the fresh remote read at `2026-08-12T00:17:28.6429299Z`. Stage 2 is this confirmation-only saver advance; authoritative `safe_to_archive=false` remains unchanged and outer saver durability becomes `safe_to_archive=true` after fresh remote equality.
