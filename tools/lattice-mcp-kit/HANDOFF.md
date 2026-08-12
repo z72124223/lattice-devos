@@ -880,3 +880,9 @@
 - Durable evidence ends at EFFECT_INTENT; it does not prove external completion, failure, or a transient state. No submit/status call or mutation was performed in this read-only task.
 - Exact replay is source-defined as zero-new-execution at this state, but the one smaller next boundary is a fresh status-only session for the known task_ref; do not submit/replay first.
 - This is not P0 PASS. Receipt stage 1 commit `7a9ac06d62b411d25330b60b5e9daf25c4ee6e30` equals the fresh remote read at `2026-08-12T01:27:26.9799148Z`; confirmation stage 2 commit `026a983f627ed8e34298ad5c56557aded51b2af0` equals the fresh remote read at `2026-08-12T01:28:09.4262898Z`. Central archived the reconciliation at `2026-08-12T01:29:11.4741571Z`; RECORDED_PENDING, task_ref `91e6a2963b02a6b73e259ec8474a07eb410fe4c1c5ccd17e4245c162d796ddb6`, next STATUS_ONLY boundary, and authoritative safe_to_archive=false remain unchanged while outer saver safe_to_archive=true.
+
+## Fresh status-only verifier first preflight failure — 019ff396-3fe5-7963-880b-a002914a7ff7
+
+- The authoritative receipt is `TRANSPORT_FAILURE` at `CONFIG_PREFLIGHT_BEFORE_CONFIG_PARSE_AND_BEFORE_PROCESS_LAUNCH`: `PREFLIGHT_PATH_LITERAL_INVALID` (`Test-Path : Illegal characters in path.`). The calling layer altered the Windows path literal before config parsing.
+- First failure stop: zero process/MCP sessions, initialize, tools/list, status, submit, delivery, replay, retry, artifact, config/source/PG mutation, holder cleanup, or port 64272 access. No current public task status was obtained.
+- Requested task ref `91e6a2963b02a6b73e259ec8474a07eb410fe4c1c5ccd17e4245c162d796ddb6` is not presented as a live response. Full fresh submit+status acceptance and P0 PASS are not claimed; baseline `026a983f627ed8e34298ad5c56557aded51b2af0` is an ancestor-only gate.
