@@ -1161,3 +1161,4 @@
 - README checks passed for absolute binary/environment examples, `90/900/180` defaults, no-retry semantics, and offline-test command. No live process/session/discovery/submit/status/retry/PostgreSQL/latticed/MCP action occurred.
 - Protected acceptance script remained unread, unmodified, and unstaged; no default-branch, merge, deployment, release, or child-agent action occurred. `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `1e116ba72f91c35f5ba1d0a0142308613bc9b096` at `2026-08-12T09:33:11.7464926Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff547-ab21-7952-befd-27afb1fa79eb` was archived at `2026-08-12T09:36:26.4860897Z` as `DONE`. It preserves the three listed Slice 1 source paths, AST 2/2 and offline 3/3 evidence (`submit/status/retry/cleanup=3/2/0/0`), zero live actions, and the protected dirty script’s unread/unmodified/unstaged state.
