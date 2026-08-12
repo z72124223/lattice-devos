@@ -1026,3 +1026,8 @@
 - The worker correction has no source change to publish (`github_remote_equality_stage1/2=NOT_APPLICABLE_NO_CORRECTION`), but its saver receipt durability is recorded separately. No operational action occurred.
 - Saver Stage 1 receipt commit `a451d8fa50da9c96dab7a3a98c98c25e225b423a` equalled fresh remote at `2026-08-12T05:33:20.7941918Z`; saver Stage 2 confirmation pending.
 - Central archive succeeded at `2026-08-12T05:34:24.6621093Z`; the rejection is a delegated SHA typo, explicitly not source drift, with zero write/replace/retry/process/PG/MCP actions.
+
+## Corrected wrapper-identity rejection — 019ff477-e8cf-7710-b785-26b67faac12f
+
+- Authoritative result: `REJECTED_GATE` at `prepared_home_exact`. This is not a successful wrapper-identity correction; first-rejected-gate stop applied with no correction, retry, File.Replace, or other write.
+- The worker correction-stage remote equality remains `NOT_RUN_REJECTED_GATE`. No MCP/runtime, PostgreSQL, cleanup, source, or protected-script action occurred; saver durability pending.
