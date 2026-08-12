@@ -68,6 +68,20 @@ The minimal UTF-8-without-BOM contract is:
 
 The current closed registry contains exactly one type: `controlled_codex_canary`, mapped to the fixed `CONTROLLED_CODEX_CANARY` intent for `lattice_task_submit`. Future types require an explicit source mapping plus focused schema and coordinator tests. Contract fields can never dispatch arbitrary shell, command, SQL, path, file-write, environment, credential, or free-form task payload data. The generic low-level client action is not reachable from this typed contract coordinator.
 
+## Offline typed-contract conformance
+
+`task-contract.conformance.v1.json` is the UTF-8-without-BOM, version 1 source of positive and exact-rejection vectors for the closed typed-contract boundary. `Invoke-LatticeTaskContractConformance.ps1` materializes every vector as a fresh temporary fixture, invokes the resolver exactly once per case, and emits one secret-free summary.
+
+```powershell
+$conformance = Join-Path $PSScriptRoot 'Invoke-LatticeTaskContractConformance.ps1'
+
+& $conformance `
+  -ResolverPath (Join-Path $PSScriptRoot 'Resolve-LatticeTaskContract.ps1') `
+  -ConformanceFile (Join-Path $PSScriptRoot 'task-contract.conformance.v1.json')
+```
+
+Every future source-owned typed contract requires both an explicit resolver mapping and new positive and negative conformance vectors. The current registry remains exactly one canary type, `controlled_codex_canary`, mapped only to `CONTROLLED_CODEX_CANARY`. Neither the manifest nor the resolver permits arbitrary shell, command, SQL, path, file-write, environment, credential, or free-form task payloads.
+
 ```powershell
 $coordinator = Join-Path $PSScriptRoot 'Invoke-LatticeFreshAcceptance.ps1'
 
