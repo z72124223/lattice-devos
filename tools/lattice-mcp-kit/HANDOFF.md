@@ -970,3 +970,8 @@
 - No discovery, submit, status, delivery, PostgreSQL, cleanup/rollback, or protected-script action occurred. This is handoff-only, not P0 PASS; saver durability pending.
 - Authoritative post-update incident: File.Replace succeeded; only subsequent DateTime/DateTimeOffset elapsed calculation failed locally, with no mutation/runtime effect. Current handoff hash remains the success-state hash; no retry, post-success handoff/config write, rollback, cleanup, or discovery occurred. Stage 1 receipt commit e3ea741963f90594d2efa8b1a2aa2c537b436b99 equals fresh remote at 2026-08-12T03:53:23.8951412Z; stage 2 pending.
 - Central archive success at 2026-08-12T03:55:18.409Z; handoff success-state hash 8c04a231..., unchanged config hash, one File.Replace, zero retry, and zero rollback/cleanup remain recorded.
+
+## Discovery-only precheck failure — 019ff41c-cf5e-7341-a4f7-a7d442cc385a
+
+- First failure is `POWERSHELL_AUTOMATIC_VARIABLE_NAME_COLLISION`: function parameter `Pid` collided with read-only `$PID` during the holder-listener query. Listener check and all execution work are NOT_RUN after first failure.
+- No wrapper invocation/MCP session/tool call, artifact, config/handoff/source/binary/holder/PG mutation, cleanup, rollback, or protected-script access occurred. This is not Discovery PASS or P0 PASS; saver durability pending.
