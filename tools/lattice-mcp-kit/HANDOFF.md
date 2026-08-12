@@ -1012,3 +1012,8 @@
 - No MCP/runtime/discovery, PostgreSQL, holder, source/build/test, cleanup/rollback, port 64272, or protected-script action occurred. Saver durability pending; this is not P0 acceptance.
 - Stage 1 receipt commit `f3eb259fa24f16ae18015642db1b1f778e091aa4` equalled fresh remote at `2026-08-12T05:17:45.6261405Z`; Stage 2 confirmation pending.
 - Central archive succeeded at `2026-08-12T05:18:47.1884369Z`; handoff-only completion remains recorded with one File.Replace and unchanged config.
+
+## Discovery-only preflight failure — 019ff469-a967-7c50-9a81-d9c768e6890d
+
+- Authoritative outcome: `DISCOVERY_ONLY_PREFLIGHT_FAIL` at `preflight.wrapper_metadata_consistency` / `WRAPPER_SHA256_HANDOFF_MISMATCH`. The wrapper current SHA and handoff SHA differ; first-failure stop applied with no retry.
+- No artifact, wrapper/latticed session, MCP request, PostgreSQL connection, operational mutation, cleanup, or protected-script access occurred. No discovery or P0 acceptance is claimed; saver durability pending.
