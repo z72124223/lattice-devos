@@ -859,3 +859,10 @@
 - One authorized no-mutation `OutputRoot` to `OutputDirectory` parameter-name correction occurred strictly before Command A. One private no-BOM 21-key environment artifact and one retained result session were produced.
 - Config command path, mandatory `BinaryPath`, and summary binary path were exactly equal; every available binary SHA-256 equaled `c79e2ee9…`, and config remained unchanged.
 - This is `DISCOVERY_ONLY_PASS`, not full P0 acceptance. No submit/status/delivery call, source/build/test, global-config or holder mutation, port 64272 action, cleanup, rollback, delete, kill, or protected-script access occurred. Receipt stage 1 commit `c66d38ae82a133d7e322877bceadbe8ddc5fb511` equals the fresh remote read at `2026-08-12T00:49:55.1166389Z`; confirmation stage 2 commit `f6a1f005ba026d77f143c7f896d46a1a754ce102` equals the fresh remote read at `2026-08-12T00:50:28.0550807Z`. Central archived the worker at `2026-08-12T00:51:21.5535894Z`; authoritative `safe_to_archive=false` and full-P0-acceptance-not-claimed remain unchanged while outer saver `safe_to_archive=true`.
+
+## Fresh live verifier timeout — 019ff374-1e75-7f73-93e5-fa028f438a28
+
+- Session 1 completed initialize and tools/list with the exact four tool names, then made exactly one CONTROLLED_CODEX_CANARY submit call. No response with ID 3 arrived; the fixed client timed out with MCP_CLIENT_TIMEOUT, call=null, and process exit 1.
+- This is the first true failure. No retry, second submit, status session, delivery call, source/build/test, config/handoff/holder/PostgreSQL mutation, or action outside the wrapper occurred; the candidate and holder remain active.
+- Cross-session equality is NOT_RUN because Session 1 did not return domain COMPLETED. Current fresh-window live acceptance is not claimed.
+- Receipt stage 1 and stage 2 saver equalities are pending; authoritative safe_to_archive=false.
