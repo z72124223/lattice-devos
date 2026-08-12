@@ -1135,3 +1135,4 @@
 - Exactly one process/session and one wrapper invocation completed: protocol `2025-11-25`, exact four typed tools, two requests plus one notification, two responses, zero tool calls, no retry, clean child exit, and empty stderr.
 - Postprocessing incidents were confined to optional-property access, compact boolean false negative, and a summary-label interpretation; the receipt was recovered from the existing single-session artifacts without a second session or wrapper retry.
 - No verifier/successor was created and no PostgreSQL, operational mutation, cleanup, protected-script, or port 64272 action occurred. This is not P0 pass; `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `e84b70bf352b56e82fa1b29a06817e15119f90fc` at `2026-08-12T08:42:21.9358494Z`; Stage 2 is confirmation-only.
