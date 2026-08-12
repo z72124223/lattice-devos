@@ -852,3 +852,10 @@
 - Completed work was read-only repository and filename inventory. No post-revocation locator/content/receipt reads, wrapper or binary execution, MCP/runtime/PostgreSQL/config/source/build/test, cleanup, rollback, delete, kill, or port 64272 action occurred.
 - `changed_paths=[]`, `operational_actions=0`, and the authoritative result is `AUTHORITATIVE_PATH_SUPERSEDED_FURTHER_DISCOVERY`.
 - Receipt stage 1 commit `12ab49a5f3bab80649fbe7e34104de65f3d096db` equals the fresh remote read at `2026-08-12T00:43:46.6045338Z`; confirmation stage 2 commit `a3cd31484bee09c50e84010ff80335c45d24c42c` equals the fresh remote read at `2026-08-12T00:44:18.4587340Z`. Central archived the cancelled locator at `2026-08-12T00:44:57.0961220Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## Corrected discovery-only pass — 019ff36a-b241-76a3-b340-2598016b2304
+
+- The exact `direct-stdio/Invoke-LatticeMcp.ps1` wrapper completed one Discovery session with protocol `2025-11-25`, response IDs 1 and 2, the exact four case-sensitive tool names, zero tool calls, child exit 0, and a clean exit.
+- One authorized no-mutation `OutputRoot` to `OutputDirectory` parameter-name correction occurred strictly before Command A. One private no-BOM 21-key environment artifact and one retained result session were produced.
+- Config command path, mandatory `BinaryPath`, and summary binary path were exactly equal; every available binary SHA-256 equaled `c79e2ee9…`, and config remained unchanged.
+- This is `DISCOVERY_ONLY_PASS`, not full P0 acceptance. No submit/status/delivery call, source/build/test, global-config or holder mutation, port 64272 action, cleanup, rollback, delete, kill, or protected-script access occurred. Receipt stage 1 and stage 2 saver equalities are pending; authoritative `safe_to_archive=false`.
