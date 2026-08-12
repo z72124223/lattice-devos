@@ -1025,3 +1025,4 @@
 - Authoritative result: `REJECTED_AT_FIRST_MISMATCH` / `WRAPPER_SHA256_PRECONDITION_MISMATCH`. The expected and observed wrapper SHA-256 values differ; no correction, retry, or write followed.
 - The worker correction has no source change to publish (`github_remote_equality_stage1/2=NOT_APPLICABLE_NO_CORRECTION`), but its saver receipt durability is recorded separately. No operational action occurred.
 - Saver Stage 1 receipt commit `a451d8fa50da9c96dab7a3a98c98c25e225b423a` equalled fresh remote at `2026-08-12T05:33:20.7941918Z`; saver Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T05:34:24.6621093Z`; the rejection is a delegated SHA typo, explicitly not source drift, with zero write/replace/retry/process/PG/MCP actions.
