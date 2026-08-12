@@ -910,3 +910,4 @@
 - Source commit `3f1d2ae98615e0899196c1f81c4b430066b2508f` (tree `45627179c174595017e152f2d08b0936bcdda59f`, parent `716108e403d8e81496811cd2c8a73ebc182073ba`) is already remotely durable.
 - Scope is exactly the direct-stdio wrapper and focused timeout fixture. RED reproduced the shared-deadline timeout; GREEN passed offline/default-compatibility/900-binding/stop-path checks. No live MCP, holder, PG, config, handoff, or recovery action occurred.
 - Full P0 acceptance is not claimed. `archived_at_utc` remains null pending central archive; saver two-stage durability pending.
+- Stage 1 receipt commit a90696e31a63bd310b08875b325aca8315978008 equals fresh remote at 2026-08-12T02:12:49.9918457Z; stage 2 confirmation pending.
