@@ -942,3 +942,8 @@
 - This receipt is not P0 PASS. archived_at remains null; saver durability pending.
 - Stage 1 receipt commit 2a7ac10fb8514e6094b04f981bc52f1c6bf4d358 equals fresh remote at 2026-08-12T03:07:21.6299547Z; stage 2 pending.
 - Central archive success at 2026-08-12T03:09:19.526Z; coordination-race evidence is preserved: config equals validated candidate, nine PG bindings/eight changed values, twelve non-PG bytes equal, and handoff remains old hash with no update.
+
+## Handoff-only verifier field-assumption failure — 019ff3f2-c29b-7b72-831a-050386464bb9
+
+- First failure: `marker.status must equal READY` was rejected because the marker status field is absent. Classification remains PRE_MUTATION_VERIFIER_FIELD_ASSUMPTION_FAILURE; no alternate-field rerun or continuation followed the stop directive.
+- Config/handoff were unchanged; zero live writes, cleanup/rollback, MCP/PG/runtime action, or protected-script access. This is not P0 PASS; saver durability pending.
