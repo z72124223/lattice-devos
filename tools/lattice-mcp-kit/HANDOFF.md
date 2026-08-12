@@ -911,3 +911,4 @@
 - Scope is exactly the direct-stdio wrapper and focused timeout fixture. RED reproduced the shared-deadline timeout; GREEN passed offline/default-compatibility/900-binding/stop-path checks. No live MCP, holder, PG, config, handoff, or recovery action occurred.
 - Full P0 acceptance is not claimed. `archived_at_utc` remains null pending central archive; saver two-stage durability pending.
 - Stage 1 receipt commit a90696e31a63bd310b08875b325aca8315978008 equals fresh remote at 2026-08-12T02:12:49.9918457Z; stage 2 confirmation pending.
+- Stage 2 confirmation commit ecf802b21a9ab43c2e27c27b4107f41ee42651eb equals fresh remote at 2026-08-12T02:13:12.4628502Z. Central archived at 2026-08-12T02:14:03.9357065Z; source commit 3f1d2ae98615e0899196c1f81c4b430066b2508f and focused scope remain unchanged.
