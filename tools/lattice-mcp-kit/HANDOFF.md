@@ -1011,3 +1011,4 @@
 - Authoritative result: `HANDOFF_ONLY_DONE`. One File.Replace updated the external handoff to `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` / next boundary `DISCOVERY_ONLY`; config remained unchanged.
 - No MCP/runtime/discovery, PostgreSQL, holder, source/build/test, cleanup/rollback, port 64272, or protected-script action occurred. Saver durability pending; this is not P0 acceptance.
 - Stage 1 receipt commit `f3eb259fa24f16ae18015642db1b1f778e091aa4` equalled fresh remote at `2026-08-12T05:17:45.6261405Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T05:18:47.1884369Z`; handoff-only completion remains recorded with one File.Replace and unchanged config.
