@@ -1129,3 +1129,9 @@
 - `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `cb8b4a6f09abd61f3c50726a848ee4f22e2a531a` at `2026-08-12T08:20:47.1399962Z`; Stage 2 is confirmation-only.
 - Archive backfill: task `019ff504-2afd-7321-b944-8bb5d6eed136` was archived at `2026-08-12T08:21:52.6368284Z`; handoff remains `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` at SHA-256 `a3a75fbd…`.
+## PowerShell-only discovery — 019ff511-0ff8-7ac3-85a4-ee66bb04200b
+
+- Shared receipt SHA-256 was verified before persistence: `aef829e1f11ec9c8504ffb4dab61c67cbb397a15dd4534949788b9e1dbbe9781`. Authoritative wrapper result is `DISCOVERY_OK`, retained as `PASS_WITH_POSTPROCESSING_INCIDENTS`.
+- Exactly one process/session and one wrapper invocation completed: protocol `2025-11-25`, exact four typed tools, two requests plus one notification, two responses, zero tool calls, no retry, clean child exit, and empty stderr.
+- Postprocessing incidents were confined to optional-property access, compact boolean false negative, and a summary-label interpretation; the receipt was recovered from the existing single-session artifacts without a second session or wrapper retry.
+- No verifier/successor was created and no PostgreSQL, operational mutation, cleanup, protected-script, or port 64272 action occurred. This is not P0 pass; `archived_at_utc=null` pending saver durability.
