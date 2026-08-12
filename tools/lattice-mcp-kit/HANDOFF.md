@@ -1113,3 +1113,9 @@
 - No global config, external handoff, source, old-holder, direct PostgreSQL, MCP, discovery, submit/status/delivery, cleanup, or protected-script action occurred. `archived_at_utc=null` pending saver durability.
 - Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `00ba3cbb3df9f004dcfafb25d9849e5a54c9c65b` at `2026-08-12T07:52:21.9172667Z`; Stage 2 is confirmation-only.
 - Archive backfill: task `019ff4ef-f89b-7cc0-97ed-adb5175be203` was archived at `2026-08-12T07:53:25.3244789Z` as `HOLDER_READY` for `127.0.0.1:51199` (run `3456886feaa04e4c8b18051463a4566a`).
+## Config PG binding complete — 019ff4f6-e7ea-7842-a94a-e4a1e0dbe969
+
+- Receipt SHA-256 was verified before persistence: `7b6712c679735f21877e698b351f1f2dbea87df0f84f0d4ec5334e5d064193af`. Result: `CONFIG_PG_BINDING_DONE` for holder `127.0.0.1:51199`.
+- One atomic `File.Replace` changed config from `b63853523cabe27886d67d783228dc3653cbec551ab7a1d5033ac6f304baa47b` to `b809db8c98b28d10101ab1b336fae7a53bd9aa753e9ed51a305e5f615875e253`; installed bytes equal the candidate.
+- The stanza-scoped parser passed with 21 environment entries, 9 holder PG bindings, 12 byte-identical non-PG entries, and zero duplicates. No external handoff, PostgreSQL, MCP/runtime, source, cleanup, or protected-script action occurred.
+- `archived_at_utc=null` pending saver durability.
