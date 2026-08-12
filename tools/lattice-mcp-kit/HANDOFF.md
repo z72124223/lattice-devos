@@ -1119,3 +1119,4 @@
 - One atomic `File.Replace` changed config from `b63853523cabe27886d67d783228dc3653cbec551ab7a1d5033ac6f304baa47b` to `b809db8c98b28d10101ab1b336fae7a53bd9aa753e9ed51a305e5f615875e253`; installed bytes equal the candidate.
 - The stanza-scoped parser passed with 21 environment entries, 9 holder PG bindings, 12 byte-identical non-PG entries, and zero duplicates. No external handoff, PostgreSQL, MCP/runtime, source, cleanup, or protected-script action occurred.
 - `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `190910b88aef0e9c4a370ebe645e0fbf3006a398` at `2026-08-12T08:05:54.3318612Z`; Stage 2 is confirmation-only.
