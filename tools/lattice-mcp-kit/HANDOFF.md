@@ -1059,3 +1059,4 @@
 
 - Authoritative status: `GATE_REJECTED` at `lattice_main_assignment_keys_unique` / `LOCAL_ORCHESTRATION_PREMUTATION_GATE_REJECTION`; this is not `CONFIG_PG_BINDING_DONE`.
 - File.Replace/config/handoff mutations are zero; original backup, candidate, staging, replace backup, and success receipt are absent. Saver durability pending.
+- Stage 1 receipt commit `8d049bb3613115cecfa5aa0a6b97b3fa51895404` equalled fresh remote at `2026-08-12T06:27:20.1153121Z`; Stage 2 confirmation pending.
