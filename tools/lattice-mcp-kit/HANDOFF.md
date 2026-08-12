@@ -1081,3 +1081,4 @@
 - One `File.Replace` corrected the two stale wrapper-identity projections (`wrapper_sha256`, `current_blob`) for holder `127.0.0.1:59431`; config remained `b63853523cabe27886d67d783228dc3653cbec551ab7a1d5033ac6f304baa47b`.
 - Transaction: 71 explicit target paths, zero unexpected paths and zero retries. Prepared-home literal and normalized equality remain true; no runtime, MCP, PostgreSQL, cleanup, or protected-script action occurred.
 - Final projection remains `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` with next boundary `DISCOVERY_ONLY`. This is not a P0 acceptance claim. Saver Stage 1/Stage 2 durability follows; `archived_at_utc=null`.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `7bfd9c4f1bdba0fd6a01005c77a76ee2484212a4` at `2026-08-12T07:14:01.0085413Z`; Stage 2 is confirmation-only.
