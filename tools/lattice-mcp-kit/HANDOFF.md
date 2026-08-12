@@ -1031,3 +1031,4 @@
 
 - Authoritative result: `REJECTED_GATE` at `prepared_home_exact`. This is not a successful wrapper-identity correction; first-rejected-gate stop applied with no correction, retry, File.Replace, or other write.
 - The worker correction-stage remote equality remains `NOT_RUN_REJECTED_GATE`. No MCP/runtime, PostgreSQL, cleanup, source, or protected-script action occurred; saver durability pending.
+- Saver Stage 1 receipt commit `84ee611eb003a28f9357f68d9c42fe43f7b36d04` equalled fresh remote at `2026-08-12T05:41:31.2670132Z`; saver Stage 2 confirmation pending.
