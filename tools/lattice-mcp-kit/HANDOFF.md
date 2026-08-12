@@ -977,3 +977,8 @@
 - No wrapper invocation/MCP session/tool call, artifact, config/handoff/source/binary/holder/PG mutation, cleanup, rollback, or protected-script access occurred. This is not Discovery PASS or P0 PASS; saver durability pending.
 - Stage 1 receipt commit db90fd92df293371f3c5816ad0f56fe01a1ac09a equals fresh remote at 2026-08-12T04:06:21.9753215Z; stage 2 pending.
 - Central archive success at 2026-08-12T04:08:11.3991086Z; PRECHECK POWERSHELL_PID_READONLY_NAME_COLLISION and command/wrapper/MCP/initialize/tools-list/tool-call counts all 0 remain recorded.
+
+## Holder provision-only readiness — 019ff428-d5ee-71b2-b2b5-3f3a0d82fc41
+
+- One validated wrapper invocation created READY holder run `92a1dc57fc7845e9993eec271e7a2499` at `127.0.0.1:52874`, PostgreSQL 17.10, exclusive listener, and fresh 7200-second TTL. All ready gates passed.
+- Parent stdout JSON capture was imperfect but independently verified from marker/PID/listener/deadline evidence. No direct PG/MCP/discovery/submit/status/config/source/cleanup action occurred. Saver durability pending.
