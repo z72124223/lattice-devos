@@ -55,3 +55,24 @@ $taskRef = [string]$submit.call.result.structuredContent.task_ref
 ```
 
 By default, redacted `stdout.jsonl`, `stderr.log`, and `summary.json` files are written below `results/session-...`. A tool response with `isError=true` is reported as `TOOL_ERROR`; it is not a successful acceptance result.
+
+## Fresh acceptance coordinator
+
+`Invoke-LatticeFreshAcceptance.ps1` records a secret-free request intent, submits exactly once, and only after a completed submit starts one independent status session. It requires exact equality of `task_ref`, `status`, `task_state`, `result_digest`, and `ledger_head_digest`. It never retries, polls, replays, cleans up, or reads the environment file contents.
+
+```powershell
+$coordinator = Join-Path $PSScriptRoot 'Invoke-LatticeFreshAcceptance.ps1'
+
+& $coordinator `
+  -BinaryPath 'C:\absolute\path\to\latticed.exe' `
+  -EnvironmentFile 'C:\absolute\path\to\runtime-environment.json' `
+  -OutputRoot 'C:\absolute\fresh-worker-output'
+```
+
+The output root must not already exist. Initialization, submit, and status timeouts default to 90, 900, and 180 seconds respectively. Override them with `-InitializeTimeoutSeconds`, `-SubmitTimeoutSeconds`, and `-StatusTimeoutSeconds`; retry count remains zero.
+
+Run the deterministic offline fake-wrapper test without starting LATTICE, MCP, PostgreSQL, or the live wrapper process:
+
+```powershell
+& (Join-Path $PSScriptRoot 'Test-LatticeFreshAcceptance.ps1')
+```
