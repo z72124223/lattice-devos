@@ -249,7 +249,9 @@ try {
         -InitializeDelayMilliseconds 100 `
         -ToolsListDelayMilliseconds 100 `
         -ToolCallDelayMilliseconds 4000
-    if ([string]$beyondDeadline.classification -cne 'TIMEOUT' -or [bool]$beyondDeadline.success) {
+    if ([string]$beyondDeadline.classification -cne 'TIMEOUT' -or
+        [string]$beyondDeadline.failure_message -cne 'MCP_CLIENT_TIMEOUT' -or
+        [bool]$beyondDeadline.success) {
         throw ('DIRECT_STDIO_OWN_TOOL_CALL_DEADLINE_REJECTED|' +
             [string]$beyondDeadline.classification + '|' +
             [string]$beyondDeadline.failure_message)

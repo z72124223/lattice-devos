@@ -100,3 +100,31 @@ Run the deterministic offline fake-wrapper test without starting LATTICE, MCP, P
 & (Join-Path $PSScriptRoot 'Test-LatticeTaskContract.ps1')
 & (Join-Path $PSScriptRoot 'Test-LatticeFreshAcceptance.ps1')
 ```
+
+## Failure catalog
+
+`Get-LatticeMcpFailureCatalog.ps1` reads the fixed adjacent production, test,
+and README evidence sets plus the parent `WINDOW_LEDGER.jsonl`. It emits one
+secret-free, deterministic `lattice.mcp-failure-catalog.v1` JSON document. The
+catalog includes structured JSON failure fields and exact failure codes found
+inside legacy text receipts; it never emits receipt text, environment values,
+credentials, or absolute paths.
+
+Each failure code receives the strongest current evidence classification:
+
+- `regression_tested`: an exact code is named by an offline regression test.
+- `implementation_known`: an exact code exists in current production tooling,
+  but no test names it.
+- `documented_only`: only the current README names it.
+- `recorded_only`: the ledger records it, but current code, tests, and README do
+  not name it.
+
+The classification is evidence inventory, not proof that every failure is
+resolved. Add or update a focused test when promoting a code to
+`regression_tested`. The catalog test is intentionally excluded from test evidence,
+so validating the inventory cannot circularly promote an unrelated failure code.
+
+```powershell
+& (Join-Path $PSScriptRoot 'Get-LatticeMcpFailureCatalog.ps1')
+& (Join-Path $PSScriptRoot 'Test-LatticeMcpFailureCatalog.ps1')
+```
