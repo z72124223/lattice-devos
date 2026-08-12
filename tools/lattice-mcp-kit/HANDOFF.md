@@ -941,3 +941,4 @@
 - Handoff remains exactly at the old hash `0c37f438...` with zero atomic updates. No MCP, discovery, submit, status, delivery, PostgreSQL action, cleanup, rollback, port 64272, or protected-script access occurred.
 - This receipt is not P0 PASS. archived_at remains null; saver durability pending.
 - Stage 1 receipt commit 2a7ac10fb8514e6094b04f981bc52f1c6bf4d358 equals fresh remote at 2026-08-12T03:07:21.6299547Z; stage 2 pending.
+- Central archive success at 2026-08-12T03:09:19.526Z; coordination-race evidence is preserved: config equals validated candidate, nine PG bindings/eight changed values, twelve non-PG bytes equal, and handoff remains old hash with no update.
