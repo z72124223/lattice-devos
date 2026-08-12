@@ -962,3 +962,4 @@
 - Exact stop is `PRE_MUTATION_DIRECTORY_CREATION_PARAMETER_FAILURE`: New-Item rejected unsupported `-LiteralPath`. Do not infer a successful handoff replacement; File.Replace was never invoked and live handoff/config remain unchanged.
 - The worker directory, original backup, and staging were created before the authoritative stop due to an incorrect incidental-failure continuation; no cleanup/rollback occurred. No MCP/PG/runtime or protected-script action occurred. Saver durability pending.
 - Stage 1 receipt commit 6607f9e24b9d6e7b01456b2eb3039d30b49ddb63 (tree 3f9c7b7d2096c8d7048a28519caa0913da215c1f) equals fresh remote at 2026-08-12T03:40:28.8965195Z; stage 2 pending.
+- Central archive success at 2026-08-12T03:42:44.008Z; New-Item LiteralPath failure, two creation attempts/one success, backup and staging copies, and zero File.Replace calls remain recorded.
