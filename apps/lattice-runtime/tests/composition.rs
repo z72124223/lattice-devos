@@ -510,6 +510,37 @@ fn spawn_bounded_latticed() -> std::process::Child {
         .expect("start latticed")
 }
 
+fn assert_safe_startup_diagnostics(stderr: &[u8], expected_stages: &[&str]) {
+    let text = std::str::from_utf8(stderr).expect("stderr UTF-8");
+    assert!(!text.contains("test-password"));
+    assert!(!text.contains("127.0.0.1"));
+    let records = text
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("startup diagnostic JSON"))
+        .collect::<Vec<_>>();
+    assert!(!records.is_empty());
+    for record in &records {
+        assert_eq!(record.as_object().expect("diagnostic object").len(), 7);
+        assert_eq!(record["schema"], "lattice.latticed.startup-diagnostic.v1");
+        assert!(record["stage"].is_string());
+        assert!(record["last_completed_stage"].is_string());
+        assert!(record["waiting_reason"].is_string());
+        assert!(record["configuration_health"].is_string());
+        assert!(record["dependency_health"].is_string());
+        assert!(record["failure_classification"].is_string());
+    }
+    let stages = records
+        .iter()
+        .filter_map(|record| record["stage"].as_str())
+        .collect::<Vec<_>>();
+    for expected_stage in expected_stages {
+        assert!(
+            stages.contains(expected_stage),
+            "missing {expected_stage}: {stages:?}"
+        );
+    }
+}
+
 #[test]
 fn real_latticed_binary_serves_only_the_four_bounded_tools() {
     let mut child = spawn_bounded_latticed();
@@ -543,7 +574,20 @@ fn real_latticed_binary_serves_only_the_four_bounded_tools() {
     let output = child.wait_with_output().expect("wait latticed");
 
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_safe_startup_diagnostics(
+        &output.stderr,
+        &[
+            "CONFIGURATION_VALIDATION_STARTED",
+            "CONFIGURATION_VALIDATED",
+            "SERVICE_ASSEMBLY_STARTED",
+            "SERVICE_ASSEMBLED",
+            "STDIO_LOOP_ENTERED",
+            "MCP_INITIALIZE_RECEIVED",
+            "MCP_INITIALIZED_NOTIFICATION_RECEIVED",
+            "MCP_TOOLS_LIST_RECEIVED",
+            "MCP_END_OF_STREAM",
+        ],
+    );
     let responses = String::from_utf8(output.stdout)
         .expect("stdout utf8")
         .lines()
@@ -630,7 +674,18 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
     let output = child.wait_with_output().expect("wait latticed");
 
     assert!(output.status.success());
-    assert!(output.stderr.is_empty());
+    assert_safe_startup_diagnostics(
+        &output.stderr,
+        &[
+            "CONFIGURATION_VALIDATION_STARTED",
+            "CONFIGURATION_VALIDATED",
+            "SERVICE_ASSEMBLY_STARTED",
+            "SERVICE_ASSEMBLED",
+            "STDIO_LOOP_ENTERED",
+            "MCP_TOOLS_LIST_RECEIVED",
+            "MCP_END_OF_STREAM",
+        ],
+    );
     let responses = String::from_utf8(output.stdout)
         .expect("stdout utf8")
         .lines()

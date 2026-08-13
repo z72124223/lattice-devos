@@ -5,8 +5,9 @@ use std::rc::Rc;
 use lattice_runtime::composition::fixed_gateway_submission;
 use lattice_runtime::mcp::{
     DeliveryToolArguments, DeliveryToolService, MAX_STDIO_MESSAGE_BYTES,
-    MAX_TOOL_INVOCATIONS_PER_SESSION, McpServer, TaskStatusArguments, TaskSubmitArguments,
-    ToolExecutionError, serve, serve_legacy_delivery_observer,
+    MAX_TOOL_INVOCATIONS_PER_SESSION, McpServer, StdioLifecycleEvent, TaskStatusArguments,
+    TaskSubmitArguments, ToolExecutionError, serve, serve_legacy_delivery_observer,
+    serve_with_lifecycle_observer,
 };
 use serde_json::{Value, json};
 
@@ -59,6 +60,53 @@ fn completed_task_status() -> Value {
         "ledger_head_digest": LEDGER_HEAD_DIGEST,
         "result_digest": RESULT_DIGEST
     })
+}
+
+#[test]
+fn lifecycle_diagnostics_observe_fixed_mcp_milestones_without_changing_stdout() {
+    let service = FakeService {
+        run_calls: Rc::new(Cell::new(0)),
+        status_calls: Rc::new(Cell::new(0)),
+    };
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"ignored-secret\",\"version\":\"1\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n"
+    );
+    let mut output = Vec::new();
+    let mut events = Vec::new();
+
+    serve_with_lifecycle_observer(
+        service,
+        fixed_binding().clone(),
+        Cursor::new(input.as_bytes()),
+        &mut output,
+        |event| events.push(event),
+    )
+    .expect("bounded MCP stream");
+
+    assert_eq!(
+        events,
+        vec![
+            StdioLifecycleEvent::WaitingForInput,
+            StdioLifecycleEvent::InitializeReceived,
+            StdioLifecycleEvent::InitializedNotificationReceived,
+            StdioLifecycleEvent::ToolsListReceived,
+            StdioLifecycleEvent::EndOfStream,
+        ]
+    );
+    let stdout = String::from_utf8(output).expect("MCP stdout is UTF-8 JSONL");
+    assert!(!stdout.contains("ignored-secret"));
+    let responses = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("MCP response JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["result"]["protocolVersion"], "2025-11-25");
+    assert_eq!(
+        responses[1]["result"]["tools"].as_array().map(Vec::len),
+        Some(4)
+    );
 }
 
 fn task_public_output_schema() -> Value {

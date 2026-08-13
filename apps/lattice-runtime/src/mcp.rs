@@ -1803,6 +1803,25 @@ enum StdioFrame {
     Unterminated,
 }
 
+/// Fixed MCP lifecycle milestones safe for process-local startup diagnostics.
+///
+/// These events intentionally carry no request, configuration, or service
+/// values. The composition root may mirror them to stderr without changing the
+/// MCP stdout protocol.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StdioLifecycleEvent {
+    /// The server is blocked waiting for the next newline-delimited frame.
+    WaitingForInput,
+    /// A syntactically decoded `initialize` request was received.
+    InitializeReceived,
+    /// A syntactically decoded initialized notification was received.
+    InitializedNotificationReceived,
+    /// A syntactically decoded `tools/list` request was received.
+    ToolsListReceived,
+    /// The stdin stream reached EOF before another frame.
+    EndOfStream,
+}
+
 /// Serves newline-delimited MCP JSON-RPC over the supplied streams.
 ///
 /// # Errors
@@ -1815,9 +1834,33 @@ pub fn serve<S: DeliveryToolService, R: BufRead, W: Write>(
     reader: R,
     writer: W,
 ) -> io::Result<()> {
+    serve_with_lifecycle_observer(service, binding, reader, writer, |_| {})
+}
+
+/// Serves MCP while reporting only fixed lifecycle milestones to `observer`.
+///
+/// The observer is process-local and never writes to the supplied MCP stdout
+/// stream. It receives no caller payload, arguments, or error text.
+///
+/// # Errors
+///
+/// Returns only the existing MCP transport or acceptance-evidence read/write
+/// failures; observer delivery has no fallible path.
+pub fn serve_with_lifecycle_observer<
+    S: DeliveryToolService,
+    R: BufRead,
+    W: Write,
+    F: FnMut(StdioLifecycleEvent),
+>(
+    service: S,
+    binding: SubjectBinding,
+    reader: R,
+    writer: W,
+    observer: F,
+) -> io::Result<()> {
     let mut server = McpServer::new(service, binding);
     server.enable_acceptance_evidence()?;
-    serve_server(server, reader, writer)
+    serve_server(server, reader, writer, observer)
 }
 
 /// Serves the legacy read-only delivery observer over the supplied streams.
@@ -1834,17 +1877,24 @@ pub fn serve_legacy_delivery_observer<S: DeliveryToolService, R: BufRead, W: Wri
 ) -> io::Result<()> {
     let mut server = McpServer::new_legacy_delivery_observer(service, binding);
     server.enable_acceptance_evidence()?;
-    serve_server(server, reader, writer)
+    serve_server(server, reader, writer, |_| {})
 }
 
-fn serve_server<S: DeliveryToolService, R: BufRead, W: Write>(
+fn serve_server<S: DeliveryToolService, R: BufRead, W: Write, F: FnMut(StdioLifecycleEvent)>(
     mut server: McpServer<S>,
     mut reader: R,
     mut writer: W,
+    mut observer: F,
 ) -> io::Result<()> {
+    let mut initial_input_wait_reported = false;
     loop {
+        if !initial_input_wait_reported {
+            observer(StdioLifecycleEvent::WaitingForInput);
+            initial_input_wait_reported = true;
+        }
         let response = match read_bounded_frame(&mut reader)? {
             StdioFrame::EndOfStream => {
+                observer(StdioLifecycleEvent::EndOfStream);
                 server.close_acceptance_evidence()?;
                 return Ok(());
             }
@@ -1853,7 +1903,10 @@ fn serve_server<S: DeliveryToolService, R: BufRead, W: Write>(
                 Some(protocol_error(Value::Null, -32600, "Unterminated message"))
             }
             StdioFrame::Complete(buffer) => match serde_json::from_slice::<Value>(&buffer) {
-                Ok(message) => server.handle(message),
+                Ok(message) => {
+                    observe_lifecycle_message(&message, &mut observer);
+                    server.handle(message)
+                }
                 Err(_) => Some(protocol_error(Value::Null, -32700, "Parse error")),
             },
         };
@@ -1865,6 +1918,20 @@ fn serve_server<S: DeliveryToolService, R: BufRead, W: Write>(
             writer.write_all(b"\n")?;
             writer.flush()?;
         }
+    }
+}
+
+fn observe_lifecycle_message<F: FnMut(StdioLifecycleEvent)>(message: &Value, observer: &mut F) {
+    let Some(method) = message.get("method").and_then(Value::as_str) else {
+        return;
+    };
+    match method {
+        "initialize" => observer(StdioLifecycleEvent::InitializeReceived),
+        "notifications/initialized" => {
+            observer(StdioLifecycleEvent::InitializedNotificationReceived);
+        }
+        "tools/list" => observer(StdioLifecycleEvent::ToolsListReceived),
+        _ => {}
     }
 }
 

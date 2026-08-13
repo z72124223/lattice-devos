@@ -361,6 +361,214 @@ impl fmt::Display for LatticedError {
     }
 }
 
+const STARTUP_DIAGNOSTIC_SCHEMA: &str = "lattice.latticed.startup-diagnostic.v1";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupDiagnosticStage {
+    ConfigurationValidationStarted,
+    ConfigurationValidated,
+    ServiceAssemblyStarted,
+    ServiceAssembled,
+    StdioLoopEntered,
+    WaitingForMcpInput,
+    McpInitializeReceived,
+    McpInitializedNotificationReceived,
+    McpToolsListReceived,
+    McpEndOfStream,
+    StartupFailed,
+}
+
+impl StartupDiagnosticStage {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ConfigurationValidationStarted => "CONFIGURATION_VALIDATION_STARTED",
+            Self::ConfigurationValidated => "CONFIGURATION_VALIDATED",
+            Self::ServiceAssemblyStarted => "SERVICE_ASSEMBLY_STARTED",
+            Self::ServiceAssembled => "SERVICE_ASSEMBLED",
+            Self::StdioLoopEntered => "STDIO_LOOP_ENTERED",
+            Self::WaitingForMcpInput => "WAITING_FOR_MCP_INPUT",
+            Self::McpInitializeReceived => "MCP_INITIALIZE_RECEIVED",
+            Self::McpInitializedNotificationReceived => "MCP_INITIALIZED_NOTIFICATION_RECEIVED",
+            Self::McpToolsListReceived => "MCP_TOOLS_LIST_RECEIVED",
+            Self::McpEndOfStream => "MCP_END_OF_STREAM",
+            Self::StartupFailed => "STARTUP_FAILED",
+        }
+    }
+}
+
+/// Fixed-vocabulary, non-authoritative startup state safe to mirror to stderr.
+///
+/// Every field is selected from compile-time constants. This prevents process
+/// configuration, request contents, credentials, paths, and raw errors from
+/// entering the product diagnostic stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StartupDiagnostic {
+    stage: StartupDiagnosticStage,
+    last_completed_stage: &'static str,
+    waiting_reason: &'static str,
+    configuration_health: &'static str,
+    dependency_health: &'static str,
+    failure_classification: &'static str,
+}
+
+impl StartupDiagnostic {
+    const fn new(
+        stage: StartupDiagnosticStage,
+        last_completed_stage: &'static str,
+        waiting_reason: &'static str,
+        configuration_health: &'static str,
+        dependency_health: &'static str,
+        failure_classification: &'static str,
+    ) -> Self {
+        Self {
+            stage,
+            last_completed_stage,
+            waiting_reason,
+            configuration_health,
+            dependency_health,
+            failure_classification,
+        }
+    }
+
+    const fn configuration_validation_started() -> Self {
+        Self::new(
+            StartupDiagnosticStage::ConfigurationValidationStarted,
+            "NONE",
+            "CONFIGURATION_VALIDATION",
+            "CHECKING",
+            "NOT_CHECKED",
+            "NONE",
+        )
+    }
+
+    const fn configuration_validated() -> Self {
+        Self::new(
+            StartupDiagnosticStage::ConfigurationValidated,
+            "CONFIGURATION_VALIDATED",
+            "SERVICE_ASSEMBLY",
+            "VALID",
+            "CONFIGURED_NO_CONNECTIVITY_PROBE",
+            "NONE",
+        )
+    }
+
+    const fn service_assembly_started() -> Self {
+        Self::new(
+            StartupDiagnosticStage::ServiceAssemblyStarted,
+            "CONFIGURATION_VALIDATED",
+            "SERVICE_ASSEMBLY",
+            "VALID",
+            "ASSEMBLY_IN_PROGRESS",
+            "NONE",
+        )
+    }
+
+    const fn service_assembled() -> Self {
+        Self::new(
+            StartupDiagnosticStage::ServiceAssembled,
+            "SERVICE_ASSEMBLED",
+            "STDIO_ENTRY",
+            "VALID",
+            "ASSEMBLED_NO_CONNECTIVITY_PROBE",
+            "NONE",
+        )
+    }
+
+    const fn stdio_loop_entered() -> Self {
+        Self::new(
+            StartupDiagnosticStage::StdioLoopEntered,
+            "STDIO_LOOP_ENTERED",
+            "MCP_INPUT",
+            "VALID",
+            "MCP_SESSION_PENDING",
+            "NONE",
+        )
+    }
+
+    const fn from_mcp_event(event: mcp::StdioLifecycleEvent) -> Self {
+        match event {
+            mcp::StdioLifecycleEvent::WaitingForInput => Self::new(
+                StartupDiagnosticStage::WaitingForMcpInput,
+                "STDIO_LOOP_ENTERED",
+                "MCP_INPUT",
+                "VALID",
+                "MCP_SESSION_PENDING",
+                "NONE",
+            ),
+            mcp::StdioLifecycleEvent::InitializeReceived => Self::new(
+                StartupDiagnosticStage::McpInitializeReceived,
+                "MCP_INITIALIZE_RECEIVED",
+                "INITIALIZED_NOTIFICATION",
+                "VALID",
+                "MCP_SESSION_PENDING",
+                "NONE",
+            ),
+            mcp::StdioLifecycleEvent::InitializedNotificationReceived => Self::new(
+                StartupDiagnosticStage::McpInitializedNotificationReceived,
+                "MCP_INITIALIZED_NOTIFICATION_RECEIVED",
+                "MCP_INPUT",
+                "VALID",
+                "MCP_SESSION_ACTIVE",
+                "NONE",
+            ),
+            mcp::StdioLifecycleEvent::ToolsListReceived => Self::new(
+                StartupDiagnosticStage::McpToolsListReceived,
+                "MCP_TOOLS_LIST_RECEIVED",
+                "MCP_INPUT",
+                "VALID",
+                "MCP_SESSION_ACTIVE",
+                "NONE",
+            ),
+            mcp::StdioLifecycleEvent::EndOfStream => Self::new(
+                StartupDiagnosticStage::McpEndOfStream,
+                "MCP_END_OF_STREAM",
+                "NONE",
+                "VALID",
+                "STDIN_EOF",
+                "NONE",
+            ),
+        }
+    }
+
+    const fn failure(
+        last_completed_stage: &'static str,
+        configuration_health: &'static str,
+        dependency_health: &'static str,
+        failure: LatticedErrorKind,
+    ) -> Self {
+        Self::new(
+            StartupDiagnosticStage::StartupFailed,
+            last_completed_stage,
+            "NONE",
+            configuration_health,
+            dependency_health,
+            failure.code(),
+        )
+    }
+
+    fn render(self) -> String {
+        format!(
+            concat!(
+                "{{\"schema\":\"{}\",",
+                "\"stage\":\"{}\",\"last_completed_stage\":\"{}\",",
+                "\"waiting_reason\":\"{}\",\"configuration_health\":\"{}\",",
+                "\"dependency_health\":\"{}\",\"failure_classification\":\"{}\"}}"
+            ),
+            STARTUP_DIAGNOSTIC_SCHEMA,
+            self.stage.code(),
+            self.last_completed_stage,
+            self.waiting_reason,
+            self.configuration_health,
+            self.dependency_health,
+            self.failure_classification,
+        )
+    }
+}
+
+fn emit_startup_diagnostic(diagnostic: StartupDiagnostic) {
+    eprintln!("{}", diagnostic.render());
+}
+
 impl Error for LatticedError {}
 
 fn observed_port_effect(kind: ObservedEffectKind, stage: DeliveryStage) -> DeliveryPortResult<()> {
@@ -1663,9 +1871,52 @@ fn delivery_environment_for_mode(
 ///
 /// Returns a bounded startup/configuration or transport failure.
 pub fn serve_stdio_from_environment() -> Result<(), LatticedError> {
-    let run_mode = full_chain_run_mode_from_environment()?;
-    let (config, database, password) = delivery_environment_for_mode(run_mode)?;
-    let submission = fixed_gateway_submission()?;
+    serve_stdio_from_environment_with_diagnostics(&mut emit_startup_diagnostic)
+}
+
+fn serve_stdio_from_environment_with_diagnostics<F>(diagnostic: &mut F) -> Result<(), LatticedError>
+where
+    F: FnMut(StartupDiagnostic),
+{
+    diagnostic(StartupDiagnostic::configuration_validation_started());
+    let run_mode = match full_chain_run_mode_from_environment() {
+        Ok(run_mode) => run_mode,
+        Err(error) => {
+            diagnostic(StartupDiagnostic::failure(
+                "NONE",
+                "REJECTED",
+                "NOT_CHECKED",
+                error.kind(),
+            ));
+            return Err(error);
+        }
+    };
+    let (config, database, password) = match delivery_environment_for_mode(run_mode) {
+        Ok(environment) => environment,
+        Err(error) => {
+            diagnostic(StartupDiagnostic::failure(
+                "NONE",
+                "REJECTED",
+                "NOT_CHECKED",
+                error.kind(),
+            ));
+            return Err(error);
+        }
+    };
+    let submission = match fixed_gateway_submission() {
+        Ok(submission) => submission,
+        Err(error) => {
+            diagnostic(StartupDiagnostic::failure(
+                "NONE",
+                "REJECTED",
+                "NOT_CHECKED",
+                error.kind(),
+            ));
+            return Err(error);
+        }
+    };
+    diagnostic(StartupDiagnostic::configuration_validated());
+    diagnostic(StartupDiagnostic::service_assembly_started());
     let (service, binding) = assemble_full_chain_service_with_mode(
         config,
         &database,
@@ -1674,11 +1925,32 @@ pub fn serve_stdio_from_environment() -> Result<(), LatticedError> {
         submission,
         run_mode,
         false,
-    )?;
+    )
+    .inspect_err(|error| {
+        diagnostic(StartupDiagnostic::failure(
+            "CONFIGURATION_VALIDATED",
+            "VALID",
+            "ASSEMBLY_REJECTED",
+            error.kind(),
+        ));
+    })?;
+    diagnostic(StartupDiagnostic::service_assembled());
+    diagnostic(StartupDiagnostic::stdio_loop_entered());
     let input = io::stdin();
     let output = io::stdout();
-    mcp::serve(service, binding, input.lock(), output.lock())
-        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))
+    mcp::serve_with_lifecycle_observer(service, binding, input.lock(), output.lock(), |event| {
+        diagnostic(StartupDiagnostic::from_mcp_event(event));
+    })
+    .map_err(|_| {
+        let error = LatticedError::new(LatticedErrorKind::Transport);
+        diagnostic(StartupDiagnostic::failure(
+            "STDIO_LOOP_ENTERED",
+            "VALID",
+            "MCP_TRANSPORT_REJECTED",
+            error.kind(),
+        ));
+        error
+    })
 }
 
 /// One live Hermes result carrying both normalized evidence and persistable content.
@@ -5333,7 +5605,7 @@ mod tests {
     }
 
     #[test]
-    fn production_composition_stderr_is_limited_to_one_fixed_public_code() {
+    fn production_composition_stderr_uses_only_fixed_public_diagnostics() {
         let source = include_str!("composition.rs");
         let stderr_macro = ["eprint", "ln!"].concat();
         let stderr_inline_macro = ["eprint", "!"].concat();
@@ -5342,11 +5614,13 @@ mod tests {
             "ln!(\"{}\", LatticedErrorKind::Transport.code());",
         ]
         .concat();
+        let diagnostic_emission = ["eprint", "ln!(\"{}\", diagnostic.render());"].concat();
         let direct_stderr = ["io::", "stderr"].concat();
         let inherited_stdio = ["Stdio", "::inherit"].concat();
 
-        assert_eq!(source.matches(&stderr_macro).count(), 1);
+        assert_eq!(source.matches(&stderr_macro).count(), 2);
         assert!(source.contains(&fixed_emission));
+        assert!(source.contains(&diagnostic_emission));
         assert_eq!(
             LatticedErrorKind::Transport.code(),
             "LATTICED_STDIO_REJECTED"
@@ -5354,6 +5628,35 @@ mod tests {
         assert!(!source.contains(&stderr_inline_macro));
         assert!(!source.contains(&direct_stderr));
         assert!(!source.contains(&inherited_stdio));
+    }
+
+    #[test]
+    fn startup_diagnostic_is_fixed_vocabulary_and_omits_secret_like_input() {
+        let progress = StartupDiagnostic::configuration_validation_started().render();
+        let progress_value: Value =
+            serde_json::from_str(&progress).expect("progress diagnostic JSON");
+        let rendered = StartupDiagnostic::failure(
+            "CONFIGURATION_VALIDATED",
+            "VALID",
+            "ASSEMBLY_REJECTED",
+            LatticedErrorKind::Configuration,
+        )
+        .render();
+        let value: Value = serde_json::from_str(&rendered).expect("diagnostic JSON");
+
+        assert_eq!(progress_value["waiting_reason"], "CONFIGURATION_VALIDATION");
+        assert_eq!(value["schema"], STARTUP_DIAGNOSTIC_SCHEMA);
+        assert_eq!(value["stage"], "STARTUP_FAILED");
+        assert_eq!(value["last_completed_stage"], "CONFIGURATION_VALIDATED");
+        assert_eq!(value["configuration_health"], "VALID");
+        assert_eq!(value["dependency_health"], "ASSEMBLY_REJECTED");
+        assert_eq!(
+            value["failure_classification"],
+            "LATTICED_CONFIGURATION_REJECTED"
+        );
+        assert!(!rendered.contains("LATTICE_TASK019_PASSWORD"));
+        assert!(!rendered.contains("ignored-secret"));
+        assert!(!rendered.contains("127.0.0.1"));
     }
 
     #[test]
