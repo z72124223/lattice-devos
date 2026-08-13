@@ -5,20 +5,13 @@ spec_id: SPEC-002
 spec_version: 27
 related_spec_id: SPEC-003
 related_spec_version: 4
+module_id: task-ledger
+constitution_version: 2.1
 status: in_progress
 parallel_safe: false
 depends_on:
   - TASK-038
   - commit:175633ca40352a314a0b699c7cb53697c239d481
-modules:
-  - module_id: task-ledger
-    constitution_version: 2.1
-  - module_id: orchestrator-runtime
-    constitution_version: 2.4
-  - module_id: postgres-store
-    constitution_version: 1.6
-  - module_id: latticed
-    constitution_version: 1.4
 branch: feature/task-050-autonomy-receipt-ledger-replay
 implementation_worktree: lattice-worktrees/task-050-autonomy-receipt-ledger-replay
 implementation_head: 714f3b9057db47e694adacf9aef5f37e09f31712
