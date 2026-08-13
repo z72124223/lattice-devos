@@ -467,12 +467,18 @@ fn relevance_score(
     for token in query_tokens {
         if record_tokens.contains(token) {
             score += 100;
-        } else if token.chars().count() >= 3 && searchable.iter().any(|value| value.contains(token))
+        } else if is_substring_query_token(token)
+            && searchable.iter().any(|value| value.contains(token))
         {
             score += 10;
         }
     }
     score
+}
+
+fn is_substring_query_token(token: &str) -> bool {
+    let minimum_length = if token.is_ascii() { 3 } else { 2 };
+    token.chars().count() >= minimum_length
 }
 
 fn tokens(value: &str) -> BTreeSet<String> {

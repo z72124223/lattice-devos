@@ -8,7 +8,8 @@ use lattice_contracts::{
     GRAPH_MEMORY_RETRIEVAL_ALGORITHM, GitObjectId, GraphConfidence, GraphMemoryContractError,
     GraphMemoryRecord, GraphMemoryRunRequest, GraphSourceProvenance, GraphifyIdentity,
     GraphifyRawEvidence, GraphifyRawNode, Invocation, MemoryQuery, MemoryRetrievalDisposition,
-    NormalizedGraphAnalysis, ProjectId, ProjectSnapshotId, RequestId, TaskId, TrackedSource,
+    NormalizedGraphAnalysis, ProjectId, ProjectSnapshotId, RankedMemoryRecord, RequestId, TaskId,
+    TrackedSource,
 };
 
 const RETRIEVAL_LIMIT: u16 = 3;
@@ -348,6 +349,20 @@ fn retrieval_quality_matrix_meets_locked_hit_at_one_and_no_answer_thresholds() {
     assert_eq!(no_answer_count, 2, "locked no-answer threshold is 2/2");
     println!(
         "TASK043_RETRIEVAL_QUALITY hit_at_one={hit_at_one}/6 mrr=1.0 no_answer={no_answer_count}/2"
+    );
+}
+
+#[test]
+fn retrieval_matches_short_cjk_substrings() {
+    let (request, analysis) = analysis_for("流程", Binding::default());
+    let query = MemoryQuery::new(&request, "流程", RETRIEVAL_LIMIT).expect("query");
+    let plan = plan_retrieval(&analysis, &query).expect("retrieval plan");
+    let expected_id = fixture_record(&analysis, "zh_retrieval_flow").record_id();
+
+    assert_eq!(plan.disposition(), MemoryRetrievalDisposition::Results);
+    assert_eq!(
+        plan.results().first().map(RankedMemoryRecord::record_id),
+        Some(expected_id)
     );
 }
 
