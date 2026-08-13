@@ -28,6 +28,7 @@ use crate::containment::{
     HermesContainmentFrameLimits, HermesWslContainmentConfig, OUTER_RUNNER_SOURCE,
     PRIVATE_RUNNER_SOURCE, WSL_DISTRO, minimal_wsl_environment, parse_containment_frame,
 };
+use crate::preparation::OFFICIAL_HERMES_CONFIG;
 use crate::runtime::HermesOfflineRuntimeManifest;
 use crate::{
     CanonicalReflection, ContainmentOwnerState, HermesAdapterConfig, HermesAdapterError,
@@ -40,19 +41,6 @@ const STARTUP_MAGIC: &[u8] = b"LATTICE_HERMES_PRODUCTION_START_V1\n";
 const STARTUP_SCHEMA: &str = "lattice.hermes.production-start.v1";
 const ATTESTATION_SCHEMA: &str = "lattice.hermes.containment-attestation.v2";
 const CONFIG_SCHEMA: &str = "lattice.hermes.production-config.v2";
-const OFFICIAL_HERMES_CONFIG: &[u8] = br"_config_version: 33
-model:
-  provider: openai-api
-  default: gpt-5.3-codex-spark
-  openai_runtime: codex_app_server
-  api_mode: codex_app_server
-  base_url: http://127.0.0.1:9/v1
-platform_toolsets:
-  api_server: []
-plugins:
-  enabled: []
-mcp_servers: {}
-";
 const BWRAP_SHA256: &str = "0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0";
 const OFFICIAL_RUNTIME_GUEST_ROOT: &str = concat!(
     "/var/tmp/lattice-runtime-targets/",

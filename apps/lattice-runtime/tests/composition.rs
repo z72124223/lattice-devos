@@ -770,6 +770,77 @@ fn legacy_full_chain_entry_rejects_hermes_preflight() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn latticed_hermes_prepare_materializes_then_revalidates_without_launch_configuration() {
+    const SECRET_SENTINEL: &str = "TASK057-SECRET-MUST-NOT-BE-READ-OR-RENDERED";
+
+    struct FixtureCleanup(PathBuf);
+
+    impl Drop for FixtureCleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let unique = NEXT_SCRIPTED_GATE_FIXTURE.fetch_add(1, Ordering::Relaxed);
+    let fixture_root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "task057-hermes-prepare-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&fixture_root).expect("create test-owned preparation fixture");
+    let _cleanup = FixtureCleanup(fixture_root.clone());
+    let product_root = fixture_root.join("product");
+    fs::create_dir(&product_root).expect("create protected product root");
+    let preparation_root = fixture_root.join("prepared-assets");
+
+    let invoke = || {
+        Command::new(env!("CARGO_BIN_EXE_latticed"))
+            .arg("--hermes-prepare")
+            .env_clear()
+            .env("LATTICE_HERMES_PREPARATION_ROOT", &preparation_root)
+            .env("LATTICE_HERMES_PRODUCT_ROOT", &product_root)
+            .env("LATTICE_HERMES_API_KEY", SECRET_SENTINEL)
+            .output()
+            .expect("start canonical latticed Hermes preparation")
+    };
+
+    let created = invoke();
+    assert_eq!(created.status.code(), Some(0));
+    assert!(created.stdout.is_empty());
+    let created_stderr = String::from_utf8(created.stderr).expect("created stderr UTF-8");
+    let created_digest = created_stderr
+        .strip_prefix("LATTICE_HERMES_PREPARE_ASSETS_CREATED_UNVERIFIED:")
+        .and_then(|value| value.strip_suffix('\n'))
+        .expect("fixed created receipt");
+    assert_eq!(created_digest.len(), 64);
+    assert!(created_digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert!(!created_stderr.contains(SECRET_SENTINEL));
+
+    let present = invoke();
+    assert_eq!(present.status.code(), Some(0));
+    assert!(present.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(present.stderr).expect("present stderr UTF-8"),
+        format!("LATTICE_HERMES_PREPARE_ASSETS_PRESENT_UNVERIFIED:{created_digest}\n")
+    );
+    let mut file_names = fs::read_dir(&preparation_root)
+        .expect("read preparation root")
+        .map(|entry| {
+            entry
+                .expect("prepared entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    file_names.sort();
+    assert_eq!(
+        file_names,
+        ["offline-runtime-manifest.json", "prepared-assets.json"]
+    );
+}
+
 #[test]
 fn latticed_hermes_preflight_reports_exact_missing_settings() {
     let output = Command::new(env!("CARGO_BIN_EXE_latticed"))

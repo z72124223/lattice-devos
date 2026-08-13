@@ -30,6 +30,10 @@ pub const HERMES_PYPROJECT_SHA256: &str =
 /// SHA-256 of `uv.lock` inside the pinned Hermes archive.
 pub const HERMES_UV_LOCK_SHA256: &str =
     "aab3c83f71b683507a590b6315b23bdc0abd6b63b76b2349eae15bf00dfbaf2b";
+pub(crate) const HERMES_RUNTIME_PAYLOAD_FILE_COUNT: u64 = 14_077;
+pub(crate) const HERMES_RUNTIME_PAYLOAD_BYTE_COUNT: u64 = 722_643_145;
+pub(crate) const HERMES_RUNTIME_PAYLOAD_TREE_SHA256: &str =
+    "cb0e331bcb2b4fe2fd0977401d246819aadb800b645ca31ec233ad4e25b96929";
 
 /// Compile-time identity of the only Hermes source accepted by this adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,6 +93,36 @@ pub struct HermesOfflineRuntimeManifest {
 }
 
 impl HermesOfflineRuntimeManifest {
+    pub(crate) fn official_canonical_bytes() -> HermesAdapterResult<Vec<u8>> {
+        let pin = HermesRuntimePin::official();
+        let manifest = Self {
+            cpython_archive_bytes: pin.cpython_archive_bytes,
+            cpython_archive_sha256: pin.cpython_archive_sha256.to_owned(),
+            cpython_build_release: pin.cpython_build_release.to_owned(),
+            cpython_provenance: pin.cpython_provenance.to_owned(),
+            cpython_sha256sums_sha256: pin.cpython_sha256sums_sha256.to_owned(),
+            cpython_version: pin.cpython_version.to_owned(),
+            hermes_archive_sha256: pin.archive_sha256.to_owned(),
+            hermes_commit: HERMES_UPSTREAM_COMMIT.to_owned(),
+            hermes_release: HERMES_RELEASE.to_owned(),
+            payload_byte_count: HERMES_RUNTIME_PAYLOAD_BYTE_COUNT,
+            payload_file_count: HERMES_RUNTIME_PAYLOAD_FILE_COUNT,
+            payload_manifest_sha256: HERMES_RUNTIME_PAYLOAD_TREE_SHA256.to_owned(),
+            platform: "x86_64-unknown-linux-gnu".to_owned(),
+            pyproject_sha256: pin.pyproject_sha256.to_owned(),
+            schema: "lattice.hermes.offline-runtime.v1".to_owned(),
+            uv_lock_sha256: pin.uv_lock_sha256.to_owned(),
+        };
+        let bytes = serde_json::to_vec(&manifest).map_err(|_| {
+            HermesAdapterError::new(
+                HermesAdapterErrorKind::Malformed,
+                "HERMES_RUNTIME_MANIFEST_CANONICALIZATION_FAILED",
+            )
+        })?;
+        Self::from_canonical_json(&bytes)?;
+        Ok(bytes)
+    }
+
     /// Parses one byte-exact canonical offline manifest and validates every
     /// upstream identity field against compile-time pins.
     ///

@@ -31,7 +31,6 @@ const PRIVATE_FRAME_FIELD_COUNT: usize = 13;
 pub(crate) const WSL_DISTRO: &str = "Ubuntu";
 #[cfg(windows)]
 const WSL_EXE_SHA256: &str = "4e589e3883229b7a74a4acdb878689dcec94e2539fcad1c194f415b149c337a9";
-#[cfg(windows)]
 pub(crate) const OUTER_RUNNER_SOURCE: &str = include_str!("wsl_outer_runner.py");
 #[cfg(windows)]
 const SOCKETPAIR_MAGIC: &[u8] = b"LATTICE_HERMES_SOCKETPAIR_V1\n";

@@ -8,6 +8,7 @@ mod broker;
 #[cfg(windows)]
 mod codex_proxy;
 mod containment;
+pub mod preparation;
 #[cfg(windows)]
 mod production;
 mod runtime;

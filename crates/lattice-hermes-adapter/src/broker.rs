@@ -234,6 +234,10 @@ non_code_mode_only = true
 [config.apps._default]
 enabled = false
 "#;
+
+pub(crate) const fn official_codex_config_lock_bytes() -> &'static [u8] {
+    CODEX_CONFIG_LOCK.as_bytes()
+}
 const CODEX_CONFIG_LOCK_RESOLUTION_OVERRIDE: &str =
     "debug.config_lockfile.save_fields_resolved_from_model_catalog=false";
 const MAX_CODEX_LAUNCHER_BYTES: u64 = 512 * 1024 * 1024;

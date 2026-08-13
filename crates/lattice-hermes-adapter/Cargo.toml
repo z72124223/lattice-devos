@@ -6,6 +6,10 @@ publish.workspace = true
 rust-version.workspace = true
 autotests = false
 
+[[test]]
+name = "preparation"
+path = "tests/preparation.rs"
+
 [[bin]]
 name = "lattice-hermes-broker"
 path = "src/bin/lattice-hermes-broker.rs"
