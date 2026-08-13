@@ -1874,6 +1874,26 @@ fn run_codex_proxy_host(
                 one_turn_gate.finish_input().inspect_err(|_| {
                     session.record_failure(one_turn_gate.pending());
                 })?;
+                let clean_completion = {
+                    let observed = status.lock().map_err(|_| {
+                        error(
+                            HermesAdapterErrorKind::Ambiguous,
+                            "HERMES_CODEX_PROXY_HOST_STATE_UNKNOWN",
+                        )
+                    })?;
+                    observed.authenticated_open
+                        && observed.clean_terminal
+                        && observed.turn_start_count == 1
+                        && observed.adapter_success_accepted
+                };
+                if clean_completion {
+                    emit_codex_proxy_trace(json!({
+                        "component": "Hermes",
+                        "event": "codex_proxy_outer_eof_accepted",
+                        "status": "clean_terminal",
+                    }));
+                    return Ok(());
+                }
                 return Err(error(
                     HermesAdapterErrorKind::Failed,
                     "HERMES_CODEX_PROXY_OUTER_EOF",
@@ -4233,6 +4253,17 @@ mod proxy_host_tests {
             "HERMES_CODEX_PROXY_ADAPTER_SUCCESS_REPLAY_REJECTED"
         );
         assert_eq!(host.status.lock().expect("host status").turn_start_count, 1);
+        sender
+            .send(OuterStreamEvent::Eof)
+            .expect("send clean outer EOF after the bound terminal");
+        wait_until(
+            || {
+                host.worker
+                    .as_ref()
+                    .is_some_and(thread::JoinHandle::is_finished)
+            },
+            "clean outer EOF did not finish the proxy worker",
+        );
         host.terminate().expect("completed host terminates cleanly");
         drop(host);
         fs::remove_file(path).expect("remove exact test sink");
@@ -4657,6 +4688,7 @@ mod proxy_host_tests {
     struct InteractiveFakeCodexQueue {
         bytes: VecDeque<u8>,
         cancelled: bool,
+        held_terminal: Option<VecDeque<u8>>,
     }
 
     struct InteractiveFakeCodexState {
@@ -4664,20 +4696,41 @@ mod proxy_host_tests {
         queue: Mutex<InteractiveFakeCodexQueue>,
         reflection: String,
         fail_turn: bool,
+        hold_terminal: bool,
         wake: Condvar,
     }
 
     impl InteractiveFakeCodexState {
+        fn encode_messages(messages: &[serde_json::Value]) -> io::Result<VecDeque<u8>> {
+            let mut bytes = VecDeque::new();
+            for message in messages {
+                let encoded = serde_json::to_vec(message)
+                    .map_err(|failure| io::Error::other(failure.to_string()))?;
+                bytes.extend(encoded);
+                bytes.push_back(b'\n');
+            }
+            Ok(bytes)
+        }
+
         fn enqueue(&self, messages: &[serde_json::Value]) -> io::Result<()> {
+            let bytes = Self::encode_messages(messages)?;
             let mut queue = self
                 .queue
                 .lock()
                 .map_err(|_| io::Error::other("fake Codex queue poisoned"))?;
-            for message in messages {
-                let encoded = serde_json::to_vec(message)
-                    .map_err(|failure| io::Error::other(failure.to_string()))?;
-                queue.bytes.extend(encoded);
-                queue.bytes.push_back(b'\n');
+            queue.bytes.extend(bytes);
+            self.wake.notify_all();
+            Ok(())
+        }
+
+        fn stage_terminal(&self, messages: &[serde_json::Value]) -> io::Result<()> {
+            let bytes = Self::encode_messages(messages)?;
+            let mut queue = self
+                .queue
+                .lock()
+                .map_err(|_| io::Error::other("fake Codex queue poisoned"))?;
+            if queue.cancelled || queue.held_terminal.replace(bytes).is_some() {
+                return Err(io::Error::other("fake Codex terminal gate rejected"));
             }
             self.wake.notify_all();
             Ok(())
@@ -4839,12 +4892,19 @@ mod proxy_host_tests {
                         observation.turn_input = Some(turn_input);
                         observation.turn_start_had_cwd = Some(turn_start_had_cwd);
                         observation.turn_output_schema = turn_output_schema;
-                        observation.reflection_emitted = !self.state.fail_turn;
+                        observation.reflection_emitted =
+                            !self.state.fail_turn && !self.state.hold_terminal;
                     }
-                    let responses = self
+                    let mut responses = self
                         .state
                         .turn_responses(request.get("id").unwrap_or(&serde_json::Value::Null));
-                    self.state.enqueue(&responses)
+                    let terminal = responses.split_off(2);
+                    self.state.enqueue(&responses)?;
+                    if self.state.hold_terminal {
+                        self.state.stage_terminal(&terminal)
+                    } else {
+                        self.state.enqueue(&terminal)
+                    }
                 }
                 _ => Err(io::Error::other(format!(
                     "unexpected fake Codex method {method}"
@@ -4916,33 +4976,94 @@ mod proxy_host_tests {
         state: Arc<InteractiveFakeCodexState>,
     }
 
+    struct InteractiveFakeCodexTerminalGate(Arc<InteractiveFakeCodexState>);
+
+    impl InteractiveFakeCodexTerminalGate {
+        fn is_held(&self) -> bool {
+            self.0
+                .queue
+                .lock()
+                .expect("fake Codex queue")
+                .held_terminal
+                .is_some()
+        }
+
+        fn release_terminal(&self) -> io::Result<()> {
+            let mut observation = self
+                .0
+                .observation
+                .lock()
+                .map_err(|_| io::Error::other("fake Codex observation poisoned"))?;
+            let mut queue = self
+                .0
+                .queue
+                .lock()
+                .map_err(|_| io::Error::other("fake Codex queue poisoned"))?;
+            if queue.cancelled {
+                return Err(io::Error::other("fake Codex terminal gate cancelled"));
+            }
+            let terminal = queue
+                .held_terminal
+                .take()
+                .ok_or_else(|| io::Error::other("fake Codex terminal gate is empty"))?;
+            queue.bytes.extend(terminal);
+            observation.reflection_emitted = !self.0.fail_turn;
+            self.0.wake.notify_all();
+            Ok(())
+        }
+    }
+
     impl InteractiveFakeCodexProvider {
         fn new(reflection: String) -> (Self, Arc<Mutex<InteractiveFakeCodexObservation>>) {
-            Self::with_outcome(reflection, false)
+            let (provider, observation, _) = Self::with_outcome(reflection, false, false);
+            (provider, observation)
         }
 
         fn failing() -> (Self, Arc<Mutex<InteractiveFakeCodexObservation>>) {
-            Self::with_outcome(String::new(), true)
+            let (provider, observation, _) = Self::with_outcome(String::new(), true, false);
+            (provider, observation)
+        }
+
+        fn gated(
+            reflection: String,
+        ) -> (
+            Self,
+            Arc<Mutex<InteractiveFakeCodexObservation>>,
+            InteractiveFakeCodexTerminalGate,
+        ) {
+            let (provider, observation, state) = Self::with_outcome(reflection, false, true);
+            (
+                provider,
+                observation,
+                InteractiveFakeCodexTerminalGate(state),
+            )
         }
 
         fn with_outcome(
             reflection: String,
             fail_turn: bool,
-        ) -> (Self, Arc<Mutex<InteractiveFakeCodexObservation>>) {
+            hold_terminal: bool,
+        ) -> (
+            Self,
+            Arc<Mutex<InteractiveFakeCodexObservation>>,
+            Arc<InteractiveFakeCodexState>,
+        ) {
             let observation = Arc::new(Mutex::new(InteractiveFakeCodexObservation::default()));
             let state = Arc::new(InteractiveFakeCodexState {
                 observation: Arc::clone(&observation),
                 queue: Mutex::new(InteractiveFakeCodexQueue::default()),
                 reflection,
                 fail_turn,
+                hold_terminal,
                 wake: Condvar::new(),
             });
             (
                 Self {
                     control: Arc::new(InteractiveFakeCodexControl(Arc::clone(&state))),
-                    state,
+                    state: Arc::clone(&state),
                 },
                 observation,
+                state,
             )
         }
     }
@@ -5199,6 +5320,107 @@ mod proxy_host_tests {
         assert!(
             !isolation_root.exists(),
             "verified teardown removes the owned zero-model isolation root"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires WSL2, bubblewrap, and the exact frozen Hermes runtime"]
+    fn official_hermes_gateway_reconciles_gated_fake_codex_without_resubmission() {
+        let request = zero_model_request();
+        let job = zero_model_job(request.clone());
+        let reflection = zero_model_reflection(&job);
+        serde_json::from_str::<serde_json::Value>(&reflection).expect("canonical reflection JSON");
+        let (provider, observation, terminal_gate) =
+            InteractiveFakeCodexProvider::gated(reflection);
+        let isolation_root = std::env::temp_dir().join(format!(
+            "lattice-hermes-official-zero-model-recovery-{}-{}",
+            std::process::id(),
+            RUNNER_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let containment = HermesWslContainmentConfig::new(
+            r"C:\Windows\System32\wsl.exe",
+            OFFICIAL_RUNTIME_GUEST_ROOT,
+            isolation_root.clone(),
+            fs::canonicalize(std::env::current_dir().expect("cwd"))
+                .expect("canonical product root"),
+        )
+        .expect("official zero-model recovery containment");
+        let mut config = HermesProductionRunnerConfig::official_with_broker_digest(
+            containment,
+            &zero_model_runtime_manifest(),
+            &ContentDigest::from_sha256("ff".repeat(32)).expect("broker digest"),
+            "production-zero-model-recovery-key",
+            "hermes-agent",
+            Duration::from_secs(10),
+            Duration::from_secs(4),
+            Duration::from_millis(1),
+        )
+        .expect("official zero-model recovery config");
+        config.codex_provider = Some(Box::new(provider));
+        let runner = config
+            .launch(Instant::now() + Duration::from_secs(20))
+            .expect("official Hermes gateway starts");
+        assert!(
+            runner.containment_receipt().endpoint().ip().is_loopback(),
+            "the no-model recovery endpoint stays loopback-only"
+        );
+        let mut port = runner
+            .bind(job.clone())
+            .expect("bind zero-model recovery job");
+        let failure = port
+            .run_reflection_evidence(&request)
+            .expect_err("withheld terminal event must exhaust the first observation deadline");
+        assert_eq!(failure.kind(), lattice_ports::PortErrorKind::Timeout);
+        assert_eq!(failure.code(), "HERMES_RUN_DEADLINE_EXCEEDED");
+        assert!(
+            terminal_gate.is_held(),
+            "terminal response is held after submission"
+        );
+        let receipt = port
+            .active_recovery_receipt()
+            .expect("post-submit timeout retains the known run")
+            .clone();
+        assert!(receipt.run_id().is_some());
+        assert_eq!(receipt.request_id(), "request-zero-model");
+        assert_eq!(receipt.session_id(), "session-zero-model");
+        assert_eq!(receipt.input_digest(), job.input_digest());
+        assert_eq!(receipt.model(), "hermes-agent");
+
+        terminal_gate
+            .release_terminal()
+            .expect("release the one held fake Codex terminal response");
+        let recovered = port
+            .reconcile_reflection_evidence(&request, &receipt)
+            .expect("same-port reconciliation returns normalized evidence");
+        assert_eq!(recovered.evidence().invocation(), request.invocation());
+        assert_eq!(
+            recovered.reflection().binding().input_digest(),
+            job.input_digest().as_str()
+        );
+        assert_eq!(
+            recovered.reflection().output_digest(),
+            recovered.evidence().output_digest()
+        );
+        assert_eq!(
+            recovered.evidence().runtime(),
+            lattice_contracts::RuntimeKind::Live
+        );
+        assert!(port.active_recovery_receipt().is_none());
+        port.terminate()
+            .expect("recovered production port tears down exactly");
+
+        let observed = observation.lock().expect("fake Codex observation");
+        assert_eq!(
+            observed.calls,
+            ["initialize", "initialized", "thread/start", "turn/start"],
+            "reconciliation must not submit a second turn"
+        );
+        assert!(observed.reflection_emitted);
+        assert_eq!(observed.terminate_calls, 1);
+        drop(observed);
+        assert!(
+            !isolation_root.exists(),
+            "verified recovery teardown removes the owned zero-model isolation root"
         );
     }
 

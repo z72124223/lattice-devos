@@ -12,6 +12,7 @@ allowed_paths:
   - docs/tickets/TASK-072-production-hermes-recovery-acceptance.md
   - crates/lattice-hermes-adapter/src/production.rs
   - crates/lattice-hermes-adapter/src/wsl_outer_runner.py
+  - crates/lattice-hermes-adapter/tests/wsl_outer_runner_fixture.py
   - PLANS.md
   - HANDOFF.md
 branch: feature/task-051-p0-platform-live-acceptance
