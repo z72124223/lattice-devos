@@ -956,6 +956,38 @@ fn latticed_hermes_launch_routes_to_production_configuration() {
     );
 }
 
+#[test]
+fn canonical_latticed_production_hermes_mode_does_not_eagerly_launch() {
+    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
+        .env_clear()
+        .env("LATTICE_HERMES_MODE", "PRODUCTION")
+        .output()
+        .expect("start canonical latticed production Hermes mode");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    assert!(stderr.ends_with("LATTICED_CONFIGURATION_REJECTED\n"));
+    assert!(!stderr.contains("LATTICE_HERMES_PREPARATION_REQUIRED"));
+    assert!(!stderr.contains("LATTICE_HERMES_READY"));
+}
+
+#[test]
+fn canonical_latticed_rejects_unknown_hermes_mode_without_echoing_it() {
+    const MODE_SENTINEL: &str = "not-a-valid-mode-sensitive-sentinel";
+    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
+        .env_clear()
+        .env("LATTICE_HERMES_MODE", MODE_SENTINEL)
+        .output()
+        .expect("start canonical latticed with invalid Hermes mode");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    assert!(stderr.ends_with("LATTICED_CONFIGURATION_REJECTED\n"));
+    assert!(!stderr.contains(MODE_SENTINEL));
+}
+
 #[cfg(windows)]
 #[test]
 fn latticed_hermes_runtime_preflight_rejects_invalid_isolation_configuration() {

@@ -4,8 +4,8 @@
   implementation window
 - Date: 2026-08-05
 - Decision owner: user
-- Related: SPEC-002 v29, ADR-004, ADR-005, ADR-006, ADR-015, ADR-023,
-  TASK-032, TASK-060
+- Related: SPEC-002 v30, ADR-004, ADR-005, ADR-006, ADR-015, ADR-023,
+  TASK-032, TASK-060, TASK-064
 
 ## Context
 
@@ -137,3 +137,14 @@ and never reach Hermes; only EOF/read failure is a lifecycle signal. The fixed
 `LATTICE_HERMES_READY` stderr diagnostic means only that the reader exists and
 the runner passed live verification; it is not durable truth or acceptance. The legacy
 `lattice-full-chain` observer remains unchanged.
+
+## 2026-08-13 Canonical Hermes Composition Clarification
+
+TASK-064 adds no gateway, tool, schema, provider, credential source, or durable
+authority. Canonical no-argument `latticed` may opt into the already-owned
+production Hermes adapter through exact process configuration. The runner is
+not started at process startup: only Delivery Run may activate it, before any
+writer effect. Delivery Status and both Task tools remain zero-Hermes paths.
+The same composition root explicitly terminates an activated runner when MCP
+stdio ends; an ambiguous teardown is the terminal result even when stdio
+otherwise succeeded or already failed.

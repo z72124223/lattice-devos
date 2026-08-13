@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 29
+version: 30
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -23,7 +23,7 @@ modules:
   - module_id: orchestrator-runtime
     constitution_version: 2.5
   - module_id: latticed
-    constitution_version: 1.5
+    constitution_version: 1.6
   - module_id: openclaw-adapter
     constitution_version: 2.0
   - module_id: gateway-ipc
@@ -192,7 +192,7 @@ creating duplicate authorities or an unconstrained self-modifying agent.
   preparation, Codex execution, workspace/test/Git verification, and durable
   outcome/receipt recording; it selects no concrete adapter and performs no
   direct I/O.
-- `latticed` 1.5 is the sole normal composition root. The existing
+- `latticed` 1.6 is the sole normal composition root. The existing
   `apps/lattice-runtime` package implements it, selects concrete adapters, and
   retains `lattice-runtime` only as a compatibility wrapper over the same
   composition and state.
@@ -797,7 +797,7 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | workspace-git | 2.0 | Worktree/Git/filesystem evidence only; consumes lease authority |
 | scope-check | 1.1 | Language-neutral contract; mission remains detection-only |
 | orchestrator-runtime | 2.5 | Preserve delivery ordering and pure injected-port coordination/dispatch plus snapshot -> Graphify -> validate -> memory persist/retrieve ordering; no concrete adapter or transport dependency |
-| latticed | 1.5 | Sole normal composition root; four bounded MCP tools preserve the delivery/task contracts, while exact `--hermes-launch` owns only the existing ephemeral production Hermes lifecycle |
+| latticed | 1.6 | Sole normal composition root; four bounded MCP tools preserve delivery/task contracts, exact `--hermes-launch` owns standalone lifecycle, and opt-in `PRODUCTION` mode lazily activates Hermes only for Delivery Run |
 | openclaw-adapter | 2.0 | Inert scaffold becomes a thin local IPC gateway |
 | gateway-ipc | 1.1 | Bounded canonical six-action protocol, NFC-preserving encoder, truthful core-service errors, and deterministic fake loopback; live transport and OS authentication remain deferred |
 | approval-verifier | 1.0 | Pure typed-subject/challenge/proof/nonce/time/current-head owner and deterministic fake; live trust/claim remains deferred |
@@ -1357,6 +1357,13 @@ packaging modules do not activate functional provider modules.
   verification and the stdin reader is established; it is not durable truth,
   reflection evidence, or full-chain acceptance. Stdin bytes are discarded and
   never reach Hermes; only EOF or read failure has lifecycle meaning.
+- [x] AC-41: TASK-064 lets canonical no-argument `latticed` select exact
+  process-owned `TASK_ONLY` or `PRODUCTION` Hermes mode without changing its
+  four MCP tools or schemas. Production mode is lazy: Delivery Status and both
+  Task tools perform zero Hermes activation; Delivery Run must obtain one
+  production-sealed runner before writer effects. MCP shutdown explicitly
+  terminates any activated runner, and teardown ambiguity overrides stdio
+  success or failure. Unknown mode values are rejected without echoing them.
 
 ## Verification Plan
 
@@ -1393,6 +1400,7 @@ packaging modules do not activate functional provider modules.
 | AC-37 | contracts/ports/orchestrator call-order tests, exact MCP tool-list/schema tests, compatibility-wrapper parity, official Codex app-server acceptance, isolated Git fixture, fixed test, local commit and separate PostgreSQL restart/status replay | typed intent-before-effect and outcome-after-effect evidence; exactly four bounded MCP tools with two zero-parameter delivery schemas and two closed task schemas; no caller shell/SQL/path/credential input; one verified commit and replayed terminal receipt; scripted evidence remains distinguishable from official live evidence |
 | AC-39 | orchestrator matrices plus lattice-runtime composition-flow tests | verified projection, deterministic next-round dispatch/archive, fail-closed ambiguity and conflict handling, zero new I/O or MCP surface |
 | AC-40 | exact CLI integration, controlled lifecycle owner, bounded local launch, process cleanup, and four-tool MCP regression | runner launches once, child death cannot look healthy, EOF/error proves teardown, output is redacted, and MCP remains unchanged |
+| AC-41 | exact mode/redaction integration tests, recording lifecycle owner, one-shot activation and explicit teardown unit tests, plus complete runtime/MCP regression | default and `TASK_ONLY` preserve the old path; only production Delivery Run activates once before writer effects; status/task paths activate zero times; canonical MCP teardown ambiguity cannot exit 0; four tools and schemas remain unchanged |
 
 ## Human Decisions
 

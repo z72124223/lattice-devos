@@ -1,7 +1,7 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 1.5
+version: 1.6
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-13
@@ -59,6 +59,12 @@ Orchestrator composition.
   arguments, reuses the production Hermes configuration and runner from the
   full-chain composition, reports only fixed redacted failures, grants no MCP
   or task authority, and owns the runner until bounded shutdown.
+- Through canonical no-argument `latticed`, accept only process-owned
+  `LATTICE_HERMES_MODE=TASK_ONLY|PRODUCTION`. The default and `TASK_ONLY`
+  preserve the task-only composition. `PRODUCTION` configures one lazy Hermes
+  owner: only `lattice_delivery_run` may activate it, before writer effects;
+  Delivery Status and both Task tools perform zero Hermes activation. MCP EOF
+  explicitly reaps an activated runner, and teardown ambiguity cannot exit 0.
 - Select every project, snapshot, repository/base, scope, verification,
   capability, budget, approval, prompt, workspace, and downstream binding from
   process-start composition configuration, never from MCP arguments.
@@ -250,3 +256,4 @@ constitution cannot be weakened merely to excuse implementation drift.
 | 1.3 | 2026-08-10 | SPEC-003 v3, ADR-023 security correction, TASK-038 | Make canonical `latticed` the sole official writer entry and restrict the legacy CLI delivery command to the exact visibly scripted fixture | User TASK-038-first security boundary |
 | 1.4 | 2026-08-10 | SPEC-003 v4, ADR-023 alternate-entry correction, TASK-038 | Restrict alternate `lattice-full-chain` to a read-only delivery observer and reserve all official mutation plus task control for canonical `latticed` | User TASK-038-first One Writer boundary |
 | 1.5 | 2026-08-13 | SPEC-002 v29, ADR-021 clarification, TASK-060 | Add canonical `latticed --hermes-launch` as bounded owner of the existing production Hermes runner without changing MCP, truth, credential, or dependency boundaries | User goal-mode direction to complete Hermes |
+| 1.6 | 2026-08-13 | SPEC-002 v30, ADR-021 clarification, TASK-064 | Add opt-in lazy production Hermes composition to canonical four-tool `latticed`; preserve task/status zero-effect paths and require explicit teardown | User goal-mode direction to integrate Hermes into LATTICE |

@@ -1,3 +1,31 @@
+# TASK-064 Local Handoff — 2026-08-13
+
+## Outcome
+
+Canonical four-tool `latticed` now owns an opt-in lazy production Hermes path.
+The default and exact `TASK_ONLY` mode retain the previous behavior. Exact
+`LATTICE_HERMES_MODE=PRODUCTION` creates no child at process startup; only
+Delivery Run activates the governed production runner, before writer effects.
+Delivery Status and both Task tools remain zero-Hermes paths.
+
+Canonical MCP shutdown explicitly terminates an activated owner once, and an
+ambiguous teardown cannot become exit 0. Unknown mode values are rejected with
+fixed diagnostics without echoing their values. MCP discovery remains exactly
+four tools with unchanged schemas. Legacy `lattice-full-chain` exit behavior is
+unchanged.
+
+Verification on the final candidate snapshot: workspace Rust tests PASS;
+runtime all-targets PASS (92 library, 20 composition, 1 coordination,
+5 dispatch, 31 MCP, 1 task-control); Node verify PASS 48/48; format, diff, and
+project checks PASS. Independent code, test, and architecture reviews report
+no P0/P1/P2. Strict runtime Clippy remains blocked by 17 pre-existing
+diagnostics in unchanged `lattice-hermes-adapter` files; TASK-064 adds no
+suppression.
+
+No credential was read, no Hermes/model request was launched, and no push,
+merge, deployment, or release was performed. The existing untracked TASK-051
+platform-acceptance script remains excluded and untouched.
+
 # TASK-056 Local Handoff — 2026-08-13
 
 ## Outcome

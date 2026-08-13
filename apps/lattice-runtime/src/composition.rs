@@ -1877,9 +1877,9 @@ fn delivery_environment_for_mode(
     ))
 }
 
-/// Starts the canonical newline-delimited MCP stdio server with only the
-/// bounded governed writer slice active. It does not launch `OpenClaw` or
-/// Hermes while TASK-038 is being accepted independently from TASK-037.
+/// Starts the canonical newline-delimited MCP stdio server. The default
+/// `TASK_ONLY` mode remains Hermes-free; exact `PRODUCTION` mode may lazily
+/// activate Hermes only when Delivery Run is invoked.
 ///
 /// # Errors
 ///
@@ -1905,6 +1905,29 @@ where
             return Err(error);
         }
     };
+    let hermes_mode = match canonical_hermes_mode_from_environment() {
+        Ok(mode) => mode,
+        Err(error) => {
+            diagnostic(StartupDiagnostic::failure(
+                "NONE",
+                "REJECTED",
+                "NOT_CHECKED",
+                error.kind(),
+            ));
+            return Err(error);
+        }
+    };
+    #[cfg(not(windows))]
+    if hermes_mode == CanonicalHermesMode::Production {
+        let error = LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired);
+        diagnostic(StartupDiagnostic::failure(
+            "NONE",
+            "REJECTED",
+            "NOT_CHECKED",
+            error.kind(),
+        ));
+        return Err(error);
+    }
     let (config, database, password) = match delivery_environment_for_mode(run_mode) {
         Ok(environment) => environment,
         Err(error) => {
@@ -1931,14 +1954,26 @@ where
     };
     diagnostic(StartupDiagnostic::configuration_validated());
     diagnostic(StartupDiagnostic::service_assembly_started());
+    let hermes = match hermes_mode {
+        CanonicalHermesMode::TaskOnly => CanonicalHermes::TaskOnly(DeferredTaskHermes),
+        #[cfg(windows)]
+        CanonicalHermesMode::Production => CanonicalHermes::Production {
+            active: None,
+            activation_attempted: false,
+        },
+        #[cfg(not(windows))]
+        CanonicalHermesMode::Production => {
+            unreachable!("non-Windows production mode returns before composition")
+        }
+    };
     let (service, binding) = assemble_full_chain_service_with_mode(
         config,
         &database,
         &password,
-        DeferredTaskHermes,
+        hermes,
         submission,
         run_mode,
-        false,
+        hermes_mode == CanonicalHermesMode::Production,
     )
     .inspect_err(|error| {
         diagnostic(StartupDiagnostic::failure(
@@ -1952,9 +1987,16 @@ where
     diagnostic(StartupDiagnostic::stdio_loop_entered());
     let input = io::stdin();
     let output = io::stdout();
-    mcp::serve_with_lifecycle_observer(service, binding, input.lock(), output.lock(), |event| {
-        diagnostic(StartupDiagnostic::from_mcp_event(event));
-    })
+    let shutdown = service.clone();
+    let serve_result = mcp::serve_with_lifecycle_observer(
+        service,
+        binding,
+        input.lock(),
+        output.lock(),
+        |event| {
+            diagnostic(StartupDiagnostic::from_mcp_event(event));
+        },
+    )
     .map_err(|_| {
         let error = LatticedError::new(LatticedErrorKind::Transport);
         diagnostic(StartupDiagnostic::failure(
@@ -1964,7 +2006,8 @@ where
             error.kind(),
         ));
         error
-    })
+    });
+    shutdown.finish_hermes_session(serve_result)
 }
 
 /// One live Hermes result carrying both normalized evidence and persistable content.
@@ -1982,8 +2025,13 @@ struct HermesProductionSeal {
 }
 
 mod production_hermes_sealed {
+    use super::LatticedError;
+
     pub trait Sealed {
         fn has_production_seal(&self) -> bool;
+        fn is_production_configured(&self) -> bool;
+        fn ensure_ready(&mut self, run_id: &str) -> Result<(), LatticedError>;
+        fn terminate(&mut self) -> Result<(), LatticedError>;
     }
 }
 
@@ -2059,6 +2107,20 @@ impl production_hermes_sealed::Sealed for DeferredTaskHermes {
     fn has_production_seal(&self) -> bool {
         false
     }
+
+    fn is_production_configured(&self) -> bool {
+        false
+    }
+
+    fn ensure_ready(&mut self, _run_id: &str) -> Result<(), LatticedError> {
+        Err(LatticedError::new(
+            LatticedErrorKind::HermesProductionRunnerRequired,
+        ))
+    }
+
+    fn terminate(&mut self) -> Result<(), LatticedError> {
+        Ok(())
+    }
 }
 
 impl HermesPort for DeferredTaskHermes {
@@ -2095,6 +2157,159 @@ impl FullChainHermesPort for DeferredTaskHermes {
             PortErrorKind::Denied,
             "HERMES_DEFERRED_UNTIL_TASK037",
         ))
+    }
+}
+
+enum CanonicalHermes {
+    TaskOnly(DeferredTaskHermes),
+    #[cfg(windows)]
+    Production {
+        active: Option<FullChainHermes>,
+        activation_attempted: bool,
+    },
+}
+
+fn activate_canonical_hermes_once<'a, T, F>(
+    active: &'a mut Option<T>,
+    activation_attempted: &mut bool,
+    launch: F,
+) -> Result<&'a mut T, LatticedError>
+where
+    F: FnOnce() -> Result<T, LatticedError>,
+{
+    if active.is_none() {
+        if *activation_attempted {
+            return Err(LatticedError::new(
+                LatticedErrorKind::HermesProductionRunnerRequired,
+            ));
+        }
+        *activation_attempted = true;
+        *active = Some(launch()?);
+    }
+    active
+        .as_mut()
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))
+}
+
+impl production_hermes_sealed::Sealed for CanonicalHermes {
+    fn has_production_seal(&self) -> bool {
+        match self {
+            Self::TaskOnly(hermes) => hermes.has_production_seal(),
+            #[cfg(windows)]
+            Self::Production { active, .. } => active
+                .as_ref()
+                .is_some_and(production_hermes_sealed::Sealed::has_production_seal),
+        }
+    }
+
+    fn is_production_configured(&self) -> bool {
+        #[cfg(windows)]
+        {
+            matches!(self, Self::Production { .. })
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    fn ensure_ready(&mut self, run_id: &str) -> Result<(), LatticedError> {
+        match self {
+            Self::TaskOnly(hermes) => hermes.ensure_ready(run_id),
+            #[cfg(windows)]
+            Self::Production {
+                active,
+                activation_attempted,
+            } => {
+                let hermes = activate_canonical_hermes_once(active, activation_attempted, || {
+                    require_hermes_preparation_environment()?;
+                    HermesEnvironmentConfig::from_environment()?.launch(run_id)
+                })?;
+                hermes.ensure_ready(run_id)
+            }
+        }
+    }
+
+    fn terminate(&mut self) -> Result<(), LatticedError> {
+        match self {
+            Self::TaskOnly(hermes) => hermes.terminate(),
+            #[cfg(windows)]
+            Self::Production { active, .. } => active.take().map_or(Ok(()), |mut hermes| {
+                production_hermes_sealed::Sealed::terminate(&mut hermes)
+            }),
+        }
+    }
+}
+
+impl HermesPort for CanonicalHermes {
+    fn research(&mut self, request: HermesResearchRequest) -> PortResult<HermesEvidence> {
+        match self {
+            Self::TaskOnly(hermes) => hermes.research(request),
+            #[cfg(windows)]
+            Self::Production { active, .. } => active.as_mut().map_or_else(
+                || {
+                    Err(PortError::new(
+                        Component::Hermes,
+                        PortErrorKind::Denied,
+                        "HERMES_PRODUCTION_RUNNER_REQUIRED",
+                    ))
+                },
+                |hermes| hermes.research(request),
+            ),
+        }
+    }
+
+    fn interrupt(&mut self, request_id: &RequestId) -> PortResult<()> {
+        match self {
+            Self::TaskOnly(hermes) => hermes.interrupt(request_id),
+            #[cfg(windows)]
+            Self::Production { active, .. } => active.as_mut().map_or_else(
+                || {
+                    Err(PortError::new(
+                        Component::Hermes,
+                        PortErrorKind::Denied,
+                        "HERMES_PRODUCTION_RUNNER_REQUIRED",
+                    ))
+                },
+                |hermes| hermes.interrupt(request_id),
+            ),
+        }
+    }
+}
+
+impl FullChainHermesPort for CanonicalHermes {
+    fn runtime_kind(&self) -> RuntimeKind {
+        match self {
+            Self::TaskOnly(hermes) => hermes.runtime_kind(),
+            #[cfg(windows)]
+            Self::Production { active, .. } => active
+                .as_ref()
+                .map_or(RuntimeKind::Fake, FullChainHermesPort::runtime_kind),
+        }
+    }
+
+    fn research_canonical(
+        &mut self,
+        request: &HermesResearchRequest,
+        graph_request: &GraphMemoryRunRequest,
+        graph_receipt: &GraphMemoryReceipt,
+    ) -> PortResult<ProductionHermesOutput> {
+        match self {
+            Self::TaskOnly(hermes) => {
+                hermes.research_canonical(request, graph_request, graph_receipt)
+            }
+            #[cfg(windows)]
+            Self::Production { active, .. } => active.as_mut().map_or_else(
+                || {
+                    Err(PortError::new(
+                        Component::Hermes,
+                        PortErrorKind::Denied,
+                        "HERMES_PRODUCTION_RUNNER_REQUIRED",
+                    ))
+                },
+                |hermes| hermes.research_canonical(request, graph_request, graph_receipt),
+            ),
+        }
     }
 }
 
@@ -2135,6 +2350,43 @@ impl FullChainHermes {
 impl production_hermes_sealed::Sealed for FullChainHermes {
     fn has_production_seal(&self) -> bool {
         self.ready.is_some()
+    }
+
+    fn is_production_configured(&self) -> bool {
+        true
+    }
+
+    fn ensure_ready(&mut self, _run_id: &str) -> Result<(), LatticedError> {
+        if let Some(runner) = self.ready.as_mut() {
+            if runner.verify_live().is_ok() {
+                return Ok(());
+            }
+            return match production_hermes_sealed::Sealed::terminate(self) {
+                Ok(()) => Err(LatticedError::new(
+                    LatticedErrorKind::HermesProductionLivenessRejected,
+                )),
+                Err(teardown) => Err(teardown),
+            };
+        } else if self.bound.is_some() {
+            Ok(())
+        } else {
+            Err(LatticedError::new(
+                LatticedErrorKind::HermesProductionRunnerRequired,
+            ))
+        }
+    }
+
+    fn terminate(&mut self) -> Result<(), LatticedError> {
+        if let Some(port) = self.bound.take() {
+            return port
+                .terminate()
+                .map_err(|_| LatticedError::new(LatticedErrorKind::HermesTeardownRejected));
+        }
+        self.ready.take().map_or(Ok(()), |runner| {
+            runner
+                .terminate()
+                .map_err(|_| LatticedError::new(LatticedErrorKind::HermesTeardownRejected))
+        })
     }
 }
 
@@ -2753,6 +3005,12 @@ enum FullChainRunMode {
     ResumeExisting,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CanonicalHermesMode {
+    TaskOnly,
+    Production,
+}
+
 const CONTROLLED_TASK_SCHEMA_OUTPUT_CHILD: &str = "codex-schema-output";
 
 fn controlled_task_delivery_config(
@@ -2801,6 +3059,26 @@ fn full_chain_run_mode_from_environment() -> Result<FullChainRunMode, LatticedEr
         Err(env::VarError::NotUnicode(_)) => {
             Err(LatticedError::new(LatticedErrorKind::Configuration))
         }
+    }
+}
+
+fn canonical_hermes_mode_from_environment() -> Result<CanonicalHermesMode, LatticedError> {
+    match env::var("LATTICE_HERMES_MODE") {
+        Ok(value) => canonical_hermes_mode_from_value(Some(&value)),
+        Err(env::VarError::NotPresent) => canonical_hermes_mode_from_value(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(LatticedError::new(LatticedErrorKind::Configuration))
+        }
+    }
+}
+
+fn canonical_hermes_mode_from_value(
+    value: Option<&str>,
+) -> Result<CanonicalHermesMode, LatticedError> {
+    match value {
+        None | Some("TASK_ONLY") => Ok(CanonicalHermesMode::TaskOnly),
+        Some("PRODUCTION") => Ok(CanonicalHermesMode::Production),
+        Some(_) => Err(LatticedError::new(LatticedErrorKind::Configuration)),
     }
 }
 
@@ -3443,6 +3721,61 @@ impl<H> Clone for FullChainService<H> {
 }
 
 impl<H: FullChainHermesPort> FullChainService<H> {
+    fn finish_hermes_session(
+        &self,
+        serve_result: Result<(), LatticedError>,
+    ) -> Result<(), LatticedError> {
+        let mut core = self
+            .inner
+            .lock()
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesTeardownRejected))?;
+        finish_hermes_owner(serve_result, &mut core.hermes)
+    }
+}
+
+fn finish_hermes_owner<H: FullChainHermesPort>(
+    serve_result: Result<(), LatticedError>,
+    hermes: &mut H,
+) -> Result<(), LatticedError> {
+    finish_hermes_session(
+        serve_result,
+        production_hermes_sealed::Sealed::terminate(hermes),
+    )
+}
+
+fn finish_hermes_session(
+    serve_result: Result<(), LatticedError>,
+    teardown_result: Result<(), LatticedError>,
+) -> Result<(), LatticedError> {
+    match teardown_result {
+        Ok(()) => serve_result,
+        Err(teardown) => Err(teardown),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CanonicalHermesTool {
+    DeliveryRun,
+    DeliveryStatus,
+    TaskSubmit,
+    TaskStatus,
+}
+
+fn apply_canonical_hermes_tool_policy<H: FullChainHermesPort>(
+    hermes: &mut H,
+    run_id: &str,
+    tool: CanonicalHermesTool,
+) -> Result<(), ToolExecutionError> {
+    if tool == CanonicalHermesTool::DeliveryRun
+        && production_hermes_sealed::Sealed::is_production_configured(hermes)
+    {
+        production_hermes_sealed::Sealed::ensure_ready(hermes, run_id)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+    }
+    Ok(())
+}
+
+impl<H: FullChainHermesPort> FullChainService<H> {
     fn run_delivery_tool_core(
         core: &mut FullChainCore<H>,
         entry: FullChainEntry,
@@ -3450,6 +3783,12 @@ impl<H: FullChainHermesPort> FullChainService<H> {
         if core.run_mode != FullChainRunMode::Fresh {
             return Err(ToolExecutionError::new("LATTICE_DELIVERY_RUN_STATUS_ONLY"));
         }
+        let run_id = core.delivery.database.run_id().to_owned();
+        apply_canonical_hermes_tool_policy(
+            &mut core.hermes,
+            &run_id,
+            CanonicalHermesTool::DeliveryRun,
+        )?;
         let binding = core.submission.binding().clone();
         let evidence = Self::run_controlled_writer(
             core,
@@ -3674,6 +4013,12 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
                 "LATTICE_FULL_CHAIN_BINDING_REJECTED",
             ));
         }
+        let run_id = core.delivery.database.run_id().to_owned();
+        apply_canonical_hermes_tool_policy(
+            &mut core.hermes,
+            &run_id,
+            CanonicalHermesTool::DeliveryStatus,
+        )?;
         let binding = core.submission.binding().clone();
         let mut lifecycle =
             task_lifecycle(&core).map_err(|error| ToolExecutionError::new(error.code()))?;
@@ -3700,6 +4045,12 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             .inner
             .lock()
             .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Transport.code()))?;
+        let run_id = core.delivery.database.run_id().to_owned();
+        apply_canonical_hermes_tool_policy(
+            &mut core.hermes,
+            &run_id,
+            CanonicalHermesTool::TaskSubmit,
+        )?;
         let existing_completion_policy = match core.run_mode {
             FullChainRunMode::Fresh => ExistingCompletionPolicy::Ignore,
             FullChainRunMode::ResumeExisting => ExistingCompletionPolicy::Require,
@@ -3723,6 +4074,12 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             .inner
             .lock()
             .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Transport.code()))?;
+        let run_id = core.delivery.database.run_id().to_owned();
+        apply_canonical_hermes_tool_policy(
+            &mut core.hermes,
+            &run_id,
+            CanonicalHermesTool::TaskStatus,
+        )?;
         let binding = core.submission.binding().clone();
         let mut lifecycle =
             task_lifecycle(&core).map_err(|error| ToolExecutionError::new(error.code()))?;
@@ -3862,18 +4219,7 @@ pub fn serve_full_chain_from_environment() -> Result<(), LatticedError> {
 /// Returns the existing production configuration or runner failure before
 /// reporting a successful process exit.
 pub fn launch_hermes_from_environment() -> Result<(), LatticedError> {
-    if [
-        "LATTICE_HERMES_PRODUCT_ROOT",
-        "LATTICE_HERMES_PREPARATION_ROOT",
-        "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
-    ]
-    .iter()
-    .any(|name| std::env::var_os(name).is_none())
-    {
-        return Err(LatticedError::new(
-            LatticedErrorKind::HermesPreparationMissing,
-        ));
-    }
+    require_hermes_preparation_environment()?;
     #[cfg(not(windows))]
     {
         Err(LatticedError::new(
@@ -3890,6 +4236,22 @@ pub fn launch_hermes_from_environment() -> Result<(), LatticedError> {
             emit_hermes_launch_ready,
         )
     }
+}
+
+fn require_hermes_preparation_environment() -> Result<(), LatticedError> {
+    if [
+        "LATTICE_HERMES_PRODUCT_ROOT",
+        "LATTICE_HERMES_PREPARATION_ROOT",
+        "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
+    ]
+    .iter()
+    .any(|name| std::env::var_os(name).is_none())
+    {
+        return Err(LatticedError::new(
+            LatticedErrorKind::HermesPreparationMissing,
+        ));
+    }
+    Ok(())
 }
 
 fn emit_hermes_launch_ready() -> Result<(), LatticedError> {
@@ -4212,9 +4574,9 @@ where
     if config.runtime != DeliveryRuntime::OfficialCodexAppServer {
         return Err(LatticedError::new(LatticedErrorKind::OfficialLiveBlocked));
     }
-    let has_production_hermes = hermes.runtime_kind() == RuntimeKind::Live
-        && production_hermes_sealed::Sealed::has_production_seal(&hermes);
-    if require_production_hermes != has_production_hermes {
+    let is_production_configured =
+        production_hermes_sealed::Sealed::is_production_configured(&hermes);
+    if require_production_hermes != is_production_configured {
         return Err(LatticedError::new(
             LatticedErrorKind::HermesProductionRunnerRequired,
         ));
@@ -6655,6 +7017,232 @@ mod tests {
         );
         assert!(parse_full_chain_run_mode(Some("resume_existing")).is_err());
         assert!(parse_full_chain_run_mode(Some("")).is_err());
+    }
+
+    #[test]
+    fn canonical_hermes_mode_is_explicit_and_fail_closed() {
+        assert_eq!(
+            canonical_hermes_mode_from_value(None).expect("default task-only mode"),
+            CanonicalHermesMode::TaskOnly
+        );
+        assert_eq!(
+            canonical_hermes_mode_from_value(Some("TASK_ONLY")).expect("explicit task-only mode"),
+            CanonicalHermesMode::TaskOnly
+        );
+        assert_eq!(
+            canonical_hermes_mode_from_value(Some("PRODUCTION")).expect("production mode"),
+            CanonicalHermesMode::Production
+        );
+        assert!(canonical_hermes_mode_from_value(Some("production")).is_err());
+        assert!(canonical_hermes_mode_from_value(Some("")).is_err());
+    }
+
+    #[test]
+    fn canonical_hermes_activation_launches_once_and_does_not_retry_failure() {
+        let mut active = None;
+        let mut attempted = false;
+        let mut launch_calls = 0;
+
+        assert_eq!(
+            *activate_canonical_hermes_once(&mut active, &mut attempted, || {
+                launch_calls += 1;
+                Ok(7_u8)
+            })
+            .expect("first activation"),
+            7
+        );
+        assert_eq!(
+            *activate_canonical_hermes_once(&mut active, &mut attempted, || {
+                launch_calls += 1;
+                Ok(9_u8)
+            })
+            .expect("reuse active owner"),
+            7
+        );
+        assert_eq!(launch_calls, 1);
+
+        let mut failed_active: Option<u8> = None;
+        let mut failed_attempted = false;
+        let first =
+            activate_canonical_hermes_once(&mut failed_active, &mut failed_attempted, || {
+                Err(LatticedError::new(LatticedErrorKind::Configuration))
+            })
+            .expect_err("first activation failure");
+        assert_eq!(first.kind(), LatticedErrorKind::Configuration);
+        let second =
+            activate_canonical_hermes_once(&mut failed_active, &mut failed_attempted, || {
+                panic!("failed activation must not be retried")
+            })
+            .expect_err("failed activation stays closed");
+        assert_eq!(
+            second.kind(),
+            LatticedErrorKind::HermesProductionRunnerRequired
+        );
+    }
+
+    struct RecordingHermesLifecycle {
+        ready_calls: usize,
+        terminate_calls: usize,
+        teardown_fails: bool,
+    }
+
+    impl production_hermes_sealed::Sealed for RecordingHermesLifecycle {
+        fn has_production_seal(&self) -> bool {
+            true
+        }
+
+        fn is_production_configured(&self) -> bool {
+            true
+        }
+
+        fn ensure_ready(&mut self, _run_id: &str) -> Result<(), LatticedError> {
+            self.ready_calls += 1;
+            Ok(())
+        }
+
+        fn terminate(&mut self) -> Result<(), LatticedError> {
+            self.terminate_calls += 1;
+            if self.teardown_fails {
+                Err(LatticedError::new(
+                    LatticedErrorKind::HermesTeardownRejected,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl HermesPort for RecordingHermesLifecycle {
+        fn research(&mut self, _request: HermesResearchRequest) -> PortResult<HermesEvidence> {
+            Err(PortError::new(
+                Component::Hermes,
+                PortErrorKind::Denied,
+                "TEST_HERMES_RESEARCH_NOT_AVAILABLE",
+            ))
+        }
+
+        fn interrupt(&mut self, _request_id: &RequestId) -> PortResult<()> {
+            Ok(())
+        }
+    }
+
+    impl FullChainHermesPort for RecordingHermesLifecycle {
+        fn runtime_kind(&self) -> RuntimeKind {
+            RuntimeKind::Live
+        }
+
+        fn research_canonical(
+            &mut self,
+            _request: &HermesResearchRequest,
+            _graph_request: &GraphMemoryRunRequest,
+            _graph_receipt: &GraphMemoryReceipt,
+        ) -> PortResult<ProductionHermesOutput> {
+            Err(PortError::new(
+                Component::Hermes,
+                PortErrorKind::Denied,
+                "TEST_HERMES_RESEARCH_NOT_AVAILABLE",
+            ))
+        }
+    }
+
+    #[test]
+    fn canonical_tool_policy_activates_only_delivery_run_and_terminates_once() {
+        let mut hermes = RecordingHermesLifecycle {
+            ready_calls: 0,
+            terminate_calls: 0,
+            teardown_fails: false,
+        };
+        for tool in [
+            CanonicalHermesTool::DeliveryStatus,
+            CanonicalHermesTool::TaskSubmit,
+            CanonicalHermesTool::TaskStatus,
+        ] {
+            apply_canonical_hermes_tool_policy(&mut hermes, "task064-run", tool)
+                .expect("non-delivery tools keep Hermes inactive");
+        }
+        assert_eq!(hermes.ready_calls, 0);
+
+        apply_canonical_hermes_tool_policy(
+            &mut hermes,
+            "task064-run",
+            CanonicalHermesTool::DeliveryRun,
+        )
+        .expect("delivery run activates Hermes");
+        assert_eq!(hermes.ready_calls, 1);
+
+        finish_hermes_owner(Ok(()), &mut hermes).expect("explicit teardown succeeds");
+        assert_eq!(hermes.terminate_calls, 1);
+
+        let mut task_only = DeferredTaskHermes;
+        apply_canonical_hermes_tool_policy(
+            &mut task_only,
+            "task064-task-only",
+            CanonicalHermesTool::DeliveryRun,
+        )
+        .expect("task-only delivery retains the pre-TASK-064 path");
+    }
+
+    #[test]
+    fn canonical_session_calls_teardown_once_and_propagates_failure() {
+        let mut hermes = RecordingHermesLifecycle {
+            ready_calls: 0,
+            terminate_calls: 0,
+            teardown_fails: true,
+        };
+
+        let error = finish_hermes_owner(
+            Err(LatticedError::new(LatticedErrorKind::Transport)),
+            &mut hermes,
+        )
+        .expect_err("teardown ambiguity overrides transport failure");
+
+        assert_eq!(error.kind(), LatticedErrorKind::HermesTeardownRejected);
+        assert_eq!(hermes.terminate_calls, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_production_hermes_is_configured_but_inactive_until_delivery_run() {
+        let mut hermes = CanonicalHermes::Production {
+            active: None,
+            activation_attempted: false,
+        };
+
+        assert!(production_hermes_sealed::Sealed::is_production_configured(
+            &hermes
+        ));
+        assert!(!production_hermes_sealed::Sealed::has_production_seal(
+            &hermes
+        ));
+        assert_eq!(hermes.runtime_kind(), RuntimeKind::Fake);
+        production_hermes_sealed::Sealed::terminate(&mut hermes)
+            .expect("inactive production mode has no process to reap");
+    }
+
+    #[test]
+    fn hermes_teardown_failure_overrides_stdio_success_or_failure() {
+        assert_eq!(
+            finish_hermes_session(
+                Ok(()),
+                Err(LatticedError::new(
+                    LatticedErrorKind::HermesTeardownRejected,
+                )),
+            )
+            .expect_err("teardown ambiguity cannot become success")
+            .kind(),
+            LatticedErrorKind::HermesTeardownRejected
+        );
+        assert_eq!(
+            finish_hermes_session(
+                Err(LatticedError::new(LatticedErrorKind::Transport)),
+                Err(LatticedError::new(
+                    LatticedErrorKind::HermesTeardownRejected,
+                )),
+            )
+            .expect_err("teardown ambiguity has precedence")
+            .kind(),
+            LatticedErrorKind::HermesTeardownRejected
+        );
     }
 
     #[test]
