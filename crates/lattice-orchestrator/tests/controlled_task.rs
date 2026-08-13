@@ -9,9 +9,11 @@ use lattice_orchestrator::{
     ControlledTaskOrchestratorError, ControlledTaskRequest, run_controlled_task,
 };
 use lattice_ports::{
-    ControlledTaskExecutionError, ControlledTaskExecutionErrorKind, ControlledTaskExecutionPort,
-    ControlledTaskExecutionResult, TaskLifecycleError, TaskLifecycleErrorKind,
-    TaskLifecycleEvidence, TaskLifecyclePort, TaskLifecycleResult, WriterAuthorityGuardPort,
+    AutonomyDisposition, AutonomyModel, AutonomyReason, AutonomyReceiptProjection,
+    AutonomyVerification, ControlledTaskExecutionError, ControlledTaskExecutionErrorKind,
+    ControlledTaskExecutionPort, ControlledTaskExecutionResult, TaskLifecycleError,
+    TaskLifecycleErrorKind, TaskLifecycleEvidence, TaskLifecyclePort, TaskLifecycleResult,
+    WriterAuthorityGuardPort,
 };
 use lattice_task_domain::TaskState;
 use lattice_writer_lease::{
@@ -57,6 +59,7 @@ struct FakeLifecycle {
     binding: SubjectBinding,
     state: TaskState,
     result_digest: Option<ContentDigest>,
+    autonomy_receipt: Option<AutonomyReceiptProjection>,
     reject_stopping_authority_as_stale: bool,
 }
 
@@ -67,18 +70,24 @@ impl FakeLifecycle {
             binding: binding(),
             state: TaskState::Draft,
             result_digest: None,
+            autonomy_receipt: None,
             reject_stopping_authority_as_stale: false,
         }
     }
 
     fn evidence(&self) -> TaskLifecycleEvidence {
-        TaskLifecycleEvidence::new(
+        let evidence = TaskLifecycleEvidence::new(
             self.binding.clone(),
             true,
             self.state,
             digest('c'),
             self.result_digest.clone(),
-        )
+        );
+        self.autonomy_receipt
+            .clone()
+            .map_or(evidence.clone(), |receipt| {
+                evidence.with_autonomy_receipt(receipt)
+            })
     }
 }
 
@@ -134,6 +143,32 @@ impl TaskLifecyclePort for FakeLifecycle {
             ));
         }
         self.state = to;
+        Ok(self.evidence())
+    }
+
+    fn record_autonomy_receipt(
+        &mut self,
+        binding: &SubjectBinding,
+        writer_authority: Option<&WriterLeaseAuthorityHead>,
+    ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
+        assert_eq!(binding, &self.binding);
+        assert_eq!(self.state, TaskState::Draft);
+        let writer_authority = writer_authority.expect("controlled task requires writer");
+        assert_writer_binding(writer_authority, binding);
+        self.calls.borrow_mut().push(format!(
+            "task:autonomy-receipt:fence={}",
+            writer_authority.identity().fencing_token().get()
+        ));
+        self.autonomy_receipt = Some(AutonomyReceiptProjection::new(
+            digest('1'),
+            digest('2'),
+            digest('3'),
+            TaskState::Draft,
+            AutonomyDisposition::Proceed,
+            AutonomyReason::RoutineAuthorized,
+            Some(AutonomyModel::GovernedCodexWriter),
+            Some(AutonomyVerification::FocusedChecks),
+        ));
         Ok(self.evidence())
     }
 
@@ -348,12 +383,13 @@ fn controlled_success_keeps_one_ordered_fenced_codex_lane_and_releases_before_co
         calls.borrow().as_slice(),
         [
             "task:admit",
-            "task:DRAFT->AWAITING_EXECUTION_APPROVAL:unfenced",
-            "task:AWAITING_EXECUTION_APPROVAL->PREPARING:unfenced",
             "lease:current:none",
             "lease:acquire",
             "lease:current:fence=1",
             "lease:assert:fence=1",
+            "task:autonomy-receipt:fence=1",
+            "task:DRAFT->AWAITING_EXECUTION_APPROVAL:unfenced",
+            "task:AWAITING_EXECUTION_APPROVAL->PREPARING:unfenced",
             "task:PREPARING->EXECUTING:fence=1",
             "lease:assert:fence=1",
             "codex:execute:fence=1",
@@ -402,12 +438,13 @@ fn controlled_codex_failure_fails_closed_releases_writer_and_never_records_a_res
         calls.borrow().as_slice(),
         [
             "task:admit",
-            "task:DRAFT->AWAITING_EXECUTION_APPROVAL:unfenced",
-            "task:AWAITING_EXECUTION_APPROVAL->PREPARING:unfenced",
             "lease:current:none",
             "lease:acquire",
             "lease:current:fence=1",
             "lease:assert:fence=1",
+            "task:autonomy-receipt:fence=1",
+            "task:DRAFT->AWAITING_EXECUTION_APPROVAL:unfenced",
+            "task:AWAITING_EXECUTION_APPROVAL->PREPARING:unfenced",
             "task:PREPARING->EXECUTING:fence=1",
             "lease:assert:fence=1",
             "codex:execute:fence=1",

@@ -52,6 +52,8 @@ pub enum LedgerError {
     InvalidStreamHead,
     /// An event kind/resource snapshot combination is invalid.
     InvalidResourceSnapshot,
+    /// An autonomy receipt event violates its fixed shape or exactly-once order.
+    InvalidAutonomyReceipt,
     /// Cumulative resource counters moved backwards.
     ResourceCounterRegression,
     /// A command ID was reused in one stream with another request digest.
@@ -110,6 +112,7 @@ impl LedgerError {
             Self::DiagnosticLimitExceeded => "LEDGER_DIAGNOSTIC_LIMIT_EXCEEDED",
             Self::InvalidStreamHead => "LEDGER_INVALID_HEAD",
             Self::InvalidResourceSnapshot => "LEDGER_INVALID_RESOURCE_SNAPSHOT",
+            Self::InvalidAutonomyReceipt => "LEDGER_INVALID_AUTONOMY_RECEIPT",
             Self::ResourceCounterRegression => "LEDGER_RESOURCE_COUNTER_REGRESSION",
             Self::CommandIdReuse => "LEDGER_COMMAND_ID_REUSE",
             Self::UnknownEventVersion => "LEDGER_UNKNOWN_EVENT_VERSION",
@@ -151,6 +154,9 @@ impl fmt::Display for LedgerError {
             Self::InvalidStreamHead => formatter.write_str("invalid full stream head"),
             Self::InvalidResourceSnapshot => {
                 formatter.write_str("invalid event/resource snapshot combination")
+            }
+            Self::InvalidAutonomyReceipt => {
+                formatter.write_str("invalid autonomy receipt event shape or order")
             }
             Self::ResourceCounterRegression => {
                 formatter.write_str("cumulative resource counter regressed")
@@ -242,6 +248,8 @@ ledger_identifier!(EffectClaimId, "effect_claim_id");
 pub enum LedgerEventKind {
     /// The immutable task subject was accepted.
     TaskCreated,
+    /// One canonical autonomy decision receipt was recorded.
+    AutonomyReceiptRecorded,
     /// A separately validated Task Domain transition was recorded.
     StateTransition,
     /// A pure Policy decision was recorded.
@@ -262,6 +270,7 @@ impl LedgerEventKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::TaskCreated => "TASK_CREATED",
+            Self::AutonomyReceiptRecorded => "AUTONOMY_RECEIPT_RECORDED",
             Self::StateTransition => "STATE_TRANSITION",
             Self::PolicyDecision => "POLICY_DECISION",
             Self::ResourceSnapshot => "RESOURCE_SNAPSHOT",
@@ -279,6 +288,7 @@ impl LedgerEventKind {
     pub fn parse(value: &str) -> Result<Self, LedgerError> {
         match value {
             "TASK_CREATED" => Ok(Self::TaskCreated),
+            "AUTONOMY_RECEIPT_RECORDED" => Ok(Self::AutonomyReceiptRecorded),
             "STATE_TRANSITION" => Ok(Self::StateTransition),
             "POLICY_DECISION" => Ok(Self::PolicyDecision),
             "RESOURCE_SNAPSHOT" => Ok(Self::ResourceSnapshot),
@@ -435,6 +445,15 @@ impl AppendCommand {
         let resource_shape = matches!(kind, LedgerEventKind::ResourceSnapshot);
         if resource_shape != resource_snapshot.is_some() {
             return Err(LedgerError::InvalidResourceSnapshot);
+        }
+        if matches!(kind, LedgerEventKind::AutonomyReceiptRecorded)
+            && (action.as_str() != "RECORD_AUTONOMY_RECEIPT_V1"
+                || outcome != LedgerOutcome::Recorded
+                || reason_code.as_str() != "AUTONOMY_DECISION_RECORDED"
+                || diagnostic.is_some()
+                || resource_snapshot.is_some())
+        {
+            return Err(LedgerError::InvalidAutonomyReceipt);
         }
         Ok(Self {
             expected_head,
@@ -1463,6 +1482,8 @@ pub fn plan_append(
         });
     }
 
+    validate_autonomy_order(command.kind, &current.events)?;
+
     let before = current.head.clone();
     let (after, receipt, new_event, new_outbox, next_counters) = if before != command.expected_head
     {
@@ -2292,6 +2313,7 @@ pub fn verify_untrusted_snapshot(
             return Err(LedgerError::InvalidStreamHead);
         }
         let command = command_from_untrusted_event(&head, raw)?;
+        validate_autonomy_order(command.kind, &events)?;
         let reconstructed_request = request_digest(&command)?;
         if reconstructed_request != raw.request_digest {
             return Err(LedgerError::RequestBindingMismatch);
@@ -2434,6 +2456,19 @@ pub fn verify_untrusted_snapshot(
     };
     validate_command_checkpoint_chain(&verified)?;
     Ok(verified)
+}
+
+fn validate_autonomy_order(
+    kind: LedgerEventKind,
+    preceding_events: &[LedgerEvent],
+) -> Result<(), LedgerError> {
+    if kind == LedgerEventKind::AutonomyReceiptRecorded
+        && (preceding_events.len() != 1
+            || preceding_events[0].kind() != LedgerEventKind::TaskCreated)
+    {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    Ok(())
 }
 
 fn valid_identifier(value: &str) -> bool {
@@ -3592,6 +3627,35 @@ mod tests {
             None,
         )
         .expect("append command")
+    }
+
+    #[test]
+    fn autonomy_order_validator_is_shared_by_append_and_untrusted_replay() {
+        assert_eq!(
+            validate_autonomy_order(LedgerEventKind::AutonomyReceiptRecorded, &[]),
+            Err(LedgerError::InvalidAutonomyReceipt)
+        );
+
+        let identity = identity();
+        let zero = FakeTaskLedger::zero_head(identity.clone()).expect("zero");
+        let mut ledger = FakeTaskLedger::new();
+        ledger
+            .execute(append_command(zero.clone(), "create", 'b'))
+            .expect("created");
+        let created = ledger
+            .planning_stream(zero.stream_id(), &identity)
+            .expect("created stream");
+        validate_autonomy_order(LedgerEventKind::AutonomyReceiptRecorded, created.events())
+            .expect("exact sequence two");
+
+        let duplicated = vec![created.events()[0].clone(), created.events()[0].clone()];
+        assert_eq!(
+            validate_autonomy_order(
+                LedgerEventKind::AutonomyReceiptRecorded,
+                duplicated.as_slice()
+            ),
+            Err(LedgerError::InvalidAutonomyReceipt)
+        );
     }
 
     fn resource_command(

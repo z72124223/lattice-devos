@@ -12,6 +12,7 @@ use crate::migrations::{
     POSTGRES_SCHEMA_VERSION, PostgresStoreSetupError, PostgresStoreSetupErrorKind,
     STORE_V2_SCHEMA_VERSION, SUPPORTED_POSTGRES_MAJOR, Sha256Hex, migration_manifest,
     verify_embedded_manifest, verify_v1_manifest_prefix, verify_v2_manifest_prefix,
+    verify_v3_manifest_prefix,
 };
 
 const MIGRATION_ADVISORY_LOCK: i64 = 0x4c41_5454_4943_4501;
@@ -36,6 +37,8 @@ const V3_EXPECTED_RELATION_SIGNATURE: &str =
 const V3_EXPECTED_COLUMN_SIGNATURE: &str =
     "7cd1aa5142dbccdc2ac2db466ba4ffdf0c9c41a1000ae0c59baf650e36bbaae8";
 const V3_EXPECTED_CONSTRAINT_SIGNATURE: &str =
+    "3d1d5fcdf290c2b0fce7641951417e3371a06271b62abc710bc55265b6f87236";
+const V3_PREFIX_EXPECTED_CONSTRAINT_SIGNATURE: &str =
     "f9d587125d792646b77ca68e6224c9866bd32c87a0e98c4d2f85b75dd0c22be8";
 const V3_EXPECTED_INDEX_SIGNATURE: &str =
     "40ca5ea0781b1be03efe9bead50ae9f78434314123d6f700d278874678d06a9b";
@@ -44,6 +47,8 @@ const V3_CODEBASE_MEMORY_V2_EXPECTED_RELATION_SIGNATURE: &str =
 const V3_CODEBASE_MEMORY_V2_EXPECTED_COLUMN_SIGNATURE: &str =
     "6c71b33bb6ce0adda52c7267a2e15d0f76e80a7da8db847c87155c21db6b574b";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_CONSTRAINT_SIGNATURE: &str =
+    "0b8c718a12925f0b88f24bf82b904fcff29d55203d42bb3412c5b05cca02e630";
+const V3_CODEBASE_MEMORY_V2_PREFIX_EXPECTED_CONSTRAINT_SIGNATURE: &str =
     "272147d02a06e9dd4863efcbc780cd6624d1d74257ae2ef28d8287b6390fe9f7";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_INDEX_SIGNATURE: &str =
     "1a7bc5e774689c8ad32c1416dc0cdc6b86a6afca402db2d5eed801c6d71afa5a";
@@ -72,6 +77,7 @@ const RELATION_SIGNATURE_SQL: &str = r"
     JOIN pg_roles r ON r.oid = c.relowner
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
       AND c.relkind <> 'i'
+      AND NOT (n.nspname = 'control' AND c.relname = 'task_ledger_autonomy_receipts')
     ORDER BY n.nspname, c.relname
 ";
 
@@ -94,6 +100,7 @@ const COLUMN_SIGNATURE_SQL: &str = r"
     LEFT JOIN pg_namespace coll_ns ON coll_ns.oid = coll.collnamespace
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
       AND c.relkind IN ('r', 'p')
+      AND NOT (n.nspname = 'control' AND c.relname = 'task_ledger_autonomy_receipts')
       AND a.attnum > 0
     ORDER BY n.nspname, c.relname, a.attnum
 ";
@@ -113,6 +120,7 @@ const CONSTRAINT_SIGNATURE_SQL: &str = r"
     LEFT JOIN pg_class ref_class ON ref_class.oid = con.confrelid
     LEFT JOIN pg_namespace ref_ns ON ref_ns.oid = ref_class.relnamespace
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
+      AND NOT (n.nspname = 'control' AND c.relname = 'task_ledger_autonomy_receipts')
     ORDER BY n.nspname, c.relname, con.conname
 ";
 
@@ -128,6 +136,7 @@ const INDEX_SIGNATURE_SQL: &str = r"
     JOIN pg_class index_class ON index_class.oid = i.indexrelid
     JOIN pg_namespace n ON n.oid = table_class.relnamespace
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
+      AND NOT (n.nspname = 'control' AND table_class.relname = 'task_ledger_autonomy_receipts')
     ORDER BY n.nspname, table_class.relname, index_class.relname
 ";
 
@@ -159,6 +168,7 @@ const TABLE_ACL_SIGNATURE_SQL: &str = r"
     JOIN pg_roles grantor ON grantor.oid = acl.grantor
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
       AND c.relkind IN ('r', 'p')
+      AND NOT (n.nspname = 'control' AND c.relname = 'task_ledger_autonomy_receipts')
     ORDER BY n.nspname, c.relname, owner.rolname,
              COALESCE(grantee.rolname, 'PUBLIC'), grantor.rolname,
              acl.privilege_type, acl.is_grantable
@@ -178,6 +188,9 @@ const TYPE_SIGNATURE_SQL: &str = r"
     LEFT JOIN pg_type array_type ON array_type.oid = t.typarray
     LEFT JOIN pg_namespace array_ns ON array_ns.oid = array_type.typnamespace
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
+      AND NOT (n.nspname = 'control' AND t.typname IN (
+          'task_ledger_autonomy_receipts', '_task_ledger_autonomy_receipts'
+      ))
     ORDER BY n.nspname, t.typname
 ";
 
@@ -201,13 +214,21 @@ const FUNCTION_SIGNATURE_SQL: &str = r"
     JOIN pg_roles owner ON owner.oid = p.proowner
     JOIN pg_language language ON language.oid = p.prolang
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
+      AND NOT (n.nspname = 'control' AND p.proname IN (
+          'task_ledger_record_autonomy_receipt_v1',
+          'task_ledger_read_autonomy_receipts_v1'
+      ))
     ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
 ";
 const V2_EXPECTED_FUNCTION_SIGNATURE: &str =
     "1e0a53bff3e47d1accf1da1e0856b8edf77738fb5a20f9163b9d2d5747481064";
 const V3_EXPECTED_FUNCTION_SIGNATURE: &str =
+    "e38d34eb346dac00b3d2db13fe3b720f825d0d9d29f3c36e0e8b07b0892044ba";
+const V3_PREFIX_EXPECTED_FUNCTION_SIGNATURE: &str =
     "f2c8585e1da944b38a50c65c6b9f448963f4c3d96c909331be87fec0c30d2279";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_SIGNATURE: &str =
+    "4dd4e12591231499501d37527ba2bb4f4a68bd25ddbab5cedc15264f2b39086a";
+const V3_CODEBASE_MEMORY_V2_PREFIX_EXPECTED_FUNCTION_SIGNATURE: &str =
     "52e146d4e8190bf92ada1754f233423055a435cf281975f05fc83b262ff20db6";
 const FUNCTION_ACL_SIGNATURE_SQL: &str = r"
     SELECT jsonb_build_array(
@@ -221,6 +242,10 @@ const FUNCTION_ACL_SIGNATURE_SQL: &str = r"
     LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
     JOIN pg_roles grantor ON grantor.oid = acl.grantor
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
+      AND NOT (n.nspname = 'control' AND p.proname IN (
+          'task_ledger_record_autonomy_receipt_v1',
+          'task_ledger_read_autonomy_receipts_v1'
+      ))
     ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
              COALESCE(grantee.rolname, 'PUBLIC'), grantor.rolname,
              acl.privilege_type, acl.is_grantable
@@ -524,6 +549,88 @@ const TASK_LEDGER_READ_HEAD_V1_IDENTITY: &str = "control.task_ledger_read_head_v
 const TASK_LEDGER_READ_EVENTS_V1_IDENTITY: &str = "control.task_ledger_read_events_v1(bytea)";
 const TASK_LEDGER_READ_COMMANDS_V1_IDENTITY: &str = "control.task_ledger_read_commands_v1(bytea)";
 const TASK_LEDGER_FINALIZE_V1_IDENTITY: &str = "control.task_ledger_finalize_v1(bytea,text,text,text,text,bytea,text,text,bytea,text,bytea,bytea,text,text,text,text,text,text,text,text,text,bytea,bytea,text,bytea,text,bytea,text,bytea,bytea,text,text,text,text,text,text,text,bytea,jsonb,boolean,text,text,text,text,text,text,text,bytea,text,bytea,bytea,text,bytea,text,bytea,bytea,text,text,bytea,bytea,bytea,text,boolean,text,bytea,text,bytea,boolean,bytea,bytea)";
+const TASK_LEDGER_RECORD_AUTONOMY_RECEIPT_V1_IDENTITY: &str = "control.task_ledger_record_autonomy_receipt_v1(bytea,text,bytea,text,text,text,text,boolean,boolean,boolean,text,text,text,text,text,text,bytea,bytea,bytea,bytea,bytea,text,bytea,bytea)";
+const TASK_LEDGER_READ_AUTONOMY_RECEIPTS_V1_IDENTITY: &str =
+    "control.task_ledger_read_autonomy_receipts_v1(bytea)";
+const AUTONOMY_PROFILE_SIGNATURE_SQL: &str = r"
+    SELECT signature::text
+      FROM (
+        SELECT 0 AS ordinal,
+               jsonb_build_array(
+                   'relation', n.nspname, c.relname, owner.rolname,
+                   c.relkind::text, c.relpersistence::text, c.relrowsecurity,
+                   c.relforcerowsecurity, c.relhassubclass, c.relispartition,
+                   COALESCE(c.relacl::text, '<NULL>'),
+                   COALESCE((
+                       SELECT jsonb_agg(jsonb_build_array(
+                           a.attnum, a.attname,
+                           pg_catalog.format_type(a.atttypid, a.atttypmod),
+                           a.attlen, a.attndims, a.attbyval, a.attalign::text,
+                           a.attstorage::text, a.attcompression::text,
+                           a.attnotnull, a.atthasdef, a.attidentity::text,
+                           a.attgenerated::text,
+                           COALESCE(coll_ns.nspname || '.' || coll.collname, '<NULL>'),
+                           COALESCE(pg_catalog.pg_get_expr(def.adbin, def.adrelid), '<NULL>')
+                       ) ORDER BY a.attnum)
+                         FROM pg_catalog.pg_attribute a
+                         LEFT JOIN pg_catalog.pg_attrdef def
+                           ON def.adrelid = a.attrelid AND def.adnum = a.attnum
+                         LEFT JOIN pg_catalog.pg_collation coll ON coll.oid = a.attcollation
+                         LEFT JOIN pg_catalog.pg_namespace coll_ns
+                           ON coll_ns.oid = coll.collnamespace
+                        WHERE a.attrelid = c.oid AND a.attnum > 0
+                   ), '[]'::jsonb),
+                   COALESCE((
+                       SELECT jsonb_agg(jsonb_build_array(
+                           con.conname, con.contype::text, con.condeferrable,
+                           con.condeferred, con.convalidated,
+                           pg_catalog.pg_get_constraintdef(con.oid, true)
+                       ) ORDER BY con.conname)
+                         FROM pg_catalog.pg_constraint con
+                        WHERE con.conrelid = c.oid
+                   ), '[]'::jsonb),
+                   COALESCE((
+                       SELECT jsonb_agg(pg_catalog.pg_get_indexdef(i.indexrelid)
+                                        ORDER BY ix.relname)
+                         FROM pg_catalog.pg_index i
+                         JOIN pg_catalog.pg_class ix ON ix.oid = i.indexrelid
+                        WHERE i.indrelid = c.oid
+                   ), '[]'::jsonb)
+               ) AS signature
+          FROM pg_catalog.pg_class c
+          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          JOIN pg_catalog.pg_roles owner ON owner.oid = c.relowner
+         WHERE n.nspname = 'control'
+           AND c.relname = 'task_ledger_autonomy_receipts'
+        UNION ALL
+        SELECT 1 AS ordinal,
+               jsonb_build_array(
+                   'function', n.nspname, p.proname,
+                   pg_catalog.pg_get_function_identity_arguments(p.oid),
+                   pg_catalog.pg_get_function_result(p.oid), owner.rolname,
+                   language.lanname, p.prokind::text, p.prosecdef, p.proleakproof,
+                   p.provolatile::text, p.proparallel::text, p.proisstrict,
+                   p.proretset, p.pronargs, p.pronargdefaults,
+                   p.prorettype::regtype::text, p.proargtypes::text,
+                   COALESCE(p.proallargtypes::text, '<NULL>'),
+                   COALESCE(p.proargmodes::text, '<NULL>'),
+                   COALESCE(p.proargnames::text, '<NULL>'),
+                   COALESCE(array_to_string(p.proconfig, ','), '<NULL>'),
+                   COALESCE(p.proacl::text, '<NULL>'), COALESCE(p.probin, '<NULL>'),
+                   p.prosrc, pg_catalog.pg_get_functiondef(p.oid)
+               ) AS signature
+          FROM pg_catalog.pg_proc p
+          JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+          JOIN pg_catalog.pg_roles owner ON owner.oid = p.proowner
+          JOIN pg_catalog.pg_language language ON language.oid = p.prolang
+         WHERE n.nspname = 'control'
+           AND p.proname IN ('task_ledger_record_autonomy_receipt_v1',
+                             'task_ledger_read_autonomy_receipts_v1')
+      ) exact_profile
+     ORDER BY ordinal, signature::text
+";
+const AUTONOMY_PROFILE_SIGNATURE: &str =
+    "e4995f4127a8ad1fb7123c78ef4de3990d5d6493cbe999a860a6f7407577035d";
 const CODEBASE_MEMORY_LOAD_RECEIPT_V1_IDENTITY: &str = "memory.codebase_memory_load_receipt_v1(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint)";
 const CODEBASE_MEMORY_LOAD_REFLECTION_V2_IDENTITY: &str = "memory.codebase_memory_load_reflection_v2(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint)";
 const CODEBASE_MEMORY_PERSIST_ANALYSIS_V1_IDENTITY: &str = "memory.codebase_memory_persist_analysis_v1(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint,text,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,integer[],bytea[],text[],text[],text[],text[],text[],text[],bytea[],integer[],integer[],text[],bytea[])";
@@ -819,6 +926,7 @@ enum InstalledManifestState {
     Fresh,
     ExactV1Prefix,
     ExactV2Prefix,
+    ExactV3Prefix,
     ExactV3Full,
 }
 
@@ -994,6 +1102,7 @@ pub fn apply_migrations(
     let manifest = verify_embedded_manifest()?;
     let legacy_manifest = verify_v1_manifest_prefix()?;
     let store_v2_manifest = verify_v2_manifest_prefix()?;
+    let v3_manifest = verify_v3_manifest_prefix()?;
     let mut transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::ReadCommitted)
@@ -1020,7 +1129,7 @@ pub fn apply_migrations(
     let installed = classify_installed_manifest_state(&mut transaction)?;
     let outcome = match installed {
         InstalledManifestState::Fresh => {
-            verify_role_and_database_boundary(&mut transaction, CatalogProfile::PreSchema)?;
+            verify_role_and_database_boundary(&mut transaction, CatalogProfile::PreSchema, false)?;
             let executable_count = apply_missing_entries(&mut transaction, 0)?;
             seed_database_identity(&mut transaction, target)?;
             insert_current_compatibility(&mut transaction, &manifest)?;
@@ -1036,6 +1145,12 @@ pub fn apply_migrations(
             verify_v2_upgrade_source(&mut transaction, &store_v2_manifest, target)?;
             let executable_count = apply_missing_entries(&mut transaction, 3)?;
             advance_compatibility_from_v2(&mut transaction, &store_v2_manifest, &manifest)?;
+            MigrationApplyOutcome::Applied { executable_count }
+        }
+        InstalledManifestState::ExactV3Prefix => {
+            verify_v3_upgrade_source(&mut transaction, &v3_manifest, target)?;
+            let executable_count = apply_missing_entries(&mut transaction, 4)?;
+            advance_compatibility_from_v3(&mut transaction, &v3_manifest, &manifest)?;
             MigrationApplyOutcome::Applied { executable_count }
         }
         InstalledManifestState::ExactV3Full => {
@@ -1057,7 +1172,7 @@ pub fn apply_migrations(
         SetupOperation::Migration,
     )?;
     let current_profile = classify_current_v3_catalog_profile(&mut transaction)?;
-    verify_role_and_database_boundary(&mut transaction, current_profile)?;
+    verify_role_and_database_boundary(&mut transaction, current_profile, false)?;
 
     transaction.commit().map_err(|_| {
         PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::CommitOutcomeUnknown)
@@ -1321,6 +1436,10 @@ fn classify_installed_manifest_state<C: GenericClient>(
                     verify_history_rows(&rows, &migration_manifest()[..3])?;
                     Ok(InstalledManifestState::ExactV2Prefix)
                 }
+                4 => {
+                    verify_history_rows(&rows, &migration_manifest()[..4])?;
+                    Ok(InstalledManifestState::ExactV3Prefix)
+                }
                 length if length == migration_manifest().len() => {
                     verify_history_rows(&rows, migration_manifest())?;
                     Ok(InstalledManifestState::ExactV3Full)
@@ -1457,6 +1576,36 @@ fn advance_compatibility_from_v2<C: GenericClient>(
     Ok(())
 }
 
+fn advance_compatibility_from_v3<C: GenericClient>(
+    client: &mut C,
+    v3_manifest: &ManifestEvidence,
+    current_manifest: &ManifestEvidence,
+) -> Result<(), PostgresStoreSetupError> {
+    let updated = client
+        .execute(
+            "UPDATE ONLY control.schema_compatibility \
+             SET manifest_sha256 = $1, updated_at = clock_timestamp() \
+             WHERE singleton = true \
+               AND manifest_sha256 = $2 \
+               AND current_schema_version = 3 \
+               AND min_reader = 3 AND max_reader = 3 \
+               AND min_writer = 3 AND max_writer = 3",
+            &[
+                &current_manifest.manifest_sha256().as_str(),
+                &v3_manifest.manifest_sha256().as_str(),
+            ],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?;
+    if updated != 1 {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    Ok(())
+}
+
 fn insert_history<C: GenericClient>(
     client: &mut C,
     entry: &MigrationDescriptor,
@@ -1527,6 +1676,7 @@ fn verify_catalog<C: GenericClient>(
 ) -> Result<PostgresSchemaEvidence, PostgresStoreSetupError> {
     let current_profile = classify_current_v3_catalog_profile(client)?;
     verify_schema_objects(client, current_profile)?;
+    verify_autonomy_receipt_profile(client)?;
     verify_history(client)?;
     verify_compatibility(client, manifest, current_profile)?;
     let database_uuid = read_database_identity(client, target)?;
@@ -1541,6 +1691,124 @@ fn verify_catalog<C: GenericClient>(
         role,
         bootstrap_admission: BootstrapAdmission::StoppedNoLeader,
     })
+}
+
+fn verify_autonomy_receipt_profile<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), PostgresStoreSetupError> {
+    verify_autonomy_receipt_catalog_signature(client)?;
+    let table = client
+        .query_one(
+            "SELECT owner.rolname, c.relkind::text, c.relpersistence::text, \
+                    c.relhassubclass, c.relispartition, \
+                    (SELECT count(*) FROM pg_attribute a \
+                      WHERE a.attrelid = c.oid AND a.attnum > 0), \
+                    (SELECT count(*) FROM pg_constraint con \
+                      WHERE con.conrelid = c.oid), \
+                    (SELECT count(*) FROM pg_trigger tr \
+                      WHERE tr.tgrelid = c.oid AND NOT tr.tgisinternal), \
+                    (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid) \
+               FROM pg_class c \
+               JOIN pg_namespace n ON n.oid = c.relnamespace \
+               JOIN pg_roles owner ON owner.oid = c.relowner \
+              WHERE n.nspname = 'control' \
+                AND c.relname = 'task_ledger_autonomy_receipts'",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    if row_value::<String>(&table, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?
+        != DatabaseRole::Migrator.as_str()
+        || row_value::<String>(&table, 1, PostgresStoreSetupErrorKind::CorruptCatalog)? != "r"
+        || row_value::<String>(&table, 2, PostgresStoreSetupErrorKind::CorruptCatalog)? != "p"
+        || row_value::<bool>(&table, 3, PostgresStoreSetupErrorKind::CorruptCatalog)?
+        || row_value::<bool>(&table, 4, PostgresStoreSetupErrorKind::CorruptCatalog)?
+        || row_value::<i64>(&table, 5, PostgresStoreSetupErrorKind::CorruptCatalog)? != 28
+        || row_value::<i64>(&table, 6, PostgresStoreSetupErrorKind::CorruptCatalog)? != 10
+        || row_value::<i64>(&table, 7, PostgresStoreSetupErrorKind::CorruptCatalog)? != 0
+        || row_value::<i64>(&table, 8, PostgresStoreSetupErrorKind::CorruptCatalog)? != 0
+    {
+        return Err(catalog_error());
+    }
+    let rows = client
+        .query(
+            "SELECT n.nspname || '.' || p.proname || '(' || \
+                    replace(pg_catalog.oidvectortypes(p.proargtypes), ' ', '') || ')', \
+                    pg_get_userbyid(p.proowner), p.prosecdef, p.proleakproof, \
+                    COALESCE(array_to_string(p.proconfig, ','), '<NULL>'), \
+                    has_function_privilege('public', p.oid, 'EXECUTE'), \
+                    has_function_privilege('lattice_runtime', p.oid, 'EXECUTE') \
+               FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+              WHERE n.nspname = 'control' AND p.proname IN ( \
+                    'task_ledger_record_autonomy_receipt_v1', \
+                    'task_ledger_read_autonomy_receipts_v1') \
+              ORDER BY p.proname",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    let expected = BTreeSet::from([
+        TASK_LEDGER_RECORD_AUTONOMY_RECEIPT_V1_IDENTITY.to_owned(),
+        TASK_LEDGER_READ_AUTONOMY_RECEIPTS_V1_IDENTITY.to_owned(),
+    ]);
+    let mut actual = BTreeSet::new();
+    for row in &rows {
+        actual.insert(row_value::<String>(
+            row,
+            0,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        )?);
+        if row_value::<String>(row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            != DatabaseRole::Migrator.as_str()
+            || !row_value::<bool>(row, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            || row_value::<bool>(row, 3, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            || row_value::<String>(row, 4, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != "search_path=pg_catalog,row_security=on,lock_timeout=5s,statement_timeout=30s"
+            || row_value::<bool>(row, 5, PostgresStoreSetupErrorKind::PermissionDenied)?
+            || !row_value::<bool>(row, 6, PostgresStoreSetupErrorKind::PermissionDenied)?
+        {
+            return Err(catalog_error());
+        }
+    }
+    if actual != expected {
+        return Err(catalog_error());
+    }
+    for role in [
+        DatabaseRole::Runtime,
+        DatabaseRole::Guardian,
+        DatabaseRole::ReadOnly,
+    ] {
+        let privileges = client
+            .query_one(
+                "SELECT has_table_privilege($1, \
+                    'control.task_ledger_autonomy_receipts', \
+                    'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')",
+                &[&role.as_str()],
+            )
+            .map_err(|error| {
+                map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
+            })?;
+        if row_value::<bool>(
+            &privileges,
+            0,
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        )? {
+            return Err(permission_error());
+        }
+    }
+    Ok(())
+}
+
+fn verify_autonomy_receipt_catalog_signature<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), PostgresStoreSetupError> {
+    let signature = catalog_signature(
+        client,
+        AUTONOMY_PROFILE_SIGNATURE_SQL,
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    )?;
+    if signature != AUTONOMY_PROFILE_SIGNATURE {
+        return Err(catalog_error());
+    }
+    Ok(())
 }
 
 fn verify_v1_upgrade_source<C: GenericClient>(
@@ -1588,6 +1856,34 @@ fn verify_v2_upgrade_source<C: GenericClient>(
     read_database_identity(client, target)?;
     verify_stopped_admission(client)?;
     verify_roles_and_grants(client, CatalogProfile::V2)
+}
+
+fn verify_v3_upgrade_source<C: GenericClient>(
+    client: &mut C,
+    v3_manifest: &ManifestEvidence,
+    target: &MigrationTarget,
+) -> Result<(), PostgresStoreSetupError> {
+    client
+        .batch_execute(
+            "LOCK TABLE control.runtime_admission IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.physical_heads IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.terminal_transactions IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_streams IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_events IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_commands IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_outbox IN ACCESS EXCLUSIVE MODE",
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+        })?;
+    let profile = classify_current_v3_catalog_profile(client)?;
+    verify_schema_objects_with_contract(client, profile, true)?;
+    let rows = read_history_rows(client)?;
+    verify_history_rows(&rows, &migration_manifest()[..4])?;
+    verify_compatibility(client, v3_manifest, profile)?;
+    read_database_identity(client, target)?;
+    verify_stopped_admission(client)?;
+    verify_roles_and_grants_with_contract(client, profile, true)
 }
 
 fn verify_v1_store_empty<C: GenericClient>(client: &mut C) -> Result<(), PostgresStoreSetupError> {
@@ -1848,9 +2144,17 @@ fn verify_schema_objects<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
 ) -> Result<(), PostgresStoreSetupError> {
-    verify_catalog_signatures(client, profile)?;
+    verify_schema_objects_with_contract(client, profile, false)
+}
+
+fn verify_schema_objects_with_contract<C: GenericClient>(
+    client: &mut C,
+    profile: CatalogProfile,
+    v3_prefix: bool,
+) -> Result<(), PostgresStoreSetupError> {
+    verify_catalog_signatures(client, profile, v3_prefix)?;
     verify_schema_headers(client, profile)?;
-    verify_forbidden_schema_objects(client, profile)?;
+    verify_forbidden_schema_objects(client, profile, v3_prefix)?;
     if matches!(
         profile,
         CatalogProfile::V2
@@ -1858,7 +2162,7 @@ fn verify_schema_objects<C: GenericClient>(
             | CatalogProfile::V3CodebaseMemoryV2
             | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
     ) {
-        verify_owned_function_boundary(client, profile)?;
+        verify_owned_function_boundary(client, profile, v3_prefix)?;
     }
     if matches!(profile, CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1) {
         verify_writer_lease_v1_profile(client)?;
@@ -2001,6 +2305,7 @@ fn verify_writer_lease_v1_profile<C: GenericClient>(
 fn verify_catalog_signatures<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
+    v3_prefix: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let expected = match profile {
         CatalogProfile::V1 => [
@@ -2018,13 +2323,21 @@ fn verify_catalog_signatures<C: GenericClient>(
         CatalogProfile::V3 => [
             V3_EXPECTED_RELATION_SIGNATURE,
             V3_EXPECTED_COLUMN_SIGNATURE,
-            V3_EXPECTED_CONSTRAINT_SIGNATURE,
+            if v3_prefix {
+                V3_PREFIX_EXPECTED_CONSTRAINT_SIGNATURE
+            } else {
+                V3_EXPECTED_CONSTRAINT_SIGNATURE
+            },
             V3_EXPECTED_INDEX_SIGNATURE,
         ],
         CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => [
             V3_CODEBASE_MEMORY_V2_EXPECTED_RELATION_SIGNATURE,
             V3_CODEBASE_MEMORY_V2_EXPECTED_COLUMN_SIGNATURE,
-            V3_CODEBASE_MEMORY_V2_EXPECTED_CONSTRAINT_SIGNATURE,
+            if v3_prefix {
+                V3_CODEBASE_MEMORY_V2_PREFIX_EXPECTED_CONSTRAINT_SIGNATURE
+            } else {
+                V3_CODEBASE_MEMORY_V2_EXPECTED_CONSTRAINT_SIGNATURE
+            },
             V3_CODEBASE_MEMORY_V2_EXPECTED_INDEX_SIGNATURE,
         ],
         CatalogProfile::PreSchema => return Err(catalog_error()),
@@ -2094,7 +2407,8 @@ fn verify_schema_headers<C: GenericClient>(
         client,
         "SELECT c.relname FROM pg_class c \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = 'control' AND c.relkind = 'r' ORDER BY c.relname",
+         WHERE n.nspname = 'control' AND c.relkind = 'r' \
+           AND c.relname <> 'task_ledger_autonomy_receipts' ORDER BY c.relname",
     )?;
     let expected_tables: BTreeSet<String> = match profile {
         CatalogProfile::V1 | CatalogProfile::V2 => {
@@ -2114,7 +2428,9 @@ fn verify_schema_headers<C: GenericClient>(
         client,
         "SELECT con.conname FROM pg_constraint con \
          JOIN pg_namespace n ON n.oid = con.connamespace \
-         WHERE n.nspname = 'control' ORDER BY con.conname",
+         JOIN pg_class c ON c.oid = con.conrelid \
+         WHERE n.nspname = 'control' \
+           AND c.relname <> 'task_ledger_autonomy_receipts' ORDER BY con.conname",
     )?;
     let expected_constraints: BTreeSet<String> = match profile {
         CatalogProfile::V1 => V1_CONTROL_CONSTRAINTS
@@ -2222,12 +2538,15 @@ fn verify_owned_type_closure<C: GenericClient>(
 fn verify_forbidden_schema_objects<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
+    v3_prefix: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let forbidden = client
         .query_one(
             "SELECT \
              (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
-              WHERE n.nspname IN ('control', 'memory', 'readmodel')), \
+              WHERE n.nspname IN ('control', 'memory', 'readmodel') \
+                AND p.proname NOT IN ('task_ledger_record_autonomy_receipt_v1', \
+                                      'task_ledger_read_autonomy_receipts_v1')), \
              (SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
               JOIN pg_namespace n ON n.oid = c.relnamespace \
               WHERE n.nspname IN ('control', 'memory', 'readmodel') AND NOT t.tgisinternal), \
@@ -2251,6 +2570,7 @@ fn verify_forbidden_schema_objects<C: GenericClient>(
               (SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
                JOIN pg_namespace n ON n.oid = c.relnamespace \
                WHERE n.nspname IN ('control', 'memory', 'readmodel') \
+                 AND c.relname <> 'task_ledger_autonomy_receipts' \
                  AND t.tgisinternal AND t.tgenabled = 'O'), \
               (SELECT count(*) FROM pg_inherits i \
                JOIN pg_class parent ON parent.oid = i.inhparent \
@@ -2298,8 +2618,14 @@ fn verify_forbidden_schema_objects<C: GenericClient>(
     let expected_internal_triggers = match profile {
         CatalogProfile::V1 => 4,
         CatalogProfile::V2 | CatalogProfile::PreSchema => 0,
-        CatalogProfile::V3 => 20,
-        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => 44,
+        CatalogProfile::V3 if v3_prefix => 20,
+        CatalogProfile::V3 => 22,
+        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+            if v3_prefix =>
+        {
+            44
+        }
+        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => 46,
     };
     if row_value::<i64>(&forbidden, 6, PostgresStoreSetupErrorKind::CorruptCatalog)?
         != expected_scope_head_triggers
@@ -2317,6 +2643,7 @@ fn verify_forbidden_schema_objects<C: GenericClient>(
 fn verify_owned_function_boundary<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
+    v3_prefix: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let signature = catalog_signature(
         client,
@@ -2325,7 +2652,13 @@ fn verify_owned_function_boundary<C: GenericClient>(
     )?;
     let expected_signature = match profile {
         CatalogProfile::V2 => V2_EXPECTED_FUNCTION_SIGNATURE,
+        CatalogProfile::V3 if v3_prefix => V3_PREFIX_EXPECTED_FUNCTION_SIGNATURE,
         CatalogProfile::V3 => V3_EXPECTED_FUNCTION_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+            if v3_prefix =>
+        {
+            V3_CODEBASE_MEMORY_V2_PREFIX_EXPECTED_FUNCTION_SIGNATURE
+        }
         CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => {
             V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_SIGNATURE
         }
@@ -2393,6 +2726,8 @@ fn verify_owned_function_boundary<C: GenericClient>(
                     COALESCE(array_to_string(p.proconfig, ','), '<NULL>') \
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname IN ('control', 'memory', 'readmodel') \
+               AND p.proname NOT IN ('task_ledger_record_autonomy_receipt_v1', \
+                                     'task_ledger_read_autonomy_receipts_v1') \
              ORDER BY n.nspname, p.proname, pg_catalog.oidvectortypes(p.proargtypes)",
             &[],
         )
@@ -2481,7 +2816,15 @@ fn verify_roles_and_grants<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
 ) -> Result<(), PostgresStoreSetupError> {
-    verify_role_and_database_boundary(client, profile)?;
+    verify_roles_and_grants_with_contract(client, profile, false)
+}
+
+fn verify_roles_and_grants_with_contract<C: GenericClient>(
+    client: &mut C,
+    profile: CatalogProfile,
+    v3_prefix: bool,
+) -> Result<(), PostgresStoreSetupError> {
+    verify_role_and_database_boundary(client, profile, v3_prefix)?;
     let expected_schema_acl = match profile {
         CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => {
             V3_CODEBASE_MEMORY_V2_EXPECTED_SCHEMA_ACL_SIGNATURE
@@ -2623,6 +2966,8 @@ fn verify_owned_function_acl<C: GenericClient>(
                        AND acl.privilege_type = 'EXECUTE' AND NOT acl.is_grantable) \
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname IN ('control', 'memory', 'readmodel') \
+               AND p.proname NOT IN ('task_ledger_record_autonomy_receipt_v1', \
+                                     'task_ledger_read_autonomy_receipts_v1') \
              ORDER BY n.nspname, p.proname, pg_catalog.oidvectortypes(p.proargtypes)",
             &[],
         )
@@ -2659,6 +3004,7 @@ fn verify_owned_function_acl<C: GenericClient>(
 fn verify_role_and_database_boundary<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
+    v3_prefix: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let role_signature = catalog_signature(
         client,
@@ -2740,9 +3086,12 @@ fn verify_role_and_database_boundary<C: GenericClient>(
     let expected_dangerous_functions = match profile {
         CatalogProfile::PreSchema | CatalogProfile::V1 => 0,
         CatalogProfile::V2 => 3,
-        CatalogProfile::V3 => 8,
-        CatalogProfile::V3CodebaseMemoryV2 => 15,
-        CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => 22,
+        CatalogProfile::V3 if v3_prefix => 8,
+        CatalogProfile::V3 => 10,
+        CatalogProfile::V3CodebaseMemoryV2 if v3_prefix => 15,
+        CatalogProfile::V3CodebaseMemoryV2 => 17,
+        CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 if v3_prefix => 22,
+        CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => 24,
     };
     if owner != DatabaseRole::Migrator.as_str()
         || is_template
@@ -3495,9 +3844,9 @@ fn permission_error() -> PostgresStoreSetupError {
 #[cfg(test)]
 mod tests {
     use super::{
-        CatalogProfile, REQUIRED_APPLICATION_NAME, classify_current_v3_catalog_profile,
-        classify_extension_catalog_counts, is_loopback, verify_network_boundary,
-        verify_runtime_store_schema, verify_server_version,
+        AUTONOMY_PROFILE_SIGNATURE_SQL, CatalogProfile, REQUIRED_APPLICATION_NAME,
+        classify_current_v3_catalog_profile, classify_extension_catalog_counts, is_loopback,
+        verify_network_boundary, verify_runtime_store_schema, verify_server_version,
     };
     use crate::migrations::{
         DatabaseRole, MigrationTarget, PostgresStoreSetupError, PostgresStoreSetupErrorKind,
@@ -3509,6 +3858,20 @@ mod tests {
     const LIVE_PROFILE_RUNTIME_URL: &str = "LATTICE_STORE_PROFILE_RUNTIME_URL";
     const LIVE_PROFILE_MIGRATOR_URL: &str = "LATTICE_STORE_PROFILE_MIGRATOR_URL";
     const LIVE_PROFILE_RUN_ID: &str = "LATTICE_TASK019_RUN_ID";
+
+    #[test]
+    fn autonomy_catalog_signature_pins_table_constraints_indexes_and_function_bodies() {
+        for required in [
+            "pg_catalog.pg_get_constraintdef",
+            "pg_catalog.pg_get_indexdef",
+            "pg_catalog.pg_get_functiondef",
+            "p.prosrc",
+            "p.proacl::text",
+            "c.relacl::text",
+        ] {
+            assert!(AUTONOMY_PROFILE_SIGNATURE_SQL.contains(required));
+        }
+    }
 
     struct LiveProfileFixture {
         target: MigrationTarget,

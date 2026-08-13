@@ -13,7 +13,7 @@ const LIVE_CONTROL_STORE_SHA256: &str =
 #[test]
 fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     let manifest = migration_manifest();
-    assert_eq!(manifest.len(), 4);
+    assert_eq!(manifest.len(), 5);
 
     let draft = &manifest[0];
     assert_eq!(draft.ordinal(), 1);
@@ -85,11 +85,112 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     assert_eq!(task_ledger.reader_compatibility(), 3..=3);
     assert_eq!(task_ledger.writer_compatibility(), 3..=3);
 
+    let autonomy = &manifest[4];
+    assert_eq!(autonomy.ordinal(), 5);
+    assert_eq!(autonomy.id(), "0005_task_autonomy_receipt");
+    assert_eq!(
+        autonomy.path(),
+        "db/migrations/0005_task_autonomy_receipt.sql"
+    );
+    assert_eq!(autonomy.byte_length(), 19_326);
+    assert_eq!(
+        autonomy.sha256(),
+        "5dbf7439887ba30e8070bcb8883c1994e42a3d3a7ce78dc174771d3b89049436"
+    );
+    assert_eq!(autonomy.status(), MigrationStatus::Executable);
+    assert_eq!(
+        autonomy.transaction_mode(),
+        MigrationTransactionMode::RunnerOwned
+    );
+    assert_eq!(autonomy.schema_version(), POSTGRES_SCHEMA_VERSION);
+    assert_eq!(autonomy.reader_compatibility(), 3..=3);
+    assert_eq!(autonomy.writer_compatibility(), 3..=3);
+
     let evidence = verify_embedded_manifest().expect("embedded manifest");
-    assert_eq!(evidence.entry_count(), 4);
-    assert_eq!(evidence.executable_count(), 3);
+    assert_eq!(evidence.entry_count(), 5);
+    assert_eq!(evidence.executable_count(), 4);
     assert_eq!(evidence.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(evidence.manifest_sha256().as_str().len(), 64);
+}
+
+#[test]
+fn autonomy_receipt_migration_is_fixed_scalar_event_owned_and_function_gated() {
+    let migration = migration_manifest()
+        .iter()
+        .find(|entry| entry.id() == "0005_task_autonomy_receipt")
+        .expect("autonomy receipt migration");
+    let sql = std::str::from_utf8(migration.bytes()).expect("UTF-8 SQL");
+    let normalized = sql
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
+    assert!(normalized.contains("CREATE TABLE CONTROL.TASK_LEDGER_AUTONOMY_RECEIPTS ("));
+    assert!(normalized.contains("AUTONOMY_RECEIPT_RECORDED"));
+    assert!(normalized.contains("LATTICE.AUTONOMY-RECEIPT/1.0"));
+    assert!(normalized.contains("REFERENCES CONTROL.TASK_LEDGER_EVENTS (STREAM_ID, SEQUENCE)"));
+    assert!(normalized.contains("CREATE FUNCTION CONTROL.TASK_LEDGER_RECORD_AUTONOMY_RECEIPT_V1("));
+    assert!(normalized.contains("CREATE FUNCTION CONTROL.TASK_LEDGER_READ_AUTONOMY_RECEIPTS_V1("));
+    assert!(!normalized.contains("RECEIPT JSON"));
+    assert!(!normalized.contains("SUBJECT JSON"));
+    assert!(!normalized.contains("GRANT SELECT ON CONTROL.TASK_LEDGER_AUTONOMY_RECEIPTS"));
+}
+
+#[test]
+fn autonomy_receipt_functions_fail_closed_on_role_input_and_changed_exact_retry() {
+    let migration = migration_manifest()
+        .iter()
+        .find(|entry| entry.id() == "0005_task_autonomy_receipt")
+        .expect("autonomy receipt migration");
+    let sql = std::str::from_utf8(migration.bytes()).expect("UTF-8 SQL");
+
+    assert_eq!(
+        sql.matches("pg_catalog.current_setting('role') <> 'lattice_runtime'")
+            .count(),
+        2,
+        "both SECURITY DEFINER functions must reject an ambient login role"
+    );
+    assert_eq!(
+        sql.matches("pg_catalog.octet_length(p_stream_id) <> 32")
+            .count(),
+        2,
+        "record and read must reject malformed stream identifiers"
+    );
+    assert!(sql.contains("v_existing.event_sequence::text IS DISTINCT FROM p_event_sequence"));
+
+    for field in [
+        "event_digest",
+        "receipt_schema_version",
+        "intent_version",
+        "task_kind",
+        "risk_class",
+        "execution_preapproved",
+        "requires_new_authority",
+        "irreversible_or_high_risk",
+        "observed_task_state",
+        "disposition",
+        "decision_reason",
+        "model",
+        "verification",
+        "authority_mode",
+        "process_start_authority_digest",
+        "ingress_profile_adapter_commitment",
+        "store_authority_head_digest",
+        "writer_lease_receipt_digest",
+        "writer_lease_head_digest",
+        "authority_digest",
+        "receipt_digest",
+    ] {
+        assert!(
+            sql.contains(&format!("v_existing.{field} IS DISTINCT FROM p_{field}")),
+            "RETAINED must compare canonical field {field}"
+        );
+    }
+    assert!(
+        sql.contains(
+            "v_existing.writer_fencing_token::text IS DISTINCT FROM p_writer_fencing_token"
+        )
+    );
 }
 
 #[test]

@@ -294,20 +294,6 @@ where
         return Err(ControlledTaskOrchestratorError::ReconciliationRequired);
     }
 
-    advance(
-        lifecycle,
-        &request.binding,
-        TaskState::Draft,
-        TaskState::AwaitingExecutionApproval,
-        None,
-    )?;
-    advance(
-        lifecycle,
-        &request.binding,
-        TaskState::AwaitingExecutionApproval,
-        TaskState::Preparing,
-        None,
-    )?;
     if writer_lease
         .current_authority(request.binding.project_id())
         .map_err(ControlledTaskOrchestratorError::Lease)?
@@ -349,6 +335,27 @@ where
     writer_lease
         .assert_current(&authority)
         .map_err(ControlledTaskOrchestratorError::Lease)?;
+    let autonomy = lifecycle
+        .record_autonomy_receipt(&request.binding, Some(&authority))
+        .map_err(ControlledTaskOrchestratorError::Lifecycle)?;
+    ensure_evidence(&autonomy, &request.binding, TaskState::Draft)?;
+    if autonomy.autonomy_receipt().is_none() {
+        return Err(ControlledTaskOrchestratorError::StateMismatch);
+    }
+    advance(
+        lifecycle,
+        &request.binding,
+        TaskState::Draft,
+        TaskState::AwaitingExecutionApproval,
+        None,
+    )?;
+    advance(
+        lifecycle,
+        &request.binding,
+        TaskState::AwaitingExecutionApproval,
+        TaskState::Preparing,
+        None,
+    )?;
     advance(
         lifecycle,
         &request.binding,
@@ -967,6 +974,8 @@ fn outcome_persistence_after_durable_intent(
 mod autonomy;
 
 pub use autonomy::{
-    AutonomyDecision, AutonomyDecisionReason, AutonomyIntent, AutonomyIntentVersion,
-    AutonomyReceipt, ModelRecommendation, TaskKind, VerificationRecommendation, classify_autonomy,
+    AutonomyAuthorityEvidence, AutonomyContractError, AutonomyDecision, AutonomyDecisionReason,
+    AutonomyIntent, AutonomyIntentVersion, AutonomyReceipt, CanonicalAutonomyReceipt,
+    ModelRecommendation, TaskKind, VerificationRecommendation, build_autonomy_receipt,
+    classify_autonomy,
 };

@@ -7,15 +7,20 @@ use lattice_contracts::{
     ContentDigest, StoreAuthorityHead, SubjectBinding, TaskIngressPeerEvidence,
     TaskLedgerStreamIdentity, WriterLeaseAuthorityHead,
 };
+use lattice_orchestrator::{
+    AutonomyAuthorityEvidence, AutonomyDecision, AutonomyIntent, AutonomyIntentVersion, TaskKind,
+    build_autonomy_receipt,
+};
 use lattice_ports::{
-    TaskLifecycleError, TaskLifecycleErrorKind, TaskLifecycleEvidence, TaskLifecyclePort,
-    TaskLifecycleResult,
+    AutonomyDisposition, AutonomyModel, AutonomyReason, AutonomyReceiptProjection,
+    AutonomyVerification, TaskLifecycleError, TaskLifecycleErrorKind, TaskLifecycleEvidence,
+    TaskLifecyclePort, TaskLifecycleResult,
 };
 use lattice_postgres_store::{MigrationTarget, PostgresTaskLedger};
-use lattice_task_domain::{TaskState, transition};
+use lattice_task_domain::{RiskClass, TaskState, transition};
 use lattice_task_ledger::{
     ActionId, ActorId, AppendCommand, CommandId, CommandOutcome, CorrelationId, Diagnostic,
-    LedgerEventKind, LedgerOutcome, ReasonCode, VerifiedStream,
+    LedgerEventKind, LedgerOutcome, ReasonCode, VerifiedStream, plan_append,
 };
 
 use crate::delivery_ledger::{DeliveryDatabaseBinding, connect_fixed_runtime_client};
@@ -28,6 +33,9 @@ const STATE_REASON: &str = "TASK038_STATE_TRANSITION";
 const RESULT_ACTION: &str = "TASK_RESULT";
 const RESULT_REASON: &str = "TASK038_FULL_CHAIN_RESULT";
 const RESULT_COMMAND_ID: &str = "task038-result";
+const AUTONOMY_COMMAND_ID: &str = "task050-autonomy-receipt-v1";
+const AUTONOMY_ACTION: &str = "RECORD_AUTONOMY_RECEIPT_V1";
+const AUTONOMY_REASON: &str = "AUTONOMY_DECISION_RECORDED";
 
 #[must_use]
 pub(crate) fn task_admission_command_id(client_request_id: &str) -> String {
@@ -141,6 +149,14 @@ impl PostgresTaskLifecycle {
     }
 
     fn load_verified(&mut self, binding: &SubjectBinding) -> TaskLifecycleResult<VerifiedStream> {
+        self.load_verified_with_autonomy(binding)
+            .map(|(stream, _)| stream)
+    }
+
+    fn load_verified_with_autonomy(
+        &mut self,
+        binding: &SubjectBinding,
+    ) -> TaskLifecycleResult<(VerifiedStream, Option<AutonomyReceiptProjection>)> {
         ensure_binding(binding, &self.identity)?;
         ensure_before(self.deadline)?;
         let loaded = self
@@ -148,7 +164,57 @@ impl PostgresTaskLifecycle {
             .load_stream(self.identity.clone())
             .map_err(map_store_error)?;
         ensure_before(self.deadline)?;
-        Ok(loaded.stream().clone())
+        let autonomy = loaded
+            .autonomy_receipt()
+            .map(|receipt| {
+                let observed_state = match receipt.observed_task_state() {
+                    "DRAFT" => TaskState::Draft,
+                    _ => return Err(corrupt("LATTICE_AUTONOMY_OBSERVED_STATE_REJECTED")),
+                };
+                let disposition = match receipt.disposition() {
+                    "PROCEED" => AutonomyDisposition::Proceed,
+                    "ASK_USER" => AutonomyDisposition::AskUser,
+                    _ => return Err(corrupt("LATTICE_AUTONOMY_DISPOSITION_REJECTED")),
+                };
+                let reason = match receipt.decision_reason() {
+                    "ROUTINE_AUTHORIZED" => AutonomyReason::RoutineAuthorized,
+                    "NEW_USER_DECISION" => AutonomyReason::NewUserDecision,
+                    "NEW_AUTHORITY" => AutonomyReason::NewAuthority,
+                    "HIGH_RISK_OR_IRREVERSIBLE" => AutonomyReason::HighRiskOrIrreversible,
+                    _ => return Err(corrupt("LATTICE_AUTONOMY_REASON_REJECTED")),
+                };
+                let model = receipt
+                    .model()
+                    .map(|value| match value {
+                        "GOVERNED_CODEX_WRITER" => Ok(AutonomyModel::GovernedCodexWriter),
+                        "NO_MODEL" => Ok(AutonomyModel::NoModel),
+                        _ => Err(corrupt("LATTICE_AUTONOMY_MODEL_REJECTED")),
+                    })
+                    .transpose()?;
+                let verification = receipt
+                    .verification()
+                    .map(|value| match value {
+                        "FOCUSED_CHECKS" => Ok(AutonomyVerification::FocusedChecks),
+                        "BUILD_AND_FOCUSED_CHECKS" => {
+                            Ok(AutonomyVerification::BuildAndFocusedChecks)
+                        }
+                        "READ_ONLY_EVIDENCE" => Ok(AutonomyVerification::ReadOnlyEvidence),
+                        _ => Err(corrupt("LATTICE_AUTONOMY_VERIFICATION_REJECTED")),
+                    })
+                    .transpose()?;
+                Ok(AutonomyReceiptProjection::new(
+                    receipt.receipt_digest().clone(),
+                    receipt.authority_digest().clone(),
+                    receipt.event_digest().clone(),
+                    observed_state,
+                    disposition,
+                    reason,
+                    model,
+                    verification,
+                ))
+            })
+            .transpose()?;
+        Ok((loaded.stream().clone(), autonomy))
     }
 
     /// Replays the same verified stream and returns its exact database/global
@@ -175,7 +241,7 @@ impl PostgresTaskLifecycle {
         })
     }
 
-    /// Returns the exact durable TaskCreated command after replay validation.
+    /// Returns the exact durable `TaskCreated` command after replay validation.
     ///
     /// # Errors
     ///
@@ -219,8 +285,8 @@ impl PostgresTaskLifecycle {
         {
             return Err(rejected("LATTICE_TASK_LEDGER_APPEND_REJECTED"));
         }
-        let stream = self.load_verified(binding)?;
-        replay_lifecycle(&stream, binding, &ingress_peer)
+        let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
+        replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, autonomy.as_ref())
     }
 }
 
@@ -231,8 +297,13 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
         client_request_id: &str,
     ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
         let ingress_peer = self.required_ingress_peer()?;
-        let stream = self.load_verified(binding)?;
-        let current = replay_lifecycle(&stream, binding, &ingress_peer)?;
+        let (stream, durable_autonomy) = self.load_verified_with_autonomy(binding)?;
+        let current = replay_lifecycle_with_autonomy(
+            &stream,
+            binding,
+            &ingress_peer,
+            durable_autonomy.as_ref(),
+        )?;
         let command_id = task_admission_command_id(client_request_id);
         if let Some(created) = stream
             .events()
@@ -258,8 +329,9 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
     ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
         let ingress_peer = self.required_ingress_peer()?;
         transition(from, to).map_err(|_| rejected("LATTICE_TASK_STATE_TRANSITION_REJECTED"))?;
-        let stream = self.load_verified(binding)?;
-        let current = replay_lifecycle(&stream, binding, &ingress_peer)?;
+        let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
+        let current =
+            replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, autonomy.as_ref())?;
         if current.state() == to {
             return Ok(current);
         }
@@ -283,6 +355,115 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
         self.execute(binding, command, writer_authority)
     }
 
+    fn record_autonomy_receipt(
+        &mut self,
+        binding: &SubjectBinding,
+        writer_authority: Option<&WriterLeaseAuthorityHead>,
+    ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
+        let ingress_peer = self.required_ingress_peer()?;
+        let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
+        let current =
+            replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, autonomy.as_ref())?;
+        let intent = AutonomyIntent {
+            version: AutonomyIntentVersion::V1,
+            kind: TaskKind::Feature,
+            risk: RiskClass::R0,
+            execution_preapproved: writer_authority.is_some(),
+            requires_new_authority: false,
+            irreversible_or_high_risk: false,
+        };
+        let authority = AutonomyAuthorityEvidence::new_p0_process_start_profile(
+            ingress_peer.process_start_authority_digest().clone(),
+            task_ingress_profile_adapter_commitment(&ingress_peer)?,
+            self.authority.head_digest().clone(),
+            writer_authority.cloned(),
+        )
+        .map_err(|_| rejected("LATTICE_AUTONOMY_AUTHORITY_REJECTED"))?;
+        let receipt = build_autonomy_receipt(binding.clone(), intent, TaskState::Draft, authority)
+            .map_err(|_| rejected("LATTICE_AUTONOMY_RECEIPT_REJECTED"))?;
+        if let Some(existing) = current.autonomy_receipt() {
+            ensure_exact_autonomy_retry(
+                existing,
+                receipt.receipt_digest(),
+                receipt.authority_digest(),
+            )?;
+            return Ok(current);
+        }
+        if current.state() != TaskState::Draft || stream.events().len() != 1 {
+            return Err(rejected("LATTICE_AUTONOMY_RECEIPT_ORDER_REJECTED"));
+        }
+        let command = append_command(
+            stream.head().clone(),
+            AUTONOMY_COMMAND_ID,
+            "2000-01-01T00:00:01Z",
+            LedgerEventKind::AutonomyReceiptRecorded,
+            ingress_peer.actor_id().as_str(),
+            AUTONOMY_ACTION,
+            AUTONOMY_REASON,
+            receipt.receipt_digest().clone(),
+            None,
+        )?;
+        let plan = plan_append(&stream, command.clone())
+            .map_err(|_| corrupt("LATTICE_AUTONOMY_LEDGER_PLAN_REJECTED"))?;
+        let event_digest = plan
+            .new_event()
+            .map(|event| event.event_digest().clone())
+            .or_else(|| plan.receipt().event_digest().cloned())
+            .ok_or_else(|| corrupt("LATTICE_AUTONOMY_EVENT_DIGEST_MISSING"))?;
+        let (disposition, decision_reason, model, verification) = receipt_scalar_decision(&receipt);
+        let authority_evidence = receipt.authority_evidence();
+        let durable_receipt = PostgresTaskLedger::autonomy_receipt(
+            2,
+            event_digest,
+            receipt.schema_version(),
+            receipt.intent().version.as_str(),
+            receipt.intent().kind.as_str(),
+            receipt.intent().risk.as_str(),
+            receipt.intent().execution_preapproved,
+            receipt.intent().requires_new_authority,
+            receipt.intent().irreversible_or_high_risk,
+            receipt.observed_state().as_str(),
+            disposition,
+            decision_reason,
+            model.map(str::to_owned),
+            verification.map(str::to_owned),
+            receipt.authority_mode(),
+            authority_evidence.process_start_authority_digest().clone(),
+            authority_evidence
+                .ingress_profile_adapter_commitment()
+                .clone(),
+            authority_evidence.store_authority_head_digest().clone(),
+            authority_evidence
+                .writer_authority()
+                .map(|writer| writer.receipt_digest().clone()),
+            receipt.writer_lease_head_digest().cloned(),
+            receipt.writer_fencing_token(),
+            receipt.authority_digest().clone(),
+            receipt.receipt_digest().clone(),
+        );
+        ensure_before(self.deadline)?;
+        let execution = match writer_authority {
+            Some(writer_authority) => self.ledger.execute_autonomy_fenced(
+                command,
+                self.authority.clone(),
+                writer_authority.clone(),
+                durable_receipt,
+            ),
+            None => self.ledger.execute_autonomy_unfenced(
+                command,
+                self.authority.clone(),
+                durable_receipt,
+            ),
+        }
+        .map_err(map_store_error)?;
+        ensure_after_mutation(self.deadline)?;
+        if execution.receipt().event_digest().is_none() {
+            return Err(corrupt("LATTICE_AUTONOMY_EVENT_DIGEST_MISSING"));
+        }
+        let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
+        replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, autonomy.as_ref())
+    }
+
     fn record_result(
         &mut self,
         binding: &SubjectBinding,
@@ -290,8 +471,9 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
         writer_authority: &WriterLeaseAuthorityHead,
     ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
         let ingress_peer = self.required_ingress_peer()?;
-        let stream = self.load_verified(binding)?;
-        let current = replay_lifecycle(&stream, binding, &ingress_peer)?;
+        let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
+        let current =
+            replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, autonomy.as_ref())?;
         if let Some(existing) = current.result_digest() {
             if existing == result_digest {
                 return Ok(current);
@@ -317,9 +499,58 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
 
     fn load(&mut self, binding: &SubjectBinding) -> TaskLifecycleResult<TaskLifecycleEvidence> {
         let ingress_peer = self.required_ingress_peer()?;
-        let stream = self.load_verified(binding)?;
-        replay_lifecycle(&stream, binding, &ingress_peer)
+        let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
+        replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, autonomy.as_ref())
     }
+}
+
+fn receipt_scalar_decision(
+    receipt: &lattice_orchestrator::CanonicalAutonomyReceipt,
+) -> (
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+    Option<&'static str>,
+) {
+    match receipt.decision() {
+        AutonomyDecision::Proceed {
+            model,
+            verification,
+            reason,
+        } => (
+            "PROCEED",
+            reason.as_str(),
+            Some(model.as_str()),
+            Some(verification.as_str()),
+        ),
+        AutonomyDecision::AskUser { reason } => ("ASK_USER", reason.as_str(), None, None),
+    }
+}
+
+fn ensure_exact_autonomy_retry(
+    existing: &AutonomyReceiptProjection,
+    candidate_receipt_digest: &ContentDigest,
+    candidate_authority_digest: &ContentDigest,
+) -> TaskLifecycleResult<()> {
+    if existing.observed_state() != TaskState::Draft
+        || existing.receipt_digest() != candidate_receipt_digest
+        || existing.authority_digest() != candidate_authority_digest
+    {
+        return Err(rejected("LATTICE_AUTONOMY_RECEIPT_SUBSTITUTED"));
+    }
+    Ok(())
+}
+
+fn replay_lifecycle_with_autonomy(
+    stream: &VerifiedStream,
+    binding: &SubjectBinding,
+    ingress_peer: &TaskIngressPeerEvidence,
+    receipt: Option<&AutonomyReceiptProjection>,
+) -> TaskLifecycleResult<TaskLifecycleEvidence> {
+    let evidence = replay_lifecycle(stream, binding, ingress_peer)?;
+    Ok(receipt.map_or(evidence.clone(), |receipt| {
+        evidence.with_autonomy_receipt(receipt.clone())
+    }))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -894,6 +1125,41 @@ mod tests {
         let error = ensure_after_mutation(Instant::now()).expect_err("expired mutation deadline");
         assert_eq!(error.kind(), TaskLifecycleErrorKind::Ambiguous);
         assert_eq!(error.code(), "LATTICE_TASK_LEDGER_POST_MUTATION_TIMEOUT");
+    }
+
+    #[test]
+    fn autonomy_exact_retry_rejects_substituted_authority_or_receipt_digest() {
+        let receipt_digest = ContentDigest::from_sha256("a".repeat(64)).unwrap();
+        let authority_digest = ContentDigest::from_sha256("b".repeat(64)).unwrap();
+        let projection = AutonomyReceiptProjection::new(
+            receipt_digest.clone(),
+            authority_digest.clone(),
+            ContentDigest::from_sha256("c".repeat(64)).unwrap(),
+            TaskState::Draft,
+            AutonomyDisposition::Proceed,
+            AutonomyReason::RoutineAuthorized,
+            Some(AutonomyModel::GovernedCodexWriter),
+            Some(AutonomyVerification::FocusedChecks),
+        );
+
+        ensure_exact_autonomy_retry(&projection, &receipt_digest, &authority_digest)
+            .expect("same canonical retry");
+        for (candidate_receipt, candidate_authority) in [
+            (
+                ContentDigest::from_sha256("d".repeat(64)).unwrap(),
+                authority_digest.clone(),
+            ),
+            (
+                receipt_digest.clone(),
+                ContentDigest::from_sha256("e".repeat(64)).unwrap(),
+            ),
+        ] {
+            let error =
+                ensure_exact_autonomy_retry(&projection, &candidate_receipt, &candidate_authority)
+                    .expect_err("changed canonical retry must fail closed");
+            assert_eq!(error.kind(), TaskLifecycleErrorKind::Rejected);
+            assert_eq!(error.code(), "LATTICE_AUTONOMY_RECEIPT_SUBSTITUTED");
+        }
     }
 
     #[test]

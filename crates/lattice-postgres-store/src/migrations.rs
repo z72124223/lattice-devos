@@ -27,12 +27,16 @@ const LIVE_CONTROL_STORE_BYTES: &[u8] =
     include_bytes!("../../../db/migrations/0003_live_control_store.sql");
 const TASK_LEDGER_REPOSITORY_BYTES: &[u8] =
     include_bytes!("../../../db/migrations/0004_task_ledger_repository.sql");
+const TASK_AUTONOMY_RECEIPT_BYTES: &[u8] =
+    include_bytes!("../../../db/migrations/0005_task_autonomy_receipt.sql");
 const BOOTSTRAP_SHA256: &str = "7bff021fc17f738551309c906578c8015b2dd0307d27d239c21df1697c4d09c8";
 const FOUNDATION_SHA256: &str = "e996dc64af3112a647e75ebf07df2a77b1e9b3a018ed443880150365184883f0";
 const LIVE_CONTROL_STORE_SHA256: &str =
     "00ae3eedd76704f26b1df58955d9d594c98f0ba525be93b15d8c9ebb1f2115c1";
 const TASK_LEDGER_REPOSITORY_SHA256: &str =
     "cd658ed2f4624cd0a829c818c1cf96d8ac3829264046976bdde3b2fc7feea6e5";
+const TASK_AUTONOMY_RECEIPT_SHA256: &str =
+    "5dbf7439887ba30e8070bcb8883c1994e42a3d3a7ce78dc174771d3b89049436";
 pub(crate) const LEGACY_V1_MANIFEST_SHA256: &str =
     "9b126a41e542b71d434b5786e35acb66575967d055a6733b9d6bf0b8c9f0eada";
 const MANIFEST_HASH_DOMAIN: &[u8] = b"LATTICE_POSTGRES_MIGRATION_MANIFEST_V1\0";
@@ -151,7 +155,7 @@ impl MigrationDescriptor {
     }
 }
 
-static MIGRATION_MANIFEST: [MigrationDescriptor; 4] = [
+static MIGRATION_MANIFEST: [MigrationDescriptor; 5] = [
     MigrationDescriptor {
         ordinal: 1,
         id: "0001_bootstrap_draft",
@@ -204,6 +208,21 @@ static MIGRATION_MANIFEST: [MigrationDescriptor; 4] = [
         bytes: TASK_LEDGER_REPOSITORY_BYTES,
         byte_length: 111_742,
         sha256: TASK_LEDGER_REPOSITORY_SHA256,
+        status: MigrationStatus::Executable,
+        transaction_mode: MigrationTransactionMode::RunnerOwned,
+        schema_version: POSTGRES_SCHEMA_VERSION,
+        min_reader: 3,
+        max_reader: 3,
+        min_writer: 3,
+        max_writer: 3,
+    },
+    MigrationDescriptor {
+        ordinal: 5,
+        id: "0005_task_autonomy_receipt",
+        path: "db/migrations/0005_task_autonomy_receipt.sql",
+        bytes: TASK_AUTONOMY_RECEIPT_BYTES,
+        byte_length: 19_326,
+        sha256: TASK_AUTONOMY_RECEIPT_SHA256,
         status: MigrationStatus::Executable,
         transaction_mode: MigrationTransactionMode::RunnerOwned,
         schema_version: POSTGRES_SCHEMA_VERSION,
@@ -533,7 +552,7 @@ fn verify_manifest(
 
     let evidence = verify_manifest_entries(manifest)?;
     if manifest != MIGRATION_MANIFEST
-        || evidence.executable_count != 3
+        || evidence.executable_count != 4
         || manifest[0].status != MigrationStatus::Superseded
         || manifest[0].schema_version != 0
         || manifest[1].status != MigrationStatus::Executable
@@ -548,6 +567,10 @@ fn verify_manifest(
         || manifest[3].schema_version != POSTGRES_SCHEMA_VERSION
         || manifest[3].reader_compatibility() != (3..=3)
         || manifest[3].writer_compatibility() != (3..=3)
+        || manifest[4].status != MigrationStatus::Executable
+        || manifest[4].schema_version != POSTGRES_SCHEMA_VERSION
+        || manifest[4].reader_compatibility() != (3..=3)
+        || manifest[4].writer_compatibility() != (3..=3)
     {
         return Err(PostgresStoreSetupError::new(
             PostgresStoreSetupErrorKind::ManifestInvalid,
@@ -578,6 +601,20 @@ pub(crate) fn verify_v2_manifest_prefix() -> Result<ManifestEvidence, PostgresSt
         || evidence.executable_count != 2
         || evidence.schema_version != STORE_V2_SCHEMA_VERSION
         || evidence.manifest_sha256.as_str() != STORE_V2_MANIFEST_SHA256
+    {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::ManifestInvalid,
+        ));
+    }
+    Ok(evidence)
+}
+
+pub(crate) fn verify_v3_manifest_prefix() -> Result<ManifestEvidence, PostgresStoreSetupError> {
+    let prefix = &MIGRATION_MANIFEST[..4];
+    let evidence = verify_manifest_entries(prefix)?;
+    if evidence.entry_count != 4
+        || evidence.executable_count != 3
+        || evidence.schema_version != POSTGRES_SCHEMA_VERSION
     {
         return Err(PostgresStoreSetupError::new(
             PostgresStoreSetupErrorKind::ManifestInvalid,

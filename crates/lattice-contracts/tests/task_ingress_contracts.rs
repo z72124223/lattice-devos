@@ -2,11 +2,23 @@ use lattice_contracts::{
     CHATGPT_SECURE_MCP_TUNNEL_ACTOR_ID, CHATGPT_SECURE_MCP_TUNNEL_ADAPTER_ID, ContentDigest,
     ContractError, GatewayChannelId, GatewayInstanceId, LOCAL_CANONICAL_MCP_ACCEPTANCE_ACTOR_ID,
     LOCAL_CANONICAL_MCP_ACCEPTANCE_ADAPTER_ID, RuntimeKind, TaskIngressActorKind,
-    TaskIngressClientKind, TaskIngressPeerEvidence,
+    TaskIngressClientKind, TaskIngressPeerEvidence, sha256_content_digest,
 };
 
 fn digest(byte: char) -> ContentDigest {
     ContentDigest::from_sha256(byte.to_string().repeat(64)).expect("valid digest")
+}
+
+#[test]
+fn shared_sha256_matches_published_vectors() {
+    assert_eq!(
+        sha256_content_digest(b"").as_str(),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(
+        sha256_content_digest(b"abc").as_str(),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
 }
 
 fn live_peer() -> TaskIngressPeerEvidence {

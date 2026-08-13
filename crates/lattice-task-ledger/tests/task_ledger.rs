@@ -49,6 +49,57 @@ fn append(
     .expect("append command")
 }
 
+fn autonomy_append(
+    head: lattice_contracts::TaskLedgerStreamHead,
+    command_id: &str,
+    receipt_digest: char,
+) -> AppendCommand {
+    AppendCommand::new(
+        head,
+        CommandId::new(command_id).expect("command"),
+        CorrelationId::new("correlation-1").expect("correlation"),
+        "2026-08-13T00:00:01Z",
+        LedgerEventKind::AutonomyReceiptRecorded,
+        ActorId::new("lattice-orchestrator").expect("actor"),
+        ActionId::new("RECORD_AUTONOMY_RECEIPT_V1").expect("action"),
+        LedgerOutcome::Recorded,
+        ReasonCode::new("AUTONOMY_DECISION_RECORDED").expect("reason"),
+        digest(receipt_digest),
+        None,
+        None,
+    )
+    .expect("autonomy append")
+}
+
+#[test]
+fn autonomy_receipt_event_is_closed_ordered_and_exactly_once() {
+    assert_eq!(
+        LedgerEventKind::parse("AUTONOMY_RECEIPT_RECORDED"),
+        Ok(LedgerEventKind::AutonomyReceiptRecorded)
+    );
+    assert_eq!(
+        LedgerEventKind::parse("AUTONOMY_RECEIPT_V2"),
+        Err(LedgerError::UnknownEventKind)
+    );
+
+    let mut ledger = FakeTaskLedger::new();
+    let zero = FakeTaskLedger::zero_head(identity("project-1", "TASK-050")).expect("zero");
+    assert_eq!(
+        ledger.execute(autonomy_append(zero.clone(), "autonomy-before-create", 'b')),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
+
+    let created = ledger.execute(append(zero, "create", 'c')).expect("create");
+    let receipt = ledger
+        .execute(autonomy_append(created.after().clone(), "autonomy", 'd'))
+        .expect("receipt");
+    assert_eq!(receipt.after().sequence(), 2);
+    assert_eq!(
+        ledger.execute(autonomy_append(receipt.after().clone(), "autonomy-2", 'e')),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
+}
+
 #[test]
 fn complete_identity_produces_deterministic_zero_head_and_distinct_streams() {
     let first = FakeTaskLedger::zero_head(identity("project-1", "TASK-013")).expect("head");

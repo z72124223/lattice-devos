@@ -156,6 +156,106 @@ impl fmt::Display for TaskLifecycleError {
 impl Error for TaskLifecycleError {}
 
 /// Replay-derived authoritative Task lifecycle projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyDisposition {
+    Proceed,
+    AskUser,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyReason {
+    RoutineAuthorized,
+    NewUserDecision,
+    NewAuthority,
+    HighRiskOrIrreversible,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyModel {
+    GovernedCodexWriter,
+    NoModel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyVerification {
+    FocusedChecks,
+    BuildAndFocusedChecks,
+    ReadOnlyEvidence,
+}
+
+/// Internal-only replay projection of one verified autonomy receipt event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutonomyReceiptProjection {
+    receipt_digest: lattice_contracts::ContentDigest,
+    authority_digest: lattice_contracts::ContentDigest,
+    event_digest: lattice_contracts::ContentDigest,
+    observed_state: TaskState,
+    disposition: AutonomyDisposition,
+    reason: AutonomyReason,
+    model: Option<AutonomyModel>,
+    verification: Option<AutonomyVerification>,
+}
+
+impl AutonomyReceiptProjection {
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub const fn new(
+        receipt_digest: lattice_contracts::ContentDigest,
+        authority_digest: lattice_contracts::ContentDigest,
+        event_digest: lattice_contracts::ContentDigest,
+        observed_state: TaskState,
+        disposition: AutonomyDisposition,
+        reason: AutonomyReason,
+        model: Option<AutonomyModel>,
+        verification: Option<AutonomyVerification>,
+    ) -> Self {
+        Self {
+            receipt_digest,
+            authority_digest,
+            event_digest,
+            observed_state,
+            disposition,
+            reason,
+            model,
+            verification,
+        }
+    }
+
+    #[must_use]
+    pub const fn receipt_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.receipt_digest
+    }
+    #[must_use]
+    pub const fn authority_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.authority_digest
+    }
+    #[must_use]
+    pub const fn event_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.event_digest
+    }
+    #[must_use]
+    pub const fn observed_state(&self) -> TaskState {
+        self.observed_state
+    }
+    #[must_use]
+    pub const fn disposition(&self) -> AutonomyDisposition {
+        self.disposition
+    }
+    #[must_use]
+    pub const fn reason(&self) -> AutonomyReason {
+        self.reason
+    }
+    #[must_use]
+    pub const fn model(&self) -> Option<AutonomyModel> {
+        self.model
+    }
+    #[must_use]
+    pub const fn verification(&self) -> Option<AutonomyVerification> {
+        self.verification
+    }
+}
+
+/// Replay-derived authoritative Task lifecycle projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskLifecycleEvidence {
     binding: lattice_contracts::SubjectBinding,
@@ -163,6 +263,7 @@ pub struct TaskLifecycleEvidence {
     state: TaskState,
     ledger_head_digest: lattice_contracts::ContentDigest,
     result_digest: Option<lattice_contracts::ContentDigest>,
+    autonomy_receipt: Option<AutonomyReceiptProjection>,
 }
 
 impl TaskLifecycleEvidence {
@@ -180,7 +281,14 @@ impl TaskLifecycleEvidence {
             state,
             ledger_head_digest,
             result_digest,
+            autonomy_receipt: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_autonomy_receipt(mut self, receipt: AutonomyReceiptProjection) -> Self {
+        self.autonomy_receipt = Some(receipt);
+        self
     }
 
     #[must_use]
@@ -207,6 +315,11 @@ impl TaskLifecycleEvidence {
     pub const fn result_digest(&self) -> Option<&lattice_contracts::ContentDigest> {
         self.result_digest.as_ref()
     }
+
+    #[must_use]
+    pub const fn autonomy_receipt(&self) -> Option<&AutonomyReceiptProjection> {
+        self.autonomy_receipt.as_ref()
+    }
 }
 
 /// PostgreSQL-backed authoritative lifecycle boundary used by the sole
@@ -222,6 +335,19 @@ pub trait TaskLifecyclePort {
         &mut self,
         binding: &lattice_contracts::SubjectBinding,
         client_request_id: &str,
+    ) -> TaskLifecycleResult<TaskLifecycleEvidence>;
+
+    /// Records the exactly-once autonomy receipt before the first writable task
+    /// effect. `PROCEED` requires the supplied current writer authority;
+    /// `ASK_USER` requires `None` and imports no ambient writer authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn record_autonomy_receipt(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        writer_authority: Option<&lattice_contracts::WriterLeaseAuthorityHead>,
     ) -> TaskLifecycleResult<TaskLifecycleEvidence>;
 
     /// Appends one Task Domain-approved state transition.
