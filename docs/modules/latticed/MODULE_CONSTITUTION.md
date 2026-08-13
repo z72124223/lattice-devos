@@ -1,7 +1,7 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 1.6
+version: 1.7
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-13
@@ -65,6 +65,11 @@ Orchestrator composition.
   owner: only `lattice_delivery_run` may activate it, before writer effects;
   Delivery Status and both Task tools perform zero Hermes activation. MCP EOF
   explicitly reaps an activated runner, and teardown ambiguity cannot exit 0.
+- Production Hermes configuration requires exactly the twelve executed-input
+  settings for preparation, runtime, containment, API bearer, Codex launcher
+  and home, broker run root, and deadline. Legacy
+  `LATTICE_HERMES_BROKER_HELPER{,_SHA256}` values are ignored and must not be
+  read, validated, echoed, or allowed to affect launch classification.
 - Select every project, snapshot, repository/base, scope, verification,
   capability, budget, approval, prompt, workspace, and downstream binding from
   process-start composition configuration, never from MCP arguments.
@@ -178,7 +183,7 @@ Orchestrator composition.
   diagnostics libraries required at the application edge.
 - Concrete PostgreSQL Task Ledger and PostgreSQL Writer Lease 1.0 adapters only
   for construction behind their typed boundaries.
-- `lattice-hermes-adapter` 1.0 only for production runner construction,
+- `lattice-hermes-adapter` 1.1 only for production runner construction,
   ephemeral liveness, and lifecycle teardown; it grants no durable truth,
   credential ownership, or orchestration authority.
 
@@ -237,6 +242,7 @@ truth, provider credentials, dependency direction, or orchestration order.
 | Delivery acceptance | official Codex turn, isolated scope/test/commit, durable outcome and separate restart/status replay | Engineering | yes |
 | Failure closure | startup/framing/adapter/timeout/unknown-effect cases never report success | Engineering | yes |
 | Standalone Hermes lifecycle | exact CLI routing, runner liveness, explicit bounded teardown, redacted errors, and local live-start evidence | Engineering and security review | yes |
+| Hermes executed-input closure | exact twelve-setting preflight, ignored legacy-helper sentinels, v2 adapter receipt and direct launcher plan | Engineering and security review | yes |
 
 ## Change Policy
 
@@ -257,3 +263,4 @@ constitution cannot be weakened merely to excuse implementation drift.
 | 1.4 | 2026-08-10 | SPEC-003 v4, ADR-023 alternate-entry correction, TASK-038 | Restrict alternate `lattice-full-chain` to a read-only delivery observer and reserve all official mutation plus task control for canonical `latticed` | User TASK-038-first One Writer boundary |
 | 1.5 | 2026-08-13 | SPEC-002 v29, ADR-021 clarification, TASK-060 | Add canonical `latticed --hermes-launch` as bounded owner of the existing production Hermes runner without changing MCP, truth, credential, or dependency boundaries | User goal-mode direction to complete Hermes |
 | 1.6 | 2026-08-13 | SPEC-002 v30, ADR-021 clarification, TASK-064 | Add opt-in lazy production Hermes composition to canonical four-tool `latticed`; preserve task/status zero-effect paths and require explicit teardown | User goal-mode direction to integrate Hermes into LATTICE |
+| 1.7 | 2026-08-13 | SPEC-002 v31, TASK-065 | Remove two non-executed broker-helper settings from production admission while preserving the direct verified Codex proxy, lazy activation, and MCP contracts | User goal-mode direction to complete Hermes |

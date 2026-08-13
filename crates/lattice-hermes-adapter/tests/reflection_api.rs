@@ -851,15 +851,11 @@ fn official_codex_0146_four_file_bundle_identity_is_live_verified() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "requires the built broker helper and staged official Codex 0.146.0 bundle"]
+#[ignore = "requires a staged official Codex 0.146.0 bundle and isolated Codex home"]
 fn official_codex_0146_zero_model_preflight_is_live_verified() {
     let launcher = std::path::PathBuf::from(
         std::env::var_os("LATTICE_HERMES_CODEX_0146_LAUNCHER")
             .expect("set exact staged launcher path"),
-    );
-    let helper = std::path::PathBuf::from(
-        std::env::var_os("LATTICE_HERMES_CODEX_BROKER_HELPER")
-            .expect("set built broker helper path"),
     );
     let codex_home = std::path::PathBuf::from(
         std::env::var_os("LATTICE_HERMES_ISOLATED_CODEX_HOME")
@@ -875,10 +871,7 @@ fn official_codex_0146_zero_model_preflight_is_live_verified() {
         "lattice-hermes-codex-preflight-{}-{sequence}",
         std::process::id()
     ));
-    let helper_sha256 = crate::sha256_file(&helper).expect("broker helper digest");
     let config = CodexReflectionBrokerConfig::new(
-        helper,
-        helper_sha256.clone(),
         launcher,
         codex_home,
         isolation_root.clone(),
@@ -889,7 +882,6 @@ fn official_codex_0146_zero_model_preflight_is_live_verified() {
     let receipt = config
         .run_zero_model_preflight(Instant::now() + Duration::from_secs(30))
         .expect("zero-model broker preflight");
-    assert_eq!(receipt.helper_sha256(), helper_sha256);
     assert_eq!(
         receipt.launcher_sha256(),
         CodexBrokerPolicy::official().launcher_sha256()

@@ -884,11 +884,24 @@ fn latticed_hermes_preflight_reports_exact_missing_settings() {
         .env_clear()
         .output()
         .expect("start canonical latticed Hermes preflight");
+    let stale_helper_output = Command::new(env!("CARGO_BIN_EXE_latticed"))
+        .arg("--hermes-preflight")
+        .env_clear()
+        .env(
+            "LATTICE_HERMES_BROKER_HELPER",
+            r"C:\STALE-HELPER-PATH-MUST-NOT-LEAK\helper.exe",
+        )
+        .env(
+            "LATTICE_HERMES_BROKER_HELPER_SHA256",
+            "STALE-HELPER-DIGEST-MUST-NOT-LEAK",
+        )
+        .output()
+        .expect("start canonical latticed with ignored legacy helper settings");
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert_eq!(
-        String::from_utf8(output.stderr).expect("stderr utf8"),
+        String::from_utf8(output.stderr.clone()).expect("stderr utf8"),
         concat!(
             "LATTICE_HERMES_PREFLIGHT_MISSING_CONFIGURATION:",
             "LATTICE_HERMES_PREPARATION_ROOT,",
@@ -899,13 +912,17 @@ fn latticed_hermes_preflight_reports_exact_missing_settings() {
             "LATTICE_HERMES_PRODUCT_ROOT,",
             "LATTICE_HERMES_WSL_EXE,",
             "LATTICE_HERMES_ISOLATION_ROOT,",
-            "LATTICE_HERMES_BROKER_HELPER,",
-            "LATTICE_HERMES_BROKER_HELPER_SHA256,",
             "LATTICE_HERMES_CODEX_LAUNCHER,",
             "LATTICE_HERMES_CODEX_HOME,",
             "LATTICE_HERMES_BROKER_ISOLATION_ROOT,",
             "LATTICE_HERMES_DEADLINE_SECONDS\n",
         )
+    );
+    assert_eq!(stale_helper_output.status.code(), Some(2));
+    assert!(stale_helper_output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(stale_helper_output.stderr).expect("stale helper stderr utf8"),
+        String::from_utf8(output.stderr).expect("original stderr utf8")
     );
 }
 
@@ -1039,8 +1056,6 @@ fn latticed_hermes_preflight_rejects_unavailable_manifest_without_echoing_values
         .env("LATTICE_HERMES_API_KEY", SECRET_SENTINEL)
         .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
         .env("LATTICE_HERMES_ISOLATION_ROOT", r"C:\isolation")
-        .env("LATTICE_HERMES_BROKER_HELPER", r"C:\broker\helper.exe")
-        .env("LATTICE_HERMES_BROKER_HELPER_SHA256", "a".repeat(64))
         .env("LATTICE_HERMES_CODEX_LAUNCHER", r"C:\codex\codex.exe")
         .env("LATTICE_HERMES_CODEX_HOME", r"C:\codex\home")
         .env(
@@ -1121,8 +1136,6 @@ fn latticed_hermes_preflight_rejects_invalid_secret_after_exact_manifest_identit
         .env("LATTICE_HERMES_PRODUCT_ROOT", &product_root)
         .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
         .env("LATTICE_HERMES_ISOLATION_ROOT", r"C:\isolation")
-        .env("LATTICE_HERMES_BROKER_HELPER", r"C:\broker\helper.exe")
-        .env("LATTICE_HERMES_BROKER_HELPER_SHA256", "a".repeat(64))
         .env("LATTICE_HERMES_CODEX_LAUNCHER", r"C:\codex\codex.exe")
         .env("LATTICE_HERMES_CODEX_HOME", r"C:\codex\home")
         .env(

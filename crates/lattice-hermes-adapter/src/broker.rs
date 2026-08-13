@@ -884,14 +884,14 @@ fn finish_broker_root_preflight<T>(
     }
 }
 
-/// Private host-side configuration for the one-shot official Codex broker.
-/// No constructor is exported outside this crate, so an arbitrary helper
-/// digest cannot mint a broker receipt.
+/// Host-side configuration for the official Codex proxy.
+///
+/// Fields remain private and a production receipt is minted only by the
+/// zero-model preflight. Inputs that are not executed by the production proxy
+/// are deliberately excluded from admission and receipt identity.
 #[cfg(windows)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodexReflectionBrokerConfig {
-    broker_helper: PathBuf,
-    broker_helper_sha256: String,
     codex_home: PathBuf,
     isolation_root: PathBuf,
     launcher: PathBuf,
@@ -901,40 +901,28 @@ pub struct CodexReflectionBrokerConfig {
 
 #[cfg(windows)]
 impl CodexReflectionBrokerConfig {
-    #[allow(clippy::too_many_arguments)]
-    /// Creates a deployment-owned broker configuration.
-    ///
-    /// The helper digest is a deployment trust input. The resulting receipt
-    /// binds it, allowing the private Live gate to compare it with the frozen
-    /// runtime manifest rather than trusting the caller at use time.
+    /// Creates a deployment-owned proxy configuration.
     ///
     /// # Errors
     ///
-    /// Rejects non-absolute paths, an invalid digest, or model drift.
+    /// Rejects non-absolute paths or model drift.
     pub fn new(
-        broker_helper: PathBuf,
-        broker_helper_sha256: impl Into<String>,
         launcher: PathBuf,
         codex_home: PathBuf,
         isolation_root: PathBuf,
         product_root: PathBuf,
         model: impl Into<String>,
     ) -> HermesAdapterResult<Self> {
-        let broker_helper_sha256 = broker_helper_sha256.into();
         let model = model.into();
-        if !broker_helper.is_absolute()
-            || !launcher.is_absolute()
+        if !launcher.is_absolute()
             || !codex_home.is_absolute()
             || !isolation_root.is_absolute()
             || !product_root.is_absolute()
-            || !is_lowercase_sha256(&broker_helper_sha256)
             || model != "gpt-5.3-codex-spark"
         {
             return Err(configuration("HERMES_CODEX_BROKER_CONFIG_REJECTED"));
         }
         Ok(Self {
-            broker_helper,
-            broker_helper_sha256,
             codex_home,
             isolation_root,
             launcher,
@@ -943,8 +931,8 @@ impl CodexReflectionBrokerConfig {
         })
     }
 
-    /// Seals the exact official bundle, helper, isolated home, config lock,
-    /// and scrubbed child environment without starting Codex or a model turn.
+    /// Seals the exact official bundle, isolated home, config lock, and
+    /// scrubbed child environment without starting Codex or a model turn.
     ///
     /// The returned receipt is only a configuration/identity prerequisite.
     /// The production provider is minted only after a matching bundle
@@ -968,13 +956,6 @@ impl CodexReflectionBrokerConfig {
         if reviewed.version() != policy.codex_version() {
             return Err(identity("HERMES_CODEX_BUNDLE_IDENTITY_REJECTED"));
         }
-        let helper = fs::canonicalize(&self.broker_helper)
-            .map_err(|_| identity("HERMES_CODEX_BROKER_HELPER_IDENTITY_REJECTED"))?;
-        reject_reparse_to_boundary(&helper, &helper)?;
-        let helper_sha256 = bounded_file_sha256(&helper, MAX_CODEX_LAUNCHER_BYTES)?;
-        if helper_sha256 != self.broker_helper_sha256 {
-            return Err(identity("HERMES_CODEX_BROKER_HELPER_IDENTITY_REJECTED"));
-        }
         let codex_home = fs::canonicalize(&self.codex_home)
             .map_err(|_| configuration("HERMES_CODEX_HOME_REJECTED"))?;
         validate_broker_codex_home(&codex_home, &self.product_root)?;
@@ -985,10 +966,8 @@ impl CodexReflectionBrokerConfig {
         )?;
         let ((verified, receipt_digest), owned_root) =
             finish_broker_root_preflight(owned_root, || {
-                if deadline <= Instant::now()
-                    || bounded_file_sha256(&helper, MAX_CODEX_LAUNCHER_BYTES)? != helper_sha256
-                {
-                    return Err(identity("HERMES_CODEX_BROKER_HELPER_IDENTITY_REJECTED"));
+                if deadline <= Instant::now() {
+                    return Err(timeout("HERMES_CODEX_BROKER_DEADLINE_EXCEEDED"));
                 }
                 let verified = VerifiedCodexProxyConfig::from_config(self.clone())?;
                 let receipt_digest = verified.preflight_receipt_digest(&reviewed)?;
@@ -997,7 +976,6 @@ impl CodexReflectionBrokerConfig {
         Ok(CodexBrokerPreflightReceipt {
             child_environment_sha256: verified.child_environment_sha256,
             config_lock_sha256: verified.config_lock_sha256,
-            helper_sha256: verified.helper_sha256,
             launcher_sha256: reviewed.launcher_sha256().to_owned(),
             receipt_digest,
             owned_root: Some(Arc::new(Mutex::new(Some(owned_root)))),
@@ -1021,15 +999,13 @@ impl CodexReflectionBrokerConfig {
             return Err(binding_rejected());
         }
         receipt.validate_for_containment()?;
-        if receipt.helper_sha256 != self.broker_helper_sha256
-            || receipt.launcher_sha256 != CODEX_LAUNCHER_SHA256
+        if receipt.launcher_sha256 != CODEX_LAUNCHER_SHA256
             || receipt.config_lock_sha256 != sha256_bytes(CODEX_CONFIG_LOCK.as_bytes())
         {
             return Err(binding_rejected());
         }
         let verified = VerifiedCodexProxyConfig::from_config(self)?;
-        if verified.helper_sha256 != receipt.helper_sha256
-            || verified.config_lock_sha256 != receipt.config_lock_sha256
+        if verified.config_lock_sha256 != receipt.config_lock_sha256
             || verified.child_environment_sha256 != receipt.child_environment_sha256
         {
             return Err(binding_rejected());
@@ -1080,13 +1056,11 @@ impl CodexReflectionBrokerConfig {
 #[cfg(windows)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifiedCodexProxyConfig {
-    broker_helper: PathBuf,
     child_environment_sha256: String,
     codex_home: PathBuf,
     config_lock: PathBuf,
     config_lock_sha256: String,
     cwd: PathBuf,
-    helper_sha256: String,
     isolation_root: PathBuf,
     launcher: PathBuf,
     model: String,
@@ -1107,8 +1081,6 @@ impl VerifiedCodexProxyConfig {
                 "HERMES_CODEX_PROXY_CONFIG_IDENTITY_REJECTED",
             )
         };
-        let broker_helper =
-            fs::canonicalize(&config.broker_helper).map_err(|_| identity_rejected())?;
         let launcher = fs::canonicalize(&config.launcher).map_err(|_| identity_rejected())?;
         let codex_home = fs::canonicalize(&config.codex_home).map_err(|_| identity_rejected())?;
         let isolation_root =
@@ -1126,7 +1098,6 @@ impl VerifiedCodexProxyConfig {
             "event": "codex_proxy_config_canonical_paths_ok",
         }));
         for path in [
-            broker_helper.as_path(),
             launcher.as_path(),
             codex_home.as_path(),
             isolation_root.as_path(),
@@ -1141,8 +1112,7 @@ impl VerifiedCodexProxyConfig {
             "component": "Hermes",
             "event": "codex_proxy_config_reparse_check_ok",
         }));
-        if !broker_helper.is_file()
-            || !launcher.is_file()
+        if !launcher.is_file()
             || !codex_home.is_dir()
             || !isolation_root.is_dir()
             || !product_root.is_dir()
@@ -1188,15 +1158,6 @@ impl VerifiedCodexProxyConfig {
             "component": "Hermes",
             "event": "codex_proxy_config_lock_ok",
         }));
-        let helper_sha256 = bounded_file_sha256(&broker_helper, MAX_CODEX_LAUNCHER_BYTES)
-            .map_err(|_| identity_rejected())?;
-        if helper_sha256 != config.broker_helper_sha256 {
-            return Err(identity_rejected());
-        }
-        emit_codex_broker_trace(json!({
-            "component": "Hermes",
-            "event": "codex_proxy_config_helper_hash_ok",
-        }));
         let child_environment = codex_child_environment(&launcher, &codex_home, &temp)
             .map_err(|_| identity_rejected())?;
         let child_environment_sha256 =
@@ -1206,13 +1167,11 @@ impl VerifiedCodexProxyConfig {
             "event": "codex_proxy_config_child_environment_ok",
         }));
         Ok(Self {
-            broker_helper,
             child_environment_sha256,
             codex_home,
             config_lock,
             config_lock_sha256,
             cwd,
-            helper_sha256,
             isolation_root,
             launcher,
             model: config.model,
@@ -1239,10 +1198,8 @@ impl VerifiedCodexProxyConfig {
             reviewed.version().to_owned(),
             CODEX_SANDBOX_SETUP_SHA256.to_owned(),
             CODEX_COMMAND_RUNNER_SHA256.to_owned(),
-            self.helper_sha256.clone(),
             self.config_lock_sha256.clone(),
             self.child_environment_sha256.clone(),
-            path_text(&self.broker_helper)?,
             path_text(&self.codex_home)?,
             path_text(&self.config_lock)?,
             path_text(&self.cwd)?,
@@ -1253,7 +1210,7 @@ impl VerifiedCodexProxyConfig {
             self.model.clone(),
         ];
         let mut sealed = Sha256::new();
-        sealed.update(b"lattice.hermes.codex-broker-zero-model-preflight.v1\0");
+        sealed.update(b"lattice.hermes.codex-broker-zero-model-preflight.v2\0");
         for field in fields {
             sealed.update((field.len() as u64).to_be_bytes());
             sealed.update(field.as_bytes());
@@ -1347,8 +1304,6 @@ impl VerifiedCodexProxyConfig {
 
     fn reverify_config_binding(&self) -> HermesAdapterResult<()> {
         let current = Self::from_config(CodexReflectionBrokerConfig {
-            broker_helper: self.broker_helper.clone(),
-            broker_helper_sha256: self.helper_sha256.clone(),
             codex_home: self.codex_home.clone(),
             isolation_root: self.isolation_root.clone(),
             launcher: self.launcher.clone(),
@@ -1954,7 +1909,6 @@ impl ProductionCodexProxyProvider for FixtureCodexProxyProvider {
 pub struct CodexBrokerPreflightReceipt {
     child_environment_sha256: String,
     config_lock_sha256: String,
-    helper_sha256: String,
     launcher_sha256: String,
     receipt_digest: ContentDigest,
     owned_root: Option<Arc<Mutex<Option<OwnedCodexBrokerRoot>>>>,
@@ -1969,7 +1923,6 @@ impl std::fmt::Debug for CodexBrokerPreflightReceipt {
         debug
             .field("child_environment_sha256", &self.child_environment_sha256)
             .field("config_lock_sha256", &self.config_lock_sha256)
-            .field("helper_sha256", &self.helper_sha256)
             .field("launcher_sha256", &self.launcher_sha256)
             .field("receipt_digest", &self.receipt_digest)
             .field("owned_root", &self.owned_root.as_ref().map(|_| "REDACTED"));
@@ -1984,7 +1937,6 @@ impl PartialEq for CodexBrokerPreflightReceipt {
     fn eq(&self, other: &Self) -> bool {
         let equal = self.child_environment_sha256 == other.child_environment_sha256
             && self.config_lock_sha256 == other.config_lock_sha256
-            && self.helper_sha256 == other.helper_sha256
             && self.launcher_sha256 == other.launcher_sha256
             && self.receipt_digest == other.receipt_digest;
         #[cfg(test)]
@@ -2007,13 +1959,11 @@ impl CodexBrokerPreflightReceipt {
     fn test_only(
         child_environment_sha256: String,
         config_lock_sha256: String,
-        helper_sha256: String,
         launcher_sha256: String,
     ) -> Self {
         Self {
             child_environment_sha256,
             config_lock_sha256,
-            helper_sha256,
             launcher_sha256,
             receipt_digest: ContentDigest::from_sha256("b".repeat(64))
                 .expect("test-only receipt digest"),
@@ -2038,12 +1988,6 @@ impl CodexBrokerPreflightReceipt {
     #[must_use]
     pub fn child_environment_sha256(&self) -> &str {
         &self.child_environment_sha256
-    }
-
-    /// Digest of the Job-contained broker helper executable.
-    #[must_use]
-    pub fn helper_sha256(&self) -> &str {
-        &self.helper_sha256
     }
 
     /// Digest of the official Codex launcher.
@@ -2081,7 +2025,6 @@ impl CodexBrokerPreflightReceipt {
         if self.launcher_sha256 != CODEX_LAUNCHER_SHA256
             || self.config_lock_sha256 != sha256_bytes(CODEX_CONFIG_LOCK.as_bytes())
             || !is_lowercase_sha256(&self.child_environment_sha256)
-            || !is_lowercase_sha256(&self.helper_sha256)
             || self.receipt_digest.as_str().len() != 64
         {
             return Err(HermesAdapterError::new(
@@ -4327,7 +4270,6 @@ mod production_provider_tests {
             ));
             let bundle = root.join("bundle").join("x86_64-pc-windows-msvc");
             let launcher = bundle.join("bin").join("codex.exe");
-            let helper = root.join("lattice-hermes-broker.exe");
             let codex_home = root.join("codex-home");
             let isolation_root = root.join("isolation");
             let product_root = root.join("product");
@@ -4344,7 +4286,6 @@ mod production_provider_tests {
                 fs::create_dir_all(directory).expect("fixture directory");
             }
             fs::write(&launcher, b"fixture launcher").expect("fixture launcher");
-            fs::write(&helper, b"fixture helper").expect("fixture helper");
             fs::write(
                 codex_home.join(CODEX_HOME_OWNERSHIP_MARKER_NAME),
                 CODEX_HOME_OWNERSHIP_MARKER_BYTES,
@@ -4354,21 +4295,16 @@ mod production_provider_tests {
             fs::write(&config_lock, CODEX_CONFIG_LOCK.as_bytes()).expect("fixture config lock");
 
             let launcher = fs::canonicalize(launcher).expect("canonical fixture launcher");
-            let helper = fs::canonicalize(helper).expect("canonical fixture helper");
             let codex_home = fs::canonicalize(codex_home).expect("canonical fixture home");
             let isolation_root =
                 fs::canonicalize(isolation_root).expect("canonical fixture isolation");
             let product_root = fs::canonicalize(product_root).expect("canonical fixture product");
             let temp = fs::canonicalize(temp).expect("canonical fixture temp");
-            let helper_sha256 =
-                bounded_file_sha256(&helper, MAX_CODEX_LAUNCHER_BYTES).expect("helper identity");
             let child_environment = codex_child_environment(&launcher, &codex_home, &temp)
                 .expect("fixture child environment");
             let child_environment_sha256 =
                 digest_environment(&child_environment).expect("fixture environment digest");
             let config = CodexReflectionBrokerConfig::new(
-                helper,
-                helper_sha256.clone(),
                 launcher,
                 codex_home,
                 isolation_root,
@@ -4379,7 +4315,6 @@ mod production_provider_tests {
             let receipt = CodexBrokerPreflightReceipt::test_only(
                 child_environment_sha256,
                 sha256_bytes(CODEX_CONFIG_LOCK.as_bytes()),
-                helper_sha256,
                 CODEX_LAUNCHER_SHA256.to_owned(),
             );
             Self {
@@ -4704,6 +4639,43 @@ mod production_provider_tests {
         );
     }
 
+    #[test]
+    fn production_preflight_receipt_v2_has_fixed_executed_input_identity() {
+        let launcher = PathBuf::from(r"C:\lattice\bundle\codex.exe");
+        let verified = VerifiedCodexProxyConfig {
+            child_environment_sha256: "d".repeat(64),
+            codex_home: PathBuf::from(r"C:\lattice\codex-home"),
+            config_lock: PathBuf::from(r"C:\lattice\run\codex-reflection.lock.toml"),
+            config_lock_sha256: "c".repeat(64),
+            cwd: PathBuf::from(r"C:\lattice\run\empty-work"),
+            isolation_root: PathBuf::from(r"C:\lattice\run"),
+            launcher: launcher.clone(),
+            model: "gpt-5.3-codex-spark".to_owned(),
+            product_root: PathBuf::from(r"C:\lattice\product"),
+            temp: PathBuf::from(r"C:\lattice\run\temp"),
+        };
+        let reviewed = ReviewedCodexBundle {
+            launcher,
+            launcher_sha256: CODEX_LAUNCHER_SHA256.to_owned(),
+            package_manifest_sha256: CODEX_PACKAGE_MANIFEST_SHA256.to_owned(),
+        };
+
+        let digest = verified
+            .preflight_receipt_digest(&reviewed)
+            .expect("v2 production receipt digest");
+
+        assert_eq!(
+            digest.as_str(),
+            "5e7ab4e5d7ccc7386eb2f2625af060ea935c73bd01e80a48558c3bb6dba6c3ab"
+        );
+        // The former v1 fixture additionally sealed helper SHA `e` * 64 and
+        // `C:\lattice\lattice-hermes-broker.exe`; it cannot substitute for v2.
+        assert_ne!(
+            digest.as_str(),
+            "a9f620fab9a8a436d6c42c49275903bf80082c3567a7d0152d2012999194a35b"
+        );
+    }
+
     fn broker_root_test_paths(label: &str) -> (PathBuf, PathBuf, PathBuf) {
         let sequence = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -4782,7 +4754,7 @@ mod production_provider_tests {
 
         let Err(failure) = finish_broker_root_preflight(owned, || -> HermesAdapterResult<()> {
             fs::write(&foreign, b"foreign").expect("foreign temp sentinel");
-            Err(identity("HERMES_CODEX_BROKER_HELPER_IDENTITY_REJECTED"))
+            Err(identity("HERMES_CODEX_PROXY_CONFIG_IDENTITY_REJECTED"))
         }) else {
             panic!("post-create failure must not mint a receipt");
         };

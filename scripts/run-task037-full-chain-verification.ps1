@@ -1091,7 +1091,6 @@ function Invoke-FullChainInternalPhase {
     $evidenceRoot = Get-CanonicalPath -Path ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_EVIDENCE_ROOT', 'Process'))
     $fixtureRoot = Get-CanonicalPath -Path ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_FIXTURE_ROOT', 'Process'))
     $fullChainExe = Get-CanonicalPath -Path ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_FULL_CHAIN_EXE', 'Process'))
-    $brokerExe = Get-CanonicalPath -Path ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_HERMES_BROKER_EXE', 'Process'))
     $runtimeManifest = Get-CanonicalPath -Path ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_RUNTIME_MANIFEST', 'Process'))
     $deliveryLauncher = Get-CanonicalPath -Path ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_DELIVERY_LAUNCHER', 'Process'))
     $deliveryCodexHome = Get-CanonicalPath -Path ([Environment]::GetEnvironmentVariable('LATTICE_TASK037_DELIVERY_CODEX_HOME', 'Process'))
@@ -1106,12 +1105,12 @@ function Invoke-FullChainInternalPhase {
     $isTaskCapability = $capability -eq 'TASK'
 
     foreach ($path in @(
-        $evidenceRoot, $fixtureRoot, $fullChainExe, $brokerExe, $runtimeManifest,
+        $evidenceRoot, $fixtureRoot, $fullChainExe, $runtimeManifest,
         $deliveryLauncher, $schemaDirectory, $deliveryRoot, $openClawCli
     )) {
         Assert-NoReparseAncestor -Path $path -Boundary $repositoryRoot
     }
-    foreach ($path in @($fullChainExe, $brokerExe, $runtimeManifest, $deliveryLauncher, $gitExe, $nodeExe, $openClawCli, $wslExe)) {
+    foreach ($path in @($fullChainExe, $runtimeManifest, $deliveryLauncher, $gitExe, $nodeExe, $openClawCli, $wslExe)) {
         Assert-RegularFile -Path $path
     }
     if ((Get-FileSha256 $runtimeManifest) -ne $hermesRuntimeManifestSha256) {
@@ -1291,8 +1290,6 @@ function Invoke-FullChainInternalPhase {
             LATTICE_HERMES_PRODUCT_ROOT = $repositoryRoot
             LATTICE_HERMES_WSL_EXE = $wslExe
             LATTICE_HERMES_ISOLATION_ROOT = $hermesIsolationRoot
-            LATTICE_HERMES_BROKER_HELPER = $brokerExe
-            LATTICE_HERMES_BROKER_HELPER_SHA256 = (Get-FileSha256 $brokerExe)
             LATTICE_HERMES_CODEX_LAUNCHER = $deliveryLauncher
             LATTICE_HERMES_CODEX_HOME = $brokerCodexHome
             LATTICE_HERMES_BROKER_ISOLATION_ROOT = $brokerIsolationRoot
@@ -1404,7 +1401,6 @@ function Invoke-FullChainInternalPhase {
             }
             hermes = [ordered]@{
                 runtime_manifest_sha256 = Get-FileSha256 $runtimeManifest
-                broker_helper_sha256 = Get-FileSha256 $brokerExe
                 deadline_seconds = 300
             }
             binary = [ordered]@{
@@ -1500,7 +1496,6 @@ function Invoke-FullChainInternalPhase {
                     status_response_sha256 = Get-FileSha256 (Join-Path $evidenceRoot 'status.response.ndjson')
                     runtime_manifest_sha256 = Get-FileSha256 $runtimeManifest
                     full_chain_binary_sha256 = Get-FileSha256 $fullChainExe
-                    broker_binary_sha256 = Get-FileSha256 $brokerExe
                 }
                 Write-JsonEvidence -Path (Join-Path $evidenceRoot 'final.json') -Value $final
             }
@@ -1590,7 +1585,6 @@ function Invoke-FullChainInternalPhase {
                 status_response_sha256 = Get-FileSha256 (Join-Path $evidenceRoot 'status.response.ndjson')
                 runtime_manifest_sha256 = Get-FileSha256 $runtimeManifest
                 full_chain_binary_sha256 = Get-FileSha256 $fullChainExe
-                broker_binary_sha256 = Get-FileSha256 $brokerExe
             }
             Write-JsonEvidence -Path (Join-Path $evidenceRoot 'final.json') -Value $final
         }
@@ -1721,10 +1715,6 @@ function Invoke-DefaultVerification {
         if ($LASTEXITCODE -ne 0) {
             throw 'TASK037_FULL_CHAIN_BUILD_FAILED'
         }
-        & $cargo.Source 'build' '-p' 'lattice-hermes-adapter' '--bin' 'lattice-hermes-broker' '--locked'
-        if ($LASTEXITCODE -ne 0) {
-            throw 'TASK037_HERMES_BROKER_BUILD_FAILED'
-        }
         $metadataText = (& $cargo.Source 'metadata' '--no-deps' '--format-version' '1' '--locked') -join "`n"
         if ($LASTEXITCODE -ne 0) {
             throw 'TASK037_CARGO_METADATA_FAILED'
@@ -1736,9 +1726,7 @@ function Invoke-DefaultVerification {
     $metadata = $metadataText | ConvertFrom-Json
     $targetDirectory = Get-CanonicalPath -Path ([string]$metadata.target_directory)
     $fullChainExe = Get-CanonicalPath -Path (Join-Path $targetDirectory 'debug\lattice-full-chain.exe')
-    $brokerExe = Get-CanonicalPath -Path (Join-Path $targetDirectory 'debug\lattice-hermes-broker.exe')
     Assert-RegularFile -Path $fullChainExe
-    Assert-RegularFile -Path $brokerExe
 
     $storeDaemonInstanceId = 'task038-daemon-' + $acceptanceId
     $storeDaemonEpoch = [Convert]::ToUInt64($acceptanceId.Substring(0, 12), 16) + 8
@@ -1762,7 +1750,6 @@ function Invoke-DefaultVerification {
         delivery_codex_home_scope = 'temp'
         runtime_manifest_sha256 = Get-FileSha256 $runtimeManifest
         full_chain_binary_sha256 = Get-FileSha256 $fullChainExe
-        broker_binary_sha256 = Get-FileSha256 $brokerExe
         delivery_launcher_sha256 = Get-FileSha256 $deliveryLauncher
         openclaw_entrypoint_sha256 = Get-FileSha256 $openClawCli
         codex_auth_source = Get-CanonicalPath -Path $CodexAuthHome
@@ -1782,7 +1769,6 @@ function Invoke-DefaultVerification {
         LATTICE_TASK037_EVIDENCE_ROOT = $evidenceRoot
         LATTICE_TASK037_FIXTURE_ROOT = $fixtureRoot
         LATTICE_TASK037_FULL_CHAIN_EXE = $fullChainExe
-        LATTICE_TASK037_HERMES_BROKER_EXE = $brokerExe
         LATTICE_TASK037_RUNTIME_MANIFEST = $runtimeManifest
         LATTICE_TASK037_DELIVERY_LAUNCHER = $deliveryLauncher
         LATTICE_TASK037_DELIVERY_CODEX_HOME = $deliveryCodexHome

@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 30
+version: 31
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -23,7 +23,7 @@ modules:
   - module_id: orchestrator-runtime
     constitution_version: 2.5
   - module_id: latticed
-    constitution_version: 1.6
+    constitution_version: 1.7
   - module_id: openclaw-adapter
     constitution_version: 2.0
   - module_id: gateway-ipc
@@ -41,7 +41,7 @@ modules:
   - module_id: graphify-adapter
     constitution_version: 1.1
   - module_id: hermes-adapter
-    constitution_version: 1.0
+    constitution_version: 1.1
   - module_id: codebase-memory
     constitution_version: 1.0
   - module_id: self-upgrade-guardian
@@ -573,6 +573,10 @@ creating duplicate authorities or an unconstrained self-modifying agent.
   process-owned. Startup succeeds only while the runner is live, and EOF or
   error must explicitly reap the owned process tree. This entry adds no MCP
   tool or durable authority.
+- The production zero-model receipt is `v2` and binds only the exact inputs
+  used by the contained direct Codex proxy. The legacy one-shot
+  `lattice-hermes-broker` executable remains separately testable but its path
+  and digest are not production configuration, admission, or receipt truth.
 
 ### Codebase Memory
 
@@ -797,7 +801,7 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | workspace-git | 2.0 | Worktree/Git/filesystem evidence only; consumes lease authority |
 | scope-check | 1.1 | Language-neutral contract; mission remains detection-only |
 | orchestrator-runtime | 2.5 | Preserve delivery ordering and pure injected-port coordination/dispatch plus snapshot -> Graphify -> validate -> memory persist/retrieve ordering; no concrete adapter or transport dependency |
-| latticed | 1.6 | Sole normal composition root; four bounded MCP tools preserve delivery/task contracts, exact `--hermes-launch` owns standalone lifecycle, and opt-in `PRODUCTION` mode lazily activates Hermes only for Delivery Run |
+| latticed | 1.7 | Sole normal composition root; four bounded MCP tools preserve delivery/task contracts, exact `--hermes-launch` owns standalone lifecycle, opt-in `PRODUCTION` mode lazily activates Hermes only for Delivery Run, and production config contains only executed inputs |
 | openclaw-adapter | 2.0 | Inert scaffold becomes a thin local IPC gateway |
 | gateway-ipc | 1.1 | Bounded canonical six-action protocol, NFC-preserving encoder, truthful core-service errors, and deterministic fake loopback; live transport and OS authentication remain deferred |
 | approval-verifier | 1.0 | Pure typed-subject/challenge/proof/nonce/time/current-head owner and deterministic fake; live trust/claim remains deferred |
@@ -806,7 +810,7 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | codex-adapter | 1.1 | One writable app-server process/thread implementing the typed `DeliveryCodexPort`; generic `CodexPort` is not a second production path |
 | review-runtime | 1.0 | New independent read-only review boundary |
 | graphify-adapter | 1.1 | Exact Graphify v0.9.33 code-only child over a tracked immutable snapshot; verified private tmpfs copies, Landlock ABI 3, strict framed capture, and typed output/provenance validation |
-| hermes-adapter | 1.0 | New contained research/candidate boundary |
+| hermes-adapter | 1.1 | Contained research/candidate boundary with v2 executed-input-only production proxy identity and an isolated legacy one-shot helper |
 | codebase-memory | 1.0 | Pure canonical structural observation, candidate-state, deterministic ranking and persistence-plan owner; PostgreSQL I/O remains in Postgres Store |
 | self-upgrade-guardian | 1.0 | New A/B activation, health, and rollback boundary |
 | lattice-core-bootstrap | 1.0 | Inert compile-time component manifest for the first Rust slice |
@@ -1364,6 +1368,13 @@ packaging modules do not activate functional provider modules.
   production-sealed runner before writer effects. MCP shutdown explicitly
   terminates any activated runner, and teardown ambiguity overrides stdio
   success or failure. Unknown mode values are rejected without echoing them.
+- [x] AC-42: TASK-065 removes the non-executed broker-helper path and digest
+  from production configuration, preflight admission, and ephemeral receipt
+  identity. The `v2` receipt seals the actual Codex launcher, official bundle,
+  strict config lock, scrubbed environment, isolated paths, model, and
+  deadline-owned run. Stale helper variables have no effect and are never
+  echoed. The legacy one-shot helper, direct contained provider route, four MCP
+  schemas, PostgreSQL truth, and task/status zero-effect paths remain intact.
 
 ## Verification Plan
 
@@ -1401,6 +1412,7 @@ packaging modules do not activate functional provider modules.
 | AC-39 | orchestrator matrices plus lattice-runtime composition-flow tests | verified projection, deterministic next-round dispatch/archive, fail-closed ambiguity and conflict handling, zero new I/O or MCP surface |
 | AC-40 | exact CLI integration, controlled lifecycle owner, bounded local launch, process cleanup, and four-tool MCP regression | runner launches once, child death cannot look healthy, EOF/error proves teardown, output is redacted, and MCP remains unchanged |
 | AC-41 | exact mode/redaction integration tests, recording lifecycle owner, one-shot activation and explicit teardown unit tests, plus complete runtime/MCP regression | default and `TASK_ONLY` preserve the old path; only production Delivery Run activates once before writer effects; status/task paths activate zero times; canonical MCP teardown ambiguity cannot exit 0; four tools and schemas remain unchanged |
+| AC-42 | exact missing-setting and ignored-sentinel integration tests, v2 receipt golden, direct launcher-plan and legacy helper regressions | only executed inputs gate production; stale helper values cannot deny or leak; old receipt domain cannot substitute; legacy helper remains isolated and the four-tool/product truth boundaries are unchanged |
 
 ## Human Decisions
 

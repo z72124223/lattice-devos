@@ -2541,8 +2541,6 @@ impl HermesEnvironmentConfig {
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
         let broker = CodexReflectionBrokerConfig::new(
-            PathBuf::from(hermes_environment("LATTICE_HERMES_BROKER_HELPER")?),
-            hermes_environment("LATTICE_HERMES_BROKER_HELPER_SHA256")?,
             PathBuf::from(hermes_environment("LATTICE_HERMES_CODEX_LAUNCHER")?),
             PathBuf::from(hermes_environment("LATTICE_HERMES_CODEX_HOME")?),
             PathBuf::from(hermes_environment("LATTICE_HERMES_BROKER_ISOLATION_ROOT")?),
@@ -2794,7 +2792,7 @@ pub fn hermes_production_preflight_from_environment() -> HermesProductionPreflig
     }
     #[cfg(windows)]
     {
-        const REQUIRED: [&str; 14] = [
+        const REQUIRED: [&str; 12] = [
             "LATTICE_HERMES_PREPARATION_ROOT",
             "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
             "LATTICE_HERMES_RUNTIME_MANIFEST",
@@ -2803,8 +2801,6 @@ pub fn hermes_production_preflight_from_environment() -> HermesProductionPreflig
             "LATTICE_HERMES_PRODUCT_ROOT",
             "LATTICE_HERMES_WSL_EXE",
             "LATTICE_HERMES_ISOLATION_ROOT",
-            "LATTICE_HERMES_BROKER_HELPER",
-            "LATTICE_HERMES_BROKER_HELPER_SHA256",
             "LATTICE_HERMES_CODEX_LAUNCHER",
             "LATTICE_HERMES_CODEX_HOME",
             "LATTICE_HERMES_BROKER_ISOLATION_ROOT",

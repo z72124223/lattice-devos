@@ -1,13 +1,25 @@
 # LATTICE DevOS V2 Plan
 
-## Current task update — TASK-064
+## Current task update — TASK-066
 
-CURRENT TASK-064 — connect the existing production Hermes owner to canonical
-four-tool `latticed` through an exact lazy process mode. Delivery Run activates
-Hermes before writer effects; Delivery Status and both Task tools remain zero
-Hermes; MCP shutdown explicitly closes the owner. No credential acquisition,
-live model request, push, merge, deploy, payment, account change, or public
-listener is authorized.
+CURRENT TASK-066 — close the deterministic canonical reflection chain from
+lazy-ready Hermes through exact graph receipt, candidate persistence, replay,
+and fresh Status with zero Hermes rerun. Use only injected local fakes in this
+slice; no credential read, live model request, push, merge, deploy, payment,
+account change, or public listener is authorized.
+
+## Completed task update — TASK-065
+
+COMPLETED TASK-065 — production Hermes admission and its `v2` receipt now bind
+only inputs actually executed by the direct contained Codex proxy. The legacy
+one-shot helper remains independently buildable and fail-closed but no longer
+blocks or defines production acceptance.
+
+## Completed task update — TASK-064
+
+COMPLETED TASK-064 — canonical four-tool `latticed` now owns an opt-in lazy
+production Hermes path. Only Delivery Run activates it before writer effects;
+status/task paths remain zero-Hermes and MCP shutdown explicitly reaps it.
 
 ## Completed task update — TASK-056
 

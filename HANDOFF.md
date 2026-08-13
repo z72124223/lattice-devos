@@ -1,3 +1,27 @@
+# TASK-065 Local Handoff — 2026-08-13
+
+## Outcome
+
+Production Hermes admission no longer depends on the unexecuted
+`lattice-hermes-broker` helper. Canonical configuration now requires twelve
+executed-input settings, and the ephemeral production receipt uses domain v2
+without helper path/hash identity. The existing direct pinned Codex launcher,
+strict config, scrubbed environment, Job ownership, lazy activation, MCP tools,
+PostgreSQL truth, and teardown semantics are unchanged.
+
+The tracked TASK-037 verifier no longer treats the helper as a production
+build, input, gate, or evidence hash. The legacy helper remains independently
+buildable and its no-argument invocation fails closed with exit 64, empty
+stdout, and fixed stderr.
+
+Affected adapter and runtime all-target suites passed; Node verify passed
+48/48; format, diff, project, and PowerShell AST checks passed. One attempted
+workspace-wide run exceeded its outer bound in an unchanged fake-Codex process
+test, so it is not claimed PASS; the run-owned processes were stopped and both
+affected suites passed independently. No credential was read, no Hermes/model
+request ran, and no push, merge, deployment, or release was performed. The
+untracked TASK-051 acceptance script remains untouched and excluded.
+
 # TASK-064 Local Handoff — 2026-08-13
 
 ## Outcome
