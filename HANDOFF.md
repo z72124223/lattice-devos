@@ -1,3 +1,30 @@
+# TASK-067 Local Handoff — 2026-08-14
+
+## Outcome
+
+The credential-free Hermes integration gate now has a truthful two-leg
+compositional acceptance at the existing production-owner boundary. The
+canonical leg proves Delivery Run-only lazy activation, exact graph/provenance
+validation before persistence, replay, Status zero-rerun, and fail-closed
+teardown. The adapter leg actually started the pinned WSL2/bubblewrap/Hermes
+v2026.8.3 runtime and completed both successful and failed turns through an
+in-process fake Codex provider on loopback, without reading an external
+credential or calling a real provider/model.
+
+The live RED exposed that the provider control could receive three teardown
+calls through worker, host, and Drop paths. A private `OnceLock`-backed
+teardown gate now invokes the underlying control exactly once and replays the
+same success or ambiguity to every caller. Both live paths assert one teardown
+and removal of the owned root; startup timeout cleanup also passes.
+
+Current evidence: adapter all-targets 81 tests plus 4 preparation tests PASS
+with 9 explicit live-only ignores; runtime canonical focused tests 9/9 PASS;
+the ignored pinned-runtime success, failed-turn, and startup-timeout tests were
+run explicitly and PASS; format and diff checks PASS. No external credential,
+real provider/model request, public network, PostgreSQL restart, push, merge,
+deployment, payment, account change, or release occurred. The untracked
+TASK-051 platform-acceptance script remains untouched and excluded.
+
 # TASK-066 Local Handoff — 2026-08-14
 
 ## Outcome

@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1305,9 +1305,27 @@ struct ProductionCodexProxyHost {
     stop: Arc<AtomicBool>,
     adapter_success_requested: AtomicBool,
     commands: mpsc::SyncSender<CodexProxyHostCommand>,
-    control: Arc<dyn ProductionCodexProxyControl>,
+    control_teardown: Arc<CodexProxyControlTeardown>,
     worker: Option<thread::JoinHandle<()>>,
     teardown_ambiguous: Option<HermesAdapterError>,
+}
+
+struct CodexProxyControlTeardown {
+    control: Arc<dyn ProductionCodexProxyControl>,
+    result: OnceLock<HermesAdapterResult<()>>,
+}
+
+impl CodexProxyControlTeardown {
+    fn new(control: Arc<dyn ProductionCodexProxyControl>) -> Self {
+        Self {
+            control,
+            result: OnceLock::new(),
+        }
+    }
+
+    fn terminate_once(&self) -> HermesAdapterResult<()> {
+        self.result.get_or_init(|| self.control.terminate()).clone()
+    }
 }
 
 impl ProductionCodexProxyHost {
@@ -1350,12 +1368,14 @@ impl ProductionCodexProxyHost {
     ) -> HermesAdapterResult<Self> {
         let mut session = CodexProxyHostSession::new(nonce, broker_receipt, absolute_deadline)?;
         let control = provider.control();
+        let control_teardown = Arc::new(CodexProxyControlTeardown::new(Arc::clone(&control)));
         let status = Arc::new(Mutex::new(CodexProxyHostStatus::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (commands, worker_commands) = mpsc::sync_channel(1);
         let worker_status = Arc::clone(&status);
         let worker_stop = Arc::clone(&stop);
         let worker_control = Arc::clone(&control);
+        let worker_control_teardown = Arc::clone(&control_teardown);
         emit_codex_proxy_trace(json!({
             "component": "Hermes",
             "event": "codex_proxy_host_start",
@@ -1388,7 +1408,7 @@ impl ProductionCodexProxyHost {
                 });
                 if let Err(failure) = result {
                     owner.invalidate();
-                    if let Err(teardown) = worker_control.terminate() {
+                    if let Err(teardown) = worker_control_teardown.terminate_once() {
                         eprintln!(
                             "{}",
                             json!({
@@ -1417,7 +1437,7 @@ impl ProductionCodexProxyHost {
             stop,
             adapter_success_requested: AtomicBool::new(false),
             commands,
-            control,
+            control_teardown,
             worker: Some(worker),
             teardown_ambiguous: None,
         })
@@ -1530,7 +1550,7 @@ impl ProductionCodexProxyHost {
             return Err(failure.clone());
         }
         self.stop.store(true, Ordering::Release);
-        let control_result = self.control.terminate();
+        let control_result = self.control_teardown.terminate_once();
         let join_result = self.join_worker_bounded();
         let result = control_result.and(join_result);
         if let Err(failure) = &result {
@@ -3344,6 +3364,50 @@ mod proxy_host_tests {
         HERMES_UV_LOCK_SHA256, ReflectionEvidence, ReflectionEvidenceKind,
     };
 
+    struct CountingTeardownControl {
+        calls: AtomicU64,
+        fail: bool,
+    }
+
+    impl ProductionCodexProxyControl for CountingTeardownControl {
+        fn ensure_running(&self) -> HermesAdapterResult<()> {
+            Ok(())
+        }
+
+        fn terminate(&self) -> HermesAdapterResult<()> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail {
+                Err(error(
+                    HermesAdapterErrorKind::Ambiguous,
+                    "HERMES_CODEX_PROXY_TEST_TEARDOWN_AMBIGUOUS",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn codex_proxy_teardown_invokes_the_owned_control_once_and_replays_ambiguity() {
+        for fail in [false, true] {
+            let control = Arc::new(CountingTeardownControl {
+                calls: AtomicU64::new(0),
+                fail,
+            });
+            let teardown = CodexProxyControlTeardown::new(control.clone());
+
+            let first = teardown.terminate_once();
+            let replay = teardown.terminate_once();
+
+            assert_eq!(control.calls.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                first.as_ref().err().map(HermesAdapterError::code),
+                replay.as_ref().err().map(HermesAdapterError::code)
+            );
+            assert_eq!(first.is_err(), fail);
+        }
+    }
+
     fn production_root_test_paths(label: &str) -> (PathBuf, PathBuf, PathBuf) {
         let parent = std::env::temp_dir().join(format!(
             "lattice-hermes-production-root-{label}-{}-{}",
@@ -4550,6 +4614,7 @@ mod proxy_host_tests {
     struct InteractiveFakeCodexObservation {
         calls: Vec<String>,
         reflection_emitted: bool,
+        terminate_calls: usize,
         thread_start_had_cwd: Option<bool>,
         turn_input: Option<String>,
         turn_start_had_cwd: Option<bool>,
@@ -4792,6 +4857,16 @@ mod proxy_host_tests {
         }
 
         fn terminate(&self) -> HermesAdapterResult<()> {
+            self.0
+                .observation
+                .lock()
+                .map_err(|_| {
+                    error(
+                        HermesAdapterErrorKind::Ambiguous,
+                        "HERMES_CODEX_PROXY_TEST_STATE_UNKNOWN",
+                    )
+                })?
+                .terminate_calls += 1;
             let mut queue = self.0.queue.lock().map_err(|_| {
                 error(
                     HermesAdapterErrorKind::Ambiguous,
@@ -5034,6 +5109,10 @@ mod proxy_host_tests {
         let runner = config
             .launch(Instant::now() + Duration::from_secs(12))
             .expect("official Hermes gateway starts");
+        assert!(
+            runner.containment_receipt().endpoint().ip().is_loopback(),
+            "the no-model acceptance endpoint stays loopback-only"
+        );
         let mut port = runner.bind(job.clone()).expect("bind zero-model job");
         let result = port
             .run_reflection_evidence(&request)
@@ -5050,6 +5129,10 @@ mod proxy_host_tests {
             result.reflection().output_digest(),
             result.evidence().output_digest()
         );
+        assert_eq!(
+            result.evidence().runtime(),
+            lattice_contracts::RuntimeKind::Live
+        );
         drop(port);
 
         let observed = observation.lock().expect("fake Codex observation");
@@ -5061,6 +5144,7 @@ mod proxy_host_tests {
         assert_eq!(observed.thread_start_had_cwd, Some(false));
         assert_eq!(observed.turn_start_had_cwd, Some(false));
         assert!(observed.reflection_emitted);
+        assert_eq!(observed.terminate_calls, 1);
         assert!(
             observed
                 .turn_input
@@ -5120,6 +5204,10 @@ mod proxy_host_tests {
         let runner = config
             .launch(Instant::now() + Duration::from_secs(12))
             .expect("official Hermes gateway starts");
+        assert!(
+            runner.containment_receipt().endpoint().ip().is_loopback(),
+            "the failed no-model acceptance endpoint stays loopback-only"
+        );
         let mut port = runner.bind(job).expect("bind zero-model failure job");
         let failure = port
             .run_reflection_evidence(&request)
@@ -5137,6 +5225,7 @@ mod proxy_host_tests {
             ["initialize", "initialized", "thread/start", "turn/start"]
         );
         assert!(!observed.reflection_emitted);
+        assert_eq!(observed.terminate_calls, 1);
         drop(observed);
         assert!(
             !isolation_root.exists(),

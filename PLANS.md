@@ -7,14 +7,22 @@ lazy-ready Hermes through exact graph receipt, candidate persistence, replay,
 and fresh Status with zero Hermes rerun. The production PostgreSQL and Hermes
 call paths remain unchanged behind a private test seam.
 
-## Current task update — TASK-067
+## Completed task update — TASK-067
 
-CURRENT TASK-067 — close the next credential-free integration gate for a
-canonical production Delivery Run using the pinned local Hermes runtime and a
-deterministic no-model provider fixture. It must prove lazy activation,
-candidate validation, exact teardown, and zero non-loopback/provider effects;
-it must not read credentials, call a model, push, merge, deploy, pay, change an
-account, or expose a public listener.
+COMPLETED TASK-067 — the canonical Delivery Run and exact pinned Hermes runner
+now have a two-leg credential-free integration acceptance at their shared
+production-owner boundary. The live adapter leg proves loopback-only
+successful and failed fake-provider turns, one underlying teardown, and exact
+owned-root cleanup; the canonical leg preserves lazy activation, validated
+persistence order, Status zero-rerun, and fail-closed teardown.
+
+## Current task update — TASK-068
+
+CURRENT TASK-068 — prove the exact canonical Hermes reflection receipt survives
+a marker-owned loopback PostgreSQL stop/start and is loaded by a fresh Status
+process with zero Hermes ready, research, or persistence calls. This slice uses
+no provider credential, model request, public network, schema migration, or
+public test seam.
 
 ## Completed task update — TASK-065
 
