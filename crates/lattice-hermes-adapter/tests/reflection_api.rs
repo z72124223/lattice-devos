@@ -1355,11 +1355,15 @@ fn same_process_reconciliation_uses_receipt_without_resubmission() {
     assert_eq!(duplicate.code(), "HERMES_RUN_RECONCILIATION_REQUIRED");
 
     thread::sleep(Duration::from_millis(250));
-    let reflection = adapter
-        .reconcile_reflection(&request, &receipt)
+    let recovered = adapter
+        .reconcile_reflection_evidence(&request, &receipt)
         .expect("same-process status reconciliation");
 
+    let reflection = recovered.reflection();
     assert_eq!(reflection.binding().input_digest().len(), 64);
+    assert_eq!(recovered.evidence().invocation(), request.invocation());
+    assert_eq!(recovered.evidence().runtime(), RuntimeKind::Live);
+    assert_eq!(recovered.evidence().output_digest(), reflection.output_digest());
     let requests = server.finish();
     assert_eq!(requests.len(), 6);
     assert_eq!(
@@ -1890,7 +1894,13 @@ fn production_port_exposes_reflection_and_normalized_evidence_seam() {
         &crate::ProductionHermesPort,
     ) -> Option<&crate::HermesRunRecoveryReceipt> =
         crate::ProductionHermesPort::active_recovery_receipt;
-    let _ = (launch, bind, seam, recovery);
+    let reconcile: fn(
+        &mut crate::ProductionHermesPort,
+        &HermesResearchRequest,
+        &crate::HermesRunRecoveryReceipt,
+    ) -> lattice_ports::PortResult<crate::HermesReflectionEvidence> =
+        crate::ProductionHermesPort::reconcile_reflection_evidence;
+    let _ = (launch, bind, seam, recovery, reconcile);
 }
 
 #[cfg(windows)]

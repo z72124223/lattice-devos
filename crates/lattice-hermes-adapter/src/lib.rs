@@ -1434,6 +1434,33 @@ impl HermesReflectionAdapter {
         Ok(reflection)
     }
 
+    /// Reconciles one known run and returns its canonical payload together
+    /// with normalized Live evidence derived from the same output digest.
+    ///
+    /// # Errors
+    ///
+    /// Preserves every containment, request, receipt, capability, transport,
+    /// recovery, and schema failure from [`Self::reconcile_reflection`].
+    pub fn reconcile_reflection_evidence(
+        &mut self,
+        request: &HermesResearchRequest,
+        receipt: &HermesRunRecoveryReceipt,
+    ) -> PortResult<HermesReflectionEvidence> {
+        let invocation = request.invocation().clone();
+        let reflection = self
+            .reconcile_reflection(request, receipt)
+            .map_err(|failure| map_port_error(&failure))?;
+        let evidence = HermesEvidence::new(
+            invocation,
+            RuntimeKind::Live,
+            reflection.output_digest().clone(),
+        );
+        Ok(HermesReflectionEvidence {
+            reflection,
+            evidence,
+        })
+    }
+
     #[must_use]
     pub const fn active_recovery_receipt(&self) -> Option<&HermesRunRecoveryReceipt> {
         self.active_run.as_ref()

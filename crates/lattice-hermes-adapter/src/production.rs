@@ -2743,6 +2743,27 @@ impl ProductionHermesPort {
         result
     }
 
+    /// Reconciles one already-submitted run and returns the canonical payload
+    /// paired with normalized evidence from the same output digest.
+    ///
+    /// # Errors
+    ///
+    /// Preserves owner, deadline, recovery, normalized-evidence, and adapter
+    /// failures without submitting another run.
+    pub fn reconcile_reflection_evidence(
+        &mut self,
+        request: &HermesResearchRequest,
+        receipt: &crate::HermesRunRecoveryReceipt,
+    ) -> PortResult<HermesReflectionEvidence> {
+        self.prepare_operation()?;
+        let result = self.adapter.reconcile_reflection_evidence(request, receipt);
+        if result.is_ok() {
+            self.complete_proxy_after_adapter_success()?;
+        }
+        self.ensure_live()?;
+        result
+    }
+
     /// Returns the adapter-owned, secret-free recovery receipt retained for
     /// potential same-port reconciliation after one post-submit ambiguity.
     ///
