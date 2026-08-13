@@ -33,12 +33,18 @@ receipt through `ProductionHermesPort` after a post-submit ambiguous failure.
 The accessor is a borrowed, read-only same-process observation: it does not
 persist, resubmit, reconcile, launch, or grant authority.
 
-## Current task update — TASK-070
+## Completed task update — TASK-070
 
-CURRENT TASK-070 — preserve normalized Hermes evidence when the existing
+COMPLETED TASK-070 — preserve normalized Hermes evidence when the existing
 same-process recovery receipt reconciles an ambiguous submitted run. The
 adapter and production port must reuse status reconciliation without another
 submission and without adding persistence or recovery authority.
+
+## Current task update — TASK-071
+
+CURRENT TASK-071 — wire the existing active recovery receipt into
+`FullChainHermes`: after one failed production run attempt, reconcile at most
+once on the same bound port, preserve normalized evidence, and never resubmit.
 
 ## Completed task update — TASK-065
 

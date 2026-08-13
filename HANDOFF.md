@@ -1,3 +1,22 @@
+# TASK-070 Local Handoff — 2026-08-14
+
+## Outcome
+
+Hermes same-process status reconciliation now returns the existing strict
+canonical reflection paired with normalized `RuntimeKind::Live` evidence from
+the exact same invocation and output digest. Both the base adapter and
+`ProductionHermesPort` expose the additive method; the production wrapper
+retains its existing prepare, successful proxy completion, child-liveness, and
+deadline gates. The prior canonical-only reconciliation API remains compatible.
+
+The scripted ambiguity test first failed to compile with `E0599`, then proved
+one submission, one status reconciliation, and exact invocation/input/output
+bindings. Adapter all-target tests pass 81 tests with 9 explicit live-only
+ignores, plus 4 preparation tests; Node, format, diff, code, and architecture
+gates pass. No WSL, real Hermes/provider/model, credential, external network,
+database, push, merge, deployment, payment, account change, or release was
+used. The untracked TASK-051 script remains untouched and excluded.
+
 # TASK-069 Local Handoff — 2026-08-14
 
 ## Outcome
