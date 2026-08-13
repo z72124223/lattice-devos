@@ -5,7 +5,7 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -565,8 +565,14 @@ impl StartupDiagnostic {
     }
 }
 
+fn write_startup_diagnostic<W: Write>(writer: &mut W, diagnostic: StartupDiagnostic) {
+    // Diagnostics are non-authoritative. A closed or failed stderr consumer
+    // must not terminate the MCP server or change its stdout protocol.
+    let _ = writeln!(writer, "{}", diagnostic.render());
+}
+
 fn emit_startup_diagnostic(diagnostic: StartupDiagnostic) {
-    eprintln!("{}", diagnostic.render());
+    write_startup_diagnostic(&mut io::stderr().lock(), diagnostic);
 }
 
 impl Error for LatticedError {}
@@ -5614,11 +5620,15 @@ mod tests {
             "ln!(\"{}\", LatticedErrorKind::Transport.code());",
         ]
         .concat();
-        let diagnostic_emission = ["eprint", "ln!(\"{}\", diagnostic.render());"].concat();
+        let diagnostic_emission = [
+            "write_startup_diagnostic(&mut io::",
+            "stderr().lock(), diagnostic);",
+        ]
+        .concat();
         let direct_stderr = ["io::", "stderr"].concat();
         let inherited_stdio = ["Stdio", "::inherit"].concat();
 
-        assert_eq!(source.matches(&stderr_macro).count(), 2);
+        assert_eq!(source.matches(&stderr_macro).count(), 1);
         assert!(source.contains(&fixed_emission));
         assert!(source.contains(&diagnostic_emission));
         assert_eq!(
@@ -5626,8 +5636,34 @@ mod tests {
             "LATTICED_STDIO_REJECTED"
         );
         assert!(!source.contains(&stderr_inline_macro));
-        assert!(!source.contains(&direct_stderr));
+        assert_eq!(source.matches(&direct_stderr).count(), 1);
         assert!(!source.contains(&inherited_stdio));
+    }
+
+    #[test]
+    fn startup_diagnostic_write_failure_is_non_authoritative() {
+        struct ClosedDiagnosticSink;
+
+        impl Write for ClosedDiagnosticSink {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "closed diagnostic sink",
+                ))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "closed diagnostic sink",
+                ))
+            }
+        }
+
+        write_startup_diagnostic(
+            &mut ClosedDiagnosticSink,
+            StartupDiagnostic::configuration_validation_started(),
+        );
     }
 
     #[test]
