@@ -59,7 +59,7 @@ use lattice_hermes_adapter::{
 use lattice_hermes_adapter::{
     CodexReflectionBrokerConfig, HermesOfflineRuntimeManifest, HermesProductionRunnerConfig,
     HermesWslContainmentConfig, ProductionHermesPort as HermesAdapterProductionPort,
-    ProductionHermesRunner,
+    ProductionHermesRunner, preparation::verify_official_preparation_for_launch,
 };
 use lattice_openclaw_adapter::{
     AuthenticationKey, GatewayTransportErrorKind, OpenClawGatewayConfig, OpenClawGatewayServer,
@@ -291,6 +291,7 @@ pub enum LatticedErrorKind {
     GraphConfiguration,
     GraphExecution,
     GraphReceiptRead,
+    HermesPreparationRequired,
     HermesProductionRunnerRequired,
     HermesExecution,
     HermesReceiptRead,
@@ -322,6 +323,7 @@ impl LatticedErrorKind {
             Self::GraphConfiguration => "LATTICE_GRAPH_MEMORY_CONFIGURATION_REJECTED",
             Self::GraphExecution => "LATTICE_GRAPH_MEMORY_RUN_REJECTED",
             Self::GraphReceiptRead => "LATTICE_GRAPH_MEMORY_RECEIPT_REJECTED",
+            Self::HermesPreparationRequired => "LATTICE_HERMES_PREPARATION_REJECTED",
             Self::HermesProductionRunnerRequired => "LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED",
             Self::HermesExecution => "LATTICE_HERMES_REFLECTION_REJECTED",
             Self::HermesReceiptRead => "LATTICE_HERMES_MEMORY_RECEIPT_REJECTED",
@@ -2231,6 +2233,23 @@ struct HermesEnvironmentConfig {
 #[cfg(windows)]
 impl HermesEnvironmentConfig {
     fn from_environment() -> Result<Self, LatticedError> {
+        let product_root = PathBuf::from(
+            std::env::var_os("LATTICE_HERMES_PRODUCT_ROOT")
+                .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesPreparationRequired))?,
+        );
+        let preparation_root = PathBuf::from(
+            std::env::var_os("LATTICE_HERMES_PREPARATION_ROOT")
+                .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesPreparationRequired))?,
+        );
+        let preparation_receipt = std::env::var("LATTICE_HERMES_PREPARATION_RECEIPT_SHA256")
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesPreparationRequired))?;
+        verify_official_preparation_for_launch(
+            &preparation_root,
+            &product_root,
+            &preparation_receipt,
+        )
+        .map_err(|_| LatticedError::new(LatticedErrorKind::HermesPreparationRequired))?;
+
         let runtime_manifest_path =
             PathBuf::from(hermes_environment("LATTICE_HERMES_RUNTIME_MANIFEST")?);
         let runtime_manifest_bytes =
@@ -2249,7 +2268,6 @@ impl HermesEnvironmentConfig {
         )?;
         let api_key = hermes_environment("LATTICE_HERMES_API_KEY")?;
         validate_hermes_api_key(&api_key)?;
-        let product_root = PathBuf::from(hermes_environment("LATTICE_HERMES_PRODUCT_ROOT")?);
         let containment = HermesWslContainmentConfig::new(
             PathBuf::from(hermes_environment("LATTICE_HERMES_WSL_EXE")?),
             runtime_guest_root,
@@ -2410,7 +2428,9 @@ pub fn hermes_production_preflight_from_environment() -> HermesProductionPreflig
     }
     #[cfg(windows)]
     {
-        const REQUIRED: [&str; 12] = [
+        const REQUIRED: [&str; 14] = [
+            "LATTICE_HERMES_PREPARATION_ROOT",
+            "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
             "LATTICE_HERMES_RUNTIME_MANIFEST",
             "LATTICE_HERMES_RUNTIME_GUEST_ROOT",
             "LATTICE_HERMES_API_KEY",
@@ -4553,6 +4573,7 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         | LatticedErrorKind::OfficialLiveBlocked
         | LatticedErrorKind::ScriptedFixtureRejected
         | LatticedErrorKind::GraphExecution
+        | LatticedErrorKind::HermesPreparationRequired
         | LatticedErrorKind::HermesProductionRunnerRequired
         | LatticedErrorKind::HermesExecution
         | LatticedErrorKind::DatabaseSecret

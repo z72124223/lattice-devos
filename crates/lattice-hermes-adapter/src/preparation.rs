@@ -475,3 +475,48 @@ pub fn materialize_official_preparation_bundle(
         receipt: bundle.receipt.clone(),
     })
 }
+
+/// Revalidates the exact prepared bundle and binds it to the receipt digest
+/// supplied by process-start configuration.
+///
+/// This gate only proves that the rebuildable, secret-free preparation assets
+/// match the current binary. It does not inspect credentials, launch a process,
+/// or grant Hermes launch authority by itself.
+pub fn verify_official_preparation_for_launch(
+    target_root: &Path,
+    product_root: &Path,
+    expected_receipt_sha256: &str,
+) -> HermesAdapterResult<HermesPreparationReceipt> {
+    let target_root = canonical_preparation_target(target_root, product_root)?;
+    if expected_receipt_sha256.len() != 64
+        || !expected_receipt_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(preparation_error(
+            HermesAdapterErrorKind::Malformed,
+            "HERMES_PREPARATION_LAUNCH_RECEIPT_REJECTED",
+        ));
+    }
+    if !target_root.exists() {
+        return Err(preparation_error(
+            HermesAdapterErrorKind::Configuration,
+            "HERMES_PREPARATION_LAUNCH_ASSETS_REQUIRED",
+        ));
+    }
+
+    let bundle = official_preparation_bundle()?;
+    verify_exact_bundle(&target_root, &bundle).map_err(|_| {
+        preparation_error(
+            HermesAdapterErrorKind::CrossBinding,
+            "HERMES_PREPARATION_LAUNCH_DIGEST_MISMATCH",
+        )
+    })?;
+    if bundle.receipt.bundle_sha256() != expected_receipt_sha256 {
+        return Err(preparation_error(
+            HermesAdapterErrorKind::CrossBinding,
+            "HERMES_PREPARATION_LAUNCH_DIGEST_MISMATCH",
+        ));
+    }
+    Ok(bundle.receipt.clone())
+}

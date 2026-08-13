@@ -9,6 +9,8 @@ use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lattice_contracts::{DeliveryProfile, DeliveryRuntime};
+#[cfg(windows)]
+use lattice_hermes_adapter::preparation::materialize_official_preparation_bundle;
 use lattice_runtime::composition::{
     LatticedDeliveryConfig, LatticedDeliveryService, LatticedErrorKind, fixed_gateway_submission,
 };
@@ -19,6 +21,38 @@ use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
 static NEXT_SCRIPTED_GATE_FIXTURE: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(windows)]
+struct HermesPreparationFixtureCleanup(PathBuf);
+
+#[cfg(windows)]
+impl Drop for HermesPreparationFixtureCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(windows)]
+fn hermes_preparation_fixture(
+    name: &str,
+) -> (PathBuf, PathBuf, String, HermesPreparationFixtureCleanup) {
+    let unique = NEXT_SCRIPTED_GATE_FIXTURE.fetch_add(1, Ordering::Relaxed);
+    let fixture_root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("task058-{name}-{}-{unique}", std::process::id()));
+    fs::create_dir_all(&fixture_root).expect("create preparation gate fixture root");
+    let product_root = fixture_root.join("product");
+    fs::create_dir(&product_root).expect("create protected product root");
+    let preparation_root = fixture_root.join("prepared-assets");
+    let outcome = materialize_official_preparation_bundle(&preparation_root, &product_root)
+        .expect("materialize exact preparation gate fixture");
+    let receipt = outcome.receipt().bundle_sha256().to_owned();
+    (
+        preparation_root,
+        product_root,
+        receipt,
+        HermesPreparationFixtureCleanup(fixture_root),
+    )
+}
 
 fn database(run_id: &str) -> DeliveryDatabaseBinding {
     DeliveryDatabaseBinding::new("127.0.0.1", 55432, run_id).expect("database binding")
@@ -750,7 +784,7 @@ fn full_chain_binary_is_reachable_and_fails_closed_without_a_sealed_hermes_runne
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr utf8"),
-        "LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED\n"
+        "LATTICE_HERMES_PREPARATION_REJECTED\n"
     );
 }
 
@@ -855,6 +889,8 @@ fn latticed_hermes_preflight_reports_exact_missing_settings() {
         String::from_utf8(output.stderr).expect("stderr utf8"),
         concat!(
             "LATTICE_HERMES_PREFLIGHT_MISSING_CONFIGURATION:",
+            "LATTICE_HERMES_PREPARATION_ROOT,",
+            "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256,",
             "LATTICE_HERMES_RUNTIME_MANIFEST,",
             "LATTICE_HERMES_RUNTIME_GUEST_ROOT,",
             "LATTICE_HERMES_API_KEY,",
@@ -875,13 +911,16 @@ fn latticed_hermes_preflight_reports_exact_missing_settings() {
 fn latticed_hermes_preflight_rejects_unavailable_manifest_without_echoing_values() {
     const SECRET_SENTINEL: &str = "TASK056-SECRET-SENTINEL-DO-NOT-LEAK";
     const PATH_SENTINEL: &str = r"C:\TASK056-PATH-SENTINEL-DO-NOT-LEAK\manifest.json";
-    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
+    #[cfg(windows)]
+    let (preparation_root, product_root, preparation_receipt, _cleanup) =
+        hermes_preparation_fixture("unavailable-manifest");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_latticed"));
+    command
         .arg("--hermes-preflight")
         .env_clear()
         .env("LATTICE_HERMES_RUNTIME_MANIFEST", PATH_SENTINEL)
         .env("LATTICE_HERMES_RUNTIME_GUEST_ROOT", "/runtime")
         .env("LATTICE_HERMES_API_KEY", SECRET_SENTINEL)
-        .env("LATTICE_HERMES_PRODUCT_ROOT", r"C:\product")
         .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
         .env("LATTICE_HERMES_ISOLATION_ROOT", r"C:\isolation")
         .env("LATTICE_HERMES_BROKER_HELPER", r"C:\broker\helper.exe")
@@ -892,7 +931,16 @@ fn latticed_hermes_preflight_rejects_unavailable_manifest_without_echoing_values
             "LATTICE_HERMES_BROKER_ISOLATION_ROOT",
             r"C:\broker\isolation",
         )
-        .env("LATTICE_HERMES_DEADLINE_SECONDS", "30")
+        .env("LATTICE_HERMES_DEADLINE_SECONDS", "30");
+    #[cfg(windows)]
+    command
+        .env("LATTICE_HERMES_PREPARATION_ROOT", &preparation_root)
+        .env(
+            "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
+            &preparation_receipt,
+        )
+        .env("LATTICE_HERMES_PRODUCT_ROOT", &product_root);
+    let output = command
         .output()
         .expect("start canonical latticed Hermes preflight");
 
@@ -932,6 +980,11 @@ fn latticed_hermes_preflight_rejects_invalid_secret_after_exact_manifest_identit
     ));
     fs::create_dir_all(&fixture_root).expect("create test-owned Hermes fixture root");
     let _cleanup = FixtureCleanup(fixture_root.clone());
+    let product_root = fixture_root.join("product");
+    fs::create_dir(&product_root).expect("create protected product root");
+    let preparation_root = fixture_root.join("prepared-assets");
+    let preparation = materialize_official_preparation_bundle(&preparation_root, &product_root)
+        .expect("materialize exact preparation gate fixture");
     let manifest_path = fixture_root.join("TASK056-PATH-SENTINEL-manifest.json");
     fs::write(&manifest_path, MANIFEST_BYTES).expect("write exact pinned manifest fixture");
     let manifest_path_text = manifest_path
@@ -941,10 +994,15 @@ fn latticed_hermes_preflight_rejects_invalid_secret_after_exact_manifest_identit
     let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
         .arg("--hermes-preflight")
         .env_clear()
+        .env("LATTICE_HERMES_PREPARATION_ROOT", &preparation_root)
+        .env(
+            "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
+            preparation.receipt().bundle_sha256(),
+        )
         .env("LATTICE_HERMES_RUNTIME_MANIFEST", manifest_path_text)
         .env("LATTICE_HERMES_RUNTIME_GUEST_ROOT", RUNTIME_GUEST_ROOT)
         .env("LATTICE_HERMES_API_KEY", SECRET_SENTINEL)
-        .env("LATTICE_HERMES_PRODUCT_ROOT", r"C:\product")
+        .env("LATTICE_HERMES_PRODUCT_ROOT", &product_root)
         .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
         .env("LATTICE_HERMES_ISOLATION_ROOT", r"C:\isolation")
         .env("LATTICE_HERMES_BROKER_HELPER", r"C:\broker\helper.exe")

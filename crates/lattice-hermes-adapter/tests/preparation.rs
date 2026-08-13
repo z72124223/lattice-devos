@@ -1,6 +1,7 @@
 use lattice_hermes_adapter::preparation::{
     HermesPreparationDisposition, OFFICIAL_HERMES_RUNTIME_GUEST_ROOT,
     materialize_official_preparation_bundle, official_preparation_bundle,
+    verify_official_preparation_for_launch,
 };
 use lattice_hermes_adapter::{
     HERMES_RELEASE, HERMES_UPSTREAM_COMMIT, HermesOfflineRuntimeManifest,
@@ -190,4 +191,58 @@ fn materialization_is_exclusive_exact_and_idempotent_without_rewrite() {
             .render()
             .starts_with("LATTICE_HERMES_PREPARE_ASSETS_PRESENT_UNVERIFIED:")
     );
+}
+
+#[test]
+fn launch_preparation_gate_rejects_missing_assets_or_receipt_digest() {
+    let (parent, _cleanup) = fixture_parent("launch-gate-missing");
+    let product_root = parent.join("product");
+    fs::create_dir(&product_root).expect("create protected product root");
+    let target = parent.join("prepared");
+
+    let missing_assets = verify_official_preparation_for_launch(
+        &target,
+        &product_root,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .expect_err("missing prepared assets must fail closed");
+    assert_eq!(
+        missing_assets.code(),
+        "HERMES_PREPARATION_LAUNCH_ASSETS_REQUIRED"
+    );
+
+    materialize_official_preparation_bundle(&target, &product_root)
+        .expect("materialize exact test bundle");
+    let missing_receipt = verify_official_preparation_for_launch(&target, &product_root, "")
+        .expect_err("missing receipt digest must fail closed");
+    assert_eq!(
+        missing_receipt.code(),
+        "HERMES_PREPARATION_LAUNCH_RECEIPT_REJECTED"
+    );
+}
+
+#[test]
+fn launch_preparation_gate_accepts_only_the_exact_receipt_without_launching() {
+    let (parent, _cleanup) = fixture_parent("launch-gate-exact");
+    let product_root = parent.join("product");
+    fs::create_dir(&product_root).expect("create protected product root");
+    let target = parent.join("prepared");
+    let prepared = materialize_official_preparation_bundle(&target, &product_root)
+        .expect("materialize exact test bundle");
+
+    let mismatch = verify_official_preparation_for_launch(
+        &target,
+        &product_root,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    .expect_err("a substituted receipt digest must fail closed");
+    assert_eq!(mismatch.code(), "HERMES_PREPARATION_LAUNCH_DIGEST_MISMATCH");
+
+    let verified = verify_official_preparation_for_launch(
+        &target,
+        &product_root,
+        prepared.receipt().bundle_sha256(),
+    )
+    .expect("exact assets and receipt advance only past the preparation gate");
+    assert_eq!(&verified, prepared.receipt());
 }
