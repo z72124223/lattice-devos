@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lattice_contracts::{DeliveryProfile, DeliveryRuntime};
 #[cfg(windows)]
-use lattice_hermes_adapter::preparation::materialize_official_preparation_bundle;
+use lattice_hermes_adapter::preparation::{
+    OFFICIAL_HERMES_RUNTIME_GUEST_ROOT, materialize_official_preparation_bundle,
+};
 use lattice_runtime::composition::{
     LatticedDeliveryConfig, LatticedDeliveryService, LatticedErrorKind, fixed_gateway_submission,
 };
@@ -935,6 +937,41 @@ fn latticed_hermes_runtime_preflight_explicitly_rejects_missing_isolation_config
             "LATTICE_HERMES_RUNTIME_PREFLIGHT_MISSING_CONFIGURATION:",
             "LATTICE_HERMES_ISOLATION_ROOT\n"
         )
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn latticed_hermes_runtime_preflight_rejects_invalid_isolation_configuration() {
+    let (preparation_root, product_root, preparation_receipt, _cleanup) =
+        hermes_preparation_fixture("invalid-runtime-isolation");
+    let manifest = preparation_root.join("offline-runtime-manifest.json");
+    let invalid_isolation_root = product_root.join("inside-product-root");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
+        .arg("--hermes-runtime-preflight")
+        .env_clear()
+        .env("LATTICE_HERMES_PREPARATION_ROOT", &preparation_root)
+        .env(
+            "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
+            &preparation_receipt,
+        )
+        .env("LATTICE_HERMES_RUNTIME_MANIFEST", &manifest)
+        .env(
+            "LATTICE_HERMES_RUNTIME_GUEST_ROOT",
+            OFFICIAL_HERMES_RUNTIME_GUEST_ROOT,
+        )
+        .env("LATTICE_HERMES_PRODUCT_ROOT", &product_root)
+        .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
+        .env("LATTICE_HERMES_ISOLATION_ROOT", &invalid_isolation_root)
+        .output()
+        .expect("start canonical latticed Hermes runtime preflight");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr utf8"),
+        "LATTICE_HERMES_RUNTIME_PREFLIGHT_CONFIGURATION_REJECTED\n"
     );
 }
 
