@@ -40,11 +40,29 @@ same-process recovery receipt reconciles an ambiguous submitted run. The
 adapter and production port must reuse status reconciliation without another
 submission and without adding persistence or recovery authority.
 
-## Current task update — TASK-073
+## Completed task update — TASK-073
 
-CURRENT TASK-073 — retire a Hermes recovery receipt as soon as an initial
-event stream or same-port reconciliation observes an authoritative Failed or
-Cancelled terminal, while retaining all genuinely uncertain recovery state.
+COMPLETED TASK-073 — initial and reconciled authoritative Failed/Cancelled
+terminals, plus immutable false-completed Codex failure sentinels, now retire
+their same-process recovery receipt. Genuinely uncertain, malformed, or
+cross-bound outcomes retain their existing fail-closed recovery state.
+
+## Completed task update — TASK-074
+
+COMPLETED TASK-074 — the existing Qwen2.5-Coder 7B CUDA runtime is awake on a
+loopback-only endpoint and can provide bounded, untrusted development support
+while CPU compilation/tests remain authoritative. Its structured test-summary
+check passed; its recovery-security classification check failed, so it is
+explicitly barred from security, architecture, authorization, and integration
+decisions.
+
+## Current prerequisite update — TASK-050
+
+CURRENT TASK-050 — reconcile and finish the dirty autonomy-receipt Task Ledger
+candidate so TASK-051 can begin. Preserve the accepted Project Registry
+`0005` source and the autonomy work; do not claim TASK-051 verification until
+the migration/profile conflict, fresh-process replay, and named acceptance
+receipt are resolved.
 
 ## Completed task update — TASK-072
 

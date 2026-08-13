@@ -1,3 +1,34 @@
+# TASK-074 Local Model Assist Handoff — 2026-08-14
+
+## Outcome
+
+The preinstalled Qwen2.5-Coder 7B Q4_K_M model is active through the verified
+CUDA llama.cpp runtime on `127.0.0.1:18181`; health and model discovery pass,
+and GPU offload is bound to the exact process. A CPU LATTICE test and a local
+GPU inference ran concurrently. The Rust test passed, and the model correctly
+summarized its output.
+
+The model failed a security-sensitive recovery-classification benchmark by
+suggesting a broader retry policy. It is therefore limited to untrusted
+summaries, candidate test lists, and mechanical second opinions. Source,
+compiler, tests, and the primary agent remain authoritative. No model download,
+credential, external API/network, public listener, project write, Git change,
+database access, push, merge, or deployment occurred. PID `26732` remains
+intentionally running on loopback for bounded assistance.
+
+# TASK-073 Local Handoff — 2026-08-14
+
+## Outcome
+
+Hermes now retires same-process recovery receipts for authoritative initial or
+reconciled Failed/Cancelled terminals and for schema-valid immutable completed
+outputs that carry the supported Codex app-server failure sentinel. Retired
+receipts fail before endpoint I/O; uncertain, malformed, and cross-bound
+observations retain recovery state. Commits `1ecdd1d` and `d057ff6` together
+close the lifecycle boundary. Adapter all-target verification passed with 85
+ordinary tests and 11 explicit live-only ignores, plus 4 preparation tests;
+focused regression, format, diff, and independent review gates passed.
+
 # TASK-072 Local Handoff — 2026-08-14
 
 ## Outcome

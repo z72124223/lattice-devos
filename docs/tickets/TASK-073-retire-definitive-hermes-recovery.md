@@ -4,7 +4,7 @@ spec_id: SPEC-002
 spec_version: 31
 module_id: hermes-adapter
 constitution_version: 1.1
-status: ready
+status: completed
 parallel_safe: false
 depends_on:
   - TASK-072
@@ -46,6 +46,27 @@ as active or recoverable.
 5. No public API, error/receipt schema, dependency, persistence, database,
    MCP, FullChain, credential, model, external-network, runtime-identity, or
    ownership contract changes.
+6. A schema-valid immutable `completed` result whose output is empty or starts
+   with the supported Codex app-server failure sentinel is also definitive:
+   it returns exact `HERMES_CODEX_APP_SERVER_RUN_FAILED`, retires the receipt,
+   and cannot be replayed. Malformed or cross-bound completed output remains
+   fail closed with its recovery receipt retained.
+
+## Completion Evidence
+
+- `1ecdd1d` retires initial and reconciled authoritative Failed/Cancelled
+  terminals, with deterministic receipt lifecycle coverage and one pinned
+  no-model WSL/bubblewrap failure acceptance.
+- `d057ff6` closes the adjacent false-completed sentinel lifecycle gap while
+  retaining malformed/cross-bound recovery state.
+- `cargo test -p lattice-hermes-adapter --all-targets --locked` passed with
+  85 ordinary tests and 11 explicit live-only ignores, plus 4 preparation
+  tests. The focused false-completed regression passed again after the final
+  commit; format and diff checks passed before integration.
+- Three independent read-only reviews found no unresolved P0/P1/P2 issue in
+  the definitive-terminal implementation. No credential, real model/provider,
+  external network, public listener, database, push, merge, or deployment was
+  used.
 
 ## Non-Goals
 

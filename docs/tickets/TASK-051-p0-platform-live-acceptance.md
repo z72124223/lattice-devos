@@ -3,15 +3,12 @@ ticket_id: TASK-051
 title: P0 current-machine LATTICE MCP platform live acceptance
 spec_id: SPEC-003
 spec_version: 4
+module_id: latticed
+constitution_version: 1.7
 status: waiting_dependency
 parallel_safe: false
 depends_on:
   - TASK-050
-modules:
-  - latticed 1.4
-  - task-ledger 2.1
-  - postgres-store 1.6
-  - orchestrator-runtime 2.4
 allowed_paths:
   - docs/tickets/TASK-051-p0-platform-live-acceptance.md
   - scripts/run-task051-p0-platform-live-acceptance.ps1
