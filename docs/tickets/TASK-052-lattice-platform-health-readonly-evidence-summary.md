@@ -5,7 +5,7 @@ spec_id: SPEC-003
 spec_version: 4
 module_id: latticed
 constitution_version: 1.4
-status: ready
+status: completed
 parallel_safe: true
 depends_on: []
 allowed_paths:
@@ -127,3 +127,19 @@ Any inventory item that cannot be refreshed immediately by an allowed read must 
 ## Human gate
 
 None for a run that remains inside the exact read-only and output scopes above. Stop and request a new decision before any operation that would mutate a source, start or stop a component, invoke product behavior, expose credentials, or write outside the two snapshot artifacts.
+
+## Completion Evidence — 2026-08-14
+
+- Snapshot: `task052-20260814T025129+0800`.
+- `summary.md`: SHA-256
+  `7399788EA0B1BFC3951EC9BCCA2B08335C4670DACA0B7CCA90EC6626CDF90438`.
+- `evidence-index.json`: SHA-256
+  `F49F3F853D8E46E77AA305AF5D3BCFA4126951B3662C13BE5F83D17F16284B46`;
+  JSON parsing passed.
+- Exactly four LATTICE tools were visible in the current Codex tool inventory,
+  but no tool was invoked. TASK-050 remained dirty and unaccepted, so the
+  snapshot's overall platform state is correctly `WAITING_DEPENDENCY`.
+- The snapshot wrote exactly its two allowlisted local artifacts. It performed
+  zero LATTICE calls, PostgreSQL reads/writes/restarts, service lifecycle
+  actions, Git mutations, or thread mutations, and recorded no secret-bearing
+  value.
