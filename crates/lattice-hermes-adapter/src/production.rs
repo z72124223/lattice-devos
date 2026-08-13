@@ -5039,6 +5039,19 @@ mod proxy_host_tests {
             )
         }
 
+        fn gated_failing() -> (
+            Self,
+            Arc<Mutex<InteractiveFakeCodexObservation>>,
+            InteractiveFakeCodexTerminalGate,
+        ) {
+            let (provider, observation, state) = Self::with_outcome(String::new(), true, true);
+            (
+                provider,
+                observation,
+                InteractiveFakeCodexTerminalGate(state),
+            )
+        }
+
         fn with_outcome(
             reflection: String,
             fail_turn: bool,
@@ -5484,6 +5497,92 @@ mod proxy_host_tests {
         assert!(
             !isolation_root.exists(),
             "verified failure teardown removes the owned zero-model isolation root"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires WSL2, bubblewrap, and the exact frozen Hermes runtime"]
+    fn official_hermes_gateway_retires_gated_failed_recovery_without_resubmission() {
+        let request = zero_model_request();
+        let job = zero_model_job(request.clone());
+        let (provider, observation, terminal_gate) = InteractiveFakeCodexProvider::gated_failing();
+        let isolation_root = std::env::temp_dir().join(format!(
+            "lattice-hermes-official-zero-model-recovery-failure-{}-{}",
+            std::process::id(),
+            RUNNER_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let containment = HermesWslContainmentConfig::new(
+            r"C:\Windows\System32\wsl.exe",
+            OFFICIAL_RUNTIME_GUEST_ROOT,
+            isolation_root.clone(),
+            fs::canonicalize(std::env::current_dir().expect("cwd"))
+                .expect("canonical product root"),
+        )
+        .expect("official zero-model recovery failure containment");
+        let mut config = HermesProductionRunnerConfig::official_with_broker_digest(
+            containment,
+            &zero_model_runtime_manifest(),
+            &ContentDigest::from_sha256("ff".repeat(32)).expect("broker digest"),
+            "production-zero-model-recovery-failure-key",
+            "hermes-agent",
+            Duration::from_secs(10),
+            Duration::from_secs(4),
+            Duration::from_millis(1),
+        )
+        .expect("official zero-model recovery failure config");
+        config.codex_provider = Some(Box::new(provider));
+        let runner = config
+            .launch(Instant::now() + Duration::from_secs(20))
+            .expect("official Hermes gateway starts");
+        assert!(
+            runner.containment_receipt().endpoint().ip().is_loopback(),
+            "the no-model recovery failure endpoint stays loopback-only"
+        );
+        let mut port = runner
+            .bind(job.clone())
+            .expect("bind zero-model recovery failure job");
+        let first_failure = port
+            .run_reflection_evidence(&request)
+            .expect_err("withheld failed terminal exhausts the first observation deadline");
+        assert_eq!(first_failure.kind(), lattice_ports::PortErrorKind::Timeout);
+        assert_eq!(first_failure.code(), "HERMES_RUN_DEADLINE_EXCEEDED");
+        assert!(terminal_gate.is_held());
+        let receipt = port
+            .active_recovery_receipt()
+            .expect("post-submit timeout retains the known run")
+            .clone();
+        assert!(receipt.run_id().is_some());
+        assert_eq!(receipt.request_id(), "request-zero-model");
+        assert_eq!(receipt.session_id(), "session-zero-model");
+        assert_eq!(receipt.input_digest(), job.input_digest());
+        assert_eq!(receipt.model(), "hermes-agent");
+
+        terminal_gate
+            .release_terminal()
+            .expect("release the one held fake Codex failed terminal");
+        let failure = port
+            .reconcile_reflection_evidence(&request, &receipt)
+            .expect_err("authoritative failed reconciliation remains failed");
+        assert_eq!(failure.kind(), lattice_ports::PortErrorKind::Unavailable);
+        assert_eq!(
+            failure.code(),
+            "HERMES_RUN_FAILED_HINT_APP_SERVER_TURN_STATUS"
+        );
+        assert!(port.active_recovery_receipt().is_none());
+        drop(port);
+
+        let observed = observation.lock().expect("fake Codex observation");
+        assert_eq!(
+            observed.calls,
+            ["initialize", "initialized", "thread/start", "turn/start"],
+            "failed reconciliation must not submit a second turn"
+        );
+        assert!(!observed.reflection_emitted);
+        assert_eq!(observed.terminate_calls, 1);
+        drop(observed);
+        assert!(
+            !isolation_root.exists(),
+            "verified failed recovery teardown removes the owned isolation root"
         );
     }
 }

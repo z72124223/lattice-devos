@@ -1342,20 +1342,13 @@ impl HermesReflectionAdapter {
             {
                 None
             }
-            Err(failure) => return Err(failure.with_recovery_receipt(receipt.clone())),
+            Err(failure) => {
+                return Err(self.finish_terminal_observation_failure(failure, receipt.clone()));
+            }
         };
         let status_output = match self.poll_terminal(&run_id, deadline) {
             Ok(output) => output,
-            Err(failure) => {
-                if matches!(
-                    failure.kind(),
-                    HermesAdapterErrorKind::Failed | HermesAdapterErrorKind::Cancelled
-                ) {
-                    self.active_run = None;
-                    return Err(failure);
-                }
-                return Err(failure.with_recovery_receipt(receipt));
-            }
+            Err(failure) => return Err(self.finish_terminal_observation_failure(failure, receipt)),
         };
         if event_output
             .as_ref()
@@ -1425,9 +1418,12 @@ impl HermesReflectionAdapter {
         validate_run_id(run_id)?;
         let deadline = self.operation_deadline()?;
         self.verify_capabilities(deadline)?;
-        let output = self
-            .poll_terminal(run_id, deadline)
-            .map_err(|failure| failure.with_recovery_receipt(receipt.clone()))?;
+        let output = match self.poll_terminal(run_id, deadline) {
+            Ok(output) => output,
+            Err(failure) => {
+                return Err(self.finish_terminal_observation_failure(failure, receipt.clone()));
+            }
+        };
         let reflection = parse_reflection(&output, &self.job)
             .map_err(|failure| failure.with_recovery_receipt(receipt.clone()))?;
         self.active_run = None;
@@ -1464,6 +1460,23 @@ impl HermesReflectionAdapter {
     #[must_use]
     pub const fn active_recovery_receipt(&self) -> Option<&HermesRunRecoveryReceipt> {
         self.active_run.as_ref()
+    }
+
+    fn finish_terminal_observation_failure(
+        &mut self,
+        failure: HermesAdapterError,
+        receipt: HermesRunRecoveryReceipt,
+    ) -> HermesAdapterError {
+        if matches!(
+            failure.kind(),
+            HermesAdapterErrorKind::Failed | HermesAdapterErrorKind::Cancelled
+        ) {
+            debug_assert_eq!(self.active_run.as_ref(), Some(&receipt));
+            self.active_run = None;
+            failure
+        } else {
+            failure.with_recovery_receipt(receipt)
+        }
     }
 
     fn require_containment_receipt(&self) -> HermesAdapterResult<&HermesContainmentReceipt> {
