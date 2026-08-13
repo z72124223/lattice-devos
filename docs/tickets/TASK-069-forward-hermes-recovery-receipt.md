@@ -4,7 +4,7 @@ spec_id: SPEC-002
 spec_version: 31
 module_id: hermes-adapter
 constitution_version: 1.1
-status: ready
+status: completed
 parallel_safe: false
 depends_on:
   - TASK-067
@@ -48,3 +48,14 @@ freezes the exact borrowed `ProductionHermesPort` signature.
 No durable recovery journal, cross-process replay, PostgreSQL schema, real
 Hermes/provider/model, credential read, external network, public listener,
 push, merge, deployment, payment, account change, or release.
+
+## Completion Evidence
+
+- RED: the production API seam failed to compile with `E0599` because
+  `ProductionHermesPort::active_recovery_receipt` did not exist.
+- GREEN: the API seam, same-process reconciliation, and timeout fail-closed
+  tests each pass; the adapter all-target suite passes 81 tests with 9 explicit
+  live-only ignores, plus 4 preparation tests.
+- The implementation is one borrowed forwarding method. Independent review
+  found no P0/P1 finding; its documentation now limits the receipt to a
+  potential same-port reconciliation after post-submit ambiguity.

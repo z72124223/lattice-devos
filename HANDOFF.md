@@ -1,3 +1,21 @@
+# TASK-069 Local Handoff — 2026-08-14
+
+## Outcome
+
+`ProductionHermesPort` now exposes the adapter-owned, secret-free active
+recovery receipt as a borrowed same-process observation after post-submit
+ambiguity. It does not clone, persist, retry, resubmit, reconcile, launch, or
+grant authority; the existing bound-port reconciliation path remains the only
+consumer.
+
+The production API seam first failed with `E0599`, then passed after the
+one-line forwarding implementation. Same-process no-resubmission and timeout
+fail-closed regressions pass. The adapter all-target suite passed 81 tests with
+9 explicit live-only ignores, plus 4 preparation tests. Independent review
+found no P0/P1 findings. No WSL, Hermes process, provider/model, credential,
+external network, push, merge, deployment, payment, account change, or release
+was used. The untracked TASK-051 script remains untouched and excluded.
+
 # TASK-068 Partial Local Handoff — 2026-08-14
 
 ## Outcome

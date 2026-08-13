@@ -26,12 +26,19 @@ between accepted Project Registry migration `0005` and the current autonomy
 receipt migration at the same ordinal. Follow-up:
 `POSTGRES-REGISTRY-AUTONOMY-MIGRATION-RECONCILIATION`.
 
-## Current task update — TASK-069
+## Completed task update — TASK-069
 
-CURRENT TASK-069 — forward the already-produced, secret-free Hermes recovery
+COMPLETED TASK-069 — forward the already-produced, secret-free Hermes recovery
 receipt through `ProductionHermesPort` after a post-submit ambiguous failure.
 The accessor is a borrowed, read-only same-process observation: it does not
 persist, resubmit, reconcile, launch, or grant authority.
+
+## Current task update — TASK-070
+
+CURRENT TASK-070 — preserve normalized Hermes evidence when the existing
+same-process recovery receipt reconciles an ambiguous submitted run. The
+adapter and production port must reuse status reconciliation without another
+submission and without adding persistence or recovery authority.
 
 ## Completed task update — TASK-065
 
