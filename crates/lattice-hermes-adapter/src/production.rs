@@ -2,10 +2,10 @@
 
 use std::collections::HashSet;
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -48,6 +48,8 @@ const OFFICIAL_RUNTIME_GUEST_ROOT: &str = concat!(
 );
 const OFFICIAL_RUNTIME_MANIFEST_SHA256: &str =
     "e3a3272b6cead30cd2df1af755df031766475595fdacfb080d0886671b6d1fbb";
+const PRODUCTION_ROOT_MARKER_NAME: &str = ".lattice-hermes-production-root-v1";
+const PRODUCTION_ROOT_MARKER_SCHEMA: &str = "lattice.hermes.production-root.v1";
 const OFFICIAL_RUNTIME_TREE_SHA256: &str =
     "cb0e331bcb2b4fe2fd0977401d246819aadb800b645ca31ec233ad4e25b96929";
 const OFFICIAL_RUNTIME_FILE_COUNT: u64 = 14_077;
@@ -66,6 +68,279 @@ const MAX_CODEX_PROXY_WIRE_BYTES: usize = CODEX_PROXY_MAGIC.len() + 4 + MAX_CODE
 const MAX_CODEX_PROXY_BUFFER_BYTES: usize = MAX_CODEX_PROXY_WIRE_BYTES + 8192;
 const CODEX_PROXY_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 static RUNNER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+struct ProductionOwnedRoot {
+    root: PathBuf,
+    product_root: PathBuf,
+    parent_guard: Option<crate::windows_job::WindowsPinnedDirectory>,
+    root_guard: Option<crate::windows_job::WindowsPinnedDirectory>,
+    marker: Option<crate::windows_job::WindowsPinnedFile>,
+    secret: Option<crate::windows_job::WindowsPinnedFile>,
+    runner: Option<crate::windows_job::WindowsPinnedFile>,
+    cleanup_on_drop: bool,
+}
+
+impl ProductionOwnedRoot {
+    fn create(root: &Path, product_root: &Path) -> HermesAdapterResult<Self> {
+        let (canonical_root, canonical_product) =
+            crate::validate_isolation_boundary(root, product_root)?;
+        if !crate::same_path(&canonical_root, root)
+            || !crate::same_path(&canonical_product, product_root)
+        {
+            return Err(error(
+                HermesAdapterErrorKind::Configuration,
+                "HERMES_PRODUCTION_ROOT_IDENTITY_REJECTED",
+            ));
+        }
+        let canonical_parent = canonical_root.parent().ok_or_else(|| {
+            error(
+                HermesAdapterErrorKind::Configuration,
+                "HERMES_PRODUCTION_ROOT_IDENTITY_REJECTED",
+            )
+        })?;
+        let parent_guard =
+            crate::windows_job::WindowsPinnedDirectory::open(canonical_parent, false, false, false)
+                .map_err(|_| production_root_cleanup_error())?;
+        if !crate::same_path(parent_guard.final_path(), canonical_parent) {
+            return Err(production_root_cleanup_error());
+        }
+        let root_name = canonical_root.file_name().ok_or_else(|| {
+            error(
+                HermesAdapterErrorKind::Configuration,
+                "HERMES_PRODUCTION_ROOT_IDENTITY_REJECTED",
+            )
+        })?;
+        let initial_root_guard =
+            crate::windows_job::WindowsPinnedDirectory::create_new(&parent_guard, root_name)
+                .map_err(|_| {
+                    error(
+                        HermesAdapterErrorKind::Spawn,
+                        "HERMES_PRODUCTION_ROOT_CREATE_FAILED",
+                    )
+                })?;
+        if !crate::same_path(initial_root_guard.final_path(), &canonical_root) {
+            return Err(production_root_cleanup_error());
+        }
+        let mut owned = Self {
+            root: canonical_root,
+            product_root: canonical_product,
+            parent_guard: Some(parent_guard),
+            root_guard: Some(initial_root_guard),
+            marker: None,
+            secret: None,
+            runner: None,
+            cleanup_on_drop: true,
+        };
+        let marker_nonce = production_nonce(&owned.root)?;
+        let marker =
+            format!("schema={PRODUCTION_ROOT_MARKER_SCHEMA}\nnonce={marker_nonce}\n").into_bytes();
+        let marker_file = crate::windows_job::WindowsPinnedFile::create_new(
+            &owned.root.join(PRODUCTION_ROOT_MARKER_NAME),
+            false,
+        )
+        .map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Spawn,
+                "HERMES_PRODUCTION_ROOT_MARKER_FAILED",
+            )
+        })?;
+        owned.marker = Some(marker_file);
+        owned
+            .marker
+            .as_mut()
+            .expect("marker was installed above")
+            .write_all_sync(&marker)
+            .map_err(|_| {
+                error(
+                    HermesAdapterErrorKind::Spawn,
+                    "HERMES_PRODUCTION_ROOT_MARKER_FAILED",
+                )
+            })?;
+
+        Ok(owned)
+    }
+
+    fn cleanup(mut self) -> HermesAdapterResult<()> {
+        self.cleanup_on_drop = false;
+        self.cleanup_verified()
+    }
+
+    fn cleanup_verified(&mut self) -> HermesAdapterResult<()> {
+        self.delete_ingress()?;
+        self.verify_cleanup_shape()?;
+        let marker_delete = self
+            .marker
+            .take()
+            .ok_or_else(production_root_cleanup_error)?
+            .delete();
+        if marker_delete.is_err() {
+            return Err(production_root_cleanup_error());
+        }
+        drop(self.parent_guard.take());
+        let root_delete = self
+            .root_guard
+            .take()
+            .ok_or_else(production_root_cleanup_error)?
+            .delete();
+        if root_delete.is_err() {
+            return Err(production_root_cleanup_error());
+        }
+        Ok(())
+    }
+
+    fn disarm_drop_cleanup(&mut self) {
+        self.cleanup_on_drop = false;
+    }
+
+    fn create_ingress(&mut self, name: &str, bytes: &[u8]) -> HermesAdapterResult<()> {
+        let slot = match name {
+            "launch-secret.json" => &mut self.secret,
+            "inner-runner.py" => &mut self.runner,
+            _ => return Err(production_root_cleanup_error()),
+        };
+        if slot.is_some() {
+            return Err(production_root_cleanup_error());
+        }
+        let file = crate::windows_job::WindowsPinnedFile::create_new(&self.root.join(name), true)
+            .map_err(|_| {
+            error(
+                HermesAdapterErrorKind::Spawn,
+                "HERMES_PRODUCTION_INGRESS_CREATE_FAILED",
+            )
+        })?;
+        *slot = Some(file);
+        slot.as_mut()
+            .expect("ingress handle was installed above")
+            .write_all_sync(bytes)
+            .map_err(|_| {
+                error(
+                    HermesAdapterErrorKind::Spawn,
+                    "HERMES_PRODUCTION_INGRESS_WRITE_FAILED",
+                )
+            })?;
+        Ok(())
+    }
+
+    fn ingress_consumed(&mut self) -> HermesAdapterResult<()> {
+        if self.root.join("launch-secret.json").exists()
+            || self.root.join("inner-runner.py").exists()
+        {
+            return Err(error(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_PRODUCTION_INGRESS_NOT_CONSUMED",
+            ));
+        }
+        for handle in [&mut self.secret, &mut self.runner] {
+            if let Some(file) = handle.take() {
+                file.close();
+            }
+        }
+        Ok(())
+    }
+
+    fn delete_ingress(&mut self) -> HermesAdapterResult<()> {
+        for handle in [&mut self.secret, &mut self.runner] {
+            if let Some(file) = handle.take() {
+                file.delete().map_err(|_| production_root_cleanup_error())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_cleanup_shape(&self) -> HermesAdapterResult<()> {
+        let root_guard = self
+            .root_guard
+            .as_ref()
+            .ok_or_else(production_root_cleanup_error)?;
+        if !crate::same_path(root_guard.final_path(), &self.root)
+            || crate::path_is_within(root_guard.final_path(), &self.product_root)
+            || crate::path_is_within(&self.product_root, root_guard.final_path())
+        {
+            return Err(production_root_cleanup_error());
+        }
+
+        let mut root_names = Vec::new();
+        for entry in fs::read_dir(&self.root).map_err(|_| production_root_cleanup_error())? {
+            let entry = entry.map_err(|_| production_root_cleanup_error())?;
+            root_names.push(entry.file_name());
+        }
+        root_names.sort();
+        let mut expected_root_names = Vec::new();
+        if self.marker.is_some() {
+            expected_root_names.push(OsString::from(PRODUCTION_ROOT_MARKER_NAME));
+        }
+        if self.secret.is_some() && self.root.join("launch-secret.json").exists() {
+            expected_root_names.push(OsString::from("launch-secret.json"));
+        }
+        if self.runner.is_some() && self.root.join("inner-runner.py").exists() {
+            expected_root_names.push(OsString::from("inner-runner.py"));
+        }
+        expected_root_names.sort();
+        if root_names != expected_root_names {
+            return Err(production_root_cleanup_error());
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for ProductionOwnedRoot {
+    fn drop(&mut self) {
+        if self.cleanup_on_drop {
+            self.cleanup_on_drop = false;
+            let _ = self.cleanup_verified();
+        }
+    }
+}
+
+fn production_root_cleanup_error() -> HermesAdapterError {
+    error(
+        HermesAdapterErrorKind::Ambiguous,
+        "HERMES_PRODUCTION_ROOT_CLEANUP_AMBIGUOUS",
+    )
+}
+
+fn finish_production_root(
+    teardown: HermesAdapterResult<()>,
+    mut owned_root: Option<ProductionOwnedRoot>,
+) -> HermesAdapterResult<()> {
+    if let Err(failure) = teardown {
+        if let Some(owned_root) = &mut owned_root {
+            owned_root.disarm_drop_cleanup();
+        }
+        return Err(failure);
+    }
+    match owned_root {
+        Some(owned_root) => owned_root.cleanup(),
+        None => Ok(()),
+    }
+}
+
+fn first_teardown_failure(
+    process_result: HermesAdapterResult<()>,
+    proxy_result: HermesAdapterResult<()>,
+) -> Option<HermesAdapterError> {
+    process_result.err().or_else(|| proxy_result.err())
+}
+
+fn abort_production_launch(
+    process: &mut crate::windows_job::WindowsJobChild,
+    mut owned_root: ProductionOwnedRoot,
+    failure: HermesAdapterError,
+) -> HermesAdapterError {
+    if let Err(teardown) = process.terminate() {
+        owned_root.disarm_drop_cleanup();
+        return teardown;
+    }
+    if let Err(capture_cleanup) = process.close_parent_stdio_and_delete_captures() {
+        owned_root.disarm_drop_cleanup();
+        return capture_cleanup;
+    }
+    match owned_root.cleanup() {
+        Ok(()) => failure,
+        Err(cleanup) => cleanup,
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CodexProxyHostEvent {
@@ -1032,6 +1307,7 @@ struct ProductionCodexProxyHost {
     commands: mpsc::SyncSender<CodexProxyHostCommand>,
     control: Arc<dyn ProductionCodexProxyControl>,
     worker: Option<thread::JoinHandle<()>>,
+    teardown_ambiguous: Option<HermesAdapterError>,
 }
 
 impl ProductionCodexProxyHost {
@@ -1143,6 +1419,7 @@ impl ProductionCodexProxyHost {
             commands,
             control,
             worker: Some(worker),
+            teardown_ambiguous: None,
         })
     }
 
@@ -1249,10 +1526,17 @@ impl ProductionCodexProxyHost {
     }
 
     fn stop_and_reap(&mut self) -> HermesAdapterResult<()> {
+        if let Some(failure) = &self.teardown_ambiguous {
+            return Err(failure.clone());
+        }
         self.stop.store(true, Ordering::Release);
         let control_result = self.control.terminate();
         let join_result = self.join_worker_bounded();
-        control_result.and(join_result)
+        let result = control_result.and(join_result);
+        if let Err(failure) = &result {
+            self.teardown_ambiguous = Some(failure.clone());
+        }
+        result
     }
 
     fn terminate(&mut self) -> HermesAdapterResult<()> {
@@ -1972,34 +2256,10 @@ impl HermesProductionRunnerConfig {
                 "HERMES_PRODUCTION_LAUNCH_BINDING_REJECTED",
             ));
         }
-        if self.containment.isolation_root().exists()
-            || self
-                .containment
-                .isolation_root()
-                .starts_with(self.containment.product_root())
-            || self
-                .containment
-                .product_root()
-                .starts_with(self.containment.isolation_root())
-        {
-            return Err(error(
-                HermesAdapterErrorKind::Configuration,
-                "HERMES_PRODUCTION_ROOT_REJECTED",
-            ));
-        }
-        fs::create_dir(self.containment.isolation_root()).map_err(|_| {
-            error(
-                HermesAdapterErrorKind::Spawn,
-                "HERMES_PRODUCTION_ROOT_CREATE_FAILED",
-            )
-        })?;
-        let capture_root = self.containment.isolation_root().join("capture");
-        fs::create_dir(&capture_root).map_err(|_| {
-            error(
-                HermesAdapterErrorKind::Spawn,
-                "HERMES_PRODUCTION_CAPTURE_CREATE_FAILED",
-            )
-        })?;
+        let mut owned_root = ProductionOwnedRoot::create(
+            self.containment.isolation_root(),
+            self.containment.product_root(),
+        )?;
         let nonce = production_nonce(self.containment.isolation_root())?;
         let remaining = absolute_deadline
             .checked_duration_since(Instant::now())
@@ -2034,11 +2294,8 @@ impl HermesProductionRunnerConfig {
         };
         let secret_bytes = serde_json::to_vec(&secret)
             .map_err(|_| malformed("HERMES_PRODUCTION_SECRET_REJECTED"))?;
-        write_new_secret(&secret_path, &secret_bytes)?;
-        if let Err(failure) = write_new_runner(&runner_path, PRIVATE_RUNNER_SOURCE.as_bytes()) {
-            remove_ingress(&secret_path);
-            return Err(failure);
-        }
+        owned_root.create_ingress("launch-secret.json", &secret_bytes)?;
+        owned_root.create_ingress("inner-runner.py", PRIVATE_RUNNER_SOURCE.as_bytes())?;
         let secret_guest_path = windows_path_to_wsl(&secret_path)?;
         let runner_guest_path = windows_path_to_wsl(&runner_path)?;
         let runner_sha256 = sha256_text(PRIVATE_RUNNER_SOURCE);
@@ -2071,37 +2328,25 @@ impl HermesProductionRunnerConfig {
             current_dir: self.containment.isolation_root().to_path_buf(),
             environment: minimal_wsl_environment(self.containment.wsl_executable())?,
             run_root: self.containment.isolation_root().to_path_buf(),
-            stdout_path: capture_root.join("production.stdout"),
-            stderr_path: capture_root.join("production.stderr"),
+            stdout_path: self.containment.isolation_root().join("production.stdout"),
+            stderr_path: self.containment.isolation_root().join("production.stderr"),
             stdout_limit: MAX_STARTUP_BYTES as u64,
             stderr_limit: 4096,
             deadline: absolute_deadline,
             teardown_timeout: Duration::from_secs(3),
         };
-        let mut process = match crate::windows_job::spawn_with_parent_stdio(&plan) {
-            Ok(process) => process,
-            Err(failure) => {
-                remove_ingress(&secret_path);
-                remove_ingress(&runner_path);
-                return Err(failure);
-            }
-        };
+        let mut process = crate::windows_job::spawn_with_parent_stdio(&plan)?;
+        owned_root.disarm_drop_cleanup();
         let outer_input = match process.take_stdin_writer() {
             Ok(writer) => writer,
             Err(failure) => {
-                let _ = process.terminate();
-                remove_ingress(&secret_path);
-                remove_ingress(&runner_path);
-                return Err(failure);
+                return Err(abort_production_launch(&mut process, owned_root, failure));
             }
         };
         let outer_output = match process.take_stdout_reader() {
             Ok(reader) => reader,
             Err(failure) => {
-                let _ = process.terminate();
-                remove_ingress(&secret_path);
-                remove_ingress(&runner_path);
-                return Err(failure);
+                return Err(abort_production_launch(&mut process, owned_root, failure));
             }
         };
         let outer_stream = start_outer_reader(outer_output);
@@ -2114,22 +2359,13 @@ impl HermesProductionRunnerConfig {
             Ok(startup) => startup,
             Err(failure) => {
                 let mapped = map_outer_failure(&process, failure);
-                let _ = process.terminate();
-                remove_ingress(&secret_path);
-                remove_ingress(&runner_path);
-                return Err(mapped);
+                return Err(abort_production_launch(&mut process, owned_root, mapped));
             }
         };
-        if secret_path.exists() || runner_path.exists() {
-            let _ = process.terminate();
-            remove_ingress(&secret_path);
-            remove_ingress(&runner_path);
-            return Err(error(
-                HermesAdapterErrorKind::Ambiguous,
-                "HERMES_PRODUCTION_INGRESS_NOT_CONSUMED",
-            ));
+        if let Err(failure) = owned_root.ingress_consumed() {
+            return Err(abort_production_launch(&mut process, owned_root, failure));
         }
-        let attestation = verify_startup(
+        let attestation = match verify_startup(
             &startup,
             &self.runtime_manifest_sha256,
             &self.broker_receipt_sha256,
@@ -2137,16 +2373,28 @@ impl HermesProductionRunnerConfig {
             &self.model,
             &nonce,
             self.mode.as_str(),
-        )?;
-        process.ensure_running()?;
+        ) {
+            Ok(attestation) => attestation,
+            Err(failure) => {
+                return Err(abort_production_launch(&mut process, owned_root, failure));
+            }
+        };
+        if let Err(failure) = process.ensure_running() {
+            return Err(abort_production_launch(&mut process, owned_root, failure));
+        }
         let runner_nonce_sha256 = attestation.runner_nonce_sha256.clone();
         let owner = Arc::new(ContainmentOwnerState::new(runner_nonce_sha256.clone()));
-        let receipt = mint_receipt(
+        let receipt = match mint_receipt(
             &attestation,
             process.process_id(),
             runner_nonce_sha256,
             Arc::downgrade(&owner),
-        )?;
+        ) {
+            Ok(receipt) => receipt,
+            Err(failure) => {
+                return Err(abort_production_launch(&mut process, owned_root, failure));
+            }
+        };
         let outer_initial_bytes = std::mem::take(&mut startup.trailing);
         Ok(ProductionHermesRunner {
             endpoint: attestation.endpoint,
@@ -2159,8 +2407,9 @@ impl HermesProductionRunnerConfig {
             outer_stream: Some(outer_stream),
             outer_initial_bytes,
             receipt,
-            process,
+            process: Some(process),
             owner,
+            owned_root: Some(owned_root),
             absolute_deadline,
             deadline_window: Duration::from_millis(deadline_millis),
             operation_timeout: self.operation_timeout,
@@ -2205,8 +2454,9 @@ pub struct ProductionHermesRunner {
     outer_stream: Option<Receiver<OuterStreamEvent>>,
     outer_initial_bytes: Vec<u8>,
     receipt: HermesContainmentReceipt,
-    process: crate::windows_job::WindowsJobChild,
+    process: Option<crate::windows_job::WindowsJobChild>,
     owner: Arc<ContainmentOwnerState>,
+    owned_root: Option<ProductionOwnedRoot>,
     absolute_deadline: Instant,
     deadline_window: Duration,
     operation_timeout: Duration,
@@ -2230,7 +2480,7 @@ impl ProductionHermesRunner {
                 "HERMES_PRODUCTION_JOB_BINDING_REJECTED",
             ));
         }
-        self.process.ensure_running()?;
+        self.process_mut()?.ensure_running()?;
         self.absolute_deadline = Instant::now()
             .checked_add(self.deadline_window)
             .ok_or_else(|| {
@@ -2283,18 +2533,25 @@ impl ProductionHermesRunner {
         let timeout = self.operation_timeout.min(remaining);
         let mut adapter_config = HermesAdapterConfig::new(
             self.endpoint,
-            self.api_key,
+            std::mem::take(&mut self.api_key),
             timeout,
             self.poll_interval.min(timeout),
         )?;
         adapter_config.install_containment_receipt(self.receipt.clone())?;
         let adapter = HermesReflectionAdapter::connect(adapter_config, job)?;
+        let process = self.process.take().ok_or_else(|| {
+            error(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_PRODUCTION_PROCESS_OWNER_UNAVAILABLE",
+            )
+        })?;
         Ok(ProductionHermesPort {
             adapter,
             codex_proxy,
-            receipt: self.receipt,
-            process: self.process,
-            owner: self.owner,
+            receipt: self.receipt.clone(),
+            process,
+            owner: Arc::clone(&self.owner),
+            owned_root: self.owned_root.take(),
             absolute_deadline: self.absolute_deadline,
             operation_timeout: self.operation_timeout,
             poll_interval: self.poll_interval,
@@ -2316,7 +2573,7 @@ impl ProductionHermesRunner {
     ///
     /// Fails closed on deadline, process exit, Job ambiguity, or receipt replay.
     pub fn verify_live(&mut self) -> HermesAdapterResult<()> {
-        self.process.ensure_running()?;
+        self.process_mut()?.ensure_running()?;
         self.receipt.verify_binding(self.endpoint, &self.api_key)
     }
 
@@ -2327,7 +2584,25 @@ impl ProductionHermesRunner {
     /// Reports teardown ambiguity if the Job cannot prove all descendants exit.
     pub fn terminate(mut self) -> HermesAdapterResult<()> {
         self.owner.invalidate();
-        self.process.terminate()
+        let mut process = self.process.take().ok_or_else(|| {
+            error(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_PRODUCTION_PROCESS_OWNER_UNAVAILABLE",
+            )
+        })?;
+        let teardown = process
+            .terminate()
+            .and_then(|()| process.close_parent_stdio_and_delete_captures());
+        finish_production_root(teardown, self.owned_root.take())
+    }
+
+    fn process_mut(&mut self) -> HermesAdapterResult<&mut crate::windows_job::WindowsJobChild> {
+        self.process.as_mut().ok_or_else(|| {
+            error(
+                HermesAdapterErrorKind::Ambiguous,
+                "HERMES_PRODUCTION_PROCESS_OWNER_UNAVAILABLE",
+            )
+        })
     }
 
     #[must_use]
@@ -2346,6 +2621,30 @@ impl ProductionHermesRunner {
     }
 }
 
+impl Drop for ProductionHermesRunner {
+    fn drop(&mut self) {
+        let Some(mut process) = self.process.take() else {
+            return;
+        };
+        self.owner.invalidate();
+        let teardown = process
+            .terminate()
+            .and_then(|()| process.close_parent_stdio_and_delete_captures());
+        if let Err(failure) = finish_production_root(teardown, self.owned_root.take()) {
+            eprintln!(
+                "{}",
+                json!({
+                    "component": "Hermes",
+                    "error_code": failure.code(),
+                    "event": "teardown_rejected",
+                    "owner_invalidated": true,
+                    "target": "production_runner"
+                })
+            );
+        }
+    }
+}
+
 /// Production-only Hermes port whose adapter and contained child share one
 /// unforgeable owner capability.
 pub struct ProductionHermesPort {
@@ -2354,6 +2653,7 @@ pub struct ProductionHermesPort {
     receipt: HermesContainmentReceipt,
     process: crate::windows_job::WindowsJobChild,
     owner: Arc<ContainmentOwnerState>,
+    owned_root: Option<ProductionOwnedRoot>,
     absolute_deadline: Instant,
     operation_timeout: Duration,
     poll_interval: Duration,
@@ -2453,10 +2753,14 @@ impl ProductionHermesPort {
         self.owner.invalidate();
         let process_result = self.process.terminate();
         let proxy_result = self.codex_proxy.terminate();
-        match (process_result, proxy_result) {
+        let mut teardown = match (process_result, proxy_result) {
             (Err(process_failure), _) => Err(process_failure),
             (Ok(()), result) => result,
+        };
+        if teardown.is_ok() {
+            teardown = self.process.close_parent_stdio_and_delete_captures();
         }
+        finish_production_root(teardown, self.owned_root.take())
     }
 
     fn prepare_operation(&mut self) -> PortResult<()> {
@@ -2503,7 +2807,8 @@ impl ProductionHermesPort {
         self.owner.invalidate();
         let process_result = self.process.terminate();
         let proxy_result = self.codex_proxy.stop_and_reap();
-        if let Err(teardown) = process_result {
+        let teardown_verified = process_result.is_ok() && proxy_result.is_ok();
+        if let Err(teardown) = &process_result {
             eprintln!(
                 "{}",
                 json!({
@@ -2515,7 +2820,7 @@ impl ProductionHermesPort {
                 })
             );
         }
-        if let Err(teardown) = proxy_result {
+        if let Err(teardown) = &proxy_result {
             eprintln!(
                 "{}",
                 json!({
@@ -2526,6 +2831,30 @@ impl ProductionHermesPort {
                     "target": "codex_proxy"
                 })
             );
+        }
+        if teardown_verified {
+            let cleanup = self
+                .process
+                .close_parent_stdio_and_delete_captures()
+                .and_then(|()| finish_production_root(Ok(()), self.owned_root.take()));
+            if let Err(teardown) = cleanup {
+                eprintln!(
+                    "{}",
+                    json!({
+                        "component": "Hermes",
+                        "error_code": teardown.code(),
+                        "event": "teardown_rejected",
+                        "owner_invalidated": true,
+                        "target": "production_root"
+                    })
+                );
+                return map_port_error(&teardown);
+            }
+        } else if let Some(teardown) = first_teardown_failure(process_result, proxy_result) {
+            if let Some(owned_root) = &mut self.owned_root {
+                owned_root.disarm_drop_cleanup();
+            }
+            return map_port_error(&teardown);
         }
         map_port_error(failure)
     }
@@ -2559,8 +2888,21 @@ impl HermesPort for ProductionHermesPort {
 impl Drop for ProductionHermesPort {
     fn drop(&mut self) {
         self.owner.invalidate();
-        let _ = self.process.terminate();
-        let _ = self.codex_proxy.stop_and_reap();
+        let process_result = self.process.terminate();
+        let proxy_result = self.codex_proxy.stop_and_reap();
+        if process_result.is_ok() && proxy_result.is_ok() {
+            if self
+                .process
+                .close_parent_stdio_and_delete_captures()
+                .is_ok()
+            {
+                let _ = finish_production_root(Ok(()), self.owned_root.take());
+            } else if let Some(owned_root) = &mut self.owned_root {
+                owned_root.disarm_drop_cleanup();
+            }
+        } else if let Some(owned_root) = &mut self.owned_root {
+            owned_root.disarm_drop_cleanup();
+        }
     }
 }
 
@@ -2936,60 +3278,6 @@ fn production_nonce(isolation_root: &Path) -> HermesAdapterResult<String> {
     Ok(encode_sha256(&digest.finalize()))
 }
 
-fn write_new_secret(path: &Path, bytes: &[u8]) -> HermesAdapterResult<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|_| {
-            error(
-                HermesAdapterErrorKind::Spawn,
-                "HERMES_PRODUCTION_SECRET_CREATE_FAILED",
-            )
-        })?;
-    file.write_all(bytes).map_err(|_| {
-        error(
-            HermesAdapterErrorKind::Spawn,
-            "HERMES_PRODUCTION_SECRET_WRITE_FAILED",
-        )
-    })?;
-    file.sync_all().map_err(|_| {
-        error(
-            HermesAdapterErrorKind::Spawn,
-            "HERMES_PRODUCTION_SECRET_WRITE_FAILED",
-        )
-    })
-}
-
-fn write_new_runner(path: &Path, bytes: &[u8]) -> HermesAdapterResult<()> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|_| {
-            error(
-                HermesAdapterErrorKind::Spawn,
-                "HERMES_PRODUCTION_RUNNER_CREATE_FAILED",
-            )
-        })?;
-    file.write_all(bytes).map_err(|_| {
-        error(
-            HermesAdapterErrorKind::Spawn,
-            "HERMES_PRODUCTION_RUNNER_WRITE_FAILED",
-        )
-    })?;
-    file.sync_all().map_err(|_| {
-        error(
-            HermesAdapterErrorKind::Spawn,
-            "HERMES_PRODUCTION_RUNNER_WRITE_FAILED",
-        )
-    })
-}
-
-fn remove_ingress(path: &Path) {
-    drop(fs::remove_file(path));
-}
-
 fn windows_path_to_wsl(path: &Path) -> HermesAdapterResult<String> {
     let text = path.as_os_str().to_string_lossy();
     let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
@@ -3042,6 +3330,7 @@ fn digest_join(parts: &[&[u8]]) -> String {
 #[cfg(test)]
 mod proxy_host_tests {
     use std::collections::VecDeque;
+    use std::fs::OpenOptions;
     use std::io;
     use std::sync::Condvar;
 
@@ -3054,6 +3343,110 @@ mod proxy_host_tests {
         HERMES_RUNTIME_ARCHIVE_SHA256, HERMES_SCHEMA_VERSION, HERMES_UPSTREAM_COMMIT,
         HERMES_UV_LOCK_SHA256, ReflectionEvidence, ReflectionEvidenceKind,
     };
+
+    fn production_root_test_paths(label: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let parent = std::env::temp_dir().join(format!(
+            "lattice-hermes-production-root-{label}-{}-{}",
+            std::process::id(),
+            RUNNER_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&parent).expect("fresh production-root test parent");
+        let parent = fs::canonicalize(parent).expect("canonical production-root test parent");
+        let root = parent.join("run");
+        let product_root = fs::canonicalize(std::env::current_dir().expect("current directory"))
+            .expect("canonical product root");
+        (parent, root, product_root)
+    }
+
+    #[test]
+    fn verified_teardown_releases_owned_root_for_same_path_relaunch() {
+        let (parent, root, product_root) = production_root_test_paths("relaunch");
+        let first = ProductionOwnedRoot::create(&root, &product_root)
+            .expect("first production root ownership");
+        finish_production_root(Ok(()), Some(first)).expect("verified teardown cleans root");
+        assert!(!root.exists());
+
+        let second = ProductionOwnedRoot::create(&root, &product_root)
+            .expect("same configured root can be relaunched");
+        finish_production_root(Ok(()), Some(second)).expect("second cleanup");
+        fs::remove_dir(parent).expect("remove empty test parent");
+    }
+
+    #[test]
+    fn pre_spawn_failure_drop_releases_exact_owned_root() {
+        let (parent, root, product_root) = production_root_test_paths("pre-spawn");
+        let owned =
+            ProductionOwnedRoot::create(&root, &product_root).expect("production root ownership");
+        drop(owned);
+        assert!(!root.exists());
+        fs::remove_dir(parent).expect("remove empty test parent");
+    }
+
+    #[test]
+    fn ambiguous_teardown_preserves_owned_root() {
+        let (parent, root, product_root) = production_root_test_paths("ambiguous");
+        let owned =
+            ProductionOwnedRoot::create(&root, &product_root).expect("production root ownership");
+        let failure = error(
+            HermesAdapterErrorKind::Ambiguous,
+            "HERMES_WINDOWS_TEARDOWN_AMBIGUOUS",
+        );
+        let observed = finish_production_root(Err(failure), Some(owned))
+            .expect_err("ambiguous teardown must retain evidence");
+        assert_eq!(observed.code(), "HERMES_WINDOWS_TEARDOWN_AMBIGUOUS");
+        assert!(root.exists());
+        assert!(root.join(PRODUCTION_ROOT_MARKER_NAME).exists());
+        fs::remove_dir_all(&parent).expect("remove retained test evidence");
+    }
+
+    #[test]
+    fn either_single_teardown_failure_is_never_hidden_by_success() {
+        let process_failure = error(
+            HermesAdapterErrorKind::Ambiguous,
+            "HERMES_TEST_PROCESS_TEARDOWN_AMBIGUOUS",
+        );
+        let observed = first_teardown_failure(Err(process_failure), Ok(()))
+            .expect("process teardown failure must win over proxy success");
+        assert_eq!(observed.code(), "HERMES_TEST_PROCESS_TEARDOWN_AMBIGUOUS");
+
+        let proxy_failure = error(
+            HermesAdapterErrorKind::Ambiguous,
+            "HERMES_TEST_PROXY_TEARDOWN_AMBIGUOUS",
+        );
+        let observed = first_teardown_failure(Ok(()), Err(proxy_failure))
+            .expect("proxy teardown failure must win over process success");
+        assert_eq!(observed.code(), "HERMES_TEST_PROXY_TEARDOWN_AMBIGUOUS");
+    }
+
+    #[test]
+    fn foreign_entry_blocks_handle_cleanup_without_partial_deletion() {
+        let (parent, root, product_root) = production_root_test_paths("foreign");
+        let owned =
+            ProductionOwnedRoot::create(&root, &product_root).expect("production root ownership");
+        let foreign = root.join("foreign.sentinel");
+        fs::write(&foreign, b"foreign").expect("foreign sentinel");
+        let failure = finish_production_root(Ok(()), Some(owned))
+            .expect_err("foreign entry blocks handle cleanup");
+        assert_eq!(failure.code(), "HERMES_PRODUCTION_ROOT_CLEANUP_AMBIGUOUS");
+        assert!(foreign.exists());
+        assert!(root.join(PRODUCTION_ROOT_MARKER_NAME).exists());
+        fs::remove_dir_all(parent).expect("remove retained test evidence");
+    }
+
+    #[test]
+    fn pinned_marker_blocks_tamper_then_cleans_exact_root() {
+        let (parent, root, product_root) = production_root_test_paths("marker-tamper");
+        let owned =
+            ProductionOwnedRoot::create(&root, &product_root).expect("production root ownership");
+        let marker = root.join(PRODUCTION_ROOT_MARKER_NAME);
+        assert!(
+            fs::write(&marker, b"tampered").is_err(),
+            "retained marker handle must reject replacement writes"
+        );
+        finish_production_root(Ok(()), Some(owned)).expect("clean untampered owned root");
+        assert!(!root.exists());
+        fs::remove_dir(parent).expect("remove empty test parent");
+    }
 
     #[test]
     fn one_turn_gate_forwards_only_complete_valid_jsonl() {
@@ -4563,6 +4956,50 @@ mod proxy_host_tests {
 
     #[test]
     #[ignore = "requires WSL2, bubblewrap, and the exact frozen Hermes runtime"]
+    fn official_hermes_startup_timeout_cleans_verified_owned_root() {
+        let isolation_root = std::env::temp_dir().join(format!(
+            "lattice-hermes-official-startup-timeout-{}-{}",
+            std::process::id(),
+            RUNNER_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let containment = HermesWslContainmentConfig::new(
+            r"C:\Windows\System32\wsl.exe",
+            OFFICIAL_RUNTIME_GUEST_ROOT,
+            isolation_root.clone(),
+            fs::canonicalize(std::env::current_dir().expect("cwd"))
+                .expect("canonical product root"),
+        )
+        .expect("official timeout containment");
+        let config = HermesProductionRunnerConfig::official_with_broker_digest(
+            containment,
+            &zero_model_runtime_manifest(),
+            &ContentDigest::from_sha256("ff".repeat(32)).expect("broker digest"),
+            "production-timeout-key",
+            "hermes-agent",
+            Duration::from_millis(1),
+            Duration::from_secs(4),
+            Duration::from_millis(1),
+        )
+        .expect("official timeout config");
+        let failure = match config.launch(Instant::now() + Duration::from_secs(12)) {
+            Ok(runner) => {
+                runner.terminate().expect("unexpected runner is reaped");
+                panic!("one-millisecond startup bound must reject readiness")
+            }
+            Err(failure) => failure,
+        };
+        assert!(matches!(
+            failure.code(),
+            "HERMES_PRODUCTION_STARTUP_TIMEOUT" | "HERMES_PRODUCTION_DEADLINE_EXCEEDED"
+        ));
+        assert!(
+            !isolation_root.exists(),
+            "verified startup failure removes only its owned root"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires WSL2, bubblewrap, and the exact frozen Hermes runtime"]
     fn official_hermes_gateway_reaches_interactive_fake_codex_without_model() {
         let request = zero_model_request();
         let job = zero_model_job(request.clone());
@@ -4643,7 +5080,10 @@ mod proxy_host_tests {
             job.input_digest().as_str()
         );
         drop(observed);
-        fs::remove_dir_all(&isolation_root).expect("remove zero-model isolation root");
+        assert!(
+            !isolation_root.exists(),
+            "verified teardown removes the owned zero-model isolation root"
+        );
     }
 
     #[test]
@@ -4698,6 +5138,9 @@ mod proxy_host_tests {
         );
         assert!(!observed.reflection_emitted);
         drop(observed);
-        fs::remove_dir_all(&isolation_root).expect("remove zero-model failure isolation root");
+        assert!(
+            !isolation_root.exists(),
+            "verified failure teardown removes the owned zero-model isolation root"
+        );
     }
 }

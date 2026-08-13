@@ -9,8 +9,9 @@
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
+use std::io::Write;
 use std::mem::{size_of, zeroed};
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::FileExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
@@ -18,18 +19,27 @@ use std::ptr::{null, null_mut};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, NtCreateFile,
+};
 #[cfg(test)]
 use windows_sys::Win32::Foundation::GetHandleInformation;
 use windows_sys::Win32::Foundation::{
     GENERIC_READ, GENERIC_WRITE, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
-    SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    OBJ_CASE_INSENSITIVE, SetHandleInformation, UNICODE_STRING, WAIT_FAILED, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
-    CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileAttributesW,
-    INVALID_FILE_ATTRIBUTES, OPEN_EXISTING,
+    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo, GetFileAttributesW,
+    GetFileInformationByHandle, GetFinalPathNameByHandleW, INVALID_FILE_ATTRIBUTES, OPEN_EXISTING,
+    SYNCHRONIZE, SetFileInformationByHandle,
 };
+use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -49,6 +59,223 @@ use crate::{HermesAdapterError, HermesAdapterErrorKind, HermesAdapterResult};
 
 const PROCESS_TEARDOWN_EXIT_CODE: u32 = 0xC0DE_0340;
 const MAX_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+const HANDLE_DELETE_RETRY_TIMEOUT: Duration = Duration::from_secs(1);
+
+pub(crate) struct WindowsPinnedDirectory {
+    handle: Option<OwnedHandle>,
+    final_path: PathBuf,
+    delete_on_drop: bool,
+}
+
+impl WindowsPinnedDirectory {
+    pub(crate) fn create_new(parent: &Self, leaf: &OsStr) -> HermesAdapterResult<Self> {
+        let parent_handle = parent
+            .handle
+            .as_ref()
+            .ok_or_else(|| ambiguous_error("HERMES_WINDOWS_DIRECTORY_HANDLE_REJECTED"))?;
+        let mut name = leaf.encode_wide().collect::<Vec<_>>();
+        let name_bytes = name
+            .len()
+            .checked_mul(size_of::<u16>())
+            .and_then(|length| u16::try_from(length).ok())
+            .filter(|_| !name.is_empty() && !name.contains(&0))
+            .ok_or_else(|| ambiguous_error("HERMES_WINDOWS_DIRECTORY_NAME_REJECTED"))?;
+        let object_name = UNICODE_STRING {
+            Length: name_bytes,
+            MaximumLength: name_bytes,
+            Buffer: name.as_mut_ptr(),
+        };
+        let object_attributes = OBJECT_ATTRIBUTES {
+            Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>())
+                .map_err(|_| ambiguous_error("HERMES_WINDOWS_DIRECTORY_HANDLE_REJECTED"))?,
+            RootDirectory: parent_handle.raw(),
+            ObjectName: &raw const object_name,
+            Attributes: OBJ_CASE_INSENSITIVE,
+            SecurityDescriptor: null(),
+            SecurityQualityOfService: null(),
+        };
+        let mut io_status = IO_STATUS_BLOCK::default();
+        let mut raw = null_mut();
+        // SAFETY: every pointer references a live fixed-size value for this
+        // call. RootDirectory pins the verified parent, FILE_CREATE makes the
+        // leaf exclusive. A provisional RAII guard below owns every
+        // pre-return failure without relying on irrevocable delete-on-close.
+        let status = unsafe {
+            NtCreateFile(
+                &raw mut raw,
+                FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
+                &raw const object_attributes,
+                &raw mut io_status,
+                null(),
+                FILE_ATTRIBUTE_NORMAL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_CREATE,
+                FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT,
+                null(),
+                0,
+            )
+        };
+        if status < 0 {
+            return Err(spawn_error("HERMES_WINDOWS_DIRECTORY_CREATE_REJECTED"));
+        }
+        let handle = owned_handle(raw)
+            .ok_or_else(|| ambiguous_error("HERMES_WINDOWS_DIRECTORY_HANDLE_REJECTED"))?;
+        let mut directory = Self {
+            handle: Some(handle),
+            final_path: PathBuf::new(),
+            delete_on_drop: true,
+        };
+        let validation = (|| {
+            let handle = directory
+                .handle
+                .as_ref()
+                .ok_or_else(|| ambiguous_error("HERMES_WINDOWS_DIRECTORY_HANDLE_REJECTED"))?;
+            let information = file_information(handle)?;
+            if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(ambiguous_error("HERMES_WINDOWS_DIRECTORY_REPARSE_REJECTED"));
+            }
+            final_path_by_handle(handle)
+        })();
+        match validation {
+            Ok(final_path) => {
+                directory.final_path = final_path;
+                directory.delete_on_drop = false;
+                Ok(directory)
+            }
+            Err(failure) => match directory.delete() {
+                Ok(()) => Err(failure),
+                Err(cleanup) => Err(cleanup),
+            },
+        }
+    }
+
+    pub(crate) fn open(
+        path: &Path,
+        exclusive_writes: bool,
+        delete_access: bool,
+        share_delete: bool,
+    ) -> HermesAdapterResult<Self> {
+        let path_wide = wide_null(path.as_os_str())?;
+        let mut share_mode = if exclusive_writes {
+            FILE_SHARE_READ
+        } else {
+            FILE_SHARE_READ | FILE_SHARE_WRITE
+        };
+        if share_delete {
+            share_mode |= FILE_SHARE_DELETE;
+        }
+        // SAFETY: `path_wide` remains live for this call. OPEN_REPARSE_POINT
+        // makes the returned handle identify the named object rather than a
+        // reparse target; BACKUP_SEMANTICS is required for directories.
+        let desired_access =
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | if delete_access { DELETE } else { 0 };
+        let raw = unsafe {
+            CreateFileW(
+                path_wide.as_ptr(),
+                desired_access,
+                share_mode,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        let handle = owned_handle(raw)
+            .ok_or_else(|| ambiguous_error("HERMES_WINDOWS_DIRECTORY_HANDLE_REJECTED"))?;
+        let information = file_information(&handle)?;
+        if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(ambiguous_error("HERMES_WINDOWS_DIRECTORY_REPARSE_REJECTED"));
+        }
+        let final_path = final_path_by_handle(&handle)?;
+        Ok(Self {
+            handle: Some(handle),
+            final_path,
+            delete_on_drop: false,
+        })
+    }
+
+    pub(crate) fn final_path(&self) -> &Path {
+        &self.final_path
+    }
+
+    pub(crate) fn delete(mut self) -> HermesAdapterResult<()> {
+        let handle = self
+            .handle
+            .as_ref()
+            .ok_or_else(|| ambiguous_error("HERMES_WINDOWS_DIRECTORY_HANDLE_REJECTED"))?;
+        mark_handle_for_deletion(handle.raw())?;
+        self.delete_on_drop = false;
+        drop(self.handle.take());
+        Ok(())
+    }
+}
+
+impl Drop for WindowsPinnedDirectory {
+    fn drop(&mut self) {
+        if self.delete_on_drop {
+            if let Some(handle) = &self.handle {
+                let _ = mark_handle_for_deletion(handle.raw());
+            }
+        }
+    }
+}
+
+pub(crate) struct WindowsPinnedFile {
+    file: Option<File>,
+}
+
+impl WindowsPinnedFile {
+    pub(crate) fn create_new(path: &Path, share_delete: bool) -> HermesAdapterResult<Self> {
+        let path_wide = wide_null(path.as_os_str())?;
+        let mut share_mode = FILE_SHARE_READ;
+        if share_delete {
+            share_mode |= FILE_SHARE_DELETE;
+        }
+        // SAFETY: `path_wide` remains live for this call. CREATE_NEW prevents
+        // adopting a foreign file, and OPEN_REPARSE_POINT prevents traversal.
+        let raw = unsafe {
+            CreateFileW(
+                path_wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE | DELETE,
+                share_mode,
+                null(),
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if raw == INVALID_HANDLE_VALUE || raw.is_null() {
+            return Err(spawn_error("HERMES_WINDOWS_OWNED_FILE_CREATE_REJECTED"));
+        }
+        // SAFETY: successful CreateFileW transfers one unique file handle.
+        let file = unsafe { File::from_raw_handle(raw.cast()) };
+        Ok(Self { file: Some(file) })
+    }
+
+    pub(crate) fn write_all_sync(&mut self, bytes: &[u8]) -> HermesAdapterResult<()> {
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| ambiguous_error("HERMES_WINDOWS_OWNED_FILE_HANDLE_REJECTED"))?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| spawn_error("HERMES_WINDOWS_OWNED_FILE_WRITE_REJECTED"))
+    }
+
+    pub(crate) fn delete(mut self) -> HermesAdapterResult<()> {
+        let file = self
+            .file
+            .take()
+            .ok_or_else(|| ambiguous_error("HERMES_WINDOWS_OWNED_FILE_HANDLE_REJECTED"))?;
+        mark_handle_for_deletion(file.as_raw_handle().cast())?;
+        drop(file);
+        Ok(())
+    }
+
+    pub(crate) fn close(mut self) {
+        drop(self.file.take());
+    }
+}
 
 pub(crate) struct WindowsJobCommandPlan {
     pub(crate) executable: PathBuf,
@@ -201,10 +428,16 @@ fn spawn_inner(
         terminate_unassigned_process(&process, plan.teardown_timeout)?;
         return Err(spawn_error("HERMES_WINDOWS_JOB_ASSIGNMENT"));
     }
+    if redirects.retain_capture_files().is_err() {
+        terminate_job_and_reap(&job, &process, plan.teardown_timeout)?;
+        redirects.delete_capture_files_best_effort();
+        return Err(spawn_error("HERMES_WINDOWS_CAPTURE_RETENTION_REJECTED"));
+    }
 
     // SAFETY: this is the still-suspended primary thread returned above.
     if unsafe { ResumeThread(thread_handle.raw()) } == u32::MAX {
         terminate_job_and_reap(&job, &process, plan.teardown_timeout)?;
+        redirects.delete_capture_files_best_effort();
         return Err(spawn_error("HERMES_WINDOWS_RESUME_THREAD"));
     }
     drop(thread_handle);
@@ -332,6 +565,38 @@ impl WindowsJobChild {
         terminate_job_and_reap(&self.job, &self.process, self.teardown_timeout)?;
         self.terminated = true;
         Ok(())
+    }
+
+    pub(crate) fn close_parent_stdio_and_delete_captures(&mut self) -> HermesAdapterResult<()> {
+        self.stdin = None;
+        let stdout = std::mem::replace(&mut self.stdout, WindowsJobStdout::Pipe(None));
+        let stderr = std::mem::replace(&mut self.stderr, WindowsJobStderr::Pipe(None));
+        let stdout_result = match stdout {
+            WindowsJobStdout::Capture(file) => {
+                let result = mark_handle_for_deletion(file.as_raw_handle().cast());
+                drop(file);
+                result
+            }
+            WindowsJobStdout::Pipe(reader) => {
+                drop(reader);
+                Ok(())
+            }
+        };
+        let stderr_result = match stderr {
+            WindowsJobStderr::Capture(file) => {
+                let result = mark_handle_for_deletion(file.as_raw_handle().cast());
+                drop(file);
+                result
+            }
+            WindowsJobStderr::Pipe(reader) => {
+                drop(reader);
+                Ok(())
+            }
+        };
+        match (stdout_result, stderr_result) {
+            (Err(failure), _) => Err(failure),
+            (Ok(()), result) => result,
+        }
     }
 
     fn wait_for_exit(&mut self) -> HermesAdapterResult<u32> {
@@ -516,6 +781,25 @@ impl RedirectHandles {
         }
         Ok(())
     }
+
+    fn retain_capture_files(&self) -> HermesAdapterResult<()> {
+        if self.parent_stdout.is_none() {
+            set_handle_deletion(self.child_stdout.raw(), false)?;
+        }
+        if self.parent_stderr.is_none() {
+            set_handle_deletion(self.child_stderr.raw(), false)?;
+        }
+        Ok(())
+    }
+
+    fn delete_capture_files_best_effort(&self) {
+        if self.parent_stdout.is_none() {
+            let _ = mark_handle_for_deletion(self.child_stdout.raw());
+        }
+        if self.parent_stderr.is_none() {
+            let _ = mark_handle_for_deletion(self.child_stderr.raw());
+        }
+    }
 }
 
 fn create_anonymous_pipe(
@@ -572,7 +856,7 @@ fn open_inheritable_capture(path: &OsStr) -> HermesAdapterResult<OwnedHandle> {
     let handle = unsafe {
         CreateFileW(
             path.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE,
+            GENERIC_READ | GENERIC_WRITE | DELETE,
             0,
             &raw const attributes,
             CREATE_NEW,
@@ -583,7 +867,9 @@ fn open_inheritable_capture(path: &OsStr) -> HermesAdapterResult<OwnedHandle> {
     if handle == INVALID_HANDLE_VALUE || handle.is_null() {
         return Err(spawn_error("HERMES_WINDOWS_REDIRECT_FILE"));
     }
-    owned_handle(handle).ok_or_else(|| spawn_error("HERMES_WINDOWS_REDIRECT_FILE"))
+    let handle = owned_handle(handle).ok_or_else(|| spawn_error("HERMES_WINDOWS_REDIRECT_FILE"))?;
+    mark_handle_for_deletion(handle.raw())?;
+    Ok(handle)
 }
 
 fn inheritable_security_attributes() -> HermesAdapterResult<SECURITY_ATTRIBUTES> {
@@ -990,6 +1276,78 @@ fn owned_handle(handle: HANDLE) -> Option<OwnedHandle> {
     Some(unsafe { OwnedHandle::from_raw_handle(handle.cast()) })
 }
 
+fn file_information(handle: &OwnedHandle) -> HermesAdapterResult<BY_HANDLE_FILE_INFORMATION> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle` remains live and `information` is writable output
+    // storage of the exact documented type.
+    if unsafe { GetFileInformationByHandle(handle.raw(), &raw mut information) } == 0 {
+        return Err(ambiguous_error("HERMES_WINDOWS_HANDLE_IDENTITY_REJECTED"));
+    }
+    Ok(information)
+}
+
+fn final_path_by_handle(handle: &OwnedHandle) -> HermesAdapterResult<PathBuf> {
+    // Query the required UTF-16 length first; the handle remains pinned across
+    // both calls, so a path rename/reparse cannot substitute another object.
+    let required = unsafe { GetFinalPathNameByHandleW(handle.raw(), null_mut(), 0, 0) };
+    if required == 0 {
+        return Err(ambiguous_error("HERMES_WINDOWS_HANDLE_PATH_REJECTED"));
+    }
+    let capacity = usize::try_from(required)
+        .map_err(|_| ambiguous_error("HERMES_WINDOWS_HANDLE_PATH_REJECTED"))?
+        .checked_add(1)
+        .ok_or_else(|| ambiguous_error("HERMES_WINDOWS_HANDLE_PATH_REJECTED"))?;
+    let mut buffer = vec![0_u16; capacity];
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            handle.raw(),
+            buffer.as_mut_ptr(),
+            u32::try_from(buffer.len())
+                .map_err(|_| ambiguous_error("HERMES_WINDOWS_HANDLE_PATH_REJECTED"))?,
+            0,
+        )
+    };
+    if length == 0
+        || usize::try_from(length)
+            .ok()
+            .is_none_or(|value| value >= buffer.len())
+    {
+        return Err(ambiguous_error("HERMES_WINDOWS_HANDLE_PATH_REJECTED"));
+    }
+    buffer.truncate(usize::try_from(length).expect("validated path length"));
+    Ok(PathBuf::from(OsString::from_wide(&buffer)))
+}
+
+fn mark_handle_for_deletion(handle: HANDLE) -> HermesAdapterResult<()> {
+    let deadline = Instant::now() + HANDLE_DELETE_RETRY_TIMEOUT;
+    loop {
+        match set_handle_deletion(handle, true) {
+            Ok(()) => return Ok(()),
+            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Err(failure) => return Err(failure),
+        }
+    }
+}
+
+fn set_handle_deletion(handle: HANDLE, delete: bool) -> HermesAdapterResult<()> {
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: delete };
+    // SAFETY: `handle` is live with DELETE access and `disposition` is the
+    // exact fixed-size structure required by FileDispositionInfo.
+    if unsafe {
+        SetFileInformationByHandle(
+            handle,
+            FileDispositionInfo,
+            (&raw const disposition).cast(),
+            u32::try_from(size_of::<FILE_DISPOSITION_INFO>())
+                .map_err(|_| ambiguous_error("HERMES_WINDOWS_DELETE_HANDLE_REJECTED"))?,
+        )
+    } == 0
+    {
+        return Err(ambiguous_error("HERMES_WINDOWS_DELETE_HANDLE_REJECTED"));
+    }
+    Ok(())
+}
+
 trait OwnedHandleExt {
     fn raw(&self) -> HANDLE;
 }
@@ -1021,6 +1379,30 @@ mod tests {
                 Err(error) => panic!("remove exact capture {path:?}: {error}"),
             }
         }
+    }
+
+    #[test]
+    fn pinned_directory_create_new_returns_the_created_object_and_preserves_collision() {
+        let sequence = PIPE_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let parent = std::env::temp_dir().join(format!(
+            "lattice-hermes-pinned-directory-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&parent).expect("fresh pinned-directory parent");
+        let parent = fs::canonicalize(parent).expect("canonical pinned-directory parent");
+        let parent_guard =
+            WindowsPinnedDirectory::open(&parent, false, false, false).expect("pin parent");
+        let child = parent.join("owned");
+
+        let child_guard = WindowsPinnedDirectory::create_new(&parent_guard, OsStr::new("owned"))
+            .expect("atomically create and own child directory");
+        assert!(crate::same_path(child_guard.final_path(), &child));
+        assert!(WindowsPinnedDirectory::create_new(&parent_guard, OsStr::new("owned")).is_err());
+        assert!(child.is_dir(), "collision must preserve the owned child");
+
+        child_guard.delete().expect("delete exact pinned child");
+        drop(parent_guard);
+        fs::remove_dir(parent).expect("remove empty pinned-directory parent");
     }
 
     #[test]

@@ -1215,7 +1215,36 @@ fn production_official_no_model_preflight_owns_the_pinned_gateway() {
         64
     );
     runner.terminate().expect("exact Job tree is reaped");
-    remove_temp_root_with_retry(&isolation_root);
+    assert!(
+        !isolation_root.exists(),
+        "verified runner teardown removes its owned isolation root"
+    );
+}
+
+#[test]
+#[ignore = "requires WSL2, bubblewrap, and the exact frozen Hermes runtime"]
+fn production_runner_drop_reaps_and_cleans_the_owned_gateway_root() {
+    let isolation_root = unique_temp_root("lattice-hermes-production-drop-cleanup");
+    let config = crate::HermesProductionRunnerConfig::official_with_broker_digest(
+        production_containment(isolation_root.clone()),
+        &test_runtime_manifest(),
+        &digest("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+        "production-drop-cleanup-key",
+        "hermes-agent",
+        Duration::from_secs(20),
+        Duration::from_secs(5),
+        Duration::from_millis(1),
+    )
+    .expect("bounded official config");
+    let mut runner = config
+        .launch(Instant::now() + Duration::from_secs(30))
+        .expect("exact official gateway reaches no-model readiness");
+    runner.verify_live().expect("owned process remains live");
+    drop(runner);
+    assert!(
+        !isolation_root.exists(),
+        "runner Drop reaps the Job and removes only its owned root"
+    );
 }
 
 #[test]
