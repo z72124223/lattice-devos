@@ -12,6 +12,7 @@ param(
     [string]$Task038TunnelProfileName = 'lattice-local',
     [ValidateRange(60, 1800)]
     [int]$HolderTtlSeconds = 900,
+    [switch]$RunTask068HermesReplayGate,
     [switch]$MemoryOnly
 )
 
@@ -68,6 +69,7 @@ $environmentNames = @(
     'LATTICE_TASK019_RUN_ID',
     'LATTICE_TASK019_EXPECTED_UUID',
     'LATTICE_TASK019_EXPECTED_MANIFEST',
+    'LATTICE_TASK068_EXPECTED_RECEIPT_SHA256',
     'LATTICE_TASK038_POSTGRES_PASSWORD',
     'LATTICE_WRITER_LEASE_MIGRATOR_URL',
     'LATTICE_WRITER_LEASE_RUNTIME_URL',
@@ -801,6 +803,113 @@ function Invoke-LiveTest {
     return ,$testOutput
 }
 
+function Invoke-Task068HermesReplayGate {
+    param(
+        [Parameter(Mandatory = $true)][string]$Cargo,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][ValidateSet('initial', 'restart')][string]$Phase
+    )
+
+    [Environment]::SetEnvironmentVariable('LATTICE_TASK019_PHASE', $Phase, 'Process')
+    $stdoutPath = Join-Path $clusterRoot ".cargo-$Phase-task068-stdout.log"
+    $stderrPath = Join-Path $clusterRoot ".cargo-$Phase-task068-stderr.log"
+    $process = $null
+    $testExitCode = $null
+    $testOutput = @()
+    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+    try {
+        $process = Start-Process -FilePath $Cargo -ArgumentList @(
+            'test',
+            '-p', 'lattice-runtime',
+            '--lib',
+            'composition::tests::canonical_hermes_reflection_survives_postgres_restart_when_provisioned',
+            '--locked',
+            '--',
+            '--ignored',
+            '--exact',
+            '--nocapture',
+            '--test-threads=1'
+        ) -WorkingDirectory $RepositoryRoot -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru
+        $null = $process.Handle
+        $process.WaitForExit()
+        $testExitCode = $process.ExitCode
+        if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+            $testOutput += @(Get-Content -LiteralPath $stdoutPath -Encoding utf8)
+        }
+        if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            $testOutput += @(Get-Content -LiteralPath $stderrPath -Encoding utf8)
+        }
+    }
+    finally {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $path) {
+                throw 'TASK068_CARGO_OUTPUT_DELETE_FAILED'
+            }
+        }
+    }
+
+    if ($testExitCode -ne 0) {
+        $safeTokens = @(
+            $testOutput | ForEach-Object {
+                foreach ($match in [regex]::Matches(
+                    [string]$_,
+                    '(?<![A-Z0-9_])(?:TASK068|MEMORY)_[A-Z0-9_]{1,63}(?![A-Z0-9_])'
+                )) {
+                    $match.Value
+                }
+            }
+        )
+        $safeTokens = @($safeTokens | Sort-Object -Unique)
+        $safeSummary = if ($safeTokens.Count -eq 0) {
+            'No allowlisted static diagnostic was emitted.'
+        }
+        else {
+            $safeTokens -join ' | '
+        }
+        throw "TASK068 postgres replay $Phase phase failed with exit code $testExitCode. Allowlisted diagnostics: $safeSummary"
+    }
+    return ,$testOutput
+}
+
+function Get-Task068HermesReplayEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$TestOutput,
+        [Parameter(Mandatory = $true)][ValidateSet('initial', 'restart')][string]$Phase
+    )
+
+    $evidence = @()
+    foreach ($item in $TestOutput) {
+        $line = [string]$item
+        if ($line -cmatch '(?:^|\s)TASK068_HERMES_POSTGRES_REPLAY_OK phase=(initial|restart) receipt_sha256=([0-9a-f]{64}) ready_calls=([01]) research_calls=([01]) persist_calls=([01])$') {
+            $evidence += [pscustomobject]@{
+                Phase = $Matches[1]
+                ReceiptSha256 = $Matches[2]
+                ReadyCalls = [int]$Matches[3]
+                ResearchCalls = [int]$Matches[4]
+                PersistCalls = [int]$Matches[5]
+            }
+        }
+    }
+    if ($evidence.Count -ne 1 -or $evidence[0].Phase -cne $Phase) {
+        throw "TASK068_HERMES_REPLAY_EVIDENCE_MISSING_$Phase"
+    }
+    $expectedCalls = if ($Phase -ceq 'initial') { 1 } else { 0 }
+    if (
+        $evidence[0].ReadyCalls -ne $expectedCalls -or
+        $evidence[0].ResearchCalls -ne $expectedCalls -or
+        $evidence[0].PersistCalls -ne $expectedCalls
+    ) {
+        throw "TASK068_HERMES_REPLAY_EFFECT_COUNT_REJECTED_$Phase"
+    }
+    return $evidence[0]
+}
+
 function Get-RestartEvidence {
     param([Parameter(Mandatory = $true)][object[]]$TestOutput)
 
@@ -1059,6 +1168,12 @@ $selectedHookCount = @(
 if (@($selectedHookCount).Count -gt 1) {
     throw 'TASK019_HOOK_MODE_REJECTED'
 }
+if (
+    $RunTask068HermesReplayGate -and
+    (-not $MemoryOnly -or @($selectedHookCount).Count -ne 0)
+) {
+    throw 'TASK068_HARNESS_MODE_REJECTED'
+}
 if ($RunLatticeDeliveryHook) {
     $deliveryHookPath = Get-LatticeDeliveryHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
 }
@@ -1094,7 +1209,7 @@ function Get-Task019PostgresProcessIdentity {
                 '--no-psqlrc' '--no-password' '--quiet' '--tuples-only' '--no-align' `
                 '--field-separator' '|' '-h' '127.0.0.1' '-p' ([string]$Port) `
                 '-U' $harnessUser '-d' 'postgres' '-v' 'ON_ERROR_STOP=1' `
-                '-c' "SELECT system_identifier::text, pg_postmaster_start_time()::text FROM pg_control_system();" `
+                '-c' "SELECT system_identifier::text, pg_postmaster_start_time()::text, current_setting('data_directory') FROM pg_control_system();" `
                 2>&1 | ForEach-Object { [string]$_ })
             $exitCode = [int]$LASTEXITCODE
         }
@@ -1109,13 +1224,14 @@ function Get-Task019PostgresProcessIdentity {
     if (
         $exitCode -ne 0 -or
         $rows.Count -ne 1 -or
-        [string]$rows[0] -cnotmatch '\A([0-9]{1,20})\|(.+)\z'
+        [string]$rows[0] -cnotmatch '\A([0-9]{1,20})\|([^|]+)\|([^|]+)\z'
     ) {
         throw 'TASK019_POSTGRES_PROCESS_IDENTITY_REJECTED'
     }
     return [pscustomobject]@{
         system_identifier = [string]$Matches[1]
         postmaster_started_at = [string]$Matches[2]
+        data_directory = [string]$Matches[3]
     }
 }
 
@@ -1144,17 +1260,30 @@ function Get-Task019PostmasterRuntimeEvidence {
     try {
         $processId = [int]$listeners[0].OwningProcess
         $process = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + $processId) -ErrorAction Stop
+        if ($null -eq $process) {
+            throw 'TASK019_POSTMASTER_PROCESS_MISSING'
+        }
         $executable = Get-CanonicalPath -Path ([string]$process.ExecutablePath)
         $createdAt = ([DateTimeOffset]([DateTime]$process.CreationDate)).ToUniversalTime()
-        if (
-            $null -eq $process -or
-            $executable -cne (Get-CanonicalPath -Path $PostgresExecutable) -or
-            [string]$process.CommandLine -notlike ('*' + (Get-CanonicalPath -Path $DataDirectory) + '*') -or
-            (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ExpectedSha256 -or
-            (Get-LatticeWindowsNativePathIdentityToken -Path $executable -Directory $false) -cne $ExpectedNativeIdentity
-        ) { throw 'TASK019_POSTMASTER_PROCESS_IDENTITY_REJECTED' }
+        if (-not (Test-ExactPath -Actual $executable -Expected $PostgresExecutable)) {
+            throw 'TASK019_POSTMASTER_PROCESS_PATH_REJECTED'
+        }
+        if (-not (Test-ExactPath -Actual ([string]$identity.data_directory) -Expected $DataDirectory)) {
+            throw 'TASK019_POSTMASTER_PROCESS_ARGUMENT_REJECTED'
+        }
+        if ((Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ExpectedSha256) {
+            throw 'TASK019_POSTMASTER_PROCESS_HASH_REJECTED'
+        }
+        if ((Get-LatticeWindowsNativePathIdentityToken -Path $executable -Directory $false) -cne $ExpectedNativeIdentity) {
+            throw 'TASK019_POSTMASTER_PROCESS_NATIVE_IDENTITY_REJECTED'
+        }
     }
-    catch { throw 'TASK019_POSTMASTER_PROCESS_IDENTITY_REJECTED' }
+    catch {
+        if ([string]$_.Exception.Message -cmatch '\ATASK019_POSTMASTER_PROCESS_[A-Z_]+\z') {
+            throw [string]$_.Exception.Message
+        }
+        throw 'TASK019_POSTMASTER_PROCESS_IDENTITY_REJECTED'
+    }
     return [pscustomobject][ordered]@{
         system_identifier = [string]$identity.system_identifier
         postmaster_started_at = [string]$identity.postmaster_started_at
@@ -1610,6 +1739,21 @@ try {
     })
     $initialOutput = Invoke-LiveTest -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'initial'
     $restartEvidence = Get-RestartEvidence -TestOutput $initialOutput
+    $task068InitialEvidence = $null
+    if ($RunTask068HermesReplayGate) {
+        $task068InitialOutput = Invoke-Task068HermesReplayGate `
+            -Cargo $cargoCommand.Source `
+            -RepositoryRoot $repositoryRoot `
+            -Phase 'initial'
+        $task068InitialEvidence = Get-Task068HermesReplayEvidence `
+            -TestOutput $task068InitialOutput `
+            -Phase 'initial'
+        [Environment]::SetEnvironmentVariable(
+            'LATTICE_TASK068_EXPECTED_RECEIPT_SHA256',
+            [string]$task068InitialEvidence.ReceiptSha256,
+            'Process'
+        )
+    }
 
     if (-not (Stop-TestCluster -PgCtl $pgCtl -DataDirectory $dataDirectory)) {
         throw 'Could not prove the disposable PostgreSQL cluster stopped after the initial phase.'
@@ -1683,6 +1827,21 @@ try {
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_UUID', $restartEvidence.DatabaseId, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_MANIFEST', $restartEvidence.ManifestHash, 'Process')
     $null = Invoke-LiveTest -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'restart'
+    if ($RunTask068HermesReplayGate) {
+        $task068RestartOutput = Invoke-Task068HermesReplayGate `
+            -Cargo $cargoCommand.Source `
+            -RepositoryRoot $repositoryRoot `
+            -Phase 'restart'
+        $task068RestartEvidence = Get-Task068HermesReplayEvidence `
+            -TestOutput $task068RestartOutput `
+            -Phase 'restart'
+        if (
+            [string]$task068RestartEvidence.ReceiptSha256 -cne
+            [string]$task068InitialEvidence.ReceiptSha256
+        ) {
+            throw 'TASK068_HERMES_REPLAY_RECEIPT_SUBSTITUTION_REJECTED'
+        }
+    }
 
     if (@($selectedHookCount).Count -eq 1) {
         foreach ($entry in ([ordered]@{
@@ -1961,6 +2120,9 @@ Write-Output 'TASK019_POSTGRES_HARNESS=PASS'
 Write-Output "POSTGRES_VERSION=$expectedPostgresVersion"
 Write-Output 'ENDPOINT=127.0.0.1:<dynamic-excludes-5432-64272-55432>'
 Write-Output 'PHASES=initial,restart'
+if ($RunTask068HermesReplayGate) {
+    Write-Output 'TASK068_HERMES_POSTGRES_REPLAY=PASS'
+}
 if ($null -ne $holderFinalEvidence) {
     Write-Output ('HOLDER_RECEIPT_PATH=' + [string]$holderFinalEvidence.path)
     Write-Output ('HOLDER_RECEIPT_RAW_SHA256=' + [string]$holderFinalEvidence.raw_sha256)

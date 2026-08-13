@@ -6223,11 +6223,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use lattice_codebase_memory::{normalize_analysis, plan_retrieval};
     use lattice_contracts::{
-        CodebaseMemoryPersistenceIdentity, GraphMemoryPersistenceEvidence,
-        MemoryRetrievalDisposition, MemoryRetrievalEvidence,
+        CodeSnapshotEvidence, CodebaseMemoryPersistenceIdentity, GraphConfidence,
+        GraphMemoryPersistenceEvidence, GraphSourceProvenance, GraphifyIdentity,
+        GraphifyRawEvidence, GraphifyRawNode, MemoryRetrievalDisposition, MemoryRetrievalEvidence,
+        MemoryRetrievalPlan, NormalizedGraphAnalysis, TrackedSource,
     };
-    use lattice_ports::{DeliveryFailureCertainty, DeliveryPortError};
+    use lattice_ports::{CodebaseMemoryPort, DeliveryFailureCertainty, DeliveryPortError};
 
     #[test]
     fn synthetic_official_bundle_facts_exercise_only_the_pure_fixed_policy() {
@@ -7323,6 +7326,266 @@ mod tests {
         .expect("retrieval evidence");
         GraphMemoryReceipt::new(persistence, retrieval, test_content_digest('7'))
             .expect("graph receipt")
+    }
+
+    fn task068_graph_memory_fixture() -> (NormalizedGraphAnalysis, MemoryRetrievalPlan) {
+        let query_text = "TASK068CanonicalHermesReflection";
+        let request = GraphMemoryRunRequest::new(
+            Invocation::new(
+                CONTRACT_VERSION,
+                RequestId::new("task068-live-request").expect("request id"),
+                TaskId::new("TASK-068").expect("task id"),
+                AttemptId::new("task068-live-attempt").expect("attempt id"),
+                ProjectSnapshotId::new("task068-live-snapshot").expect("snapshot id"),
+                test_content_digest('a'),
+            )
+            .expect("invocation"),
+            ProjectId::new("task068-hermes-replay").expect("project"),
+            GitObjectId::new("3".repeat(40)).expect("commit"),
+            digest_query_text(query_text).expect("query digest"),
+            test_content_digest('c'),
+            5,
+        )
+        .expect("graph request");
+        let source =
+            TrackedSource::new("src/task068.rs", test_content_digest('d')).expect("tracked source");
+        let snapshot = CodeSnapshotEvidence::new(
+            &request,
+            GitObjectId::new("4".repeat(40)).expect("tree"),
+            vec![source.clone()],
+            test_content_digest('e'),
+            test_content_digest('f'),
+        )
+        .expect("snapshot");
+        let provenance = GraphSourceProvenance::new(&source, Some(1), Some(2)).expect("provenance");
+        let raw = GraphifyRawEvidence::new(
+            &request,
+            &snapshot,
+            GraphifyIdentity::task033(
+                test_content_digest('1'),
+                test_content_digest('2'),
+                test_content_digest('3'),
+            )
+            .expect("graphify identity"),
+            vec![
+                GraphifyRawNode::new(
+                    "node-task068-canonical-hermes-reflection",
+                    query_text,
+                    "trait",
+                    provenance,
+                    GraphConfidence::Extracted,
+                )
+                .expect("graph node"),
+            ],
+            Vec::new(),
+            test_content_digest('4'),
+            test_content_digest('5'),
+            test_content_digest('6'),
+        )
+        .expect("raw graph evidence");
+        let analysis = normalize_analysis(&request, &snapshot, &raw).expect("normalized analysis");
+        let query = MemoryQuery::new(&request, query_text, 5).expect("memory query");
+        let plan = plan_retrieval(&analysis, &query).expect("retrieval plan");
+        (analysis, plan)
+    }
+
+    fn task068_reflection_candidate(
+        graph_receipt: &GraphMemoryReceipt,
+    ) -> HermesReflectionCandidate {
+        HermesReflectionCandidate::new(
+            graph_receipt.persistence().request(),
+            graph_receipt,
+            HermesReflectionContent::new(
+                "The exact graph receipt supports one deterministic finding.",
+                vec![
+                    HermesReflectionFinding::new(
+                        "Persist only the exact graph-bound Hermes candidate.",
+                        test_content_digest('6'),
+                    )
+                    .expect("finding"),
+                ],
+                vec!["Replay the persisted candidate for Status.".to_owned()],
+            )
+            .expect("reflection content"),
+            test_content_digest('9'),
+            test_content_digest('7'),
+            test_content_digest('8'),
+        )
+        .expect("reflection candidate")
+    }
+
+    fn assert_task068_reflection(
+        receipt: &HermesReflectionReceipt,
+        candidate: &HermesReflectionCandidate,
+    ) {
+        assert_eq!(receipt.request(), candidate.request());
+        assert_eq!(
+            receipt.graph_receipt_digest(),
+            candidate.graph_receipt_digest()
+        );
+        assert_eq!(receipt.content(), candidate.content());
+        assert_eq!(
+            receipt.hermes_identity_digest(),
+            candidate.hermes_identity_digest()
+        );
+        assert_eq!(receipt.input_digest(), candidate.input_digest());
+        assert_eq!(receipt.reflection_digest(), candidate.reflection_digest());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the marker-owned TASK-019 PostgreSQL restart harness"]
+    fn canonical_hermes_reflection_survives_postgres_restart_when_provisioned() {
+        assert_eq!(
+            required_environment("LATTICE_TASK019_LIVE").expect("live gate"),
+            "1"
+        );
+        let phase = required_environment("LATTICE_TASK019_PHASE").expect("phase");
+        assert!(matches!(phase.as_str(), "initial" | "restart"));
+        let port = required_environment("LATTICE_TASK019_PORT")
+            .expect("port")
+            .parse::<u16>()
+            .expect("valid port");
+        let database = DeliveryDatabaseBinding::new(
+            required_environment("LATTICE_TASK019_HOST").expect("host"),
+            port,
+            required_environment("LATTICE_TASK019_RUN_ID").expect("run id"),
+        )
+        .expect("marker-owned database binding");
+        let password = required_environment("LATTICE_TASK019_PASSWORD").expect("password");
+        let timeout = Duration::from_secs(30);
+        let (analysis, plan) = task068_graph_memory_fixture();
+        let request = analysis.request().clone();
+        let (ready_calls, research_calls, persist_calls);
+
+        let receipt = if phase == "initial" {
+            let mut memory =
+                reflection_memory(&database, &password, timeout, GraphMemoryStage::Persistence)
+                    .expect("production memory owner");
+            let persistence = memory
+                .persist_analysis(&analysis)
+                .expect("persist deterministic graph analysis");
+            let graph_receipt = memory
+                .retrieve(&persistence, plan)
+                .expect("persist deterministic graph receipt");
+            drop(memory);
+            let candidate = task068_reflection_candidate(&graph_receipt);
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut hermes = RecordingReflectionHermes {
+                events,
+                ready_calls: 0,
+                research_calls: 0,
+                sealed: true,
+                seal: HermesProductionSeal {
+                    receipt_digest: test_content_digest('9'),
+                },
+            };
+            apply_canonical_hermes_tool_policy(
+                &mut hermes,
+                database.run_id(),
+                CanonicalHermesTool::DeliveryRun,
+            )
+            .expect("Delivery Run readies the canonical Hermes owner");
+            let mut reflection_load_calls = 0;
+            let mut graph_load_calls = 0;
+            let mut persistence_calls = 0;
+            let replayed = load_or_run_canonical_reflection(
+                &mut hermes,
+                database.run_id(),
+                &request,
+                |request| {
+                    reflection_load_calls += 1;
+                    load_reflection_from_postgres(&database, &password, timeout, request)
+                },
+                |request| {
+                    graph_load_calls += 1;
+                    load_delivery_graph_receipt(
+                        &database,
+                        &password,
+                        deadline(timeout).expect("deadline"),
+                        request,
+                    )
+                },
+                |candidate| {
+                    persistence_calls += 1;
+                    persist_reflection_to_postgres(&database, &password, timeout, candidate)
+                },
+            )
+            .expect("production reflection round");
+            assert_task068_reflection(&replayed, &candidate);
+            assert_eq!(reflection_load_calls, 2);
+            assert_eq!(graph_load_calls, 1);
+            assert_eq!(persistence_calls, 1);
+            ready_calls = hermes.ready_calls;
+            research_calls = hermes.research_calls;
+            persist_calls = persistence_calls;
+            assert_eq!(ready_calls, 1);
+            assert_eq!(research_calls, 1);
+            replayed
+        } else {
+            let graph_receipt = load_delivery_graph_receipt(
+                &database,
+                &password,
+                deadline(timeout).expect("deadline"),
+                &request,
+            )
+            .expect("restart graph receipt");
+            let candidate = task068_reflection_candidate(&graph_receipt);
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut hermes = RecordingReflectionHermes {
+                events: Arc::clone(&events),
+                ready_calls: 0,
+                research_calls: 0,
+                sealed: false,
+                seal: HermesProductionSeal {
+                    receipt_digest: test_content_digest('8'),
+                },
+            };
+            apply_canonical_hermes_tool_policy(
+                &mut hermes,
+                database.run_id(),
+                CanonicalHermesTool::DeliveryStatus,
+            )
+            .expect("fresh Status stays Hermes-free");
+            let load_events = Arc::clone(&events);
+            let replayed = load_canonical_reflection(&request, |request| {
+                load_events
+                    .lock()
+                    .expect("events lock")
+                    .push(CanonicalReflectionEvent::ReflectionLoadHit);
+                load_reflection_from_postgres(&database, &password, timeout, request)
+            })
+            .expect("fresh Status exact replay");
+            assert_eq!(hermes.ready_calls, 0);
+            assert_eq!(hermes.research_calls, 0);
+            assert!(!production_hermes_sealed::Sealed::has_production_seal(
+                &hermes
+            ));
+            assert_eq!(
+                *events.lock().expect("events lock"),
+                vec![CanonicalReflectionEvent::ReflectionLoadHit]
+            );
+            assert_task068_reflection(&replayed, &candidate);
+            let expected = ContentDigest::from_sha256(
+                required_environment("LATTICE_TASK068_EXPECTED_RECEIPT_SHA256")
+                    .expect("initial receipt digest"),
+            )
+            .expect("valid initial receipt digest");
+            assert_eq!(replayed.receipt_digest(), &expected);
+            ready_calls = hermes.ready_calls;
+            research_calls = hermes.research_calls;
+            persist_calls = 0;
+            replayed
+        };
+
+        println!(
+            "TASK068_HERMES_POSTGRES_REPLAY_OK phase={} receipt_sha256={} ready_calls={} research_calls={} persist_calls={}",
+            phase,
+            receipt.receipt_digest().as_str(),
+            ready_calls,
+            research_calls,
+            persist_calls
+        );
     }
 
     #[test]
