@@ -2920,7 +2920,7 @@ fn prove_first_apply_and_reconciliation(
     assert_eq!(
         must_setup(apply_migrations(&mut first, &target)),
         MigrationApplyOutcome::Applied {
-            executable_count: 3
+            executable_count: 4
         }
     );
     let evidence = must_setup(verify_postgres_schema(
@@ -2996,7 +2996,7 @@ fn assert_history_manifest_recomputation(client: &mut Client, expected_manifest:
         )
         .unwrap_or_else(|_| panic!("STORE_TASK021_MANIFEST_RECOMPUTE_QUERY_FAILED"));
     assert_eq!(row.get::<_, String>(0), expected_manifest);
-    assert_eq!(row.get::<_, i64>(1), 4);
+    assert_eq!(row.get::<_, i64>(1), 5);
 }
 
 fn prove_exact_v1_upgrade(config: &LiveConfig, admin: &mut Client) {
@@ -3797,7 +3797,7 @@ fn prove_concurrent_runners(config: &LiveConfig, admin: &mut Client) {
                 .unwrap_or_else(|_| panic!("TASK019_CONCURRENT_RUNNER_PANICKED")),
         ) {
             MigrationApplyOutcome::Applied {
-                executable_count: 3,
+                executable_count: 4,
             } => applied += 1,
             MigrationApplyOutcome::AlreadyCurrent => current += 1,
             MigrationApplyOutcome::Applied { .. } => panic!("TASK019_CONCURRENT_COUNT_INVALID"),

@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use crate::{ExtensionTarget, verify_embedded_extension_manifest};
 
 const GLOBAL_MANIFEST_SHA256: &str =
-    "09c431df18ad71a4f44239a5d2ddf6b1774b8ffec06c7f9223f0e41757f3d407";
+    "9378bbadf1e990e7d2617b66343b07193b2b8dd19bc8bb3dd6a3b618b134538a";
 
 /// Production repository adapter for the fixed same-database Memory profile.
 ///
