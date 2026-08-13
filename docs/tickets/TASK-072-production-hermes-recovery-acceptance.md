@@ -4,12 +4,13 @@ spec_id: SPEC-002
 spec_version: 31
 module_id: hermes-adapter
 constitution_version: 1.1
-status: ready
+status: completed
 parallel_safe: false
 depends_on:
   - TASK-071
 allowed_paths:
   - docs/tickets/TASK-072-production-hermes-recovery-acceptance.md
+  - docs/tickets/TASK-073-retire-definitive-hermes-recovery.md
   - crates/lattice-hermes-adapter/src/production.rs
   - crates/lattice-hermes-adapter/src/wsl_outer_runner.py
   - crates/lattice-hermes-adapter/tests/wsl_outer_runner_fixture.py
@@ -61,3 +62,25 @@ No canonical MCP or PostgreSQL end-to-end claim, real provider/model request,
 external credential read, public listener, durable recovery, retry loop,
 cross-process recovery, push, merge, deployment, payment, account change, or
 release.
+
+## Completion Evidence
+
+- RED: the new official recovery acceptance first failed to compile without a
+  gated provider, then reached same-port reconciliation but exposed
+  `HERMES_CODEX_PROXY_OUTER_EOF` during otherwise verified teardown.
+- GREEN: `7e83d55` adds one gated in-process fake provider, accepts outer EOF
+  only after authenticated clean terminal plus adapter success, and keeps the
+  outer WSL relay alive only when delivery of an already-received inner
+  response hits `BrokenPipeError` or `ConnectionResetError`.
+- The exact ignored pinned-Hermes recovery test passes with
+  `HERMES_RUN_DEADLINE_EXCEEDED`, a known run receipt, one `turn/start`, Live
+  normalized evidence, one underlying teardown, and an absent owned root. The
+  existing official no-model success and definitive-failure live tests also
+  pass.
+- Adapter all-target verification passes 81 ordinary tests with 10 explicit
+  live-only ignores plus 4 preparation tests. Three deterministic Python relay
+  tests pass; format and diff checks pass. Three independent reviews report
+  P0/P1/P2 = 0.
+- No external/provider credential, real provider/model request, external
+  network, public listener, PostgreSQL, MCP, push, merge, deployment, payment,
+  account change, or release was used.

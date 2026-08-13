@@ -40,11 +40,17 @@ same-process recovery receipt reconciles an ambiguous submitted run. The
 adapter and production port must reuse status reconciliation without another
 submission and without adding persistence or recovery authority.
 
-## Current task update — TASK-072
+## Current task update — TASK-073
 
-CURRENT TASK-072 — prove one real pinned-Hermes post-submit timeout can be
-reconciled on the same production port with an in-process no-model provider,
-exactly one submission, and verified teardown.
+CURRENT TASK-073 — retire a Hermes recovery receipt as soon as an initial
+event stream or same-port reconciliation observes an authoritative Failed or
+Cancelled terminal, while retaining all genuinely uncertain recovery state.
+
+## Completed task update — TASK-072
+
+COMPLETED TASK-072 — one real pinned-Hermes post-submit timeout now reconciles
+on the same production port with an in-process no-model provider, exactly one
+submission, Live normalized evidence, and verified teardown/root cleanup.
 
 ## Completed task update — TASK-071
 

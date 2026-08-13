@@ -1,3 +1,31 @@
+# TASK-072 Local Handoff — 2026-08-14
+
+## Outcome
+
+The exact pinned Hermes v2026.8.3 runtime now has a concrete same-port
+recovery acceptance through its production WSL/bubblewrap owner. A gated
+in-process fake Codex acknowledges one turn, withholds its terminal, and makes
+the first observation return exact `HERMES_RUN_DEADLINE_EXCEEDED` with a known
+run receipt. Releasing that terminal lets one reconciliation return strict
+canonical reflection plus `RuntimeKind::Live` evidence without another
+`turn/start`.
+
+The first GREEN exposed a teardown bug: after the authenticated close and
+terminal barrier, outer EOF was still classified as failure. `7e83d55` accepts
+EOF only after authenticated open, clean terminal, exactly one turn, and
+adapter success. The outer WSL relay now ignores only broken-pipe or
+connection-reset delivery of an already-received inner response; deterministic
+Python tests prove all other socket errors remain fail closed.
+
+The exact recovery, existing success, and existing definitive-failure
+no-model live tests pass. Adapter all-target verification passes 81 ordinary
+tests with 10 explicit live-only ignores plus 4 preparation tests; Python
+relay tests pass 3/3; format/diff checks pass; three reviews report P0/P1/P2=0.
+No external/provider credential, real model/provider request, external
+network, public listener, database, MCP, push, merge, deployment, payment,
+account change, or release was used. The untracked TASK-051 script remains
+untouched and excluded.
+
 # TASK-071 Local Handoff — 2026-08-14
 
 ## Outcome
