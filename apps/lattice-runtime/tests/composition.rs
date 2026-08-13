@@ -940,6 +940,22 @@ fn latticed_hermes_runtime_preflight_explicitly_rejects_missing_isolation_config
     );
 }
 
+#[test]
+fn latticed_hermes_launch_routes_to_production_configuration() {
+    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
+        .arg("--hermes-launch")
+        .env_clear()
+        .output()
+        .expect("start canonical latticed Hermes launcher");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr utf8"),
+        "LATTICE_HERMES_PREPARATION_REQUIRED\n"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn latticed_hermes_runtime_preflight_rejects_invalid_isolation_configuration() {

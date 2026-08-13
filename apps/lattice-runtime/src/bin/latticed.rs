@@ -50,6 +50,15 @@ fn main() -> ExitCode {
             eprintln!("{}", preflight.render());
             return ExitCode::from(2);
         }
+        if argument == "--hermes-launch" && arguments.next().is_none() {
+            return match lattice_runtime::composition::launch_hermes_from_environment() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("{}", error.code());
+                    ExitCode::from(2)
+                }
+            };
+        }
         eprintln!("LATTICED_ARGUMENTS_REJECTED");
         return ExitCode::from(2);
     }

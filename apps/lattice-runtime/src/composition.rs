@@ -291,6 +291,7 @@ pub enum LatticedErrorKind {
     GraphConfiguration,
     GraphExecution,
     GraphReceiptRead,
+    HermesPreparationMissing,
     HermesPreparationRequired,
     HermesProductionRunnerRequired,
     HermesExecution,
@@ -323,6 +324,7 @@ impl LatticedErrorKind {
             Self::GraphConfiguration => "LATTICE_GRAPH_MEMORY_CONFIGURATION_REJECTED",
             Self::GraphExecution => "LATTICE_GRAPH_MEMORY_RUN_REJECTED",
             Self::GraphReceiptRead => "LATTICE_GRAPH_MEMORY_RECEIPT_REJECTED",
+            Self::HermesPreparationMissing => "LATTICE_HERMES_PREPARATION_REQUIRED",
             Self::HermesPreparationRequired => "LATTICE_HERMES_PREPARATION_REJECTED",
             Self::HermesProductionRunnerRequired => "LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED",
             Self::HermesExecution => "LATTICE_HERMES_REFLECTION_REJECTED",
@@ -3838,6 +3840,45 @@ pub fn serve_full_chain_from_environment() -> Result<(), LatticedError> {
     }
 }
 
+/// Starts and owns the production Hermes runner until standard input closes.
+///
+/// This is the standalone process entry for the same production runner used by
+/// the full-chain composition. Closing stdin is the bounded shutdown signal;
+/// dropping the owner reaps the contained process tree.
+///
+/// # Errors
+///
+/// Returns the existing production configuration or runner failure before
+/// reporting a successful process exit.
+pub fn launch_hermes_from_environment() -> Result<(), LatticedError> {
+    if [
+        "LATTICE_HERMES_PRODUCT_ROOT",
+        "LATTICE_HERMES_PREPARATION_ROOT",
+        "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
+    ]
+    .iter()
+    .any(|name| std::env::var_os(name).is_none())
+    {
+        return Err(LatticedError::new(
+            LatticedErrorKind::HermesPreparationMissing,
+        ));
+    }
+    #[cfg(not(windows))]
+    {
+        Err(LatticedError::new(
+            LatticedErrorKind::HermesProductionRunnerRequired,
+        ))
+    }
+    #[cfg(windows)]
+    {
+        let hermes_environment = HermesEnvironmentConfig::from_environment()?;
+        let _hermes = hermes_environment.launch("standalone-hermes")?;
+        io::copy(&mut io::stdin(), &mut io::sink())
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+        Ok(())
+    }
+}
+
 /// Serves MCP stdio and continuously pumps the authenticated `OpenClaw` listener.
 ///
 /// Both surfaces hold clones of the same [`FullChainService`], so they serialize
@@ -4674,6 +4715,7 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         | LatticedErrorKind::OfficialLiveBlocked
         | LatticedErrorKind::ScriptedFixtureRejected
         | LatticedErrorKind::GraphExecution
+        | LatticedErrorKind::HermesPreparationMissing
         | LatticedErrorKind::HermesPreparationRequired
         | LatticedErrorKind::HermesProductionRunnerRequired
         | LatticedErrorKind::HermesExecution
