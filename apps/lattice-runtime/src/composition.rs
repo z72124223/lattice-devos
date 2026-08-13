@@ -2346,10 +2346,15 @@ impl FullChainHermes {
     }
 }
 
+#[cfg(any(windows, test))]
+fn full_chain_hermes_state_has_seal<R, B>(ready: &Option<R>, bound: &Option<B>) -> bool {
+    ready.is_some() || bound.is_some()
+}
+
 #[cfg(windows)]
 impl production_hermes_sealed::Sealed for FullChainHermes {
     fn has_production_seal(&self) -> bool {
-        self.ready.is_some()
+        full_chain_hermes_state_has_seal(&self.ready, &self.bound)
     }
 
     fn is_production_configured(&self) -> bool {
@@ -3111,17 +3116,64 @@ struct FullChainCore<H> {
     store_authority: StoreAuthorityHead,
 }
 
+fn load_canonical_reflection<L>(
+    request: &GraphMemoryRunRequest,
+    load_reflection: L,
+) -> Result<HermesReflectionReceipt, LatticedError>
+where
+    L: FnOnce(&GraphMemoryRunRequest) -> Result<HermesReflectionReceipt, GraphMemoryPortError>,
+{
+    load_reflection(request).map_err(|error| map_reflection_read_error(&error))
+}
+
+fn load_or_run_canonical_reflection<H, L, G, P>(
+    hermes: &mut H,
+    run_id: &str,
+    request: &GraphMemoryRunRequest,
+    mut load_reflection: L,
+    load_graph_receipt: G,
+    persist_reflection: P,
+) -> Result<HermesReflectionReceipt, LatticedError>
+where
+    H: FullChainHermesPort,
+    L: FnMut(&GraphMemoryRunRequest) -> Result<HermesReflectionReceipt, GraphMemoryPortError>,
+    G: FnOnce(&GraphMemoryRunRequest) -> Result<GraphMemoryReceipt, LatticedError>,
+    P: FnOnce(&HermesReflectionCandidate) -> Result<HermesReflectionReceipt, LatticedError>,
+{
+    match load_reflection(request) {
+        Ok(receipt) => return Ok(receipt),
+        Err(error)
+            if error.kind() == PortErrorKind::Unavailable
+                && error.code() == "MEMORY_RECEIPT_UNAVAILABLE" => {}
+        Err(error) => return Err(map_reflection_read_error(&error)),
+    }
+
+    let graph_receipt = load_graph_receipt(request)?;
+    let hermes_request = hermes_request_for_graph(run_id, request, &graph_receipt)?;
+    let output = hermes
+        .research_canonical(&hermes_request, request, &graph_receipt)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::HermesExecution))?;
+    let candidate = output.into_candidate();
+    let persisted = persist_reflection(&candidate)?;
+    let replayed = load_reflection(request).map_err(|error| map_reflection_read_error(&error))?;
+    if replayed != persisted {
+        return Err(LatticedError::new(LatticedErrorKind::HermesReceiptRead));
+    }
+    Ok(replayed)
+}
+
 impl<H: FullChainHermesPort> FullChainCore<H> {
     fn status_json(&mut self, entry: FullChainEntry) -> Result<Value, LatticedError> {
         let base = self.delivery.status_json()?;
         let request = graph_request_from_json(self.delivery.database.run_id(), &base)?;
-        let reflection = load_reflection_from_postgres(
-            &self.delivery.database,
-            &self.delivery.password,
-            self.delivery.timeout,
-            &request,
-        )
-        .map_err(|error| map_reflection_read_error(&error))?;
+        let reflection = load_canonical_reflection(&request, |request| {
+            load_reflection_from_postgres(
+                &self.delivery.database,
+                &self.delivery.password,
+                self.delivery.timeout,
+                request,
+            )
+        })?;
         append_full_chain_json(base, &reflection, entry)
     }
 
@@ -3165,13 +3217,14 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
     ) -> Result<Value, LatticedError> {
         let base = self.delivery.status_task_downstream_json(binding)?;
         let request = graph_request_from_json(self.delivery.database.run_id(), &base)?;
-        let reflection = load_reflection_from_postgres(
-            &self.delivery.database,
-            &self.delivery.password,
-            self.delivery.timeout,
-            &request,
-        )
-        .map_err(|error| map_reflection_read_error(&error))?;
+        let reflection = load_canonical_reflection(&request, |request| {
+            load_reflection_from_postgres(
+                &self.delivery.database,
+                &self.delivery.password,
+                self.delivery.timeout,
+                request,
+            )
+        })?;
         append_full_chain_json(base, &reflection, entry)
     }
 
@@ -3180,49 +3233,18 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         base: &Value,
     ) -> Result<HermesReflectionReceipt, LatticedError> {
         let request = graph_request_from_json(self.delivery.database.run_id(), base)?;
-        match load_reflection_from_postgres(
-            &self.delivery.database,
-            &self.delivery.password,
-            self.delivery.timeout,
+        let database = &self.delivery.database;
+        let password = &self.delivery.password;
+        let timeout = self.delivery.timeout;
+        let run_id = database.run_id().to_owned();
+        load_or_run_canonical_reflection(
+            &mut self.hermes,
+            &run_id,
             &request,
-        ) {
-            Ok(receipt) => return Ok(receipt),
-            Err(error)
-                if error.kind() == PortErrorKind::Unavailable
-                    && error.code() == "MEMORY_RECEIPT_UNAVAILABLE" => {}
-            Err(error) => return Err(map_reflection_read_error(&error)),
-        }
-
-        let graph_receipt = load_delivery_graph_receipt(
-            &self.delivery.database,
-            &self.delivery.password,
-            deadline(self.delivery.timeout)?,
-            &request,
-        )?;
-        let hermes_request =
-            hermes_request_for_graph(self.delivery.database.run_id(), &request, &graph_receipt)?;
-        let output = self
-            .hermes
-            .research_canonical(&hermes_request, &request, &graph_receipt)
-            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesExecution))?;
-        let candidate = output.into_candidate();
-        let persisted = persist_reflection_to_postgres(
-            &self.delivery.database,
-            &self.delivery.password,
-            self.delivery.timeout,
-            &candidate,
-        )?;
-        let replayed = load_reflection_from_postgres(
-            &self.delivery.database,
-            &self.delivery.password,
-            self.delivery.timeout,
-            &request,
+            |request| load_reflection_from_postgres(database, password, timeout, request),
+            |request| load_delivery_graph_receipt(database, password, deadline(timeout)?, request),
+            |candidate| persist_reflection_to_postgres(database, password, timeout, candidate),
         )
-        .map_err(|error| map_reflection_read_error(&error))?;
-        if replayed != persisted {
-            return Err(LatticedError::new(LatticedErrorKind::HermesReceiptRead));
-        }
-        Ok(replayed)
     }
 }
 
@@ -6201,6 +6223,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use lattice_contracts::{
+        CodebaseMemoryPersistenceIdentity, GraphMemoryPersistenceEvidence,
+        MemoryRetrievalDisposition, MemoryRetrievalEvidence,
+    };
     use lattice_ports::{DeliveryFailureCertainty, DeliveryPortError};
 
     #[test]
@@ -7139,6 +7165,377 @@ mod tests {
                 "TEST_HERMES_RESEARCH_NOT_AVAILABLE",
             ))
         }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CanonicalReflectionEvent {
+        Ready,
+        ReflectionLoadMiss,
+        GraphReceiptLoad,
+        Research,
+        Persist,
+        ReflectionReload,
+        ReflectionLoadHit,
+    }
+
+    struct RecordingReflectionHermes {
+        events: Arc<Mutex<Vec<CanonicalReflectionEvent>>>,
+        ready_calls: usize,
+        research_calls: usize,
+        sealed: bool,
+        seal: HermesProductionSeal,
+    }
+
+    impl production_hermes_sealed::Sealed for RecordingReflectionHermes {
+        fn has_production_seal(&self) -> bool {
+            self.sealed
+        }
+
+        fn is_production_configured(&self) -> bool {
+            true
+        }
+
+        fn ensure_ready(&mut self, _run_id: &str) -> Result<(), LatticedError> {
+            self.ready_calls += 1;
+            self.events
+                .lock()
+                .expect("events lock")
+                .push(CanonicalReflectionEvent::Ready);
+            Ok(())
+        }
+
+        fn terminate(&mut self) -> Result<(), LatticedError> {
+            Ok(())
+        }
+    }
+
+    impl HermesPort for RecordingReflectionHermes {
+        fn research(&mut self, _request: HermesResearchRequest) -> PortResult<HermesEvidence> {
+            Err(PortError::new(
+                Component::Hermes,
+                PortErrorKind::Denied,
+                "TEST_CANONICAL_HERMES_RESEARCH_REQUIRES_GRAPH",
+            ))
+        }
+
+        fn interrupt(&mut self, _request_id: &RequestId) -> PortResult<()> {
+            Ok(())
+        }
+    }
+
+    impl FullChainHermesPort for RecordingReflectionHermes {
+        fn runtime_kind(&self) -> RuntimeKind {
+            RuntimeKind::Live
+        }
+
+        fn research_canonical(
+            &mut self,
+            request: &HermesResearchRequest,
+            graph_request: &GraphMemoryRunRequest,
+            graph_receipt: &GraphMemoryReceipt,
+        ) -> PortResult<ProductionHermesOutput> {
+            self.research_calls += 1;
+            self.events
+                .lock()
+                .expect("events lock")
+                .push(CanonicalReflectionEvent::Research);
+            let content = HermesReflectionContent::new(
+                "The exact graph receipt supports one deterministic finding.",
+                vec![
+                    HermesReflectionFinding::new(
+                        "Persist only the exact graph-bound Hermes candidate.",
+                        test_content_digest('6'),
+                    )
+                    .expect("finding"),
+                ],
+                vec!["Replay the persisted candidate for Status.".to_owned()],
+            )
+            .expect("reflection content");
+            let candidate = HermesReflectionCandidate::new(
+                graph_request,
+                graph_receipt,
+                content,
+                self.seal.receipt_digest.clone(),
+                test_content_digest('7'),
+                test_content_digest('8'),
+            )
+            .expect("reflection candidate");
+            let evidence = HermesEvidence::new(
+                request.invocation().clone(),
+                RuntimeKind::Live,
+                candidate.reflection_digest().clone(),
+            );
+            ProductionHermesOutput::new(
+                &self.seal,
+                request,
+                graph_request,
+                graph_receipt,
+                evidence,
+                candidate,
+            )
+        }
+    }
+
+    fn canonical_reflection_request() -> GraphMemoryRunRequest {
+        GraphMemoryRunRequest::new(
+            Invocation::new(
+                CONTRACT_VERSION,
+                RequestId::new("task066-graph-request").expect("request"),
+                TaskId::new(GRAPH_TASK_ID).expect("task"),
+                AttemptId::new("task066-graph-attempt").expect("attempt"),
+                ProjectSnapshotId::new(GRAPH_PROJECT_SNAPSHOT_ID).expect("snapshot"),
+                test_content_digest('a'),
+            )
+            .expect("invocation"),
+            ProjectId::new(GRAPH_PROJECT_ID).expect("project"),
+            GitObjectId::new("1".repeat(40)).expect("commit"),
+            test_content_digest('b'),
+            test_content_digest('c'),
+            GRAPH_RETRIEVAL_LIMIT,
+        )
+        .expect("graph request")
+    }
+
+    fn canonical_graph_receipt(request: &GraphMemoryRunRequest) -> GraphMemoryReceipt {
+        let persistence = GraphMemoryPersistenceEvidence::replay(
+            request.clone(),
+            CodebaseMemoryPersistenceIdentity::v2(
+                test_content_digest('1'),
+                test_content_digest('2'),
+                test_content_digest('3'),
+                test_content_digest('4'),
+            )
+            .expect("persistence identity"),
+            test_content_digest('d'),
+            test_content_digest('e'),
+            1,
+            test_content_digest('f'),
+        )
+        .expect("persistence evidence");
+        let retrieval = MemoryRetrievalEvidence::replay(
+            &persistence,
+            request.retrieval_limit(),
+            MemoryRetrievalDisposition::NoAnswer,
+            Vec::new(),
+            test_content_digest('5'),
+            test_content_digest('6'),
+        )
+        .expect("retrieval evidence");
+        GraphMemoryReceipt::new(persistence, retrieval, test_content_digest('7'))
+            .expect("graph receipt")
+    }
+
+    #[test]
+    fn canonical_delivery_run_reflects_once_persists_and_replays_exact_receipt() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let stored = Arc::new(Mutex::new(None::<HermesReflectionReceipt>));
+        let request = canonical_reflection_request();
+        let graph_receipt = canonical_graph_receipt(&request);
+        let mut hermes = RecordingReflectionHermes {
+            events: Arc::clone(&events),
+            ready_calls: 0,
+            research_calls: 0,
+            sealed: true,
+            seal: HermesProductionSeal {
+                receipt_digest: test_content_digest('9'),
+            },
+        };
+
+        apply_canonical_hermes_tool_policy(
+            &mut hermes,
+            "task066-run",
+            CanonicalHermesTool::DeliveryRun,
+        )
+        .expect("delivery run readies Hermes");
+        assert!(production_hermes_sealed::Sealed::has_production_seal(
+            &hermes
+        ));
+
+        let load_events = Arc::clone(&events);
+        let load_stored = Arc::clone(&stored);
+        let graph_events = Arc::clone(&events);
+        let persist_events = Arc::clone(&events);
+        let persist_stored = Arc::clone(&stored);
+        let expected_graph_receipt = graph_receipt.clone();
+        let replayed = load_or_run_canonical_reflection(
+            &mut hermes,
+            "task066-run",
+            &request,
+            move |_request| {
+                let stored = load_stored.lock().expect("stored lock");
+                if let Some(receipt) = stored.as_ref() {
+                    load_events
+                        .lock()
+                        .expect("events lock")
+                        .push(CanonicalReflectionEvent::ReflectionReload);
+                    Ok(receipt.clone())
+                } else {
+                    load_events
+                        .lock()
+                        .expect("events lock")
+                        .push(CanonicalReflectionEvent::ReflectionLoadMiss);
+                    Err(GraphMemoryPortError::new(
+                        GraphMemoryStage::ReflectionReceipt,
+                        PortErrorKind::Unavailable,
+                        GraphMemoryFailureCertainty::Known,
+                        "MEMORY_RECEIPT_UNAVAILABLE",
+                    ))
+                }
+            },
+            move |_request| {
+                graph_events
+                    .lock()
+                    .expect("events lock")
+                    .push(CanonicalReflectionEvent::GraphReceiptLoad);
+                Ok(expected_graph_receipt)
+            },
+            move |candidate| {
+                persist_events
+                    .lock()
+                    .expect("events lock")
+                    .push(CanonicalReflectionEvent::Persist);
+                let receipt = HermesReflectionReceipt::from_candidate(
+                    candidate.clone(),
+                    test_content_digest('a'),
+                )
+                .expect("persisted reflection receipt");
+                *persist_stored.lock().expect("stored lock") = Some(receipt.clone());
+                Ok(receipt)
+            },
+        )
+        .expect("canonical reflection round");
+
+        let persisted = stored
+            .lock()
+            .expect("stored lock")
+            .clone()
+            .expect("persisted receipt");
+        assert_eq!(replayed, persisted);
+        assert_eq!(replayed.receipt_digest(), persisted.receipt_digest());
+        assert_eq!(hermes.ready_calls, 1);
+        assert_eq!(hermes.research_calls, 1);
+        assert!(production_hermes_sealed::Sealed::has_production_seal(
+            &hermes
+        ));
+        assert_eq!(
+            *events.lock().expect("events lock"),
+            vec![
+                CanonicalReflectionEvent::Ready,
+                CanonicalReflectionEvent::ReflectionLoadMiss,
+                CanonicalReflectionEvent::GraphReceiptLoad,
+                CanonicalReflectionEvent::Research,
+                CanonicalReflectionEvent::Persist,
+                CanonicalReflectionEvent::ReflectionReload,
+            ]
+        );
+
+        events.lock().expect("events lock").clear();
+        let mut status_hermes = RecordingReflectionHermes {
+            events: Arc::clone(&events),
+            ready_calls: 0,
+            research_calls: 0,
+            sealed: false,
+            seal: HermesProductionSeal {
+                receipt_digest: test_content_digest('9'),
+            },
+        };
+        apply_canonical_hermes_tool_policy(
+            &mut status_hermes,
+            "task066-run",
+            CanonicalHermesTool::DeliveryStatus,
+        )
+        .expect("fresh status keeps Hermes inactive");
+        let status_events = Arc::clone(&events);
+        let expected = persisted.clone();
+        let status_replay = load_canonical_reflection(&request, move |_request| {
+            status_events
+                .lock()
+                .expect("events lock")
+                .push(CanonicalReflectionEvent::ReflectionLoadHit);
+            Ok(expected)
+        })
+        .expect("fresh status replays the persisted Run candidate");
+
+        assert_eq!(status_replay, persisted);
+        assert_eq!(status_hermes.ready_calls, 0);
+        assert_eq!(status_hermes.research_calls, 0);
+        assert!(!production_hermes_sealed::Sealed::has_production_seal(
+            &status_hermes
+        ));
+        assert_eq!(
+            *events.lock().expect("events lock"),
+            vec![CanonicalReflectionEvent::ReflectionLoadHit]
+        );
+    }
+
+    #[test]
+    fn canonical_reflection_reload_mismatch_fails_closed() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let request = canonical_reflection_request();
+        let graph_receipt = canonical_graph_receipt(&request);
+        let mismatched = HermesReflectionReceipt::new(
+            &request,
+            &graph_receipt,
+            HermesReflectionContent::new("Substituted replay.", Vec::new(), Vec::new())
+                .expect("reflection content"),
+            test_content_digest('8'),
+            test_content_digest('9'),
+            test_content_digest('a'),
+            test_content_digest('b'),
+        )
+        .expect("mismatched receipt");
+        let mut hermes = RecordingReflectionHermes {
+            events,
+            ready_calls: 0,
+            research_calls: 0,
+            sealed: true,
+            seal: HermesProductionSeal {
+                receipt_digest: test_content_digest('c'),
+            },
+        };
+        let expected_graph_receipt = graph_receipt.clone();
+        let mut load_calls = 0;
+
+        let error = load_or_run_canonical_reflection(
+            &mut hermes,
+            "task066-mismatch",
+            &request,
+            move |_request| {
+                load_calls += 1;
+                if load_calls == 1 {
+                    Err(GraphMemoryPortError::new(
+                        GraphMemoryStage::ReflectionReceipt,
+                        PortErrorKind::Unavailable,
+                        GraphMemoryFailureCertainty::Known,
+                        "MEMORY_RECEIPT_UNAVAILABLE",
+                    ))
+                } else {
+                    Ok(mismatched.clone())
+                }
+            },
+            move |_request| Ok(expected_graph_receipt),
+            move |candidate| {
+                HermesReflectionReceipt::from_candidate(candidate.clone(), test_content_digest('d'))
+                    .map_err(|_| LatticedError::new(LatticedErrorKind::HermesExecution))
+            },
+        )
+        .expect_err("substituted reload must fail closed");
+
+        assert_eq!(error.kind(), LatticedErrorKind::HermesReceiptRead);
+        assert_eq!(hermes.research_calls, 1);
+    }
+
+    #[test]
+    fn production_owner_seal_survives_ready_to_bound_transition() {
+        let mut ready = Some(());
+        let mut bound = None;
+        assert!(full_chain_hermes_state_has_seal(&ready, &bound));
+
+        bound = ready.take();
+        assert!(full_chain_hermes_state_has_seal(&ready, &bound));
+
+        bound = None;
+        assert!(!full_chain_hermes_state_has_seal(&ready, &bound));
     }
 
     #[test]

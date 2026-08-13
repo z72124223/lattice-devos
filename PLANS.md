@@ -1,12 +1,20 @@
 # LATTICE DevOS V2 Plan
 
-## Current task update — TASK-066
+## Completed task update — TASK-066
 
-CURRENT TASK-066 — close the deterministic canonical reflection chain from
+COMPLETED TASK-066 — the deterministic canonical reflection chain now proves
 lazy-ready Hermes through exact graph receipt, candidate persistence, replay,
-and fresh Status with zero Hermes rerun. Use only injected local fakes in this
-slice; no credential read, live model request, push, merge, deploy, payment,
-account change, or public listener is authorized.
+and fresh Status with zero Hermes rerun. The production PostgreSQL and Hermes
+call paths remain unchanged behind a private test seam.
+
+## Current task update — TASK-067
+
+CURRENT TASK-067 — close the next credential-free integration gate for a
+canonical production Delivery Run using the pinned local Hermes runtime and a
+deterministic no-model provider fixture. It must prove lazy activation,
+candidate validation, exact teardown, and zero non-loopback/provider effects;
+it must not read credentials, call a model, push, merge, deploy, pay, change an
+account, or expose a public listener.
 
 ## Completed task update — TASK-065
 
