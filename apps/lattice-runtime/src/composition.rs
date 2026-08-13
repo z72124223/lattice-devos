@@ -2376,7 +2376,17 @@ fn run_or_reconcile_active_hermes<P, R, O>(
         Ok(output) => Ok(output),
         Err(initial_failure) if hermes_failure_allows_reconciliation(&initial_failure) => {
             match known_run_receipt(port) {
-                Some(receipt) => reconcile(port, &receipt),
+                Some(receipt) => reconcile(port, &receipt).map_err(|failure| {
+                    if hermes_failure_allows_reconciliation(&failure) {
+                        PortError::new(
+                            Component::Hermes,
+                            PortErrorKind::Ambiguous,
+                            "HERMES_RUN_RECONCILIATION_REQUIRED",
+                        )
+                    } else {
+                        failure
+                    }
+                }),
                 None => Err(initial_failure),
             }
         }
@@ -3168,6 +3178,16 @@ where
     load_reflection(request).map_err(|error| map_reflection_read_error(&error))
 }
 
+fn map_hermes_research_error(error: &PortError) -> LatticedError {
+    if error.kind() == PortErrorKind::Ambiguous
+        && error.code() == "HERMES_RUN_RECONCILIATION_REQUIRED"
+    {
+        LatticedError::new(LatticedErrorKind::ReconciliationRequired)
+    } else {
+        LatticedError::new(LatticedErrorKind::HermesExecution)
+    }
+}
+
 fn load_or_run_canonical_reflection<H, L, G, P>(
     hermes: &mut H,
     run_id: &str,
@@ -3194,7 +3214,7 @@ where
     let hermes_request = hermes_request_for_graph(run_id, request, &graph_receipt)?;
     let output = hermes
         .research_canonical(&hermes_request, request, &graph_receipt)
-        .map_err(|_| LatticedError::new(LatticedErrorKind::HermesExecution))?;
+        .map_err(|error| map_hermes_research_error(&error))?;
     let candidate = output.into_candidate();
     let persisted = persist_reflection(&candidate)?;
     let replayed = load_reflection(request).map_err(|error| map_reflection_read_error(&error))?;
@@ -7227,6 +7247,7 @@ mod tests {
         events: Arc<Mutex<Vec<CanonicalReflectionEvent>>>,
         ready_calls: usize,
         research_calls: usize,
+        research_failure: Option<PortError>,
         sealed: bool,
         seal: HermesProductionSeal,
     }
@@ -7284,6 +7305,9 @@ mod tests {
                 .lock()
                 .expect("events lock")
                 .push(CanonicalReflectionEvent::Research);
+            if let Some(failure) = self.research_failure.clone() {
+                return Err(failure);
+            }
             let content = HermesReflectionContent::new(
                 "The exact graph receipt supports one deterministic finding.",
                 vec![
@@ -7517,6 +7541,7 @@ mod tests {
                 events,
                 ready_calls: 0,
                 research_calls: 0,
+                research_failure: None,
                 sealed: true,
                 seal: HermesProductionSeal {
                     receipt_digest: test_content_digest('9'),
@@ -7578,6 +7603,7 @@ mod tests {
                 events: Arc::clone(&events),
                 ready_calls: 0,
                 research_calls: 0,
+                research_failure: None,
                 sealed: false,
                 seal: HermesProductionSeal {
                     receipt_digest: test_content_digest('8'),
@@ -7640,6 +7666,7 @@ mod tests {
             events: Arc::clone(&events),
             ready_calls: 0,
             research_calls: 0,
+            research_failure: None,
             sealed: true,
             seal: HermesProductionSeal {
                 receipt_digest: test_content_digest('9'),
@@ -7739,6 +7766,7 @@ mod tests {
             events: Arc::clone(&events),
             ready_calls: 0,
             research_calls: 0,
+            research_failure: None,
             sealed: false,
             seal: HermesProductionSeal {
                 receipt_digest: test_content_digest('9'),
@@ -7793,6 +7821,7 @@ mod tests {
             events,
             ready_calls: 0,
             research_calls: 0,
+            research_failure: None,
             sealed: true,
             seal: HermesProductionSeal {
                 receipt_digest: test_content_digest('c'),
@@ -7805,7 +7834,7 @@ mod tests {
             &mut hermes,
             "task066-mismatch",
             &request,
-            move |_request| {
+            |_request| {
                 load_calls += 1;
                 if load_calls == 1 {
                     Err(GraphMemoryPortError::new(
@@ -7828,6 +7857,74 @@ mod tests {
 
         assert_eq!(error.kind(), LatticedErrorKind::HermesReceiptRead);
         assert_eq!(hermes.research_calls, 1);
+    }
+
+    #[test]
+    fn canonical_hermes_reconciliation_required_is_not_collapsed_to_execution_failure() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let request = canonical_reflection_request();
+        let graph_receipt = canonical_graph_receipt(&request);
+        let expected_graph_receipt = graph_receipt.clone();
+        let mut hermes = RecordingReflectionHermes {
+            events: Arc::clone(&events),
+            ready_calls: 0,
+            research_calls: 0,
+            research_failure: Some(PortError::new(
+                Component::Hermes,
+                PortErrorKind::Ambiguous,
+                "HERMES_RUN_RECONCILIATION_REQUIRED",
+            )),
+            sealed: true,
+            seal: HermesProductionSeal {
+                receipt_digest: test_content_digest('d'),
+            },
+        };
+        let mut load_calls = 0;
+
+        let error = load_or_run_canonical_reflection(
+            &mut hermes,
+            "task071-reconcile",
+            &request,
+            |_request| {
+                load_calls += 1;
+                Err(GraphMemoryPortError::new(
+                    GraphMemoryStage::ReflectionReceipt,
+                    PortErrorKind::Unavailable,
+                    GraphMemoryFailureCertainty::Known,
+                    "MEMORY_RECEIPT_UNAVAILABLE",
+                ))
+            },
+            move |_request| Ok(expected_graph_receipt),
+            |_candidate| panic!("reconciliation-required output must not persist"),
+        )
+        .expect_err("active Hermes run remains reconciliation-required");
+
+        assert_eq!(error.kind(), LatticedErrorKind::ReconciliationRequired);
+        assert_eq!(error.code(), "LATTICE_DELIVERY_RECONCILIATION_REQUIRED");
+        assert_eq!(load_calls, 1);
+        assert_eq!(hermes.research_calls, 1);
+        assert_eq!(
+            *events.lock().expect("events lock"),
+            vec![CanonicalReflectionEvent::Research]
+        );
+
+        for failure in [
+            PortError::new(
+                Component::Hermes,
+                PortErrorKind::Ambiguous,
+                "HERMES_RUN_NOT_RECOVERABLE",
+            ),
+            PortError::new(
+                Component::Hermes,
+                PortErrorKind::Malformed,
+                "HERMES_STATUS_MALFORMED",
+            ),
+        ] {
+            assert_eq!(
+                map_hermes_research_error(&failure).kind(),
+                LatticedErrorKind::HermesExecution
+            );
+        }
     }
 
     #[test]
@@ -7947,6 +8044,59 @@ mod tests {
             assert_eq!(recovered, "normalized-evidence");
             assert_eq!(&*events.borrow(), &["run", "active_receipt", "reconcile"]);
         }
+
+        for (kind, code) in [
+            (PortErrorKind::Timeout, "HERMES_LOOPBACK_TIMEOUT"),
+            (PortErrorKind::Timeout, "HERMES_RUN_DEADLINE_EXCEEDED"),
+            (
+                PortErrorKind::Unavailable,
+                "HERMES_LOOPBACK_TRANSPORT_FAILED",
+            ),
+        ] {
+            let repeated_uncertainty = run_or_reconcile_active_hermes(
+                &mut (),
+                |_| {
+                    Err::<&str, _>(PortError::new(
+                        Component::Hermes,
+                        PortErrorKind::Timeout,
+                        "HERMES_LOOPBACK_TIMEOUT",
+                    ))
+                },
+                |_| Some(7_u8),
+                |_, receipt| {
+                    assert_eq!(*receipt, 7);
+                    Err(PortError::new(Component::Hermes, kind, code))
+                },
+            )
+            .expect_err("a second transient observation remains reconciliation-required");
+            assert_eq!(repeated_uncertainty.kind(), PortErrorKind::Ambiguous);
+            assert_eq!(
+                repeated_uncertainty.code(),
+                "HERMES_RUN_RECONCILIATION_REQUIRED"
+            );
+        }
+
+        let definitive_failure = run_or_reconcile_active_hermes(
+            &mut (),
+            |_| {
+                Err::<&str, _>(PortError::new(
+                    Component::Hermes,
+                    PortErrorKind::Timeout,
+                    "HERMES_LOOPBACK_TIMEOUT",
+                ))
+            },
+            |_| Some(7_u8),
+            |_, _| {
+                Err(PortError::new(
+                    Component::Hermes,
+                    PortErrorKind::Malformed,
+                    "HERMES_STATUS_MALFORMED",
+                ))
+            },
+        )
+        .expect_err("definitive reconciliation failure remains exact");
+        assert_eq!(definitive_failure.kind(), PortErrorKind::Malformed);
+        assert_eq!(definitive_failure.code(), "HERMES_STATUS_MALFORMED");
     }
 
     #[test]
