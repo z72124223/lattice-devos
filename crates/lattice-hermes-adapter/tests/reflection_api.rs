@@ -1886,7 +1886,11 @@ fn production_port_exposes_reflection_and_normalized_evidence_seam() {
         &HermesResearchRequest,
     ) -> lattice_ports::PortResult<crate::HermesReflectionEvidence> =
         crate::ProductionHermesPort::run_reflection_evidence;
-    let _ = (launch, bind, seam);
+    let recovery: fn(
+        &crate::ProductionHermesPort,
+    ) -> Option<&crate::HermesRunRecoveryReceipt> =
+        crate::ProductionHermesPort::active_recovery_receipt;
+    let _ = (launch, bind, seam, recovery);
 }
 
 #[cfg(windows)]

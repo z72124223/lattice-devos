@@ -2743,6 +2743,17 @@ impl ProductionHermesPort {
         result
     }
 
+    /// Returns the adapter-owned, secret-free recovery receipt retained for
+    /// potential same-port reconciliation after one post-submit ambiguity.
+    ///
+    /// The borrowed receipt authorizes neither resubmission nor durable or
+    /// cross-process recovery. It is valid only with
+    /// [`Self::reconcile_reflection`] on this bound production port.
+    #[must_use]
+    pub const fn active_recovery_receipt(&self) -> Option<&crate::HermesRunRecoveryReceipt> {
+        self.adapter.active_recovery_receipt()
+    }
+
     #[must_use]
     pub fn containment_receipt(&self) -> &HermesContainmentReceipt {
         &self.receipt
