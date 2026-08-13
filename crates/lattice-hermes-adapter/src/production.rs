@@ -4684,7 +4684,11 @@ mod proxy_host_tests {
         let failure = port
             .run_reflection_evidence(&request)
             .expect_err("failed Codex turn must produce run.failed");
-        assert_eq!(failure.code(), "HERMES_RUN_FAILED");
+        assert_eq!(failure.kind(), lattice_ports::PortErrorKind::Unavailable);
+        assert_eq!(
+            failure.code(),
+            "HERMES_RUN_FAILED_HINT_APP_SERVER_TURN_STATUS"
+        );
         drop(port);
 
         let observed = observation.lock().expect("fake Codex observation");
