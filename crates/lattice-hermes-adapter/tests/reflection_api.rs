@@ -1361,7 +1361,10 @@ fn same_process_reconciliation_uses_receipt_without_resubmission() {
         .expect("same-process status reconciliation");
 
     let reflection = recovered.reflection();
-    assert_eq!(reflection.binding().input_digest(), &expected_input_digest);
+    assert_eq!(
+        reflection.binding().input_digest(),
+        expected_input_digest.as_str()
+    );
     assert_eq!(recovered.evidence().invocation(), request.invocation());
     assert_eq!(recovered.evidence().runtime(), RuntimeKind::Live);
     assert_eq!(recovered.evidence().output_digest(), reflection.output_digest());
