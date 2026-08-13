@@ -4,7 +4,7 @@ spec_id: SPEC-002
 spec_version: 29
 module_id: latticed
 constitution_version: 1.5
-status: in_progress
+status: completed
 parallel_safe: false
 depends_on:
   - TASK-056
@@ -83,3 +83,20 @@ The main agent is the sole writer; all other agents are read-only.
 No additional gate for bounded local work. Reading/providing a real credential,
 external model access, public exposure, push, merge, deploy, payment, or account
 creation remains a separate explicit user decision.
+
+## Completion Evidence
+
+- Local commit `066d7fcb67601b2b3b49e38ce5b6bbede8e02f6e` owns continuous
+  liveness, fixed `LATTICE_HERMES_READY`, and explicit teardown.
+- `cargo test -p lattice-runtime --all-targets --locked` passed, including 86
+  library tests, 18 composition tests, and the unchanged four-tool MCP suite.
+- `cargo test -p lattice-hermes-adapter --all-targets --locked` passed 65
+  enabled unit tests and all 4 preparation tests; 7 explicit live fixtures
+  remained ignored by the normal target run.
+- A bounded local pinned-runtime launch passed preparation, runtime preflight,
+  production preflight, READY, EOF teardown, exit 0, zero stdout, zero extra
+  stderr, zero residual process, and zero secret-ingress residue. No reflection
+  request or external model request was sent and no credential contents were
+  read.
+- Independent final review reported P0=0, P1=0, P2=0; format, diff, and project
+  contract checks passed.

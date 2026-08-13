@@ -1345,7 +1345,7 @@ packaging modules do not activate functional provider modules.
   `lattice-runtime` composition, including verified projection, fail-closed
   next-round dispatch, and explicit archive/retain recommendations with no I/O
   or execution authority.
-- [ ] AC-40: TASK-060 exposes exact canonical `latticed --hermes-launch`
+- [x] AC-40: TASK-060 exposes exact canonical `latticed --hermes-launch`
   routing to the existing production Hermes configuration and runner. Missing
   preparation, invalid configuration, runner death, deadline, stdin failure,
   or teardown ambiguity returns only a fixed redacted failure. A controlled
