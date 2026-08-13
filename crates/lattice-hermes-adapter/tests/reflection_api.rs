@@ -1324,6 +1324,7 @@ fn event_transport_loss_recovers_through_bound_status_polling() {
 fn same_process_reconciliation_uses_receipt_without_resubmission() {
     let request = request();
     let job = job(request.clone());
+    let expected_input_digest = job.input_digest().clone();
     let output = bound_output(&job);
     let server = ScriptedServer::start(vec![
         capabilities(),
@@ -1360,7 +1361,7 @@ fn same_process_reconciliation_uses_receipt_without_resubmission() {
         .expect("same-process status reconciliation");
 
     let reflection = recovered.reflection();
-    assert_eq!(reflection.binding().input_digest().len(), 64);
+    assert_eq!(reflection.binding().input_digest(), &expected_input_digest);
     assert_eq!(recovered.evidence().invocation(), request.invocation());
     assert_eq!(recovered.evidence().runtime(), RuntimeKind::Live);
     assert_eq!(recovered.evidence().output_digest(), reflection.output_digest());
