@@ -293,7 +293,9 @@ pub enum LatticedErrorKind {
     GraphReceiptRead,
     HermesPreparationMissing,
     HermesPreparationRequired,
+    HermesProductionLivenessRejected,
     HermesProductionRunnerRequired,
+    HermesTeardownRejected,
     HermesExecution,
     HermesReceiptRead,
     TaskControl,
@@ -326,7 +328,9 @@ impl LatticedErrorKind {
             Self::GraphReceiptRead => "LATTICE_GRAPH_MEMORY_RECEIPT_REJECTED",
             Self::HermesPreparationMissing => "LATTICE_HERMES_PREPARATION_REQUIRED",
             Self::HermesPreparationRequired => "LATTICE_HERMES_PREPARATION_REJECTED",
+            Self::HermesProductionLivenessRejected => "LATTICE_HERMES_PRODUCTION_LIVENESS_REJECTED",
             Self::HermesProductionRunnerRequired => "LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED",
+            Self::HermesTeardownRejected => "LATTICE_HERMES_TEARDOWN_REJECTED",
             Self::HermesExecution => "LATTICE_HERMES_REFLECTION_REJECTED",
             Self::HermesReceiptRead => "LATTICE_HERMES_MEMORY_RECEIPT_REJECTED",
             Self::TaskControl => "LATTICE_TASK_CONTROL_REJECTED",
@@ -2106,9 +2110,16 @@ struct FullChainHermes {
 #[cfg(windows)]
 impl FullChainHermes {
     fn from_ready(mut runner: ProductionHermesRunner, run_id: &str) -> Result<Self, LatticedError> {
-        runner
-            .verify_live()
-            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        if runner.verify_live().is_err() {
+            return match runner.terminate() {
+                Ok(()) => Err(LatticedError::new(
+                    LatticedErrorKind::HermesProductionLivenessRejected,
+                )),
+                Err(_) => Err(LatticedError::new(
+                    LatticedErrorKind::HermesTeardownRejected,
+                )),
+            };
+        }
         let receipt_digest = runner.containment_receipt().receipt_digest().clone();
         Ok(Self {
             ready: Some(runner),
@@ -3872,10 +3883,140 @@ pub fn launch_hermes_from_environment() -> Result<(), LatticedError> {
     #[cfg(windows)]
     {
         let hermes_environment = HermesEnvironmentConfig::from_environment()?;
-        let _hermes = hermes_environment.launch("standalone-hermes")?;
-        io::copy(&mut io::stdin(), &mut io::sink())
-            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
-        Ok(())
+        launch_hermes_until_eof(
+            io::stdin(),
+            HERMES_POLL_INTERVAL,
+            |run_id| hermes_environment.launch(run_id),
+            emit_hermes_launch_ready,
+        )
+    }
+}
+
+fn emit_hermes_launch_ready() -> Result<(), LatticedError> {
+    let stderr = io::stderr();
+    let mut output = stderr.lock();
+    writeln!(output, "LATTICE_HERMES_READY")
+        .and_then(|()| output.flush())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))
+}
+
+trait HermesStandaloneOwner {
+    fn verify_live(&mut self) -> Result<(), LatticedError>;
+    fn terminate(self) -> Result<(), LatticedError>;
+}
+
+#[cfg(windows)]
+impl HermesStandaloneOwner for FullChainHermes {
+    fn verify_live(&mut self) -> Result<(), LatticedError> {
+        self.ready
+            .as_mut()
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?
+            .verify_live()
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionLivenessRejected))
+    }
+
+    fn terminate(mut self) -> Result<(), LatticedError> {
+        self.ready
+            .take()
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?
+            .terminate()
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesTeardownRejected))
+    }
+}
+
+fn launch_hermes_until_eof<R, H, F, G>(
+    mut input: R,
+    poll_interval: Duration,
+    launch: F,
+    ready: G,
+) -> Result<(), LatticedError>
+where
+    R: Read + Send + 'static,
+    H: HermesStandaloneOwner,
+    F: FnOnce(&str) -> Result<H, LatticedError>,
+    G: FnOnce() -> Result<(), LatticedError>,
+{
+    let mut owner = launch("standalone-hermes")?;
+    if let Err(failure) = owner.verify_live() {
+        return match owner.terminate() {
+            Ok(()) => Err(failure),
+            Err(teardown) => Err(teardown),
+        };
+    }
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let (reader_gate_sender, reader_gate_receiver) = std::sync::mpsc::sync_channel(1);
+    let (reader_ready_sender, reader_ready_receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = thread::Builder::new()
+        .name("lattice-hermes-stdin".to_owned())
+        .spawn(move || {
+            let _ = reader_ready_sender.send(());
+            if reader_gate_receiver.recv().is_err() {
+                return;
+            }
+            let result = io::copy(&mut input, &mut io::sink())
+                .map(|_| ())
+                .map_err(|_| LatticedError::new(LatticedErrorKind::Transport));
+            let _ = sender.send(result);
+        });
+    if reader.is_err() {
+        let failure = LatticedError::new(LatticedErrorKind::Transport);
+        return match owner.terminate() {
+            Ok(()) => Err(failure),
+            Err(teardown) => Err(teardown),
+        };
+    }
+    if reader_ready_receiver.recv().is_err() {
+        let failure = LatticedError::new(LatticedErrorKind::Transport);
+        return match owner.terminate() {
+            Ok(()) => Err(failure),
+            Err(teardown) => Err(teardown),
+        };
+    }
+    if let Err(failure) = owner.verify_live() {
+        return match owner.terminate() {
+            Ok(()) => Err(failure),
+            Err(teardown) => Err(teardown),
+        };
+    }
+    if let Err(failure) = ready() {
+        return match owner.terminate() {
+            Ok(()) => Err(failure),
+            Err(teardown) => Err(teardown),
+        };
+    }
+    if reader_gate_sender.send(()).is_err() {
+        let failure = LatticedError::new(LatticedErrorKind::Transport);
+        return match owner.terminate() {
+            Ok(()) => Err(failure),
+            Err(teardown) => Err(teardown),
+        };
+    }
+
+    loop {
+        match receiver.recv_timeout(poll_interval) {
+            Ok(input_result) => {
+                let live_result = owner.verify_live();
+                return match owner.terminate() {
+                    Ok(()) => live_result.and(input_result),
+                    Err(teardown) => Err(teardown),
+                };
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Err(failure) = owner.verify_live() {
+                    return match owner.terminate() {
+                        Ok(()) => Err(failure),
+                        Err(teardown) => Err(teardown),
+                    };
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let input_failure = LatticedError::new(LatticedErrorKind::Transport);
+                return match owner.terminate() {
+                    Ok(()) => Err(input_failure),
+                    Err(teardown) => Err(teardown),
+                };
+            }
+        }
     }
 }
 
@@ -4702,10 +4843,12 @@ fn gateway_reply(
 const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
     match kind {
         LatticedErrorKind::ReconciliationRequired
-        | LatticedErrorKind::TaskReconciliationRequired => PortErrorKind::Ambiguous,
+        | LatticedErrorKind::TaskReconciliationRequired
+        | LatticedErrorKind::HermesTeardownRejected => PortErrorKind::Ambiguous,
         LatticedErrorKind::DatabaseConnect
         | LatticedErrorKind::GraphReceiptRead
-        | LatticedErrorKind::HermesReceiptRead => PortErrorKind::Unavailable,
+        | LatticedErrorKind::HermesReceiptRead
+        | LatticedErrorKind::HermesProductionLivenessRejected => PortErrorKind::Unavailable,
         LatticedErrorKind::Configuration
         | LatticedErrorKind::Contract
         | LatticedErrorKind::ReceiptMismatch => PortErrorKind::Malformed,
@@ -5881,7 +6024,7 @@ mod tests {
             "LATTICED_STDIO_REJECTED"
         );
         assert!(!source.contains(&stderr_inline_macro));
-        assert_eq!(source.matches(&direct_stderr).count(), 1);
+        assert_eq!(source.matches(&direct_stderr).count(), 2);
         assert!(!source.contains(&inherited_stdio));
     }
 
@@ -6552,14 +6695,11 @@ mod tests {
     }
 
     #[test]
-    fn full_chain_startup_requires_a_true_production_hermes_runner() {
+    fn full_chain_startup_requires_prepared_assets_before_a_production_hermes_runner() {
         let error = serve_full_chain_from_environment()
             .expect_err("incomplete official Hermes chain fails before external effects");
-        assert_eq!(
-            error.kind(),
-            LatticedErrorKind::HermesProductionRunnerRequired
-        );
-        assert_eq!(error.code(), "LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED");
+        assert_eq!(error.kind(), LatticedErrorKind::HermesPreparationRequired);
+        assert_eq!(error.code(), "LATTICE_HERMES_PREPARATION_REJECTED");
     }
 
     #[test]
@@ -6772,6 +6912,271 @@ mod tests {
         assert_eq!(
             full_chain_receipt_digest(&value).expect("typed final digest"),
             test_content_digest('3')
+        );
+    }
+
+    #[test]
+    fn hermes_launch_lifecycle_launches_once_and_terminates_owner_on_stdin_eof() {
+        use std::cell::Cell;
+        use std::io::Cursor;
+        use std::rc::Rc;
+
+        struct FakeOwner {
+            verifies: Rc<Cell<usize>>,
+            terminations: Rc<Cell<usize>>,
+        }
+
+        impl HermesStandaloneOwner for FakeOwner {
+            fn verify_live(&mut self) -> Result<(), LatticedError> {
+                self.verifies.set(self.verifies.get() + 1);
+                Ok(())
+            }
+
+            fn terminate(self) -> Result<(), LatticedError> {
+                self.terminations.set(self.terminations.get() + 1);
+                Ok(())
+            }
+        }
+
+        let launches = Rc::new(Cell::new(0));
+        let verifies = Rc::new(Cell::new(0));
+        let terminations = Rc::new(Cell::new(0));
+        let observed_launches = Rc::clone(&launches);
+        let observed_verifies = Rc::clone(&verifies);
+        let observed_terminations = Rc::clone(&terminations);
+
+        launch_hermes_until_eof(
+            Cursor::new(Vec::<u8>::new()),
+            Duration::from_millis(1),
+            move |run_id| {
+                assert_eq!(run_id, "standalone-hermes");
+                observed_launches.set(observed_launches.get() + 1);
+                Ok(FakeOwner {
+                    verifies: observed_verifies,
+                    terminations: observed_terminations,
+                })
+            },
+            || Ok(()),
+        )
+        .expect("EOF explicitly terminates the standalone Hermes owner");
+
+        assert_eq!(launches.get(), 1);
+        assert_eq!(verifies.get(), 3);
+        assert_eq!(terminations.get(), 1);
+    }
+
+    #[test]
+    fn hermes_launch_lifecycle_reports_child_exit_and_still_terminates_owner() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::sync::mpsc;
+
+        struct BlockingReader(mpsc::Receiver<()>);
+
+        impl Read for BlockingReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                let _ = self.0.recv();
+                Ok(0)
+            }
+        }
+
+        struct ExitingOwner {
+            verifies: Rc<Cell<usize>>,
+            terminations: Rc<Cell<usize>>,
+        }
+
+        impl HermesStandaloneOwner for ExitingOwner {
+            fn verify_live(&mut self) -> Result<(), LatticedError> {
+                let next = self.verifies.get() + 1;
+                self.verifies.set(next);
+                if next >= 3 {
+                    Err(LatticedError::new(
+                        LatticedErrorKind::HermesProductionLivenessRejected,
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+
+            fn terminate(self) -> Result<(), LatticedError> {
+                self.terminations.set(self.terminations.get() + 1);
+                Ok(())
+            }
+        }
+
+        let verifies = Rc::new(Cell::new(0));
+        let terminations = Rc::new(Cell::new(0));
+        let ready = Rc::new(Cell::new(false));
+        let observed_verifies = Rc::clone(&verifies);
+        let observed_terminations = Rc::clone(&terminations);
+        let observed_ready = Rc::clone(&ready);
+        let (release, blocked) = mpsc::channel();
+
+        let failure = launch_hermes_until_eof(
+            BlockingReader(blocked),
+            Duration::from_millis(1),
+            move |_| {
+                Ok(ExitingOwner {
+                    verifies: observed_verifies,
+                    terminations: observed_terminations,
+                })
+            },
+            move || {
+                observed_ready.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("child exit cannot remain falsely healthy");
+        drop(release);
+
+        assert_eq!(
+            failure.kind(),
+            LatticedErrorKind::HermesProductionLivenessRejected
+        );
+        assert!(ready.get());
+        assert!(verifies.get() >= 3);
+        assert_eq!(terminations.get(), 1);
+    }
+
+    #[test]
+    fn hermes_launch_lifecycle_reports_ambiguous_teardown_at_stdin_eof() {
+        use std::io::Cursor;
+
+        struct AmbiguousTeardownOwner;
+
+        impl HermesStandaloneOwner for AmbiguousTeardownOwner {
+            fn verify_live(&mut self) -> Result<(), LatticedError> {
+                Ok(())
+            }
+
+            fn terminate(self) -> Result<(), LatticedError> {
+                Err(LatticedError::new(
+                    LatticedErrorKind::HermesTeardownRejected,
+                ))
+            }
+        }
+
+        let failure = launch_hermes_until_eof(
+            Cursor::new(Vec::<u8>::new()),
+            Duration::from_millis(1),
+            |_| Ok(AmbiguousTeardownOwner),
+            || Ok(()),
+        )
+        .expect_err("teardown ambiguity cannot become success");
+
+        assert_eq!(failure.kind(), LatticedErrorKind::HermesTeardownRejected);
+    }
+
+    #[test]
+    fn hermes_launch_lifecycle_reports_stdin_failure_after_live_check_and_teardown() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct FailingReader;
+
+        impl Read for FailingReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("controlled stdin failure"))
+            }
+        }
+
+        struct LiveOwner {
+            verifies: Rc<Cell<usize>>,
+            terminations: Rc<Cell<usize>>,
+        }
+
+        impl HermesStandaloneOwner for LiveOwner {
+            fn verify_live(&mut self) -> Result<(), LatticedError> {
+                self.verifies.set(self.verifies.get() + 1);
+                Ok(())
+            }
+
+            fn terminate(self) -> Result<(), LatticedError> {
+                self.terminations.set(self.terminations.get() + 1);
+                Ok(())
+            }
+        }
+
+        let verifies = Rc::new(Cell::new(0));
+        let terminations = Rc::new(Cell::new(0));
+        let observed_verifies = Rc::clone(&verifies);
+        let observed_terminations = Rc::clone(&terminations);
+
+        let failure = launch_hermes_until_eof(
+            FailingReader,
+            Duration::from_millis(1),
+            move |_| {
+                Ok(LiveOwner {
+                    verifies: observed_verifies,
+                    terminations: observed_terminations,
+                })
+            },
+            || Ok(()),
+        )
+        .expect_err("stdin failure cannot become success");
+
+        assert_eq!(failure.kind(), LatticedErrorKind::Transport);
+        assert_eq!(verifies.get(), 3);
+        assert_eq!(terminations.get(), 1);
+    }
+
+    #[test]
+    fn hermes_launch_lifecycle_emits_ready_after_live_verification_before_input() {
+        use std::sync::{Arc, Mutex};
+
+        struct EventReader(Arc<Mutex<Vec<&'static str>>>);
+
+        impl Read for EventReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                self.0.lock().expect("event lock").push("input");
+                Ok(0)
+            }
+        }
+
+        struct EventOwner(Arc<Mutex<Vec<&'static str>>>);
+
+        impl HermesStandaloneOwner for EventOwner {
+            fn verify_live(&mut self) -> Result<(), LatticedError> {
+                self.0.lock().expect("event lock").push("verify");
+                Ok(())
+            }
+
+            fn terminate(self) -> Result<(), LatticedError> {
+                self.0.lock().expect("event lock").push("terminate");
+                Ok(())
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let reader_events = Arc::clone(&events);
+        let launch_events = Arc::clone(&events);
+        let ready_events = Arc::clone(&events);
+
+        launch_hermes_until_eof(
+            EventReader(reader_events),
+            Duration::from_millis(1),
+            move |_| {
+                launch_events.lock().expect("event lock").push("launch");
+                Ok(EventOwner(Arc::clone(&launch_events)))
+            },
+            move || {
+                ready_events.lock().expect("event lock").push("ready");
+                Ok(())
+            },
+        )
+        .expect("ready signal participates in the bounded lifecycle");
+
+        assert_eq!(
+            events.lock().expect("event lock").as_slice(),
+            [
+                "launch",
+                "verify",
+                "verify",
+                "ready",
+                "input",
+                "verify",
+                "terminate",
+            ]
         );
     }
 }

@@ -1,10 +1,10 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 1.4
+version: 1.5
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-13
 ---
 
 ## Mission
@@ -38,7 +38,7 @@ Orchestrator composition.
 
 ## Public Contracts
 
-- Construct one Orchestrator 2.3 instance with typed Contracts 1.12 / Ports 1.8
+- Construct one Orchestrator 2.5 instance with typed Contracts 1.12 / Ports 1.8
   implementations for the bounded delivery, graph-memory, and task-control
   paths.
 - Through canonical `latticed`, expose exactly four MCP tools: `lattice_delivery_run`,
@@ -54,6 +54,11 @@ Orchestrator composition.
   `client_request_id`, and give Task Status only the lowercase SHA-256
   `task_ref` returned by Submit. Every schema has
   `additionalProperties: false`.
+- Through canonical `latticed --hermes-launch`, expose one exact
+  process-start-only Hermes lifecycle entry. It accepts no additional CLI
+  arguments, reuses the production Hermes configuration and runner from the
+  full-chain composition, reports only fixed redacted failures, grants no MCP
+  or task authority, and owns the runner until bounded shutdown.
 - Select every project, snapshot, repository/base, scope, verification,
   capability, budget, approval, prompt, workspace, and downstream binding from
   process-start composition configuration, never from MCP arguments.
@@ -155,7 +160,7 @@ Orchestrator composition.
 ## Allowed Dependencies
 
 - `lattice-contracts` 1.12, `lattice-ports` 1.8,
-  `orchestrator-runtime` 2.3, and Writer Lease 1.1 public APIs.
+  `orchestrator-runtime` 2.5, and Writer Lease 1.1 public APIs.
 - Concrete Codex, PostgreSQL Task Ledger, bounded workspace/Git, and fixed-test
   adapters required by TASK-032, only for construction and port
   implementation.
@@ -167,6 +172,9 @@ Orchestrator composition.
   diagnostics libraries required at the application edge.
 - Concrete PostgreSQL Task Ledger and PostgreSQL Writer Lease 1.0 adapters only
   for construction behind their typed boundaries.
+- `lattice-hermes-adapter` 1.0 only for production runner construction,
+  ephemeral liveness, and lifecycle teardown; it grants no durable truth,
+  credential ownership, or orchestration authority.
 
 ## Forbidden Dependencies
 
@@ -204,6 +212,10 @@ CLI paths from becoming a second official workspace/adapter entry or being
 misrecorded as an MCP tunnel actor. The four canonical `latticed` tools and
 their schemas are unchanged.
 
+Version 1.5 adds an exact standalone Hermes process-lifecycle flag to canonical
+`latticed`. It changes neither the four-tool MCP contract nor durable task
+truth, provider credentials, dependency direction, or orchestration order.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -218,6 +230,7 @@ their schemas are unchanged.
 | Legacy command isolation | `lattice-runtime delivery-run` accepts only the exact scripted fixture; official Codex and MCP/tunnel provenance fail before effects | Compatibility review | yes |
 | Delivery acceptance | official Codex turn, isolated scope/test/commit, durable outcome and separate restart/status replay | Engineering | yes |
 | Failure closure | startup/framing/adapter/timeout/unknown-effect cases never report success | Engineering | yes |
+| Standalone Hermes lifecycle | exact CLI routing, runner liveness, explicit bounded teardown, redacted errors, and local live-start evidence | Engineering and security review | yes |
 
 ## Change Policy
 
@@ -236,3 +249,4 @@ constitution cannot be weakened merely to excuse implementation drift.
 | 1.2 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Add bounded Task Submit/Status through the same Gateway with a fixed server-owned actor, Task Spec digest unity, PostgreSQL task truth, and real writer lease/fencing | User TASK-038-first direction |
 | 1.3 | 2026-08-10 | SPEC-003 v3, ADR-023 security correction, TASK-038 | Make canonical `latticed` the sole official writer entry and restrict the legacy CLI delivery command to the exact visibly scripted fixture | User TASK-038-first security boundary |
 | 1.4 | 2026-08-10 | SPEC-003 v4, ADR-023 alternate-entry correction, TASK-038 | Restrict alternate `lattice-full-chain` to a read-only delivery observer and reserve all official mutation plus task control for canonical `latticed` | User TASK-038-first One Writer boundary |
+| 1.5 | 2026-08-13 | SPEC-002 v29, ADR-021 clarification, TASK-060 | Add canonical `latticed --hermes-launch` as bounded owner of the existing production Hermes runner without changing MCP, truth, credential, or dependency boundaries | User goal-mode direction to complete Hermes |

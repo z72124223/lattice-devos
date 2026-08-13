@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 28
+version: 29
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -23,7 +23,7 @@ modules:
   - module_id: orchestrator-runtime
     constitution_version: 2.5
   - module_id: latticed
-    constitution_version: 1.1
+    constitution_version: 1.5
   - module_id: openclaw-adapter
     constitution_version: 2.0
   - module_id: gateway-ipc
@@ -192,13 +192,15 @@ creating duplicate authorities or an unconstrained self-modifying agent.
   preparation, Codex execution, workspace/test/Git verification, and durable
   outcome/receipt recording; it selects no concrete adapter and performs no
   direct I/O.
-- `latticed` 1.0 is the sole normal composition root. The existing
+- `latticed` 1.5 is the sole normal composition root. The existing
   `apps/lattice-runtime` package implements it, selects concrete adapters, and
   retains `lattice-runtime` only as a compatibility wrapper over the same
   composition and state.
-- The Codex App MCP stdio surface exposes exactly two zero-parameter tools,
-  `lattice_delivery_run` and `lattice_delivery_status`. Their tool schemas
-  accept no shell, SQL, path, credential, provider, or arbitrary task input.
+- The Codex App MCP stdio surface exposes exactly four bounded tools:
+  `lattice_delivery_run`, `lattice_delivery_status`, `lattice_task_submit`, and
+  `lattice_task_status`. Delivery schemas remain zero-parameter; task schemas
+  remain closed to the fixed canary intent/request ID and returned task ref.
+  They accept no shell, SQL, path, credential, provider, or arbitrary task input.
   This surface is not a second general gateway; OpenClaw remains the normal
   human gateway.
 - Provider-specific behavior remains behind versioned ports. External adapters
@@ -565,6 +567,12 @@ creating duplicate authorities or an unconstrained self-modifying agent.
 - Hermes memory/skill approval settings and guard-agent settings are defense in
   depth only. Unknown capabilities, malformed output, or an attempted product
   mutation blocks the lane.
+- Canonical `latticed --hermes-launch` is the explicit standalone process entry
+  for the existing production Hermes runner. It accepts no caller path, secret,
+  provider, task, shell, or network argument; configuration stays
+  process-owned. Startup succeeds only while the runner is live, and EOF or
+  error must explicitly reap the owned process tree. This entry adds no MCP
+  tool or durable authority.
 
 ### Codebase Memory
 
@@ -788,8 +796,8 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | writer-lease | 1.0 | New lease/fencing/daemon-epoch domain owner |
 | workspace-git | 2.0 | Worktree/Git/filesystem evidence only; consumes lease authority |
 | scope-check | 1.1 | Language-neutral contract; mission remains detection-only |
-| orchestrator-runtime | 2.2 | Preserve delivery ordering and add pure injected-port snapshot -> Graphify -> validate -> memory persist/retrieve ordering; no concrete adapter or transport dependency |
-| latticed | 1.1 | Sole normal composition root; existing two zero-parameter MCP tools expose the preconfigured delivery plus graph-memory run and durable status without a third tool or new arguments |
+| orchestrator-runtime | 2.5 | Preserve delivery ordering and pure injected-port coordination/dispatch plus snapshot -> Graphify -> validate -> memory persist/retrieve ordering; no concrete adapter or transport dependency |
+| latticed | 1.5 | Sole normal composition root; four bounded MCP tools preserve the delivery/task contracts, while exact `--hermes-launch` owns only the existing ephemeral production Hermes lifecycle |
 | openclaw-adapter | 2.0 | Inert scaffold becomes a thin local IPC gateway |
 | gateway-ipc | 1.1 | Bounded canonical six-action protocol, NFC-preserving encoder, truthful core-service errors, and deterministic fake loopback; live transport and OS authentication remain deferred |
 | approval-verifier | 1.0 | Pure typed-subject/challenge/proof/nonce/time/current-head owner and deterministic fake; live trust/claim remains deferred |
@@ -1331,12 +1339,24 @@ packaging modules do not activate functional provider modules.
   source invalidates the old current snapshot; untracked and
   secret files never enter the snapshot; timeout, malformed/partial output,
   unknown source provenance, or persistence ambiguity fails closed with zero
-  false success. `latticed` retains exactly its two zero-parameter MCP tools
-  and accepts no new caller-controlled query/path/shell/SQL/credential input.
+  false success. `latticed` retains exactly its four bounded MCP tools and
+  accepts no new caller-controlled query/path/shell/SQL/credential input.
 - [x] AC-39: TASK-055 exposes the pure typed coordination gate through normal
   `lattice-runtime` composition, including verified projection, fail-closed
   next-round dispatch, and explicit archive/retain recommendations with no I/O
   or execution authority.
+- [ ] AC-40: TASK-060 exposes exact canonical `latticed --hermes-launch`
+  routing to the existing production Hermes configuration and runner. Missing
+  preparation, invalid configuration, runner death, deadline, stdin failure,
+  or teardown ambiguity returns only a fixed redacted failure. A controlled
+  no-credential test proves launch-before-read, continuous liveness, and
+  explicit teardown at EOF; live acceptance additionally requires the pinned
+  local runtime and broker without changing the four-tool MCP surface or
+  durable task truth. `LATTICE_HERMES_READY` is an ephemeral, redacted stderr
+  diagnostic emitted and flushed only after the existing runner passes live
+  verification and the stdin reader is established; it is not durable truth,
+  reflection evidence, or full-chain acceptance. Stdin bytes are discarded and
+  never reach Hermes; only EOF or read failure has lifecycle meaning.
 
 ## Verification Plan
 
@@ -1370,8 +1390,9 @@ packaging modules do not activate functional provider modules.
 | AC-34 | Store v1/v2 contract matrices, exact-prefix migration upgrade tests, and marker-owned PostgreSQL 17.10 live transaction/concurrency/retry/restart/permission harness | durable physical receipt and head evidence only; no domain repository, Guardian activation, production target, provider/product, or release claim |
 | AC-35 | Task Ledger pure planner/checkpoint parity plus exact schema-v3 migration and marker-owned PostgreSQL 17.10 Ledger append/outbox/concurrency/fault/restart/corruption harness | durable atomic command/event/projection/outbox and byte-identical historical Store replay; no effect delivery, live resource observation, other repository, production, or release claim |
 | AC-36 | Project Registry 1.1 observation/request/authority-receipt/command-result golden vectors; 1.2 vacant `0` and strict `1..N` planner/checkpoint/record-set vectors; exact 103-byte logical-state/Fake-Live digest fixtures; self-consistency-versus-retained-checkpoint rollback tests; schema-v4 PostgreSQL 17.10 global transaction/concurrency/fault/restart/corruption harness | acyclic command-core -> logical bytes -> result checkpoint -> record-set -> transaction/persistence commitments; complete bounded durable history and independently retained current checkpoint; serialized identity ownership and byte-identical Store/Ledger compatibility; no live Windows/Git inspection, Workspace Git, Scope Check, production, or release claim |
-| AC-37 | contracts/ports/orchestrator call-order tests, exact MCP tool-list/schema tests, compatibility-wrapper parity, official Codex app-server acceptance, isolated Git fixture, fixed test, local commit and separate PostgreSQL restart/status replay | typed intent-before-effect and outcome-after-effect evidence; exactly two zero-parameter MCP tools; no caller shell/SQL/path/credential input; one verified commit and replayed terminal receipt; scripted evidence remains distinguishable from official live evidence |
+| AC-37 | contracts/ports/orchestrator call-order tests, exact MCP tool-list/schema tests, compatibility-wrapper parity, official Codex app-server acceptance, isolated Git fixture, fixed test, local commit and separate PostgreSQL restart/status replay | typed intent-before-effect and outcome-after-effect evidence; exactly four bounded MCP tools with two zero-parameter delivery schemas and two closed task schemas; no caller shell/SQL/path/credential input; one verified commit and replayed terminal receipt; scripted evidence remains distinguishable from official live evidence |
 | AC-39 | orchestrator matrices plus lattice-runtime composition-flow tests | verified projection, deterministic next-round dispatch/archive, fail-closed ambiguity and conflict handling, zero new I/O or MCP surface |
+| AC-40 | exact CLI integration, controlled lifecycle owner, bounded local launch, process cleanup, and four-tool MCP regression | runner launches once, child death cannot look healthy, EOF/error proves teardown, output is redacted, and MCP remains unchanged |
 
 ## Human Decisions
 

@@ -1,8 +1,17 @@
 # LATTICE DevOS V2 Plan
 
+## Current task update — TASK-060
+
+CURRENT TASK-060 — make canonical `latticed --hermes-launch` a verified owner
+of the existing production Hermes runner. The exact CLI route is locally
+committed; the current slice must prove continuous liveness, explicit bounded
+teardown, fixed redacted failures, unchanged four-tool MCP discovery, and then
+perform one bounded local live-start attempt. No push, merge, deploy, payment,
+account change, or public listener is authorized.
+
 ## Completed task update — TASK-056
 
-CURRENT TASK-056 — close the completed canonical Hermes production
+COMPLETED TASK-056 — close the completed canonical Hermes production
 configuration preflight with its verified local commit before opening the next
 live Hermes integration slice.
 
