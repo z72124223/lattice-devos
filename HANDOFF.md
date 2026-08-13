@@ -1,3 +1,33 @@
+# TASK-068 Partial Local Handoff — 2026-08-14
+
+## Outcome
+
+The new opt-in TASK-068 gate completed against marker-owned loopback
+PostgreSQL: initial canonical reflection persistence, a physical server
+stop/start, and a fresh Rust Status process replayed the exact receipt digest.
+The initial phase observed one ready, research, and persist call; restart
+observed zero of all three. The current contract-conflicted five-entry
+autonomy baseline passes the complete Store initial/restart profile; this does
+not prove the approved Registry-plus-autonomy combined profile. Runtime
+all-target tests, Node verification, format, diff, and PowerShell parse checks
+pass. The disposable listener and cluster root were cleaned, and the holder
+receipt reached its closed terminal event.
+
+The task remains `partial`, not integrated-complete. The inherited branch has
+an autonomy receipt migration at ordinal `0005`, while accepted ADR-020 keeps
+that ordinal for Project Registry. Completed Registry sources `12f7100` and
+`a1aced9` are not ancestors of this worktree; autonomy source `714f3b9` occupies
+the ordinal. `aa097e0`/`593112e` align only the inherited five-entry profile,
+and `3ac4b1c` proves replay mechanics only. The named follow-up is **Registry
+`0005` / autonomy `0006` migration reconciliation**, with durable identifier
+`POSTGRES-REGISTRY-AUTONOMY-MIGRATION-RECONCILIATION`. The stop boundary is:
+do not cherry-pick/merge TASK-022, reorder migrations, change schema/manifest
+contracts, or mark TASK-068 completed in this slice. A separately authorized
+ticket must preserve Registry `0005` and move autonomy to a later
+ordinal/profile. TASK-068 made no migration or schema change and does not claim
+that combined profile as proven. The untracked TASK-051 platform-acceptance
+script remains untouched and excluded.
+
 # TASK-067 Local Handoff — 2026-08-14
 
 ## Outcome

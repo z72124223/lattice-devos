@@ -16,13 +16,22 @@ successful and failed fake-provider turns, one underlying teardown, and exact
 owned-root cleanup; the canonical leg preserves lazy activation, validated
 persistence order, Status zero-rerun, and fail-closed teardown.
 
-## Current task update — TASK-068
+## Partial task update — TASK-068
 
-CURRENT TASK-068 — prove the exact canonical Hermes reflection receipt survives
-a marker-owned loopback PostgreSQL stop/start and is loaded by a fresh Status
-process with zero Hermes ready, research, or persistence calls. This slice uses
-no provider credential, model request, public network, schema migration, or
-public test seam.
+PARTIAL TASK-068 — the exact canonical Hermes reflection receipt now survives a
+marker-owned loopback PostgreSQL stop/start and is loaded by a fresh Status
+process with zero Hermes ready, research, or persistence calls. Its live gate
+passes, but integration closure remains blocked by the inherited conflict
+between accepted Project Registry migration `0005` and the current autonomy
+receipt migration at the same ordinal. Follow-up:
+`POSTGRES-REGISTRY-AUTONOMY-MIGRATION-RECONCILIATION`.
+
+## Current task update — TASK-069
+
+CURRENT TASK-069 — forward the already-produced, secret-free Hermes recovery
+receipt through `ProductionHermesPort` after a post-submit ambiguous failure.
+The accessor is a borrowed, read-only same-process observation: it does not
+persist, resubmit, reconcile, launch, or grant authority.
 
 ## Completed task update — TASK-065
 
