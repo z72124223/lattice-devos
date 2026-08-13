@@ -40,11 +40,18 @@ same-process recovery receipt reconciles an ambiguous submitted run. The
 adapter and production port must reuse status reconciliation without another
 submission and without adding persistence or recovery authority.
 
-## Current task update — TASK-071
+## Current task update — TASK-072
 
-CURRENT TASK-071 — wire the existing active recovery receipt into
-`FullChainHermes`: after one failed production run attempt, reconcile at most
-once on the same bound port, preserve normalized evidence, and never resubmit.
+CURRENT TASK-072 — prove one real pinned-Hermes post-submit timeout can be
+reconciled on the same production port with an in-process no-model provider,
+exactly one submission, and verified teardown.
+
+## Completed task update — TASK-071
+
+COMPLETED TASK-071 — `FullChainHermes` now reconciles at most once only for the
+three exact transient observation codes and a known run ID, never resubmits,
+preserves normalized evidence, and reports repeated uncertainty through the
+existing reconciliation-required result. Definitive failures remain exact.
 
 ## Completed task update — TASK-065
 

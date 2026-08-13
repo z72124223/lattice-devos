@@ -1,3 +1,33 @@
+# TASK-071 Local Handoff — 2026-08-14
+
+## Outcome
+
+`FullChainHermes` now consumes the active, secret-free same-port recovery
+receipt without resubmission. Automatic reconciliation is restricted to a
+known run ID plus exact `HERMES_LOOPBACK_TIMEOUT`,
+`HERMES_RUN_DEADLINE_EXCEEDED`, or `HERMES_LOOPBACK_TRANSPORT_FAILED`.
+Malformed, cross-bound, cancelled, failed, HTTP-rejected, production-liveness,
+and every other kind/code pair preserve the exact initial failure and never
+inspect recovery state.
+
+The first implementation (`f7cd1b3`) exposed a real RED: structural failures
+also retain a receipt and could be washed into success. `fbbebbb` added the
+exact eligibility and run-ID gates. A second RED showed repeated observation
+uncertainty was collapsed to `HermesExecution`/gateway `Denied`; `27a7b7f`
+preserves it through the existing `LATTICE_DELIVERY_RECONCILIATION_REQUIRED`
+classification, while definitive reconciliation failures remain exact. No
+public error, receipt, MCP, database, credential, network, or ownership schema
+changed.
+
+Runtime all-target verification passes 97 tests with one explicit
+marker-owned PostgreSQL live-only ignore; the 20 composition, 1 coordination,
+5 dispatch, 31 MCP, and 1 task-control integration tests all pass. Project
+verification passes 48 Node tests; format and diff checks pass. Three
+independent final reviews found no P0/P1 correctness or architecture findings.
+No WSL, real provider/model, credential read, external network, database
+mutation, push, merge, deployment, payment, account change, or release was
+used. The untracked TASK-051 script remains untouched and excluded.
+
 # TASK-070 Local Handoff — 2026-08-14
 
 ## Outcome
