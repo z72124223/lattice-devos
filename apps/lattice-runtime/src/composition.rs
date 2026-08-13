@@ -2352,18 +2352,35 @@ fn full_chain_hermes_state_has_seal<R, B>(ready: &Option<R>, bound: &Option<B>) 
 }
 
 #[cfg(any(windows, test))]
+fn hermes_failure_allows_reconciliation(failure: &PortError) -> bool {
+    matches!(
+        (failure.kind(), failure.code()),
+        (
+            PortErrorKind::Timeout,
+            "HERMES_LOOPBACK_TIMEOUT" | "HERMES_RUN_DEADLINE_EXCEEDED"
+        ) | (
+            PortErrorKind::Unavailable,
+            "HERMES_LOOPBACK_TRANSPORT_FAILED"
+        )
+    )
+}
+
+#[cfg(any(windows, test))]
 fn run_or_reconcile_active_hermes<P, R, O>(
     port: &mut P,
     run: impl FnOnce(&mut P) -> PortResult<O>,
-    active_receipt: impl FnOnce(&P) -> Option<R>,
+    known_run_receipt: impl FnOnce(&P) -> Option<R>,
     reconcile: impl FnOnce(&mut P, &R) -> PortResult<O>,
 ) -> PortResult<O> {
     match run(port) {
         Ok(output) => Ok(output),
-        Err(initial_failure) => match active_receipt(port) {
-            Some(receipt) => reconcile(port, &receipt),
-            None => Err(initial_failure),
-        },
+        Err(initial_failure) if hermes_failure_allows_reconciliation(&initial_failure) => {
+            match known_run_receipt(port) {
+                Some(receipt) => reconcile(port, &receipt),
+                None => Err(initial_failure),
+            }
+        }
+        Err(initial_failure) => Err(initial_failure),
     }
 }
 
@@ -2486,7 +2503,11 @@ impl FullChainHermesPort for FullChainHermes {
         let output = run_or_reconcile_active_hermes(
             port,
             |port| port.run_reflection_evidence(request),
-            |port| port.active_recovery_receipt().cloned(),
+            |port| {
+                port.active_recovery_receipt()
+                    .filter(|receipt| receipt.run_id().is_some())
+                    .cloned()
+            },
             |port, receipt| port.reconcile_reflection_evidence(request, receipt),
         )?;
         let (reflection, evidence) = output.into_parts();
@@ -7836,6 +7857,40 @@ mod tests {
         .expect("initial success is unchanged");
         assert_eq!(output, "initial");
 
+        for (kind, code) in [
+            (
+                PortErrorKind::VersionMismatch,
+                "HERMES_PACKAGE_VERSION_MISMATCH",
+            ),
+            (
+                PortErrorKind::CapabilityMismatch,
+                "HERMES_UNEXPECTED_EXECUTION_EVENT",
+            ),
+            (
+                PortErrorKind::Malformed,
+                "HERMES_EVENT_DISCRIMINATOR_REJECTED",
+            ),
+            (PortErrorKind::Cancelled, "HERMES_RUN_CANCELLED"),
+            (PortErrorKind::Denied, "HERMES_EVENT_STATUS_OUTPUT_MISMATCH"),
+            (PortErrorKind::Ambiguous, "HERMES_RUN_NOT_RECOVERABLE"),
+            (
+                PortErrorKind::Timeout,
+                "HERMES_PRODUCTION_DEADLINE_EXCEEDED",
+            ),
+            (PortErrorKind::Unavailable, "HERMES_RUN_FAILED"),
+            (PortErrorKind::Unavailable, "HERMES_STATUS_HTTP_REJECTED"),
+        ] {
+            let initial_failure = run_or_reconcile_active_hermes(
+                &mut (),
+                |_| Err::<&str, _>(PortError::new(Component::Hermes, kind, code)),
+                |_| panic!("non-recoverable failure must not inspect recovery state"),
+                |_, _: &u8| panic!("non-recoverable failure must not reconcile"),
+            )
+            .expect_err("non-recoverable failure remains fail-closed");
+            assert_eq!(initial_failure.kind(), kind);
+            assert_eq!(initial_failure.code(), code);
+        }
+
         let events = Rc::new(RefCell::new(Vec::new()));
         let run_events = Rc::clone(&events);
         let receipt_events = Rc::clone(&events);
@@ -7846,7 +7901,7 @@ mod tests {
                 Err::<&str, _>(PortError::new(
                     Component::Hermes,
                     PortErrorKind::Unavailable,
-                    "HERMES_INITIAL_UNAVAILABLE",
+                    "HERMES_LOOPBACK_TRANSPORT_FAILED",
                 ))
             },
             move |_| {
@@ -7857,36 +7912,41 @@ mod tests {
         )
         .expect_err("missing receipt preserves the initial failure");
         assert_eq!(initial_failure.kind(), PortErrorKind::Unavailable);
-        assert_eq!(initial_failure.code(), "HERMES_INITIAL_UNAVAILABLE");
+        assert_eq!(initial_failure.code(), "HERMES_LOOPBACK_TRANSPORT_FAILED");
         assert_eq!(&*events.borrow(), &["run", "active_receipt"]);
 
-        let events = Rc::new(RefCell::new(Vec::new()));
-        let run_events = Rc::clone(&events);
-        let receipt_events = Rc::clone(&events);
-        let reconcile_events = Rc::clone(&events);
-        let recovered = run_or_reconcile_active_hermes(
-            &mut (),
-            move |_| {
-                run_events.borrow_mut().push("run");
-                Err::<&str, _>(PortError::new(
-                    Component::Hermes,
-                    PortErrorKind::Timeout,
-                    "HERMES_POST_SUBMIT_AMBIGUOUS",
-                ))
-            },
-            move |_| {
-                receipt_events.borrow_mut().push("active_receipt");
-                Some(7_u8)
-            },
-            move |_, receipt| {
-                reconcile_events.borrow_mut().push("reconcile");
-                assert_eq!(*receipt, 7);
-                Ok("normalized-evidence")
-            },
-        )
-        .expect("active receipt permits one same-port reconciliation");
-        assert_eq!(recovered, "normalized-evidence");
-        assert_eq!(&*events.borrow(), &["run", "active_receipt", "reconcile"]);
+        for (kind, code) in [
+            (PortErrorKind::Timeout, "HERMES_LOOPBACK_TIMEOUT"),
+            (PortErrorKind::Timeout, "HERMES_RUN_DEADLINE_EXCEEDED"),
+            (
+                PortErrorKind::Unavailable,
+                "HERMES_LOOPBACK_TRANSPORT_FAILED",
+            ),
+        ] {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let run_events = Rc::clone(&events);
+            let receipt_events = Rc::clone(&events);
+            let reconcile_events = Rc::clone(&events);
+            let recovered = run_or_reconcile_active_hermes(
+                &mut (),
+                move |_| {
+                    run_events.borrow_mut().push("run");
+                    Err::<&str, _>(PortError::new(Component::Hermes, kind, code))
+                },
+                move |_| {
+                    receipt_events.borrow_mut().push("active_receipt");
+                    Some(7_u8)
+                },
+                move |_, receipt| {
+                    reconcile_events.borrow_mut().push("reconcile");
+                    assert_eq!(*receipt, 7);
+                    Ok("normalized-evidence")
+                },
+            )
+            .expect("active known-run receipt permits one same-port reconciliation");
+            assert_eq!(recovered, "normalized-evidence");
+            assert_eq!(&*events.borrow(), &["run", "active_receipt", "reconcile"]);
+        }
     }
 
     #[test]
