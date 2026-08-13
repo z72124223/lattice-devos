@@ -2351,6 +2351,22 @@ fn full_chain_hermes_state_has_seal<R, B>(ready: &Option<R>, bound: &Option<B>) 
     ready.is_some() || bound.is_some()
 }
 
+#[cfg(any(windows, test))]
+fn run_or_reconcile_active_hermes<P, R, O>(
+    port: &mut P,
+    run: impl FnOnce(&mut P) -> PortResult<O>,
+    active_receipt: impl FnOnce(&P) -> Option<R>,
+    reconcile: impl FnOnce(&mut P, &R) -> PortResult<O>,
+) -> PortResult<O> {
+    match run(port) {
+        Ok(output) => Ok(output),
+        Err(initial_failure) => match active_receipt(port) {
+            Some(receipt) => reconcile(port, &receipt),
+            None => Err(initial_failure),
+        },
+    }
+}
+
 #[cfg(windows)]
 impl production_hermes_sealed::Sealed for FullChainHermes {
     fn has_production_seal(&self) -> bool {
@@ -2463,11 +2479,16 @@ impl FullChainHermesPort for FullChainHermes {
             ));
         }
         self.bound = Some(port);
-        let output = self
+        let port = self
             .bound
             .as_mut()
-            .expect("bound port installed immediately above")
-            .run_reflection_evidence(request)?;
+            .expect("bound port installed immediately above");
+        let output = run_or_reconcile_active_hermes(
+            port,
+            |port| port.run_reflection_evidence(request),
+            |port| port.active_recovery_receipt().cloned(),
+            |port, receipt| port.reconcile_reflection_evidence(request, receipt),
+        )?;
         let (reflection, evidence) = output.into_parts();
         let candidate = reflection_candidate(
             request,
@@ -7799,6 +7820,73 @@ mod tests {
 
         bound = None;
         assert!(!full_chain_hermes_state_has_seal(&ready, &bound));
+    }
+
+    #[test]
+    fn canonical_hermes_recovery_is_receipt_gated_and_never_resubmits() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let output = run_or_reconcile_active_hermes(
+            &mut (),
+            |_| Ok::<_, PortError>("initial"),
+            |_| panic!("successful run must not inspect recovery state"),
+            |_, _: &u8| panic!("successful run must not reconcile"),
+        )
+        .expect("initial success is unchanged");
+        assert_eq!(output, "initial");
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let run_events = Rc::clone(&events);
+        let receipt_events = Rc::clone(&events);
+        let initial_failure = run_or_reconcile_active_hermes(
+            &mut (),
+            move |_| {
+                run_events.borrow_mut().push("run");
+                Err::<&str, _>(PortError::new(
+                    Component::Hermes,
+                    PortErrorKind::Unavailable,
+                    "HERMES_INITIAL_UNAVAILABLE",
+                ))
+            },
+            move |_| {
+                receipt_events.borrow_mut().push("active_receipt");
+                None::<u8>
+            },
+            |_, _| panic!("missing receipt must not reconcile"),
+        )
+        .expect_err("missing receipt preserves the initial failure");
+        assert_eq!(initial_failure.kind(), PortErrorKind::Unavailable);
+        assert_eq!(initial_failure.code(), "HERMES_INITIAL_UNAVAILABLE");
+        assert_eq!(&*events.borrow(), &["run", "active_receipt"]);
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let run_events = Rc::clone(&events);
+        let receipt_events = Rc::clone(&events);
+        let reconcile_events = Rc::clone(&events);
+        let recovered = run_or_reconcile_active_hermes(
+            &mut (),
+            move |_| {
+                run_events.borrow_mut().push("run");
+                Err::<&str, _>(PortError::new(
+                    Component::Hermes,
+                    PortErrorKind::Timeout,
+                    "HERMES_POST_SUBMIT_AMBIGUOUS",
+                ))
+            },
+            move |_| {
+                receipt_events.borrow_mut().push("active_receipt");
+                Some(7_u8)
+            },
+            move |_, receipt| {
+                reconcile_events.borrow_mut().push("reconcile");
+                assert_eq!(*receipt, 7);
+                Ok("normalized-evidence")
+            },
+        )
+        .expect("active receipt permits one same-port reconciliation");
+        assert_eq!(recovered, "normalized-evidence");
+        assert_eq!(&*events.borrow(), &["run", "active_receipt", "reconcile"]);
     }
 
     #[test]
