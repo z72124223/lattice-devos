@@ -765,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_prefix_digests_are_frozen_and_full_manifest_requires_four_entries() {
+    fn legacy_prefix_digests_are_frozen_and_full_manifest_requires_five_entries() {
         let legacy = verify_v1_manifest_prefix().expect("exact v1 prefix");
         assert_eq!(legacy.entry_count(), 2);
         assert_eq!(legacy.executable_count(), 1);

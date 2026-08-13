@@ -3010,7 +3010,7 @@ fn prove_exact_v1_upgrade(config: &LiveConfig, admin: &mut Client) {
     assert_eq!(
         must_setup(apply_migrations(&mut migrator, &target)),
         MigrationApplyOutcome::Applied {
-            executable_count: 2
+            executable_count: 3
         }
     );
     let evidence = must_setup(verify_postgres_schema(
@@ -3049,7 +3049,7 @@ fn prove_concurrent_v1_upgrade(config: &LiveConfig, admin: &mut Client) {
                 .unwrap_or_else(|_| panic!("STORE_TASK020_V1_CONCURRENT_RUNNER_PANICKED")),
         ) {
             MigrationApplyOutcome::Applied {
-                executable_count: 2,
+                executable_count: 3,
             } => applied += 1,
             MigrationApplyOutcome::AlreadyCurrent => current += 1,
             MigrationApplyOutcome::Applied { .. } => {
@@ -3166,7 +3166,7 @@ fn prove_v1_upgrade_transaction_rollback(config: &LiveConfig, admin: &mut Client
     assert_eq!(
         must_setup(apply_migrations(&mut retry, &target)),
         MigrationApplyOutcome::Applied {
-            executable_count: 2
+            executable_count: 3
         }
     );
     assert_eq!(
@@ -3193,7 +3193,7 @@ fn prove_exact_nonempty_v2_upgrade_and_replay(config: &LiveConfig, admin: &mut C
     assert_eq!(
         must_setup(apply_migrations(&mut migrator, &target)),
         MigrationApplyOutcome::Applied {
-            executable_count: 1
+            executable_count: 2
         }
     );
     assert_eq!(
@@ -3384,7 +3384,7 @@ fn install_exact_prefix(
     schema_version: i16,
 ) {
     let manifest = migration_manifest();
-    assert_eq!(manifest.len(), 4);
+    assert_eq!(manifest.len(), 5);
     assert!(matches!(prefix_len, 2 | 3));
     let mut client = config.role_client(
         target.database_name(),
@@ -4368,7 +4368,7 @@ fn prove_history_shape_drift(config: &LiveConfig, admin: &mut Client) {
                  migration_status, transaction_mode, schema_version, min_reader, \
                  max_reader, min_writer, max_writer \
              ) VALUES ( \
-                 5, '0005_unknown', 'db/migrations/0005_unknown.sql', 1, repeat('1', 64), \
+                 6, '0006_unknown', 'db/migrations/0006_unknown.sql', 1, repeat('1', 64), \
                  'EXECUTABLE', 'RUNNER_OWNED', 3, 3, 3, 3, 3 \
              )",
         )
