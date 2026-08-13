@@ -972,10 +972,17 @@ fn outcome_persistence_after_durable_intent(
     ))
 }
 mod autonomy;
+mod coordination;
 
 pub use autonomy::{
     AutonomyAuthorityEvidence, AutonomyContractError, AutonomyDecision, AutonomyDecisionReason,
     AutonomyIntent, AutonomyIntentVersion, AutonomyReceipt, CanonicalAutonomyReceipt,
     ModelRecommendation, TaskKind, VerificationRecommendation, build_autonomy_receipt,
     classify_autonomy,
+};
+pub use coordination::{
+    ArchiveDecision, ArchiveDisposition, BlockedWorkItem, CompletionReport, CompletionState,
+    CoordinationBlocker, CoordinationRound, CoordinationWorkState, DispatchBoundary,
+    DispatchCandidate, EvidenceRecord, EvidenceState, ProjectedCompletion, WorkItem,
+    WorkItemProjection, decide_coordination_round, project_work_item_status,
 };

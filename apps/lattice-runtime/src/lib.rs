@@ -1,6 +1,7 @@
 //! LATTICE runtime composition entry.
 
 pub mod composition;
+pub mod coordination;
 pub mod delivery_ledger;
 pub mod git_delivery;
 pub mod mcp;

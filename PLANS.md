@@ -33,7 +33,15 @@ Current Goal:
   can discover/invoke the two bounded task tools. Only after that separate live
   ChatGPT gate resumes TASK-037 production-chain diagnosis/repair.
 
-CURRENT TASK-038 — add `lattice_task_submit` and `lattice_task_status` through
+CURRENT TASK-055 — integrate the bounded coordination decision core into
+`orchestrator-runtime` and expose it through normal `lattice-runtime`
+composition. Local implementation and full available tests are complete. This
+slice adds verified state projection, fail-closed
+dependency/resource dispatch, next-round decisions, and archive/retain
+recommendations without a scheduler, MCP expansion, window/process control,
+second truth source, push, merge, deployment, or release.
+
+Historical TASK-038 checkpoint — add `lattice_task_submit` and `lattice_task_status` through
 the same `latticed` One Gateway. The first public intent is exactly
 `CONTROLLED_CODEX_CANARY`; LATTICE builds the complete Task Spec 2.1, preserves
 one spec digest, uses PostgreSQL Task Ledger truth and a real PostgreSQL Writer

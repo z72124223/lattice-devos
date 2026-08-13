@@ -1,10 +1,10 @@
 ---
 module_id: orchestrator-runtime
 name: Orchestrator and Runtime Port
-version: 2.4
+version: 2.5
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-13
 ---
 
 ## Mission
@@ -37,6 +37,8 @@ composition root.
   adapter, transport, driver, process, filesystem, test, or Git state.
 - Versioned, explainable autonomy-control recommendation/receipt types for an
   already agreed task boundary; the receipt is not durable task truth.
+- Pure coordination projections plus data-only dispatch and archive decisions;
+  neither the snapshot nor decision is durable truth or execution authority.
 
 Task Domain owns Task Spec/state legality; Task Ledger/PostgreSQL owns durable
 truth; Policy owns decisions; Gateway IPC owns protocol; Approval Verifier owns
@@ -78,6 +80,10 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
 - Recommend only the existing governed Codex writer or no model; return a
   typed user decision for missing preapproval, new authority, or high-risk/
   irreversible work without invoking a model or changing lifecycle state.
+- Project work/completion evidence and recommend a round only for unique
+  `READY`, dependency-complete, resource-valid, conflict-free work. Recompute
+  after completion registration and recommend `ARCHIVE`/`RETAIN` without
+  performing either action.
 
 ## Invariants
 
@@ -122,6 +128,12 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
 19. Autonomy-control recommendation is non-authoritative: it cannot schedule,
     create, persist, approve, or transition a task, and its receipt requires
     existing Ledger binding before it can become durable evidence.
+20. Unknown/blocked/incomplete evidence, duplicate work/report IDs,
+    undeclared/duplicate/self dependency, invalid resources, and resource
+    collision fail closed without dispatch or archive from an invalid round.
+21. Dispatch/archive values are data only. They cannot create/control a window
+    or process, reserve resources, invoke Codex, mutate files/PostgreSQL, access
+    network/credentials, or bypass the governed execution path.
 
 ## Allowed Dependencies
 
@@ -158,6 +170,9 @@ Version 2.4 adds a pure, versioned decision classifier for already agreed task
 intent. It preserves all Task Spec, Policy, Ledger, lease/fence, MCP, and
 composition boundaries and does not claim model or scheduler control.
 
+Version 2.5 adds the pure TASK-055 coordination gate over typed snapshots. It
+adds no concrete scheduler, adapter, I/O, MCP, or durable authority.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -170,6 +185,7 @@ composition boundaries and does not claim model or scheduler control.
 | Delivery call order | intent -> workspace prepare -> Codex -> scope -> fixed test -> Git -> outcome/receipt, with first-failure call suppression | Engineering | yes |
 | Fake scenarios | success/failure/timeout/cancel/malformed/ambiguous tests | Engineering | yes when implemented |
 | No external call | injected-only dependency inspection | Security review | yes |
+| Coordination round | projection, identity/dependency/evidence/resource conflict, next-round, and archive matrices | Engineering | yes |
 | End-to-end | one offline task with restart/replay evidence | MVP-1 exit | yes |
 
 ## Change Policy
@@ -188,3 +204,4 @@ SPEC/ADR update, architecture review, and responsible-user authorization.
 | 2.2 | 2026-08-05 | SPEC-002 v26, ADR-022, TASK-033 | Pure exact snapshot -> Graphify -> validate -> PostgreSQL Memory -> retrieval ordering | User TASK-033 direction |
 | 2.3 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Bounded Gateway Submit/Status, one Task Spec digest, PostgreSQL task control, and real Writer Lease/fencing before Codex | User TASK-038-first direction |
 | 2.4 | 2026-08-12 | Autonomous execution-control user direction | Pure versioned intent classification, safe writer/verification recommendation, and non-durable state receipt | Current user task |
+| 2.5 | 2026-08-13 | TASK-055 | Pure fail-closed work/evidence projection, next-round dispatch, and archive recommendation without I/O or execution authority | Current user task |

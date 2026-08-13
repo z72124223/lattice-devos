@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 27
+version: 28
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -21,7 +21,7 @@ modules:
   - module_id: scope-check
     constitution_version: 1.1
   - module_id: orchestrator-runtime
-    constitution_version: 2.2
+    constitution_version: 2.5
   - module_id: latticed
     constitution_version: 1.1
   - module_id: openclaw-adapter
@@ -209,6 +209,20 @@ creating duplicate authorities or an unconstrained self-modifying agent.
   legal transitions.
 - Local IPC uses an authenticated OS-local transport and does not listen on a
   public interface by default.
+
+### Product coordination core
+
+- `orchestrator-runtime` projects a bounded typed snapshot of declared work
+  items and completion evidence without becoming a second task/evidence truth.
+- A round dispatches only unique `READY` items with valid conflict-free
+  resources and referenced `VERIFIED DONE` evidence for every declared
+  dependency. Unknown, blocked, incomplete, duplicate, undeclared,
+  self-dependent, or conflicting input fails closed.
+- Completion registration recomputes the next round. Verified completed work
+  is recommended for archival only when no unfinished dependent remains.
+- `lattice-runtime` exposes the typed gate but adds no MCP tool, scheduler,
+  task/window/process control, resource reservation, file/network/credential
+  access, database mutation, or bypass of existing execution gates.
 
 ### Artifact Store 1.0 boundary
 
@@ -1319,6 +1333,10 @@ packaging modules do not activate functional provider modules.
   unknown source provenance, or persistence ambiguity fails closed with zero
   false success. `latticed` retains exactly its two zero-parameter MCP tools
   and accepts no new caller-controlled query/path/shell/SQL/credential input.
+- [x] AC-39: TASK-055 exposes the pure typed coordination gate through normal
+  `lattice-runtime` composition, including verified projection, fail-closed
+  next-round dispatch, and explicit archive/retain recommendations with no I/O
+  or execution authority.
 
 ## Verification Plan
 
@@ -1353,6 +1371,7 @@ packaging modules do not activate functional provider modules.
 | AC-35 | Task Ledger pure planner/checkpoint parity plus exact schema-v3 migration and marker-owned PostgreSQL 17.10 Ledger append/outbox/concurrency/fault/restart/corruption harness | durable atomic command/event/projection/outbox and byte-identical historical Store replay; no effect delivery, live resource observation, other repository, production, or release claim |
 | AC-36 | Project Registry 1.1 observation/request/authority-receipt/command-result golden vectors; 1.2 vacant `0` and strict `1..N` planner/checkpoint/record-set vectors; exact 103-byte logical-state/Fake-Live digest fixtures; self-consistency-versus-retained-checkpoint rollback tests; schema-v4 PostgreSQL 17.10 global transaction/concurrency/fault/restart/corruption harness | acyclic command-core -> logical bytes -> result checkpoint -> record-set -> transaction/persistence commitments; complete bounded durable history and independently retained current checkpoint; serialized identity ownership and byte-identical Store/Ledger compatibility; no live Windows/Git inspection, Workspace Git, Scope Check, production, or release claim |
 | AC-37 | contracts/ports/orchestrator call-order tests, exact MCP tool-list/schema tests, compatibility-wrapper parity, official Codex app-server acceptance, isolated Git fixture, fixed test, local commit and separate PostgreSQL restart/status replay | typed intent-before-effect and outcome-after-effect evidence; exactly two zero-parameter MCP tools; no caller shell/SQL/path/credential input; one verified commit and replayed terminal receipt; scripted evidence remains distinguishable from official live evidence |
+| AC-39 | orchestrator matrices plus lattice-runtime composition-flow tests | verified projection, deterministic next-round dispatch/archive, fail-closed ambiguity and conflict handling, zero new I/O or MCP surface |
 
 ## Human Decisions
 
