@@ -1358,8 +1358,12 @@ impl HermesReflectionAdapter {
                 cross_binding("HERMES_EVENT_STATUS_OUTPUT_MISMATCH").with_recovery_receipt(receipt)
             );
         }
-        let reflection = parse_reflection(&status_output, &self.job)
-            .map_err(|failure| failure.with_recovery_receipt(receipt))?;
+        let reflection = match parse_reflection(&status_output, &self.job) {
+            Ok(reflection) => reflection,
+            Err(failure) => {
+                return Err(self.finish_completed_output_failure(failure, receipt));
+            }
+        };
         self.active_run = None;
         Ok(reflection)
     }
@@ -1424,8 +1428,12 @@ impl HermesReflectionAdapter {
                 return Err(self.finish_terminal_observation_failure(failure, receipt.clone()));
             }
         };
-        let reflection = parse_reflection(&output, &self.job)
-            .map_err(|failure| failure.with_recovery_receipt(receipt.clone()))?;
+        let reflection = match parse_reflection(&output, &self.job) {
+            Ok(reflection) => reflection,
+            Err(failure) => {
+                return Err(self.finish_completed_output_failure(failure, receipt.clone()));
+            }
+        };
         self.active_run = None;
         Ok(reflection)
     }
@@ -1471,6 +1479,22 @@ impl HermesReflectionAdapter {
             failure.kind(),
             HermesAdapterErrorKind::Failed | HermesAdapterErrorKind::Cancelled
         ) {
+            debug_assert_eq!(self.active_run.as_ref(), Some(&receipt));
+            self.active_run = None;
+            failure
+        } else {
+            failure.with_recovery_receipt(receipt)
+        }
+    }
+
+    fn finish_completed_output_failure(
+        &mut self,
+        failure: HermesAdapterError,
+        receipt: HermesRunRecoveryReceipt,
+    ) -> HermesAdapterError {
+        if failure.kind() == HermesAdapterErrorKind::Failed
+            && failure.code() == "HERMES_CODEX_APP_SERVER_RUN_FAILED"
+        {
             debug_assert_eq!(self.active_run.as_ref(), Some(&receipt));
             self.active_run = None;
             failure

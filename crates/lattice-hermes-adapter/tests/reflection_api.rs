@@ -1604,6 +1604,11 @@ fn malformed_reflection_schema_fails_closed() {
 
     assert_eq!(failure.kind(), HermesAdapterErrorKind::Malformed);
     assert_eq!(failure.code(), "HERMES_REFLECTION_SCHEMA_REJECTED");
+    let retained = failure
+        .recovery_receipt()
+        .expect("malformed completed output remains recoverable");
+    assert_eq!(retained.run_id(), Some("run_malformed"));
+    assert_eq!(adapter.active_recovery_receipt(), Some(retained));
     assert_eq!(server.finish().len(), 4);
 }
 
@@ -1636,8 +1641,69 @@ fn false_completed_codex_app_server_runs_are_classified_as_failed() {
 
         assert_eq!(failure.kind(), HermesAdapterErrorKind::Failed);
         assert_eq!(failure.code(), "HERMES_CODEX_APP_SERVER_RUN_FAILED");
+        assert!(failure.recovery_receipt().is_none());
+        assert!(adapter.active_recovery_receipt().is_none());
         assert_eq!(server.finish().len(), 4);
     }
+}
+
+#[test]
+fn reconciled_false_completed_codex_failure_retires_the_active_recovery_receipt() {
+    let request = request();
+    let run_id = "run_reconcile_false_completed";
+    let output = "Codex app-server turn failed: thread/start rejected";
+    let server = ScriptedServer::start(vec![
+        capabilities(),
+        Response::json(
+            202,
+            serde_json::json!({"run_id": run_id, "status": "started"}).to_string(),
+        ),
+        Response::json(503, r#"{"error":{"message":"events unavailable"}}"#),
+        running_status(run_id).with_delay(Duration::from_millis(200)),
+        capabilities(),
+        completed_status(run_id, "lattice-task-034-session", output),
+    ]);
+    let timeout_config = contained_config_with_timing(
+        &server,
+        Duration::from_millis(100),
+        Duration::from_millis(1),
+    );
+    let mut adapter =
+        HermesReflectionAdapter::connect(timeout_config, job(request.clone())).expect("adapter");
+
+    let first_failure = adapter
+        .run_reflection(&request)
+        .expect_err("first completed-output observation times out after submission");
+    assert_eq!(first_failure.kind(), HermesAdapterErrorKind::Timeout);
+    assert_eq!(first_failure.code(), "HERMES_LOOPBACK_TIMEOUT");
+    let receipt = first_failure
+        .recovery_receipt()
+        .expect("known submitted run receipt")
+        .clone();
+    assert_eq!(receipt.run_id(), Some(run_id));
+    thread::sleep(Duration::from_millis(250));
+
+    let failure = adapter
+        .reconcile_reflection(&request, &receipt)
+        .expect_err("false completed Codex output is a definitive failure");
+    assert_eq!(failure.kind(), HermesAdapterErrorKind::Failed);
+    assert_eq!(failure.code(), "HERMES_CODEX_APP_SERVER_RUN_FAILED");
+    assert!(failure.recovery_receipt().is_none());
+    assert!(adapter.active_recovery_receipt().is_none());
+
+    let replay = adapter
+        .reconcile_reflection(&request, &receipt)
+        .expect_err("retired false-completed receipt cannot replay");
+    assert_eq!(replay.code(), "HERMES_RECOVERY_RECEIPT_BINDING_REJECTED");
+    let requests = server.finish();
+    assert_eq!(requests.len(), 6);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("POST /v1/runs HTTP/1.1"))
+            .count(),
+        1
+    );
 }
 
 const FAILED_RUN_HINT_CASES: &[(&str, &str)] = &[
