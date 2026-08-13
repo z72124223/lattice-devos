@@ -2386,6 +2386,107 @@ pub enum HermesProductionPreflight {
     ConfigurationPresentUnverified,
 }
 
+/// Fixed, redacted result of the secret-free Hermes runtime/isolation check.
+#[derive(Debug, Eq, PartialEq)]
+pub enum HermesRuntimePreflight {
+    MissingConfiguration(Vec<&'static str>),
+    ConfigurationRejected,
+    ConfigurationPresentUnverified,
+}
+
+impl HermesRuntimePreflight {
+    /// Renders one stable, stderr-safe record.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            Self::MissingConfiguration(names) => format!(
+                "LATTICE_HERMES_RUNTIME_PREFLIGHT_MISSING_CONFIGURATION:{}",
+                names.join(",")
+            ),
+            Self::ConfigurationRejected => {
+                "LATTICE_HERMES_RUNTIME_PREFLIGHT_CONFIGURATION_REJECTED".to_owned()
+            }
+            Self::ConfigurationPresentUnverified => {
+                "LATTICE_HERMES_RUNTIME_PREFLIGHT_CONFIGURATION_PRESENT_UNVERIFIED".to_owned()
+            }
+        }
+    }
+}
+
+/// Validates only the secret-free runtime and isolation configuration without
+/// launching WSL, Hermes, a broker, a provider, or any child process.
+#[must_use]
+pub fn hermes_runtime_preflight_from_environment() -> HermesRuntimePreflight {
+    #[cfg(not(windows))]
+    {
+        HermesRuntimePreflight::ConfigurationRejected
+    }
+    #[cfg(windows)]
+    {
+        const REQUIRED: [&str; 7] = [
+            "LATTICE_HERMES_PREPARATION_ROOT",
+            "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
+            "LATTICE_HERMES_RUNTIME_MANIFEST",
+            "LATTICE_HERMES_RUNTIME_GUEST_ROOT",
+            "LATTICE_HERMES_PRODUCT_ROOT",
+            "LATTICE_HERMES_WSL_EXE",
+            "LATTICE_HERMES_ISOLATION_ROOT",
+        ];
+        let missing = REQUIRED
+            .into_iter()
+            .filter(|name| std::env::var_os(name).is_none())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return HermesRuntimePreflight::MissingConfiguration(missing);
+        }
+
+        let result = (|| {
+            let product_root = PathBuf::from(hermes_environment("LATTICE_HERMES_PRODUCT_ROOT")?);
+            let preparation_root =
+                PathBuf::from(hermes_environment("LATTICE_HERMES_PREPARATION_ROOT")?);
+            let preparation_receipt =
+                hermes_environment("LATTICE_HERMES_PREPARATION_RECEIPT_SHA256")?;
+            verify_official_preparation_for_launch(
+                &preparation_root,
+                &product_root,
+                &preparation_receipt,
+            )
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesPreparationRequired))?;
+            let runtime_manifest_path =
+                PathBuf::from(hermes_environment("LATTICE_HERMES_RUNTIME_MANIFEST")?);
+            let runtime_manifest_bytes =
+                read_regular_file(&runtime_manifest_path, MAX_HERMES_RUNTIME_MANIFEST_BYTES)
+                    .map_err(|_| {
+                        LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired)
+                    })?;
+            let runtime_manifest =
+                HermesOfflineRuntimeManifest::from_canonical_json(&runtime_manifest_bytes)
+                    .map_err(|_| {
+                        LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired)
+                    })?;
+            let runtime_guest_root = hermes_environment("LATTICE_HERMES_RUNTIME_GUEST_ROOT")?;
+            validate_official_hermes_runtime_identity(
+                &runtime_guest_root,
+                &runtime_manifest_bytes,
+                &runtime_manifest,
+            )?;
+            HermesWslContainmentConfig::new(
+                PathBuf::from(hermes_environment("LATTICE_HERMES_WSL_EXE")?),
+                runtime_guest_root,
+                PathBuf::from(hermes_environment("LATTICE_HERMES_ISOLATION_ROOT")?),
+                product_root,
+            )
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+            Ok::<(), LatticedError>(())
+        })();
+        if result.is_ok() {
+            HermesRuntimePreflight::ConfigurationPresentUnverified
+        } else {
+            HermesRuntimePreflight::ConfigurationRejected
+        }
+    }
+}
+
 impl HermesProductionPreflight {
     /// Renders one stable, stderr-safe record.
     #[must_use]

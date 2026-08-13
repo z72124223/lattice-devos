@@ -908,6 +908,37 @@ fn latticed_hermes_preflight_reports_exact_missing_settings() {
 }
 
 #[test]
+fn latticed_hermes_runtime_preflight_explicitly_rejects_missing_isolation_configuration() {
+    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
+        .arg("--hermes-runtime-preflight")
+        .env_clear()
+        .env("LATTICE_HERMES_PREPARATION_ROOT", r"C:\prepared")
+        .env("LATTICE_HERMES_PREPARATION_RECEIPT_SHA256", "a".repeat(64))
+        .env(
+            "LATTICE_HERMES_RUNTIME_MANIFEST",
+            r"C:\runtime\manifest.json",
+        )
+        .env(
+            "LATTICE_HERMES_RUNTIME_GUEST_ROOT",
+            "/var/tmp/lattice-runtime-targets/hermes",
+        )
+        .env("LATTICE_HERMES_PRODUCT_ROOT", r"C:\product")
+        .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
+        .output()
+        .expect("start canonical latticed Hermes runtime preflight");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr utf8"),
+        concat!(
+            "LATTICE_HERMES_RUNTIME_PREFLIGHT_MISSING_CONFIGURATION:",
+            "LATTICE_HERMES_ISOLATION_ROOT\n"
+        )
+    );
+}
+
+#[test]
 fn latticed_hermes_preflight_rejects_unavailable_manifest_without_echoing_values() {
     const SECRET_SENTINEL: &str = "TASK056-SECRET-SENTINEL-DO-NOT-LEAK";
     const PATH_SENTINEL: &str = r"C:\TASK056-PATH-SENTINEL-DO-NOT-LEAK\manifest.json";
