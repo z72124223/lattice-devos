@@ -2353,6 +2353,87 @@ fn hermes_environment(name: &'static str) -> Result<String, LatticedError> {
         .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))
 }
 
+/// Fixed, redacted result of the canonical Hermes configuration preflight.
+///
+/// It is operational output only. It never contains an environment value, a
+/// file path, a credential, or a raw validation error.
+#[derive(Debug, Eq, PartialEq)]
+pub enum HermesProductionPreflight {
+    /// One or more required settings are absent. The names are safe to report.
+    MissingConfiguration(Vec<&'static str>),
+    /// Present configuration did not satisfy the pinned local validation.
+    ConfigurationRejected,
+    /// Required configuration passed static parsing, but launch-time asset,
+    /// identity, containment, and broker verification has not run.
+    ConfigurationPresentUnverified,
+}
+
+impl HermesProductionPreflight {
+    /// Renders one stable, stderr-safe record.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            Self::MissingConfiguration(names) => format!(
+                "LATTICE_HERMES_PREFLIGHT_MISSING_CONFIGURATION:{}",
+                names.join(",")
+            ),
+            Self::ConfigurationRejected => {
+                "LATTICE_HERMES_PREFLIGHT_CONFIGURATION_REJECTED".to_owned()
+            }
+            Self::ConfigurationPresentUnverified => {
+                "LATTICE_HERMES_PREFLIGHT_CONFIGURATION_PRESENT_UNVERIFIED".to_owned()
+            }
+        }
+    }
+}
+
+fn classify_hermes_production_preflight(
+    missing: Vec<&'static str>,
+    configuration_passed_static_validation: bool,
+) -> HermesProductionPreflight {
+    if !missing.is_empty() {
+        HermesProductionPreflight::MissingConfiguration(missing)
+    } else if configuration_passed_static_validation {
+        HermesProductionPreflight::ConfigurationPresentUnverified
+    } else {
+        HermesProductionPreflight::ConfigurationRejected
+    }
+}
+
+/// Checks the local Hermes production prerequisite without launching a process
+/// or accessing a network, database, MCP, or provider.
+#[must_use]
+pub fn hermes_production_preflight_from_environment() -> HermesProductionPreflight {
+    #[cfg(not(windows))]
+    {
+        classify_hermes_production_preflight(Vec::new(), false)
+    }
+    #[cfg(windows)]
+    {
+        const REQUIRED: [&str; 12] = [
+            "LATTICE_HERMES_RUNTIME_MANIFEST",
+            "LATTICE_HERMES_RUNTIME_GUEST_ROOT",
+            "LATTICE_HERMES_API_KEY",
+            "LATTICE_HERMES_PRODUCT_ROOT",
+            "LATTICE_HERMES_WSL_EXE",
+            "LATTICE_HERMES_ISOLATION_ROOT",
+            "LATTICE_HERMES_BROKER_HELPER",
+            "LATTICE_HERMES_BROKER_HELPER_SHA256",
+            "LATTICE_HERMES_CODEX_LAUNCHER",
+            "LATTICE_HERMES_CODEX_HOME",
+            "LATTICE_HERMES_BROKER_ISOLATION_ROOT",
+            "LATTICE_HERMES_DEADLINE_SECONDS",
+        ];
+        let missing = REQUIRED
+            .into_iter()
+            .filter(|name| std::env::var_os(name).is_none())
+            .collect::<Vec<_>>();
+        let configuration_passed_static_validation =
+            missing.is_empty() && HermesEnvironmentConfig::from_environment().is_ok();
+        classify_hermes_production_preflight(missing, configuration_passed_static_validation)
+    }
+}
+
 #[cfg(windows)]
 struct OpenClawEnvironmentLaunch {
     authentication_key: AuthenticationKey,
@@ -6315,6 +6396,18 @@ mod tests {
             LatticedErrorKind::HermesProductionRunnerRequired
         );
         assert_eq!(error.code(), "LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED");
+    }
+
+    #[test]
+    fn parsed_hermes_configuration_is_not_launch_authority() {
+        assert_eq!(
+            classify_hermes_production_preflight(Vec::new(), true),
+            HermesProductionPreflight::ConfigurationPresentUnverified
+        );
+        assert_eq!(
+            classify_hermes_production_preflight(Vec::new(), true).render(),
+            "LATTICE_HERMES_PREFLIGHT_CONFIGURATION_PRESENT_UNVERIFIED"
+        );
     }
 
     #[cfg(windows)]

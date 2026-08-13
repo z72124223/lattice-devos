@@ -1,5 +1,23 @@
 # LATTICE DevOS V2 Plan
 
+## Completed task update — TASK-056
+
+CURRENT TASK-056 — close the completed canonical Hermes production
+configuration preflight with its verified local commit before opening the next
+live Hermes integration slice.
+
+Canonical `latticed` now owns a closed `--hermes-preflight` check for the
+sealed Hermes production prerequisite. It reports only fixed classifications
+and missing setting names, and performs no process launch, network access,
+installation, or configuration mutation. Even statically valid configuration
+is `CONFIGURATION_PRESENT_UNVERIFIED`, so the live runner remains blocked until
+the normal launch-time asset, identity, containment, and broker gates pass.
+The legacy `lattice-full-chain` observer remains unchanged and rejects the
+preflight flag. Implementation and all local checks pass. Independent re-review
+found no P0, P1, P2, or P3 findings. The P3 follow-up separates
+unavailable-manifest redaction from an exact pinned-manifest fixture that
+reaches invalid-secret validation and cleans its target-owned bytes.
+
 ## Goal
 
 Build **LATTICE DevOS — 織網 AI 開發中樞** as a general-purpose,
@@ -33,7 +51,7 @@ Current Goal:
   can discover/invoke the two bounded task tools. Only after that separate live
   ChatGPT gate resumes TASK-037 production-chain diagnosis/repair.
 
-CURRENT TASK-055 — integrate the bounded coordination decision core into
+Historical TASK-055 — integrate the bounded coordination decision core into
 `orchestrator-runtime` and expose it through normal `lattice-runtime`
 composition. Local implementation and full available tests are complete. This
 slice adds verified state projection, fail-closed

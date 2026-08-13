@@ -1,8 +1,32 @@
-# TASK-055 Local Handoff — 2026-08-13
+# TASK-056 Local Handoff — 2026-08-13
 
-Status: `DONE` for the local product coordination core on branch
+## Outcome
+
+LATTICE now provides canonical `latticed --hermes-preflight`, a local,
+no-effect static check for the sealed Hermes production configuration. It
+reports only a fixed classification plus missing setting names; it never
+exposes values, paths, credentials, or raw errors, and it never launches an
+external process. A statically accepted configuration is explicitly
+`CONFIGURATION_PRESENT_UNVERIFIED`, not ready or launch-authorized.
+
+On this machine the preflight reports missing production configuration. The
+full-chain launch remains fail-closed until the approved pinned runtime,
+containment, broker, and secret source pass their normal launch-time checks.
+The legacy `lattice-full-chain` observer still rejects extra arguments. This
+does not change the no-argument commands, MCP surface, or already verified
+TASK-050, TASK-054, and TASK-055 behavior.
+
+Status: `DONE` for the local TASK-056 product preflight on branch
 `feature/task-051-p0-platform-live-acceptance`; push, PR, merge, deployment,
 and release were not performed.
+
+- Independent review P1-P2 are addressed: the preflight moved off the legacy
+  observer and parsed configuration no longer reports ready. The P3 follow-up
+  retains unavailable-manifest redaction and adds a separate test-owned exact
+  pinned-manifest fixture whose digest is checked before `latticed` reaches an
+  invalid-secret sentinel. Both tests assert exact fixed stderr, no value leak,
+  and the new fixture is scope-cleaned. Independent re-review found no P0, P1,
+  P2, or P3 findings.
 
 - `lattice-orchestrator` now owns the pure typed work/evidence projection,
   fail-closed dispatch round, next-round recomputation, and archive/retain
