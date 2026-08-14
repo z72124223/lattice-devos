@@ -75,67 +75,29 @@ TASK-075 gates and four distinct marker-owned PostgreSQL receipt closures. The
 implementation source remains `a3599c1`; the exact combined revalidation source
 is `f32531002a0c6588e96dc9fe0229db7e0ed546e0`.
 
-## Current autonomy receipt closure - TASK-050
+## Completed autonomy receipt closure - TASK-050
 
-CURRENT TASK-050 - use the completed TASK-075/TASK-076 combined candidate and
-its retained marker only as a historical baseline; the prior run did not prove
-a fresh canonical `latticed` process and is not closure evidence.
-TASK-051 remains blocked until TASK-050 records its own verified completion.
+COMPLETED TASK-050 - commit `8e5ba40d38b781afff7028841bd981c8dd2b9721`
+makes Task Ledger the sole autonomy profile/receipt/hash owner, closes invalid
+Ports lifecycle states, delegates the 24-scalar durable row to the Ledger
+verifier, and binds PROCEED to the exact current 15-scalar Writer tuple.
+The full wrapper passed against PostgreSQL 17.10 through physical restart and
+four fresh canonical `latticed` processes with ASK_USER/PROCEED, exact four-tool
+and six-field MCP output, zero prohibited effects, eight atomic-failure
+boundaries, complete cleanup, and no unresolved P0-P3 finding. GitHub Actions
+run `31835654240` passed on the exact implementation commit. Draft PR #12
+remains not authorized for merge or Draft promotion.
 
-### TASK-050 recovery trajectory
+## Current P0 platform live acceptance - TASK-051
 
-Goal: close TASK-050 only after the combined candidate proves the Task Ledger
-is the sole autonomy-receipt semantic owner, every new-profile lifecycle/status
-load fails closed without that receipt, and acceptance uses a real fresh
-`latticed` process with zero prohibited effects.
-
-Confirmed facts: independent closure review rejected reuse of the old review.
-The approved repair now gives Task Ledger sole profile/receipt/hash ownership,
-uses a versioned closed Ports contract, distinguishes required pending from
-historical absence, and makes normal lifecycle/Status fail closed until the
-sequence-2 receipt exists. The runner now contains a fail-closed four-process
-canonical `latticed` phase, but the marker-owned dual-profile selector and live
-PROCEED authority matrix must be complete before the one PostgreSQL run.
-
-Current step: the user approved the one narrow Human Gate on 2026-08-15 and the
-governance amendment is committed at `97b6ab1`. Finish the marker-owned
-dual-profile acceptance seam and PostgreSQL PROCEED matrix, then run the pure
-gates before the one marker-owned PostgreSQL acceptance.
-
-Verification: focused tests first; then the affected Rust suites, runner self-
-test, one marker-owned PostgreSQL acceptance, repository/format/Clippy gates,
-independent code/security and architecture re-review, and integration/CI.
-
-TDD evidence, 2026-08-15: focused RED/GREEN cycles now reject generic receipt
-and reserved-profile construction, non-P0 risk, substituted recommendations,
-late/missing receipt progression, invalid persisted Writer tuples, a Store-head
-substitution, schema-v3 autonomy admission/load, and receipt replay after later
-lifecycle events. Task Ledger alone verifies the complete 24-scalar row and its
-Writer commitment covers exactly the same 15 fields asserted current by Store.
-The out-of-bound Contracts hash helper and Orchestrator duplicate canonical
-builder are removed. Ports makes an unadmitted `Existing` admission
-unrepresentable through a checked opaque wrapper. Current pure evidence is Task
-Ledger 23 integration plus 15 lib tests, Ports package, Runtime task-control
-14/14, Store lib 38 passed/1 ignored, Orchestrator controlled-task 5/5, and
-strict no-deps Clippy for Contracts, Task Ledger, Ports, and Orchestrator. No
-PostgreSQL acceptance or implementation-complete claim is made.
-
-| Workflow stage | Status | Current evidence | Gate strength |
-|---|---|---|---|
-| Repository/spec/ticket/constitution inspection | valid | TASK-050, SPEC-002 v35, ADR-011/019/020, Task Ledger 2.3, Ports 1.9, Store 1.10, Orchestrator 2.6, latticed 1.8 | documented-only |
-| Dependencies and combined branch | valid | TASK-075/TASK-076 complete; `f325310` functional candidate | machine-enforced |
-| Module constitution | in review | SPEC v35 and five versioned constitutions are amended; final scope and architecture re-review remain active | documented-only |
-| TDD implementation | in progress | owner/replay/Ports/Store/Runtime core and runner self-tests GREEN; live acceptance not yet run | machine-enforced |
-| Focused/full verification | partial | Task Ledger 23+15, Ports, Runtime lib 102/2 ignored, Runtime MCP 31, Store 38/1 ignored, and migration contract 37 PASS; PostgreSQL not run | machine-enforced |
-| Code/security and architecture review | in progress | prior P1/P2 code findings repaired; final frozen-diff re-review pending | documented-only |
-| Integration/CI | blocked | PR remains Draft; latest docs CI passes but repaired tree does not exist | machine-enforced |
-
-Risk and drift: the earlier closure-only strategy was invalidated by independent
-review. Do not mark TASK-050 complete, activate TASK-051, or reuse the existing
-fresh-process claim until these P1 findings are resolved and re-reviewed.
-The user explicitly approved the narrow Task Ledger profile/Ports amendment on
-2026-08-15. Only the Ports constitution is added to the durable allowlist;
-Contracts remains at 1.13 by removing the out-of-bound public SHA helper.
+CURRENT TASK-051 - TASK-050 now satisfies the ticket's
+`TASK050_FULLY_VERIFIED` prerequisite at `8e5ba40`. Begin with the ticket's
+read-only exact-source/configuration/runtime preflight. Current-machine Codex
+registration, discovery, semantic invocation, and restart acceptance remain
+unverified until TASK-051 produces its own run-bound evidence. Any reversible
+Codex MCP configuration-table mutation remains a separate exact ticket gate;
+no merge, deployment, release, credential change, or public exposure is
+authorized.
 
 ## Completed task update — TASK-072
 

@@ -7,7 +7,7 @@ related_spec_id: SPEC-003
 related_spec_version: 5
 module_id: task-ledger
 constitution_version: 2.3
-status: in_progress
+status: complete
 human_gate: approved_task050_profile_and_ports_amendment
 governance_amendment_authorized_at: 2026-08-15
 governance_amendment_authority: direct_user_reply
@@ -28,6 +28,13 @@ implementation_head: 714f3b9057db47e694adacf9aef5f37e09f31712
 closure_branch: feature/task-076-postgres-writer-lease-v2
 closure_worktree: lattice-worktrees/task-076-postgres-writer-lease-v2
 combined_revalidation_head: f32531002a0c6588e96dc9fe0229db7e0ed546e0
+completion_implementation_head: 8e5ba40d38b781afff7028841bd981c8dd2b9721
+completion_tree: b4478be2801814ffc630cbf113b0a4ffa3a1b591
+completion_acceptance_run_id: 9f1907f07f5545be9927a8def04529f5
+completion_receipt_raw_sha256: b2ba6aa3d5f5c6b145de146bbe5b59696322ab3713dabb07a44313f1fcfc2478
+completion_receipt_final_hmac_sha256: e953e32d4cc7ab8d9509e18b5bb66c98f449b027d0d25b301dd8038e8da7cc04
+completion_receipt_event_count: 10
+completion_review_state: clear_p0_p1_p2_p3
 authorized_path_reconciliation:
   - path: crates/lattice-postgres-store/src/migrations.rs
     source_thread_id: 019ff693-b2c3-7a81-9704-49f1e6e3f2d1
@@ -84,12 +91,14 @@ schema-v5 `0006`, and TASK-076 supplied the Writer Lease v2 bridge required to
 reach the combined candidate without rewriting historical receipts or fencing
 state. Both dependencies are complete and the exact combined candidate
 `f32531002a0c6588e96dc9fe0229db7e0ed546e0` emitted the embedded TASK-050 PASS
-marker. Independent review proved that the current runner launches the
-Postgres Store `postgres_task_ledger` test binary rather than a fresh canonical
-`latticed` process, so that marker is retained only as partial baseline
-evidence and is not closure evidence. This ticket remains `in_progress` for a
-bounded repair and fresh-process revalidation; it does not unlock TASK-051
-until its own completion is recorded.
+marker. Independent review proved that the earlier runner launched only the
+Postgres Store test binary, so its marker remains partial baseline evidence.
+The repair at `8e5ba40d38b781afff7028841bd981c8dd2b9721` now launches four fresh canonical
+`latticed` processes across initial/restart and ASK_USER/PROCEED profiles,
+replays the internal receipt through PostgreSQL 17.10, and keeps the public MCP
+surface at four tools and six fields. The current wrapper, reviews, cleanup,
+repository gate, and exact-commit GitHub CI all pass, so TASK-050 is complete
+and may satisfy TASK-051's `TASK050_FULLY_VERIFIED` prerequisite.
 
 The user decision relayed from coordination thread
 `019ff693-b2c3-7a81-9704-49f1e6e3f2d1` requires Autonomy Intent/Receipt to
@@ -329,41 +338,61 @@ synthetic Policy or Approval evidence.
 - [x] Governance first: SPEC-002, ADR-011/019, and the five module
   constitutions agree on the new event owner, subject persistence, mixed
   historical compatibility, dependency direction, and six-field wire freeze.
-- [ ] Closed-contract tests reject every unknown/extra/missing field and every
+- [x] Closed-contract tests reject every unknown/extra/missing field and every
   mutation of binding, intent, observed state, decision, authority, or digest.
-- [ ] Ports tests prove the closed autonomy-evidence sum type cannot represent
+- [x] Ports tests prove the closed autonomy-evidence sum type cannot represent
   required-without-receipt, profileless-with-receipt, or admitted
   not-applicable lifecycle evidence.
-- [ ] Task Ledger tests own the exact task-created profile mapping and canonical
+- [x] Task Ledger tests own the exact task-created profile mapping and canonical
   authority/receipt hashes, add/parse only `AUTONOMY_RECEIPT_RECORDED`, deny a
   generic forged append, preserve all existing event/hash fixtures, and reject
   unknown profile, event, or payload versions.
-- [ ] Replay proves `TASK_CREATED -> AUTONOMY_RECEIPT_RECORDED`, exactly-one
+- [x] Replay proves `TASK_CREATED -> AUTONOMY_RECEIPT_RECORDED`, exactly-one
   semantics, exact retry, changed-command substitution denial, orphan/duplicate
   subject denial, digest tamper, reordering, truncation, and trusted-checkpoint
   rollback detection.
-- [ ] Authority tests prove `execution_preapproved` alone has zero authority;
+- [x] Authority tests prove `execution_preapproved` alone has zero authority;
   `PROCEED` requires the exact current live lease/head/fence and `ASK_USER`
   rejects ambient writer authority and produces zero later effects.
-- [ ] PostgreSQL tests atomically commit event-owned scalar subject, event,
+- [x] PostgreSQL tests atomically commit event-owned scalar subject, event,
   command receipt, head, projection, checkpoint, and physical Store receipt;
   injected failure at every boundary leaves no partial durable record.
-- [ ] Fresh install plus exact v1/v2/v3/v4-to-schema-v5 upgrade through
+- [x] Fresh install plus exact v1/v2/v3/v4-to-schema-v5 upgrade through
   Registry `0005` and autonomy `0006` passes without historical rewrite;
   partial, edited, wrong-order, misplaced-autonomy-`0005`, unknown,
   active-at-upgrade, or rollback-incompatible state fails closed.
-- [ ] A disposable PostgreSQL 17 runtime physically restarts; fresh canonical
+- [x] A disposable PostgreSQL 17 runtime physically restarts; fresh canonical
   `latticed` processes prove both `ASK_USER` and `PROCEED`, reconstruct a
   byte-equal internal autonomy projection through Status, and produce zero
   model, Git, GitHub, verification, Graphify, Hermes, Memory, or
   product-worktree effect.
-- [ ] Rust MCP tests prove exactly four tools and byte-identical closed input
+- [x] Rust MCP tests prove exactly four tools and byte-identical closed input
   and six-field `lattice.task.status.v1` output. Internal receipt data never
   appears in discovery, arguments, results, errors, logs, or acceptance files.
-- [ ] Format, changed-slice strict Clippy, focused Rust tests, PostgreSQL
+- [x] Format, changed-slice strict Clippy, focused Rust tests, PostgreSQL
   integration, `npm.cmd run check`, dependency/forbidden-reference scan,
   independent code/security review, architecture review, and final diff check
   pass with no unresolved P0/P1 finding.
+
+## Completion Evidence - 2026-08-15
+
+- Immutable implementation: commit
+  `8e5ba40d38b781afff7028841bd981c8dd2b9721`, tree
+  `b4478be2801814ffc630cbf113b0a4ffa3a1b591`.
+- Full acceptance: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+  scripts/test-task050-autonomy-receipt-acceptance.ps1`, exit `0`, final marker
+  `TASK050_AUTONOMY_RECEIPT_ACCEPTANCE=PASS`.
+- Disposable PostgreSQL evidence: PostgreSQL `17.10`, initial and physical
+  restart phases, run `9f1907f07f5545be9927a8def04529f5`, raw receipt
+  SHA-256 `b2ba6aa3d5f5c6b145de146bbe5b59696322ab3713dabb07a44313f1fcfc2478`,
+  final HMAC SHA-256
+  `e953e32d4cc7ab8d9509e18b5bb66c98f449b027d0d25b301dd8038e8da7cc04`,
+  event count `10`, `cleanup_complete=true`, cluster root and listener absent.
+- Independent final code/security and architecture reviews report no P0, P1,
+  P2, or P3 findings and `CLEAR_FOR_INTEGRATION`.
+- GitHub Actions verify run `31835654240`, job `94881263124`, passed on the
+  exact implementation commit. Draft PR #12 remains open and is not authorized
+  for merge or Draft promotion.
 
 ## TDD Behaviors
 
