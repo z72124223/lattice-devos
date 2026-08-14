@@ -50,6 +50,13 @@ history deletion, and credential/account/payment mutation remain outside this
 authorization. TASK-076 completion is not claimed until the remaining review
 and integration gates pass.
 
+The first published implementation checkpoint is
+`172307c19ee5be3387646858a834b0aa1790d81e`. Its remote head is
+`feature/task-076-postgres-writer-lease-v2`; the separately published base is
+`feature/task-075-schema-v5-migration-reconciliation` at `a3599c1`. GitHub
+Draft PR `https://github.com/z72124223/lattice-devos/pull/12` targets that base
+and remains explicitly non-mergeable until the pending reviews close.
+
 # TASK-075 Schema-v5 Migration Reconciliation Handoff - 2026-08-14
 
 ## Current Outcome

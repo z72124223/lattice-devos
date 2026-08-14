@@ -92,6 +92,19 @@ Only this non-secret metadata may be retained. OAuth tokens, one-time device
 codes, passwords, browser/mobile sessions, and confirmation values are excluded
 from every repository artifact and publication record.
 
+Publication record:
+
+- prerequisite branch: `feature/task-075-schema-v5-migration-reconciliation`
+  at `a3599c18d9462732c3b82c9e7d302980657eeccc`;
+- TASK-076 implementation checkpoint:
+  `172307c19ee5be3387646858a834b0aa1790d81e`;
+- published branch: `feature/task-076-postgres-writer-lease-v2`;
+- Draft pull request: `https://github.com/z72124223/lattice-devos/pull/12`,
+  based on the prerequisite branch above;
+- publication state: checkpoint only, with final independent code,
+  architecture, and integration review still required before completion or
+  merge consideration.
+
 ## Frozen History
 
 - `db/extensions/writer-lease/v1.sql` remains byte-identical, including its
