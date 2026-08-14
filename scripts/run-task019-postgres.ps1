@@ -16,6 +16,9 @@ param(
     [switch]$MemoryOnly,
     [switch]$StoreOnly,
     [switch]$RunTask075MemoryGate,
+    [switch]$RunTask076WriterLeaseGate,
+    [ValidateSet('bridge', 'current')]
+    [string]$MeasureTask076WriterCatalog,
     [switch]$MeasureTask075Catalog,
     [switch]$MeasureTask075CurrentCatalog,
     [switch]$SelfTestOnly
@@ -46,12 +49,14 @@ catch {
     throw 'TASK019_WINDOWS_NATIVE_IDENTITY_HELPER_REJECTED'
 }
 $task075CatalogMeasurementRequested = $MeasureTask075Catalog -or $MeasureTask075CurrentCatalog
+$task076CatalogMeasurementRequested = -not [string]::IsNullOrWhiteSpace($MeasureTask076WriterCatalog)
 if ($MeasureTask075Catalog -and $MeasureTask075CurrentCatalog) {
     throw 'TASK075_CATALOG_MEASUREMENT_MODE_CONFLICT'
 }
 if ($task075CatalogMeasurementRequested) {
     if (
-        $MemoryOnly -or $RunTask075MemoryGate -or $RunLatticeDeliveryHook -or
+        $MemoryOnly -or $RunTask075MemoryGate -or $RunTask076WriterLeaseGate -or
+        $RunLatticeDeliveryHook -or
         $RunFullChainAcceptanceHook -or
         $RunTask038AcceptanceHook -or $RunTask038TunnelHook -or $RunTask068HermesReplayGate
     ) {
@@ -59,9 +64,22 @@ if ($task075CatalogMeasurementRequested) {
     }
     $StoreOnly = $true
 }
+if ($task076CatalogMeasurementRequested) {
+    if (
+        $RunTask076WriterLeaseGate -or $MemoryOnly -or $StoreOnly -or
+        $RunTask075MemoryGate -or $task075CatalogMeasurementRequested -or
+        $RunLatticeDeliveryHook -or $RunFullChainAcceptanceHook -or
+        $RunTask038AcceptanceHook -or $RunTask038TunnelHook -or
+        $RunTask068HermesReplayGate
+    ) {
+        throw 'TASK076_CATALOG_MEASUREMENT_PROFILE_CONFLICT'
+    }
+    $RunTask076WriterLeaseGate = $true
+}
 if (
     $SelfTestOnly -and (
         $MemoryOnly -or $StoreOnly -or $RunTask075MemoryGate -or
+        $RunTask076WriterLeaseGate -or
         $task075CatalogMeasurementRequested -or
         $RunLatticeDeliveryHook -or $RunFullChainAcceptanceHook -or
         $RunTask038AcceptanceHook -or $RunTask038TunnelHook -or
@@ -74,18 +92,25 @@ function Test-Task019ProfileModeSelection {
     param(
         [bool]$MemoryOnlySelected,
         [bool]$StoreOnlySelected,
-        [bool]$Task075MemoryGateSelected
+        [bool]$Task075MemoryGateSelected,
+        [bool]$Task076WriterLeaseGateSelected
     )
 
     return @(
-        @($MemoryOnlySelected, $StoreOnlySelected, $Task075MemoryGateSelected) |
+        @(
+            $MemoryOnlySelected,
+            $StoreOnlySelected,
+            $Task075MemoryGateSelected,
+            $Task076WriterLeaseGateSelected
+        ) |
             Where-Object { $_ }
     ).Count -le 1
 }
 if (-not (Test-Task019ProfileModeSelection `
         -MemoryOnlySelected $MemoryOnly `
         -StoreOnlySelected $StoreOnly `
-        -Task075MemoryGateSelected $RunTask075MemoryGate)) {
+        -Task075MemoryGateSelected $RunTask075MemoryGate `
+        -Task076WriterLeaseGateSelected $RunTask076WriterLeaseGate)) {
     throw 'TASK019_HARNESS_PROFILE_SELECTION_CONFLICT'
 }
 if ($StoreOnly -and ($RunLatticeDeliveryHook -or $RunFullChainAcceptanceHook -or $RunTask038AcceptanceHook)) {
@@ -100,11 +125,20 @@ if (
 ) {
     throw 'TASK075_MEMORY_GATE_HOOK_FORBIDDEN'
 }
+if (
+    $RunTask076WriterLeaseGate -and (
+        $RunLatticeDeliveryHook -or $RunFullChainAcceptanceHook -or
+        $RunTask038AcceptanceHook -or $RunTask038TunnelHook -or
+        $RunTask068HermesReplayGate
+    )
+) {
+    throw 'TASK076_WRITER_LEASE_GATE_HOOK_FORBIDDEN'
+}
 $extensionHookRequested =
     $RunLatticeDeliveryHook -or $RunFullChainAcceptanceHook -or $RunTask038AcceptanceHook
 if (
     $extensionHookRequested -and -not $MemoryOnly -and -not $StoreOnly -and
-    -not $RunTask075MemoryGate
+    -not $RunTask075MemoryGate -and -not $RunTask076WriterLeaseGate
 ) {
     # Preserve the established hook CLI while pinning every extension hook to
     # the separately governed frozen V3 Memory profile.
@@ -118,6 +152,7 @@ if (
     -not $MemoryOnly -and
     -not $StoreOnly -and
     -not $RunTask075MemoryGate -and
+    -not $RunTask076WriterLeaseGate -and
     -not $SelfTestOnly -and
     -not $extensionHookRequested
 ) {
@@ -141,8 +176,11 @@ $expectedPostgresVersion = '17.10'
 $expectedPostgresExecutableSha256 = '882a5a073a88817f6c6d4c8827df1e4269ff226d52cf6f47c9883e91088c6345'
 $expectedPsqlExecutableSha256 = 'e43adb9c5032e7efc63eebb44c5d32b142b34e5f4207666fed2dc7a51d43b630'
 $expectedPgCtlExecutableSha256 = 'abe89b0767a8cd0f956059aa5a5a93cd1042efc6194d000c2501da3e23babbd2'
+$task076GlobalV3ManifestSha256 = '09c431df18ad71a4f44239a5d2ddf6b1774b8ffec06c7f9223f0e41757f3d407'
+$task076MemoryV2ManifestSha256 = '0aedbd7d9ef7ca07fc2910d0da34c163cc83e3dd56f9b28292ae1f4f0c3c4d7e'
 $task075GlobalV5ManifestSha256 = 'f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d'
 $task075MemoryV3ManifestSha256 = 'd4cc712d262ae1f7c96bd65526eab611c90e193363afd865af2126307b2903f0'
+$task076WriterV2ManifestSha256 = '5f54c182465c8e2dc8a6e6cc2ebd9a375f776adf500656586e59bfbc7dfd31a4'
 $harnessUser = 'task019_harness'
 $reservedPostgresPorts = [Collections.Generic.HashSet[int]]::new()
 foreach ($reservedPort in @(5432, 64272, 55432)) {
@@ -158,6 +196,8 @@ $environmentNames = @(
     'LATTICE_TASK019_EXPECTED_UUID',
     'LATTICE_TASK019_EXPECTED_MANIFEST',
     'LATTICE_TASK075_CURRENT_CATALOG_ONLY',
+    'LATTICE_TASK076_WRITER_PHASE',
+    'LATTICE_TASK076_CATALOG_MEASURE',
     'LATTICE_TASK068_EXPECTED_RECEIPT_SHA256',
     'LATTICE_TASK038_POSTGRES_PASSWORD',
     'LATTICE_WRITER_LEASE_MIGRATOR_URL',
@@ -373,7 +413,8 @@ function Test-StoreProfileLiveGateOutput {
     )
 
     $allowedProfiles = @(
-        'V5', 'V5_MEMORY_V3', 'V3_MEMORY_V2', 'V3_MEMORY_V2_WRITER_LEASE_V1'
+        'V5', 'V5_MEMORY_V3', 'V3_MEMORY_V2', 'V3_MEMORY_V2_WRITER_LEASE_V1',
+        'V5_MEMORY_V3_WRITER_LEASE_V2'
     )
     if ($ExpectedProfile -notin $allowedProfiles) {
         return $false
@@ -397,7 +438,7 @@ function Get-Task019AllowlistedDiagnosticTokens {
     foreach ($item in $Output) {
         foreach ($match in [regex]::Matches(
             [string]$item,
-            '(?<![A-Z0-9_])(?:TASK019|TASK075|STORE|POSTGRES_TASK_LEDGER|POSTGRES_PROJECT_REGISTRY|MEMORY|OPENCLAW)_[A-Z0-9_]{1,63}(?![A-Z0-9_])'
+            '(?<![A-Z0-9_])(?:TASK019|TASK075|TASK076|STORE|POSTGRES_TASK_LEDGER|POSTGRES_PROJECT_REGISTRY|MEMORY|WRITER_LEASE|OPENCLAW)_[A-Z0-9_]{1,63}(?![A-Z0-9_])'
         )) {
             if ($seen.Add($match.Value)) {
                 $tokens += $match.Value
@@ -565,11 +606,13 @@ function Test-Task075CatalogMeasurementShape {
 
 function Invoke-HarnessSelfTest {
     if (
-        -not (Test-Task019ProfileModeSelection $false $false $false) -or
-        -not (Test-Task019ProfileModeSelection $false $false $true) -or
-        (Test-Task019ProfileModeSelection $true $false $true) -or
-        (Test-Task019ProfileModeSelection $false $true $true) -or
-        (Test-Task019ProfileModeSelection $true $true $true)
+        -not (Test-Task019ProfileModeSelection $false $false $false $false) -or
+        -not (Test-Task019ProfileModeSelection $false $false $true $false) -or
+        -not (Test-Task019ProfileModeSelection $false $false $false $true) -or
+        (Test-Task019ProfileModeSelection $true $false $true $false) -or
+        (Test-Task019ProfileModeSelection $false $true $true $false) -or
+        (Test-Task019ProfileModeSelection $false $false $true $true) -or
+        (Test-Task019ProfileModeSelection $true $true $true $true)
     ) {
         throw 'TASK075_MEMORY_GATE_MODE_SELECTION_SELF_TEST_REJECTED'
     }
@@ -733,6 +776,103 @@ function Invoke-HarnessSelfTest {
         $currentCatalogAccessQuery -cmatch 'catalog_(?:bare|vtwo)'
     ) {
         throw 'TASK075_CURRENT_CATALOG_DATABASE_ACCESS_SELF_TEST_REJECTED'
+    }
+    $task076SourceSha = 'a' * 64
+    $task076RuntimeSha = 'b' * 64
+    $task076FreshSha = 'c' * 64
+    $task076DatabaseUuid = '00000000-0000-8000-8000-000000000076'
+    $task076FreshDatabaseUuid = '00000000-0000-8000-8000-000000000077'
+    $task076InitialOutput = @(
+        'TASK076_WRITER_SOURCE_SETUP_OK',
+        "TASK019_EVIDENCE database_uuid=$task076DatabaseUuid manifest_sha256=$task076GlobalV3ManifestSha256",
+        'TASK076_MEMORY_V2_SOURCE_PASS',
+        'TASK076_WRITER_SOURCE_INSTALL_PASS',
+        "TASK076_WRITER_SOURCE_SHA256=$task076SourceSha",
+        'TASK076_WRITER_FENCING_HIGH_WATER=1',
+        'TASK076_WRITER_COMMAND_HIGH_WATER=2',
+        'TASK076_WRITER_TRANSITION_HIGH_WATER=2',
+        'TASK076_WRITER_SOURCE_PASS',
+        "TASK076_WRITER_BRIDGE_SHA256=$task076SourceSha",
+        'TASK076_WRITER_BRIDGE_PASS',
+        'TASK076_GLOBAL_UPGRADE_OK',
+        "TASK019_EVIDENCE database_uuid=$task076DatabaseUuid manifest_sha256=$task075GlobalV5ManifestSha256",
+        'TASK076_MEMORY_UPGRADE_PASS',
+        'TASK076_WRITER_ACTIVATE_PASS',
+        "TASK076_WRITER_SOURCE_SHA256=$task076SourceSha",
+        "TASK076_WRITER_RUNTIME_SHA256=$task076RuntimeSha",
+        'TASK076_WRITER_FENCING_HIGH_WATER=2',
+        'TASK076_WRITER_COMMAND_HIGH_WATER=4',
+        'TASK076_WRITER_TRANSITION_HIGH_WATER=4',
+        'TASK076_WRITER_RUNTIME_PASS',
+        'TASK076_FINAL_VERIFY_OK',
+        "TASK019_EVIDENCE database_uuid=$task076DatabaseUuid manifest_sha256=$task075GlobalV5ManifestSha256",
+        "TASK076_FRESH_G5_EVIDENCE database_uuid=$task076FreshDatabaseUuid manifest_sha256=$task075GlobalV5ManifestSha256",
+        'TASK076_WRITER_FRESH_G5_SETUP_OK',
+        "TASK076_FRESH_M3_EVIDENCE database_uuid=$task076FreshDatabaseUuid manifest_sha256=$task075MemoryV3ManifestSha256",
+        'TASK076_MEMORY_V3_FRESH_SETUP_OK',
+        'TASK076_WRITER_FRESH_INSTALLED_PASS',
+        'TASK076_WRITER_FRESH_ALREADY_CURRENT_PASS',
+        "TASK076_WRITER_FRESH_DATABASE_UUID=$task076FreshDatabaseUuid",
+        "TASK076_WRITER_FRESH_PROFILE_SHA256=$task076FreshSha",
+        'TASK076_WRITER_FRESH_INSTALL_PASS',
+        'TASK076_WRITER_BASE_ACCESS_OK'
+    )
+    $task076InitialEvidence = Get-Task076InitialEvidence -Output $task076InitialOutput
+    $task076TargetEvidence = Get-Task076RestartTargetEvidence -Output $task076InitialOutput
+    $task076RestartOutput = @(
+        "TASK076_WRITER_RESTART_SHA256=$task076RuntimeSha",
+        'TASK076_WRITER_FENCING_HIGH_WATER=2',
+        'TASK076_WRITER_COMMAND_HIGH_WATER=4',
+        'TASK076_WRITER_TRANSITION_HIGH_WATER=4',
+        'TASK076_WRITER_RESTART_PASS',
+        'TASK076_WRITER_RESTART_OK',
+        "TASK019_EVIDENCE database_uuid=$task076DatabaseUuid manifest_sha256=$task075GlobalV5ManifestSha256",
+        'TASK076_WRITER_FRESH_ACCESS_OK',
+        'TASK076_WRITER_FRESH_RESTART_ALREADY_CURRENT_PASS',
+        "TASK076_WRITER_FRESH_RESTART_DATABASE_UUID=$task076FreshDatabaseUuid",
+        "TASK076_WRITER_FRESH_RESTART_PROFILE_SHA256=$task076FreshSha",
+        'TASK076_WRITER_FRESH_RESTART_PASS',
+        'TASK076_WRITER_BASE_ACCESS_OK'
+    )
+    $task076FreshRestartEvidence = Assert-Task076RestartEvidence -Output $task076RestartOutput `
+        -InitialEvidence $task076InitialEvidence `
+        -InitialTargetEvidence $task076TargetEvidence
+    $task076Rejected = $false
+    try {
+        $null = Get-Task076InitialEvidence -Output @(
+            $task076InitialOutput | Where-Object { $_ -cne 'TASK076_MEMORY_UPGRADE_PASS' }
+        )
+    }
+    catch {
+        $task076Rejected = $_.Exception.Message -ceq `
+            'TASK076_INITIAL_EVIDENCE_REJECTED_TASK076_MEMORY_UPGRADE_PASS'
+    }
+    if (
+        [string]$task076InitialEvidence.SourceSha256 -cne $task076SourceSha -or
+        [string]$task076InitialEvidence.RuntimeSha256 -cne $task076RuntimeSha -or
+        [string]$task076InitialEvidence.FreshDatabaseId -cne $task076FreshDatabaseUuid -or
+        [string]$task076InitialEvidence.FreshProfileSha256 -cne $task076FreshSha -or
+        [string]$task076FreshRestartEvidence.FreshDatabaseId -cne $task076FreshDatabaseUuid -or
+        [string]$task076FreshRestartEvidence.FreshProfileSha256 -cne $task076FreshSha -or
+        -not $task076Rejected
+    ) {
+        throw 'TASK076_WRITER_GATE_OUTPUT_SELF_TEST_REJECTED'
+    }
+    $task076CatalogOutput = @(
+        foreach ($metric in @(
+            'RELATION', 'COLUMN', 'CONSTRAINT', 'INDEX', 'FUNCTION',
+            'SCHEMA_ACL', 'TABLE_ACL', 'FUNCTION_ACL', 'COLUMN_ACL', 'TYPE'
+        )) {
+            "TASK076_WRITER_CATALOG_BRIDGE_${metric}_ROWS=1"
+            "TASK076_WRITER_CATALOG_BRIDGE_${metric}_SHA256=$task076SourceSha"
+        }
+        'TASK076_WRITER_CATALOG_BRIDGE_MEASURE_PASS'
+    )
+    $task076CatalogEvidence = @(
+        Get-Task076WriterCatalogMeasurement -Output $task076CatalogOutput -Profile 'bridge'
+    )
+    if ($task076CatalogEvidence.Count -ne 20) {
+        throw 'TASK076_WRITER_CATALOG_OUTPUT_SELF_TEST_REJECTED'
     }
     Write-Output 'TASK019_HARNESS_SELF_TEST=PASS'
 }
@@ -963,6 +1103,777 @@ RESET ROLE;
         throw 'TASK019_WRITER_LEASE_OWNER_LIVE_GATE_REJECTED'
     }
     $script:writerLeaseOwnerProfileProved = $true
+}
+
+function Invoke-Task076CargoLivePhase {
+    param(
+        [Parameter(Mandatory = $true)][string]$Cargo,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][ValidateSet(
+            'lattice-postgres-store',
+            'lattice-postgres-codebase-memory',
+            'lattice-postgres-writer-lease'
+        )][string]$Package,
+        [Parameter(Mandatory = $true)][ValidateSet(
+            'marker_owned_postgres_17_foundation',
+            'exact_memory_extension_install_and_restart_profile',
+            'live_postgres_acquire_restarts_and_replays_authority_when_provisioned'
+        )][string]$TestName,
+        [Parameter(Mandatory = $true)][ValidateSet(
+            'LATTICE_TASK019_PHASE',
+            'LATTICE_TASK076_WRITER_PHASE'
+        )][string]$PhaseEnvironmentName,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[a-z0-9_]{1,48}$')][string]$Phase,
+        [Parameter(Mandatory = $true)][ValidatePattern('^TASK076_[A-Z0-9_]{1,63}$')][string]$ExpectedToken
+    )
+
+    $originalPhase = [Environment]::GetEnvironmentVariable($PhaseEnvironmentName, 'Process')
+    $stdoutPath = Join-Path $clusterRoot ".cargo-task076-$Package-$Phase-stdout.log"
+    $stderrPath = Join-Path $clusterRoot ".cargo-task076-$Package-$Phase-stderr.log"
+    $process = $null
+    $exitCode = $null
+    $output = @()
+    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+    try {
+        [Environment]::SetEnvironmentVariable($PhaseEnvironmentName, $Phase, 'Process')
+        $liveTestName = 'postgres_live'
+        $process = Start-Process -FilePath $Cargo -ArgumentList @(
+            'test', '-p', $Package, '--test', $liveTestName, $TestName, '--locked',
+            '--', '--exact', '--nocapture', '--test-threads=1'
+        ) -WorkingDirectory $RepositoryRoot -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru
+        $null = $process.Handle
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                $output += @(Get-Content -LiteralPath $path -Encoding utf8)
+            }
+        }
+    }
+    finally {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+        [Environment]::SetEnvironmentVariable($PhaseEnvironmentName, $originalPhase, 'Process')
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $path) {
+                throw 'TASK076_CARGO_OUTPUT_DELETE_FAILED'
+            }
+        }
+    }
+
+    $text = @($output | ForEach-Object { [string]$_ }) -join "`n"
+    $tokenPattern = '(?<![A-Z0-9_])' + [regex]::Escape($ExpectedToken) + '(?![A-Z0-9_])'
+    $valid = (
+        $exitCode -eq 0 -and
+        [regex]::Matches($text, $tokenPattern).Count -eq 1 -and
+        $text -notmatch '(?m)(?:^|[^\S\r\n])SKIP:'
+    )
+    if (-not $valid) {
+        $safeTokens = @(Get-Task019AllowlistedDiagnosticTokens -Output $output)
+        $safeSummary = Get-Task019SafeDiagnosticSummary -Tokens $safeTokens
+        if ($null -ne $holderReceipt -and -not [bool]$holderReceipt.closed) {
+            Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'LIVE_GATE_FAILED' -Payload ([ordered]@{
+                suite = $Package
+                phase = $Phase
+                exit_code = if ($null -eq $exitCode) { -1L } else { [long]$exitCode }
+                diagnostics = $safeTokens
+                diagnostic_summary = $safeSummary
+                expected_token = $ExpectedToken
+            })
+        }
+        throw "TASK076_LIVE_PHASE_REJECTED_$ExpectedToken diagnostics: $safeSummary"
+    }
+    return $output
+}
+
+function Get-Task076WriterCatalogMeasurement {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Output,
+        [Parameter(Mandatory = $true)][ValidateSet('bridge', 'current')][string]$Profile
+    )
+
+    $profileToken = $Profile.ToUpperInvariant()
+    $metrics = @(
+        'RELATION', 'COLUMN', 'CONSTRAINT', 'INDEX', 'FUNCTION',
+        'SCHEMA_ACL', 'TABLE_ACL', 'FUNCTION_ACL', 'COLUMN_ACL', 'TYPE'
+    )
+    $text = @($Output | ForEach-Object { [string]$_ }) -join "`n"
+    $passToken = "TASK076_WRITER_CATALOG_${profileToken}_MEASURE_PASS"
+    if ([regex]::Matches($text, '(?<![A-Z0-9_])' + $passToken + '(?![A-Z0-9_])').Count -ne 1) {
+        throw "TASK076_WRITER_CATALOG_${profileToken}_PASS_REJECTED"
+    }
+    $values = @()
+    foreach ($metric in $metrics) {
+        $rowName = "TASK076_WRITER_CATALOG_${profileToken}_${metric}_ROWS"
+        $shaName = "TASK076_WRITER_CATALOG_${profileToken}_${metric}_SHA256"
+        $rows = @(Get-Task076MarkerValues -Output $Output -Name $rowName -Kind integer)
+        $sha = @(Get-Task076MarkerValues -Output $Output -Name $shaName -Kind sha256)
+        if ($rows.Count -ne 1 -or $sha.Count -ne 1) {
+            throw "TASK076_WRITER_CATALOG_${profileToken}_${metric}_SHAPE_REJECTED"
+        }
+        $values += "${rowName}=$($rows[0])"
+        $values += "${shaName}=$($sha[0])"
+    }
+    if ($values.Count -ne 20 -or @($values | Sort-Object -Unique).Count -ne 20) {
+        throw "TASK076_WRITER_CATALOG_${profileToken}_COUNT_REJECTED"
+    }
+    return $values
+}
+
+function Invoke-Task076WriterCatalogMeasurement {
+    param(
+        [Parameter(Mandatory = $true)][string]$Cargo,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][ValidateSet('bridge', 'current')][string]$Profile
+    )
+
+    $originalProfile = [Environment]::GetEnvironmentVariable('LATTICE_TASK076_CATALOG_MEASURE', 'Process')
+    $stdoutPath = Join-Path $clusterRoot ".cargo-task076-catalog-$Profile-stdout.log"
+    $stderrPath = Join-Path $clusterRoot ".cargo-task076-catalog-$Profile-stderr.log"
+    $process = $null
+    $exitCode = $null
+    $output = @()
+    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+    try {
+        [Environment]::SetEnvironmentVariable('LATTICE_TASK076_CATALOG_MEASURE', $Profile, 'Process')
+        $process = Start-Process -FilePath $Cargo -ArgumentList @(
+            'test', '-p', 'lattice-postgres-writer-lease', '--lib',
+            'setup::tests::task076_catalog_measurement_when_requested', '--locked',
+            '--', '--exact', '--nocapture', '--test-threads=1'
+        ) -WorkingDirectory $RepositoryRoot -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru
+        $null = $process.Handle
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                $output += @(Get-Content -LiteralPath $path -Encoding utf8)
+            }
+        }
+    }
+    finally {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+        [Environment]::SetEnvironmentVariable(
+            'LATTICE_TASK076_CATALOG_MEASURE',
+            $originalProfile,
+            'Process'
+        )
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $path) {
+                throw 'TASK076_CATALOG_OUTPUT_DELETE_FAILED'
+            }
+        }
+    }
+    if ($exitCode -ne 0) {
+        $safeTokens = @(Get-Task019AllowlistedDiagnosticTokens -Output $output)
+        $safeSummary = Get-Task019SafeDiagnosticSummary -Tokens $safeTokens
+        if ($null -ne $holderReceipt -and -not [bool]$holderReceipt.closed) {
+            Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'LIVE_GATE_FAILED' -Payload ([ordered]@{
+                suite = 'lattice-postgres-writer-lease'
+                phase = "catalog_$Profile"
+                exit_code = [long]$exitCode
+                diagnostics = $safeTokens
+                diagnostic_summary = $safeSummary
+            })
+        }
+        throw "TASK076_CATALOG_MEASUREMENT_${Profile}_REJECTED diagnostics: $safeSummary"
+    }
+    $null = Get-Task076WriterCatalogMeasurement -Output $output -Profile $Profile
+    return $output
+}
+
+function Set-Task076WriterTargetEnvironment {
+    param(
+        [Parameter(Mandatory = $true)][string]$Psql,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$RunId,
+        [Parameter(Mandatory = $true)][ValidateSet('G3M2', 'G5M3')][string]$ExpectedProfile,
+        [ValidateSet('base', 'writer_fresh')][string]$DatabaseTag = 'base'
+    )
+
+    $databaseName = 'lattice_task019_' + $RunId.Substring(0, 8) + '_' + $DatabaseTag
+    $rows = Invoke-HarnessPsqlRows -Psql $Psql -DatabaseName $databaseName `
+        -Port $Port -Password $Password -FailureCode 'TASK076_WRITER_TARGET_QUERY_REJECTED' `
+        -Query @"
+SET ROLE lattice_migrator;
+SELECT pg_catalog.btrim(i.database_identity_sha256::text),
+       i.global_schema_version::text,
+       pg_catalog.btrim(i.global_manifest_sha256::text),
+       i.extension_schema_version::text,
+       pg_catalog.btrim(i.extension_manifest_sha256::text),
+       pg_catalog.current_database()
+FROM ONLY memory.codebase_memory_extension_identity AS i
+WHERE i.singleton = true;
+RESET ROLE;
+"@
+    if ($rows.Count -ne 1) {
+        throw 'TASK076_WRITER_TARGET_SHAPE_REJECTED'
+    }
+    $identity = @(([string]$rows[0]) -split '\|', -1)
+    $expectedVersions = if ($ExpectedProfile -ceq 'G3M2') { @('3', '2') } else { @('5', '3') }
+    $expectedManifests = if ($ExpectedProfile -ceq 'G3M2') {
+        @($task076GlobalV3ManifestSha256, $task076MemoryV2ManifestSha256)
+    }
+    else {
+        @($task075GlobalV5ManifestSha256, $task075MemoryV3ManifestSha256)
+    }
+    if (
+        $identity.Count -ne 6 -or
+        $identity[0] -notmatch '^[0-9a-f]{64}$' -or
+        $identity[1] -cne $expectedVersions[0] -or
+        $identity[2] -cne $expectedManifests[0] -or
+        $identity[3] -cne $expectedVersions[1] -or
+        $identity[4] -cne $expectedManifests[1] -or
+        $identity[5] -cne $databaseName
+    ) {
+        throw "TASK076_WRITER_TARGET_PROFILE_REJECTED_$ExpectedProfile"
+    }
+
+    $encodedPassword = [Uri]::EscapeDataString($Password)
+    foreach ($entry in ([ordered]@{
+        LATTICE_WRITER_LEASE_MIGRATOR_URL = ('postgresql://lattice_migrator_login:{0}@127.0.0.1:{1}/{2}' -f $encodedPassword, $Port, $databaseName)
+        LATTICE_WRITER_LEASE_RUNTIME_URL = ('postgresql://lattice_runtime_login:{0}@127.0.0.1:{1}/{2}' -f $encodedPassword, $Port, $databaseName)
+        LATTICE_WRITER_LEASE_ADMIN_URL = ('postgresql://task019_harness:{0}@127.0.0.1:{1}/postgres' -f $encodedPassword, $Port)
+        LATTICE_WRITER_LEASE_DATABASE_NAME = $databaseName
+        LATTICE_WRITER_LEASE_DATABASE_IDENTITY_SHA256 = $identity[0]
+        LATTICE_WRITER_LEASE_GLOBAL_MANIFEST_SHA256 = $identity[2]
+        LATTICE_WRITER_LEASE_MEMORY_MANIFEST_SHA256 = $identity[4]
+    }).GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+    }
+}
+
+function Set-Task076RuntimeAdmission {
+    param(
+        [Parameter(Mandatory = $true)][string]$Psql,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$RunId,
+        [Parameter(Mandatory = $true)][ValidateSet('ACTIVE', 'STOPPED')][string]$Mode
+    )
+
+    $databaseName = 'lattice_task019_' + $RunId.Substring(0, 8) + '_base'
+    $daemonInstanceId = 'task076-harness-' + $RunId
+    $query = if ($Mode -ceq 'ACTIVE') {
+        @"
+SET ROLE lattice_migrator;
+UPDATE ONLY control.runtime_admission
+SET admission_mode = 'ACTIVE', daemon_instance_id = '$daemonInstanceId', daemon_epoch = 1,
+    authority_revision = 1,
+    observation_digest = pg_catalog.decode(pg_catalog.repeat('a1', 32), 'hex'),
+    authority_head_digest = pg_catalog.decode(pg_catalog.repeat('a2', 32), 'hex'),
+    updated_at = pg_catalog.clock_timestamp()
+WHERE singleton = true;
+SELECT admission_mode::text, daemon_instance_id, daemon_epoch::text, authority_revision::text,
+       pg_catalog.encode(observation_digest, 'hex'),
+       pg_catalog.encode(authority_head_digest, 'hex')
+FROM ONLY control.runtime_admission WHERE singleton = true;
+RESET ROLE;
+"@
+    }
+    else {
+        @"
+SET ROLE lattice_migrator;
+UPDATE ONLY control.runtime_admission
+SET admission_mode = 'STOPPED', daemon_instance_id = NULL, daemon_epoch = NULL,
+    authority_revision = 0, observation_digest = NULL, authority_head_digest = NULL,
+    updated_at = pg_catalog.clock_timestamp()
+WHERE singleton = true;
+SELECT admission_mode::text, authority_revision::text
+     , COALESCE(daemon_instance_id, '<NULL>')
+     , COALESCE(daemon_epoch::text, '<NULL>')
+     , COALESCE(pg_catalog.encode(observation_digest, 'hex'), '<NULL>')
+     , COALESCE(pg_catalog.encode(authority_head_digest, 'hex'), '<NULL>')
+FROM ONLY control.runtime_admission WHERE singleton = true;
+RESET ROLE;
+"@
+    }
+    $rows = Invoke-HarnessPsqlRows -Psql $Psql -DatabaseName $databaseName `
+        -Port $Port -Password $Password -Query $query `
+        -FailureCode "TASK076_RUNTIME_ADMISSION_${Mode}_REJECTED"
+    if ($rows.Count -ne 1) {
+        throw "TASK076_RUNTIME_ADMISSION_${Mode}_SHAPE_REJECTED"
+    }
+    $values = @(([string]$rows[0]) -split '\|', -1)
+    if ($Mode -ceq 'ACTIVE') {
+        if (
+            $values.Count -ne 6 -or $values[0] -cne 'ACTIVE' -or
+            $values[1] -cne $daemonInstanceId -or $values[2] -cne '1' -or
+            $values[3] -cne '1' -or $values[4] -cne ('a1' * 32) -or
+            $values[5] -cne ('a2' * 32)
+        ) {
+            throw 'TASK076_RUNTIME_ADMISSION_ACTIVE_EVIDENCE_REJECTED'
+        }
+        foreach ($entry in ([ordered]@{
+            LATTICE_WRITER_LEASE_DAEMON_INSTANCE_ID = $values[1]
+            LATTICE_WRITER_LEASE_DAEMON_EPOCH = $values[2]
+            LATTICE_WRITER_LEASE_AUTHORITY_REVISION = $values[3]
+            LATTICE_WRITER_LEASE_ADMISSION_OBSERVATION_SHA256 = $values[4]
+            LATTICE_WRITER_LEASE_AUTHORITY_HEAD_SHA256 = $values[5]
+        }).GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+        }
+    }
+    else {
+        if (
+            $values.Count -ne 6 -or $values[0] -cne 'STOPPED' -or
+            $values[1] -cne '0' -or
+            @($values[2..5] | Where-Object { $_ -cne '<NULL>' }).Count -ne 0
+        ) {
+            throw 'TASK076_RUNTIME_ADMISSION_STOPPED_EVIDENCE_REJECTED'
+        }
+        foreach ($name in @(
+            'LATTICE_WRITER_LEASE_DAEMON_INSTANCE_ID',
+            'LATTICE_WRITER_LEASE_DAEMON_EPOCH',
+            'LATTICE_WRITER_LEASE_AUTHORITY_REVISION',
+            'LATTICE_WRITER_LEASE_ADMISSION_OBSERVATION_SHA256',
+            'LATTICE_WRITER_LEASE_AUTHORITY_HEAD_SHA256'
+        )) {
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+        }
+    }
+}
+
+function Assert-Task076RuntimeAdmissionActive {
+    param(
+        [Parameter(Mandatory = $true)][string]$Psql,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$RunId
+    )
+
+    $databaseName = 'lattice_task019_' + $RunId.Substring(0, 8) + '_base'
+    $rows = Invoke-HarnessPsqlRows -Psql $Psql -DatabaseName $databaseName `
+        -Port $Port -Password $Password -FailureCode 'TASK076_RUNTIME_ADMISSION_RESTART_QUERY_REJECTED' `
+        -Query @"
+SET ROLE lattice_migrator;
+SELECT admission_mode::text, daemon_instance_id, daemon_epoch::text, authority_revision::text,
+       pg_catalog.encode(observation_digest, 'hex'),
+       pg_catalog.encode(authority_head_digest, 'hex')
+FROM ONLY control.runtime_admission WHERE singleton = true;
+RESET ROLE;
+"@
+    if ($rows.Count -ne 1) {
+        throw 'TASK076_RUNTIME_ADMISSION_RESTART_SHAPE_REJECTED'
+    }
+    $values = @(([string]$rows[0]) -split '\|', -1)
+    if (
+        $values.Count -ne 6 -or $values[0] -cne 'ACTIVE' -or
+        $values[1] -cne [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_DAEMON_INSTANCE_ID', 'Process') -or
+        $values[2] -cne [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_DAEMON_EPOCH', 'Process') -or
+        $values[3] -cne [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_AUTHORITY_REVISION', 'Process') -or
+        $values[4] -cne [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_ADMISSION_OBSERVATION_SHA256', 'Process') -or
+        $values[5] -cne [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_AUTHORITY_HEAD_SHA256', 'Process') -or
+        $values[4] -cne ('a1' * 32) -or $values[5] -cne ('a2' * 32)
+    ) {
+        throw 'TASK076_RUNTIME_ADMISSION_RESTART_EVIDENCE_REJECTED'
+    }
+}
+
+function Get-Task076MarkerValues {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Output,
+        [Parameter(Mandatory = $true)][ValidatePattern('^TASK076_[A-Z0-9_]{1,63}$')][string]$Name,
+        [Parameter(Mandatory = $true)][ValidateSet('sha256', 'integer', 'uuid')][string]$Kind
+    )
+
+    $valuePattern = switch ($Kind) {
+        'sha256' { '[a-f0-9]{64}' }
+        'integer' { '[0-9]+' }
+        'uuid' { '[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}' }
+    }
+    $pattern = '(?<![A-Z0-9_])' + [regex]::Escape($Name) + '=(?<value>' + $valuePattern + ')(?![A-Z0-9_])'
+    $values = @()
+    foreach ($item in $Output) {
+        foreach ($match in [regex]::Matches([string]$item, $pattern)) {
+            $values += $match.Groups['value'].Value
+        }
+    }
+    return $values
+}
+
+function Get-Task076InitialEvidence {
+    param([Parameter(Mandatory = $true)][object[]]$Output)
+
+    $text = @($Output | ForEach-Object { [string]$_ }) -join "`n"
+    $required = @(
+        'TASK076_WRITER_SOURCE_SETUP_OK',
+        'TASK076_MEMORY_V2_SOURCE_PASS',
+        'TASK076_WRITER_SOURCE_INSTALL_PASS',
+        'TASK076_WRITER_SOURCE_PASS',
+        'TASK076_WRITER_BRIDGE_PASS',
+        'TASK076_GLOBAL_UPGRADE_OK',
+        'TASK076_MEMORY_UPGRADE_PASS',
+        'TASK076_WRITER_ACTIVATE_PASS',
+        'TASK076_WRITER_RUNTIME_PASS',
+        'TASK076_FINAL_VERIFY_OK',
+        'TASK076_WRITER_FRESH_G5_SETUP_OK',
+        'TASK076_MEMORY_V3_FRESH_SETUP_OK',
+        'TASK076_WRITER_FRESH_INSTALLED_PASS',
+        'TASK076_WRITER_FRESH_ALREADY_CURRENT_PASS',
+        'TASK076_WRITER_FRESH_INSTALL_PASS',
+        'TASK076_WRITER_BASE_ACCESS_OK'
+    )
+    foreach ($token in $required) {
+        if ([regex]::Matches($text, '(?<![A-Z0-9_])' + $token + '(?![A-Z0-9_])').Count -ne 1) {
+            throw "TASK076_INITIAL_EVIDENCE_REJECTED_$token"
+        }
+    }
+    $source = @(Get-Task076MarkerValues -Output $Output -Name 'TASK076_WRITER_SOURCE_SHA256' -Kind sha256)
+    $bridge = @(Get-Task076MarkerValues -Output $Output -Name 'TASK076_WRITER_BRIDGE_SHA256' -Kind sha256)
+    $runtime = @(Get-Task076MarkerValues -Output $Output -Name 'TASK076_WRITER_RUNTIME_SHA256' -Kind sha256)
+    $fences = @(Get-Task076MarkerValues -Output $Output -Name 'TASK076_WRITER_FENCING_HIGH_WATER' -Kind integer)
+    $commands = @(Get-Task076MarkerValues -Output $Output -Name 'TASK076_WRITER_COMMAND_HIGH_WATER' -Kind integer)
+    $transitions = @(Get-Task076MarkerValues -Output $Output -Name 'TASK076_WRITER_TRANSITION_HIGH_WATER' -Kind integer)
+    $freshDatabase = @(
+        Get-Task076MarkerValues -Output $Output `
+            -Name 'TASK076_WRITER_FRESH_DATABASE_UUID' -Kind uuid
+    )
+    $freshProfile = @(
+        Get-Task076MarkerValues -Output $Output `
+            -Name 'TASK076_WRITER_FRESH_PROFILE_SHA256' -Kind sha256
+    )
+    $freshG5 = @()
+    $freshM3 = @()
+    $baseDatabaseIds = @()
+    foreach ($item in $Output) {
+        $line = [string]$item
+        $g5 = [regex]::Match(
+            $line,
+            '(?:^|\s)TASK076_FRESH_G5_EVIDENCE database_uuid=(?<uuid>[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}) manifest_sha256=(?<manifest>[0-9a-f]{64})$'
+        )
+        if ($g5.Success) { $freshG5 += $g5 }
+        $m3 = [regex]::Match(
+            $line,
+            '(?:^|\s)TASK076_FRESH_M3_EVIDENCE database_uuid=(?<uuid>[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}) manifest_sha256=(?<manifest>[0-9a-f]{64})$'
+        )
+        if ($m3.Success) { $freshM3 += $m3 }
+        $base = [regex]::Match(
+            $line,
+            '(?:^|\s)TASK019_EVIDENCE database_uuid=(?<uuid>[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}) manifest_sha256=[0-9a-f]{64}$'
+        )
+        if ($base.Success) { $baseDatabaseIds += $base.Groups['uuid'].Value }
+    }
+    if (
+        $source.Count -ne 2 -or $source[0] -cne $source[1] -or
+        $bridge.Count -ne 1 -or $bridge[0] -cne $source[0] -or
+        $runtime.Count -ne 1 -or $runtime[0] -ceq $source[0] -or
+        $fences.Count -ne 2 -or $fences[0] -cne '1' -or $fences[1] -cne '2' -or
+        $commands.Count -ne 2 -or $commands[0] -cne '2' -or $commands[1] -cne '4' -or
+        $transitions.Count -ne 2 -or $transitions[0] -cne '2' -or $transitions[1] -cne '4' -or
+        $freshDatabase.Count -ne 1 -or $freshProfile.Count -ne 1 -or
+        $freshG5.Count -ne 1 -or $freshM3.Count -ne 1 -or $baseDatabaseIds.Count -ne 3 -or
+        $freshG5[0].Groups['uuid'].Value -cne $freshDatabase[0] -or
+        $freshM3[0].Groups['uuid'].Value -cne $freshDatabase[0] -or
+        $freshG5[0].Groups['manifest'].Value -cne $task075GlobalV5ManifestSha256 -or
+        $freshM3[0].Groups['manifest'].Value -cne $task075MemoryV3ManifestSha256 -or
+        @($baseDatabaseIds | Where-Object { $_ -ceq $freshDatabase[0] }).Count -ne 0
+    ) {
+        throw 'TASK076_INITIAL_HISTORY_EVIDENCE_REJECTED'
+    }
+    return [pscustomobject]@{
+        SourceSha256 = $source[0]
+        RuntimeSha256 = $runtime[0]
+        FreshDatabaseId = $freshDatabase[0]
+        FreshProfileSha256 = $freshProfile[0]
+    }
+}
+
+function Get-Task076RestartTargetEvidence {
+    param([Parameter(Mandatory = $true)][object[]]$Output)
+
+    $evidence = @()
+    foreach ($item in $Output) {
+        $match = [regex]::Match(
+            [string]$item,
+            '(?:^|\s)TASK019_EVIDENCE database_uuid=(?<uuid>[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}) manifest_sha256=(?<manifest>[0-9a-f]{64})$'
+        )
+        if ($match.Success) {
+            $evidence += [pscustomobject]@{
+                DatabaseId = $match.Groups['uuid'].Value
+                ManifestHash = $match.Groups['manifest'].Value
+            }
+        }
+    }
+    if (
+        $evidence.Count -ne 3 -or
+        $evidence[0].DatabaseId -cne $evidence[1].DatabaseId -or
+        $evidence[1].DatabaseId -cne $evidence[2].DatabaseId -or
+        $evidence[0].ManifestHash -cne $task076GlobalV3ManifestSha256 -or
+        $evidence[1].ManifestHash -cne $task075GlobalV5ManifestSha256 -or
+        $evidence[2].ManifestHash -cne $task075GlobalV5ManifestSha256
+    ) {
+        throw 'TASK076_RESTART_TARGET_EVIDENCE_REJECTED'
+    }
+    return $evidence[2]
+}
+
+function Get-Task076MeasurementTargetEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Output,
+        [Parameter(Mandatory = $true)][ValidateSet('bridge', 'current')][string]$Profile
+    )
+
+    $evidence = @()
+    foreach ($item in $Output) {
+        $match = [regex]::Match(
+            [string]$item,
+            '(?:^|\s)TASK019_EVIDENCE database_uuid=(?<uuid>[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}) manifest_sha256=(?<manifest>[0-9a-f]{64})$'
+        )
+        if ($match.Success) {
+            $evidence += [pscustomobject]@{
+                DatabaseId = $match.Groups['uuid'].Value
+                ManifestHash = $match.Groups['manifest'].Value
+            }
+        }
+    }
+    $expectedCount = if ($Profile -ceq 'bridge') { 1 } else { 2 }
+    if (
+        $evidence.Count -ne $expectedCount -or
+        $evidence[0].ManifestHash -cne $task076GlobalV3ManifestSha256 -or
+        (
+            $Profile -ceq 'current' -and (
+                $evidence[1].DatabaseId -cne $evidence[0].DatabaseId -or
+                $evidence[1].ManifestHash -cne $task075GlobalV5ManifestSha256
+            )
+        )
+    ) {
+        throw "TASK076_CATALOG_${Profile}_TARGET_EVIDENCE_REJECTED"
+    }
+    return $evidence[$expectedCount - 1]
+}
+
+function Assert-Task076RestartEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Output,
+        [Parameter(Mandatory = $true)]$InitialEvidence,
+        [Parameter(Mandatory = $true)]$InitialTargetEvidence
+    )
+
+    $text = @($Output | ForEach-Object { [string]$_ }) -join "`n"
+    foreach ($token in @(
+        'TASK076_WRITER_RESTART_PASS',
+        'TASK076_WRITER_RESTART_OK',
+        'TASK076_WRITER_FRESH_ACCESS_OK',
+        'TASK076_WRITER_FRESH_RESTART_ALREADY_CURRENT_PASS',
+        'TASK076_WRITER_FRESH_RESTART_PASS',
+        'TASK076_WRITER_BASE_ACCESS_OK'
+    )) {
+        if ([regex]::Matches($text, '(?<![A-Z0-9_])' + $token + '(?![A-Z0-9_])').Count -ne 1) {
+            throw "TASK076_RESTART_EVIDENCE_REJECTED_$token"
+        }
+    }
+    $restart = @(Get-Task076MarkerValues -Output $Output -Name 'TASK076_WRITER_RESTART_SHA256' -Kind sha256)
+    $fences = @(Get-Task076MarkerValues -Output $Output -Name 'TASK076_WRITER_FENCING_HIGH_WATER' -Kind integer)
+    $commands = @(Get-Task076MarkerValues -Output $Output -Name 'TASK076_WRITER_COMMAND_HIGH_WATER' -Kind integer)
+    $transitions = @(Get-Task076MarkerValues -Output $Output -Name 'TASK076_WRITER_TRANSITION_HIGH_WATER' -Kind integer)
+    $freshDatabase = @(
+        Get-Task076MarkerValues -Output $Output `
+            -Name 'TASK076_WRITER_FRESH_RESTART_DATABASE_UUID' -Kind uuid
+    )
+    $freshProfile = @(
+        Get-Task076MarkerValues -Output $Output `
+            -Name 'TASK076_WRITER_FRESH_RESTART_PROFILE_SHA256' -Kind sha256
+    )
+    $targetEvidence = @()
+    foreach ($item in $Output) {
+        $match = [regex]::Match(
+            [string]$item,
+            '(?:^|\s)TASK019_EVIDENCE database_uuid=(?<uuid>[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}) manifest_sha256=(?<manifest>[0-9a-f]{64})$'
+        )
+        if ($match.Success) {
+            $targetEvidence += [pscustomobject]@{
+                DatabaseId = $match.Groups['uuid'].Value
+                ManifestHash = $match.Groups['manifest'].Value
+            }
+        }
+    }
+    if (
+        $restart.Count -ne 1 -or $restart[0] -cne [string]$InitialEvidence.RuntimeSha256 -or
+        $fences.Count -ne 1 -or $fences[0] -cne '2' -or
+        $commands.Count -ne 1 -or $commands[0] -cne '4' -or
+        $transitions.Count -ne 1 -or $transitions[0] -cne '4' -or
+        $targetEvidence.Count -ne 1 -or
+        $targetEvidence[0].DatabaseId -cne [string]$InitialTargetEvidence.DatabaseId -or
+        $targetEvidence[0].ManifestHash -cne $task075GlobalV5ManifestSha256 -or
+        $freshDatabase.Count -ne 1 -or
+        $freshDatabase[0] -cne [string]$InitialEvidence.FreshDatabaseId -or
+        $freshDatabase[0] -ceq [string]$InitialTargetEvidence.DatabaseId -or
+        $freshProfile.Count -ne 1 -or
+        $freshProfile[0] -cne [string]$InitialEvidence.FreshProfileSha256
+    ) {
+        throw 'TASK076_RESTART_HISTORY_EVIDENCE_REJECTED'
+    }
+    return [pscustomobject]@{
+        FreshDatabaseId = $freshDatabase[0]
+        FreshProfileSha256 = $freshProfile[0]
+    }
+}
+
+function Invoke-Task076WriterLeaseGatePhase {
+    param(
+        [Parameter(Mandatory = $true)][string]$Cargo,
+        [Parameter(Mandatory = $true)][string]$Psql,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$RunId,
+        [Parameter(Mandatory = $true)][ValidateSet('initial', 'restart')][string]$Phase,
+        [ValidateSet('bridge', 'current')][string]$MeasurementProfile
+    )
+
+    $output = @()
+    if ($Phase -ceq 'initial') {
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-store' -TestName 'marker_owned_postgres_17_foundation' `
+            -PhaseEnvironmentName 'LATTICE_TASK019_PHASE' -Phase 'task076_writer_source_setup' `
+            -ExpectedToken 'TASK076_WRITER_SOURCE_SETUP_OK')
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-codebase-memory' `
+            -TestName 'exact_memory_extension_install_and_restart_profile' `
+            -PhaseEnvironmentName 'LATTICE_TASK019_PHASE' -Phase 'task076_memory_source_setup' `
+            -ExpectedToken 'TASK076_MEMORY_V2_SOURCE_PASS')
+        Set-Task076WriterTargetEnvironment -Psql $Psql -Port $Port -Password $Password `
+            -RunId $RunId -ExpectedProfile 'G3M2'
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-writer-lease' `
+            -TestName 'live_postgres_acquire_restarts_and_replays_authority_when_provisioned' `
+            -PhaseEnvironmentName 'LATTICE_TASK076_WRITER_PHASE' -Phase 'source_install' `
+            -ExpectedToken 'TASK076_WRITER_SOURCE_INSTALL_PASS')
+        Set-Task076RuntimeAdmission -Psql $Psql -Port $Port -Password $Password `
+            -RunId $RunId -Mode 'ACTIVE'
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-writer-lease' `
+            -TestName 'live_postgres_acquire_restarts_and_replays_authority_when_provisioned' `
+            -PhaseEnvironmentName 'LATTICE_TASK076_WRITER_PHASE' -Phase 'source_seed' `
+            -ExpectedToken 'TASK076_WRITER_SOURCE_PASS')
+        Set-Task076RuntimeAdmission -Psql $Psql -Port $Port -Password $Password `
+            -RunId $RunId -Mode 'STOPPED'
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-writer-lease' `
+            -TestName 'live_postgres_acquire_restarts_and_replays_authority_when_provisioned' `
+            -PhaseEnvironmentName 'LATTICE_TASK076_WRITER_PHASE' -Phase 'bridge' `
+            -ExpectedToken 'TASK076_WRITER_BRIDGE_PASS')
+        if ($MeasurementProfile -ceq 'bridge') {
+            $output += @(Invoke-Task076WriterCatalogMeasurement `
+                -Cargo $Cargo -RepositoryRoot $RepositoryRoot -Profile 'bridge')
+            [Environment]::SetEnvironmentVariable('LATTICE_TASK019_PHASE', $Phase, 'Process')
+            [Environment]::SetEnvironmentVariable('LATTICE_TASK076_WRITER_PHASE', $null, 'Process')
+            return $output
+        }
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-store' -TestName 'marker_owned_postgres_17_foundation' `
+            -PhaseEnvironmentName 'LATTICE_TASK019_PHASE' -Phase 'task076_global_upgrade' `
+            -ExpectedToken 'TASK076_GLOBAL_UPGRADE_OK')
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-codebase-memory' `
+            -TestName 'exact_memory_extension_install_and_restart_profile' `
+            -PhaseEnvironmentName 'LATTICE_TASK019_PHASE' -Phase 'task076_memory_upgrade' `
+            -ExpectedToken 'TASK076_MEMORY_UPGRADE_PASS')
+        Set-Task076WriterTargetEnvironment -Psql $Psql -Port $Port -Password $Password `
+            -RunId $RunId -ExpectedProfile 'G5M3'
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-writer-lease' `
+            -TestName 'live_postgres_acquire_restarts_and_replays_authority_when_provisioned' `
+            -PhaseEnvironmentName 'LATTICE_TASK076_WRITER_PHASE' -Phase 'activate' `
+            -ExpectedToken 'TASK076_WRITER_ACTIVATE_PASS')
+        if ($MeasurementProfile -ceq 'current') {
+            $output += @(Invoke-Task076WriterCatalogMeasurement `
+                -Cargo $Cargo -RepositoryRoot $RepositoryRoot -Profile 'current')
+            [Environment]::SetEnvironmentVariable('LATTICE_TASK019_PHASE', $Phase, 'Process')
+            [Environment]::SetEnvironmentVariable('LATTICE_TASK076_WRITER_PHASE', $null, 'Process')
+            return $output
+        }
+        Set-Task076RuntimeAdmission -Psql $Psql -Port $Port -Password $Password `
+            -RunId $RunId -Mode 'ACTIVE'
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-writer-lease' `
+            -TestName 'live_postgres_acquire_restarts_and_replays_authority_when_provisioned' `
+            -PhaseEnvironmentName 'LATTICE_TASK076_WRITER_PHASE' -Phase 'runtime' `
+            -ExpectedToken 'TASK076_WRITER_RUNTIME_PASS')
+        Set-Task076RuntimeAdmission -Psql $Psql -Port $Port -Password $Password `
+            -RunId $RunId -Mode 'STOPPED'
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-store' -TestName 'marker_owned_postgres_17_foundation' `
+            -PhaseEnvironmentName 'LATTICE_TASK019_PHASE' -Phase 'task076_final_verify' `
+            -ExpectedToken 'TASK076_FINAL_VERIFY_OK')
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-store' -TestName 'marker_owned_postgres_17_foundation' `
+            -PhaseEnvironmentName 'LATTICE_TASK019_PHASE' -Phase 'task076_writer_fresh_setup' `
+            -ExpectedToken 'TASK076_WRITER_FRESH_G5_SETUP_OK')
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-codebase-memory' `
+            -TestName 'exact_memory_extension_install_and_restart_profile' `
+            -PhaseEnvironmentName 'LATTICE_TASK019_PHASE' -Phase 'task076_memory_fresh_setup' `
+            -ExpectedToken 'TASK076_MEMORY_V3_FRESH_SETUP_OK')
+        Set-Task076WriterTargetEnvironment -Psql $Psql -Port $Port -Password $Password `
+            -RunId $RunId -ExpectedProfile 'G5M3' -DatabaseTag 'writer_fresh'
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-writer-lease' `
+            -TestName 'live_postgres_acquire_restarts_and_replays_authority_when_provisioned' `
+            -PhaseEnvironmentName 'LATTICE_TASK076_WRITER_PHASE' -Phase 'fresh_install' `
+            -ExpectedToken 'TASK076_WRITER_FRESH_INSTALL_PASS')
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-store' -TestName 'marker_owned_postgres_17_foundation' `
+            -PhaseEnvironmentName 'LATTICE_TASK019_PHASE' -Phase 'task076_writer_base_access' `
+            -ExpectedToken 'TASK076_WRITER_BASE_ACCESS_OK')
+        Set-Task076RuntimeAdmission -Psql $Psql -Port $Port -Password $Password `
+            -RunId $RunId -Mode 'ACTIVE'
+    }
+    else {
+        if (-not [string]::IsNullOrWhiteSpace($MeasurementProfile)) {
+            $targetProfile = if ($MeasurementProfile -ceq 'bridge') { 'G3M2' } else { 'G5M3' }
+            Set-Task076WriterTargetEnvironment -Psql $Psql -Port $Port -Password $Password `
+                -RunId $RunId -ExpectedProfile $targetProfile
+            $output += @(Invoke-Task076WriterCatalogMeasurement `
+                -Cargo $Cargo -RepositoryRoot $RepositoryRoot -Profile $MeasurementProfile)
+            [Environment]::SetEnvironmentVariable('LATTICE_TASK019_PHASE', $Phase, 'Process')
+            [Environment]::SetEnvironmentVariable('LATTICE_TASK076_WRITER_PHASE', $null, 'Process')
+            return $output
+        }
+        Set-Task076WriterTargetEnvironment -Psql $Psql -Port $Port -Password $Password `
+            -RunId $RunId -ExpectedProfile 'G5M3'
+        Assert-Task076RuntimeAdmissionActive -Psql $Psql -Port $Port -Password $Password `
+            -RunId $RunId
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-writer-lease' `
+            -TestName 'live_postgres_acquire_restarts_and_replays_authority_when_provisioned' `
+            -PhaseEnvironmentName 'LATTICE_TASK076_WRITER_PHASE' -Phase 'restart' `
+            -ExpectedToken 'TASK076_WRITER_RESTART_PASS')
+        Set-Task076RuntimeAdmission -Psql $Psql -Port $Port -Password $Password `
+            -RunId $RunId -Mode 'STOPPED'
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-store' -TestName 'marker_owned_postgres_17_foundation' `
+            -PhaseEnvironmentName 'LATTICE_TASK019_PHASE' -Phase 'task076_writer_restart' `
+            -ExpectedToken 'TASK076_WRITER_RESTART_OK')
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-store' -TestName 'marker_owned_postgres_17_foundation' `
+            -PhaseEnvironmentName 'LATTICE_TASK019_PHASE' -Phase 'task076_writer_fresh_access' `
+            -ExpectedToken 'TASK076_WRITER_FRESH_ACCESS_OK')
+        Set-Task076WriterTargetEnvironment -Psql $Psql -Port $Port -Password $Password `
+            -RunId $RunId -ExpectedProfile 'G5M3' -DatabaseTag 'writer_fresh'
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-writer-lease' `
+            -TestName 'live_postgres_acquire_restarts_and_replays_authority_when_provisioned' `
+            -PhaseEnvironmentName 'LATTICE_TASK076_WRITER_PHASE' -Phase 'fresh_restart' `
+            -ExpectedToken 'TASK076_WRITER_FRESH_RESTART_PASS')
+        $output += @(Invoke-Task076CargoLivePhase -Cargo $Cargo -RepositoryRoot $RepositoryRoot `
+            -Package 'lattice-postgres-store' -TestName 'marker_owned_postgres_17_foundation' `
+            -PhaseEnvironmentName 'LATTICE_TASK019_PHASE' -Phase 'task076_writer_base_access' `
+            -ExpectedToken 'TASK076_WRITER_BASE_ACCESS_OK')
+    }
+    [Environment]::SetEnvironmentVariable('LATTICE_TASK019_PHASE', $Phase, 'Process')
+    [Environment]::SetEnvironmentVariable('LATTICE_TASK076_WRITER_PHASE', $null, 'Process')
+    return $output
 }
 
 function Get-PgIsReadyExitCode {
@@ -2311,7 +3222,7 @@ function Add-Task019HolderEvent {
             'INITIAL_POSTMASTER_STOPPED', 'RESTART_POSTMASTER_READY',
             'CONSUMER_STARTED', 'CONSUMER_EXITED', 'HOLDER_STOP_REQUESTED',
             'HOLDER_STOPPED', 'CATALOG_SIGNATURES_MEASURED', 'CATALOG_SIGNATURES_PARTIAL',
-            'CATALOG_DIAGNOSTIC_FAILED', 'LIVE_GATE_FAILED',
+            'CATALOG_DIAGNOSTIC_FAILED', 'LIVE_GATE_FAILED', 'TASK076_WRITER_V2_VERIFIED',
             'CLEANUP_REQUESTED',
             'CLEANUP_COMPLETED', 'RECEIPT_CLOSED'
         )][string]$EventType,
@@ -2655,8 +3566,46 @@ try {
         listener_port = [long]$postgresProcessIdentity.listener_port
         data_native_identity = [string]$marker.data_native_identity
     })
-    $initialOutput = Invoke-LiveTest -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'initial'
-    $restartEvidence = Get-RestartEvidence -TestOutput $initialOutput
+    if ($RunTask076WriterLeaseGate) {
+        if ($task076CatalogMeasurementRequested) {
+            $initialOutput = Invoke-Task076WriterLeaseGatePhase `
+                -Cargo $cargoCommand.Source `
+                -Psql $psql `
+                -RepositoryRoot $repositoryRoot `
+                -Port $port `
+                -Password $oneTimePassword `
+                -RunId $runId `
+                -Phase 'initial' `
+                -MeasurementProfile $MeasureTask076WriterCatalog
+            $task076CatalogInitial = @(
+                Get-Task076WriterCatalogMeasurement `
+                    -Output $initialOutput `
+                    -Profile $MeasureTask076WriterCatalog
+            )
+            $restartEvidence = Get-Task076MeasurementTargetEvidence `
+                -Output $initialOutput `
+                -Profile $MeasureTask076WriterCatalog
+            $task076InitialEvidence = $null
+        }
+        else {
+            $initialOutput = Invoke-Task076WriterLeaseGatePhase `
+                -Cargo $cargoCommand.Source `
+                -Psql $psql `
+                -RepositoryRoot $repositoryRoot `
+                -Port $port `
+                -Password $oneTimePassword `
+                -RunId $runId `
+                -Phase 'initial'
+            $task076InitialEvidence = Get-Task076InitialEvidence -Output $initialOutput
+            $restartEvidence = Get-Task076RestartTargetEvidence -Output $initialOutput
+            $task076CatalogInitial = @()
+        }
+    }
+    else {
+        $initialOutput = Invoke-LiveTest -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'initial'
+        $restartEvidence = Get-RestartEvidence -TestOutput $initialOutput
+        $task076InitialEvidence = $null
+    }
     if ($task075CatalogMeasurementRequested) {
         $catalogSignatures = @($initialOutput | Where-Object {
             [string]$_ -cmatch '^TASK075_[A-Z0-9_]+_(?:STORE|MEMORY)_CATALOG_[A-Z_]+_SIGNATURE=[a-f0-9]{64}$'
@@ -2759,7 +3708,78 @@ try {
     })
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_UUID', $restartEvidence.DatabaseId, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_MANIFEST', $restartEvidence.ManifestHash, 'Process')
-    $null = Invoke-LiveTest -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'restart'
+    if ($RunTask076WriterLeaseGate) {
+        if ($task076CatalogMeasurementRequested) {
+            $task076RestartOutput = Invoke-Task076WriterLeaseGatePhase `
+                -Cargo $cargoCommand.Source `
+                -Psql $psql `
+                -RepositoryRoot $repositoryRoot `
+                -Port $port `
+                -Password $oneTimePassword `
+                -RunId $runId `
+                -Phase 'restart' `
+                -MeasurementProfile $MeasureTask076WriterCatalog
+            $task076CatalogRestart = @(
+                Get-Task076WriterCatalogMeasurement `
+                    -Output $task076RestartOutput `
+                    -Profile $MeasureTask076WriterCatalog
+            )
+            if (
+                $task076CatalogInitial.Count -ne 20 -or
+                $task076CatalogRestart.Count -ne 20 -or
+                ($task076CatalogInitial -join "`n") -cne ($task076CatalogRestart -join "`n")
+            ) {
+                throw 'TASK076_CATALOG_RESTART_SUBSTITUTION_REJECTED'
+            }
+            Add-Task019HolderEvent `
+                -Receipt $holderReceipt `
+                -EventType 'CATALOG_SIGNATURES_MEASURED' `
+                -Payload ([ordered]@{
+                    profile = $MeasureTask076WriterCatalog
+                    signatures = $task076CatalogInitial
+                    physical_restart_matched = $true
+                })
+            $task076CatalogInitial | Write-Output
+        }
+        else {
+            $task076RestartOutput = Invoke-Task076WriterLeaseGatePhase `
+                -Cargo $cargoCommand.Source `
+                -Psql $psql `
+                -RepositoryRoot $repositoryRoot `
+                -Port $port `
+                -Password $oneTimePassword `
+                -RunId $runId `
+                -Phase 'restart'
+            $task076FreshRestartEvidence = Assert-Task076RestartEvidence `
+                -Output $task076RestartOutput `
+                -InitialEvidence $task076InitialEvidence `
+                -InitialTargetEvidence $restartEvidence
+            Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'TASK076_WRITER_V2_VERIFIED' -Payload ([ordered]@{
+                upgrade_database_uuid = [string]$restartEvidence.DatabaseId
+                source_history_sha256 = [string]$task076InitialEvidence.SourceSha256
+                runtime_history_sha256 = [string]$task076InitialEvidence.RuntimeSha256
+                fencing_high_water = 2L
+                command_high_water = 4L
+                transition_high_water = 4L
+                physical_restart_verified = $true
+                fresh_database_name = 'lattice_task019_' + $runId.Substring(0, 8) + '_writer_fresh'
+                fresh_database_uuid = [string]$task076InitialEvidence.FreshDatabaseId
+                fresh_global_manifest_sha256 = $task075GlobalV5ManifestSha256
+                fresh_memory_manifest_sha256 = $task075MemoryV3ManifestSha256
+                fresh_writer_manifest_sha256 = $task076WriterV2ManifestSha256
+                fresh_ledger_shape = '1:INSTALLED'
+                fresh_initial_profile_sha256 = [string]$task076InitialEvidence.FreshProfileSha256
+                fresh_restart_profile_sha256 = [string]$task076FreshRestartEvidence.FreshProfileSha256
+                fresh_initial_install_outcome = 'INSTALLED'
+                fresh_initial_reapply_outcome = 'ALREADY_CURRENT'
+                fresh_restart_reapply_outcome = 'ALREADY_CURRENT'
+                fresh_physical_restart_verified = $true
+            })
+        }
+    }
+    else {
+        $null = Invoke-LiveTest -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'restart'
+    }
     if ($RunTask068HermesReplayGate) {
         $task068RestartOutput = Invoke-Task068HermesReplayGate `
             -Cargo $cargoCommand.Source `
@@ -3071,6 +4091,13 @@ Write-Output 'ENDPOINT=127.0.0.1:<dynamic-excludes-5432-64272-55432>'
 Write-Output 'PHASES=initial,restart'
 if ($RunTask068HermesReplayGate) {
     Write-Output 'TASK068_HERMES_POSTGRES_REPLAY=PASS'
+}
+if ($RunTask076WriterLeaseGate -and -not $task076CatalogMeasurementRequested) {
+    Write-Output 'TASK076_WRITER_LEASE_V2_BRIDGE=PASS'
+    Write-Output 'TASK076_WRITER_LEASE_V2_FRESH_CURRENT=PASS'
+}
+if ($task076CatalogMeasurementRequested) {
+    Write-Output "TASK076_WRITER_CATALOG_MEASUREMENT=$MeasureTask076WriterCatalog"
 }
 if ($null -ne $holderFinalEvidence) {
     Write-Output ('HOLDER_RECEIPT_PATH=' + [string]$holderFinalEvidence.path)

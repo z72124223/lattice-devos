@@ -15,6 +15,245 @@ const CURRENT_V5_MANIFEST_SHA256: &str =
     "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
 
 #[test]
+fn task076_store_migration_locks_global_memory_writer_before_classification() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    let apply = setup
+        .split_once("pub fn apply_migrations")
+        .expect("migration runner")
+        .1
+        .split_once("pub fn verify_postgres_schema")
+        .expect("migration runner boundary")
+        .0;
+    let global = apply
+        .find("&MIGRATION_ADVISORY_LOCK")
+        .expect("global migration advisory lock");
+    let memory = apply
+        .find("&CODEBASE_MEMORY_ADVISORY_LOCK")
+        .expect("Memory advisory lock");
+    let writer = apply
+        .find("&WRITER_LEASE_ADVISORY_LOCK")
+        .expect("Writer Lease advisory lock");
+    let classify = apply
+        .find("classify_installed_manifest_state")
+        .expect("installed profile classification");
+    assert!(global < memory && memory < writer && writer < classify);
+
+    let source = setup
+        .split_once("fn verify_v3_upgrade_source")
+        .expect("v3 upgrade source verifier")
+        .1
+        .split_once("fn v3_upgrade_source_has_memory")
+        .expect("v3 verifier boundary")
+        .0;
+    let memory_tables = source
+        .find("LOCK TABLE memory.codebase_memory_analyses")
+        .expect("Memory source locks");
+    let writer_tables = source
+        .find("LOCK TABLE writer_lease.writer_lease_commands")
+        .expect("Writer Lease source locks");
+    let reclassify = source[memory_tables..]
+        .find("classify_current_catalog_profile")
+        .map(|offset| memory_tables + offset)
+        .expect("locked profile reclassification");
+    assert!(memory_tables < writer_tables && writer_tables < reclassify);
+    assert!(source.contains("CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge"));
+}
+
+#[test]
+fn task076_store_freezes_writer_v2_catalog_acl_identity_and_ledger_profiles() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    for required in [
+        "WRITER_LEASE_V2_SQL_SHA256",
+        "WRITER_LEASE_V2_MANIFEST_SHA256",
+        "WRITER_LEASE_V2_BRIDGE_CATALOG_PROFILES",
+        "WRITER_LEASE_V2_CURRENT_CATALOG_PROFILES",
+        "verify_writer_lease_v2_catalog",
+        "verify_writer_lease_v2_function_sources",
+        "verify_writer_lease_v2_identity_and_ledger",
+        "LATTICE_WRITER_LEASE_SCHEMA_V2",
+        "LATTICE_WRITER_LEASE_EXTENSION_IDENTITY_V2",
+        "LATTICE_WRITER_LEASE_EXTENSION_LEDGER_V2",
+        "writer_lease_bind_runtime_v2",
+        "writer_lease_load_for_update_v2",
+        "1:INSTALLED,2:UPGRADED",
+        "1:INSTALLED,2:UPGRADED,3:REBOUND",
+        "WriterLeaseV2RuntimeProfile::Bridge",
+        "WriterLeaseV2RuntimeProfile::Current",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing exact Writer v2 sentinel: {required}"
+        );
+    }
+    for measured_bridge_signature in [
+        "382b81889838d60c02ce5c31f77454e93f23372d90b3137a47663c5de74f9670",
+        "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+        "3463b3ac82c1a7c53e5a80c41995f882ffe5f3f07fc5a82a97d50582d4d26915",
+        "66b315513cbf50c3c7dbc143eb7061c6dbb823d7eac853c50f83434caf1a1022",
+        "caa34168b5f9da4c8d2d02fce6e98882d73456c7c1f5c1af2b71f404efc647d1",
+        "f8a84b870fcb8b091dbc7f9cf6835fb4311064eec5c83b31159a9a936a11e738",
+        "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+        "73951f1b33a4d6b3c4742fb49f91cf0601f04fd472b21c4db8bb36815fed0e89",
+        "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+        "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+    ] {
+        assert!(
+            setup.contains(measured_bridge_signature),
+            "missing measured Writer v2 bridge profile: {measured_bridge_signature}"
+        );
+    }
+    assert!(setup.contains("runtime == WriterLeaseV2RuntimeProfile::Bridge"));
+    assert!(setup.contains(
+        "WriterLeaseV2RuntimeProfile::Bridge => &WRITER_LEASE_V2_BRIDGE_CATALOG_PROFILES"
+    ));
+    assert!(setup.contains(
+        "WriterLeaseV2RuntimeProfile::Current => &WRITER_LEASE_V2_CURRENT_CATALOG_PROFILES"
+    ));
+    assert!(setup.contains("bd5b05d60340a1b9f9fbf1de2b4bed8586b7eede4fd8d7c4825841c221e89b7a"));
+    assert!(setup.contains("\"{}|t|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\""));
+    assert!(!setup.contains("\"{}|true|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\""));
+    let writer_v2_catalog = setup
+        .split_once("fn verify_writer_lease_v2_catalog")
+        .expect("Writer v2 companion catalog verifier")
+        .1
+        .split_once("fn verify_writer_lease_v2_function_catalog")
+        .expect("Writer v2 companion catalog verifier boundary")
+        .0;
+    assert!(!writer_v2_catalog.contains("AND NOT con.connoinherit"));
+    assert!(!writer_v2_catalog.contains("AND NOT p.proretset"));
+    assert!(
+        setup.contains("('pg_catalog.pg_try_advisory_lock(bigint)', 'lattice_migrator'::text)")
+    );
+    assert!(setup.contains("WRITER_LEASE_V1_SQL"));
+    assert!(setup.contains("WRITER_LEASE_V2_SQL"));
+    assert!(setup.contains("WriterLeaseV2RuntimeProfile::Bridge => 0_i64"));
+    assert!(setup.contains("WriterLeaseV2RuntimeProfile::Current => 7_i64"));
+}
+
+#[test]
+fn task076_harness_stops_for_final_migration_verify_then_restores_restart_admission() {
+    let harness = include_str!("../../../scripts/run-task019-postgres.ps1");
+    let phase = harness
+        .split_once("function Invoke-Task076WriterLeaseGatePhase")
+        .expect("TASK-076 Writer gate phase")
+        .1
+        .split_once("function Get-PgIsReadyExitCode")
+        .expect("TASK-076 Writer gate phase boundary")
+        .0;
+    let runtime = phase
+        .find("-Phase 'runtime'")
+        .expect("Writer runtime phase");
+    let stopped = runtime
+        + phase[runtime..]
+            .find("-Mode 'STOPPED'")
+            .expect("stopped migration boundary");
+    let final_verify = phase
+        .find("-Phase 'task076_final_verify'")
+        .expect("final Store no-op verify");
+    let base_access = phase
+        .find("-Phase 'task076_writer_base_access'")
+        .expect("initial base access proof");
+    let restored = base_access
+        + phase[base_access..]
+            .find("-Mode 'ACTIVE'")
+            .expect("restart admission restore");
+    assert!(runtime < stopped && stopped < final_verify);
+    assert!(base_access < restored);
+    let writer_restart = phase
+        .rfind("-Phase 'restart'")
+        .expect("Writer restart proof");
+    let restart_stopped = writer_restart
+        + phase[writer_restart..]
+            .find("-Mode 'STOPPED'")
+            .expect("stopped restart verification boundary");
+    let store_restart = phase
+        .find("-Phase 'task076_writer_restart'")
+        .expect("Store restart verifier");
+    assert!(writer_restart < restart_stopped && restart_stopped < store_restart);
+}
+
+#[test]
+fn task076_store_live_phases_are_closed_and_emit_fixed_pass_tokens() {
+    let live = include_str!("postgres_live.rs");
+    for phase in [
+        "task076_writer_source_setup",
+        "task076_global_upgrade",
+        "task076_final_verify",
+        "task076_writer_fresh_setup",
+        "task076_writer_fresh_access",
+        "task076_writer_base_access",
+        "task076_writer_restart",
+    ] {
+        assert!(
+            live.contains(phase),
+            "missing TASK076 Store live phase: {phase}"
+        );
+    }
+    for token in [
+        "TASK076_WRITER_SOURCE_SETUP_OK",
+        "TASK076_GLOBAL_UPGRADE_OK",
+        "TASK076_FINAL_VERIFY_OK",
+        "TASK076_WRITER_FRESH_G5_SETUP_OK",
+        "TASK076_WRITER_FRESH_ACCESS_OK",
+        "TASK076_WRITER_BASE_ACCESS_OK",
+        "TASK076_WRITER_RESTART_OK",
+    ] {
+        assert!(
+            live.contains(token),
+            "missing TASK076 Store PASS token: {token}"
+        );
+    }
+    assert!(live.contains("writer_fresh"));
+
+    let access_start = live
+        .find("fn run_task076_writer_access_phase")
+        .expect("TASK076 single-target access phase");
+    let access_end = live[access_start..]
+        .find("\nfn run_initial_phase")
+        .map(|offset| access_start + offset)
+        .expect("TASK076 single-target access phase end");
+    let access = &live[access_start..access_end];
+    assert!(access.contains("matches!(database_tag, \"base\" | \"writer_fresh\")"));
+    assert_eq!(
+        access
+            .matches("set_exact_database_access(&mut admin, &database_name)")
+            .count(),
+        1,
+        "TASK076 access phase must switch all direct LOGIN ACLs to one database"
+    );
+    assert!(
+        !live.contains("set_exact_task076_database_access"),
+        "TASK076 must not grant direct LOGIN CONNECT to base and fresh together"
+    );
+
+    let helper_start = live
+        .find("fn set_exact_database_access")
+        .expect("single-target database ACL helper");
+    let helper_end = live[helper_start..]
+        .find("\nfn set_exact_pre_role_function_access")
+        .map(|offset| helper_start + offset)
+        .expect("single-target database ACL helper end");
+    let helper = &live[helper_start..helper_end];
+    for required in [
+        "SELECT datname::text FROM pg_database ORDER BY datname",
+        "REVOKE ALL ON DATABASE {quoted} FROM",
+        "lattice_migrator_login, lattice_runtime_login",
+        "lattice_guardian_login, lattice_readonly_login",
+        "GRANT CONNECT ON DATABASE {quoted_target} TO",
+    ] {
+        assert!(
+            helper.contains(required),
+            "single-target database ACL helper drifted: {required}"
+        );
+    }
+    assert_eq!(
+        helper.matches("GRANT CONNECT ON DATABASE").count(),
+        1,
+        "single-target helper must grant exactly one database target"
+    );
+}
+
+#[test]
 fn schema_v5_manifest_reconciles_registry_before_autonomy() {
     let manifest = migration_manifest();
     assert_eq!(POSTGRES_SCHEMA_VERSION, 5);
@@ -394,7 +633,23 @@ fn schema_v5_memory_identity_and_ledger_require_migrator_authority() {
 fn schema_v5_forbidden_object_closure_counts_autonomy_reference_triggers() {
     let setup = include_str!("../src/postgres_setup.rs");
     assert!(setup.contains("CatalogProfile::V5 => 42"));
-    assert!(setup.contains("| CatalogProfile::V5CodebaseMemoryV3Current => 66"));
+    let trigger_counts = setup
+        .split_once("fn expected_internal_trigger_count")
+        .expect("internal-trigger classifier")
+        .1
+        .split_once("fn verify_owned_function_boundary")
+        .expect("internal-trigger classifier boundary")
+        .0;
+    for profile in [
+        "CatalogProfile::V5CodebaseMemoryV2UpgradePending",
+        "CatalogProfile::V5CodebaseMemoryV3Current",
+        "CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending",
+        "CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending",
+        "CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current",
+    ] {
+        assert!(trigger_counts.contains(profile));
+    }
+    assert!(trigger_counts.contains("=> 66"));
     let migration = include_str!("../../../db/migrations/0006_task_autonomy_receipt.sql");
     assert_eq!(
         migration
@@ -496,7 +751,7 @@ fn schema_v5_catalog_measurement_has_closed_role_boundary_diagnostics() {
     assert!(live.contains("let current_only = env::var(\"LATTICE_TASK075_CURRENT_CATALOG_ONLY\")"));
     for required in [
         "function Get-Task019AllowlistedDiagnosticTokens",
-        "(?:TASK019|TASK075|STORE|POSTGRES_TASK_LEDGER|POSTGRES_PROJECT_REGISTRY|MEMORY|OPENCLAW)",
+        "(?:TASK019|TASK075|TASK076|STORE|POSTGRES_TASK_LEDGER|POSTGRES_PROJECT_REGISTRY|MEMORY|WRITER_LEASE|OPENCLAW)",
         "function Get-Task019SafeDiagnosticSummary",
         "No allowlisted static diagnostic was emitted.",
         "EventType 'LIVE_GATE_FAILED'",
@@ -1440,6 +1695,63 @@ fn review_regression_verifier_uses_one_exact_catalog_snapshot_and_fixed_tables()
             source.contains(&format!("FROM ONLY {table}")),
             "authoritative read does not use ONLY: {table}"
         );
+    }
+}
+
+#[test]
+fn task076_pre_snapshot_try_lock_is_narrowly_granted_to_migrator() {
+    let source = include_str!("../src/postgres_setup.rs");
+    let live = include_str!("postgres_live.rs");
+    let task_ledger_live = include_str!("postgres_task_ledger.rs");
+    assert!(
+        source.contains("('pg_catalog.pg_try_advisory_lock(bigint)', 'lattice_migrator'::text)")
+    );
+    for denied in [
+        "('pg_catalog.pg_advisory_lock(bigint)', NULL::text)",
+        "('pg_catalog.pg_try_advisory_lock(integer,integer)', NULL::text)",
+        "('pg_catalog.pg_try_advisory_lock_shared(bigint)', NULL::text)",
+        "('pg_catalog.pg_try_advisory_lock_shared(integer,integer)', NULL::text)",
+    ] {
+        assert!(source.contains(denied), "missing fixed denial: {denied}");
+    }
+
+    let boundary = live
+        .split_once("fn set_exact_pre_role_function_access")
+        .expect("system function ACL fixture")
+        .1
+        .split_once("fn prove_first_apply_and_reconciliation")
+        .expect("system function ACL fixture boundary")
+        .0;
+    let grant = boundary
+        .split_once("GRANT EXECUTE ON FUNCTION")
+        .expect("fixed migrator grants")
+        .1
+        .split_once("TO lattice_migrator")
+        .expect("fixed migrator grant role")
+        .0;
+    assert!(grant.contains("pg_catalog.pg_try_advisory_lock(bigint)"));
+    assert!(grant.contains("pg_catalog.pg_advisory_xact_lock(bigint)"));
+    assert!(!grant.contains("pg_catalog.pg_advisory_lock(bigint)"));
+    assert!(!grant.contains("pg_catalog.pg_try_advisory_lock(integer, integer)"));
+    assert!(!grant.contains("pg_catalog.pg_try_advisory_lock_shared"));
+    let task_ledger_grants: Vec<&str> = task_ledger_live
+        .split("GRANT EXECUTE ON FUNCTION")
+        .skip(1)
+        .map(|suffix| {
+            suffix
+                .split_once("TO lattice_migrator")
+                .expect("fixed TASK-050 migrator grant")
+                .0
+        })
+        .collect();
+    assert_eq!(task_ledger_grants.len(), 2);
+    for grant in task_ledger_grants {
+        assert!(grant.contains("pg_catalog.pg_try_advisory_lock(bigint)"));
+        assert!(grant.contains("pg_catalog.pg_advisory_xact_lock(bigint)"));
+        assert!(grant.contains("pg_catalog.pg_current_xact_id()"));
+        assert!(!grant.contains("pg_catalog.pg_advisory_lock(bigint)"));
+        assert!(!grant.contains("pg_catalog.pg_try_advisory_lock(integer, integer)"));
+        assert!(!grant.contains("pg_catalog.pg_try_advisory_lock_shared"));
     }
 }
 

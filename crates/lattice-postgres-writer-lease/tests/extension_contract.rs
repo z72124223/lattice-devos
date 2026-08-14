@@ -1,10 +1,24 @@
 use lattice_postgres_writer_lease::{
     WRITER_LEASE_EXTENSION_ID, WRITER_LEASE_EXTENSION_PATH, WRITER_LEASE_EXTENSION_SCHEMA_VERSION,
-    verify_embedded_extension_manifest,
+    WRITER_LEASE_V1_EXTENSION_PATH, verify_embedded_extension_manifest,
+    verify_embedded_v1_extension_manifest,
 };
 
 #[test]
-fn embedded_extension_is_exact_closed_and_contains_no_advisory_lock() {
+fn v1_history_is_immutable_and_v2_is_the_current_append_only_successor() {
+    let historical = verify_embedded_v1_extension_manifest().expect("frozen v1 manifest");
+    assert_eq!(historical.path(), WRITER_LEASE_V1_EXTENSION_PATH);
+    assert_eq!(historical.schema_version(), 1);
+    assert_eq!(historical.byte_length(), 44_366);
+    assert_eq!(
+        historical.sql_sha256().as_str(),
+        "63ffbf8f8b6c22bf35c3d393bd84e9462ca37e4ace94ceaedd6c27b729daa562"
+    );
+    assert_eq!(
+        historical.manifest_sha256().as_str(),
+        "0179e2a9b0976008902ab0d1cce6ab493a16047a649571f9ce4f13cc53cc6b33"
+    );
+
     let manifest = verify_embedded_extension_manifest().expect("frozen manifest");
     assert_eq!(manifest.extension_id(), WRITER_LEASE_EXTENSION_ID);
     assert_eq!(manifest.path(), WRITER_LEASE_EXTENSION_PATH);
@@ -16,39 +30,282 @@ fn embedded_extension_is_exact_closed_and_contains_no_advisory_lock() {
     assert_eq!(manifest.manifest_sha256().as_str().len(), 64);
 
     let sql = std::str::from_utf8(manifest.bytes()).expect("UTF-8 SQL");
+    assert!(!sql.contains("CREATE OR REPLACE"));
+    assert!(!sql.contains("DROP TABLE"));
+    assert!(!sql.contains("DROP CONSTRAINT writer_lease_extension_ledger_identity_fk"));
     for required in [
-        "CREATE TABLE writer_lease.writer_lease_extension_identity",
-        "CREATE TABLE writer_lease.writer_lease_extension_ledger",
-        "CREATE TABLE writer_lease.writer_lease_heads",
-        "CREATE TABLE writer_lease.writer_lease_commands",
-        "CREATE TABLE writer_lease.writer_lease_transitions",
-        "CREATE FUNCTION writer_lease.writer_lease_bind_runtime_v1",
-        "CREATE FUNCTION writer_lease.writer_lease_load_for_update_v1",
-        "CREATE FUNCTION writer_lease.writer_lease_commit_plan_v1",
-        "CREATE FUNCTION writer_lease.writer_lease_load_commands_v1",
-        "CREATE FUNCTION writer_lease.writer_lease_load_transitions_v1",
-        "CREATE FUNCTION writer_lease.writer_lease_load_current_v1",
-        "CREATE FUNCTION writer_lease.writer_lease_assert_current_v1",
-        "repository_request_bytes bytea NOT NULL",
-        "repository_request_sha256 bytea NOT NULL",
-        "p_repository_request_sha256 <> pg_catalog.sha256(p_repository_request_bytes)",
-        "p_next_fencing_high_water < v_head.fencing_high_water",
-        "p_next_lease_revision < v_head.lease_revision",
-        "current_fencing_token = fencing_high_water",
-        "current_project_snapshot_id = p_project_snapshot_id",
-        "current_task_spec_digest = p_task_spec_digest",
-        "current_holder_process_start_identity = p_holder_process_start_identity",
-        "v_command_count IS DISTINCT FROM v_command_high_water",
-        "v_physical_bytes > 67108864",
+        "DROP CONSTRAINT writer_lease_extension_ledger_singleton_key",
+        "DROP CONSTRAINT writer_lease_extension_ledger_single",
+        "DROP CONSTRAINT writer_lease_extension_ledger_fixed",
+        "DROP CONSTRAINT writer_lease_extension_identity_fixed",
+        "CREATE FUNCTION writer_lease.writer_lease_bind_runtime_v2",
+        "CREATE FUNCTION writer_lease.writer_lease_load_for_update_v2",
+        "ledger_ordinal = 2",
+        "event_kind = 'UPGRADED'",
+        "ledger_ordinal = 3",
+        "event_kind = 'REBOUND'",
+        "ledger_ordinal = 1",
+        "event_kind = 'INSTALLED'",
         "FOR UPDATE OF h",
         "SECURITY DEFINER",
-        "REVOKE ALL ON ALL TABLES IN SCHEMA writer_lease",
+        "REVOKE ALL ON SCHEMA writer_lease",
+        "REVOKE ALL ON ALL FUNCTIONS IN SCHEMA writer_lease",
+        "LATTICE_WRITER_LEASE_SCHEMA_V2",
     ] {
         assert!(sql.contains(required), "missing SQL boundary: {required}");
     }
-    assert!(!sql.to_ascii_lowercase().contains("advisory"));
-    assert!(!sql.contains("GRANT SELECT ON"));
-    assert!(!sql.contains("GRANT INSERT ON"));
-    assert!(!sql.contains("GRANT UPDATE ON"));
-    assert!(!sql.contains("GRANT DELETE ON"));
+    assert_eq!(
+        sql.matches("CREATE FUNCTION writer_lease.").count(),
+        2,
+        "v2 adds only the two ordinal-aware runtime functions"
+    );
+    assert!(!sql.contains("writer_lease_assert_memory_upgrade"));
+    assert!(!sql.contains("GRANT USAGE ON SCHEMA writer_lease"));
+    assert!(!sql.contains("GRANT EXECUTE ON FUNCTION writer_lease"));
+}
+
+#[test]
+fn setup_encodes_the_closed_state_machine_and_common_lock_order() {
+    let setup = include_str!("../src/setup.rs");
+    let global = setup
+        .find("0x4c41_5454_4943_4501")
+        .expect("global migration lock");
+    let memory = setup
+        .find("0x4c41_5443_4d45_4d31")
+        .expect("Memory migration lock");
+    let writer = setup
+        .find("0x4c41_5457_4c45_4131")
+        .expect("Writer Lease migration lock");
+    assert!(global < memory && memory < writer);
+    for required in [
+        "G3MemoryV2WriterV1Current",
+        "G3MemoryV2WriterV2Bridge",
+        "G5MemoryV2WriterV2BridgePending",
+        "G5MemoryV3WriterV2BridgePending",
+        "G5MemoryV3WriterV2Current",
+        "UPGRADED",
+        "REBOUND",
+        "ACTIVE",
+        "SUSPECT",
+        "GRANT USAGE ON SCHEMA writer_lease",
+        "writer_lease_bind_runtime_v2",
+        "writer_lease_load_for_update_v2",
+        "{}|t|{}",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing setup boundary: {required}"
+        );
+    }
+}
+
+#[test]
+fn writer_v2_freezes_measured_bridge_and_current_catalog_profiles() {
+    let setup = include_str!("../src/setup.rs");
+    for required in [
+        "V2_BRIDGE_EXPECTED_CATALOG_PROFILES",
+        "V2_CURRENT_EXPECTED_CATALOG_PROFILES",
+        "382b81889838d60c02ce5c31f77454e93f23372d90b3137a47663c5de74f9670",
+        "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+        "3463b3ac82c1a7c53e5a80c41995f882ffe5f3f07fc5a82a97d50582d4d26915",
+        "66b315513cbf50c3c7dbc143eb7061c6dbb823d7eac853c50f83434caf1a1022",
+        "caa34168b5f9da4c8d2d02fce6e98882d73456c7c1f5c1af2b71f404efc647d1",
+        "f8a84b870fcb8b091dbc7f9cf6835fb4311064eec5c83b31159a9a936a11e738",
+        "a2e1be8a403a96b679c18ddfa75e476fa1d6ceeccc1ccf62ff6424b2c259ef7b",
+        "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+        "73951f1b33a4d6b3c4742fb49f91cf0601f04fd472b21c4db8bb36815fed0e89",
+        "bd5b05d60340a1b9f9fbf1de2b4bed8586b7eede4fd8d7c4825841c221e89b7a",
+        "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+        "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing catalog commitment {required}"
+        );
+    }
+    assert!(setup.contains("RuntimeProfile::Quarantined => &V2_BRIDGE_EXPECTED_CATALOG_PROFILES"));
+    assert!(setup.contains("RuntimeProfile::Current => &V2_CURRENT_EXPECTED_CATALOG_PROFILES"));
+}
+
+#[test]
+fn live_acceptance_has_owner_staged_w1_source_and_restart_phases() {
+    let live = include_str!("postgres_live.rs");
+    for required in [
+        "Some(\"source_install\")",
+        "Some(\"source_seed\")",
+        "Some(\"bridge\")",
+        "Some(\"activate\")",
+        "Some(\"runtime\")",
+        "Some(\"restart\")",
+        "Some(\"fresh_install\")",
+        "Some(\"fresh_restart\")",
+        "writer_lease_bind_runtime_v1",
+        "writer_lease_load_for_update_v1",
+        "writer_lease_commit_plan_v1",
+        "TASK076_WRITER_SOURCE_INSTALL_PASS",
+        "TASK076_WRITER_SOURCE_PASS",
+        "TASK076_WRITER_BRIDGE_PASS",
+        "TASK076_WRITER_ACTIVATE_PASS",
+        "TASK076_WRITER_RUNTIME_PASS",
+        "TASK076_WRITER_RESTART_PASS",
+        "TASK076_WRITER_FRESH_INSTALL_PASS",
+        "TASK076_WRITER_FRESH_RESTART_PASS",
+        "TASK076_WRITER_FRESH_PROFILE_SHA256",
+        "TASK076_WRITER_FRESH_DATABASE_UUID",
+    ] {
+        assert!(
+            live.contains(required),
+            "missing live phase boundary: {required}"
+        );
+    }
+}
+
+#[test]
+fn fresh_profile_evidence_sql_preserves_keyword_boundaries() {
+    let live = include_str!("postgres_live.rs");
+    for required in [
+        "FROM pg_catalog.pg_proc AS p \\",
+        "ON n.oid=p.pronamespace \\",
+        "WHERE n.nspname='writer_lease' \\",
+        "writer_lease_extension_identity AS i \\",
+    ] {
+        assert!(live.contains(required), "missing SQL boundary {required}");
+    }
+}
+
+#[test]
+fn phased_live_owner_queries_hold_the_migrator_session_role() {
+    let live = include_str!("postgres_live.rs");
+    assert!(live.contains("if task076_phase.is_some()"));
+    assert!(
+        live.contains(
+            "SET ROLE lattice_migrator; SET search_path=pg_catalog; SET row_security=on;"
+        )
+    );
+}
+
+#[test]
+fn live_acceptance_proves_bridge_activation_and_fresh_noop_idempotency() {
+    let live = include_str!("postgres_live.rs");
+    for required in [
+        "TASK076_WRITER_BRIDGE_REPLAY_PASS",
+        "TASK076_WRITER_ACTIVATE_REPLAY_PASS",
+        "TASK076_WRITER_FRESH_NOOP_PASS",
+        "ExtensionApplyOutcome::AlreadyCurrent",
+        "bridge replay must preserve exact",
+        "activation replay must preserve exact",
+    ] {
+        assert!(
+            live.contains(required),
+            "missing idempotency proof: {required}"
+        );
+    }
+}
+
+#[test]
+fn setup_and_live_acceptance_converge_two_concurrent_runners() {
+    let setup = include_str!("../src/setup.rs");
+    let apply = setup
+        .split_once("pub fn apply_extension")
+        .expect("apply_extension source")
+        .1
+        .split_once("pub fn verify_extension")
+        .expect("verify_extension source")
+        .0;
+    assert!(
+        apply.contains(".isolation_level(IsolationLevel::Serializable)"),
+        "each Writer setup attempt must remain one bounded serializable transaction"
+    );
+    assert!(!apply.contains("IsolationLevel::ReadCommitted"));
+    for required in [
+        "MAX_SERIALIZATION_ATTEMPTS: usize = 3",
+        "SqlState::T_R_SERIALIZATION_FAILURE",
+        "attempt < MAX_SERIALIZATION_ATTEMPTS",
+        "struct GlobalApplyGate",
+        "GlobalApplyGate::acquire(client)",
+        "GLOBAL_APPLY_GATE_TIMEOUT: Duration = Duration::from_secs(30)",
+        "GLOBAL_APPLY_GATE_POLL_INTERVAL: Duration = Duration::from_millis(20)",
+        "pg_catalog.pg_try_advisory_lock($1)",
+        "Instant::now()",
+        "std::thread::sleep(",
+        "pg_catalog.pg_advisory_unlock($1)",
+        "impl Drop for GlobalApplyGate",
+        "GLOBAL_APPLY_GATE_TIMEOUT.saturating_sub(elapsed)",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing bounded serialization retry boundary: {required}"
+        );
+    }
+    assert!(!setup.contains("pg_catalog.current_setting('lock_timeout')"));
+    assert!(!setup.contains("pg_catalog.set_config('lock_timeout','30s',false)"));
+    assert!(!setup.contains("pg_catalog.pg_advisory_lock($1)"));
+    assert!(!setup.contains("SqlState::T_R_DEADLOCK_DETECTED"));
+    assert!(!setup.contains("42704"));
+    assert!(!setup.contains("42723"));
+    let session_gate = apply
+        .find("GlobalApplyGate::acquire(client)")
+        .expect("pre-snapshot session gate");
+    let serializable_attempt = apply
+        .find("apply_extension_attempt(")
+        .expect("serializable attempt");
+    assert!(session_gate < serializable_attempt);
+
+    let live = include_str!("postgres_live.rs");
+    let concurrent_apply = live
+        .split_once("fn task076_concurrent_apply")
+        .expect("TASK-076 concurrent apply helper")
+        .1
+        .split_once("fn run_task076_fresh_install")
+        .expect("TASK-076 fresh install helper")
+        .0;
+    for required in [
+        "Duration::from_millis(100)",
+        "both Writer setup runners must remain pending while the global lock is held",
+        "!runner_a.is_finished()",
+        "!runner_b.is_finished()",
+        "Writer setup runner A migrator role",
+        "Writer setup runner B migrator role",
+    ] {
+        assert!(
+            concurrent_apply.contains(required),
+            "missing concurrent runner proof: {required}"
+        );
+    }
+    assert!(!concurrent_apply.contains("pg_blocking_pids"));
+    for required in [
+        "TASK076_WRITER_BRIDGE_CONCURRENT_PASS",
+        "TASK076_WRITER_ACTIVATE_CONCURRENT_PASS",
+        "TASK076_WRITER_FRESH_CONCURRENT_PASS",
+    ] {
+        assert!(
+            live.contains(required),
+            "missing concurrent runner proof: {required}"
+        );
+    }
+}
+
+#[test]
+fn bridge_live_acceptance_has_fixed_safe_concurrency_stages() {
+    let live = include_str!("postgres_live.rs");
+    for stage in [
+        "PRE_PROFILE",
+        "HISTORY_LOAD",
+        "BLOCKER_TX",
+        "BLOCKER_LOCK",
+        "RUNNERS_CONNECTED",
+        "RUNNERS_STARTED",
+        "RUNNERS_BLOCKED",
+        "BLOCKER_RELEASED",
+        "RUNNERS_JOINED",
+        "OUTCOMES",
+        "POST_PROFILE",
+        "HISTORY_COMPARE",
+        "SEQUENTIAL_NOOP",
+    ] {
+        for boundary in ["ENTER", "PASS"] {
+            let token = format!("TASK076_WRITER_BRIDGE_{stage}_{boundary}");
+            assert!(live.contains(&token), "missing safe bridge stage: {token}");
+        }
+    }
 }

@@ -11,10 +11,11 @@ status: in_progress
 parallel_safe: false
 depends_on:
   - commit:a3599c18d9462732c3b82c9e7d302980657eeccc
+  - commit:8b6d5171759e28339d6fe2b66fab0c3b6718c64c
   - TASK-038
 branch: feature/task-076-postgres-writer-lease-v2
 implementation_worktree: lattice-worktrees/task-076-postgres-writer-lease-v2
-implementation_base: a3599c18d9462732c3b82c9e7d302980657eeccc
+implementation_base: 8b6d5171759e28339d6fe2b66fab0c3b6718c64c
 allowed_paths:
   - crates/lattice-postgres-writer-lease/src/lib.rs
   - crates/lattice-postgres-writer-lease/src/setup.rs
@@ -63,8 +64,33 @@ fencing, replay, and runtime admission.
 TASK-075 commit `a3599c18d9462732c3b82c9e7d302980657eeccc`
 is the immutable implementation prerequisite. This ticket does not reopen its
 Registry/autonomy/Memory semantics, does not mark TASK-050 or TASK-051
-complete, and does not authorize push, merge, deployment, public networking,
-credential access, or an external provider/model call.
+complete, and does not authorize merge, deployment, public networking,
+credential mutation, or an external provider/model call.
+
+TASK-076 implementation begins after the separately committed byte-preservation
+prerequisite `8b6d5171759e28339d6fe2b66fab0c3b6718c64c`. That prerequisite marks
+`db/migrations/0006_task_autonomy_receipt.sql` as binary so Git retains its
+already accepted CRLF bytes and freezes its raw SHA-256 as
+`c50f2a51380950b5f6c757b736b35b550d903319a46d2bcd9319938e02106a61`.
+Neither that file nor `.gitattributes` is a TASK-076 implementation path; both
+must remain unchanged from this implementation base.
+
+## GitHub Checkpoint Publication Authorization - 2026-08-14
+
+The user explicitly authorized this ticket's current progress to be committed,
+pushed without force to `feature/task-076-postgres-writer-lease-v2`, and
+published as a Draft pull request. The project-scoped standing authorization in
+`PLANS.md` permits later clean checkpoint pushes to the same bounded feature
+branch without another routine approval. It does not authorize merge, promotion
+from Draft, force-push, tag/release, deployment, protected-branch mutation, or
+repository/account/credential changes.
+
+GitHub CLI authorization was verified for host `github.com`, account
+`z72124223`, repository `z72124223/lattice-devos`, HTTPS transport, and an
+operating-system-keyring credential with `repo`, `read:org`, and `gist` scopes.
+Only this non-secret metadata may be retained. OAuth tokens, one-time device
+codes, passwords, browser/mobile sessions, and confirmation values are excluded
+from every repository artifact and publication record.
 
 ## Frozen History
 
@@ -78,8 +104,9 @@ credential access, or an external provider/model call.
   currentness, recovery, and fencing semantics do not change.
 - `writer_lease_assert_current_v1` retains its exact 15-scalar signature and
   same-transaction Task Ledger fencing contract.
-- Global migrations `0001` through `0006`, Codebase Memory v1/v2/v3 SQL, and
-  their retained receipts remain immutable.
+- Global migrations `0001` through `0006` (including the frozen `0006` raw
+  SHA-256 above), Codebase Memory v1/v2/v3 SQL, and their retained receipts
+  remain immutable from the TASK-076 implementation base.
 
 ## Closed Bridge State Machine
 
@@ -90,8 +117,9 @@ Only the following ordered states are recognized:
 2. `G3_M2_W2_BRIDGE`: the Writer owner has verified v1, required no current
    `ACTIVE` or `SUSPECT` authority, preserved every semantic row and
    high-water, updated the extension identity to schema v2, and appended
-   ledger ordinal 2 for the bridge. Runtime remains admitted while the global
-   and Memory profiles are still v3/v2.
+   ledger ordinal 2 for the bridge. Runtime is quarantined because the v1
+   bind/load functions no longer match the current identity and the v2
+   successors admit only the final global-v5/Memory-v3 profile.
 3. `G5_M2_W2_BRIDGE_PENDING`: the Store owner has re-verified the exact bridge
    under the common locks and advanced only the global manifest to schema v5.
    All runtime constructors reject this migration-only state.
@@ -163,6 +191,9 @@ adapter dependencies or generic extension discovery.
 - Both pending states are deliberate fail-closed recovery points: rerunning
   the owning next step is allowed; runtime, Task Submit, and fenced writes are
   not.
+- Every v2 bridge or pending profile has no runtime schema usage and zero
+  runtime function execution grants. Only exact W1 current or final W2 current
+  is executable.
 - A wrong owner, ACL, function body, constraint, index, identity, ledger row,
   manifest, database identity, global profile, Memory profile, receipt,
   checkpoint, high-water, or current-authority substitution is rejected.
@@ -223,8 +254,10 @@ listeners at ports `5432`, `64272`, and `55432`.
   current-authority shortcut, generic migration coordinator, or second truth.
 - No rewrite of global migrations, Memory SQL, historical Writer v1 SQL, or
   retained receipt bytes.
-- No public MCP/tool/schema change, model/provider call, Git push/merge,
-  deployment, public listener, credential/account mutation, or release.
+- No public MCP/tool/schema change, model/provider call, Git merge/force-push,
+  deployment, public listener, credential/account mutation, or release. Only
+  the explicitly authorized bounded feature-branch checkpoint publication is
+  permitted.
 - No TASK-050, TASK-051, TASK-052, TASK-053, Hermes, Registry, autonomy, or
   Codebase Memory product-feature expansion beyond the exact compatibility
   recognition required by this bridge.

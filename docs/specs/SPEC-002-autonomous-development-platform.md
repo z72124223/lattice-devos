@@ -1469,9 +1469,10 @@ creates the bridge and final rebind; Store changes only global history and
 Memory changes only its own extension. Each owner takes global, Memory, and
 Writer transaction locks in that order. Memory additionally locks the five
 Writer tables in `SHARE` mode and verifies the complete bridge before and
-after its DDL. Both pending states reject runtime and fenced writes. A fresh
-final install records truthful fresh-current history; an upgrade records exact
-v1 `INSTALLED`, v2 bridge `UPGRADED`, and v2 final `REBOUND` rows.
+after its DDL. Every v2 bridge or pending profile rejects runtime and fenced
+writes; only W1 current or final W2 current is executable. A fresh final
+install records truthful fresh-current history; an upgrade records exact v1
+`INSTALLED`, v2 bridge `UPGRADED`, and v2 final `REBOUND` rows.
 
 No Writer command, transition, receipt, snapshot, checkpoint, lease-revision,
 or fencing byte changes. Partial, extra, drifted, active, suspect, unknown,

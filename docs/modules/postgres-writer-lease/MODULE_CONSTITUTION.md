@@ -145,7 +145,9 @@ v2 bridge state only when replay proves all retained state and no current
 only after exact global-v5/Memory-v3 verification. Both steps hold global,
 Memory, and Writer advisory locks in that order, preserve every semantic row
 and high-water, append exact ledger provenance, and fail closed on ambiguity.
-The intermediate schema-v5 bridge profiles never admit runtime use.
+Every v2 bridge or pending profile, including `G3_M2_W2_BRIDGE`, never admits
+runtime use. Only the exact W1 current profile and the exact final W2 current
+profile are executable.
 
 ## Acceptance Gates
 

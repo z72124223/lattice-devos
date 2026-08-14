@@ -61,7 +61,14 @@ impl LiveConfig {
             "MEMORY_EXTENSION_LIVE_PORT_INVALID"
         );
         assert_eq!(run_id.len(), 32, "MEMORY_EXTENSION_LIVE_RUN_ID_INVALID");
-        assert!(matches!(phase.as_str(), "initial" | "restart"));
+        assert!(matches!(
+            phase.as_str(),
+            "initial"
+                | "restart"
+                | "task076_memory_source_setup"
+                | "task076_memory_upgrade"
+                | "task076_memory_fresh_setup"
+        ));
         Some(Self {
             host,
             port,
@@ -72,8 +79,13 @@ impl LiveConfig {
     }
 
     fn target(&self) -> ExtensionTarget {
+        let database_tag = if self.phase == "task076_memory_fresh_setup" {
+            "writer_fresh"
+        } else {
+            "base"
+        };
         ExtensionTarget::new(
-            format!("lattice_task019_{}_base", &self.run_id[..8]),
+            format!("lattice_task019_{}_{database_tag}", &self.run_id[..8]),
             self.run_id.clone(),
         )
         .expect("MEMORY_EXTENSION_TARGET_INVALID")
@@ -120,6 +132,9 @@ fn exact_memory_extension_install_and_restart_profile() {
         return;
     };
     let target = config.target();
+    if run_task076_phase(&config, &target) {
+        return;
+    }
     if config.phase == "initial" {
         prove_partial_collision_and_transaction_rollback(&config, &target);
         let mut migrator = config.role_client(ExtensionDatabaseRole::Migrator);
@@ -215,6 +230,352 @@ fn exact_memory_extension_install_and_restart_profile() {
     }
 }
 
+fn prove_task076_memory_upgrade(config: &LiveConfig, target: &ExtensionTarget) {
+    let mut migrator = config.role_client(ExtensionDatabaseRole::Migrator);
+    assert_task076_bridge_state(&mut migrator, target, 2, 3);
+    drop(migrator);
+    prove_task076_bridge_runtime_quarantined(config);
+    prove_task076_memory_rejection_matrix(config, target);
+
+    let mut migrator = config.role_client(ExtensionDatabaseRole::Migrator);
+    assert_task076_bridge_state(&mut migrator, target, 2, 3);
+    let writer_before = task076_writer_lease_fingerprint(&mut migrator);
+
+    assert_eq!(
+        apply_extension(&mut migrator, target).unwrap_or_else(|error| panic!("{}", error.code())),
+        ExtensionApplyOutcome::Installed
+    );
+
+    assert_eq!(
+        task076_writer_lease_fingerprint(&mut migrator),
+        writer_before,
+        "MEMORY_EXTENSION_TASK076_WRITER_CHANGED"
+    );
+    assert_task076_bridge_state(&mut migrator, target, 3, 5);
+    let pending = verify_extension(&mut migrator, target, ExtensionDatabaseRole::Migrator)
+        .expect_err("MEMORY_EXTENSION_TASK076_BRIDGE_VERIFIER_ALLOWED");
+    assert_eq!(
+        pending.code(),
+        "MEMORY_EXTENSION_WRITER_LEASE_BRIDGE_PENDING"
+    );
+    drop(migrator);
+    prove_task076_bridge_runtime_quarantined(config);
+    println!("TASK076_MEMORY_UPGRADE_PASS");
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Task076WriterMutation {
+    V1,
+    Partial,
+    Drift,
+    Extra,
+    Active,
+    Suspect,
+}
+
+fn prove_task076_bridge_runtime_quarantined(config: &LiveConfig) {
+    let mut runtime = config.role_client(ExtensionDatabaseRole::Runtime);
+    let schema_usage: bool = runtime
+        .query_one(
+            "SELECT pg_catalog.has_schema_privilege(\
+                 'lattice_runtime','writer_lease','USAGE')",
+            &[],
+        )
+        .expect("MEMORY_EXTENSION_TASK076_RUNTIME_SCHEMA_QUERY_FAILED")
+        .get(0);
+    assert!(
+        !schema_usage,
+        "MEMORY_EXTENSION_TASK076_RUNTIME_SCHEMA_USAGE_ALLOWED"
+    );
+    let executable_functions: i64 = runtime
+        .query_one(
+            "SELECT pg_catalog.count(*)::bigint \
+               FROM pg_catalog.pg_proc AS p \
+               JOIN pg_catalog.pg_namespace AS n ON n.oid=p.pronamespace \
+              WHERE n.nspname='writer_lease' \
+                AND pg_catalog.has_function_privilege(\
+                    'lattice_runtime',p.oid,'EXECUTE')",
+            &[],
+        )
+        .expect("MEMORY_EXTENSION_TASK076_RUNTIME_FUNCTION_QUERY_FAILED")
+        .get(0);
+    assert_eq!(
+        executable_functions, 0,
+        "MEMORY_EXTENSION_TASK076_RUNTIME_FUNCTION_EXECUTE_ALLOWED"
+    );
+}
+
+fn prove_task076_memory_rejection_matrix(config: &LiveConfig, target: &ExtensionTarget) {
+    let mut migrator = config.role_client(ExtensionDatabaseRole::Migrator);
+    migrator
+        .batch_execute(
+            "CREATE TEMP TABLE task076_writer_identity_backup ON COMMIT PRESERVE ROWS \
+                 AS TABLE writer_lease.writer_lease_extension_identity; \
+             CREATE TEMP TABLE task076_writer_ledger_backup ON COMMIT PRESERVE ROWS \
+                 AS TABLE writer_lease.writer_lease_extension_ledger;",
+        )
+        .expect("MEMORY_EXTENSION_TASK076_BACKUP_FAILED");
+
+    for mutation in [
+        Task076WriterMutation::V1,
+        Task076WriterMutation::Partial,
+        Task076WriterMutation::Drift,
+        Task076WriterMutation::Extra,
+        Task076WriterMutation::Active,
+        Task076WriterMutation::Suspect,
+    ] {
+        stage_task076_writer_mutation(&mut migrator, mutation);
+        let memory_before = extension_install_fingerprint(&mut migrator);
+        let writer_before = task076_writer_lease_fingerprint(&mut migrator);
+        let error = apply_extension(&mut migrator, target)
+            .expect_err("MEMORY_EXTENSION_TASK076_MUTATION_ALLOWED");
+        assert_eq!(
+            error.kind(),
+            ExtensionSetupErrorKind::CatalogMismatch,
+            "MEMORY_EXTENSION_TASK076_MUTATION_WRONG_ERROR: {mutation:?}"
+        );
+        assert_eq!(
+            extension_install_fingerprint(&mut migrator),
+            memory_before,
+            "MEMORY_EXTENSION_TASK076_MEMORY_CHANGED_ON_REJECTION: {mutation:?}"
+        );
+        assert_eq!(
+            task076_writer_lease_fingerprint(&mut migrator),
+            writer_before,
+            "MEMORY_EXTENSION_TASK076_WRITER_CHANGED_ON_REJECTION: {mutation:?}"
+        );
+        restore_task076_writer_bridge(&mut migrator, mutation);
+        assert_task076_bridge_state(&mut migrator, target, 2, 3);
+    }
+
+    migrator
+        .batch_execute(
+            "DROP TABLE pg_temp.task076_writer_ledger_backup; \
+             DROP TABLE pg_temp.task076_writer_identity_backup;",
+        )
+        .expect("MEMORY_EXTENSION_TASK076_BACKUP_CLEANUP_FAILED");
+}
+
+fn stage_task076_writer_mutation(client: &mut Client, mutation: Task076WriterMutation) {
+    match mutation {
+        Task076WriterMutation::V1 => client
+            .batch_execute(
+                "DELETE FROM writer_lease.writer_lease_extension_ledger \
+                   WHERE ledger_ordinal=2; \
+                 UPDATE writer_lease.writer_lease_extension_identity AS w \
+                    SET extension_schema_version=1, \
+                        extension_path='db/extensions/writer-lease/v1.sql', \
+                        extension_sql_sha256=l.extension_sql_sha256, \
+                        extension_manifest_sha256=l.extension_manifest_sha256, \
+                        global_schema_version=l.global_schema_version, \
+                        global_manifest_sha256=l.global_manifest_sha256, \
+                        required_memory_schema_version=l.required_memory_schema_version, \
+                        required_memory_manifest_sha256=l.required_memory_manifest_sha256 \
+                   FROM pg_temp.task076_writer_ledger_backup AS l \
+                  WHERE w.singleton AND l.ledger_ordinal=1;",
+            )
+            .expect("MEMORY_EXTENSION_TASK076_V1_STAGE_FAILED"),
+        Task076WriterMutation::Partial => client
+            .batch_execute(
+                "DELETE FROM writer_lease.writer_lease_extension_ledger \
+                  WHERE ledger_ordinal=2;",
+            )
+            .expect("MEMORY_EXTENSION_TASK076_PARTIAL_STAGE_FAILED"),
+        Task076WriterMutation::Drift => client
+            .batch_execute(
+                "COMMENT ON TABLE writer_lease.writer_lease_extension_identity \
+                    IS 'TASK076_DRIFT';",
+            )
+            .expect("MEMORY_EXTENSION_TASK076_DRIFT_STAGE_FAILED"),
+        Task076WriterMutation::Extra => client
+            .batch_execute(
+                "CREATE TABLE writer_lease.task076_unexpected_object (id bigint PRIMARY KEY);",
+            )
+            .expect("MEMORY_EXTENSION_TASK076_EXTRA_STAGE_FAILED"),
+        Task076WriterMutation::Active => {
+            stage_task076_current_authority(client, "ACTIVE");
+        }
+        Task076WriterMutation::Suspect => {
+            stage_task076_current_authority(client, "SUSPECT");
+        }
+    }
+}
+
+fn stage_task076_current_authority(client: &mut Client, status: &str) {
+    assert!(matches!(status, "ACTIVE" | "SUSPECT"));
+    let changed = client
+        .execute(
+            "WITH chosen AS ( \
+                 SELECT project_id FROM ONLY writer_lease.writer_lease_heads \
+                  WHERE current_status IS NULL AND fencing_high_water > 0 \
+                  ORDER BY project_id LIMIT 1 \
+             ) \
+             UPDATE writer_lease.writer_lease_heads AS h \
+                SET current_status=$1, \
+                    current_receipt_digest=pg_catalog.decode(pg_catalog.repeat('11',32),'hex'), \
+                    current_project_snapshot_id='task076-snapshot', \
+                    current_task_id='task076-task', current_task_revision='1', \
+                    current_task_spec_digest=pg_catalog.decode(pg_catalog.repeat('22',32),'hex'), \
+                    current_attempt_id='task076-attempt', current_lease_id='task076-lease', \
+                    current_lease_holder_id='task076-holder', current_worktree_id='task076-worktree', \
+                    current_holder_process_id=1, \
+                    current_holder_process_start_identity=\
+                        pg_catalog.decode(pg_catalog.repeat('33',32),'hex'), \
+                    current_daemon_instance_id='task076-daemon', current_daemon_epoch=1, \
+                    current_fencing_token=h.fencing_high_water, \
+                    current_expires_at='2026-08-14T00:00:00.000000Z' \
+               FROM chosen WHERE h.project_id=chosen.project_id",
+            &[&status],
+        )
+        .expect("MEMORY_EXTENSION_TASK076_AUTHORITY_STAGE_FAILED");
+    assert_eq!(
+        changed, 1,
+        "MEMORY_EXTENSION_TASK076_RELEASED_HEAD_REQUIRED"
+    );
+}
+
+fn restore_task076_writer_bridge(client: &mut Client, mutation: Task076WriterMutation) {
+    match mutation {
+        Task076WriterMutation::V1 | Task076WriterMutation::Partial => client
+            .batch_execute(
+                "DELETE FROM writer_lease.writer_lease_extension_ledger; \
+                 DELETE FROM writer_lease.writer_lease_extension_identity; \
+                 INSERT INTO writer_lease.writer_lease_extension_identity \
+                     SELECT * FROM pg_temp.task076_writer_identity_backup; \
+                 INSERT INTO writer_lease.writer_lease_extension_ledger \
+                     SELECT * FROM pg_temp.task076_writer_ledger_backup;",
+            )
+            .expect("MEMORY_EXTENSION_TASK076_PROFILE_RESTORE_FAILED"),
+        Task076WriterMutation::Drift => client
+            .batch_execute(
+                "COMMENT ON TABLE writer_lease.writer_lease_extension_identity \
+                    IS 'LATTICE_WRITER_LEASE_EXTENSION_IDENTITY_V2';",
+            )
+            .expect("MEMORY_EXTENSION_TASK076_DRIFT_RESTORE_FAILED"),
+        Task076WriterMutation::Extra => client
+            .batch_execute("DROP TABLE writer_lease.task076_unexpected_object;")
+            .expect("MEMORY_EXTENSION_TASK076_EXTRA_RESTORE_FAILED"),
+        Task076WriterMutation::Active | Task076WriterMutation::Suspect => client
+            .batch_execute(
+                "UPDATE writer_lease.writer_lease_heads \
+                    SET current_status=NULL, current_receipt_digest=NULL, \
+                        current_project_snapshot_id=NULL, current_task_id=NULL, \
+                        current_task_revision=NULL, current_task_spec_digest=NULL, \
+                        current_attempt_id=NULL, current_lease_id=NULL, \
+                        current_lease_holder_id=NULL, current_worktree_id=NULL, \
+                        current_holder_process_id=NULL, current_holder_process_start_identity=NULL, \
+                        current_daemon_instance_id=NULL, current_daemon_epoch=NULL, \
+                        current_fencing_token=NULL, current_expires_at=NULL \
+                  WHERE current_status IN ('ACTIVE','SUSPECT');",
+            )
+            .expect("MEMORY_EXTENSION_TASK076_AUTHORITY_RESTORE_FAILED"),
+    }
+}
+
+fn assert_task076_bridge_state(
+    client: &mut Client,
+    target: &ExtensionTarget,
+    expected_memory_version: i16,
+    expected_memory_global_version: i16,
+) {
+    let row = client
+        .query_one(
+            "SELECT c.current_schema_version, m.extension_schema_version, \
+                    m.global_schema_version, w.extension_schema_version, \
+                    w.extension_path::text, w.global_schema_version, \
+                    w.required_memory_schema_version, \
+                    (SELECT pg_catalog.count(*)::bigint \
+                       FROM ONLY writer_lease.writer_lease_extension_ledger), \
+                    (SELECT pg_catalog.string_agg(l.event_kind::text, ',' \
+                                                  ORDER BY l.ledger_ordinal) \
+                       FROM ONLY writer_lease.writer_lease_extension_ledger AS l), \
+                    (SELECT pg_catalog.count(*)::bigint \
+                       FROM ONLY writer_lease.writer_lease_heads AS h \
+                      WHERE h.current_status IN ('ACTIVE','SUSPECT')) \
+               FROM ONLY control.schema_compatibility AS c \
+               CROSS JOIN ONLY memory.codebase_memory_extension_identity AS m \
+               CROSS JOIN ONLY writer_lease.writer_lease_extension_identity AS w \
+              WHERE c.singleton AND m.singleton AND w.singleton \
+                AND m.database_uuid = $1::text::uuid \
+                AND w.database_uuid = $1::text::uuid",
+            &[&target.expected_database_uuid()],
+        )
+        .expect("MEMORY_EXTENSION_TASK076_BRIDGE_STATE_QUERY_FAILED");
+    assert_eq!(row.get::<_, i16>(0), 5);
+    assert_eq!(row.get::<_, i16>(1), expected_memory_version);
+    assert_eq!(row.get::<_, i16>(2), expected_memory_global_version);
+    assert_eq!(row.get::<_, i16>(3), 2);
+    assert_eq!(row.get::<_, String>(4), "db/extensions/writer-lease/v2.sql");
+    assert_eq!(row.get::<_, i16>(5), 3);
+    assert_eq!(row.get::<_, i16>(6), 2);
+    assert_eq!(row.get::<_, i64>(7), 2);
+    assert_eq!(
+        row.get::<_, Option<String>>(8).as_deref(),
+        Some("INSTALLED,UPGRADED")
+    );
+    assert_eq!(row.get::<_, i64>(9), 0);
+}
+
+fn task076_writer_lease_fingerprint(client: &mut Client) -> Vec<String> {
+    [
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+             pg_catalog.jsonb_build_array(t.xmin::text,t.ctid::text,pg_catalog.to_jsonb(t))::text,\
+             E'\\n' ORDER BY t.singleton),'')) \
+         FROM ONLY writer_lease.writer_lease_extension_identity AS t",
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+             pg_catalog.jsonb_build_array(t.xmin::text,t.ctid::text,pg_catalog.to_jsonb(t))::text,\
+             E'\\n' ORDER BY t.ledger_ordinal),'')) \
+         FROM ONLY writer_lease.writer_lease_extension_ledger AS t",
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+             pg_catalog.jsonb_build_array(t.xmin::text,t.ctid::text,pg_catalog.to_jsonb(t))::text,\
+             E'\\n' ORDER BY t.project_id),'')) \
+         FROM ONLY writer_lease.writer_lease_heads AS t",
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+             pg_catalog.jsonb_build_array(t.xmin::text,t.ctid::text,pg_catalog.to_jsonb(t))::text,\
+             E'\\n' ORDER BY t.project_id,t.ordinal),'')) \
+         FROM ONLY writer_lease.writer_lease_commands AS t",
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+             pg_catalog.jsonb_build_array(t.xmin::text,t.ctid::text,pg_catalog.to_jsonb(t))::text,\
+             E'\\n' ORDER BY t.project_id,t.ordinal),'')) \
+         FROM ONLY writer_lease.writer_lease_transitions AS t",
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(x.value, E'\\n' \
+             ORDER BY x.value),'')) FROM (\
+             SELECT pg_catalog.jsonb_build_array('relation',c.oid,c.relname)::text AS value \
+               FROM pg_catalog.pg_class AS c \
+               JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease' \
+             UNION ALL \
+             SELECT pg_catalog.jsonb_build_array('function',p.oid,p.proname,\
+                    pg_catalog.pg_get_function_identity_arguments(p.oid))::text \
+               FROM pg_catalog.pg_proc AS p \
+               JOIN pg_catalog.pg_namespace AS n ON n.oid=p.pronamespace \
+              WHERE n.nspname='writer_lease' \
+             UNION ALL \
+             SELECT pg_catalog.jsonb_build_array('type',t.oid,t.typname)::text \
+               FROM pg_catalog.pg_type AS t \
+               JOIN pg_catalog.pg_namespace AS n ON n.oid=t.typnamespace \
+              WHERE n.nspname='writer_lease') AS x",
+    ]
+    .into_iter()
+    .map(|query| {
+        client
+            .query_one(query, &[])
+            .expect("MEMORY_EXTENSION_TASK076_WRITER_FINGERPRINT_FAILED")
+            .get(0)
+    })
+    .collect()
+}
+
+fn run_task076_phase(config: &LiveConfig, target: &ExtensionTarget) -> bool {
+    match config.phase.as_str() {
+        "task076_memory_source_setup" => stage_task076_memory_v2_source(config, target),
+        "task076_memory_upgrade" => prove_task076_memory_upgrade(config, target),
+        "task076_memory_fresh_setup" => stage_task076_memory_v3_fresh(config, target),
+        _ => return false,
+    }
+    true
+}
+
 struct HistoricalMemoryFixture {
     analysis: NormalizedGraphAnalysis,
     receipt: GraphMemoryReceipt,
@@ -247,22 +608,66 @@ fn historical_v2_fixture_receipts_have_frozen_digests() {
     );
 }
 
-#[allow(clippy::too_many_lines)]
+fn stage_task076_memory_v2_source(config: &LiveConfig, target: &ExtensionTarget) {
+    stage_exact_v2_source(config, target, "LATTICE_DEVOS_MEMORY_SCHEMA_V3");
+    println!("TASK076_MEMORY_V2_SOURCE_PASS");
+}
+
 fn stage_exact_v2_upgrade_source(config: &LiveConfig, target: &ExtensionTarget) {
     // The Store live gate owns the real global-v3 -> global-v5 transition. This
     // Memory-only gate starts from the already verified global-v5 catalog, then
     // constructs the exact retained v2/global-v3 extension source and restores
     // the v5 compatibility row before invoking the production Memory upgrader.
+    stage_exact_v2_source(config, target, "LATTICE_DEVOS_MEMORY_SCHEMA_V5");
+}
+
+fn stage_task076_memory_v3_fresh(config: &LiveConfig, target: &ExtensionTarget) {
+    let mut migrator = config.role_client(ExtensionDatabaseRole::Migrator);
+    assert_eq!(
+        apply_extension(&mut migrator, target).unwrap_or_else(|error| panic!("{}", error.code())),
+        ExtensionApplyOutcome::Installed
+    );
+    let evidence = verify_extension(&mut migrator, target, ExtensionDatabaseRole::Migrator)
+        .unwrap_or_else(|error| panic!("{}", error.code()));
+    assert_eq!(evidence.database_uuid(), target.expected_database_uuid());
+    assert_eq!(
+        apply_extension(&mut migrator, target).unwrap_or_else(|error| panic!("{}", error.code())),
+        ExtensionApplyOutcome::AlreadyCurrent
+    );
+    println!(
+        "TASK076_FRESH_M3_EVIDENCE database_uuid={} manifest_sha256={}",
+        evidence.database_uuid(),
+        evidence.identity().extension_manifest_digest().as_str()
+    );
+    println!("TASK076_MEMORY_V3_FRESH_SETUP_OK");
+}
+
+#[allow(clippy::too_many_lines)]
+fn stage_exact_v2_source(
+    config: &LiveConfig,
+    target: &ExtensionTarget,
+    schema_comment: &'static str,
+) {
     let v2_manifest =
         verify_embedded_v2_extension_manifest().expect("MEMORY_EXTENSION_V2_MANIFEST_INVALID");
     let mut admin = config.admin_client();
-    admin
-        .batch_execute(
+    let schema_reset = match schema_comment {
+        "LATTICE_DEVOS_MEMORY_SCHEMA_V3" => {
             "DROP SCHEMA memory CASCADE; \
              CREATE SCHEMA memory AUTHORIZATION lattice_migrator; \
              REVOKE ALL ON SCHEMA memory FROM PUBLIC; \
-             COMMENT ON SCHEMA memory IS 'LATTICE_DEVOS_MEMORY_SCHEMA_V5'",
-        )
+             COMMENT ON SCHEMA memory IS 'LATTICE_DEVOS_MEMORY_SCHEMA_V3'"
+        }
+        "LATTICE_DEVOS_MEMORY_SCHEMA_V5" => {
+            "DROP SCHEMA memory CASCADE; \
+             CREATE SCHEMA memory AUTHORIZATION lattice_migrator; \
+             REVOKE ALL ON SCHEMA memory FROM PUBLIC; \
+             COMMENT ON SCHEMA memory IS 'LATTICE_DEVOS_MEMORY_SCHEMA_V5'"
+        }
+        _ => panic!("MEMORY_HISTORICAL_SCHEMA_PROFILE_REJECTED"),
+    };
+    admin
+        .batch_execute(schema_reset)
         .expect("MEMORY_HISTORICAL_SCHEMA_RESET_FAILED");
     drop(admin);
 

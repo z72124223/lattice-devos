@@ -183,7 +183,8 @@ fn provision_fresh_database(target: &MigrationTarget) {
              FROM PUBLIC, lattice_migrator, lattice_runtime, lattice_guardian, \
                  lattice_readonly, lattice_migrator_login, lattice_runtime_login, \
                  lattice_guardian_login, lattice_readonly_login; \
-             GRANT EXECUTE ON FUNCTION pg_catalog.pg_advisory_xact_lock(bigint), \
+             GRANT EXECUTE ON FUNCTION pg_catalog.pg_try_advisory_lock(bigint), \
+                 pg_catalog.pg_advisory_xact_lock(bigint), \
                  pg_catalog.pg_current_xact_id() TO lattice_migrator",
         )
         .expect("pre-role function boundary");
@@ -260,7 +261,8 @@ fn provision_upgrade_database(target: &MigrationTarget) {
              FROM PUBLIC, lattice_migrator, lattice_runtime, lattice_guardian, \
                  lattice_readonly, lattice_migrator_login, lattice_runtime_login, \
                  lattice_guardian_login, lattice_readonly_login; \
-             GRANT EXECUTE ON FUNCTION pg_catalog.pg_advisory_xact_lock(bigint), \
+             GRANT EXECUTE ON FUNCTION pg_catalog.pg_try_advisory_lock(bigint), \
+                 pg_catalog.pg_advisory_xact_lock(bigint), \
                  pg_catalog.pg_current_xact_id() TO lattice_migrator",
         )
         .expect("upgrade pre-role function boundary");

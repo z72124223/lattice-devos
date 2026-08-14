@@ -159,3 +159,95 @@ fn historical_profile_staging_never_downgrades_global_compatibility() {
     assert!(staging.contains("global_schema_version, global_manifest_sha256"));
     assert!(staging.contains("&HISTORICAL_GLOBAL_MANIFEST_SHA256"));
 }
+
+#[test]
+fn task076_live_phase_uses_only_the_memory_production_upgrader() {
+    let live = include_str!("postgres_live.rs");
+    let setup = include_str!("../src/setup.rs");
+
+    for required in [
+        "task076_memory_upgrade",
+        "prove_task076_memory_upgrade",
+        "apply_extension(&mut migrator, target)",
+        "task076_writer_lease_fingerprint",
+        "MEMORY_EXTENSION_WRITER_LEASE_BRIDGE_PENDING",
+        "TASK076_MEMORY_UPGRADE_PASS",
+    ] {
+        assert!(
+            live.contains(required),
+            "missing TASK-076 live field {required}"
+        );
+    }
+    assert!(
+        !live.contains("lattice_postgres_writer_lease"),
+        "the Memory phase must not create or upgrade Writer Lease"
+    );
+    assert!(
+        setup.contains("MEMORY_EXTENSION_WRITER_LEASE_PROFILE_NOT_FROZEN"),
+        "an unfrozen Writer v2 catalog must fail closed"
+    );
+
+    for required in [
+        "prove_task076_bridge_runtime_quarantined",
+        "prove_task076_memory_rejection_matrix",
+        "Task076WriterMutation::V1",
+        "Task076WriterMutation::Partial",
+        "Task076WriterMutation::Drift",
+        "Task076WriterMutation::Extra",
+        "Task076WriterMutation::Active",
+        "Task076WriterMutation::Suspect",
+        "MEMORY_EXTENSION_TASK076_MEMORY_CHANGED_ON_REJECTION",
+        "MEMORY_EXTENSION_TASK076_WRITER_CHANGED_ON_REJECTION",
+        "MEMORY_EXTENSION_TASK076_RUNTIME_SCHEMA_USAGE_ALLOWED",
+        "MEMORY_EXTENSION_TASK076_RUNTIME_FUNCTION_EXECUTE_ALLOWED",
+    ] {
+        assert!(
+            live.contains(required),
+            "missing TASK-076 negative live evidence {required}"
+        );
+    }
+}
+
+#[test]
+fn task076_historical_memory_source_is_staged_only_by_the_memory_fixture() {
+    let live = include_str!("postgres_live.rs");
+
+    for required in [
+        "task076_memory_source_setup",
+        "stage_task076_memory_v2_source",
+        "LATTICE_DEVOS_MEMORY_SCHEMA_V3",
+        "TASK076_MEMORY_V2_SOURCE_PASS",
+    ] {
+        assert!(
+            live.contains(required),
+            "missing TASK-076 historical Memory source field {required}"
+        );
+    }
+    let start = live
+        .find("fn stage_task076_memory_v2_source")
+        .expect("TASK-076 Memory source fixture");
+    let end = live[start..]
+        .find("\nfn stage_exact_v2_upgrade_source")
+        .map(|offset| start + offset)
+        .expect("TASK-076 Memory source fixture end");
+    let source = &live[start..end];
+    assert!(source.contains("stage_exact_v2_source(config, target"));
+    assert!(!source.contains("apply_extension("));
+    assert!(!source.contains("writer_lease"));
+}
+
+#[test]
+fn task076_fresh_current_memory_fixture_is_a_closed_owned_phase() {
+    let live = include_str!("postgres_live.rs");
+    for required in [
+        "task076_memory_fresh_setup",
+        "stage_task076_memory_v3_fresh",
+        "writer_fresh",
+        "TASK076_MEMORY_V3_FRESH_SETUP_OK",
+    ] {
+        assert!(
+            live.contains(required),
+            "missing TASK-076 fresh Memory boundary {required}"
+        );
+    }
+}

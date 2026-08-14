@@ -262,10 +262,12 @@ Only the Writer owner creates the v2 bridge or final rebind. Store advances
 only the global profile, and Memory advances only its extension after exact
 companion verification. All three administrative runners acquire global,
 Memory, and Writer transaction locks in that order. Both schema-v5 pending
-states reject runtime and fenced Task Ledger writes. Fresh global-v5/
-Memory-v3 installation produces the same final catalog/current identity with
-a truthful one-row fresh history; an upgrade retains the exact three-row
-v1/bridge/rebind history.
+states reject runtime and fenced Task Ledger writes. The G3/M2 v2 bridge is
+likewise runtime-quarantined because neither the historical v1 bind/load pair
+nor the final-only v2 pair is valid there. Fresh global-v5/Memory-v3
+installation produces the same final catalog/current identity with a truthful
+one-row fresh history; an upgrade retains the exact three-row v1/bridge/rebind
+history.
 
 Writer v2 adds only the two runtime successors required to replace v1
 functions that hard-bound ledger ordinal 1. The other five v1 runtime

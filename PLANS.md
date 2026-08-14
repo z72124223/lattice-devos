@@ -636,6 +636,31 @@ remain future Orchestrator/PostgreSQL responsibilities.
 | Credentials, account/payment actions, public exposure, irreversible actions | Authenticated protected-action evidence | User/protected system surface |
 | Primary-branch merge | Current checks, review, synchronization, explicit authorization | User |
 
+### Project-Scoped GitHub Development Authorization - 2026-08-14
+
+The user explicitly authorizes Codex, for ongoing development of this LATTICE
+repository, to reuse the GitHub CLI credential already stored by the operating
+system keyring without requesting approval for each routine action. Within an
+authorized bounded ticket, Codex may create clean local commits, push the exact
+task feature branch without force, and create or update a Draft pull request
+that reports current verification and review state. This standing authorization
+also covers later checkpoint pushes to that same task branch while its ticket
+and allowed paths remain authoritative.
+
+The verified publication identity is GitHub host `github.com`, account
+`z72124223`, repository `z72124223/lattice-devos`, and HTTPS Git transport.
+`gh auth status` reported the credential in the operating-system keyring with
+`repo`, `read:org`, and `gist` scopes. No OAuth token, one-time device code,
+password, browser session, mobile confirmation value, or other credential
+material may be copied into the repository, commits, logs, tickets, handoffs,
+pull-request text, or LATTICE memory.
+
+This authorization does not permit force-push, merge to a primary or protected
+branch, branch-protection or repository-permission changes, tag/release,
+deployment, public-network exposure, history deletion, credential/account/
+payment mutation, or publication outside the exact LATTICE repository. Those
+actions remain separately protected and require explicit current authorization.
+
 ## Implementation Steps
 
 - [x] Step 1: Audit the repository, dirty Git state, original attachment,

@@ -2,12 +2,12 @@
 
 ## Current Outcome
 
-TASK-075 implementation is preserved in clean commit `a3599c1`, but final
-architecture review found one real compatibility blocker: the accepted exact
-global-v3 + Codebase-Memory-v2 + Writer-Lease-v1 profile cannot advance to the
-schema-v5/Memory-v3 candidate because Writer v1 identity and its runtime bind/
-load functions are intentionally fixed to v3/v2. Closing TASK-075 or resuming
-TASK-050 on that tree would therefore be false completion.
+TASK-076 implementation is active on base
+`8b6d5171759e28339d6fe2b66fab0c3b6718c64c`; TASK-075 commit `a3599c1` and
+the separately committed migration-byte preservation prerequisite remain
+unchanged. The Writer Lease v2 bridge now addresses the accepted compatibility
+blocker that prevented the global-v3 + Codebase-Memory-v2 + Writer-Lease-v1
+profile from advancing to global-v5 + Memory-v3.
 
 TASK-076 is the sole current ticket. It adds an append-only Writer Lease v2
 bridge while preserving v1 SQL and every semantic row, canonical receipt,
@@ -20,12 +20,35 @@ reject runtime use.
 
 The implementation worktree is
 `lattice-worktrees/task-076-postgres-writer-lease-v2` on branch
-`feature/task-076-postgres-writer-lease-v2`, based on `a3599c1`. TASK-075 and
-TASK-050 are `waiting_dependency`; TASK-051 remains blocked. Existing
+`feature/task-076-postgres-writer-lease-v2`, based on `8b6d517`. The official
+TASK-076 wrapper passed with
+`TASK076_WRITER_LEASE_V2_BRIDGE_ACCEPTANCE=PASS`; its embedded TASK-050 fresh-
+process acceptance also passed and emitted a holder receipt. Focused Writer,
+Store, and Codebase Memory contract/compile checks pass, temporary diagnostics
+are removed, frozen history is unchanged from the implementation base, and
+`git diff --check` passes. Independent final code and architecture reviews are
+still pending, so this is a publishable checkpoint rather than ticket closure.
+
+TASK-075 and TASK-050 remain `waiting_dependency`; TASK-051 remains blocked.
+Existing
 PostgreSQL listeners at `5432`, `64272`, and `55432`, unrelated dirty
-worktrees, and the protected TASK-051 runner must not be touched. No TASK-076
-test, live fixture, review, commit, push, merge, deployment, or completion is
-claimed by this governance checkpoint.
+worktrees, and the protected TASK-051 runner must not be touched.
+
+## GitHub Publication Authorization And Safety
+
+On 2026-08-14 the user explicitly authorized routine GitHub publication for
+ongoing LATTICE development. GitHub CLI is verified for `github.com` account
+`z72124223`, repository `z72124223/lattice-devos`, HTTPS transport, and a
+credential stored in the operating-system keyring. Within a bounded authorized
+ticket, Codex may create clean commits, push the exact feature branch without
+force, and create or update a Draft pull request without repeated approval.
+
+No OAuth token, device code, password, browser/mobile session, or confirmation
+value is stored. Merge, Draft promotion, force-push, protected-branch or
+repository-permission changes, tag/release, deployment, public exposure,
+history deletion, and credential/account/payment mutation remain outside this
+authorization. TASK-076 completion is not claimed until the remaining review
+and integration gates pass.
 
 # TASK-075 Schema-v5 Migration Reconciliation Handoff - 2026-08-14
 

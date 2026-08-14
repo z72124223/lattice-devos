@@ -20,9 +20,9 @@ use crate::{sha256_bytes, verify_embedded_extension_manifest};
 
 const MAX_SERIALIZATION_RETRIES: usize = 3;
 const BIND_RUNTIME_SQL: &str =
-    "SELECT * FROM writer_lease.writer_lease_bind_runtime_v1($1,$2,$3,$4,$5,$6,$7,$8)";
+    "SELECT * FROM writer_lease.writer_lease_bind_runtime_v2($1,$2,$3,$4,$5,$6,$7,$8)";
 const LOAD_FOR_UPDATE_SQL: &str =
-    "SELECT * FROM writer_lease.writer_lease_load_for_update_v1($1,$2,$3,$4,$5)";
+    "SELECT * FROM writer_lease.writer_lease_load_for_update_v2($1,$2,$3,$4,$5)";
 const LOAD_COMMANDS_SQL: &str = "SELECT * FROM writer_lease.writer_lease_load_commands_v1($1)";
 const LOAD_TRANSITIONS_SQL: &str =
     "SELECT * FROM writer_lease.writer_lease_load_transitions_v1($1)";
