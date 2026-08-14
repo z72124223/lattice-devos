@@ -1,7 +1,7 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.8
+version: 1.9
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-14
@@ -35,6 +35,13 @@ Writer-v1 database to schema v5. It holds global, Memory, and Writer migration
 locks in that order and keeps both schema-v5 bridge states runtime closed. It
 does not install, mutate, rebind, replay, or semantically interpret Writer
 Lease state and adds no dependency on the Writer adapter.
+Version 1.9 closes the TASK-076 protected-function ACL amendment. Every fixed
+LOGIN remains denied every advisory-lock acquisition before `SET ROLE`.
+`lattice_migrator` alone receives the two exact non-grantable bigint
+acquisitions required by the governed runners: transaction-scoped
+`pg_advisory_xact_lock(bigint)` and nonblocking session-scoped
+`pg_try_advisory_lock(bigint)`. The latter is only the bounded Writer apply
+gate; it does not become a Store migration primitive or Writer state ownership.
 
 ## Non-Goals
 
@@ -382,9 +389,15 @@ Lease state and adds no dependency on the Writer adapter.
     authenticated as the same fixed LOGIN prove that
     `pg_cancel_backend(integer)` and `pg_terminate_backend(integer,bigint)` are
     also denied. Of the sixteen lock-acquisition overloads, only
-    `pg_advisory_xact_lock(bigint)` is granted to `lattice_migrator` after
-    `SET ROLE`; no fixed LOGIN has that direct grant. The one allowed direct
-    grant is non-grantable and its grantor is the protected function owner.
+    `pg_advisory_xact_lock(bigint)` and `pg_try_advisory_lock(bigint)` are
+    granted to `lattice_migrator` after `SET ROLE`; no fixed LOGIN has either
+    direct grant. Both allowed direct grants are non-grantable and their
+    grantor is the protected function owner. The former is the ordered
+    transaction-scoped migration lock. The latter is restricted to the
+    bounded Writer apply session gate, whose acquire/release each run in a
+    short `SET LOCAL ROLE lattice_migrator` transaction and restore the login
+    role at commit. The other fourteen acquisition overloads remain denied
+    after `SET ROLE`.
 30. `max_prepared_transactions` is exactly zero. `LISTEN`/`NOTIFY` is never a
     truth, admission, evidence, authority, or effect-delivery source. Because
     `NOTIFY` is a SQL command rather than a function call, function revocation
@@ -772,7 +785,7 @@ is unchanged.
 | Transactional migration | apply/no-op/concurrent runner/rollback/unknown-response and committed-unverified reconciliation | Engineering | yes |
 | Ownership and roles | exact target sentinel, cluster-wide database/PUBLIC/parameter ACL closure, all-catalog LOGIN direct grants, cluster-wide `pg_shdepend` plus explicit local fixed-LOGIN owner checks, external relation/column/effective-function closure, all-owner default-ACL closure, and migrator/runtime/guardian/reader matrix | Security review | yes |
 | Catalog and type closure | exact column ACL signature, table-row/array type allowlist, shell/extra type denial | Architecture review | yes |
-| Protected function/settings closure | exact 5 large-object creator, 2 four-argument logical-message, 16 advisory-lock, same-LOGIN backend-control, snapshot-export, and transaction-ID function proof; only one exact non-grantable post-`SET ROLE` migrator advisory-lock grant from the function owner; `max_prepared_transactions = 0`; no notification-authority claim | Security review | yes |
+| Protected function/settings closure | exact 5 large-object creator, 2 four-argument logical-message, 16 advisory-lock, same-LOGIN backend-control, snapshot-export, and transaction-ID function proof; only two exact non-grantable post-`SET ROLE` migrator advisory-lock grants from the function owner, with the nonblocking session overload restricted to the bounded Writer apply gate; `max_prepared_transactions = 0`; no notification-authority claim | Security review | yes |
 | Admission bootstrap | exact STOPPED/no-leader row; runtime cannot mutate or self-activate | Architecture review | yes |
 | Disposable PostgreSQL | owned isolated 17.10 cluster, loopback/settings/checksums/restart/cleanup evidence | Integration review | yes |
 | Secret/error hygiene | redacted static errors and zero credential/DSN persistence | Security review | yes |
@@ -831,3 +844,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.6 | 2026-08-10 | SPEC-003 v3, ADR-023, TASK-038 | Permit only the fixed 15-field Writer Lease current-authority assertion inside a fenced Task Ledger transaction, without lease repository dependency, state ownership, or mutation | User TASK-038-first direction |
 | 1.7 | 2026-08-14 | SPEC-002 v32, ADR-011/019/020/022, TASK-075 | Preserve exact Registry schema-v4 `0005`, add autonomy schema-v5 `0006`, fail closed on misplaced history, freeze exact successor/catalog profile, retain Registry persistence provenance, and recognize separate Memory-v3/global-v5 compatibility without changing historical bytes | User-approved TASK-075 reconciliation |
 | 1.8 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-022/023, TASK-076 | Recognize exact Writer-v2 bridge/current companion profiles under global-to-Memory-to-Writer locking and keep schema-v5 pending states runtime closed without taking Writer ownership | User continuation authorization |
+| 1.9 | 2026-08-14 | SPEC-002 v34, ADR-023 TASK-076 amendment, TASK-076 | Freeze the exact second post-role migrator acquisition grant for the bounded Writer session gate while keeping all LOGIN roles and the other fourteen overloads denied | User TASK-076 continuation directive |

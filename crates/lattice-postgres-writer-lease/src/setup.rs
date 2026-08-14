@@ -451,17 +451,44 @@ struct GlobalApplyGate<'client> {
     held: bool,
 }
 
+fn try_global_apply_gate_lock(client: &mut Client) -> Result<bool, ExtensionSetupError> {
+    let mut transaction = client.transaction().map_err(map_public_database)?;
+    enter_migrator(&mut transaction).map_err(SetupAttemptError::into_public)?;
+    let acquired = transaction
+        .query_one(
+            "SELECT pg_catalog.pg_try_advisory_lock($1)",
+            &[&GLOBAL_MIGRATION_ADVISORY_LOCK],
+        )
+        .and_then(|row| row.try_get(0))
+        .map_err(map_public_database)?;
+    if let Err(error) = transaction.commit() {
+        if acquired {
+            let _ = release_global_apply_gate_lock(client);
+        }
+        return Err(map_public_database(error));
+    }
+    Ok(acquired)
+}
+
+fn release_global_apply_gate_lock(client: &mut Client) -> Result<bool, ExtensionSetupError> {
+    let mut transaction = client.transaction().map_err(map_public_database)?;
+    enter_migrator(&mut transaction).map_err(SetupAttemptError::into_public)?;
+    let unlocked = transaction
+        .query_one(
+            "SELECT pg_catalog.pg_advisory_unlock($1)",
+            &[&GLOBAL_MIGRATION_ADVISORY_LOCK],
+        )
+        .and_then(|row| row.try_get(0))
+        .map_err(map_public_database)?;
+    transaction.commit().map_err(map_public_database)?;
+    Ok(unlocked)
+}
+
 impl<'client> GlobalApplyGate<'client> {
     fn acquire(client: &'client mut Client) -> Result<Self, ExtensionSetupError> {
         let started_at = Instant::now();
         loop {
-            let acquired: bool = client
-                .query_one(
-                    "SELECT pg_catalog.pg_try_advisory_lock($1)",
-                    &[&GLOBAL_MIGRATION_ADVISORY_LOCK],
-                )
-                .and_then(|row| row.try_get(0))
-                .map_err(map_public_database)?;
+            let acquired = try_global_apply_gate_lock(client)?;
             if acquired {
                 return Ok(Self { client, held: true });
             }
@@ -482,14 +509,7 @@ impl<'client> GlobalApplyGate<'client> {
     }
 
     fn release(mut self) -> Result<(), ExtensionSetupError> {
-        let unlocked: bool = self
-            .client
-            .query_one(
-                "SELECT pg_catalog.pg_advisory_unlock($1)",
-                &[&GLOBAL_MIGRATION_ADVISORY_LOCK],
-            )
-            .and_then(|row| row.try_get(0))
-            .map_err(map_public_database)?;
+        let unlocked = release_global_apply_gate_lock(self.client)?;
         self.held = false;
         if !unlocked {
             return Err(ExtensionSetupError::new(ExtensionSetupErrorKind::Database));
@@ -500,13 +520,7 @@ impl<'client> GlobalApplyGate<'client> {
 
 impl Drop for GlobalApplyGate<'_> {
     fn drop(&mut self) {
-        if self.held
-            && let Ok(row) = self.client.query_one(
-                "SELECT pg_catalog.pg_advisory_unlock($1)",
-                &[&GLOBAL_MIGRATION_ADVISORY_LOCK],
-            )
-            && row.try_get::<_, bool>(0).unwrap_or(false)
-        {
+        if self.held && release_global_apply_gate_lock(self.client).unwrap_or(false) {
             self.held = false;
         }
     }

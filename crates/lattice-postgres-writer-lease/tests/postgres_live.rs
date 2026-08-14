@@ -1353,17 +1353,7 @@ fn task076_concurrent_apply(
     }
 
     let mut client_a = Client::connect(migrator_url, NoTls).expect("Writer setup runner A");
-    client_a
-        .batch_execute(
-            "SET ROLE lattice_migrator; SET search_path=pg_catalog; SET row_security=on;",
-        )
-        .expect("Writer setup runner A migrator role");
     let mut client_b = Client::connect(migrator_url, NoTls).expect("Writer setup runner B");
-    client_b
-        .batch_execute(
-            "SET ROLE lattice_migrator; SET search_path=pg_catalog; SET row_security=on;",
-        )
-        .expect("Writer setup runner B migrator role");
     if trace_bridge {
         println!("TASK076_WRITER_BRIDGE_RUNNERS_CONNECTED_PASS");
         println!("TASK076_WRITER_BRIDGE_RUNNERS_STARTED_ENTER");
@@ -1419,6 +1409,78 @@ fn task076_concurrent_apply(
     ]
 }
 
+fn assert_task076_login_apply_boundary(migrator_url: &str, target: &ExtensionTarget) {
+    let mut caller = Client::connect(migrator_url, NoTls).expect("Writer setup login caller");
+    let login_role = caller
+        .query_one("SELECT current_user::text", &[])
+        .and_then(|row| row.try_get::<_, String>(0))
+        .expect("Writer setup login identity");
+    assert_eq!(login_role, "lattice_migrator_login");
+    assert_eq!(
+        apply_extension(&mut caller, target).expect("normal login Writer reapply"),
+        ExtensionApplyOutcome::AlreadyCurrent
+    );
+    let restored_role = caller
+        .query_one("SELECT current_user::text", &[])
+        .and_then(|row| row.try_get::<_, String>(0))
+        .expect("Writer setup restored login identity");
+    assert_eq!(restored_role, "lattice_migrator_login");
+
+    let wrong_identity = if target.database_identity_digest().as_str() == digest('f').as_str() {
+        digest('e')
+    } else {
+        digest('f')
+    };
+    let wrong_target = ExtensionTarget::new(
+        target.database_name().to_owned(),
+        wrong_identity,
+        target.global_manifest_digest().clone(),
+        target.memory_manifest_digest().clone(),
+    )
+    .expect("bounded wrong Writer target");
+    let error = apply_extension(&mut caller, &wrong_target)
+        .expect_err("wrong target must fail after taking the setup gate");
+    assert_eq!(error.kind(), ExtensionSetupErrorKind::UnsupportedFoundation);
+    let error_restored_role = caller
+        .query_one("SELECT current_user::text", &[])
+        .and_then(|row| row.try_get::<_, String>(0))
+        .expect("Writer setup error restored login identity");
+    assert_eq!(error_restored_role, "lattice_migrator_login");
+
+    let mut probe = Client::connect(migrator_url, NoTls).expect("Writer setup gate probe");
+    let mut transaction = probe
+        .transaction()
+        .expect("Writer setup gate probe transaction");
+    transaction
+        .batch_execute("SET LOCAL ROLE lattice_migrator; SET LOCAL search_path=pg_catalog;")
+        .expect("Writer setup gate probe role");
+    let acquired = transaction
+        .query_one(
+            "SELECT pg_catalog.pg_try_advisory_lock($1)",
+            &[&TASK076_GLOBAL_LOCK],
+        )
+        .and_then(|row| row.try_get::<_, bool>(0))
+        .expect("Writer setup gate probe acquisition");
+    assert!(
+        acquired,
+        "Writer setup gate must not remain held after error"
+    );
+    let unlocked = transaction
+        .query_one(
+            "SELECT pg_catalog.pg_advisory_unlock($1)",
+            &[&TASK076_GLOBAL_LOCK],
+        )
+        .and_then(|row| row.try_get::<_, bool>(0))
+        .expect("Writer setup gate probe release");
+    assert!(
+        unlocked,
+        "Writer setup gate probe must release its own lock"
+    );
+    transaction
+        .commit()
+        .expect("Writer setup gate probe commit");
+}
+
 fn run_task076_fresh_install(migrator: &mut Client, migrator_url: &str, target: &ExtensionTarget) {
     let namespace_absent: bool = migrator
         .query_one(
@@ -1445,6 +1507,8 @@ fn run_task076_fresh_install(migrator: &mut Client, migrator_url: &str, target: 
     );
     println!("TASK076_WRITER_FRESH_INSTALLED_PASS");
     println!("TASK076_WRITER_FRESH_CONCURRENT_PASS");
+    assert_task076_login_apply_boundary(migrator_url, target);
+    println!("TASK076_WRITER_LOGIN_APPLY_BOUNDARY_PASS");
     let installed = task076_fresh_profile_evidence(migrator, target);
     assert_eq!(
         apply_extension(migrator, target).expect("reapply exact fresh Writer v2 current"),

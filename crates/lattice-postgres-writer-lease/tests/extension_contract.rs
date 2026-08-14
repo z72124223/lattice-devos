@@ -225,6 +225,9 @@ fn setup_and_live_acceptance_converge_two_concurrent_runners() {
         "GlobalApplyGate::acquire(client)",
         "GLOBAL_APPLY_GATE_TIMEOUT: Duration = Duration::from_secs(30)",
         "GLOBAL_APPLY_GATE_POLL_INTERVAL: Duration = Duration::from_millis(20)",
+        "fn try_global_apply_gate_lock",
+        "fn release_global_apply_gate_lock",
+        "enter_migrator(&mut transaction)",
         "pg_catalog.pg_try_advisory_lock($1)",
         "Instant::now()",
         "std::thread::sleep(",
@@ -264,15 +267,27 @@ fn setup_and_live_acceptance_converge_two_concurrent_runners() {
         "both Writer setup runners must remain pending while the global lock is held",
         "!runner_a.is_finished()",
         "!runner_b.is_finished()",
-        "Writer setup runner A migrator role",
-        "Writer setup runner B migrator role",
+        "Client::connect(migrator_url, NoTls).expect(\"Writer setup runner A\")",
+        "Client::connect(migrator_url, NoTls).expect(\"Writer setup runner B\")",
     ] {
         assert!(
             concurrent_apply.contains(required),
             "missing concurrent runner proof: {required}"
         );
     }
+    assert!(!concurrent_apply.contains("SET ROLE lattice_migrator"));
     assert!(!concurrent_apply.contains("pg_blocking_pids"));
+    for required in [
+        "fn assert_task076_login_apply_boundary",
+        "assert_task076_login_apply_boundary(migrator_url, target)",
+        "TASK076_WRITER_LOGIN_APPLY_BOUNDARY_PASS",
+        "Writer setup gate must not remain held after error",
+    ] {
+        assert!(
+            live.contains(required),
+            "missing login-role setup boundary proof: {required}"
+        );
+    }
     for required in [
         "TASK076_WRITER_BRIDGE_CONCURRENT_PASS",
         "TASK076_WRITER_ACTIVATE_CONCURRENT_PASS",

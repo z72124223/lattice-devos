@@ -2,7 +2,7 @@
 ticket_id: TASK-076
 title: PostgreSQL Writer Lease v2 schema-v5 compatibility bridge
 spec_id: SPEC-002
-spec_version: 33
+spec_version: 34
 related_spec_id: SPEC-003
 related_spec_version: 5
 module_id: postgres-writer-lease
@@ -160,6 +160,17 @@ locks in this exact order before installed-profile classification or DDL:
 1. global Store migration lock `0x4c41_5454_4943_4501`;
 2. Codebase Memory extension lock `0x4c41_5443_4d45_4d31`;
 3. Writer Lease extension lock `0x4c41_5457_4c45_4131`.
+
+The Writer apply API additionally uses the global key as a bounded
+session-scoped gate across the complete apply operation and its serializable
+retries. It may use only `pg_try_advisory_lock(bigint)`, acquired and released
+inside short transactions after `SET LOCAL ROLE lattice_migrator`; commit must
+restore the NOINHERIT login role and success, failure, and Drop must not leave
+the gate held. This is distinct from the three ordered transaction-scoped
+state locks. The protected-function manifest grants only
+`pg_advisory_xact_lock(bigint)` and `pg_try_advisory_lock(bigint)` to
+`lattice_migrator`, directly grants neither to a LOGIN, and denies the other
+fourteen acquisition overloads even after role selection.
 
 The Writer owner performs the v1-to-v2 bridge and final activation. The Store
 runner may recognize the exact bridge/current companion profile only to govern

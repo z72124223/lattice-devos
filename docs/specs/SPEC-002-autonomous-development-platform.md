@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 33
+version: 34
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -31,7 +31,7 @@ modules:
   - module_id: approval-verifier
     constitution_version: 1.0
   - module_id: postgres-store
-    constitution_version: 1.8
+    constitution_version: 1.9
   - module_id: postgres-codebase-memory
     constitution_version: 1.2
   - module_id: postgres-writer-lease
@@ -846,7 +846,7 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | task-ledger | 2.2 | Preserve 2.1 hashes/planner/replay and add the closed internal autonomy-receipt event/subject semantics, exactly-one profile ordering, mixed historical replay, and atomic event-owned persistence contract; public MCP bytes remain unchanged and all I/O stays in Postgres Store |
 | policy-engine | 2.6 | Generic project/capability/upgrade policy; independent current Registry, Task Ledger, Writer Lease, and Approval Verifier full-head comparison; R3 denies pending Review Runtime authority |
 | project-registry | 1.2 | Canonical repository identity and lifecycle plus one pure runtime-aware global vacant/plan/apply/export/verify boundary, separately reconstructed retained checkpoint, acyclic command-core/logical-bytes/checkpoint/record-set commitments, complete bounded history, and byte-identical Registry-1.1 Fake vectors |
-| writer-lease | 1.0 | New lease/fencing/daemon-epoch domain owner |
+| writer-lease | 1.1 | Preserve the closed lease/fencing/daemon-epoch semantic owner and exact historical replay; no TASK-076 pure transition or receipt bytes change |
 | workspace-git | 2.0 | Worktree/Git/filesystem evidence only; consumes lease authority |
 | scope-check | 1.1 | Language-neutral contract; mission remains detection-only |
 | orchestrator-runtime | 2.5 | Preserve delivery ordering and pure injected-port coordination/dispatch plus snapshot -> Graphify -> validate -> memory persist/retrieve ordering; no concrete adapter or transport dependency |
@@ -854,8 +854,9 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | openclaw-adapter | 2.0 | Inert scaffold becomes a thin local IPC gateway |
 | gateway-ipc | 1.1 | Bounded canonical six-action protocol, NFC-preserving encoder, truthful core-service errors, and deterministic fake loopback; live transport and OS authentication remain deferred |
 | approval-verifier | 1.0 | Pure typed-subject/challenge/proof/nonce/time/current-head owner and deterministic fake; live trust/claim remains deferred |
-| postgres-store | 1.7 | Preserve exact Registry schema-v4 `0005`, add autonomy schema-v5 `0006`, fail closed before DDL on misplaced autonomy-`0005` histories, retain per-command Registry persistence-profile provenance for byte-identical mixed replay, and expose only the exact `16/47/19/28` base catalog profile |
-| postgres-codebase-memory | 1.1 | Preserve extension v1/v2 bytes and historical v2/global-v3 receipt identity; add exact extension v3/global-v5 install/upgrade, per-analysis profile provenance, and byte-identical v2/v3 graph/reflection replay outside the global manifest |
+| postgres-store | 1.9 | Preserve the exact schema-v5 Registry/autonomy profile, recognize only the governed Memory/Writer companion profiles, and close the protected advisory-function ACL to the two exact post-`SET ROLE` migrator acquisitions required by global migration and the bounded Writer apply gate |
+| postgres-codebase-memory | 1.2 | Preserve extension v1/v2 bytes and historical v2/global-v3 receipt identity; add exact extension v3/global-v5 install/upgrade plus the bounded Writer-v2 bridge recognizer, per-analysis profile provenance, and byte-identical v2/v3 graph/reflection replay outside the global manifest |
+| postgres-writer-lease | 1.1 | Preserve Writer v1 bytes and add the append-only v2 bridge/current adapter under exact Store/Memory profiles, ordered transaction locks, and the bounded post-role session apply gate |
 | artifact-store | 1.0 | Pure project-scoped object/reference/provenance/quota/delete-claim semantic owner and deterministic fake; PostgreSQL/filesystem I/O remains deferred |
 | codex-adapter | 1.1 | One writable app-server process/thread implementing the typed `DeliveryCodexPort`; generic `CodexPort` is not a second production path |
 | review-runtime | 1.0 | New independent read-only review boundary |
@@ -1216,10 +1217,17 @@ packaging modules do not activate functional provider modules.
   and `txid_current()`. Two concurrent sessions authenticated as the same fixed
   LOGIN also prove denial of `pg_cancel_backend(integer)` and
   `pg_terminate_backend(integer,bigint)`. Of the sixteen lock-acquisition
-  overloads, only `pg_advisory_xact_lock(bigint)` is granted to
-  `lattice_migrator`, and only after `SET ROLE`; no fixed LOGIN receives that
-  grant directly. That single direct grant is non-grantable and originates from
-  the protected function owner. The disposable harness proves these boundaries with one-time
+  overloads, only `pg_advisory_xact_lock(bigint)` and
+  `pg_try_advisory_lock(bigint)` are granted to `lattice_migrator`, and only
+  after `SET ROLE`; no fixed LOGIN receives either grant directly. Both direct
+  grants are non-grantable and originate from the protected function owner.
+  The transaction-scoped overload owns the ordered global/Memory/Writer
+  migration locks. The nonblocking session overload owns only the bounded
+  Writer apply gate: its acquire and release each execute inside a short
+  transaction with `SET LOCAL ROLE lattice_migrator`, the role is restored at
+  commit, and the gate is released on success, error, or Drop. The other
+  fourteen acquisition overloads remain denied after `SET ROLE`. The
+  disposable harness proves these boundaries with one-time
   test-only SCRAM identities instead of superuser impersonation. Normal runtime
   has no direct table DML,
   DDL, admission/history/identity write, role escalation, or effective CREATE
@@ -1477,6 +1485,16 @@ install records truthful fresh-current history; an upgrade records exact v1
 No Writer command, transition, receipt, snapshot, checkpoint, lease-revision,
 or fencing byte changes. Partial, extra, drifted, active, suspect, unknown,
 cross-profile, or substituted state fails closed without automatic repair.
+
+SPEC-002 v34 closes the TASK-076 protected-function amendment. All fixed LOGIN
+roles still have zero effective advisory-lock acquisition capability before
+role selection. After `SET ROLE`, `lattice_migrator` alone receives the exact
+non-grantable `pg_advisory_xact_lock(bigint)` and
+`pg_try_advisory_lock(bigint)` grants. The first remains the only
+transaction-scoped migration-lock primitive; the second is used only as the
+bounded session gate that spans a Writer apply attempt and its serialization
+retries. This does not grant a login role directly, add a generic lock API, or
+change Store/Memory/Writer state ownership.
 
 ## Verification Plan
 
