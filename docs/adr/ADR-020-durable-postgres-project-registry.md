@@ -4,8 +4,8 @@
   approved V2 amendment and user's MVP-3 execution directive
 - Date: 2026-08-03
 - Decision owner: user
-- Related: SPEC-002 v24, ADR-005, ADR-008, ADR-010, ADR-016, ADR-017,
-  ADR-019, Project Registry 1.2, Postgres Store 1.4, TASK-022
+- Related: SPEC-002 v32, ADR-005, ADR-008, ADR-010, ADR-016, ADR-017,
+  ADR-019, Project Registry 1.2, Postgres Store 1.7, TASK-022, TASK-075
 
 ## Context
 
@@ -442,6 +442,38 @@ global transaction only when its constitution proves that no truthful project
 snapshot exists and an ADR freezes its global serialization, evidence, and
 compatibility contract. TASK-022 Project Registry is the first and only such
 exception approved here. This does not make Store scope optional or generic.
+
+## TASK-075 Schema-v5 Compatibility Amendment
+
+TASK-075 does not change Project Registry 1.2 pure command, checkpoint,
+record-set, or persistence-receipt semantics. Schema v4 remains the exact
+TASK-022 `db/migrations/0005_project_registry_repository.sql` bytes from
+commit `12f7100`, SHA-256
+`b7af1f8a8ac370bbfc8a5312497461587cb8a86eb32ff97e5b865c7ae9bf0dcf`.
+Its five-entry manifest commitment is
+`df3f7ca3687afaa0d1f676158725e6d2f06670e0612df7482aa9d4d244b59f0f`.
+Autonomy follows at `0006` as global schema v5; autonomy content at ordinal
+`0005` is incompatible history and fails closed before migration DDL without
+automatic repair.
+
+Schema v5 adds `persistence_schema_version` and
+`persistence_manifest_sha256` to every Registry command row. The migration
+backfills all schema-v4 commands with schema `4` and the frozen v4 manifest.
+New commands record schema `5` and the current v5 manifest. Reads reconstruct
+each persistence receipt from that command-owned profile, not from the
+adapter's current profile, so mixed v4/v5 replay remains byte-identical.
+
+The current Registry surface is exactly
+`project_registry_prepare_v2`, `project_registry_read_state_v2`,
+`project_registry_read_observations_v2`, `project_registry_read_projects_v2`,
+`project_registry_read_commands_v2`,
+`project_registry_read_reservations_v2`, `project_registry_stage_command_v2`,
+`project_registry_stage_project_v2`, and `project_registry_finalize_v2`.
+The nine v1 functions remain historical catalog objects with runtime
+privileges revoked. Across the base schema-v5 profile, the catalog contains
+16 tables and 47 retained functions: 19 are runtime-executable and 28 are
+historical non-runtime functions. Extension profiles are accounted for
+separately and do not alter these base counts.
 
 ## Consequences
 

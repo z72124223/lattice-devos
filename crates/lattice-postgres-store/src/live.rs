@@ -29,29 +29,30 @@ const PREPARE_SQL: &str = "\
            after_state_digest, after_head_digest, terminal_disposition, \
            terminal_transaction_digest, terminal_receipt_digest, \
            global_schema_version, global_manifest_sha256 \
-      FROM control.store_prepare_v3(\
-           $1::smallint, $2::text, $3::text, $4::text, $5::text, $6::bytea, \
-           $7::bytea, $8::text, $9::text, $10::bigint, $11::text, $12::bigint, \
-           $13::bytea, $14::bytea, $15::text, $16::bigint, $17::bytea, \
-           $18::bytea, $19::bytea, $20::bytea, $21::bytea, $22::bytea, \
-           $23::bytea, $24::bytea, $25::bytea, $26::bytea)";
+      FROM control.store_prepare_v5(\
+           $1::smallint, $2::text, $3::smallint, $4::text, $5::text, $6::text, \
+           $7::text, $8::bytea, $9::bytea, $10::text, $11::text, $12::bigint, \
+           $13::text, $14::bigint, $15::bytea, $16::bytea, $17::text, \
+           $18::bigint, $19::bytea, $20::bytea, $21::bytea, $22::bytea, \
+           $23::bytea, $24::bytea, $25::bytea, $26::bytea, $27::bytea, $28::bytea)";
 
 const FINALIZE_SQL: &str = "\
-    SELECT control.store_finalize_v3(\
-           $1::smallint, $2::text, $3::text, $4::text, $5::text, $6::bytea, \
-           $7::bytea, $8::text, $9::text, $10::bigint, $11::text, $12::bigint, \
-           $13::bytea, $14::bytea, $15::text, $16::bigint, $17::bytea, \
-           $18::bytea, $19::bytea, $20::bytea, $21::bytea, $22::bytea, \
-           $23::bytea, $24::bytea, $25::bytea, $26::bytea, $27::text::uuid, \
-           $28::bytea, $29::smallint, $30::text, $31::bigint, $32::bytea, \
-           $33::bytea, $34::bigint, $35::bytea, $36::bytea, $37::text, \
-           $38::bytea, $39::bytea)";
+    SELECT control.store_finalize_v5(\
+           $1::smallint, $2::text, $3::smallint, $4::text, $5::text, $6::text, \
+           $7::text, $8::bytea, $9::bytea, $10::text, $11::text, $12::bigint, \
+           $13::text, $14::bigint, $15::bytea, $16::bytea, $17::text, \
+           $18::bigint, $19::bytea, $20::bytea, $21::bytea, $22::bytea, \
+           $23::bytea, $24::bytea, $25::bytea, $26::bytea, $27::bytea, \
+           $28::bytea, $29::text::uuid, $30::bytea, $31::smallint, $32::text, \
+           $33::bigint, $34::bytea, $35::bytea, $36::bigint, $37::bytea, \
+           $38::bytea, $39::text, $40::bytea, $41::bytea)";
 
 const CURRENT_HEAD_SQL: &str = "\
     SELECT database_uuid::text, schema_version, manifest_sha256, head_found, \
            physical_revision, state_digest, head_digest, global_schema_version, \
            global_manifest_sha256 \
-      FROM control.store_current_head_v3($1::text, $2::text, $3::text, $4::bytea)";
+      FROM control.store_current_head_v5(\
+           $1::smallint, $2::text, $3::text, $4::text, $5::text, $6::bytea)";
 
 const WRITE_TRANSACTION_SETTINGS: &str = "\
     SET LOCAL search_path = pg_catalog; \
@@ -90,7 +91,7 @@ impl PostgresControlStore {
     ///
     /// Returns a bounded Store error when the connection, target identity,
     /// manifest, catalog, roles, grants, or runtime-admission shape is not
-    /// exactly the verified global schema-v3 contract and immutable Store-v2
+    /// exactly the verified global schema-v5 contract and immutable Store-v2
     /// receipt profile.
     pub fn new(mut client: Client, target: &MigrationTarget) -> ControlStoreResult<Self> {
         let evidence = verify_runtime_store_schema(&mut client, target).map_err(map_setup_error)?;
@@ -232,6 +233,8 @@ impl ControlStore for PostgresControlStore {
         let row = match transaction.query_one(
             CURRENT_HEAD_SQL,
             &[
+                &global_schema_version,
+                &global_manifest_sha256,
                 &scope.project_id().as_str(),
                 &scope.project_snapshot_id().as_str(),
                 &scope.owner().as_str(),
@@ -404,7 +407,7 @@ fn run_attempt(
     if let Err(error) = transaction.batch_execute(WRITE_TRANSACTION_SETTINGS) {
         return rollback_attempt(transaction, classify_query_error(&error));
     }
-    let row = match call_prepare(&mut transaction, &context.sql) {
+    let row = match call_prepare(&mut transaction, context) {
         Ok(row) => row,
         Err(error) => return rollback_attempt(transaction, classify_query_error(&error)),
     };
@@ -461,11 +464,14 @@ fn run_attempt(
 
 fn call_prepare(
     transaction: &mut Transaction<'_>,
-    values: &SqlRequestValues,
+    context: &AttemptContext,
 ) -> Result<Row, PostgresError> {
+    let values = &context.sql;
     transaction.query_one(
         PREPARE_SQL,
         &[
+            &context.global_schema_version,
+            &context.global_manifest_sha256,
             &values.version,
             &values.transaction_id,
             &values.project_id,
@@ -530,6 +536,8 @@ fn call_finalize(
         .query_one(
             FINALIZE_SQL,
             &[
+                &context.global_schema_version,
+                &context.global_manifest_sha256,
                 &values.version,
                 &values.transaction_id,
                 &values.project_id,
@@ -1002,6 +1010,18 @@ mod tests {
 
     #[test]
     fn runtime_queries_append_global_identity_without_changing_store_profile_columns() {
+        for (query, successor, legacy) in [
+            (PREPARE_SQL, "store_prepare_v5", "store_prepare_v4"),
+            (FINALIZE_SQL, "store_finalize_v5", "store_finalize_v4"),
+            (
+                CURRENT_HEAD_SQL,
+                "store_current_head_v5",
+                "store_current_head_v4",
+            ),
+        ] {
+            assert!(query.contains(successor));
+            assert!(!query.contains(legacy));
+        }
         assert!(
             PREPARE_SQL
                 .contains("terminal_receipt_digest, global_schema_version, global_manifest_sha256")
@@ -1014,7 +1034,7 @@ mod tests {
 
     #[test]
     fn global_persistence_comparison_is_exact() {
-        assert!(global_persistence_matches(3, "manifest-a", 3, "manifest-a"));
+        assert!(global_persistence_matches(4, "manifest-a", 4, "manifest-a"));
         assert!(!global_persistence_matches(
             4,
             "manifest-a",
@@ -1022,9 +1042,9 @@ mod tests {
             "manifest-a"
         ));
         assert!(!global_persistence_matches(
-            3,
+            4,
             "manifest-b",
-            3,
+            4,
             "manifest-a"
         ));
     }

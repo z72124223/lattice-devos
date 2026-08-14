@@ -192,7 +192,7 @@ fn provision_fresh_database(target: &MigrationTarget) {
     assert_eq!(
         apply_migrations(&mut migrator, target).expect("fresh migration"),
         MigrationApplyOutcome::Applied {
-            executable_count: 4
+            executable_count: 5
         }
     );
     let evidence = verify_postgres_schema(&mut migrator, target, DatabaseRole::Migrator)
@@ -484,7 +484,7 @@ fn prove_live_upgrade(run_id: &str, suffix: &str, prefix_len: usize, manifest_sh
     assert_eq!(
         apply_migrations(&mut migrator, &target).expect("prefix upgrade"),
         MigrationApplyOutcome::Applied {
-            executable_count: 5 - prefix_len
+            executable_count: 6 - prefix_len
         }
     );
     verify_postgres_schema(&mut migrator, &target, DatabaseRole::Migrator)
@@ -512,7 +512,7 @@ fn prove_live_memory_upgrade(run_id: &str) {
     assert_eq!(
         apply_migrations(&mut migrator, &target).expect("memory prefix upgrade"),
         MigrationApplyOutcome::Applied {
-            executable_count: 1
+            executable_count: 2
         }
     );
     verify_postgres_schema(&mut migrator, &target, DatabaseRole::Migrator)

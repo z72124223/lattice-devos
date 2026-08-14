@@ -3,8 +3,8 @@
 - Status: accepted under the approved V2 amendment and user's MVP-3 execution directive
 - Date: 2026-08-02
 - Decision owner: user
-- Related: SPEC-002 v23, ADR-005, ADR-008, ADR-011, ADR-018,
-  Task Ledger 2.1, Postgres Store 1.3, TASK-021
+- Related: SPEC-002 v32, ADR-005, ADR-008, ADR-011, ADR-018, ADR-020,
+  Task Ledger 2.2, Postgres Store 1.7, TASK-021, TASK-050, TASK-075
 
 ## Context
 
@@ -306,6 +306,33 @@ projection composition, OpenClaw, Codex, Graphify, Hermes, Codebase Memory,
 Guardian activation, production provisioning, release, and deployment remain
 later tickets. These deferrals do not prevent AC-03 atomic append/outbox or
 AC-04 durable replay/corruption evidence from completing.
+
+### TASK-075 schema-v5 successor amendment
+
+The exact TASK-022 `0005_project_registry_repository.sql` remains schema v4.
+The autonomy-receipt expansion is re-authored only as
+`0006_task_autonomy_receipt.sql`, producing global schema v5. A database whose
+ordinal `0005` contains the autonomy migration is an incompatible history: the
+runner returns `PostgresStoreSetupErrorKind::HistoryMismatch` with stable code
+`STORE_MIGRATION_HISTORY_MISMATCH` after transaction/advisory-lock preflight
+and before any migration DDL or batch execution. It does not rename, rewrite,
+delete, or otherwise repair that history.
+
+Schema v5 publishes exactly these Task Ledger functions:
+
+- `task_ledger_prepare_v3`, `task_ledger_read_head_v3`,
+  `task_ledger_read_events_v3`, `task_ledger_read_commands_v3`, and
+  `task_ledger_finalize_v3`;
+- `task_ledger_record_autonomy_receipt_v1` and
+  `task_ledger_read_autonomy_receipts_v1`.
+
+The five v2 Ledger functions remain in the catalog as historical non-runtime
+objects with runtime privileges revoked. The v3 successors continue to read
+and append byte-identical historical Ledger and Store evidence, while one
+`SERIALIZABLE` transaction stages and finalizes the optional closed autonomy
+event with the command, projection, terminal domain receipt, and Store
+receipt. Registry persistence replay is profile-bound per command, so later
+schema v5 evidence cannot change a schema-v4 persistence receipt.
 
 ## Implementation And Verification Status
 

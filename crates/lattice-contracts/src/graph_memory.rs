@@ -35,10 +35,14 @@ pub const GRAPH_MEMORY_MAX_RECORDS: usize = 100_000;
 pub const GRAPH_MEMORY_MAX_RESULTS: u16 = 100;
 /// Fixed identity of the independent same-database Memory extension.
 pub const CODEBASE_MEMORY_EXTENSION_ID: &str = "lattice-codebase-memory";
-/// Current Memory extension schema version with structured reflection storage.
-pub const CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION: u16 = 2;
-/// Global Store schema profile required by the first Memory extension.
-pub const CODEBASE_MEMORY_REQUIRED_GLOBAL_SCHEMA_VERSION: u16 = 3;
+/// Current Memory extension schema version with retained persistence profiles.
+pub const CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION: u16 = 3;
+/// Global Store schema profile required by the current Memory extension.
+pub const CODEBASE_MEMORY_REQUIRED_GLOBAL_SCHEMA_VERSION: u16 = 5;
+/// Frozen schema generation of the historical structured-reflection profile.
+pub const CODEBASE_MEMORY_V2_EXTENSION_SCHEMA_VERSION: u16 = 2;
+/// Frozen global Store profile used by Memory v1 and v2.
+pub const CODEBASE_MEMORY_V2_REQUIRED_GLOBAL_SCHEMA_VERSION: u16 = 3;
 /// Closed schema accepted for a persisted Hermes reflection receipt.
 pub const HERMES_REFLECTION_SCHEMA_VERSION: &str = "lattice.hermes.reflection.v1";
 
@@ -1149,8 +1153,9 @@ impl CodebaseMemoryPersistenceIdentity {
         extension_sql_digest: ContentDigest,
         extension_manifest_digest: ContentDigest,
     ) -> Result<Self, GraphMemoryContractError> {
-        Self::with_schema_version(
+        Self::with_schema_versions(
             1,
+            CODEBASE_MEMORY_V2_REQUIRED_GLOBAL_SCHEMA_VERSION,
             database_identity_digest,
             global_manifest_digest,
             extension_sql_digest,
@@ -1170,8 +1175,9 @@ impl CodebaseMemoryPersistenceIdentity {
         extension_sql_digest: ContentDigest,
         extension_manifest_digest: ContentDigest,
     ) -> Result<Self, GraphMemoryContractError> {
-        Self::with_schema_version(
-            CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION,
+        Self::with_schema_versions(
+            CODEBASE_MEMORY_V2_EXTENSION_SCHEMA_VERSION,
+            CODEBASE_MEMORY_V2_REQUIRED_GLOBAL_SCHEMA_VERSION,
             database_identity_digest,
             global_manifest_digest,
             extension_sql_digest,
@@ -1179,8 +1185,32 @@ impl CodebaseMemoryPersistenceIdentity {
         )
     }
 
-    fn with_schema_version(
+    /// Constructs the current v3 same-database extension identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any zero database, global-manifest, SQL, or extension-manifest
+    /// commitment. Unlike the frozen v1/v2 constructors, this identity is
+    /// permanently bound to global schema v5.
+    pub fn v3(
+        database_identity_digest: ContentDigest,
+        global_manifest_digest: ContentDigest,
+        extension_sql_digest: ContentDigest,
+        extension_manifest_digest: ContentDigest,
+    ) -> Result<Self, GraphMemoryContractError> {
+        Self::with_schema_versions(
+            CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION,
+            CODEBASE_MEMORY_REQUIRED_GLOBAL_SCHEMA_VERSION,
+            database_identity_digest,
+            global_manifest_digest,
+            extension_sql_digest,
+            extension_manifest_digest,
+        )
+    }
+
+    fn with_schema_versions(
         extension_schema_version: u16,
+        global_schema_version: u16,
         database_identity_digest: ContentDigest,
         global_manifest_digest: ContentDigest,
         extension_sql_digest: ContentDigest,
@@ -1195,7 +1225,7 @@ impl CodebaseMemoryPersistenceIdentity {
         )?;
         Ok(Self {
             database_identity_digest,
-            global_schema_version: CODEBASE_MEMORY_REQUIRED_GLOBAL_SCHEMA_VERSION,
+            global_schema_version,
             global_manifest_digest,
             extension_id: CODEBASE_MEMORY_EXTENSION_ID,
             extension_schema_version,

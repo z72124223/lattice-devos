@@ -1,3 +1,42 @@
+# TASK-075 Schema-v5 Migration Reconciliation Handoff - 2026-08-14
+
+## Current Outcome
+
+TASK-075 is `in_progress`. Governance selects the exact TASK-022 Project
+Registry `0005` source at commit `12f7100` (SHA-256
+`b7af1f8a8ac370bbfc8a5312497461587cb8a86eb32ff97e5b865c7ae9bf0dcf`)
+as global schema v4 and requires TASK-050 autonomy commit `714f3b9` to be
+re-authored as `0006_task_autonomy_receipt.sql`, global schema v5. TASK-022
+closure source `a1aced9` remains provenance; none of these commits is treated
+as already integrated merely because it is readable.
+
+The fixed compatibility rule is fail-closed: an existing database that placed
+autonomy at ordinal `0005` returns
+`STORE_MIGRATION_HISTORY_MISMATCH` before migration DDL and is not repaired.
+Every Registry command must retain the schema/manifest profile that created its
+persistence receipt. Existing v4 commands bind schema `4` and exact manifest
+`df3f7ca3687afaa0d1f676158725e6d2f06670e0612df7482aa9d4d244b59f0f`;
+new v5 commands bind the exact current v5 profile, and mixed replay must return
+the original byte-identical receipt for each command.
+
+The exact base v5 target is 16 `control` tables, 47 retained functions, 19
+runtime-executable successors, and 28 historical non-runtime functions.
+Codebase Memory v1/v2 bytes and v2/global-v3 receipts remain immutable;
+TASK-075 adds only extension v3/global-v5 plus per-analysis profile provenance
+for byte-identical mixed graph/reflection replay. Contracts 1.13 and Postgres
+Codebase Memory 1.1 own that compatibility amendment.
+Project Registry pure semantics stay at 1.2. TASK-050 is now a waiting
+dependency and cannot unlock TASK-051 until TASK-075 plus TASK-050 acceptance
+produce a clean identified candidate.
+
+This is a governance/implementation checkpoint only. No focused Rust,
+PostgreSQL, fresh-process, full workspace, review, integration, commit, push,
+merge, deployment, release, or completion result is claimed yet. Continue only
+inside
+`docs/tickets/TASK-075-schema-v5-registry-autonomy-migration-reconciliation.md`
+and its exact `allowed_paths`; preserve unrelated Hermes and TASK-051/052/053
+content.
+
 # TASK-074 Local Model Assist Handoff — 2026-08-14
 
 ## Outcome

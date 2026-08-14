@@ -9,6 +9,7 @@ rust-version.workspace = true
 lattice-cjson = { path = "../lattice-cjson" }
 lattice-contracts = { path = "../lattice-contracts" }
 lattice-ports = { path = "../lattice-ports" }
+lattice-project-registry = { path = "../lattice-project-registry" }
 lattice-task-ledger = { path = "../lattice-task-ledger" }
 postgres = { version = "=0.19.14", default-features = false, features = ["with-serde_json-1"] }
 serde_json = "=1.0.151"

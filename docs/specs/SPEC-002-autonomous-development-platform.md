@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 31
+version: 32
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -9,7 +9,7 @@ modules:
   - module_id: task-domain
     constitution_version: 2.1
   - module_id: task-ledger
-    constitution_version: 2.1
+    constitution_version: 2.2
   - module_id: policy-engine
     constitution_version: 2.6
   - module_id: project-registry
@@ -31,7 +31,9 @@ modules:
   - module_id: approval-verifier
     constitution_version: 1.0
   - module_id: postgres-store
-    constitution_version: 1.4
+    constitution_version: 1.7
+  - module_id: postgres-codebase-memory
+    constitution_version: 1.1
   - module_id: artifact-store
     constitution_version: 1.0
   - module_id: codex-adapter
@@ -51,7 +53,7 @@ modules:
   - module_id: lattice-cli
     constitution_version: 1.0
   - module_id: lattice-contracts
-    constitution_version: 1.11
+    constitution_version: 1.13
   - module_id: lattice-ports
     constitution_version: 1.7
 ---
@@ -156,6 +158,51 @@ creating duplicate authorities or an unconstrained self-modifying agent.
 - TASK-013 supplies only a deterministic `RuntimeKind::Fake` in-memory owner.
   It is neither durable restart evidence nor authority to perform a live
   effect. ADR-005 PostgreSQL atomicity remains a later gate.
+
+### Schema-v5 Registry/autonomy reconciliation
+
+- TASK-075 preserves the exact TASK-022
+  `0005_project_registry_repository.sql` blob from commit `12f7100`, SHA-256
+  `b7af1f8a8ac370bbfc8a5312497461587cb8a86eb32ff97e5b865c7ae9bf0dcf`,
+  as the sole global schema-v4 migration. Its exact five-entry manifest
+  commitment is
+  `df3f7ca3687afaa0d1f676158725e6d2f06670e0612df7482aa9d4d244b59f0f`.
+- TASK-050's autonomy source at commit `714f3b9` is re-authored only as
+  `0006_task_autonomy_receipt.sql`, global schema v5. Migrations `0001`
+  through Registry `0005`, Store-v2 receipt profiles, historical Task Ledger
+  and Registry bytes, and Project Registry 1.2 pure semantics do not change.
+- Before any migration DDL, an installed history that uses autonomy rather
+  than the exact Registry blob at ordinal `0005` fails with
+  `STORE_MIGRATION_HISTORY_MISMATCH`. The runner does not rename, rewrite,
+  reorder, delete, infer, or automatically repair that database.
+- Every retained Registry command stores the exact persistence schema version
+  and global manifest commitment from which its adapter receipt was created.
+  Schema v5 backfills existing Registry commands with version `4` plus the
+  frozen v4 commitment above; new commands retain version `5` plus the exact
+  constructor-frozen current six-entry commitment. Mixed replay reconstructs
+  each receipt from its retained command profile, never from the current
+  adapter profile, so historical v4 receipts remain byte-identical.
+- The base schema-v5 catalog has exactly 16 `control` tables, 47 retained
+  functions, 19 runtime-executable functions, and 28 historical functions
+  without runtime EXECUTE. The v5 surface is three Store-v5, five Task-
+  Ledger-v3, nine Project-Registry-v2, and the two autonomy-v1 fixed
+  functions frozen by ADR-019/020 and TASK-075. All 17 schema-v4 runtime
+  functions remain immutable ungranted catalog history.
+- Task Ledger 2.2 adds only the closed `AUTONOMY_RECEIPT_RECORDED` event and
+  event-owned fixed-scalar subject persistence. Historical profiles synthesize
+  no event; new profiles require exactly one after `TASK_CREATED` and before
+  any writable/external effect. Subject, event, terminal command receipt,
+  head/projection/checkpoint, and physical receipt commit atomically in the
+  fenced Ledger transaction. Existing Task Ledger hash domains and public MCP
+  tool names/input schemas/six-field output remain byte-identical.
+- The independent Codebase Memory extension advances only through new
+  `db/extensions/codebase-memory/v3.sql`. Extension v1/v2 SQL bytes and every
+  v2/global-v3 receipt identity remain immutable. Contracts 1.13 keeps v1/v2
+  constructors bound to global schema 3 and adds a distinct v3/global-v5
+  identity. Postgres Codebase Memory 1.1 backfills each historical analysis
+  with its v2 profile and records the v3 profile for new analyses; graph and
+  reflection replay use retained row provenance, never the current adapter
+  identity. The extension stays outside the global Store manifest/base counts.
 
 ### One Writer
 
@@ -794,7 +841,7 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 |---|---:|---|
 | lattice-cjson | 1.0 | Pure shared `lattice-cjson-1` byte/framing mechanism; caller modules retain hash-subject semantics |
 | task-domain | 2.1 | Rust contract and V2 schema; V1 read compatibility; accounting currency is hash-bound |
-| task-ledger | 2.1 | Pure Rust event/request/head/receipt/resource semantics plus shared vacant/plan/apply, retained-command replay, complete checkpoint, and conditional outbox-admission derivation; the fake remains visibly non-durable and all I/O stays in Postgres Store |
+| task-ledger | 2.2 | Preserve 2.1 hashes/planner/replay and add the closed internal autonomy-receipt event/subject semantics, exactly-one profile ordering, mixed historical replay, and atomic event-owned persistence contract; public MCP bytes remain unchanged and all I/O stays in Postgres Store |
 | policy-engine | 2.6 | Generic project/capability/upgrade policy; independent current Registry, Task Ledger, Writer Lease, and Approval Verifier full-head comparison; R3 denies pending Review Runtime authority |
 | project-registry | 1.2 | Canonical repository identity and lifecycle plus one pure runtime-aware global vacant/plan/apply/export/verify boundary, separately reconstructed retained checkpoint, acyclic command-core/logical-bytes/checkpoint/record-set commitments, complete bounded history, and byte-identical Registry-1.1 Fake vectors |
 | writer-lease | 1.0 | New lease/fencing/daemon-epoch domain owner |
@@ -805,7 +852,8 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | openclaw-adapter | 2.0 | Inert scaffold becomes a thin local IPC gateway |
 | gateway-ipc | 1.1 | Bounded canonical six-action protocol, NFC-preserving encoder, truthful core-service errors, and deterministic fake loopback; live transport and OS authentication remain deferred |
 | approval-verifier | 1.0 | Pure typed-subject/challenge/proof/nonce/time/current-head owner and deterministic fake; live trust/claim remains deferred |
-| postgres-store | 1.4 | Preserved Store/Task-Ledger evidence plus the approved global schema-v4 Project Registry design; TASK-033 does not alter its `0005` reservation or current constitution |
+| postgres-store | 1.7 | Preserve exact Registry schema-v4 `0005`, add autonomy schema-v5 `0006`, fail closed before DDL on misplaced autonomy-`0005` histories, retain per-command Registry persistence-profile provenance for byte-identical mixed replay, and expose only the exact `16/47/19/28` base catalog profile |
+| postgres-codebase-memory | 1.1 | Preserve extension v1/v2 bytes and historical v2/global-v3 receipt identity; add exact extension v3/global-v5 install/upgrade, per-analysis profile provenance, and byte-identical v2/v3 graph/reflection replay outside the global manifest |
 | artifact-store | 1.0 | Pure project-scoped object/reference/provenance/quota/delete-claim semantic owner and deterministic fake; PostgreSQL/filesystem I/O remains deferred |
 | codex-adapter | 1.1 | One writable app-server process/thread implementing the typed `DeliveryCodexPort`; generic `CodexPort` is not a second production path |
 | review-runtime | 1.0 | New independent read-only review boundary |
@@ -815,7 +863,7 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | self-upgrade-guardian | 1.0 | New A/B activation, health, and rollback boundary |
 | lattice-core-bootstrap | 1.0 | Inert compile-time component manifest for the first Rust slice |
 | lattice-cli | 1.0 | Read-only bootstrap inspection/recovery command; no runtime authority |
-| lattice-contracts | 1.11 | Preserve delivery values and add immutable snapshot-manifest, Graphify analysis, graph-memory record/query/status and terminal receipt representations without I/O or authority |
+| lattice-contracts | 1.13 | Preserve every existing value and freeze v1/v2 Memory persistence identities to global schema 3 while adding a distinct v3/global-v5 identity constructor without I/O or authority |
 | lattice-ports | 1.7 | Preserve delivery ports and add exact snapshot, typed Graphify analysis and Codebase Memory repository ports; generic GraphifyPort remains frozen outside production composition |
 
 The user approved this module direction, the local bootstrap slice, and
@@ -856,6 +904,14 @@ packaging modules do not activate functional provider modules.
 - Existing file-ledger data, if any, is handled by a future read-only verifier
   and dry-run importer. Import is not assumed to exist.
 - PostgreSQL migrations use checksums and explicit compatibility ranges.
+- Global migration order is immutable through TASK-075: Project Registry is
+  schema-v4 `0005` and autonomy is schema-v5 `0006`. A historical database
+  with autonomy at ordinal `0005` is incompatible and fails closed before DDL;
+  no automatic repair or history rewrite exists.
+- Schema expansion never changes the profile embedded in a prior receipt.
+  Registry commands retain their own persistence schema/manifest provenance;
+  v4 and v5 commands therefore replay together without recomputing historical
+  receipts from the newest manifest.
 - The first A/B MVP permits no schema migration. A later expansion-only
   protocol must prove active and candidate compatibility, use one migration
   lock/owner, record intent/outcome, and recover interruption. Destructive
@@ -872,6 +928,9 @@ packaging modules do not activate functional provider modules.
 - Reused command ID with different subject; stale expected sequence.
 - PostgreSQL unavailable, serialization retry exhaustion, transaction outcome
   unknown, stale projection, or outbox claim lost.
+- Misplaced autonomy migration at ordinal `0005`, missing or substituted
+  Registry command profile provenance, v4/v5 profile disagreement, or a
+  current-profile reconstruction of a historical Registry receipt.
 - At-least-once external effect delivered twice without provider idempotency or
   reconciliation support.
 - Lease counter overflow, duplicate active lease, expired heartbeat, daemon
@@ -1375,6 +1434,24 @@ packaging modules do not activate functional provider modules.
   deadline-owned run. Stale helper variables have no effect and are never
   echoed. The legacy one-shot helper, direct contained provider route, four MCP
   schemas, PostgreSQL truth, and task/status zero-effect paths remain intact.
+- [ ] AC-43: TASK-075 preserves the exact TASK-022 Registry migration as
+  `0005_project_registry_repository.sql` at global schema v4 and moves the
+  TASK-050 autonomy expansion to `0006_task_autonomy_receipt.sql` at global
+  schema v5. A database whose migration ordinal `0005` identifies the
+  autonomy expansion fails closed as
+  `PostgresStoreSetupErrorKind::HistoryMismatch` /
+  `STORE_MIGRATION_HISTORY_MISMATCH` before any migration DDL and receives no
+  automatic repair. The base v5 profile retains 16 tables and 47 functions,
+  exposes exactly 19 current runtime functions, and retains 28 historical
+  non-runtime functions. Every Registry command row stores the persistence
+  schema version and manifest SHA-256 used when it was written; v4 rows are
+  backfilled with schema `4` and the frozen v4 manifest, new v5 rows store the
+  current v5 profile, and mixed v4/v5 replay reproduces every historical
+  persistence receipt byte-for-byte. Project Registry pure semantics remain
+  1.2 and the four MCP tools/schemas remain unchanged. Codebase Memory v1/v2
+  bytes and historical receipt identities also remain unchanged: extension v3
+  accepts global schema v5, stores per-analysis persistence-profile
+  provenance, and replays mixed v2/v3 graph/reflection receipts byte-identically.
 
 ## Verification Plan
 
@@ -1413,6 +1490,7 @@ packaging modules do not activate functional provider modules.
 | AC-40 | exact CLI integration, controlled lifecycle owner, bounded local launch, process cleanup, and four-tool MCP regression | runner launches once, child death cannot look healthy, EOF/error proves teardown, output is redacted, and MCP remains unchanged |
 | AC-41 | exact mode/redaction integration tests, recording lifecycle owner, one-shot activation and explicit teardown unit tests, plus complete runtime/MCP regression | default and `TASK_ONLY` preserve the old path; only production Delivery Run activates once before writer effects; status/task paths activate zero times; canonical MCP teardown ambiguity cannot exit 0; four tools and schemas remain unchanged |
 | AC-42 | exact missing-setting and ignored-sentinel integration tests, v2 receipt golden, direct launcher-plan and legacy helper regressions | only executed inputs gate production; stale helper values cannot deny or leak; old receipt domain cannot substitute; legacy helper remains isolated and the four-tool/product truth boundaries are unchanged |
+| AC-43 | exact source/blob checksum checks, fresh and exact-prefix disposable PostgreSQL schema-v5 migration matrices, misplaced-autonomy-0005 no-DDL rejection, base and Memory-extension catalog/ACL/profile assertions, Registry v4/v5 and Memory v2/v3 mixed-replay fixtures | exact Registry `0005` and autonomy `0006` history; stable fail-closed mismatch classification before DDL; base 16-table/47-function catalog with only 19 runtime functions; immutable Memory v1/v2 bytes and byte-identical historical Registry/Memory persistence receipts |
 
 ## Human Decisions
 
@@ -1428,6 +1506,11 @@ packaging modules do not activate functional provider modules.
   verification, and exact-version capability preflights proceed without
   repeated chat approval when their ticket contains the safety boundary and
   verification.
+- The user approved TASK-075's exact migration reconciliation: TASK-022
+  commit `12f7100` supplies immutable Registry schema v4, TASK-050 commit
+  `714f3b9` supplies autonomy behavior re-authored only at schema v5, misplaced
+  autonomy-`0005` history is rejected without repair, and historical Registry
+  persistence receipts keep per-command profile provenance.
 - Account or credential changes, payment, public exposure, irreversible
   deletion, destructive/incompatible migrations, security-control changes,
   and protected release promotion remain on authenticated protected surfaces.

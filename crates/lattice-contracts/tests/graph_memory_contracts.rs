@@ -1,8 +1,8 @@
 use lattice_contracts::{
-    AttemptId, CONTRACT_VERSION, CodeSnapshotEvidence, ContentDigest, GitObjectId, GraphConfidence,
-    GraphMemoryRunRequest, GraphSourceProvenance, GraphifyIdentity, GraphifyRawEdge,
-    GraphifyRawEvidence, GraphifyRawNode, Invocation, MemoryQuery, ProjectId, ProjectSnapshotId,
-    RequestId, TaskId, TrackedSource,
+    AttemptId, CONTRACT_VERSION, CodeSnapshotEvidence, CodebaseMemoryPersistenceIdentity,
+    ContentDigest, GitObjectId, GraphConfidence, GraphMemoryRunRequest, GraphSourceProvenance,
+    GraphifyIdentity, GraphifyRawEdge, GraphifyRawEvidence, GraphifyRawNode, Invocation,
+    MemoryQuery, ProjectId, ProjectSnapshotId, RequestId, TaskId, TrackedSource,
 };
 
 fn digest(byte: char) -> ContentDigest {
@@ -28,6 +28,53 @@ fn request() -> GraphMemoryRunRequest {
         5,
     )
     .expect("graph-memory request")
+}
+
+#[test]
+fn memory_persistence_profiles_freeze_v1_v2_and_separate_v3() {
+    let database = digest('1');
+    let historical_global = digest('2');
+    let historical_sql = digest('3');
+    let historical_extension = digest('4');
+    let current_global = digest('5');
+    let current_sql = digest('6');
+    let current_extension = digest('7');
+
+    let v1 = CodebaseMemoryPersistenceIdentity::v1(
+        database.clone(),
+        historical_global.clone(),
+        historical_sql.clone(),
+        historical_extension.clone(),
+    )
+    .expect("frozen v1 profile");
+    let v2 = CodebaseMemoryPersistenceIdentity::v2(
+        database.clone(),
+        historical_global.clone(),
+        historical_sql,
+        historical_extension,
+    )
+    .expect("frozen v2 profile");
+    let v3 = CodebaseMemoryPersistenceIdentity::v3(
+        database,
+        current_global,
+        current_sql,
+        current_extension,
+    )
+    .expect("current v3 profile");
+
+    assert_eq!(
+        (v1.global_schema_version(), v1.extension_schema_version()),
+        (3, 1)
+    );
+    assert_eq!(
+        (v2.global_schema_version(), v2.extension_schema_version()),
+        (3, 2)
+    );
+    assert_eq!(
+        (v3.global_schema_version(), v3.extension_schema_version()),
+        (5, 3)
+    );
+    assert_ne!(v2, v3);
 }
 
 #[test]

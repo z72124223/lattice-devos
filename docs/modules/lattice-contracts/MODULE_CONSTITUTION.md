@@ -1,10 +1,10 @@
 ---
 module_id: lattice-contracts
 name: LATTICE Shared Contracts
-version: 1.12
+version: 1.13
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-14
 ---
 
 ## Mission
@@ -46,6 +46,8 @@ their mutable domain state.
   graph record, memory persistence/retrieval, graph-memory status, and terminal
   receipt representations. These values carry provenance and digests only;
   they grant no source, database, task, policy, or release authority.
+- Versioned Codebase Memory persistence-profile identity: v1/v2 remain bound
+  to global schema 3; v3 is separately bound to global schema 5.
 - Neutral bounded gateway peer, request/action payload, reply/disposition,
   stable denial, and redacted Task Spec document representations.
 - Neutral fixed-profile MCP client/actor classification, server-derived live
@@ -103,6 +105,9 @@ their mutable domain state.
 - Represent memory records and ranked retrieval results with bounded closed
   enums, strict ordinals/ranks, exact digests, and no raw source, SQL, path
   selection, credential, provider configuration, or caller-selected MCP query.
+- Construct Memory v1/v2 identities only with their frozen global-v3 profile
+  and Memory v3 only with the exact global-v5 profile; changing the current
+  profile cannot change a historical identity value.
 - Construct task-agnostic Project Registry authority receipts only for the
   fixed `lattice-project-registry` producer ID and supported semantic producer
   version.
@@ -289,6 +294,9 @@ their mutable domain state.
     identifiers/digests. Raw spec bytes, prompt, diff, command, path, SQL,
     secret, lease/fence, process output, and database detail are
     unrepresentable.
+44. A Codebase Memory identity constructor fixes both extension and global
+    schema generations. V1/v2 never consult a mutable current-version constant;
+    v3 cannot represent or substitute a v1/v2 receipt identity.
 
 ## Allowed Dependencies
 
@@ -334,6 +342,8 @@ Spec binding, and lease-bound writer evidence needed by TASK-038. It does not
 authenticate a tunnel, parse MCP, create a Task Spec, query a lease/current
 head, persist status, run Codex, or perform I/O. Version 1.11 added graph-memory
 and PostgreSQL Memory evidence without changing the delivery/gateway contract.
+Version 1.13 preserves all prior bytes and adds only the distinct Memory-v3 /
+global-v5 persistence identity while freezing v1/v2 constructors to global v3.
 
 ## Acceptance Gates
 
@@ -351,6 +361,7 @@ and PostgreSQL Memory evidence without changing the delivery/gateway contract.
 | Fixed-profile peer | live/fake separation, closed client/actor pairs, non-zero authority, and hostile `clientInfo` non-authority matrix | Security review | yes |
 | Controlled task values | exact intent, idempotency/handle bounds, public-status allowlist, and prohibited-field construction matrix | Security review | yes |
 | Spec/lease writer binding | Task Spec, lease identity/fence/current-head, workspace, Codex, verification, Git, and status substitution matrix | Security review | yes |
+| Memory persistence profiles | frozen v1/v2 global-v3 constructors, distinct v3/global-v5 constructor, and complete cross-profile substitution matrix | Compatibility review | yes |
 | Dependency inspection | Cargo metadata shows no dependencies | Architecture review | yes |
 | Full Rust verification | workspace format, lint, and tests | Engineering | yes |
 
@@ -376,3 +387,4 @@ a versioned amendment, SPEC-002 trace, architecture review, and user approval.
 | 1.10 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Immutable typed delivery request, ordered stage evidence, terminal status/outcome, and receipt representations without caller command/path/credential escape hatches | User approval in preceding implementation window |
 | 1.11 | 2026-08-05 | SPEC-002 v26, ADR-022, TASK-033 | Immutable exact-snapshot, Graphify, normalized graph, PostgreSQL Memory, retrieval, and graph-status evidence | User TASK-033 direction |
 | 1.12 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Fixed-profile MCP peer, closed controlled-task values, one Task Spec digest, and lease/fence-bound writer/status evidence | User TASK-038-first direction |
+| 1.13 | 2026-08-14 | SPEC-002 v32, ADR-022, TASK-075 | Freeze Memory v1/v2 persistence identities to global schema 3 and add a distinct extension-v3/global-v5 identity without I/O or authority | User-approved TASK-075 reconciliation |

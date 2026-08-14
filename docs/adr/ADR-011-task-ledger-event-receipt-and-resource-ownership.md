@@ -4,7 +4,8 @@
   continue the approved LATTICE plan through MVP-3
 - Date: 2026-07-29
 - Decision owner: user
-- Related: SPEC-002 v9, ADR-001, ADR-005, ADR-008, ADR-009, TASK-013
+- Related: SPEC-002 v32, ADR-001, ADR-005, ADR-008, ADR-009, ADR-019,
+  TASK-013, TASK-050, TASK-075
 
 ## Context
 
@@ -202,6 +203,24 @@ time-of-use drift and never authorizes a live effect.
   persistence, and heuristic sanitizer behavior are explicitly rejected.
 - Changing a field set, hash domain, event kind, counter meaning, receipt
   outcome, or retry order requires a versioned amendment and fixtures.
+
+### TASK-075 schema-v5 autonomy amendment
+
+Task Ledger 2.2 adds the closed `AutonomyReceiptRecorded` event defined by
+TASK-050. The event owns fixed scalar fields for its canonical autonomy receipt
+subject and authority digest; it does not accept arbitrary JSON, paths,
+commands, SQL, credentials, or provider payloads. Planning and verified replay
+remain pure Task Ledger semantics. Durable storage belongs only to Postgres
+Store and must append the command, optional autonomy event, stream projection,
+terminal domain receipt, and physical persistence receipt atomically.
+
+The global migration order is Registry `0005` / schema v4 followed by autonomy
+`0006` / schema v5. Existing Task Ledger events, commands, receipts,
+checkpoints, and Store-v2 receipts remain byte-identical. Historical Registry
+persistence receipts use their command-owned schema/manifest profile rather
+than the current global profile. No public MCP field or tool changes, and no
+autonomous scheduler, model call, Git effect, provider effect, or authority
+expansion, are part of this amendment.
 
 ## Consequences
 

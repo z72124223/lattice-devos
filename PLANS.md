@@ -56,13 +56,20 @@ check passed; its recovery-security classification check failed, so it is
 explicitly barred from security, architecture, authorization, and integration
 decisions.
 
-## Current prerequisite update — TASK-050
+## Current migration reconciliation - TASK-075
 
-CURRENT TASK-050 — reconcile and finish the dirty autonomy-receipt Task Ledger
-candidate so TASK-051 can begin. Preserve the accepted Project Registry
-`0005` source and the autonomy work; do not claim TASK-051 verification until
-the migration/profile conflict, fresh-process replay, and named acceptance
-receipt are resolved.
+CURRENT TASK-075 - reconcile the accepted Project Registry schema-v4 `0005`
+source with the TASK-050 autonomy receipt as schema-v5 `0006`. Preserve the
+exact Registry migration and its historical receipt profile; reject a database
+that already used autonomy at ordinal `0005` before any DDL; persist per-command
+Registry profile provenance so v4/v5 mixed replay is byte-identical. Preserve
+Codebase Memory v1/v2 bytes and receipt identities while adding only the
+separate extension-v3/global-v5 profile with per-analysis provenance; it does
+not alter base catalog counts. TASK-050
+is `waiting_dependency` on TASK-075, and TASK-051 remains blocked on the later
+clean, accepted TASK-050 schema-v5 candidate. No TASK-075 test, review,
+integration, commit, merge, deployment, or completion is claimed by this
+planning checkpoint.
 
 ## Completed task update — TASK-072
 

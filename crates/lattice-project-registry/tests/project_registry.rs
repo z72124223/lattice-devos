@@ -3,9 +3,11 @@ use lattice_contracts::{
     ContentDigest, GitRefIdentity, ProjectClass, ProjectId, ProjectLifecycle, RuntimeKind,
 };
 use lattice_project_registry::{
-    CommandId, FakeProjectRegistry, IdentityDimension, IdentityDrift, ReconciliationDecision,
-    RegistryCheckpoint, RegistryCommand, RegistryCommandOutcome, RegistryDenial, RegistryError,
-    RepositoryObservation, VerifiedRegistryState, export_untrusted_registry_snapshot,
+    CommandId, FakeProjectRegistry, IdentityDimension, IdentityDrift, MAX_CANONICAL_ROOT_BYTES,
+    ReconciliationDecision, RegistryCheckpoint, RegistryCommand, RegistryCommandOutcome,
+    RegistryCommandReceipt, RegistryCommandRecord, RegistryDenial, RegistryError,
+    RegistryIdentityReservation, RepositoryObservation, UntrustedRegistrySnapshot,
+    VerifiedRegistryState, apply_command_plan, export_untrusted_registry_snapshot, plan_command,
     verify_untrusted_registry_snapshot, verify_untrusted_registry_snapshot_against_checkpoint,
 };
 
@@ -24,6 +26,10 @@ const REGISTRY_1_2_VACANT_FAKE_CHECKPOINT_DIGEST: &str =
     "22ad9599c05ab384e720b8f1d91bdfbe1262360850602aa0f6b5fd79c1797f4f";
 const REGISTRY_1_2_VACANT_LIVE_CHECKPOINT_DIGEST: &str =
     "5bb1f9d9adf7228bef7ea45cc029e79d71761c4dfed3abe086634917db38c173";
+const REGISTRY_1_2_FIRST_REGISTER_CHECKPOINT_DIGEST: &str =
+    "8ae74e03b9e8b4908c3c1d1c0aa2f59d7347a56339b1b9917e2fbc186c2e6796";
+const REGISTRY_1_2_FIRST_REGISTER_RECORD_SET_DIGEST: &str =
+    "3f13f2556b1f1a6953d8003cf274d7a607cf874678123ece8c7e66784922c15a";
 
 fn digest(byte: char) -> ContentDigest {
     ContentDigest::from_sha256(byte.to_string().repeat(64)).expect("valid test digest")
@@ -211,6 +217,607 @@ fn vacant_snapshot_self_consistency_is_distinct_from_retained_currentness() {
 }
 
 #[test]
+fn first_registration_plan_is_non_mutating_and_applies_once() {
+    let base = VerifiedRegistryState::vacant(RuntimeKind::Fake)
+        .expect("construct structural Fake vacant Registry");
+    let vacant_checkpoint = base.checkpoint().clone();
+    let request = RegistryCommand::register(
+        command("register-planned-1"),
+        project("planned-project"),
+        ProjectClass::UserProject,
+        primary_observation(),
+    );
+
+    let plan = plan_command(&base, request).expect("plan first registration");
+
+    assert_eq!(base.checkpoint(), &vacant_checkpoint);
+    assert!(
+        base.is_vacant(),
+        "planning must not mutate the verified base"
+    );
+    assert_eq!(plan.base_checkpoint(), &vacant_checkpoint);
+    assert_eq!(plan.result_checkpoint().command_ordinal(), 1);
+    assert_eq!(plan.result_checkpoint().command_count(), 1);
+    assert_eq!(plan.result_checkpoint().project_count(), 1);
+    assert!(!plan.is_replay());
+
+    let applied = apply_command_plan(&base, &plan).expect("apply exact plan");
+    assert_eq!(applied.checkpoint(), plan.result_checkpoint());
+    assert_eq!(applied.receipt(), plan.receipt());
+    assert_eq!(applied.record_set(), plan.record_set());
+    assert_eq!(applied.state().checkpoint().command_ordinal(), 1);
+    assert!(!applied.state().is_vacant());
+    assert_eq!(base.checkpoint(), &vacant_checkpoint);
+}
+
+#[test]
+fn fake_wrapper_uses_global_first_seen_order_and_exact_replay_is_stable() {
+    let mut registry = FakeProjectRegistry::new();
+    assert_eq!(registry.checkpoint().command_ordinal(), 0);
+
+    let register = RegistryCommand::register(
+        command("global-register-1"),
+        project("global-project"),
+        ProjectClass::UserProject,
+        primary_observation(),
+    );
+    let first = registry.execute(register.clone()).expect("first register");
+    assert_eq!(registry.checkpoint().command_ordinal(), 1);
+    assert_eq!(registry.checkpoint().project_count(), 1);
+    assert_eq!(registry.checkpoint().reservation_count(), 3);
+
+    let replay = registry.execute(register).expect("exact replay");
+    assert_eq!(replay, first);
+    assert_eq!(registry.checkpoint().command_ordinal(), 1);
+
+    let changed = RegistryCommand::register(
+        command("global-register-1"),
+        project("substituted-project"),
+        ProjectClass::UserProject,
+        observation(
+            r"C:\work\substituted",
+            '5',
+            '6',
+            '7',
+            "refs/heads/main",
+            '8',
+        ),
+    );
+    assert_eq!(
+        registry.execute(changed),
+        Err(RegistryError::CommandIdReuse)
+    );
+    assert_eq!(registry.checkpoint().command_ordinal(), 1);
+
+    let denied = registry
+        .execute(RegistryCommand::register(
+            command("global-denied-2"),
+            project("global-project"),
+            ProjectClass::UserProject,
+            primary_observation(),
+        ))
+        .expect("first-seen denial is terminal");
+    assert!(matches!(
+        denied.outcome(),
+        RegistryCommandOutcome::Denied(RegistryDenial::DuplicateIdentity {
+            dimension: IdentityDimension::ProjectId,
+            ..
+        })
+    ));
+    assert_eq!(registry.checkpoint().command_ordinal(), 2);
+    assert_eq!(registry.checkpoint().project_count(), 1);
+
+    let exact_observe = registry
+        .execute(RegistryCommand::observe(
+            command("global-observe-3"),
+            project("global-project"),
+            first.authority().expect("registered authority").head(),
+            primary_observation(),
+        ))
+        .expect("first-seen exact observation");
+    assert_eq!(exact_observe.outcome(), RegistryCommandOutcome::Applied);
+    assert_eq!(exact_observe.before(), exact_observe.after());
+    assert_eq!(registry.checkpoint().command_ordinal(), 3);
+    assert_eq!(registry.checkpoint().command_count(), 3);
+    assert_eq!(registry.checkpoint().project_count(), 1);
+}
+
+#[test]
+fn fake_wrapper_receipt_and_checkpoint_match_direct_plan_apply() {
+    let request = RegistryCommand::register(
+        command("fake-parity-register"),
+        project("fake-parity-project"),
+        ProjectClass::UserProject,
+        primary_observation(),
+    );
+    let base = VerifiedRegistryState::vacant(RuntimeKind::Fake).expect("vacant fake state");
+    let plan = plan_command(&base, request.clone()).expect("direct plan");
+    let applied = apply_command_plan(&base, &plan).expect("direct apply");
+
+    let mut fake = FakeProjectRegistry::new();
+    let receipt = fake.execute(request).expect("fake execute");
+
+    assert_eq!(&receipt, applied.receipt());
+    assert_eq!(fake.checkpoint(), applied.checkpoint());
+    assert_eq!(fake.verified_state(), applied.state());
+}
+
+#[test]
+fn non_vacant_snapshot_replays_and_denial_tail_cannot_claim_currentness() {
+    let mut registry = FakeProjectRegistry::new();
+    registry
+        .execute(RegistryCommand::register(
+            command("snapshot-register-1"),
+            project("snapshot-project"),
+            ProjectClass::UserProject,
+            primary_observation(),
+        ))
+        .expect("register project");
+    let prefix_state = registry.verified_state().clone();
+    let prefix_snapshot = export_untrusted_registry_snapshot(&prefix_state);
+
+    registry
+        .execute(RegistryCommand::register(
+            command("snapshot-denied-2"),
+            project("snapshot-project"),
+            ProjectClass::UserProject,
+            primary_observation(),
+        ))
+        .expect("retain zero-project-mutation denial tail");
+    let full_state = registry.verified_state().clone();
+    let full_snapshot = export_untrusted_registry_snapshot(&full_state);
+
+    assert_eq!(
+        verify_untrusted_registry_snapshot(&full_snapshot),
+        Ok(full_state.clone())
+    );
+    assert_eq!(
+        verify_untrusted_registry_snapshot(&prefix_snapshot),
+        Ok(prefix_state),
+        "a coherent older prefix remains internally self-consistent"
+    );
+    assert_eq!(
+        verify_untrusted_registry_snapshot_against_checkpoint(
+            &prefix_snapshot,
+            full_state.checkpoint(),
+        ),
+        Err(RegistryError::CheckpointMismatch),
+        "the independently retained current checkpoint detects denial-tail rollback"
+    );
+}
+
+fn snapshot_with_denial_tail() -> UntrustedRegistrySnapshot {
+    let mut registry = FakeProjectRegistry::new();
+    registry
+        .execute(RegistryCommand::register(
+            command("corrupt-register-1"),
+            project("corrupt-project"),
+            ProjectClass::UserProject,
+            primary_observation(),
+        ))
+        .expect("register project");
+    registry
+        .execute(RegistryCommand::register(
+            command("corrupt-denied-2"),
+            project("corrupt-project"),
+            ProjectClass::UserProject,
+            primary_observation(),
+        ))
+        .expect("retain denial");
+    export_untrusted_registry_snapshot(registry.verified_state())
+}
+
+fn snapshot_with_registration() -> UntrustedRegistrySnapshot {
+    let mut registry = FakeProjectRegistry::new();
+    registry
+        .execute(RegistryCommand::register(
+            command("substitution-register-1"),
+            project("substitution-project"),
+            ProjectClass::UserProject,
+            primary_observation(),
+        ))
+        .expect("register project");
+    export_untrusted_registry_snapshot(registry.verified_state())
+}
+
+fn assert_corrupt(snapshot: &UntrustedRegistrySnapshot) {
+    assert_eq!(
+        verify_untrusted_registry_snapshot(snapshot),
+        Err(RegistryError::CorruptSnapshot)
+    );
+}
+
+#[test]
+fn retained_snapshot_rejects_missing_duplicated_and_reordered_projection_rows() {
+    let exported = snapshot_with_denial_tail();
+    let checkpoint = exported.claimed_checkpoint().clone();
+    let observations = exported.observations().to_vec();
+    let projects = exported.projects().to_vec();
+    let commands = exported.commands().to_vec();
+    let reservations = exported.reservations().to_vec();
+
+    let rebuild = |observations, projects, commands, reservations| {
+        UntrustedRegistrySnapshot::from_retained(
+            checkpoint.clone(),
+            observations,
+            projects,
+            commands,
+            reservations,
+        )
+    };
+
+    assert_corrupt(&rebuild(
+        Vec::new(),
+        projects.clone(),
+        commands.clone(),
+        reservations.clone(),
+    ));
+    let mut duplicated_observations = observations.clone();
+    duplicated_observations.push(observations[0].clone());
+    assert_corrupt(&rebuild(
+        duplicated_observations,
+        projects.clone(),
+        commands.clone(),
+        reservations.clone(),
+    ));
+    assert_corrupt(&rebuild(
+        observations.clone(),
+        Vec::new(),
+        commands.clone(),
+        reservations.clone(),
+    ));
+    let mut reordered_reservations = reservations;
+    reordered_reservations.reverse();
+    assert_corrupt(&rebuild(
+        observations,
+        projects,
+        commands,
+        reordered_reservations,
+    ));
+}
+
+#[test]
+fn retained_snapshot_rejects_command_order_and_commitment_corruption() {
+    let exported = snapshot_with_denial_tail();
+    let checkpoint = exported.claimed_checkpoint().clone();
+    let observations = exported.observations().to_vec();
+    let projects = exported.projects().to_vec();
+    let commands = exported.commands().to_vec();
+    let reservations = exported.reservations().to_vec();
+    let rebuild = |commands| {
+        UntrustedRegistrySnapshot::from_retained(
+            checkpoint.clone(),
+            observations.clone(),
+            projects.clone(),
+            commands,
+            reservations.clone(),
+        )
+    };
+
+    let mut missing_tail = commands.clone();
+    missing_tail.pop();
+    assert_corrupt(&rebuild(missing_tail));
+    let mut reordered = commands.clone();
+    reordered.reverse();
+    assert_corrupt(&rebuild(reordered));
+    let mut duplicated = commands.clone();
+    duplicated.push(commands[1].clone());
+    assert_corrupt(&rebuild(duplicated));
+
+    let first = &commands[0];
+    let corrupt_receipt = RegistryCommandReceipt::from_retained(
+        first.receipt().command_id().clone(),
+        first.receipt().request_digest().clone(),
+        first.receipt().before().cloned(),
+        first.receipt().after().cloned(),
+        first.receipt().outcome(),
+        first.receipt().drift().to_vec(),
+        first.receipt().authority().cloned(),
+        digest('e'),
+    );
+    let corrupt_receipt_record = RegistryCommandRecord::from_retained(
+        first.ordinal(),
+        first.command().clone(),
+        corrupt_receipt,
+        first.base_checkpoint().clone(),
+        first.result_checkpoint().clone(),
+        first.record_set_digest().clone(),
+    );
+    let mut corrupt_receipt_commands = commands.clone();
+    corrupt_receipt_commands[0] = corrupt_receipt_record;
+    assert_corrupt(&rebuild(corrupt_receipt_commands));
+
+    let corrupt_record = RegistryCommandRecord::from_retained(
+        first.ordinal(),
+        first.command().clone(),
+        first.receipt().clone(),
+        first.base_checkpoint().clone(),
+        first.result_checkpoint().clone(),
+        digest('f'),
+    );
+    let mut corrupt_commands = commands.clone();
+    corrupt_commands[0] = corrupt_record;
+    assert_corrupt(&rebuild(corrupt_commands));
+}
+
+#[test]
+fn retained_snapshot_rejects_injection_projection_and_reservation_collision() {
+    let exported = snapshot_with_registration();
+    let checkpoint = exported.claimed_checkpoint().clone();
+    let observations = exported.observations().to_vec();
+    let projects = exported.projects().to_vec();
+    let commands = exported.commands().to_vec();
+    let reservations = exported.reservations().to_vec();
+
+    let first = &commands[0];
+    let injected = RegistryCommandRecord::from_retained(
+        2,
+        RegistryCommand::register(
+            command("injected-command-2"),
+            project("injected-project"),
+            ProjectClass::UserProject,
+            observation(r"C:\work\injected", '5', '6', '7', "refs/heads/main", '8'),
+        ),
+        first.receipt().clone(),
+        first.result_checkpoint().clone(),
+        first.result_checkpoint().clone(),
+        first.record_set_digest().clone(),
+    );
+    let mut injected_commands = commands.clone();
+    injected_commands.push(injected);
+    assert_corrupt(&UntrustedRegistrySnapshot::from_retained(
+        checkpoint.clone(),
+        observations.clone(),
+        projects.clone(),
+        injected_commands,
+        reservations.clone(),
+    ));
+
+    let mut alternate = FakeProjectRegistry::new();
+    alternate
+        .execute(RegistryCommand::register(
+            command("alternate-register-1"),
+            project("alternate-project"),
+            ProjectClass::LatticeSystem,
+            observation(r"C:\work\alternate", '5', '6', '7', "refs/heads/main", '8'),
+        ))
+        .expect("register alternate");
+    let alternate_rows = export_untrusted_registry_snapshot(alternate.verified_state());
+    assert_corrupt(&UntrustedRegistrySnapshot::from_retained(
+        checkpoint.clone(),
+        observations.clone(),
+        alternate_rows.projects().to_vec(),
+        commands.clone(),
+        reservations.clone(),
+    ));
+
+    let first_reservation = &reservations[0];
+    let mut colliding_reservations = reservations.clone();
+    colliding_reservations.push(RegistryIdentityReservation::from_retained(
+        first_reservation.dimension(),
+        first_reservation.identity_digest().clone(),
+        first_reservation.status(),
+        project("reservation-intruder"),
+    ));
+    assert_corrupt(&UntrustedRegistrySnapshot::from_retained(
+        checkpoint,
+        observations,
+        projects,
+        commands,
+        colliding_reservations,
+    ));
+}
+
+#[test]
+fn retained_snapshot_rejects_count_and_runtime_substitution() {
+    let exported = snapshot_with_registration();
+    let checkpoint = exported.claimed_checkpoint().clone();
+    let observations = exported.observations().to_vec();
+    let projects = exported.projects().to_vec();
+    let commands = exported.commands().to_vec();
+    let reservations = exported.reservations().to_vec();
+    let wrong_count = RegistryCheckpoint::from_retained(
+        checkpoint.runtime(),
+        checkpoint.command_ordinal(),
+        checkpoint.observation_count(),
+        checkpoint.project_count() + 1,
+        checkpoint.command_count(),
+        checkpoint.reservation_count(),
+        checkpoint.retained_bytes(),
+        checkpoint.checkpoint_digest().clone(),
+    );
+    assert_corrupt(&UntrustedRegistrySnapshot::from_retained(
+        wrong_count,
+        observations.clone(),
+        projects.clone(),
+        commands.clone(),
+        reservations.clone(),
+    ));
+
+    let wrong_runtime = RegistryCheckpoint::from_retained(
+        RuntimeKind::Live,
+        checkpoint.command_ordinal(),
+        checkpoint.observation_count(),
+        checkpoint.project_count(),
+        checkpoint.command_count(),
+        checkpoint.reservation_count(),
+        checkpoint.retained_bytes(),
+        checkpoint.checkpoint_digest().clone(),
+    );
+    assert_corrupt(&UntrustedRegistrySnapshot::from_retained(
+        wrong_runtime,
+        observations,
+        projects,
+        commands,
+        reservations,
+    ));
+}
+
+#[test]
+fn live_planner_uses_live_authority_and_verifies_through_the_same_replay_path() {
+    let command = RegistryCommand::register(
+        command("live-register-1"),
+        project("live-project"),
+        ProjectClass::UserProject,
+        primary_observation(),
+    );
+    let fake_base = VerifiedRegistryState::vacant(RuntimeKind::Fake).expect("vacant fake");
+    let live_base = VerifiedRegistryState::vacant(RuntimeKind::Live).expect("vacant live");
+    let fake_plan = plan_command(&fake_base, command.clone()).expect("fake plan");
+    let live_plan = plan_command(&live_base, command).expect("live plan");
+
+    assert_eq!(
+        fake_plan.receipt().request_digest(),
+        live_plan.receipt().request_digest(),
+        "semantic request identity is runtime independent"
+    );
+    assert_eq!(
+        fake_plan
+            .receipt()
+            .authority()
+            .expect("fake authority")
+            .runtime(),
+        RuntimeKind::Fake
+    );
+    assert_eq!(
+        live_plan
+            .receipt()
+            .authority()
+            .expect("live authority")
+            .runtime(),
+        RuntimeKind::Live
+    );
+    assert_ne!(
+        fake_plan.result_checkpoint().checkpoint_digest(),
+        live_plan.result_checkpoint().checkpoint_digest()
+    );
+
+    let live_applied = apply_command_plan(&live_base, &live_plan).expect("apply live plan");
+    let snapshot = export_untrusted_registry_snapshot(live_applied.state());
+    assert_eq!(
+        verify_untrusted_registry_snapshot_against_checkpoint(&snapshot, live_applied.checkpoint(),),
+        Ok(live_applied.state().clone())
+    );
+}
+
+#[test]
+fn record_sets_capture_only_the_exact_domain_delta() {
+    let base = VerifiedRegistryState::vacant(RuntimeKind::Fake).expect("vacant state");
+    let register_plan = plan_command(
+        &base,
+        RegistryCommand::register(
+            command("delta-register-1"),
+            project("delta-project"),
+            ProjectClass::UserProject,
+            primary_observation(),
+        ),
+    )
+    .expect("plan registration");
+    assert!(register_plan.record_set().new_observation().is_some());
+    assert!(register_plan.record_set().project_replacement().is_some());
+    assert!(register_plan.record_set().reservation_deletes().is_empty());
+    assert_eq!(register_plan.record_set().reservation_inserts().len(), 3);
+    let registered = apply_command_plan(&base, &register_plan).expect("apply registration");
+
+    let denied_plan = plan_command(
+        registered.state(),
+        RegistryCommand::register(
+            command("delta-denied-2"),
+            project("delta-project"),
+            ProjectClass::UserProject,
+            primary_observation(),
+        ),
+    )
+    .expect("plan denial");
+    assert!(matches!(
+        denied_plan.receipt().outcome(),
+        RegistryCommandOutcome::Denied(_)
+    ));
+    assert!(denied_plan.record_set().new_observation().is_none());
+    assert!(denied_plan.record_set().project_replacement().is_none());
+    assert!(denied_plan.record_set().reservation_deletes().is_empty());
+    assert!(denied_plan.record_set().reservation_inserts().is_empty());
+}
+
+#[test]
+fn apply_rechecks_the_complete_base_checkpoint() {
+    let base = VerifiedRegistryState::vacant(RuntimeKind::Fake).expect("vacant state");
+    let first_plan = plan_command(
+        &base,
+        RegistryCommand::register(
+            command("stale-plan-a"),
+            project("stale-project-a"),
+            ProjectClass::UserProject,
+            primary_observation(),
+        ),
+    )
+    .expect("first plan");
+    let competing_plan = plan_command(
+        &base,
+        RegistryCommand::register(
+            command("stale-plan-b"),
+            project("stale-project-b"),
+            ProjectClass::UserProject,
+            observation(r"C:\work\stale-b", '5', '6', '7', "refs/heads/main", '8'),
+        ),
+    )
+    .expect("competing plan");
+    let advanced = apply_command_plan(&base, &first_plan).expect("apply first plan");
+
+    assert_eq!(
+        apply_command_plan(advanced.state(), &competing_plan),
+        Err(RegistryError::CheckpointMismatch)
+    );
+    assert_eq!(
+        apply_command_plan(advanced.state(), &first_plan),
+        Err(RegistryError::CheckpointMismatch)
+    );
+}
+
+#[test]
+fn direct_exact_replay_returns_historical_record_without_advancing_current_state() {
+    let base = VerifiedRegistryState::vacant(RuntimeKind::Fake).expect("vacant state");
+    let original = RegistryCommand::register(
+        command("direct-replay-1"),
+        project("direct-replay-project"),
+        ProjectClass::UserProject,
+        primary_observation(),
+    );
+    let first_plan = plan_command(&base, original.clone()).expect("first plan");
+    let first = apply_command_plan(&base, &first_plan).expect("first apply");
+    let tail_plan = plan_command(
+        first.state(),
+        RegistryCommand::register(
+            command("direct-replay-denial-2"),
+            project("direct-replay-project"),
+            ProjectClass::UserProject,
+            primary_observation(),
+        ),
+    )
+    .expect("tail plan");
+    let current = apply_command_plan(first.state(), &tail_plan).expect("tail apply");
+
+    let replay_plan = plan_command(current.state(), original).expect("exact replay plan");
+    assert!(replay_plan.is_replay());
+    assert_eq!(replay_plan.receipt(), first.receipt());
+    assert_eq!(replay_plan.base_checkpoint(), current.checkpoint());
+    assert_eq!(replay_plan.result_checkpoint(), current.checkpoint());
+    assert_eq!(replay_plan.record_set(), first.record_set());
+    assert_eq!(
+        replay_plan
+            .record_set()
+            .result_checkpoint()
+            .command_ordinal(),
+        1,
+        "historical persistence evidence stays bound to its original result"
+    );
+
+    let replayed = apply_command_plan(current.state(), &replay_plan).expect("apply replay");
+    assert_eq!(replayed.state(), current.state());
+    assert_eq!(replayed.checkpoint().command_ordinal(), 2);
+}
+
+#[test]
 fn registry_1_1_literal_golden_vectors() {
     let observation = primary_observation();
     let mut registry = FakeProjectRegistry::new();
@@ -239,6 +846,30 @@ fn registry_1_1_literal_golden_vectors() {
     assert_eq!(
         receipt.result_digest().as_str(),
         REGISTRY_1_1_COMMAND_RESULT_DIGEST
+    );
+}
+
+#[test]
+fn registry_1_2_first_registration_checkpoint_and_record_set_literals() {
+    let base = VerifiedRegistryState::vacant(RuntimeKind::Fake).expect("vacant Fake Registry");
+    let plan = plan_command(
+        &base,
+        RegistryCommand::register(
+            command("register-1"),
+            project("lattice-devos"),
+            ProjectClass::LatticeSystem,
+            primary_observation(),
+        ),
+    )
+    .expect("plan representative first registration");
+
+    assert_eq!(
+        plan.result_checkpoint().checkpoint_digest().as_str(),
+        REGISTRY_1_2_FIRST_REGISTER_CHECKPOINT_DIGEST
+    );
+    assert_eq!(
+        plan.record_set().record_set_digest().as_str(),
+        REGISTRY_1_2_FIRST_REGISTER_RECORD_SET_DIGEST
     );
 }
 
@@ -305,6 +936,44 @@ fn exact_observation_resolve_reuses_snapshot_and_revision() {
     assert_eq!(resolved.before(), Some(&original.head()));
     assert_eq!(resolved.after(), Some(&original.head()));
     assert_eq!(resolved.authority(), Some(&original));
+}
+
+#[test]
+fn exact_observation_followed_by_canonical_move_enters_reconciliation() {
+    let mut registry = FakeProjectRegistry::new();
+    let registered = registry
+        .execute(RegistryCommand::register(
+            command("move-after-exact-register"),
+            project("move-after-exact-project"),
+            ProjectClass::UserProject,
+            primary_observation(),
+        ))
+        .expect("register");
+    let original = registered.authority().expect("authority").clone();
+    let exact = registry
+        .execute(RegistryCommand::observe(
+            command("move-after-exact-observe"),
+            project("move-after-exact-project"),
+            original.head(),
+            primary_observation(),
+        ))
+        .expect("exact observation");
+    assert_eq!(exact.authority(), Some(&original));
+
+    let moved = registry
+        .execute(RegistryCommand::observe(
+            command("move-after-exact-moved"),
+            project("move-after-exact-project"),
+            original.head(),
+            observation(r"D:\moved\lattice", '5', '2', '3', "refs/heads/main", '4'),
+        ))
+        .expect("moved observation");
+    assert_eq!(moved.drift(), &[IdentityDrift::CanonicalRoot]);
+    assert_eq!(registry.checkpoint().reservation_count(), 6);
+    assert_eq!(
+        moved.authority().expect("moved authority").lifecycle(),
+        ProjectLifecycle::ReconciliationRequired
+    );
 }
 
 #[test]
@@ -802,6 +1471,11 @@ fn authoritative_observation_collision_blocks_the_previously_active_project() {
     );
     assert_eq!(registry.latest(&project("project-1")), Some(blocked));
     assert!(registry.scope_binding(&project("project-1")).is_none());
+    assert_eq!(registry.checkpoint().command_ordinal(), 3);
+    assert_eq!(registry.checkpoint().command_count(), 3);
+    assert_eq!(registry.checkpoint().project_count(), 2);
+    assert_eq!(registry.checkpoint().observation_count(), 3);
+    assert_eq!(registry.checkpoint().reservation_count(), 6);
 }
 
 #[test]
@@ -1065,5 +1739,56 @@ fn invalid_command_and_canonical_root_inputs_fail_before_state_exists() {
         Err(RegistryError::NonCanonicalText {
             field: "primary_branch"
         })
+    );
+}
+
+#[test]
+fn canonical_root_utf8_limit_accepts_exact_and_rejects_plus_one() {
+    let exact = "a".repeat(MAX_CANONICAL_ROOT_BYTES);
+    assert!(
+        RepositoryObservation::new(
+            exact,
+            digest('1'),
+            digest('2'),
+            digest('3'),
+            GitRefIdentity::new("refs/heads/main", digest('4')).expect("valid primary ref"),
+        )
+        .is_ok()
+    );
+
+    let plus_one = "a".repeat(MAX_CANONICAL_ROOT_BYTES + 1);
+    assert_eq!(
+        RepositoryObservation::new(
+            plus_one,
+            digest('1'),
+            digest('2'),
+            digest('3'),
+            GitRefIdentity::new("refs/heads/main", digest('4')).expect("valid primary ref"),
+        ),
+        Err(RegistryError::InvalidCanonicalRoot)
+    );
+
+    let exact_multibyte = "é".repeat(MAX_CANONICAL_ROOT_BYTES / 2);
+    assert!(
+        RepositoryObservation::new(
+            exact_multibyte,
+            digest('1'),
+            digest('2'),
+            digest('3'),
+            GitRefIdentity::new("refs/heads/main", digest('4')).expect("valid primary ref"),
+        )
+        .is_ok(),
+        "the limit is encoded UTF-8 bytes, not scalar count"
+    );
+    let plus_one_multibyte = format!("{}a", "é".repeat(MAX_CANONICAL_ROOT_BYTES / 2));
+    assert_eq!(
+        RepositoryObservation::new(
+            plus_one_multibyte,
+            digest('1'),
+            digest('2'),
+            digest('3'),
+            GitRefIdentity::new("refs/heads/main", digest('4')).expect("valid primary ref"),
+        ),
+        Err(RegistryError::InvalidCanonicalRoot)
     );
 }

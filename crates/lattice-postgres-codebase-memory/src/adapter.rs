@@ -20,7 +20,21 @@ use sha2::{Digest, Sha256};
 use crate::{ExtensionTarget, verify_embedded_extension_manifest};
 
 const GLOBAL_MANIFEST_SHA256: &str =
-    "9378bbadf1e990e7d2617b66343b07193b2b8dd19bc8bb3dd6a3b618b134538a";
+    "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
+const HISTORICAL_GLOBAL_MANIFEST_SHA256: &str =
+    "09c431df18ad71a4f44239a5d2ddf6b1774b8ffec06c7f9223f0e41757f3d407";
+const V1_EXTENSION_SQL_SHA256: &str =
+    "555eabce843417bcbcd111a3cec42d05f3e2aaff802aa168b54be2fbfb300a3f";
+const V1_EXTENSION_MANIFEST_SHA256: &str =
+    "90942d378fce1e7a35356e537bd3724c505fe062cd581b5be956a2960f531600";
+const V2_EXTENSION_SQL_SHA256: &str =
+    "9db54342b88f554ca76054c7a33ae72f04b412d2dfe21fae6eb4d8faf3e854e2";
+const V2_EXTENSION_MANIFEST_SHA256: &str =
+    "0aedbd7d9ef7ca07fc2910d0da34c163cc83e3dd56f9b28292ae1f4f0c3c4d7e";
+const V3_EXTENSION_SQL_SHA256: &str =
+    "7388f6bfe4c2d30a20306e4f9ebdff5862125bcab58f769ba286af542cb051c3";
+const V3_EXTENSION_MANIFEST_SHA256: &str =
+    "d4cc712d262ae1f7c96bd65526eab611c90e193363afd865af2126307b2903f0";
 
 /// Production repository adapter for the fixed same-database Memory profile.
 ///
@@ -50,7 +64,7 @@ impl PostgresCodebaseMemory {
         })?;
         let global_manifest_digest = ContentDigest::from_sha256(GLOBAL_MANIFEST_SHA256)
             .map_err(|_| contract_error(GraphMemoryStage::Persistence))?;
-        let identity = CodebaseMemoryPersistenceIdentity::v2(
+        let identity = CodebaseMemoryPersistenceIdentity::v3(
             target.expected_database_identity_digest().clone(),
             global_manifest_digest,
             manifest.sql_sha256().clone(),
@@ -118,7 +132,7 @@ impl OpenClawIdempotencyStore for PostgresCodebaseMemory {
             .query_one(
                 "SELECT claim_decision, terminal_reply_frame, terminal_reply_digest, \
                         terminal_frame_digest \
-                   FROM memory.openclaw_gateway_reconcile_and_claim_v1(\
+                   FROM memory.openclaw_gateway_reconcile_and_claim_v3(\
                        $1,$2,$3,$4,$5,$6,$7,$8,$9\
                    )",
                 &[
@@ -168,7 +182,7 @@ impl OpenClawIdempotencyStore for PostgresCodebaseMemory {
         harden_openclaw_write(&mut transaction)?;
         let row = transaction
             .query_one(
-                "SELECT memory.openclaw_gateway_finalize_terminal_v1(\
+                "SELECT memory.openclaw_gateway_finalize_terminal_v3(\
                     $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12\
                 )",
                 &[
@@ -402,7 +416,7 @@ impl CodebaseMemoryPort for PostgresCodebaseMemory {
         let row = transaction
             .query_one(
                 "SELECT persistence_status, record_count \
-                   FROM memory.codebase_memory_persist_analysis_v1(\
+                   FROM memory.codebase_memory_persist_analysis_v3(\
                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,\
                        $20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38\
                    )",
@@ -532,7 +546,7 @@ impl CodebaseMemoryPort for PostgresCodebaseMemory {
         let row = transaction
             .query_one(
                 "SELECT retrieval_status \
-                   FROM memory.codebase_memory_persist_retrieval_v1(\
+                   FROM memory.codebase_memory_persist_retrieval_v3(\
                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15\
                    )",
                 &[
@@ -613,8 +627,14 @@ impl CodebaseMemoryPort for PostgresCodebaseMemory {
             .query(
                 "SELECT analysis_digest, record_set_digest, record_count, persistence_digest, \
                         disposition, result_record_ids, result_record_digests, result_scores, \
-                        result_set_digest, retrieval_digest, receipt_digest \
-                   FROM memory.codebase_memory_load_receipt_v1(\
+                        result_set_digest, retrieval_digest, receipt_digest, \
+                        persistence_database_identity_sha256, \
+                        persistence_global_schema_version, \
+                        persistence_global_manifest_sha256, persistence_extension_id, \
+                        persistence_extension_schema_version, \
+                        persistence_extension_sql_sha256, \
+                        persistence_extension_manifest_sha256 \
+                   FROM memory.codebase_memory_load_receipt_v3(\
                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15\
                    )",
                 &[
@@ -642,7 +662,13 @@ impl CodebaseMemoryPort for PostgresCodebaseMemory {
                 "MEMORY_RECEIPT_CARDINALITY_MISMATCH",
             ));
         }
-        let receipt = decode_receipt(request, self.identity.clone(), &rows[0])?;
+        let row_identity = decode_row_identity(&rows[0], 11, GraphMemoryStage::Receipt)?;
+        verify_row_database_identity(
+            &row_identity,
+            self.target.expected_database_identity_digest(),
+            GraphMemoryStage::Receipt,
+        )?;
+        let receipt = decode_receipt(request, row_identity, &rows[0])?;
         transaction
             .commit()
             .map_err(|error| database_error(GraphMemoryStage::Receipt, &error))?;
@@ -700,7 +726,7 @@ impl HermesReflectionMemoryPort for PostgresCodebaseMemory {
         let row = transaction
             .query_one(
                 "SELECT reflection_status \
-                   FROM memory.codebase_memory_persist_reflection_v2(\
+                   FROM memory.codebase_memory_persist_reflection_v3(\
                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,\
                        $19,$20,$21,$22,$23,$24,$25,$26\
                    )",
@@ -787,8 +813,14 @@ impl HermesReflectionMemoryPort for PostgresCodebaseMemory {
                 "SELECT graph_receipt_digest, reflection_schema_version, reflection_status, \
                         hermes_identity_digest, input_digest, reflection_digest, \
                         reflection_receipt_digest, summary, finding_statements, \
-                        finding_evidence_digests, next_actions \
-                   FROM memory.codebase_memory_load_reflection_v2(\
+                        finding_evidence_digests, next_actions, \
+                        persistence_database_identity_sha256, \
+                        persistence_global_schema_version, \
+                        persistence_global_manifest_sha256, persistence_extension_id, \
+                        persistence_extension_schema_version, \
+                        persistence_extension_sql_sha256, \
+                        persistence_extension_manifest_sha256 \
+                   FROM memory.codebase_memory_load_reflection_v3(\
                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15\
                    )",
                 &[
@@ -813,7 +845,13 @@ impl HermesReflectionMemoryPort for PostgresCodebaseMemory {
         if rows.len() != 1 {
             return Err(corrupt(stage, "MEMORY_REFLECTION_CARDINALITY_MISMATCH"));
         }
-        let reflection = decode_reflection(request, &self.identity, &rows[0])?;
+        let row_identity = decode_row_identity(&rows[0], 11, stage)?;
+        verify_row_database_identity(
+            &row_identity,
+            self.target.expected_database_identity_digest(),
+            stage,
+        )?;
+        let reflection = decode_reflection(request, &row_identity, &rows[0])?;
         transaction
             .commit()
             .map_err(|error| database_error(stage, &error))?;
@@ -840,6 +878,109 @@ fn identity_bytes(
     })
 }
 
+fn decode_row_identity(
+    row: &Row,
+    offset: usize,
+    stage: GraphMemoryStage,
+) -> GraphMemoryPortResult<CodebaseMemoryPersistenceIdentity> {
+    let database: String = row.get(offset);
+    let global_schema: i16 = row.get(offset + 1);
+    let global_manifest: String = row.get(offset + 2);
+    let extension_id: String = row.get(offset + 3);
+    let extension_schema: i16 = row.get(offset + 4);
+    let extension_sql: String = row.get(offset + 5);
+    let extension_manifest: String = row.get(offset + 6);
+    construct_row_identity(
+        &database,
+        global_schema,
+        &global_manifest,
+        &extension_id,
+        extension_schema,
+        &extension_sql,
+        &extension_manifest,
+        stage,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn construct_row_identity(
+    database: &str,
+    global_schema: i16,
+    global_manifest: &str,
+    extension_id: &str,
+    extension_schema: i16,
+    extension_sql: &str,
+    extension_manifest: &str,
+    stage: GraphMemoryStage,
+) -> GraphMemoryPortResult<CodebaseMemoryPersistenceIdentity> {
+    if extension_id != lattice_contracts::CODEBASE_MEMORY_EXTENSION_ID {
+        return Err(corrupt(stage, "MEMORY_ROW_PROFILE_ID_INVALID"));
+    }
+    let database = ContentDigest::from_sha256(database.to_owned())
+        .map_err(|_| corrupt(stage, "MEMORY_ROW_PROFILE_DATABASE_INVALID"))?;
+    let global_manifest = ContentDigest::from_sha256(global_manifest.to_owned())
+        .map_err(|_| corrupt(stage, "MEMORY_ROW_PROFILE_GLOBAL_INVALID"))?;
+    let extension_sql = ContentDigest::from_sha256(extension_sql.to_owned())
+        .map_err(|_| corrupt(stage, "MEMORY_ROW_PROFILE_SQL_INVALID"))?;
+    let extension_manifest = ContentDigest::from_sha256(extension_manifest.to_owned())
+        .map_err(|_| corrupt(stage, "MEMORY_ROW_PROFILE_EXTENSION_INVALID"))?;
+    let admitted = match (global_schema, extension_schema) {
+        (3, 1) => {
+            global_manifest.as_str() == HISTORICAL_GLOBAL_MANIFEST_SHA256
+                && extension_sql.as_str() == V1_EXTENSION_SQL_SHA256
+                && extension_manifest.as_str() == V1_EXTENSION_MANIFEST_SHA256
+        }
+        (3, 2) => {
+            global_manifest.as_str() == HISTORICAL_GLOBAL_MANIFEST_SHA256
+                && extension_sql.as_str() == V2_EXTENSION_SQL_SHA256
+                && extension_manifest.as_str() == V2_EXTENSION_MANIFEST_SHA256
+        }
+        (5, 3) => {
+            global_manifest.as_str() == GLOBAL_MANIFEST_SHA256
+                && extension_sql.as_str() == V3_EXTENSION_SQL_SHA256
+                && extension_manifest.as_str() == V3_EXTENSION_MANIFEST_SHA256
+        }
+        _ => false,
+    };
+    if !admitted {
+        return Err(corrupt(stage, "MEMORY_ROW_PROFILE_SUBSTITUTED"));
+    }
+    let identity = match (global_schema, extension_schema) {
+        (3, 1) => CodebaseMemoryPersistenceIdentity::v1(
+            database,
+            global_manifest,
+            extension_sql,
+            extension_manifest,
+        ),
+        (3, 2) => CodebaseMemoryPersistenceIdentity::v2(
+            database,
+            global_manifest,
+            extension_sql,
+            extension_manifest,
+        ),
+        (5, 3) => CodebaseMemoryPersistenceIdentity::v3(
+            database,
+            global_manifest,
+            extension_sql,
+            extension_manifest,
+        ),
+        _ => unreachable!("closed profile allowlist checked above"),
+    };
+    identity.map_err(|_| corrupt(stage, "MEMORY_ROW_PROFILE_INVALID"))
+}
+
+fn verify_row_database_identity(
+    identity: &CodebaseMemoryPersistenceIdentity,
+    expected: &ContentDigest,
+    stage: GraphMemoryStage,
+) -> GraphMemoryPortResult<()> {
+    if identity.database_identity_digest() != expected {
+        return Err(corrupt(stage, "MEMORY_ROW_PROFILE_DATABASE_SUBSTITUTED"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
 fn decode_receipt(
     request: &GraphMemoryRunRequest,
     identity: CodebaseMemoryPersistenceIdentity,
@@ -898,7 +1039,20 @@ fn decode_receipt(
     }
     let result_set_digest = row_digest(row, 8)?;
     let retrieval_digest = row_digest(row, 9)?;
-    let receipt_digest = row_digest(row, 10)?;
+    let persisted_receipt_digest = row_digest(row, 10)?;
+    let expected_persistence_digest = replayed_persistence_digest(
+        request,
+        &identity,
+        &analysis_digest,
+        &record_set_digest,
+        record_count,
+    )?;
+    if persistence_digest != expected_persistence_digest {
+        return Err(corrupt(
+            GraphMemoryStage::Receipt,
+            "MEMORY_RECEIPT_PERSISTENCE_DIGEST_MISMATCH",
+        ));
+    }
     let persistence = GraphMemoryPersistenceEvidence::replay(
         request.clone(),
         identity,
@@ -913,6 +1067,14 @@ fn decode_receipt(
             "MEMORY_RECEIPT_PERSISTENCE_INVALID",
         )
     })?;
+    let expected_retrieval_digest =
+        replayed_retrieval_digest(&persistence, disposition, &results, &result_set_digest)?;
+    if retrieval_digest != expected_retrieval_digest {
+        return Err(corrupt(
+            GraphMemoryStage::Receipt,
+            "MEMORY_RECEIPT_RETRIEVAL_DIGEST_MISMATCH",
+        ));
+    }
     let retrieval = MemoryRetrievalEvidence::replay(
         &persistence,
         request.retrieval_limit(),
@@ -927,7 +1089,14 @@ fn decode_receipt(
             "MEMORY_RECEIPT_RETRIEVAL_INVALID",
         )
     })?;
-    GraphMemoryReceipt::new(persistence, retrieval, receipt_digest)
+    let expected_receipt_digest = receipt_digest(&persistence, &retrieval)?;
+    if persisted_receipt_digest != expected_receipt_digest {
+        return Err(corrupt(
+            GraphMemoryStage::Receipt,
+            "MEMORY_RECEIPT_DIGEST_MISMATCH",
+        ));
+    }
+    GraphMemoryReceipt::new(persistence, retrieval, persisted_receipt_digest)
         .map_err(|_| corrupt(GraphMemoryStage::Receipt, "MEMORY_RECEIPT_BINDING_INVALID"))
 }
 
@@ -982,6 +1151,74 @@ fn decode_reflection(
     }
     HermesReflectionReceipt::from_candidate(candidate, persisted_receipt_digest)
         .map_err(|_| corrupt(stage, "MEMORY_REFLECTION_RECEIPT_INVALID"))
+}
+
+fn replayed_persistence_digest(
+    request: &GraphMemoryRunRequest,
+    identity: &CodebaseMemoryPersistenceIdentity,
+    analysis_digest: &ContentDigest,
+    record_set_digest: &ContentDigest,
+    record_count: u32,
+) -> GraphMemoryPortResult<ContentDigest> {
+    hash(
+        GraphMemoryStage::Receipt,
+        "lattice.postgres-codebase-memory.persistence",
+        &CanonicalValue::Object(vec![
+            ("analysis".to_owned(), string(analysis_digest.as_str())),
+            ("commit".to_owned(), string(request.commit_id().as_str())),
+            (
+                "configuration".to_owned(),
+                string(request.configuration_digest().as_str()),
+            ),
+            ("identity".to_owned(), identity_value(identity)),
+            ("project".to_owned(), string(request.project_id().as_str())),
+            ("query".to_owned(), string(request.query_digest().as_str())),
+            ("record_count".to_owned(), string(record_count.to_string())),
+            ("record_set".to_owned(), string(record_set_digest.as_str())),
+            ("request".to_owned(), request_value(request)),
+        ]),
+    )
+}
+
+fn replayed_retrieval_digest(
+    persistence: &GraphMemoryPersistenceEvidence,
+    disposition: MemoryRetrievalDisposition,
+    results: &[RankedMemoryRecord],
+    result_set_digest: &ContentDigest,
+) -> GraphMemoryPortResult<ContentDigest> {
+    hash(
+        GraphMemoryStage::Receipt,
+        "lattice.postgres-codebase-memory.retrieval",
+        &CanonicalValue::Object(vec![
+            (
+                "algorithm".to_owned(),
+                string(lattice_contracts::GRAPH_MEMORY_RETRIEVAL_ALGORITHM),
+            ),
+            (
+                "analysis".to_owned(),
+                string(persistence.analysis_digest().as_str()),
+            ),
+            ("disposition".to_owned(), string(disposition.as_str())),
+            (
+                "identity".to_owned(),
+                identity_value(persistence.identity()),
+            ),
+            (
+                "limit".to_owned(),
+                string(persistence.request().retrieval_limit().to_string()),
+            ),
+            (
+                "persistence".to_owned(),
+                string(persistence.persistence_digest().as_str()),
+            ),
+            (
+                "query".to_owned(),
+                string(persistence.request().query_digest().as_str()),
+            ),
+            ("result_set".to_owned(), string(result_set_digest.as_str())),
+            ("results".to_owned(), results_value(results)),
+        ]),
+    )
 }
 
 fn persistence_digest(
@@ -1415,4 +1652,29 @@ fn ambiguous(stage: GraphMemoryStage, code: &'static str) -> GraphMemoryPortErro
         GraphMemoryFailureCertainty::Ambiguous,
         code,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coherent_row_database_substitution_is_rejected() {
+        let row_identity = construct_row_identity(
+            &"1".repeat(64),
+            5,
+            GLOBAL_MANIFEST_SHA256,
+            lattice_contracts::CODEBASE_MEMORY_EXTENSION_ID,
+            3,
+            "7388f6bfe4c2d30a20306e4f9ebdff5862125bcab58f769ba286af542cb051c3",
+            "d4cc712d262ae1f7c96bd65526eab611c90e193363afd865af2126307b2903f0",
+            GraphMemoryStage::Receipt,
+        )
+        .expect("exact row profile");
+        let expected = ContentDigest::from_sha256("2".repeat(64)).expect("database digest");
+        assert!(
+            verify_row_database_identity(&row_identity, &expected, GraphMemoryStage::Receipt)
+                .is_err()
+        );
+    }
 }
