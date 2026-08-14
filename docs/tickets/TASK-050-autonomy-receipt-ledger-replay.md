@@ -8,6 +8,7 @@ related_spec_version: 5
 module_id: task-ledger
 constitution_version: 2.2
 status: in_progress
+human_gate: pending_task050_profile_and_ports_amendment
 parallel_safe: false
 depends_on:
   - TASK-075
@@ -22,6 +23,16 @@ implementation_head: 714f3b9057db47e694adacf9aef5f37e09f31712
 closure_branch: feature/task-076-postgres-writer-lease-v2
 closure_worktree: lattice-worktrees/task-076-postgres-writer-lease-v2
 combined_revalidation_head: f32531002a0c6588e96dc9fe0229db7e0ed546e0
+authorized_path_reconciliation:
+  - path: crates/lattice-postgres-store/src/migrations.rs
+    source_thread_id: 019ff693-b2c3-7a81-9704-49f1e6e3f2d1
+    authorized_at_utc: 2026-08-12T16:10:10.180Z
+  - path: crates/lattice-postgres-store/tests/migration_contract.rs
+    source_thread_id: 019ff693-b2c3-7a81-9704-49f1e6e3f2d1
+    authorized_at_utc: 2026-08-12T16:10:10.180Z
+  - path: crates/lattice-orchestrator/tests/controlled_task.rs
+    source_thread_id: 019ff72b-9704-7b42-92c7-b6aaaa980dd1
+    authorized_at_utc: 2026-08-12T18:32:34.806Z
 allowed_paths:
   - docs/tickets/TASK-050-autonomy-receipt-ledger-replay.md
   - docs/specs/SPEC-002-autonomous-development-platform.md
@@ -36,12 +47,15 @@ allowed_paths:
   - crates/lattice-orchestrator/src/autonomy.rs
   - crates/lattice-orchestrator/src/lib.rs
   - crates/lattice-orchestrator/tests/autonomy_control.rs
+  - crates/lattice-orchestrator/tests/controlled_task.rs
   - crates/lattice-task-ledger/src/lib.rs
   - crates/lattice-task-ledger/tests/task_ledger.rs
   - crates/lattice-ports/src/lib.rs
   - crates/lattice-postgres-store/src/postgres_setup.rs
+  - crates/lattice-postgres-store/src/migrations.rs
   - crates/lattice-postgres-store/src/task_ledger.rs
   - crates/lattice-postgres-store/src/live.rs
+  - crates/lattice-postgres-store/tests/migration_contract.rs
   - crates/lattice-postgres-store/tests/postgres_task_ledger.rs
   - apps/lattice-runtime/src/task_control.rs
   - apps/lattice-runtime/src/composition.rs
@@ -63,9 +77,13 @@ The original implementation source remains `714f3b9`; its autonomy-at-ordinal
 schema-v5 `0006`, and TASK-076 supplied the Writer Lease v2 bridge required to
 reach the combined candidate without rewriting historical receipts or fencing
 state. Both dependencies are complete and the exact combined candidate
-`f32531002a0c6588e96dc9fe0229db7e0ed546e0` passed the embedded TASK-050
-fresh-process acceptance. This ticket is now `in_progress` for bounded closure
-verification; it does not unlock TASK-051 until its own completion is recorded.
+`f32531002a0c6588e96dc9fe0229db7e0ed546e0` emitted the embedded TASK-050 PASS
+marker. Independent review proved that the current runner launches the
+Postgres Store `postgres_task_ledger` test binary rather than a fresh canonical
+`latticed` process, so that marker is retained only as partial baseline
+evidence and is not closure evidence. This ticket remains `in_progress` for a
+bounded repair and fresh-process revalidation; it does not unlock TASK-051
+until its own completion is recorded.
 
 The user decision relayed from coordination thread
 `019ff693-b2c3-7a81-9704-49f1e6e3f2d1` requires Autonomy Intent/Receipt to
@@ -83,6 +101,40 @@ The accepted implementation base must contain
 `175633ca40352a314a0b699c7cb53697c239d481`, whose pure
 `AutonomyIntent`/`AutonomyReceipt` classifier is non-durable. This ticket does
 not treat that commit or its tests as persistence evidence.
+
+## Current Review Blockers - 2026-08-14
+
+Independent code/security and architecture review found no P0 issue and four
+closure blockers:
+
+1. Autonomy-receipt classification, canonicalization, and hashing currently
+   have overlapping implementations in Contracts, Orchestrator, Task Ledger,
+   and Postgres Store. Task Ledger must become the sole semantic owner, while
+   Postgres Store maps durable scalar rows and delegates verification.
+2. No authoritative, versioned `TASK_CREATED` profile discriminator currently
+   distinguishes a historical profile, where `autonomy_receipt = None` is
+   valid, from an autonomy-required profile. Required-profile missing,
+   duplicate, late, or unknown values must fail closed through transition,
+   replay, and Status projection.
+3. The public `TaskLifecyclePort` and `TaskLifecycleEvidence` contract changed
+   without a versioned Ports constitution amendment or matching SPEC trace.
+4. The existing acceptance runner does not launch and restart fresh canonical
+   `latticed`, so it does not yet prove the public MCP/Status path, both
+   `ASK_USER` and `PROCEED`, or zero prohibited downstream effects.
+
+The prior authorization records under `authorized_path_reconciliation` make
+the three restored implementation/test paths part of this ticket's durable
+allowlist. They do not authorize the new profile/Ports governance decision.
+
+The pending Human Gate is one narrow amendment: make Task Ledger the owner of
+an exact versioned authoritative profile discriminator; preserve historical
+optional receipt semantics while making autonomy-required profiles fail
+closed; version and trace the Ports contract; add only
+`docs/modules/lattice-ports/MODULE_CONSTITUTION.md` to `allowed_paths`; remove
+the out-of-bound public Contracts SHA-256 helper so Contracts remains at 1.13;
+and keep the public MCP wire at exactly four tools and six output fields. No
+production repair or PostgreSQL acceptance run starts before that explicit
+authorization.
 
 ## Canonical Event Contract
 

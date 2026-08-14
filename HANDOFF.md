@@ -24,8 +24,11 @@ The implementation worktree is
 `feature/task-076-postgres-writer-lease-v2`, based on `8b6d517`. The post-fix
 official wrapper passed in 368.4 seconds with
 `TASK076_WRITER_LEASE_V2_BRIDGE_ACCEPTANCE=PASS`; its embedded TASK-075 and
-TASK-050 revalidations passed. Focused checks, strict Clippy, frozen-history,
-format, repository, and diff checks pass. Independent code re-review is clear,
+TASK-050 gates emitted their expected markers. The TASK-050 marker is partial
+baseline evidence only: later independent TASK-050 review proved that its
+runner did not launch a fresh canonical `latticed` process. Focused checks,
+strict Clippy, frozen-history, format, repository, and diff checks pass for
+TASK-076. Independent TASK-076 code re-review is clear,
 architecture review reports no findings, and integration found zero technical
 blockers. GitHub Actions run `31810017320` / job `94798123907` passed on the
 exact verified commit.
@@ -96,9 +99,15 @@ combined revalidation source is `f325310`.
 
 TASK-050 is now the sole `in_progress` ticket. Its original source `714f3b9`
 remains provenance only; closure must use the exact combined schema-v5
-candidate and retained fresh-process receipt. TASK-051 remains blocked until
-TASK-050 records its own verified completion. No merge, Draft promotion,
-deployment, release, or public exposure is authorized.
+candidate. Independent review invalidated the prior fresh-process claim and
+found unresolved P1 ownership, required-profile, Ports-versioning, and
+acceptance-runner gaps. Repair is paused at the narrow Human Gate recorded in
+the TASK-050 ticket: approve a Task Ledger-owned versioned profile
+discriminator, Ports constitution amendment/path, and removal of the Contracts
+public SHA helper while preserving the six-field MCP wire. TASK-051 remains
+blocked until TASK-050 is repaired, freshly revalidated, re-reviewed, and
+records its own verified completion. No merge, Draft promotion, deployment,
+release, or public exposure is authorized.
 
 # TASK-074 Local Model Assist Handoff — 2026-08-14
 

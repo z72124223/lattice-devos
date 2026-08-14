@@ -81,6 +81,48 @@ CURRENT TASK-050 - use the completed TASK-075/TASK-076 combined candidate and
 its retained fresh-process acceptance to finish the autonomy receipt closure.
 TASK-051 remains blocked until TASK-050 records its own verified completion.
 
+### TASK-050 recovery trajectory
+
+Goal: close TASK-050 only after the combined candidate proves the Task Ledger
+is the sole autonomy-receipt semantic owner, every new-profile lifecycle/status
+load fails closed without that receipt, and acceptance uses a real fresh
+`latticed` process with zero prohibited effects.
+
+Confirmed facts: independent closure review rejected reuse of the old review.
+New code/security and architecture reviews confirmed P1 blockers: autonomy
+receipt semantics/hashing have multiple owners; the durable Task-created
+profile cannot distinguish historical absence from a required missing receipt;
+the public lifecycle port change lacks a versioned constitution amendment; and
+the current runner launches a Store test binary rather than fresh canonical
+`latticed`. No new PostgreSQL run is authorized until the smallest failing
+regressions and exact repair surface are fixed.
+
+Current step: await the one narrow Human Gate recorded in the TASK-050 ticket.
+After approval, add one focused RED regression at a time for the owner
+boundary, missing-receipt denial, and fresh-process runner shape. Then
+implement only the smallest approved TASK-050 correction and make each check
+GREEN before the next step.
+
+Verification: focused tests first; then the affected Rust suites, runner self-
+test, one marker-owned PostgreSQL acceptance, repository/format/Clippy gates,
+independent code/security and architecture re-review, and integration/CI.
+
+| Workflow stage | Status | Current evidence | Gate strength |
+|---|---|---|---|
+| Repository/spec/ticket/constitution inspection | valid | TASK-050, SPEC-002 v34, ADR-011/019/020, four constitutions | documented-only |
+| Dependencies and combined branch | valid | TASK-075/TASK-076 complete; `f325310` functional candidate | machine-enforced |
+| TDD implementation | blocked | P1 candidates require focused RED tests | machine-enforced |
+| Focused/full verification | stale | prior wrapper predates the required repair | machine-enforced |
+| Code/security and architecture review | blocked | independent reviews found unresolved P1 candidates | documented-only |
+| Integration/CI | blocked | PR remains Draft; latest docs CI passes but repaired tree does not exist | machine-enforced |
+
+Risk and drift: the earlier closure-only strategy was invalidated by independent
+review. Do not mark TASK-050 complete, activate TASK-051, or reuse the existing
+fresh-process claim until these P1 findings are resolved and re-reviewed.
+The required versioned Ports/profile governance may need paths outside the
+current durable allowlist; implementation remains paused until prior authority
+is found or one narrow scope amendment is explicitly approved.
+
 ## Completed task update — TASK-072
 
 COMPLETED TASK-072 — one real pinned-Hermes post-submit timeout now reconciles
