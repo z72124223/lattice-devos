@@ -2,15 +2,13 @@
 ticket_id: TASK-075
 title: Schema-v5 Project Registry and autonomy migration reconciliation
 spec_id: SPEC-002
-spec_version: 33
+spec_version: 34
 module_id: postgres-store
-constitution_version: 1.8
-status: waiting_dependency
+constitution_version: 1.9
+status: in_progress
 parallel_safe: false
 depends_on:
   - TASK-022
-blocked_by:
-  - TASK-076
 integration_sources:
   task_022_implementation: 12f71009b5baa3ff3ddd026e0912f90db6d87e56
   task_022_closure: a1aced9f5acc81e9081a966a1e953b3029e45163
@@ -75,11 +73,11 @@ removal_only_paths:
 Commit `a3599c18d9462732c3b82c9e7d302980657eeccc` is the clean,
 scope-reviewed TASK-075 implementation checkpoint. Its Registry/autonomy
 schema-v5, Memory-v3, deterministic, and disposable acceptance evidence is
-retained, but the ticket is not complete: final architecture review proved
-that the previously accepted `G3_M2_W1` profile cannot enter schema v5 while
-Writer Lease remains hard-bound to global-v3/Memory-v2. TASK-076 owns the
-versioned Writer Lease v2 bridge. TASK-075 remains `waiting_dependency` until
-that bridge passes and the combined clean candidate is re-verified.
+retained. TASK-076 has now completed the versioned Writer Lease v2 bridge that
+allows the previously accepted `G3_M2_W1` profile to enter schema v5 without
+rewriting history. This ticket is therefore `in_progress` again for its final
+combined-candidate revalidation and closure under SPEC-002 v34 / Postgres Store
+1.9; TASK-050 remains waiting until that closure is recorded.
 
 ## Authority And Objective
 

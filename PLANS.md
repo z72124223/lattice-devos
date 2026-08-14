@@ -56,18 +56,24 @@ check passed; its recovery-security classification check failed, so it is
 explicitly barred from security, architecture, authorization, and integration
 decisions.
 
-## Current Writer Lease compatibility bridge - TASK-076
+## Completed Writer Lease compatibility bridge - TASK-076
 
-CURRENT TASK-076 - preserve the clean TASK-075 schema-v5 checkpoint at
-`a3599c1` while adding the versioned PostgreSQL Writer Lease v2 bridge required
-to upgrade the already accepted global-v3/Memory-v2/Writer-v1 profile. Writer
-v1 SQL, semantic rows, receipts, checkpoints, and fencing high-water remain
-immutable. The only accepted route is Writer-owned v2 bridge, Store-owned
-global-v5 advance, Memory-owned v3 advance with exact companion verification,
-then Writer-owned v2 activation. Both intermediate schema-v5 states remain
-runtime closed. TASK-075 and TASK-050 are `waiting_dependency` on TASK-076;
-TASK-051 remains blocked until the combined candidate and TASK-050 acceptance
-are clean and verified.
+COMPLETED TASK-076 - the append-only Writer Lease v2 bridge preserves v1 SQL,
+semantic rows, receipts, checkpoints, lease revision, and fencing high-water
+while admitting only the five governed profiles. Official disposable
+PostgreSQL acceptance, focused checks, strict Clippy, repository checks,
+independent code review, architecture review, and integration review pass with
+no technical blocker. The verified implementation/governance checkpoint is
+`f32531002a0c6588e96dc9fe0229db7e0ed546e0`; GitHub Draft PR #12 remains not
+authorized for merge or Draft promotion.
+
+## Current schema-v5 reconciliation closure - TASK-075
+
+CURRENT TASK-075 - the Writer-v2 dependency is now satisfied. Revalidate and
+close the existing clean schema-v5 checkpoint `a3599c1` against SPEC-002 v34,
+Postgres Store 1.9, the exact TASK-076 bridge/current profiles, and the retained
+TASK-050 fresh-process acceptance. TASK-050 remains `waiting_dependency` until
+TASK-075 closes; TASK-051 remains blocked until TASK-050 acceptance closes.
 
 ## Completed task update — TASK-072
 

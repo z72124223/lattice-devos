@@ -7,7 +7,7 @@ related_spec_id: SPEC-003
 related_spec_version: 5
 module_id: postgres-writer-lease
 constitution_version: 1.1
-status: in_progress
+status: complete
 parallel_safe: false
 depends_on:
   - commit:a3599c18d9462732c3b82c9e7d302980657eeccc
@@ -16,6 +16,7 @@ depends_on:
 branch: feature/task-076-postgres-writer-lease-v2
 implementation_worktree: lattice-worktrees/task-076-postgres-writer-lease-v2
 implementation_base: 8b6d5171759e28339d6fe2b66fab0c3b6718c64c
+implementation_head: f32531002a0c6588e96dc9fe0229db7e0ed546e0
 allowed_paths:
   - crates/lattice-postgres-writer-lease/src/lib.rs
   - crates/lattice-postgres-writer-lease/src/setup.rs
@@ -224,35 +225,66 @@ adapter dependencies or generic extension discovery.
 
 ## Acceptance Criteria
 
-- [ ] V1 SQL bytes/hash/manifest and all existing semantic golden vectors are
+- [x] V1 SQL bytes/hash/manifest and all existing semantic golden vectors are
       unchanged; v2 SQL/hash/manifest and the nine-function catalog are exact.
-- [ ] Fresh global-v5/Memory-v3 install and exact v1 upgrade converge on one
+- [x] Fresh global-v5/Memory-v3 install and exact v1 upgrade converge on one
       `G5_M3_W2_CURRENT` profile; exact current apply is a verified no-op.
-- [ ] A non-empty released v1 database upgrades through all five states with
+- [x] A non-empty released v1 database upgrades through all five states with
       commands, transitions, receipts, snapshots, checkpoints, fence high-
       water, and lease-revision high-water byte-identical after process and
       PostgreSQL restart.
-- [ ] `ACTIVE`, `SUSPECT`, partial, extra, drifted, cross-profile, wrong-
+- [x] `ACTIVE`, `SUSPECT`, partial, extra, drifted, cross-profile, wrong-
       identity, and wrong-ledger inputs fail before mutation.
-- [ ] Store and Memory take global -> Memory -> Writer locks, recognize only
+- [x] Store and Memory take global -> Memory -> Writer locks, recognize only
       the exact bridge/current profiles, and keep both pending profiles closed
       to every runtime role.
-- [ ] Memory verifies the full Writer v2 bridge before and after its own DDL
+- [x] Memory verifies the full Writer v2 bridge before and after its own DDL
       while holding Writer table `SHARE` locks, without changing Writer rows.
-- [ ] The old bind/load functions are ungranted, the two v2 successors are
+- [x] The old bind/load functions are ungranted, the two v2 successors are
       granted, the other five v1 functions remain granted, and direct table
       access remains denied.
-- [ ] Concurrent/repeated runners converge without deadlock, duplicate ledger
+- [x] Concurrent/repeated runners converge without deadlock, duplicate ledger
       ordinals, fence reuse, or partial success; injected rollback and commit-
       unknown matrices remain recoverable and fail closed.
-- [ ] The existing same-transaction Task Ledger current-authority assertion
+- [x] The existing same-transaction Task Ledger current-authority assertion
       and TASK-050 fresh-process replay pass unchanged on the final profile.
-- [ ] The dedicated marker-owned disposable PostgreSQL acceptance proves
+- [x] The dedicated marker-owned disposable PostgreSQL acceptance proves
       initial/restart cleanup, exact receipt closure, zero impact on existing
       listeners, and no external credentials, model, network, or publication.
-- [ ] Focused tests, affected crate suites, strict Clippy, format, repository
+- [x] Focused tests, affected crate suites, strict Clippy, format, repository
       checks, diff check, code review, architecture review, and integration
       review report no unresolved P0/P1 findings.
+
+## Completion Evidence - 2026-08-14
+
+- Verified implementation/governance commit:
+  `f32531002a0c6588e96dc9fe0229db7e0ed546e0`.
+- The official wrapper completed in 368.4 seconds with exit 0 and
+  `TASK076_WRITER_LEASE_V2_BRIDGE_ACCEPTANCE=PASS`.
+- The post-fix live-only PostgreSQL 17.10 gate passed both Writer v2 bridge and
+  fresh-current profiles on a dynamic port excluding `5432`, `64272`, and
+  `55432`; its 11-event holder receipt is
+  `target/task019-holder-receipts/6d527883bde0444a97ef392d9ea3dc05.jsonl`
+  with raw SHA-256
+  `01e88dfc40f69e3121b3064482589cb3c8e5f25b19f7404514906b0d6a14003a`
+  and final HMAC SHA-256
+  `13011d5449960e61dc91c8c3bd6c0f50d160d770f6305fe7569cd291c2103ffe`.
+- Independent code review found one P1 in the pre-role session gate, which was
+  fixed by short `SET LOCAL ROLE lattice_migrator` acquire/release
+  transactions and normal-login live coverage; re-review reported `No
+  findings` and `BLOCKER_STATUS: CLEAR`.
+- Independent architecture review required the SPEC-002 v34 / Postgres Store
+  1.9 protected-function amendment, then reported
+  `FINAL_ARCHITECTURE_REVIEW=NO_FINDINGS` and
+  `BLOCKER_STATUS=NOT_BLOCKED`.
+- Integration review verified the exact combined tree, allowlist, frozen
+  prerequisite, remote synchronization, and GitHub Actions run `31810017320`
+  / job `94798123907` PASS. Its decision is `NEEDS_REVIEW` solely because
+  merge/Draft-promotion authorization and GitHub human approval are absent;
+  technical integration blockers are zero and no merge was performed.
+- Residual non-blocker: no fault injection forces session-gate
+  acquire/release commit-response-loss or panic-unwind. Drop cleanup remains
+  best-effort and was independently inspected.
 
 ## Verification Commands
 
