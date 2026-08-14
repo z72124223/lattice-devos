@@ -90,32 +90,44 @@ load fails closed without that receipt, and acceptance uses a real fresh
 `latticed` process with zero prohibited effects.
 
 Confirmed facts: independent closure review rejected reuse of the old review.
-New code/security and architecture reviews confirmed P1 blockers: autonomy
-receipt semantics/hashing have multiple owners; the durable Task-created
-profile cannot distinguish historical absence from a required missing receipt;
-the public lifecycle port change lacks a versioned constitution amendment; and
-the current runner launches a Store test binary rather than fresh canonical
-`latticed`. No new PostgreSQL run is authorized until the smallest failing
-regressions and exact repair surface are fixed.
+The approved repair now gives Task Ledger sole profile/receipt/hash ownership,
+uses a versioned closed Ports contract, distinguishes required pending from
+historical absence, and makes normal lifecycle/Status fail closed until the
+sequence-2 receipt exists. The runner now contains a fail-closed four-process
+canonical `latticed` phase, but the marker-owned dual-profile selector and live
+PROCEED authority matrix must be complete before the one PostgreSQL run.
 
-Current step: the user approved the one narrow Human Gate on 2026-08-15.
-Complete the versioned governance amendment first, then add one focused RED
-regression at a time for the owner boundary, missing-receipt denial, and
-fresh-process runner shape. Implement only the smallest approved TASK-050
-correction and make each check GREEN before the next step.
+Current step: the user approved the one narrow Human Gate on 2026-08-15 and the
+governance amendment is committed at `97b6ab1`. Finish the marker-owned
+dual-profile acceptance seam and PostgreSQL PROCEED matrix, then run the pure
+gates before the one marker-owned PostgreSQL acceptance.
 
 Verification: focused tests first; then the affected Rust suites, runner self-
 test, one marker-owned PostgreSQL acceptance, repository/format/Clippy gates,
 independent code/security and architecture re-review, and integration/CI.
 
+TDD evidence, 2026-08-15: focused RED/GREEN cycles now reject generic receipt
+and reserved-profile construction, non-P0 risk, substituted recommendations,
+late/missing receipt progression, invalid persisted Writer tuples, a Store-head
+substitution, schema-v3 autonomy admission/load, and receipt replay after later
+lifecycle events. Task Ledger alone verifies the complete 24-scalar row and its
+Writer commitment covers exactly the same 15 fields asserted current by Store.
+The out-of-bound Contracts hash helper and Orchestrator duplicate canonical
+builder are removed. Ports makes an unadmitted `Existing` admission
+unrepresentable through a checked opaque wrapper. Current pure evidence is Task
+Ledger 23 integration plus 15 lib tests, Ports package, Runtime task-control
+14/14, Store lib 38 passed/1 ignored, Orchestrator controlled-task 5/5, and
+strict no-deps Clippy for Contracts, Task Ledger, Ports, and Orchestrator. No
+PostgreSQL acceptance or implementation-complete claim is made.
+
 | Workflow stage | Status | Current evidence | Gate strength |
 |---|---|---|---|
 | Repository/spec/ticket/constitution inspection | valid | TASK-050, SPEC-002 v35, ADR-011/019/020, Task Ledger 2.3, Ports 1.9, Store 1.10, Orchestrator 2.6, latticed 1.8 | documented-only |
 | Dependencies and combined branch | valid | TASK-075/TASK-076 complete; `f325310` functional candidate | machine-enforced |
-| Module constitution | complete | SPEC v35 and five versioned constitutions; repository check, scope audit, and architecture re-review pass | machine-enforced |
-| TDD implementation | in progress | begins with one focused Task Ledger generic-forgery RED | machine-enforced |
-| Focused/full verification | stale | prior wrapper predates the required repair | machine-enforced |
-| Code/security and architecture review | blocked | independent reviews found unresolved P1 candidates | documented-only |
+| Module constitution | in review | SPEC v35 and five versioned constitutions are amended; final scope and architecture re-review remain active | documented-only |
+| TDD implementation | in progress | owner/replay/Ports/Store/Runtime core and runner self-tests GREEN; live acceptance not yet run | machine-enforced |
+| Focused/full verification | partial | Task Ledger 23+15, Ports, Runtime lib 102/2 ignored, Runtime MCP 31, Store 38/1 ignored, and migration contract 37 PASS; PostgreSQL not run | machine-enforced |
+| Code/security and architecture review | in progress | prior P1/P2 code findings repaired; final frozen-diff re-review pending | documented-only |
 | Integration/CI | blocked | PR remains Draft; latest docs CI passes but repaired tree does not exist | machine-enforced |
 
 Risk and drift: the earlier closure-only strategy was invalidated by independent

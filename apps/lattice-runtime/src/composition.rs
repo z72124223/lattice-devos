@@ -71,6 +71,8 @@ use lattice_orchestrator::{
     delivery_status, graph_memory_status, run_controlled_task, run_delivery, run_delivery_governed,
     run_graph_memory,
 };
+#[cfg(test)]
+use lattice_ports::TaskLifecycleAutonomyEvidence;
 use lattice_ports::{
     ControlledTaskExecutionError, ControlledTaskExecutionErrorKind, ControlledTaskExecutionPort,
     DeliveryCodexPort, DeliveryFailureCertainty, DeliveryLedgerPort, DeliveryPortError,
@@ -121,6 +123,14 @@ const PROJECT_SNAPSHOT_ID: &str = "task032-delivery:snapshot:1";
 const CONTROLLED_TASK_ID: &str = "TASK-038-CANARY";
 const CONTROLLED_PROJECT_ID: &str = "task038-controlled-canary";
 const CONTROLLED_PROJECT_SNAPSHOT_ID: &str = "task038-controlled-canary:snapshot:1";
+const TASK050_ACCEPTANCE_PROFILE_ENV: &str = "LATTICE_TASK050_ACCEPTANCE_PROFILE";
+const TASK050_ACCEPTANCE_TASK_SPEC_SHA256_ENV: &str = "LATTICE_TASK050_ACCEPTANCE_TASK_SPEC_SHA256";
+const TASK050_ASK_USER_PROJECT_ID: &str = "task050-fresh-process";
+const TASK050_ASK_USER_PROJECT_SNAPSHOT_ID: &str = "task050-snapshot";
+const TASK050_ASK_USER_TASK_ID: &str = "TASK-050-FRESH";
+const TASK050_PROCEED_PROJECT_ID: &str = "task050-proceed-current";
+const TASK050_PROCEED_PROJECT_SNAPSHOT_ID: &str = "task050-proceed-snapshot";
+const TASK050_PROCEED_TASK_ID: &str = "TASK-050-PROCEED";
 const CONTROLLED_WRITER_FENCING_HIGH_WATER: u64 = 1;
 const CONTROLLED_WRITER_ACQUIRED_HIGH_WATER: u64 = 1;
 const CONTROLLED_WRITER_TRANSITION_HIGH_WATER: u64 = 2;
@@ -1940,7 +1950,7 @@ where
             return Err(error);
         }
     };
-    let submission = match fixed_gateway_submission() {
+    let submission = match gateway_submission_from_environment(run_mode) {
         Ok(submission) => submission,
         Err(error) => {
             diagnostic(StartupDiagnostic::failure(
@@ -3058,6 +3068,120 @@ enum FullChainEntry {
 enum FullChainRunMode {
     Fresh,
     ResumeExisting,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Task050AcceptanceProfile {
+    AskUser,
+    Proceed,
+}
+
+impl Task050AcceptanceProfile {
+    const fn identity(self) -> GatewaySubmissionIdentity {
+        match self {
+            Self::AskUser => GatewaySubmissionIdentity {
+                project: TASK050_ASK_USER_PROJECT_ID,
+                snapshot: TASK050_ASK_USER_PROJECT_SNAPSHOT_ID,
+                task: TASK050_ASK_USER_TASK_ID,
+            },
+            Self::Proceed => GatewaySubmissionIdentity {
+                project: TASK050_PROCEED_PROJECT_ID,
+                snapshot: TASK050_PROCEED_PROJECT_SNAPSHOT_ID,
+                task: TASK050_PROCEED_TASK_ID,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Task050AcceptanceSelectorInput<'a> {
+    profile: Option<&'a str>,
+    task_spec_sha256: Option<&'a str>,
+    task050_live: Option<&'a str>,
+    task019_live: Option<&'a str>,
+    phase: Option<&'a str>,
+    host: Option<&'a str>,
+    run_id: Option<&'a str>,
+    ingress_kind: Option<&'a str>,
+}
+
+fn select_task050_acceptance_profile(
+    run_mode: FullChainRunMode,
+    input: Task050AcceptanceSelectorInput<'_>,
+) -> Result<Option<Task050AcceptanceProfile>, LatticedErrorKind> {
+    let profile = match (input.profile, input.task_spec_sha256) {
+        (None, None) => return Ok(None),
+        (Some("ASK_USER"), Some(_)) => Task050AcceptanceProfile::AskUser,
+        (Some("PROCEED"), Some(_)) => Task050AcceptanceProfile::Proceed,
+        _ => return Err(LatticedErrorKind::Configuration),
+    };
+    if run_mode != FullChainRunMode::ResumeExisting
+        || input.task050_live != Some("1")
+        || input.task019_live != Some("1")
+        || !matches!(input.phase, Some("initial" | "restart"))
+        || input.host != Some("127.0.0.1")
+        || !input.run_id.is_some_and(|run_id| {
+            run_id.len() == 32
+                && run_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        || input.ingress_kind != Some(TASK_INGRESS_LOCAL_ACCEPTANCE)
+    {
+        return Err(LatticedErrorKind::Configuration);
+    }
+    let submission = match task050_acceptance_gateway_submission(profile) {
+        Ok(submission) => submission,
+        Err(error) => return Err(error.kind()),
+    };
+    if input.task_spec_sha256 != Some(submission.binding().task_spec_digest().as_str()) {
+        return Err(LatticedErrorKind::Configuration);
+    }
+    Ok(Some(profile))
+}
+
+fn optional_unicode_environment(name: &str) -> Result<Option<String>, LatticedError> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(LatticedError::new(LatticedErrorKind::Configuration))
+        }
+    }
+}
+
+fn gateway_submission_from_environment(
+    run_mode: FullChainRunMode,
+) -> Result<TaskSpecSubmission, LatticedError> {
+    let profile = optional_unicode_environment(TASK050_ACCEPTANCE_PROFILE_ENV)?;
+    let task_spec_sha256 = optional_unicode_environment(TASK050_ACCEPTANCE_TASK_SPEC_SHA256_ENV)?;
+    if profile.is_none() && task_spec_sha256.is_none() {
+        return fixed_gateway_submission();
+    }
+    let task050_live = optional_unicode_environment("LATTICE_TASK050_LIVE")?;
+    let task019_live = optional_unicode_environment("LATTICE_TASK019_LIVE")?;
+    let phase = optional_unicode_environment("LATTICE_TASK019_PHASE")?;
+    let host = optional_unicode_environment("LATTICE_TASK019_HOST")?;
+    let run_id = optional_unicode_environment("LATTICE_TASK019_RUN_ID")?;
+    let ingress_kind = optional_unicode_environment(TASK_INGRESS_KIND_ENV)?;
+    let selected = select_task050_acceptance_profile(
+        run_mode,
+        Task050AcceptanceSelectorInput {
+            profile: profile.as_deref(),
+            task_spec_sha256: task_spec_sha256.as_deref(),
+            task050_live: task050_live.as_deref(),
+            task019_live: task019_live.as_deref(),
+            phase: phase.as_deref(),
+            host: host.as_deref(),
+            run_id: run_id.as_deref(),
+            ingress_kind: ingress_kind.as_deref(),
+        },
+    )
+    .map_err(LatticedError::new)?;
+    selected.map_or_else(
+        fixed_gateway_submission,
+        task050_acceptance_gateway_submission,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4703,15 +4827,38 @@ fn validate_controlled_task_timeout(
 ///
 /// Returns a contract failure if canonical hashing or fixed binding construction fails.
 pub fn fixed_gateway_submission() -> Result<TaskSpecSubmission, LatticedError> {
+    gateway_submission(GatewaySubmissionIdentity {
+        project: CONTROLLED_PROJECT_ID,
+        snapshot: CONTROLLED_PROJECT_SNAPSHOT_ID,
+        task: CONTROLLED_TASK_ID,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct GatewaySubmissionIdentity {
+    project: &'static str,
+    snapshot: &'static str,
+    task: &'static str,
+}
+
+fn task050_acceptance_gateway_submission(
+    profile: Task050AcceptanceProfile,
+) -> Result<TaskSpecSubmission, LatticedError> {
+    gateway_submission(profile.identity())
+}
+
+fn gateway_submission(
+    identity: GatewaySubmissionIdentity,
+) -> Result<TaskSpecSubmission, LatticedError> {
     let task_spec = TaskSpec::new(TaskSpecInput {
         schema_version: TASK_SPEC_SCHEMA_VERSION.to_owned(),
-        task_id: TaskId::new(CONTROLLED_TASK_ID)
+        task_id: TaskId::new(identity.task)
             .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
         revision: FIXED_GATEWAY_TASK_REVISION.to_owned(),
         created_at: "2026-08-09T00:00:00Z".to_owned(),
         created_by: "chatgpt-mcp-controlled-profile".to_owned(),
-        project_id: CONTROLLED_PROJECT_ID.to_owned(),
-        project_snapshot_id: ProjectSnapshotId::new(CONTROLLED_PROJECT_SNAPSHOT_ID)
+        project_id: identity.project.to_owned(),
+        project_snapshot_id: ProjectSnapshotId::new(identity.snapshot)
             .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
         base_ref: "main".to_owned(),
         base_commit_id: BASELINE_COMMIT_SHA.to_owned(),
@@ -4776,12 +4923,11 @@ pub fn fixed_gateway_submission() -> Result<TaskSpecSubmission, LatticedError> {
         return Err(LatticedError::new(LatticedErrorKind::Contract));
     }
     let binding = SubjectBinding::new(
-        ProjectId::new(CONTROLLED_PROJECT_ID)
+        ProjectId::new(identity.project)
             .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
-        ProjectSnapshotId::new(CONTROLLED_PROJECT_SNAPSHOT_ID)
+        ProjectSnapshotId::new(identity.snapshot)
             .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
-        TaskId::new(CONTROLLED_TASK_ID)
-            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        TaskId::new(identity.task).map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
         FIXED_GATEWAY_TASK_REVISION,
         digest.clone(),
     )
@@ -6289,12 +6435,417 @@ mod tests {
     use super::*;
     use lattice_codebase_memory::{normalize_analysis, plan_retrieval};
     use lattice_contracts::{
-        CodeSnapshotEvidence, CodebaseMemoryPersistenceIdentity, GraphConfidence,
+        CodeSnapshotEvidence, CodebaseMemoryPersistenceIdentity, DaemonEpoch, GraphConfidence,
         GraphMemoryPersistenceEvidence, GraphSourceProvenance, GraphifyIdentity,
         GraphifyRawEvidence, GraphifyRawNode, MemoryRetrievalDisposition, MemoryRetrievalEvidence,
         MemoryRetrievalPlan, NormalizedGraphAnalysis, TrackedSource,
     };
-    use lattice_ports::{CodebaseMemoryPort, DeliveryFailureCertainty, DeliveryPortError};
+    use lattice_ports::{
+        AutonomyDisposition, AutonomyReceiptProjection, CodebaseMemoryPort,
+        DeliveryFailureCertainty, DeliveryPortError,
+    };
+    use lattice_postgres_codebase_memory::{
+        ExtensionApplyOutcome as MemoryExtensionApplyOutcome,
+        ExtensionDatabaseRole as MemoryExtensionDatabaseRole,
+        ExtensionTarget as MemoryExtensionTarget, apply_extension as apply_memory_extension,
+        verify_extension as verify_memory_extension,
+    };
+    use lattice_postgres_writer_lease::{
+        ExtensionApplyOutcome as WriterExtensionApplyOutcome,
+        apply_extension as apply_writer_extension, verify_extension as verify_writer_extension,
+    };
+    use lattice_writer_lease::{
+        CommandOutcome as WriterCommandOutcome, WriterLeaseAcquireRequest, WriterLeaseRepository,
+        WriterLeaseRepositoryCommand,
+    };
+    use postgres::config::SslMode;
+    use postgres::{Client, Config, NoTls};
+
+    const TASK050_PROFILE_MARKER_PREFIX: &str = "TASK050_LATTICED_PROFILE_INPUT=";
+
+    fn task050_test_digest(value: char) -> ContentDigest {
+        ContentDigest::from_sha256(value.to_string().repeat(64)).expect("TASK050 digest")
+    }
+
+    fn task050_store_authority() -> StoreAuthorityHead {
+        StoreAuthorityHead::new(
+            RuntimeKind::Live,
+            StoreDaemonInstanceId::new("task050-fresh-process").expect("TASK050 daemon"),
+            DaemonEpoch::new(50).expect("TASK050 epoch"),
+            RuntimeAdmissionMode::Active,
+            StoreAuthorityRevision::new(50).expect("TASK050 revision"),
+            task050_test_digest('a'),
+            task050_test_digest('b'),
+        )
+        .expect("TASK050 Store authority")
+    }
+
+    fn task050_connect_as(database: &str, role: &str) -> Result<Client, Box<dyn Error>> {
+        let host = required_environment("LATTICE_TASK019_HOST")?;
+        let port = required_environment("LATTICE_TASK019_PORT")?.parse::<u16>()?;
+        let password = required_environment("LATTICE_TASK019_PASSWORD")?;
+        let mut config = Config::new();
+        config
+            .host(&host)
+            .port(port)
+            .user(&format!("{role}_login"))
+            .password(password)
+            .dbname(database)
+            .application_name("lattice-devos-task050-canonical-profile")
+            .ssl_mode(SslMode::Disable);
+        let mut client = config.connect(NoTls)?;
+        client.batch_execute(&format!("SET ROLE {role}"))?;
+        Ok(client)
+    }
+
+    fn task050_ingress_peer(
+        profile: Task050AcceptanceProfile,
+    ) -> Result<TaskIngressPeerEvidence, Box<dyn Error>> {
+        let executable = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("debug")
+            .join("latticed.exe");
+        let binary_digest = ContentDigest::from_sha256(official_file_sha256(
+            &executable,
+            MAX_LATTICED_EXECUTABLE_BYTES,
+        )?)?;
+        let profile_digest = match profile {
+            Task050AcceptanceProfile::AskUser => task050_test_digest('c'),
+            Task050AcceptanceProfile::Proceed => task050_test_digest('d'),
+        };
+        Ok(
+            TaskIngressPeerEvidence::new_local_canonical_mcp_acceptance_live(
+                GatewayInstanceId::new("latticed-local-canonical-acceptance")?,
+                env!("CARGO_PKG_VERSION"),
+                binary_digest,
+                mcp::task_ingress_schema_digest().ok_or("TASK050 MCP schema digest missing")?,
+                GatewayChannelId::new("main")?,
+                profile_digest,
+                task050_test_digest('e'),
+            )?,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn task050_autonomy_marker(
+        phase: &str,
+        profile: Task050AcceptanceProfile,
+        run_id: &str,
+        ingress_peer: &TaskIngressPeerEvidence,
+        authority: &StoreAuthorityHead,
+        binding: &SubjectBinding,
+        evidence: &TaskLifecycleEvidence,
+        task_ref: &ContentDigest,
+    ) -> Result<Value, Box<dyn Error>> {
+        let profile_name = match profile {
+            Task050AcceptanceProfile::AskUser => "ASK_USER",
+            Task050AcceptanceProfile::Proceed => "PROCEED",
+        };
+        let autonomy = evidence
+            .autonomy_receipt()
+            .ok_or("TASK050 autonomy projection missing")?;
+        Ok(json!({
+            "authority_head_digest": authority.head_digest().as_str(),
+            "authority_revision": authority.revision().get(),
+            "autonomy_projection_sha256": autonomy.receipt_digest().as_str(),
+            "daemon_epoch": authority.daemon_epoch().get(),
+            "daemon_instance_id": authority.daemon_instance_id().as_str(),
+            "database_run_id": run_id,
+            "expected_status": task_public_status(evidence, task_ref),
+            "ingress_profile_sha256": ingress_peer.profile_digest().as_str(),
+            "observation_digest": authority.observation_digest().as_str(),
+            "phase": phase,
+            "profile": profile_name,
+            "schema": "lattice.task050.latticed-profile-input.v2",
+            "task_ref": task_ref.as_str(),
+            "task_spec_digest": binding.task_spec_digest().as_str(),
+        }))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_task050_canonical_latticed_profiles() -> Result<(), Box<dyn Error>> {
+        if required_environment("LATTICE_TASK019_LIVE")? != "1"
+            || required_environment("LATTICE_TASK019_HOST")? != "127.0.0.1"
+        {
+            return Err("TASK050 live boundary rejected".into());
+        }
+        let phase = required_environment("LATTICE_TASK019_PHASE")?;
+        if !matches!(phase.as_str(), "initial" | "restart") {
+            return Err("TASK050 phase rejected".into());
+        }
+        let run_id = required_environment("LATTICE_TASK019_RUN_ID")?;
+        let port = required_environment("LATTICE_TASK019_PORT")?.parse::<u16>()?;
+        let password = required_environment("LATTICE_TASK019_PASSWORD")?;
+        let database = DeliveryDatabaseBinding::new("127.0.0.1", port, run_id.clone())?;
+        let authority = task050_store_authority();
+        let ask_submission =
+            task050_acceptance_gateway_submission(Task050AcceptanceProfile::AskUser)?;
+        let ask_peer = task050_ingress_peer(Task050AcceptanceProfile::AskUser)?;
+        let mut foundation_probe = PostgresTaskLifecycle::connect_with_ingress_peer(
+            &database,
+            &password,
+            Instant::now() + Duration::from_mins(2),
+            task_ledger_identity(ask_submission.binding())?,
+            authority.clone(),
+            ask_peer,
+        )?;
+        let foundation = foundation_probe.persistence_foundation(ask_submission.binding())?;
+        drop(foundation_probe);
+
+        let memory_target = MemoryExtensionTarget::new(database.database_name(), &run_id)?;
+        let memory_manifest = verify_embedded_extension_manifest()?;
+        let writer_target = WriterLeaseExtensionTarget::new(
+            database.database_name(),
+            foundation.database_identity_digest().clone(),
+            foundation.global_manifest_digest().clone(),
+            memory_manifest.manifest_sha256().clone(),
+        )?;
+        let mut migrator = task050_connect_as(&database.database_name(), "lattice_migrator")?;
+        if phase == "initial" {
+            assert!(matches!(
+                apply_memory_extension(&mut migrator, &memory_target)?,
+                MemoryExtensionApplyOutcome::Installed
+                    | MemoryExtensionApplyOutcome::AlreadyCurrent
+            ));
+            assert!(matches!(
+                apply_writer_extension(&mut migrator, &writer_target)?,
+                WriterExtensionApplyOutcome::Installed
+                    | WriterExtensionApplyOutcome::Activated
+                    | WriterExtensionApplyOutcome::AlreadyCurrent
+            ));
+        } else {
+            verify_memory_extension(
+                &mut migrator,
+                &memory_target,
+                MemoryExtensionDatabaseRole::Migrator,
+            )?;
+            verify_writer_extension(&mut migrator, &writer_target)?;
+        }
+        drop(migrator);
+
+        for profile in [
+            Task050AcceptanceProfile::AskUser,
+            Task050AcceptanceProfile::Proceed,
+        ] {
+            let submission = task050_acceptance_gateway_submission(profile)?;
+            let binding = submission.binding().clone();
+            let ingress_peer = task050_ingress_peer(profile)?;
+            let client_request_id = match profile {
+                Task050AcceptanceProfile::AskUser => "task050-canonical-ask-user",
+                Task050AcceptanceProfile::Proceed => "task050-canonical-proceed",
+            };
+            let mut lifecycle = PostgresTaskLifecycle::connect_with_ingress_peer(
+                &database,
+                &password,
+                Instant::now() + Duration::from_mins(2),
+                task_ledger_identity(&binding)?,
+                authority.clone(),
+                ingress_peer.clone(),
+            )?;
+            lifecycle.admit(&binding, client_request_id)?;
+            let mut writer = None;
+            let writer_authority = if profile == Task050AcceptanceProfile::Proceed {
+                let runtime = connect_fixed_runtime_client(
+                    &database,
+                    &password,
+                    Instant::now() + Duration::from_mins(2),
+                )?;
+                let mut repository =
+                    PostgresWriterLease::new(runtime, writer_target.clone(), &authority, 600)?;
+                let current = if phase == "initial" {
+                    let receipt = repository.execute(WriterLeaseRepositoryCommand::Acquire(
+                        WriterLeaseAcquireRequest {
+                            command_id: "task050-canonical-proceed-acquire".to_owned(),
+                            expected_head: None,
+                            project_id: binding.project_id().clone(),
+                            project_snapshot_id: binding.project_snapshot_id().clone(),
+                            task_id: binding.task_id().clone(),
+                            task_revision: binding.task_revision().to_owned(),
+                            task_spec_digest: binding.task_spec_digest().clone(),
+                            attempt_id: AttemptId::new("task050-canonical-proceed-attempt")?,
+                            lease_id: "task050-canonical-proceed-lease".to_owned(),
+                            lease_holder_id: "codex-writer".to_owned(),
+                            worktree_id: "task050-canonical-acceptance".to_owned(),
+                            holder_process_id: HolderProcessId::new(u64::from(process::id()))?,
+                            holder_process_start_identity: task050_test_digest('f'),
+                        },
+                    ))?;
+                    if receipt.outcome != WriterCommandOutcome::Applied {
+                        return Err("TASK050 writer acquire denied".into());
+                    }
+                    receipt.after.ok_or("TASK050 writer authority missing")?
+                } else {
+                    repository
+                        .current_authority(binding.project_id())?
+                        .ok_or("TASK050 current writer authority missing")?
+                        .independent_head()
+                        .clone()
+                };
+                repository.assert_current(&current)?;
+                writer = Some(repository);
+                Some(current)
+            } else {
+                None
+            };
+            let evidence =
+                lifecycle.record_autonomy_receipt(&binding, writer_authority.as_ref())?;
+            if evidence.state() != TaskState::Draft
+                || evidence.result_digest().is_some()
+                || evidence
+                    .autonomy_receipt()
+                    .map(AutonomyReceiptProjection::disposition)
+                    != Some(match profile {
+                        Task050AcceptanceProfile::AskUser => AutonomyDisposition::AskUser,
+                        Task050AcceptanceProfile::Proceed => AutonomyDisposition::Proceed,
+                    })
+            {
+                return Err("TASK050 autonomy projection rejected".into());
+            }
+            if let (Some(repository), Some(current)) = (writer.as_mut(), writer_authority.as_ref())
+            {
+                repository.assert_current(current)?;
+            }
+            let task_ref = controlled_task_reference(
+                &binding,
+                &task_admission_command_id(client_request_id),
+                &run_id,
+                ingress_peer.profile_digest(),
+            )?;
+            let marker = task050_autonomy_marker(
+                &phase,
+                profile,
+                &run_id,
+                &ingress_peer,
+                &authority,
+                &binding,
+                &evidence,
+                &task_ref,
+            )?;
+            println!("\n{TASK050_PROFILE_MARKER_PREFIX}{marker}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn task050_acceptance_profile_selector_is_private_exact_and_fail_closed() {
+        let ask = task050_acceptance_gateway_submission(Task050AcceptanceProfile::AskUser)
+            .expect("ASK_USER submission");
+        let proceed = task050_acceptance_gateway_submission(Task050AcceptanceProfile::Proceed)
+            .expect("PROCEED submission");
+
+        assert_eq!(
+            ask.binding().task_spec_digest().as_str(),
+            "0915bc62fe4613bebda5a82e65863a325b7102124a61aa0efc9310a33a18be59"
+        );
+        assert_eq!(
+            proceed.binding().task_spec_digest().as_str(),
+            "0cdfb9ee77f8f3b819ddbd74bf2d58537da11ec065bb1526889bb08adf77e86d"
+        );
+        assert_ne!(ask.binding(), proceed.binding());
+
+        let exact = Task050AcceptanceSelectorInput {
+            profile: Some("ASK_USER"),
+            task_spec_sha256: Some(ask.binding().task_spec_digest().as_str()),
+            task050_live: Some("1"),
+            task019_live: Some("1"),
+            phase: Some("initial"),
+            host: Some("127.0.0.1"),
+            run_id: Some("05000000000000000000000000000001"),
+            ingress_kind: Some(TASK_INGRESS_LOCAL_ACCEPTANCE),
+        };
+        assert_eq!(
+            select_task050_acceptance_profile(FullChainRunMode::ResumeExisting, exact),
+            Ok(Some(Task050AcceptanceProfile::AskUser))
+        );
+        assert_eq!(
+            select_task050_acceptance_profile(
+                FullChainRunMode::ResumeExisting,
+                Task050AcceptanceSelectorInput {
+                    profile: Some("PROCEED"),
+                    task_spec_sha256: Some(proceed.binding().task_spec_digest().as_str()),
+                    phase: Some("restart"),
+                    ..exact
+                }
+            ),
+            Ok(Some(Task050AcceptanceProfile::Proceed))
+        );
+        assert_eq!(
+            select_task050_acceptance_profile(FullChainRunMode::Fresh, exact),
+            Err(LatticedErrorKind::Configuration)
+        );
+        for rejected in [
+            Task050AcceptanceSelectorInput {
+                task050_live: None,
+                ..exact
+            },
+            Task050AcceptanceSelectorInput {
+                task019_live: None,
+                ..exact
+            },
+            Task050AcceptanceSelectorInput {
+                phase: Some("memory_setup"),
+                ..exact
+            },
+            Task050AcceptanceSelectorInput {
+                host: Some("localhost"),
+                ..exact
+            },
+            Task050AcceptanceSelectorInput {
+                run_id: None,
+                ..exact
+            },
+            Task050AcceptanceSelectorInput {
+                run_id: Some("0500000000000000000000000000000A"),
+                ..exact
+            },
+            Task050AcceptanceSelectorInput {
+                ingress_kind: Some(TASK_INGRESS_SECURE_TUNNEL),
+                ..exact
+            },
+        ] {
+            assert_eq!(
+                select_task050_acceptance_profile(FullChainRunMode::ResumeExisting, rejected),
+                Err(LatticedErrorKind::Configuration)
+            );
+        }
+        assert_eq!(
+            select_task050_acceptance_profile(
+                FullChainRunMode::ResumeExisting,
+                Task050AcceptanceSelectorInput {
+                    task_spec_sha256: Some(proceed.binding().task_spec_digest().as_str()),
+                    ..exact
+                }
+            ),
+            Err(LatticedErrorKind::Configuration)
+        );
+        assert_eq!(
+            select_task050_acceptance_profile(
+                FullChainRunMode::ResumeExisting,
+                Task050AcceptanceSelectorInput {
+                    profile: None,
+                    task_spec_sha256: None,
+                    task050_live: None,
+                    task019_live: None,
+                    phase: None,
+                    host: None,
+                    run_id: None,
+                    ingress_kind: None,
+                }
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the coordinated marker-owned TASK-019 PostgreSQL fixture"]
+    fn task050_canonical_latticed_profiles_when_provisioned() {
+        if env::var("LATTICE_TASK050_LIVE").ok().as_deref() != Some("1") {
+            return;
+        }
+        run_task050_canonical_latticed_profiles().expect("TASK050 canonical profiles");
+    }
 
     #[test]
     fn synthetic_official_bundle_facts_exercise_only_the_pure_fixed_policy() {
@@ -6589,7 +7140,7 @@ mod tests {
             .clone();
         let completed = TaskLifecycleEvidence::new(
             binding.clone(),
-            true,
+            TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
             TaskState::Completed,
             test_content_digest('7'),
             Some(test_content_digest('8')),
@@ -6622,35 +7173,35 @@ mod tests {
         let cases = [
             TaskLifecycleEvidence::new(
                 binding.clone(),
-                false,
+                TaskLifecycleAutonomyEvidence::Unadmitted,
                 TaskState::Draft,
                 test_content_digest('7'),
                 None,
             ),
             TaskLifecycleEvidence::new(
                 binding.clone(),
-                true,
+                TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
                 TaskState::Executing,
                 test_content_digest('7'),
                 None,
             ),
             TaskLifecycleEvidence::new(
                 binding.clone(),
-                true,
+                TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
                 TaskState::Failed,
                 test_content_digest('7'),
                 Some(test_content_digest('8')),
             ),
             TaskLifecycleEvidence::new(
                 binding.clone(),
-                true,
+                TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
                 TaskState::Stopping,
                 test_content_digest('7'),
                 Some(test_content_digest('8')),
             ),
             TaskLifecycleEvidence::new(
                 mismatched_binding,
-                true,
+                TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
                 TaskState::Completed,
                 test_content_digest('7'),
                 Some(test_content_digest('8')),
@@ -6827,7 +7378,7 @@ mod tests {
         let public_status = task_public_status(
             &TaskLifecycleEvidence::new(
                 binding,
-                true,
+                TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
                 TaskState::Executing,
                 test_content_digest('7'),
                 None,
@@ -6922,7 +7473,7 @@ mod tests {
             .clone();
         let evidence = TaskLifecycleEvidence::new(
             binding,
-            true,
+            TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
             TaskState::Executing,
             test_content_digest('7'),
             None,

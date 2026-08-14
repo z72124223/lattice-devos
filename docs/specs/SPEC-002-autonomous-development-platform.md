@@ -210,6 +210,9 @@ creating duplicate authorities or an unconstrained self-modifying agent.
   verified scalar plans to I/O without recreating domain classification or
   hashing. Subject, event, terminal command receipt, head/projection/checkpoint,
   and physical receipt commit atomically in the fenced Ledger transaction.
+  The Writer head commitment covers exactly the fixed 15-scalar tuple asserted
+  current by Store in that transaction; it does not claim unasserted structural
+  receipt fields as owner-current.
   The exact `0006` migration, existing hash domains, catalog bytes, and public
   MCP tool names/input schemas/six-field output remain unchanged.
 - The independent Codebase Memory extension advances only through new
@@ -882,7 +885,7 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | lattice-core-bootstrap | 1.0 | Inert compile-time component manifest for the first Rust slice |
 | lattice-cli | 1.0 | Read-only bootstrap inspection/recovery command; no runtime authority |
 | lattice-contracts | 1.13 | Preserve every existing value and freeze v1/v2 Memory persistence identities to global schema 3 while adding a distinct v3/global-v5 identity constructor without I/O or authority |
-| lattice-ports | 1.9 | Preserve delivery ports and add neutral task-lifecycle profile evidence plus the receipt-recording port needed to enforce required-profile reconciliation without exposing a seventh MCP field |
+| lattice-ports | 1.9 | Preserve delivery ports and add a closed neutral lifecycle autonomy-evidence sum type plus the receipt-recording port; invalid profile/receipt combinations are unrepresentable and no seventh MCP field is exposed |
 
 The user approved this module direction, the local bootstrap slice, and
 continued local work on 2026-07-29. TASK-010 adds the pure technical

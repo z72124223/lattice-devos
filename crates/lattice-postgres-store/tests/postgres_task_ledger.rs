@@ -1,4 +1,3 @@
-use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
 use lattice_contracts::{
     ContentDigest, DaemonEpoch, ProjectId, ProjectSnapshotId, RuntimeAdmissionMode, RuntimeKind,
     StoreAuthorityHead, StoreAuthorityRevision, StoreDaemonInstanceId, TaskId,
@@ -10,8 +9,10 @@ use lattice_postgres_store::{
     verify_postgres_schema,
 };
 use lattice_task_ledger::{
-    ActionId, ActorId, AppendCommand, CommandId, CorrelationId, LedgerEventKind, LedgerOutcome,
-    ReasonCode, plan_append,
+    ActorId, AppendCommand, AutonomyAppendMetadata, AutonomyAuthorityEvidence,
+    AutonomyDecisionReason, AutonomyIntent, AutonomyObservedTaskState, AutonomyRecommendation,
+    AutonomyRiskClass, AutonomyTaskKind, CommandId, CorrelationId, ReasonCode,
+    VerifiedAutonomyReceiptState, plan_autonomy_receipt_append,
 };
 use postgres::config::SslMode;
 use postgres::{Client, Config, NoTls};
@@ -546,143 +547,303 @@ fn store_authority() -> StoreAuthorityHead {
     .expect("authority")
 }
 
-fn binding_value(identity: &TaskLedgerStreamIdentity) -> CanonicalValue {
-    CanonicalValue::Object(vec![
-        (
-            "project_id".into(),
-            CanonicalValue::String(identity.project_id().as_str().into()),
-        ),
-        (
-            "project_snapshot_id".into(),
-            CanonicalValue::String(identity.project_snapshot_id().as_str().into()),
-        ),
-        (
-            "task_id".into(),
-            CanonicalValue::String(identity.task_id().as_str().into()),
-        ),
-        (
-            "task_revision".into(),
-            CanonicalValue::String(identity.task_revision().into()),
-        ),
-        (
-            "task_spec_digest".into(),
-            CanonicalValue::String(identity.task_spec_digest().as_str().into()),
-        ),
-    ])
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AutonomyPersistenceFaultBehavior {
+    RaiseAfterWrite,
+    CorruptBeforeReload,
+    RaiseAtCommit,
 }
 
-fn autonomy_digest(domain: &str, value: &CanonicalValue) -> ContentDigest {
-    let domain = HashDomain::new(domain, "1.0").expect("domain");
-    ContentDigest::from_sha256(
-        canonical_sha256(&domain, value)
-            .expect("canonical hash")
-            .to_hex(),
-    )
-    .expect("digest")
+#[derive(Clone, Copy)]
+struct AutonomyPersistenceFaultBoundary {
+    name: &'static str,
+    table: &'static str,
+    operation: &'static str,
+    behavior: AutonomyPersistenceFaultBehavior,
 }
 
-fn ask_user_digests(identity: &TaskLedgerStreamIdentity) -> (ContentDigest, ContentDigest) {
-    let authority = CanonicalValue::Object(vec![
-        ("binding".into(), binding_value(identity)),
-        (
-            "authority_mode".into(),
-            CanonicalValue::String("P0_PROCESS_START_PROFILE_V1".into()),
-        ),
-        (
-            "process_start_authority_digest".into(),
-            CanonicalValue::String(digest('c').as_str().into()),
-        ),
-        (
-            "ingress_profile_adapter_commitment".into(),
-            CanonicalValue::String(digest('d').as_str().into()),
-        ),
-        (
-            "store_authority_head_digest".into(),
-            CanonicalValue::String(digest('b').as_str().into()),
-        ),
-        (
-            "policy_decision_receipt_digest".into(),
-            CanonicalValue::Null,
-        ),
-        ("policy_owner_head_digest".into(), CanonicalValue::Null),
-        ("approval_receipt_digest".into(), CanonicalValue::Null),
-        ("approval_owner_head_digest".into(), CanonicalValue::Null),
-        ("writer_lease_receipt_digest".into(), CanonicalValue::Null),
-        ("writer_lease_head_digest".into(), CanonicalValue::Null),
-        ("writer_fencing_token".into(), CanonicalValue::Null),
-    ]);
-    let authority_digest = autonomy_digest("lattice.autonomy-authority", &authority);
-    let receipt = CanonicalValue::Object(vec![
-        (
-            "schema_version".into(),
-            CanonicalValue::String("lattice.autonomy-receipt/1.0".into()),
-        ),
-        ("binding".into(), binding_value(identity)),
-        (
-            "intent".into(),
-            CanonicalValue::Object(vec![
-                ("version".into(), CanonicalValue::String("1.0".into())),
-                ("task_kind".into(), CanonicalValue::String("FEATURE".into())),
-                ("risk_class".into(), CanonicalValue::String("R0".into())),
-                ("execution_preapproved".into(), CanonicalValue::Bool(false)),
-                ("requires_new_authority".into(), CanonicalValue::Bool(false)),
-                (
-                    "irreversible_or_high_risk".into(),
-                    CanonicalValue::Bool(false),
-                ),
-            ]),
-        ),
-        (
-            "observed_task_state".into(),
-            CanonicalValue::String("DRAFT".into()),
-        ),
-        (
-            "decision".into(),
-            CanonicalValue::Object(vec![
-                (
-                    "disposition".into(),
-                    CanonicalValue::String("ASK_USER".into()),
-                ),
-                (
-                    "reason".into(),
-                    CanonicalValue::String("NEW_USER_DECISION".into()),
-                ),
-                ("model".into(), CanonicalValue::Null),
-                ("verification".into(), CanonicalValue::Null),
-            ]),
-        ),
-        (
-            "authority_digest".into(),
-            CanonicalValue::String(authority_digest.as_str().into()),
-        ),
-    ]);
-    let receipt_digest = autonomy_digest("lattice.autonomy-receipt", &receipt);
-    (authority_digest, receipt_digest)
+const AUTONOMY_PERSISTENCE_FAULT_BOUNDARIES: [AutonomyPersistenceFaultBoundary; 8] = [
+    AutonomyPersistenceFaultBoundary {
+        name: "physical_head",
+        table: "physical_heads",
+        operation: "AFTER UPDATE",
+        behavior: AutonomyPersistenceFaultBehavior::RaiseAfterWrite,
+    },
+    AutonomyPersistenceFaultBoundary {
+        name: "physical_store_receipt",
+        table: "terminal_transactions",
+        operation: "AFTER INSERT",
+        behavior: AutonomyPersistenceFaultBehavior::RaiseAfterWrite,
+    },
+    AutonomyPersistenceFaultBoundary {
+        name: "ledger_head_projection_checkpoint",
+        table: "task_ledger_streams",
+        operation: "AFTER UPDATE",
+        behavior: AutonomyPersistenceFaultBehavior::RaiseAfterWrite,
+    },
+    AutonomyPersistenceFaultBoundary {
+        name: "ledger_command_receipt",
+        table: "task_ledger_commands",
+        operation: "AFTER INSERT",
+        behavior: AutonomyPersistenceFaultBehavior::RaiseAfterWrite,
+    },
+    AutonomyPersistenceFaultBoundary {
+        name: "ledger_event",
+        table: "task_ledger_events",
+        operation: "AFTER INSERT",
+        behavior: AutonomyPersistenceFaultBehavior::RaiseAfterWrite,
+    },
+    AutonomyPersistenceFaultBoundary {
+        name: "autonomy_subject",
+        table: "task_ledger_autonomy_receipts",
+        operation: "AFTER INSERT",
+        behavior: AutonomyPersistenceFaultBehavior::RaiseAfterWrite,
+    },
+    AutonomyPersistenceFaultBoundary {
+        name: "reload_verification",
+        table: "task_ledger_autonomy_receipts",
+        operation: "AFTER INSERT",
+        behavior: AutonomyPersistenceFaultBehavior::CorruptBeforeReload,
+    },
+    AutonomyPersistenceFaultBoundary {
+        name: "transaction_commit",
+        table: "task_ledger_autonomy_receipts",
+        operation: "AFTER INSERT",
+        behavior: AutonomyPersistenceFaultBehavior::RaiseAtCommit,
+    },
+];
+
+#[derive(Debug, Eq, PartialEq)]
+struct AutonomyPersistenceSnapshot {
+    physical_heads: Vec<String>,
+    terminal_transactions: Vec<String>,
+    streams: Vec<String>,
+    commands: Vec<String>,
+    events: Vec<String>,
+    outbox: Vec<String>,
+    autonomy_receipts: Vec<String>,
 }
 
-fn append(
-    head: lattice_contracts::TaskLedgerStreamHead,
-    command_id: &str,
-    kind: LedgerEventKind,
-    action: &str,
-    reason: &str,
-    subject_digest: ContentDigest,
-) -> AppendCommand {
-    AppendCommand::new(
-        head,
-        CommandId::new(command_id).expect("command"),
-        CorrelationId::new("task050-fresh-process").expect("correlation"),
-        "2000-01-01T00:00:00Z",
-        kind,
-        ActorId::new("task050-local-acceptance").expect("actor"),
-        ActionId::new(action).expect("action"),
-        LedgerOutcome::Recorded,
-        ReasonCode::new(reason).expect("reason"),
-        subject_digest,
-        None,
-        None,
-    )
-    .expect("append")
+fn json_rows(client: &mut Client, sql: &str, stream_id: &[u8]) -> Vec<String> {
+    client
+        .query(sql, &[&stream_id])
+        .expect("durable boundary snapshot")
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect()
+}
+
+fn autonomy_persistence_snapshot(
+    client: &mut Client,
+    stream_id: &ContentDigest,
+) -> AutonomyPersistenceSnapshot {
+    let stream_id = hex_bytes(stream_id);
+    AutonomyPersistenceSnapshot {
+        physical_heads: json_rows(
+            client,
+            "SELECT pg_catalog.to_jsonb(retained)::text FROM (\
+                 SELECT * FROM ONLY control.physical_heads \
+                 WHERE aggregate_key_digest=$1::bytea \
+                 ORDER BY project_id, project_snapshot_id, repository_owner\
+             ) AS retained",
+            &stream_id,
+        ),
+        terminal_transactions: json_rows(
+            client,
+            "SELECT pg_catalog.to_jsonb(retained)::text FROM (\
+                 SELECT * FROM ONLY control.terminal_transactions \
+                 WHERE aggregate_key_digest=$1::bytea ORDER BY transaction_id\
+             ) AS retained",
+            &stream_id,
+        ),
+        streams: json_rows(
+            client,
+            "SELECT pg_catalog.to_jsonb(retained)::text FROM (\
+                 SELECT * FROM ONLY control.task_ledger_streams \
+                 WHERE stream_id=$1::bytea ORDER BY stream_id\
+             ) AS retained",
+            &stream_id,
+        ),
+        commands: json_rows(
+            client,
+            "SELECT pg_catalog.to_jsonb(retained)::text FROM (\
+                 SELECT * FROM ONLY control.task_ledger_commands \
+                 WHERE stream_id=$1::bytea ORDER BY command_id\
+             ) AS retained",
+            &stream_id,
+        ),
+        events: json_rows(
+            client,
+            "SELECT pg_catalog.to_jsonb(retained)::text FROM (\
+                 SELECT * FROM ONLY control.task_ledger_events \
+                 WHERE stream_id=$1::bytea ORDER BY sequence\
+             ) AS retained",
+            &stream_id,
+        ),
+        outbox: json_rows(
+            client,
+            "SELECT pg_catalog.to_jsonb(retained)::text FROM (\
+                 SELECT * FROM ONLY control.task_ledger_outbox \
+                 WHERE stream_id=$1::bytea ORDER BY event_sequence\
+             ) AS retained",
+            &stream_id,
+        ),
+        autonomy_receipts: json_rows(
+            client,
+            "SELECT pg_catalog.to_jsonb(retained)::text FROM (\
+                 SELECT * FROM ONLY control.task_ledger_autonomy_receipts \
+                 WHERE stream_id=$1::bytea ORDER BY event_sequence\
+             ) AS retained",
+            &stream_id,
+        ),
+    }
+}
+
+fn create_autonomy_persistence_fault_function(client: &mut Client) {
+    client
+        .batch_execute(
+            "CREATE FUNCTION control.task050_raise_autonomy_persistence_fault() \
+             RETURNS trigger LANGUAGE plpgsql AS $task050$ \
+             BEGIN \
+                 IF TG_NAME = 'task050_autonomy_reload_corruption' THEN \
+                     UPDATE ONLY control.task_ledger_autonomy_receipts \
+                        SET task_kind = CASE task_kind \
+                            WHEN 'FEATURE' THEN 'BUG_FIX' ELSE 'FEATURE' END \
+                      WHERE stream_id = NEW.stream_id \
+                        AND event_sequence = NEW.event_sequence; \
+                     RETURN NEW; \
+                 END IF; \
+                 RAISE EXCEPTION USING ERRCODE='P0500', \
+                     MESSAGE='TASK050_INJECTED_PERSISTENCE_FAULT'; \
+             END \
+             $task050$; \
+             REVOKE ALL ON FUNCTION control.task050_raise_autonomy_persistence_fault() \
+                 FROM PUBLIC",
+        )
+        .expect("fault function");
+}
+
+const fn autonomy_persistence_fault_trigger_name(
+    behavior: AutonomyPersistenceFaultBehavior,
+) -> &'static str {
+    match behavior {
+        AutonomyPersistenceFaultBehavior::RaiseAfterWrite => "task050_autonomy_persistence_fault",
+        AutonomyPersistenceFaultBehavior::CorruptBeforeReload => {
+            "task050_autonomy_reload_corruption"
+        }
+        AutonomyPersistenceFaultBehavior::RaiseAtCommit => "task050_autonomy_commit_fault",
+    }
+}
+
+fn install_autonomy_persistence_fault(
+    client: &mut Client,
+    boundary: AutonomyPersistenceFaultBoundary,
+) {
+    let trigger_name = autonomy_persistence_fault_trigger_name(boundary.behavior);
+    let trigger_kind = if boundary.behavior == AutonomyPersistenceFaultBehavior::RaiseAtCommit {
+        "CREATE CONSTRAINT TRIGGER"
+    } else {
+        "CREATE TRIGGER"
+    };
+    let deferral = if boundary.behavior == AutonomyPersistenceFaultBehavior::RaiseAtCommit {
+        "DEFERRABLE INITIALLY DEFERRED"
+    } else {
+        ""
+    };
+    client
+        .batch_execute(&format!(
+            "{trigger_kind} {trigger_name} {} ON control.{} {deferral} \
+             FOR EACH ROW EXECUTE FUNCTION control.task050_raise_autonomy_persistence_fault()",
+            boundary.operation, boundary.table,
+        ))
+        .unwrap_or_else(|error| panic!("install {} fault: {error}", boundary.name));
+}
+
+fn remove_autonomy_persistence_fault(
+    client: &mut Client,
+    boundary: AutonomyPersistenceFaultBoundary,
+) {
+    let trigger_name = autonomy_persistence_fault_trigger_name(boundary.behavior);
+    client
+        .batch_execute(&format!(
+            "DROP TRIGGER {trigger_name} ON control.{}",
+            boundary.table,
+        ))
+        .unwrap_or_else(|error| panic!("remove {} fault: {error}", boundary.name));
+}
+
+fn drop_autonomy_persistence_fault_function(client: &mut Client) {
+    client
+        .batch_execute("DROP FUNCTION control.task050_raise_autonomy_persistence_fault()")
+        .expect("drop fault function");
+}
+
+#[test]
+fn autonomy_persistence_fault_matrix_covers_every_durable_boundary() {
+    let boundaries: Vec<_> = AUTONOMY_PERSISTENCE_FAULT_BOUNDARIES
+        .iter()
+        .map(|boundary| {
+            (
+                boundary.name,
+                boundary.table,
+                boundary.operation,
+                boundary.behavior,
+            )
+        })
+        .collect();
+    assert_eq!(
+        boundaries,
+        [
+            (
+                "physical_head",
+                "physical_heads",
+                "AFTER UPDATE",
+                AutonomyPersistenceFaultBehavior::RaiseAfterWrite,
+            ),
+            (
+                "physical_store_receipt",
+                "terminal_transactions",
+                "AFTER INSERT",
+                AutonomyPersistenceFaultBehavior::RaiseAfterWrite,
+            ),
+            (
+                "ledger_head_projection_checkpoint",
+                "task_ledger_streams",
+                "AFTER UPDATE",
+                AutonomyPersistenceFaultBehavior::RaiseAfterWrite,
+            ),
+            (
+                "ledger_command_receipt",
+                "task_ledger_commands",
+                "AFTER INSERT",
+                AutonomyPersistenceFaultBehavior::RaiseAfterWrite,
+            ),
+            (
+                "ledger_event",
+                "task_ledger_events",
+                "AFTER INSERT",
+                AutonomyPersistenceFaultBehavior::RaiseAfterWrite,
+            ),
+            (
+                "autonomy_subject",
+                "task_ledger_autonomy_receipts",
+                "AFTER INSERT",
+                AutonomyPersistenceFaultBehavior::RaiseAfterWrite,
+            ),
+            (
+                "reload_verification",
+                "task_ledger_autonomy_receipts",
+                "AFTER INSERT",
+                AutonomyPersistenceFaultBehavior::CorruptBeforeReload,
+            ),
+            (
+                "transaction_commit",
+                "task_ledger_autonomy_receipts",
+                "AFTER INSERT",
+                AutonomyPersistenceFaultBehavior::RaiseAtCommit,
+            ),
+        ]
+    );
 }
 
 #[test]
@@ -738,88 +899,121 @@ fn autonomy_receipt_survives_postgres_restart_and_fresh_process_when_provisioned
 
     if phase == "initial" {
         let vacant = ledger.load_stream(identity.clone()).expect("vacant");
+        let create = AppendCommand::new_autonomy_required_task_created(
+            vacant.stream().head().clone(),
+            CommandId::new("task050-create").expect("command"),
+            CorrelationId::new("task050-fresh-process").expect("correlation"),
+            "2000-01-01T00:00:00Z",
+            ActorId::new("task050-local-acceptance").expect("actor"),
+            ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+            digest('f'),
+            None,
+        )
+        .expect("required task creation");
         ledger
-            .execute(
-                append(
-                    vacant.stream().head().clone(),
-                    "task050-create",
-                    LedgerEventKind::TaskCreated,
-                    "CONTROLLED_CODEX_CANARY",
-                    "TASK038_TASK_ACCEPTED",
-                    digest('f'),
-                ),
-                authority.clone(),
-            )
+            .execute(create, authority.clone())
             .expect("task created");
         let created = ledger.load_stream(identity.clone()).expect("created");
-        let (authority_digest, receipt_digest) = ask_user_digests(&identity);
-        let command = append(
-            created.stream().head().clone(),
-            "task050-autonomy-receipt-v1",
-            LedgerEventKind::AutonomyReceiptRecorded,
-            "RECORD_AUTONOMY_RECEIPT_V1",
-            "AUTONOMY_DECISION_RECORDED",
-            receipt_digest.clone(),
+        assert_eq!(
+            created.autonomy_state(),
+            &VerifiedAutonomyReceiptState::PendingRequiredReceipt
         );
-        let plan = plan_append(created.stream(), command.clone()).expect("plan");
-        let event_digest = plan
-            .new_event()
-            .expect("new autonomy event")
-            .event_digest()
-            .clone();
-        let durable = |task_kind: &str, durable_receipt_digest: ContentDigest| {
-            PostgresTaskLedger::autonomy_receipt(
-                2,
-                event_digest.clone(),
-                "lattice.autonomy-receipt/1.0",
-                "1.0",
-                task_kind,
-                "R0",
-                false,
-                false,
-                false,
-                "DRAFT",
-                "ASK_USER",
-                "NEW_USER_DECISION",
-                None,
-                None,
-                "P0_PROCESS_START_PROFILE_V1",
-                digest('c'),
-                digest('d'),
-                digest('b'),
-                None,
-                None,
-                None,
-                authority_digest.clone(),
-                durable_receipt_digest,
+        let build_plan = |task_kind| {
+            plan_autonomy_receipt_append(
+                created.stream(),
+                AutonomyAppendMetadata::new(
+                    CommandId::new("task050-autonomy-receipt-v1").expect("command"),
+                    CorrelationId::new("task050-fresh-process").expect("correlation"),
+                    "2000-01-01T00:00:00Z",
+                    ActorId::new("task050-local-acceptance").expect("actor"),
+                )
+                .expect("metadata"),
+                AutonomyIntent::new(
+                    task_kind,
+                    AutonomyRiskClass::R0,
+                    false,
+                    false,
+                    false,
+                    AutonomyObservedTaskState::Draft,
+                    AutonomyRecommendation::AskUser {
+                        reason: AutonomyDecisionReason::NewUserDecision,
+                    },
+                ),
+                AutonomyAuthorityEvidence::new_p0_process_start_profile(
+                    digest('c'),
+                    digest('d'),
+                    digest('b'),
+                    None,
+                )
+                .expect("authority"),
             )
+            .expect("typed autonomy plan")
         };
-        let partial_error = ledger
-            .execute_autonomy_unfenced(
-                command.clone(),
-                authority.clone(),
-                durable("FEATURE", digest('9')),
-            )
-            .expect_err("mismatched subject must roll back atomically");
-        assert_eq!(partial_error.kind(), PostgresTaskLedgerErrorKind::Malformed);
-        let after_rejected = ledger
-            .load_stream(identity.clone())
-            .expect("rejected write leaves valid stream");
-        assert_eq!(after_rejected.stream().events().len(), 1);
-        assert!(after_rejected.autonomy_receipt().is_none());
+        let plan = build_plan(AutonomyTaskKind::Feature);
+        let substitution_plan = build_plan(AutonomyTaskKind::BugFix);
+        let receipt_digest = plan.receipt().receipt_digest().clone();
+        let exact_retry_plan = plan.clone();
+        let mut fault_admin = connect_superuser(&database);
+        let baseline =
+            autonomy_persistence_snapshot(&mut fault_admin, created.stream().head().stream_id());
+        create_autonomy_persistence_fault_function(&mut fault_admin);
+        for boundary in AUTONOMY_PERSISTENCE_FAULT_BOUNDARIES {
+            install_autonomy_persistence_fault(&mut fault_admin, boundary);
+            let failure = ledger
+                .execute_autonomy(plan.clone(), authority.clone())
+                .expect_err("injected boundary failure must reject the transaction");
+            remove_autonomy_persistence_fault(&mut fault_admin, boundary);
+            let expected_failure = match boundary.behavior {
+                AutonomyPersistenceFaultBehavior::CorruptBeforeReload => {
+                    PostgresTaskLedgerErrorKind::RetainedRowCorrupt
+                }
+                AutonomyPersistenceFaultBehavior::RaiseAfterWrite
+                | AutonomyPersistenceFaultBehavior::RaiseAtCommit => {
+                    PostgresTaskLedgerErrorKind::TransactionFailed
+                }
+            };
+            assert_eq!(
+                failure.kind(),
+                expected_failure,
+                "{} fault returned the wrong fail-closed class",
+                boundary.name
+            );
+            assert_eq!(
+                autonomy_persistence_snapshot(
+                    &mut fault_admin,
+                    created.stream().head().stream_id()
+                ),
+                baseline,
+                "{} fault left a partial durable record",
+                boundary.name
+            );
+            let after_failure = ledger
+                .load_stream(identity.clone())
+                .unwrap_or_else(|error| panic!("{} rollback replay: {error}", boundary.name));
+            assert_eq!(
+                after_failure.stream().events().len(),
+                1,
+                "{}",
+                boundary.name
+            );
+            assert_eq!(
+                after_failure.autonomy_state(),
+                &VerifiedAutonomyReceiptState::PendingRequiredReceipt,
+                "{}",
+                boundary.name
+            );
+        }
+        drop_autonomy_persistence_fault_function(&mut fault_admin);
+        println!("TASK050_AUTONOMY_ATOMICITY_FAULT_MATRIX_OK boundaries=8");
         ledger
-            .execute_autonomy_unfenced(
-                command.clone(),
-                authority.clone(),
-                durable("FEATURE", receipt_digest.clone()),
-            )
+            .execute_autonomy(plan, authority.clone())
             .expect("atomic autonomy receipt");
+        let retry = ledger
+            .execute_autonomy(exact_retry_plan, authority.clone())
+            .expect("exact autonomy retry");
+        assert!(retry.is_exact_retry());
         let substitution = ledger
-            .execute_autonomy_unfenced(
-                command,
-                authority,
-                durable("BUG_FIX", receipt_digest.clone()),
-            )
+            .execute_autonomy(substitution_plan, authority)
             .expect_err("changed exact retry must fail closed");
         assert_eq!(
             substitution.kind(),
@@ -835,12 +1029,13 @@ fn autonomy_receipt_survives_postgres_restart_and_fresh_process_when_provisioned
     } else {
         let loaded = ledger.load_stream(identity).expect("fresh process replay");
         let receipt = loaded.autonomy_receipt().expect("durable receipt");
+        let row = receipt.to_untrusted();
         assert_eq!(loaded.stream().events().len(), 2);
-        assert_eq!(receipt.observed_task_state(), "DRAFT");
-        assert_eq!(receipt.disposition(), "ASK_USER");
-        assert_eq!(receipt.decision_reason(), "NEW_USER_DECISION");
-        assert_eq!(receipt.model(), None);
-        assert_eq!(receipt.verification(), None);
+        assert_eq!(row.observed_task_state(), "DRAFT");
+        assert_eq!(row.disposition(), "ASK_USER");
+        assert_eq!(row.decision_reason(), "NEW_USER_DECISION");
+        assert_eq!(row.model(), None);
+        assert_eq!(row.verification(), None);
         println!("TASK050_AUTONOMY_RESTART_OK");
     }
 }

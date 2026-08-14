@@ -60,8 +60,9 @@ lane, fixed-test lane, and authoritative Task lifecycle repository lane.
 - `TaskLifecyclePort` admits one exact Task binding/client request, appends one
   Task-Ledger-owned autonomy receipt, appends one caller-validated state
   transition, records one result digest, and loads one replay-derived
-  authoritative lifecycle projection. The neutral projection carries a closed
-  `TaskLifecycleProfile` plus an internal-only optional receipt. It exposes no
+  authoritative lifecycle projection. The neutral projection carries one
+  closed `TaskLifecycleAutonomyEvidence` sum type: `Unadmitted`,
+  `HistoricalOptional(Option<receipt>)`, or `RequiredComplete(receipt)`. It exposes no
   SQL, database client, event fragment, arbitrary payload, cache, or alternate
   state mutation, and it does not decide transition or receipt legality.
 - `WorkspaceGitPort` prepares/inspects the preconfigured bounded workspace and
@@ -128,15 +129,21 @@ lane, fixed-test lane, and authoritative Task lifecycle repository lane.
     verification command, writer lease, fencing token, or Codex thread.
 19. Writer Lease repository semantics/traits remain owned by Writer Lease 1.1;
     this crate neither duplicates nor wraps them into a second authority.
-20. `TaskLifecycleProfile` is only a transport of Task Ledger verified
-    `HistoricalAutonomyOptionalV1` or `AutonomyReceiptRequiredV1`; Ports does
-    not parse `TASK_CREATED.action` or select a profile.
+20. `TaskLifecycleAutonomyEvidence` is only a transport of Task Ledger verified
+    state. Its closed variants prevent a required profile without a receipt,
+    a missing profile with a receipt, or an unadmitted stream from being
+    represented as admitted. Ports does not parse `TASK_CREATED.action` or
+    select a profile.
 21. `record_autonomy_receipt` transports an already bound Writer authority to
     the adapter and returns replay-derived evidence. Ports cannot build,
     classify, hash, persist, or independently validate the receipt.
-22. A required profile with a missing receipt is reconciliation, never normal
-    Draft success, transition authority, or terminal Status. Historical
-    optional evidence may contain `None`; no caller Boolean selects the rule.
+22. A required profile with a missing receipt is Ledger reconciliation and has
+    no successful `TaskLifecycleEvidence` representation. `admit` may expose
+    only the bounded `TaskLifecycleAdmission::PendingRequiredReceipt` result so
+    the exact sequence-2 append can reconcile it; normal `load`, transition,
+    dispatch, and Status must reject it. It is never normal Draft success or
+    terminal Status. Historical optional evidence may contain `None`; no caller
+    Boolean or independent `Option` selects the rule.
 
 ## Allowed Dependencies
 
@@ -181,7 +188,7 @@ lease, process, filesystem, Git, MCP, actor-authentication, or workflow
 implementation.
 
 Version 1.9 records the internal autonomy-receipt method and projection as a
-versioned lifecycle contract and adds the neutral verified lifecycle profile.
+versioned lifecycle contract and adds the neutral closed autonomy-evidence sum type.
 Task Ledger 2.3 remains the semantic owner; adapters fail closed on required
 profile progress or Status without the receipt. No public MCP field, SQL type,
 profile selector, or caller authority is added.

@@ -197,9 +197,13 @@ pub struct AutonomyReceiptProjection {
 }
 
 impl AutonomyReceiptProjection {
+    /// Constructs one closed projection from Task-Ledger-verified values.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-Draft observations and impossible decision shapes.
     #[allow(clippy::too_many_arguments)]
-    #[must_use]
-    pub const fn new(
+    pub fn new(
         receipt_digest: lattice_contracts::ContentDigest,
         authority_digest: lattice_contracts::ContentDigest,
         event_digest: lattice_contracts::ContentDigest,
@@ -208,8 +212,30 @@ impl AutonomyReceiptProjection {
         reason: AutonomyReason,
         model: Option<AutonomyModel>,
         verification: Option<AutonomyVerification>,
-    ) -> Self {
-        Self {
+    ) -> TaskLifecycleResult<Self> {
+        let decision_shape_valid = matches!(
+            (disposition, reason, model, verification),
+            (
+                AutonomyDisposition::Proceed,
+                AutonomyReason::RoutineAuthorized,
+                Some(_),
+                Some(_)
+            ) | (
+                AutonomyDisposition::AskUser,
+                AutonomyReason::NewUserDecision
+                    | AutonomyReason::NewAuthority
+                    | AutonomyReason::HighRiskOrIrreversible,
+                None,
+                None
+            )
+        );
+        if observed_state != TaskState::Draft || !decision_shape_valid {
+            return Err(TaskLifecycleError::new(
+                TaskLifecycleErrorKind::Corrupt,
+                "TASK_LIFECYCLE_AUTONOMY_PROJECTION_INVALID",
+            ));
+        }
+        Ok(Self {
             receipt_digest,
             authority_digest,
             event_digest,
@@ -218,7 +244,7 @@ impl AutonomyReceiptProjection {
             reason,
             model,
             verification,
-        }
+        })
     }
 
     #[must_use]
@@ -255,40 +281,122 @@ impl AutonomyReceiptProjection {
     }
 }
 
+/// Closed lifecycle admission/receipt relationship exposed through Ports.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TaskLifecycleAutonomyEvidence {
+    Unadmitted,
+    HistoricalOptional(Option<AutonomyReceiptProjection>),
+    RequiredComplete(AutonomyReceiptProjection),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TaskLifecycleAdmissionState {
+    PendingRequiredReceipt {
+        binding: lattice_contracts::SubjectBinding,
+        ledger_head_digest: lattice_contracts::ContentDigest,
+    },
+    Existing(TaskLifecycleEvidence),
+}
+
+/// Closed result of idempotent task admission. A fresh required profile may
+/// exist only as reconciliation state until its sequence-2 receipt is durable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskLifecycleAdmission {
+    state: TaskLifecycleAdmissionState,
+}
+
+impl TaskLifecycleAdmission {
+    #[must_use]
+    pub const fn pending_required_receipt(
+        binding: lattice_contracts::SubjectBinding,
+        ledger_head_digest: lattice_contracts::ContentDigest,
+    ) -> Self {
+        Self {
+            state: TaskLifecycleAdmissionState::PendingRequiredReceipt {
+                binding,
+                ledger_head_digest,
+            },
+        }
+    }
+
+    /// Wraps replay-derived evidence only after it represents an admitted task.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unadmitted/not-applicable lifecycle evidence.
+    pub fn existing(evidence: TaskLifecycleEvidence) -> TaskLifecycleResult<Self> {
+        if !evidence.admitted() {
+            return Err(TaskLifecycleError::new(
+                TaskLifecycleErrorKind::Corrupt,
+                "LATTICE_TASK_ADMISSION_STATE_REJECTED",
+            ));
+        }
+        Ok(Self {
+            state: TaskLifecycleAdmissionState::Existing(evidence),
+        })
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> &lattice_contracts::SubjectBinding {
+        match &self.state {
+            TaskLifecycleAdmissionState::PendingRequiredReceipt { binding, .. } => binding,
+            TaskLifecycleAdmissionState::Existing(evidence) => evidence.binding(),
+        }
+    }
+
+    #[must_use]
+    pub const fn ledger_head_digest(&self) -> &lattice_contracts::ContentDigest {
+        match &self.state {
+            TaskLifecycleAdmissionState::PendingRequiredReceipt {
+                ledger_head_digest, ..
+            } => ledger_head_digest,
+            TaskLifecycleAdmissionState::Existing(evidence) => evidence.ledger_head_digest(),
+        }
+    }
+
+    #[must_use]
+    pub const fn existing_evidence(&self) -> Option<&TaskLifecycleEvidence> {
+        match &self.state {
+            TaskLifecycleAdmissionState::Existing(evidence) => Some(evidence),
+            TaskLifecycleAdmissionState::PendingRequiredReceipt { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn into_existing(self) -> Option<TaskLifecycleEvidence> {
+        match self.state {
+            TaskLifecycleAdmissionState::Existing(evidence) => Some(evidence),
+            TaskLifecycleAdmissionState::PendingRequiredReceipt { .. } => None,
+        }
+    }
+}
+
 /// Replay-derived authoritative Task lifecycle projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskLifecycleEvidence {
     binding: lattice_contracts::SubjectBinding,
-    admitted: bool,
+    autonomy_evidence: TaskLifecycleAutonomyEvidence,
     state: TaskState,
     ledger_head_digest: lattice_contracts::ContentDigest,
     result_digest: Option<lattice_contracts::ContentDigest>,
-    autonomy_receipt: Option<AutonomyReceiptProjection>,
 }
 
 impl TaskLifecycleEvidence {
     #[must_use]
     pub const fn new(
         binding: lattice_contracts::SubjectBinding,
-        admitted: bool,
+        autonomy_evidence: TaskLifecycleAutonomyEvidence,
         state: TaskState,
         ledger_head_digest: lattice_contracts::ContentDigest,
         result_digest: Option<lattice_contracts::ContentDigest>,
     ) -> Self {
         Self {
             binding,
-            admitted,
+            autonomy_evidence,
             state,
             ledger_head_digest,
             result_digest,
-            autonomy_receipt: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_autonomy_receipt(mut self, receipt: AutonomyReceiptProjection) -> Self {
-        self.autonomy_receipt = Some(receipt);
-        self
     }
 
     #[must_use]
@@ -298,7 +406,10 @@ impl TaskLifecycleEvidence {
 
     #[must_use]
     pub const fn admitted(&self) -> bool {
-        self.admitted
+        !matches!(
+            self.autonomy_evidence,
+            TaskLifecycleAutonomyEvidence::Unadmitted
+        )
     }
 
     #[must_use]
@@ -318,7 +429,16 @@ impl TaskLifecycleEvidence {
 
     #[must_use]
     pub const fn autonomy_receipt(&self) -> Option<&AutonomyReceiptProjection> {
-        self.autonomy_receipt.as_ref()
+        match &self.autonomy_evidence {
+            TaskLifecycleAutonomyEvidence::HistoricalOptional(receipt) => receipt.as_ref(),
+            TaskLifecycleAutonomyEvidence::RequiredComplete(receipt) => Some(receipt),
+            TaskLifecycleAutonomyEvidence::Unadmitted => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn autonomy_evidence(&self) -> &TaskLifecycleAutonomyEvidence {
+        &self.autonomy_evidence
     }
 }
 
@@ -335,7 +455,7 @@ pub trait TaskLifecyclePort {
         &mut self,
         binding: &lattice_contracts::SubjectBinding,
         client_request_id: &str,
-    ) -> TaskLifecycleResult<TaskLifecycleEvidence>;
+    ) -> TaskLifecycleResult<TaskLifecycleAdmission>;
 
     /// Records the exactly-once autonomy receipt before the first writable task
     /// effect. `PROCEED` requires the supplied current writer authority;
@@ -1193,4 +1313,84 @@ pub trait HermesPort {
     ///
     /// Returns a typed failure when interruption or final outcome is unknown.
     fn interrupt(&mut self, request_id: &RequestId) -> PortResult<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lattice_contracts::{ContentDigest, ProjectId, ProjectSnapshotId, SubjectBinding, TaskId};
+
+    fn digest(byte: char) -> ContentDigest {
+        ContentDigest::from_sha256(byte.to_string().repeat(64)).expect("valid digest")
+    }
+
+    #[test]
+    fn task_lifecycle_autonomy_evidence_is_closed() {
+        let binding = SubjectBinding::new(
+            ProjectId::new("project-1").expect("project"),
+            ProjectSnapshotId::new("snapshot-1").expect("snapshot"),
+            TaskId::new("TASK-050").expect("task"),
+            "1",
+            digest('a'),
+        )
+        .expect("binding");
+        let receipt = AutonomyReceiptProjection::new(
+            digest('b'),
+            digest('c'),
+            digest('d'),
+            TaskState::Draft,
+            AutonomyDisposition::Proceed,
+            AutonomyReason::RoutineAuthorized,
+            Some(AutonomyModel::GovernedCodexWriter),
+            Some(AutonomyVerification::FocusedChecks),
+        )
+        .expect("closed receipt projection");
+        let evidence = TaskLifecycleEvidence::new(
+            binding,
+            TaskLifecycleAutonomyEvidence::RequiredComplete(receipt.clone()),
+            TaskState::Draft,
+            digest('e'),
+            None,
+        );
+        assert!(evidence.admitted());
+        assert_eq!(evidence.autonomy_receipt(), Some(&receipt));
+        assert_eq!(
+            evidence.autonomy_evidence(),
+            &TaskLifecycleAutonomyEvidence::RequiredComplete(receipt)
+        );
+        assert!(TaskLifecycleAdmission::existing(evidence).is_ok());
+        let unadmitted = TaskLifecycleEvidence::new(
+            SubjectBinding::new(
+                ProjectId::new("project-1").expect("project"),
+                ProjectSnapshotId::new("snapshot-1").expect("snapshot"),
+                TaskId::new("TASK-050").expect("task"),
+                "1",
+                digest('a'),
+            )
+            .expect("binding"),
+            TaskLifecycleAutonomyEvidence::Unadmitted,
+            TaskState::Draft,
+            digest('e'),
+            None,
+        );
+        assert_eq!(
+            TaskLifecycleAdmission::existing(unadmitted)
+                .expect_err("unadmitted evidence cannot become existing admission")
+                .code(),
+            "LATTICE_TASK_ADMISSION_STATE_REJECTED"
+        );
+        assert!(
+            AutonomyReceiptProjection::new(
+                digest('b'),
+                digest('c'),
+                digest('d'),
+                TaskState::Draft,
+                AutonomyDisposition::AskUser,
+                AutonomyReason::NewUserDecision,
+                Some(AutonomyModel::GovernedCodexWriter),
+                None,
+            )
+            .is_err()
+        );
+    }
 }

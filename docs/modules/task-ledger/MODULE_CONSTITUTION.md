@@ -94,6 +94,9 @@ until a separately approved module/ticket owns those mechanics.
   a recommendation and already-issued authority evidence; it does not own the
   receipt bytes or digest algorithm. A Store supplies untrusted scalar rows and
   consumes the same verifier; it never reclassifies or rehashes the subject.
+  For `PROCEED`, the Writer head commitment includes exactly the 15 scalar
+  values that Store's fixed current-authority predicate proves in the same
+  transaction; unasserted structural receipt fields are not durable authority.
 - Classify a verified task-control stream as historical optional,
   required-receipt pending, or required-receipt complete. The one-event
   required prefix may exist only as a non-runtime-admissible reconciliation
@@ -160,7 +163,10 @@ until a separately approved module/ticket owns those mechanics.
 23. An autonomy receipt records already-issued authority evidence; it does not
     grant, refresh, broaden, or execute authority and cannot authorize its own
     creation.
-24. Public MCP tools, input schemas, and six-field output remain unchanged by
+24. The `writer_lease_head_digest` is a commitment to the exact 15-scalar
+    Writer current-authority assertion tuple. Caller-supplied projection fields
+    outside that predicate cannot alter or enlarge the durable authority claim.
+25. Public MCP tools, input schemas, and six-field output remain unchanged by
     the internal event. Projection-only status may derive from verified state
     but cannot become a second durable record or wire authority.
 

@@ -12,11 +12,11 @@ use lattice_contracts::{
     WriterLeaseAuthorityHead,
 };
 use lattice_ports::{
-    CodeSnapshotPort, CodebaseMemoryPort, ControlledTaskExecutionError,
+    AutonomyDisposition, CodeSnapshotPort, CodebaseMemoryPort, ControlledTaskExecutionError,
     ControlledTaskExecutionPort, DeliveryCodexPort, DeliveryFailureCertainty, DeliveryLedgerPort,
     DeliveryPortError, GraphMemoryPortError, GraphMemoryStage, GraphifyAnalysisPort, PortErrorKind,
-    TaskLifecycleError, TaskLifecycleEvidence, TaskLifecyclePort, TestRunnerPort, WorkspaceGitPort,
-    WriterAuthorityGuardPort,
+    TaskLifecycleAutonomyEvidence, TaskLifecycleError, TaskLifecycleEvidence, TaskLifecyclePort,
+    TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
 };
 use lattice_task_domain::TaskState;
 use lattice_writer_lease::{
@@ -277,21 +277,41 @@ where
     W: WriterLeaseRepository,
     E: ControlledTaskExecutionPort,
 {
-    let admitted = lifecycle
+    let admission = lifecycle
         .admit(&request.binding, &request.client_request_id)
         .map_err(ControlledTaskOrchestratorError::Lifecycle)?;
-    ensure_evidence(&admitted, &request.binding, admitted.state())?;
-    if !admitted.admitted() {
+    if admission.binding() != &request.binding {
         return Err(ControlledTaskOrchestratorError::StateMismatch);
     }
-    if admitted.state() == TaskState::Completed && admitted.result_digest().is_some() {
-        return Ok(admitted);
-    }
-    if admitted.state() == TaskState::Merging && admitted.result_digest().is_some() {
-        return finish_merging_task(request, lifecycle, writer_lease, &admitted);
-    }
-    if admitted.state() != TaskState::Draft || admitted.result_digest().is_some() {
-        return Err(ControlledTaskOrchestratorError::ReconciliationRequired);
+    let mut historical_draft = None;
+    if let Some(admitted) = admission.into_existing() {
+        ensure_evidence(&admitted, &request.binding, admitted.state())?;
+        if admitted.state() == TaskState::Completed && admitted.result_digest().is_some() {
+            return Ok(admitted);
+        }
+        if admitted.state() == TaskState::Merging && admitted.result_digest().is_some() {
+            return finish_merging_task(request, lifecycle, writer_lease, &admitted);
+        }
+        if admitted.state() != TaskState::Draft || admitted.result_digest().is_some() {
+            return Err(ControlledTaskOrchestratorError::ReconciliationRequired);
+        }
+        match admitted.autonomy_evidence() {
+            TaskLifecycleAutonomyEvidence::RequiredComplete(receipt)
+            | TaskLifecycleAutonomyEvidence::HistoricalOptional(Some(receipt)) => {
+                return match receipt.disposition() {
+                    AutonomyDisposition::AskUser => Ok(admitted),
+                    AutonomyDisposition::Proceed => {
+                        Err(ControlledTaskOrchestratorError::ReconciliationRequired)
+                    }
+                };
+            }
+            TaskLifecycleAutonomyEvidence::HistoricalOptional(None) => {
+                historical_draft = Some(admitted);
+            }
+            TaskLifecycleAutonomyEvidence::Unadmitted => {
+                return Err(ControlledTaskOrchestratorError::StateMismatch);
+            }
+        }
     }
 
     if writer_lease
@@ -335,12 +355,19 @@ where
     writer_lease
         .assert_current(&authority)
         .map_err(ControlledTaskOrchestratorError::Lease)?;
-    let autonomy = lifecycle
-        .record_autonomy_receipt(&request.binding, Some(&authority))
-        .map_err(ControlledTaskOrchestratorError::Lifecycle)?;
+    let autonomy = if let Some(historical) = historical_draft {
+        historical
+    } else {
+        lifecycle
+            .record_autonomy_receipt(&request.binding, Some(&authority))
+            .map_err(ControlledTaskOrchestratorError::Lifecycle)?
+    };
     ensure_evidence(&autonomy, &request.binding, TaskState::Draft)?;
-    if autonomy.autonomy_receipt().is_none() {
-        return Err(ControlledTaskOrchestratorError::StateMismatch);
+    match autonomy.autonomy_evidence() {
+        TaskLifecycleAutonomyEvidence::RequiredComplete(receipt)
+            if receipt.disposition() == AutonomyDisposition::Proceed => {}
+        TaskLifecycleAutonomyEvidence::HistoricalOptional(None) => {}
+        _ => return Err(ControlledTaskOrchestratorError::StateMismatch),
     }
     advance(
         lifecycle,
@@ -975,10 +1002,8 @@ mod autonomy;
 mod coordination;
 
 pub use autonomy::{
-    AutonomyAuthorityEvidence, AutonomyContractError, AutonomyDecision, AutonomyDecisionReason,
-    AutonomyIntent, AutonomyIntentVersion, AutonomyReceipt, CanonicalAutonomyReceipt,
-    ModelRecommendation, TaskKind, VerificationRecommendation, build_autonomy_receipt,
-    classify_autonomy,
+    AutonomyDecision, AutonomyDecisionReason, AutonomyIntent, AutonomyIntentVersion,
+    AutonomyReceipt, ModelRecommendation, TaskKind, VerificationRecommendation, classify_autonomy,
 };
 pub use coordination::{
     ArchiveDecision, ArchiveDisposition, BlockedWorkItem, CompletionReport, CompletionState,

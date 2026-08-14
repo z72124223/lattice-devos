@@ -8,25 +8,36 @@ use lattice_contracts::{
     TaskLedgerStreamIdentity, WriterLeaseAuthorityHead,
 };
 use lattice_orchestrator::{
-    AutonomyAuthorityEvidence, AutonomyDecision, AutonomyIntent, AutonomyIntentVersion, TaskKind,
-    build_autonomy_receipt,
+    AutonomyDecision as OrchestratorAutonomyDecision, AutonomyDecisionReason,
+    AutonomyIntent as OrchestratorAutonomyIntent, AutonomyIntentVersion, ModelRecommendation,
+    TaskKind, VerificationRecommendation, classify_autonomy,
 };
 use lattice_ports::{
     AutonomyDisposition, AutonomyModel, AutonomyReason, AutonomyReceiptProjection,
-    AutonomyVerification, TaskLifecycleError, TaskLifecycleErrorKind, TaskLifecycleEvidence,
-    TaskLifecyclePort, TaskLifecycleResult,
+    AutonomyVerification, TaskLifecycleAdmission, TaskLifecycleAutonomyEvidence,
+    TaskLifecycleError, TaskLifecycleErrorKind, TaskLifecycleEvidence, TaskLifecyclePort,
+    TaskLifecycleResult,
 };
 use lattice_postgres_store::{MigrationTarget, PostgresTaskLedger};
 use lattice_task_domain::{RiskClass, TaskState, transition};
 use lattice_task_ledger::{
-    ActionId, ActorId, AppendCommand, CommandId, CommandOutcome, CorrelationId, Diagnostic,
-    LedgerEventKind, LedgerOutcome, ReasonCode, VerifiedStream, plan_append,
+    ActionId, ActorId, AppendCommand, AutonomyAppendMetadata,
+    AutonomyAuthorityEvidence as LedgerAutonomyAuthorityEvidence,
+    AutonomyDecisionReason as LedgerAutonomyDecisionReason, AutonomyIntent as LedgerAutonomyIntent,
+    AutonomyModel as LedgerAutonomyModel, AutonomyObservedTaskState, AutonomyRecommendation,
+    AutonomyRiskClass as LedgerAutonomyRiskClass, AutonomyTaskKind,
+    AutonomyVerification as LedgerAutonomyVerification, CommandId, CommandOutcome, CorrelationId,
+    Diagnostic, LedgerEventKind, LedgerOutcome, ReasonCode, TaskCreatedProfile,
+    VerifiedAutonomyReceipt, VerifiedAutonomyReceiptState, VerifiedStream,
+    classify_task_created_profile, plan_autonomy_receipt_append,
+    verify_exact_autonomy_receipt_retry,
 };
 
 use crate::delivery_ledger::{DeliveryDatabaseBinding, connect_fixed_runtime_client};
 
 const CORRELATION_ID: &str = "task038-controlled-codex-canary";
-const TASK_CREATED_ACTION: &str = "CONTROLLED_CODEX_CANARY";
+#[cfg(test)]
+const TASK_CREATED_ACTION: &str = TaskCreatedProfile::AutonomyReceiptRequiredV1.action();
 const TASK_CREATED_REASON: &str = "TASK038_TASK_ACCEPTED";
 const TASK_CREATED_AUDIT_SCHEMA: &str = "lattice.task-created-ingress-audit.v1";
 const STATE_REASON: &str = "TASK038_STATE_TRANSITION";
@@ -34,8 +45,6 @@ const RESULT_ACTION: &str = "TASK_RESULT";
 const RESULT_REASON: &str = "TASK038_FULL_CHAIN_RESULT";
 const RESULT_COMMAND_ID: &str = "task038-result";
 const AUTONOMY_COMMAND_ID: &str = "task050-autonomy-receipt-v1";
-const AUTONOMY_ACTION: &str = "RECORD_AUTONOMY_RECEIPT_V1";
-const AUTONOMY_REASON: &str = "AUTONOMY_DECISION_RECORDED";
 
 #[must_use]
 pub(crate) fn task_admission_command_id(client_request_id: &str) -> String {
@@ -148,15 +157,10 @@ impl PostgresTaskLifecycle {
             .ok_or_else(|| corrupt("LATTICE_TASK_INGRESS_PEER_REQUIRED"))
     }
 
-    fn load_verified(&mut self, binding: &SubjectBinding) -> TaskLifecycleResult<VerifiedStream> {
-        self.load_verified_with_autonomy(binding)
-            .map(|(stream, _)| stream)
-    }
-
     fn load_verified_with_autonomy(
         &mut self,
         binding: &SubjectBinding,
-    ) -> TaskLifecycleResult<(VerifiedStream, Option<AutonomyReceiptProjection>)> {
+    ) -> TaskLifecycleResult<(VerifiedStream, VerifiedAutonomyReceiptState)> {
         ensure_binding(binding, &self.identity)?;
         ensure_before(self.deadline)?;
         let loaded = self
@@ -164,57 +168,7 @@ impl PostgresTaskLifecycle {
             .load_stream(self.identity.clone())
             .map_err(map_store_error)?;
         ensure_before(self.deadline)?;
-        let autonomy = loaded
-            .autonomy_receipt()
-            .map(|receipt| {
-                let observed_state = match receipt.observed_task_state() {
-                    "DRAFT" => TaskState::Draft,
-                    _ => return Err(corrupt("LATTICE_AUTONOMY_OBSERVED_STATE_REJECTED")),
-                };
-                let disposition = match receipt.disposition() {
-                    "PROCEED" => AutonomyDisposition::Proceed,
-                    "ASK_USER" => AutonomyDisposition::AskUser,
-                    _ => return Err(corrupt("LATTICE_AUTONOMY_DISPOSITION_REJECTED")),
-                };
-                let reason = match receipt.decision_reason() {
-                    "ROUTINE_AUTHORIZED" => AutonomyReason::RoutineAuthorized,
-                    "NEW_USER_DECISION" => AutonomyReason::NewUserDecision,
-                    "NEW_AUTHORITY" => AutonomyReason::NewAuthority,
-                    "HIGH_RISK_OR_IRREVERSIBLE" => AutonomyReason::HighRiskOrIrreversible,
-                    _ => return Err(corrupt("LATTICE_AUTONOMY_REASON_REJECTED")),
-                };
-                let model = receipt
-                    .model()
-                    .map(|value| match value {
-                        "GOVERNED_CODEX_WRITER" => Ok(AutonomyModel::GovernedCodexWriter),
-                        "NO_MODEL" => Ok(AutonomyModel::NoModel),
-                        _ => Err(corrupt("LATTICE_AUTONOMY_MODEL_REJECTED")),
-                    })
-                    .transpose()?;
-                let verification = receipt
-                    .verification()
-                    .map(|value| match value {
-                        "FOCUSED_CHECKS" => Ok(AutonomyVerification::FocusedChecks),
-                        "BUILD_AND_FOCUSED_CHECKS" => {
-                            Ok(AutonomyVerification::BuildAndFocusedChecks)
-                        }
-                        "READ_ONLY_EVIDENCE" => Ok(AutonomyVerification::ReadOnlyEvidence),
-                        _ => Err(corrupt("LATTICE_AUTONOMY_VERIFICATION_REJECTED")),
-                    })
-                    .transpose()?;
-                Ok(AutonomyReceiptProjection::new(
-                    receipt.receipt_digest().clone(),
-                    receipt.authority_digest().clone(),
-                    receipt.event_digest().clone(),
-                    observed_state,
-                    disposition,
-                    reason,
-                    model,
-                    verification,
-                ))
-            })
-            .transpose()?;
-        Ok((loaded.stream().clone(), autonomy))
+        Ok((loaded.stream().clone(), loaded.autonomy_state().clone()))
     }
 
     /// Replays the same verified stream and returns its exact database/global
@@ -251,8 +205,8 @@ impl PostgresTaskLifecycle {
         binding: &SubjectBinding,
     ) -> TaskLifecycleResult<String> {
         let ingress_peer = self.required_ingress_peer()?;
-        let stream = self.load_verified(binding)?;
-        let evidence = replay_lifecycle(&stream, binding, &ingress_peer)?;
+        let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
+        let evidence = replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)?;
         if !evidence.admitted() {
             return Err(rejected("LATTICE_TASK_ADMISSION_MISSING"));
         }
@@ -264,13 +218,11 @@ impl PostgresTaskLifecycle {
             .ok_or_else(|| corrupt("LATTICE_TASK_ADMISSION_MISSING"))
     }
 
-    fn execute(
+    fn execute_command(
         &mut self,
-        binding: &SubjectBinding,
         command: AppendCommand,
         writer_authority: Option<&WriterLeaseAuthorityHead>,
-    ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
-        let ingress_peer = self.required_ingress_peer()?;
+    ) -> TaskLifecycleResult<()> {
         ensure_before(self.deadline)?;
         let execution = match writer_authority {
             Some(authority) => {
@@ -285,8 +237,19 @@ impl PostgresTaskLifecycle {
         {
             return Err(rejected("LATTICE_TASK_LEDGER_APPEND_REJECTED"));
         }
+        Ok(())
+    }
+
+    fn execute(
+        &mut self,
+        binding: &SubjectBinding,
+        command: AppendCommand,
+        writer_authority: Option<&WriterLeaseAuthorityHead>,
+    ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
+        let ingress_peer = self.required_ingress_peer()?;
+        self.execute_command(command, writer_authority)?;
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
-        replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, autonomy.as_ref())
+        replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)
     }
 }
 
@@ -295,15 +258,9 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
         &mut self,
         binding: &SubjectBinding,
         client_request_id: &str,
-    ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
+    ) -> TaskLifecycleResult<TaskLifecycleAdmission> {
         let ingress_peer = self.required_ingress_peer()?;
         let (stream, durable_autonomy) = self.load_verified_with_autonomy(binding)?;
-        let current = replay_lifecycle_with_autonomy(
-            &stream,
-            binding,
-            &ingress_peer,
-            durable_autonomy.as_ref(),
-        )?;
         let command_id = task_admission_command_id(client_request_id);
         if let Some(created) = stream
             .events()
@@ -313,11 +270,32 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
             if created.command_id().as_str() != command_id {
                 return Err(rejected("LATTICE_TASK_REQUEST_SUBSTITUTED"));
             }
-            return Ok(current);
+            return match durable_autonomy {
+                VerifiedAutonomyReceiptState::PendingRequiredReceipt => {
+                    pending_required_admission(&stream, binding, &ingress_peer)
+                }
+                _ => replay_lifecycle_with_autonomy(
+                    &stream,
+                    binding,
+                    &ingress_peer,
+                    &durable_autonomy,
+                )
+                .and_then(TaskLifecycleAdmission::existing),
+            };
+        }
+        let vacant =
+            replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &durable_autonomy)?;
+        if vacant.admitted() {
+            return Err(corrupt("LATTICE_TASK_ADMISSION_STATE_REJECTED"));
         }
         let command =
             task_created_command(stream.head().clone(), &command_id, binding, &ingress_peer)?;
-        self.execute(binding, command, None)
+        self.execute_command(command, None)?;
+        let (stream, durable_autonomy) = self.load_verified_with_autonomy(binding)?;
+        if durable_autonomy != VerifiedAutonomyReceiptState::PendingRequiredReceipt {
+            return Err(corrupt("LATTICE_TASK_ADMISSION_STATE_REJECTED"));
+        }
+        pending_required_admission(&stream, binding, &ingress_peer)
     }
 
     fn transition(
@@ -330,8 +308,7 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
         let ingress_peer = self.required_ingress_peer()?;
         transition(from, to).map_err(|_| rejected("LATTICE_TASK_STATE_TRANSITION_REJECTED"))?;
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
-        let current =
-            replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, autonomy.as_ref())?;
+        let current = replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)?;
         if current.state() == to {
             return Ok(current);
         }
@@ -362,9 +339,7 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
     ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
         let ingress_peer = self.required_ingress_peer()?;
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
-        let current =
-            replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, autonomy.as_ref())?;
-        let intent = AutonomyIntent {
+        let orchestrator_intent = OrchestratorAutonomyIntent {
             version: AutonomyIntentVersion::V1,
             kind: TaskKind::Feature,
             risk: RiskClass::R0,
@@ -372,96 +347,52 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
             requires_new_authority: false,
             irreversible_or_high_risk: false,
         };
-        let authority = AutonomyAuthorityEvidence::new_p0_process_start_profile(
+        let intent = task_ledger_autonomy_intent(orchestrator_intent);
+        let authority = LedgerAutonomyAuthorityEvidence::new_p0_process_start_profile(
             ingress_peer.process_start_authority_digest().clone(),
             task_ingress_profile_adapter_commitment(&ingress_peer)?,
             self.authority.head_digest().clone(),
             writer_authority.cloned(),
         )
         .map_err(|_| rejected("LATTICE_AUTONOMY_AUTHORITY_REJECTED"))?;
-        let receipt = build_autonomy_receipt(binding.clone(), intent, TaskState::Draft, authority)
-            .map_err(|_| rejected("LATTICE_AUTONOMY_RECEIPT_REJECTED"))?;
-        if let Some(existing) = current.autonomy_receipt() {
-            ensure_exact_autonomy_retry(
-                existing,
-                receipt.receipt_digest(),
-                receipt.authority_digest(),
-            )?;
-            return Ok(current);
+        match &autonomy {
+            VerifiedAutonomyReceiptState::RequiredComplete(existing) => {
+                ensure_exact_autonomy_retry(stream.identity(), existing, intent, &authority)?;
+                return replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy);
+            }
+            VerifiedAutonomyReceiptState::PendingRequiredReceipt => {}
+            VerifiedAutonomyReceiptState::NotApplicable
+            | VerifiedAutonomyReceiptState::HistoricalOptional(_) => {
+                return Err(rejected("LATTICE_AUTONOMY_RECEIPT_ORDER_REJECTED"));
+            }
         }
-        if current.state() != TaskState::Draft || stream.events().len() != 1 {
+        let replayed = replay_lifecycle_state(&stream, binding, &ingress_peer)?;
+        if !replayed.created || replayed.state != TaskState::Draft || stream.events().len() != 1 {
             return Err(rejected("LATTICE_AUTONOMY_RECEIPT_ORDER_REJECTED"));
         }
-        let command = append_command(
-            stream.head().clone(),
-            AUTONOMY_COMMAND_ID,
+        let metadata = AutonomyAppendMetadata::new(
+            CommandId::new(AUTONOMY_COMMAND_ID)
+                .map_err(|_| corrupt("LATTICE_AUTONOMY_LEDGER_PLAN_REJECTED"))?,
+            CorrelationId::new(CORRELATION_ID)
+                .map_err(|_| corrupt("LATTICE_AUTONOMY_LEDGER_PLAN_REJECTED"))?,
             "2000-01-01T00:00:01Z",
-            LedgerEventKind::AutonomyReceiptRecorded,
-            ingress_peer.actor_id().as_str(),
-            AUTONOMY_ACTION,
-            AUTONOMY_REASON,
-            receipt.receipt_digest().clone(),
-            None,
-        )?;
-        let plan = plan_append(&stream, command.clone())
+            ActorId::new(ingress_peer.actor_id().as_str())
+                .map_err(|_| corrupt("LATTICE_AUTONOMY_LEDGER_PLAN_REJECTED"))?,
+        )
+        .map_err(|_| corrupt("LATTICE_AUTONOMY_LEDGER_PLAN_REJECTED"))?;
+        let plan = plan_autonomy_receipt_append(&stream, metadata, intent, authority)
             .map_err(|_| corrupt("LATTICE_AUTONOMY_LEDGER_PLAN_REJECTED"))?;
-        let event_digest = plan
-            .new_event()
-            .map(|event| event.event_digest().clone())
-            .or_else(|| plan.receipt().event_digest().cloned())
-            .ok_or_else(|| corrupt("LATTICE_AUTONOMY_EVENT_DIGEST_MISSING"))?;
-        let (disposition, decision_reason, model, verification) = receipt_scalar_decision(&receipt);
-        let authority_evidence = receipt.authority_evidence();
-        let durable_receipt = PostgresTaskLedger::autonomy_receipt(
-            2,
-            event_digest,
-            receipt.schema_version(),
-            receipt.intent().version.as_str(),
-            receipt.intent().kind.as_str(),
-            receipt.intent().risk.as_str(),
-            receipt.intent().execution_preapproved,
-            receipt.intent().requires_new_authority,
-            receipt.intent().irreversible_or_high_risk,
-            receipt.observed_state().as_str(),
-            disposition,
-            decision_reason,
-            model.map(str::to_owned),
-            verification.map(str::to_owned),
-            receipt.authority_mode(),
-            authority_evidence.process_start_authority_digest().clone(),
-            authority_evidence
-                .ingress_profile_adapter_commitment()
-                .clone(),
-            authority_evidence.store_authority_head_digest().clone(),
-            authority_evidence
-                .writer_authority()
-                .map(|writer| writer.receipt_digest().clone()),
-            receipt.writer_lease_head_digest().cloned(),
-            receipt.writer_fencing_token(),
-            receipt.authority_digest().clone(),
-            receipt.receipt_digest().clone(),
-        );
         ensure_before(self.deadline)?;
-        let execution = match writer_authority {
-            Some(writer_authority) => self.ledger.execute_autonomy_fenced(
-                command,
-                self.authority.clone(),
-                writer_authority.clone(),
-                durable_receipt,
-            ),
-            None => self.ledger.execute_autonomy_unfenced(
-                command,
-                self.authority.clone(),
-                durable_receipt,
-            ),
-        }
-        .map_err(map_store_error)?;
+        let execution = self
+            .ledger
+            .execute_autonomy(plan, self.authority.clone())
+            .map_err(map_store_error)?;
         ensure_after_mutation(self.deadline)?;
         if execution.receipt().event_digest().is_none() {
             return Err(corrupt("LATTICE_AUTONOMY_EVENT_DIGEST_MISSING"));
         }
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
-        replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, autonomy.as_ref())
+        replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)
     }
 
     fn record_result(
@@ -472,8 +403,7 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
     ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
         let ingress_peer = self.required_ingress_peer()?;
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
-        let current =
-            replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, autonomy.as_ref())?;
+        let current = replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)?;
         if let Some(existing) = current.result_digest() {
             if existing == result_digest {
                 return Ok(current);
@@ -500,57 +430,183 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
     fn load(&mut self, binding: &SubjectBinding) -> TaskLifecycleResult<TaskLifecycleEvidence> {
         let ingress_peer = self.required_ingress_peer()?;
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
-        replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, autonomy.as_ref())
+        replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)
     }
 }
 
-fn receipt_scalar_decision(
-    receipt: &lattice_orchestrator::CanonicalAutonomyReceipt,
-) -> (
-    &'static str,
-    &'static str,
-    Option<&'static str>,
-    Option<&'static str>,
-) {
-    match receipt.decision() {
-        AutonomyDecision::Proceed {
+fn task_ledger_autonomy_intent(intent: OrchestratorAutonomyIntent) -> LedgerAutonomyIntent {
+    let decision = classify_autonomy(intent, TaskState::Draft).decision;
+    let recommendation = match decision {
+        OrchestratorAutonomyDecision::Proceed {
+            model,
+            verification,
+            reason,
+        } => AutonomyRecommendation::Proceed {
+            model: match model {
+                ModelRecommendation::GovernedCodexWriter => {
+                    LedgerAutonomyModel::GovernedCodexWriter
+                }
+                ModelRecommendation::NoModel => LedgerAutonomyModel::NoModel,
+            },
+            verification: match verification {
+                VerificationRecommendation::FocusedChecks => {
+                    LedgerAutonomyVerification::FocusedChecks
+                }
+                VerificationRecommendation::BuildAndFocusedChecks => {
+                    LedgerAutonomyVerification::BuildAndFocusedChecks
+                }
+                VerificationRecommendation::ReadOnlyEvidence => {
+                    LedgerAutonomyVerification::ReadOnlyEvidence
+                }
+            },
+            reason: ledger_autonomy_reason(reason),
+        },
+        OrchestratorAutonomyDecision::AskUser { reason } => AutonomyRecommendation::AskUser {
+            reason: ledger_autonomy_reason(reason),
+        },
+    };
+    LedgerAutonomyIntent::new(
+        match intent.kind {
+            TaskKind::Feature => AutonomyTaskKind::Feature,
+            TaskKind::BugFix => AutonomyTaskKind::BugFix,
+            TaskKind::Configuration => AutonomyTaskKind::Configuration,
+            TaskKind::Research => AutonomyTaskKind::Research,
+        },
+        match intent.risk {
+            RiskClass::R0 => LedgerAutonomyRiskClass::R0,
+            RiskClass::R1 => LedgerAutonomyRiskClass::R1,
+            RiskClass::R2 => LedgerAutonomyRiskClass::R2,
+            RiskClass::R3 => LedgerAutonomyRiskClass::R3,
+        },
+        intent.execution_preapproved,
+        intent.requires_new_authority,
+        intent.irreversible_or_high_risk,
+        AutonomyObservedTaskState::Draft,
+        recommendation,
+    )
+}
+
+const fn ledger_autonomy_reason(reason: AutonomyDecisionReason) -> LedgerAutonomyDecisionReason {
+    match reason {
+        AutonomyDecisionReason::RoutineAuthorized => {
+            LedgerAutonomyDecisionReason::RoutineAuthorized
+        }
+        AutonomyDecisionReason::NewUserDecision => LedgerAutonomyDecisionReason::NewUserDecision,
+        AutonomyDecisionReason::NewAuthority => LedgerAutonomyDecisionReason::NewAuthority,
+        AutonomyDecisionReason::HighRiskOrIrreversible => {
+            LedgerAutonomyDecisionReason::HighRiskOrIrreversible
+        }
+    }
+}
+
+fn autonomy_projection(
+    receipt: &VerifiedAutonomyReceipt,
+) -> TaskLifecycleResult<AutonomyReceiptProjection> {
+    let recommendation = receipt.intent().recommendation();
+    let (disposition, reason, model, verification) = match recommendation {
+        AutonomyRecommendation::Proceed {
             model,
             verification,
             reason,
         } => (
-            "PROCEED",
-            reason.as_str(),
-            Some(model.as_str()),
-            Some(verification.as_str()),
+            AutonomyDisposition::Proceed,
+            ports_autonomy_reason(reason),
+            Some(match model {
+                LedgerAutonomyModel::GovernedCodexWriter => AutonomyModel::GovernedCodexWriter,
+                LedgerAutonomyModel::NoModel => AutonomyModel::NoModel,
+            }),
+            Some(match verification {
+                LedgerAutonomyVerification::FocusedChecks => AutonomyVerification::FocusedChecks,
+                LedgerAutonomyVerification::BuildAndFocusedChecks => {
+                    AutonomyVerification::BuildAndFocusedChecks
+                }
+                LedgerAutonomyVerification::ReadOnlyEvidence => {
+                    AutonomyVerification::ReadOnlyEvidence
+                }
+            }),
         ),
-        AutonomyDecision::AskUser { reason } => ("ASK_USER", reason.as_str(), None, None),
+        AutonomyRecommendation::AskUser { reason } => (
+            AutonomyDisposition::AskUser,
+            ports_autonomy_reason(reason),
+            None,
+            None,
+        ),
+    };
+    AutonomyReceiptProjection::new(
+        receipt.receipt_digest().clone(),
+        receipt.authority_digest().clone(),
+        receipt.event_digest().clone(),
+        TaskState::Draft,
+        disposition,
+        reason,
+        model,
+        verification,
+    )
+}
+
+const fn ports_autonomy_reason(reason: LedgerAutonomyDecisionReason) -> AutonomyReason {
+    match reason {
+        LedgerAutonomyDecisionReason::RoutineAuthorized => AutonomyReason::RoutineAuthorized,
+        LedgerAutonomyDecisionReason::NewUserDecision => AutonomyReason::NewUserDecision,
+        LedgerAutonomyDecisionReason::NewAuthority => AutonomyReason::NewAuthority,
+        LedgerAutonomyDecisionReason::HighRiskOrIrreversible => {
+            AutonomyReason::HighRiskOrIrreversible
+        }
     }
 }
 
 fn ensure_exact_autonomy_retry(
-    existing: &AutonomyReceiptProjection,
-    candidate_receipt_digest: &ContentDigest,
-    candidate_authority_digest: &ContentDigest,
+    identity: &TaskLedgerStreamIdentity,
+    existing: &VerifiedAutonomyReceipt,
+    candidate_intent: LedgerAutonomyIntent,
+    candidate_authority: &LedgerAutonomyAuthorityEvidence,
 ) -> TaskLifecycleResult<()> {
-    if existing.observed_state() != TaskState::Draft
-        || existing.receipt_digest() != candidate_receipt_digest
-        || existing.authority_digest() != candidate_authority_digest
-    {
-        return Err(rejected("LATTICE_AUTONOMY_RECEIPT_SUBSTITUTED"));
-    }
-    Ok(())
+    verify_exact_autonomy_receipt_retry(identity, existing, candidate_intent, candidate_authority)
+        .map_err(|_| rejected("LATTICE_AUTONOMY_RECEIPT_SUBSTITUTED"))
 }
 
 fn replay_lifecycle_with_autonomy(
     stream: &VerifiedStream,
     binding: &SubjectBinding,
     ingress_peer: &TaskIngressPeerEvidence,
-    receipt: Option<&AutonomyReceiptProjection>,
+    autonomy: &VerifiedAutonomyReceiptState,
 ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
-    let evidence = replay_lifecycle(stream, binding, ingress_peer)?;
-    Ok(receipt.map_or(evidence.clone(), |receipt| {
-        evidence.with_autonomy_receipt(receipt.clone())
-    }))
+    let replayed = replay_lifecycle_state(stream, binding, ingress_peer)?;
+    let autonomy_evidence = match autonomy {
+        VerifiedAutonomyReceiptState::NotApplicable if replayed.profile.is_none() => {
+            TaskLifecycleAutonomyEvidence::Unadmitted
+        }
+        VerifiedAutonomyReceiptState::HistoricalOptional(receipt)
+            if replayed.profile == Some(TaskCreatedProfile::HistoricalAutonomyOptionalV1) =>
+        {
+            TaskLifecycleAutonomyEvidence::HistoricalOptional(
+                receipt.as_ref().map(autonomy_projection).transpose()?,
+            )
+        }
+        VerifiedAutonomyReceiptState::RequiredComplete(receipt)
+            if replayed.profile == Some(TaskCreatedProfile::AutonomyReceiptRequiredV1) =>
+        {
+            TaskLifecycleAutonomyEvidence::RequiredComplete(autonomy_projection(receipt)?)
+        }
+        VerifiedAutonomyReceiptState::PendingRequiredReceipt
+            if replayed.profile == Some(TaskCreatedProfile::AutonomyReceiptRequiredV1) =>
+        {
+            return Err(rejected("LATTICE_AUTONOMY_RECEIPT_RECONCILIATION_REQUIRED"));
+        }
+        VerifiedAutonomyReceiptState::NotApplicable
+        | VerifiedAutonomyReceiptState::HistoricalOptional(_)
+        | VerifiedAutonomyReceiptState::PendingRequiredReceipt
+        | VerifiedAutonomyReceiptState::RequiredComplete(_) => {
+            return Err(corrupt("LATTICE_TASK_AUTONOMY_PROFILE_REJECTED"));
+        }
+    };
+    Ok(TaskLifecycleEvidence::new(
+        binding.clone(),
+        autonomy_evidence,
+        replayed.state,
+        stream.head().head_digest().clone(),
+        replayed.result_digest,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -597,23 +653,34 @@ fn enforce_transition_writer_policy(
     }
 }
 
-fn replay_lifecycle(
+#[derive(Debug)]
+struct ReplayedLifecycleState {
+    created: bool,
+    profile: Option<TaskCreatedProfile>,
+    state: TaskState,
+    result_digest: Option<ContentDigest>,
+}
+
+fn replay_lifecycle_state(
     stream: &VerifiedStream,
     binding: &SubjectBinding,
     ingress_peer: &TaskIngressPeerEvidence,
-) -> TaskLifecycleResult<TaskLifecycleEvidence> {
+) -> TaskLifecycleResult<ReplayedLifecycleState> {
     ensure_binding(binding, stream.identity())?;
     let expected_actor = ingress_peer.actor_id().as_str();
     let expected_created_subject = task_created_subject_digest(binding, ingress_peer)?;
     let mut state = TaskState::Draft;
     let mut created = false;
+    let mut profile = None;
     let mut result_digest = None;
     for event in stream.events() {
         match event.kind() {
             LedgerEventKind::TaskCreated => {
+                let event_profile = classify_task_created_profile(event)
+                    .map_err(|_| corrupt("LATTICE_TASK_CREATED_PROFILE_REJECTED"))?;
                 if created
+                    || event_profile.is_none()
                     || event.actor_id().as_str() != expected_actor
-                    || event.action().as_str() != TASK_CREATED_ACTION
                     || event.outcome() != LedgerOutcome::Recorded
                     || event.reason_code().as_str() != TASK_CREATED_REASON
                 {
@@ -628,6 +695,7 @@ fn replay_lifecycle(
                     .ok_or_else(|| corrupt("LATTICE_TASK_INGRESS_AUDIT_REJECTED"))?;
                 validate_task_created_audit(audit, ingress_peer)?;
                 created = true;
+                profile = event_profile;
             }
             LedgerEventKind::StateTransition => {
                 if !created
@@ -667,12 +735,31 @@ fn replay_lifecycle(
         // any other event without TASK_CREATED is not a valid task authority.
         return Err(corrupt("LATTICE_TASK_ADMISSION_MISSING"));
     }
-    Ok(TaskLifecycleEvidence::new(
-        binding.clone(),
+    Ok(ReplayedLifecycleState {
         created,
+        profile,
         state,
-        stream.head().head_digest().clone(),
         result_digest,
+    })
+}
+
+fn pending_required_admission(
+    stream: &VerifiedStream,
+    binding: &SubjectBinding,
+    ingress_peer: &TaskIngressPeerEvidence,
+) -> TaskLifecycleResult<TaskLifecycleAdmission> {
+    let replayed = replay_lifecycle_state(stream, binding, ingress_peer)?;
+    if !replayed.created
+        || replayed.profile != Some(TaskCreatedProfile::AutonomyReceiptRequiredV1)
+        || replayed.state != TaskState::Draft
+        || replayed.result_digest.is_some()
+        || stream.events().len() != 1
+    {
+        return Err(corrupt("LATTICE_TASK_ADMISSION_STATE_REJECTED"));
+    }
+    Ok(TaskLifecycleAdmission::pending_required_receipt(
+        binding.clone(),
+        stream.head().head_digest().clone(),
     ))
 }
 
@@ -682,17 +769,22 @@ fn task_created_command(
     binding: &SubjectBinding,
     ingress_peer: &TaskIngressPeerEvidence,
 ) -> TaskLifecycleResult<AppendCommand> {
-    append_command(
+    AppendCommand::new_autonomy_required_task_created(
         head,
-        command_id,
+        CommandId::new(command_id).map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
+        CorrelationId::new(CORRELATION_ID).map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
         "2000-01-01T00:00:00Z",
-        LedgerEventKind::TaskCreated,
-        ingress_peer.actor_id().as_str(),
-        TASK_CREATED_ACTION,
-        TASK_CREATED_REASON,
+        ActorId::new(ingress_peer.actor_id().as_str())
+            .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
+        ReasonCode::new(TASK_CREATED_REASON)
+            .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
         task_created_subject_digest(binding, ingress_peer)?,
-        Some(task_created_audit_value(ingress_peer)?),
+        Some(
+            Diagnostic::new(task_created_audit_value(ingress_peer)?)
+                .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
+        ),
     )
+    .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))
 }
 
 fn task_created_subject_digest(
@@ -1118,7 +1210,72 @@ mod tests {
         GatewayChannelId, GatewayInstanceId, ProjectId, ProjectSnapshotId, TaskId,
         TaskIngressPeerEvidence,
     };
-    use lattice_task_ledger::{FakeTaskLedger, verify_untrusted_snapshot};
+    use lattice_task_ledger::{
+        FakeTaskLedger, verify_untrusted_autonomy_receipt_rows, verify_untrusted_snapshot,
+    };
+
+    #[test]
+    fn required_profile_without_receipt_is_reconciliation_only() {
+        let binding = binding();
+        let identity = identity(&binding);
+        let ingress_peer = ingress_peer('a', 'c');
+        let mut fake = FakeTaskLedger::new();
+        let vacant = verified(&fake, &identity);
+        fake.execute(
+            task_created_command(
+                vacant.head().clone(),
+                "mcp-submit:req-required",
+                &binding,
+                &ingress_peer,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = replay_lifecycle_with_autonomy(
+            &verified(&fake, &identity),
+            &binding,
+            &ingress_peer,
+            &lattice_task_ledger::VerifiedAutonomyReceiptState::PendingRequiredReceipt,
+        )
+        .expect_err("required profile without receipt must not form lifecycle evidence");
+
+        assert_eq!(error.kind(), TaskLifecycleErrorKind::Rejected);
+        assert_eq!(
+            error.code(),
+            "LATTICE_AUTONOMY_RECEIPT_RECONCILIATION_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn required_profile_cannot_be_downgraded_to_historical_optional() {
+        let binding = binding();
+        let identity = identity(&binding);
+        let ingress_peer = ingress_peer('a', 'c');
+        let mut fake = FakeTaskLedger::new();
+        let vacant = verified(&fake, &identity);
+        fake.execute(
+            task_created_command(
+                vacant.head().clone(),
+                "mcp-submit:req-required-downgrade",
+                &binding,
+                &ingress_peer,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = replay_lifecycle_with_autonomy(
+            &verified(&fake, &identity),
+            &binding,
+            &ingress_peer,
+            &VerifiedAutonomyReceiptState::HistoricalOptional(None),
+        )
+        .expect_err("required profile cannot use historical optional evidence");
+
+        assert_eq!(error.kind(), TaskLifecycleErrorKind::Corrupt);
+        assert_eq!(error.code(), "LATTICE_TASK_AUTONOMY_PROFILE_REJECTED");
+    }
 
     #[test]
     fn post_mutation_deadline_is_ambiguous() {
@@ -1128,38 +1285,175 @@ mod tests {
     }
 
     #[test]
-    fn autonomy_exact_retry_rejects_substituted_authority_or_receipt_digest() {
-        let receipt_digest = ContentDigest::from_sha256("a".repeat(64)).unwrap();
-        let authority_digest = ContentDigest::from_sha256("b".repeat(64)).unwrap();
-        let projection = AutonomyReceiptProjection::new(
-            receipt_digest.clone(),
-            authority_digest.clone(),
-            ContentDigest::from_sha256("c".repeat(64)).unwrap(),
-            TaskState::Draft,
-            AutonomyDisposition::Proceed,
-            AutonomyReason::RoutineAuthorized,
-            Some(AutonomyModel::GovernedCodexWriter),
-            Some(AutonomyVerification::FocusedChecks),
-        );
+    fn autonomy_exact_retry_rejects_substituted_authority_or_intent() {
+        let binding = binding();
+        let identity = identity(&binding);
+        let ingress_peer = ingress_peer('a', 'c');
+        let mut fake = FakeTaskLedger::new();
+        let vacant = verified(&fake, &identity);
+        fake.execute(
+            task_created_command(
+                vacant.head().clone(),
+                "mcp-submit:req-retry",
+                &binding,
+                &ingress_peer,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let stream = verified(&fake, &identity);
+        let intent = task_ledger_autonomy_intent(OrchestratorAutonomyIntent {
+            version: AutonomyIntentVersion::V1,
+            kind: TaskKind::Feature,
+            risk: RiskClass::R0,
+            execution_preapproved: false,
+            requires_new_authority: false,
+            irreversible_or_high_risk: false,
+        });
+        let authority = LedgerAutonomyAuthorityEvidence::new_p0_process_start_profile(
+            ingress_peer.process_start_authority_digest().clone(),
+            task_ingress_profile_adapter_commitment(&ingress_peer).unwrap(),
+            ContentDigest::from_sha256("e".repeat(64)).unwrap(),
+            None,
+        )
+        .unwrap();
+        let plan = plan_autonomy_receipt_append(
+            &stream,
+            AutonomyAppendMetadata::new(
+                CommandId::new(AUTONOMY_COMMAND_ID).unwrap(),
+                CorrelationId::new(CORRELATION_ID).unwrap(),
+                "2000-01-01T00:00:01Z",
+                ActorId::new(ingress_peer.actor_id().as_str()).unwrap(),
+            )
+            .unwrap(),
+            intent,
+            authority.clone(),
+        )
+        .unwrap();
 
-        ensure_exact_autonomy_retry(&projection, &receipt_digest, &authority_digest)
-            .expect("same canonical retry");
-        for (candidate_receipt, candidate_authority) in [
-            (
-                ContentDigest::from_sha256("d".repeat(64)).unwrap(),
-                authority_digest.clone(),
-            ),
-            (
-                receipt_digest.clone(),
+        ensure_exact_autonomy_retry(&identity, plan.receipt(), intent, &authority)
+            .expect("same verified scalar retry");
+
+        let changed_authority = LedgerAutonomyAuthorityEvidence::new_p0_process_start_profile(
+            ContentDigest::from_sha256("f".repeat(64)).unwrap(),
+            task_ingress_profile_adapter_commitment(&ingress_peer).unwrap(),
+            ContentDigest::from_sha256("e".repeat(64)).unwrap(),
+            None,
+        )
+        .unwrap();
+        let error =
+            ensure_exact_autonomy_retry(&identity, plan.receipt(), intent, &changed_authority)
+                .expect_err("changed authority must fail closed");
+        assert_eq!(error.code(), "LATTICE_AUTONOMY_RECEIPT_SUBSTITUTED");
+
+        let changed_intent = task_ledger_autonomy_intent(OrchestratorAutonomyIntent {
+            execution_preapproved: true,
+            ..OrchestratorAutonomyIntent {
+                version: AutonomyIntentVersion::V1,
+                kind: TaskKind::Feature,
+                risk: RiskClass::R0,
+                execution_preapproved: false,
+                requires_new_authority: false,
+                irreversible_or_high_risk: false,
+            }
+        });
+        let error =
+            ensure_exact_autonomy_retry(&identity, plan.receipt(), changed_intent, &authority)
+                .expect_err("changed intent must fail closed");
+        assert_eq!(error.code(), "LATTICE_AUTONOMY_RECEIPT_SUBSTITUTED");
+    }
+
+    #[test]
+    fn orchestrator_recommendation_maps_exhaustively_to_task_ledger() {
+        let intent = |execution_preapproved| OrchestratorAutonomyIntent {
+            version: AutonomyIntentVersion::V1,
+            kind: TaskKind::Feature,
+            risk: RiskClass::R0,
+            execution_preapproved,
+            requires_new_authority: false,
+            irreversible_or_high_risk: false,
+        };
+
+        assert_eq!(
+            task_ledger_autonomy_intent(intent(false)).recommendation(),
+            AutonomyRecommendation::AskUser {
+                reason: LedgerAutonomyDecisionReason::NewUserDecision,
+            }
+        );
+        assert_eq!(
+            task_ledger_autonomy_intent(intent(true)).recommendation(),
+            AutonomyRecommendation::Proceed {
+                model: LedgerAutonomyModel::GovernedCodexWriter,
+                verification: LedgerAutonomyVerification::FocusedChecks,
+                reason: LedgerAutonomyDecisionReason::RoutineAuthorized,
+            }
+        );
+    }
+
+    #[test]
+    fn required_profile_with_verified_receipt_projects_required_complete() {
+        let binding = binding();
+        let identity = identity(&binding);
+        let ingress_peer = ingress_peer('a', 'c');
+        let mut fake = FakeTaskLedger::new();
+        let vacant = verified(&fake, &identity);
+        fake.execute(
+            task_created_command(
+                vacant.head().clone(),
+                "mcp-submit:req-complete",
+                &binding,
+                &ingress_peer,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let stream = verified(&fake, &identity);
+        let intent = task_ledger_autonomy_intent(OrchestratorAutonomyIntent {
+            version: AutonomyIntentVersion::V1,
+            kind: TaskKind::Feature,
+            risk: RiskClass::R0,
+            execution_preapproved: false,
+            requires_new_authority: false,
+            irreversible_or_high_risk: false,
+        });
+        let plan = plan_autonomy_receipt_append(
+            &stream,
+            AutonomyAppendMetadata::new(
+                CommandId::new(AUTONOMY_COMMAND_ID).unwrap(),
+                CorrelationId::new(CORRELATION_ID).unwrap(),
+                "2000-01-01T00:00:01Z",
+                ActorId::new(ingress_peer.actor_id().as_str()).unwrap(),
+            )
+            .unwrap(),
+            intent,
+            LedgerAutonomyAuthorityEvidence::new_p0_process_start_profile(
+                ingress_peer.process_start_authority_digest().clone(),
+                task_ingress_profile_adapter_commitment(&ingress_peer).unwrap(),
                 ContentDigest::from_sha256("e".repeat(64)).unwrap(),
-            ),
-        ] {
-            let error =
-                ensure_exact_autonomy_retry(&projection, &candidate_receipt, &candidate_authority)
-                    .expect_err("changed canonical retry must fail closed");
-            assert_eq!(error.kind(), TaskLifecycleErrorKind::Rejected);
-            assert_eq!(error.code(), "LATTICE_AUTONOMY_RECEIPT_SUBSTITUTED");
-        }
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let row = plan.receipt().to_untrusted();
+        fake.execute(plan.append_plan().command_record().request().clone())
+            .unwrap();
+        let stream = verified(&fake, &identity);
+        let autonomy = verify_untrusted_autonomy_receipt_rows(&stream, &[row]).unwrap();
+        let evidence =
+            replay_lifecycle_with_autonomy(&stream, &binding, &ingress_peer, &autonomy).unwrap();
+
+        assert!(matches!(
+            evidence.autonomy_evidence(),
+            TaskLifecycleAutonomyEvidence::RequiredComplete(_)
+        ));
+        assert_eq!(
+            evidence
+                .autonomy_receipt()
+                .expect("verified receipt")
+                .disposition(),
+            AutonomyDisposition::AskUser
+        );
     }
 
     #[test]
@@ -1307,6 +1601,43 @@ mod tests {
         }
     }
 
+    fn append_required_receipt(
+        fake: &mut FakeTaskLedger,
+        identity: &TaskLedgerStreamIdentity,
+        ingress_peer: &TaskIngressPeerEvidence,
+    ) {
+        let stream = verified(fake, identity);
+        let intent = task_ledger_autonomy_intent(OrchestratorAutonomyIntent {
+            version: AutonomyIntentVersion::V1,
+            kind: TaskKind::Feature,
+            risk: RiskClass::R0,
+            execution_preapproved: false,
+            requires_new_authority: false,
+            irreversible_or_high_risk: false,
+        });
+        let plan = plan_autonomy_receipt_append(
+            &stream,
+            AutonomyAppendMetadata::new(
+                CommandId::new(AUTONOMY_COMMAND_ID).unwrap(),
+                CorrelationId::new(CORRELATION_ID).unwrap(),
+                "2000-01-01T00:00:01Z",
+                ActorId::new(ingress_peer.actor_id().as_str()).unwrap(),
+            )
+            .unwrap(),
+            intent,
+            LedgerAutonomyAuthorityEvidence::new_p0_process_start_profile(
+                ingress_peer.process_start_authority_digest().clone(),
+                task_ingress_profile_adapter_commitment(ingress_peer).unwrap(),
+                ContentDigest::from_sha256("e".repeat(64)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        fake.execute(plan.append_plan().command_record().request().clone())
+            .unwrap();
+    }
+
     fn append_transition(
         fake: &mut FakeTaskLedger,
         identity: &TaskLedgerStreamIdentity,
@@ -1344,7 +1675,19 @@ mod tests {
         let ingress_peer = ingress_peer('a', 'c');
         let mut fake = FakeTaskLedger::new();
         let stream = verified(&fake, &identity);
-        fake.execute(
+        let command = if action == TASK_CREATED_ACTION {
+            AppendCommand::new_autonomy_required_task_created(
+                stream.head().clone(),
+                CommandId::new("mcp-submit:req-1").unwrap(),
+                CorrelationId::new(CORRELATION_ID).unwrap(),
+                "2000-01-01T00:00:00Z",
+                ActorId::new(actor_id).unwrap(),
+                ReasonCode::new(reason).unwrap(),
+                task_created_subject_digest(&binding, &ingress_peer).unwrap(),
+                diagnostic.map(Diagnostic::new).transpose().unwrap(),
+            )
+            .unwrap()
+        } else {
             append_command(
                 stream.head().clone(),
                 "mcp-submit:req-1",
@@ -1356,10 +1699,10 @@ mod tests {
                 task_created_subject_digest(&binding, &ingress_peer).unwrap(),
                 diagnostic,
             )
-            .unwrap(),
-        )
-        .unwrap();
-        replay_lifecycle(&verified(&fake, &identity), &binding, &ingress_peer).unwrap_err()
+            .unwrap()
+        };
+        fake.execute(command).unwrap();
+        replay_lifecycle_state(&verified(&fake, &identity), &binding, &ingress_peer).unwrap_err()
     }
 
     #[test]
@@ -1390,8 +1733,8 @@ mod tests {
             &task_created_audit_value(&first_process_peer).unwrap()
         );
 
-        let evidence = replay_lifecycle(&stream, &binding, &restarted_process_peer).unwrap();
-        assert!(evidence.admitted());
+        let evidence = replay_lifecycle_state(&stream, &binding, &restarted_process_peer).unwrap();
+        assert!(evidence.created);
     }
 
     #[test]
@@ -1411,7 +1754,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = replay_lifecycle(
+        let error = replay_lifecycle_state(
             &verified(&fake, &identity),
             &binding,
             &ingress_peer('a', 'e'),
@@ -1422,7 +1765,7 @@ mod tests {
             "LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH"
         );
 
-        let adapter_error = replay_lifecycle(
+        let adapter_error = replay_lifecycle_state(
             &verified(&fake, &identity),
             &binding,
             &ingress_peer('e', 'c'),
@@ -1434,7 +1777,7 @@ mod tests {
         );
 
         let local_error =
-            replay_lifecycle(&verified(&fake, &identity), &binding, &local_ingress_peer())
+            replay_lifecycle_state(&verified(&fake, &identity), &binding, &local_ingress_peer())
                 .unwrap_err();
         assert_eq!(local_error.code(), "LATTICE_TASK_CREATED_EVIDENCE_REJECTED");
     }
@@ -1513,6 +1856,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        append_required_receipt(&mut fake, &identity, &ingress_peer);
         for (from, to) in [
             (TaskState::Draft, TaskState::AwaitingExecutionApproval),
             (TaskState::AwaitingExecutionApproval, TaskState::Preparing),
@@ -1544,9 +1888,9 @@ mod tests {
         .unwrap();
 
         let evidence =
-            replay_lifecycle(&verified(&fake, &identity), &binding, &ingress_peer).unwrap();
-        assert_eq!(evidence.state(), TaskState::Merging);
-        assert_eq!(evidence.result_digest(), Some(&result));
+            replay_lifecycle_state(&verified(&fake, &identity), &binding, &ingress_peer).unwrap();
+        assert_eq!(evidence.state, TaskState::Merging);
+        assert_eq!(evidence.result_digest.as_ref(), Some(&result));
     }
 
     #[test]
@@ -1566,6 +1910,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        append_required_receipt(&mut fake, &identity, &ingress_peer);
         let stream = verified(&fake, &identity);
         fake.execute(
             append_command(
@@ -1583,8 +1928,8 @@ mod tests {
         )
         .unwrap();
 
-        let error =
-            replay_lifecycle(&verified(&fake, &identity), &binding, &ingress_peer).unwrap_err();
+        let error = replay_lifecycle_state(&verified(&fake, &identity), &binding, &ingress_peer)
+            .unwrap_err();
         assert_eq!(error.code(), "LATTICE_TASK_RESULT_EVIDENCE_REJECTED");
     }
 
@@ -1611,8 +1956,8 @@ mod tests {
         )
         .unwrap();
 
-        let error =
-            replay_lifecycle(&verified(&fake, &identity), &binding, &ingress_peer).unwrap_err();
+        let error = replay_lifecycle_state(&verified(&fake, &identity), &binding, &ingress_peer)
+            .unwrap_err();
         assert_eq!(error.code(), "LATTICE_TASK_ADMISSION_MISSING");
     }
 }

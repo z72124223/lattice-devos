@@ -227,6 +227,15 @@ with exactly:
   `writer_fencing_token`, all non-null for `PROCEED` and all explicit `null`
   for `ASK_USER`.
 
+For `PROCEED`, `writer_lease_head_digest` is the domain-separated commitment of
+the exact 15-scalar tuple that the fixed
+`writer_lease_assert_current_v1` predicate independently proves current in the
+same transaction: project, snapshot, task, revision, spec digest, attempt,
+lease, holder, worktree, holder process and process-start identity, daemon and
+epoch, fence, and Writer receipt digest. Structural receipt fields outside that
+predicate are not claimed as independently current and cannot change the
+durable autonomy subject.
+
 `execution_preapproved = true` is never authority by itself. It is accepted
 only when the complete authority subject recomputes to `authority_digest` and
 all required owner heads are independently current. R1/R2/R3 or any non-P0
@@ -263,14 +272,21 @@ synthetic Policy or Approval evidence.
 
 ## Internal Status Projection And Stable MCP Wire Contract
 
-- Extend internal `TaskLifecycleEvidence` with a neutral
-  `profile: Option<TaskLifecycleProfile>` and
-  `autonomy_receipt: Option<AutonomyReceiptProjection>`. The projection contains
+- Extend internal `TaskLifecycleEvidence` with one neutral closed
+  `TaskLifecycleAutonomyEvidence`: `Unadmitted`,
+  `HistoricalOptional(Option<AutonomyReceiptProjection>)`, or
+  `RequiredComplete(AutonomyReceiptProjection)`. Do not use independent profile
+  and receipt `Option` fields that can represent an invalid combination. The receipt contains
   the canonical receipt digest, authority digest, event digest, observed state,
   disposition, reason, model, and verification; it is reconstructed only from
   verified Ledger replay.
+- Fresh required admission returns only
+  `TaskLifecycleAdmission::PendingRequiredReceipt { binding,
+  ledger_head_digest }` until sequence `2` is durable. This bounded result is
+  not lifecycle evidence and authorizes only the typed receipt reconciliation;
+  normal load, transition, dispatch, and Status continue to fail closed.
 - Receipt-required Status requires one valid receipt. Historical optional
-  profiles return `None`; they do not synthesize a receipt. Not-applicable or
+  profiles use `HistoricalOptional(None)`; they do not synthesize a receipt. Not-applicable or
   missing profile evidence at the task-control boundary fails closed rather
   than being mistaken for a receipt-optional controlled canary.
 - `lattice_task_submit` and `lattice_task_status` must still emit exactly the
@@ -315,6 +331,9 @@ synthetic Policy or Approval evidence.
   historical compatibility, dependency direction, and six-field wire freeze.
 - [ ] Closed-contract tests reject every unknown/extra/missing field and every
   mutation of binding, intent, observed state, decision, authority, or digest.
+- [ ] Ports tests prove the closed autonomy-evidence sum type cannot represent
+  required-without-receipt, profileless-with-receipt, or admitted
+  not-applicable lifecycle evidence.
 - [ ] Task Ledger tests own the exact task-created profile mapping and canonical
   authority/receipt hashes, add/parse only `AUTONOMY_RECEIPT_RECORDED`, deny a
   generic forged append, preserve all existing event/hash fixtures, and reject

@@ -16,11 +16,14 @@ use lattice_contracts::{
     WriterLeaseAuthorityHead, WriterLeaseStatus,
 };
 use lattice_task_ledger::{
-    AppendCommand, CommandReceipt, Diagnostic, LEDGER_CHECKPOINT_SCHEMA_VERSION,
-    LEDGER_SCHEMA_VERSION, LedgerAppendPlan, LedgerCheckpoint, LedgerError, OutboxAdmission,
-    UntrustedAppendRequest, UntrustedCommandReceipt, UntrustedCommandRecord, UntrustedLedgerEvent,
-    UntrustedLedgerSnapshot, UntrustedOutboxAdmission, VerifiedStream, apply_append_plan,
-    plan_append, verify_untrusted_snapshot_against_checkpoint,
+    AppendCommand, AutonomyReceiptAppendPlan, CommandReceipt, Diagnostic,
+    LEDGER_CHECKPOINT_SCHEMA_VERSION, LEDGER_SCHEMA_VERSION, LedgerAppendPlan, LedgerCheckpoint,
+    LedgerError, LedgerEventKind, OutboxAdmission, TaskCreatedProfile, UntrustedAppendRequest,
+    UntrustedAutonomyReceiptRow, UntrustedCommandReceipt, UntrustedCommandRecord,
+    UntrustedLedgerEvent, UntrustedLedgerSnapshot, UntrustedOutboxAdmission,
+    VerifiedAutonomyReceipt, VerifiedAutonomyReceiptState, VerifiedStream, apply_append_plan,
+    classify_task_created_profile, plan_append, verify_untrusted_autonomy_receipt_rows,
+    verify_untrusted_snapshot_against_checkpoint,
 };
 use postgres::error::SqlState;
 use postgres::types::{FromSqlOwned, ToSql};
@@ -389,122 +392,6 @@ pub struct PostgresTaskLedgerPersistenceEvidence {
     manifest_digest: ContentDigest,
 }
 
-/// Fixed-scalar, event-owned autonomy receipt reconstructed from `PostgreSQL`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PostgresAutonomyReceipt {
-    event_sequence: u64,
-    event_digest: ContentDigest,
-    receipt_schema_version: String,
-    intent_version: String,
-    task_kind: String,
-    risk_class: String,
-    execution_preapproved: bool,
-    requires_new_authority: bool,
-    irreversible_or_high_risk: bool,
-    observed_task_state: String,
-    disposition: String,
-    decision_reason: String,
-    model: Option<String>,
-    verification: Option<String>,
-    authority_mode: String,
-    process_start_authority_digest: ContentDigest,
-    ingress_profile_adapter_commitment: ContentDigest,
-    store_authority_head_digest: ContentDigest,
-    writer_lease_receipt_digest: Option<ContentDigest>,
-    writer_lease_head_digest: Option<ContentDigest>,
-    writer_fencing_token: Option<u64>,
-    authority_digest: ContentDigest,
-    receipt_digest: ContentDigest,
-}
-
-impl PostgresAutonomyReceipt {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        event_sequence: u64,
-        event_digest: ContentDigest,
-        receipt_schema_version: impl Into<String>,
-        intent_version: impl Into<String>,
-        task_kind: impl Into<String>,
-        risk_class: impl Into<String>,
-        execution_preapproved: bool,
-        requires_new_authority: bool,
-        irreversible_or_high_risk: bool,
-        observed_task_state: impl Into<String>,
-        disposition: impl Into<String>,
-        decision_reason: impl Into<String>,
-        model: Option<String>,
-        verification: Option<String>,
-        authority_mode: impl Into<String>,
-        process_start_authority_digest: ContentDigest,
-        ingress_profile_adapter_commitment: ContentDigest,
-        store_authority_head_digest: ContentDigest,
-        writer_lease_receipt_digest: Option<ContentDigest>,
-        writer_lease_head_digest: Option<ContentDigest>,
-        writer_fencing_token: Option<u64>,
-        authority_digest: ContentDigest,
-        receipt_digest: ContentDigest,
-    ) -> Self {
-        Self {
-            event_sequence,
-            event_digest,
-            receipt_schema_version: receipt_schema_version.into(),
-            intent_version: intent_version.into(),
-            task_kind: task_kind.into(),
-            risk_class: risk_class.into(),
-            execution_preapproved,
-            requires_new_authority,
-            irreversible_or_high_risk,
-            observed_task_state: observed_task_state.into(),
-            disposition: disposition.into(),
-            decision_reason: decision_reason.into(),
-            model,
-            verification,
-            authority_mode: authority_mode.into(),
-            process_start_authority_digest,
-            ingress_profile_adapter_commitment,
-            store_authority_head_digest,
-            writer_lease_receipt_digest,
-            writer_lease_head_digest,
-            writer_fencing_token,
-            authority_digest,
-            receipt_digest,
-        }
-    }
-
-    #[must_use]
-    pub const fn event_digest(&self) -> &ContentDigest {
-        &self.event_digest
-    }
-    #[must_use]
-    pub const fn receipt_digest(&self) -> &ContentDigest {
-        &self.receipt_digest
-    }
-    #[must_use]
-    pub const fn authority_digest(&self) -> &ContentDigest {
-        &self.authority_digest
-    }
-    #[must_use]
-    pub fn observed_task_state(&self) -> &str {
-        &self.observed_task_state
-    }
-    #[must_use]
-    pub fn disposition(&self) -> &str {
-        &self.disposition
-    }
-    #[must_use]
-    pub fn decision_reason(&self) -> &str {
-        &self.decision_reason
-    }
-    #[must_use]
-    pub fn model(&self) -> Option<&str> {
-        self.model.as_deref()
-    }
-    #[must_use]
-    pub fn verification(&self) -> Option<&str> {
-        self.verification.as_deref()
-    }
-}
-
 impl PostgresTaskLedgerPersistenceEvidence {
     #[must_use]
     pub const fn database_identity_digest(&self) -> &ContentDigest {
@@ -529,7 +416,7 @@ pub struct PostgresTaskLedgerLoad {
     retained_checkpoint: LedgerCheckpoint,
     physical_head: StorePhysicalHead,
     persistence: PostgresTaskLedgerPersistenceEvidence,
-    autonomy_receipt: Option<PostgresAutonomyReceipt>,
+    autonomy_state: VerifiedAutonomyReceiptState,
 }
 
 impl PostgresTaskLedgerLoad {
@@ -554,8 +441,25 @@ impl PostgresTaskLedgerLoad {
     }
 
     #[must_use]
-    pub const fn autonomy_receipt(&self) -> Option<&PostgresAutonomyReceipt> {
-        self.autonomy_receipt.as_ref()
+    pub const fn autonomy_state(&self) -> &VerifiedAutonomyReceiptState {
+        &self.autonomy_state
+    }
+
+    #[must_use]
+    pub const fn autonomy_receipt(&self) -> Option<&VerifiedAutonomyReceipt> {
+        verified_autonomy_receipt(&self.autonomy_state)
+    }
+}
+
+const fn verified_autonomy_receipt(
+    state: &VerifiedAutonomyReceiptState,
+) -> Option<&VerifiedAutonomyReceipt> {
+    match state {
+        VerifiedAutonomyReceiptState::HistoricalOptional(Some(receipt))
+        | VerifiedAutonomyReceiptState::RequiredComplete(receipt) => Some(receipt),
+        VerifiedAutonomyReceiptState::NotApplicable
+        | VerifiedAutonomyReceiptState::HistoricalOptional(None)
+        | VerifiedAutonomyReceiptState::PendingRequiredReceipt => None,
     }
 }
 
@@ -613,62 +517,6 @@ pub struct PostgresTaskLedger {
 }
 
 impl PostgresTaskLedger {
-    /// Builds the fixed-scalar autonomy subject accepted only by this Ledger
-    /// adapter. The concrete row type remains owned by the `PostgreSQL` module.
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn autonomy_receipt(
-        event_sequence: u64,
-        event_digest: ContentDigest,
-        receipt_schema_version: impl Into<String>,
-        intent_version: impl Into<String>,
-        task_kind: impl Into<String>,
-        risk_class: impl Into<String>,
-        execution_preapproved: bool,
-        requires_new_authority: bool,
-        irreversible_or_high_risk: bool,
-        observed_task_state: impl Into<String>,
-        disposition: impl Into<String>,
-        decision_reason: impl Into<String>,
-        model: Option<String>,
-        verification: Option<String>,
-        authority_mode: impl Into<String>,
-        process_start_authority_digest: ContentDigest,
-        ingress_profile_adapter_commitment: ContentDigest,
-        store_authority_head_digest: ContentDigest,
-        writer_lease_receipt_digest: Option<ContentDigest>,
-        writer_lease_head_digest: Option<ContentDigest>,
-        writer_fencing_token: Option<u64>,
-        authority_digest: ContentDigest,
-        receipt_digest: ContentDigest,
-    ) -> PostgresAutonomyReceipt {
-        PostgresAutonomyReceipt::new(
-            event_sequence,
-            event_digest,
-            receipt_schema_version,
-            intent_version,
-            task_kind,
-            risk_class,
-            execution_preapproved,
-            requires_new_authority,
-            irreversible_or_high_risk,
-            observed_task_state,
-            disposition,
-            decision_reason,
-            model,
-            verification,
-            authority_mode,
-            process_start_authority_digest,
-            ingress_profile_adapter_commitment,
-            store_authority_head_digest,
-            writer_lease_receipt_digest,
-            writer_lease_head_digest,
-            writer_fencing_token,
-            authority_digest,
-            receipt_digest,
-        )
-    }
-
     /// Verifies an exact frozen schema-v3 or current schema-v5 runtime surface
     /// before accepting the client.
     ///
@@ -759,7 +607,7 @@ impl PostgresTaskLedger {
             retained_checkpoint: loaded.retained_checkpoint,
             physical_head: loaded.physical_head,
             persistence: self.global_persistence.clone(),
-            autonomy_receipt: loaded.autonomy_receipt,
+            autonomy_state: loaded.autonomy_state,
         })
     }
 
@@ -803,47 +651,31 @@ impl PostgresTaskLedger {
         )
     }
 
-    /// Atomically records one fixed-scalar autonomy subject with its fenced event.
+    /// Atomically records one Task-Ledger-planned autonomy receipt and event.
     ///
     /// # Errors
     ///
-    /// Fails closed on ordinary append errors, authority mismatch, malformed
-    /// receipt scalars, or any non-atomic retained-row disagreement.
+    /// Fails closed on ordinary append errors, authority mismatch, a stale or
+    /// substituted typed plan, or any non-atomic retained-row disagreement.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn execute_autonomy_fenced(
+    pub fn execute_autonomy(
         &mut self,
-        command: AppendCommand,
+        autonomy_plan: AutonomyReceiptAppendPlan,
         expected_authority: StoreAuthorityHead,
-        writer_authority: WriterLeaseAuthorityHead,
-        autonomy_receipt: PostgresAutonomyReceipt,
     ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
+        if !autonomy_plan_matches_store_authority(&autonomy_plan, &expected_authority) {
+            return Err(error(PostgresTaskLedgerErrorKind::AuthorityMismatch));
+        }
+        let command = autonomy_plan
+            .append_plan()
+            .command_record()
+            .request()
+            .clone();
         self.execute_with_writer_authority(
             &command,
             &expected_authority,
-            Some(&writer_authority),
-            Some(&autonomy_receipt),
-        )
-    }
-
-    /// Atomically records one fixed-scalar `ASK_USER` autonomy subject without
-    /// importing ambient writer authority.
-    ///
-    /// # Errors
-    ///
-    /// Fails closed on ordinary append errors, active authority mismatch,
-    /// malformed receipt scalars, or any retained-row disagreement.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn execute_autonomy_unfenced(
-        &mut self,
-        command: AppendCommand,
-        expected_authority: StoreAuthorityHead,
-        autonomy_receipt: PostgresAutonomyReceipt,
-    ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
-        self.execute_with_writer_authority(
-            &command,
-            &expected_authority,
-            None,
-            Some(&autonomy_receipt),
+            autonomy_plan.writer_authority(),
+            Some(&autonomy_plan),
         )
     }
 
@@ -852,10 +684,13 @@ impl PostgresTaskLedger {
         command: &AppendCommand,
         expected_authority: &StoreAuthorityHead,
         writer_authority: Option<&WriterLeaseAuthorityHead>,
-        autonomy_receipt: Option<&PostgresAutonomyReceipt>,
+        autonomy_plan: Option<&AutonomyReceiptAppendPlan>,
     ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
         self.ensure_reconcilable()?;
-        if command.expected_head().runtime() != RuntimeKind::Live {
+        if command.expected_head().runtime() != RuntimeKind::Live
+            || (autonomy_plan.is_none()
+                && command.kind() == lattice_task_ledger::LedgerEventKind::AutonomyReceiptRecorded)
+        {
             return Err(error(PostgresTaskLedgerErrorKind::Malformed));
         }
         let identity = command.expected_head().identity().clone();
@@ -885,7 +720,7 @@ impl PostgresTaskLedger {
                 &command_id,
                 expected_authority.clone(),
                 writer_authority,
-                autonomy_receipt,
+                autonomy_plan,
             ) {
                 Ok(execution) => return Ok(execution),
                 Err(AttemptFailure::Retryable) if retry_count < MAX_LIVE_SERIALIZATION_RETRIES => {}
@@ -1013,7 +848,7 @@ struct LoadedStream {
     physical_head: StorePhysicalHead,
     store_receipts: BTreeMap<String, StoreTransactionReceipt>,
     record_set_digests: BTreeMap<String, ContentDigest>,
-    autonomy_receipt: Option<PostgresAutonomyReceipt>,
+    autonomy_state: VerifiedAutonomyReceiptState,
 }
 
 struct LedgerPrepareRow {
@@ -1123,7 +958,7 @@ fn load_verified_stream<C: GenericClient>(
             physical_head: physical,
             store_receipts: BTreeMap::new(),
             record_set_digests: BTreeMap::new(),
-            autonomy_receipt: None,
+            autonomy_state: VerifiedAutonomyReceiptState::NotApplicable,
         });
     };
 
@@ -1289,7 +1124,7 @@ fn load_verified_stream<C: GenericClient>(
     let stream = verify_untrusted_snapshot_against_checkpoint(&snapshot, &retained_checkpoint)
         .map_err(|ledger| map_ledger_error(&ledger))?;
     validate_store_bindings(&stream, &store_receipts, &record_set_digests)?;
-    let autonomy_receipt =
+    let autonomy_state =
         load_autonomy_receipt_for_profile(client, stream_id_bytes, &stream, sql_profile)?;
     Ok(LoadedStream {
         stream,
@@ -1297,7 +1132,7 @@ fn load_verified_stream<C: GenericClient>(
         physical_head,
         store_receipts,
         record_set_digests,
-        autonomy_receipt,
+        autonomy_state,
     })
 }
 
@@ -1626,64 +1461,47 @@ fn load_autonomy_receipt<C: GenericClient>(
     stream_id_bytes: &[u8],
     stream: &VerifiedStream,
     sql: &str,
-) -> PostgresTaskLedgerResult<Option<PostgresAutonomyReceipt>> {
+) -> PostgresTaskLedgerResult<VerifiedAutonomyReceiptState> {
     let rows = client
         .query(sql, &[&stream_id_bytes])
         .map_err(|database| map_database_error(&database))?;
-    let events = stream
-        .events()
-        .iter()
-        .filter(|event| {
-            event.kind() == lattice_task_ledger::LedgerEventKind::AutonomyReceiptRecorded
-        })
-        .collect::<Vec<_>>();
-    if rows.len() != events.len() || rows.len() > 1 {
-        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+    let mut untrusted = Vec::with_capacity(rows.len());
+    for row in &rows {
+        if row.len() != 24 {
+            return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+        }
+        untrusted.push(UntrustedAutonomyReceiptRow::new(
+            row_digest(row, 0)?,
+            parse_u64_text(&row_value::<String>(row, 1)?)?,
+            row_digest(row, 2)?,
+            row_value::<String>(row, 3)?,
+            row_value::<String>(row, 4)?,
+            row_value::<String>(row, 5)?,
+            row_value::<String>(row, 6)?,
+            row_value::<bool>(row, 7)?,
+            row_value::<bool>(row, 8)?,
+            row_value::<bool>(row, 9)?,
+            row_value::<String>(row, 10)?,
+            row_value::<String>(row, 11)?,
+            row_value::<String>(row, 12)?,
+            row_value::<Option<String>>(row, 13)?,
+            row_value::<Option<String>>(row, 14)?,
+            row_value::<String>(row, 15)?,
+            row_digest(row, 16)?,
+            row_digest(row, 17)?,
+            row_digest(row, 18)?,
+            optional_row_digest(row, 19)?,
+            optional_row_digest(row, 20)?,
+            row_value::<Option<String>>(row, 21)?
+                .as_deref()
+                .map(parse_u64_text)
+                .transpose()?,
+            row_digest(row, 22)?,
+            row_digest(row, 23)?,
+        ));
     }
-    let Some(row) = rows.first() else {
-        return Ok(None);
-    };
-    if row.len() != 24 || row_digest(row, 0)? != *stream.head().stream_id() {
-        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
-    }
-    let receipt = PostgresAutonomyReceipt::new(
-        parse_u64_text(&row_value::<String>(row, 1)?)?,
-        row_digest(row, 2)?,
-        row_value::<String>(row, 3)?,
-        row_value::<String>(row, 4)?,
-        row_value::<String>(row, 5)?,
-        row_value::<String>(row, 6)?,
-        row_value::<bool>(row, 7)?,
-        row_value::<bool>(row, 8)?,
-        row_value::<bool>(row, 9)?,
-        row_value::<String>(row, 10)?,
-        row_value::<String>(row, 11)?,
-        row_value::<String>(row, 12)?,
-        row_value::<Option<String>>(row, 13)?,
-        row_value::<Option<String>>(row, 14)?,
-        row_value::<String>(row, 15)?,
-        row_digest(row, 16)?,
-        row_digest(row, 17)?,
-        row_digest(row, 18)?,
-        optional_row_digest(row, 19)?,
-        optional_row_digest(row, 20)?,
-        row_value::<Option<String>>(row, 21)?
-            .as_deref()
-            .map(parse_u64_text)
-            .transpose()?,
-        row_digest(row, 22)?,
-        row_digest(row, 23)?,
-    );
-    let event = events[0];
-    if receipt.event_sequence != event.sequence()
-        || receipt.event_digest != *event.event_digest()
-        || receipt.receipt_digest != *event.subject_digest()
-        || event.sequence() != 2
-    {
-        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
-    }
-    validate_autonomy_receipt(stream.identity(), &receipt)?;
-    Ok(Some(receipt))
+    verify_untrusted_autonomy_receipt_rows(stream, &untrusted)
+        .map_err(|ledger| map_ledger_error(&ledger))
 }
 
 fn load_autonomy_receipt_for_profile<C: GenericClient>(
@@ -1691,238 +1509,31 @@ fn load_autonomy_receipt_for_profile<C: GenericClient>(
     stream_id_bytes: &[u8],
     stream: &VerifiedStream,
     sql_profile: TaskLedgerSqlProfile,
-) -> PostgresTaskLedgerResult<Option<PostgresAutonomyReceipt>> {
+) -> PostgresTaskLedgerResult<VerifiedAutonomyReceiptState> {
+    validate_autonomy_surface_for_profile(stream, sql_profile)?;
     let Some(sql) = sql_profile.autonomy_receipts_sql() else {
-        if stream.events().iter().any(|event| {
-            event.kind() == lattice_task_ledger::LedgerEventKind::AutonomyReceiptRecorded
-        }) {
-            return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
-        }
-        return Ok(None);
+        return verify_untrusted_autonomy_receipt_rows(stream, &[])
+            .map_err(|ledger| map_ledger_error(&ledger));
     };
     load_autonomy_receipt(client, stream_id_bytes, stream, sql)
 }
 
-#[allow(clippy::too_many_lines)]
-fn validate_autonomy_receipt(
-    identity: &TaskLedgerStreamIdentity,
-    receipt: &PostgresAutonomyReceipt,
+fn validate_autonomy_surface_for_profile(
+    stream: &VerifiedStream,
+    sql_profile: TaskLedgerSqlProfile,
 ) -> PostgresTaskLedgerResult<()> {
-    let (expected_disposition, expected_reason, expected_model, expected_verification) =
-        if receipt.requires_new_authority {
-            ("ASK_USER", "NEW_AUTHORITY", None, None)
-        } else if receipt.irreversible_or_high_risk || receipt.risk_class == "R3" {
-            ("ASK_USER", "HIGH_RISK_OR_IRREVERSIBLE", None, None)
-        } else if !receipt.execution_preapproved {
-            ("ASK_USER", "NEW_USER_DECISION", None, None)
-        } else {
-            let model = match receipt.task_kind.as_str() {
-                "FEATURE" | "BUG_FIX" => "GOVERNED_CODEX_WRITER",
-                "CONFIGURATION" | "RESEARCH" => "NO_MODEL",
-                _ => return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
-            };
-            let verification = if receipt.task_kind == "RESEARCH" {
-                "READ_ONLY_EVIDENCE"
-            } else if receipt.risk_class == "R2" {
-                "BUILD_AND_FOCUSED_CHECKS"
-            } else {
-                "FOCUSED_CHECKS"
-            };
-            (
-                "PROCEED",
-                "ROUTINE_AUTHORIZED",
-                Some(model),
-                Some(verification),
-            )
-        };
-    if receipt.receipt_schema_version != "lattice.autonomy-receipt/1.0"
-        || receipt.intent_version != "1.0"
-        || receipt.authority_mode != "P0_PROCESS_START_PROFILE_V1"
-        || receipt.event_sequence != 2
-        || receipt.disposition != expected_disposition
-        || receipt.decision_reason != expected_reason
-        || receipt.model.as_deref() != expected_model
-        || receipt.verification.as_deref() != expected_verification
-        || receipt.observed_task_state != "DRAFT"
-    {
-        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+    if sql_profile.supports_autonomy() {
+        return Ok(());
     }
-    let writer_receipt = receipt
-        .writer_lease_receipt_digest
-        .as_ref()
-        .map_or(CanonicalValue::Null, |value| {
-            CanonicalValue::String(value.as_str().to_owned())
-        });
-    let writer_head = receipt
-        .writer_lease_head_digest
-        .as_ref()
-        .map_or(CanonicalValue::Null, |value| {
-            CanonicalValue::String(value.as_str().to_owned())
-        });
-    let writer_fence = receipt
-        .writer_fencing_token
-        .map_or(CanonicalValue::Null, |value| {
-            CanonicalValue::String(value.to_string())
-        });
-    if (expected_disposition == "PROCEED")
-        != (receipt.writer_lease_receipt_digest.is_some()
-            && receipt.writer_lease_head_digest.is_some()
-            && receipt.writer_fencing_token.is_some())
-    {
-        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
-    }
-    let binding = autonomy_binding_value(identity);
-    let authority = CanonicalValue::Object(vec![
-        ("binding".to_owned(), binding.clone()),
-        (
-            "authority_mode".to_owned(),
-            CanonicalValue::String(receipt.authority_mode.clone()),
-        ),
-        (
-            "process_start_authority_digest".to_owned(),
-            CanonicalValue::String(receipt.process_start_authority_digest.as_str().to_owned()),
-        ),
-        (
-            "ingress_profile_adapter_commitment".to_owned(),
-            CanonicalValue::String(
-                receipt
-                    .ingress_profile_adapter_commitment
-                    .as_str()
-                    .to_owned(),
-            ),
-        ),
-        (
-            "store_authority_head_digest".to_owned(),
-            CanonicalValue::String(receipt.store_authority_head_digest.as_str().to_owned()),
-        ),
-        (
-            "policy_decision_receipt_digest".to_owned(),
-            CanonicalValue::Null,
-        ),
-        ("policy_owner_head_digest".to_owned(), CanonicalValue::Null),
-        ("approval_receipt_digest".to_owned(), CanonicalValue::Null),
-        (
-            "approval_owner_head_digest".to_owned(),
-            CanonicalValue::Null,
-        ),
-        ("writer_lease_receipt_digest".to_owned(), writer_receipt),
-        ("writer_lease_head_digest".to_owned(), writer_head),
-        ("writer_fencing_token".to_owned(), writer_fence),
-    ]);
-    if autonomy_digest("lattice.autonomy-authority", &authority)? != receipt.authority_digest {
-        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
-    }
-    let decision = CanonicalValue::Object(vec![
-        (
-            "disposition".to_owned(),
-            CanonicalValue::String(receipt.disposition.clone()),
-        ),
-        (
-            "reason".to_owned(),
-            CanonicalValue::String(receipt.decision_reason.clone()),
-        ),
-        (
-            "model".to_owned(),
-            receipt
-                .model
-                .as_ref()
-                .map_or(CanonicalValue::Null, |value| {
-                    CanonicalValue::String(value.clone())
-                }),
-        ),
-        (
-            "verification".to_owned(),
-            receipt
-                .verification
-                .as_ref()
-                .map_or(CanonicalValue::Null, |value| {
-                    CanonicalValue::String(value.clone())
-                }),
-        ),
-    ]);
-    let intent = CanonicalValue::Object(vec![
-        (
-            "version".to_owned(),
-            CanonicalValue::String(receipt.intent_version.clone()),
-        ),
-        (
-            "task_kind".to_owned(),
-            CanonicalValue::String(receipt.task_kind.clone()),
-        ),
-        (
-            "risk_class".to_owned(),
-            CanonicalValue::String(receipt.risk_class.clone()),
-        ),
-        (
-            "execution_preapproved".to_owned(),
-            CanonicalValue::Bool(receipt.execution_preapproved),
-        ),
-        (
-            "requires_new_authority".to_owned(),
-            CanonicalValue::Bool(receipt.requires_new_authority),
-        ),
-        (
-            "irreversible_or_high_risk".to_owned(),
-            CanonicalValue::Bool(receipt.irreversible_or_high_risk),
-        ),
-    ]);
-    let subject = CanonicalValue::Object(vec![
-        (
-            "schema_version".to_owned(),
-            CanonicalValue::String(receipt.receipt_schema_version.clone()),
-        ),
-        ("binding".to_owned(), binding),
-        ("intent".to_owned(), intent),
-        (
-            "observed_task_state".to_owned(),
-            CanonicalValue::String(receipt.observed_task_state.clone()),
-        ),
-        ("decision".to_owned(), decision),
-        (
-            "authority_digest".to_owned(),
-            CanonicalValue::String(receipt.authority_digest.as_str().to_owned()),
-        ),
-    ]);
-    if autonomy_digest("lattice.autonomy-receipt", &subject)? != receipt.receipt_digest {
-        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+    for event in stream.events() {
+        let required_profile = classify_task_created_profile(event)
+            .map_err(|ledger| map_ledger_error(&ledger))?
+            == Some(TaskCreatedProfile::AutonomyReceiptRequiredV1);
+        if required_profile || event.kind() == LedgerEventKind::AutonomyReceiptRecorded {
+            return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+        }
     }
     Ok(())
-}
-
-fn autonomy_binding_value(identity: &TaskLedgerStreamIdentity) -> CanonicalValue {
-    CanonicalValue::Object(vec![
-        (
-            "project_id".to_owned(),
-            CanonicalValue::String(identity.project_id().as_str().to_owned()),
-        ),
-        (
-            "project_snapshot_id".to_owned(),
-            CanonicalValue::String(identity.project_snapshot_id().as_str().to_owned()),
-        ),
-        (
-            "task_id".to_owned(),
-            CanonicalValue::String(identity.task_id().as_str().to_owned()),
-        ),
-        (
-            "task_revision".to_owned(),
-            CanonicalValue::String(identity.task_revision().to_owned()),
-        ),
-        (
-            "task_spec_digest".to_owned(),
-            CanonicalValue::String(identity.task_spec_digest().as_str().to_owned()),
-        ),
-    ])
-}
-
-fn autonomy_digest(
-    schema: &str,
-    value: &CanonicalValue,
-) -> PostgresTaskLedgerResult<ContentDigest> {
-    let domain = HashDomain::new(schema, "1.0")
-        .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
-    let hash = canonical_sha256(&domain, value)
-        .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
-    digest(&hash.to_hex())
 }
 
 fn parse_command_row(
@@ -2284,7 +1895,7 @@ fn run_execute_attempt(
     command_id: &str,
     expected_authority: StoreAuthorityHead,
     writer_authority: Option<&WriterLeaseAuthorityHead>,
-    autonomy_receipt: Option<&PostgresAutonomyReceipt>,
+    autonomy_plan: Option<&AutonomyReceiptAppendPlan>,
 ) -> Result<PostgresTaskLedgerExecution, AttemptFailure> {
     let Ok(global_schema_version) = i16::try_from(global_persistence.schema_version()) else {
         return Err(AttemptFailure::Terminal(error(
@@ -2343,12 +1954,18 @@ fn run_execute_attempt(
             );
         }
     };
+    let autonomy_receipt = autonomy_plan.map(AutonomyReceiptAppendPlan::receipt);
+    if autonomy_plan
+        .is_some_and(|submitted| !plan.is_exact_retry() && submitted.append_plan() != &plan)
+    {
+        return rollback_attempt(
+            transaction,
+            AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Malformed)),
+        );
+    }
 
     if !sql_profile.supports_autonomy()
-        && (autonomy_receipt.is_some()
-            || plan.new_event().is_some_and(|event| {
-                event.kind() == lattice_task_ledger::LedgerEventKind::AutonomyReceiptRecorded
-            }))
+        && (autonomy_plan.is_some() || plan_uses_autonomy_surface(&plan))
     {
         return rollback_attempt(
             transaction,
@@ -2357,10 +1974,9 @@ fn run_execute_attempt(
     }
 
     if plan.is_exact_retry() {
-        if autonomy_receipt.is_some() != loaded.autonomy_receipt.is_some()
-            || autonomy_receipt
-                .is_some_and(|receipt| loaded.autonomy_receipt.as_ref() != Some(receipt))
-        {
+        if autonomy_receipt.is_some_and(|receipt| {
+            loaded.autonomy_state != VerifiedAutonomyReceiptState::RequiredComplete(receipt.clone())
+        }) {
             return rollback_attempt(
                 transaction,
                 AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::CommandSubstitution)),
@@ -2548,10 +2164,10 @@ fn run_execute_attempt(
                 );
             }
         };
-        if receipt.event_sequence != event.sequence()
-            || receipt.event_digest != *event.event_digest()
-            || receipt.receipt_digest != *event.subject_digest()
-            || validate_autonomy_receipt(identity, receipt).is_err()
+        if receipt.stream_id() != event.stream_id()
+            || receipt.event_sequence() != event.sequence()
+            || receipt.event_digest() != event.event_digest()
+            || receipt.receipt_digest() != event.subject_digest()
         {
             return rollback_attempt(
                 transaction,
@@ -2564,7 +2180,7 @@ fn run_execute_attempt(
                 AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Malformed)),
             );
         };
-        let values = AutonomySqlValues::new(stream_id_bytes, receipt);
+        let values = AutonomySqlValues::new(receipt);
         let status = match transaction.query_one(record_sql, &values.params()) {
             Ok(row) => match row_value::<String>(&row, 0) {
                 Ok(status) => status,
@@ -2618,7 +2234,10 @@ fn run_execute_attempt(
         || reloaded.physical_head != *store_receipt.after_head()
         || reloaded.store_receipts.get(command_id) != Some(&store_receipt)
         || reloaded.record_set_digests.get(command_id) != Some(plan.record_set_digest())
-        || reloaded.autonomy_receipt.as_ref() != autonomy_receipt
+        || autonomy_receipt.is_some_and(|receipt| {
+            reloaded.autonomy_state
+                != VerifiedAutonomyReceiptState::RequiredComplete(receipt.clone())
+        })
     {
         return rollback_attempt(
             transaction,
@@ -2637,6 +2256,21 @@ fn run_execute_attempt(
         .commit()
         .map(|()| execution)
         .map_err(|database| classify_commit_error(&database))
+}
+
+fn autonomy_plan_matches_store_authority(
+    plan: &AutonomyReceiptAppendPlan,
+    expected_authority: &StoreAuthorityHead,
+) -> bool {
+    plan.receipt().store_authority_head_digest() == expected_authority.head_digest()
+}
+
+fn plan_uses_autonomy_surface(plan: &LedgerAppendPlan) -> bool {
+    plan.new_event().is_some_and(|event| {
+        event.kind() == lattice_task_ledger::LedgerEventKind::AutonomyReceiptRecorded
+            || classify_task_created_profile(event)
+                == Ok(Some(TaskCreatedProfile::AutonomyReceiptRequiredV1))
+    })
 }
 
 fn writer_authority_matches_identity(
@@ -2861,43 +2495,42 @@ struct AutonomySqlValues {
 }
 
 impl AutonomySqlValues {
-    fn new(stream_id: &[u8], receipt: &PostgresAutonomyReceipt) -> Self {
+    fn new(receipt: &VerifiedAutonomyReceipt) -> Self {
+        let row = receipt.to_untrusted();
         Self {
-            stream_id: stream_id.to_vec(),
-            event_sequence: receipt.event_sequence.to_string(),
-            event_digest: digest_bytes(&receipt.event_digest).expect("validated digest"),
-            receipt_schema_version: receipt.receipt_schema_version.clone(),
-            intent_version: receipt.intent_version.clone(),
-            task_kind: receipt.task_kind.clone(),
-            risk_class: receipt.risk_class.clone(),
-            execution_preapproved: receipt.execution_preapproved,
-            requires_new_authority: receipt.requires_new_authority,
-            irreversible_or_high_risk: receipt.irreversible_or_high_risk,
-            observed_task_state: receipt.observed_task_state.clone(),
-            disposition: receipt.disposition.clone(),
-            decision_reason: receipt.decision_reason.clone(),
-            model: receipt.model.clone(),
-            verification: receipt.verification.clone(),
-            authority_mode: receipt.authority_mode.clone(),
-            process_start_authority_digest: digest_bytes(&receipt.process_start_authority_digest)
+            stream_id: digest_bytes(row.stream_id()).expect("verified digest"),
+            event_sequence: row.event_sequence().to_string(),
+            event_digest: digest_bytes(row.event_digest()).expect("verified digest"),
+            receipt_schema_version: row.receipt_schema_version().to_owned(),
+            intent_version: row.intent_version().to_owned(),
+            task_kind: row.task_kind().to_owned(),
+            risk_class: row.risk_class().to_owned(),
+            execution_preapproved: row.execution_preapproved(),
+            requires_new_authority: row.requires_new_authority(),
+            irreversible_or_high_risk: row.irreversible_or_high_risk(),
+            observed_task_state: row.observed_task_state().to_owned(),
+            disposition: row.disposition().to_owned(),
+            decision_reason: row.decision_reason().to_owned(),
+            model: row.model().map(str::to_owned),
+            verification: row.verification().map(str::to_owned),
+            authority_mode: row.authority_mode().to_owned(),
+            process_start_authority_digest: digest_bytes(row.process_start_authority_digest())
                 .expect("validated digest"),
             ingress_profile_adapter_commitment: digest_bytes(
-                &receipt.ingress_profile_adapter_commitment,
+                row.ingress_profile_adapter_commitment(),
             )
-            .expect("validated digest"),
-            store_authority_head_digest: digest_bytes(&receipt.store_authority_head_digest)
+            .expect("verified digest"),
+            store_authority_head_digest: digest_bytes(row.store_authority_head_digest())
                 .expect("validated digest"),
-            writer_lease_receipt_digest: receipt
-                .writer_lease_receipt_digest
-                .as_ref()
+            writer_lease_receipt_digest: row
+                .writer_lease_receipt_digest()
                 .map(|value| digest_bytes(value).expect("validated digest")),
-            writer_lease_head_digest: receipt
-                .writer_lease_head_digest
-                .as_ref()
+            writer_lease_head_digest: row
+                .writer_lease_head_digest()
                 .map(|value| digest_bytes(value).expect("validated digest")),
-            writer_fencing_token: receipt.writer_fencing_token.map(|value| value.to_string()),
-            authority_digest: digest_bytes(&receipt.authority_digest).expect("validated digest"),
-            receipt_digest: digest_bytes(&receipt.receipt_digest).expect("validated digest"),
+            writer_fencing_token: row.writer_fencing_token().map(|value| value.to_string()),
+            authority_digest: digest_bytes(row.authority_digest()).expect("verified digest"),
+            receipt_digest: digest_bytes(row.receipt_digest()).expect("verified digest"),
         }
     }
 
@@ -3759,8 +3392,11 @@ mod tests {
         TaskLedgerStreamIdentity,
     };
     use lattice_task_ledger::{
-        ActionId, ActorId, AppendCommand, CommandId, CorrelationId, LedgerEventKind, LedgerOutcome,
-        ReasonCode, VerifiedStream, plan_append,
+        ActionId, ActorId, AppendCommand, AutonomyAppendMetadata, AutonomyAuthorityEvidence,
+        AutonomyDecisionReason, AutonomyIntent, AutonomyObservedTaskState, AutonomyRecommendation,
+        AutonomyRiskClass, AutonomyTaskKind, CommandId, CorrelationId, LedgerEventKind,
+        LedgerOutcome, ReasonCode, VerifiedStream, apply_append_plan, plan_append,
+        plan_autonomy_receipt_append,
     };
     use serde_json::json;
 
@@ -3802,6 +3438,10 @@ mod tests {
     }
 
     fn authority() -> StoreAuthorityHead {
+        authority_with_head('d')
+    }
+
+    fn authority_with_head(byte: char) -> StoreAuthorityHead {
         StoreAuthorityHead::new(
             RuntimeKind::Live,
             StoreDaemonInstanceId::new("daemon-1").expect("daemon"),
@@ -3809,9 +3449,72 @@ mod tests {
             RuntimeAdmissionMode::Active,
             StoreAuthorityRevision::new(1).expect("revision"),
             fixed_digest('c'),
-            fixed_digest('d'),
+            fixed_digest(byte),
         )
         .expect("authority")
+    }
+
+    fn ask_user_autonomy_plan(
+        expected_store_authority: &StoreAuthorityHead,
+    ) -> AutonomyReceiptAppendPlan {
+        let vacant =
+            VerifiedStream::vacant(identity("project-1"), RuntimeKind::Live).expect("stream");
+        let created_plan = plan_append(
+            &vacant,
+            AppendCommand::new_autonomy_required_task_created(
+                vacant.head().clone(),
+                CommandId::new("required-profile").expect("command"),
+                CorrelationId::new("correlation-1").expect("correlation"),
+                "2026-08-13T00:00:00Z",
+                ActorId::new("lattice-runtime").expect("actor"),
+                ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+                fixed_digest('9'),
+                None,
+            )
+            .expect("required command"),
+        )
+        .expect("required plan");
+        let created = apply_append_plan(&vacant, &created_plan).expect("created stream");
+        plan_autonomy_receipt_append(
+            &created,
+            AutonomyAppendMetadata::new(
+                CommandId::new("autonomy").expect("command"),
+                CorrelationId::new("correlation-1").expect("correlation"),
+                "2026-08-13T00:00:01Z",
+                ActorId::new("lattice-runtime").expect("actor"),
+            )
+            .expect("metadata"),
+            AutonomyIntent::new(
+                AutonomyTaskKind::Feature,
+                AutonomyRiskClass::R0,
+                false,
+                false,
+                false,
+                AutonomyObservedTaskState::Draft,
+                AutonomyRecommendation::AskUser {
+                    reason: AutonomyDecisionReason::NewUserDecision,
+                },
+            ),
+            AutonomyAuthorityEvidence::new_p0_process_start_profile(
+                fixed_digest('1'),
+                fixed_digest('2'),
+                expected_store_authority.head_digest().clone(),
+                None,
+            )
+            .expect("authority evidence"),
+        )
+        .expect("autonomy plan")
+    }
+
+    #[test]
+    fn autonomy_plan_binds_the_transaction_store_authority_head() {
+        let expected = authority();
+        let plan = ask_user_autonomy_plan(&expected);
+        assert!(autonomy_plan_matches_store_authority(&plan, &expected));
+        assert!(!autonomy_plan_matches_store_authority(
+            &plan,
+            &authority_with_head('e')
+        ));
     }
 
     #[test]
@@ -4052,6 +3755,69 @@ mod tests {
         assert_eq!(
             current.autonomy_record_sql(),
             Some(LEDGER_RECORD_AUTONOMY_RECEIPT_SQL)
+        );
+    }
+
+    #[test]
+    fn historical_v3_profile_rejects_new_required_task_profile() {
+        let stream =
+            VerifiedStream::vacant(identity("project-1"), RuntimeKind::Live).expect("stream");
+        let plan = plan_append(
+            &stream,
+            AppendCommand::new_autonomy_required_task_created(
+                stream.head().clone(),
+                CommandId::new("required-profile").expect("command"),
+                CorrelationId::new("correlation-1").expect("correlation"),
+                "2026-08-13T00:00:00Z",
+                ActorId::new("lattice-runtime").expect("actor"),
+                ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+                fixed_digest('9'),
+                None,
+            )
+            .expect("required command"),
+        )
+        .expect("required plan");
+        assert!(plan_uses_autonomy_surface(&plan));
+        assert!(!TaskLedgerSqlProfile::V3.supports_autonomy());
+    }
+
+    #[test]
+    fn historical_v3_load_rejects_retained_autonomy_surface() {
+        let vacant =
+            VerifiedStream::vacant(identity("project-1"), RuntimeKind::Live).expect("stream");
+        let created_plan = plan_append(
+            &vacant,
+            AppendCommand::new_autonomy_required_task_created(
+                vacant.head().clone(),
+                CommandId::new("required-profile").expect("command"),
+                CorrelationId::new("correlation-1").expect("correlation"),
+                "2026-08-13T00:00:00Z",
+                ActorId::new("lattice-runtime").expect("actor"),
+                ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+                fixed_digest('9'),
+                None,
+            )
+            .expect("required command"),
+        )
+        .expect("required plan");
+        let pending = apply_append_plan(&vacant, &created_plan).expect("pending stream");
+        assert_eq!(
+            validate_autonomy_surface_for_profile(&pending, TaskLedgerSqlProfile::V3),
+            Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))
+        );
+
+        let receipt_plan = ask_user_autonomy_plan(&authority());
+        let complete =
+            apply_append_plan(&pending, receipt_plan.append_plan()).expect("complete stream");
+        assert!(
+            complete
+                .events()
+                .iter()
+                .any(|event| { event.kind() == LedgerEventKind::AutonomyReceiptRecorded })
+        );
+        assert_eq!(
+            validate_autonomy_surface_for_profile(&complete, TaskLedgerSqlProfile::V3),
+            Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))
         );
     }
 
