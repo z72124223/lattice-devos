@@ -9,10 +9,12 @@ status: in_progress
 parallel_safe: false
 depends_on:
   - TASK-022
+  - TASK-076
 integration_sources:
   task_022_implementation: 12f71009b5baa3ff3ddd026e0912f90db6d87e56
   task_022_closure: a1aced9f5acc81e9081a966a1e953b3029e45163
   task_050_implementation: 714f3b9057db47e694adacf9aef5f37e09f31712
+  task_076_implementation: f32531002a0c6588e96dc9fe0229db7e0ed546e0
 branch: feature/task-075-schema-v5-migration-reconciliation
 implementation_worktree: lattice-worktrees/task-075-schema-v5-migration-reconciliation
 implementation_base: 0f8cee695e1089d8d883d9c7647a2e105b5bcae1
