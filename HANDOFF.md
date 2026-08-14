@@ -32,8 +32,8 @@ exact verified commit.
 
 Integration status is `NEEDS_REVIEW` only because merge/Draft-promotion
 authorization and GitHub human approval are absent. No merge or Draft promotion
-occurred. TASK-075 is now the sole `in_progress` ticket; TASK-050 remains
-`waiting_dependency`, and TASK-051 remains blocked. Existing
+occurred. TASK-075 has completed its combined-candidate revalidation; TASK-050
+is now the sole `in_progress` ticket, and TASK-051 remains blocked. Existing
 PostgreSQL listeners at `5432`, `64272`, and `55432`, unrelated dirty
 worktrees, and the protected TASK-051 runner must not be touched.
 
@@ -63,7 +63,7 @@ and remains explicitly not authorized for merge or Draft promotion.
 
 ## Current Outcome
 
-TASK-075 is `in_progress`. Governance selects the exact TASK-022 Project
+TASK-075 is complete. Governance selects the exact TASK-022 Project
 Registry `0005` source at commit `12f7100` (SHA-256
 `b7af1f8a8ac370bbfc8a5312497461587cb8a86eb32ff97e5b865c7ae9bf0dcf`)
 as global schema v4 and requires TASK-050 autonomy commit `714f3b9` to be
@@ -86,17 +86,19 @@ Codebase Memory v1/v2 bytes and v2/global-v3 receipts remain immutable;
 TASK-075 adds only extension v3/global-v5 plus per-analysis profile provenance
 for byte-identical mixed graph/reflection replay. Contracts 1.13 and Postgres
 Codebase Memory 1.1 own that compatibility amendment.
-Project Registry pure semantics stay at 1.2. TASK-050 is now a waiting
-dependency and cannot unlock TASK-051 until TASK-075 plus TASK-050 acceptance
-produce a clean identified candidate.
+Project Registry pure semantics stay at 1.2. The TASK-076 wrapper executed all
+16 TASK-075 gates, required the exact full-acceptance marker, and closed four
+distinct marker-owned PostgreSQL 17.10 receipts for Store-only, catalog,
+Memory-v3, and TASK-050 profiles. Code and architecture re-reviews found no
+issues, integration found zero technical blockers, and no additional heavy
+rerun was needed. The implementation source remains `a3599c1`; the exact
+combined revalidation source is `f325310`.
 
-This is a governance/implementation checkpoint only. No focused Rust,
-PostgreSQL, fresh-process, full workspace, review, integration, commit, push,
-merge, deployment, release, or completion result is claimed yet. Continue only
-inside
-`docs/tickets/TASK-075-schema-v5-registry-autonomy-migration-reconciliation.md`
-and its exact `allowed_paths`; preserve unrelated Hermes and TASK-051/052/053
-content.
+TASK-050 is now the sole `in_progress` ticket. Its original source `714f3b9`
+remains provenance only; closure must use the exact combined schema-v5
+candidate and retained fresh-process receipt. TASK-051 remains blocked until
+TASK-050 records its own verified completion. No merge, Draft promotion,
+deployment, release, or public exposure is authorized.
 
 # TASK-074 Local Model Assist Handoff — 2026-08-14
 

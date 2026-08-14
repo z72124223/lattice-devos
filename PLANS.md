@@ -67,13 +67,19 @@ no technical blocker. The verified implementation/governance checkpoint is
 `f32531002a0c6588e96dc9fe0229db7e0ed546e0`; GitHub Draft PR #12 remains not
 authorized for merge or Draft promotion.
 
-## Current schema-v5 reconciliation closure - TASK-075
+## Completed schema-v5 reconciliation - TASK-075
 
-CURRENT TASK-075 - the Writer-v2 dependency is now satisfied. Revalidate and
-close the existing clean schema-v5 checkpoint `a3599c1` against SPEC-002 v34,
-Postgres Store 1.9, the exact TASK-076 bridge/current profiles, and the retained
-TASK-050 fresh-process acceptance. TASK-050 remains `waiting_dependency` until
-TASK-075 closes; TASK-051 remains blocked until TASK-050 acceptance closes.
+COMPLETED TASK-075 - the exact Registry-v4 `0005`, autonomy-v5 `0006`,
+Memory-v3 provenance, and Writer-v2 bridge combined candidate passed all 16
+TASK-075 gates and four distinct marker-owned PostgreSQL receipt closures. The
+implementation source remains `a3599c1`; the exact combined revalidation source
+is `f32531002a0c6588e96dc9fe0229db7e0ed546e0`.
+
+## Current autonomy receipt closure - TASK-050
+
+CURRENT TASK-050 - use the completed TASK-075/TASK-076 combined candidate and
+its retained fresh-process acceptance to finish the autonomy receipt closure.
+TASK-051 remains blocked until TASK-050 records its own verified completion.
 
 ## Completed task update — TASK-072
 

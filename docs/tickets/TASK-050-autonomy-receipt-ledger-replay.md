@@ -2,22 +2,26 @@
 ticket_id: TASK-050
 title: Autonomy receipt durable Task Ledger event and fresh-process replay
 spec_id: SPEC-002
-spec_version: 33
+spec_version: 34
 related_spec_id: SPEC-003
 related_spec_version: 5
 module_id: task-ledger
 constitution_version: 2.2
-status: waiting_dependency
+status: in_progress
 parallel_safe: false
 depends_on:
   - TASK-075
   - TASK-038
   - commit:175633ca40352a314a0b699c7cb53697c239d481
-blocked_by:
-  - TASK-075
+integration_sources:
+  task_075_implementation: a3599c18d9462732c3b82c9e7d302980657eeccc
+  task_075_combined_candidate: f32531002a0c6588e96dc9fe0229db7e0ed546e0
 branch: feature/task-050-autonomy-receipt-ledger-replay
 implementation_worktree: lattice-worktrees/task-050-autonomy-receipt-ledger-replay
 implementation_head: 714f3b9057db47e694adacf9aef5f37e09f31712
+closure_branch: feature/task-076-postgres-writer-lease-v2
+closure_worktree: lattice-worktrees/task-076-postgres-writer-lease-v2
+combined_revalidation_head: f32531002a0c6588e96dc9fe0229db7e0ed546e0
 allowed_paths:
   - docs/tickets/TASK-050-autonomy-receipt-ledger-replay.md
   - docs/specs/SPEC-002-autonomous-development-platform.md
@@ -54,19 +58,14 @@ allowed_paths:
 
 ## Current Implementation State
 
-The identified implementation source at `714f3b9` has no
-`TASK050_FULLY_VERIFIED` or `TASK050_ACCEPTED_FOR_TASK051_MACHINE_GATE`
-receipt and does not unlock TASK-051. It placed autonomy at ordinal `0005`,
-which conflicts with the accepted Project Registry schema-v4 `0005` source.
-TASK-075 owns the separately governed reconciliation: preserve the exact
-Registry `0005`, re-author autonomy as schema-v5 `0006`, retain per-command
-Registry and Codebase Memory persistence-profile provenance, advance the
-independent Memory extension to v3/global-v5 without editing v1/v2, and prove
-mixed replay. TASK-076 then owns the Writer Lease v2 compatibility bridge that
-allows the accepted global-v3/Memory-v2/Writer-v1 platform to reach that exact
-schema-v5 candidate without rewriting lease receipts or fencing history.
-TASK-050 is `waiting_dependency` and may not resume acceptance or claim
-completion until both tickets produce one verified candidate.
+The original implementation source remains `714f3b9`; its autonomy-at-ordinal
+`0005` history is not accepted. TASK-075 re-authored that behavior as the exact
+schema-v5 `0006`, and TASK-076 supplied the Writer Lease v2 bridge required to
+reach the combined candidate without rewriting historical receipts or fencing
+state. Both dependencies are complete and the exact combined candidate
+`f32531002a0c6588e96dc9fe0229db7e0ed546e0` passed the embedded TASK-050
+fresh-process acceptance. This ticket is now `in_progress` for bounded closure
+verification; it does not unlock TASK-051 until its own completion is recorded.
 
 The user decision relayed from coordination thread
 `019ff693-b2c3-7a81-9704-49f1e6e3f2d1` requires Autonomy Intent/Receipt to
@@ -192,23 +191,23 @@ synthetic Policy or Approval evidence.
   byte-identical. `autonomy_receipt` is internal only and must be rejected if
   supplied by an MCP caller or emitted on the wire.
 
-## Preconditions That Fail Closed Before Implementation
+## Preconditions And Fail-Closed Boundary
 
-1. TASK-075 must complete its exact schema-v5 reconciliation first. The
-   accepted migration order is Project Registry schema-v4 `0005` followed by
-   `db/migrations/0006_task_autonomy_receipt.sql` as schema v5. Any other
-   ordinal, edited Registry `0005`, missing profile provenance, or unresolved
-   TASK-075 acceptance gate keeps this ticket blocked.
+1. TASK-075 completed its exact schema-v5 reconciliation on the combined
+   candidate. The accepted migration order is Project Registry schema-v4
+   `0005` followed by `db/migrations/0006_task_autonomy_receipt.sql` as schema
+   v5. Any other ordinal, edited Registry `0005`, missing profile provenance,
+   or substituted combined candidate fails closed.
 2. The implementation base must contain `175633c` and the accepted TASK-038
    Task Ledger/Writer Lease/PostgreSQL boundaries. Task-owned paths must have no
    unknown drift. The existing unrelated dirty
    `scripts/test-task038-four-tool-acceptance.ps1` is explicitly excluded and
    must not be modified, staged, cleaned, reset, or used as TASK-050 evidence.
-3. SPEC-002 v32, ADR-011/019/020, Task Ledger 2.2, and Postgres Store 1.7 must
+3. SPEC-002 v34, ADR-011/019/020, Task Ledger 2.2, and Postgres Store 1.9 must
    remain aligned with TASK-075's closed event, mixed historical replay,
    event-owned subject persistence, per-command Registry profile provenance,
    and unchanged MCP wire contract. Do not broaden `allowed_paths` implicitly.
-   ADR-022, Contracts 1.13, and Postgres Codebase Memory 1.1 must preserve
+   ADR-022, Contracts 1.13, and Postgres Codebase Memory 1.2 must preserve
    v2/global-v3 receipt identity while admitting exact v3/global-v5.
 4. Migration `0006` must prove fresh install and exact prefix upgrades through
    Registry schema v4 without rewriting historical events, receipts, heads,
@@ -303,9 +302,9 @@ and update this ticket before substituting another command.
 
 ## Dependencies And Overlap
 
-`parallel_safe: false`. This ticket is blocked by TASK-075, then changes the
-closed Task Ledger event set,
-canonical hashing, the sole PostgreSQL Ledger transaction, TaskLifecycle
+`parallel_safe: false`. TASK-075 is complete; this ticket now closes the
+already implemented Task Ledger event set, canonical hashing, the sole
+PostgreSQL Ledger transaction, TaskLifecycle
 projection, and the P0 Status compatibility boundary. It cannot run in
 parallel with another Task Ledger schema/migration, TaskLifecycle, Postgres
 Store, MCP Status, Writer Lease assertion, or autonomy-contract change.

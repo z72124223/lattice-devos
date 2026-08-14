@@ -1444,7 +1444,7 @@ packaging modules do not activate functional provider modules.
   deadline-owned run. Stale helper variables have no effect and are never
   echoed. The legacy one-shot helper, direct contained provider route, four MCP
   schemas, PostgreSQL truth, and task/status zero-effect paths remain intact.
-- [ ] AC-43: TASK-075 preserves the exact TASK-022 Registry migration as
+- [x] AC-43: TASK-075 preserves the exact TASK-022 Registry migration as
   `0005_project_registry_repository.sql` at global schema v4 and moves the
   TASK-050 autonomy expansion to `0006_task_autonomy_receipt.sql` at global
   schema v5. A database whose migration ordinal `0005` identifies the
