@@ -2,13 +2,18 @@
 ticket_id: TASK-050
 title: Autonomy receipt durable Task Ledger event and fresh-process replay
 spec_id: SPEC-002
-spec_version: 34
+spec_version: 35
 related_spec_id: SPEC-003
 related_spec_version: 5
 module_id: task-ledger
-constitution_version: 2.2
+constitution_version: 2.3
 status: in_progress
-human_gate: pending_task050_profile_and_ports_amendment
+human_gate: approved_task050_profile_and_ports_amendment
+governance_amendment_authorized_at: 2026-08-15
+governance_amendment_authority: direct_user_reply
+governance_amendment_source_thread_id: 019ffee6-488a-70e0-8990-9aa9133892a7
+governance_amendment_authorized_at_utc: 2026-08-14T16:40:08Z
+governance_amendment_decision: task050_profile_owner_ports_and_fresh_latticed_repair
 parallel_safe: false
 depends_on:
   - TASK-075
@@ -39,6 +44,7 @@ allowed_paths:
   - docs/adr/ADR-011-task-ledger-event-receipt-and-resource-ownership.md
   - docs/adr/ADR-019-durable-postgres-task-ledger-and-outbox.md
   - docs/modules/task-ledger/MODULE_CONSTITUTION.md
+  - docs/modules/lattice-ports/MODULE_CONSTITUTION.md
   - docs/modules/orchestrator-runtime/MODULE_CONSTITUTION.md
   - docs/modules/postgres-store/MODULE_CONSTITUTION.md
   - docs/modules/latticed/MODULE_CONSTITUTION.md
@@ -102,7 +108,7 @@ The accepted implementation base must contain
 `AutonomyIntent`/`AutonomyReceipt` classifier is non-durable. This ticket does
 not treat that commit or its tests as persistence evidence.
 
-## Current Review Blockers - 2026-08-14
+## Approved Repair Scope - reviewed 2026-08-14, authorized 2026-08-15
 
 Independent code/security and architecture review found no P0 issue and four
 closure blockers:
@@ -126,15 +132,42 @@ The prior authorization records under `authorized_path_reconciliation` make
 the three restored implementation/test paths part of this ticket's durable
 allowlist. They do not authorize the new profile/Ports governance decision.
 
-The pending Human Gate is one narrow amendment: make Task Ledger the owner of
+The user approved the narrow Human Gate on 2026-08-15: make Task Ledger the owner of
 an exact versioned authoritative profile discriminator; preserve historical
 optional receipt semantics while making autonomy-required profiles fail
 closed; version and trace the Ports contract; add only
 `docs/modules/lattice-ports/MODULE_CONSTITUTION.md` to `allowed_paths`; remove
 the out-of-bound public Contracts SHA-256 helper so Contracts remains at 1.13;
-and keep the public MCP wire at exactly four tools and six output fields. No
-production repair or PostgreSQL acceptance run starts before that explicit
-authorization.
+and keep the public MCP wire at exactly four tools and six output fields. This
+authorization is now consumed by the governance and repair work below; it does
+not authorize any other path, migration, public contract, merge, or release.
+
+## Task-created Profile Contract
+
+- Task Ledger is the sole owner of the semantic domain
+  `lattice.task-ledger.task-created-profile`, version `1.0`. Its carrier is the
+  existing hash-bound `TASK_CREATED.action`; no event field, database column,
+  or public MCP field is added.
+- `CONTROLLED_CODEX_CANARY` maps to the historical
+  `HistoricalAutonomyOptionalV1` profile.
+- `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` maps to
+  `AutonomyReceiptRequiredV1`.
+- Other existing action families are `NotApplicable` and retain their existing
+  bytes and generic Ledger behavior. Unknown values in the reserved
+  `CONTROLLED_CODEX_CANARY*` namespace fail with
+  `LEDGER_UNKNOWN_TASK_CREATED_PROFILE` during append, replay, and Status.
+- A required profile with only `TASK_CREATED` is
+  `PendingRequiredReceipt`: it may be reconciled only by exactly one typed
+  `AUTONOMY_RECEIPT_RECORDED` append at sequence `2`. It cannot report terminal
+  success, progress, dispatch, or execute an external effect. Missing, late,
+  duplicate, or unknown receipt/profile state fails closed.
+- Historical optional profiles may have no receipt. If an autonomy receipt is
+  present, it is still unique and sequence `2`.
+- Task Ledger exposes typed classification and autonomy-append planning over a
+  verified stream. Generic `AppendCommand::new` cannot construct or forge an
+  `AUTONOMY_RECEIPT_RECORDED` event. Postgres Store consumes the verified
+  scalar plan and performs I/O only; Orchestrator supplies a pure recommendation
+  and does not own canonical receipt or hash semantics.
 
 ## Canonical Event Contract
 
@@ -202,7 +235,7 @@ synthetic Policy or Approval evidence.
 
 ## Ordering, Idempotency, Lease, And Fence Rules
 
-- A new-profile Task must contain exactly one V1 autonomy receipt event after
+- An `AutonomyReceiptRequiredV1` Task must contain exactly one V1 autonomy receipt event after
   `TASK_CREATED` and before any writable workspace, Codex, verification, Git,
   downstream, or other external effect.
 - `PROCEED` may append only with the exact current live Writer Lease authority
@@ -217,9 +250,11 @@ synthetic Policy or Approval evidence.
   command receipt without another event or subject row.
 - Unknown commit outcome returns no success receipt, poisons the current store
   instance, and requires a fresh connection plus exact-command reconciliation.
-- Historical tasks created under a pre-TASK-050 ingress profile remain valid
-  with internal `autonomy_receipt = None`. A new profile that declares the
-  receipt required cannot advance without exactly one valid event.
+- Historical optional task-control streams remain valid with internal
+  `autonomy_receipt = None`. Not-applicable actions retain generic Ledger replay
+  compatibility but cannot form `TaskLifecycleEvidence` or normal Task Status.
+  A receipt-required profile cannot advance without exactly one valid event at
+  sequence `2`.
 - Unknown Ledger event kind, receipt/authority schema version, event-owned row
   version, malformed scalar, orphan row, row/event digest mismatch, missing
   row, duplicate row, reordered event, checkpoint drift, or an old binary that
@@ -228,13 +263,16 @@ synthetic Policy or Approval evidence.
 
 ## Internal Status Projection And Stable MCP Wire Contract
 
-- Extend internal `TaskLifecycleEvidence` with
+- Extend internal `TaskLifecycleEvidence` with a neutral
+  `profile: Option<TaskLifecycleProfile>` and
   `autonomy_receipt: Option<AutonomyReceiptProjection>`. The projection contains
   the canonical receipt digest, authority digest, event digest, observed state,
   disposition, reason, model, and verification; it is reconstructed only from
   verified Ledger replay.
-- New-profile Status requires one valid receipt. Historical profiles return
-  `None`; they do not synthesize a receipt.
+- Receipt-required Status requires one valid receipt. Historical optional
+  profiles return `None`; they do not synthesize a receipt. Not-applicable or
+  missing profile evidence at the task-control boundary fails closed rather
+  than being mistaken for a receipt-optional controlled canary.
 - `lattice_task_submit` and `lattice_task_status` must still emit exactly the
   existing six MCP fields: `schema_version`, `status`, `task_state`,
   `task_ref`, `ledger_head_digest`, and `result_digest`.
@@ -255,7 +293,7 @@ synthetic Policy or Approval evidence.
    unknown drift. The existing unrelated dirty
    `scripts/test-task038-four-tool-acceptance.ps1` is explicitly excluded and
    must not be modified, staged, cleaned, reset, or used as TASK-050 evidence.
-3. SPEC-002 v34, ADR-011/019/020, Task Ledger 2.2, and Postgres Store 1.9 must
+3. SPEC-002 v35, ADR-011/019/020, Task Ledger 2.3, and Postgres Store 1.10 must
    remain aligned with TASK-075's closed event, mixed historical replay,
    event-owned subject persistence, per-command Registry profile provenance,
    and unchanged MCP wire contract. Do not broaden `allowed_paths` implicitly.
@@ -272,13 +310,15 @@ synthetic Policy or Approval evidence.
 
 ## Acceptance Criteria
 
-- [ ] Governance first: SPEC-002, ADR-011/019, and the four module
+- [x] Governance first: SPEC-002, ADR-011/019, and the five module
   constitutions agree on the new event owner, subject persistence, mixed
   historical compatibility, dependency direction, and six-field wire freeze.
 - [ ] Closed-contract tests reject every unknown/extra/missing field and every
   mutation of binding, intent, observed state, decision, authority, or digest.
-- [ ] Task Ledger tests add/parse only `AUTONOMY_RECEIPT_RECORDED`, preserve all
-  existing event/hash fixtures, and reject unknown event or payload versions.
+- [ ] Task Ledger tests own the exact task-created profile mapping and canonical
+  authority/receipt hashes, add/parse only `AUTONOMY_RECEIPT_RECORDED`, deny a
+  generic forged append, preserve all existing event/hash fixtures, and reject
+  unknown profile, event, or payload versions.
 - [ ] Replay proves `TASK_CREATED -> AUTONOMY_RECEIPT_RECORDED`, exactly-one
   semantics, exact retry, changed-command substitution denial, orphan/duplicate
   subject denial, digest tamper, reordering, truncation, and trusted-checkpoint
@@ -293,9 +333,10 @@ synthetic Policy or Approval evidence.
   Registry `0005` and autonomy `0006` passes without historical rewrite;
   partial, edited, wrong-order, misplaced-autonomy-`0005`, unknown,
   active-at-upgrade, or rollback-incompatible state fails closed.
-- [ ] A disposable PostgreSQL 17 runtime physically restarts; a fresh
-  `latticed` process reconstructs a byte-equal internal autonomy projection
-  with zero model, Git, GitHub, verification, Graphify, Hermes, Memory, or
+- [ ] A disposable PostgreSQL 17 runtime physically restarts; fresh canonical
+  `latticed` processes prove both `ASK_USER` and `PROCEED`, reconstruct a
+  byte-equal internal autonomy projection through Status, and produce zero
+  model, Git, GitHub, verification, Graphify, Hermes, Memory, or
   product-worktree effect.
 - [ ] Rust MCP tests prove exactly four tools and byte-identical closed input
   and six-field `lattice.task.status.v1` output. Internal receipt data never
@@ -307,24 +348,27 @@ synthetic Policy or Approval evidence.
 
 ## TDD Behaviors
 
-1. RED unknown event/payload/authority versions and receipt-field mutation;
+1. RED generic autonomy-event forgery plus unknown task-created profile;
+   GREEN Task Ledger-owned classifier and typed canonical append plan.
+2. RED unknown event/payload/authority versions and receipt-field mutation;
    GREEN closed typed canonical contracts and digests.
-2. RED missing/duplicate/orphan autonomy subject and changed exact retry;
+3. RED missing/duplicate/orphan autonomy subject and changed exact retry;
    GREEN Task Ledger append, event hash, receipt, checkpoint, and replay.
-3. RED unfenced/stale/substituted `PROCEED` and writer-bearing `ASK_USER`;
+4. RED unfenced/stale/substituted `PROCEED` and writer-bearing `ASK_USER`;
    GREEN exact authority/fence policy with first-failure suppression.
-4. RED partial PostgreSQL persistence and mixed-version corruption; GREEN
+5. RED partial PostgreSQL persistence and mixed-version corruption; GREEN
    atomic schema-v5 `0006` persistence plus non-rewriting historical replay.
-5. RED process-cache-only Status and seventh MCP output field; GREEN internal
+6. RED process-cache-only Status and seventh MCP output field; GREEN internal
    fresh-process projection with byte-identical existing six-field wire output.
-6. RED any model/Git/GitHub/downstream effect in the acceptance canary; GREEN
+7. RED any model/Git/GitHub/downstream effect in the acceptance canary; GREEN
    restart-safe receipt-only machine acceptance and cleanup.
 
 ## Verification
 
 | Check | Command or service | Expected evidence |
 |---|---|---|
-| Canonical classifier/receipt | `cargo test -p lattice-orchestrator --test autonomy_control` | Closed decisions and all digest/authority mutations pass |
+| Canonical profile/receipt owner | `cargo test -p lattice-task-ledger --test task_ledger` | Exact profile mapping, generic-forgery denial, typed plan, closed decisions and all digest/authority mutations pass |
+| Advisory classifier | `cargo test -p lattice-orchestrator --test autonomy_control` | Pure recommendation remains aligned without owning canonical receipt/hash semantics |
 | Ledger semantics | `cargo test -p lattice-task-ledger` | New event, exact retry, replay and corruption matrix pass; old fixtures unchanged |
 | Lifecycle projection | `cargo test -p lattice-runtime --test task_control` | Exactly-one ordering, lease/fence policy and internal projection pass |
 | MCP compatibility | `cargo test -p lattice-runtime --test mcp` | Four tools and exact six-field public output remain unchanged |
@@ -363,9 +407,10 @@ Store, MCP Status, Writer Lease assertion, or autonomy-contract change.
 
 ## Human Gate
 
-None for the bounded implementation and disposable local verification: the
-user has selected a new versioned Task Ledger event as the sole durable truth.
-Any need to change the event name/version, public six-field MCP output, listed
+Consumed on 2026-08-15 for the exact Task Ledger-owned versioned profile
+discriminator, Ports constitution 1.9/path, owner-boundary repair, Contracts
+SHA-helper removal, and unchanged four-tool/six-field MCP contract recorded
+above. Any other change to the event name/version, public MCP output, listed
 `allowed_paths`, authority profile, migration number `0006`, TASK-075's frozen
 Registry `0005`/profile rules, external effect scope, or protected action is a
 new decision and blocks this ticket.

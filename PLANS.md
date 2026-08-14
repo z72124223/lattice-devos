@@ -78,7 +78,8 @@ is `f32531002a0c6588e96dc9fe0229db7e0ed546e0`.
 ## Current autonomy receipt closure - TASK-050
 
 CURRENT TASK-050 - use the completed TASK-075/TASK-076 combined candidate and
-its retained fresh-process acceptance to finish the autonomy receipt closure.
+its retained marker only as a historical baseline; the prior run did not prove
+a fresh canonical `latticed` process and is not closure evidence.
 TASK-051 remains blocked until TASK-050 records its own verified completion.
 
 ### TASK-050 recovery trajectory
@@ -97,11 +98,11 @@ the current runner launches a Store test binary rather than fresh canonical
 `latticed`. No new PostgreSQL run is authorized until the smallest failing
 regressions and exact repair surface are fixed.
 
-Current step: await the one narrow Human Gate recorded in the TASK-050 ticket.
-After approval, add one focused RED regression at a time for the owner
-boundary, missing-receipt denial, and fresh-process runner shape. Then
-implement only the smallest approved TASK-050 correction and make each check
-GREEN before the next step.
+Current step: the user approved the one narrow Human Gate on 2026-08-15.
+Complete the versioned governance amendment first, then add one focused RED
+regression at a time for the owner boundary, missing-receipt denial, and
+fresh-process runner shape. Implement only the smallest approved TASK-050
+correction and make each check GREEN before the next step.
 
 Verification: focused tests first; then the affected Rust suites, runner self-
 test, one marker-owned PostgreSQL acceptance, repository/format/Clippy gates,
@@ -109,9 +110,10 @@ independent code/security and architecture re-review, and integration/CI.
 
 | Workflow stage | Status | Current evidence | Gate strength |
 |---|---|---|---|
-| Repository/spec/ticket/constitution inspection | valid | TASK-050, SPEC-002 v34, ADR-011/019/020, four constitutions | documented-only |
+| Repository/spec/ticket/constitution inspection | valid | TASK-050, SPEC-002 v35, ADR-011/019/020, Task Ledger 2.3, Ports 1.9, Store 1.10, Orchestrator 2.6, latticed 1.8 | documented-only |
 | Dependencies and combined branch | valid | TASK-075/TASK-076 complete; `f325310` functional candidate | machine-enforced |
-| TDD implementation | blocked | P1 candidates require focused RED tests | machine-enforced |
+| Module constitution | complete | SPEC v35 and five versioned constitutions; repository check, scope audit, and architecture re-review pass | machine-enforced |
+| TDD implementation | in progress | begins with one focused Task Ledger generic-forgery RED | machine-enforced |
 | Focused/full verification | stale | prior wrapper predates the required repair | machine-enforced |
 | Code/security and architecture review | blocked | independent reviews found unresolved P1 candidates | documented-only |
 | Integration/CI | blocked | PR remains Draft; latest docs CI passes but repaired tree does not exist | machine-enforced |
@@ -119,9 +121,9 @@ independent code/security and architecture re-review, and integration/CI.
 Risk and drift: the earlier closure-only strategy was invalidated by independent
 review. Do not mark TASK-050 complete, activate TASK-051, or reuse the existing
 fresh-process claim until these P1 findings are resolved and re-reviewed.
-The required versioned Ports/profile governance may need paths outside the
-current durable allowlist; implementation remains paused until prior authority
-is found or one narrow scope amendment is explicitly approved.
+The user explicitly approved the narrow Task Ledger profile/Ports amendment on
+2026-08-15. Only the Ports constitution is added to the durable allowlist;
+Contracts remains at 1.13 by removing the out-of-bound public SHA helper.
 
 ## Completed task update — TASK-072
 

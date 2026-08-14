@@ -101,10 +101,13 @@ TASK-050 is now the sole `in_progress` ticket. Its original source `714f3b9`
 remains provenance only; closure must use the exact combined schema-v5
 candidate. Independent review invalidated the prior fresh-process claim and
 found unresolved P1 ownership, required-profile, Ports-versioning, and
-acceptance-runner gaps. Repair is paused at the narrow Human Gate recorded in
-the TASK-050 ticket: approve a Task Ledger-owned versioned profile
-discriminator, Ports constitution amendment/path, and removal of the Contracts
-public SHA helper while preserving the six-field MCP wire. TASK-051 remains
+acceptance-runner gaps. On 2026-08-15 the user approved and consumed the narrow
+Human Gate recorded in the TASK-050 ticket: Task Ledger 2.3 owns the versioned
+profile discriminator and canonical autonomy receipt/hash semantics; Ports 1.9
+carries neutral lifecycle profile evidence; Store 1.10, Orchestrator 2.6, and
+`latticed` 1.8 consume that contract; the Contracts public SHA helper is
+removed while Contracts remains 1.13 and the six-field MCP wire is frozen.
+Governance validation and focused TDD repair are active. TASK-051 remains
 blocked until TASK-050 is repaired, freshly revalidated, re-reviewed, and
 records its own verified completion. No merge, Draft promotion, deployment,
 release, or public exposure is authorized.

@@ -4,7 +4,7 @@
   continue the approved LATTICE plan through MVP-3
 - Date: 2026-07-29
 - Decision owner: user
-- Related: SPEC-002 v32, ADR-001, ADR-005, ADR-008, ADR-009, ADR-019,
+- Related: SPEC-002 v35, ADR-001, ADR-005, ADR-008, ADR-009, ADR-019,
   TASK-013, TASK-050, TASK-075
 
 ## Context
@@ -206,7 +206,7 @@ time-of-use drift and never authorizes a live effect.
 
 ### TASK-075 schema-v5 autonomy amendment
 
-Task Ledger 2.2 adds the closed `AutonomyReceiptRecorded` event defined by
+Task Ledger 2.3 owns the closed `AutonomyReceiptRecorded` event defined by
 TASK-050. The event owns fixed scalar fields for its canonical autonomy receipt
 subject and authority digest; it does not accept arbitrary JSON, paths,
 commands, SQL, credentials, or provider payloads. Planning and verified replay
@@ -221,6 +221,35 @@ persistence receipts use their command-owned schema/manifest profile rather
 than the current global profile. No public MCP field or tool changes, and no
 autonomous scheduler, model call, Git effect, provider effect, or authority
 expansion, are part of this amendment.
+
+### TASK-050 profile and receipt-owner repair amendment
+
+Task Ledger 2.3 owns the closed
+`lattice.task-ledger.task-created-profile/1.0` discriminator for bounded
+task-control streams. Its carrier is the existing authoritative
+`TASK_CREATED.action`, already covered by the command-request, event, head, and
+checkpoint hashes; no new event field, standalone hash, or database column is
+introduced.
+
+The closed task-control mappings are:
+
+- `CONTROLLED_CODEX_CANARY` -> historical autonomy-optional V1;
+- `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` -> autonomy-receipt-required V1.
+
+Other existing Task-created action families are outside this discriminator and
+retain byte-identical historical semantics. Other values in the reserved
+`CONTROLLED_CODEX_CANARY*` namespace fail closed as unknown profiles. The
+required profile with only `TASK_CREATED` is a reconciliation-only pending
+prefix: its next event must be the exact sequence-2
+`AUTONOMY_RECEIPT_RECORDED`. It cannot transition, replay as completed, or
+project normal Status until that event verifies. Historical optional streams
+may omit the event; if already present, it remains unique at sequence 2.
+
+Task Ledger alone constructs, canonicalizes, hashes, orders, and verifies the
+closed authority/receipt subject. The generic append API cannot accept a
+caller-forged autonomy subject digest. Orchestrator retains only its pure
+recommendation; Ports transports typed verified values; Postgres Store maps
+fixed scalars and delegates untrusted-row verification back to Task Ledger.
 
 ## Consequences
 

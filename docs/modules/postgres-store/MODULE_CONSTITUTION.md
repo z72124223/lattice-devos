@@ -1,10 +1,10 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.9
+version: 1.10
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-14
+last_reviewed: 2026-08-15
 ---
 
 ## Mission
@@ -662,13 +662,16 @@ gate; it does not become a Store migration primitive or Writer state ownership.
     command, optional closed autonomy event and subject, stream projection,
     checkpoint, terminal domain receipt, and physical Store receipt. Partial,
     duplicate, late, reordered, or substituted autonomy state fails closed.
-84. Codebase Memory v1/v2 SQL bytes and v2/global-v3 receipt identities remain
+84. Autonomy scalar rows are reconstructed only through the Task Ledger 2.3
+    canonical subject/verifier API. Store does not classify decisions, build
+    canonical subjects, or hash autonomy authority/receipt domains.
+85. Codebase Memory v1/v2 SQL bytes and v2/global-v3 receipt identities remain
     immutable. Schema v5 recognizes only the exact separately governed Memory
     v3 profile; it never inserts that extension into the global manifest or
     base catalog counts.
-85. An exact Memory-v2 extension retained while the global schema advances to
+86. An exact Memory-v2 extension retained while the global schema advances to
     v5 is only a versioned v3-upgrade source, never a current runtime profile.
-86. Memory v3 verification closes its own relation/function/owner/ACL and
+87. Memory v3 verification closes its own relation/function/owner/ACL and
     extension-ledger profile. Partial, extra, drifted, wrong-owner, or
     wrong-profile objects fail closed and cannot fall back to base schema v5.
 
@@ -677,7 +680,7 @@ gate; it does not become a Store migration primitive or Writer state ownership.
 - `lattice-contracts` 1.13.
 - `lattice-ports` 1.4.
 - `lattice-cjson` 1.0.
-- `lattice-task-ledger` 2.2 pure planner/checkpoint/replay/autonomy-event API.
+- `lattice-task-ledger` 2.3 pure planner/checkpoint/replay/profile/autonomy-subject API.
 - `lattice-project-registry` 1.2 pure planner/checkpoint/replay API, one-way
   from this adapter only.
 - Exact `postgres` 0.19.14 with default features disabled.
@@ -693,8 +696,8 @@ gate; it does not become a Store migration primitive or Writer state ownership.
   Git, product repositories, and companion/playmate website code.
 - Task Domain, Writer Lease, PostgreSQL Writer Lease, Approval, Artifact, Policy,
   Orchestrator, Gateway, another concrete adapter, Review Runtime, Codebase
-  Memory, or Guardian crates. Task Ledger 2.2 and Project Registry 1.2 are the
-  only approved domain-owner dependencies in version 1.7.
+  Memory, or Guardian crates. Task Ledger 2.3 and Project Registry 1.2 are the
+  only approved domain-owner dependencies in version 1.10.
 - Any adapter-to-adapter dependency or reverse dependency from a domain owner.
 
 ## Failure, Compatibility, And Migration
@@ -769,6 +772,12 @@ v3/global-v5 extension while preserving v1/v2 bytes and receipt identities.
 Task Ledger advances to 2.2; Project Registry remains 1.2 and the MCP surface
 is unchanged.
 
+Version 1.10 preserves the schema-v5 migration, catalog, SQL functions, and
+physical scalar rows. It replaces Store-local autonomy classification,
+canonicalization, and hashing with Task Ledger 2.3 typed construction and
+verification. This is a consumer/ownership correction only: no migration,
+row, ACL, MCP, or Store receipt byte changes.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -794,7 +803,7 @@ is unchanged.
 | Durable reconciliation | commit-response loss, reconnect exact retry, restart, and corrupt-row denial | Security review | yes |
 | Runtime function ACL | exact function signature/source/property/grant manifest plus direct table denial | Security review | yes |
 | Historical Store profile | v2 receipt before/after v3 upgrade replays byte-identically; old v2 functions become ungranted | Compatibility review | yes |
-| Ledger planner parity | fake and PostgreSQL use Task Ledger 2.2 plan/checkpoint/replay; no duplicated domain builder | Architecture review | yes |
+| Ledger planner parity | fake and PostgreSQL use Task Ledger 2.3 plan/checkpoint/replay/profile/autonomy verifier; no duplicated domain builder or hash | Architecture review | yes |
 | Ledger atomicity | command plus optional event/outbox, projection/checkpoint, and physical receipt all-or-none | Engineering | yes |
 | Ledger restart/corruption | restart replay plus event/command/denial/outbox/head/checkpoint/physical mismatch matrices | Security review | yes |
 | Ledger concurrency/reconciliation | same command, same stream, cross-stream, bounded retry, response loss, reconnect replay | Engineering | yes |
@@ -845,3 +854,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.7 | 2026-08-14 | SPEC-002 v32, ADR-011/019/020/022, TASK-075 | Preserve exact Registry schema-v4 `0005`, add autonomy schema-v5 `0006`, fail closed on misplaced history, freeze exact successor/catalog profile, retain Registry persistence provenance, and recognize separate Memory-v3/global-v5 compatibility without changing historical bytes | User-approved TASK-075 reconciliation |
 | 1.8 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-022/023, TASK-076 | Recognize exact Writer-v2 bridge/current companion profiles under global-to-Memory-to-Writer locking and keep schema-v5 pending states runtime closed without taking Writer ownership | User continuation authorization |
 | 1.9 | 2026-08-14 | SPEC-002 v34, ADR-023 TASK-076 amendment, TASK-076 | Freeze the exact second post-role migrator acquisition grant for the bounded Writer session gate while keeping all LOGIN roles and the other fourteen overloads denied | User TASK-076 continuation directive |
+| 1.10 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Delegate autonomy subject/profile semantics and hashes exclusively to Task Ledger 2.3 while preserving schema-v5 physical bytes and Store ownership | User-approved TASK-050 repair amendment |

@@ -1,10 +1,10 @@
 ---
 module_id: lattice-ports
 name: LATTICE I/O Ports
-version: 1.8
+version: 1.9
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-15
 ---
 
 ## Mission
@@ -58,10 +58,12 @@ lane, fixed-test lane, and authoritative Task lifecycle repository lane.
   terminal outcome/receipt after it, and loads exact status without exposing a
   database client, SQL, credential, or schema detail.
 - `TaskLifecyclePort` admits one exact Task binding/client request, appends one
-  caller-validated state transition, records one result digest, and loads one
-  replay-derived authoritative lifecycle projection. It exposes no SQL,
-  database client, event fragment, arbitrary payload, cache, or alternate state
-  mutation, and it does not decide transition legality.
+  Task-Ledger-owned autonomy receipt, appends one caller-validated state
+  transition, records one result digest, and loads one replay-derived
+  authoritative lifecycle projection. The neutral projection carries a closed
+  `TaskLifecycleProfile` plus an internal-only optional receipt. It exposes no
+  SQL, database client, event fragment, arbitrary payload, cache, or alternate
+  state mutation, and it does not decide transition or receipt legality.
 - `WorkspaceGitPort` prepares/inspects the preconfigured bounded workspace and
   creates a local commit only from typed passing scope/test evidence. It
   exposes no arbitrary command or caller-selected path.
@@ -126,6 +128,15 @@ lane, fixed-test lane, and authoritative Task lifecycle repository lane.
     verification command, writer lease, fencing token, or Codex thread.
 19. Writer Lease repository semantics/traits remain owned by Writer Lease 1.1;
     this crate neither duplicates nor wraps them into a second authority.
+20. `TaskLifecycleProfile` is only a transport of Task Ledger verified
+    `HistoricalAutonomyOptionalV1` or `AutonomyReceiptRequiredV1`; Ports does
+    not parse `TASK_CREATED.action` or select a profile.
+21. `record_autonomy_receipt` transports an already bound Writer authority to
+    the adapter and returns replay-derived evidence. Ports cannot build,
+    classify, hash, persist, or independently validate the receipt.
+22. A required profile with a missing receipt is reconciliation, never normal
+    Draft success, transition authority, or terminal Status. Historical
+    optional evidence may contain `None`; no caller Boolean selects the rule.
 
 ## Allowed Dependencies
 
@@ -164,10 +175,16 @@ require a versioned amendment and coordinated consumer migration.
 
 Version 1.8 adds the neutral Task lifecycle repository boundary and lease-bound
 Codex-delivery request shape for Orchestrator 2.3. It retains the contracts-only
-core boundary except for an explicit one-way Task Domain 2.1 dependency on the
+core boundary except for an explicit one-way Task Domain 2.2 dependency on the
 closed `TaskState` value. It adds no database, domain transition implementation,
 lease, process, filesystem, Git, MCP, actor-authentication, or workflow
 implementation.
+
+Version 1.9 records the internal autonomy-receipt method and projection as a
+versioned lifecycle contract and adds the neutral verified lifecycle profile.
+Task Ledger 2.3 remains the semantic owner; adapters fail closed on required
+profile progress or Status without the receipt. No public MCP field, SQL type,
+profile selector, or caller authority is added.
 
 ## Acceptance Gates
 
@@ -200,3 +217,4 @@ approval.
 | 1.6 | 2026-08-05 | SPEC-002 v26, ADR-021 clarification, TASK-032 | Record the approved typed `DeliveryCodexPort` specialization; freeze generic `CodexPort` outside the production delivery composition | User approval of typed delivery contracts/ports in preceding implementation window |
 | 1.7 | 2026-08-05 | SPEC-002 v26, ADR-022, TASK-033 | Add exact snapshot, Graphify analysis, PostgreSQL Memory, and retrieval ports while retaining contracts-only dependencies | User TASK-033 direction |
 | 1.8 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Add neutral Task lifecycle operations, an explicit Task Domain `TaskState` dependency, and lease-bound sole-writer requests for bounded MCP Submit/Status | User TASK-038-first direction |
+| 1.9 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Version the internal autonomy-receipt/profile projection boundary and required-profile fail-closed transport semantics without changing public MCP | User-approved TASK-050 repair amendment |

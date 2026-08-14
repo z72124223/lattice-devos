@@ -1,10 +1,10 @@
 ---
 module_id: task-ledger
 name: Task Ledger
-version: 2.2
+version: 2.3
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-14
+last_reviewed: 2026-08-15
 ---
 
 ## Mission
@@ -12,7 +12,8 @@ last_reviewed: 2026-08-14
 Own the versioned event, hash-chain, exact command-receipt, verified replay,
 resource-projection, effect-intent outbox-admission, pure append-plan, and
 complete checkpoint semantics, including the closed autonomy-receipt event,
-that PostgreSQL persists as the single durable control-plane truth.
+and the authoritative Task-created autonomy profile discriminator that
+PostgreSQL persists as the single durable control-plane truth.
 
 ## Non-Goals
 
@@ -47,6 +48,10 @@ that PostgreSQL persists as the single durable control-plane truth.
 - The closed `AutonomyReceiptRecorded` event and its fixed-scalar canonical
   subject/authority-digest meaning. The module owns this event's semantics,
   ordering, hash participation, and replay; it does not own durable rows.
+- The `lattice.task-ledger.task-created-profile/1.0` discriminator carried by
+  the authoritative `TASK_CREATED.action` field for bounded task-control
+  streams. The legacy `CONTROLLED_CODEX_CANARY` value is receipt-optional;
+  `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` requires exactly one V1 receipt.
 
 The TASK-013 fake owns only disposable process-memory test state. Postgres
 Store 1.3 owns physical durable rows, locks, transactions, indexes, projection
@@ -84,6 +89,15 @@ until a separately approved module/ticket owns those mechanics.
   arbitrary payloads or a public MCP field. A historical profile may omit it;
   a new autonomy-enabled task requires exactly one after `TASK_CREATED` and
   before any writable or external effect.
+- Build and verify the closed canonical autonomy authority/receipt subject and
+  its domain-separated digests from typed scalar inputs. Orchestrator supplies
+  a recommendation and already-issued authority evidence; it does not own the
+  receipt bytes or digest algorithm. A Store supplies untrusted scalar rows and
+  consumes the same verifier; it never reclassifies or rehashes the subject.
+- Classify a verified task-control stream as historical optional,
+  required-receipt pending, or required-receipt complete. The one-event
+  required prefix may exist only as a non-runtime-admissible reconciliation
+  state; transition, completed replay, and Status require the exact receipt.
 
 ## Invariants
 
@@ -129,11 +143,17 @@ until a separately approved module/ticket owns those mechanics.
 19. `AutonomyReceiptRecorded` is a closed typed event with only the frozen
     TASK-050 subject and authority-digest scalars; it cannot carry arbitrary
     JSON, commands, SQL, paths, credentials, prompts, or provider output.
-20. Historical profiles synthesize no autonomy event. Their events, commands,
-    receipts, projections, checkpoints, and hash domains replay byte-identically.
-21. A new autonomy-enabled profile contains exactly one autonomy receipt event
-    after `TASK_CREATED` and before the first writable or external effect.
-    Duplicate, missing, late, reordered, or substituted events fail closed.
+20. Existing Task-created action families outside the bounded task-control
+    namespace and the exact historical controlled-canary action synthesize no
+    receipt. Their events, commands, receipts, projections, checkpoints, and
+    hash domains replay byte-identically; an already present valid V1 receipt
+    remains replayable.
+21. `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` is the only current required marker.
+    It contains exactly one autonomy receipt event immediately after
+    `TASK_CREATED` and before any later event or external effect. Other values
+    in the reserved `CONTROLLED_CODEX_CANARY*` namespace, duplicate,
+    missing-before-progress, late, reordered, or substituted receipts fail
+    closed. Other action families are `NotApplicable`, not unknown profiles.
 22. The event subject, event, terminal command receipt, stream head/resource
     projection/checkpoint, optional outbox admission, and physical Store
     receipt are one indivisible plan. A persistence adapter commits all or none.
@@ -168,9 +188,9 @@ characterization evidence; V1 Node hashing, arbitrary payloads, filesystem
 persistence, Task Domain projection import, and unknown-event no-op behavior
 are not active V2 compatibility.
 
-The in-memory fake is not restart evidence. Task Ledger 2.2 provides the pure
+The in-memory fake is not restart evidence. Task Ledger 2.3 provides the pure
 planner/checkpoint/replay boundary used by PostgreSQL, but does not itself
-claim durable currentness. Postgres Store 1.7 must atomically commit the
+claim durable currentness. Postgres Store 1.10 must atomically commit the
 command receipt, optional event, head, projection, outbox admission, checkpoint,
 and physical Store receipt under daemon epoch/runtime-admission checks. Unknown
 commit retries the same command/request and must reconstruct the identical
@@ -181,6 +201,15 @@ the closed autonomy-receipt event/subject contract and mixed-profile replay.
 The event is stored only through the schema-v5 Postgres Store adapter at
 `0006`; databases with autonomy content at ordinal `0005` are incompatible and
 must fail closed before migration DDL without repair.
+
+Version 2.3 preserves the event, command, receipt, head, checkpoint,
+`AUTONOMY_RECEIPT_RECORDED`, and migration `0006` bytes. It assigns the
+Task-created profile discriminator and canonical autonomy subject/hash
+semantics solely to Task Ledger. The discriminator is already covered by the
+existing command-request/event/head/checkpoint hashes; it creates no second
+profile hash or database column. Historical optional streams remain valid,
+while the new required marker cannot progress or project Status without its
+exact second event.
 
 ## Acceptance Gates
 
@@ -214,3 +243,4 @@ compatibility plan, security and architecture review, and user authorization.
 | 2.0 | 2026-07-29 | SPEC-002 v9, ADR-005/008/011, TASK-013 | Pure Rust event/receipt/replay/resource semantics plus visibly non-durable fake; PostgreSQL persistence deferred | User MVP-3 execution directive |
 | 2.1 | 2026-08-02 | SPEC-002 v23, ADR-019, TASK-021 | Shared pure vacant/plan/apply boundary, verified retained receipts, effect-intent outbox admission, and independent complete Ledger checkpoint without adding I/O | Approved V2 amendment and user MVP-3 execution directive |
 | 2.2 | 2026-08-14 | SPEC-002 v32, ADR-011/019, TASK-050, TASK-075 | Closed autonomy-receipt event/subject semantics, exactly-one ordering, and byte-identical mixed historical replay without public MCP or I/O expansion | User-approved TASK-075 reconciliation |
+| 2.3 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Own the exact Task-created autonomy profile discriminator and canonical receipt verifier; preserve unrelated/historical action bytes while required profiles fail closed before progress or Status | User-approved TASK-050 repair amendment |
