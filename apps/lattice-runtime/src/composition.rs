@@ -2164,7 +2164,7 @@ enum CanonicalHermes {
     TaskOnly(DeferredTaskHermes),
     #[cfg(windows)]
     Production {
-        active: Option<FullChainHermes>,
+        active: Option<Box<FullChainHermes>>,
         activation_attempted: bool,
     },
 }
@@ -2196,9 +2196,9 @@ impl production_hermes_sealed::Sealed for CanonicalHermes {
         match self {
             Self::TaskOnly(hermes) => hermes.has_production_seal(),
             #[cfg(windows)]
-            Self::Production { active, .. } => active
-                .as_ref()
-                .is_some_and(production_hermes_sealed::Sealed::has_production_seal),
+            Self::Production { active, .. } => active.as_ref().is_some_and(|hermes| {
+                production_hermes_sealed::Sealed::has_production_seal(hermes.as_ref())
+            }),
         }
     }
 
@@ -2223,7 +2223,9 @@ impl production_hermes_sealed::Sealed for CanonicalHermes {
             } => {
                 let hermes = activate_canonical_hermes_once(active, activation_attempted, || {
                     require_hermes_preparation_environment()?;
-                    HermesEnvironmentConfig::from_environment()?.launch(run_id)
+                    HermesEnvironmentConfig::from_environment()?
+                        .launch(run_id)
+                        .map(Box::new)
                 })?;
                 hermes.ensure_ready(run_id)
             }
@@ -2235,7 +2237,7 @@ impl production_hermes_sealed::Sealed for CanonicalHermes {
             Self::TaskOnly(hermes) => hermes.terminate(),
             #[cfg(windows)]
             Self::Production { active, .. } => active.take().map_or(Ok(()), |mut hermes| {
-                production_hermes_sealed::Sealed::terminate(&mut hermes)
+                production_hermes_sealed::Sealed::terminate(hermes.as_mut())
             }),
         }
     }
@@ -2284,7 +2286,7 @@ impl FullChainHermesPort for CanonicalHermes {
             #[cfg(windows)]
             Self::Production { active, .. } => active
                 .as_ref()
-                .map_or(RuntimeKind::Fake, FullChainHermesPort::runtime_kind),
+                .map_or(RuntimeKind::Fake, |hermes| hermes.runtime_kind()),
         }
     }
 
@@ -2347,7 +2349,7 @@ impl FullChainHermes {
 }
 
 #[cfg(any(windows, test))]
-fn full_chain_hermes_state_has_seal<R, B>(ready: &Option<R>, bound: &Option<B>) -> bool {
+fn full_chain_hermes_state_has_seal<R, B>(ready: Option<&R>, bound: Option<&B>) -> bool {
     ready.is_some() || bound.is_some()
 }
 
@@ -2397,7 +2399,7 @@ fn run_or_reconcile_active_hermes<P, R, O>(
 #[cfg(windows)]
 impl production_hermes_sealed::Sealed for FullChainHermes {
     fn has_production_seal(&self) -> bool {
-        full_chain_hermes_state_has_seal(&self.ready, &self.bound)
+        full_chain_hermes_state_has_seal(self.ready.as_ref(), self.bound.as_ref())
     }
 
     fn is_production_configured(&self) -> bool {
@@ -2409,12 +2411,12 @@ impl production_hermes_sealed::Sealed for FullChainHermes {
             if runner.verify_live().is_ok() {
                 return Ok(());
             }
-            return match production_hermes_sealed::Sealed::terminate(self) {
+            match production_hermes_sealed::Sealed::terminate(self) {
                 Ok(()) => Err(LatticedError::new(
                     LatticedErrorKind::HermesProductionLivenessRejected,
                 )),
                 Err(teardown) => Err(teardown),
-            };
+            }
         } else if self.bound.is_some() {
             Ok(())
         } else {
@@ -7931,13 +7933,22 @@ mod tests {
     fn production_owner_seal_survives_ready_to_bound_transition() {
         let mut ready = Some(());
         let mut bound = None;
-        assert!(full_chain_hermes_state_has_seal(&ready, &bound));
+        assert!(full_chain_hermes_state_has_seal(
+            ready.as_ref(),
+            bound.as_ref()
+        ));
 
         bound = ready.take();
-        assert!(full_chain_hermes_state_has_seal(&ready, &bound));
+        assert!(full_chain_hermes_state_has_seal(
+            ready.as_ref(),
+            bound.as_ref()
+        ));
 
         bound = None;
-        assert!(!full_chain_hermes_state_has_seal(&ready, &bound));
+        assert!(!full_chain_hermes_state_has_seal(
+            ready.as_ref(),
+            bound.as_ref()
+        ));
     }
 
     #[test]
@@ -7947,9 +7958,9 @@ mod tests {
 
         let output = run_or_reconcile_active_hermes(
             &mut (),
-            |_| Ok::<_, PortError>("initial"),
-            |_| panic!("successful run must not inspect recovery state"),
-            |_, _: &u8| panic!("successful run must not reconcile"),
+            |()| Ok::<_, PortError>("initial"),
+            |()| panic!("successful run must not inspect recovery state"),
+            |(), _: &u8| panic!("successful run must not reconcile"),
         )
         .expect("initial success is unchanged");
         assert_eq!(output, "initial");
@@ -7979,9 +7990,9 @@ mod tests {
         ] {
             let initial_failure = run_or_reconcile_active_hermes(
                 &mut (),
-                |_| Err::<&str, _>(PortError::new(Component::Hermes, kind, code)),
-                |_| panic!("non-recoverable failure must not inspect recovery state"),
-                |_, _: &u8| panic!("non-recoverable failure must not reconcile"),
+                |()| Err::<&str, _>(PortError::new(Component::Hermes, kind, code)),
+                |()| panic!("non-recoverable failure must not inspect recovery state"),
+                |(), _: &u8| panic!("non-recoverable failure must not reconcile"),
             )
             .expect_err("non-recoverable failure remains fail-closed");
             assert_eq!(initial_failure.kind(), kind);
@@ -7993,7 +8004,7 @@ mod tests {
         let receipt_events = Rc::clone(&events);
         let initial_failure = run_or_reconcile_active_hermes(
             &mut (),
-            move |_| {
+            move |()| {
                 run_events.borrow_mut().push("run");
                 Err::<&str, _>(PortError::new(
                     Component::Hermes,
@@ -8001,11 +8012,11 @@ mod tests {
                     "HERMES_LOOPBACK_TRANSPORT_FAILED",
                 ))
             },
-            move |_| {
+            move |()| {
                 receipt_events.borrow_mut().push("active_receipt");
                 None::<u8>
             },
-            |_, _| panic!("missing receipt must not reconcile"),
+            |(), _| panic!("missing receipt must not reconcile"),
         )
         .expect_err("missing receipt preserves the initial failure");
         assert_eq!(initial_failure.kind(), PortErrorKind::Unavailable);
@@ -8026,15 +8037,15 @@ mod tests {
             let reconcile_events = Rc::clone(&events);
             let recovered = run_or_reconcile_active_hermes(
                 &mut (),
-                move |_| {
+                move |()| {
                     run_events.borrow_mut().push("run");
                     Err::<&str, _>(PortError::new(Component::Hermes, kind, code))
                 },
-                move |_| {
+                move |()| {
                     receipt_events.borrow_mut().push("active_receipt");
                     Some(7_u8)
                 },
-                move |_, receipt| {
+                move |(), receipt| {
                     reconcile_events.borrow_mut().push("reconcile");
                     assert_eq!(*receipt, 7);
                     Ok("normalized-evidence")
@@ -8055,15 +8066,15 @@ mod tests {
         ] {
             let repeated_uncertainty = run_or_reconcile_active_hermes(
                 &mut (),
-                |_| {
+                |()| {
                     Err::<&str, _>(PortError::new(
                         Component::Hermes,
                         PortErrorKind::Timeout,
                         "HERMES_LOOPBACK_TIMEOUT",
                     ))
                 },
-                |_| Some(7_u8),
-                |_, receipt| {
+                |()| Some(7_u8),
+                |(), receipt| {
                     assert_eq!(*receipt, 7);
                     Err(PortError::new(Component::Hermes, kind, code))
                 },
@@ -8078,15 +8089,15 @@ mod tests {
 
         let definitive_failure = run_or_reconcile_active_hermes(
             &mut (),
-            |_| {
+            |()| {
                 Err::<&str, _>(PortError::new(
                     Component::Hermes,
                     PortErrorKind::Timeout,
                     "HERMES_LOOPBACK_TIMEOUT",
                 ))
             },
-            |_| Some(7_u8),
-            |_, _| {
+            |()| Some(7_u8),
+            |(), _| {
                 Err(PortError::new(
                     Component::Hermes,
                     PortErrorKind::Malformed,
