@@ -56,20 +56,18 @@ check passed; its recovery-security classification check failed, so it is
 explicitly barred from security, architecture, authorization, and integration
 decisions.
 
-## Current migration reconciliation - TASK-075
+## Current Writer Lease compatibility bridge - TASK-076
 
-CURRENT TASK-075 - reconcile the accepted Project Registry schema-v4 `0005`
-source with the TASK-050 autonomy receipt as schema-v5 `0006`. Preserve the
-exact Registry migration and its historical receipt profile; reject a database
-that already used autonomy at ordinal `0005` before any DDL; persist per-command
-Registry profile provenance so v4/v5 mixed replay is byte-identical. Preserve
-Codebase Memory v1/v2 bytes and receipt identities while adding only the
-separate extension-v3/global-v5 profile with per-analysis provenance; it does
-not alter base catalog counts. TASK-050
-is `waiting_dependency` on TASK-075, and TASK-051 remains blocked on the later
-clean, accepted TASK-050 schema-v5 candidate. No TASK-075 test, review,
-integration, commit, merge, deployment, or completion is claimed by this
-planning checkpoint.
+CURRENT TASK-076 - preserve the clean TASK-075 schema-v5 checkpoint at
+`a3599c1` while adding the versioned PostgreSQL Writer Lease v2 bridge required
+to upgrade the already accepted global-v3/Memory-v2/Writer-v1 profile. Writer
+v1 SQL, semantic rows, receipts, checkpoints, and fencing high-water remain
+immutable. The only accepted route is Writer-owned v2 bridge, Store-owned
+global-v5 advance, Memory-owned v3 advance with exact companion verification,
+then Writer-owned v2 activation. Both intermediate schema-v5 states remain
+runtime closed. TASK-075 and TASK-050 are `waiting_dependency` on TASK-076;
+TASK-051 remains blocked until the combined candidate and TASK-050 acceptance
+are clean and verified.
 
 ## Completed task update — TASK-072
 

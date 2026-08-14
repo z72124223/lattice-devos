@@ -1,7 +1,7 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.7
+version: 1.8
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-14
@@ -29,6 +29,12 @@ persistence-profile provenance, and exposes only the exact schema-v5 successor
 function profile. It also recognizes the separately governed exact Codebase
 Memory v3/global-v5 extension profile without joining its manifest or owning
 its state. Project Registry 1.2 remains the semantic owner.
+Version 1.8 recognizes only the exact Writer Lease v2 bridge and current
+companion profiles needed to advance an accepted global-v3/Memory-v2/
+Writer-v1 database to schema v5. It holds global, Memory, and Writer migration
+locks in that order and keeps both schema-v5 bridge states runtime closed. It
+does not install, mutate, rebind, replay, or semantically interpret Writer
+Lease state and adds no dependency on the Writer adapter.
 
 ## Non-Goals
 
@@ -824,3 +830,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.5 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Read-only exact V3+Codebase-Memory-v2+Writer-Lease-v1 catalog/ACL compatibility recognition without installation, mutation, lease ownership, or global migration changes | User TASK-038-first direction |
 | 1.6 | 2026-08-10 | SPEC-003 v3, ADR-023, TASK-038 | Permit only the fixed 15-field Writer Lease current-authority assertion inside a fenced Task Ledger transaction, without lease repository dependency, state ownership, or mutation | User TASK-038-first direction |
 | 1.7 | 2026-08-14 | SPEC-002 v32, ADR-011/019/020/022, TASK-075 | Preserve exact Registry schema-v4 `0005`, add autonomy schema-v5 `0006`, fail closed on misplaced history, freeze exact successor/catalog profile, retain Registry persistence provenance, and recognize separate Memory-v3/global-v5 compatibility without changing historical bytes | User-approved TASK-075 reconciliation |
+| 1.8 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-022/023, TASK-076 | Recognize exact Writer-v2 bridge/current companion profiles under global-to-Memory-to-Writer locking and keep schema-v5 pending states runtime closed without taking Writer ownership | User continuation authorization |

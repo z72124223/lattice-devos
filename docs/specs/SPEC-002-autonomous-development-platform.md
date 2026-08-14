@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 32
+version: 33
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -15,7 +15,7 @@ modules:
   - module_id: project-registry
     constitution_version: 1.2
   - module_id: writer-lease
-    constitution_version: 1.0
+    constitution_version: 1.1
   - module_id: workspace-git
     constitution_version: 2.0
   - module_id: scope-check
@@ -31,8 +31,10 @@ modules:
   - module_id: approval-verifier
     constitution_version: 1.0
   - module_id: postgres-store
-    constitution_version: 1.7
+    constitution_version: 1.8
   - module_id: postgres-codebase-memory
+    constitution_version: 1.2
+  - module_id: postgres-writer-lease
     constitution_version: 1.1
   - module_id: artifact-store
     constitution_version: 1.0
@@ -1453,6 +1455,28 @@ packaging modules do not activate functional provider modules.
   accepts global schema v5, stores per-analysis persistence-profile
   provenance, and replays mixed v2/v3 graph/reflection receipts byte-identically.
 
+### Writer Lease v2 schema-v5 compatibility bridge
+
+SPEC-002 v33 preserves the complete TASK-075 schema-v5 candidate and adds the
+versioned Writer Lease v2 bridge required for an accepted exact
+global-v3/Memory-v2/Writer-v1 database to reach it. The five closed profiles
+are `G3_M2_W1_CURRENT`, `G3_M2_W2_BRIDGE`,
+`G5_M2_W2_BRIDGE_PENDING`, `G5_M3_W2_BRIDGE_PENDING`, and
+`G5_M3_W2_CURRENT`. No direct W1-to-global-v5 transition exists.
+
+Writer v1 SQL and semantic history remain immutable. Only the Writer owner
+creates the bridge and final rebind; Store changes only global history and
+Memory changes only its own extension. Each owner takes global, Memory, and
+Writer transaction locks in that order. Memory additionally locks the five
+Writer tables in `SHARE` mode and verifies the complete bridge before and
+after its DDL. Both pending states reject runtime and fenced writes. A fresh
+final install records truthful fresh-current history; an upgrade records exact
+v1 `INSTALLED`, v2 bridge `UPGRADED`, and v2 final `REBOUND` rows.
+
+No Writer command, transition, receipt, snapshot, checkpoint, lease-revision,
+or fencing byte changes. Partial, extra, drifted, active, suspect, unknown,
+cross-profile, or substituted state fails closed without automatic repair.
+
 ## Verification Plan
 
 | Criterion | Verification method | Expected evidence |
@@ -1491,6 +1515,7 @@ packaging modules do not activate functional provider modules.
 | AC-41 | exact mode/redaction integration tests, recording lifecycle owner, one-shot activation and explicit teardown unit tests, plus complete runtime/MCP regression | default and `TASK_ONLY` preserve the old path; only production Delivery Run activates once before writer effects; status/task paths activate zero times; canonical MCP teardown ambiguity cannot exit 0; four tools and schemas remain unchanged |
 | AC-42 | exact missing-setting and ignored-sentinel integration tests, v2 receipt golden, direct launcher-plan and legacy helper regressions | only executed inputs gate production; stale helper values cannot deny or leak; old receipt domain cannot substitute; legacy helper remains isolated and the four-tool/product truth boundaries are unchanged |
 | AC-43 | exact source/blob checksum checks, fresh and exact-prefix disposable PostgreSQL schema-v5 migration matrices, misplaced-autonomy-0005 no-DDL rejection, base and Memory-extension catalog/ACL/profile assertions, Registry v4/v5 and Memory v2/v3 mixed-replay fixtures | exact Registry `0005` and autonomy `0006` history; stable fail-closed mismatch classification before DDL; base 16-table/47-function catalog with only 19 runtime functions; immutable Memory v1/v2 bytes and byte-identical historical Registry/Memory persistence receipts |
+| AC-44 | exact Writer v1/v2 manifests, five-state Store/Memory/Writer transition matrices, common lock-order concurrency, pending-runtime denial, non-empty replay, and marker-owned PostgreSQL restart acceptance | immutable v1 and semantic/fencing bytes; exact v2 bridge/current identities; no deadlock or partial state; final TASK-050 fenced assertion and fresh-process replay |
 
 ## Human Decisions
 

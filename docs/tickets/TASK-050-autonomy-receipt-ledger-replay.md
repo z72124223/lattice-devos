@@ -2,9 +2,9 @@
 ticket_id: TASK-050
 title: Autonomy receipt durable Task Ledger event and fresh-process replay
 spec_id: SPEC-002
-spec_version: 32
+spec_version: 33
 related_spec_id: SPEC-003
-related_spec_version: 4
+related_spec_version: 5
 module_id: task-ledger
 constitution_version: 2.2
 status: waiting_dependency
@@ -58,13 +58,15 @@ The identified implementation source at `714f3b9` has no
 `TASK050_FULLY_VERIFIED` or `TASK050_ACCEPTED_FOR_TASK051_MACHINE_GATE`
 receipt and does not unlock TASK-051. It placed autonomy at ordinal `0005`,
 which conflicts with the accepted Project Registry schema-v4 `0005` source.
-TASK-075 now owns the separately governed reconciliation: preserve the exact
+TASK-075 owns the separately governed reconciliation: preserve the exact
 Registry `0005`, re-author autonomy as schema-v5 `0006`, retain per-command
 Registry and Codebase Memory persistence-profile provenance, advance the
 independent Memory extension to v3/global-v5 without editing v1/v2, and prove
-mixed replay. TASK-050 is
-`waiting_dependency` and may not resume acceptance or claim completion until
-TASK-075 produces its verified candidate.
+mixed replay. TASK-076 then owns the Writer Lease v2 compatibility bridge that
+allows the accepted global-v3/Memory-v2/Writer-v1 platform to reach that exact
+schema-v5 candidate without rewriting lease receipts or fencing history.
+TASK-050 is `waiting_dependency` and may not resume acceptance or claim
+completion until both tickets produce one verified candidate.
 
 The user decision relayed from coordination thread
 `019ff693-b2c3-7a81-9704-49f1e6e3f2d1` requires Autonomy Intent/Receipt to

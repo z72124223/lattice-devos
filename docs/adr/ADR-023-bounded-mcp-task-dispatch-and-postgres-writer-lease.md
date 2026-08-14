@@ -5,8 +5,8 @@
   discovery and two-session invocation remain incomplete
 - Date: 2026-08-09
 - Decision owner: user
-- Related: SPEC-003 v4, ADR-005, ADR-006, ADR-012, ADR-015, ADR-019,
-  ADR-021, TASK-037, TASK-038
+- Related: SPEC-002 v33, SPEC-003 v5, ADR-005, ADR-006, ADR-012,
+  ADR-015, ADR-019, ADR-021, ADR-022, TASK-037, TASK-038, TASK-076
 
 ## Context
 
@@ -244,6 +244,34 @@ fallback is allowed.
 - Per-human identity, arbitrary project selection, generic task text, broader
   templates, and production TASK-037 downstream repair remain explicit later
   work.
+
+## TASK-076 Writer Lease V2 Bridge Amendment
+
+The v1 PostgreSQL extension remains immutable. Postgres Writer Lease 1.1 adds
+one append-only v2 successor so the accepted global-v3/Memory-v2/v1 database
+can reach schema v5 without losing or rehashing commands, transitions,
+receipts, snapshots, checkpoints, lease revisions, or fencing high-water.
+
+The sole accepted sequence is:
+
+`G3_M2_W1_CURRENT -> G3_M2_W2_BRIDGE ->
+G5_M2_W2_BRIDGE_PENDING -> G5_M3_W2_BRIDGE_PENDING ->
+G5_M3_W2_CURRENT`.
+
+Only the Writer owner creates the v2 bridge or final rebind. Store advances
+only the global profile, and Memory advances only its extension after exact
+companion verification. All three administrative runners acquire global,
+Memory, and Writer transaction locks in that order. Both schema-v5 pending
+states reject runtime and fenced Task Ledger writes. Fresh global-v5/
+Memory-v3 installation produces the same final catalog/current identity with
+a truthful one-row fresh history; an upgrade retains the exact three-row
+v1/bridge/rebind history.
+
+Writer v2 adds only the two runtime successors required to replace v1
+functions that hard-bound ledger ordinal 1. The other five v1 runtime
+functions, including the fixed 15-scalar current-authority assertion, retain
+their signatures and semantics. No MCP, Task Spec, lease transition, fencing,
+credential, public-network, or provider/model contract changes.
 
 ## Acceptance Evidence Required
 

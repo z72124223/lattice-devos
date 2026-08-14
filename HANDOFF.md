@@ -1,3 +1,32 @@
+# TASK-076 Writer Lease V2 Bridge Handoff - 2026-08-14
+
+## Current Outcome
+
+TASK-075 implementation is preserved in clean commit `a3599c1`, but final
+architecture review found one real compatibility blocker: the accepted exact
+global-v3 + Codebase-Memory-v2 + Writer-Lease-v1 profile cannot advance to the
+schema-v5/Memory-v3 candidate because Writer v1 identity and its runtime bind/
+load functions are intentionally fixed to v3/v2. Closing TASK-075 or resuming
+TASK-050 on that tree would therefore be false completion.
+
+TASK-076 is the sole current ticket. It adds an append-only Writer Lease v2
+bridge while preserving v1 SQL and every semantic row, canonical receipt,
+checkpoint, lease revision, and fencing high-water. The fixed transition is
+`G3_M2_W1_CURRENT -> G3_M2_W2_BRIDGE -> G5_M2_W2_BRIDGE_PENDING ->
+G5_M3_W2_BRIDGE_PENDING -> G5_M3_W2_CURRENT`. Store, Memory, and Writer
+administrative runners take global -> Memory -> Writer transaction locks;
+only the Writer owner changes Writer identity/ledger, and both pending states
+reject runtime use.
+
+The implementation worktree is
+`lattice-worktrees/task-076-postgres-writer-lease-v2` on branch
+`feature/task-076-postgres-writer-lease-v2`, based on `a3599c1`. TASK-075 and
+TASK-050 are `waiting_dependency`; TASK-051 remains blocked. Existing
+PostgreSQL listeners at `5432`, `64272`, and `55432`, unrelated dirty
+worktrees, and the protected TASK-051 runner must not be touched. No TASK-076
+test, live fixture, review, commit, push, merge, deployment, or completion is
+claimed by this governance checkpoint.
+
 # TASK-075 Schema-v5 Migration Reconciliation Handoff - 2026-08-14
 
 ## Current Outcome

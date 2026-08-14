@@ -1,10 +1,10 @@
 ---
 module_id: postgres-writer-lease
 name: PostgreSQL Writer Lease Repository
-version: 1.0
+version: 1.1
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-14
 ---
 
 ## Mission
@@ -13,6 +13,8 @@ Persist and independently replay Writer Lease 1.1 commands, transitions,
 current authority, monotonic fencing high-water, and checkpoints in PostgreSQL
 through one exact extension and repository implementation, without acquiring
 lease semantic ownership.
+Version 1.1 preserves the v1 extension and semantic history while adding the
+Writer-owned v2 schema-v5 bridge and exact current v2 runtime profile.
 
 ## Non-Goals
 
@@ -29,8 +31,9 @@ lease semantic ownership.
 
 ## Owned Data
 
-- The exact `db/extensions/writer-lease/v1.sql` bytes, extension identity,
-  checksum, explicit administrative installer, and read-only verifier.
+- The exact `db/extensions/writer-lease/v1.sql` and append-only
+  `db/extensions/writer-lease/v2.sql` bytes, extension identities, checksums,
+  explicit administrative state transitions, and read-only verifiers.
 - Physical PostgreSQL tables, indexes, constraints, fixed functions, roles,
   ownership, ACLs, transactions, and bounded retry/poison state used only for
   Writer Lease persistence.
@@ -135,6 +138,15 @@ admitted or through a later versioned migration that preserves fencing
 high-water/currentness; dropping durable authority to make tests pass is
 forbidden.
 
+Version 1.1 accepts only the closed bridge sequence defined by SPEC-003 v5 and
+TASK-076. The Writer owner may move an exact global-v3/Memory-v2/v1 profile to
+v2 bridge state only when replay proves all retained state and no current
+`ACTIVE` or `SUSPECT` lease exists. It later activates the same v2 identity
+only after exact global-v5/Memory-v3 verification. Both steps hold global,
+Memory, and Writer advisory locks in that order, preserve every semantic row
+and high-water, append exact ledger provenance, and fail closed on ambiguity.
+The intermediate schema-v5 bridge profiles never admit runtime use.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -163,3 +175,4 @@ synthetic evidence as production authority.
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
 | 1.0 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Independent exact PostgreSQL extension and repository for Writer Lease 1.1 with atomic replay/currentness and monotonic fencing | User TASK-038-first direction |
+| 1.1 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-023, TASK-076 | Preserve v1 history and add the Writer-owned v2 bridge/current profiles for global-v5/Memory-v3 without changing lease semantics or fencing bytes | User continuation authorization |
