@@ -101,6 +101,18 @@ $requiredFragments = @(
     'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_NAMES_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_RESOURCES_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_RESOURCE_TEMPLATES_REJECTED',
+    'Read-Task051McpSessionOpen',
+    'Get-Task051OwnedProcessEvidence',
+    'IsProcessInJob',
+    'QueryFullProcessImageName',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_JOB_MEMBERSHIP_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED',
+    'TASK051_TASK038_CANDIDATE_BINARY_COMMITMENT_TRANSFORM_REJECTED',
+    '$candidateLatticedNativeIdentity = Get-LatticeWindowsNativePathIdentityToken',
+    '-ExpectedLatticedSha256 $candidateLatticedSha256',
+    '-ExpectedLatticedNativeIdentity $candidateLatticedNativeIdentity',
+    'TASK051_MCP_SESSION_OPEN_SELF_TEST_REJECTED',
     'TEMP',
     'TMP',
     'TASK051_TEMP_CLEANUP_REJECTED',
@@ -147,6 +159,28 @@ $requiredFragments = @(
 foreach ($fragment in $requiredFragments) {
     if ($runnerSource.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
         throw ('TASK051_RUNNER_SHAPE_REJECTED|' + $fragment)
+    }
+}
+
+$discoveryStart = $runnerSource.IndexOf('function Invoke-Task051CodexDiscovery', [StringComparison]::Ordinal)
+$discoveryEnd = $runnerSource.IndexOf('function Get-Task051ExecStructuredContent', $discoveryStart, [StringComparison]::Ordinal)
+if ($discoveryStart -lt 0 -or $discoveryEnd -le $discoveryStart) {
+    throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_SHAPE_REJECTED'
+}
+$discoverySource = $runnerSource.Substring($discoveryStart, $discoveryEnd - $discoveryStart)
+$sessionOpenRead = $discoverySource.IndexOf('$sessionOpen = Read-Task051McpSessionOpen', [StringComparison]::Ordinal)
+$serverPidCapture = $discoverySource.IndexOf('$serverProcessId = [int]$sessionOpen.ProcessId', [StringComparison]::Ordinal)
+$processAuthority = $discoverySource.IndexOf('$processEvidence = Get-Task051OwnedProcessEvidence', [StringComparison]::Ordinal)
+if (
+    $sessionOpenRead -lt 0 -or
+    $serverPidCapture -le $sessionOpenRead -or
+    $processAuthority -le $serverPidCapture
+) {
+    throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_SHAPE_REJECTED'
+}
+foreach ($forbiddenDiscoveryFragment in @('ParentProcessId =', '.ExecutablePath')) {
+    if ($discoverySource.IndexOf($forbiddenDiscoveryFragment, [StringComparison]::Ordinal) -ge 0) {
+        throw ('TASK051_APP_SERVER_PROCESS_AUTHORITY_SHAPE_REJECTED|' + $forbiddenDiscoveryFragment)
     }
 }
 

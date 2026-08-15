@@ -880,6 +880,282 @@ function Stop-Task051OwnedProcess {
     if ($null -ne $cleanupFailure) { throw $cleanupFailure }
 }
 
+function Initialize-Task051ProcessIdentityInterop {
+    if ($null -ne ('LatticeTask051ProcessIdentityInterop' -as [type])) { return }
+    try {
+        Add-Type -ErrorAction Stop -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public sealed class LatticeTask051OwnedProcessEvidence
+{
+    public bool InJob { get; set; }
+    public string ImagePath { get; set; }
+    public long CreationFileTimeUtc { get; set; }
+}
+
+public static class LatticeTask051ProcessIdentityInterop
+{
+    private const UInt32 ProcessQueryLimitedInformation = 0x1000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileTime
+    {
+        public UInt32 Low;
+        public UInt32 High;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(UInt32 desiredAccess, bool inheritHandle, UInt32 processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(
+        IntPtr process,
+        UInt32 flags,
+        StringBuilder imagePath,
+        ref UInt32 size);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessTimes(
+        IntPtr process,
+        out FileTime creation,
+        out FileTime exit,
+        out FileTime kernel,
+        out FileTime user);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static LatticeTask051OwnedProcessEvidence Inspect(IntPtr job, Int32 processId)
+    {
+        if (job == IntPtr.Zero || processId < 1)
+        {
+            throw new ArgumentException("invalid process authority input");
+        }
+        IntPtr process = OpenProcess(ProcessQueryLimitedInformation, false, (UInt32)processId);
+        if (process == IntPtr.Zero)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        try
+        {
+            bool inJob;
+            if (!IsProcessInJob(process, job, out inJob))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            if (!inJob)
+            {
+                return new LatticeTask051OwnedProcessEvidence
+                {
+                    InJob = false,
+                    ImagePath = String.Empty,
+                    CreationFileTimeUtc = 0
+                };
+            }
+            var imagePath = new StringBuilder(32768);
+            UInt32 imagePathLength = (UInt32)imagePath.Capacity;
+            if (!QueryFullProcessImageName(process, 0, imagePath, ref imagePathLength))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            FileTime creation;
+            FileTime exit;
+            FileTime kernel;
+            FileTime user;
+            if (!GetProcessTimes(process, out creation, out exit, out kernel, out user))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            UInt64 creationValue = ((UInt64)creation.High << 32) | creation.Low;
+            return new LatticeTask051OwnedProcessEvidence
+            {
+                InJob = true,
+                ImagePath = imagePath.ToString(),
+                CreationFileTimeUtc = checked((Int64)creationValue)
+            };
+        }
+        finally
+        {
+            if (!CloseHandle(process))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+        }
+    }
+}
+'@
+    }
+    catch {
+        throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+    }
+}
+
+function Read-Task051McpSessionOpen {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedNativeIdentity,
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })][string]$SessionId,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{64}\z' })][string]$SafeConfigSha256
+    )
+
+    $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
+    try {
+        $canonicalPath = [IO.Path]::GetFullPath($Path)
+        $canonicalRoot = [IO.Path]::GetFullPath($EvidenceRoot)
+        Assert-Task051NoReparseAncestor -Path $canonicalPath -Boundary $canonicalRoot -FailureCode $failureCode
+        Assert-Task051OwnerOnlyAcl -Path $canonicalPath -Directory $false
+        if (-not (Test-LatticeWindowsNativePathIdentity -Path $canonicalPath -Directory $false -ExpectedToken $ExpectedNativeIdentity)) {
+            throw $failureCode
+        }
+        $bytes = [IO.File]::ReadAllBytes($canonicalPath)
+        if (
+            $bytes.Length -lt 1 -or
+            $bytes.Length -gt 65536 -or
+            ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf)
+        ) {
+            throw $failureCode
+        }
+        $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        if (-not $text.EndsWith("`n", [StringComparison]::Ordinal) -or $text.Contains("`r")) {
+            throw $failureCode
+        }
+        $lines = @($text.Split([string[]]@("`n"), [StringSplitOptions]::None))
+        if ($lines.Count -ne 2 -or $lines[1] -cne '') { throw $failureCode }
+        $record = $lines[0] | ConvertFrom-Json -ErrorAction Stop
+        $actualKeys = @($record.PSObject.Properties.Name | Sort-Object)
+        $expectedKeys = @(
+            'dispatch_accepted_count', 'event_sha256', 'observed_at_unix_nanos',
+            'ordinal', 'previous_event_sha256', 'process_id', 'record_type',
+            'request_id_sha256', 'safe_config_sha256', 'schema', 'session_id', 'tool_name'
+        ) | Sort-Object
+        if (($actualKeys -join "`n") -cne ($expectedKeys -join "`n")) { throw $failureCode }
+        if (
+            ($record.process_id -isnot [int] -and $record.process_id -isnot [long]) -or
+            ($record.ordinal -isnot [int] -and $record.ordinal -isnot [long]) -or
+            ($record.dispatch_accepted_count -isnot [int] -and $record.dispatch_accepted_count -isnot [long]) -or
+            $record.observed_at_unix_nanos -isnot [string] -or
+            [string]$record.schema -cne 'lattice.mcp.acceptance-dispatch.v1' -or
+            [string]$record.record_type -cne 'SESSION_OPEN' -or
+            [string]$record.session_id -cne $SessionId -or
+            [string]$record.safe_config_sha256 -cne $SafeConfigSha256 -or
+            [long]$record.process_id -lt 1 -or
+            [long]$record.process_id -gt [int]::MaxValue -or
+            [long]$record.ordinal -ne 1 -or
+            [long]$record.dispatch_accepted_count -ne 0 -or
+            [string]$record.observed_at_unix_nanos -cnotmatch '\A[1-9][0-9]*\z' -or
+            [string]$record.previous_event_sha256 -cne ('0' * 64) -or
+            [string]$record.event_sha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
+            $null -ne $record.tool_name -or
+            $null -ne $record.request_id_sha256
+        ) {
+            throw $failureCode
+        }
+        $hashInput = @(
+            'lattice.mcp.acceptance-dispatch-hash.v1',
+            ('0' * 64),
+            $SessionId,
+            $SafeConfigSha256,
+            'SESSION_OPEN',
+            '1',
+            [string]$record.process_id,
+            'null',
+            'null',
+            '0',
+            [string]$record.observed_at_unix_nanos
+        ) -join "`n"
+        if ([string]$record.event_sha256 -cne (Get-Task051StringSha256 -Value $hashInput)) {
+            throw $failureCode
+        }
+        return [pscustomobject]@{
+            ProcessId = [int]$record.process_id
+            ObservedAtUnixNanos = [long]$record.observed_at_unix_nanos
+            EventSha256 = [string]$record.event_sha256
+        }
+    }
+    catch {
+        throw $failureCode
+    }
+}
+
+function Get-Task051OwnedProcessEvidence {
+    param(
+        [Parameter(Mandatory = $true)][IntPtr]$Job,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][string]$ExpectedExecutable,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{64}\z' })][string]$ExpectedExecutableSha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedExecutableNativeIdentity,
+        [Parameter(Mandatory = $true)][Diagnostics.Process]$OwnerProcess,
+        [Parameter(Mandatory = $true)][long]$ObservedAtUnixNanos
+    )
+
+    $candidate = $null
+    Initialize-Task051ProcessIdentityInterop
+    try {
+        $native = [LatticeTask051ProcessIdentityInterop]::Inspect($Job, $ProcessId)
+    }
+    catch {
+        throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+    }
+    if (-not [bool]$native.InJob) {
+        throw 'TASK038_CURRENT_CODEX_DISCOVERY_JOB_MEMBERSHIP_REJECTED'
+    }
+    try {
+        $candidate = Get-Process -Id $ProcessId -ErrorAction Stop
+        if ($candidate.HasExited -or [string]::IsNullOrWhiteSpace([string]$native.ImagePath)) {
+            throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+        }
+        Assert-Task051RegularFile -Path ([string]$native.ImagePath) -FailureCode 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+        Assert-Task051RegularFile -Path $ExpectedExecutable -FailureCode 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+        $expectedIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $ExpectedExecutable -Directory $false
+        $actualIdentity = Get-LatticeWindowsNativePathIdentityToken -Path ([string]$native.ImagePath) -Directory $false
+        $currentExpectedSha256 = Get-Task051Sha256 -Path $ExpectedExecutable
+        $actualSha256 = Get-Task051Sha256 -Path ([string]$native.ImagePath)
+        if (
+            [string]$expectedIdentity -cne $ExpectedExecutableNativeIdentity -or
+            [string]$actualIdentity -cne $ExpectedExecutableNativeIdentity -or
+            $currentExpectedSha256 -cne $ExpectedExecutableSha256 -or
+            $actualSha256 -cne $ExpectedExecutableSha256
+        ) {
+            throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+        }
+        $candidateCreationUtc = $candidate.StartTime.ToUniversalTime()
+        $ownerCreationFileTimeUtc = $OwnerProcess.StartTime.ToUniversalTime().ToFileTimeUtc()
+        $observedUnixHundredNanoseconds = [decimal]$ObservedAtUnixNanos / [decimal]100
+        $observedFileTimeUtc = [long][decimal]::Floor($observedUnixHundredNanoseconds) + 116444736000000000L
+        if (
+            $candidateCreationUtc.ToFileTimeUtc() -ne [long]$native.CreationFileTimeUtc -or
+            [long]$native.CreationFileTimeUtc -lt $ownerCreationFileTimeUtc -or
+            [long]$native.CreationFileTimeUtc -gt $observedFileTimeUtc
+        ) {
+            throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+        }
+        $candidate.Refresh()
+        if ($candidate.HasExited) { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED' }
+        return [pscustomobject]@{
+            ProcessId = $ProcessId
+            ImagePath = [string]$native.ImagePath
+            ImageSha256 = $actualSha256
+            NativeIdentity = [string]$actualIdentity
+            CreationFileTimeUtc = [long]$native.CreationFileTimeUtc
+        }
+    }
+    catch {
+        $message = [string]$_.Exception.Message
+        if ($message -match '^TASK038_CURRENT_CODEX_DISCOVERY_[A-Z0-9_]+_REJECTED$') { throw $message }
+        throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+    }
+    finally {
+        if ($null -ne $candidate) { $candidate.Dispose() }
+    }
+}
+
 function New-Task051CodexHome {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
@@ -1083,7 +1359,13 @@ function Invoke-Task051CodexDiscovery {
     param(
         [Parameter(Mandatory = $true)][string]$Phase,
         [Parameter(Mandatory = $true)][string]$EvidenceRoot,
-        [Parameter(Mandatory = $true)][Collections.IDictionary]$Environment
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$Environment,
+        [Parameter(Mandatory = $true)][string]$AcceptanceEvidencePath,
+        [Parameter(Mandatory = $true)][string]$AcceptanceNativeIdentity,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })][string]$AcceptanceSessionId,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{64}\z' })][string]$SafeConfigSha256,
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{64}\z' })][string]$ExpectedLatticedSha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedLatticedNativeIdentity
     )
 
     $codex = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_CURRENT_CODEX', 'Process')
@@ -1094,6 +1376,13 @@ function Invoke-Task051CodexDiscovery {
     $serverProcessId = 0
     $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_HOME_REJECTED'
     try {
+        if (
+            [string]$Environment['LATTICE_MCP_ACCEPTANCE_EVIDENCE_PATH'] -cne $AcceptanceEvidencePath -or
+            [string]$Environment['LATTICE_MCP_ACCEPTANCE_SESSION_ID'] -cne $AcceptanceSessionId -or
+            [string]$Environment['LATTICE_MCP_ACCEPTANCE_SAFE_CONFIG_SHA256'] -cne $SafeConfigSha256
+        ) {
+            throw 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
+        }
         $codexHome = New-Task051CodexHome -Root $EvidenceRoot -Phase $Phase -Latticed $script:Latticed -EnvironmentNames @($Environment.Keys)
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_START_INFO_REJECTED'
         $info = [Diagnostics.ProcessStartInfo]::new()
@@ -1184,22 +1473,33 @@ function Invoke-Task051CodexDiscovery {
         Assert-ToolDiscovery -Response ([pscustomobject]@{
             result = [pscustomobject]@{ tools = $toolRecords }
         })
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_EVIDENCE_REJECTED'
-        $serverRows = @(Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + [string]$process.Id) -ErrorAction Stop | Where-Object {
-            [string]::Equals(
-                [IO.Path]::GetFullPath([string]$_.ExecutablePath),
-                [IO.Path]::GetFullPath([string]$script:Latticed),
-                [StringComparison]::OrdinalIgnoreCase
-            )
-        })
-        if ($serverRows.Count -ne 1) { throw 'TASK051_APP_SERVER_PROCESS_REJECTED' }
-        $serverProcessId = [int]$serverRows[0].ProcessId
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
+        $sessionOpen = Read-Task051McpSessionOpen `
+            -Path $AcceptanceEvidencePath `
+            -ExpectedNativeIdentity $AcceptanceNativeIdentity `
+            -EvidenceRoot $EvidenceRoot `
+            -SessionId $AcceptanceSessionId `
+            -SafeConfigSha256 $SafeConfigSha256
+        $serverProcessId = [int]$sessionOpen.ProcessId
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_JOB_MEMBERSHIP_REJECTED'
+        $processEvidence = Get-Task051OwnedProcessEvidence `
+            -Job ([IntPtr]$owned.Job) `
+            -ProcessId $serverProcessId `
+            -ExpectedExecutable $script:Latticed `
+            -ExpectedExecutableSha256 $ExpectedLatticedSha256 `
+            -ExpectedExecutableNativeIdentity $ExpectedLatticedNativeIdentity `
+            -OwnerProcess $process `
+            -ObservedAtUnixNanos ([long]$sessionOpen.ObservedAtUnixNanos)
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_EVIDENCE_WRITE_REJECTED'
         $evidence = Write-Task051JsonEvidence -Path (Join-Path $EvidenceRoot ('task051-' + $Phase + '-discovery.json')) -Value ([ordered]@{
             schema_version = 'lattice.task051.current-codex-discovery.v1'
             phase = $Phase
             codex_process_id = [int]$process.Id
             latticed_process_id = $serverProcessId
+            latticed_sha256 = [string]$processEvidence.ImageSha256
+            latticed_native_identity = [string]$processEvidence.NativeIdentity
+            latticed_creation_file_time_utc = [long]$processEvidence.CreationFileTimeUtc
+            session_open_event_sha256 = [string]$sessionOpen.EventSha256
             codex_sha256 = Get-Task051Sha256 -Path $codex
             config_sha256 = [string]$codexHome.ConfigSha256
             user_agent = [string]$init.result.userAgent
@@ -1213,6 +1513,8 @@ function Invoke-Task051CodexDiscovery {
         return [pscustomobject]@{
             ProcessId = [int]$process.Id
             ServerProcessId = $serverProcessId
+            ServerSha256 = [string]$processEvidence.ImageSha256
+            ServerNativeIdentity = [string]$processEvidence.NativeIdentity
             ConfigSha256 = [string]$codexHome.ConfigSha256
             CodexSha256 = Get-Task051Sha256 -Path $codex
             UserAgent = [string]$init.result.userAgent
@@ -1496,6 +1798,10 @@ if (
 '@ -FailureCode 'TASK051_TASK038_CARGO_HOST_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '    ''--target-dir'', $task038CargoTarget, ''--target'', $cargoHostTarget' -New '    ''--target-dir'', $task038CargoTarget' -FailureCode 'TASK051_TASK038_HOST_TARGET_ARGUMENT_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '$script:Latticed = Get-CanonicalPath -Path (Join-Path $task038CargoTarget ($cargoHostTarget + ''\debug\latticed.exe''))' -New '$script:Latticed = Get-CanonicalPath -Path (Join-Path $task038CargoTarget ''debug\latticed.exe'')' -FailureCode 'TASK051_TASK038_HOST_TARGET_BINARY_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$candidateLatticedSha256 = Get-FileSha256 -Path $script:Latticed' -New @'
+$candidateLatticedSha256 = Get-FileSha256 -Path $script:Latticed
+$candidateLatticedNativeIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $script:Latticed -Directory $false
+'@ -FailureCode 'TASK051_TASK038_CANDIDATE_BINARY_COMMITMENT_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old @'
         'INITIAL_POSTMASTER_STOPPED', 'RESTART_POSTMASTER_READY', 'CONSUMER_STARTED'
 '@ -New @'
@@ -1864,9 +2170,9 @@ $legacyFrames = @(
 $task051DiscoverySessionId = [Guid]::NewGuid().ToString('N')
 $task051DiscoverySink = New-Task038McpAcceptanceEvidenceSink -EvidenceRoot $evidenceRoot -SessionId $task051DiscoverySessionId
 $task051DiscoveryObserved = New-Task038McpObservedEffectEvidenceSink -AcceptanceEvidencePath ([string]$task051DiscoverySink.path) -SessionId $task051DiscoverySessionId
-$task051DiscoverySafeConfig = Get-Task051StringSha256 -Value ('TASK051_DISCOVERY|' + $acceptanceId)
+$task051DiscoverySafeConfig = Get-Task051StringSha256 -Value ('TASK051_DISCOVERY|' + $acceptanceId + '|' + $candidateLatticedSha256 + '|' + $candidateLatticedNativeIdentity)
 $task051DiscoveryEnvironment = Get-Task051McpEnvironment -RunMode 'FRESH' -Authority $authority -DatabasePassword $databasePassword -DeliveryRoot $deliveryRoot -SchemaDirectory $schemaDirectory -LauncherSha256 $launcherSha256 -LauncherVersion $codexVersion.Text.Trim() -AcceptanceEvidencePath ([string]$task051DiscoverySink.path) -AcceptanceSessionId $task051DiscoverySessionId -SafeConfigSha256 $task051DiscoverySafeConfig -ObservedEffectPath ([string]$task051DiscoveryObserved.path) -ObservedEffectNonce ([string]$task051DiscoveryObserved.nonce)
-$task051Discovery = Invoke-Task051CodexDiscovery -Phase 'discovery' -EvidenceRoot $evidenceRoot -Environment $task051DiscoveryEnvironment
+$task051Discovery = Invoke-Task051CodexDiscovery -Phase 'discovery' -EvidenceRoot $evidenceRoot -Environment $task051DiscoveryEnvironment -AcceptanceEvidencePath ([string]$task051DiscoverySink.path) -AcceptanceNativeIdentity ([string]$task051DiscoverySink.native_identity) -AcceptanceSessionId $task051DiscoverySessionId -SafeConfigSha256 $task051DiscoverySafeConfig -ExpectedLatticedSha256 $candidateLatticedSha256 -ExpectedLatticedNativeIdentity $candidateLatticedNativeIdentity
 $task051SubmitArguments = [ordered]@{ client_request_id = $sameClientRequestId; intent = 'CONTROLLED_CODEX_CANARY' }
 $task051Submit = Invoke-Task051CodexTool -Phase 'submit' -Tool 'lattice_task_submit' -Arguments $task051SubmitArguments -RunMode 'FRESH' -EvidenceRoot $evidenceRoot -Authority $authority -DatabasePassword $databasePassword -DeliveryRoot $deliveryRoot -SchemaDirectory $schemaDirectory -LauncherSha256 $launcherSha256 -LauncherVersion $codexVersion.Text.Trim()
 $task051Submitted = $task051Submit.StructuredContent
@@ -2268,6 +2574,85 @@ function Invoke-Task051SelfTest {
         $fakeAuth = Join-Path $aclRoot 'fake-auth.json'
         [IO.File]::WriteAllText($fakeAuth, '{"fake":true}', [Text.UTF8Encoding]::new($false))
         Set-Task051OwnerOnlyAcl -Path $fakeAuth -Directory $false
+        function Test-LatticeWindowsNativePathIdentity {
+            param($Path, $Directory, $ExpectedToken)
+            return (-not $Directory -and [string]$ExpectedToken -ceq 'task051-selftest-native')
+        }
+        $sessionOpenPath = Join-Path $aclRoot 'session-open.jsonl'
+        $sessionOpenId = [Guid]::NewGuid().ToString('N')
+        $sessionOpenSafeConfig = 'a' * 64
+        $sessionOpenObserved = '1770000000000000000'
+        $sessionOpenPid = 1234
+        $sessionOpenHashInput = @(
+            'lattice.mcp.acceptance-dispatch-hash.v1',
+            ('0' * 64),
+            $sessionOpenId,
+            $sessionOpenSafeConfig,
+            'SESSION_OPEN',
+            '1',
+            [string]$sessionOpenPid,
+            'null',
+            'null',
+            '0',
+            $sessionOpenObserved
+        ) -join "`n"
+        $sessionOpenRecord = [ordered]@{
+            schema = 'lattice.mcp.acceptance-dispatch.v1'
+            record_type = 'SESSION_OPEN'
+            session_id = $sessionOpenId
+            safe_config_sha256 = $sessionOpenSafeConfig
+            process_id = [int]$sessionOpenPid
+            ordinal = [int]1
+            dispatch_accepted_count = [int]0
+            observed_at_unix_nanos = $sessionOpenObserved
+            previous_event_sha256 = '0' * 64
+            event_sha256 = Get-Task051StringSha256 -Value $sessionOpenHashInput
+            tool_name = $null
+            request_id_sha256 = $null
+        }
+        $writeSessionOpen = {
+            param([Parameter(Mandatory = $true)]$Record, [switch]$Duplicate)
+            $line = $Record | ConvertTo-Json -Compress -Depth 10
+            $text = if ($Duplicate) { $line + "`n" + $line + "`n" } else { $line + "`n" }
+            [IO.File]::WriteAllText($sessionOpenPath, $text, [Text.UTF8Encoding]::new($false))
+            Set-Task051OwnerOnlyAcl -Path $sessionOpenPath -Directory $false
+        }
+        & $writeSessionOpen -Record $sessionOpenRecord
+        $parsedSessionOpen = Read-Task051McpSessionOpen -Path $sessionOpenPath -ExpectedNativeIdentity 'task051-selftest-native' -EvidenceRoot $aclRoot -SessionId $sessionOpenId -SafeConfigSha256 $sessionOpenSafeConfig
+        if (
+            [int]$parsedSessionOpen.ProcessId -ne $sessionOpenPid -or
+            [long]$parsedSessionOpen.ObservedAtUnixNanos -ne [long]$sessionOpenObserved -or
+            [string]$parsedSessionOpen.EventSha256 -cne [string]$sessionOpenRecord.event_sha256
+        ) {
+            throw 'TASK051_MCP_SESSION_OPEN_SELF_TEST_REJECTED'
+        }
+        foreach ($invalidSessionOpen in @(
+            [pscustomobject]@{ Kind = 'BAD_HASH'; Value = 'b' * 64 },
+            [pscustomobject]@{ Kind = 'STRING_PID'; Value = [string]$sessionOpenPid },
+            [pscustomobject]@{ Kind = 'NUMERIC_OBSERVED'; Value = [long]$sessionOpenObserved },
+            [pscustomobject]@{ Kind = 'NATIVE_IDENTITY'; Value = 'task051-wrong-native' },
+            [pscustomobject]@{ Kind = 'DUPLICATE'; Value = $null }
+        )) {
+            $candidateRecord = [ordered]@{}
+            foreach ($entry in $sessionOpenRecord.GetEnumerator()) { $candidateRecord[$entry.Key] = $entry.Value }
+            $expectedIdentity = 'task051-selftest-native'
+            $duplicate = $false
+            if ($invalidSessionOpen.Kind -ceq 'BAD_HASH') { $candidateRecord.event_sha256 = $invalidSessionOpen.Value }
+            elseif ($invalidSessionOpen.Kind -ceq 'STRING_PID') { $candidateRecord.process_id = $invalidSessionOpen.Value }
+            elseif ($invalidSessionOpen.Kind -ceq 'NUMERIC_OBSERVED') { $candidateRecord.observed_at_unix_nanos = $invalidSessionOpen.Value }
+            elseif ($invalidSessionOpen.Kind -ceq 'NATIVE_IDENTITY') { $expectedIdentity = $invalidSessionOpen.Value }
+            elseif ($invalidSessionOpen.Kind -ceq 'DUPLICATE') { $duplicate = $true }
+            & $writeSessionOpen -Record $candidateRecord -Duplicate:$duplicate
+            $rejected = $false
+            try {
+                [void](Read-Task051McpSessionOpen -Path $sessionOpenPath -ExpectedNativeIdentity $expectedIdentity -EvidenceRoot $aclRoot -SessionId $sessionOpenId -SafeConfigSha256 $sessionOpenSafeConfig)
+            }
+            catch {
+                $rejected = [string]$_.Exception.Message -ceq 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
+            }
+            if (-not $rejected) { throw 'TASK051_MCP_SESSION_OPEN_SELF_TEST_REJECTED' }
+        }
+        Remove-Item -LiteralPath $sessionOpenPath -Force
         [Environment]::SetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', $fakeAuth, 'Process')
         try {
             $null = New-Task051CodexHome -Root $aclRoot -Phase 'provisioning-failure' -Latticed "C:\invalid'path\latticed.exe" -EnvironmentNames @('PATH')
@@ -2508,6 +2893,13 @@ function Invoke-Task051SelfTest {
     if (@($errors).Count -ne 0) { throw 'TASK051_TASK038_TRANSFORM_PARSE_REJECTED' }
     [void][Management.Automation.Language.Parser]::ParseInput($task019, [ref]$tokens, [ref]$errors)
     if (@($errors).Count -ne 0) { throw 'TASK051_TASK019_TRANSFORM_PARSE_REJECTED' }
+    if (
+        [regex]::Matches($task038, [regex]::Escape('$candidateLatticedNativeIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $script:Latticed -Directory $false')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('-ExpectedLatticedSha256 $candidateLatticedSha256 -ExpectedLatticedNativeIdentity $candidateLatticedNativeIdentity')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("'TASK051_DISCOVERY|' + `$acceptanceId + '|' + `$candidateLatticedSha256 + '|' + `$candidateLatticedNativeIdentity")).Count -ne 1
+    ) {
+        throw 'TASK051_TASK038_CANDIDATE_BINARY_COMMITMENT_SELF_TEST_REJECTED'
+    }
     if (
         [regex]::Matches($task038, [regex]::Escape("`$task051PhysicalPostgresData = Get-CanonicalPath -Path (Join-Path `$env:LATTICE_TASK051_RUN_ROOT ('task019-postgres\' + `$PostgresRunId + '\data'))")).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('Assert-NoReparseAncestor -Path $script:PostgresData -Boundary $env:LATTICE_TASK051_RUN_ALIAS_ROOT')).Count -ne 1 -or
