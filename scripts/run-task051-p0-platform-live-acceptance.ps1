@@ -900,6 +900,19 @@ public static class LatticeTask051ProcessIdentityInterop
 {
     private const UInt32 ProcessQueryLimitedInformation = 0x1000;
 
+    public static string ClassifyOpenFailure(Int32 error)
+    {
+        if (error == 5)
+        {
+            return "TASK051_PROCESS_INTEROP_OPEN_ACCESS";
+        }
+        if (error == 87)
+        {
+            return "TASK051_PROCESS_INTEROP_OPEN_STALE_PID";
+        }
+        return "TASK051_PROCESS_INTEROP_OPEN_OTHER";
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct FileTime
     {
@@ -940,7 +953,8 @@ public static class LatticeTask051ProcessIdentityInterop
         IntPtr process = OpenProcess(ProcessQueryLimitedInformation, false, (UInt32)processId);
         if (process == IntPtr.Zero)
         {
-            throw new InvalidOperationException("TASK051_PROCESS_INTEROP_OPEN");
+            int error = Marshal.GetLastWin32Error();
+            throw new InvalidOperationException(ClassifyOpenFailure(error));
         }
         try
         {
@@ -1105,7 +1119,9 @@ function Get-Task051OwnedProcessEvidence {
         $leaf = $_.Exception
         while ($null -ne $leaf.InnerException) { $leaf = $leaf.InnerException }
         switch -CaseSensitive ([string]$leaf.Message) {
-            'TASK051_PROCESS_INTEROP_OPEN' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_OPEN_REJECTED' }
+            'TASK051_PROCESS_INTEROP_OPEN_ACCESS' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_OPEN_ACCESS_REJECTED' }
+            'TASK051_PROCESS_INTEROP_OPEN_STALE_PID' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_OPEN_STALE_PID_REJECTED' }
+            'TASK051_PROCESS_INTEROP_OPEN_OTHER' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_OPEN_OTHER_REJECTED' }
             'TASK051_PROCESS_INTEROP_JOB_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_JOB_QUERY_REJECTED' }
             'TASK051_PROCESS_INTEROP_IMAGE_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_QUERY_REJECTED' }
             'TASK051_PROCESS_INTEROP_TIME_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_TIME_QUERY_REJECTED' }
@@ -2557,6 +2573,28 @@ function Invoke-Task051SelfTest {
     $authBefore = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', 'Process')
     try {
         New-Task051OwnerOnlyDirectory -Path $aclRoot
+        $selfTestTempBefore = [Environment]::GetEnvironmentVariable('TEMP', 'Process')
+        $selfTestTmpBefore = [Environment]::GetEnvironmentVariable('TMP', 'Process')
+        try {
+            [Environment]::SetEnvironmentVariable('TEMP', $aclRoot, 'Process')
+            [Environment]::SetEnvironmentVariable('TMP', $aclRoot, 'Process')
+            Initialize-Task051ProcessIdentityInterop
+            foreach ($openFailureCase in @(
+                [pscustomobject]@{ Error = 5; Expected = 'TASK051_PROCESS_INTEROP_OPEN_ACCESS' },
+                [pscustomobject]@{ Error = 87; Expected = 'TASK051_PROCESS_INTEROP_OPEN_STALE_PID' },
+                [pscustomobject]@{ Error = 0; Expected = 'TASK051_PROCESS_INTEROP_OPEN_OTHER' },
+                [pscustomobject]@{ Error = 6; Expected = 'TASK051_PROCESS_INTEROP_OPEN_OTHER' },
+                [pscustomobject]@{ Error = 8; Expected = 'TASK051_PROCESS_INTEROP_OPEN_OTHER' }
+            )) {
+                if ([LatticeTask051ProcessIdentityInterop]::ClassifyOpenFailure([int]$openFailureCase.Error) -cne [string]$openFailureCase.Expected) {
+                    throw 'TASK051_PROCESS_OPEN_CLASSIFIER_SELF_TEST_REJECTED'
+                }
+            }
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('TEMP', $selfTestTempBefore, 'Process')
+            [Environment]::SetEnvironmentVariable('TMP', $selfTestTmpBefore, 'Process')
+        }
         $cargoLinkPathProbe = Join-Path $aclRoot 't\debug\deps\liblattice_postgres_codebase_memory-0123456789abcdef.rlib'
         if ($cargoLinkPathProbe.Length -ge 260) {
             throw 'TASK051_CARGO_LINK_PATH_BUDGET_REJECTED'
@@ -3060,6 +3098,7 @@ function Invoke-Task051SelfTest {
     Write-Output 'TASK051_SOURCE_TRANSFORM_SELF_TEST=PASS'
     Write-Output 'TASK051_CODEX_EVENT_PARSER_SELF_TEST=PASS'
     Write-Output 'TASK051_APP_SERVER_DISCOVERY_SELF_TEST=PASS'
+    Write-Output 'TASK051_PROCESS_OPEN_CLASSIFIER_SELF_TEST=PASS'
     Write-Output 'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST=PASS'
     Write-Output 'TASK051_OWNER_ONLY_CREDENTIAL_SELF_TEST=PASS'
     Write-Output 'TASK051_PROCESS_CONTAINMENT_SELF_TEST=PASS'
