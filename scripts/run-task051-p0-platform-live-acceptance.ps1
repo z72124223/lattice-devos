@@ -955,6 +955,19 @@ function Get-Task051UniqueMcpServer {
     return $matches[0]
 }
 
+function Get-Task051McpToolNames {
+    param([Parameter(Mandatory = $true)][AllowNull()][object]$Tools)
+
+    if ($null -eq $Tools -or $Tools -isnot [Management.Automation.PSCustomObject]) {
+        throw 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_SHAPE_REJECTED'
+    }
+    $names = [Collections.Generic.List[string]]::new()
+    foreach ($property in @($Tools.PSObject.Properties)) {
+        $names.Add([string]$property.Name)
+    }
+    return @($names | Sort-Object)
+}
+
 function Invoke-Task051CodexDiscovery {
     param(
         [Parameter(Mandatory = $true)][string]$Phase,
@@ -1009,21 +1022,32 @@ function Invoke-Task051CodexDiscovery {
         ) {
             throw 'TASK051_APP_SERVER_IDENTITY_REJECTED'
         }
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LIST_REQUEST_REJECTED'
         $owned.Suspended.StandardInput.WriteLine('{"method":"initialized","params":{}}')
-        $owned.Suspended.StandardInput.WriteLine('{"method":"mcpServerStatus/list","id":2,"params":{"detail":"full"}}')
         $owned.Suspended.StandardInput.Flush()
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LIST_RESPONSE_REJECTED'
-        $list = Get-Task051AppServerResponse -Reader $owned.Suspended.StandardOutput -Id 2 -TimeoutSeconds 60
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SERVER_COUNT_ZERO_REJECTED'
-        $servers = @($list.result.data)
-        if ($servers.Count -eq 0) {
-            throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
+        $list = $null
+        $listRequest = $null
+        $server = $null
+        $toolNames = @()
+        for ($attempt = 0; $attempt -lt 3; $attempt++) {
+            $requestId = 2 + $attempt
+            $listRequest = '{"method":"mcpServerStatus/list","id":' + [string]$requestId + ',"params":{"detail":"full"}}'
+            $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LIST_REQUEST_REJECTED'
+            $owned.Suspended.StandardInput.WriteLine($listRequest)
+            $owned.Suspended.StandardInput.Flush()
+            $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LIST_RESPONSE_REJECTED'
+            $list = Get-Task051AppServerResponse -Reader $owned.Suspended.StandardOutput -Id $requestId -TimeoutSeconds 60
+            $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SERVER_COUNT_ZERO_REJECTED'
+            $servers = @($list.result.data)
+            if ($servers.Count -eq 0) {
+                throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
+            }
+            $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LATTICE_SERVER_COUNT_REJECTED'
+            $server = Get-Task051UniqueMcpServer -Servers $servers -Name 'lattice'
+            $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_SHAPE_REJECTED'
+            $toolNames = @(Get-Task051McpToolNames -Tools $server.tools)
+            if ($toolNames.Count -gt 0) { break }
+            if ($attempt -lt 2) { Start-Sleep -Milliseconds 250 }
         }
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LATTICE_SERVER_COUNT_REJECTED'
-        $server = Get-Task051UniqueMcpServer -Servers $servers -Name 'lattice'
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_SHAPE_REJECTED'
-        $toolNames = @($server.tools.PSObject.Properties.Name | Sort-Object)
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_COUNT_ZERO_REJECTED'
         if ($toolNames.Count -eq 0) {
             throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
@@ -1072,7 +1096,7 @@ function Invoke-Task051CodexDiscovery {
             tool_schemas = @($toolRecords)
             initialize_request_sha256 = Get-Task051StringSha256 -Value $initialize
             initialize_response_sha256 = Get-Task051StringSha256 -Value ($init | ConvertTo-Json -Compress -Depth 50)
-            list_request_sha256 = Get-Task051StringSha256 -Value '{"method":"mcpServerStatus/list","id":2,"params":{"detail":"full"}}'
+            list_request_sha256 = Get-Task051StringSha256 -Value $listRequest
             list_response_sha256 = Get-Task051StringSha256 -Value ($list | ConvertTo-Json -Compress -Depth 50)
         })
         return [pscustomobject]@{
@@ -1963,6 +1987,23 @@ function Invoke-Task051SelfTest {
     ) -Name 'lattice'
     if ([string]$selectedServer.name -cne 'lattice') {
         throw 'TASK051_APP_SERVER_LATTICE_SERVER_SELECTION_SELF_TEST_REJECTED'
+    }
+    $emptyToolNames = @(Get-Task051McpToolNames -Tools ([pscustomobject]@{}))
+    $mappedToolNames = @(Get-Task051McpToolNames -Tools ([pscustomobject]@{
+        lattice_task_status = [pscustomobject]@{}
+        lattice_task_submit = [pscustomobject]@{}
+    }))
+    if (
+        $emptyToolNames.Count -ne 0 -or
+        ($mappedToolNames -join ',') -cne 'lattice_task_status,lattice_task_submit'
+    ) {
+        throw 'TASK051_APP_SERVER_TOOL_MAP_SELF_TEST_REJECTED'
+    }
+    foreach ($invalidTools in @($null, @())) {
+        $rejected = $false
+        try { [void](Get-Task051McpToolNames -Tools $invalidTools) }
+        catch { $rejected = [string]$_.Exception.Message -ceq 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_SHAPE_REJECTED' }
+        if (-not $rejected) { throw 'TASK051_APP_SERVER_TOOL_MAP_SELF_TEST_REJECTED' }
     }
     foreach ($invalidServers in @(
         @([pscustomobject]@{ name = 'codex_apps' }),
