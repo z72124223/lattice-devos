@@ -1264,6 +1264,15 @@ function Convert-Task051Task019Source {
     $qScripts = ConvertTo-Task051TomlLiteral -Value ([IO.Path]::GetFullPath($ScriptsRoot))
     $Source = $Source.Replace('$PSScriptRoot', $qScripts)
     $Source = Replace-Task051Exact -Source $Source -Old '$repositoryTarget = Get-CanonicalPath -Path (Join-Path $repositoryRoot ''target'')' -New '$repositoryTarget = Get-CanonicalPath -Path $env:LATTICE_TASK051_RUN_ROOT' -FailureCode 'TASK051_TASK019_TARGET_TRANSFORM_REJECTED'
+    $emptyDiagnosticParameter = @'
+function Get-Task019AllowlistedDiagnosticTokens {
+    param([Parameter(Mandatory = $true)][object[]]$Output)
+'@
+    $allowEmptyDiagnosticParameter = @'
+function Get-Task019AllowlistedDiagnosticTokens {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Output)
+'@
+    $Source = Replace-Task051Exact -Source $Source -Old $emptyDiagnosticParameter -New $allowEmptyDiagnosticParameter -FailureCode 'TASK051_TASK019_EMPTY_DIAGNOSTIC_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '$dataDirectory = Join-Path $clusterRoot ''data''' -New @'
 $dataDirectory = Join-Path $clusterRoot 'data'
 $initdbDataDirectory = Join-Path $env:LATTICE_TASK051_RUN_ALIAS_ROOT ('task019-postgres\' + $runId + '\data')
@@ -1531,6 +1540,14 @@ function Invoke-Task051SelfTest {
     if (@($errors).Count -ne 0) { throw 'TASK051_TASK038_TRANSFORM_PARSE_REJECTED' }
     [void][Management.Automation.Language.Parser]::ParseInput($task019, [ref]$tokens, [ref]$errors)
     if (@($errors).Count -ne 0) { throw 'TASK051_TASK019_TRANSFORM_PARSE_REJECTED' }
+    if (
+        [regex]::Matches(
+            $task019,
+            [regex]::Escape('param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Output)')
+        ).Count -ne 1
+    ) {
+        throw 'TASK051_TASK019_EMPTY_DIAGNOSTIC_SELF_TEST_REJECTED'
+    }
     Write-Output 'TASK051_SOURCE_TRANSFORM_SELF_TEST=PASS'
     Write-Output 'TASK051_CODEX_EVENT_PARSER_SELF_TEST=PASS'
     Write-Output 'TASK051_APP_SERVER_DISCOVERY_SELF_TEST=PASS'
