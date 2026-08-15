@@ -1334,8 +1334,15 @@ $holder = $records[0].payload
         if (-not (Test-ExactPath -Actual ([string]$listenerProcess.ExecutablePath) -Expected $script:PostgresExecutable)) {
             throw $failureCode
         }
-        $failureCode = 'TASK038_POSTGRES_HOLDER_LISTENER_DATA_REJECTED'
-        if ([string]$listenerProcess.CommandLine -notlike ('*' + $script:PostgresData + '*')) {
+        $failureCode = 'TASK038_POSTGRES_HOLDER_LISTENER_RECEIPT_REJECTED'
+        if (
+            -not (Test-ExactPath -Actual ([string]$restart.listener_executable_path) -Expected $script:PostgresExecutable) -or
+            [string]$restart.listener_executable_sha256 -cne $expectedPostgresExecutableSha256 -or
+            [string]$restart.listener_executable_native_identity -cne $script:PostgresExecutableNativeIdentity -or
+            -not (Test-ExactPath -Actual ([string]$restart.listener_data_directory) -Expected $script:PostgresData) -or
+            [string]$restart.listener_host -cne '127.0.0.1' -or
+            [long]$restart.listener_port -ne [long]$PostgresPort
+        ) {
             throw $failureCode
         }
         $failureCode = 'TASK038_POSTGRES_HOLDER_LISTENER_CREATION_REJECTED'
@@ -1345,6 +1352,15 @@ $holder = $records[0].payload
         $failureCode = 'TASK038_POSTGRES_HOLDER_LISTENER_REJECTED'
 '@
     $Source = Replace-Task051Exact -Source $Source -Old '        $listenerProcess = Get-CimInstance -ClassName Win32_Process -Filter (''ProcessId = '' + [long]$restart.listener_process_id) -ErrorAction Stop' -New $listenerDiagnosticBlock -FailureCode 'TASK051_TASK038_HOLDER_LISTENER_DIAGNOSTIC_TRANSFORM_REJECTED'
+    $listenerCommandLineCondition = @'
+            -not (Test-ExactPath -Actual ([string]$restart.listener_executable_path) -Expected $script:PostgresExecutable) -or
+            [string]$restart.listener_executable_sha256 -cne $expectedPostgresExecutableSha256 -or
+            [string]$restart.listener_executable_native_identity -cne $script:PostgresExecutableNativeIdentity -or
+            -not (Test-ExactPath -Actual ([string]$restart.listener_data_directory) -Expected $script:PostgresData) -or
+            [string]$restart.listener_host -cne '127.0.0.1' -or
+            [long]$restart.listener_port -ne [long]$PostgresPort -or
+'@
+    $Source = Replace-Task051Exact -Source $Source -Old '            [string]$listenerProcess.CommandLine -notlike (''*'' + $script:PostgresData + ''*'') -or' -New $listenerCommandLineCondition -FailureCode 'TASK051_TASK038_HOLDER_LISTENER_RECEIPT_TRANSFORM_REJECTED'
     $postgresDataBlock = @'
 $script:PostgresData = Get-CanonicalPath -Path $PostgresDataDirectory
 $dataItem = Get-Item -LiteralPath $script:PostgresData -Force -ErrorAction SilentlyContinue
@@ -2254,7 +2270,7 @@ function Invoke-Task051SelfTest {
         'TASK038_POSTGRES_HOLDER_LISTENER_SOCKET_REJECTED',
         'TASK038_POSTGRES_HOLDER_LISTENER_PROCESS_QUERY_REJECTED',
         'TASK038_POSTGRES_HOLDER_LISTENER_EXECUTABLE_REJECTED',
-        'TASK038_POSTGRES_HOLDER_LISTENER_DATA_REJECTED',
+        'TASK038_POSTGRES_HOLDER_LISTENER_RECEIPT_REJECTED',
         'TASK038_POSTGRES_HOLDER_LISTENER_CREATION_REJECTED',
         'TASK038_POSTGRES_HOLDER_LISTENER_REJECTED'
     )) {
