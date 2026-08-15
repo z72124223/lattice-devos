@@ -71,6 +71,8 @@ $requiredFragments = @(
     'LATTICE_TASK051_RUN_ALIAS_ROOT',
     'TASK051_TASK019_PGDATA_ALIAS_TRANSFORM_REJECTED',
     'TASK051_TASK019_INITDB_ALIAS_TRANSFORM_REJECTED',
+    'TASK051_TASK019_CLUSTER_CLEANUP_TRANSFORM_REJECTED',
+    'TASK051_TASK019_CLUSTER_CLEANUP_REJECTED',
     "PSObject.Properties['outputSchema']",
     'lattice.task051.current-codex-discovery.v1',
     'lattice.task051.current-codex-tool-call.v1',

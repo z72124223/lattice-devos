@@ -1269,6 +1269,7 @@ $dataDirectory = Join-Path $clusterRoot 'data'
 $initdbDataDirectory = Join-Path $env:LATTICE_TASK051_RUN_ALIAS_ROOT ('task019-postgres\' + $runId + '\data')
 '@ -FailureCode 'TASK051_TASK019_PGDATA_ALIAS_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old "            '--pgdata', `$dataDirectory," -New "            '--pgdata', `$initdbDataDirectory," -FailureCode 'TASK051_TASK019_INITDB_ALIAS_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '            Remove-Item -LiteralPath $clusterRoot -Recurse -Force' -New '            Remove-Task051OwnedDirectory -Path $clusterRoot -AllowedRoot $repositoryTarget -FailureCode ''TASK051_TASK019_CLUSTER_CLEANUP_REJECTED''' -FailureCode 'TASK051_TASK019_CLUSTER_CLEANUP_TRANSFORM_REJECTED'
     $Source = $Source.Replace('$task038HookPath = Get-LatticeTask038AcceptanceHookPath -ScriptDirectory ' + $qScripts + ' -RepositoryRoot $repositoryRoot', '$task038HookPath = [IO.Path]::GetFullPath($env:LATTICE_TASK051_GENERATED_TASK038)')
     $conflictStart = $Source.IndexOf('$RunTask076WriterLeaseGate -and (', [StringComparison]::Ordinal)
     $conflictEndMarker = "throw 'TASK076_WRITER_LEASE_GATE_HOOK_FORBIDDEN'"
