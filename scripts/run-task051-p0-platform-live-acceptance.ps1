@@ -946,8 +946,11 @@ function Get-Task051UniqueMcpServer {
     )
 
     $matches = @($Servers | Where-Object { [string]$_.name -ceq $Name })
-    if ($matches.Count -ne 1) {
-        throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
+    if ($matches.Count -eq 0) {
+        throw 'TASK038_CURRENT_CODEX_DISCOVERY_LATTICE_SERVER_ZERO_REJECTED'
+    }
+    if ($matches.Count -gt 1) {
+        throw 'TASK038_CURRENT_CODEX_DISCOVERY_LATTICE_SERVER_DUPLICATE_REJECTED'
     }
     return $matches[0]
 }
@@ -1019,6 +1022,7 @@ function Invoke-Task051CodexDiscovery {
         }
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LATTICE_SERVER_COUNT_REJECTED'
         $server = Get-Task051UniqueMcpServer -Servers $servers -Name 'lattice'
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_SHAPE_REJECTED'
         $toolNames = @($server.tools.PSObject.Properties.Name | Sort-Object)
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_COUNT_ZERO_REJECTED'
         if ($toolNames.Count -eq 0) {
@@ -1966,7 +1970,12 @@ function Invoke-Task051SelfTest {
     )) {
         $rejected = $false
         try { [void](Get-Task051UniqueMcpServer -Servers $invalidServers -Name 'lattice') }
-        catch { $rejected = ([string]$_.Exception.Message -ceq 'TASK051_APP_SERVER_DISCOVERY_REJECTED') }
+        catch {
+            $rejected = [string]$_.Exception.Message -in @(
+                'TASK038_CURRENT_CODEX_DISCOVERY_LATTICE_SERVER_ZERO_REJECTED',
+                'TASK038_CURRENT_CODEX_DISCOVERY_LATTICE_SERVER_DUPLICATE_REJECTED'
+            )
+        }
         if (-not $rejected) {
             throw 'TASK051_APP_SERVER_LATTICE_SERVER_SELECTION_SELF_TEST_REJECTED'
         }
