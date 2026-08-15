@@ -181,6 +181,26 @@ $requiredFragments = @(
     'TASK051_CODEX_STATUS_CALL_COUNT_REJECTED',
     'collab_tool_call',
     'TASK051_CODEX_UNEXPECTED_TOOL_REJECTED',
+    'function Resolve-Task051CodexToolFailure',
+    'TASK038_CURRENT_CODEX_TOOL_HOME_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_START_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_PROCESS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_PROMPT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_WAIT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_EXIT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_OUTPUT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_EVENT_JSON_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_UNEXPECTED_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_IDENTITY_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_ARGUMENT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_PUBLIC_STATUS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_DISPATCH_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_EFFECT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_COUNTERS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_EVIDENCE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_CLEANUP_REJECTED',
     'TASK051_CODEX_FRESH_PROCESS_REJECTED',
     'V5_MEMORY_V3_WRITER_LEASE_V2',
     'CONTROLLED_CODEX_CANARY_AUTONOMY_V1',
@@ -297,6 +317,55 @@ if (
     throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_CLEANUP_SHAPE_REJECTED'
 }
 
+$codexToolResolverStart = $runnerSource.IndexOf('function Resolve-Task051CodexToolFailure', [StringComparison]::Ordinal)
+$codexToolInvokeStart = $runnerSource.IndexOf('function Invoke-Task051CodexTool', $codexToolResolverStart, [StringComparison]::Ordinal)
+$codexToolInvokeEnd = $runnerSource.IndexOf('function Replace-Task051Exact', $codexToolInvokeStart, [StringComparison]::Ordinal)
+if ($codexToolResolverStart -lt 0 -or $codexToolInvokeStart -le $codexToolResolverStart -or $codexToolInvokeEnd -le $codexToolInvokeStart) {
+    throw 'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SHAPE_REJECTED'
+}
+$codexToolResolverSource = $runnerSource.Substring($codexToolResolverStart, $codexToolInvokeStart - $codexToolResolverStart)
+$codexToolInvokeSource = $runnerSource.Substring($codexToolInvokeStart, $codexToolInvokeEnd - $codexToolInvokeStart)
+foreach ($codexToolLeaf in @(
+    'TASK038_CURRENT_CODEX_TOOL_HOME_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_START_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_PROCESS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_PROMPT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_WAIT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_EXIT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_OUTPUT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_EVENT_JSON_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_UNEXPECTED_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_IDENTITY_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_ARGUMENT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_PUBLIC_STATUS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_DISPATCH_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_EFFECT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_COUNTERS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_EVIDENCE_REJECTED'
+)) {
+    if ($codexToolResolverSource.IndexOf($codexToolLeaf, [StringComparison]::Ordinal) -lt 0) {
+        throw 'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SHAPE_REJECTED'
+    }
+}
+$codexToolStageIndex = -1
+foreach ($codexToolStage in @('HOME', 'START', 'PROCESS', 'PROMPT', 'WAIT', 'EXIT', 'OUTPUT', 'EVENT_JSON', 'RESULT', 'PUBLIC_STATUS', 'DISPATCH', 'EFFECT', 'COUNTERS', 'EVIDENCE')) {
+    $nextCodexToolStageIndex = $codexToolInvokeSource.IndexOf(("`$failureStage = '" + $codexToolStage + "'"), $codexToolStageIndex + 1, [StringComparison]::Ordinal)
+    if ($nextCodexToolStageIndex -le $codexToolStageIndex) {
+        throw 'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SHAPE_REJECTED'
+    }
+    $codexToolStageIndex = $nextCodexToolStageIndex
+}
+if (
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape('Resolve-Task051CodexToolFailure -Stage $failureStage')).Count -ne 1 -or
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape("throw 'TASK038_CURRENT_CODEX_TOOL_CLEANUP_REJECTED'")).Count -ne 1 -or
+    $codexToolInvokeSource.IndexOf('throw $message', [StringComparison]::Ordinal) -ge 0 -or
+    $codexToolInvokeSource.IndexOf('throw $_', [StringComparison]::Ordinal) -ge 0
+) {
+    throw 'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SHAPE_REJECTED'
+}
+
 $bundleStart = $runnerSource.IndexOf('function Get-Task051OfficialCodexBundlePolicy', [StringComparison]::Ordinal)
 if ($bundleStart -lt 0) {
     throw 'TASK051_OFFICIAL_CODEX_BUNDLE_SHAPE_REJECTED'
@@ -384,6 +453,7 @@ $expectedSelfTestMarkers = @(
     'TASK051_PROCESS_OPEN_CLASSIFIER_SELF_TEST=PASS',
     'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST=PASS',
     'TASK051_MCP_SESSION_OPEN_PARSE_DIAGNOSTIC_SELF_TEST=PASS',
+    'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST=PASS',
     'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST=PASS',
     'TASK051_OWNER_ONLY_CREDENTIAL_SELF_TEST=PASS',
     'TASK051_PROCESS_CONTAINMENT_SELF_TEST=PASS',

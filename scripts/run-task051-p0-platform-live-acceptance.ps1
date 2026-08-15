@@ -1915,6 +1915,49 @@ function Get-Task051ExecStructuredContent {
     }
 }
 
+function Resolve-Task051CodexToolFailure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('HOME', 'START', 'PROCESS', 'PROMPT', 'WAIT', 'EXIT', 'OUTPUT', 'EVENT_JSON', 'RESULT', 'PUBLIC_STATUS', 'DISPATCH', 'EFFECT', 'COUNTERS', 'EVIDENCE')]
+        [string]$Stage,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Message
+    )
+
+    if (
+        $Stage -in @('DISPATCH', 'EFFECT') -and
+        $Message -cmatch '^(?:TASK038|LATTICE)_[A-Z0-9_]{1,127}(?:\|[A-Z0-9_]{1,127}|\|[0-9a-f]{64})*$'
+    ) {
+        return $Message
+    }
+
+    switch -CaseSensitive ($Message) {
+        'TASK051_CODEX_SUBMIT_CALL_COUNT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED' }
+        'TASK051_CODEX_STATUS_CALL_COUNT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED' }
+        'TASK051_CODEX_UNEXPECTED_TOOL_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_UNEXPECTED_REJECTED' }
+        'TASK051_CODEX_TOOL_IDENTITY_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_IDENTITY_REJECTED' }
+        'TASK051_CODEX_TOOL_ARGUMENT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_ARGUMENT_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED' }
+    }
+
+    switch -CaseSensitive ($Stage) {
+        'HOME' { return 'TASK038_CURRENT_CODEX_TOOL_HOME_REJECTED' }
+        'START' { return 'TASK038_CURRENT_CODEX_TOOL_START_REJECTED' }
+        'PROCESS' { return 'TASK038_CURRENT_CODEX_TOOL_PROCESS_REJECTED' }
+        'PROMPT' { return 'TASK038_CURRENT_CODEX_TOOL_PROMPT_REJECTED' }
+        'WAIT' { return 'TASK038_CURRENT_CODEX_TOOL_WAIT_REJECTED' }
+        'EXIT' { return 'TASK038_CURRENT_CODEX_TOOL_EXIT_REJECTED' }
+        'OUTPUT' { return 'TASK038_CURRENT_CODEX_TOOL_OUTPUT_REJECTED' }
+        'EVENT_JSON' { return 'TASK038_CURRENT_CODEX_TOOL_EVENT_JSON_REJECTED' }
+        'RESULT' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED' }
+        'PUBLIC_STATUS' { return 'TASK038_CURRENT_CODEX_TOOL_PUBLIC_STATUS_REJECTED' }
+        'DISPATCH' { return 'TASK038_CURRENT_CODEX_TOOL_DISPATCH_REJECTED' }
+        'EFFECT' { return 'TASK038_CURRENT_CODEX_TOOL_EFFECT_REJECTED' }
+        'COUNTERS' { return 'TASK038_CURRENT_CODEX_TOOL_COUNTERS_REJECTED' }
+        'EVIDENCE' { return 'TASK038_CURRENT_CODEX_TOOL_EVIDENCE_REJECTED' }
+    }
+}
+
 function Invoke-Task051CodexTool {
     param(
         [Parameter(Mandatory = $true)][string]$Phase,
@@ -1930,25 +1973,33 @@ function Invoke-Task051CodexTool {
         [Parameter(Mandatory = $true)][string]$LauncherVersion
     )
 
-    $codex = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_CURRENT_CODEX', 'Process')
-    Assert-Task051RegularFile -Path $codex -FailureCode 'TASK051_CURRENT_CODEX_REJECTED'
-    $sessionId = [Guid]::NewGuid().ToString('N')
-    $acceptanceSink = New-Task038McpAcceptanceEvidenceSink -EvidenceRoot $EvidenceRoot -SessionId $sessionId
-    $observedSink = New-Task038McpObservedEffectEvidenceSink -AcceptanceEvidencePath ([string]$acceptanceSink.path) -SessionId $sessionId
-    $safeConfig = Get-Task051StringSha256 -Value (@(
-        'lattice.task051.current-codex-session.v1',
-        $Phase,
-        $Tool,
-        $RunMode,
-        ($Arguments | ConvertTo-Json -Compress -Depth 8)
-    ) -join [char]10)
-    $environment = Get-Task051McpEnvironment -RunMode $RunMode -Authority $Authority -DatabasePassword $DatabasePassword -DeliveryRoot $DeliveryRoot -SchemaDirectory $SchemaDirectory -LauncherSha256 $LauncherSha256 -LauncherVersion $LauncherVersion -AcceptanceEvidencePath ([string]$acceptanceSink.path) -AcceptanceSessionId $sessionId -SafeConfigSha256 $safeConfig -ObservedEffectPath ([string]$observedSink.path) -ObservedEffectNonce ([string]$observedSink.nonce)
+    $failureStage = 'HOME'
+    $codex = $null
+    $sessionId = $null
+    $acceptanceSink = $null
+    $observedSink = $null
+    $safeConfig = $null
+    $environment = $null
     $codexHome = $null
     $owned = $null
     $process = $null
     $serverProcessId = 0
     try {
+        $codex = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_CURRENT_CODEX', 'Process')
+        Assert-Task051RegularFile -Path $codex -FailureCode 'TASK051_CURRENT_CODEX_REJECTED'
+        $sessionId = [Guid]::NewGuid().ToString('N')
+        $acceptanceSink = New-Task038McpAcceptanceEvidenceSink -EvidenceRoot $EvidenceRoot -SessionId $sessionId
+        $observedSink = New-Task038McpObservedEffectEvidenceSink -AcceptanceEvidencePath ([string]$acceptanceSink.path) -SessionId $sessionId
+        $safeConfig = Get-Task051StringSha256 -Value (@(
+            'lattice.task051.current-codex-session.v1',
+            $Phase,
+            $Tool,
+            $RunMode,
+            ($Arguments | ConvertTo-Json -Compress -Depth 8)
+        ) -join [char]10)
+        $environment = Get-Task051McpEnvironment -RunMode $RunMode -Authority $Authority -DatabasePassword $DatabasePassword -DeliveryRoot $DeliveryRoot -SchemaDirectory $SchemaDirectory -LauncherSha256 $LauncherSha256 -LauncherVersion $LauncherVersion -AcceptanceEvidencePath ([string]$acceptanceSink.path) -AcceptanceSessionId $sessionId -SafeConfigSha256 $safeConfig -ObservedEffectPath ([string]$observedSink.path) -ObservedEffectNonce ([string]$observedSink.nonce)
         $codexHome = New-Task051CodexHome -Root $EvidenceRoot -Phase $Phase -Latticed $script:Latticed -EnvironmentNames @($environment.Keys)
+        $failureStage = 'START'
         $info = [Diagnostics.ProcessStartInfo]::new()
         $info.FileName = $codex
         $info.Arguments = 'exec --ephemeral --json --color never --sandbox read-only --ignore-rules --skip-git-repo-check -C "' + $EvidenceRoot + '" -'
@@ -1961,8 +2012,10 @@ function Invoke-Task051CodexTool {
         $childEnvironment = [ordered]@{ CODEX_HOME = [string]$codexHome.Path }
         foreach ($entry in $environment.GetEnumerator()) { $childEnvironment[$entry.Key] = [string]$entry.Value }
         Set-Task051ClosedEnvironment -StartInfo $info -Additional $childEnvironment
+        $failureStage = 'PROCESS'
         $owned = Start-Task051OwnedProcess -StartInfo $info
         $process = $owned.Process
+        $failureStage = 'PROMPT'
         $prompt = if ($Tool -ceq 'lattice_task_submit') {
             'Call only the MCP tool lattice_task_submit on server lattice exactly once with client_request_id "' + [string]$Arguments.client_request_id + '" and intent "CONTROLLED_CODEX_CANARY". Do not use any other tool. After the tool returns, output TASK051_CODEX_SUBMIT_OK.'
         }
@@ -1971,28 +2024,38 @@ function Invoke-Task051CodexTool {
         }
         $owned.Suspended.StandardInput.Write($prompt)
         $owned.Suspended.StandardInput.Close()
+        $failureStage = 'WAIT'
         $stdoutTask = $owned.Suspended.StandardOutput.ReadToEndAsync()
         $stderrTask = $owned.Suspended.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit(360000)) {
             throw 'TASK051_CODEX_EXEC_TIMEOUT'
         }
+        $failureStage = 'EXIT'
         $stdout = [string]$stdoutTask.GetAwaiter().GetResult()
         $stderr = [string]$stderrTask.GetAwaiter().GetResult()
         if ($process.ExitCode -ne 0 -or $stdout.Length -gt 1048576 -or $stderr.Length -gt 1048576) {
             throw ('TASK051_CODEX_EXEC_REJECTED|' + (Get-Task051StringSha256 -Value $stderr))
         }
+        $failureStage = 'OUTPUT'
         Assert-SecretFreeText -Text ($stdout + [char]10 + $stderr) -FailureCode 'TASK051_CODEX_OUTPUT_SECRET_REJECTED'
+        $failureStage = 'EVENT_JSON'
         $events = @(Read-Task051JsonLines -Text $stdout -FailureCode 'TASK051_CODEX_EVENT_JSON_REJECTED')
+        $failureStage = 'RESULT'
         $envelope = Get-Task051ExecStructuredContent -Events $events -Tool $Tool -ExpectedArguments $Arguments
         $structured = $envelope.StructuredContent
+        $failureStage = 'PUBLIC_STATUS'
         Assert-Task051PublicStatus -Value $structured -Kind $(if ($Tool -ceq 'lattice_task_submit') { 'SUBMIT' } else { 'STATUS' })
+        $failureStage = 'DISPATCH'
         $firstDispatchLine = Get-Content -LiteralPath ([string]$acceptanceSink.path) -TotalCount 1
         $serverProcessId = [int](($firstDispatchLine | ConvertFrom-Json -ErrorAction Stop).process_id)
         $dispatch = Read-Task038McpAcceptanceEvidence -Path ([string]$acceptanceSink.path) -ExpectedNativeIdentity ([string]$acceptanceSink.native_identity) -SessionId $sessionId -SafeConfigSha256 $safeConfig -ProcessId $serverProcessId -ExpectedDispatchCount 1
+        $failureStage = 'EFFECT'
         $effects = Read-Task038McpObservedEffectEvidence -Path ([string]$observedSink.path) -ExpectedNativeIdentity ([string]$observedSink.native_identity) -SessionId $sessionId -SafeConfigSha256 $safeConfig -Nonce ([string]$observedSink.nonce) -ProcessId $serverProcessId
+        $failureStage = 'PROCESS'
         if ($null -ne (Get-Process -Id $serverProcessId -ErrorAction SilentlyContinue)) {
             throw 'TASK051_LATTICED_PROCESS_CLEANUP_REJECTED'
         }
+        $failureStage = 'COUNTERS'
         if (
             [long]$effects.completed_probe_count -ne 1 -or
             [long]$effects.rejected_probe_count -ne 0 -or
@@ -2011,6 +2074,7 @@ function Invoke-Task051CodexTool {
         ) {
             throw 'TASK051_CODEX_STATUS_DUPLICATE_EFFECT_REJECTED'
         }
+        $failureStage = 'EVIDENCE'
         $evidence = Write-Task051JsonEvidence -Path (Join-Path $EvidenceRoot ('task051-' + $Phase + '-tool-call.json')) -Value ([ordered]@{
             schema_version = 'lattice.task051.current-codex-tool-call.v1'
             phase = $Phase
@@ -2046,9 +2110,17 @@ function Invoke-Task051CodexTool {
             EvidenceSha256 = [string]$evidence.Sha256
         }
     }
+    catch {
+        throw (Resolve-Task051CodexToolFailure -Stage $failureStage -Message ([string]$_.Exception.Message))
+    }
     finally {
         if ($null -ne $codexHome) {
-            Complete-Task051InvocationCleanup -Owned $owned -CodexHome $codexHome -KnownServerProcessId $serverProcessId
+            try {
+                Complete-Task051InvocationCleanup -Owned $owned -CodexHome $codexHome -KnownServerProcessId $serverProcessId
+            }
+            catch {
+                throw 'TASK038_CURRENT_CODEX_TOOL_CLEANUP_REJECTED'
+            }
         }
     }
 }
@@ -2799,6 +2871,60 @@ function Invoke-Task051SelfTest {
     catch {
         if ([string]$_.Exception.Message -cne 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED') { throw }
     }
+    foreach ($structuredFailureFixture in @(
+        [pscustomobject]@{
+            Mutation = 'IDENTITY'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_IDENTITY_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_IDENTITY_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'ARGUMENT'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_ARGUMENT_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_ARGUMENT_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'RESULT'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED'
+        }
+    )) {
+        $structuredFailureEvents = @(($events | ConvertTo-Json -Depth 20) | ConvertFrom-Json -ErrorAction Stop)
+        switch -CaseSensitive ([string]$structuredFailureFixture.Mutation) {
+            'IDENTITY' { $structuredFailureEvents[0].item.server = 'other' }
+            'ARGUMENT' { $structuredFailureEvents[0].item.arguments.task_ref = '2' * 64 }
+            'RESULT' { $structuredFailureEvents[0].item.result = $null }
+        }
+        $structuredFailureMessage = $null
+        try {
+            $null = Get-Task051ExecStructuredContent -Events $structuredFailureEvents -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
+        }
+        catch { $structuredFailureMessage = [string]$_.Exception.Message }
+        if (
+            $structuredFailureMessage -cne [string]$structuredFailureFixture.ExpectedRaw -or
+            (Resolve-Task051CodexToolFailure -Stage 'RESULT' -Message $structuredFailureMessage) -cne [string]$structuredFailureFixture.ExpectedMapped
+        ) {
+            throw 'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST_REJECTED'
+        }
+    }
+    $codexToolFailureFixtures = @(
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_SUBMIT_CALL_COUNT_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_STATUS_CALL_COUNT_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_UNEXPECTED_TOOL_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_UNEXPECTED_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED' },
+        [pscustomobject]@{ Stage = 'EXIT'; Message = ('TASK051_CODEX_EXEC_REJECTED|' + ('a' * 64)); Expected = 'TASK038_CURRENT_CODEX_TOOL_EXIT_REJECTED' },
+        [pscustomobject]@{ Stage = 'OUTPUT'; Message = "secret`r`nvalue"; Expected = 'TASK038_CURRENT_CODEX_TOOL_OUTPUT_REJECTED' },
+        [pscustomobject]@{ Stage = 'DISPATCH'; Message = 'TASK038_ACCEPTANCE_EVIDENCE_REJECTED'; Expected = 'TASK038_ACCEPTANCE_EVIDENCE_REJECTED' },
+        [pscustomobject]@{ Stage = 'EFFECT'; Message = ('LATTICE_OBSERVED_EFFECT_REJECTED|' + ('b' * 64)); Expected = ('LATTICE_OBSERVED_EFFECT_REJECTED|' + ('b' * 64)) },
+        [pscustomobject]@{ Stage = 'HOME'; Message = 'TASK038_ACCEPTANCE_EVIDENCE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_HOME_REJECTED' },
+        [pscustomobject]@{ Stage = 'DISPATCH'; Message = 'TASK038_bad'; Expected = 'TASK038_CURRENT_CODEX_TOOL_DISPATCH_REJECTED' }
+    )
+    foreach ($codexToolFailureFixture in $codexToolFailureFixtures) {
+        $mappedFailure = Resolve-Task051CodexToolFailure -Stage ([string]$codexToolFailureFixture.Stage) -Message ([string]$codexToolFailureFixture.Message)
+        if ($mappedFailure -cne [string]$codexToolFailureFixture.Expected) {
+            throw 'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST_REJECTED'
+        }
+    }
+    Write-Output 'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST=PASS'
     try {
         $wrongSchema = $status.PSObject.Copy()
         $wrongSchema.schema_version = 'lattice.task.status.v2'
