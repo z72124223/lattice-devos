@@ -2,13 +2,19 @@
 ticket_id: TASK-051
 title: P0 current-machine LATTICE MCP platform live acceptance
 spec_id: SPEC-003
-spec_version: 4
+spec_version: 5
 module_id: latticed
-constitution_version: 1.7
-status: waiting_dependency
+constitution_version: 1.8
+status: in_progress
 parallel_safe: false
 depends_on:
   - TASK-050
+dependency_state: TASK050_FULLY_VERIFIED
+accepted_task050_commit: 8e5ba40d38b781afff7028841bd981c8dd2b9721
+accepted_task050_tree: b4478be2801814ffc630cbf113b0a4ffa3a1b591
+execution_authorized_by: direct_user_reply
+execution_authorized_at_utc: 2026-08-15T08:25:19Z
+execution_authorization_source_thread_id: 019ffee6-488a-70e0-8990-9aa9133892a7
 allowed_paths:
   - docs/tickets/TASK-051-p0-platform-live-acceptance.md
   - scripts/run-task051-p0-platform-live-acceptance.ps1
@@ -20,6 +26,13 @@ branch: feature/task-051-p0-platform-live-acceptance
 # TASK-051 — P0 current-machine LATTICE MCP platform live acceptance
 
 ## Objective
+
+Current contract reconciliation:
+
+- TASK-050 is accepted at commit `8e5ba40d38b781afff7028841bd981c8dd2b9721`, tree `b4478be2801814ffc630cbf113b0a4ffa3a1b591`, and is an ancestor of this branch.
+- This ticket is reconciled to `SPEC-003` version 5, `SPEC-002` version 35, and latticed constitution version 1.8. No public contract or product-code amendment is required.
+- The current-machine gate uses an isolated, run-owned `CODEX_HOME` and process-local MCP registration. It does not mutate `C:\Users\f7212\.codex\config.toml`; the original file hash must remain byte-identical.
+- The user authorized TASK-051 completion and a non-force feature-branch push in source thread `019ffee6-488a-70e0-8990-9aa9133892a7`. Merge, Draft promotion, default-branch movement, deployment, and release remain unauthorized.
 
 After TASK-050 reaches an accepted completion state, prove on the current machine that Codex can discover the registered LATTICE MCP server, make one real typed call with semantic success, and recover the resulting PostgreSQL-backed task safely from a fresh client/server process after a physical database restart. Preserve the exact four-tool public surface and the existing six-field `lattice_task_status` wire result.
 
@@ -38,12 +51,12 @@ This is an acceptance-only ticket. It does not repair product code or expand the
 
 | Item | State | Meaning |
 | --- | --- | --- |
-| TASK-050 implementation and verification | `WAITING_DEPENDENCY` | It is being implemented in its dedicated worktree; this ticket neither reads nor changes that work. |
+| TASK-050 implementation and verification | `VERIFIED` | Accepted commit `8e5ba40d38b781afff7028841bd981c8dd2b9721`, tree `b4478be2801814ffc630cbf113b0a4ffa3a1b591`, is an ancestor of this branch. |
 | MCP registration loaded by the current Codex desktop process | `UNKNOWN` | No current process-bound discovery receipt is accepted by this ticket. |
-| Four LATTICE tools discoverable from a fresh Codex process | `WAITING_DEPENDENCY` | Must be checked only after the accepted TASK-050 candidate is registered. |
+| Four LATTICE tools discoverable from a fresh Codex process | `NOT_RUN` | The dependency is satisfied; current-machine execution is now authorized and pending. |
 | Real typed Codex-to-LATTICE call | `NOT_RUN` | No current semantic call is claimed. |
-| PostgreSQL durable write, fresh read, and restart recovery | `WAITING_DEPENDENCY` | Requires the accepted TASK-050 candidate and a fresh disposable runtime. |
-| Four-tool and six-field regression after TASK-050 | `WAITING_DEPENDENCY` | Historical or static evidence is not current acceptance. |
+| PostgreSQL durable write, fresh read, and restart recovery | `NOT_RUN` | The dependency is satisfied; the unique marker-owned PostgreSQL 17 run remains pending. |
+| Four-tool and six-field regression after TASK-050 | `NOT_RUN` | Historical evidence remains baseline only until the current run completes. |
 
 ## Fail-closed prerequisites
 
@@ -62,7 +75,7 @@ Execution may start only when all of the following are recorded in a preflight r
 
 Repository writes are limited to the frontmatter `allowed_paths`. Product source, migrations, existing specifications, existing tickets, `PLANS.md`, `HANDOFF.md`, module constitutions, and repository configuration are outside scope.
 
-The only permitted external mutation during a separately authorized TASK-051 run is the exact `[mcp_servers.lattice]` table in `C:\Users\f7212\.codex\config.toml`, and only when a reversible switch is required to point at the accepted binary. Before changing it, capture the full-file hash and exact prior table bytes; do not alter environment values, credentials, or any other table. Restore the original bytes and verify the original hash during cleanup. If this narrow mutation is not authorized at execution time, report `WAITING_DEPENDENCY`.
+The authorized implementation uses a run-owned isolated `CODEX_HOME` and process-local `[mcp_servers.lattice]` registration under the ticket evidence root. `C:\Users\f7212\.codex\config.toml` must not be written. Capture its pre-run hash and require the same byte hash after cleanup. Any attempted persistent registration change is `FAIL`.
 
 All disposable PostgreSQL data, isolated homes, local canary repository, logs, and receipts must live under `target/task051-p0-platform-live-acceptance/<run_id>/`. No other filesystem root is writable under this ticket.
 
@@ -130,9 +143,9 @@ TASK-051 is `VERIFIED` only when one current run proves all of the following:
 - No TASK-050 implementation, repair, duplication, or acceptance substitution.
 - No product feature fix, migration change, module refactor, new MCP tool/schema/field, or public receipt exposure. A product defect found here is reported as `FAIL` and repaired under a separate authorized ticket.
 - No Hermes, Graphify, Codebase Memory, model platform, scheduler, autonomous-control implementation, ChatGPT tunnel, or unrelated module acceptance.
-- No Git/GitHub integration, push, PR, merge, default-branch change, deployment, or release. A run-owned local disposable Git repository is permitted only if the existing closed canary requires it; it is an effect counter, not Git platform acceptance.
+- The live acceptance does not treat Git/GitHub integration as evidence. After verified closure, the separately authorized non-force feature-branch push may publish the checkpoint; PR creation, merge, Draft promotion, default-branch change, deployment, and release remain non-goals without separate authorization. A run-owned local disposable Git repository is permitted only if the existing closed canary requires it; it is an effect counter, not Git platform acceptance.
 - No production database, credential/account change, package installation/update, security-control weakening, arbitrary SQL/shell/path surface, or unknown resource cleanup.
 
 ## Human gate
 
-Creating this ticket does not authorize its execution. A future explicit TASK-051 execution authorization must cover the listed paths and, if needed, the exact reversible MCP table switch. Merge, deployment, release, destructive cleanup, credentials, and every action outside this ticket remain separate user decisions.
+The execution gate was explicitly authorized by the user in source thread `019ffee6-488a-70e0-8990-9aa9133892a7` at `2026-08-15T08:25:19Z` and is consumed only for the listed paths, current-machine acceptance, local reversible resources, bounded commits, and a non-force feature-branch push. It does not authorize PR creation, merge, Draft promotion, default-branch change, deployment, release, account/credential mutation, destructive unowned cleanup, or any action outside this ticket.
