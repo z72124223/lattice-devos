@@ -1311,6 +1311,22 @@ if (
         'TASK076_WRITER_V2_VERIFIED', 'CONSUMER_STARTED'
 '@ -FailureCode 'TASK051_TASK038_HOLDER_EVENT_SEQUENCE_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '$consumer = $records[5].payload' -New '$consumer = $records[6].payload' -FailureCode 'TASK051_TASK038_HOLDER_CONSUMER_INDEX_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$expectedTypes = @(' -New @'
+$failureCode = 'TASK038_POSTGRES_HOLDER_PREFIX_REJECTED'
+$expectedTypes = @(
+'@ -FailureCode 'TASK051_TASK038_HOLDER_PREFIX_STAGE_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$previous = ''0'' * 64' -New @'
+$failureCode = 'TASK038_POSTGRES_HOLDER_CHAIN_REJECTED'
+$previous = '0' * 64
+'@ -FailureCode 'TASK051_TASK038_HOLDER_CHAIN_STAGE_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$holder = $records[0].payload' -New @'
+$failureCode = 'TASK038_POSTGRES_HOLDER_STATE_REJECTED'
+$holder = $records[0].payload
+'@ -FailureCode 'TASK051_TASK038_HOLDER_STATE_STAGE_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $PostgresPort -ErrorAction Stop | Where-Object {' -New @'
+        $failureCode = 'TASK038_POSTGRES_HOLDER_LISTENER_REJECTED'
+        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $PostgresPort -ErrorAction Stop | Where-Object {
+'@ -FailureCode 'TASK051_TASK038_HOLDER_LISTENER_STAGE_TRANSFORM_REJECTED'
     $postgresDataBlock = @'
 $script:PostgresData = Get-CanonicalPath -Path $PostgresDataDirectory
 $dataItem = Get-Item -LiteralPath $script:PostgresData -Force -ErrorAction SilentlyContinue
@@ -1345,6 +1361,48 @@ $clusterRoot = $script:Task051PhysicalPostgresRoot
 '@
     $Source = Replace-Task051Exact -Source $Source -Old $postgresDataBlock -New $task051PostgresDataBlock -FailureCode 'TASK051_TASK038_POSTGRES_DATA_ALIAS_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '-not (Test-ExactPath -Actual ([string]$holder.cluster_root) -Expected (Split-Path -Parent $script:PostgresData)) -or' -New '-not (Test-ExactPath -Actual ([string]$holder.cluster_root) -Expected $script:Task051PhysicalPostgresRoot) -or' -FailureCode 'TASK051_TASK038_HOLDER_ROOT_TRANSFORM_REJECTED'
+    $holderDiagnosticBlock = @'
+$currentOwnerExecutable = Get-CanonicalPath -Path ([string]$currentOwner.Path)
+if (
+    [long]$holder.owner_process_id -ne [long]$PID -or
+    [string]$holder.owner_process_creation_time -cne $currentOwner.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() -or
+    -not (Test-ExactPath -Actual ([string]$holder.owner_process_executable) -Expected $currentOwnerExecutable) -or
+    [string]$holder.owner_process_executable_sha256 -cne (Get-FileSha256 -Path $currentOwnerExecutable) -or
+    [string]$holder.owner_process_executable_native_identity -cne (Get-LatticeWindowsNativePathIdentityToken -Path $currentOwnerExecutable -Directory $false)
+) { throw 'TASK038_POSTGRES_HOLDER_OWNER_PROCESS_REJECTED' }
+if (
+    -not (Test-ExactPath -Actual ([string]$holder.cluster_root) -Expected $script:Task051PhysicalPostgresRoot) -or
+    -not (Test-ExactPath -Actual ([string]$holder.data_directory) -Expected $script:PostgresData) -or
+    -not (Test-ExactPath -Actual ([string]$holder.authority_receipt_path) -Expected $ReceiptPath) -or
+    [string]$holder.authority_receipt_native_identity -cne $receiptNativeIdentity
+) { throw 'TASK038_POSTGRES_HOLDER_SCOPE_REJECTED' }
+if (
+    [string]$holder.tool_identity.postgres_version -cne '17.10' -or
+    [string]$holder.tool_identity.postgres_sha256 -cne $expectedPostgresExecutableSha256 -or
+    [string]$holder.tool_identity.psql_sha256 -cne $expectedPsqlExecutableSha256 -or
+    [string]$holder.tool_identity.pg_ctl_sha256 -cne $expectedPgCtlExecutableSha256 -or
+    [string]$holder.tool_identity.postgres_native_identity -cne $script:PostgresExecutableNativeIdentity -or
+    [string]$holder.tool_identity.psql_native_identity -cne $script:PsqlNativeIdentity -or
+    [string]$holder.tool_identity.pg_ctl_native_identity -cne $script:PgCtlNativeIdentity
+) { throw 'TASK038_POSTGRES_HOLDER_TOOL_REJECTED' }
+if (
+    -not (Test-ExactPath -Actual ([string]$marker.marker_path) -Expected $ClusterMarkerPath) -or
+    [string]$restart.marker_raw_sha256 -cne $ClusterMarkerRawSha256 -or
+    [string]$restart.marker_native_identity -cne (Get-LatticeWindowsNativePathIdentityToken -Path $ClusterMarkerPath -Directory $false) -or
+    [string]$initial.system_identifier -cne [string]$restart.system_identifier -or
+    [string]$initial.postmaster_started_at -ceq [string]$restart.restart_postmaster_started_at -or
+    -not [bool]$stopped.pg_ctl_status_stopped -or
+    -not [bool]$stopped.port_listener_absent -or
+    ([long]$initial.listener_process_id -eq [long]$restart.listener_process_id -and [string]$initial.listener_process_creation_time -ceq [string]$restart.listener_process_creation_time)
+) { throw 'TASK038_POSTGRES_HOLDER_MARKER_REJECTED' }
+if (
+    [string]$consumer.consumer_session_id -cne $ConsumerSessionId -or
+    [long]$consumer.holder_process_id -ne [long]$PID -or
+    [long]$consumer.listener_process_id -ne [long]$restart.listener_process_id -or
+    [string]$consumer.listener_process_creation_time -cne [string]$restart.listener_process_creation_time
+) { throw 'TASK038_POSTGRES_HOLDER_CONSUMER_REJECTED' }
+'@
+    $Source = Replace-Task051Exact -Source $Source -Old '$currentOwnerExecutable = Get-CanonicalPath -Path ([string]$currentOwner.Path)' -New $holderDiagnosticBlock -FailureCode 'TASK051_TASK038_HOLDER_DIAGNOSTIC_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old @'
     $captureRoot = Get-CanonicalPath -Path (Split-Path -Parent $DataDirectory)
     Assert-NoReparseAncestor `
@@ -2136,7 +2194,7 @@ function Invoke-Task051SelfTest {
         [regex]::Matches($task038, [regex]::Escape('$script:Task051PhysicalPostgresParent = Get-CanonicalPath -Path (Split-Path -Parent $script:Task051PhysicalPostgresRoot)')).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('$clusterRoot = $script:Task051PhysicalPostgresRoot')).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('-Expected (Split-Path -Parent $script:PostgresData)')).Count -ne 0 -or
-        [regex]::Matches($task038, [regex]::Escape('-Expected $script:Task051PhysicalPostgresRoot')).Count -ne 2 -or
+        [regex]::Matches($task038, [regex]::Escape('-Expected $script:Task051PhysicalPostgresRoot')).Count -ne 3 -or
         [regex]::Matches($task038, [regex]::Escape("-Expected (Join-Path `$script:Task051PhysicalPostgresRoot 'postgres.log')")).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('$captureRoot = Get-CanonicalPath -Path (Split-Path -Parent $DataDirectory)')).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape('$captureRoot = Get-CanonicalPath -Path $script:Task051PhysicalPostgresRoot')).Count -ne 1 -or
@@ -2166,6 +2224,20 @@ function Invoke-Task051SelfTest {
         [regex]::Matches($task038, [regex]::Escape('[IO.Directory]::Delete($task051LongExecutionHome, $true)')).Count -ne 1
     ) {
         throw 'TASK051_TASK038_POSTGRES_DATA_ALIAS_SELF_TEST_REJECTED'
+    }
+    foreach ($holderDiagnostic in @(
+        'TASK038_POSTGRES_HOLDER_PREFIX_REJECTED',
+        'TASK038_POSTGRES_HOLDER_CHAIN_REJECTED',
+        'TASK038_POSTGRES_HOLDER_OWNER_PROCESS_REJECTED',
+        'TASK038_POSTGRES_HOLDER_SCOPE_REJECTED',
+        'TASK038_POSTGRES_HOLDER_TOOL_REJECTED',
+        'TASK038_POSTGRES_HOLDER_MARKER_REJECTED',
+        'TASK038_POSTGRES_HOLDER_CONSUMER_REJECTED',
+        'TASK038_POSTGRES_HOLDER_LISTENER_REJECTED'
+    )) {
+        if ([regex]::Matches($task038, [regex]::Escape($holderDiagnostic)).Count -ne 1) {
+            throw 'TASK051_TASK038_HOLDER_DIAGNOSTIC_SELF_TEST_REJECTED'
+        }
     }
     if (
         [regex]::Matches(
