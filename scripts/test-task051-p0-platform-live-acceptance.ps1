@@ -202,7 +202,9 @@ $requiredFragments = @(
     'TASK038_CURRENT_CODEX_TOOL_EVENT_JSON_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_UNEXPECTED_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_IDENTITY_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_SERVER_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_NAME_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_ARGUMENT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_PUBLIC_STATUS_REJECTED',
@@ -362,6 +364,23 @@ if ($codexToolResolverStart -lt 0 -or $codexToolInvokeStart -le $codexToolResolv
 }
 $codexToolResolverSource = $runnerSource.Substring($codexToolResolverStart, $codexToolInvokeStart - $codexToolResolverStart)
 $codexToolInvokeSource = $runnerSource.Substring($codexToolInvokeStart, $codexToolInvokeEnd - $codexToolInvokeStart)
+$codexToolStructuredStart = $runnerSource.IndexOf('function Get-Task051ExecStructuredContent', [StringComparison]::Ordinal)
+if ($codexToolStructuredStart -lt 0 -or $codexToolResolverStart -le $codexToolStructuredStart) {
+    throw 'TASK051_CODEX_TOOL_IDENTITY_SPLIT_SHAPE_REJECTED'
+}
+$codexToolStructuredSource = $runnerSource.Substring($codexToolStructuredStart, $codexToolResolverStart - $codexToolStructuredStart)
+$codexToolServerGate = $codexToolStructuredSource.IndexOf("throw 'TASK051_CODEX_TOOL_SERVER_REJECTED'", [StringComparison]::Ordinal)
+$codexToolNameGate = $codexToolStructuredSource.IndexOf("throw 'TASK051_CODEX_TOOL_NAME_REJECTED'", [StringComparison]::Ordinal)
+$codexToolStatusGate = $codexToolStructuredSource.IndexOf("throw 'TASK051_CODEX_TOOL_STATUS_REJECTED'", [StringComparison]::Ordinal)
+if (
+    $codexToolServerGate -lt 0 -or
+    $codexToolNameGate -le $codexToolServerGate -or
+    $codexToolStatusGate -le $codexToolNameGate -or
+    [regex]::Matches($codexToolStructuredSource, 'TASK051_CODEX_TOOL_(?:SERVER|NAME|STATUS)_REJECTED').Count -ne 3 -or
+    $codexToolStructuredSource.IndexOf('TASK051_CODEX_TOOL_IDENTITY_REJECTED', [StringComparison]::Ordinal) -ge 0
+) {
+    throw 'TASK051_CODEX_TOOL_IDENTITY_SPLIT_SHAPE_REJECTED'
+}
 foreach ($codexToolLeaf in @(
     'TASK038_CURRENT_CODEX_TOOL_HOME_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_START_REJECTED',
@@ -373,7 +392,9 @@ foreach ($codexToolLeaf in @(
     'TASK038_CURRENT_CODEX_TOOL_EVENT_JSON_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_UNEXPECTED_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_IDENTITY_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_SERVER_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_NAME_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_ARGUMENT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_PUBLIC_STATUS_REJECTED',

@@ -1921,8 +1921,14 @@ function Get-Task051ExecStructuredContent {
         throw 'TASK051_CODEX_STATUS_CALL_COUNT_REJECTED'
     }
     $call = $calls[0]
-    if ([string]$call.server -cne 'lattice' -or [string]$call.tool -cne $Tool -or [string]$call.status -cne 'completed') {
-        throw 'TASK051_CODEX_TOOL_IDENTITY_REJECTED'
+    if ([string]$call.server -cne 'lattice') {
+        throw 'TASK051_CODEX_TOOL_SERVER_REJECTED'
+    }
+    if ([string]$call.tool -cne $Tool) {
+        throw 'TASK051_CODEX_TOOL_NAME_REJECTED'
+    }
+    if ([string]$call.status -cne 'completed') {
+        throw 'TASK051_CODEX_TOOL_STATUS_REJECTED'
     }
     $actualArguments = $call.arguments
     $actualKeys = @($actualArguments.PSObject.Properties.Name | Sort-Object)
@@ -1996,7 +2002,9 @@ function Resolve-Task051CodexToolFailure {
         'TASK051_CODEX_SUBMIT_CALL_COUNT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED' }
         'TASK051_CODEX_STATUS_CALL_COUNT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED' }
         'TASK051_CODEX_UNEXPECTED_TOOL_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_UNEXPECTED_REJECTED' }
-        'TASK051_CODEX_TOOL_IDENTITY_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_IDENTITY_REJECTED' }
+        'TASK051_CODEX_TOOL_SERVER_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_SERVER_REJECTED' }
+        'TASK051_CODEX_TOOL_NAME_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_NAME_REJECTED' }
+        'TASK051_CODEX_TOOL_STATUS_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_STATUS_REJECTED' }
         'TASK051_CODEX_TOOL_ARGUMENT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_ARGUMENT_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED' }
@@ -2935,9 +2943,19 @@ function Invoke-Task051SelfTest {
     }
     foreach ($structuredFailureFixture in @(
         [pscustomobject]@{
-            Mutation = 'IDENTITY'
-            ExpectedRaw = 'TASK051_CODEX_TOOL_IDENTITY_REJECTED'
-            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_IDENTITY_REJECTED'
+            Mutation = 'SERVER'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_SERVER_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_SERVER_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'TOOL_NAME'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_NAME_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_NAME_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'STATUS'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_STATUS_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_STATUS_REJECTED'
         },
         [pscustomobject]@{
             Mutation = 'ARGUMENT'
@@ -2952,7 +2970,9 @@ function Invoke-Task051SelfTest {
     )) {
         $structuredFailureEvents = @(($events | ConvertTo-Json -Depth 20) | ConvertFrom-Json -ErrorAction Stop)
         switch -CaseSensitive ([string]$structuredFailureFixture.Mutation) {
-            'IDENTITY' { $structuredFailureEvents[0].item.server = 'other' }
+            'SERVER' { $structuredFailureEvents[0].item.server = 'other' }
+            'TOOL_NAME' { $structuredFailureEvents[0].item.tool = 'lattice_task_submit' }
+            'STATUS' { $structuredFailureEvents[0].item.status = 'failed' }
             'ARGUMENT' { $structuredFailureEvents[0].item.arguments.task_ref = '2' * 64 }
             'RESULT' { $structuredFailureEvents[0].item.result = $null }
         }
