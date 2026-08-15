@@ -999,16 +999,34 @@ function Invoke-Task051CodexDiscovery {
         $owned.Suspended.StandardInput.Flush()
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LIST_RESPONSE_REJECTED'
         $list = Get-Task051AppServerResponse -Reader $owned.Suspended.StandardOutput -Id 2 -TimeoutSeconds 60
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SHAPE_REJECTED'
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SERVER_COUNT_REJECTED'
         $servers = @($list.result.data)
-        if ($servers.Count -ne 1 -or [string]$servers[0].name -cne 'lattice') {
+        if ($servers.Count -ne 1) {
+            throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
+        }
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SERVER_NAME_REJECTED'
+        if ([string]$servers[0].name -cne 'lattice') {
             throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
         }
         $toolNames = @($servers[0].tools.PSObject.Properties.Name | Sort-Object)
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_COUNT_ZERO_REJECTED'
+        if ($toolNames.Count -eq 0) {
+            throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
+        }
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_COUNT_REJECTED'
+        if ($toolNames.Count -ne $script:Task051ExpectedTools.Count) {
+            throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
+        }
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_NAMES_REJECTED'
         if (($toolNames -join [char]10) -cne (($script:Task051ExpectedTools | Sort-Object) -join [char]10)) {
             throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
         }
-        if (@($servers[0].resources).Count -ne 0 -or @($servers[0].resourceTemplates).Count -ne 0) {
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_RESOURCES_REJECTED'
+        if (@($servers[0].resources).Count -ne 0) {
+            throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
+        }
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_RESOURCE_TEMPLATES_REJECTED'
+        if (@($servers[0].resourceTemplates).Count -ne 0) {
             throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
         }
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_SCHEMA_REJECTED'
