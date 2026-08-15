@@ -723,11 +723,12 @@ function Assert-Task051PublicStatus {
 function Assert-Task051SameStatus {
     param(
         [Parameter(Mandatory = $true)]$Expected,
-        [Parameter(Mandatory = $true)]$Actual
+        [Parameter(Mandatory = $true)]$Actual,
+        [Parameter(Mandatory = $true)][ValidateSet('SUBMIT', 'STATUS')][string]$Kind
     )
 
-    Assert-Task051PublicStatus -Value $Expected -Kind 'STATUS'
-    Assert-Task051PublicStatus -Value $Actual -Kind 'STATUS'
+    Assert-Task051PublicStatus -Value $Expected -Kind $Kind
+    Assert-Task051PublicStatus -Value $Actual -Kind $Kind
     foreach ($name in $script:Task051ExpectedStatusKeys) {
         if ([string]$Expected.$name -cne [string]$Actual.$name) {
             throw 'TASK051_PUBLIC_STATUS_REPLAY_REJECTED'
@@ -1997,6 +1998,33 @@ function Get-Task051CodexEventSummary {
     }
 }
 
+function Resolve-Task051PublicProjectionFailure {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('STRUCTURED', 'CONTENT')][string]$Projection,
+        [Parameter(Mandatory = $true)][ValidateSet('SUBMIT', 'STATUS')][string]$Kind,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Message
+    )
+
+    if ($Message -ceq 'TASK051_PUBLIC_STATUS_SHAPE_REJECTED') {
+        switch -CaseSensitive ($Projection) {
+            'STRUCTURED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED' }
+            'CONTENT' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED' }
+        }
+    }
+
+    switch -CaseSensitive ($Projection + '|' + $Kind + '|' + $Message) {
+        'STRUCTURED|SUBMIT|TASK051_SUBMIT_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED' }
+        'STRUCTURED|STATUS|TASK051_STATUS_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED' }
+        'CONTENT|SUBMIT|TASK051_SUBMIT_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED' }
+        'CONTENT|STATUS|TASK051_STATUS_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED' }
+    }
+
+    switch -CaseSensitive ($Projection) {
+        'STRUCTURED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' }
+        'CONTENT' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED' }
+    }
+}
+
 function Get-Task051ExecStructuredContent {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Events,
@@ -2115,19 +2143,24 @@ function Get-Task051ExecStructuredContent {
         $metaMode = 'PRESENT_VERIFIED'
         $metaSha256 = Get-Task051StringSha256 -Value ($meta | ConvertTo-Json -Compress -Depth 20)
     }
-    $structuredFailure = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED'
-    $contentJsonFailure = 'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED'
+    $publicKind = switch -CaseSensitive ($Tool) {
+        'lattice_task_submit' { 'SUBMIT'; break }
+        'lattice_task_status' { 'STATUS'; break }
+        default { throw 'TASK051_CODEX_TOOL_PUBLIC_KIND_REJECTED' }
+    }
     $structured = $result.structured_content
-    if ($null -eq $structured) { throw $structuredFailure }
+    if ($null -eq $structured) {
+        throw 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED'
+    }
     try {
         $contentValue = [string]$content[0].text | ConvertFrom-Json -ErrorAction Stop
     }
-    catch { throw $contentJsonFailure }
-    try { Assert-Task051PublicStatus -Value $structured -Kind 'STATUS' }
-    catch { throw $structuredFailure }
-    try { Assert-Task051PublicStatus -Value $contentValue -Kind 'STATUS' }
-    catch { throw $contentJsonFailure }
-    try { Assert-Task051SameStatus -Expected $structured -Actual $contentValue }
+    catch { throw 'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED' }
+    try { Assert-Task051PublicStatus -Value $structured -Kind $publicKind }
+    catch { throw (Resolve-Task051PublicProjectionFailure -Projection 'STRUCTURED' -Kind $publicKind -Message ([string]$_.Exception.Message)) }
+    try { Assert-Task051PublicStatus -Value $contentValue -Kind $publicKind }
+    catch { throw (Resolve-Task051PublicProjectionFailure -Projection 'CONTENT' -Kind $publicKind -Message ([string]$_.Exception.Message)) }
+    try { Assert-Task051SameStatus -Expected $structured -Actual $contentValue -Kind $publicKind }
     catch { throw 'TASK051_CODEX_TOOL_RESULT_PARITY_REJECTED' }
     return [pscustomobject]@{
         StructuredContent = $structured
@@ -2192,6 +2225,7 @@ function Resolve-Task051CodexToolFailure {
         'TASK051_CODEX_TOOL_SERVER_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_SERVER_REJECTED' }
         'TASK051_CODEX_TOOL_NAME_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_NAME_REJECTED' }
         'TASK051_CODEX_TOOL_STATUS_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_STATUS_REJECTED' }
+        'TASK051_CODEX_TOOL_PUBLIC_KIND_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_PUBLIC_KIND_REJECTED' }
         'TASK051_CODEX_TOOL_ARGUMENT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_ARGUMENT_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_ERROR_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_ERROR_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_MISSING_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_MISSING_REJECTED' }
@@ -2199,8 +2233,16 @@ function Resolve-Task051CodexToolFailure {
         'TASK051_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED' }
-        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_PARITY_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_PARITY_REJECTED' }
     }
 
@@ -3057,7 +3099,7 @@ function Invoke-Task051SelfTest {
         result_digest = '3' * 64
     }
     Assert-Task051PublicStatus -Value $status -Kind 'SUBMIT'
-    Assert-Task051SameStatus -Expected $status -Actual $status
+    Assert-Task051SameStatus -Expected $status -Actual $status -Kind 'STATUS'
     Assert-Task051DistinctProcessIds -ProcessIds @(101, 102, 103, 104)
     $optionalOutputRecords = @(Convert-Task051AppServerTools -Tools ([pscustomobject]@{
         delivery = [pscustomobject]@{ inputSchema = [pscustomobject]@{ type = 'object' } }
@@ -3140,7 +3182,17 @@ function Invoke-Task051SelfTest {
         }
     )
     $parsed = Get-Task051ExecStructuredContent -Events $events -Phase 'status-pre-restart' -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
-    Assert-Task051SameStatus -Expected $status -Actual $parsed.StructuredContent
+    Assert-Task051SameStatus -Expected $status -Actual $parsed.StructuredContent -Kind 'STATUS'
+    $statusPostParsed = Get-Task051ExecStructuredContent -Events $events -Phase 'status-post-restart' -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
+    Assert-Task051SameStatus -Expected $status -Actual $statusPostParsed.StructuredContent -Kind 'STATUS'
+    $submitEvents = @(($events | ConvertTo-Json -Depth 20) | ConvertFrom-Json -ErrorAction Stop)
+    $submitEvents[0].item.tool = 'lattice_task_submit'
+    $submitEvents[0].item.arguments = [pscustomobject]@{
+        client_request_id = '0' * 64
+        intent = 'CONTROLLED_CODEX_CANARY'
+    }
+    $submitParsed = Get-Task051ExecStructuredContent -Events $submitEvents -Phase 'submit' -Tool 'lattice_task_submit' -ExpectedArguments ([ordered]@{ client_request_id = '0' * 64; intent = 'CONTROLLED_CODEX_CANARY' })
+    Assert-Task051SameStatus -Expected $status -Actual $submitParsed.StructuredContent -Kind 'SUBMIT'
     if (
         -not ($parsed.MetaPresent -is [bool]) -or
         -not [bool]$parsed.MetaPresent -or
@@ -3152,11 +3204,11 @@ function Invoke-Task051SelfTest {
     $explicitNullErrorEvents = @(($events | ConvertTo-Json -Depth 20) | ConvertFrom-Json -ErrorAction Stop)
     $explicitNullErrorEvents[0].item | Add-Member -NotePropertyName error -NotePropertyValue $null
     $explicitNullErrorParsed = Get-Task051ExecStructuredContent -Events $explicitNullErrorEvents -Phase 'status-pre-restart' -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
-    Assert-Task051SameStatus -Expected $status -Actual $explicitNullErrorParsed.StructuredContent
+    Assert-Task051SameStatus -Expected $status -Actual $explicitNullErrorParsed.StructuredContent -Kind 'STATUS'
     $metaAbsentEvents = @(($events | ConvertTo-Json -Depth 20) | ConvertFrom-Json -ErrorAction Stop)
     $metaAbsentEvents[0].item.result.PSObject.Properties.Remove('_meta')
     $metaAbsentParsed = Get-Task051ExecStructuredContent -Events $metaAbsentEvents -Phase 'status-pre-restart' -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
-    Assert-Task051SameStatus -Expected $status -Actual $metaAbsentParsed.StructuredContent
+    Assert-Task051SameStatus -Expected $status -Actual $metaAbsentParsed.StructuredContent -Kind 'STATUS'
     if (
         -not ($metaAbsentParsed.MetaPresent -is [bool]) -or
         [bool]$metaAbsentParsed.MetaPresent -or
@@ -3329,8 +3381,18 @@ function Invoke-Task051SelfTest {
         },
         [pscustomobject]@{
             Mutation = 'CONTENT_STATUS'
-            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED'
-            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'CONTENT_PUBLIC_SHAPE'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'CONTENT_SUBMIT_STATUS'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED'
         },
         [pscustomobject]@{
             Mutation = 'META_SHAPE'
@@ -3364,13 +3426,23 @@ function Invoke-Task051SelfTest {
         },
         [pscustomobject]@{
             Mutation = 'STRUCTURED'
-            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED'
-            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'STRUCTURED_PUBLIC_SHAPE'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED'
         },
         [pscustomobject]@{
             Mutation = 'STRUCTURED_STATUS'
-            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED'
-            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'STRUCTURED_SUBMIT_STATUS'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED'
         },
         [pscustomobject]@{
             Mutation = 'PARITY'
@@ -3395,6 +3467,16 @@ function Invoke-Task051SelfTest {
                 $invalidContentStatus.status = 'RUNNING'
                 $structuredFailureEvents[0].item.result.content[0].text = $invalidContentStatus | ConvertTo-Json -Compress -Depth 10
             }
+            'CONTENT_PUBLIC_SHAPE' {
+                $invalidContentShape = $status.PSObject.Copy()
+                $invalidContentShape.PSObject.Properties.Remove('result_digest')
+                $structuredFailureEvents[0].item.result.content[0].text = $invalidContentShape | ConvertTo-Json -Compress -Depth 10
+            }
+            'CONTENT_SUBMIT_STATUS' {
+                $invalidContentSubmitStatus = $status.PSObject.Copy()
+                $invalidContentSubmitStatus.status = 'RUNNING'
+                $structuredFailureEvents[0].item.result.content[0].text = $invalidContentSubmitStatus | ConvertTo-Json -Compress -Depth 10
+            }
             'META_SHAPE' { $structuredFailureEvents[0].item.result._meta = $null }
             'META_EMPTY' { $structuredFailureEvents[0].item.result._meta = [pscustomobject]@{} }
             'META_PARTIAL' { $structuredFailureEvents[0].item.result._meta.'io.modelcontextprotocol/serverInfo'.PSObject.Properties.Remove('version') }
@@ -3406,7 +3488,9 @@ function Invoke-Task051SelfTest {
             }
             'META_IDENTITY' { $structuredFailureEvents[0].item.result._meta.'io.modelcontextprotocol/serverInfo'.version = '2.0.0' }
             'STRUCTURED' { $structuredFailureEvents[0].item.result.structured_content = $null }
+            'STRUCTURED_PUBLIC_SHAPE' { $structuredFailureEvents[0].item.result.structured_content.PSObject.Properties.Remove('result_digest') }
             'STRUCTURED_STATUS' { $structuredFailureEvents[0].item.result.structured_content.status = 'RUNNING' }
+            'STRUCTURED_SUBMIT_STATUS' { $structuredFailureEvents[0].item.result.structured_content.status = 'RUNNING' }
             'PARITY' {
                 $parityStatus = $status.PSObject.Copy()
                 $parityStatus.task_ref = '2' * 64
@@ -3414,8 +3498,18 @@ function Invoke-Task051SelfTest {
             }
         }
         $structuredFailureMessage = $null
+        $structuredFailurePhase = 'status-pre-restart'
+        $structuredFailureTool = 'lattice_task_status'
+        $structuredFailureArguments = [ordered]@{ task_ref = '1' * 64 }
+        if ([string]$structuredFailureFixture.Mutation -in @('CONTENT_SUBMIT_STATUS', 'STRUCTURED_SUBMIT_STATUS')) {
+            $structuredFailurePhase = 'submit'
+            $structuredFailureTool = 'lattice_task_submit'
+            $structuredFailureArguments = [ordered]@{ client_request_id = '0' * 64; intent = 'CONTROLLED_CODEX_CANARY' }
+            $structuredFailureEvents[0].item.tool = $structuredFailureTool
+            $structuredFailureEvents[0].item.arguments = [pscustomobject]$structuredFailureArguments
+        }
         try {
-            $null = Get-Task051ExecStructuredContent -Events $structuredFailureEvents -Phase 'status-pre-restart' -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
+            $null = Get-Task051ExecStructuredContent -Events $structuredFailureEvents -Phase $structuredFailurePhase -Tool $structuredFailureTool -ExpectedArguments $structuredFailureArguments
         }
         catch { $structuredFailureMessage = [string]$_.Exception.Message }
         if (
@@ -3423,6 +3517,16 @@ function Invoke-Task051SelfTest {
             (Resolve-Task051CodexToolFailure -Stage 'RESULT' -Message $structuredFailureMessage) -cne [string]$structuredFailureFixture.ExpectedMapped
         ) {
             throw 'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST_REJECTED'
+        }
+    }
+    foreach ($projectionFailureFixture in @(
+        [pscustomobject]@{ Projection = 'STRUCTURED'; Kind = 'SUBMIT'; Message = 'TASK051_STATUS_SEMANTICS_REJECTED'; Expected = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' },
+        [pscustomobject]@{ Projection = 'CONTENT'; Kind = 'STATUS'; Message = 'TASK051_SUBMIT_SEMANTICS_REJECTED'; Expected = 'TASK051_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED' },
+        [pscustomobject]@{ Projection = 'CONTENT'; Kind = 'STATUS'; Message = "secret`r`nvalue"; Expected = 'TASK051_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED' }
+    )) {
+        $projectionFailure = Resolve-Task051PublicProjectionFailure -Projection ([string]$projectionFailureFixture.Projection) -Kind ([string]$projectionFailureFixture.Kind) -Message ([string]$projectionFailureFixture.Message)
+        if ($projectionFailure -cne [string]$projectionFailureFixture.Expected) {
+            throw 'TASK051_CODEX_TOOL_PROJECTION_FAILURE_SELF_TEST_REJECTED'
         }
     }
     $codexToolFailureFixtures = @(
@@ -3440,8 +3544,16 @@ function Invoke-Task051SelfTest {
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_PARITY_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_PARITY_REJECTED' },
         [pscustomobject]@{ Stage = 'EXIT'; Message = ('TASK051_CODEX_EXEC_REJECTED|' + ('a' * 64)); Expected = 'TASK038_CURRENT_CODEX_TOOL_EXIT_REJECTED' },
         [pscustomobject]@{ Stage = 'OUTPUT'; Message = "secret`r`nvalue"; Expected = 'TASK038_CURRENT_CODEX_TOOL_OUTPUT_REJECTED' },

@@ -217,6 +217,7 @@ $requiredFragments = @(
     'TASK038_CURRENT_CODEX_TOOL_SERVER_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_NAME_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_STATUS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_PUBLIC_KIND_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_ARGUMENT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_ERROR_REJECTED',
@@ -225,8 +226,17 @@ $requiredFragments = @(
     'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED',
+    'function Resolve-Task051PublicProjectionFailure',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_PARITY_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_PUBLIC_STATUS_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_DISPATCH_REJECTED',
@@ -457,10 +467,12 @@ if ($codexToolStructuredStart -lt 0 -or $codexToolResolverStart -le $codexToolSt
 }
 $codexToolStructuredSource = $runnerSource.Substring($codexToolStructuredStart, $codexToolResolverStart - $codexToolStructuredStart)
 $codexEventSummaryStart = $runnerSource.IndexOf('function Get-Task051CodexEventSummary', [StringComparison]::Ordinal)
-if ($codexEventSummaryStart -lt 0 -or $codexToolStructuredStart -le $codexEventSummaryStart) {
+$codexPublicProjectionStart = $runnerSource.IndexOf('function Resolve-Task051PublicProjectionFailure', $codexEventSummaryStart, [StringComparison]::Ordinal)
+if ($codexEventSummaryStart -lt 0 -or $codexPublicProjectionStart -le $codexEventSummaryStart -or $codexToolStructuredStart -le $codexPublicProjectionStart) {
     throw 'TASK051_CODEX_EVENT_SUMMARY_SHAPE_REJECTED'
 }
-$codexEventSummarySource = $runnerSource.Substring($codexEventSummaryStart, $codexToolStructuredStart - $codexEventSummaryStart)
+$codexEventSummarySource = $runnerSource.Substring($codexEventSummaryStart, $codexPublicProjectionStart - $codexEventSummaryStart)
+$codexPublicProjectionSource = $runnerSource.Substring($codexPublicProjectionStart, $codexToolStructuredStart - $codexPublicProjectionStart)
 $codexEventSummaryKeys = @(
     'schema_version', 'phase', 'expected_tool', 'total_event_count', 'mcp_started_count',
     'mcp_completed_count', 'expected_started_count', 'expected_completed_count', 'other_completed_count',
@@ -552,6 +564,54 @@ if (
 ) {
     throw 'TASK051_CODEX_TOOL_IDENTITY_SPLIT_SHAPE_REJECTED'
 }
+$publicKindSubmitIndex = $codexToolStructuredSource.IndexOf("'lattice_task_submit' { 'SUBMIT'; break }", [StringComparison]::Ordinal)
+$publicKindStatusIndex = $codexToolStructuredSource.IndexOf("'lattice_task_status' { 'STATUS'; break }", [StringComparison]::Ordinal)
+$publicKindDefaultIndex = $codexToolStructuredSource.IndexOf("default { throw 'TASK051_CODEX_TOOL_PUBLIC_KIND_REJECTED' }", [StringComparison]::Ordinal)
+$structuredPublicValidationIndex = $codexToolStructuredSource.IndexOf('Assert-Task051PublicStatus -Value $structured -Kind $publicKind', [StringComparison]::Ordinal)
+$contentPublicValidationIndex = $codexToolStructuredSource.IndexOf('Assert-Task051PublicStatus -Value $contentValue -Kind $publicKind', [StringComparison]::Ordinal)
+$parityValidationIndex = $codexToolStructuredSource.IndexOf('Assert-Task051SameStatus -Expected $structured -Actual $contentValue -Kind $publicKind', [StringComparison]::Ordinal)
+if (
+    $publicKindSubmitIndex -lt 0 -or
+    $publicKindStatusIndex -le $publicKindSubmitIndex -or
+    $publicKindDefaultIndex -le $publicKindStatusIndex -or
+    $structuredPublicValidationIndex -le $publicKindDefaultIndex -or
+    $contentPublicValidationIndex -le $structuredPublicValidationIndex -or
+    $parityValidationIndex -le $contentPublicValidationIndex -or
+    [regex]::Matches($codexToolStructuredSource, [regex]::Escape('-Kind $publicKind')).Count -ne 5 -or
+    [regex]::Matches($codexToolStructuredSource, [regex]::Escape("'TASK051_CODEX_TOOL_PUBLIC_KIND_REJECTED'")).Count -ne 1 -or
+    [regex]::Matches($codexToolResolverSource, [regex]::Escape("'TASK051_CODEX_TOOL_PUBLIC_KIND_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_PUBLIC_KIND_REJECTED' }")).Count -ne 1 -or
+    $codexToolStructuredSource.IndexOf("Assert-Task051PublicStatus -Value `$structured -Kind 'STATUS'", [StringComparison]::Ordinal) -ge 0 -or
+    $codexToolStructuredSource.IndexOf("Assert-Task051PublicStatus -Value `$structured -Kind 'SUBMIT'", [StringComparison]::Ordinal) -ge 0 -or
+    $codexToolStructuredSource.IndexOf("Assert-Task051PublicStatus -Value `$contentValue -Kind 'STATUS'", [StringComparison]::Ordinal) -ge 0 -or
+    $codexToolStructuredSource.IndexOf("Assert-Task051PublicStatus -Value `$contentValue -Kind 'SUBMIT'", [StringComparison]::Ordinal) -ge 0
+) {
+    throw 'TASK051_CODEX_TOOL_PUBLIC_PROJECTION_SHAPE_REJECTED'
+}
+$projectionMappingFragments = @(
+    "if (`$Message -ceq 'TASK051_PUBLIC_STATUS_SHAPE_REJECTED')",
+    "'STRUCTURED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED' }",
+    "'CONTENT' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED' }",
+    "'STRUCTURED|SUBMIT|TASK051_SUBMIT_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED' }",
+    "'STRUCTURED|STATUS|TASK051_STATUS_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED' }",
+    "'CONTENT|SUBMIT|TASK051_SUBMIT_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED' }",
+    "'CONTENT|STATUS|TASK051_STATUS_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED' }",
+    "'STRUCTURED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' }",
+    "'CONTENT' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED' }"
+)
+$projectionMappingIndex = -1
+foreach ($projectionMappingFragment in $projectionMappingFragments) {
+    $nextProjectionMappingIndex = $codexPublicProjectionSource.IndexOf($projectionMappingFragment, $projectionMappingIndex + 1, [StringComparison]::Ordinal)
+    if ($nextProjectionMappingIndex -le $projectionMappingIndex) {
+        throw 'TASK051_CODEX_TOOL_PUBLIC_PROJECTION_SHAPE_REJECTED'
+    }
+    $projectionMappingIndex = $nextProjectionMappingIndex
+}
+if (
+    $codexPublicProjectionSource.IndexOf('throw $Message', [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+    $codexPublicProjectionSource.IndexOf('throw $_', [StringComparison]::OrdinalIgnoreCase) -ge 0
+) {
+    throw 'TASK051_CODEX_TOOL_PUBLIC_PROJECTION_SHAPE_REJECTED'
+}
 $codexToolResultRawLeaves = @(
     'TASK051_CODEX_TOOL_RESULT_ERROR_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_MISSING_REJECTED',
@@ -559,20 +619,54 @@ $codexToolResultRawLeaves = @(
     'TASK051_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_PARITY_REJECTED'
+)
+$codexToolParserRawLeaves = @(
+    'TASK051_CODEX_TOOL_RESULT_ERROR_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_MISSING_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_KEYS_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_PARITY_REJECTED'
 )
-$codexToolResultRawLeafIndex = -1
-foreach ($codexToolResultRawLeaf in $codexToolResultRawLeaves) {
-    if ([regex]::Matches($codexToolStructuredSource, [regex]::Escape("'" + $codexToolResultRawLeaf + "'")).Count -ne 1) {
+foreach ($codexToolParserRawLeaf in $codexToolParserRawLeaves) {
+    if ([regex]::Matches($codexToolStructuredSource, [regex]::Escape("'" + $codexToolParserRawLeaf + "'")).Count -ne 1) {
         throw 'TASK051_CODEX_TOOL_RESULT_SPLIT_SHAPE_REJECTED'
     }
-    $nextCodexToolResultRawLeafIndex = $codexToolStructuredSource.IndexOf($codexToolResultRawLeaf, $codexToolResultRawLeafIndex + 1, [StringComparison]::Ordinal)
-    if ($nextCodexToolResultRawLeafIndex -le $codexToolResultRawLeafIndex) {
+}
+$codexProjectionRawLeaves = @(
+    'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED'
+)
+$codexProjectionRawLeafIndex = -1
+foreach ($codexProjectionRawLeaf in $codexProjectionRawLeaves) {
+    if ([regex]::Matches($codexPublicProjectionSource, [regex]::Escape("'" + $codexProjectionRawLeaf + "'")).Count -ne 1) {
         throw 'TASK051_CODEX_TOOL_RESULT_SPLIT_SHAPE_REJECTED'
     }
-    $codexToolResultRawLeafIndex = $nextCodexToolResultRawLeafIndex
+    $nextCodexProjectionRawLeafIndex = $codexPublicProjectionSource.IndexOf($codexProjectionRawLeaf, $codexProjectionRawLeafIndex + 1, [StringComparison]::Ordinal)
+    if ($nextCodexProjectionRawLeafIndex -le $codexProjectionRawLeafIndex) {
+        throw 'TASK051_CODEX_TOOL_RESULT_SPLIT_SHAPE_REJECTED'
+    }
+    $codexProjectionRawLeafIndex = $nextCodexProjectionRawLeafIndex
 }
 if (
     $codexToolStructuredSource.IndexOf('TASK051_CODEX_TOOL_RESULT_REJECTED', [StringComparison]::Ordinal) -ge 0 -or
@@ -587,8 +681,16 @@ $codexToolResultMappedLeaves = @(
     'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_PARITY_REJECTED'
 )
 $codexToolResultMappingIndex = -1
@@ -648,8 +750,16 @@ foreach ($codexToolLeaf in @(
     'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_PARITY_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_PUBLIC_STATUS_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_DISPATCH_REJECTED',
