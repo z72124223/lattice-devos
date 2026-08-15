@@ -301,6 +301,249 @@ function Remove-Task051RunRootAlias {
     }
 }
 
+function Get-Task051PostgresProcessSnapshot {
+    try {
+        $identities = @(
+            Get-CimInstance -ClassName Win32_Process -Filter "Name = 'postgres.exe'" -ErrorAction Stop |
+                ForEach-Object {
+                    if ([long]$_.ProcessId -lt 1 -or [string]::IsNullOrWhiteSpace([string]$_.CreationDate)) {
+                        throw 'TASK051_POSTGRES_PROCESS_SNAPSHOT_REJECTED'
+                    }
+                    $createdAt = [DateTimeOffset]([DateTime]$_.CreationDate)
+                    ([string][long]$_.ProcessId) + '|' + $createdAt.ToFileTime().ToString()
+                } |
+                Sort-Object -Unique
+        )
+        return $identities
+    }
+    catch {
+        throw 'TASK051_POSTGRES_PROCESS_SNAPSHOT_REJECTED'
+    }
+}
+
+function Test-Task051PostgresProcessSnapshotClosed {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Baseline,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Current
+    )
+
+    foreach ($identity in @($Baseline) + @($Current)) {
+        if ([string]$identity -cnotmatch '\A[1-9][0-9]{0,9}\|[1-9][0-9]{0,19}\z') {
+            return $false
+        }
+    }
+    if (
+        @($Baseline | Sort-Object -Unique).Count -ne @($Baseline).Count -or
+        @($Current | Sort-Object -Unique).Count -ne @($Current).Count
+    ) {
+        return $false
+    }
+    return (@($Current | Where-Object { $_ -cnotin $Baseline }).Count -eq 0)
+}
+
+function Test-Task051RunRootAliasReleaseSafe {
+    param(
+        [Parameter(Mandatory = $true)][object]$Alias,
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$BaselinePostgresProcesses
+    )
+
+    try {
+        $fullRunRoot = [IO.Path]::GetFullPath($RunRoot).TrimEnd('\')
+        $aliasRoot = [IO.Path]::GetFullPath([string]$Alias.Root)
+        if (
+            -not ([string]$Alias.RunRoot).Equals($fullRunRoot, [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath ([string]$Alias.Root) -PathType Container)
+        ) {
+            return $false
+        }
+
+        $processes = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+        $currentPostgresIdentities = @(
+            $processes |
+                Where-Object { [string]$_.Name -ieq 'postgres.exe' } |
+                ForEach-Object {
+                    if ([long]$_.ProcessId -lt 1 -or [string]::IsNullOrWhiteSpace([string]$_.CreationDate)) {
+                        throw 'TASK051_RUN_ALIAS_RELEASE_PROCESS_REJECTED'
+                    }
+                    $createdAt = [DateTimeOffset]([DateTime]$_.CreationDate)
+                    ([string][long]$_.ProcessId) + '|' + $createdAt.ToFileTime().ToString()
+                } |
+                Sort-Object -Unique
+        )
+        if (-not (Test-Task051PostgresProcessSnapshotClosed -Baseline $BaselinePostgresProcesses -Current $currentPostgresIdentities)) {
+            return $false
+        }
+        foreach ($process in $processes) {
+            $commandLine = [string]$process.CommandLine
+            $executablePath = [string]$process.ExecutablePath
+            if (
+                (-not [string]::IsNullOrWhiteSpace($commandLine) -and (
+                    $commandLine.IndexOf($aliasRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                    $commandLine.IndexOf($fullRunRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                )) -or
+                (-not [string]::IsNullOrWhiteSpace($executablePath) -and (
+                    $executablePath.IndexOf($aliasRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                    $executablePath.IndexOf($fullRunRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                ))
+            ) {
+                return $false
+            }
+        }
+
+        $clusterParent = Join-Path $fullRunRoot 'task019-postgres'
+        if (
+            -not (Test-Path -LiteralPath $clusterParent -PathType Container) -or
+            ((Get-Item -LiteralPath $clusterParent -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            @(Get-ChildItem -LiteralPath $clusterParent -Force -ErrorAction Stop).Count -ne 0
+        ) {
+            return $false
+        }
+
+        $receiptRoot = Join-Path $fullRunRoot 'task019-holder-receipts'
+        if (
+            -not (Test-Path -LiteralPath $receiptRoot -PathType Container) -or
+            ((Get-Item -LiteralPath $receiptRoot -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint)
+        ) {
+            return $false
+        }
+        Assert-Task051OwnerOnlyAcl -Path $receiptRoot -Directory $true
+        $receiptEntries = @(Get-ChildItem -LiteralPath $receiptRoot -Force -ErrorAction Stop)
+        if ($receiptEntries.Count -ne 1 -or [bool]$receiptEntries[0].PSIsContainer) {
+            return $false
+        }
+        $receipt = $receiptEntries[0]
+        Assert-Task051RegularFile -Path $receipt.FullName -FailureCode 'TASK051_RUN_ALIAS_RELEASE_RECEIPT_REJECTED'
+        Assert-Task051OwnerOnlyAcl -Path $receipt.FullName -Directory $false
+        $lines = @(Get-Content -LiteralPath $receipt.FullName -Encoding utf8)
+        if ($lines.Count -lt 5) { return $false }
+        $events = @($lines | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop })
+        $first = $events[0]
+        $runId = [string]$first.run_id
+        $sessionId = [string]$first.session_id
+        $port = [int]$first.port
+        if (
+            $runId -cnotmatch '\A[0-9a-f]{32}\z' -or
+            $sessionId -cnotmatch '\A[0-9a-f]{32}\z' -or
+            $receipt.Name -cne ($runId + '.jsonl') -or
+            $port -lt 1 -or
+            [string]$first.event_type -cne 'HOLDER_OPEN'
+        ) {
+            return $false
+        }
+        $previousHmac = '0' * 64
+        $consumerSessionId = [string]$first.consumer_session_id
+        $nonceCommitment = [string]$first.nonce_commitment
+        $allowedEventTypes = @(
+            'HOLDER_OPEN', 'MARKER_CREATED', 'INITIAL_POSTMASTER_READY',
+            'INITIAL_POSTMASTER_STOPPED', 'RESTART_POSTMASTER_READY',
+            'CONSUMER_STARTED', 'CONSUMER_EXITED', 'HOLDER_STOP_REQUESTED',
+            'HOLDER_STOPPED', 'CATALOG_SIGNATURES_MEASURED', 'CATALOG_SIGNATURES_PARTIAL',
+            'CATALOG_DIAGNOSTIC_FAILED', 'LIVE_GATE_FAILED', 'TASK076_WRITER_V2_VERIFIED',
+            'CLEANUP_REQUESTED', 'CLEANUP_COMPLETED', 'RECEIPT_CLOSED'
+        )
+        if (
+            $consumerSessionId -cnotmatch '\A[0-9a-f]{32}\z' -or
+            $nonceCommitment -cnotmatch '\A[0-9a-f]{64}\z'
+        ) {
+            return $false
+        }
+        for ($index = 0; $index -lt $events.Count; $index++) {
+            $event = $events[$index]
+            $payloadSha256 = Get-Task051StringSha256 -Value ($event.payload | ConvertTo-Json -Compress -Depth 20)
+            if (
+                [string]$event.schema -cne 'lattice.task019.postgres-holder-authority.v1' -or
+                [string]$event.event_type -cnotin $allowedEventTypes -or
+                [string]$event.run_id -cne $runId -or
+                [string]$event.session_id -cne $sessionId -or
+                [string]$event.consumer_session_id -cne $consumerSessionId -or
+                [string]$event.host -cne '127.0.0.1' -or
+                [int]$event.port -ne $port -or
+                (@($event.excluded_ports) -join ',') -cne '5432,64272,55432' -or
+                [string]$event.nonce_commitment -cne $nonceCommitment -or
+                [long]$event.ordinal -ne ($index + 1) -or
+                [string]$event.previous_hmac_sha256 -cne $previousHmac -or
+                [string]$event.payload_sha256 -cne $payloadSha256 -or
+                [string]$event.event_hmac_sha256 -cnotmatch '\A[0-9a-f]{64}\z'
+            ) {
+                return $false
+            }
+            $previousHmac = [string]$event.event_hmac_sha256
+        }
+        $expectedClusterRoot = [IO.Path]::GetFullPath((Join-Path $clusterParent $runId))
+        $expectedAliasData = [IO.Path]::GetFullPath((Join-Path ([string]$Alias.Root) ('task019-postgres\' + $runId + '\data')))
+        if (
+            -not ([IO.Path]::GetFullPath([string]$first.payload.cluster_root).Equals($expectedClusterRoot, [StringComparison]::OrdinalIgnoreCase)) -or
+            -not ([IO.Path]::GetFullPath([string]$first.payload.data_directory).Equals($expectedAliasData, [StringComparison]::OrdinalIgnoreCase)) -or
+            [string]$first.payload.authority_receipt_path -cne $receipt.FullName
+        ) {
+            return $false
+        }
+        $tail = @($events | Select-Object -Last 4)
+        if (
+            ($tail.event_type -join ',') -cne 'HOLDER_STOPPED,CLEANUP_REQUESTED,CLEANUP_COMPLETED,RECEIPT_CLOSED' -or
+            $tail[0].payload.pg_ctl_status_stopped -isnot [bool] -or $tail[0].payload.pg_ctl_status_stopped -cne $true -or
+            $tail[0].payload.listener_absent -isnot [bool] -or $tail[0].payload.listener_absent -cne $true -or
+            $tail[2].payload.cluster_root_absent -isnot [bool] -or $tail[2].payload.cluster_root_absent -cne $true -or
+            $tail[2].payload.listener_absent -isnot [bool] -or $tail[2].payload.listener_absent -cne $true -or
+            $tail[3].payload.cleanup_complete -isnot [bool] -or $tail[3].payload.cleanup_complete -cne $true -or
+            [long]$tail[3].payload.final_event_count_before_close -ne ($events.Count - 1) -or
+            -not ([IO.Path]::GetFullPath([string]$tail[2].payload.cluster_root).Equals($expectedClusterRoot, [StringComparison]::OrdinalIgnoreCase))
+        ) {
+            return $false
+        }
+        $portListeners = @(
+            Get-NetTCPConnection -State Listen -ErrorAction Stop |
+                Where-Object { [int]$_.LocalPort -eq $port }
+        )
+        if ($portListeners.Count -ne 0) {
+            return $false
+        }
+
+        $postgresPath = [IO.Path]::GetFullPath([string]$first.payload.tool_identity.postgres_path)
+        Assert-Task051RegularFile -Path $postgresPath -FailureCode 'TASK051_RUN_ALIAS_RELEASE_POSTGRES_REJECTED'
+        if ((Get-Task051Sha256 -Path $postgresPath) -cne [string]$first.payload.tool_identity.postgres_sha256) {
+            return $false
+        }
+        foreach ($event in $events) {
+            $pidProperty = $event.payload.PSObject.Properties['listener_process_id']
+            if ($null -eq $pidProperty -or [long]$pidProperty.Value -lt 1) { continue }
+            $known = @($processes | Where-Object { [long]$_.ProcessId -eq [long]$pidProperty.Value })
+            if ($known.Count -gt 1) { return $false }
+            if ($known.Count -eq 1) {
+                $creationProperty = $event.payload.PSObject.Properties['listener_process_creation_time']
+                if ($null -eq $creationProperty -or [string]::IsNullOrWhiteSpace([string]$known[0].CreationDate)) {
+                    return $false
+                }
+                $actualCreation = ([DateTimeOffset]([DateTime]$known[0].CreationDate)).ToFileTime().ToString()
+                if ($actualCreation -ceq [string]$creationProperty.Value) {
+                    return $false
+                }
+            }
+        }
+        foreach ($process in @($processes | Where-Object { [string]$_.Name -ieq 'postgres.exe' })) {
+            $commandLine = [string]$process.CommandLine
+            $executablePath = [string]$process.ExecutablePath
+            if ([string]::IsNullOrWhiteSpace($commandLine) -or [string]::IsNullOrWhiteSpace($executablePath)) {
+                continue
+            }
+            if (
+                [IO.Path]::GetFullPath($executablePath).Equals($postgresPath, [StringComparison]::OrdinalIgnoreCase) -and
+                (
+                    $commandLine.IndexOf($expectedAliasData, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                    $commandLine.IndexOf($expectedClusterRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                )
+            ) {
+                return $false
+            }
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 function Write-Task051JsonEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -1274,11 +1517,9 @@ function Get-Task019AllowlistedDiagnosticTokens {
 '@
     $Source = Replace-Task051Exact -Source $Source -Old $emptyDiagnosticParameter -New $allowEmptyDiagnosticParameter -FailureCode 'TASK051_TASK019_EMPTY_DIAGNOSTIC_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '$dataDirectory = Join-Path $clusterRoot ''data''' -New @'
-$dataDirectory = Join-Path $clusterRoot 'data'
-$initdbDataDirectory = Join-Path $env:LATTICE_TASK051_RUN_ALIAS_ROOT ('task019-postgres\' + $runId + '\data')
+$dataDirectory = Join-Path $env:LATTICE_TASK051_RUN_ALIAS_ROOT ('task019-postgres\' + $runId + '\data')
 $task051CargoOutputRoot = Join-Path $env:LATTICE_TASK051_RUN_ALIAS_ROOT ('task019-postgres\' + $runId)
 '@ -FailureCode 'TASK051_TASK019_PGDATA_ALIAS_TRANSFORM_REJECTED'
-    $Source = Replace-Task051Exact -Source $Source -Old "            '--pgdata', `$dataDirectory," -New "            '--pgdata', `$initdbDataDirectory," -FailureCode 'TASK051_TASK019_INITDB_ALIAS_TRANSFORM_REJECTED'
     $doubleQuotedCargoOutput = 'Join-Path $clusterRoot ".cargo'
     $singleQuotedCargoOutput = "Join-Path `$clusterRoot '.cargo"
     if (
@@ -1371,6 +1612,13 @@ $task051CargoOutputRoot = Join-Path $env:LATTICE_TASK051_RUN_ALIAS_ROOT ('task01
 }
 
 function Invoke-Task051SelfTest {
+    if (
+        -not (Test-Task051PostgresProcessSnapshotClosed -Baseline @('100|1000') -Current @('100|1000')) -or
+        (Test-Task051PostgresProcessSnapshotClosed -Baseline @('100|1000') -Current @('100|1000', '101|1001')) -or
+        (Test-Task051PostgresProcessSnapshotClosed -Baseline @('100|1000') -Current @('invalid'))
+    ) {
+        throw 'TASK051_POSTGRES_PROCESS_SNAPSHOT_SELF_TEST_REJECTED'
+    }
     $status = [pscustomobject]@{
         schema_version = $script:Task051PublicStatusSchema
         status = 'COMPLETED'
@@ -1524,6 +1772,107 @@ function Invoke-Task051SelfTest {
         if (Test-Path -LiteralPath (Join-Path $aclRoot 'codex-provisioning-failure')) {
             throw 'TASK051_CODEX_HOME_PROVISIONING_SELF_TEST_REJECTED'
         }
+        $fakeAlias = [pscustomobject]@{ Root = $aclRoot; RunRoot = $aclRoot }
+        $selfTestPostgresBaseline = @(Get-Task051PostgresProcessSnapshot)
+        if (Test-Task051RunRootAliasReleaseSafe -Alias $fakeAlias -RunRoot $aclRoot -BaselinePostgresProcesses $selfTestPostgresBaseline) {
+            throw 'TASK051_RUN_ALIAS_MISSING_RECEIPT_SELF_TEST_REJECTED'
+        }
+        $clusterParent = Join-Path $aclRoot 'task019-postgres'
+        $receiptRoot = Join-Path $aclRoot 'task019-holder-receipts'
+        [IO.Directory]::CreateDirectory($clusterParent) | Out-Null
+        [IO.Directory]::CreateDirectory($receiptRoot) | Out-Null
+        if (Test-Task051RunRootAliasReleaseSafe -Alias $fakeAlias -RunRoot $aclRoot -BaselinePostgresProcesses $selfTestPostgresBaseline) {
+            throw 'TASK051_RUN_ALIAS_EMPTY_RECEIPT_SELF_TEST_REJECTED'
+        }
+        $preservedCluster = Join-Path $clusterParent 'preserved'
+        [IO.Directory]::CreateDirectory($preservedCluster) | Out-Null
+        if (Test-Task051RunRootAliasReleaseSafe -Alias $fakeAlias -RunRoot $aclRoot -BaselinePostgresProcesses $selfTestPostgresBaseline) {
+            throw 'TASK051_RUN_ALIAS_PRESERVATION_SELF_TEST_REJECTED'
+        }
+        [IO.Directory]::Delete($clusterParent, $true)
+        [IO.Directory]::Delete($receiptRoot, $true)
+        [IO.Directory]::CreateDirectory($clusterParent) | Out-Null
+        [IO.Directory]::CreateDirectory($receiptRoot) | Out-Null
+        Set-Task051OwnerOnlyAcl -Path $receiptRoot -Directory $true
+        $releaseRunId = [Guid]::NewGuid().ToString('N')
+        $releaseSessionId = [Guid]::NewGuid().ToString('N')
+        $releaseConsumerSessionId = [Guid]::NewGuid().ToString('N')
+        $releaseReceiptPath = Join-Path $receiptRoot ($releaseRunId + '.jsonl')
+        $releaseClusterRoot = Join-Path $clusterParent $releaseRunId
+        $releaseDataDirectory = Join-Path $aclRoot ('task019-postgres\' + $releaseRunId + '\data')
+        $releaseToolPath = [IO.Path]::GetFullPath([string](Get-Process -Id $PID -ErrorAction Stop).Path)
+        $occupiedReleasePorts = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | ForEach-Object { [int]$_.LocalPort })
+        $releasePort = @(49151..49250 | Where-Object { $_ -notin $occupiedReleasePorts } | Select-Object -First 1)
+        if ($releasePort.Count -ne 1) { throw 'TASK051_RUN_ALIAS_SELF_TEST_PORT_REJECTED' }
+        $writeReleaseReceipt = {
+            param(
+                [Parameter(Mandatory = $true)]$CleanupComplete,
+                [Parameter(Mandatory = $true)][bool]$TamperRequestedPayload
+            )
+            $payloads = @(
+                [ordered]@{
+                    cluster_root = $releaseClusterRoot
+                    data_directory = $releaseDataDirectory
+                    authority_receipt_path = $releaseReceiptPath
+                    tool_identity = [ordered]@{
+                        postgres_path = $releaseToolPath
+                        postgres_sha256 = Get-Task051Sha256 -Path $releaseToolPath
+                    }
+                },
+                [ordered]@{ pg_ctl_status_stopped = $true; listener_absent = $true },
+                [ordered]@{ cleanup_requested = $true },
+                [ordered]@{ cluster_root = $releaseClusterRoot; cluster_root_absent = $true; listener_absent = $true },
+                [ordered]@{ final_event_count_before_close = 4L; cleanup_complete = $CleanupComplete }
+            )
+            $eventTypes = @('HOLDER_OPEN', 'HOLDER_STOPPED', 'CLEANUP_REQUESTED', 'CLEANUP_COMPLETED', 'RECEIPT_CLOSED')
+            $previousHmac = '0' * 64
+            $records = [Collections.Generic.List[string]]::new()
+            for ($eventIndex = 0; $eventIndex -lt $eventTypes.Count; $eventIndex++) {
+                $payload = $payloads[$eventIndex]
+                $payloadSha256 = Get-Task051StringSha256 -Value ($payload | ConvertTo-Json -Compress -Depth 20)
+                if ($TamperRequestedPayload -and $eventIndex -eq 2) {
+                    $payload['tampered_after_digest'] = $true
+                }
+                $eventHmac = Get-Task051StringSha256 -Value ('task051-release-selftest-' + [string]$eventIndex)
+                $record = [ordered]@{
+                    schema = 'lattice.task019.postgres-holder-authority.v1'
+                    event_type = $eventTypes[$eventIndex]
+                    session_id = $releaseSessionId
+                    consumer_session_id = $releaseConsumerSessionId
+                    run_id = $releaseRunId
+                    host = '127.0.0.1'
+                    port = [long]$releasePort[0]
+                    excluded_ports = @(5432, 64272, 55432)
+                    deadline_utc = [DateTimeOffset]::UtcNow.AddMinutes(5).ToString('o')
+                    nonce_commitment = 'a' * 64
+                    ordinal = [long]($eventIndex + 1)
+                    observed_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
+                    payload = $payload
+                    payload_sha256 = $payloadSha256
+                    previous_hmac_sha256 = $previousHmac
+                    event_hmac_sha256 = $eventHmac
+                }
+                $records.Add(($record | ConvertTo-Json -Compress -Depth 24))
+                $previousHmac = $eventHmac
+            }
+            [IO.File]::WriteAllText($releaseReceiptPath, (($records -join [char]10) + [char]10), [Text.UTF8Encoding]::new($false))
+            Set-Task051OwnerOnlyAcl -Path $releaseReceiptPath -Directory $false
+        }
+        & $writeReleaseReceipt -CleanupComplete $true -TamperRequestedPayload:$false
+        if (-not (Test-Task051RunRootAliasReleaseSafe -Alias $fakeAlias -RunRoot $aclRoot -BaselinePostgresProcesses $selfTestPostgresBaseline)) {
+            throw 'TASK051_RUN_ALIAS_VALID_RECEIPT_SELF_TEST_REJECTED'
+        }
+        & $writeReleaseReceipt -CleanupComplete 'false' -TamperRequestedPayload:$false
+        if (Test-Task051RunRootAliasReleaseSafe -Alias $fakeAlias -RunRoot $aclRoot -BaselinePostgresProcesses $selfTestPostgresBaseline) {
+            throw 'TASK051_RUN_ALIAS_BOOLEAN_TAMPER_SELF_TEST_REJECTED'
+        }
+        & $writeReleaseReceipt -CleanupComplete $true -TamperRequestedPayload:$true
+        if (Test-Task051RunRootAliasReleaseSafe -Alias $fakeAlias -RunRoot $aclRoot -BaselinePostgresProcesses $selfTestPostgresBaseline) {
+            throw 'TASK051_RUN_ALIAS_PAYLOAD_TAMPER_SELF_TEST_REJECTED'
+        }
+        Remove-Item -LiteralPath $releaseReceiptPath -Force
+        [IO.Directory]::Delete($clusterParent, $true)
+        [IO.Directory]::Delete($receiptRoot, $true)
         $directoryAcl = [IO.Directory]::GetAccessControl($aclRoot)
         $usersSid = [Security.Principal.SecurityIdentifier]::new(
             [Security.Principal.WellKnownSidType]::BuiltinUsersSid,
@@ -1607,6 +1956,13 @@ function Invoke-Task051SelfTest {
         [regex]::Matches($task019, [regex]::Escape('Join-Path $task051CargoOutputRoot')).Count -ne 14
     ) {
         throw 'TASK051_TASK019_CARGO_OUTPUT_ALIAS_SELF_TEST_REJECTED'
+    }
+    if (
+        [regex]::Matches($task019, [regex]::Escape("`$dataDirectory = Join-Path `$clusterRoot 'data'")).Count -ne 0 -or
+        [regex]::Matches($task019, [regex]::Escape("`$dataDirectory = Join-Path `$env:LATTICE_TASK051_RUN_ALIAS_ROOT ('task019-postgres\' + `$runId + '\data')")).Count -ne 1 -or
+        [regex]::Matches($task019, [regex]::Escape("            '--pgdata', `$dataDirectory,")).Count -ne 1
+    ) {
+        throw 'TASK051_TASK019_RUNTIME_PGDATA_ALIAS_SELF_TEST_REJECTED'
     }
     foreach ($cleanupFailure in @(
         'TASK051_WRITER_OWNER_OUTPUT_DELETE_FAILED',
@@ -1706,6 +2062,7 @@ foreach ($name in @(
 $primaryFailure = $null
 $harnessOutput = @()
 $runAlias = $null
+$postgresProcessBaseline = @(Get-Task051PostgresProcessSnapshot)
 try {
     $runAlias = New-Task051RunRootAlias -RunRoot $runRoot
     New-Task051OwnerOnlyDirectory -Path $credentialSource
@@ -1773,10 +2130,15 @@ finally {
         }
     }
     if ($null -ne $runAlias) {
-        try { Remove-Task051RunRootAlias -Alias $runAlias }
+        try {
+            if (-not (Test-Task051RunRootAliasReleaseSafe -Alias $runAlias -RunRoot $runRoot -BaselinePostgresProcesses $postgresProcessBaseline)) {
+                throw 'TASK051_RUN_ALIAS_PRESERVED_FOR_ACTIVE_RESOURCE'
+            }
+            Remove-Task051RunRootAlias -Alias $runAlias
+        }
         catch {
             if ($null -eq $cleanupFailure) {
-                $cleanupFailure = 'TASK051_RUN_ALIAS_CLEANUP_REJECTED'
+                $cleanupFailure = [string]$_.Exception.Message
             }
         }
     }
