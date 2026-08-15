@@ -1264,6 +1264,11 @@ function Convert-Task051Task019Source {
     $qScripts = ConvertTo-Task051TomlLiteral -Value ([IO.Path]::GetFullPath($ScriptsRoot))
     $Source = $Source.Replace('$PSScriptRoot', $qScripts)
     $Source = Replace-Task051Exact -Source $Source -Old '$repositoryTarget = Get-CanonicalPath -Path (Join-Path $repositoryRoot ''target'')' -New '$repositoryTarget = Get-CanonicalPath -Path $env:LATTICE_TASK051_RUN_ROOT' -FailureCode 'TASK051_TASK019_TARGET_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$dataDirectory = Join-Path $clusterRoot ''data''' -New @'
+$dataDirectory = Join-Path $clusterRoot 'data'
+$initdbDataDirectory = Join-Path $env:LATTICE_TASK051_RUN_ALIAS_ROOT ('task019-postgres\' + $runId + '\data')
+'@ -FailureCode 'TASK051_TASK019_PGDATA_ALIAS_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old "            '--pgdata', `$dataDirectory," -New "            '--pgdata', `$initdbDataDirectory," -FailureCode 'TASK051_TASK019_INITDB_ALIAS_TRANSFORM_REJECTED'
     $Source = $Source.Replace('$task038HookPath = Get-LatticeTask038AcceptanceHookPath -ScriptDirectory ' + $qScripts + ' -RepositoryRoot $repositoryRoot', '$task038HookPath = [IO.Path]::GetFullPath($env:LATTICE_TASK051_GENERATED_TASK038)')
     $conflictStart = $Source.IndexOf('$RunTask076WriterLeaseGate -and (', [StringComparison]::Ordinal)
     $conflictEndMarker = "throw 'TASK076_WRITER_LEASE_GATE_HOOK_FORBIDDEN'"
@@ -1589,6 +1594,7 @@ foreach ($name in @(
     'TEMP',
     'TMP',
     'LATTICE_TASK051_RUN_ROOT',
+    'LATTICE_TASK051_RUN_ALIAS_ROOT',
     'LATTICE_TASK051_GENERATED_TASK038',
     'LATTICE_TASK051_CURRENT_CODEX',
     'LATTICE_TASK051_AUTH_SOURCE',
@@ -1621,6 +1627,7 @@ try {
     [Environment]::SetEnvironmentVariable('TEMP', (Join-Path $runAlias.Root 'temp'), 'Process')
     [Environment]::SetEnvironmentVariable('TMP', (Join-Path $runAlias.Root 'temp'), 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK051_RUN_ROOT', $runRoot, 'Process')
+    [Environment]::SetEnvironmentVariable('LATTICE_TASK051_RUN_ALIAS_ROOT', $runAlias.Root, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK051_GENERATED_TASK038', $generatedTask038, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK051_CURRENT_CODEX', $currentCodex, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', $authSource, 'Process')
