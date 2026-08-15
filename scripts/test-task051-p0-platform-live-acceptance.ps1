@@ -594,7 +594,7 @@ $projectionMappingFragments = @(
     "'STRUCTURED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED' }",
     "'CONTENT' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED' }"
 )
-$publicProjectionFields = @('SCHEMA', 'STATE', 'TASK_REF', 'LEDGER_HEAD', 'RESULT_DIGEST')
+$publicProjectionFields = @('SCHEMA', 'STATUS', 'TASK_STATE', 'TASK_REF', 'LEDGER_HEAD', 'RESULT_DIGEST')
 foreach ($projectionName in @('STRUCTURED', 'CONTENT')) {
     foreach ($kindName in @('SUBMIT', 'STATUS')) {
         foreach ($fieldName in $publicProjectionFields) {
@@ -883,7 +883,8 @@ $semanticFieldSource = $runnerSource.Substring($semanticFieldStart, $publicStatu
 $publicStatusAssertSource = $runnerSource.Substring($publicStatusAssertStart, $sameStatusAssertStart - $publicStatusAssertStart)
 $semanticFieldFragments = @(
     "if ([string]`$Value.schema_version -cne `$script:Task051PublicStatusSchema) { return 'SCHEMA' }",
-    "if ([string]`$Value.status -cne 'COMPLETED' -or [string]`$Value.task_state -cne 'COMPLETED') { return 'STATE' }",
+    "if ([string]`$Value.status -cne 'COMPLETED') { return 'STATUS' }",
+    "if ([string]`$Value.task_state -cne 'COMPLETED') { return 'TASK_STATE' }",
     "if ([string]`$Value.task_ref -cnotmatch '\A[0-9a-f]{64}\z') { return 'TASK_REF' }",
     "if ([string]`$Value.ledger_head_digest -cnotmatch '\A[0-9a-f]{64}\z') { return 'LEDGER_HEAD' }",
     "if ([string]`$Value.result_digest -cnotmatch '\A[0-9a-f]{64}\z') { return 'RESULT_DIGEST' }",
@@ -909,7 +910,7 @@ if (
 ) {
     throw 'TASK051_PUBLIC_STATUS_FIELD_DIAGNOSTIC_SHAPE_REJECTED'
 }
-foreach ($internalFieldLeaf in @('SCHEMA', 'STATE', 'TASK_REF', 'LEDGER_HEAD', 'RESULT_DIGEST')) {
+foreach ($internalFieldLeaf in @('SCHEMA', 'STATUS', 'TASK_STATE', 'TASK_REF', 'LEDGER_HEAD', 'RESULT_DIGEST')) {
     if ([regex]::Matches($publicStatusAssertSource, [regex]::Escape("'TASK051_PUBLIC_STATUS_" + $internalFieldLeaf + "_REJECTED'")).Count -ne 1) {
         throw 'TASK051_PUBLIC_STATUS_FIELD_DIAGNOSTIC_SHAPE_REJECTED'
     }
