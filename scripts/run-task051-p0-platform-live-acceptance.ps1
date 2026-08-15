@@ -1276,8 +1276,61 @@ function Get-Task019AllowlistedDiagnosticTokens {
     $Source = Replace-Task051Exact -Source $Source -Old '$dataDirectory = Join-Path $clusterRoot ''data''' -New @'
 $dataDirectory = Join-Path $clusterRoot 'data'
 $initdbDataDirectory = Join-Path $env:LATTICE_TASK051_RUN_ALIAS_ROOT ('task019-postgres\' + $runId + '\data')
+$task051CargoOutputRoot = Join-Path $env:LATTICE_TASK051_RUN_ALIAS_ROOT ('task019-postgres\' + $runId)
 '@ -FailureCode 'TASK051_TASK019_PGDATA_ALIAS_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old "            '--pgdata', `$dataDirectory," -New "            '--pgdata', `$initdbDataDirectory," -FailureCode 'TASK051_TASK019_INITDB_ALIAS_TRANSFORM_REJECTED'
+    $doubleQuotedCargoOutput = 'Join-Path $clusterRoot ".cargo'
+    $singleQuotedCargoOutput = "Join-Path `$clusterRoot '.cargo"
+    if (
+        [regex]::Matches($Source, [regex]::Escape($doubleQuotedCargoOutput)).Count -ne 12 -or
+        [regex]::Matches($Source, [regex]::Escape($singleQuotedCargoOutput)).Count -ne 2
+    ) {
+        throw 'TASK051_TASK019_CARGO_OUTPUT_ALIAS_TRANSFORM_REJECTED'
+    }
+    $Source = $Source.Replace($doubleQuotedCargoOutput, 'Join-Path $task051CargoOutputRoot ".cargo')
+    $Source = $Source.Replace($singleQuotedCargoOutput, "Join-Path `$task051CargoOutputRoot '.cargo")
+    $writerOwnerCleanup = @'
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+        $null = Invoke-HarnessPsqlRows -Psql $Psql -DatabaseName $databaseName `
+            -Port $Port -Password $Password -Query $stopQuery `
+            -FailureCode 'TASK019_WRITER_LEASE_OWNER_STOP_REJECTED'
+'@
+    $writerOwnerVerifiedCleanup = @'
+        $task051WriterOwnerOutputCleanupFailed = $false
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $path) {
+                $task051WriterOwnerOutputCleanupFailed = $true
+            }
+        }
+        $null = Invoke-HarnessPsqlRows -Psql $Psql -DatabaseName $databaseName `
+            -Port $Port -Password $Password -Query $stopQuery `
+            -FailureCode 'TASK019_WRITER_LEASE_OWNER_STOP_REJECTED'
+        if ($task051WriterOwnerOutputCleanupFailed) {
+            throw 'TASK051_WRITER_OWNER_OUTPUT_DELETE_FAILED'
+        }
+'@
+    $Source = Replace-Task051Exact -Source $Source -Old $writerOwnerCleanup -New $writerOwnerVerifiedCleanup -FailureCode 'TASK051_WRITER_OWNER_OUTPUT_CLEANUP_TRANSFORM_REJECTED'
+    $catalogCleanup = @'
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if ($exitCode -ne 0) {
+'@
+    $catalogVerifiedCleanup = @'
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $path) {
+                throw 'TASK051_CATALOG_OUTPUT_DELETE_FAILED'
+            }
+        }
+    }
+    if ($exitCode -ne 0) {
+'@
+    $Source = Replace-Task051Exact -Source $Source -Old $catalogCleanup -New $catalogVerifiedCleanup -FailureCode 'TASK051_CATALOG_OUTPUT_CLEANUP_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '            Remove-Item -LiteralPath $clusterRoot -Recurse -Force' -New '            Remove-Task051OwnedDirectory -Path $clusterRoot -AllowedRoot $repositoryTarget -FailureCode ''TASK051_TASK019_CLUSTER_CLEANUP_REJECTED''' -FailureCode 'TASK051_TASK019_CLUSTER_CLEANUP_TRANSFORM_REJECTED'
     $Source = $Source.Replace('$task038HookPath = Get-LatticeTask038AcceptanceHookPath -ScriptDirectory ' + $qScripts + ' -RepositoryRoot $repositoryRoot', '$task038HookPath = [IO.Path]::GetFullPath($env:LATTICE_TASK051_GENERATED_TASK038)')
     $conflictStart = $Source.IndexOf('$RunTask076WriterLeaseGate -and (', [StringComparison]::Ordinal)
@@ -1547,6 +1600,36 @@ function Invoke-Task051SelfTest {
         ).Count -ne 1
     ) {
         throw 'TASK051_TASK019_EMPTY_DIAGNOSTIC_SELF_TEST_REJECTED'
+    }
+    if (
+        [regex]::Matches($task019, [regex]::Escape('Join-Path $clusterRoot ".cargo')).Count -ne 0 -or
+        [regex]::Matches($task019, [regex]::Escape("Join-Path `$clusterRoot '.cargo")).Count -ne 0 -or
+        [regex]::Matches($task019, [regex]::Escape('Join-Path $task051CargoOutputRoot')).Count -ne 14
+    ) {
+        throw 'TASK051_TASK019_CARGO_OUTPUT_ALIAS_SELF_TEST_REJECTED'
+    }
+    foreach ($cleanupFailure in @(
+        'TASK051_WRITER_OWNER_OUTPUT_DELETE_FAILED',
+        'TASK051_CATALOG_OUTPUT_DELETE_FAILED'
+    )) {
+        if ([regex]::Matches($task019, [regex]::Escape($cleanupFailure)).Count -ne 1) {
+            throw 'TASK051_TASK019_CARGO_OUTPUT_CLEANUP_SELF_TEST_REJECTED'
+        }
+    }
+    $writerOwnerDeleteObserved = $task019.IndexOf('$task051WriterOwnerOutputCleanupFailed = $true', [StringComparison]::Ordinal)
+    if ($writerOwnerDeleteObserved -lt 0) {
+        throw 'TASK051_TASK019_WRITER_OWNER_CLEANUP_ORDER_SELF_TEST_REJECTED'
+    }
+    $writerOwnerStopCompleted = $task019.IndexOf("-FailureCode 'TASK019_WRITER_LEASE_OWNER_STOP_REJECTED'", $writerOwnerDeleteObserved, [StringComparison]::Ordinal)
+    if ($writerOwnerStopCompleted -lt 0) {
+        throw 'TASK051_TASK019_WRITER_OWNER_CLEANUP_ORDER_SELF_TEST_REJECTED'
+    }
+    $writerOwnerDeleteRejected = $task019.IndexOf("throw 'TASK051_WRITER_OWNER_OUTPUT_DELETE_FAILED'", $writerOwnerStopCompleted, [StringComparison]::Ordinal)
+    if (
+        $writerOwnerStopCompleted -le $writerOwnerDeleteObserved -or
+        $writerOwnerDeleteRejected -le $writerOwnerStopCompleted
+    ) {
+        throw 'TASK051_TASK019_WRITER_OWNER_CLEANUP_ORDER_SELF_TEST_REJECTED'
     }
     Write-Output 'TASK051_SOURCE_TRANSFORM_SELF_TEST=PASS'
     Write-Output 'TASK051_CODEX_EVENT_PARSER_SELF_TEST=PASS'
