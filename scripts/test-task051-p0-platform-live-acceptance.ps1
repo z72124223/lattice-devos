@@ -594,10 +594,21 @@ $projectionMappingFragments = @(
     "'STRUCTURED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED' }",
     "'CONTENT' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED' }"
 )
-$publicProjectionFields = @('SCHEMA', 'STATUS', 'TASK_STATE', 'TASK_REF', 'LEDGER_HEAD', 'RESULT_DIGEST')
+$publicProjectionLeaves = @(
+    'SCHEMA',
+    'STATUS_NOT_SUBMITTED',
+    'STATUS_RECONCILIATION_REQUIRED',
+    'STATUS_FAILED',
+    'STATUS_LOWER_COMPLETED',
+    'STATUS_OTHER',
+    'TASK_STATE',
+    'TASK_REF',
+    'LEDGER_HEAD',
+    'RESULT_DIGEST'
+)
 foreach ($projectionName in @('STRUCTURED', 'CONTENT')) {
     foreach ($kindName in @('SUBMIT', 'STATUS')) {
-        foreach ($fieldName in $publicProjectionFields) {
+        foreach ($fieldName in $publicProjectionLeaves) {
             $projectionMappingFragments += "'" + $projectionName + '|' + $kindName + '|TASK051_PUBLIC_STATUS_' + $fieldName + "_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_" + $projectionName + '_' + $kindName + '_' + $fieldName + "_REJECTED' }"
         }
     }
@@ -635,7 +646,7 @@ $codexToolResultRawLeaves = @(
     'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED'
 )
 foreach ($kindName in @('SUBMIT', 'STATUS')) {
-    foreach ($fieldName in $publicProjectionFields) {
+    foreach ($fieldName in $publicProjectionLeaves) {
         $codexToolResultRawLeaves += 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_' + $kindName + '_' + $fieldName + '_REJECTED'
     }
 }
@@ -646,7 +657,7 @@ $codexToolResultRawLeaves += @(
     'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED'
 )
 foreach ($kindName in @('SUBMIT', 'STATUS')) {
-    foreach ($fieldName in $publicProjectionFields) {
+    foreach ($fieldName in $publicProjectionLeaves) {
         $codexToolResultRawLeaves += 'TASK051_CODEX_TOOL_RESULT_CONTENT_' + $kindName + '_' + $fieldName + '_REJECTED'
     }
 }
@@ -679,7 +690,7 @@ $codexProjectionRawLeaves = @(
 )
 foreach ($projectionName in @('STRUCTURED', 'CONTENT')) {
     foreach ($kindName in @('SUBMIT', 'STATUS')) {
-        foreach ($fieldName in $publicProjectionFields) {
+        foreach ($fieldName in $publicProjectionLeaves) {
             $codexProjectionRawLeaves += 'TASK051_CODEX_TOOL_RESULT_' + $projectionName + '_' + $kindName + '_' + $fieldName + '_REJECTED'
         }
     }
@@ -901,8 +912,9 @@ foreach ($semanticFieldFragment in $semanticFieldFragments) {
 if (
     [regex]::Matches($publicStatusAssertSource, [regex]::Escape('Get-Task051PublicStatusSemanticField -Value $Value')).Count -ne 1 -or
     [regex]::Matches($publicStatusAssertSource, [regex]::Escape('[switch]$DetailedFailure')).Count -ne 1 -or
+    [regex]::Matches($publicStatusAssertSource, [regex]::Escape('$Value.status -is [string]')).Count -ne 1 -or
+    [regex]::Matches($publicStatusAssertSource, [regex]::Escape('switch -CaseSensitive ([string]$Value.status)')).Count -ne 1 -or
     $publicStatusAssertSource.IndexOf('$Value.schema_version', [StringComparison]::Ordinal) -ge 0 -or
-    $publicStatusAssertSource.IndexOf('$Value.status', [StringComparison]::Ordinal) -ge 0 -or
     $publicStatusAssertSource.IndexOf('$Value.task_state', [StringComparison]::Ordinal) -ge 0 -or
     $publicStatusAssertSource.IndexOf('$Value.task_ref', [StringComparison]::Ordinal) -ge 0 -or
     $publicStatusAssertSource.IndexOf('$Value.ledger_head_digest', [StringComparison]::Ordinal) -ge 0 -or
@@ -910,7 +922,7 @@ if (
 ) {
     throw 'TASK051_PUBLIC_STATUS_FIELD_DIAGNOSTIC_SHAPE_REJECTED'
 }
-foreach ($internalFieldLeaf in @('SCHEMA', 'STATUS', 'TASK_STATE', 'TASK_REF', 'LEDGER_HEAD', 'RESULT_DIGEST')) {
+foreach ($internalFieldLeaf in @('SCHEMA', 'STATUS_NOT_SUBMITTED', 'STATUS_RECONCILIATION_REQUIRED', 'STATUS_FAILED', 'STATUS_LOWER_COMPLETED', 'STATUS_OTHER', 'TASK_STATE', 'TASK_REF', 'LEDGER_HEAD', 'RESULT_DIGEST')) {
     if ([regex]::Matches($publicStatusAssertSource, [regex]::Escape("'TASK051_PUBLIC_STATUS_" + $internalFieldLeaf + "_REJECTED'")).Count -ne 1) {
         throw 'TASK051_PUBLIC_STATUS_FIELD_DIAGNOSTIC_SHAPE_REJECTED'
     }
