@@ -1742,6 +1742,9 @@ Assert-SamePublicTaskStatus -Expected $task051PostStatus.StructuredContent -Actu
     task051_post_restart_evidence_sha256 = [string]$task051PostStatus.EvidenceSha256
     task051_autonomy_receipt_verified = $true
 '@ -FailureCode 'TASK051_TASK038_FINAL_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$fixtureParent = Get-CanonicalPath -Path (Join-Path $repositoryTarget ''lattice-delivery'')' -New '$fixtureParent = Get-CanonicalPath -Path $repositoryTarget' -FailureCode 'TASK051_TASK038_COMPACT_FIXTURE_PARENT_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$fixtureRoot = Get-CanonicalPath -Path (Join-Path $fixtureParent $acceptanceId)' -New '$fixtureRoot = Get-CanonicalPath -Path (Join-Path $fixtureParent ''d'')' -FailureCode 'TASK051_TASK038_COMPACT_FIXTURE_ROOT_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$evidenceRoot = Join-Path $fixtureRoot ''evidence''' -New '$evidenceRoot = Join-Path $fixtureRoot ''e''' -FailureCode 'TASK051_TASK038_COMPACT_EVIDENCE_ROOT_TRANSFORM_REJECTED'
     if (
         $Source.IndexOf('CONTROLLED_CODEX_CANARY_AUTONOMY_V1', [StringComparison]::Ordinal) -lt 0 -or
         $Source.IndexOf('TASK051_AUTONOMY_RECEIPT_REJECTED', [StringComparison]::Ordinal) -ge 0
@@ -2250,6 +2253,11 @@ function Invoke-Task051SelfTest {
         [regex]::Matches($task038, [regex]::Escape("'TASK076_WRITER_V2_VERIFIED', 'CONSUMER_STARTED'")).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('$consumer = $records[5].payload')).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape('$consumer = $records[6].payload')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("Join-Path `$repositoryTarget 'lattice-delivery'")).Count -ne 0 -or
+        [regex]::Matches($task038, [regex]::Escape('$fixtureParent = Get-CanonicalPath -Path $repositoryTarget')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('Join-Path $fixtureParent $acceptanceId')).Count -ne 0 -or
+        [regex]::Matches($task038, [regex]::Escape("`$fixtureRoot = Get-CanonicalPath -Path (Join-Path `$fixtureParent 'd')")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("`$evidenceRoot = Join-Path `$fixtureRoot 'e'")).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('LATTICE_TASK051_RUN_ALIAS_ROOT ''task038-execution-homes''')).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape('TASK038_CODEX_EXECUTION_PARENT_NATIVE_LINK_REJECTED')).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape("`$task051LongPathRoot = '\\?\' + `$canonicalRoot")).Count -ne 1 -or
@@ -2258,6 +2266,33 @@ function Invoke-Task051SelfTest {
         [regex]::Matches($task038, [regex]::Escape('[IO.Directory]::Delete($task051LongExecutionHome, $true)')).Count -ne 1
     ) {
         throw 'TASK051_TASK038_POSTGRES_DATA_ALIAS_SELF_TEST_REJECTED'
+    }
+    $compactRunRoot = Join-Path $repositoryRoot ('target\task051-p0-platform-live-acceptance\' + [Guid]::NewGuid().ToString('N'))
+    New-Task051OwnerOnlyDirectory -Path $compactRunRoot | Out-Null
+    try {
+        $compactEvidencePath = Join-Path $compactRunRoot ('d\e\mcp-dispatch\mcp-observed-effects\' + ('a' * 32) + '.jsonl')
+        if ($compactEvidencePath.Length -ge 260) {
+            throw 'TASK051_TASK038_COMPACT_EVIDENCE_PATH_BUDGET_REJECTED'
+        }
+        $compactEvidenceParent = Split-Path -Parent $compactEvidencePath
+        [IO.Directory]::CreateDirectory($compactEvidenceParent) | Out-Null
+        Assert-Task051NoReparseAncestor -Path $compactEvidenceParent -Boundary $compactRunRoot -FailureCode 'TASK051_TASK038_COMPACT_EVIDENCE_REPARSE_REJECTED'
+        [IO.File]::WriteAllText($compactEvidencePath, "task051-compact-evidence-self-test`n", [Text.UTF8Encoding]::new($false))
+        if ([IO.File]::ReadAllText($compactEvidencePath, [Text.Encoding]::UTF8) -cne "task051-compact-evidence-self-test`n") {
+            throw 'TASK051_TASK038_COMPACT_EVIDENCE_IO_REJECTED'
+        }
+        [IO.File]::Delete($compactEvidencePath)
+        if (Test-Path -LiteralPath $compactEvidencePath) {
+            throw 'TASK051_TASK038_COMPACT_EVIDENCE_IO_REJECTED'
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $compactRunRoot -PathType Container) {
+            [IO.Directory]::Delete(('\\?\' + $compactRunRoot), $true)
+        }
+        if (Test-Path -LiteralPath $compactRunRoot) {
+            throw 'TASK051_TASK038_COMPACT_EVIDENCE_CLEANUP_REJECTED'
+        }
     }
     foreach ($holderDiagnostic in @(
         'TASK038_POSTGRES_HOLDER_PREFIX_REJECTED',
