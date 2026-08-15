@@ -2064,11 +2064,11 @@ function Get-Task051ExecStructuredContent {
     }
     $result = $resultProperty.Value
     $resultKeys = @($result.PSObject.Properties.Name | Sort-Object)
-    if (($resultKeys -join ',') -ceq 'content,structured_content') {
-        throw 'TASK051_CODEX_TOOL_RESULT_META_ABSENT_REJECTED'
-    }
-    if (($resultKeys -join ',') -cne '_meta,content,structured_content') {
-        throw 'TASK051_CODEX_TOOL_RESULT_KEYS_REJECTED'
+    $metaPresent = $false
+    switch -CaseSensitive ($resultKeys -join ',') {
+        'content,structured_content' { $metaPresent = $false; break }
+        '_meta,content,structured_content' { $metaPresent = $true; break }
+        default { throw 'TASK051_CODEX_TOOL_RESULT_KEYS_REJECTED' }
     }
     $content = @($result.content)
     if (
@@ -2079,33 +2079,41 @@ function Get-Task051ExecStructuredContent {
     ) {
         throw 'TASK051_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED'
     }
-    $metaShapeFailure = 'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
-    $metaShapeRejected = $false
+    $metaMode = 'ABSENT'
     $meta = $null
-    $serverInfo = $null
-    try {
-        $meta = $result._meta
-        if ($null -eq $meta) {
-            $metaShapeRejected = $true
+    $metaSha256 = $null
+    if ($metaPresent) {
+        $metaShapeFailure = 'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
+        $metaShapeRejected = $false
+        $serverInfo = $null
+        try {
+            $metaProperty = $result.PSObject.Properties['_meta']
+            if ($null -eq $metaProperty -or $null -eq $metaProperty.Value) {
+                $metaShapeRejected = $true
+            }
+            else {
+                $meta = $metaProperty.Value
+                $serverInfo = $meta.PSObject.Properties['io.modelcontextprotocol/serverInfo']
+                $metaShapeRejected = (
+                    @($meta.PSObject.Properties).Count -ne 1 -or
+                    $null -eq $serverInfo -or
+                    [string]$serverInfo.Name -cne 'io.modelcontextprotocol/serverInfo' -or
+                    $null -eq $serverInfo.Value -or
+                    (@($serverInfo.Value.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'name,title,version'
+                )
+            }
         }
-        else {
-            $serverInfo = $meta.PSObject.Properties['io.modelcontextprotocol/serverInfo']
-            $metaShapeRejected = (
-                @($meta.PSObject.Properties).Count -ne 1 -or
-                $null -eq $serverInfo -or
-                $null -eq $serverInfo.Value -or
-                (@($serverInfo.Value.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'name,title,version'
-            )
+        catch { $metaShapeRejected = $true }
+        if ($metaShapeRejected) { throw $metaShapeFailure }
+        if (
+            [string]$serverInfo.Value.name -cne 'latticed' -or
+            [string]$serverInfo.Value.title -cne 'LATTICE DevOS' -or
+            [string]$serverInfo.Value.version -cne '1.0.0'
+        ) {
+            throw 'TASK051_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED'
         }
-    }
-    catch { $metaShapeRejected = $true }
-    if ($metaShapeRejected) { throw $metaShapeFailure }
-    if (
-        [string]$serverInfo.Value.name -cne 'latticed' -or
-        [string]$serverInfo.Value.title -cne 'LATTICE DevOS' -or
-        [string]$serverInfo.Value.version -cne '1.0.0'
-    ) {
-        throw 'TASK051_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED'
+        $metaMode = 'PRESENT_VERIFIED'
+        $metaSha256 = Get-Task051StringSha256 -Value ($meta | ConvertTo-Json -Compress -Depth 20)
     }
     $structuredFailure = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED'
     $contentJsonFailure = 'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED'
@@ -2124,9 +2132,37 @@ function Get-Task051ExecStructuredContent {
     return [pscustomobject]@{
         StructuredContent = $structured
         ContentSha256 = Get-Task051StringSha256 -Value ([string]$content[0].text)
-        MetaSha256 = Get-Task051StringSha256 -Value ($meta | ConvertTo-Json -Compress -Depth 20)
+        MetaMode = $metaMode
+        MetaPresent = $metaPresent
+        MetaSha256 = $metaSha256
         ResultSha256 = Get-Task051StringSha256 -Value ($result | ConvertTo-Json -Compress -Depth 30)
     }
+}
+
+function Get-Task051CodexResultMetaCommitment {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('submit', 'status-pre-restart', 'status-post-restart')]
+        [string]$Phase,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('lattice_task_submit', 'lattice_task_status')]
+        [string]$Tool,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('ABSENT', 'PRESENT_VERIFIED')]
+        [string]$MetaMode,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$ResultSha256,
+        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{64}$')][string]$SafeConfigSha256
+    )
+
+    Assert-Task051CodexPhaseTool -Phase $Phase -Tool $Tool
+    return Get-Task051StringSha256 -Value (([ordered]@{
+        schema_version = 'lattice.task051.codex-result-meta-commitment.v1'
+        phase = $Phase
+        tool = $Tool
+        meta_mode = $MetaMode
+        result_sha256 = $ResultSha256
+        safe_config_sha256 = $SafeConfigSha256
+    }) | ConvertTo-Json -Compress -Depth 10)
 }
 
 function Resolve-Task051CodexToolFailure {
@@ -2159,7 +2195,6 @@ function Resolve-Task051CodexToolFailure {
         'TASK051_CODEX_TOOL_ARGUMENT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_ARGUMENT_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_ERROR_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_ERROR_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_MISSING_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_MISSING_REJECTED' }
-        'TASK051_CODEX_TOOL_RESULT_META_ABSENT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_ABSENT_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_KEYS_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_KEYS_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED' }
@@ -2342,8 +2377,9 @@ function Invoke-Task051CodexTool {
             throw 'TASK051_CODEX_STATUS_DUPLICATE_EFFECT_REJECTED'
         }
         $failureStage = 'EVIDENCE'
+        $metaCommitmentSha256 = Get-Task051CodexResultMetaCommitment -Phase $Phase -Tool $Tool -MetaMode ([string]$envelope.MetaMode) -ResultSha256 ([string]$envelope.ResultSha256) -SafeConfigSha256 $safeConfig
         $evidence = Write-Task051JsonEvidence -Path (Join-Path $EvidenceRoot ('task051-' + $Phase + '-tool-call.json')) -Value ([ordered]@{
-            schema_version = 'lattice.task051.current-codex-tool-call.v1'
+            schema_version = 'lattice.task051.current-codex-tool-call.v2'
             phase = $Phase
             tool = $Tool
             run_mode = $RunMode
@@ -2355,7 +2391,10 @@ function Invoke-Task051CodexTool {
             prompt_sha256 = Get-Task051StringSha256 -Value $prompt
             arguments_sha256 = Get-Task051StringSha256 -Value ($Arguments | ConvertTo-Json -Compress -Depth 10)
             content_sha256 = [string]$envelope.ContentSha256
-            meta_sha256 = [string]$envelope.MetaSha256
+            meta_mode = [string]$envelope.MetaMode
+            meta_present = [bool]$envelope.MetaPresent
+            meta_sha256 = $envelope.MetaSha256
+            meta_commitment_sha256 = $metaCommitmentSha256
             result_sha256 = [string]$envelope.ResultSha256
             structured_content_sha256 = Get-Task051StringSha256 -Value ($structured | ConvertTo-Json -Compress -Depth 20)
             dispatch_raw_sha256 = [string]$dispatch.raw_sha256
@@ -3102,10 +3141,50 @@ function Invoke-Task051SelfTest {
     )
     $parsed = Get-Task051ExecStructuredContent -Events $events -Phase 'status-pre-restart' -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
     Assert-Task051SameStatus -Expected $status -Actual $parsed.StructuredContent
+    if (
+        -not ($parsed.MetaPresent -is [bool]) -or
+        -not [bool]$parsed.MetaPresent -or
+        [string]$parsed.MetaMode -cne 'PRESENT_VERIFIED' -or
+        [string]$parsed.MetaSha256 -cnotmatch '^[0-9a-f]{64}$'
+    ) {
+        throw 'TASK051_CODEX_TOOL_RESULT_META_OPTIONAL_SELF_TEST_REJECTED'
+    }
     $explicitNullErrorEvents = @(($events | ConvertTo-Json -Depth 20) | ConvertFrom-Json -ErrorAction Stop)
     $explicitNullErrorEvents[0].item | Add-Member -NotePropertyName error -NotePropertyValue $null
     $explicitNullErrorParsed = Get-Task051ExecStructuredContent -Events $explicitNullErrorEvents -Phase 'status-pre-restart' -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
     Assert-Task051SameStatus -Expected $status -Actual $explicitNullErrorParsed.StructuredContent
+    $metaAbsentEvents = @(($events | ConvertTo-Json -Depth 20) | ConvertFrom-Json -ErrorAction Stop)
+    $metaAbsentEvents[0].item.result.PSObject.Properties.Remove('_meta')
+    $metaAbsentParsed = Get-Task051ExecStructuredContent -Events $metaAbsentEvents -Phase 'status-pre-restart' -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
+    Assert-Task051SameStatus -Expected $status -Actual $metaAbsentParsed.StructuredContent
+    if (
+        -not ($metaAbsentParsed.MetaPresent -is [bool]) -or
+        [bool]$metaAbsentParsed.MetaPresent -or
+        [string]$metaAbsentParsed.MetaMode -cne 'ABSENT' -or
+        $null -ne $metaAbsentParsed.MetaSha256 -or
+        [string]$metaAbsentParsed.ResultSha256 -cnotmatch '^[0-9a-f]{64}$'
+    ) {
+        throw 'TASK051_CODEX_TOOL_RESULT_META_OPTIONAL_SELF_TEST_REJECTED'
+    }
+    $safeConfigFixture = 'a' * 64
+    $presentCommitment = Get-Task051CodexResultMetaCommitment -Phase 'status-pre-restart' -Tool 'lattice_task_status' -MetaMode ([string]$parsed.MetaMode) -ResultSha256 ([string]$parsed.ResultSha256) -SafeConfigSha256 $safeConfigFixture
+    $presentCommitmentReplay = Get-Task051CodexResultMetaCommitment -Phase 'status-pre-restart' -Tool 'lattice_task_status' -MetaMode ([string]$parsed.MetaMode) -ResultSha256 ([string]$parsed.ResultSha256) -SafeConfigSha256 $safeConfigFixture
+    $absentCommitment = Get-Task051CodexResultMetaCommitment -Phase 'status-pre-restart' -Tool 'lattice_task_status' -MetaMode ([string]$metaAbsentParsed.MetaMode) -ResultSha256 ([string]$metaAbsentParsed.ResultSha256) -SafeConfigSha256 $safeConfigFixture
+    $phaseCommitment = Get-Task051CodexResultMetaCommitment -Phase 'status-post-restart' -Tool 'lattice_task_status' -MetaMode ([string]$parsed.MetaMode) -ResultSha256 ([string]$parsed.ResultSha256) -SafeConfigSha256 $safeConfigFixture
+    $toolCommitment = Get-Task051CodexResultMetaCommitment -Phase 'submit' -Tool 'lattice_task_submit' -MetaMode ([string]$parsed.MetaMode) -ResultSha256 ([string]$parsed.ResultSha256) -SafeConfigSha256 $safeConfigFixture
+    $resultCommitment = Get-Task051CodexResultMetaCommitment -Phase 'status-pre-restart' -Tool 'lattice_task_status' -MetaMode ([string]$parsed.MetaMode) -ResultSha256 ('b' * 64) -SafeConfigSha256 $safeConfigFixture
+    $configCommitment = Get-Task051CodexResultMetaCommitment -Phase 'status-pre-restart' -Tool 'lattice_task_status' -MetaMode ([string]$parsed.MetaMode) -ResultSha256 ([string]$parsed.ResultSha256) -SafeConfigSha256 ('b' * 64)
+    if (
+        $presentCommitment -cnotmatch '^[0-9a-f]{64}$' -or
+        $presentCommitment -cne $presentCommitmentReplay -or
+        $presentCommitment -ceq $absentCommitment -or
+        $presentCommitment -ceq $phaseCommitment -or
+        $presentCommitment -ceq $toolCommitment -or
+        $presentCommitment -ceq $resultCommitment -or
+        $presentCommitment -ceq $configCommitment
+    ) {
+        throw 'TASK051_CODEX_TOOL_RESULT_META_COMMITMENT_SELF_TEST_REJECTED'
+    }
     try {
         Assert-Task051DistinctProcessIds -ProcessIds @(101, 102, 102, 104)
         throw 'TASK051_SELF_TEST_FALSE_PASS'
@@ -3234,11 +3313,6 @@ function Invoke-Task051SelfTest {
             ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_MISSING_REJECTED'
         },
         [pscustomobject]@{
-            Mutation = 'META_ABSENT'
-            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_META_ABSENT_REJECTED'
-            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_ABSENT_REJECTED'
-        },
-        [pscustomobject]@{
             Mutation = 'RESULT_KEYS'
             ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_KEYS_REJECTED'
             ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_KEYS_REJECTED'
@@ -3260,6 +3334,26 @@ function Invoke-Task051SelfTest {
         },
         [pscustomobject]@{
             Mutation = 'META_SHAPE'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'META_EMPTY'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'META_PARTIAL'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'META_EXTRA'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'META_KEY_CASE'
             ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
             ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
         },
@@ -3293,7 +3387,6 @@ function Invoke-Task051SelfTest {
             'ARGUMENT' { $structuredFailureEvents[0].item.arguments.task_ref = '2' * 64 }
             'MISSING_RESULT' { $structuredFailureEvents[0].item.PSObject.Properties.Remove('result') }
             'NULL_RESULT' { $structuredFailureEvents[0].item.result = $null }
-            'META_ABSENT' { $structuredFailureEvents[0].item.result.PSObject.Properties.Remove('_meta') }
             'RESULT_KEYS' { $structuredFailureEvents[0].item.result | Add-Member -NotePropertyName isError -NotePropertyValue $false }
             'CONTENT_SHAPE' { $structuredFailureEvents[0].item.result.content = @() }
             'CONTENT_JSON' { $structuredFailureEvents[0].item.result.content[0].text = '{' }
@@ -3303,6 +3396,14 @@ function Invoke-Task051SelfTest {
                 $structuredFailureEvents[0].item.result.content[0].text = $invalidContentStatus | ConvertTo-Json -Compress -Depth 10
             }
             'META_SHAPE' { $structuredFailureEvents[0].item.result._meta = $null }
+            'META_EMPTY' { $structuredFailureEvents[0].item.result._meta = [pscustomobject]@{} }
+            'META_PARTIAL' { $structuredFailureEvents[0].item.result._meta.'io.modelcontextprotocol/serverInfo'.PSObject.Properties.Remove('version') }
+            'META_EXTRA' { $structuredFailureEvents[0].item.result._meta | Add-Member -NotePropertyName 'io.modelcontextprotocol/extra' -NotePropertyValue ([pscustomobject]@{}) }
+            'META_KEY_CASE' {
+                $caseDriftServerInfo = $structuredFailureEvents[0].item.result._meta.'io.modelcontextprotocol/serverInfo'
+                $structuredFailureEvents[0].item.result._meta.PSObject.Properties.Remove('io.modelcontextprotocol/serverInfo')
+                $structuredFailureEvents[0].item.result._meta | Add-Member -NotePropertyName 'IO.MODELCONTEXTPROTOCOL/SERVERINFO' -NotePropertyValue $caseDriftServerInfo
+            }
             'META_IDENTITY' { $structuredFailureEvents[0].item.result._meta.'io.modelcontextprotocol/serverInfo'.version = '2.0.0' }
             'STRUCTURED' { $structuredFailureEvents[0].item.result.structured_content = $null }
             'STRUCTURED_STATUS' { $structuredFailureEvents[0].item.result.structured_content.status = 'RUNNING' }
@@ -3335,7 +3436,6 @@ function Invoke-Task051SelfTest {
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_UNEXPECTED_TOOL_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_UNEXPECTED_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_ERROR_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_ERROR_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_MISSING_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_MISSING_REJECTED' },
-        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_META_ABSENT_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_ABSENT_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_KEYS_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_KEYS_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED' },
@@ -3430,6 +3530,61 @@ function Invoke-Task051SelfTest {
         if (Test-Path -LiteralPath $eventSummaryPath) {
             throw 'TASK051_CODEX_EVENT_SUMMARY_SELF_TEST_REJECTED'
         }
+        foreach ($metaEvidenceFixture in @(
+            [pscustomobject]@{
+                Name = 'present'
+                Mode = 'PRESENT_VERIFIED'
+                Present = $true
+                MetaSha256 = [string]$parsed.MetaSha256
+                CommitmentSha256 = $presentCommitment
+                ResultSha256 = [string]$parsed.ResultSha256
+            },
+            [pscustomobject]@{
+                Name = 'absent'
+                Mode = 'ABSENT'
+                Present = $false
+                MetaSha256 = $null
+                CommitmentSha256 = $absentCommitment
+                ResultSha256 = [string]$metaAbsentParsed.ResultSha256
+            }
+        )) {
+            $metaEvidencePath = Join-Path $aclRoot ('task051-meta-evidence-' + [string]$metaEvidenceFixture.Name + '.json')
+            $metaEvidenceValue = [ordered]@{
+                schema_version = 'lattice.task051.current-codex-tool-call.v2'
+                meta_mode = [string]$metaEvidenceFixture.Mode
+                meta_present = [bool]$metaEvidenceFixture.Present
+                meta_sha256 = $metaEvidenceFixture.MetaSha256
+                meta_commitment_sha256 = [string]$metaEvidenceFixture.CommitmentSha256
+                result_sha256 = [string]$metaEvidenceFixture.ResultSha256
+            }
+            [IO.File]::WriteAllText($metaEvidencePath, ($metaEvidenceValue | ConvertTo-Json -Compress -Depth 10) + [char]10, [Text.UTF8Encoding]::new($false))
+            Set-Task051OwnerOnlyAcl -Path $metaEvidencePath -Directory $false
+            $metaEvidence = Get-Content -LiteralPath $metaEvidencePath -Raw | ConvertFrom-Json -ErrorAction Stop
+            $metaEvidenceValid = (
+                (@($metaEvidence.PSObject.Properties.Name) -join ',') -ceq 'schema_version,meta_mode,meta_present,meta_sha256,meta_commitment_sha256,result_sha256' -and
+                [string]$metaEvidence.schema_version -ceq 'lattice.task051.current-codex-tool-call.v2' -and
+                ($metaEvidence.meta_present -is [bool]) -and
+                [string]$metaEvidence.meta_mode -ceq [string]$metaEvidenceFixture.Mode -and
+                [bool]$metaEvidence.meta_present -eq [bool]$metaEvidenceFixture.Present -and
+                [string]$metaEvidence.meta_commitment_sha256 -cmatch '^[0-9a-f]{64}$' -and
+                [string]$metaEvidence.result_sha256 -cmatch '^[0-9a-f]{64}$'
+            )
+            if ([bool]$metaEvidenceFixture.Present) {
+                $metaEvidenceValid = $metaEvidenceValid -and [string]$metaEvidence.meta_sha256 -cmatch '^[0-9a-f]{64}$'
+            }
+            else {
+                $metaEvidenceValid = $metaEvidenceValid -and $null -eq $metaEvidence.meta_sha256
+            }
+            if (-not $metaEvidenceValid) {
+                throw 'TASK051_CODEX_TOOL_RESULT_META_EVIDENCE_SELF_TEST_REJECTED'
+            }
+            Assert-Task051OwnerOnlyAcl -Path $metaEvidencePath -Directory $false
+            [IO.File]::Delete($metaEvidencePath)
+            if (Test-Path -LiteralPath $metaEvidencePath) {
+                throw 'TASK051_CODEX_TOOL_RESULT_META_EVIDENCE_SELF_TEST_REJECTED'
+            }
+        }
+        Write-Output 'TASK051_CODEX_TOOL_RESULT_META_EVIDENCE_SELF_TEST=PASS'
         $selfTestTempBefore = [Environment]::GetEnvironmentVariable('TEMP', 'Process')
         $selfTestTmpBefore = [Environment]::GetEnvironmentVariable('TMP', 'Process')
         try {

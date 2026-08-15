@@ -186,7 +186,12 @@ $requiredFragments = @(
     'authority.ExitFileTimeUtc = 0;',
     'authority.ExitFileTimeUtc = checked((Int64)exitValue);',
     'if (waitResult != WaitTimeout && waitResult != WaitObject0)',
-    'lattice.task051.current-codex-tool-call.v1',
+    'lattice.task051.current-codex-tool-call.v2',
+    'lattice.task051.codex-result-meta-commitment.v1',
+    'function Get-Task051CodexResultMetaCommitment',
+    'TASK051_CODEX_TOOL_RESULT_META_OPTIONAL_SELF_TEST_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_META_COMMITMENT_SELF_TEST_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_META_EVIDENCE_SELF_TEST=PASS',
     'lattice.task051.codex-event-summary.v1',
     'function Get-Task051CodexEventSummary',
     'function Assert-Task051CodexPhaseTool',
@@ -216,7 +221,6 @@ $requiredFragments = @(
     'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_ERROR_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_MISSING_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_META_ABSENT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_KEYS_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED',
@@ -551,7 +555,6 @@ if (
 $codexToolResultRawLeaves = @(
     'TASK051_CODEX_TOOL_RESULT_ERROR_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_MISSING_REJECTED',
-    'TASK051_CODEX_TOOL_RESULT_META_ABSENT_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_KEYS_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED',
@@ -580,7 +583,6 @@ if (
 $codexToolResultMappedLeaves = @(
     'TASK038_CURRENT_CODEX_TOOL_RESULT_ERROR_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_MISSING_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_META_ABSENT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_KEYS_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED',
@@ -600,6 +602,23 @@ for ($resultLeafIndex = 0; $resultLeafIndex -lt $codexToolResultRawLeaves.Count;
         throw 'TASK051_CODEX_TOOL_RESULT_SPLIT_SHAPE_REJECTED'
     }
     $codexToolResultMappingIndex = $nextCodexToolResultMappingIndex
+}
+if (
+    $runnerSource.IndexOf('TASK051_CODEX_TOOL_RESULT_META_ABSENT_REJECTED', [StringComparison]::Ordinal) -ge 0 -or
+    $runnerSource.IndexOf('TASK038_CURRENT_CODEX_TOOL_RESULT_META_ABSENT_REJECTED', [StringComparison]::Ordinal) -ge 0 -or
+    [regex]::Matches($codexToolStructuredSource, [regex]::Escape("'content,structured_content' { `$metaPresent = `$false; break }")).Count -ne 1 -or
+    [regex]::Matches($codexToolStructuredSource, [regex]::Escape("'_meta,content,structured_content' { `$metaPresent = `$true; break }")).Count -ne 1 -or
+    [regex]::Matches($codexToolStructuredSource, [regex]::Escape("`$metaProperty = `$result.PSObject.Properties['_meta']")).Count -ne 1 -or
+    [regex]::Matches($codexToolStructuredSource, [regex]::Escape("[string]`$serverInfo.Name -cne 'io.modelcontextprotocol/serverInfo'")).Count -ne 1 -or
+    $codexToolStructuredSource.IndexOf('$result._meta', [StringComparison]::Ordinal) -ge 0 -or
+    [regex]::Matches($codexToolStructuredSource, [regex]::Escape("[ValidateSet('ABSENT', 'PRESENT_VERIFIED')]")).Count -ne 1 -or
+    [regex]::Matches($codexToolStructuredSource, [regex]::Escape("`$metaMode = 'ABSENT'")).Count -ne 1 -or
+    [regex]::Matches($codexToolStructuredSource, [regex]::Escape("`$metaMode = 'PRESENT_VERIFIED'")).Count -ne 1 -or
+    [regex]::Matches($codexToolStructuredSource, [regex]::Escape('MetaPresent = $metaPresent')).Count -ne 1 -or
+    [regex]::Matches($codexToolStructuredSource, [regex]::Escape('MetaSha256 = $metaSha256')).Count -ne 1 -or
+    [regex]::Matches($codexToolStructuredSource, [regex]::Escape('lattice.task051.codex-result-meta-commitment.v1')).Count -ne 1
+) {
+    throw 'TASK051_CODEX_TOOL_RESULT_META_OPTIONAL_SHAPE_REJECTED'
 }
 foreach ($codexToolLeaf in @(
     'TASK038_CURRENT_CODEX_TOOL_HOME_REJECTED',
@@ -625,7 +644,6 @@ foreach ($codexToolLeaf in @(
     'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_ERROR_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_MISSING_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_META_ABSENT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_KEYS_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED',
@@ -661,6 +679,8 @@ $summaryWriterFragment = "Write-Task051JsonEvidence -Path (Join-Path `$EvidenceR
 $summaryWriterIndex = $codexToolInvokeSource.IndexOf($summaryWriterFragment, $callCountAllowListIndex, [StringComparison]::Ordinal)
 $resultRethrowIndex = $codexToolInvokeSource.IndexOf('throw $resultFailure', $summaryWriterIndex, [StringComparison]::Ordinal)
 $structuredProjectionIndex = $codexToolInvokeSource.IndexOf('$structured = $envelope.StructuredContent', $resultRethrowIndex, [StringComparison]::Ordinal)
+$metaCommitmentIndex = $codexToolInvokeSource.IndexOf('$metaCommitmentSha256 = Get-Task051CodexResultMetaCommitment', $structuredProjectionIndex, [StringComparison]::Ordinal)
+$toolEvidenceIndex = $codexToolInvokeSource.IndexOf("schema_version = 'lattice.task051.current-codex-tool-call.v2'", $metaCommitmentIndex, [StringComparison]::Ordinal)
 $callCountGuardSource = if ($callCountAllowListIndex -ge 0 -and $summaryWriterIndex -gt $callCountAllowListIndex) {
     $codexToolInvokeSource.Substring($callCountAllowListIndex, $summaryWriterIndex - $callCountAllowListIndex)
 }
@@ -694,6 +714,12 @@ if (
     $summaryWriterIndex -le $callCountAllowListIndex -or
     $resultRethrowIndex -le $summaryWriterIndex -or
     $structuredProjectionIndex -le $resultRethrowIndex -or
+    $metaCommitmentIndex -le $structuredProjectionIndex -or
+    $toolEvidenceIndex -le $metaCommitmentIndex -or
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape('meta_mode = [string]$envelope.MetaMode')).Count -ne 1 -or
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape('meta_present = [bool]$envelope.MetaPresent')).Count -ne 1 -or
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape('meta_sha256 = $envelope.MetaSha256')).Count -ne 1 -or
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape('meta_commitment_sha256 = $metaCommitmentSha256')).Count -ne 1 -or
     [regex]::Matches($callCountGuardSource, "'TASK051_CODEX_[A-Z0-9_]+_REJECTED'").Count -ne 6 -or
     [regex]::Matches($codexToolInvokeSource, [regex]::Escape($summaryWriterFragment)).Count -ne 1 -or
     [regex]::Matches($codexToolInvokeSource, [regex]::Escape('Resolve-Task051CodexToolFailure -Stage $failureStage')).Count -ne 1 -or
@@ -812,6 +838,7 @@ $expectedSelfTestMarkers = @(
     'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST=PASS',
     'TASK051_CODEX_CALL_COUNT_PHASE_SELF_TEST=PASS',
     'TASK051_CODEX_EVENT_SUMMARY_SELF_TEST=PASS',
+    'TASK051_CODEX_TOOL_RESULT_META_EVIDENCE_SELF_TEST=PASS',
     'TASK051_CODEX_PHASE_TOOL_NO_MATERIALIZATION_SELF_TEST=PASS',
     'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST=PASS',
     'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST=PASS',
