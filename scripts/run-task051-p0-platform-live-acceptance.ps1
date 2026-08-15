@@ -1612,17 +1612,27 @@ function Invoke-Task051CodexDiscovery {
         $owned.Suspended.StandardInput.Flush()
         $sessionOpenPoll = {
             if ($null -ne $watchState.ProcessEvidence) { return $watchState }
-            $ready = Test-Task051McpSessionOpenReady `
-                -Path $AcceptanceEvidencePath `
-                -ExpectedNativeIdentity $AcceptanceNativeIdentity `
-                -EvidenceRoot $EvidenceRoot
+            try {
+                $ready = Test-Task051McpSessionOpenReady `
+                    -Path $AcceptanceEvidencePath `
+                    -ExpectedNativeIdentity $AcceptanceNativeIdentity `
+                    -EvidenceRoot $EvidenceRoot
+            }
+            catch {
+                throw 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_READY_REJECTED'
+            }
             if (-not $ready) { return $null }
-            $parsedSessionOpen = Read-Task051McpSessionOpen `
-                -Path $AcceptanceEvidencePath `
-                -ExpectedNativeIdentity $AcceptanceNativeIdentity `
-                -EvidenceRoot $EvidenceRoot `
-                -SessionId $AcceptanceSessionId `
-                -SafeConfigSha256 $SafeConfigSha256
+            try {
+                $parsedSessionOpen = Read-Task051McpSessionOpen `
+                    -Path $AcceptanceEvidencePath `
+                    -ExpectedNativeIdentity $AcceptanceNativeIdentity `
+                    -EvidenceRoot $EvidenceRoot `
+                    -SessionId $AcceptanceSessionId `
+                    -SafeConfigSha256 $SafeConfigSha256
+            }
+            catch {
+                throw 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_REJECTED'
+            }
             $watchState.ServerProcessId = [int]$parsedSessionOpen.ProcessId
             $capturedProcessEvidence = Get-Task051OwnedProcessEvidence `
                 -Job ([IntPtr]$owned.Job) `
@@ -1657,7 +1667,7 @@ function Invoke-Task051CodexDiscovery {
                     -PollResult ([ref]$pollResult) `
                     -PollTimeoutFailureCode 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_TIMEOUT_REJECTED'
                 if ($null -eq $pollResult -or $null -eq $watchState.ProcessEvidence) {
-                    throw 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
+                    throw 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_POLL_RESULT_REJECTED'
                 }
                 $serverProcessId = [int]$watchState.ServerProcessId
                 $sessionOpen = $watchState.SessionOpen
@@ -1704,13 +1714,18 @@ function Invoke-Task051CodexDiscovery {
         Assert-ToolDiscovery -Response ([pscustomobject]@{
             result = [pscustomobject]@{ tools = $toolRecords }
         })
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
-        $sessionOpenReplay = Read-Task051McpSessionOpen `
-            -Path $AcceptanceEvidencePath `
-            -ExpectedNativeIdentity $AcceptanceNativeIdentity `
-            -EvidenceRoot $EvidenceRoot `
-            -SessionId $AcceptanceSessionId `
-            -SafeConfigSha256 $SafeConfigSha256
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REPLAY_READ_REJECTED'
+        try {
+            $sessionOpenReplay = Read-Task051McpSessionOpen `
+                -Path $AcceptanceEvidencePath `
+                -ExpectedNativeIdentity $AcceptanceNativeIdentity `
+                -EvidenceRoot $EvidenceRoot `
+                -SessionId $AcceptanceSessionId `
+                -SafeConfigSha256 $SafeConfigSha256
+        }
+        catch {
+            throw $failureCode
+        }
         if (
             $null -eq $sessionOpen -or
             $null -eq $processEvidence -or
@@ -1719,7 +1734,7 @@ function Invoke-Task051CodexDiscovery {
             [long]$sessionOpenReplay.ObservedAtUnixNanos -ne [long]$sessionOpen.ObservedAtUnixNanos -or
             [string]$sessionOpenReplay.EventSha256 -cne [string]$sessionOpen.EventSha256
         ) {
-            throw 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
+            throw 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REPLAY_MISMATCH_REJECTED'
         }
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_EVIDENCE_WRITE_REJECTED'
         $evidence = Write-Task051JsonEvidence -Path (Join-Path $EvidenceRoot ('task051-' + $Phase + '-discovery.json')) -Value ([ordered]@{

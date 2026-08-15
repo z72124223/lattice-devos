@@ -113,6 +113,11 @@ $requiredFragments = @(
     'QueryFullProcessImageName',
     'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_TIMEOUT_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_READY_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_POLL_RESULT_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REPLAY_READ_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REPLAY_MISMATCH_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_JOB_MEMBERSHIP_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_INTEROP_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_INTEROP_INIT_REJECTED',
@@ -193,6 +198,23 @@ $pollActionCall = $discoverySource.IndexOf('-PollAction $sessionOpenPoll', [Stri
 $authorityCapture = $discoverySource.IndexOf('$serverAuthority = $processEvidence.Authority', [StringComparison]::Ordinal)
 if ($pollActionCall -lt 0 -or $authorityCapture -le $pollActionCall) {
     throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_SHAPE_REJECTED'
+}
+$sessionOpenLeafIndex = -1
+foreach ($sessionOpenLeaf in @(
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_READY_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_POLL_RESULT_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REPLAY_READ_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REPLAY_MISMATCH_REJECTED'
+)) {
+    if ([regex]::Matches($discoverySource, [regex]::Escape($sessionOpenLeaf)).Count -ne 1) {
+        throw 'TASK051_APP_SERVER_SESSION_OPEN_DIAGNOSTIC_SHAPE_REJECTED'
+    }
+    $nextSessionOpenLeafIndex = $discoverySource.IndexOf($sessionOpenLeaf, [StringComparison]::Ordinal)
+    if ($nextSessionOpenLeafIndex -le $sessionOpenLeafIndex) {
+        throw 'TASK051_APP_SERVER_SESSION_OPEN_DIAGNOSTIC_SHAPE_REJECTED'
+    }
+    $sessionOpenLeafIndex = $nextSessionOpenLeafIndex
 }
 foreach ($forbiddenDiscoveryFragment in @('ParentProcessId =', '.ExecutablePath')) {
     if ($discoverySource.IndexOf($forbiddenDiscoveryFragment, [StringComparison]::Ordinal) -ge 0) {
