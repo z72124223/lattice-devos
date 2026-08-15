@@ -187,8 +187,16 @@ $requiredFragments = @(
     'authority.ExitFileTimeUtc = checked((Int64)exitValue);',
     'if (waitResult != WaitTimeout && waitResult != WaitObject0)',
     'lattice.task051.current-codex-tool-call.v1',
-    'TASK051_CODEX_SUBMIT_CALL_COUNT_REJECTED',
-    'TASK051_CODEX_STATUS_CALL_COUNT_REJECTED',
+    'lattice.task051.codex-event-summary.v1',
+    'function Get-Task051CodexEventSummary',
+    'function Assert-Task051CodexPhaseTool',
+    'TASK038_CURRENT_CODEX_TOOL_SUBMIT_CALL_COUNT_ZERO_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_EVENT_SUMMARY_REJECTED',
     'collab_tool_call',
     'TASK051_CODEX_UNEXPECTED_TOOL_REJECTED',
     'function Resolve-Task051CodexToolFailure',
@@ -200,7 +208,6 @@ $requiredFragments = @(
     'TASK038_CURRENT_CODEX_TOOL_EXIT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_OUTPUT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_EVENT_JSON_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_UNEXPECTED_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_SERVER_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_NAME_REJECTED',
@@ -225,6 +232,11 @@ $requiredFragments = @(
     'TASK038_CURRENT_CODEX_TOOL_CLEANUP_REJECTED',
     '[mcp_servers.lattice.tools.lattice_task_submit]',
     '[mcp_servers.lattice.tools.lattice_task_status]',
+    'enabled_tools = ["lattice_task_submit"]',
+    'enabled_tools = ["lattice_task_status"]',
+    'TASK051_CODEX_CALL_COUNT_PHASE_SELF_TEST=PASS',
+    'TASK051_CODEX_EVENT_SUMMARY_SELF_TEST=PASS',
+    'TASK051_CODEX_PHASE_TOOL_NO_MATERIALIZATION_SELF_TEST=PASS',
     'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST=PASS',
     'TASK051_CODEX_FRESH_PROCESS_REJECTED',
     'V5_MEMORY_V3_WRITER_LEASE_V2',
@@ -252,6 +264,11 @@ $sandboxModeSourceIndex = $codexHomeSource.IndexOf("'sandbox_mode = `"read-only`
 $serverApprovalSourceIndex = $codexHomeSource.IndexOf("'[mcp_servers.lattice]'", [StringComparison]::Ordinal)
 $submitApprovalSourceIndex = $codexHomeSource.IndexOf("'[mcp_servers.lattice.tools.lattice_task_submit]'", [StringComparison]::Ordinal)
 $statusApprovalSourceIndex = $codexHomeSource.IndexOf("'[mcp_servers.lattice.tools.lattice_task_status]'", [StringComparison]::Ordinal)
+$discoveryPhaseSourceIndex = $codexHomeSource.IndexOf("'discovery' { `$null; break }", [StringComparison]::Ordinal)
+$submitPhaseSourceIndex = $codexHomeSource.IndexOf("'submit' { 'enabled_tools = [`"lattice_task_submit`"]'; break }", [StringComparison]::Ordinal)
+$preStatusPhaseSourceIndex = $codexHomeSource.IndexOf("'status-pre-restart' { 'enabled_tools = [`"lattice_task_status`"]'; break }", [StringComparison]::Ordinal)
+$postStatusPhaseSourceIndex = $codexHomeSource.IndexOf("'status-post-restart' { 'enabled_tools = [`"lattice_task_status`"]'; break }", [StringComparison]::Ordinal)
+$phaseRejectSourceIndex = $codexHomeSource.IndexOf("default { throw 'TASK051_CODEX_PHASE_REJECTED' }", [StringComparison]::Ordinal)
 if (
     $approvalPolicySourceIndex -lt 0 -or
     $sandboxModeSourceIndex -le $approvalPolicySourceIndex -or
@@ -263,7 +280,17 @@ if (
     [regex]::Matches($codexHomeSource, [regex]::Escape("'[mcp_servers.lattice.tools.lattice_task_submit]'" )).Count -ne 1 -or
     [regex]::Matches($codexHomeSource, [regex]::Escape("'[mcp_servers.lattice.tools.lattice_task_status]'" )).Count -ne 1 -or
     [regex]::Matches($codexHomeSource, [regex]::Escape("'approval_mode = `"approve`"'" )).Count -ne 2 -or
+    $discoveryPhaseSourceIndex -lt 0 -or
+    $submitPhaseSourceIndex -le $discoveryPhaseSourceIndex -or
+    $preStatusPhaseSourceIndex -le $submitPhaseSourceIndex -or
+    $postStatusPhaseSourceIndex -le $preStatusPhaseSourceIndex -or
+    $phaseRejectSourceIndex -le $postStatusPhaseSourceIndex -or
+    [regex]::Matches($codexHomeSource, [regex]::Escape("'enabled_tools = [`"lattice_task_submit`"]'" )).Count -ne 1 -or
+    [regex]::Matches($codexHomeSource, [regex]::Escape("'enabled_tools = [`"lattice_task_status`"]'" )).Count -ne 2 -or
+    $codexHomeSource.IndexOf('Set-Task051OwnerOnlyAcl -Path $configPath -Directory $false', [StringComparison]::Ordinal) -lt 0 -or
     $codexHomeSource.IndexOf('default_tools_approval_mode', [StringComparison]::Ordinal) -ge 0 -or
+    $codexHomeSource.IndexOf('disabled_tools', [StringComparison]::Ordinal) -ge 0 -or
+    $codexHomeSource.IndexOf('enabled_tools = ["lattice_delivery_', [StringComparison]::Ordinal) -ge 0 -or
     $codexHomeSource.IndexOf('[mcp_servers.lattice.tools.lattice_delivery_', [StringComparison]::Ordinal) -ge 0 -or
     $codexHomeSource.IndexOf('approval_mode = "auto"', [StringComparison]::Ordinal) -ge 0
 ) {
@@ -406,11 +433,105 @@ if ($codexToolResolverStart -lt 0 -or $codexToolInvokeStart -le $codexToolResolv
 }
 $codexToolResolverSource = $runnerSource.Substring($codexToolResolverStart, $codexToolInvokeStart - $codexToolResolverStart)
 $codexToolInvokeSource = $runnerSource.Substring($codexToolInvokeStart, $codexToolInvokeEnd - $codexToolInvokeStart)
+$codexPhaseToolStart = $runnerSource.IndexOf('function Assert-Task051CodexPhaseTool', $codexToolResolverStart, [StringComparison]::Ordinal)
+if ($codexPhaseToolStart -lt 0 -or $codexToolInvokeStart -le $codexPhaseToolStart) {
+    throw 'TASK051_CODEX_PHASE_TOOL_SHAPE_REJECTED'
+}
+$codexPhaseToolSource = $runnerSource.Substring($codexPhaseToolStart, $codexToolInvokeStart - $codexPhaseToolStart)
+if (
+    $codexPhaseToolSource.IndexOf("'submit' { 'lattice_task_submit'; break }", [StringComparison]::Ordinal) -lt 0 -or
+    $codexPhaseToolSource.IndexOf("'status-pre-restart' { 'lattice_task_status'; break }", [StringComparison]::Ordinal) -lt 0 -or
+    $codexPhaseToolSource.IndexOf("'status-post-restart' { 'lattice_task_status'; break }", [StringComparison]::Ordinal) -lt 0 -or
+    $codexPhaseToolSource.IndexOf("default { throw 'TASK051_CODEX_PHASE_TOOL_REJECTED' }", [StringComparison]::Ordinal) -lt 0 -or
+    $codexPhaseToolSource.IndexOf("if (`$Tool -cne `$expectedTool) { throw 'TASK051_CODEX_PHASE_TOOL_REJECTED' }", [StringComparison]::Ordinal) -lt 0
+) {
+    throw 'TASK051_CODEX_PHASE_TOOL_SHAPE_REJECTED'
+}
 $codexToolStructuredStart = $runnerSource.IndexOf('function Get-Task051ExecStructuredContent', [StringComparison]::Ordinal)
 if ($codexToolStructuredStart -lt 0 -or $codexToolResolverStart -le $codexToolStructuredStart) {
     throw 'TASK051_CODEX_TOOL_IDENTITY_SPLIT_SHAPE_REJECTED'
 }
 $codexToolStructuredSource = $runnerSource.Substring($codexToolStructuredStart, $codexToolResolverStart - $codexToolStructuredStart)
+$codexEventSummaryStart = $runnerSource.IndexOf('function Get-Task051CodexEventSummary', [StringComparison]::Ordinal)
+if ($codexEventSummaryStart -lt 0 -or $codexToolStructuredStart -le $codexEventSummaryStart) {
+    throw 'TASK051_CODEX_EVENT_SUMMARY_SHAPE_REJECTED'
+}
+$codexEventSummarySource = $runnerSource.Substring($codexEventSummaryStart, $codexToolStructuredStart - $codexEventSummaryStart)
+$codexEventSummaryKeys = @(
+    'schema_version', 'phase', 'expected_tool', 'total_event_count', 'mcp_started_count',
+    'mcp_completed_count', 'expected_started_count', 'expected_completed_count', 'other_completed_count',
+    'completed_status_count', 'failed_status_count', 'unknown_status_count', 'agent_message_completed_count',
+    'turn_completed_count', 'response_completed_count'
+)
+$codexEventSummaryKeyIndex = -1
+foreach ($codexEventSummaryKey in $codexEventSummaryKeys) {
+    $nextCodexEventSummaryKeyIndex = $codexEventSummarySource.IndexOf($codexEventSummaryKey, $codexEventSummaryKeyIndex + 1, [StringComparison]::Ordinal)
+    if ($nextCodexEventSummaryKeyIndex -le $codexEventSummaryKeyIndex) {
+        throw 'TASK051_CODEX_EVENT_SUMMARY_SHAPE_REJECTED'
+    }
+    $codexEventSummaryKeyIndex = $nextCodexEventSummaryKeyIndex
+}
+foreach ($forbiddenSummaryFragment in @('.arguments', '.result', '.error', '.text', 'prompt', 'environment')) {
+    if ($codexEventSummarySource.IndexOf($forbiddenSummaryFragment, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        throw 'TASK051_CODEX_EVENT_SUMMARY_SHAPE_REJECTED'
+    }
+}
+$codexCallCountRawLeaves = @(
+    'TASK051_CODEX_SUBMIT_CALL_COUNT_ZERO_REJECTED',
+    'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED',
+    'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED',
+    'TASK051_CODEX_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED',
+    'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED',
+    'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED'
+)
+$codexCallCountMappedLeaves = @(
+    'TASK038_CURRENT_CODEX_TOOL_SUBMIT_CALL_COUNT_ZERO_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED'
+)
+$codexCallCountRawIndex = -1
+for ($codexCallCountLeafIndex = 0; $codexCallCountLeafIndex -lt $codexCallCountRawLeaves.Count; $codexCallCountLeafIndex++) {
+    $rawCallCountLeaf = $codexCallCountRawLeaves[$codexCallCountLeafIndex]
+    if ([regex]::Matches($codexToolStructuredSource, [regex]::Escape("'" + $rawCallCountLeaf + "'")).Count -ne 1) {
+        throw 'TASK051_CODEX_CALL_COUNT_PHASE_SHAPE_REJECTED'
+    }
+    $nextCodexCallCountRawIndex = $codexToolStructuredSource.IndexOf($rawCallCountLeaf, $codexCallCountRawIndex + 1, [StringComparison]::Ordinal)
+    if ($nextCodexCallCountRawIndex -le $codexCallCountRawIndex) {
+        throw 'TASK051_CODEX_CALL_COUNT_PHASE_SHAPE_REJECTED'
+    }
+    $codexCallCountRawIndex = $nextCodexCallCountRawIndex
+    $callCountMapping = "'" + $rawCallCountLeaf + "' { return '" + $codexCallCountMappedLeaves[$codexCallCountLeafIndex] + "' }"
+    if ([regex]::Matches($codexToolResolverSource, [regex]::Escape($callCountMapping)).Count -ne 1) {
+        throw 'TASK051_CODEX_CALL_COUNT_PHASE_SHAPE_REJECTED'
+    }
+}
+$callCountMappingOrder = @(
+    "'TASK051_CODEX_SUBMIT_CALL_COUNT_ZERO_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_SUBMIT_CALL_COUNT_ZERO_REJECTED' }",
+    "'TASK051_CODEX_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED' }",
+    "'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED' }",
+    "'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED' }",
+    "'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED' }",
+    "'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED' }",
+    "'TASK051_CODEX_EVENT_SUMMARY_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_EVENT_SUMMARY_REJECTED' }"
+)
+$callCountMappingOrderIndex = -1
+foreach ($orderedCallCountMapping in $callCountMappingOrder) {
+    $nextCallCountMappingOrderIndex = $codexToolResolverSource.IndexOf($orderedCallCountMapping, $callCountMappingOrderIndex + 1, [StringComparison]::Ordinal)
+    if ($nextCallCountMappingOrderIndex -le $callCountMappingOrderIndex) {
+        throw 'TASK051_CODEX_CALL_COUNT_PHASE_SHAPE_REJECTED'
+    }
+    $callCountMappingOrderIndex = $nextCallCountMappingOrderIndex
+}
+if (
+    $codexToolStructuredSource.IndexOf('TASK051_CODEX_SUBMIT_CALL_COUNT_REJECTED', [StringComparison]::Ordinal) -ge 0 -or
+    $codexToolStructuredSource.IndexOf('TASK051_CODEX_STATUS_CALL_COUNT_REJECTED', [StringComparison]::Ordinal) -ge 0 -or
+    $codexToolResolverSource.IndexOf('TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED', [StringComparison]::Ordinal) -ge 0
+) {
+    throw 'TASK051_CODEX_CALL_COUNT_PHASE_SHAPE_REJECTED'
+}
 $codexToolServerGate = $codexToolStructuredSource.IndexOf("throw 'TASK051_CODEX_TOOL_SERVER_REJECTED'", [StringComparison]::Ordinal)
 $codexToolNameGate = $codexToolStructuredSource.IndexOf("throw 'TASK051_CODEX_TOOL_NAME_REJECTED'", [StringComparison]::Ordinal)
 $codexToolStatusGate = $codexToolStructuredSource.IndexOf("throw 'TASK051_CODEX_TOOL_STATUS_REJECTED'", [StringComparison]::Ordinal)
@@ -489,7 +610,13 @@ foreach ($codexToolLeaf in @(
     'TASK038_CURRENT_CODEX_TOOL_EXIT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_OUTPUT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_EVENT_JSON_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_SUBMIT_CALL_COUNT_ZERO_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_EVENT_SUMMARY_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_UNEXPECTED_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_SERVER_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_NAME_REJECTED',
@@ -524,13 +651,73 @@ foreach ($codexToolStage in @('HOME', 'START', 'PROCESS', 'PROMPT', 'WAIT', 'EXI
     }
     $codexToolStageIndex = $nextCodexToolStageIndex
 }
+$phaseToolAssertIndex = $codexToolInvokeSource.IndexOf('Assert-Task051CodexPhaseTool -Phase $Phase -Tool $Tool', [StringComparison]::Ordinal)
+$acceptanceSinkCreateIndex = $codexToolInvokeSource.IndexOf('$acceptanceSink = New-Task038McpAcceptanceEvidenceSink', [StringComparison]::Ordinal)
+$codexHomeCreateIndex = $codexToolInvokeSource.IndexOf('$codexHome = New-Task051CodexHome', [StringComparison]::Ordinal)
+$structuredParserIndex = $codexToolInvokeSource.IndexOf('Get-Task051ExecStructuredContent -Events $events -Phase $Phase -Tool $Tool', [StringComparison]::Ordinal)
+$structuredParserCatchIndex = $codexToolInvokeSource.IndexOf('catch {', $structuredParserIndex, [StringComparison]::Ordinal)
+$callCountAllowListIndex = $codexToolInvokeSource.IndexOf('$resultFailure -in @(', $structuredParserCatchIndex, [StringComparison]::Ordinal)
+$summaryWriterFragment = "Write-Task051JsonEvidence -Path (Join-Path `$EvidenceRoot ('task051-' + `$Phase + '-codex-event-summary.json')) -Value `$eventSummary"
+$summaryWriterIndex = $codexToolInvokeSource.IndexOf($summaryWriterFragment, $callCountAllowListIndex, [StringComparison]::Ordinal)
+$resultRethrowIndex = $codexToolInvokeSource.IndexOf('throw $resultFailure', $summaryWriterIndex, [StringComparison]::Ordinal)
+$structuredProjectionIndex = $codexToolInvokeSource.IndexOf('$structured = $envelope.StructuredContent', $resultRethrowIndex, [StringComparison]::Ordinal)
+$callCountGuardSource = if ($callCountAllowListIndex -ge 0 -and $summaryWriterIndex -gt $callCountAllowListIndex) {
+    $codexToolInvokeSource.Substring($callCountAllowListIndex, $summaryWriterIndex - $callCountAllowListIndex)
+}
+else { '' }
+$callCountGuardLeaves = @(
+    'TASK051_CODEX_SUBMIT_CALL_COUNT_ZERO_REJECTED',
+    'TASK051_CODEX_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED',
+    'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED',
+    'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED',
+    'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED',
+    'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED'
+)
+$callCountGuardLeafIndex = -1
+foreach ($callCountGuardLeaf in $callCountGuardLeaves) {
+    if ([regex]::Matches($callCountGuardSource, [regex]::Escape("'" + $callCountGuardLeaf + "'")).Count -ne 1) {
+        throw 'TASK051_CODEX_CALL_COUNT_PHASE_SHAPE_REJECTED'
+    }
+    $nextCallCountGuardLeafIndex = $callCountGuardSource.IndexOf($callCountGuardLeaf, $callCountGuardLeafIndex + 1, [StringComparison]::Ordinal)
+    if ($nextCallCountGuardLeafIndex -le $callCountGuardLeafIndex) {
+        throw 'TASK051_CODEX_CALL_COUNT_PHASE_SHAPE_REJECTED'
+    }
+    $callCountGuardLeafIndex = $nextCallCountGuardLeafIndex
+}
 if (
+    $phaseToolAssertIndex -lt 0 -or
+    $acceptanceSinkCreateIndex -le $phaseToolAssertIndex -or
+    $codexHomeCreateIndex -le $acceptanceSinkCreateIndex -or
+    $structuredParserIndex -le $codexHomeCreateIndex -or
+    $structuredParserCatchIndex -le $structuredParserIndex -or
+    $callCountAllowListIndex -le $structuredParserCatchIndex -or
+    $summaryWriterIndex -le $callCountAllowListIndex -or
+    $resultRethrowIndex -le $summaryWriterIndex -or
+    $structuredProjectionIndex -le $resultRethrowIndex -or
+    [regex]::Matches($callCountGuardSource, "'TASK051_CODEX_[A-Z0-9_]+_REJECTED'").Count -ne 6 -or
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape($summaryWriterFragment)).Count -ne 1 -or
     [regex]::Matches($codexToolInvokeSource, [regex]::Escape('Resolve-Task051CodexToolFailure -Stage $failureStage')).Count -ne 1 -or
     [regex]::Matches($codexToolInvokeSource, [regex]::Escape("throw 'TASK038_CURRENT_CODEX_TOOL_CLEANUP_REJECTED'")).Count -ne 1 -or
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape('Get-Task051CodexEventSummary -Events $events -Phase $Phase -ExpectedTool $Tool')).Count -ne 1 -or
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape('Get-Task051ExecStructuredContent -Events $events -Phase $Phase -Tool $Tool')).Count -ne 1 -or
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape("task051-' + `$Phase + '-codex-event-summary.json")).Count -ne 1 -or
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape('Assert-Task051CodexPhaseTool -Phase $Phase -Tool $Tool')).Count -ne 1 -or
+    [regex]::Matches($codexToolInvokeSource, 'Execution-only request\. Your first and only action').Count -ne 2 -or
+    $codexToolInvokeSource.IndexOf('retry', [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
     $codexToolInvokeSource.IndexOf('throw $message', [StringComparison]::Ordinal) -ge 0 -or
     $codexToolInvokeSource.IndexOf('throw $_', [StringComparison]::Ordinal) -ge 0
 ) {
     throw 'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SHAPE_REJECTED'
+}
+foreach ($phaseCallFragment in @(
+    "Invoke-Task051CodexDiscovery -Phase 'discovery'",
+    "Invoke-Task051CodexTool -Phase 'submit' -Tool 'lattice_task_submit'",
+    "Invoke-Task051CodexTool -Phase 'status-pre-restart' -Tool 'lattice_task_status'",
+    "Invoke-Task051CodexTool -Phase 'status-post-restart' -Tool 'lattice_task_status'"
+)) {
+    if ([regex]::Matches($runnerSource, [regex]::Escape($phaseCallFragment)).Count -ne 1) {
+        throw 'TASK051_CODEX_PHASE_TOOL_SHAPE_REJECTED'
+    }
 }
 
 $bundleStart = $runnerSource.IndexOf('function Get-Task051OfficialCodexBundlePolicy', [StringComparison]::Ordinal)
@@ -623,6 +810,9 @@ $expectedSelfTestMarkers = @(
     'TASK051_PROCESS_LIFETIME_SELF_TEST=PASS',
     'TASK051_MCP_SESSION_OPEN_PARSE_DIAGNOSTIC_SELF_TEST=PASS',
     'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST=PASS',
+    'TASK051_CODEX_CALL_COUNT_PHASE_SELF_TEST=PASS',
+    'TASK051_CODEX_EVENT_SUMMARY_SELF_TEST=PASS',
+    'TASK051_CODEX_PHASE_TOOL_NO_MATERIALIZATION_SELF_TEST=PASS',
     'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST=PASS',
     'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST=PASS',
     'TASK051_OWNER_ONLY_CREDENTIAL_SELF_TEST=PASS',

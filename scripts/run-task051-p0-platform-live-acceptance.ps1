@@ -1416,6 +1416,15 @@ function New-Task051CodexHome {
         [Parameter(Mandatory = $true)][string[]]$EnvironmentNames
     )
 
+    $enabledToolsLine = switch -CaseSensitive ($Phase) {
+        'discovery' { $null; break }
+        'submit' { 'enabled_tools = ["lattice_task_submit"]'; break }
+        'status-pre-restart' { 'enabled_tools = ["lattice_task_status"]'; break }
+        'status-post-restart' { 'enabled_tools = ["lattice_task_status"]'; break }
+        'approval-profile' { $null; break }
+        'provisioning-failure' { $null; break }
+        default { throw 'TASK051_CODEX_PHASE_REJECTED' }
+    }
     $codexHome = [IO.Path]::GetFullPath((Join-Path $Root ('codex-' + $Phase)))
     if (Test-Path -LiteralPath $codexHome) { throw 'TASK051_CODEX_HOME_NOT_FRESH' }
     New-Task051OwnerOnlyDirectory -Path $codexHome
@@ -1428,7 +1437,8 @@ function New-Task051CodexHome {
         $envLiteral = @($EnvironmentNames | Sort-Object -Unique | ForEach-Object {
             ConvertTo-Task051TomlLiteral -Value $_
         }) -join ', '
-        $config = @(
+        $configLines = [Collections.Generic.List[string]]::new()
+        @(
             'approval_policy = "never"',
             'sandbox_mode = "read-only"',
             '',
@@ -1437,7 +1447,12 @@ function New-Task051CodexHome {
             ('env_vars = [' + $envLiteral + ']'),
             'required = true',
             'startup_timeout_sec = 30',
-            'tool_timeout_sec = 330',
+            'tool_timeout_sec = 330'
+        ) | ForEach-Object { $configLines.Add($_) }
+        if ($null -ne $enabledToolsLine) {
+            $configLines.Add([string]$enabledToolsLine)
+        }
+        @(
             '',
             '[mcp_servers.lattice.tools.lattice_task_submit]',
             'approval_mode = "approve"',
@@ -1445,9 +1460,11 @@ function New-Task051CodexHome {
             '[mcp_servers.lattice.tools.lattice_task_status]',
             'approval_mode = "approve"',
             ''
-        ) -join [char]10
+        ) | ForEach-Object { $configLines.Add($_) }
+        $config = @($configLines) -join [char]10
         $configPath = Join-Path $codexHome 'config.toml'
         [IO.File]::WriteAllText($configPath, $config, [Text.UTF8Encoding]::new($false))
+        Set-Task051OwnerOnlyAcl -Path $configPath -Directory $false
         return [pscustomobject]@{
             Path = $codexHome
             ConfigPath = $configPath
@@ -1903,9 +1920,89 @@ function Invoke-Task051CodexDiscovery {
     }
 }
 
+function Get-Task051CodexEventSummary {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Events,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('submit', 'status-pre-restart', 'status-post-restart')]
+        [string]$Phase,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('lattice_task_submit', 'lattice_task_status')]
+        [string]$ExpectedTool
+    )
+
+    $expectedStartedCount = 0L
+    $expectedCompletedCount = 0L
+    $otherCompletedCount = 0L
+    $mcpStartedCount = 0L
+    $mcpCompletedCount = 0L
+    $completedStatusCount = 0L
+    $failedStatusCount = 0L
+    $unknownStatusCount = 0L
+    $agentMessageCompletedCount = 0L
+    $turnCompletedCount = 0L
+    $responseCompletedCount = 0L
+    foreach ($event in $Events) {
+        $eventType = [string]$event.type
+        if ($eventType -ceq 'turn.completed') { $turnCompletedCount++ }
+        if ($eventType -ceq 'response.completed') { $responseCompletedCount++ }
+        if ($eventType -notin @('item.started', 'item.completed')) { continue }
+        $itemType = [string]$event.item.type
+        if ($eventType -ceq 'item.completed' -and $itemType -ceq 'agent_message') {
+            $agentMessageCompletedCount++
+        }
+        if ($itemType -cne 'mcp_tool_call') { continue }
+        $serverProperty = $event.item.PSObject.Properties['server']
+        $toolProperty = $event.item.PSObject.Properties['tool']
+        $itemServer = if ($null -eq $serverProperty) { '' } else { [string]$serverProperty.Value }
+        $itemTool = if ($null -eq $toolProperty) { '' } else { [string]$toolProperty.Value }
+        $isExpectedCall = $itemServer -ceq 'lattice' -and $itemTool -ceq $ExpectedTool
+        if ($eventType -ceq 'item.started') {
+            $mcpStartedCount++
+            if ($isExpectedCall) { $expectedStartedCount++ }
+            continue
+        }
+        $mcpCompletedCount++
+        if ($isExpectedCall) {
+            $expectedCompletedCount++
+        }
+        else {
+            $otherCompletedCount++
+        }
+        $statusProperty = $event.item.PSObject.Properties['status']
+        $itemStatus = if ($null -eq $statusProperty) { '' } else { [string]$statusProperty.Value }
+        switch -CaseSensitive ($itemStatus) {
+            'completed' { $completedStatusCount++ }
+            'failed' { $failedStatusCount++ }
+            default { $unknownStatusCount++ }
+        }
+    }
+
+    return [ordered]@{
+        schema_version = 'lattice.task051.codex-event-summary.v1'
+        phase = $Phase
+        expected_tool = $ExpectedTool
+        total_event_count = [long]$Events.Count
+        mcp_started_count = $mcpStartedCount
+        mcp_completed_count = $mcpCompletedCount
+        expected_started_count = $expectedStartedCount
+        expected_completed_count = $expectedCompletedCount
+        other_completed_count = $otherCompletedCount
+        completed_status_count = $completedStatusCount
+        failed_status_count = $failedStatusCount
+        unknown_status_count = $unknownStatusCount
+        agent_message_completed_count = $agentMessageCompletedCount
+        turn_completed_count = $turnCompletedCount
+        response_completed_count = $responseCompletedCount
+    }
+}
+
 function Get-Task051ExecStructuredContent {
     param(
-        [Parameter(Mandatory = $true)][object[]]$Events,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Events,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('submit', 'status-pre-restart', 'status-post-restart')]
+        [string]$Phase,
         [Parameter(Mandatory = $true)][string]$Tool,
         [Parameter(Mandatory = $true)][Collections.IDictionary]$ExpectedArguments
     )
@@ -1922,9 +2019,19 @@ function Get-Task051ExecStructuredContent {
             }
         }
     }
-    if ($calls.Count -ne 1) {
-        if ($Tool -ceq 'lattice_task_submit') { throw 'TASK051_CODEX_SUBMIT_CALL_COUNT_REJECTED' }
-        throw 'TASK051_CODEX_STATUS_CALL_COUNT_REJECTED'
+    if ($calls.Count -eq 0) {
+        switch -CaseSensitive ($Phase) {
+            'submit' { throw 'TASK051_CODEX_SUBMIT_CALL_COUNT_ZERO_REJECTED' }
+            'status-pre-restart' { throw 'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED' }
+            'status-post-restart' { throw 'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED' }
+        }
+    }
+    if ($calls.Count -gt 1) {
+        switch -CaseSensitive ($Phase) {
+            'submit' { throw 'TASK051_CODEX_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED' }
+            'status-pre-restart' { throw 'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED' }
+            'status-post-restart' { throw 'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED' }
+        }
     }
     $call = $calls[0]
     if ([string]$call.server -cne 'lattice') {
@@ -2038,8 +2145,13 @@ function Resolve-Task051CodexToolFailure {
     }
 
     switch -CaseSensitive ($Message) {
-        'TASK051_CODEX_SUBMIT_CALL_COUNT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED' }
-        'TASK051_CODEX_STATUS_CALL_COUNT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED' }
+        'TASK051_CODEX_SUBMIT_CALL_COUNT_ZERO_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_SUBMIT_CALL_COUNT_ZERO_REJECTED' }
+        'TASK051_CODEX_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED' }
+        'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED' }
+        'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED' }
+        'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED' }
+        'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED' }
+        'TASK051_CODEX_EVENT_SUMMARY_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_EVENT_SUMMARY_REJECTED' }
         'TASK051_CODEX_UNEXPECTED_TOOL_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_UNEXPECTED_REJECTED' }
         'TASK051_CODEX_TOOL_SERVER_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_SERVER_REJECTED' }
         'TASK051_CODEX_TOOL_NAME_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_NAME_REJECTED' }
@@ -2075,9 +2187,26 @@ function Resolve-Task051CodexToolFailure {
     }
 }
 
-function Invoke-Task051CodexTool {
+function Assert-Task051CodexPhaseTool {
     param(
         [Parameter(Mandatory = $true)][string]$Phase,
+        [Parameter(Mandatory = $true)][string]$Tool
+    )
+
+    $expectedTool = switch -CaseSensitive ($Phase) {
+        'submit' { 'lattice_task_submit'; break }
+        'status-pre-restart' { 'lattice_task_status'; break }
+        'status-post-restart' { 'lattice_task_status'; break }
+        default { throw 'TASK051_CODEX_PHASE_TOOL_REJECTED' }
+    }
+    if ($Tool -cne $expectedTool) { throw 'TASK051_CODEX_PHASE_TOOL_REJECTED' }
+}
+
+function Invoke-Task051CodexTool {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('submit', 'status-pre-restart', 'status-post-restart')]
+        [string]$Phase,
         [Parameter(Mandatory = $true)][ValidateSet('lattice_task_submit', 'lattice_task_status')][string]$Tool,
         [Parameter(Mandatory = $true)][Collections.IDictionary]$Arguments,
         [Parameter(Mandatory = $true)][ValidateSet('FRESH', 'RESUME_EXISTING')][string]$RunMode,
@@ -2102,6 +2231,7 @@ function Invoke-Task051CodexTool {
     $process = $null
     $serverProcessId = 0
     try {
+        Assert-Task051CodexPhaseTool -Phase $Phase -Tool $Tool
         $codex = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_CURRENT_CODEX', 'Process')
         Assert-Task051RegularFile -Path $codex -FailureCode 'TASK051_CURRENT_CODEX_REJECTED'
         $sessionId = [Guid]::NewGuid().ToString('N')
@@ -2134,10 +2264,10 @@ function Invoke-Task051CodexTool {
         $process = $owned.Process
         $failureStage = 'PROMPT'
         $prompt = if ($Tool -ceq 'lattice_task_submit') {
-            'Call only the MCP tool lattice_task_submit on server lattice exactly once with client_request_id "' + [string]$Arguments.client_request_id + '" and intent "CONTROLLED_CODEX_CANARY". Do not use any other tool. After the tool returns, output TASK051_CODEX_SUBMIT_OK.'
+            'Execution-only request. Your first and only action before the final response must be exactly one MCP tool call: call lattice_task_submit on server lattice with client_request_id "' + [string]$Arguments.client_request_id + '" and intent "CONTROLLED_CODEX_CANARY". Do not reason aloud, explain, plan, ask for clarification, simulate success, or call any other tool. Do not produce a final response unless the required tool call has completed. After it returns, output only TASK051_CODEX_SUBMIT_OK.'
         }
         else {
-            'Call only the MCP tool lattice_task_status on server lattice exactly once with task_ref "' + [string]$Arguments.task_ref + '". Do not use any other tool. After the tool returns, output TASK051_CODEX_STATUS_OK.'
+            'Execution-only request. Your first and only action before the final response must be exactly one MCP tool call: call lattice_task_status on server lattice with task_ref "' + [string]$Arguments.task_ref + '". Do not reason aloud, explain, plan, ask for clarification, simulate success, or call any other tool. Do not produce a final response unless the required tool call has completed. After it returns, output only TASK051_CODEX_STATUS_OK.'
         }
         $owned.Suspended.StandardInput.Write($prompt)
         $owned.Suspended.StandardInput.Close()
@@ -2158,7 +2288,27 @@ function Invoke-Task051CodexTool {
         $failureStage = 'EVENT_JSON'
         $events = @(Read-Task051JsonLines -Text $stdout -FailureCode 'TASK051_CODEX_EVENT_JSON_REJECTED')
         $failureStage = 'RESULT'
-        $envelope = Get-Task051ExecStructuredContent -Events $events -Tool $Tool -ExpectedArguments $Arguments
+        $eventSummary = Get-Task051CodexEventSummary -Events $events -Phase $Phase -ExpectedTool $Tool
+        try {
+            $envelope = Get-Task051ExecStructuredContent -Events $events -Phase $Phase -Tool $Tool -ExpectedArguments $Arguments
+        }
+        catch {
+            $resultFailure = [string]$_.Exception.Message
+            if ($resultFailure -in @(
+                'TASK051_CODEX_SUBMIT_CALL_COUNT_ZERO_REJECTED',
+                'TASK051_CODEX_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED',
+                'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED',
+                'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED',
+                'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED',
+                'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED'
+            )) {
+                try {
+                    $null = Write-Task051JsonEvidence -Path (Join-Path $EvidenceRoot ('task051-' + $Phase + '-codex-event-summary.json')) -Value $eventSummary
+                }
+                catch { throw 'TASK051_CODEX_EVENT_SUMMARY_REJECTED' }
+            }
+            throw $resultFailure
+        }
         $structured = $envelope.StructuredContent
         $failureStage = 'PUBLIC_STATUS'
         Assert-Task051PublicStatus -Value $structured -Kind $(if ($Tool -ceq 'lattice_task_submit') { 'SUBMIT' } else { 'STATUS' })
@@ -2950,11 +3100,11 @@ function Invoke-Task051SelfTest {
             }
         }
     )
-    $parsed = Get-Task051ExecStructuredContent -Events $events -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
+    $parsed = Get-Task051ExecStructuredContent -Events $events -Phase 'status-pre-restart' -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
     Assert-Task051SameStatus -Expected $status -Actual $parsed.StructuredContent
     $explicitNullErrorEvents = @(($events | ConvertTo-Json -Depth 20) | ConvertFrom-Json -ErrorAction Stop)
     $explicitNullErrorEvents[0].item | Add-Member -NotePropertyName error -NotePropertyValue $null
-    $explicitNullErrorParsed = Get-Task051ExecStructuredContent -Events $explicitNullErrorEvents -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
+    $explicitNullErrorParsed = Get-Task051ExecStructuredContent -Events $explicitNullErrorEvents -Phase 'status-pre-restart' -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
     Assert-Task051SameStatus -Expected $status -Actual $explicitNullErrorParsed.StructuredContent
     try {
         Assert-Task051DistinctProcessIds -ProcessIds @(101, 102, 102, 104)
@@ -2963,20 +3113,85 @@ function Invoke-Task051SelfTest {
     catch {
         if ([string]$_.Exception.Message -cne 'TASK051_CODEX_FRESH_PROCESS_REJECTED') { throw }
     }
-    try {
-        $duplicateEvents = @($events[0], $events[0])
-        $null = Get-Task051ExecStructuredContent -Events $duplicateEvents -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
-        throw 'TASK051_SELF_TEST_FALSE_PASS'
+    foreach ($callCountFixture in @(
+        [pscustomobject]@{ Phase = 'submit'; Tool = 'lattice_task_submit'; Events = @(); Expected = 'TASK051_CODEX_SUBMIT_CALL_COUNT_ZERO_REJECTED' },
+        [pscustomobject]@{ Phase = 'submit'; Tool = 'lattice_task_submit'; Events = @($events[0], $events[0]); Expected = 'TASK051_CODEX_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED' },
+        [pscustomobject]@{ Phase = 'status-pre-restart'; Tool = 'lattice_task_status'; Events = @(); Expected = 'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED' },
+        [pscustomobject]@{ Phase = 'status-pre-restart'; Tool = 'lattice_task_status'; Events = @($events[0], $events[0]); Expected = 'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED' },
+        [pscustomobject]@{ Phase = 'status-post-restart'; Tool = 'lattice_task_status'; Events = @(); Expected = 'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED' },
+        [pscustomobject]@{ Phase = 'status-post-restart'; Tool = 'lattice_task_status'; Events = @($events[0], $events[0]); Expected = 'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED' }
+    )) {
+        $callCountMessage = $null
+        try {
+            $null = Get-Task051ExecStructuredContent -Events @($callCountFixture.Events) -Phase ([string]$callCountFixture.Phase) -Tool ([string]$callCountFixture.Tool) -ExpectedArguments $(if ([string]$callCountFixture.Tool -ceq 'lattice_task_submit') { [ordered]@{ client_request_id = '0' * 64; intent = 'CONTROLLED_CODEX_CANARY' } } else { [ordered]@{ task_ref = '1' * 64 } })
+        }
+        catch { $callCountMessage = [string]$_.Exception.Message }
+        if ($callCountMessage -cne [string]$callCountFixture.Expected) {
+            throw 'TASK051_CODEX_CALL_COUNT_PHASE_SELF_TEST_REJECTED'
+        }
     }
-    catch {
-        if ([string]$_.Exception.Message -cne 'TASK051_CODEX_STATUS_CALL_COUNT_REJECTED') { throw }
+    foreach ($validPhaseTool in @(
+        [pscustomobject]@{ Phase = 'submit'; Tool = 'lattice_task_submit' },
+        [pscustomobject]@{ Phase = 'status-pre-restart'; Tool = 'lattice_task_status' },
+        [pscustomobject]@{ Phase = 'status-post-restart'; Tool = 'lattice_task_status' }
+    )) {
+        Assert-Task051CodexPhaseTool -Phase ([string]$validPhaseTool.Phase) -Tool ([string]$validPhaseTool.Tool)
     }
+    foreach ($invalidPhaseTool in @(
+        [pscustomobject]@{ Phase = 'submit'; Tool = 'lattice_task_status' },
+        [pscustomobject]@{ Phase = 'status-pre-restart'; Tool = 'lattice_task_submit' },
+        [pscustomobject]@{ Phase = 'UNKNOWN'; Tool = 'lattice_task_status' }
+    )) {
+        $phaseToolRejected = $false
+        try { Assert-Task051CodexPhaseTool -Phase ([string]$invalidPhaseTool.Phase) -Tool ([string]$invalidPhaseTool.Tool) }
+        catch { $phaseToolRejected = [string]$_.Exception.Message -ceq 'TASK051_CODEX_PHASE_TOOL_REJECTED' }
+        if (-not $phaseToolRejected) { throw 'TASK051_CODEX_CALL_COUNT_PHASE_SELF_TEST_REJECTED' }
+    }
+    Write-Output 'TASK051_CODEX_CALL_COUNT_PHASE_SELF_TEST=PASS'
+    $eventSummary = Get-Task051CodexEventSummary -Phase 'status-pre-restart' -ExpectedTool 'lattice_task_status' -Events @(
+        [pscustomobject]@{ type = 'item.started'; item = [pscustomobject]@{ type = 'mcp_tool_call'; server = 'lattice'; tool = 'lattice_task_status' } },
+        $events[0],
+        [pscustomobject]@{ type = 'item.completed'; item = [pscustomobject]@{ type = 'mcp_tool_call'; tool = 'lattice_delivery_run'; status = 'failed'; error = 'forbidden-secret-value' } },
+        [pscustomobject]@{ type = 'item.completed'; item = [pscustomobject]@{ type = 'agent_message'; text = 'forbidden-agent-text' } },
+        [pscustomobject]@{ type = 'turn.completed' },
+        [pscustomobject]@{ type = 'response.completed' }
+    )
+    $eventSummaryKeys = @($eventSummary.Keys)
+    $expectedEventSummaryKeys = @(
+        'schema_version', 'phase', 'expected_tool', 'total_event_count', 'mcp_started_count',
+        'mcp_completed_count', 'expected_started_count', 'expected_completed_count', 'other_completed_count',
+        'completed_status_count', 'failed_status_count', 'unknown_status_count', 'agent_message_completed_count',
+        'turn_completed_count', 'response_completed_count'
+    )
+    $eventSummaryJson = $eventSummary | ConvertTo-Json -Compress -Depth 5
+    if (
+        ($eventSummaryKeys -join ',') -cne ($expectedEventSummaryKeys -join ',') -or
+        [string]$eventSummary.schema_version -cne 'lattice.task051.codex-event-summary.v1' -or
+        [long]$eventSummary.total_event_count -ne 6 -or
+        [long]$eventSummary.mcp_started_count -ne 1 -or
+        [long]$eventSummary.mcp_completed_count -ne 2 -or
+        [long]$eventSummary.expected_started_count -ne 1 -or
+        [long]$eventSummary.expected_completed_count -ne 1 -or
+        [long]$eventSummary.other_completed_count -ne 1 -or
+        [long]$eventSummary.completed_status_count -ne 1 -or
+        [long]$eventSummary.failed_status_count -ne 1 -or
+        [long]$eventSummary.unknown_status_count -ne 0 -or
+        [long]$eventSummary.agent_message_completed_count -ne 1 -or
+        [long]$eventSummary.turn_completed_count -ne 1 -or
+        [long]$eventSummary.response_completed_count -ne 1 -or
+        $eventSummaryJson.IndexOf('lattice_delivery_run', [StringComparison]::Ordinal) -ge 0 -or
+        $eventSummaryJson.IndexOf('forbidden-secret-value', [StringComparison]::Ordinal) -ge 0 -or
+        $eventSummaryJson.IndexOf('forbidden-agent-text', [StringComparison]::Ordinal) -ge 0
+    ) {
+        throw 'TASK051_CODEX_EVENT_SUMMARY_SELF_TEST_REJECTED'
+    }
+    Write-Output 'TASK051_CODEX_EVENT_SUMMARY_SELF_TEST=PASS'
     try {
         $collabEvents = @($events[0], [pscustomobject]@{
             type = 'item.completed'
             item = [pscustomobject]@{ type = 'collab_tool_call' }
         })
-        $null = Get-Task051ExecStructuredContent -Events $collabEvents -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
+        $null = Get-Task051ExecStructuredContent -Events $collabEvents -Phase 'status-pre-restart' -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
         throw 'TASK051_SELF_TEST_FALSE_PASS'
     }
     catch {
@@ -3099,7 +3314,7 @@ function Invoke-Task051SelfTest {
         }
         $structuredFailureMessage = $null
         try {
-            $null = Get-Task051ExecStructuredContent -Events $structuredFailureEvents -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
+            $null = Get-Task051ExecStructuredContent -Events $structuredFailureEvents -Phase 'status-pre-restart' -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
         }
         catch { $structuredFailureMessage = [string]$_.Exception.Message }
         if (
@@ -3110,8 +3325,13 @@ function Invoke-Task051SelfTest {
         }
     }
     $codexToolFailureFixtures = @(
-        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_SUBMIT_CALL_COUNT_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED' },
-        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_STATUS_CALL_COUNT_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_SUBMIT_CALL_COUNT_ZERO_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_SUBMIT_CALL_COUNT_ZERO_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_SUBMIT_CALL_COUNT_MULTIPLE_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_STATUS_PRE_RESTART_CALL_COUNT_ZERO_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_STATUS_PRE_RESTART_CALL_COUNT_MULTIPLE_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_STATUS_POST_RESTART_CALL_COUNT_ZERO_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_STATUS_POST_RESTART_CALL_COUNT_MULTIPLE_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_EVENT_SUMMARY_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_EVENT_SUMMARY_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_UNEXPECTED_TOOL_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_UNEXPECTED_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_ERROR_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_ERROR_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_MISSING_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_MISSING_REJECTED' },
@@ -3170,6 +3390,46 @@ function Invoke-Task051SelfTest {
     $authBefore = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', 'Process')
     try {
         New-Task051OwnerOnlyDirectory -Path $aclRoot
+        $phaseToolMismatchRoot = Join-Path $aclRoot 'phase-tool-mismatch'
+        New-Task051OwnerOnlyDirectory -Path $phaseToolMismatchRoot
+        $phaseToolMismatchMessage = $null
+        try {
+            $null = Invoke-Task051CodexTool `
+                -Phase 'submit' `
+                -Tool 'lattice_task_status' `
+                -Arguments ([ordered]@{ task_ref = '1' * 64 }) `
+                -RunMode 'FRESH' `
+                -EvidenceRoot $phaseToolMismatchRoot `
+                -Authority ([pscustomobject]@{}) `
+                -DatabasePassword 'not-used' `
+                -DeliveryRoot $phaseToolMismatchRoot `
+                -SchemaDirectory $phaseToolMismatchRoot `
+                -LauncherSha256 ('0' * 64) `
+                -LauncherVersion 'selftest'
+        }
+        catch { $phaseToolMismatchMessage = [string]$_.Exception.Message }
+        if (
+            $phaseToolMismatchMessage -cne 'TASK038_CURRENT_CODEX_TOOL_HOME_REJECTED' -or
+            @(Get-ChildItem -LiteralPath $phaseToolMismatchRoot -Force).Count -ne 0
+        ) {
+            throw 'TASK051_CODEX_PHASE_TOOL_NO_MATERIALIZATION_SELF_TEST_REJECTED'
+        }
+        [IO.Directory]::Delete($phaseToolMismatchRoot, $false)
+        if (Test-Path -LiteralPath $phaseToolMismatchRoot) {
+            throw 'TASK051_CODEX_PHASE_TOOL_NO_MATERIALIZATION_SELF_TEST_REJECTED'
+        }
+        Write-Output 'TASK051_CODEX_PHASE_TOOL_NO_MATERIALIZATION_SELF_TEST=PASS'
+        $eventSummaryPath = Join-Path $aclRoot 'task051-status-pre-restart-codex-event-summary.json'
+        [IO.File]::WriteAllText($eventSummaryPath, $eventSummaryJson + [char]10, [Text.UTF8Encoding]::new($false))
+        Set-Task051OwnerOnlyAcl -Path $eventSummaryPath -Directory $false
+        Assert-Task051OwnerOnlyAcl -Path $eventSummaryPath -Directory $false
+        if ((Get-Task051Sha256 -Path $eventSummaryPath) -notmatch '^[0-9a-f]{64}$') {
+            throw 'TASK051_CODEX_EVENT_SUMMARY_SELF_TEST_REJECTED'
+        }
+        [IO.File]::Delete($eventSummaryPath)
+        if (Test-Path -LiteralPath $eventSummaryPath) {
+            throw 'TASK051_CODEX_EVENT_SUMMARY_SELF_TEST_REJECTED'
+        }
         $selfTestTempBefore = [Environment]::GetEnvironmentVariable('TEMP', 'Process')
         $selfTestTmpBefore = [Environment]::GetEnvironmentVariable('TMP', 'Process')
         try {
@@ -3504,39 +3764,70 @@ function Invoke-Task051SelfTest {
         }
         Remove-Item -LiteralPath $sessionOpenPath -Force
         [Environment]::SetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', $fakeAuth, 'Process')
-        $approvalHome = New-Task051CodexHome -Root $aclRoot -Phase 'approval-profile' -Latticed (Join-Path $aclRoot 'latticed.exe') -EnvironmentNames @('PATH')
-        try {
-            $approvalLines = @([IO.File]::ReadAllLines([string]$approvalHome.ConfigPath, [Text.UTF8Encoding]::new($false)))
-            $approvalPolicyIndex = [Array]::IndexOf($approvalLines, 'approval_policy = "never"')
-            $sandboxModeIndex = [Array]::IndexOf($approvalLines, 'sandbox_mode = "read-only"')
-            $serverApprovalIndex = [Array]::IndexOf($approvalLines, '[mcp_servers.lattice]')
-            $submitApprovalIndex = [Array]::IndexOf($approvalLines, '[mcp_servers.lattice.tools.lattice_task_submit]')
-            $statusApprovalIndex = [Array]::IndexOf($approvalLines, '[mcp_servers.lattice.tools.lattice_task_status]')
-            if (
-                $approvalPolicyIndex -lt 0 -or
-                $sandboxModeIndex -le $approvalPolicyIndex -or
-                $serverApprovalIndex -le $sandboxModeIndex -or
-                $submitApprovalIndex -le $serverApprovalIndex -or
-                $statusApprovalIndex -le $submitApprovalIndex -or
-                @($approvalLines | Where-Object { $_ -ceq 'approval_policy = "never"' }).Count -ne 1 -or
-                @($approvalLines | Where-Object { $_ -ceq 'sandbox_mode = "read-only"' }).Count -ne 1 -or
-                @($approvalLines | Where-Object { $_ -cmatch '^default_tools_approval_mode\s*=' }).Count -ne 0 -or
-                $approvalLines[$submitApprovalIndex + 1] -cne 'approval_mode = "approve"' -or
-                $approvalLines[$statusApprovalIndex + 1] -cne 'approval_mode = "approve"' -or
-                @($approvalLines | Where-Object { $_ -ceq 'approval_mode = "approve"' }).Count -ne 2 -or
-                @($approvalLines | Where-Object { $_.StartsWith('[mcp_servers.lattice.tools.', [StringComparison]::Ordinal) }).Count -ne 2 -or
-                @($approvalLines | Where-Object { $_ -cmatch '^approval_mode\s*=' -and $_ -cne 'approval_mode = "approve"' }).Count -ne 0
-            ) {
+        $phaseConfigHashes = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($phaseProfile in @(
+            [pscustomobject]@{ Phase = 'discovery'; EnabledTools = @() },
+            [pscustomobject]@{ Phase = 'submit'; EnabledTools = @('enabled_tools = ["lattice_task_submit"]') },
+            [pscustomobject]@{ Phase = 'status-pre-restart'; EnabledTools = @('enabled_tools = ["lattice_task_status"]') },
+            [pscustomobject]@{ Phase = 'status-post-restart'; EnabledTools = @('enabled_tools = ["lattice_task_status"]') }
+        )) {
+            $approvalHome = New-Task051CodexHome -Root $aclRoot -Phase ([string]$phaseProfile.Phase) -Latticed (Join-Path $aclRoot 'latticed.exe') -EnvironmentNames @('PATH')
+            try {
+                Assert-Task051OwnerOnlyAcl -Path ([string]$approvalHome.Path) -Directory $true
+                Assert-Task051OwnerOnlyAcl -Path ([string]$approvalHome.ConfigPath) -Directory $false
+                Assert-Task051OwnerOnlyAcl -Path ([string]$approvalHome.AuthPath) -Directory $false
+                $approvalLines = @([IO.File]::ReadAllLines([string]$approvalHome.ConfigPath, [Text.UTF8Encoding]::new($false)))
+                $approvalPolicyIndex = [Array]::IndexOf($approvalLines, 'approval_policy = "never"')
+                $sandboxModeIndex = [Array]::IndexOf($approvalLines, 'sandbox_mode = "read-only"')
+                $serverApprovalIndex = [Array]::IndexOf($approvalLines, '[mcp_servers.lattice]')
+                $submitApprovalIndex = [Array]::IndexOf($approvalLines, '[mcp_servers.lattice.tools.lattice_task_submit]')
+                $statusApprovalIndex = [Array]::IndexOf($approvalLines, '[mcp_servers.lattice.tools.lattice_task_status]')
+                $enabledToolLines = @($approvalLines | Where-Object { $_ -cmatch '^enabled_tools\s*=' })
+                if (
+                    $approvalPolicyIndex -lt 0 -or
+                    $sandboxModeIndex -le $approvalPolicyIndex -or
+                    $serverApprovalIndex -le $sandboxModeIndex -or
+                    $submitApprovalIndex -le $serverApprovalIndex -or
+                    $statusApprovalIndex -le $submitApprovalIndex -or
+                    @($approvalLines | Where-Object { $_ -ceq 'approval_policy = "never"' }).Count -ne 1 -or
+                    @($approvalLines | Where-Object { $_ -ceq 'sandbox_mode = "read-only"' }).Count -ne 1 -or
+                    @($approvalLines | Where-Object { $_ -cmatch '^default_tools_approval_mode\s*=' }).Count -ne 0 -or
+                    @($approvalLines | Where-Object { $_ -cmatch '^disabled_tools\s*=' }).Count -ne 0 -or
+                    ($enabledToolLines -join [char]10) -cne (@($phaseProfile.EnabledTools) -join [char]10) -or
+                    ($enabledToolLines.Count -eq 1 -and [Array]::IndexOf($approvalLines, $enabledToolLines[0]) -ge $submitApprovalIndex) -or
+                    @($enabledToolLines | Where-Object { $_ -match 'lattice_delivery_|\*' }).Count -ne 0 -or
+                    $approvalLines[$submitApprovalIndex + 1] -cne 'approval_mode = "approve"' -or
+                    $approvalLines[$statusApprovalIndex + 1] -cne 'approval_mode = "approve"' -or
+                    @($approvalLines | Where-Object { $_ -ceq 'approval_mode = "approve"' }).Count -ne 2 -or
+                    @($approvalLines | Where-Object { $_.StartsWith('[mcp_servers.lattice.tools.', [StringComparison]::Ordinal) }).Count -ne 2 -or
+                    @($approvalLines | Where-Object { $_ -cmatch '^approval_mode\s*=' -and $_ -cne 'approval_mode = "approve"' }).Count -ne 0
+                ) {
+                    throw 'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST_REJECTED'
+                }
+                [void]$phaseConfigHashes.Add([string]$approvalHome.ConfigSha256)
+            }
+            finally {
+                Remove-Task051CodexCredential -CodexHome $approvalHome
+                if (Test-Path -LiteralPath ([string]$approvalHome.Path) -PathType Container) {
+                    [IO.Directory]::Delete([string]$approvalHome.Path, $true)
+                }
+            }
+            if (Test-Path -LiteralPath ([string]$approvalHome.Path)) {
                 throw 'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST_REJECTED'
             }
         }
-        finally {
-            Remove-Task051CodexCredential -CodexHome $approvalHome
-            if (Test-Path -LiteralPath ([string]$approvalHome.Path) -PathType Container) {
-                [IO.Directory]::Delete([string]$approvalHome.Path, $true)
-            }
+        if ($phaseConfigHashes.Count -ne 3) {
+            throw 'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST_REJECTED'
         }
-        if (Test-Path -LiteralPath ([string]$approvalHome.Path)) {
+        $unknownPhasePath = Join-Path $aclRoot 'codex-UNKNOWN'
+        try {
+            $null = New-Task051CodexHome -Root $aclRoot -Phase 'UNKNOWN' -Latticed (Join-Path $aclRoot 'latticed.exe') -EnvironmentNames @('PATH')
+            throw 'TASK051_SELF_TEST_FALSE_PASS'
+        }
+        catch {
+            if ([string]$_.Exception.Message -cne 'TASK051_CODEX_PHASE_REJECTED') { throw }
+        }
+        if (Test-Path -LiteralPath $unknownPhasePath) {
             throw 'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST_REJECTED'
         }
         Write-Output 'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST=PASS'
