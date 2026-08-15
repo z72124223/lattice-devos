@@ -952,8 +952,10 @@ function Invoke-Task051CodexDiscovery {
     $owned = $null
     $process = $null
     $serverProcessId = 0
+    $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_HOME_REJECTED'
     try {
         $codexHome = New-Task051CodexHome -Root $EvidenceRoot -Phase $Phase -Latticed $script:Latticed -EnvironmentNames @($Environment.Keys)
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_START_INFO_REJECTED'
         $info = [Diagnostics.ProcessStartInfo]::new()
         $info.FileName = $codex
         $info.Arguments = 'app-server --stdio'
@@ -966,8 +968,10 @@ function Invoke-Task051CodexDiscovery {
         $childEnvironment = [ordered]@{ CODEX_HOME = [string]$codexHome.Path }
         foreach ($entry in $Environment.GetEnumerator()) { $childEnvironment[$entry.Key] = [string]$entry.Value }
         Set-Task051ClosedEnvironment -StartInfo $info -Additional $childEnvironment
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_START_REJECTED'
         $owned = Start-Task051OwnedProcess -StartInfo $info
         $process = $owned.Process
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_INITIALIZE_REQUEST_REJECTED'
         $initialize = [ordered]@{
             method = 'initialize'
             id = 1
@@ -978,14 +982,19 @@ function Invoke-Task051CodexDiscovery {
         } | ConvertTo-Json -Compress -Depth 10
         $owned.Suspended.StandardInput.WriteLine($initialize)
         $owned.Suspended.StandardInput.Flush()
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_INITIALIZE_RESPONSE_REJECTED'
         $init = Get-Task051AppServerResponse -Reader $owned.Suspended.StandardOutput -Id 1 -TimeoutSeconds 30
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_IDENTITY_REJECTED'
         if ([string]$init.result.userAgent -notmatch 'Codex Desktop/0\.147\.0-alpha\.6\.6') {
             throw 'TASK051_APP_SERVER_IDENTITY_REJECTED'
         }
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LIST_REQUEST_REJECTED'
         $owned.Suspended.StandardInput.WriteLine('{"method":"initialized","params":{}}')
         $owned.Suspended.StandardInput.WriteLine('{"method":"mcpServerStatus/list","id":2,"params":{"detail":"full"}}')
         $owned.Suspended.StandardInput.Flush()
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LIST_RESPONSE_REJECTED'
         $list = Get-Task051AppServerResponse -Reader $owned.Suspended.StandardOutput -Id 2 -TimeoutSeconds 60
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SHAPE_REJECTED'
         $servers = @($list.result.data)
         if ($servers.Count -ne 1 -or [string]$servers[0].name -cne 'lattice') {
             throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
@@ -997,10 +1006,12 @@ function Invoke-Task051CodexDiscovery {
         if (@($servers[0].resources).Count -ne 0 -or @($servers[0].resourceTemplates).Count -ne 0) {
             throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
         }
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_SCHEMA_REJECTED'
         $toolRecords = @(Convert-Task051AppServerTools -Tools $servers[0].tools)
         Assert-ToolDiscovery -Response ([pscustomobject]@{
             result = [pscustomobject]@{ tools = $toolRecords }
         })
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_EVIDENCE_REJECTED'
         $serverRows = @(Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + [string]$process.Id) -ErrorAction Stop | Where-Object {
             [string]::Equals(
                 [IO.Path]::GetFullPath([string]$_.ExecutablePath),
@@ -1010,6 +1021,7 @@ function Invoke-Task051CodexDiscovery {
         })
         if ($serverRows.Count -ne 1) { throw 'TASK051_APP_SERVER_PROCESS_REJECTED' }
         $serverProcessId = [int]$serverRows[0].ProcessId
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_EVIDENCE_WRITE_REJECTED'
         $evidence = Write-Task051JsonEvidence -Path (Join-Path $EvidenceRoot ('task051-' + $Phase + '-discovery.json')) -Value ([ordered]@{
             schema_version = 'lattice.task051.current-codex-discovery.v1'
             phase = $Phase
@@ -1035,6 +1047,13 @@ function Invoke-Task051CodexDiscovery {
             EvidencePath = [string]$evidence.Path
             EvidenceSha256 = [string]$evidence.Sha256
         }
+    }
+    catch {
+        $message = [string]$_.Exception.Message
+        if ($message -match '^(?:TASK038|LATTICE)_[A-Z0-9_]{1,127}(?:\|[A-Z0-9_]{1,127}|\|[0-9a-f]{64})*$') {
+            throw $message
+        }
+        throw $failureCode
     }
     finally {
         try { if ($null -ne $owned) { $owned.Suspended.StandardInput.Close() } } catch {}
