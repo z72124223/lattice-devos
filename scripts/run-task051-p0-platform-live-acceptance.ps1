@@ -1949,17 +1949,19 @@ function Get-Task051ExecStructuredContent {
     }
     $errorProperty = $call.PSObject.Properties['error']
     $resultProperty = $call.PSObject.Properties['result']
-    if (
-        ($null -ne $errorProperty -and $null -ne $errorProperty.Value) -or
-        $null -eq $resultProperty -or
-        $null -eq $resultProperty.Value
-    ) {
-        throw 'TASK051_CODEX_TOOL_RESULT_REJECTED'
+    if ($null -ne $errorProperty -and $null -ne $errorProperty.Value) {
+        throw 'TASK051_CODEX_TOOL_RESULT_ERROR_REJECTED'
+    }
+    if ($null -eq $resultProperty -or $null -eq $resultProperty.Value) {
+        throw 'TASK051_CODEX_TOOL_RESULT_MISSING_REJECTED'
     }
     $result = $resultProperty.Value
     $resultKeys = @($result.PSObject.Properties.Name | Sort-Object)
+    if (($resultKeys -join ',') -ceq 'content,structured_content') {
+        throw 'TASK051_CODEX_TOOL_RESULT_META_ABSENT_REJECTED'
+    }
     if (($resultKeys -join ',') -cne '_meta,content,structured_content') {
-        throw 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED'
+        throw 'TASK051_CODEX_TOOL_RESULT_KEYS_REJECTED'
     }
     $content = @($result.content)
     if (
@@ -1968,26 +1970,50 @@ function Get-Task051ExecStructuredContent {
         [string]$content[0].type -cne 'text' -or
         -not ($content[0].text -is [string])
     ) {
-        throw 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED'
+        throw 'TASK051_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED'
     }
-    $meta = $result._meta
-    if ($null -eq $meta) { throw 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED' }
-    $serverInfo = $meta.PSObject.Properties['io.modelcontextprotocol/serverInfo']
+    $metaShapeFailure = 'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
+    $metaShapeRejected = $false
+    $meta = $null
+    $serverInfo = $null
+    try {
+        $meta = $result._meta
+        if ($null -eq $meta) {
+            $metaShapeRejected = $true
+        }
+        else {
+            $serverInfo = $meta.PSObject.Properties['io.modelcontextprotocol/serverInfo']
+            $metaShapeRejected = (
+                @($meta.PSObject.Properties).Count -ne 1 -or
+                $null -eq $serverInfo -or
+                $null -eq $serverInfo.Value -or
+                (@($serverInfo.Value.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'name,title,version'
+            )
+        }
+    }
+    catch { $metaShapeRejected = $true }
+    if ($metaShapeRejected) { throw $metaShapeFailure }
     if (
-        @($meta.PSObject.Properties).Count -ne 1 -or
-        $null -eq $serverInfo -or
-        (@($serverInfo.Value.PSObject.Properties.Name | Sort-Object) -join ',') -cne 'name,title,version' -or
         [string]$serverInfo.Value.name -cne 'latticed' -or
         [string]$serverInfo.Value.title -cne 'LATTICE DevOS' -or
         [string]$serverInfo.Value.version -cne '1.0.0'
     ) {
-        throw 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED'
+        throw 'TASK051_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED'
     }
+    $structuredFailure = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED'
+    $contentJsonFailure = 'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED'
     $structured = $result.structured_content
-    if ($null -eq $structured) { throw 'TASK051_CODEX_TOOL_RESULT_REJECTED' }
-    try { $contentValue = [string]$content[0].text | ConvertFrom-Json -ErrorAction Stop }
-    catch { throw 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED' }
-    Assert-Task051SameStatus -Expected $structured -Actual $contentValue
+    if ($null -eq $structured) { throw $structuredFailure }
+    try {
+        $contentValue = [string]$content[0].text | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch { throw $contentJsonFailure }
+    try { Assert-Task051PublicStatus -Value $structured -Kind 'STATUS' }
+    catch { throw $structuredFailure }
+    try { Assert-Task051PublicStatus -Value $contentValue -Kind 'STATUS' }
+    catch { throw $contentJsonFailure }
+    try { Assert-Task051SameStatus -Expected $structured -Actual $contentValue }
+    catch { throw 'TASK051_CODEX_TOOL_RESULT_PARITY_REJECTED' }
     return [pscustomobject]@{
         StructuredContent = $structured
         ContentSha256 = Get-Task051StringSha256 -Value ([string]$content[0].text)
@@ -2019,8 +2045,16 @@ function Resolve-Task051CodexToolFailure {
         'TASK051_CODEX_TOOL_NAME_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_NAME_REJECTED' }
         'TASK051_CODEX_TOOL_STATUS_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_STATUS_REJECTED' }
         'TASK051_CODEX_TOOL_ARGUMENT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_ARGUMENT_REJECTED' }
-        'TASK051_CODEX_TOOL_RESULT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED' }
-        'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_ERROR_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_ERROR_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_MISSING_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_MISSING_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_META_ABSENT_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_ABSENT_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_KEYS_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_KEYS_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_PARITY_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_PARITY_REJECTED' }
     }
 
     switch -CaseSensitive ($Stage) {
@@ -2918,6 +2952,10 @@ function Invoke-Task051SelfTest {
     )
     $parsed = Get-Task051ExecStructuredContent -Events $events -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
     Assert-Task051SameStatus -Expected $status -Actual $parsed.StructuredContent
+    $explicitNullErrorEvents = @(($events | ConvertTo-Json -Depth 20) | ConvertFrom-Json -ErrorAction Stop)
+    $explicitNullErrorEvents[0].item | Add-Member -NotePropertyName error -NotePropertyValue $null
+    $explicitNullErrorParsed = Get-Task051ExecStructuredContent -Events $explicitNullErrorEvents -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
+    Assert-Task051SameStatus -Expected $status -Actual $explicitNullErrorParsed.StructuredContent
     try {
         Assert-Task051DistinctProcessIds -ProcessIds @(101, 102, 102, 104)
         throw 'TASK051_SELF_TEST_FALSE_PASS'
@@ -2944,15 +2982,6 @@ function Invoke-Task051SelfTest {
     catch {
         if ([string]$_.Exception.Message -cne 'TASK051_CODEX_UNEXPECTED_TOOL_REJECTED') { throw }
     }
-    try {
-        $extraEnvelopeEvents = @(($events | ConvertTo-Json -Depth 20) | ConvertFrom-Json -ErrorAction Stop)
-        $extraEnvelopeEvents[0].item.result | Add-Member -NotePropertyName isError -NotePropertyValue $false
-        $null = Get-Task051ExecStructuredContent -Events $extraEnvelopeEvents -Tool 'lattice_task_status' -ExpectedArguments ([ordered]@{ task_ref = '1' * 64 })
-        throw 'TASK051_SELF_TEST_FALSE_PASS'
-    }
-    catch {
-        if ([string]$_.Exception.Message -cne 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED') { throw }
-    }
     foreach ($structuredFailureFixture in @(
         [pscustomobject]@{
             Mutation = 'SERVER'
@@ -2971,8 +3000,8 @@ function Invoke-Task051SelfTest {
         },
         [pscustomobject]@{
             Mutation = 'ERROR'
-            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_REJECTED'
-            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_ERROR_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_ERROR_REJECTED'
         },
         [pscustomobject]@{
             Mutation = 'ARGUMENT'
@@ -2980,9 +3009,64 @@ function Invoke-Task051SelfTest {
             ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_ARGUMENT_REJECTED'
         },
         [pscustomobject]@{
-            Mutation = 'RESULT'
-            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_REJECTED'
-            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED'
+            Mutation = 'MISSING_RESULT'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_MISSING_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_MISSING_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'NULL_RESULT'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_MISSING_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_MISSING_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'META_ABSENT'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_META_ABSENT_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_ABSENT_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'RESULT_KEYS'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_KEYS_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_KEYS_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'CONTENT_SHAPE'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'CONTENT_JSON'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'CONTENT_STATUS'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'META_SHAPE'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'META_IDENTITY'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'STRUCTURED'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'STRUCTURED_STATUS'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED'
+        },
+        [pscustomobject]@{
+            Mutation = 'PARITY'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_PARITY_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_PARITY_REJECTED'
         }
     )) {
         $structuredFailureEvents = @(($events | ConvertTo-Json -Depth 20) | ConvertFrom-Json -ErrorAction Stop)
@@ -2992,7 +3076,26 @@ function Invoke-Task051SelfTest {
             'STATUS' { $structuredFailureEvents[0].item.status = 'failed' }
             'ERROR' { $structuredFailureEvents[0].item | Add-Member -NotePropertyName error -NotePropertyValue ([pscustomobject]@{ message = 'task051-selftest-error' }) }
             'ARGUMENT' { $structuredFailureEvents[0].item.arguments.task_ref = '2' * 64 }
-            'RESULT' { $structuredFailureEvents[0].item.result = $null }
+            'MISSING_RESULT' { $structuredFailureEvents[0].item.PSObject.Properties.Remove('result') }
+            'NULL_RESULT' { $structuredFailureEvents[0].item.result = $null }
+            'META_ABSENT' { $structuredFailureEvents[0].item.result.PSObject.Properties.Remove('_meta') }
+            'RESULT_KEYS' { $structuredFailureEvents[0].item.result | Add-Member -NotePropertyName isError -NotePropertyValue $false }
+            'CONTENT_SHAPE' { $structuredFailureEvents[0].item.result.content = @() }
+            'CONTENT_JSON' { $structuredFailureEvents[0].item.result.content[0].text = '{' }
+            'CONTENT_STATUS' {
+                $invalidContentStatus = $status.PSObject.Copy()
+                $invalidContentStatus.status = 'RUNNING'
+                $structuredFailureEvents[0].item.result.content[0].text = $invalidContentStatus | ConvertTo-Json -Compress -Depth 10
+            }
+            'META_SHAPE' { $structuredFailureEvents[0].item.result._meta = $null }
+            'META_IDENTITY' { $structuredFailureEvents[0].item.result._meta.'io.modelcontextprotocol/serverInfo'.version = '2.0.0' }
+            'STRUCTURED' { $structuredFailureEvents[0].item.result.structured_content = $null }
+            'STRUCTURED_STATUS' { $structuredFailureEvents[0].item.result.structured_content.status = 'RUNNING' }
+            'PARITY' {
+                $parityStatus = $status.PSObject.Copy()
+                $parityStatus.task_ref = '2' * 64
+                $structuredFailureEvents[0].item.result.content[0].text = $parityStatus | ConvertTo-Json -Compress -Depth 10
+            }
         }
         $structuredFailureMessage = $null
         try {
@@ -3010,7 +3113,16 @@ function Invoke-Task051SelfTest {
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_SUBMIT_CALL_COUNT_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_STATUS_CALL_COUNT_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_CALL_COUNT_REJECTED' },
         [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_UNEXPECTED_TOOL_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_UNEXPECTED_REJECTED' },
-        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_ERROR_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_ERROR_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_MISSING_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_MISSING_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_META_ABSENT_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_ABSENT_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_KEYS_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_KEYS_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED' },
+        [pscustomobject]@{ Stage = 'RESULT'; Message = 'TASK051_CODEX_TOOL_RESULT_PARITY_REJECTED'; Expected = 'TASK038_CURRENT_CODEX_TOOL_RESULT_PARITY_REJECTED' },
         [pscustomobject]@{ Stage = 'EXIT'; Message = ('TASK051_CODEX_EXEC_REJECTED|' + ('a' * 64)); Expected = 'TASK038_CURRENT_CODEX_TOOL_EXIT_REJECTED' },
         [pscustomobject]@{ Stage = 'OUTPUT'; Message = "secret`r`nvalue"; Expected = 'TASK038_CURRENT_CODEX_TOOL_OUTPUT_REJECTED' },
         [pscustomobject]@{ Stage = 'DISPATCH'; Message = 'TASK038_ACCEPTANCE_EVIDENCE_REJECTED'; Expected = 'TASK038_ACCEPTANCE_EVIDENCE_REJECTED' },
