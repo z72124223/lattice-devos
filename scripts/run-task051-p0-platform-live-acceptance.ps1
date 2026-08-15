@@ -1324,9 +1324,27 @@ $failureCode = 'TASK038_POSTGRES_HOLDER_STATE_REJECTED'
 $holder = $records[0].payload
 '@ -FailureCode 'TASK051_TASK038_HOLDER_STATE_STAGE_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '        $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $PostgresPort -ErrorAction Stop | Where-Object {' -New @'
-        $failureCode = 'TASK038_POSTGRES_HOLDER_LISTENER_REJECTED'
+        $failureCode = 'TASK038_POSTGRES_HOLDER_LISTENER_SOCKET_REJECTED'
         $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $PostgresPort -ErrorAction Stop | Where-Object {
 '@ -FailureCode 'TASK051_TASK038_HOLDER_LISTENER_STAGE_TRANSFORM_REJECTED'
+    $listenerDiagnosticBlock = @'
+        $failureCode = 'TASK038_POSTGRES_HOLDER_LISTENER_PROCESS_QUERY_REJECTED'
+        $listenerProcess = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + [long]$restart.listener_process_id) -ErrorAction Stop
+        $failureCode = 'TASK038_POSTGRES_HOLDER_LISTENER_EXECUTABLE_REJECTED'
+        if (-not (Test-ExactPath -Actual ([string]$listenerProcess.ExecutablePath) -Expected $script:PostgresExecutable)) {
+            throw $failureCode
+        }
+        $failureCode = 'TASK038_POSTGRES_HOLDER_LISTENER_DATA_REJECTED'
+        if ([string]$listenerProcess.CommandLine -notlike ('*' + $script:PostgresData + '*')) {
+            throw $failureCode
+        }
+        $failureCode = 'TASK038_POSTGRES_HOLDER_LISTENER_CREATION_REJECTED'
+        if (([DateTimeOffset]([DateTime]$listenerProcess.CreationDate)).ToUniversalTime().ToFileTime().ToString() -cne [string]$restart.listener_process_creation_time) {
+            throw $failureCode
+        }
+        $failureCode = 'TASK038_POSTGRES_HOLDER_LISTENER_REJECTED'
+'@
+    $Source = Replace-Task051Exact -Source $Source -Old '        $listenerProcess = Get-CimInstance -ClassName Win32_Process -Filter (''ProcessId = '' + [long]$restart.listener_process_id) -ErrorAction Stop' -New $listenerDiagnosticBlock -FailureCode 'TASK051_TASK038_HOLDER_LISTENER_DIAGNOSTIC_TRANSFORM_REJECTED'
     $postgresDataBlock = @'
 $script:PostgresData = Get-CanonicalPath -Path $PostgresDataDirectory
 $dataItem = Get-Item -LiteralPath $script:PostgresData -Force -ErrorAction SilentlyContinue
@@ -2233,6 +2251,11 @@ function Invoke-Task051SelfTest {
         'TASK038_POSTGRES_HOLDER_TOOL_REJECTED',
         'TASK038_POSTGRES_HOLDER_MARKER_REJECTED',
         'TASK038_POSTGRES_HOLDER_CONSUMER_REJECTED',
+        'TASK038_POSTGRES_HOLDER_LISTENER_SOCKET_REJECTED',
+        'TASK038_POSTGRES_HOLDER_LISTENER_PROCESS_QUERY_REJECTED',
+        'TASK038_POSTGRES_HOLDER_LISTENER_EXECUTABLE_REJECTED',
+        'TASK038_POSTGRES_HOLDER_LISTENER_DATA_REJECTED',
+        'TASK038_POSTGRES_HOLDER_LISTENER_CREATION_REJECTED',
         'TASK038_POSTGRES_HOLDER_LISTENER_REJECTED'
     )) {
         if ([regex]::Matches($task038, [regex]::Escape($holderDiagnostic)).Count -ne 1) {
