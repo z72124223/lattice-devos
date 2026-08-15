@@ -1389,6 +1389,59 @@ foreach ($cargoVariable in @('CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET')) {
 '@ -FailureCode 'TASK051_TASK038_CARGO_TARGET_CONDITION_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '$canonicalRepository = Get-CanonicalPath -Path $RepositoryRoot' -New '$canonicalRepository = Get-CanonicalPath -Path (Join-Path $env:LATTICE_TASK051_RUN_ROOT ''__repository-boundary-sentinel'')' -FailureCode 'TASK051_TASK038_HOME_BOUNDARY_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old 'if (Test-PathOverlap -Left $script:CodexCredentialSource -Right $script:RepositoryRoot) {' -New 'if (-not (Test-ExactPath -Actual $script:CodexCredentialSource -Expected (Join-Path $env:LATTICE_TASK051_RUN_ROOT ''credential-source''))) {' -FailureCode 'TASK051_TASK038_CREDENTIAL_BOUNDARY_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$executionParent = Get-CanonicalPath -Path (Join-Path (Split-Path -Parent $source) ''task038-execution-homes'')' -New '$executionParent = Get-CanonicalPath -Path (Join-Path $env:LATTICE_TASK051_RUN_ROOT ''t38h'')' -FailureCode 'TASK051_TASK038_EXECUTION_HOME_SHORT_PATH_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old "    Assert-NoReparsePath -Path `$executionParent -FailureCode 'TASK038_CODEX_EXECUTION_PARENT_REJECTED'" -New "    Assert-NoReparseAncestor -Path `$executionParent -Boundary `$env:LATTICE_TASK051_RUN_ROOT -FailureCode 'TASK038_CODEX_EXECUTION_PARENT_REJECTED'" -FailureCode 'TASK051_TASK038_EXECUTION_HOME_BOUNDARY_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$canonicalRoot = Get-CanonicalPath -Path $Root' -New @'
+    $canonicalRoot = Get-CanonicalPath -Path $Root
+    $task051LongPathRoot = '\\?\' + $canonicalRoot
+'@ -FailureCode 'TASK051_TASK038_LONG_PATH_FOOTPRINT_ROOT_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$rootItem = Get-Item -LiteralPath $canonicalRoot -Force -ErrorAction SilentlyContinue' -New '$rootItem = Get-Item -LiteralPath $task051LongPathRoot -Force -ErrorAction SilentlyContinue' -FailureCode 'TASK051_TASK038_LONG_PATH_FOOTPRINT_ITEM_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old 'Get-ChildItem -LiteralPath $canonicalRoot -Recurse -Force | ForEach-Object {' -New 'Get-ChildItem -LiteralPath $task051LongPathRoot -Recurse -Force | ForEach-Object {' -FailureCode 'TASK051_TASK038_LONG_PATH_FOOTPRINT_ENUMERATION_TRANSFORM_REJECTED'
+    if ([regex]::Matches($Source, [regex]::Escape('Substring($canonicalRoot.Length)')).Count -ne 2) {
+        throw 'TASK051_TASK038_LONG_PATH_FOOTPRINT_RELATIVE_TRANSFORM_REJECTED'
+    }
+    $Source = $Source.Replace('Substring($canonicalRoot.Length)', 'Substring($task051LongPathRoot.Length)')
+    $Source = Replace-Task051Exact -Source $Source -Old '$executionHome = Get-CanonicalPath -Path $Path' -New @'
+    $executionHome = Get-CanonicalPath -Path $Path
+    $task051LongExecutionHome = '\\?\' + $executionHome
+'@ -FailureCode 'TASK051_TASK038_LONG_PATH_CLEANUP_ROOT_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$authPath = Join-Path $executionHome ''auth.json''' -New '$authPath = $task051LongExecutionHome + ''\auth.json''' -FailureCode 'TASK051_TASK038_LONG_PATH_CLEANUP_AUTH_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$ownerPath = Join-Path $executionHome ''.lattice-task038-execution-owner-v1''' -New '$ownerPath = $task051LongExecutionHome + ''\.lattice-task038-execution-owner-v1''' -FailureCode 'TASK051_TASK038_LONG_PATH_CLEANUP_OWNER_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old @'
+    $authPath = $task051LongExecutionHome + '\auth.json'
+    if (Test-Path -LiteralPath $authPath) {
+        [IO.File]::Delete($authPath)
+    }
+    if (Test-Path -LiteralPath $authPath) {
+        throw 'TASK038_CODEX_EXECUTION_HOME_SECRET_CLEANUP_REJECTED'
+    }
+    $ownerPath = $task051LongExecutionHome + '\.lattice-task038-execution-owner-v1'
+    Assert-RegularFile -Path $ownerPath -FailureCode 'TASK038_CODEX_EXECUTION_HOME_CLEANUP_REJECTED'
+    if (
+        [IO.File]::ReadAllText($ownerPath, [Text.Encoding]::UTF8) -cne
+        ("lattice.task038-execution-home.v1:" + $AcceptanceId + "`n")
+    ) {
+        throw 'TASK038_CODEX_EXECUTION_HOME_CLEANUP_REJECTED'
+    }
+'@ -New @'
+    $ownerPath = $task051LongExecutionHome + '\.lattice-task038-execution-owner-v1'
+    Assert-RegularFile -Path $ownerPath -FailureCode 'TASK038_CODEX_EXECUTION_HOME_CLEANUP_REJECTED'
+    if (
+        [IO.File]::ReadAllText($ownerPath, [Text.Encoding]::UTF8) -cne
+        ("lattice.task038-execution-home.v1:" + $AcceptanceId + "`n")
+    ) {
+        throw 'TASK038_CODEX_EXECUTION_HOME_CLEANUP_REJECTED'
+    }
+    $authPath = $task051LongExecutionHome + '\auth.json'
+    if (Test-Path -LiteralPath $authPath) {
+        [IO.File]::Delete($authPath)
+    }
+    if (Test-Path -LiteralPath $authPath) {
+        throw 'TASK038_CODEX_EXECUTION_HOME_SECRET_CLEANUP_REJECTED'
+    }
+'@ -FailureCode 'TASK051_TASK038_LONG_PATH_CLEANUP_OWNER_ORDER_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$items = @(Get-ChildItem -LiteralPath $executionHome -Recurse -Force)' -New '$items = @(Get-ChildItem -LiteralPath $task051LongExecutionHome -Recurse -Force)' -FailureCode 'TASK051_TASK038_LONG_PATH_CLEANUP_ENUMERATION_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old 'Remove-Item -LiteralPath $executionHome -Recurse -Force' -New '[IO.Directory]::Delete($task051LongExecutionHome, $true)' -FailureCode 'TASK051_TASK038_LONG_PATH_CLEANUP_DELETE_TRANSFORM_REJECTED'
     $oldWriterCall = 'Invoke-WriterLeaseLiveSuite -Identity $identity -Authority $authority -DatabaseName $databaseName -MigratorDsn $migratorDsn -RuntimeDsn $runtimeDsn -AdminDsn $adminDsn -EvidencePath (Join-Path $evidenceRoot ''writer-lease-live.json'')'
     $newWriterCall = 'Write-JsonEvidence -Path (Join-Path $evidenceRoot ''writer-lease-live.json'') -Value ([ordered]@{ schema_version = ''lattice.task051.writer-v2-delegation.v1''; status = ''DELEGATED_TO_TASK076_CURRENT_GATE'' })'
     $Source = Replace-Task051Exact -Source $Source -Old $oldWriterCall -New $newWriterCall -FailureCode 'TASK051_TASK038_WRITER_TRANSFORM_REJECTED'
@@ -1827,6 +1880,24 @@ function Invoke-Task051SelfTest {
     $authBefore = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', 'Process')
     try {
         New-Task051OwnerOnlyDirectory -Path $aclRoot
+        $longIoRoot = Join-Path $aclRoot 'long-path-io'
+        $longIoDirectory = '\\?\' + $longIoRoot
+        foreach ($index in 1..3) {
+            $longIoDirectory += ('\segment-' + ('x' * 40) + $index)
+            [IO.Directory]::CreateDirectory($longIoDirectory) | Out-Null
+        }
+        $longIoFile = $longIoDirectory + ('\rollout-' + ('y' * 70) + '.jsonl')
+        [IO.File]::WriteAllText($longIoFile, 'probe')
+        $longIoFiles = @(Get-ChildItem -LiteralPath ('\\?\' + $longIoRoot) -Recurse -File -Force)
+        if (
+            $longIoFiles.Count -ne 1 -or
+            $longIoFiles[0].FullName.Length -le 260 -or
+            [string]::IsNullOrWhiteSpace((Get-FileHash -LiteralPath $longIoFiles[0].FullName -Algorithm SHA256).Hash)
+        ) {
+            throw 'TASK051_LONG_PATH_IO_SELF_TEST_REJECTED'
+        }
+        [IO.Directory]::Delete(('\\?\' + $longIoRoot), $true)
+        if (Test-Path -LiteralPath $longIoRoot) { throw 'TASK051_LONG_PATH_IO_SELF_TEST_REJECTED' }
         $realDirectory = Join-Path $aclRoot 'real-directory'
         $junction = Join-Path $aclRoot 'junction'
         [IO.Directory]::CreateDirectory($realDirectory) | Out-Null
@@ -1981,7 +2052,10 @@ function Invoke-Task051SelfTest {
     finally {
         [Environment]::SetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', $authBefore, 'Process')
         if (Test-Path -LiteralPath $aclRoot -PathType Container) {
-            [IO.Directory]::Delete($aclRoot, $true)
+            [IO.Directory]::Delete(('\\?\' + $aclRoot), $true)
+        }
+        if (Test-Path -LiteralPath $aclRoot) {
+            throw 'TASK051_SELF_TEST_ROOT_CLEANUP_REJECTED'
         }
     }
     $jobEvents = [Collections.Generic.List[string]]::new()
@@ -2045,7 +2119,16 @@ function Invoke-Task051SelfTest {
         [regex]::Matches($task038, [regex]::Escape('$task051PhysicalOutputDirectory = Get-CanonicalPath -Path $OutputDirectory')).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('$canonicalOutputDirectory = Get-CanonicalPath -Path (Split-Path -Parent $script:PostgresData)')).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('-Boundary $env:LATTICE_TASK051_RUN_ALIAS_ROOT')).Count -ne 2 -or
-        [regex]::Matches($task038, [regex]::Escape("throw 'TASK038_POSTGRES_DATA_NATIVE_LINK_REJECTED'")).Count -ne 1
+        [regex]::Matches($task038, [regex]::Escape("throw 'TASK038_POSTGRES_DATA_NATIVE_LINK_REJECTED'")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("`$executionParent = Get-CanonicalPath -Path (Join-Path (Split-Path -Parent `$source) 'task038-execution-homes')")).Count -ne 0 -or
+        [regex]::Matches($task038, [regex]::Escape("`$executionParent = Get-CanonicalPath -Path (Join-Path `$env:LATTICE_TASK051_RUN_ROOT 't38h')")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('Assert-NoReparseAncestor -Path $executionParent -Boundary $env:LATTICE_TASK051_RUN_ROOT')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('LATTICE_TASK051_RUN_ALIAS_ROOT ''task038-execution-homes''')).Count -ne 0 -or
+        [regex]::Matches($task038, [regex]::Escape('TASK038_CODEX_EXECUTION_PARENT_NATIVE_LINK_REJECTED')).Count -ne 0 -or
+        [regex]::Matches($task038, [regex]::Escape("`$task051LongPathRoot = '\\?\' + `$canonicalRoot")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('Get-ChildItem -LiteralPath $task051LongPathRoot -Recurse -Force')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("`$task051LongExecutionHome = '\\?\' + `$executionHome")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('[IO.Directory]::Delete($task051LongExecutionHome, $true)')).Count -ne 1
     ) {
         throw 'TASK051_TASK038_POSTGRES_DATA_ALIAS_SELF_TEST_REJECTED'
     }
