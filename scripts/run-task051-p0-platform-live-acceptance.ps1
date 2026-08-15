@@ -992,7 +992,7 @@ public static class LatticeTask051ProcessIdentityInterop
 '@
     }
     catch {
-        throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+        throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_INTEROP_REJECTED'
     }
 }
 
@@ -1096,35 +1096,45 @@ function Get-Task051OwnedProcessEvidence {
     )
 
     $candidate = $null
+    $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_INTEROP_REJECTED'
     Initialize-Task051ProcessIdentityInterop
     try {
         $native = [LatticeTask051ProcessIdentityInterop]::Inspect($Job, $ProcessId)
     }
     catch {
-        throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+        throw $failureCode
     }
     if (-not [bool]$native.InJob) {
         throw 'TASK038_CURRENT_CODEX_DISCOVERY_JOB_MEMBERSHIP_REJECTED'
     }
     try {
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIVENESS_REJECTED'
         $candidate = Get-Process -Id $ProcessId -ErrorAction Stop
         if ($candidate.HasExited -or [string]::IsNullOrWhiteSpace([string]$native.ImagePath)) {
-            throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+            throw $failureCode
         }
-        Assert-Task051RegularFile -Path ([string]$native.ImagePath) -FailureCode 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
-        Assert-Task051RegularFile -Path $ExpectedExecutable -FailureCode 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_FILE_REJECTED'
+        Assert-Task051RegularFile -Path ([string]$native.ImagePath) -FailureCode $failureCode
+        Assert-Task051RegularFile -Path $ExpectedExecutable -FailureCode $failureCode
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_NATIVE_IDENTITY_REJECTED'
         $expectedIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $ExpectedExecutable -Directory $false
         $actualIdentity = Get-LatticeWindowsNativePathIdentityToken -Path ([string]$native.ImagePath) -Directory $false
+        if (
+            [string]$expectedIdentity -cne $ExpectedExecutableNativeIdentity -or
+            [string]$actualIdentity -cne $ExpectedExecutableNativeIdentity
+        ) {
+            throw $failureCode
+        }
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_SHA256_REJECTED'
         $currentExpectedSha256 = Get-Task051Sha256 -Path $ExpectedExecutable
         $actualSha256 = Get-Task051Sha256 -Path ([string]$native.ImagePath)
         if (
-            [string]$expectedIdentity -cne $ExpectedExecutableNativeIdentity -or
-            [string]$actualIdentity -cne $ExpectedExecutableNativeIdentity -or
             $currentExpectedSha256 -cne $ExpectedExecutableSha256 -or
             $actualSha256 -cne $ExpectedExecutableSha256
         ) {
-            throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+            throw $failureCode
         }
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_CREATION_REJECTED'
         $candidateCreationUtc = $candidate.StartTime.ToUniversalTime()
         $ownerCreationFileTimeUtc = $OwnerProcess.StartTime.ToUniversalTime().ToFileTimeUtc()
         $observedUnixHundredNanoseconds = [decimal]$ObservedAtUnixNanos / [decimal]100
@@ -1134,10 +1144,13 @@ function Get-Task051OwnedProcessEvidence {
             [long]$native.CreationFileTimeUtc -lt $ownerCreationFileTimeUtc -or
             [long]$native.CreationFileTimeUtc -gt $observedFileTimeUtc
         ) {
-            throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+            throw $failureCode
         }
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIVENESS_REJECTED'
         $candidate.Refresh()
-        if ($candidate.HasExited) { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED' }
+        if ($candidate.HasExited) {
+            throw $failureCode
+        }
         return [pscustomobject]@{
             ProcessId = $ProcessId
             ImagePath = [string]$native.ImagePath
@@ -1149,7 +1162,7 @@ function Get-Task051OwnedProcessEvidence {
     catch {
         $message = [string]$_.Exception.Message
         if ($message -match '^TASK038_CURRENT_CODEX_DISCOVERY_[A-Z0-9_]+_REJECTED$') { throw $message }
-        throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_REJECTED'
+        throw $failureCode
     }
     finally {
         if ($null -ne $candidate) { $candidate.Dispose() }
