@@ -1947,14 +1947,21 @@ function Get-Task051ExecStructuredContent {
             throw 'TASK051_CODEX_TOOL_ARGUMENT_REJECTED'
         }
     }
-    if ($null -ne $call.error -or $null -eq $call.result) {
+    $errorProperty = $call.PSObject.Properties['error']
+    $resultProperty = $call.PSObject.Properties['result']
+    if (
+        ($null -ne $errorProperty -and $null -ne $errorProperty.Value) -or
+        $null -eq $resultProperty -or
+        $null -eq $resultProperty.Value
+    ) {
         throw 'TASK051_CODEX_TOOL_RESULT_REJECTED'
     }
-    $resultKeys = @($call.result.PSObject.Properties.Name | Sort-Object)
+    $result = $resultProperty.Value
+    $resultKeys = @($result.PSObject.Properties.Name | Sort-Object)
     if (($resultKeys -join ',') -cne '_meta,content,structured_content') {
         throw 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED'
     }
-    $content = @($call.result.content)
+    $content = @($result.content)
     if (
         $content.Count -ne 1 -or
         (@($content[0].PSObject.Properties.Name | Sort-Object) -join ',') -cne 'text,type' -or
@@ -1963,7 +1970,7 @@ function Get-Task051ExecStructuredContent {
     ) {
         throw 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED'
     }
-    $meta = $call.result._meta
+    $meta = $result._meta
     if ($null -eq $meta) { throw 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED' }
     $serverInfo = $meta.PSObject.Properties['io.modelcontextprotocol/serverInfo']
     if (
@@ -1976,7 +1983,7 @@ function Get-Task051ExecStructuredContent {
     ) {
         throw 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED'
     }
-    $structured = $call.result.structured_content
+    $structured = $result.structured_content
     if ($null -eq $structured) { throw 'TASK051_CODEX_TOOL_RESULT_REJECTED' }
     try { $contentValue = [string]$content[0].text | ConvertFrom-Json -ErrorAction Stop }
     catch { throw 'TASK051_CODEX_TOOL_RESULT_ENVELOPE_REJECTED' }
@@ -1985,7 +1992,7 @@ function Get-Task051ExecStructuredContent {
         StructuredContent = $structured
         ContentSha256 = Get-Task051StringSha256 -Value ([string]$content[0].text)
         MetaSha256 = Get-Task051StringSha256 -Value ($meta | ConvertTo-Json -Compress -Depth 20)
-        ResultSha256 = Get-Task051StringSha256 -Value ($call.result | ConvertTo-Json -Compress -Depth 30)
+        ResultSha256 = Get-Task051StringSha256 -Value ($result | ConvertTo-Json -Compress -Depth 30)
     }
 }
 
@@ -2892,7 +2899,6 @@ function Invoke-Task051SelfTest {
                 tool = 'lattice_task_status'
                 status = 'completed'
                 arguments = [pscustomobject]@{ task_ref = '1' * 64 }
-                error = $null
                 result = [pscustomobject]@{
                     content = @([pscustomobject]@{
                         type = 'text'
@@ -2964,6 +2970,11 @@ function Invoke-Task051SelfTest {
             ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_STATUS_REJECTED'
         },
         [pscustomobject]@{
+            Mutation = 'ERROR'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_REJECTED'
+        },
+        [pscustomobject]@{
             Mutation = 'ARGUMENT'
             ExpectedRaw = 'TASK051_CODEX_TOOL_ARGUMENT_REJECTED'
             ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_ARGUMENT_REJECTED'
@@ -2979,6 +2990,7 @@ function Invoke-Task051SelfTest {
             'SERVER' { $structuredFailureEvents[0].item.server = 'other' }
             'TOOL_NAME' { $structuredFailureEvents[0].item.tool = 'lattice_task_submit' }
             'STATUS' { $structuredFailureEvents[0].item.status = 'failed' }
+            'ERROR' { $structuredFailureEvents[0].item | Add-Member -NotePropertyName error -NotePropertyValue ([pscustomobject]@{ message = 'task051-selftest-error' }) }
             'ARGUMENT' { $structuredFailureEvents[0].item.arguments.task_ref = '2' * 64 }
             'RESULT' { $structuredFailureEvents[0].item.result = $null }
         }

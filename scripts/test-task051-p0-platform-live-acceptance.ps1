@@ -409,7 +409,11 @@ if (
     $codexToolNameGate -le $codexToolServerGate -or
     $codexToolStatusGate -le $codexToolNameGate -or
     [regex]::Matches($codexToolStructuredSource, 'TASK051_CODEX_TOOL_(?:SERVER|NAME|STATUS)_REJECTED').Count -ne 3 -or
-    $codexToolStructuredSource.IndexOf('TASK051_CODEX_TOOL_IDENTITY_REJECTED', [StringComparison]::Ordinal) -ge 0
+    $codexToolStructuredSource.IndexOf('TASK051_CODEX_TOOL_IDENTITY_REJECTED', [StringComparison]::Ordinal) -ge 0 -or
+    $codexToolStructuredSource.IndexOf("`$call.PSObject.Properties['error']", [StringComparison]::Ordinal) -lt 0 -or
+    $codexToolStructuredSource.IndexOf("`$call.PSObject.Properties['result']", [StringComparison]::Ordinal) -lt 0 -or
+    $codexToolStructuredSource.IndexOf('$call.error', [StringComparison]::Ordinal) -ge 0 -or
+    $codexToolStructuredSource.IndexOf('$call.result', [StringComparison]::Ordinal) -ge 0
 ) {
     throw 'TASK051_CODEX_TOOL_IDENTITY_SPLIT_SHAPE_REJECTED'
 }
