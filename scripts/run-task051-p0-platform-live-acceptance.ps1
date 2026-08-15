@@ -985,7 +985,12 @@ function Invoke-Task051CodexDiscovery {
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_INITIALIZE_RESPONSE_REJECTED'
         $init = Get-Task051AppServerResponse -Reader $owned.Suspended.StandardOutput -Id 1 -TimeoutSeconds 30
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_IDENTITY_REJECTED'
-        if ([string]$init.result.userAgent -notmatch 'Codex Desktop/0\.147\.0-alpha\.6\.6') {
+        $expectedUserAgent = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_CURRENT_CODEX_USER_AGENT', 'Process')
+        if (
+            [string]::IsNullOrWhiteSpace($expectedUserAgent) -or
+            $expectedUserAgent.IndexOfAny([char[]]@("`r", "`n", [char]0)) -ge 0 -or
+            [string]$init.result.userAgent -cne $expectedUserAgent
+        ) {
             throw 'TASK051_APP_SERVER_IDENTITY_REJECTED'
         }
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LIST_REQUEST_REJECTED'
@@ -2425,6 +2430,7 @@ if ($currentCodexCandidates.Count -lt 1) { throw 'TASK051_CURRENT_CODEX_REJECTED
 $currentCodex = [IO.Path]::GetFullPath($currentCodexCandidates[0].FullName)
 $currentCodexVersion = (& $currentCodex --version).Trim()
 if ($currentCodexVersion -cne 'codex-cli 0.147.0-alpha.6.6') { throw 'TASK051_CURRENT_CODEX_REJECTED' }
+$currentCodexUserAgent = $currentCodexVersion.Replace('codex-cli ', 'codex_cli_rs/')
 $officialCodex = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $repositoryRoot) 'chatgpt-mcp\target\task038-official-codex\0.146.0\codex.exe'))
 Assert-Task051RegularFile -Path $officialCodex -FailureCode 'TASK051_TASK038_CODEX_REJECTED'
 $credentialSource = Join-Path $runRoot 'credential-source'
@@ -2444,6 +2450,7 @@ foreach ($name in @(
     'LATTICE_TASK051_RUN_ALIAS_ROOT',
     'LATTICE_TASK051_GENERATED_TASK038',
     'LATTICE_TASK051_CURRENT_CODEX',
+    'LATTICE_TASK051_CURRENT_CODEX_USER_AGENT',
     'LATTICE_TASK051_AUTH_SOURCE',
     'LATTICE_TASK051_ORIGINAL_CONFIG_SHA256'
 )) {
@@ -2478,6 +2485,7 @@ try {
     [Environment]::SetEnvironmentVariable('LATTICE_TASK051_RUN_ALIAS_ROOT', $runAlias.Root, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK051_GENERATED_TASK038', $generatedTask038, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK051_CURRENT_CODEX', $currentCodex, 'Process')
+    [Environment]::SetEnvironmentVariable('LATTICE_TASK051_CURRENT_CODEX_USER_AGENT', $currentCodexUserAgent, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', $authSource, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK051_ORIGINAL_CONFIG_SHA256', $originalConfigSha256, 'Process')
     $harnessOutput = @(& $generatedTask019 -RunTask076WriterLeaseGate -RunTask038AcceptanceHook -Task038OfficialCodexExecutable $officialCodex -Task038CodexAuthHome $credentialSource 2>&1 | ForEach-Object { [string]$_ })
