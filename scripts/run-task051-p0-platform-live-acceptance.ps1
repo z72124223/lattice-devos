@@ -1287,8 +1287,23 @@ function Convert-Task051Task038Source {
     $Source = $Source.Replace('$PSScriptRoot', $qScripts)
     $Source = Replace-Task051Exact -Source $Source -Old 'Set-StrictMode -Version Latest' -New ('. ' + $qRunner + ' -LibraryOnly' + [char]10 + 'Set-StrictMode -Version Latest') -FailureCode 'TASK051_TASK038_LIBRARY_INSERT_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '$repositoryTarget = Get-CanonicalPath -Path (Join-Path $script:RepositoryRoot ''target'')' -New '$repositoryTarget = Get-CanonicalPath -Path $env:LATTICE_TASK051_RUN_ROOT' -FailureCode 'TASK051_TASK038_TARGET_TRANSFORM_REJECTED'
-    $Source = Replace-Task051Exact -Source $Source -Old '$task038CargoTarget = Get-CanonicalPath -Path (Join-Path $repositoryTarget ''task038-main'')' -New '$task038CargoTarget = Get-CanonicalPath -Path (Join-Path $env:CARGO_TARGET_DIR ''task038-main'')' -FailureCode 'TASK051_TASK038_CARGO_TARGET_PATH_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$task038CargoTarget = Get-CanonicalPath -Path (Join-Path $repositoryTarget ''task038-main'')' -New '$task038CargoTarget = Get-CanonicalPath -Path $env:CARGO_TARGET_DIR' -FailureCode 'TASK051_TASK038_CARGO_TARGET_PATH_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old 'Assert-NoReparseAncestor -Path $task038CargoTarget -Boundary $script:RepositoryRoot -FailureCode ''TASK038_CARGO_TARGET_REJECTED''' -New 'Assert-NoReparseAncestor -Path $task038CargoTarget -Boundary $env:CARGO_TARGET_DIR -FailureCode ''TASK038_CARGO_TARGET_REJECTED''' -FailureCode 'TASK051_TASK038_CARGO_TARGET_BOUNDARY_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$cargoHostTarget = ''x86_64-pc-windows-msvc''' -New @'
+$cargoHostTarget = 'x86_64-pc-windows-msvc'
+$cargoVersion = Invoke-NativeText -Executable $script:Cargo -WorkingDirectory $script:RepositoryRoot -Arguments @('-vV')
+Assert-SecretFreeText -Text $cargoVersion.Text -FailureCode 'TASK051_TASK038_CARGO_HOST_REJECTED'
+$cargoHostLines = @($cargoVersion.Text -split '\r?\n' | Where-Object { $_ -like 'host: *' })
+if (
+    $cargoVersion.ExitCode -ne 0 -or
+    $cargoHostLines.Count -ne 1 -or
+    [string]$cargoHostLines[0] -cne ('host: ' + $cargoHostTarget)
+) {
+    throw 'TASK051_TASK038_CARGO_HOST_REJECTED'
+}
+'@ -FailureCode 'TASK051_TASK038_CARGO_HOST_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '    ''--target-dir'', $task038CargoTarget, ''--target'', $cargoHostTarget' -New '    ''--target-dir'', $task038CargoTarget' -FailureCode 'TASK051_TASK038_HOST_TARGET_ARGUMENT_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$script:Latticed = Get-CanonicalPath -Path (Join-Path $task038CargoTarget ($cargoHostTarget + ''\debug\latticed.exe''))' -New '$script:Latticed = Get-CanonicalPath -Path (Join-Path $task038CargoTarget ''debug\latticed.exe'')' -FailureCode 'TASK051_TASK038_HOST_TARGET_BINARY_TRANSFORM_REJECTED'
     $postgresDataBlock = @'
 $script:PostgresData = Get-CanonicalPath -Path $PostgresDataDirectory
 $dataItem = Get-Item -LiteralPath $script:PostgresData -Force -ErrorAction SilentlyContinue
@@ -1880,6 +1895,10 @@ function Invoke-Task051SelfTest {
     $authBefore = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', 'Process')
     try {
         New-Task051OwnerOnlyDirectory -Path $aclRoot
+        $cargoLinkPathProbe = Join-Path $aclRoot 't\debug\deps\liblattice_postgres_codebase_memory-0123456789abcdef.rlib'
+        if ($cargoLinkPathProbe.Length -ge 260) {
+            throw 'TASK051_CARGO_LINK_PATH_BUDGET_REJECTED'
+        }
         $longIoRoot = Join-Path $aclRoot 'long-path-io'
         $longIoDirectory = '\\?\' + $longIoRoot
         foreach ($index in 1..3) {
@@ -2123,6 +2142,12 @@ function Invoke-Task051SelfTest {
         [regex]::Matches($task038, [regex]::Escape("`$executionParent = Get-CanonicalPath -Path (Join-Path (Split-Path -Parent `$source) 'task038-execution-homes')")).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape("`$executionParent = Get-CanonicalPath -Path (Join-Path `$env:LATTICE_TASK051_RUN_ROOT 't38h')")).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('Assert-NoReparseAncestor -Path $executionParent -Boundary $env:LATTICE_TASK051_RUN_ROOT')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('$task038CargoTarget = Get-CanonicalPath -Path $env:CARGO_TARGET_DIR')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("Join-Path `$env:CARGO_TARGET_DIR 'task038-main'")).Count -ne 0 -or
+        [regex]::Matches($task038, [regex]::Escape("`$cargoHostLines = @(`$cargoVersion.Text -split '\r?\n' | Where-Object { `$_ -like 'host: *' })")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("'--target-dir', `$task038CargoTarget, '--target', `$cargoHostTarget")).Count -ne 0 -or
+        [regex]::Matches($task038, [regex]::Escape("'--target-dir', `$task038CargoTarget")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("Join-Path `$task038CargoTarget 'debug\latticed.exe'")).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('LATTICE_TASK051_RUN_ALIAS_ROOT ''task038-execution-homes''')).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape('TASK038_CODEX_EXECUTION_PARENT_NATIVE_LINK_REJECTED')).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape("`$task051LongPathRoot = '\\?\' + `$canonicalRoot")).Count -ne 1 -or
@@ -2230,7 +2255,7 @@ Assert-Task051RegularFile -Path $officialCodex -FailureCode 'TASK051_TASK038_COD
 $credentialSource = Join-Path $runRoot 'credential-source'
 $generatedTask038 = Join-Path $runRoot 'run-task038-task-submit.generated.ps1'
 $generatedTask019 = Join-Path $runRoot 'run-task019-postgres.generated.ps1'
-$cargoTarget = Join-Path $runRoot 'cargo-target'
+$cargoTarget = Join-Path $runRoot 't'
 $cargoHome = Join-Path $runRoot 'cargo-home'
 $tempRoot = Join-Path $runRoot 'temp'
 $environmentBefore = [ordered]@{}
@@ -2271,7 +2296,7 @@ try {
     [IO.Directory]::CreateDirectory($cargoTarget) | Out-Null
     [Environment]::SetEnvironmentVariable('CARGO_HOME', (Join-Path $runAlias.Root 'cargo-home'), 'Process')
     [Environment]::SetEnvironmentVariable('CARGO_NET_OFFLINE', 'true', 'Process')
-    [Environment]::SetEnvironmentVariable('CARGO_TARGET_DIR', (Join-Path $runAlias.Root 'cargo-target'), 'Process')
+    [Environment]::SetEnvironmentVariable('CARGO_TARGET_DIR', (Join-Path $runAlias.Root 't'), 'Process')
     [Environment]::SetEnvironmentVariable('TEMP', (Join-Path $runAlias.Root 'temp'), 'Process')
     [Environment]::SetEnvironmentVariable('TMP', (Join-Path $runAlias.Root 'temp'), 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK051_RUN_ROOT', $runRoot, 'Process')
