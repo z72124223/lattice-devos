@@ -179,6 +179,130 @@ function New-Task051OwnerOnlyDirectory {
     }
 }
 
+function Assert-Task051AtomicDirectoryStage {
+    param(
+        [Parameter(Mandatory = $true)][string]$ParentPath,
+        [Parameter(Mandatory = $true)][string]$DirectoryPath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [Parameter(Mandatory = $true)][string]$OwnerId,
+        [Parameter(Mandatory = $true)][string]$MarkerSchema,
+        [Parameter(Mandatory = $true)][string]$FailureCode
+    )
+
+    try {
+        $fullParent = [IO.Path]::GetFullPath($ParentPath).TrimEnd('\')
+        $fullDirectory = [IO.Path]::GetFullPath($DirectoryPath).TrimEnd('\')
+        $fullDestination = [IO.Path]::GetFullPath($DestinationPath).TrimEnd('\')
+        if (
+            $OwnerId -cnotmatch '\A[0-9a-f]{32}\z' -or
+            $MarkerSchema -cnotmatch '\Alattice\.task051\.[a-z0-9.-]+\.v1\z' -or
+            [IO.Path]::GetDirectoryName($fullDirectory) -cne $fullParent -or
+            [IO.Path]::GetDirectoryName($fullDestination) -cne $fullParent -or
+            -not (Test-Path -LiteralPath $fullDirectory -PathType Container)
+        ) {
+            throw $FailureCode
+        }
+        Assert-Task051NoReparseAncestor -Path $fullDirectory -Boundary $fullParent -FailureCode $FailureCode
+        Assert-Task051OwnerOnlyAcl -Path $fullDirectory -Directory $true
+        $markerPath = Join-Path $fullDirectory '.a'
+        Assert-Task051RegularFile -Path $markerPath -FailureCode $FailureCode
+        Assert-Task051OwnerOnlyAcl -Path $markerPath -Directory $false
+        $markerText = (([ordered]@{
+            schema_version = $MarkerSchema
+            owner_id = $OwnerId
+            destination = $fullDestination
+        } | ConvertTo-Json -Compress) + [char]10)
+        $expectedBytes = [Text.UTF8Encoding]::new($false).GetBytes($markerText)
+        $actualBytes = [IO.File]::ReadAllBytes($markerPath)
+        if (
+            [Convert]::ToBase64String($actualBytes) -cne [Convert]::ToBase64String($expectedBytes) -or
+            @(Get-ChildItem -LiteralPath $fullDirectory -Force).Count -ne 1
+        ) {
+            throw $FailureCode
+        }
+        return [pscustomobject]@{
+            DirectoryPath = $fullDirectory
+            DestinationPath = $fullDestination
+            MarkerPath = $markerPath
+        }
+    }
+    catch {
+        throw $FailureCode
+    }
+}
+
+function New-Task051AtomicOwnerOnlyEmptyDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$ParentPath,
+        [Parameter(Mandatory = $true)][string]$LeafName,
+        [Parameter(Mandatory = $true)][string]$OwnerId,
+        [Parameter(Mandatory = $true)][string]$MarkerSchema,
+        [Parameter(Mandatory = $true)][string]$FailureCode,
+        [Parameter(Mandatory = $true)][string]$CleanupFailureCode
+    )
+
+    $fullParent = [IO.Path]::GetFullPath($ParentPath).TrimEnd('\')
+    if (
+        -not (Test-Path -LiteralPath $fullParent -PathType Container) -or
+        $LeafName -cnotmatch '\A[a-z0-9][a-z0-9-]{0,31}\z' -or
+        $OwnerId -cnotmatch '\A[0-9a-f]{32}\z' -or
+        $MarkerSchema -cnotmatch '\Alattice\.task051\.[a-z0-9.-]+\.v1\z'
+    ) {
+        throw $FailureCode
+    }
+    $destination = [IO.Path]::GetFullPath((Join-Path $fullParent $LeafName)).TrimEnd('\')
+    if ([IO.Path]::GetDirectoryName($destination) -cne $fullParent -or (Test-Path -LiteralPath $destination)) {
+        throw $FailureCode
+    }
+    $stage = [IO.Path]::GetFullPath((Join-Path $fullParent ('.a-' + [Guid]::NewGuid().ToString('N')))).TrimEnd('\')
+    if (Test-Path -LiteralPath $stage) { throw $FailureCode }
+    $stageVerified = $false
+    $committed = $false
+    try {
+        New-Task051OwnerOnlyDirectory -Path $stage
+        Assert-Task051NoReparseAncestor -Path $stage -Boundary $fullParent -FailureCode $FailureCode
+        $markerPath = Join-Path $stage '.a'
+        $markerText = (([ordered]@{
+            schema_version = $MarkerSchema
+            owner_id = $OwnerId
+            destination = $destination
+        } | ConvertTo-Json -Compress) + [char]10)
+        $markerBytes = [Text.UTF8Encoding]::new($false).GetBytes($markerText)
+        $markerStream = [IO.FileStream]::new($markerPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $markerStream.Write($markerBytes, 0, $markerBytes.Length)
+            $markerStream.Flush($true)
+        }
+        finally { $markerStream.Dispose() }
+        Set-Task051OwnerOnlyAcl -Path $markerPath -Directory $false
+        [void](Assert-Task051AtomicDirectoryStage -ParentPath $fullParent -DirectoryPath $stage -DestinationPath $destination -OwnerId $OwnerId -MarkerSchema $MarkerSchema -FailureCode $FailureCode)
+        $stageVerified = $true
+        [IO.Directory]::Move($stage, $destination)
+        $committed = $true
+        $committedEvidence = Assert-Task051AtomicDirectoryStage -ParentPath $fullParent -DirectoryPath $destination -DestinationPath $destination -OwnerId $OwnerId -MarkerSchema $MarkerSchema -FailureCode $FailureCode
+        [IO.File]::Delete([string]$committedEvidence.MarkerPath)
+        if (
+            (Test-Path -LiteralPath ([string]$committedEvidence.MarkerPath)) -or
+            @(Get-ChildItem -LiteralPath $destination -Force).Count -ne 0
+        ) {
+            throw $FailureCode
+        }
+        return $destination
+    }
+    catch {
+        if (-not $committed -and (Test-Path -LiteralPath $stage)) {
+            if (-not $stageVerified) { throw $CleanupFailureCode }
+            try {
+                [void](Assert-Task051AtomicDirectoryStage -ParentPath $fullParent -DirectoryPath $stage -DestinationPath $destination -OwnerId $OwnerId -MarkerSchema $MarkerSchema -FailureCode $CleanupFailureCode)
+                [IO.Directory]::Delete(('\\?\' + $stage), $true)
+                if (Test-Path -LiteralPath $stage) { throw $CleanupFailureCode }
+            }
+            catch { throw $CleanupFailureCode }
+        }
+        throw $FailureCode
+    }
+}
+
 function Initialize-Task051CargoHome {
     param([Parameter(Mandatory = $true)][string]$Destination)
 
@@ -708,6 +832,227 @@ function Get-Task051PublicStatusSemanticField {
     if ([string]$Value.ledger_head_digest -cnotmatch '\A[0-9a-f]{64}\z') { return 'LEDGER_HEAD' }
     if ([string]$Value.result_digest -cnotmatch '\A[0-9a-f]{64}\z') { return 'RESULT_DIGEST' }
     return 'NONE'
+}
+
+function Get-Task051RunSlot {
+    param(
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][ValidateRange(0, 63)][int]$Attempt
+    )
+
+    if ($RunId -cnotmatch '\A[0-9a-f]{32}\z') {
+        throw 'TASK051_RUN_ID_REJECTED'
+    }
+    return (Get-Task051StringSha256 -Value ($RunId + '|' + [string]$Attempt)).Substring(0, 6)
+}
+
+function Get-Task051RunRootMarkerText {
+    param(
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][string]$RunSlot,
+        [Parameter(Mandatory = $true)][ValidateRange(0, 63)][int]$SlotAttempt,
+        [Parameter(Mandatory = $true)][string]$RunRoot
+    )
+
+    return (([ordered]@{
+        schema_version = 'lattice.task051.run-root.v1'
+        run_id = $RunId
+        run_slot = $RunSlot
+        slot_attempt = $SlotAttempt
+        run_root = [IO.Path]::GetFullPath($RunRoot).TrimEnd('\')
+    } | ConvertTo-Json -Compress) + [char]10)
+}
+
+function Assert-Task051RunRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$AllowedRoot,
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][string]$RunSlot,
+        [Parameter(Mandatory = $true)][ValidateRange(0, 63)][int]$SlotAttempt
+    )
+
+    try {
+        $fullAllowedRoot = [IO.Path]::GetFullPath($AllowedRoot).TrimEnd('\')
+        $fullRunRoot = [IO.Path]::GetFullPath($RunRoot).TrimEnd('\')
+        if (
+            $RunId -cnotmatch '\A[0-9a-f]{32}\z' -or
+            $RunSlot -cnotmatch '\A[0-9a-f]{6}\z' -or
+            $RunSlot -cne (Get-Task051RunSlot -RunId $RunId -Attempt $SlotAttempt) -or
+            [IO.Path]::GetDirectoryName($fullRunRoot) -cne $fullAllowedRoot -or
+            [IO.Path]::GetFileName($fullRunRoot) -cne $RunSlot -or
+            -not (Test-Path -LiteralPath $fullRunRoot -PathType Container)
+        ) {
+            throw 'TASK051_RUN_ROOT_MARKER_REJECTED'
+        }
+        return Assert-Task051RunRootMarker -AllowedRoot $fullAllowedRoot -DirectoryPath $fullRunRoot -ExpectedRunRoot $fullRunRoot -RunId $RunId -RunSlot $RunSlot -SlotAttempt $SlotAttempt
+    }
+    catch {
+        throw 'TASK051_RUN_ROOT_MARKER_REJECTED'
+    }
+}
+
+function Assert-Task051RunRootMarker {
+    param(
+        [Parameter(Mandatory = $true)][string]$AllowedRoot,
+        [Parameter(Mandatory = $true)][string]$DirectoryPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedRunRoot,
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][string]$RunSlot,
+        [Parameter(Mandatory = $true)][ValidateRange(0, 63)][int]$SlotAttempt
+    )
+
+    try {
+        $fullAllowedRoot = [IO.Path]::GetFullPath($AllowedRoot).TrimEnd('\')
+        $fullDirectoryPath = [IO.Path]::GetFullPath($DirectoryPath).TrimEnd('\')
+        $fullExpectedRunRoot = [IO.Path]::GetFullPath($ExpectedRunRoot).TrimEnd('\')
+        if (
+            $RunId -cnotmatch '\A[0-9a-f]{32}\z' -or
+            $RunSlot -cnotmatch '\A[0-9a-f]{6}\z' -or
+            $RunSlot -cne (Get-Task051RunSlot -RunId $RunId -Attempt $SlotAttempt) -or
+            [IO.Path]::GetDirectoryName($fullDirectoryPath) -cne $fullAllowedRoot -or
+            [IO.Path]::GetDirectoryName($fullExpectedRunRoot) -cne $fullAllowedRoot -or
+            [IO.Path]::GetFileName($fullExpectedRunRoot) -cne $RunSlot -or
+            -not (Test-Path -LiteralPath $fullDirectoryPath -PathType Container)
+        ) {
+            throw 'TASK051_RUN_ROOT_MARKER_REJECTED'
+        }
+        Assert-Task051NoReparseAncestor -Path $fullDirectoryPath -Boundary $fullAllowedRoot -FailureCode 'TASK051_RUN_ROOT_MARKER_REJECTED'
+        Assert-Task051OwnerOnlyAcl -Path $fullDirectoryPath -Directory $true
+        $markerPath = Join-Path $fullDirectoryPath '.task051-run-root.json'
+        Assert-Task051RegularFile -Path $markerPath -FailureCode 'TASK051_RUN_ROOT_MARKER_REJECTED'
+        Assert-Task051OwnerOnlyAcl -Path $markerPath -Directory $false
+        $markerItem = Get-Item -LiteralPath $markerPath -Force
+        if ($markerItem.Length -lt 2 -or $markerItem.Length -gt 4096) {
+            throw 'TASK051_RUN_ROOT_MARKER_REJECTED'
+        }
+        $markerBytes = [IO.File]::ReadAllBytes($markerPath)
+        if (
+            $markerBytes.Length -ne $markerItem.Length -or
+            ($markerBytes.Length -ge 3 -and $markerBytes[0] -eq 0xEF -and $markerBytes[1] -eq 0xBB -and $markerBytes[2] -eq 0xBF)
+        ) {
+            throw 'TASK051_RUN_ROOT_MARKER_REJECTED'
+        }
+        $markerText = [Text.UTF8Encoding]::new($false, $true).GetString($markerBytes)
+        if (
+            $markerText.Contains([char]0) -or
+            $markerText.Contains([char]13) -or
+            -not $markerText.EndsWith([string][char]10, [StringComparison]::Ordinal) -or
+            $markerText.IndexOf([char]10) -ne ($markerText.Length - 1)
+        ) {
+            throw 'TASK051_RUN_ROOT_MARKER_REJECTED'
+        }
+        $marker = $markerText.Substring(0, $markerText.Length - 1) | ConvertFrom-Json -ErrorAction Stop
+        $keys = @($marker.PSObject.Properties.Name | Sort-Object -CaseSensitive)
+        if (
+            ($keys -join ',') -cne 'run_id,run_root,run_slot,schema_version,slot_attempt' -or
+            -not ($marker.schema_version -is [string]) -or
+            -not ($marker.run_id -is [string]) -or
+            -not ($marker.run_slot -is [string]) -or
+            -not ($marker.slot_attempt -is [int]) -or
+            -not ($marker.run_root -is [string]) -or
+            [string]$marker.schema_version -cne 'lattice.task051.run-root.v1' -or
+            [string]$marker.run_id -cne $RunId -or
+            [string]$marker.run_slot -cne $RunSlot -or
+            [int]$marker.slot_attempt -ne $SlotAttempt -or
+            [string]$marker.run_root -cne $fullExpectedRunRoot
+        ) {
+            throw 'TASK051_RUN_ROOT_MARKER_REJECTED'
+        }
+        $canonicalMarkerText = Get-Task051RunRootMarkerText -RunId $RunId -RunSlot $RunSlot -SlotAttempt $SlotAttempt -RunRoot $fullExpectedRunRoot
+        if (-not [string]::Equals($markerText, $canonicalMarkerText, [StringComparison]::Ordinal)) {
+            throw 'TASK051_RUN_ROOT_MARKER_REJECTED'
+        }
+        return [pscustomobject]@{
+            Path = $fullDirectoryPath
+            MarkerPath = $markerPath
+            MarkerSha256 = Get-Task051StringSha256 -Value $markerText
+        }
+    }
+    catch {
+        throw 'TASK051_RUN_ROOT_MARKER_REJECTED'
+    }
+}
+
+function New-Task051RunRoot {
+    param(
+        [Parameter(Mandatory = $true)][string]$AllowedRoot,
+        [Parameter(Mandatory = $true)][string]$RunId
+    )
+
+    $fullAllowedRoot = [IO.Path]::GetFullPath($AllowedRoot).TrimEnd('\')
+    if ($RunId -cnotmatch '\A[0-9a-f]{32}\z' -or -not (Test-Path -LiteralPath $fullAllowedRoot -PathType Container)) {
+        throw 'TASK051_RUN_ROOT_CREATE_REJECTED'
+    }
+    for ($attempt = 0; $attempt -lt 64; $attempt++) {
+        $slot = Get-Task051RunSlot -RunId $RunId -Attempt $attempt
+        $candidate = [IO.Path]::GetFullPath((Join-Path $fullAllowedRoot $slot))
+        if (Test-Path -LiteralPath $candidate) { continue }
+        $stageName = '.task051-stage-' + $RunId + '-' + ('{0:d2}' -f $attempt) + '-' + [Guid]::NewGuid().ToString('N')
+        $stage = [IO.Path]::GetFullPath((Join-Path $fullAllowedRoot $stageName))
+        if (Test-Path -LiteralPath $stage) { throw 'TASK051_RUN_ROOT_CREATE_REJECTED' }
+        $stageMarkerVerified = $false
+        $candidateCommitted = $false
+        try {
+            New-Task051OwnerOnlyDirectory -Path $stage
+            Assert-Task051NoReparseAncestor -Path $stage -Boundary $fullAllowedRoot -FailureCode 'TASK051_RUN_ROOT_CREATE_REJECTED'
+            $markerPath = Join-Path $stage '.task051-run-root.json'
+            $markerBytes = [Text.UTF8Encoding]::new($false).GetBytes((Get-Task051RunRootMarkerText -RunId $RunId -RunSlot $slot -SlotAttempt $attempt -RunRoot $candidate))
+            $stream = [IO.FileStream]::new($markerPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try {
+                $stream.Write($markerBytes, 0, $markerBytes.Length)
+                $stream.Flush($true)
+            }
+            finally { $stream.Dispose() }
+            Set-Task051OwnerOnlyAcl -Path $markerPath -Directory $false
+            [void](Assert-Task051RunRootMarker -AllowedRoot $fullAllowedRoot -DirectoryPath $stage -ExpectedRunRoot $candidate -RunId $RunId -RunSlot $slot -SlotAttempt $attempt)
+            $stageMarkerVerified = $true
+            try {
+                [IO.Directory]::Move($stage, $candidate)
+                $candidateCommitted = $true
+            }
+            catch {
+                if (Test-Path -LiteralPath $candidate) {
+                    [void](Assert-Task051RunRootMarker -AllowedRoot $fullAllowedRoot -DirectoryPath $stage -ExpectedRunRoot $candidate -RunId $RunId -RunSlot $slot -SlotAttempt $attempt)
+                    [IO.Directory]::Delete(('\\?\' + $stage), $true)
+                    if (Test-Path -LiteralPath $stage) { throw 'TASK051_RUN_ROOT_CREATE_CLEANUP_REJECTED' }
+                    continue
+                }
+                throw
+            }
+            [void](Assert-Task051RunRoot -AllowedRoot $fullAllowedRoot -RunRoot $candidate -RunId $RunId -RunSlot $slot -SlotAttempt $attempt)
+            return [pscustomobject]@{
+                RunId = $RunId
+                RunSlot = $slot
+                SlotAttempt = $attempt
+                RunRoot = $candidate
+                MarkerPath = Join-Path $candidate '.task051-run-root.json'
+            }
+        }
+        catch {
+            if ($candidateCommitted -and (Test-Path -LiteralPath $candidate -PathType Container)) {
+                try {
+                    [void](Assert-Task051RunRoot -AllowedRoot $fullAllowedRoot -RunRoot $candidate -RunId $RunId -RunSlot $slot -SlotAttempt $attempt)
+                    [IO.Directory]::Delete(('\\?\' + $candidate), $true)
+                    if (Test-Path -LiteralPath $candidate) { throw 'TASK051_RUN_ROOT_CREATE_CLEANUP_REJECTED' }
+                }
+                catch { throw 'TASK051_RUN_ROOT_CREATE_CLEANUP_REJECTED' }
+                throw 'TASK051_RUN_ROOT_CREATE_REJECTED'
+            }
+            if ($stageMarkerVerified -and (Test-Path -LiteralPath $stage -PathType Container)) {
+                try {
+                    [void](Assert-Task051RunRootMarker -AllowedRoot $fullAllowedRoot -DirectoryPath $stage -ExpectedRunRoot $candidate -RunId $RunId -RunSlot $slot -SlotAttempt $attempt)
+                    [IO.Directory]::Delete(('\\?\' + $stage), $true)
+                    if (Test-Path -LiteralPath $stage) { throw 'TASK051_RUN_ROOT_CREATE_CLEANUP_REJECTED' }
+                }
+                catch { throw 'TASK051_RUN_ROOT_CREATE_CLEANUP_REJECTED' }
+            }
+            if (Test-Path -LiteralPath $stage) { throw 'TASK051_RUN_ROOT_CREATE_CLEANUP_REJECTED' }
+            if (Test-Path -LiteralPath $candidate) { continue }
+            throw 'TASK051_RUN_ROOT_CREATE_REJECTED'
+        }
+    }
+    throw 'TASK051_RUN_ROOT_SLOT_EXHAUSTED'
 }
 
 function Assert-Task051PublicStatus {
@@ -3067,6 +3412,57 @@ Assert-SamePublicTaskStatus -Expected $task051PostStatus.StructuredContent -Actu
     $Source = Replace-Task051Exact -Source $Source -Old '$fixtureParent = Get-CanonicalPath -Path (Join-Path $repositoryTarget ''lattice-delivery'')' -New '$fixtureParent = Get-CanonicalPath -Path $repositoryTarget' -FailureCode 'TASK051_TASK038_COMPACT_FIXTURE_PARENT_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '$fixtureRoot = Get-CanonicalPath -Path (Join-Path $fixtureParent $acceptanceId)' -New '$fixtureRoot = Get-CanonicalPath -Path (Join-Path $fixtureParent ''d'')' -FailureCode 'TASK051_TASK038_COMPACT_FIXTURE_ROOT_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '$evidenceRoot = Join-Path $fixtureRoot ''evidence''' -New '$evidenceRoot = Join-Path $fixtureRoot ''e''' -FailureCode 'TASK051_TASK038_COMPACT_EVIDENCE_ROOT_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$deliveryRoot = Join-Path $fixtureRoot ''delivery''' -New @'
+$deliveryRootCandidate = [IO.Path]::GetFullPath((Join-Path $repositoryTarget 'x'))
+if (Test-Path -LiteralPath $deliveryRootCandidate) {
+    throw 'TASK038_DELIVERY_ROOT_NOT_FRESH_REJECTED'
+}
+try {
+    $deliveryRootCandidate = New-Task051AtomicOwnerOnlyEmptyDirectory `
+        -ParentPath $repositoryTarget `
+        -LeafName 'x' `
+        -OwnerId $acceptanceId `
+        -MarkerSchema 'lattice.task051.delivery-stage.v1' `
+        -FailureCode 'TASK038_DELIVERY_ROOT_CREATE_REJECTED' `
+        -CleanupFailureCode 'TASK038_DELIVERY_ROOT_CLEANUP_REJECTED'
+}
+catch {
+    if ([string]$_.Exception.Message -ceq 'TASK038_DELIVERY_ROOT_CLEANUP_REJECTED') { throw }
+    throw 'TASK038_DELIVERY_ROOT_CREATE_REJECTED'
+}
+try { $deliveryRoot = Get-CanonicalPath -Path $deliveryRootCandidate }
+catch { throw 'TASK038_DELIVERY_ROOT_CREATE_REJECTED' }
+Assert-NoReparseAncestor -Path $deliveryRoot -Boundary $repositoryTarget -FailureCode 'TASK038_DELIVERY_ROOT_REPARSE_REJECTED'
+try { Assert-Task051OwnerOnlyAcl -Path $deliveryRoot -Directory $true }
+catch { throw 'TASK038_DELIVERY_ROOT_ACL_REJECTED' }
+if (
+    -not (Test-ExactPath -Actual (Split-Path -Parent $deliveryRoot) -Expected $repositoryTarget) -or
+    @(Get-ChildItem -LiteralPath $deliveryRoot -Force).Count -ne 0
+) {
+    throw 'TASK038_DELIVERY_ROOT_REJECTED'
+}
+'@ -FailureCode 'TASK051_TASK038_DELIVERY_ROOT_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$repository = Get-CanonicalPath -Path (Join-Path $deliveryRoot ''repo'')' -New @'
+if ([string]$submitted.task_ref -cnotmatch '\A[0-9a-f]{64}\z') {
+    throw 'TASK038_DELIVERY_TASK_REF_REJECTED'
+}
+try { $taskDeliveryRoot = Get-CanonicalPath -Path (Join-Path $deliveryRoot ('task-' + [string]$submitted.task_ref)) }
+catch { throw 'TASK038_DELIVERY_TASK_ROOT_REJECTED' }
+$deliveryChildren = @(Get-ChildItem -LiteralPath $deliveryRoot -Force)
+if (
+    $deliveryChildren.Count -ne 1 -or
+    -not $deliveryChildren[0].PSIsContainer -or
+    ($deliveryChildren[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+    -not (Test-ExactPath -Actual $deliveryChildren[0].FullName -Expected $taskDeliveryRoot) -or
+    -not (Test-ExactPath -Actual (Split-Path -Parent $taskDeliveryRoot) -Expected $deliveryRoot)
+) {
+    throw 'TASK038_DELIVERY_TASK_ROOT_REJECTED'
+}
+Assert-NoReparseAncestor -Path $taskDeliveryRoot -Boundary $deliveryRoot -FailureCode 'TASK038_DELIVERY_TASK_ROOT_REJECTED'
+try { $repository = Get-CanonicalPath -Path (Join-Path $taskDeliveryRoot 'repo') }
+catch { throw 'TASK038_DELIVERY_REPOSITORY_REJECTED' }
+Assert-NoReparseAncestor -Path $repository -Boundary $taskDeliveryRoot -FailureCode 'TASK038_DELIVERY_REPOSITORY_REJECTED'
+'@ -FailureCode 'TASK051_TASK038_DELIVERY_REPOSITORY_TRANSFORM_REJECTED'
     if (
         $Source.IndexOf('CONTROLLED_CODEX_CANARY_AUTONOMY_V1', [StringComparison]::Ordinal) -lt 0 -or
         $Source.IndexOf('TASK051_AUTONOMY_RECEIPT_REJECTED', [StringComparison]::Ordinal) -ge 0
@@ -3816,6 +4212,65 @@ function Invoke-Task051SelfTest {
             throw 'TASK051_CODEX_PHASE_TOOL_NO_MATERIALIZATION_SELF_TEST_REJECTED'
         }
         Write-Output 'TASK051_CODEX_PHASE_TOOL_NO_MATERIALIZATION_SELF_TEST=PASS'
+        $atomicParent = Join-Path $aclRoot 'atomic-directory'
+        New-Task051OwnerOnlyDirectory -Path $atomicParent
+        $atomicOwnerId = [Guid]::NewGuid().ToString('N')
+        $atomicCollision = Join-Path $atomicParent 'x'
+        New-Task051OwnerOnlyDirectory -Path $atomicCollision
+        $atomicSentinel = Join-Path $atomicCollision 'sentinel.txt'
+        [IO.File]::WriteAllText($atomicSentinel, "task051-atomic-sentinel`n", [Text.UTF8Encoding]::new($false))
+        Set-Task051OwnerOnlyAcl -Path $atomicSentinel -Directory $false
+        $atomicCollisionAcl = ([IO.Directory]::GetAccessControl($atomicCollision)).Sddl
+        $atomicCollisionRejected = $false
+        try {
+            [void](New-Task051AtomicOwnerOnlyEmptyDirectory -ParentPath $atomicParent -LeafName 'x' -OwnerId $atomicOwnerId -MarkerSchema 'lattice.task051.delivery-stage.v1' -FailureCode 'TASK051_ATOMIC_DIRECTORY_SELF_TEST_REJECTED' -CleanupFailureCode 'TASK051_ATOMIC_DIRECTORY_SELF_TEST_CLEANUP_REJECTED')
+        }
+        catch { $atomicCollisionRejected = [string]$_.Exception.Message -ceq 'TASK051_ATOMIC_DIRECTORY_SELF_TEST_REJECTED' }
+        if (
+            -not $atomicCollisionRejected -or
+            -not (Test-Path -LiteralPath $atomicSentinel -PathType Leaf) -or
+            (Get-Task051Sha256 -Path $atomicSentinel) -cne (Get-Task051StringSha256 -Value "task051-atomic-sentinel`n") -or
+            ([IO.Directory]::GetAccessControl($atomicCollision)).Sddl -cne $atomicCollisionAcl
+        ) {
+            throw 'TASK051_ATOMIC_DIRECTORY_SELF_TEST_REJECTED'
+        }
+        [IO.Directory]::Delete($atomicCollision, $true)
+        $atomicJunctionTarget = Join-Path $atomicParent 'junction-target'
+        New-Task051OwnerOnlyDirectory -Path $atomicJunctionTarget
+        $atomicJunctionSentinel = Join-Path $atomicJunctionTarget 'junction-sentinel.txt'
+        [IO.File]::WriteAllText($atomicJunctionSentinel, "task051-junction-sentinel`n", [Text.UTF8Encoding]::new($false))
+        Set-Task051OwnerOnlyAcl -Path $atomicJunctionSentinel -Directory $false
+        $atomicJunctionTargetAcl = ([IO.Directory]::GetAccessControl($atomicJunctionTarget)).Sddl
+        New-Item -ItemType Junction -Path $atomicCollision -Target $atomicJunctionTarget | Out-Null
+        $atomicJunctionRejected = $false
+        try {
+            [void](New-Task051AtomicOwnerOnlyEmptyDirectory -ParentPath $atomicParent -LeafName 'x' -OwnerId $atomicOwnerId -MarkerSchema 'lattice.task051.delivery-stage.v1' -FailureCode 'TASK051_ATOMIC_DIRECTORY_SELF_TEST_REJECTED' -CleanupFailureCode 'TASK051_ATOMIC_DIRECTORY_SELF_TEST_CLEANUP_REJECTED')
+        }
+        catch { $atomicJunctionRejected = [string]$_.Exception.Message -ceq 'TASK051_ATOMIC_DIRECTORY_SELF_TEST_REJECTED' }
+        $atomicJunctionItem = Get-Item -LiteralPath $atomicCollision -Force
+        if (
+            -not $atomicJunctionRejected -or
+            ($atomicJunctionItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -or
+            -not (Test-Path -LiteralPath $atomicJunctionSentinel -PathType Leaf) -or
+            (Get-Task051Sha256 -Path $atomicJunctionSentinel) -cne (Get-Task051StringSha256 -Value "task051-junction-sentinel`n") -or
+            ([IO.Directory]::GetAccessControl($atomicJunctionTarget)).Sddl -cne $atomicJunctionTargetAcl
+        ) {
+            throw 'TASK051_ATOMIC_DIRECTORY_SELF_TEST_REJECTED'
+        }
+        [IO.Directory]::Delete($atomicCollision, $false)
+        [IO.Directory]::Delete($atomicJunctionTarget, $true)
+        $atomicPublished = New-Task051AtomicOwnerOnlyEmptyDirectory -ParentPath $atomicParent -LeafName 'x' -OwnerId $atomicOwnerId -MarkerSchema 'lattice.task051.delivery-stage.v1' -FailureCode 'TASK051_ATOMIC_DIRECTORY_SELF_TEST_REJECTED' -CleanupFailureCode 'TASK051_ATOMIC_DIRECTORY_SELF_TEST_CLEANUP_REJECTED'
+        if (
+            [string]$atomicPublished -cne [IO.Path]::GetFullPath($atomicCollision) -or
+            @(Get-ChildItem -LiteralPath $atomicPublished -Force).Count -ne 0
+        ) {
+            throw 'TASK051_ATOMIC_DIRECTORY_SELF_TEST_REJECTED'
+        }
+        Assert-Task051OwnerOnlyAcl -Path $atomicPublished -Directory $true
+        Assert-Task051NoReparseAncestor -Path $atomicPublished -Boundary $atomicParent -FailureCode 'TASK051_ATOMIC_DIRECTORY_SELF_TEST_REJECTED'
+        [IO.Directory]::Delete($atomicPublished, $false)
+        [IO.Directory]::Delete($atomicParent, $false)
+        Write-Output 'TASK051_ATOMIC_DIRECTORY_SELF_TEST=PASS'
         $eventSummaryPath = Join-Path $aclRoot 'task051-status-pre-restart-codex-event-summary.json'
         [IO.File]::WriteAllText($eventSummaryPath, $eventSummaryJson + [char]10, [Text.UTF8Encoding]::new($false))
         Set-Task051OwnerOnlyAcl -Path $eventSummaryPath -Directory $false
@@ -4541,7 +4996,6 @@ function Invoke-Task051SelfTest {
         [regex]::Matches($task038, [regex]::Escape("-Expected (Join-Path `$script:Task051PhysicalPostgresRoot 'postgres.log')")).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('$captureRoot = Get-CanonicalPath -Path (Split-Path -Parent $DataDirectory)')).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape('$captureRoot = Get-CanonicalPath -Path $script:Task051PhysicalPostgresRoot')).Count -ne 1 -or
-        [regex]::Matches($task038, [regex]::Escape('-ParentPath $repositoryTarget')).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape('-ParentPath $script:Task051PhysicalPostgresParent')).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('$task051PhysicalOutputDirectory = Get-CanonicalPath -Path $OutputDirectory')).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('$canonicalOutputDirectory = Get-CanonicalPath -Path (Split-Path -Parent $script:PostgresData)')).Count -ne 1 -or
@@ -4564,6 +5018,15 @@ function Invoke-Task051SelfTest {
         [regex]::Matches($task038, [regex]::Escape('Join-Path $fixtureParent $acceptanceId')).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape("`$fixtureRoot = Get-CanonicalPath -Path (Join-Path `$fixtureParent 'd')")).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape("`$evidenceRoot = Join-Path `$fixtureRoot 'e'")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("`$deliveryRootCandidate = [IO.Path]::GetFullPath((Join-Path `$repositoryTarget 'x'))")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('New-Task051OwnerOnlyDirectory -Path $deliveryRootCandidate')).Count -ne 0 -or
+        [regex]::Matches($task038, [regex]::Escape('New-Task051AtomicOwnerOnlyEmptyDirectory')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("-MarkerSchema 'lattice.task051.delivery-stage.v1'")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("-CleanupFailureCode 'TASK038_DELIVERY_ROOT_CLEANUP_REJECTED'")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("`$deliveryRoot = Join-Path `$fixtureRoot 'delivery'")).Count -ne 0 -or
+        [regex]::Matches($task038, [regex]::Escape("`$taskDeliveryRoot = Get-CanonicalPath -Path (Join-Path `$deliveryRoot ('task-' + [string]`$submitted.task_ref))")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("`$repository = Get-CanonicalPath -Path (Join-Path `$taskDeliveryRoot 'repo')")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("Join-Path `$deliveryRoot 'repo'")).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape('LATTICE_TASK051_RUN_ALIAS_ROOT ''task038-execution-homes''')).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape('TASK038_CODEX_EXECUTION_PARENT_NATIVE_LINK_REJECTED')).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape("`$task051LongPathRoot = '\\?\' + `$canonicalRoot")).Count -ne 1 -or
@@ -4573,9 +5036,88 @@ function Invoke-Task051SelfTest {
     ) {
         throw 'TASK051_TASK038_POSTGRES_DATA_ALIAS_SELF_TEST_REJECTED'
     }
-    $compactRunRoot = Join-Path $repositoryRoot ('target\task051-p0-platform-live-acceptance\' + [Guid]::NewGuid().ToString('N'))
-    New-Task051OwnerOnlyDirectory -Path $compactRunRoot | Out-Null
+    $compactAllowedRoot = Join-Path $repositoryRoot 'target\task051-p0-platform-live-acceptance'
+    do {
+        $compactLogicalRunId = [Guid]::NewGuid().ToString('N')
+        $compactCollisionSlot = Get-Task051RunSlot -RunId $compactLogicalRunId -Attempt 0
+        $compactExpectedSlot = Get-Task051RunSlot -RunId $compactLogicalRunId -Attempt 1
+        $compactCollisionRoot = Join-Path $compactAllowedRoot $compactCollisionSlot
+        $compactExpectedRoot = Join-Path $compactAllowedRoot $compactExpectedSlot
+    } while ((Test-Path -LiteralPath $compactCollisionRoot) -or (Test-Path -LiteralPath $compactExpectedRoot))
+    New-Task051OwnerOnlyDirectory -Path $compactCollisionRoot
+    $compactCollisionSentinel = Join-Path $compactCollisionRoot 'sentinel.txt'
+    [IO.File]::WriteAllText($compactCollisionSentinel, "task051-run-slot-collision`n", [Text.UTF8Encoding]::new($false))
+    Set-Task051OwnerOnlyAcl -Path $compactCollisionSentinel -Directory $false
+    $compactCollisionAcl = ([IO.Directory]::GetAccessControl($compactCollisionRoot)).Sddl
+    $compactAllocation = $null
     try {
+        $compactAllocation = New-Task051RunRoot -AllowedRoot $compactAllowedRoot -RunId $compactLogicalRunId
+        $compactRunRoot = [string]$compactAllocation.RunRoot
+        if (
+            [string]$compactAllocation.RunSlot -cne $compactExpectedSlot -or
+            [int]$compactAllocation.SlotAttempt -ne 1 -or
+            [IO.Path]::GetFileName($compactRunRoot) -cne $compactExpectedSlot -or
+            [IO.Path]::GetFileName($compactRunRoot).Length -ne 6 -or
+            [string]$compactAllocation.MarkerPath -cne (Join-Path $compactRunRoot '.task051-run-root.json') -or
+            -not (Test-Path -LiteralPath ([string]$compactAllocation.MarkerPath) -PathType Leaf)
+        ) {
+            throw 'TASK051_COMPACT_RUN_ROOT_SELF_TEST_REJECTED'
+        }
+        if (
+            -not (Test-Path -LiteralPath $compactCollisionSentinel -PathType Leaf) -or
+            (Get-Task051Sha256 -Path $compactCollisionSentinel) -cne (Get-Task051StringSha256 -Value "task051-run-slot-collision`n") -or
+            ([IO.Directory]::GetAccessControl($compactCollisionRoot)).Sddl -cne $compactCollisionAcl
+        ) {
+            throw 'TASK051_COMPACT_RUN_ROOT_SELF_TEST_REJECTED'
+        }
+        $compactRunEvidence = Assert-Task051RunRoot -AllowedRoot $compactAllowedRoot -RunRoot $compactRunRoot -RunId $compactLogicalRunId -RunSlot $compactExpectedSlot -SlotAttempt 1
+        if ([string]$compactRunEvidence.MarkerSha256 -cnotmatch '\A[0-9a-f]{64}\z') {
+            throw 'TASK051_COMPACT_RUN_ROOT_SELF_TEST_REJECTED'
+        }
+        $compactMarkerPath = [string]$compactRunEvidence.MarkerPath
+        $compactCanonicalMarkerBytes = [IO.File]::ReadAllBytes($compactMarkerPath)
+        $compactCanonicalMarkerText = [Text.UTF8Encoding]::new($false, $true).GetString($compactCanonicalMarkerBytes)
+        $compactWrongMarkerRunId = if ($compactLogicalRunId -cne ('f' * 32)) { 'f' * 32 } else { 'e' * 32 }
+        $compactMarkerMutationBytes = [Collections.Generic.List[byte[]]]::new()
+        $compactUtf8 = [Text.UTF8Encoding]::new($false)
+        [void]$compactMarkerMutationBytes.Add($compactUtf8.GetBytes($compactCanonicalMarkerText.Substring(0, $compactCanonicalMarkerText.Length - 1) + "`r`n"))
+        [void]$compactMarkerMutationBytes.Add($compactUtf8.GetBytes($compactCanonicalMarkerText.Replace(
+            ('"run_id":"' + $compactLogicalRunId + '"'),
+            ('"run_id":"' + $compactWrongMarkerRunId + '","run_id":"' + $compactLogicalRunId + '"')
+        )))
+        [void]$compactMarkerMutationBytes.Add($compactUtf8.GetBytes($compactCanonicalMarkerText.Replace('"slot_attempt":1', '"slot_attempt":"1"')))
+        [void]$compactMarkerMutationBytes.Add($compactUtf8.GetBytes($compactCanonicalMarkerText.Replace(
+            ('"run_id":"' + $compactLogicalRunId + '"'),
+            ('"run_id":"' + $compactWrongMarkerRunId + '"')
+        )))
+        $compactBomMarkerBytes = [byte[]]::new($compactCanonicalMarkerBytes.Length + 3)
+        $compactBomMarkerBytes[0] = 0xEF
+        $compactBomMarkerBytes[1] = 0xBB
+        $compactBomMarkerBytes[2] = 0xBF
+        [Array]::Copy($compactCanonicalMarkerBytes, 0, $compactBomMarkerBytes, 3, $compactCanonicalMarkerBytes.Length)
+        [void]$compactMarkerMutationBytes.Add($compactBomMarkerBytes)
+        try {
+            foreach ($compactMarkerMutation in $compactMarkerMutationBytes) {
+                [IO.File]::WriteAllBytes($compactMarkerPath, $compactMarkerMutation)
+                $compactMarkerMutationRejected = $false
+                try {
+                    [void](Assert-Task051RunRoot -AllowedRoot $compactAllowedRoot -RunRoot $compactRunRoot -RunId $compactLogicalRunId -RunSlot $compactExpectedSlot -SlotAttempt 1)
+                }
+                catch { $compactMarkerMutationRejected = [string]$_.Exception.Message -ceq 'TASK051_RUN_ROOT_MARKER_REJECTED' }
+                if (-not $compactMarkerMutationRejected) { throw 'TASK051_COMPACT_RUN_ROOT_SELF_TEST_REJECTED' }
+            }
+        }
+        finally {
+            [IO.File]::WriteAllBytes($compactMarkerPath, $compactCanonicalMarkerBytes)
+            Set-Task051OwnerOnlyAcl -Path $compactMarkerPath -Directory $false
+        }
+        [void](Assert-Task051RunRoot -AllowedRoot $compactAllowedRoot -RunRoot $compactRunRoot -RunId $compactLogicalRunId -RunSlot $compactExpectedSlot -SlotAttempt 1)
+        $wrongRunIdRejected = $false
+        try {
+            [void](Assert-Task051RunRoot -AllowedRoot $compactAllowedRoot -RunRoot $compactRunRoot -RunId ('f' * 32) -RunSlot $compactExpectedSlot -SlotAttempt 1)
+        }
+        catch { $wrongRunIdRejected = [string]$_.Exception.Message -ceq 'TASK051_RUN_ROOT_MARKER_REJECTED' }
+        if (-not $wrongRunIdRejected) { throw 'TASK051_COMPACT_RUN_ROOT_SELF_TEST_REJECTED' }
         $compactEvidencePath = Join-Path $compactRunRoot ('d\e\mcp-dispatch\mcp-observed-effects\' + ('a' * 32) + '.jsonl')
         if ($compactEvidencePath.Length -ge 260) {
             throw 'TASK051_TASK038_COMPACT_EVIDENCE_PATH_BUDGET_REJECTED'
@@ -4593,13 +5135,20 @@ function Invoke-Task051SelfTest {
         }
     }
     finally {
-        if (Test-Path -LiteralPath $compactRunRoot -PathType Container) {
-            [IO.Directory]::Delete(('\\?\' + $compactRunRoot), $true)
+        if ($null -ne $compactAllocation -and (Test-Path -LiteralPath ([string]$compactAllocation.RunRoot) -PathType Container)) {
+            [IO.Directory]::Delete(('\\?\' + [string]$compactAllocation.RunRoot), $true)
         }
-        if (Test-Path -LiteralPath $compactRunRoot) {
+        if (Test-Path -LiteralPath $compactCollisionRoot -PathType Container) {
+            [IO.Directory]::Delete(('\\?\' + $compactCollisionRoot), $true)
+        }
+        if (
+            ($null -ne $compactAllocation -and (Test-Path -LiteralPath ([string]$compactAllocation.RunRoot))) -or
+            (Test-Path -LiteralPath $compactCollisionRoot)
+        ) {
             throw 'TASK051_TASK038_COMPACT_EVIDENCE_CLEANUP_REJECTED'
         }
     }
+    Write-Output 'TASK051_COMPACT_RUN_ROOT_SELF_TEST=PASS'
     foreach ($holderDiagnostic in @(
         'TASK038_POSTGRES_HOLDER_PREFIX_REJECTED',
         'TASK038_POSTGRES_HOLDER_CHAIN_REJECTED',
@@ -4689,12 +5238,6 @@ if (-not (Test-Path -LiteralPath $allowedRoot -PathType Container)) {
     [IO.Directory]::CreateDirectory($allowedRoot) | Out-Null
 }
 Assert-Task051NoReparseAncestor -Path $allowedRoot -Boundary $repositoryRoot -FailureCode 'TASK051_ALLOWED_ROOT_REPARSE_REJECTED'
-$runId = [Guid]::NewGuid().ToString('N')
-$runRoot = [IO.Path]::GetFullPath((Join-Path $allowedRoot $runId))
-if (Test-Path -LiteralPath $runRoot) { throw 'TASK051_RUN_ROOT_NOT_FRESH' }
-Assert-Task051NoReparseAncestor -Path $runRoot -Boundary $repositoryRoot -FailureCode 'TASK051_RUN_ROOT_REPARSE_REJECTED'
-New-Task051OwnerOnlyDirectory -Path $runRoot
-Assert-Task051NoReparseAncestor -Path $runRoot -Boundary $repositoryRoot -FailureCode 'TASK051_RUN_ROOT_REPARSE_REJECTED'
 $originalConfig = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.codex\config.toml'))
 $authSource = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.codex\auth.json'))
 Assert-Task051RegularFile -Path $originalConfig -FailureCode 'TASK051_ORIGINAL_CONFIG_REJECTED'
@@ -4722,6 +5265,13 @@ $workspaceRoot = [IO.Path]::GetFullPath((Split-Path -Parent $repositoryRoot))
 $officialCodexSourceTarget = [IO.Path]::GetFullPath((Join-Path $workspaceRoot 'chatgpt-mcp\target'))
 $officialCodex = $null
 $officialCodexSha256 = 'bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb'
+$postgresProcessBaseline = @(Get-Task051PostgresProcessSnapshot)
+$runId = [Guid]::NewGuid().ToString('N')
+$runAllocation = New-Task051RunRoot -AllowedRoot $allowedRoot -RunId $runId
+$runSlot = [string]$runAllocation.RunSlot
+$runSlotAttempt = [int]$runAllocation.SlotAttempt
+$runRoot = [string]$runAllocation.RunRoot
+$runRootMarkerPath = [string]$runAllocation.MarkerPath
 $privateOfficialCodexBundleTarget = Join-Path $runRoot 'official-bundle-target'
 $credentialSource = Join-Path $runRoot 'credential-source'
 $generatedTask038 = Join-Path $runRoot 'run-task038-task-submit.generated.ps1'
@@ -4750,7 +5300,6 @@ $primaryFailure = $null
 $harnessOutput = @()
 $runAlias = $null
 $externalResourcesMayExist = $false
-$postgresProcessBaseline = @(Get-Task051PostgresProcessSnapshot)
 try {
     $runAlias = New-Task051RunRootAlias -RunRoot $runRoot
     $privateOfficialCodexBundleTargetAlias = Join-Path $runAlias.Root 'official-bundle-target'
@@ -4894,10 +5443,16 @@ foreach ($marker in $requiredMarkers) {
         throw ('TASK051_INNER_MARKER_REJECTED|' + $marker)
     }
 }
+$runRootEvidence = Assert-Task051RunRoot -AllowedRoot $allowedRoot -RunRoot $runRoot -RunId $runId -RunSlot $runSlot -SlotAttempt $runSlotAttempt
 $final = [ordered]@{
-    schema_version = 'lattice.task051.p0-platform-live-acceptance.v1'
+    schema_version = 'lattice.task051.p0-platform-live-acceptance.v2'
     status = 'VERIFIED'
     run_id = $runId
+    run_slot = $runSlot
+    run_slot_attempt = $runSlotAttempt
+    run_root = $runRoot
+    run_root_marker_path = [string]$runRootEvidence.MarkerPath
+    run_root_marker_sha256 = [string]$runRootEvidence.MarkerSha256
     source_branch = $branch
     source_commit = $head
     source_tree = $tree

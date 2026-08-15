@@ -36,7 +36,6 @@ $requiredFragments = @(
     'task051-p0-platform-live-acceptance',
     'Assert-Task051NoReparseAncestor',
     'TASK051_ALLOWED_ROOT_REPARSE_REJECTED',
-    'TASK051_RUN_ROOT_REPARSE_REJECTED',
     'TASK050_FULLY_VERIFIED',
     '8e5ba40d38b781afff7028841bd981c8dd2b9721',
     'mcpServerStatus/list',
@@ -53,6 +52,18 @@ $requiredFragments = @(
     'Invoke-Task051CodexTool',
     'lattice.task.status.v1',
     'New-Task051OwnerOnlyDirectory',
+    'New-Task051AtomicOwnerOnlyEmptyDirectory',
+    'Assert-Task051AtomicDirectoryStage',
+    'Get-Task051RunSlot',
+    'Get-Task051RunRootMarkerText',
+    'New-Task051RunRoot',
+    'Assert-Task051RunRoot',
+    'Assert-Task051RunRootMarker',
+    'lattice.task051.run-root.v1',
+    'TASK051_RUN_ROOT_MARKER_REJECTED',
+    'TASK051_RUN_ROOT_SLOT_EXHAUSTED',
+    'TASK051_ATOMIC_DIRECTORY_SELF_TEST=PASS',
+    'TASK051_COMPACT_RUN_ROOT_SELF_TEST=PASS',
     'Start-Task038SuspendedProcess',
     'Add-Task038ProcessToJob',
     'Stop-Task038Job',
@@ -84,6 +95,14 @@ $requiredFragments = @(
     'TASK051_CARGO_HOME_CLEANUP_REJECTED',
     'CARGO_TARGET_DIR',
     'TASK051_TASK038_CARGO_HOST_REJECTED',
+    'TASK051_TASK038_DELIVERY_ROOT_TRANSFORM_REJECTED',
+    'TASK051_TASK038_DELIVERY_REPOSITORY_TRANSFORM_REJECTED',
+    'TASK038_DELIVERY_ROOT_NOT_FRESH_REJECTED',
+    'TASK038_DELIVERY_ROOT_CREATE_REJECTED',
+    'TASK038_DELIVERY_ROOT_ACL_REJECTED',
+    'TASK038_DELIVERY_TASK_REF_REJECTED',
+    'TASK038_DELIVERY_TASK_ROOT_REJECTED',
+    'TASK038_DELIVERY_REPOSITORY_REJECTED',
     'TASK051_CARGO_LINK_PATH_BUDGET_REJECTED',
     'TASK051_TASK038_HOLDER_EVENT_SEQUENCE_TRANSFORM_REJECTED',
     'TASK076_WRITER_V2_VERIFIED',
@@ -187,6 +206,7 @@ $requiredFragments = @(
     'authority.ExitFileTimeUtc = checked((Int64)exitValue);',
     'if (waitResult != WaitTimeout && waitResult != WaitObject0)',
     'lattice.task051.current-codex-tool-call.v2',
+    'lattice.task051.p0-platform-live-acceptance.v2',
     'lattice.task051.codex-result-meta-commitment.v1',
     'function Get-Task051CodexResultMetaCommitment',
     'TASK051_CODEX_TOOL_RESULT_META_OPTIONAL_SELF_TEST_REJECTED',
@@ -963,6 +983,19 @@ if ($mainStart -lt 0) { throw 'TASK051_OFFICIAL_CODEX_BUNDLE_CLEANUP_SHAPE_REJEC
 $mainEnd = $runnerSource.IndexOf('if ((Get-Task051Sha256 -Path $originalConfig)', $mainStart, [StringComparison]::Ordinal)
 if ($mainEnd -le $mainStart) { throw 'TASK051_OFFICIAL_CODEX_BUNDLE_CLEANUP_SHAPE_REJECTED' }
 $mainSource = $runnerSource.Substring($mainStart, $mainEnd - $mainStart)
+$mainPreludeStart = $runnerSource.IndexOf('if ($LibraryOnly) { return }', [StringComparison]::Ordinal)
+if ($mainPreludeStart -lt 0 -or $mainPreludeStart -ge $mainStart) { throw 'TASK051_RUN_ROOT_PRETRY_SHAPE_REJECTED' }
+$mainPreludeSource = $runnerSource.Substring($mainPreludeStart, $mainStart - $mainPreludeStart)
+$baselineBeforeAllocation = $mainPreludeSource.IndexOf('$postgresProcessBaseline = @(Get-Task051PostgresProcessSnapshot)', [StringComparison]::Ordinal)
+$runAllocationAfterBaseline = $mainPreludeSource.IndexOf('$runAllocation = New-Task051RunRoot -AllowedRoot $allowedRoot -RunId $runId', [StringComparison]::Ordinal)
+if (
+    $baselineBeforeAllocation -lt 0 -or
+    $runAllocationAfterBaseline -le $baselineBeforeAllocation -or
+    [regex]::Matches($mainPreludeSource, [regex]::Escape('$postgresProcessBaseline = @(Get-Task051PostgresProcessSnapshot)')).Count -ne 1 -or
+    [regex]::Matches($mainPreludeSource, [regex]::Escape('Assert-Task051NoReparseAncestor -Path $runRoot')).Count -ne 0
+) {
+    throw 'TASK051_RUN_ROOT_PRETRY_SHAPE_REJECTED'
+}
 $resourcesArmed = $mainSource.IndexOf('$externalResourcesMayExist = $true', [StringComparison]::Ordinal)
 $harnessInvocation = $mainSource.IndexOf('$harnessOutput = @(& $generatedTask019', [StringComparison]::Ordinal)
 $aliasReleaseSafe = $mainSource.IndexOf('$externalResourcesMayExist -and', [StringComparison]::Ordinal)
@@ -985,6 +1018,59 @@ if (
     throw 'TASK051_OFFICIAL_CODEX_BUNDLE_CLEANUP_SHAPE_REJECTED'
 }
 
+$runRootFunctionStart = $runnerSource.IndexOf('function Get-Task051RunSlot {', [StringComparison]::Ordinal)
+$runRootFunctionEnd = $runnerSource.IndexOf('function Assert-Task051PublicStatus {', $runRootFunctionStart, [StringComparison]::Ordinal)
+$atomicDirectoryFunctionStart = $runnerSource.IndexOf('function Assert-Task051AtomicDirectoryStage {', [StringComparison]::Ordinal)
+$atomicDirectoryFunctionEnd = $runnerSource.IndexOf('function Initialize-Task051CargoHome {', $atomicDirectoryFunctionStart, [StringComparison]::Ordinal)
+$task038TransformStart = $runnerSource.IndexOf('function Convert-Task051Task038Source {', [StringComparison]::Ordinal)
+$task038TransformEnd = $runnerSource.IndexOf('function Convert-Task051Task019Source {', $task038TransformStart, [StringComparison]::Ordinal)
+if (
+    $runRootFunctionStart -lt 0 -or
+    $runRootFunctionEnd -le $runRootFunctionStart -or
+    $atomicDirectoryFunctionStart -lt 0 -or
+    $atomicDirectoryFunctionEnd -le $atomicDirectoryFunctionStart -or
+    $task038TransformStart -lt 0 -or
+    $task038TransformEnd -le $task038TransformStart
+) {
+    throw 'TASK051_COMPACT_DELIVERY_SHAPE_REJECTED'
+}
+$runRootFunctionSource = $runnerSource.Substring($runRootFunctionStart, $runRootFunctionEnd - $runRootFunctionStart)
+$atomicDirectoryFunctionSource = $runnerSource.Substring($atomicDirectoryFunctionStart, $atomicDirectoryFunctionEnd - $atomicDirectoryFunctionStart)
+$task038TransformSource = $runnerSource.Substring($task038TransformStart, $task038TransformEnd - $task038TransformStart)
+if (
+    [regex]::Matches($runRootFunctionSource, [regex]::Escape(".Substring(0, 6)")).Count -ne 1 -or
+    [regex]::Matches($runRootFunctionSource, [regex]::Escape("schema_version = 'lattice.task051.run-root.v1'")).Count -ne 1 -or
+    [regex]::Matches($runRootFunctionSource, [regex]::Escape('for ($attempt = 0; $attempt -lt 64; $attempt++)')).Count -ne 1 -or
+    [regex]::Matches($runRootFunctionSource, [regex]::Escape("`$stageName = '.task051-stage-' + `$RunId + '-' + ('{0:d2}' -f `$attempt) + '-' + [Guid]::NewGuid().ToString('N')")).Count -ne 1 -or
+    [regex]::Matches($runRootFunctionSource, [regex]::Escape('New-Task051OwnerOnlyDirectory -Path $stage')).Count -ne 1 -or
+    [regex]::Matches($runRootFunctionSource, [regex]::Escape('New-Task051OwnerOnlyDirectory -Path $candidate')).Count -ne 0 -or
+    [regex]::Matches($runRootFunctionSource, [regex]::Escape('[IO.Directory]::Move($stage, $candidate)')).Count -ne 1 -or
+    [regex]::Matches($runRootFunctionSource, [regex]::Escape('$candidateCommitted = $true')).Count -ne 1 -or
+    [regex]::Matches($runRootFunctionSource, [regex]::Escape('if ($candidateCommitted -and (Test-Path -LiteralPath $candidate -PathType Container))')).Count -ne 1 -or
+    [regex]::Matches($runRootFunctionSource, [regex]::Escape('[string]::Equals($markerText, $canonicalMarkerText, [StringComparison]::Ordinal')).Count -ne 1 -or
+    [regex]::Matches($runRootFunctionSource, [regex]::Escape("MarkerPath = Join-Path `$candidate '.task051-run-root.json'")).Count -ne 1 -or
+    [regex]::Matches($atomicDirectoryFunctionSource, [regex]::Escape('[IO.Directory]::Move($stage, $destination)')).Count -ne 1 -or
+    [regex]::Matches($atomicDirectoryFunctionSource, [regex]::Escape("'.a-' + [Guid]::NewGuid().ToString('N')")).Count -ne 1 -or
+    [regex]::Matches($atomicDirectoryFunctionSource, [regex]::Escape("`$markerPath = Join-Path `$fullDirectory '.a'")).Count -ne 1 -or
+    [regex]::Matches($atomicDirectoryFunctionSource, [regex]::Escape("`$markerPath = Join-Path `$stage '.a'")).Count -ne 1 -or
+    [regex]::Matches($atomicDirectoryFunctionSource, [regex]::Escape("[IO.Directory]::Delete(('\\?\' + `$destination)")).Count -ne 0 -or
+    [regex]::Matches($atomicDirectoryFunctionSource, [regex]::Escape('Assert-Task051AtomicDirectoryStage -ParentPath $fullParent -DirectoryPath $stage')).Count -ne 2 -or
+    [regex]::Matches($runnerSource, [regex]::Escape('$compactMarkerMutationBytes.Add($compactUtf8.GetBytes($compactCanonicalMarkerText.Replace(')).Count -ne 3 -or
+    [regex]::Matches($task038TransformSource, [regex]::Escape("Join-Path `$repositoryTarget 'x'")).Count -ne 1 -or
+    [regex]::Matches($task038TransformSource, [regex]::Escape('New-Task051OwnerOnlyDirectory -Path $deliveryRootCandidate')).Count -ne 0 -or
+    [regex]::Matches($task038TransformSource, [regex]::Escape('New-Task051AtomicOwnerOnlyEmptyDirectory')).Count -ne 1 -or
+    [regex]::Matches($task038TransformSource, [regex]::Escape("-MarkerSchema 'lattice.task051.delivery-stage.v1'")).Count -ne 1 -or
+    [regex]::Matches($task038TransformSource, [regex]::Escape("-CleanupFailureCode 'TASK038_DELIVERY_ROOT_CLEANUP_REJECTED'")).Count -ne 1 -or
+    [regex]::Matches($task038TransformSource, [regex]::Escape("Join-Path `$deliveryRoot ('task-' + [string]`$submitted.task_ref)")).Count -ne 1 -or
+    [regex]::Matches($task038TransformSource, [regex]::Escape("Join-Path `$taskDeliveryRoot 'repo'")).Count -ne 1 -or
+    [regex]::Matches($task038TransformSource, [regex]::Escape("Join-Path `$deliveryRoot 'repo'")).Count -ne 0 -or
+    [regex]::Matches($runnerSource, [regex]::Escape('$runAllocation = New-Task051RunRoot -AllowedRoot $allowedRoot -RunId $runId')).Count -ne 1 -or
+    [regex]::Matches($runnerSource, [regex]::Escape("schema_version = 'lattice.task051.p0-platform-live-acceptance.v2'")).Count -ne 1 -or
+    [regex]::Matches($runnerSource, [regex]::Escape('$runRoot = [IO.Path]::GetFullPath((Join-Path $allowedRoot $runId))')).Count -ne 0
+) {
+    throw 'TASK051_COMPACT_DELIVERY_SHAPE_REJECTED'
+}
+
 $forbiddenFragments = @(
     '[IO.File]::WriteAllBytes($originalConfig',
     '[IO.File]::WriteAllText($originalConfig',
@@ -996,7 +1082,8 @@ $forbiddenFragments = @(
     'git clean',
     'git reset --hard',
     'GetExitCodeProcess',
-    'task038-official-codex\0.146.0\codex.exe'
+    'task038-official-codex\0.146.0\codex.exe',
+    "`$deliveryRoot = Join-Path `$fixtureRoot 'delivery'"
 )
 foreach ($fragment in $forbiddenFragments) {
     if ($runnerSource.IndexOf($fragment, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
@@ -1023,8 +1110,10 @@ $expectedSelfTestMarkers = @(
     'TASK051_CODEX_TOOL_FIELD_DIAGNOSTIC_SELF_TEST=PASS',
     'TASK051_CODEX_TOOL_RESULT_META_EVIDENCE_SELF_TEST=PASS',
     'TASK051_CODEX_PHASE_TOOL_NO_MATERIALIZATION_SELF_TEST=PASS',
+    'TASK051_ATOMIC_DIRECTORY_SELF_TEST=PASS',
     'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST=PASS',
     'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST=PASS',
+    'TASK051_COMPACT_RUN_ROOT_SELF_TEST=PASS',
     'TASK051_OWNER_ONLY_CREDENTIAL_SELF_TEST=PASS',
     'TASK051_PROCESS_CONTAINMENT_SELF_TEST=PASS',
     'TASK051_RUNNER_SELF_TEST=PASS'

@@ -77,7 +77,9 @@ Repository writes are limited to the frontmatter `allowed_paths`. Product source
 
 The authorized implementation uses a run-owned isolated `CODEX_HOME` and process-local `[mcp_servers.lattice]` registration under the ticket evidence root. `C:\Users\f7212\.codex\config.toml` must not be written. Capture its pre-run hash and require the same byte hash after cleanup. Any attempted persistent registration change is `FAIL`.
 
-All disposable PostgreSQL data, isolated homes, local canary repository, logs, and receipts must live under `target/task051-p0-platform-live-acceptance/<run_id>/`. No other filesystem root is writable under this ticket.
+All disposable PostgreSQL data, isolated homes, local canary repository, logs, and receipts must live under `target/task051-p0-platform-live-acceptance/<run_slot>/`. The logical `run_id` remains a fresh 32-hex identifier. The physical `run_slot` is a separately recorded 6-hex value deterministically derived from `SHA-256("<run_id>|<slot_attempt>")`; the runner first creates a nonce-qualified owner-only staging directory with a byte-canonical `lattice.task051.run-root.v1` marker, then atomically renames it into the slot. Collisions are skipped without changing or deleting the existing slot, and only a staging directory whose exact marker has been reverified may be removed. No other filesystem root is writable under this ticket.
+
+The controlled delivery parent is the fresh owner-only direct child `<run_root>/x`, published by the same nonce-stage plus canonical-marker atomic-rename discipline so an existing directory or junction is never modified. After submit succeeds, the repository is resolved only from the exact returned task reference as `<run_root>/x/task-<task_ref>/repo`; the legacy `<delivery_root>/repo` spelling is forbidden.
 
 ## Acceptance procedure and evidence
 
