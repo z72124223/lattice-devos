@@ -1129,7 +1129,26 @@ function Read-Task051McpSessionOpen {
             throw $failureCode
         }
         if ($DetailedFailure) { $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_READ_REJECTED' }
-        $bytes = [IO.File]::ReadAllBytes($canonicalPath)
+        $readStream = $null
+        try {
+            $share = [IO.FileShare]([int][IO.FileShare]::ReadWrite -bor [int][IO.FileShare]::Delete)
+            $readStream = [IO.FileStream]::new($canonicalPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+            $buffer = [byte[]]::new(65537)
+            $byteCount = 0
+            while ($byteCount -lt $buffer.Length) {
+                $readCount = $readStream.Read($buffer, $byteCount, $buffer.Length - $byteCount)
+                if ($readCount -eq 0) { break }
+                $byteCount += $readCount
+            }
+            if ($byteCount -lt $buffer.Length -and $readStream.Length -ne $byteCount) {
+                throw $failureCode
+            }
+            $bytes = [byte[]]::new($byteCount)
+            if ($byteCount -gt 0) { [Array]::Copy($buffer, $bytes, $byteCount) }
+        }
+        finally {
+            if ($null -ne $readStream) { $readStream.Dispose() }
+        }
         if ($DetailedFailure) { $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_FRAMING_REJECTED' }
         if (
             $bytes.Length -lt 1 -or
@@ -3067,7 +3086,14 @@ function Invoke-Task051SelfTest {
             if (-not $rejected) { throw 'TASK051_MCP_SESSION_OPEN_SELF_TEST_REJECTED' }
         }
         & $writeSessionOpen -Record $sessionOpenRecord
-        $detailedSessionOpen = Read-Task051McpSessionOpen -Path $sessionOpenPath -ExpectedNativeIdentity 'task051-selftest-native' -EvidenceRoot $aclRoot -SessionId $sessionOpenId -SafeConfigSha256 $sessionOpenSafeConfig -DetailedFailure
+        $liveWriterShare = [IO.FileShare]([int][IO.FileShare]::ReadWrite -bor [int][IO.FileShare]::Delete)
+        $liveWriter = [IO.FileStream]::new($sessionOpenPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, $liveWriterShare)
+        try {
+            $detailedSessionOpen = Read-Task051McpSessionOpen -Path $sessionOpenPath -ExpectedNativeIdentity 'task051-selftest-native' -EvidenceRoot $aclRoot -SessionId $sessionOpenId -SafeConfigSha256 $sessionOpenSafeConfig -DetailedFailure
+        }
+        finally {
+            $liveWriter.Dispose()
+        }
         if ([int]$detailedSessionOpen.ProcessId -ne $sessionOpenPid) {
             throw 'TASK051_MCP_SESSION_OPEN_PARSE_DIAGNOSTIC_SELF_TEST_REJECTED'
         }

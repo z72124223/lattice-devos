@@ -235,7 +235,12 @@ foreach ($sessionOpenParseLeaf in $sessionOpenParseLeaves) {
 }
 if (
     [regex]::Matches($sessionOpenReaderSource, [regex]::Escape('[switch]$DetailedFailure')).Count -ne 1 -or
-    [regex]::Matches($discoverySource, [regex]::Escape('-DetailedFailure')).Count -ne 1
+    [regex]::Matches($discoverySource, [regex]::Escape('-DetailedFailure')).Count -ne 1 -or
+    [regex]::Matches($sessionOpenReaderSource, [regex]::Escape('[IO.FileStream]::new($canonicalPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)')).Count -ne 1 -or
+    [regex]::Matches($sessionOpenReaderSource, [regex]::Escape('[byte[]]::new(65537)')).Count -ne 1 -or
+    [regex]::Matches($sessionOpenReaderSource, [regex]::Escape('$readStream.Length -ne $byteCount')).Count -ne 1 -or
+    [regex]::Matches($sessionOpenReaderSource, [regex]::Escape('$readStream.Dispose()')).Count -ne 1 -or
+    $sessionOpenReaderSource.IndexOf('[IO.File]::ReadAllBytes(', [StringComparison]::Ordinal) -ge 0
 ) {
     throw 'TASK051_APP_SERVER_SESSION_OPEN_PARSE_DIAGNOSTIC_SHAPE_REJECTED'
 }
