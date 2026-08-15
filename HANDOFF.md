@@ -50,7 +50,7 @@ and merge authorization are absent; no merge was performed.
 | PostgreSQL/fresh process | PASS | run `9f1907f07f5545be9927a8def04529f5`; PostgreSQL 17.10; initial/restart; cleanup complete |
 | Code/security review | PASS | independent P0-P3 = 0; `CLEAR_FOR_INTEGRATION` |
 | Architecture review | PASS | independent P0-P3 = 0; `CLEAR_FOR_INTEGRATION` |
-| GitHub CI | PASS | Actions run `31835654240`, job `94881263124`, exact commit `8e5ba40` |
+| GitHub CI | PASS | implementation run `31835654240` / job `94881263124` at `8e5ba40`; closure run `31836370497` / job `94883441544` at `0f4d5c3` |
 
 ## Verification
 
@@ -68,27 +68,36 @@ and merge authorization are absent; no merge was performed.
 
 ## Review And Integration
 
-- Feature branch is synchronized through `8e5ba40`; target remains
+- Feature branch is synchronized through closure head `0f4d5c3`; accepted
+  TASK-050 implementation remains `8e5ba40`, and the PR target remains
   `feature/task-075-schema-v5-migration-reconciliation@a3599c1`.
 - GitHub reports Draft PR #12 open. The implementation CI is green. Branch
   protection/rules enforcement is not claimed.
+- GitHub's default branch remains
+  `feature/task-037-full-chain-integration@8828d2b`, 448 commits behind this
+  combined source. Its local branch also has four independent fixes absent from
+  `0f4d5c3`, so default movement is blocked pending explicit reconciliation.
 - Decision: `NEEDS_REVIEW`. Machine checks pass, but no human review or merge
   authorization exists. No Draft promotion, force push, protected mutation,
   merge, deployment, or release occurred.
 
 ## Risks And Open Decisions
 
-- TASK-051 current-machine MCP registration and semantic invocation are not
-  inferred from TASK-050's local canonical NDJSON acceptance.
+- TASK-051 current-machine MCP registration is visible but points to historical
+  commit `0b59b79`; it is not verified for accepted TASK-050 implementation
+  `8e5ba40`. Semantic invocation remains `UNKNOWN`.
+- The dedicated TASK-051 branch is 14 commits behind this combined source and
+  preserves one untracked runner; its test wrapper is absent. Its ticket still
+  names SPEC-003 v4 and latticed 1.7 while current contracts are v5 and 1.8.
 - Any TASK-051 reversible `C:\Users\f7212\.codex\config.toml`
   `[mcp_servers.lattice]` switch must meet that ticket's exact preflight and
   rollback gate; credentials and other tables remain prohibited.
 
 ## Next Action
 
-1. Continue TASK-051 with a read-only exact-source, binary, configuration,
-   Codex-process, and PostgreSQL preflight; stop before any unapproved config
-   mutation or unknown resource action.
+1. Preserve the TASK-051 runner bytes, fast-forward its dedicated branch to the
+   accepted combined source, then reconcile the ticket/contracts and complete
+   its runner/wrapper before any live acceptance or configuration switch.
 
 ## Restart Context
 

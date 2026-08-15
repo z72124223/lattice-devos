@@ -158,23 +158,26 @@ The governing invariant remains:
 
 > **One Gateway. One Truth. One Writer.**
 
-## Current GitHub Handoff — 2026-08-10
+## Current GitHub Handoff — 2026-08-15
 
 Repository: `z72124223/lattice-devos`<br>
 GitHub URL: `https://github.com/z72124223/lattice-devos`<br>
 Remote: `origin` -> `https://github.com/z72124223/lattice-devos.git`<br>
-Default branch: not established; remote HEAD is currently
-`feature/task-037-full-chain-integration`<br>
-Current branch: `feature/task-038-chatgpt-mcp`<br>
-Upstream: none; this branch has not been pushed<br>
-Base checkpoint: local Phase 1 commit `512732d`<br>
-Latest fetched TASK-037 remote head: `8828d2b`<br>
+GitHub default branch: `feature/task-037-full-chain-integration@8828d2b`;
+it is 448 commits behind the accepted combined source, and moving it remains
+blocked until four local-only TASK-037 fixes are reconciled<br>
+Canonical integration branch:
+`feature/task-076-postgres-writer-lease-v2@0f4d5c3`<br>
+Upstream: synchronized exactly with
+`origin/feature/task-076-postgres-writer-lease-v2` (`ahead 0`, `behind 0`)<br>
+Draft PR #12: open, mergeable/clean, latest `verify` green, no human review or
+merge authorization<br>
 
 Current Goal:
-- Preserve the accepted canonical-local TASK-038 Phase 2 checkpoint, publish
-  its exact feature commit, then refresh the real Secure MCP Tunnel so ChatGPT
-  can discover/invoke the two bounded task tools. Only after that separate live
-  ChatGPT gate resumes TASK-037 production-chain diagnosis/repair.
+- Preserve `0f4d5c3` as the accepted combined source for completed TASK-076,
+  TASK-075, and TASK-050; continue TASK-051 from a read-only preflight after
+  reconciling its SPEC/module versions and protected runner; keep PR #12 Draft
+  and leave default-branch movement, Draft promotion, and merge blocked.
 
 Historical TASK-055 — integrate the bounded coordination decision core into
 `orchestrator-runtime` and expose it through normal `lattice-runtime`
@@ -286,10 +289,10 @@ Deferred Until TASK-038 Phase 2 Completes:
 Known Boundaries:
 - The fixed profile actor is deliberately not a per-human ChatGPT identity.
   Broader identity and task templates require later versioned decisions.
-- No remote default/main branch, CI, push, merge, deployment, or release is
-  established/performed by this local phase.
-- Historical sections below are retained for evidence; this top section is the
-  authoritative current order and completion truth.
+- The 2026-08-10 statement that no remote/default/CI state existed is retained
+  only as historical evidence; the current GitHub truth is the handoff above.
+- No default-branch movement, Draft promotion, merge, deployment, or release is
+  authorized by the current alignment work.
 
 Relevant Issue:
 - GitHub Issue #4: `TASK-038 — GPT Web UI ↔ LATTICE MCP Gateway Interface`.
