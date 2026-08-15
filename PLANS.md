@@ -164,10 +164,11 @@ Repository: `z72124223/lattice-devos`<br>
 GitHub URL: `https://github.com/z72124223/lattice-devos`<br>
 Remote: `origin` -> `https://github.com/z72124223/lattice-devos.git`<br>
 GitHub default branch: `feature/task-037-full-chain-integration@8828d2b`;
-it is 448 commits behind the accepted combined source, and moving it remains
-blocked until four local-only TASK-037 fixes are reconciled<br>
-Canonical integration branch:
-`feature/task-076-postgres-writer-lease-v2@0f4d5c3`<br>
+it trails the accepted combined source, and moving it remains blocked until
+four local-only TASK-037 fixes are reconciled<br>
+Accepted combined implementation/closure source:
+`feature/task-076-postgres-writer-lease-v2` through `0f4d5c3`; later branch
+commits are GitHub-truth alignment only<br>
 Upstream: synchronized exactly with
 `origin/feature/task-076-postgres-writer-lease-v2` (`ahead 0`, `behind 0`)<br>
 Draft PR #12: open, mergeable/clean, latest `verify` green, no human review or
