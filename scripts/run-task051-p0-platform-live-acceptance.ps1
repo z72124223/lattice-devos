@@ -939,6 +939,19 @@ function Convert-Task051AppServerTools {
     return @($toolRecords)
 }
 
+function Get-Task051UniqueMcpServer {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Servers,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $matches = @($Servers | Where-Object { [string]$_.name -ceq $Name })
+    if ($matches.Count -ne 1) {
+        throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
+    }
+    return $matches[0]
+}
+
 function Invoke-Task051CodexDiscovery {
     param(
         [Parameter(Mandatory = $true)][string]$Phase,
@@ -999,16 +1012,14 @@ function Invoke-Task051CodexDiscovery {
         $owned.Suspended.StandardInput.Flush()
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LIST_RESPONSE_REJECTED'
         $list = Get-Task051AppServerResponse -Reader $owned.Suspended.StandardOutput -Id 2 -TimeoutSeconds 60
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SERVER_COUNT_REJECTED'
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SERVER_COUNT_ZERO_REJECTED'
         $servers = @($list.result.data)
-        if ($servers.Count -ne 1) {
+        if ($servers.Count -eq 0) {
             throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
         }
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SERVER_NAME_REJECTED'
-        if ([string]$servers[0].name -cne 'lattice') {
-            throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
-        }
-        $toolNames = @($servers[0].tools.PSObject.Properties.Name | Sort-Object)
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LATTICE_SERVER_COUNT_REJECTED'
+        $server = Get-Task051UniqueMcpServer -Servers $servers -Name 'lattice'
+        $toolNames = @($server.tools.PSObject.Properties.Name | Sort-Object)
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_COUNT_ZERO_REJECTED'
         if ($toolNames.Count -eq 0) {
             throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
@@ -1022,15 +1033,15 @@ function Invoke-Task051CodexDiscovery {
             throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
         }
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_RESOURCES_REJECTED'
-        if (@($servers[0].resources).Count -ne 0) {
+        if (@($server.resources).Count -ne 0) {
             throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
         }
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_RESOURCE_TEMPLATES_REJECTED'
-        if (@($servers[0].resourceTemplates).Count -ne 0) {
+        if (@($server.resourceTemplates).Count -ne 0) {
             throw 'TASK051_APP_SERVER_DISCOVERY_REJECTED'
         }
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_TOOL_SCHEMA_REJECTED'
-        $toolRecords = @(Convert-Task051AppServerTools -Tools $servers[0].tools)
+        $toolRecords = @(Convert-Task051AppServerTools -Tools $server.tools)
         Assert-ToolDiscovery -Response ([pscustomobject]@{
             result = [pscustomobject]@{ tools = $toolRecords }
         })
@@ -1941,6 +1952,24 @@ function Invoke-Task051SelfTest {
         $null -eq $optionalOutputRecords[1].PSObject.Properties['outputSchema']
     ) {
         throw 'TASK051_APP_SERVER_OPTIONAL_OUTPUT_SCHEMA_SELF_TEST_REJECTED'
+    }
+    $selectedServer = Get-Task051UniqueMcpServer -Servers @(
+        [pscustomobject]@{ name = 'codex_apps'; tools = [pscustomobject]@{} },
+        [pscustomobject]@{ name = 'lattice'; tools = [pscustomobject]@{} }
+    ) -Name 'lattice'
+    if ([string]$selectedServer.name -cne 'lattice') {
+        throw 'TASK051_APP_SERVER_LATTICE_SERVER_SELECTION_SELF_TEST_REJECTED'
+    }
+    foreach ($invalidServers in @(
+        @([pscustomobject]@{ name = 'codex_apps' }),
+        @([pscustomobject]@{ name = 'lattice' }, [pscustomobject]@{ name = 'lattice' })
+    )) {
+        $rejected = $false
+        try { [void](Get-Task051UniqueMcpServer -Servers $invalidServers -Name 'lattice') }
+        catch { $rejected = ([string]$_.Exception.Message -ceq 'TASK051_APP_SERVER_DISCOVERY_REJECTED') }
+        if (-not $rejected) {
+            throw 'TASK051_APP_SERVER_LATTICE_SERVER_SELECTION_SELF_TEST_REJECTED'
+        }
     }
     $events = @(
         [pscustomobject]@{
