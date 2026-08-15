@@ -1109,10 +1109,17 @@ function Read-Task051McpSessionOpen {
         [Parameter(Mandatory = $true)][string]$ExpectedNativeIdentity,
         [Parameter(Mandatory = $true)][string]$EvidenceRoot,
         [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{32}\z' })][string]$SessionId,
-        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{64}\z' })][string]$SafeConfigSha256
+        [Parameter(Mandatory = $true)][ValidateScript({ $_ -cmatch '\A[0-9a-f]{64}\z' })][string]$SafeConfigSha256,
+        [switch]$DetailedFailure
     )
 
-    $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
+    $genericFailureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
+    $failureCode = if ($DetailedFailure) {
+        'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_SOURCE_REJECTED'
+    }
+    else {
+        $genericFailureCode
+    }
     try {
         $canonicalPath = [IO.Path]::GetFullPath($Path)
         $canonicalRoot = [IO.Path]::GetFullPath($EvidenceRoot)
@@ -1121,7 +1128,9 @@ function Read-Task051McpSessionOpen {
         if (-not (Test-LatticeWindowsNativePathIdentity -Path $canonicalPath -Directory $false -ExpectedToken $ExpectedNativeIdentity)) {
             throw $failureCode
         }
+        if ($DetailedFailure) { $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_READ_REJECTED' }
         $bytes = [IO.File]::ReadAllBytes($canonicalPath)
+        if ($DetailedFailure) { $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_FRAMING_REJECTED' }
         if (
             $bytes.Length -lt 1 -or
             $bytes.Length -gt 65536 -or
@@ -1135,7 +1144,9 @@ function Read-Task051McpSessionOpen {
         }
         $lines = @($text.Split([string[]]@("`n"), [StringSplitOptions]::None))
         if ($lines.Count -ne 2 -or $lines[1] -cne '') { throw $failureCode }
+        if ($DetailedFailure) { $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_JSON_REJECTED' }
         $record = $lines[0] | ConvertFrom-Json -ErrorAction Stop
+        if ($DetailedFailure) { $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_KEYS_REJECTED' }
         $actualKeys = @($record.PSObject.Properties.Name | Sort-Object)
         $expectedKeys = @(
             'dispatch_accepted_count', 'event_sha256', 'observed_at_unix_nanos',
@@ -1143,6 +1154,7 @@ function Read-Task051McpSessionOpen {
             'request_id_sha256', 'safe_config_sha256', 'schema', 'session_id', 'tool_name'
         ) | Sort-Object
         if (($actualKeys -join "`n") -cne ($expectedKeys -join "`n")) { throw $failureCode }
+        if ($DetailedFailure) { $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_FIELDS_REJECTED' }
         if (
             ($record.process_id -isnot [int] -and $record.process_id -isnot [long]) -or
             ($record.ordinal -isnot [int] -and $record.ordinal -isnot [long]) -or
@@ -1164,6 +1176,7 @@ function Read-Task051McpSessionOpen {
         ) {
             throw $failureCode
         }
+        if ($DetailedFailure) { $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_HASH_REJECTED' }
         $hashInput = @(
             'lattice.mcp.acceptance-dispatch-hash.v1',
             ('0' * 64),
@@ -1180,6 +1193,7 @@ function Read-Task051McpSessionOpen {
         if ([string]$record.event_sha256 -cne (Get-Task051StringSha256 -Value $hashInput)) {
             throw $failureCode
         }
+        if ($DetailedFailure) { $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_PROJECTION_REJECTED' }
         return [pscustomobject]@{
             ProcessId = [int]$record.process_id
             ObservedAtUnixNanos = [long]$record.observed_at_unix_nanos
@@ -1628,9 +1642,21 @@ function Invoke-Task051CodexDiscovery {
                     -ExpectedNativeIdentity $AcceptanceNativeIdentity `
                     -EvidenceRoot $EvidenceRoot `
                     -SessionId $AcceptanceSessionId `
-                    -SafeConfigSha256 $SafeConfigSha256
+                    -SafeConfigSha256 $SafeConfigSha256 `
+                    -DetailedFailure
             }
             catch {
+                $parseFailure = [string]$_.Exception.Message
+                switch -CaseSensitive ($parseFailure) {
+                    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_SOURCE_REJECTED' { throw $parseFailure }
+                    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_READ_REJECTED' { throw $parseFailure }
+                    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_FRAMING_REJECTED' { throw $parseFailure }
+                    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_JSON_REJECTED' { throw $parseFailure }
+                    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_KEYS_REJECTED' { throw $parseFailure }
+                    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_FIELDS_REJECTED' { throw $parseFailure }
+                    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_HASH_REJECTED' { throw $parseFailure }
+                    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_PROJECTION_REJECTED' { throw $parseFailure }
+                }
                 throw 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_REJECTED'
             }
             $watchState.ServerProcessId = [int]$parsedSessionOpen.ProcessId
@@ -2835,6 +2861,33 @@ function Invoke-Task051SelfTest {
         finally {
             $pollReader.Dispose()
         }
+        $malformedPollState = [pscustomobject]@{ Count = 0 }
+        $malformedPollReader = [IO.StringReader]::new("{`"id`":100,`"result`":{}}`n")
+        try {
+            $malformedPollFailure = $null
+            try {
+                [void](Get-Task051AppServerResponse `
+                    -Reader $malformedPollReader `
+                    -Id 100 `
+                    -TimeoutSeconds 5 `
+                    -PollAction {
+                        $malformedPollState.Count++
+                        throw 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_JSON_REJECTED'
+                    })
+            }
+            catch {
+                $malformedPollFailure = [string]$_.Exception.Message
+            }
+            if (
+                $malformedPollState.Count -ne 1 -or
+                $malformedPollFailure -cne 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_JSON_REJECTED'
+            ) {
+                throw 'TASK051_MCP_SESSION_OPEN_PARSE_DIAGNOSTIC_SELF_TEST_REJECTED'
+            }
+        }
+        finally {
+            $malformedPollReader.Dispose()
+        }
         $selfTestChild = $null
         $selfTestAuthority = $null
         try {
@@ -3012,6 +3065,57 @@ function Invoke-Task051SelfTest {
                 $rejected = [string]$_.Exception.Message -ceq 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
             }
             if (-not $rejected) { throw 'TASK051_MCP_SESSION_OPEN_SELF_TEST_REJECTED' }
+        }
+        & $writeSessionOpen -Record $sessionOpenRecord
+        $detailedSessionOpen = Read-Task051McpSessionOpen -Path $sessionOpenPath -ExpectedNativeIdentity 'task051-selftest-native' -EvidenceRoot $aclRoot -SessionId $sessionOpenId -SafeConfigSha256 $sessionOpenSafeConfig -DetailedFailure
+        if ([int]$detailedSessionOpen.ProcessId -ne $sessionOpenPid) {
+            throw 'TASK051_MCP_SESSION_OPEN_PARSE_DIAGNOSTIC_SELF_TEST_REJECTED'
+        }
+        foreach ($detailedInvalidSessionOpen in @(
+            [pscustomobject]@{ Kind = 'SOURCE'; Expected = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_SOURCE_REJECTED' },
+            [pscustomobject]@{ Kind = 'FRAMING'; Expected = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_FRAMING_REJECTED' },
+            [pscustomobject]@{ Kind = 'JSON'; Expected = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_JSON_REJECTED' },
+            [pscustomobject]@{ Kind = 'KEYS'; Expected = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_KEYS_REJECTED' },
+            [pscustomobject]@{ Kind = 'FIELDS'; Expected = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_FIELDS_REJECTED' },
+            [pscustomobject]@{ Kind = 'HASH'; Expected = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_HASH_REJECTED' },
+            [pscustomobject]@{ Kind = 'PROJECTION'; Expected = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_PROJECTION_REJECTED' }
+        )) {
+            $candidateRecord = [ordered]@{}
+            foreach ($entry in $sessionOpenRecord.GetEnumerator()) { $candidateRecord[$entry.Key] = $entry.Value }
+            $expectedIdentity = 'task051-selftest-native'
+            $duplicate = $false
+            $rawText = $null
+            if ($detailedInvalidSessionOpen.Kind -ceq 'SOURCE') { $expectedIdentity = 'task051-wrong-native' }
+            elseif ($detailedInvalidSessionOpen.Kind -ceq 'FRAMING') { $duplicate = $true }
+            elseif ($detailedInvalidSessionOpen.Kind -ceq 'JSON') { $rawText = "{not-json}`n" }
+            elseif ($detailedInvalidSessionOpen.Kind -ceq 'KEYS') { [void]$candidateRecord.Remove('tool_name') }
+            elseif ($detailedInvalidSessionOpen.Kind -ceq 'FIELDS') { $candidateRecord.process_id = [string]$sessionOpenPid }
+            elseif ($detailedInvalidSessionOpen.Kind -ceq 'HASH') { $candidateRecord.event_sha256 = 'b' * 64 }
+            elseif ($detailedInvalidSessionOpen.Kind -ceq 'PROJECTION') {
+                $candidateRecord.observed_at_unix_nanos = '9223372036854775808'
+                $candidateRecord.event_sha256 = Get-Task051StringSha256 -Value (@(
+                    'lattice.mcp.acceptance-dispatch-hash.v1', ('0' * 64), $sessionOpenId,
+                    $sessionOpenSafeConfig, 'SESSION_OPEN', '1', [string]$sessionOpenPid,
+                    'null', 'null', '0', [string]$candidateRecord.observed_at_unix_nanos
+                ) -join "`n")
+            }
+            if ($null -ne $rawText) {
+                [IO.File]::WriteAllText($sessionOpenPath, $rawText, [Text.UTF8Encoding]::new($false))
+                Set-Task051OwnerOnlyAcl -Path $sessionOpenPath -Directory $false
+            }
+            else {
+                & $writeSessionOpen -Record $candidateRecord -Duplicate:$duplicate
+            }
+            $actualDetailedFailure = $null
+            try {
+                [void](Read-Task051McpSessionOpen -Path $sessionOpenPath -ExpectedNativeIdentity $expectedIdentity -EvidenceRoot $aclRoot -SessionId $sessionOpenId -SafeConfigSha256 $sessionOpenSafeConfig -DetailedFailure)
+            }
+            catch {
+                $actualDetailedFailure = [string]$_.Exception.Message
+            }
+            if ($actualDetailedFailure -cne [string]$detailedInvalidSessionOpen.Expected) {
+                throw 'TASK051_MCP_SESSION_OPEN_PARSE_DIAGNOSTIC_SELF_TEST_REJECTED'
+            }
         }
         Remove-Item -LiteralPath $sessionOpenPath -Force
         [Environment]::SetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', $fakeAuth, 'Process')
@@ -3401,6 +3505,7 @@ function Invoke-Task051SelfTest {
     Write-Output 'TASK051_APP_SERVER_DISCOVERY_SELF_TEST=PASS'
     Write-Output 'TASK051_PROCESS_OPEN_CLASSIFIER_SELF_TEST=PASS'
     Write-Output 'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST=PASS'
+    Write-Output 'TASK051_MCP_SESSION_OPEN_PARSE_DIAGNOSTIC_SELF_TEST=PASS'
     Write-Output 'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST=PASS'
     Write-Output 'TASK051_OWNER_ONLY_CREDENTIAL_SELF_TEST=PASS'
     Write-Output 'TASK051_PROCESS_CONTAINMENT_SELF_TEST=PASS'

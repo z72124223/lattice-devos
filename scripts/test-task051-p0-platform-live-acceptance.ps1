@@ -115,6 +115,14 @@ $requiredFragments = @(
     'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_TIMEOUT_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_READY_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_SOURCE_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_READ_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_FRAMING_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_JSON_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_KEYS_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_FIELDS_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_HASH_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_PROJECTION_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_POLL_RESULT_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REPLAY_READ_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REPLAY_MISMATCH_REJECTED',
@@ -194,6 +202,43 @@ if ($discoveryStart -lt 0 -or $discoveryEnd -le $discoveryStart) {
     throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_SHAPE_REJECTED'
 }
 $discoverySource = $runnerSource.Substring($discoveryStart, $discoveryEnd - $discoveryStart)
+$sessionOpenReaderStart = $runnerSource.IndexOf('function Read-Task051McpSessionOpen', [StringComparison]::Ordinal)
+$sessionOpenReaderEnd = $runnerSource.IndexOf('function Test-Task051McpSessionOpenReady', $sessionOpenReaderStart, [StringComparison]::Ordinal)
+if ($sessionOpenReaderStart -lt 0 -or $sessionOpenReaderEnd -le $sessionOpenReaderStart) {
+    throw 'TASK051_APP_SERVER_SESSION_OPEN_PARSE_DIAGNOSTIC_SHAPE_REJECTED'
+}
+$sessionOpenReaderSource = $runnerSource.Substring($sessionOpenReaderStart, $sessionOpenReaderEnd - $sessionOpenReaderStart)
+$sessionOpenParseLeaves = @(
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_SOURCE_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_READ_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_FRAMING_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_JSON_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_KEYS_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_FIELDS_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_HASH_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_PARSE_PROJECTION_REJECTED'
+)
+$sessionOpenParseLeafIndex = -1
+foreach ($sessionOpenParseLeaf in $sessionOpenParseLeaves) {
+    $quotedSessionOpenParseLeaf = "'" + $sessionOpenParseLeaf + "'"
+    if (
+        [regex]::Matches($sessionOpenReaderSource, [regex]::Escape($quotedSessionOpenParseLeaf)).Count -ne 1 -or
+        [regex]::Matches($discoverySource, [regex]::Escape($quotedSessionOpenParseLeaf)).Count -ne 1
+    ) {
+        throw 'TASK051_APP_SERVER_SESSION_OPEN_PARSE_DIAGNOSTIC_SHAPE_REJECTED'
+    }
+    $nextSessionOpenParseLeafIndex = $sessionOpenReaderSource.IndexOf($quotedSessionOpenParseLeaf, [StringComparison]::Ordinal)
+    if ($nextSessionOpenParseLeafIndex -le $sessionOpenParseLeafIndex) {
+        throw 'TASK051_APP_SERVER_SESSION_OPEN_PARSE_DIAGNOSTIC_SHAPE_REJECTED'
+    }
+    $sessionOpenParseLeafIndex = $nextSessionOpenParseLeafIndex
+}
+if (
+    [regex]::Matches($sessionOpenReaderSource, [regex]::Escape('[switch]$DetailedFailure')).Count -ne 1 -or
+    [regex]::Matches($discoverySource, [regex]::Escape('-DetailedFailure')).Count -ne 1
+) {
+    throw 'TASK051_APP_SERVER_SESSION_OPEN_PARSE_DIAGNOSTIC_SHAPE_REJECTED'
+}
 $pollActionCall = $discoverySource.IndexOf('-PollAction $sessionOpenPoll', [StringComparison]::Ordinal)
 $authorityCapture = $discoverySource.IndexOf('$serverAuthority = $processEvidence.Authority', [StringComparison]::Ordinal)
 if ($pollActionCall -lt 0 -or $authorityCapture -le $pollActionCall) {
@@ -333,6 +378,7 @@ $expectedSelfTestMarkers = @(
     'TASK051_APP_SERVER_DISCOVERY_SELF_TEST=PASS',
     'TASK051_PROCESS_OPEN_CLASSIFIER_SELF_TEST=PASS',
     'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST=PASS',
+    'TASK051_MCP_SESSION_OPEN_PARSE_DIAGNOSTIC_SELF_TEST=PASS',
     'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST=PASS',
     'TASK051_OWNER_ONLY_CREDENTIAL_SELF_TEST=PASS',
     'TASK051_PROCESS_CONTAINMENT_SELF_TEST=PASS',
