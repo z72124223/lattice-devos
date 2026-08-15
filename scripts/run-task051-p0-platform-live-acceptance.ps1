@@ -1304,6 +1304,13 @@ if (
 '@ -FailureCode 'TASK051_TASK038_CARGO_HOST_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '    ''--target-dir'', $task038CargoTarget, ''--target'', $cargoHostTarget' -New '    ''--target-dir'', $task038CargoTarget' -FailureCode 'TASK051_TASK038_HOST_TARGET_ARGUMENT_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '$script:Latticed = Get-CanonicalPath -Path (Join-Path $task038CargoTarget ($cargoHostTarget + ''\debug\latticed.exe''))' -New '$script:Latticed = Get-CanonicalPath -Path (Join-Path $task038CargoTarget ''debug\latticed.exe'')' -FailureCode 'TASK051_TASK038_HOST_TARGET_BINARY_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old @'
+        'INITIAL_POSTMASTER_STOPPED', 'RESTART_POSTMASTER_READY', 'CONSUMER_STARTED'
+'@ -New @'
+        'INITIAL_POSTMASTER_STOPPED', 'RESTART_POSTMASTER_READY',
+        'TASK076_WRITER_V2_VERIFIED', 'CONSUMER_STARTED'
+'@ -FailureCode 'TASK051_TASK038_HOLDER_EVENT_SEQUENCE_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '$consumer = $records[5].payload' -New '$consumer = $records[6].payload' -FailureCode 'TASK051_TASK038_HOLDER_CONSUMER_INDEX_TRANSFORM_REJECTED'
     $postgresDataBlock = @'
 $script:PostgresData = Get-CanonicalPath -Path $PostgresDataDirectory
 $dataItem = Get-Item -LiteralPath $script:PostgresData -Force -ErrorAction SilentlyContinue
@@ -2148,6 +2155,9 @@ function Invoke-Task051SelfTest {
         [regex]::Matches($task038, [regex]::Escape("'--target-dir', `$task038CargoTarget, '--target', `$cargoHostTarget")).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape("'--target-dir', `$task038CargoTarget")).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape("Join-Path `$task038CargoTarget 'debug\latticed.exe'")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape("'TASK076_WRITER_V2_VERIFIED', 'CONSUMER_STARTED'")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('$consumer = $records[5].payload')).Count -ne 0 -or
+        [regex]::Matches($task038, [regex]::Escape('$consumer = $records[6].payload')).Count -ne 1 -or
         [regex]::Matches($task038, [regex]::Escape('LATTICE_TASK051_RUN_ALIAS_ROOT ''task038-execution-homes''')).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape('TASK038_CODEX_EXECUTION_PARENT_NATIVE_LINK_REJECTED')).Count -ne 0 -or
         [regex]::Matches($task038, [regex]::Escape("`$task051LongPathRoot = '\\?\' + `$canonicalRoot")).Count -ne 1 -or
