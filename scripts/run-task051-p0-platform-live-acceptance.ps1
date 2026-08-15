@@ -1289,6 +1289,92 @@ function Convert-Task051Task038Source {
     $Source = Replace-Task051Exact -Source $Source -Old '$repositoryTarget = Get-CanonicalPath -Path (Join-Path $script:RepositoryRoot ''target'')' -New '$repositoryTarget = Get-CanonicalPath -Path $env:LATTICE_TASK051_RUN_ROOT' -FailureCode 'TASK051_TASK038_TARGET_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '$task038CargoTarget = Get-CanonicalPath -Path (Join-Path $repositoryTarget ''task038-main'')' -New '$task038CargoTarget = Get-CanonicalPath -Path (Join-Path $env:CARGO_TARGET_DIR ''task038-main'')' -FailureCode 'TASK051_TASK038_CARGO_TARGET_PATH_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old 'Assert-NoReparseAncestor -Path $task038CargoTarget -Boundary $script:RepositoryRoot -FailureCode ''TASK038_CARGO_TARGET_REJECTED''' -New 'Assert-NoReparseAncestor -Path $task038CargoTarget -Boundary $env:CARGO_TARGET_DIR -FailureCode ''TASK038_CARGO_TARGET_REJECTED''' -FailureCode 'TASK051_TASK038_CARGO_TARGET_BOUNDARY_TRANSFORM_REJECTED'
+    $postgresDataBlock = @'
+$script:PostgresData = Get-CanonicalPath -Path $PostgresDataDirectory
+$dataItem = Get-Item -LiteralPath $script:PostgresData -Force -ErrorAction SilentlyContinue
+if ($null -eq $dataItem -or -not $dataItem.PSIsContainer -or ($dataItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    throw 'TASK038_POSTGRES_DATA_REJECTED'
+}
+Assert-NoReparseAncestor -Path $script:PostgresData -Boundary $script:RepositoryRoot -FailureCode 'TASK038_POSTGRES_DATA_REJECTED'
+$clusterRoot = Get-CanonicalPath -Path (Split-Path -Parent $script:PostgresData)
+'@
+    $task051PostgresDataBlock = @'
+$script:PostgresData = Get-CanonicalPath -Path $PostgresDataDirectory
+$task051PhysicalPostgresData = Get-CanonicalPath -Path (Join-Path $env:LATTICE_TASK051_RUN_ROOT ('task019-postgres\' + $PostgresRunId + '\data'))
+$dataItem = Get-Item -LiteralPath $script:PostgresData -Force -ErrorAction SilentlyContinue
+$task051PhysicalDataItem = Get-Item -LiteralPath $task051PhysicalPostgresData -Force -ErrorAction SilentlyContinue
+if (
+    $null -eq $dataItem -or -not $dataItem.PSIsContainer -or ($dataItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+    $null -eq $task051PhysicalDataItem -or -not $task051PhysicalDataItem.PSIsContainer -or ($task051PhysicalDataItem.Attributes -band [IO.FileAttributes]::ReparsePoint)
+) {
+    throw 'TASK038_POSTGRES_DATA_REJECTED'
+}
+Assert-NoReparseAncestor -Path $script:PostgresData -Boundary $env:LATTICE_TASK051_RUN_ALIAS_ROOT -FailureCode 'TASK038_POSTGRES_DATA_REJECTED'
+Assert-NoReparseAncestor -Path $task051PhysicalPostgresData -Boundary $repositoryTarget -FailureCode 'TASK038_POSTGRES_DATA_REJECTED'
+if (
+    (Get-LatticeWindowsNativePathIdentityToken -Path $script:PostgresData -Directory $true) -cne
+    (Get-LatticeWindowsNativePathIdentityToken -Path $task051PhysicalPostgresData -Directory $true)
+) {
+    throw 'TASK038_POSTGRES_DATA_NATIVE_LINK_REJECTED'
+}
+$script:Task051PhysicalPostgresRoot = Get-CanonicalPath -Path (Split-Path -Parent $task051PhysicalPostgresData)
+$script:Task051PhysicalPostgresParent = Get-CanonicalPath -Path (Split-Path -Parent $script:Task051PhysicalPostgresRoot)
+$clusterRoot = $script:Task051PhysicalPostgresRoot
+'@
+    $Source = Replace-Task051Exact -Source $Source -Old $postgresDataBlock -New $task051PostgresDataBlock -FailureCode 'TASK051_TASK038_POSTGRES_DATA_ALIAS_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old '-not (Test-ExactPath -Actual ([string]$holder.cluster_root) -Expected (Split-Path -Parent $script:PostgresData)) -or' -New '-not (Test-ExactPath -Actual ([string]$holder.cluster_root) -Expected $script:Task051PhysicalPostgresRoot) -or' -FailureCode 'TASK051_TASK038_HOLDER_ROOT_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old @'
+    $captureRoot = Get-CanonicalPath -Path (Split-Path -Parent $DataDirectory)
+    Assert-NoReparseAncestor `
+        -Path $captureRoot `
+        -Boundary $script:RepositoryRoot `
+        -FailureCode 'TASK038_POSTGRES_RESTART_ROOT_REJECTED'
+    if (-not (Test-ExactPath -Actual $ServerLog -Expected (Join-Path $captureRoot 'postgres.log'))) {
+'@ -New @'
+    $captureRoot = Get-CanonicalPath -Path $script:Task051PhysicalPostgresRoot
+    Assert-NoReparseAncestor `
+        -Path $captureRoot `
+        -Boundary $repositoryTarget `
+        -FailureCode 'TASK038_POSTGRES_RESTART_ROOT_REJECTED'
+    if (-not (Test-ExactPath -Actual $ServerLog -Expected (Join-Path $script:Task051PhysicalPostgresRoot 'postgres.log'))) {
+'@ -FailureCode 'TASK051_TASK038_RESTART_ROOT_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old @'
+    $canonicalOutputDirectory = Get-CanonicalPath -Path $OutputDirectory
+    $outputDirectoryItem = Get-Item -LiteralPath $canonicalOutputDirectory -Force -ErrorAction SilentlyContinue
+'@ -New @'
+    $task051PhysicalOutputDirectory = Get-CanonicalPath -Path $OutputDirectory
+    if (-not (Test-ExactPath -Actual $task051PhysicalOutputDirectory -Expected $script:Task051PhysicalPostgresRoot)) {
+        throw 'TASK038_NATIVE_OUTPUT_DIRECTORY_REJECTED'
+    }
+    $canonicalOutputDirectory = Get-CanonicalPath -Path (Split-Path -Parent $script:PostgresData)
+    if (
+        (Get-LatticeWindowsNativePathIdentityToken -Path $canonicalOutputDirectory -Directory $true) -cne
+        (Get-LatticeWindowsNativePathIdentityToken -Path $task051PhysicalOutputDirectory -Directory $true)
+    ) {
+        throw 'TASK038_NATIVE_OUTPUT_DIRECTORY_REJECTED'
+    }
+    $outputDirectoryItem = Get-Item -LiteralPath $canonicalOutputDirectory -Force -ErrorAction SilentlyContinue
+'@ -FailureCode 'TASK051_TASK038_CAPTURE_ALIAS_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old @'
+    Assert-NoReparseAncestor `
+        -Path $canonicalOutputDirectory `
+        -Boundary $script:RepositoryRoot `
+        -FailureCode 'TASK038_NATIVE_OUTPUT_DIRECTORY_REJECTED'
+'@ -New @'
+    Assert-NoReparseAncestor `
+        -Path $canonicalOutputDirectory `
+        -Boundary $env:LATTICE_TASK051_RUN_ALIAS_ROOT `
+        -FailureCode 'TASK038_NATIVE_OUTPUT_DIRECTORY_REJECTED'
+'@ -FailureCode 'TASK051_TASK038_CAPTURE_BOUNDARY_TRANSFORM_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old @'
+$script:PostgresContainmentSnapshot = New-LatticeWindowsNativeContainmentSnapshot `
+    -ParentPath $repositoryTarget `
+    -RootPath $clusterRoot `
+'@ -New @'
+$script:PostgresContainmentSnapshot = New-LatticeWindowsNativeContainmentSnapshot `
+    -ParentPath $script:Task051PhysicalPostgresParent `
+    -RootPath $clusterRoot `
+'@ -FailureCode 'TASK051_TASK038_CONTAINMENT_PARENT_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old "schema_version = 'lattice.task038.local-canonical-mcp-acceptance.v1'" -New "schema_version = 'lattice.task051.task038-derived-acceptance.v1'" -FailureCode 'TASK051_TASK038_EVIDENCE_SCHEMA_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old "foreach (`$cargoVariable in @('CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET')) {" -New @'
 $expectedTask051CargoTarget = Get-CanonicalPath -Path $env:CARGO_TARGET_DIR
@@ -1942,6 +2028,27 @@ function Invoke-Task051SelfTest {
     if (@($errors).Count -ne 0) { throw 'TASK051_TASK038_TRANSFORM_PARSE_REJECTED' }
     [void][Management.Automation.Language.Parser]::ParseInput($task019, [ref]$tokens, [ref]$errors)
     if (@($errors).Count -ne 0) { throw 'TASK051_TASK019_TRANSFORM_PARSE_REJECTED' }
+    if (
+        [regex]::Matches($task038, [regex]::Escape("`$task051PhysicalPostgresData = Get-CanonicalPath -Path (Join-Path `$env:LATTICE_TASK051_RUN_ROOT ('task019-postgres\' + `$PostgresRunId + '\data'))")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('Assert-NoReparseAncestor -Path $script:PostgresData -Boundary $env:LATTICE_TASK051_RUN_ALIAS_ROOT')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('Get-LatticeWindowsNativePathIdentityToken -Path $task051PhysicalPostgresData -Directory $true')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('$script:Task051PhysicalPostgresRoot = Get-CanonicalPath -Path (Split-Path -Parent $task051PhysicalPostgresData)')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('$script:Task051PhysicalPostgresParent = Get-CanonicalPath -Path (Split-Path -Parent $script:Task051PhysicalPostgresRoot)')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('$clusterRoot = $script:Task051PhysicalPostgresRoot')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('-Expected (Split-Path -Parent $script:PostgresData)')).Count -ne 0 -or
+        [regex]::Matches($task038, [regex]::Escape('-Expected $script:Task051PhysicalPostgresRoot')).Count -ne 2 -or
+        [regex]::Matches($task038, [regex]::Escape("-Expected (Join-Path `$script:Task051PhysicalPostgresRoot 'postgres.log')")).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('$captureRoot = Get-CanonicalPath -Path (Split-Path -Parent $DataDirectory)')).Count -ne 0 -or
+        [regex]::Matches($task038, [regex]::Escape('$captureRoot = Get-CanonicalPath -Path $script:Task051PhysicalPostgresRoot')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('-ParentPath $repositoryTarget')).Count -ne 0 -or
+        [regex]::Matches($task038, [regex]::Escape('-ParentPath $script:Task051PhysicalPostgresParent')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('$task051PhysicalOutputDirectory = Get-CanonicalPath -Path $OutputDirectory')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('$canonicalOutputDirectory = Get-CanonicalPath -Path (Split-Path -Parent $script:PostgresData)')).Count -ne 1 -or
+        [regex]::Matches($task038, [regex]::Escape('-Boundary $env:LATTICE_TASK051_RUN_ALIAS_ROOT')).Count -ne 2 -or
+        [regex]::Matches($task038, [regex]::Escape("throw 'TASK038_POSTGRES_DATA_NATIVE_LINK_REJECTED'")).Count -ne 1
+    ) {
+        throw 'TASK051_TASK038_POSTGRES_DATA_ALIAS_SELF_TEST_REJECTED'
+    }
     if (
         [regex]::Matches(
             $task019,
