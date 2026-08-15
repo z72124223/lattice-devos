@@ -698,24 +698,39 @@ function Copy-Task051OfficialCodexBundle {
     }
 }
 
+function Get-Task051PublicStatusSemanticField {
+    param([Parameter(Mandatory = $true)]$Value)
+
+    if ([string]$Value.schema_version -cne $script:Task051PublicStatusSchema) { return 'SCHEMA' }
+    if ([string]$Value.status -cne 'COMPLETED' -or [string]$Value.task_state -cne 'COMPLETED') { return 'STATE' }
+    if ([string]$Value.task_ref -cnotmatch '\A[0-9a-f]{64}\z') { return 'TASK_REF' }
+    if ([string]$Value.ledger_head_digest -cnotmatch '\A[0-9a-f]{64}\z') { return 'LEDGER_HEAD' }
+    if ([string]$Value.result_digest -cnotmatch '\A[0-9a-f]{64}\z') { return 'RESULT_DIGEST' }
+    return 'NONE'
+}
+
 function Assert-Task051PublicStatus {
     param(
         [Parameter(Mandatory = $true)]$Value,
-        [Parameter(Mandatory = $true)][ValidateSet('SUBMIT', 'STATUS')][string]$Kind
+        [Parameter(Mandatory = $true)][ValidateSet('SUBMIT', 'STATUS')][string]$Kind,
+        [switch]$DetailedFailure
     )
 
     $keys = @($Value.PSObject.Properties.Name | Sort-Object)
     if (($keys -join [char]10) -cne (($script:Task051ExpectedStatusKeys | Sort-Object) -join [char]10)) {
         throw 'TASK051_PUBLIC_STATUS_SHAPE_REJECTED'
     }
-    if (
-        [string]$Value.schema_version -cne $script:Task051PublicStatusSchema -or
-        [string]$Value.status -cne 'COMPLETED' -or
-        [string]$Value.task_state -cne 'COMPLETED' -or
-        [string]$Value.task_ref -cnotmatch '\A[0-9a-f]{64}\z' -or
-        [string]$Value.ledger_head_digest -cnotmatch '\A[0-9a-f]{64}\z' -or
-        [string]$Value.result_digest -cnotmatch '\A[0-9a-f]{64}\z'
-    ) {
+    $semanticField = Get-Task051PublicStatusSemanticField -Value $Value
+    if ($semanticField -cne 'NONE') {
+        if ($DetailedFailure) {
+            switch -CaseSensitive ($semanticField) {
+                'SCHEMA' { throw 'TASK051_PUBLIC_STATUS_SCHEMA_REJECTED' }
+                'STATE' { throw 'TASK051_PUBLIC_STATUS_STATE_REJECTED' }
+                'TASK_REF' { throw 'TASK051_PUBLIC_STATUS_TASK_REF_REJECTED' }
+                'LEDGER_HEAD' { throw 'TASK051_PUBLIC_STATUS_LEDGER_HEAD_REJECTED' }
+                'RESULT_DIGEST' { throw 'TASK051_PUBLIC_STATUS_RESULT_DIGEST_REJECTED' }
+            }
+        }
         throw ('TASK051_' + $Kind + '_SEMANTICS_REJECTED')
     }
 }
@@ -2013,6 +2028,26 @@ function Resolve-Task051PublicProjectionFailure {
     }
 
     switch -CaseSensitive ($Projection + '|' + $Kind + '|' + $Message) {
+        'STRUCTURED|SUBMIT|TASK051_PUBLIC_STATUS_SCHEMA_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SCHEMA_REJECTED' }
+        'STRUCTURED|SUBMIT|TASK051_PUBLIC_STATUS_STATE_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_STATE_REJECTED' }
+        'STRUCTURED|SUBMIT|TASK051_PUBLIC_STATUS_TASK_REF_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_TASK_REF_REJECTED' }
+        'STRUCTURED|SUBMIT|TASK051_PUBLIC_STATUS_LEDGER_HEAD_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_LEDGER_HEAD_REJECTED' }
+        'STRUCTURED|SUBMIT|TASK051_PUBLIC_STATUS_RESULT_DIGEST_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_RESULT_DIGEST_REJECTED' }
+        'STRUCTURED|STATUS|TASK051_PUBLIC_STATUS_SCHEMA_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SCHEMA_REJECTED' }
+        'STRUCTURED|STATUS|TASK051_PUBLIC_STATUS_STATE_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_STATE_REJECTED' }
+        'STRUCTURED|STATUS|TASK051_PUBLIC_STATUS_TASK_REF_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_TASK_REF_REJECTED' }
+        'STRUCTURED|STATUS|TASK051_PUBLIC_STATUS_LEDGER_HEAD_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_LEDGER_HEAD_REJECTED' }
+        'STRUCTURED|STATUS|TASK051_PUBLIC_STATUS_RESULT_DIGEST_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_RESULT_DIGEST_REJECTED' }
+        'CONTENT|SUBMIT|TASK051_PUBLIC_STATUS_SCHEMA_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SCHEMA_REJECTED' }
+        'CONTENT|SUBMIT|TASK051_PUBLIC_STATUS_STATE_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_STATE_REJECTED' }
+        'CONTENT|SUBMIT|TASK051_PUBLIC_STATUS_TASK_REF_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_TASK_REF_REJECTED' }
+        'CONTENT|SUBMIT|TASK051_PUBLIC_STATUS_LEDGER_HEAD_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_LEDGER_HEAD_REJECTED' }
+        'CONTENT|SUBMIT|TASK051_PUBLIC_STATUS_RESULT_DIGEST_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_RESULT_DIGEST_REJECTED' }
+        'CONTENT|STATUS|TASK051_PUBLIC_STATUS_SCHEMA_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_SCHEMA_REJECTED' }
+        'CONTENT|STATUS|TASK051_PUBLIC_STATUS_STATE_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_STATE_REJECTED' }
+        'CONTENT|STATUS|TASK051_PUBLIC_STATUS_TASK_REF_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_TASK_REF_REJECTED' }
+        'CONTENT|STATUS|TASK051_PUBLIC_STATUS_LEDGER_HEAD_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_LEDGER_HEAD_REJECTED' }
+        'CONTENT|STATUS|TASK051_PUBLIC_STATUS_RESULT_DIGEST_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_RESULT_DIGEST_REJECTED' }
         'STRUCTURED|SUBMIT|TASK051_SUBMIT_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED' }
         'STRUCTURED|STATUS|TASK051_STATUS_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED' }
         'CONTENT|SUBMIT|TASK051_SUBMIT_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED' }
@@ -2156,9 +2191,9 @@ function Get-Task051ExecStructuredContent {
         $contentValue = [string]$content[0].text | ConvertFrom-Json -ErrorAction Stop
     }
     catch { throw 'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED' }
-    try { Assert-Task051PublicStatus -Value $structured -Kind $publicKind }
+    try { Assert-Task051PublicStatus -Value $structured -Kind $publicKind -DetailedFailure }
     catch { throw (Resolve-Task051PublicProjectionFailure -Projection 'STRUCTURED' -Kind $publicKind -Message ([string]$_.Exception.Message)) }
-    try { Assert-Task051PublicStatus -Value $contentValue -Kind $publicKind }
+    try { Assert-Task051PublicStatus -Value $contentValue -Kind $publicKind -DetailedFailure }
     catch { throw (Resolve-Task051PublicProjectionFailure -Projection 'CONTENT' -Kind $publicKind -Message ([string]$_.Exception.Message)) }
     try { Assert-Task051SameStatus -Expected $structured -Actual $contentValue -Kind $publicKind }
     catch { throw 'TASK051_CODEX_TOOL_RESULT_PARITY_REJECTED' }
@@ -2235,10 +2270,30 @@ function Resolve-Task051CodexToolFailure {
         'TASK051_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SCHEMA_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SCHEMA_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_STATE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_STATE_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_TASK_REF_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_TASK_REF_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_LEDGER_HEAD_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_LEDGER_HEAD_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_RESULT_DIGEST_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_RESULT_DIGEST_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SCHEMA_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SCHEMA_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_STATE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_STATE_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_TASK_REF_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_TASK_REF_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_LEDGER_HEAD_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_LEDGER_HEAD_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_RESULT_DIGEST_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_RESULT_DIGEST_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SCHEMA_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SCHEMA_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_STATE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_STATE_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_TASK_REF_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_TASK_REF_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_LEDGER_HEAD_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_LEDGER_HEAD_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_RESULT_DIGEST_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_RESULT_DIGEST_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_SCHEMA_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_SCHEMA_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_STATE_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_STATE_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_TASK_REF_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_TASK_REF_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_LEDGER_HEAD_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_LEDGER_HEAD_REJECTED' }
+        'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_RESULT_DIGEST_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_RESULT_DIGEST_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED' }
         'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' }
@@ -3381,8 +3436,8 @@ function Invoke-Task051SelfTest {
         },
         [pscustomobject]@{
             Mutation = 'CONTENT_STATUS'
-            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED'
-            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_STATE_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_STATE_REJECTED'
         },
         [pscustomobject]@{
             Mutation = 'CONTENT_PUBLIC_SHAPE'
@@ -3391,8 +3446,8 @@ function Invoke-Task051SelfTest {
         },
         [pscustomobject]@{
             Mutation = 'CONTENT_SUBMIT_STATUS'
-            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED'
-            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_STATE_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_STATE_REJECTED'
         },
         [pscustomobject]@{
             Mutation = 'META_SHAPE'
@@ -3436,13 +3491,13 @@ function Invoke-Task051SelfTest {
         },
         [pscustomobject]@{
             Mutation = 'STRUCTURED_STATUS'
-            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED'
-            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_STATE_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_STATE_REJECTED'
         },
         [pscustomobject]@{
             Mutation = 'STRUCTURED_SUBMIT_STATUS'
-            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED'
-            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED'
+            ExpectedRaw = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_STATE_REJECTED'
+            ExpectedMapped = 'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_STATE_REJECTED'
         },
         [pscustomobject]@{
             Mutation = 'PARITY'
@@ -3519,6 +3574,74 @@ function Invoke-Task051SelfTest {
             throw 'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST_REJECTED'
         }
     }
+    foreach ($projectionFixture in @('STRUCTURED', 'CONTENT')) {
+        foreach ($kindFixture in @('SUBMIT', 'STATUS')) {
+            foreach ($fieldFixture in @('SCHEMA', 'STATE', 'TASK_REF', 'LEDGER_HEAD', 'RESULT_DIGEST')) {
+                $variantFixtures = switch -CaseSensitive ($fieldFixture) {
+                    'STATE' { @('status', 'task_state'); break }
+                    'RESULT_DIGEST' { @('null', 'malformed'); break }
+                    default { @('single'); break }
+                }
+                foreach ($variantFixture in $variantFixtures) {
+                    $fieldEvents = @(($events | ConvertTo-Json -Depth 20) | ConvertFrom-Json -ErrorAction Stop)
+                    $fieldPhase = 'status-pre-restart'
+                    $fieldTool = 'lattice_task_status'
+                    $fieldArguments = [ordered]@{ task_ref = '1' * 64 }
+                    if ($kindFixture -ceq 'SUBMIT') {
+                        $fieldPhase = 'submit'
+                        $fieldTool = 'lattice_task_submit'
+                        $fieldArguments = [ordered]@{ client_request_id = '0' * 64; intent = 'CONTROLLED_CODEX_CANARY' }
+                        $fieldEvents[0].item.tool = $fieldTool
+                        $fieldEvents[0].item.arguments = [pscustomobject]$fieldArguments
+                    }
+                    $fieldStatus = $status.PSObject.Copy()
+                    switch -CaseSensitive ($fieldFixture) {
+                        'SCHEMA' { $fieldStatus.schema_version = 'lattice.task.status.v2' }
+                        'STATE' { $fieldStatus.$variantFixture = 'RUNNING' }
+                        'TASK_REF' { $fieldStatus.task_ref = 'invalid' }
+                        'LEDGER_HEAD' { $fieldStatus.ledger_head_digest = 'invalid' }
+                        'RESULT_DIGEST' {
+                            if ($variantFixture -ceq 'null') { $fieldStatus.result_digest = $null }
+                            else { $fieldStatus.result_digest = 'invalid' }
+                        }
+                    }
+                    if ((Get-Task051PublicStatusSemanticField -Value $fieldStatus) -cne $fieldFixture) {
+                        throw 'TASK051_PUBLIC_STATUS_SEMANTIC_FIELD_SELF_TEST_REJECTED'
+                    }
+                    try {
+                        Assert-Task051PublicStatus -Value $fieldStatus -Kind $kindFixture
+                        throw 'TASK051_SELF_TEST_FALSE_PASS'
+                    }
+                    catch {
+                        if ([string]$_.Exception.Message -cne ('TASK051_' + $kindFixture + '_SEMANTICS_REJECTED')) { throw }
+                    }
+                    if ($projectionFixture -ceq 'STRUCTURED') {
+                        $fieldEvents[0].item.result.structured_content = $fieldStatus
+                    }
+                    else {
+                        $fieldEvents[0].item.result.content[0].text = $fieldStatus | ConvertTo-Json -Compress -Depth 10
+                    }
+                    $fieldFailure = $null
+                    try {
+                        $null = Get-Task051ExecStructuredContent -Events $fieldEvents -Phase $fieldPhase -Tool $fieldTool -ExpectedArguments $fieldArguments
+                    }
+                    catch { $fieldFailure = [string]$_.Exception.Message }
+                    $expectedFieldFailure = 'TASK051_CODEX_TOOL_RESULT_' + $projectionFixture + '_' + $kindFixture + '_' + $fieldFixture + '_REJECTED'
+                    $expectedMappedFieldFailure = $expectedFieldFailure.Replace('TASK051_CODEX', 'TASK038_CURRENT_CODEX')
+                    if (
+                        $fieldFailure -cne $expectedFieldFailure -or
+                        (Resolve-Task051CodexToolFailure -Stage 'RESULT' -Message $fieldFailure) -cne $expectedMappedFieldFailure
+                    ) {
+                        throw 'TASK051_CODEX_TOOL_FIELD_DIAGNOSTIC_SELF_TEST_REJECTED'
+                    }
+                }
+            }
+        }
+    }
+    if ((Get-Task051PublicStatusSemanticField -Value $status) -cne 'NONE') {
+        throw 'TASK051_PUBLIC_STATUS_SEMANTIC_FIELD_SELF_TEST_REJECTED'
+    }
+    Write-Output 'TASK051_CODEX_TOOL_FIELD_DIAGNOSTIC_SELF_TEST=PASS'
     foreach ($projectionFailureFixture in @(
         [pscustomobject]@{ Projection = 'STRUCTURED'; Kind = 'SUBMIT'; Message = 'TASK051_STATUS_SEMANTICS_REJECTED'; Expected = 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED' },
         [pscustomobject]@{ Projection = 'CONTENT'; Kind = 'STATUS'; Message = 'TASK051_SUBMIT_SEMANTICS_REJECTED'; Expected = 'TASK051_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED' },

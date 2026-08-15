@@ -250,6 +250,7 @@ $requiredFragments = @(
     'enabled_tools = ["lattice_task_status"]',
     'TASK051_CODEX_CALL_COUNT_PHASE_SELF_TEST=PASS',
     'TASK051_CODEX_EVENT_SUMMARY_SELF_TEST=PASS',
+    'TASK051_CODEX_TOOL_FIELD_DIAGNOSTIC_SELF_TEST=PASS',
     'TASK051_CODEX_PHASE_TOOL_NO_MATERIALIZATION_SELF_TEST=PASS',
     'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST=PASS',
     'TASK051_CODEX_FRESH_PROCESS_REJECTED',
@@ -567,8 +568,8 @@ if (
 $publicKindSubmitIndex = $codexToolStructuredSource.IndexOf("'lattice_task_submit' { 'SUBMIT'; break }", [StringComparison]::Ordinal)
 $publicKindStatusIndex = $codexToolStructuredSource.IndexOf("'lattice_task_status' { 'STATUS'; break }", [StringComparison]::Ordinal)
 $publicKindDefaultIndex = $codexToolStructuredSource.IndexOf("default { throw 'TASK051_CODEX_TOOL_PUBLIC_KIND_REJECTED' }", [StringComparison]::Ordinal)
-$structuredPublicValidationIndex = $codexToolStructuredSource.IndexOf('Assert-Task051PublicStatus -Value $structured -Kind $publicKind', [StringComparison]::Ordinal)
-$contentPublicValidationIndex = $codexToolStructuredSource.IndexOf('Assert-Task051PublicStatus -Value $contentValue -Kind $publicKind', [StringComparison]::Ordinal)
+$structuredPublicValidationIndex = $codexToolStructuredSource.IndexOf('Assert-Task051PublicStatus -Value $structured -Kind $publicKind -DetailedFailure', [StringComparison]::Ordinal)
+$contentPublicValidationIndex = $codexToolStructuredSource.IndexOf('Assert-Task051PublicStatus -Value $contentValue -Kind $publicKind -DetailedFailure', [StringComparison]::Ordinal)
 $parityValidationIndex = $codexToolStructuredSource.IndexOf('Assert-Task051SameStatus -Expected $structured -Actual $contentValue -Kind $publicKind', [StringComparison]::Ordinal)
 if (
     $publicKindSubmitIndex -lt 0 -or
@@ -578,6 +579,7 @@ if (
     $contentPublicValidationIndex -le $structuredPublicValidationIndex -or
     $parityValidationIndex -le $contentPublicValidationIndex -or
     [regex]::Matches($codexToolStructuredSource, [regex]::Escape('-Kind $publicKind')).Count -ne 5 -or
+    [regex]::Matches($codexToolStructuredSource, [regex]::Escape('-DetailedFailure')).Count -ne 2 -or
     [regex]::Matches($codexToolStructuredSource, [regex]::Escape("'TASK051_CODEX_TOOL_PUBLIC_KIND_REJECTED'")).Count -ne 1 -or
     [regex]::Matches($codexToolResolverSource, [regex]::Escape("'TASK051_CODEX_TOOL_PUBLIC_KIND_REJECTED' { return 'TASK038_CURRENT_CODEX_TOOL_PUBLIC_KIND_REJECTED' }")).Count -ne 1 -or
     $codexToolStructuredSource.IndexOf("Assert-Task051PublicStatus -Value `$structured -Kind 'STATUS'", [StringComparison]::Ordinal) -ge 0 -or
@@ -590,7 +592,17 @@ if (
 $projectionMappingFragments = @(
     "if (`$Message -ceq 'TASK051_PUBLIC_STATUS_SHAPE_REJECTED')",
     "'STRUCTURED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED' }",
-    "'CONTENT' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED' }",
+    "'CONTENT' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED' }"
+)
+$publicProjectionFields = @('SCHEMA', 'STATE', 'TASK_REF', 'LEDGER_HEAD', 'RESULT_DIGEST')
+foreach ($projectionName in @('STRUCTURED', 'CONTENT')) {
+    foreach ($kindName in @('SUBMIT', 'STATUS')) {
+        foreach ($fieldName in $publicProjectionFields) {
+            $projectionMappingFragments += "'" + $projectionName + '|' + $kindName + '|TASK051_PUBLIC_STATUS_' + $fieldName + "_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_" + $projectionName + '_' + $kindName + '_' + $fieldName + "_REJECTED' }"
+        }
+    }
+}
+$projectionMappingFragments += @(
     "'STRUCTURED|SUBMIT|TASK051_SUBMIT_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED' }",
     "'STRUCTURED|STATUS|TASK051_STATUS_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED' }",
     "'CONTENT|SUBMIT|TASK051_SUBMIT_SEMANTICS_REJECTED' { return 'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED' }",
@@ -620,11 +632,25 @@ $codexToolResultRawLeaves = @(
     'TASK051_CODEX_TOOL_RESULT_META_SHAPE_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED',
-    'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED'
+)
+foreach ($kindName in @('SUBMIT', 'STATUS')) {
+    foreach ($fieldName in $publicProjectionFields) {
+        $codexToolResultRawLeaves += 'TASK051_CODEX_TOOL_RESULT_STRUCTURED_' + $kindName + '_' + $fieldName + '_REJECTED'
+    }
+}
+$codexToolResultRawLeaves += @(
     'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED',
-    'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED'
+)
+foreach ($kindName in @('SUBMIT', 'STATUS')) {
+    foreach ($fieldName in $publicProjectionFields) {
+        $codexToolResultRawLeaves += 'TASK051_CODEX_TOOL_RESULT_CONTENT_' + $kindName + '_' + $fieldName + '_REJECTED'
+    }
+}
+$codexToolResultRawLeaves += @(
     'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_STRUCTURED_REJECTED',
@@ -649,7 +675,16 @@ foreach ($codexToolParserRawLeaf in $codexToolParserRawLeaves) {
 }
 $codexProjectionRawLeaves = @(
     'TASK051_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED',
-    'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED',
+    'TASK051_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED'
+)
+foreach ($projectionName in @('STRUCTURED', 'CONTENT')) {
+    foreach ($kindName in @('SUBMIT', 'STATUS')) {
+        foreach ($fieldName in $publicProjectionFields) {
+            $codexProjectionRawLeaves += 'TASK051_CODEX_TOOL_RESULT_' + $projectionName + '_' + $kindName + '_' + $fieldName + '_REJECTED'
+        }
+    }
+}
+$codexProjectionRawLeaves += @(
     'TASK051_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED',
     'TASK051_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED',
@@ -674,25 +709,7 @@ if (
 ) {
     throw 'TASK051_CODEX_TOOL_RESULT_SPLIT_SHAPE_REJECTED'
 }
-$codexToolResultMappedLeaves = @(
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_ERROR_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_MISSING_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_KEYS_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SHAPE_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_META_SHAPE_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_META_IDENTITY_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_NULL_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_PUBLIC_SHAPE_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_SUBMIT_SEMANTICS_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_STATUS_SEMANTICS_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_JSON_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PUBLIC_SHAPE_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_SUBMIT_SEMANTICS_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_STATUS_SEMANTICS_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_STRUCTURED_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_CONTENT_PROJECTION_REJECTED',
-    'TASK038_CURRENT_CODEX_TOOL_RESULT_PARITY_REJECTED'
-)
+$codexToolResultMappedLeaves = @($codexToolResultRawLeaves | ForEach-Object { $_.Replace('TASK051_CODEX', 'TASK038_CURRENT_CODEX') })
 $codexToolResultMappingIndex = -1
 for ($resultLeafIndex = 0; $resultLeafIndex -lt $codexToolResultRawLeaves.Count; $resultLeafIndex++) {
     $mappingFragment = "'" + $codexToolResultRawLeaves[$resultLeafIndex] + "' { return '" + $codexToolResultMappedLeaves[$resultLeafIndex] + "' }"
@@ -856,6 +873,48 @@ foreach ($phaseCallFragment in @(
     }
 }
 
+$semanticFieldStart = $runnerSource.IndexOf('function Get-Task051PublicStatusSemanticField', [StringComparison]::Ordinal)
+$publicStatusAssertStart = $runnerSource.IndexOf('function Assert-Task051PublicStatus', $semanticFieldStart, [StringComparison]::Ordinal)
+$sameStatusAssertStart = $runnerSource.IndexOf('function Assert-Task051SameStatus', $publicStatusAssertStart, [StringComparison]::Ordinal)
+if ($semanticFieldStart -lt 0 -or $publicStatusAssertStart -le $semanticFieldStart -or $sameStatusAssertStart -le $publicStatusAssertStart) {
+    throw 'TASK051_PUBLIC_STATUS_FIELD_DIAGNOSTIC_SHAPE_REJECTED'
+}
+$semanticFieldSource = $runnerSource.Substring($semanticFieldStart, $publicStatusAssertStart - $semanticFieldStart)
+$publicStatusAssertSource = $runnerSource.Substring($publicStatusAssertStart, $sameStatusAssertStart - $publicStatusAssertStart)
+$semanticFieldFragments = @(
+    "if ([string]`$Value.schema_version -cne `$script:Task051PublicStatusSchema) { return 'SCHEMA' }",
+    "if ([string]`$Value.status -cne 'COMPLETED' -or [string]`$Value.task_state -cne 'COMPLETED') { return 'STATE' }",
+    "if ([string]`$Value.task_ref -cnotmatch '\A[0-9a-f]{64}\z') { return 'TASK_REF' }",
+    "if ([string]`$Value.ledger_head_digest -cnotmatch '\A[0-9a-f]{64}\z') { return 'LEDGER_HEAD' }",
+    "if ([string]`$Value.result_digest -cnotmatch '\A[0-9a-f]{64}\z') { return 'RESULT_DIGEST' }",
+    "return 'NONE'"
+)
+$semanticFieldFragmentIndex = -1
+foreach ($semanticFieldFragment in $semanticFieldFragments) {
+    $nextSemanticFieldFragmentIndex = $semanticFieldSource.IndexOf($semanticFieldFragment, $semanticFieldFragmentIndex + 1, [StringComparison]::Ordinal)
+    if ($nextSemanticFieldFragmentIndex -le $semanticFieldFragmentIndex) {
+        throw 'TASK051_PUBLIC_STATUS_FIELD_DIAGNOSTIC_SHAPE_REJECTED'
+    }
+    $semanticFieldFragmentIndex = $nextSemanticFieldFragmentIndex
+}
+if (
+    [regex]::Matches($publicStatusAssertSource, [regex]::Escape('Get-Task051PublicStatusSemanticField -Value $Value')).Count -ne 1 -or
+    [regex]::Matches($publicStatusAssertSource, [regex]::Escape('[switch]$DetailedFailure')).Count -ne 1 -or
+    $publicStatusAssertSource.IndexOf('$Value.schema_version', [StringComparison]::Ordinal) -ge 0 -or
+    $publicStatusAssertSource.IndexOf('$Value.status', [StringComparison]::Ordinal) -ge 0 -or
+    $publicStatusAssertSource.IndexOf('$Value.task_state', [StringComparison]::Ordinal) -ge 0 -or
+    $publicStatusAssertSource.IndexOf('$Value.task_ref', [StringComparison]::Ordinal) -ge 0 -or
+    $publicStatusAssertSource.IndexOf('$Value.ledger_head_digest', [StringComparison]::Ordinal) -ge 0 -or
+    $publicStatusAssertSource.IndexOf('$Value.result_digest', [StringComparison]::Ordinal) -ge 0
+) {
+    throw 'TASK051_PUBLIC_STATUS_FIELD_DIAGNOSTIC_SHAPE_REJECTED'
+}
+foreach ($internalFieldLeaf in @('SCHEMA', 'STATE', 'TASK_REF', 'LEDGER_HEAD', 'RESULT_DIGEST')) {
+    if ([regex]::Matches($publicStatusAssertSource, [regex]::Escape("'TASK051_PUBLIC_STATUS_" + $internalFieldLeaf + "_REJECTED'")).Count -ne 1) {
+        throw 'TASK051_PUBLIC_STATUS_FIELD_DIAGNOSTIC_SHAPE_REJECTED'
+    }
+}
+
 $bundleStart = $runnerSource.IndexOf('function Get-Task051OfficialCodexBundlePolicy', [StringComparison]::Ordinal)
 if ($bundleStart -lt 0) {
     throw 'TASK051_OFFICIAL_CODEX_BUNDLE_SHAPE_REJECTED'
@@ -948,6 +1007,7 @@ $expectedSelfTestMarkers = @(
     'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST=PASS',
     'TASK051_CODEX_CALL_COUNT_PHASE_SELF_TEST=PASS',
     'TASK051_CODEX_EVENT_SUMMARY_SELF_TEST=PASS',
+    'TASK051_CODEX_TOOL_FIELD_DIAGNOSTIC_SELF_TEST=PASS',
     'TASK051_CODEX_TOOL_RESULT_META_EVIDENCE_SELF_TEST=PASS',
     'TASK051_CODEX_PHASE_TOOL_NO_MATERIALIZATION_SELF_TEST=PASS',
     'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST=PASS',
