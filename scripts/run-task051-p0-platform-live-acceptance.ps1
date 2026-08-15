@@ -587,6 +587,117 @@ function Assert-Task051RegularFile {
     }
 }
 
+function Get-Task051OfficialCodexBundlePolicy {
+    return @(
+        [pscustomobject]@{
+            RelativePath = 'codex-official\0.146.0\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe'
+            Sha256 = 'bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb'
+        },
+        [pscustomobject]@{
+            RelativePath = 'codex-official\0.146.0\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex-resources\codex-windows-sandbox-setup.exe'
+            Sha256 = 'c12d225b34e7f82cdab6bbc714797abed661f40e158104694953889750121cef'
+        },
+        [pscustomobject]@{
+            RelativePath = 'codex-official\0.146.0\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex-resources\codex-command-runner.exe'
+            Sha256 = '0102fa1820ecd03bb03a991fd2303a1a484118f7da8a71864f88ec94bca61d6d'
+        },
+        [pscustomobject]@{
+            RelativePath = 'codex-official\0.146.0\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex-code-mode-host.exe'
+            Sha256 = '6ef1de0e04d859f8f4f6d4d64f0f3ceeec28658423d91de160f5e804280d1c36'
+        },
+        [pscustomobject]@{
+            RelativePath = 'codex-official\0.146.0\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex-path\rg.exe'
+            Sha256 = '14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680'
+        },
+        [pscustomobject]@{
+            RelativePath = 'codex-official\0.146.0\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\codex-package.json'
+            Sha256 = 'aaa0646d6b615da94187b51efd50c69621a00867761161ae55cc16cfd545bec7'
+        },
+        [pscustomobject]@{
+            RelativePath = 'codex-official\0.146.0\node_modules\@openai\codex\package.json'
+            Sha256 = '24dd8c63a4d2b7bc2ded86c887974f842093ce4f2ed8473267a91e036c38da20'
+        }
+    )
+}
+
+function Assert-Task051OfficialCodexBundle {
+    param(
+        [Parameter(Mandatory = $true)][string]$BundleTargetRoot,
+        [Parameter(Mandatory = $true)][string]$Boundary,
+        [switch]$ValidateVersion
+    )
+
+    $bundleTarget = [IO.Path]::GetFullPath($BundleTargetRoot)
+    $canonicalBoundary = [IO.Path]::GetFullPath($Boundary)
+    if (-not (Test-Path -LiteralPath $bundleTarget -PathType Container)) {
+        throw 'TASK051_OFFICIAL_CODEX_BUNDLE_REJECTED'
+    }
+    Assert-Task051NoReparseAncestor -Path $bundleTarget -Boundary $canonicalBoundary -FailureCode 'TASK051_OFFICIAL_CODEX_BUNDLE_REJECTED'
+
+    $policy = @(Get-Task051OfficialCodexBundlePolicy)
+    foreach ($entry in $policy) {
+        $path = [IO.Path]::GetFullPath((Join-Path $bundleTarget ([string]$entry.RelativePath)))
+        Assert-Task051NoReparseAncestor -Path $path -Boundary $bundleTarget -FailureCode 'TASK051_OFFICIAL_CODEX_BUNDLE_REJECTED'
+        Assert-Task051RegularFile -Path $path -FailureCode 'TASK051_OFFICIAL_CODEX_BUNDLE_REJECTED'
+        if ((Get-Task051Sha256 -Path $path) -cne [string]$entry.Sha256) {
+            throw 'TASK051_OFFICIAL_CODEX_BUNDLE_REJECTED'
+        }
+    }
+
+    $launcher = [IO.Path]::GetFullPath((Join-Path $bundleTarget ([string]$policy[0].RelativePath)))
+    if ($ValidateVersion) {
+        $versionOutput = @(& $launcher --version 2>&1 | ForEach-Object { [string]$_ })
+        if ($LASTEXITCODE -ne 0 -or $versionOutput.Count -ne 1 -or $versionOutput[0] -cne 'codex-cli 0.146.0') {
+            throw 'TASK051_OFFICIAL_CODEX_BUNDLE_REJECTED'
+        }
+    }
+    return $launcher
+}
+
+function Copy-Task051OfficialCodexBundle {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceTargetRoot,
+        [Parameter(Mandatory = $true)][string]$SourceBoundary,
+        [Parameter(Mandatory = $true)][string]$DestinationTargetRoot,
+        [Parameter(Mandatory = $true)][string]$DestinationBoundary
+    )
+
+    try {
+        [void](Assert-Task051OfficialCodexBundle -BundleTargetRoot $SourceTargetRoot -Boundary $SourceBoundary)
+        $sourceTarget = [IO.Path]::GetFullPath($SourceTargetRoot)
+        $destinationTarget = [IO.Path]::GetFullPath($DestinationTargetRoot)
+        if (Test-Path -LiteralPath $destinationTarget) {
+            throw 'TASK051_OFFICIAL_CODEX_BUNDLE_COPY_REJECTED'
+        }
+        New-Task051OwnerOnlyDirectory -Path $destinationTarget
+        Assert-Task051NoReparseAncestor -Path $destinationTarget -Boundary $DestinationBoundary -FailureCode 'TASK051_OFFICIAL_CODEX_BUNDLE_COPY_REJECTED'
+        $destinationBundle = Join-Path $destinationTarget 'codex-official'
+        [IO.Directory]::CreateDirectory($destinationBundle) | Out-Null
+        Set-Task051OwnerOnlyAcl -Path $destinationBundle -Directory $true
+        Assert-Task051NoReparseAncestor -Path $destinationBundle -Boundary $DestinationBoundary -FailureCode 'TASK051_OFFICIAL_CODEX_BUNDLE_COPY_REJECTED'
+
+        foreach ($entry in @(Get-Task051OfficialCodexBundlePolicy)) {
+            $source = [IO.Path]::GetFullPath((Join-Path $sourceTarget ([string]$entry.RelativePath)))
+            $destination = [IO.Path]::GetFullPath((Join-Path $destinationTarget ([string]$entry.RelativePath)))
+            $destinationParent = Split-Path -Parent $destination
+            [IO.Directory]::CreateDirectory($destinationParent) | Out-Null
+            Set-Task051OwnerOnlyAcl -Path $destinationParent -Directory $true
+            Assert-Task051NoReparseAncestor -Path $destinationParent -Boundary $destinationTarget -FailureCode 'TASK051_OFFICIAL_CODEX_BUNDLE_COPY_REJECTED'
+            [IO.File]::Copy($source, $destination, $false)
+            Set-Task051OwnerOnlyAcl -Path $destination -Directory $false
+            if ((Get-Task051Sha256 -Path $destination) -cne [string]$entry.Sha256) {
+                throw 'TASK051_OFFICIAL_CODEX_BUNDLE_COPY_REJECTED'
+            }
+        }
+
+        [void](Assert-Task051OfficialCodexBundle -BundleTargetRoot $SourceTargetRoot -Boundary $SourceBoundary)
+        return Assert-Task051OfficialCodexBundle -BundleTargetRoot $destinationTarget -Boundary $DestinationBoundary -ValidateVersion
+    }
+    catch {
+        throw 'TASK051_OFFICIAL_CODEX_BUNDLE_COPY_REJECTED'
+    }
+}
+
 function Assert-Task051PublicStatus {
     param(
         [Parameter(Mandatory = $true)]$Value,
@@ -2272,6 +2383,59 @@ function Invoke-Task051SelfTest {
         Remove-Item -LiteralPath $releaseReceiptPath -Force
         [IO.Directory]::Delete($clusterParent, $true)
         [IO.Directory]::Delete($receiptRoot, $true)
+        $selfTestRepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+        $selfTestWorkspaceRoot = [IO.Path]::GetFullPath((Split-Path -Parent $selfTestRepositoryRoot))
+        $selfTestBundleSource = Join-Path $selfTestWorkspaceRoot 'chatgpt-mcp\target'
+        $bundleAlias = $null
+        try {
+            $bundleAlias = New-Task051RunRootAlias -RunRoot $aclRoot
+            $selfTestBundleTargetAlias = Join-Path $bundleAlias.Root 'official-bundle-selftest'
+            $selfTestLauncher = Copy-Task051OfficialCodexBundle -SourceTargetRoot $selfTestBundleSource -SourceBoundary $selfTestWorkspaceRoot -DestinationTargetRoot $selfTestBundleTargetAlias -DestinationBoundary $selfTestBundleTargetAlias
+            if ((Get-Task051Sha256 -Path $selfTestLauncher) -cne 'bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb') {
+                throw 'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST_REJECTED'
+            }
+            Assert-Task051OwnerOnlyAcl -Path $selfTestBundleTargetAlias -Directory $true
+            Assert-Task051OwnerOnlyAcl -Path $selfTestLauncher -Directory $false
+
+            $tamperedManifest = Join-Path $selfTestBundleTargetAlias 'codex-official\0.146.0\node_modules\@openai\codex\package.json'
+            [IO.File]::WriteAllText($tamperedManifest, '{"tampered":true}', [Text.UTF8Encoding]::new($false))
+            $tamperRejected = $false
+            try {
+                [void](Assert-Task051OfficialCodexBundle -BundleTargetRoot $selfTestBundleTargetAlias -Boundary $selfTestBundleTargetAlias -ValidateVersion)
+            }
+            catch {
+                $tamperRejected = [string]$_.Exception.Message -ceq 'TASK051_OFFICIAL_CODEX_BUNDLE_REJECTED'
+            }
+            if (-not $tamperRejected) { throw 'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST_REJECTED' }
+        }
+        finally {
+            if ($null -ne $bundleAlias) {
+                $selfTestBundleTargetPhysical = Join-Path $aclRoot 'official-bundle-selftest'
+                Remove-Task051OwnedDirectory -Path $selfTestBundleTargetPhysical -AllowedRoot $aclRoot -FailureCode 'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST_REJECTED'
+                Remove-Task051RunRootAlias -Alias $bundleAlias
+                if (Test-Path -LiteralPath $selfTestBundleTargetPhysical) {
+                    throw 'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST_REJECTED'
+                }
+            }
+        }
+        $reparseBundleSource = Join-Path $aclRoot 'official-bundle-reparse-source'
+        New-Task051OwnerOnlyDirectory -Path $reparseBundleSource
+        $reparseBundleLink = Join-Path $reparseBundleSource 'codex-official'
+        New-Item -ItemType Junction -Path $reparseBundleLink -Target (Join-Path $selfTestBundleSource 'codex-official') | Out-Null
+        try {
+            $reparseRejected = $false
+            try {
+                [void](Assert-Task051OfficialCodexBundle -BundleTargetRoot $reparseBundleSource -Boundary $aclRoot)
+            }
+            catch {
+                $reparseRejected = [string]$_.Exception.Message -ceq 'TASK051_OFFICIAL_CODEX_BUNDLE_REJECTED'
+            }
+            if (-not $reparseRejected) { throw 'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST_REJECTED' }
+        }
+        finally {
+            if (Test-Path -LiteralPath $reparseBundleLink) { [IO.Directory]::Delete($reparseBundleLink, $false) }
+            if (Test-Path -LiteralPath $reparseBundleSource) { [IO.Directory]::Delete($reparseBundleSource, $false) }
+        }
         $directoryAcl = [IO.Directory]::GetAccessControl($aclRoot)
         $usersSid = [Security.Principal.SecurityIdentifier]::new(
             [Security.Principal.WellKnownSidType]::BuiltinUsersSid,
@@ -2482,6 +2646,7 @@ function Invoke-Task051SelfTest {
     Write-Output 'TASK051_SOURCE_TRANSFORM_SELF_TEST=PASS'
     Write-Output 'TASK051_CODEX_EVENT_PARSER_SELF_TEST=PASS'
     Write-Output 'TASK051_APP_SERVER_DISCOVERY_SELF_TEST=PASS'
+    Write-Output 'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST=PASS'
     Write-Output 'TASK051_OWNER_ONLY_CREDENTIAL_SELF_TEST=PASS'
     Write-Output 'TASK051_PROCESS_CONTAINMENT_SELF_TEST=PASS'
     Write-Output 'TASK051_RUNNER_SELF_TEST=PASS'
@@ -2529,8 +2694,11 @@ $currentCodexVersion = (& $currentCodex --version).Trim()
 if ($currentCodexVersion -cne 'codex-cli 0.147.0-alpha.6.6') { throw 'TASK051_CURRENT_CODEX_REJECTED' }
 $currentCodexSemanticVersion = $currentCodexVersion.Substring('codex-cli '.Length)
 $currentCodexUserAgent = 'lattice-task051-acceptance/' + $currentCodexSemanticVersion + ' (Windows ' + [Environment]::OSVersion.Version.ToString(3) + '; x86_64) unknown (lattice-task051-acceptance; 1)'
-$officialCodex = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $repositoryRoot) 'chatgpt-mcp\target\task038-official-codex\0.146.0\codex.exe'))
-Assert-Task051RegularFile -Path $officialCodex -FailureCode 'TASK051_TASK038_CODEX_REJECTED'
+$workspaceRoot = [IO.Path]::GetFullPath((Split-Path -Parent $repositoryRoot))
+$officialCodexSourceTarget = [IO.Path]::GetFullPath((Join-Path $workspaceRoot 'chatgpt-mcp\target'))
+$officialCodex = $null
+$officialCodexSha256 = 'bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb'
+$privateOfficialCodexBundleTarget = Join-Path $runRoot 'official-bundle-target'
 $credentialSource = Join-Path $runRoot 'credential-source'
 $generatedTask038 = Join-Path $runRoot 'run-task038-task-submit.generated.ps1'
 $generatedTask019 = Join-Path $runRoot 'run-task019-postgres.generated.ps1'
@@ -2557,9 +2725,12 @@ foreach ($name in @(
 $primaryFailure = $null
 $harnessOutput = @()
 $runAlias = $null
+$externalResourcesMayExist = $false
 $postgresProcessBaseline = @(Get-Task051PostgresProcessSnapshot)
 try {
     $runAlias = New-Task051RunRootAlias -RunRoot $runRoot
+    $privateOfficialCodexBundleTargetAlias = Join-Path $runAlias.Root 'official-bundle-target'
+    $officialCodex = Copy-Task051OfficialCodexBundle -SourceTargetRoot $officialCodexSourceTarget -SourceBoundary $workspaceRoot -DestinationTargetRoot $privateOfficialCodexBundleTargetAlias -DestinationBoundary $privateOfficialCodexBundleTargetAlias
     New-Task051OwnerOnlyDirectory -Path $credentialSource
     $credentialAuth = Join-Path $credentialSource 'auth.json'
     [IO.File]::Copy($authSource, $credentialAuth, $false)
@@ -2586,6 +2757,7 @@ try {
     [Environment]::SetEnvironmentVariable('LATTICE_TASK051_CURRENT_CODEX_USER_AGENT', $currentCodexUserAgent, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', $authSource, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK051_ORIGINAL_CONFIG_SHA256', $originalConfigSha256, 'Process')
+    $externalResourcesMayExist = $true
     $harnessOutput = @(& $generatedTask019 -RunTask076WriterLeaseGate -RunTask038AcceptanceHook -Task038OfficialCodexExecutable $officialCodex -Task038CodexAuthHome $credentialSource 2>&1 | ForEach-Object { [string]$_ })
     if ($LASTEXITCODE -ne 0) { throw 'TASK051_TASK019_HARNESS_REJECTED' }
 }
@@ -2627,8 +2799,19 @@ finally {
     }
     if ($null -ne $runAlias) {
         try {
-            if (-not (Test-Task051RunRootAliasReleaseSafe -Alias $runAlias -RunRoot $runRoot -BaselinePostgresProcesses $postgresProcessBaseline)) {
+            if (
+                $externalResourcesMayExist -and
+                -not (Test-Task051RunRootAliasReleaseSafe -Alias $runAlias -RunRoot $runRoot -BaselinePostgresProcesses $postgresProcessBaseline)
+            ) {
                 throw 'TASK051_RUN_ALIAS_PRESERVED_FOR_ACTIVE_RESOURCE'
+            }
+            try {
+                Remove-Task051OwnedDirectory -Path $privateOfficialCodexBundleTarget -AllowedRoot $runRoot -FailureCode 'TASK051_OFFICIAL_CODEX_BUNDLE_CLEANUP_REJECTED'
+            }
+            catch {
+                if ($null -eq $cleanupFailure) {
+                    $cleanupFailure = 'TASK051_OFFICIAL_CODEX_BUNDLE_CLEANUP_REJECTED'
+                }
             }
             Remove-Task051RunRootAlias -Alias $runAlias
         }
@@ -2700,7 +2883,7 @@ $final = [ordered]@{
     current_codex_path = $currentCodex
     current_codex_version = $currentCodexVersion
     current_codex_sha256 = Get-Task051Sha256 -Path $currentCodex
-    task038_official_codex_sha256 = Get-Task051Sha256 -Path $officialCodex
+    task038_official_codex_sha256 = $officialCodexSha256
     original_config_path = $originalConfig
     original_config_sha256 = $originalConfigSha256
     original_config_unchanged = $true

@@ -59,6 +59,25 @@ $requiredFragments = @(
     'Close-Task038Job',
     'Stop-Task038ProcessTree',
     'TASK051_PROCESS_START_CLEANUP_REJECTED',
+    'Assert-Task051OfficialCodexBundle',
+    'Copy-Task051OfficialCodexBundle',
+    'codex-official\0.146.0\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe',
+    'codex-windows-sandbox-setup.exe',
+    'codex-command-runner.exe',
+    'codex-code-mode-host.exe',
+    'codex-path\rg.exe',
+    'codex-package.json',
+    '@openai\codex\package.json',
+    'bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb',
+    'c12d225b34e7f82cdab6bbc714797abed661f40e158104694953889750121cef',
+    '0102fa1820ecd03bb03a991fd2303a1a484118f7da8a71864f88ec94bca61d6d',
+    '6ef1de0e04d859f8f4f6d4d64f0f3ceeec28658423d91de160f5e804280d1c36',
+    '14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680',
+    'aaa0646d6b615da94187b51efd50c69621a00867761161ae55cc16cfd545bec7',
+    '24dd8c63a4d2b7bc2ded86c887974f842093ce4f2ed8473267a91e036c38da20',
+    'TASK051_OFFICIAL_CODEX_BUNDLE_REJECTED',
+    'TASK051_OFFICIAL_CODEX_BUNDLE_COPY_REJECTED',
+    'TASK051_OFFICIAL_CODEX_BUNDLE_CLEANUP_REJECTED',
     'Initialize-Task051CargoHome',
     'CARGO_HOME',
     'CARGO_NET_OFFLINE',
@@ -131,6 +150,63 @@ foreach ($fragment in $requiredFragments) {
     }
 }
 
+$bundleStart = $runnerSource.IndexOf('function Get-Task051OfficialCodexBundlePolicy', [StringComparison]::Ordinal)
+if ($bundleStart -lt 0) {
+    throw 'TASK051_OFFICIAL_CODEX_BUNDLE_SHAPE_REJECTED'
+}
+$bundleEnd = $runnerSource.IndexOf('function Assert-Task051PublicStatus', $bundleStart, [StringComparison]::Ordinal)
+if ($bundleEnd -le $bundleStart) { throw 'TASK051_OFFICIAL_CODEX_BUNDLE_SHAPE_REJECTED' }
+$bundleSource = $runnerSource.Substring($bundleStart, $bundleEnd - $bundleStart)
+$bundleRequiredFragments = @(
+    'function Assert-Task051OfficialCodexBundle',
+    'function Copy-Task051OfficialCodexBundle',
+    'Assert-Task051NoReparseAncestor -Path $path -Boundary $bundleTarget',
+    'Assert-Task051RegularFile -Path $path',
+    '(Get-Task051Sha256 -Path $path) -cne',
+    '$versionOutput.Count -ne 1',
+    "'codex-cli 0.146.0'",
+    'Set-Task051OwnerOnlyAcl -Path $destination -Directory $false',
+    '(Get-Task051Sha256 -Path $destination) -cne',
+    '-BundleTargetRoot $destinationTarget -Boundary $DestinationBoundary -ValidateVersion'
+)
+foreach ($fragment in $bundleRequiredFragments) {
+    if ($bundleSource.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
+        throw ('TASK051_OFFICIAL_CODEX_BUNDLE_SHAPE_REJECTED|' + $fragment)
+    }
+}
+if (
+    [regex]::Matches($bundleSource, "RelativePath = 'codex-official\\").Count -ne 7 -or
+    [regex]::Matches($bundleSource, [regex]::Escape('[void](Assert-Task051OfficialCodexBundle -BundleTargetRoot $SourceTargetRoot -Boundary $SourceBoundary)')).Count -ne 2
+) {
+    throw 'TASK051_OFFICIAL_CODEX_BUNDLE_SHAPE_REJECTED'
+}
+$mainStart = $runnerSource.IndexOf('$externalResourcesMayExist = $false', [StringComparison]::Ordinal)
+if ($mainStart -lt 0) { throw 'TASK051_OFFICIAL_CODEX_BUNDLE_CLEANUP_SHAPE_REJECTED' }
+$mainEnd = $runnerSource.IndexOf('if ((Get-Task051Sha256 -Path $originalConfig)', $mainStart, [StringComparison]::Ordinal)
+if ($mainEnd -le $mainStart) { throw 'TASK051_OFFICIAL_CODEX_BUNDLE_CLEANUP_SHAPE_REJECTED' }
+$mainSource = $runnerSource.Substring($mainStart, $mainEnd - $mainStart)
+$resourcesArmed = $mainSource.IndexOf('$externalResourcesMayExist = $true', [StringComparison]::Ordinal)
+$harnessInvocation = $mainSource.IndexOf('$harnessOutput = @(& $generatedTask019', [StringComparison]::Ordinal)
+$aliasReleaseSafe = $mainSource.IndexOf('$externalResourcesMayExist -and', [StringComparison]::Ordinal)
+$privateBundleCleanup = $mainSource.IndexOf("Remove-Task051OwnedDirectory -Path `$privateOfficialCodexBundleTarget -AllowedRoot `$runRoot -FailureCode 'TASK051_OFFICIAL_CODEX_BUNDLE_CLEANUP_REJECTED'", [StringComparison]::Ordinal)
+$aliasRemoval = if ($privateBundleCleanup -ge 0) {
+    $mainSource.IndexOf('Remove-Task051RunRootAlias -Alias $runAlias', $privateBundleCleanup, [StringComparison]::Ordinal)
+}
+else { -1 }
+if (
+    [regex]::Matches($mainSource, [regex]::Escape('$externalResourcesMayExist')).Count -ne 3 -or
+    $resourcesArmed -lt 0 -or
+    $harnessInvocation -le $resourcesArmed -or
+    $aliasReleaseSafe -lt 0 -or
+    $aliasReleaseSafe -le $harnessInvocation -or
+    $privateBundleCleanup -le $aliasReleaseSafe -or
+    $aliasRemoval -le $privateBundleCleanup -or
+    $runnerSource.IndexOf("[IO.Directory]::Delete(('\\?\' + `$fullPath), `$true)", [StringComparison]::Ordinal) -lt 0 -or
+    $runnerSource.IndexOf('if (Test-Path -LiteralPath $fullPath)', [StringComparison]::Ordinal) -lt 0
+) {
+    throw 'TASK051_OFFICIAL_CODEX_BUNDLE_CLEANUP_SHAPE_REJECTED'
+}
+
 $forbiddenFragments = @(
     '[IO.File]::WriteAllBytes($originalConfig',
     '[IO.File]::WriteAllText($originalConfig',
@@ -140,7 +216,8 @@ $forbiddenFragments = @(
     'codex mcp add',
     'codex mcp login',
     'git clean',
-    'git reset --hard'
+    'git reset --hard',
+    'task038-official-codex\0.146.0\codex.exe'
 )
 foreach ($fragment in $forbiddenFragments) {
     if ($runnerSource.IndexOf($fragment, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
@@ -157,6 +234,7 @@ $expectedSelfTestMarkers = @(
     'TASK051_SOURCE_TRANSFORM_SELF_TEST=PASS',
     'TASK051_CODEX_EVENT_PARSER_SELF_TEST=PASS',
     'TASK051_APP_SERVER_DISCOVERY_SELF_TEST=PASS',
+    'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST=PASS',
     'TASK051_OWNER_ONLY_CREDENTIAL_SELF_TEST=PASS',
     'TASK051_PROCESS_CONTAINMENT_SELF_TEST=PASS',
     'TASK051_RUNNER_SELF_TEST=PASS'
