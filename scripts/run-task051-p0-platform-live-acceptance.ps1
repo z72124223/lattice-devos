@@ -935,19 +935,19 @@ public static class LatticeTask051ProcessIdentityInterop
     {
         if (job == IntPtr.Zero || processId < 1)
         {
-            throw new ArgumentException("invalid process authority input");
+            throw new InvalidOperationException("TASK051_PROCESS_INTEROP_INPUT");
         }
         IntPtr process = OpenProcess(ProcessQueryLimitedInformation, false, (UInt32)processId);
         if (process == IntPtr.Zero)
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error());
+            throw new InvalidOperationException("TASK051_PROCESS_INTEROP_OPEN");
         }
         try
         {
             bool inJob;
             if (!IsProcessInJob(process, job, out inJob))
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error());
+                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_JOB_QUERY");
             }
             if (!inJob)
             {
@@ -962,7 +962,7 @@ public static class LatticeTask051ProcessIdentityInterop
             UInt32 imagePathLength = (UInt32)imagePath.Capacity;
             if (!QueryFullProcessImageName(process, 0, imagePath, ref imagePathLength))
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error());
+                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_IMAGE_QUERY");
             }
             FileTime creation;
             FileTime exit;
@@ -970,7 +970,7 @@ public static class LatticeTask051ProcessIdentityInterop
             FileTime user;
             if (!GetProcessTimes(process, out creation, out exit, out kernel, out user))
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error());
+                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_TIME_QUERY");
             }
             UInt64 creationValue = ((UInt64)creation.High << 32) | creation.Low;
             return new LatticeTask051OwnedProcessEvidence
@@ -984,7 +984,7 @@ public static class LatticeTask051ProcessIdentityInterop
         {
             if (!CloseHandle(process))
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error());
+                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_CLOSE");
             }
         }
     }
@@ -992,7 +992,7 @@ public static class LatticeTask051ProcessIdentityInterop
 '@
     }
     catch {
-        throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_INTEROP_REJECTED'
+        throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_INTEROP_INIT_REJECTED'
     }
 }
 
@@ -1102,7 +1102,16 @@ function Get-Task051OwnedProcessEvidence {
         $native = [LatticeTask051ProcessIdentityInterop]::Inspect($Job, $ProcessId)
     }
     catch {
-        throw $failureCode
+        $leaf = $_.Exception
+        while ($null -ne $leaf.InnerException) { $leaf = $leaf.InnerException }
+        switch -CaseSensitive ([string]$leaf.Message) {
+            'TASK051_PROCESS_INTEROP_OPEN' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_OPEN_REJECTED' }
+            'TASK051_PROCESS_INTEROP_JOB_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_JOB_QUERY_REJECTED' }
+            'TASK051_PROCESS_INTEROP_IMAGE_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_QUERY_REJECTED' }
+            'TASK051_PROCESS_INTEROP_TIME_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_TIME_QUERY_REJECTED' }
+            'TASK051_PROCESS_INTEROP_CLOSE' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_CLOSE_REJECTED' }
+            default { throw $failureCode }
+        }
     }
     if (-not [bool]$native.InJob) {
         throw 'TASK038_CURRENT_CODEX_DISCOVERY_JOB_MEMBERSHIP_REJECTED'
