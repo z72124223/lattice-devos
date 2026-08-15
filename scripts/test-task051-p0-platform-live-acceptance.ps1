@@ -213,6 +213,9 @@ $requiredFragments = @(
     'TASK038_CURRENT_CODEX_TOOL_COUNTERS_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_EVIDENCE_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_CLEANUP_REJECTED',
+    '[mcp_servers.lattice.tools.lattice_task_submit]',
+    '[mcp_servers.lattice.tools.lattice_task_status]',
+    'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST=PASS',
     'TASK051_CODEX_FRESH_PROCESS_REJECTED',
     'V5_MEMORY_V3_WRITER_LEASE_V2',
     'CONTROLLED_CODEX_CANARY_AUTONOMY_V1',
@@ -226,6 +229,35 @@ foreach ($fragment in $requiredFragments) {
     if ($runnerSource.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
         throw ('TASK051_RUNNER_SHAPE_REJECTED|' + $fragment)
     }
+}
+
+$codexHomeStart = $runnerSource.IndexOf('function New-Task051CodexHome', [StringComparison]::Ordinal)
+$codexHomeEnd = $runnerSource.IndexOf('function Remove-Task051CodexCredential', $codexHomeStart, [StringComparison]::Ordinal)
+if ($codexHomeStart -lt 0 -or $codexHomeEnd -le $codexHomeStart) {
+    throw 'TASK051_CODEX_PER_TOOL_APPROVAL_SHAPE_REJECTED'
+}
+$codexHomeSource = $runnerSource.Substring($codexHomeStart, $codexHomeEnd - $codexHomeStart)
+$approvalPolicySourceIndex = $codexHomeSource.IndexOf("'approval_policy = `"never`"'", [StringComparison]::Ordinal)
+$sandboxModeSourceIndex = $codexHomeSource.IndexOf("'sandbox_mode = `"read-only`"'", [StringComparison]::Ordinal)
+$serverApprovalSourceIndex = $codexHomeSource.IndexOf("'[mcp_servers.lattice]'", [StringComparison]::Ordinal)
+$submitApprovalSourceIndex = $codexHomeSource.IndexOf("'[mcp_servers.lattice.tools.lattice_task_submit]'", [StringComparison]::Ordinal)
+$statusApprovalSourceIndex = $codexHomeSource.IndexOf("'[mcp_servers.lattice.tools.lattice_task_status]'", [StringComparison]::Ordinal)
+if (
+    $approvalPolicySourceIndex -lt 0 -or
+    $sandboxModeSourceIndex -le $approvalPolicySourceIndex -or
+    $serverApprovalSourceIndex -le $sandboxModeSourceIndex -or
+    $submitApprovalSourceIndex -le $serverApprovalSourceIndex -or
+    $statusApprovalSourceIndex -le $submitApprovalSourceIndex -or
+    [regex]::Matches($codexHomeSource, [regex]::Escape("'approval_policy = `"never`"'" )).Count -ne 1 -or
+    [regex]::Matches($codexHomeSource, [regex]::Escape("'sandbox_mode = `"read-only`"'" )).Count -ne 1 -or
+    [regex]::Matches($codexHomeSource, [regex]::Escape("'[mcp_servers.lattice.tools.lattice_task_submit]'" )).Count -ne 1 -or
+    [regex]::Matches($codexHomeSource, [regex]::Escape("'[mcp_servers.lattice.tools.lattice_task_status]'" )).Count -ne 1 -or
+    [regex]::Matches($codexHomeSource, [regex]::Escape("'approval_mode = `"approve`"'" )).Count -ne 2 -or
+    $codexHomeSource.IndexOf('default_tools_approval_mode', [StringComparison]::Ordinal) -ge 0 -or
+    $codexHomeSource.IndexOf('[mcp_servers.lattice.tools.lattice_delivery_', [StringComparison]::Ordinal) -ge 0 -or
+    $codexHomeSource.IndexOf('approval_mode = "auto"', [StringComparison]::Ordinal) -ge 0
+) {
+    throw 'TASK051_CODEX_PER_TOOL_APPROVAL_SHAPE_REJECTED'
 }
 
 $discoveryStart = $runnerSource.IndexOf('function Invoke-Task051CodexDiscovery', [StringComparison]::Ordinal)
@@ -514,6 +546,7 @@ $expectedSelfTestMarkers = @(
     'TASK051_PROCESS_LIFETIME_SELF_TEST=PASS',
     'TASK051_MCP_SESSION_OPEN_PARSE_DIAGNOSTIC_SELF_TEST=PASS',
     'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST=PASS',
+    'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST=PASS',
     'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST=PASS',
     'TASK051_OWNER_ONLY_CREDENTIAL_SELF_TEST=PASS',
     'TASK051_PROCESS_CONTAINMENT_SELF_TEST=PASS',

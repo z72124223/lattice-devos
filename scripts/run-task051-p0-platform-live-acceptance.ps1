@@ -1438,6 +1438,12 @@ function New-Task051CodexHome {
             'required = true',
             'startup_timeout_sec = 30',
             'tool_timeout_sec = 330',
+            '',
+            '[mcp_servers.lattice.tools.lattice_task_submit]',
+            'approval_mode = "approve"',
+            '',
+            '[mcp_servers.lattice.tools.lattice_task_status]',
+            'approval_mode = "approve"',
             ''
         ) -join [char]10
         $configPath = Join-Path $codexHome 'config.toml'
@@ -3374,6 +3380,42 @@ function Invoke-Task051SelfTest {
         }
         Remove-Item -LiteralPath $sessionOpenPath -Force
         [Environment]::SetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', $fakeAuth, 'Process')
+        $approvalHome = New-Task051CodexHome -Root $aclRoot -Phase 'approval-profile' -Latticed (Join-Path $aclRoot 'latticed.exe') -EnvironmentNames @('PATH')
+        try {
+            $approvalLines = @([IO.File]::ReadAllLines([string]$approvalHome.ConfigPath, [Text.UTF8Encoding]::new($false)))
+            $approvalPolicyIndex = [Array]::IndexOf($approvalLines, 'approval_policy = "never"')
+            $sandboxModeIndex = [Array]::IndexOf($approvalLines, 'sandbox_mode = "read-only"')
+            $serverApprovalIndex = [Array]::IndexOf($approvalLines, '[mcp_servers.lattice]')
+            $submitApprovalIndex = [Array]::IndexOf($approvalLines, '[mcp_servers.lattice.tools.lattice_task_submit]')
+            $statusApprovalIndex = [Array]::IndexOf($approvalLines, '[mcp_servers.lattice.tools.lattice_task_status]')
+            if (
+                $approvalPolicyIndex -lt 0 -or
+                $sandboxModeIndex -le $approvalPolicyIndex -or
+                $serverApprovalIndex -le $sandboxModeIndex -or
+                $submitApprovalIndex -le $serverApprovalIndex -or
+                $statusApprovalIndex -le $submitApprovalIndex -or
+                @($approvalLines | Where-Object { $_ -ceq 'approval_policy = "never"' }).Count -ne 1 -or
+                @($approvalLines | Where-Object { $_ -ceq 'sandbox_mode = "read-only"' }).Count -ne 1 -or
+                @($approvalLines | Where-Object { $_ -cmatch '^default_tools_approval_mode\s*=' }).Count -ne 0 -or
+                $approvalLines[$submitApprovalIndex + 1] -cne 'approval_mode = "approve"' -or
+                $approvalLines[$statusApprovalIndex + 1] -cne 'approval_mode = "approve"' -or
+                @($approvalLines | Where-Object { $_ -ceq 'approval_mode = "approve"' }).Count -ne 2 -or
+                @($approvalLines | Where-Object { $_.StartsWith('[mcp_servers.lattice.tools.', [StringComparison]::Ordinal) }).Count -ne 2 -or
+                @($approvalLines | Where-Object { $_ -cmatch '^approval_mode\s*=' -and $_ -cne 'approval_mode = "approve"' }).Count -ne 0
+            ) {
+                throw 'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST_REJECTED'
+            }
+        }
+        finally {
+            Remove-Task051CodexCredential -CodexHome $approvalHome
+            if (Test-Path -LiteralPath ([string]$approvalHome.Path) -PathType Container) {
+                [IO.Directory]::Delete([string]$approvalHome.Path, $true)
+            }
+        }
+        if (Test-Path -LiteralPath ([string]$approvalHome.Path)) {
+            throw 'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST_REJECTED'
+        }
+        Write-Output 'TASK051_CODEX_PER_TOOL_APPROVAL_SELF_TEST=PASS'
         try {
             $null = New-Task051CodexHome -Root $aclRoot -Phase 'provisioning-failure' -Latticed "C:\invalid'path\latticed.exe" -EnvironmentNames @('PATH')
             throw 'TASK051_SELF_TEST_FALSE_PASS'
