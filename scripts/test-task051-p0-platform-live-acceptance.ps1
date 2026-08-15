@@ -136,7 +136,6 @@ $requiredFragments = @(
     'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_QUERY_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_TIME_QUERY_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_CLOSE_REJECTED',
-    'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIVENESS_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_FILE_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_NATIVE_IDENTITY_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_SHA256_REJECTED',
@@ -175,7 +174,18 @@ $requiredFragments = @(
     'TASK051_TASK019_CLUSTER_CLEANUP_TRANSFORM_REJECTED',
     'TASK051_TASK019_CLUSTER_CLEANUP_REJECTED',
     "PSObject.Properties['outputSchema']",
-    'lattice.task051.current-codex-discovery.v1',
+    'lattice.task051.current-codex-discovery.v2',
+    'function Test-Task051ProcessLifetime',
+    'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIFETIME_REJECTED',
+    'latticed_exit_file_time_utc',
+    'latticed_was_running_at_capture',
+    'ProcessQueryLimitedInformation | Synchronize',
+    'WaitForSingleObject(authority.ProcessHandle, 0)',
+    'WasRunningAtCapture',
+    'authority.WasRunningAtCapture = waitResult == WaitTimeout;',
+    'authority.ExitFileTimeUtc = 0;',
+    'authority.ExitFileTimeUtc = checked((Int64)exitValue);',
+    'if (waitResult != WaitTimeout && waitResult != WaitObject0)',
     'lattice.task051.current-codex-tool-call.v1',
     'TASK051_CODEX_SUBMIT_CALL_COUNT_REJECTED',
     'TASK051_CODEX_STATUS_CALL_COUNT_REJECTED',
@@ -222,6 +232,32 @@ if ($discoveryStart -lt 0 -or $discoveryEnd -le $discoveryStart) {
     throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_SHAPE_REJECTED'
 }
 $discoverySource = $runnerSource.Substring($discoveryStart, $discoveryEnd - $discoveryStart)
+$processLifetimeStart = $runnerSource.IndexOf('function Test-Task051ProcessLifetime', [StringComparison]::Ordinal)
+$ownedProcessEvidenceStart = $runnerSource.IndexOf('function Get-Task051OwnedProcessEvidence', $processLifetimeStart, [StringComparison]::Ordinal)
+$ownedProcessEvidenceEnd = $runnerSource.IndexOf('function New-Task051CodexHome', $ownedProcessEvidenceStart, [StringComparison]::Ordinal)
+if ($processLifetimeStart -lt 0 -or $ownedProcessEvidenceStart -le $processLifetimeStart -or $ownedProcessEvidenceEnd -le $ownedProcessEvidenceStart) {
+    throw 'TASK051_APP_SERVER_PROCESS_LIFETIME_SHAPE_REJECTED'
+}
+$processLifetimeSource = $runnerSource.Substring($processLifetimeStart, $ownedProcessEvidenceStart - $processLifetimeStart)
+$ownedProcessEvidenceSource = $runnerSource.Substring($ownedProcessEvidenceStart, $ownedProcessEvidenceEnd - $ownedProcessEvidenceStart)
+foreach ($processLifetimeFragment in @(
+    '$CreationFileTimeUtc -le $ObservedFileTimeFloorUtc',
+    '$ObservedFileTimeCeilingUtc - $ObservedFileTimeFloorUtc -le 1',
+    '$ExitFileTimeUtc -ge $ObservedFileTimeCeilingUtc',
+    '$WasRunningAtCapture -and $ExitFileTimeUtc -eq 0',
+    '-not $WasRunningAtCapture'
+)) {
+    if ($processLifetimeSource.IndexOf($processLifetimeFragment, [StringComparison]::Ordinal) -lt 0) {
+        throw 'TASK051_APP_SERVER_PROCESS_LIFETIME_SHAPE_REJECTED'
+    }
+}
+if (
+    $ownedProcessEvidenceSource.IndexOf('TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIFETIME_REJECTED', [StringComparison]::Ordinal) -lt 0 -or
+    $ownedProcessEvidenceSource.IndexOf('.IsAlive()', [StringComparison]::Ordinal) -ge 0 -or
+    $processLifetimeSource.IndexOf('GetProcessTimes', [StringComparison]::Ordinal) -ge 0
+) {
+    throw 'TASK051_APP_SERVER_PROCESS_LIFETIME_SHAPE_REJECTED'
+}
 $sessionOpenReaderStart = $runnerSource.IndexOf('function Read-Task051McpSessionOpen', [StringComparison]::Ordinal)
 $sessionOpenReaderEnd = $runnerSource.IndexOf('function Test-Task051McpSessionOpenReady', $sessionOpenReaderStart, [StringComparison]::Ordinal)
 if ($sessionOpenReaderStart -lt 0 -or $sessionOpenReaderEnd -le $sessionOpenReaderStart) {
@@ -312,7 +348,8 @@ if (
     $cleanupStop -lt 0 -or
     $cleanupAlive -le $cleanupStop -or
     $cleanupClose -le $cleanupAlive -or
-    $cleanupCredential -le $cleanupClose
+    $cleanupCredential -le $cleanupClose -or
+    [regex]::Matches($cleanupSource, [regex]::Escape('$ServerAuthority.IsAlive()')).Count -ne 1
 ) {
     throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_CLEANUP_SHAPE_REJECTED'
 }
@@ -433,6 +470,7 @@ $forbiddenFragments = @(
     'codex mcp login',
     'git clean',
     'git reset --hard',
+    'GetExitCodeProcess',
     'task038-official-codex\0.146.0\codex.exe'
 )
 foreach ($fragment in $forbiddenFragments) {
@@ -452,6 +490,7 @@ $expectedSelfTestMarkers = @(
     'TASK051_APP_SERVER_DISCOVERY_SELF_TEST=PASS',
     'TASK051_PROCESS_OPEN_CLASSIFIER_SELF_TEST=PASS',
     'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST=PASS',
+    'TASK051_PROCESS_LIFETIME_SELF_TEST=PASS',
     'TASK051_MCP_SESSION_OPEN_PARSE_DIAGNOSTIC_SELF_TEST=PASS',
     'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST=PASS',
     'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST=PASS',

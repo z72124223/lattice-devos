@@ -925,9 +925,11 @@ public sealed class LatticeTask051OwnedProcessAuthority : IDisposable
     internal IntPtr ProcessHandle { get { return processHandle; } }
     public string ImagePath { get; internal set; }
     public long CreationFileTimeUtc { get; internal set; }
+    public long ExitFileTimeUtc { get; internal set; }
+    public bool WasRunningAtCapture { get; internal set; }
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetExitCodeProcess(IntPtr process, out UInt32 exitCode);
+    private static extern UInt32 WaitForSingleObject(IntPtr handle, UInt32 milliseconds);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr handle);
@@ -940,12 +942,16 @@ public sealed class LatticeTask051OwnedProcessAuthority : IDisposable
             {
                 throw new InvalidOperationException("TASK051_PROCESS_INTEROP_LIVENESS_QUERY");
             }
-            UInt32 exitCode;
-            if (!GetExitCodeProcess(processHandle, out exitCode))
+            UInt32 waitResult = WaitForSingleObject(processHandle, 0);
+            if (waitResult == 0x00000102)
             {
-                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_LIVENESS_QUERY");
+                return true;
             }
-            return exitCode == 259;
+            if (waitResult == 0x00000000)
+            {
+                return false;
+            }
+            throw new InvalidOperationException("TASK051_PROCESS_INTEROP_LIVENESS_QUERY");
         }
     }
 
@@ -987,6 +993,9 @@ public sealed class LatticeTask051OwnedProcessAuthority : IDisposable
 public static class LatticeTask051ProcessIdentityInterop
 {
     private const UInt32 ProcessQueryLimitedInformation = 0x1000;
+    private const UInt32 Synchronize = 0x00100000;
+    private const UInt32 WaitObject0 = 0x00000000;
+    private const UInt32 WaitTimeout = 0x00000102;
 
     public static string ClassifyOpenFailure(Int32 error)
     {
@@ -1029,6 +1038,9 @@ public static class LatticeTask051ProcessIdentityInterop
         out FileTime kernel,
         out FileTime user);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern UInt32 WaitForSingleObject(IntPtr handle, UInt32 milliseconds);
+
     public static LatticeTask051OwnedProcessAuthority Acquire(IntPtr job, Int32 processId)
     {
         return AcquireCore(job, processId, true);
@@ -1048,7 +1060,7 @@ public static class LatticeTask051ProcessIdentityInterop
         {
             throw new InvalidOperationException("TASK051_PROCESS_INTEROP_INPUT");
         }
-        IntPtr process = OpenProcess(ProcessQueryLimitedInformation, false, (UInt32)processId);
+        IntPtr process = OpenProcess(ProcessQueryLimitedInformation | Synchronize, false, (UInt32)processId);
         if (process == IntPtr.Zero)
         {
             int error = Marshal.GetLastWin32Error();
@@ -1072,6 +1084,11 @@ public static class LatticeTask051ProcessIdentityInterop
             {
                 throw new InvalidOperationException("TASK051_PROCESS_INTEROP_IMAGE_QUERY");
             }
+            UInt32 waitResult = WaitForSingleObject(authority.ProcessHandle, 0);
+            if (waitResult != WaitTimeout && waitResult != WaitObject0)
+            {
+                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_WAIT_QUERY");
+            }
             FileTime creation;
             FileTime exit;
             FileTime kernel;
@@ -1081,11 +1098,21 @@ public static class LatticeTask051ProcessIdentityInterop
                 throw new InvalidOperationException("TASK051_PROCESS_INTEROP_TIME_QUERY");
             }
             UInt64 creationValue = ((UInt64)creation.High << 32) | creation.Low;
+            UInt64 exitValue = ((UInt64)exit.High << 32) | exit.Low;
             authority.ImagePath = imagePath.ToString();
             authority.CreationFileTimeUtc = checked((Int64)creationValue);
-            if (!authority.IsAlive())
+            authority.WasRunningAtCapture = waitResult == WaitTimeout;
+            if (authority.WasRunningAtCapture)
             {
-                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_EXITED");
+                authority.ExitFileTimeUtc = 0;
+            }
+            else
+            {
+                authority.ExitFileTimeUtc = checked((Int64)exitValue);
+                if (authority.ExitFileTimeUtc <= 0)
+                {
+                    throw new InvalidOperationException("TASK051_PROCESS_INTEROP_TIME_QUERY");
+                }
             }
             return authority;
         }
@@ -1256,6 +1283,33 @@ function Test-Task051McpSessionOpenReady {
     }
 }
 
+function Test-Task051ProcessLifetime {
+    param(
+        [Parameter(Mandatory = $true)][long]$CreationFileTimeUtc,
+        [Parameter(Mandatory = $true)][long]$ObservedFileTimeFloorUtc,
+        [Parameter(Mandatory = $true)][long]$ObservedFileTimeCeilingUtc,
+        [Parameter(Mandatory = $true)][long]$ExitFileTimeUtc,
+        [Parameter(Mandatory = $true)][bool]$WasRunningAtCapture
+    )
+
+    return (
+        $CreationFileTimeUtc -gt 0 -and
+        $ObservedFileTimeFloorUtc -gt 0 -and
+        $ObservedFileTimeCeilingUtc -ge $ObservedFileTimeFloorUtc -and
+        $ObservedFileTimeCeilingUtc - $ObservedFileTimeFloorUtc -le 1 -and
+        $ExitFileTimeUtc -ge 0 -and
+        $CreationFileTimeUtc -le $ObservedFileTimeFloorUtc -and
+        (
+            ($WasRunningAtCapture -and $ExitFileTimeUtc -eq 0) -or
+            (
+                -not $WasRunningAtCapture -and
+                $ExitFileTimeUtc -ge $CreationFileTimeUtc -and
+                $ExitFileTimeUtc -ge $ObservedFileTimeCeilingUtc
+            )
+        )
+    )
+}
+
 function Get-Task051OwnedProcessEvidence {
     param(
         [Parameter(Mandatory = $true)][IntPtr]$Job,
@@ -1283,19 +1337,17 @@ function Get-Task051OwnedProcessEvidence {
             'TASK051_PROCESS_INTEROP_JOB_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_JOB_QUERY_REJECTED' }
             'TASK051_PROCESS_INTEROP_JOB_MEMBERSHIP' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_JOB_MEMBERSHIP_REJECTED' }
             'TASK051_PROCESS_INTEROP_IMAGE_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_QUERY_REJECTED' }
+            'TASK051_PROCESS_INTEROP_WAIT_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIFETIME_REJECTED' }
             'TASK051_PROCESS_INTEROP_TIME_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_TIME_QUERY_REJECTED' }
-            'TASK051_PROCESS_INTEROP_LIVENESS_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIVENESS_REJECTED' }
-            'TASK051_PROCESS_INTEROP_EXITED' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIVENESS_REJECTED' }
             'TASK051_PROCESS_INTEROP_CLOSE' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_CLOSE_REJECTED' }
             default { throw $failureCode }
         }
     }
     try {
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIVENESS_REJECTED'
-        if (-not $native.IsAlive() -or [string]::IsNullOrWhiteSpace([string]$native.ImagePath)) {
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_FILE_REJECTED'
+        if ([string]::IsNullOrWhiteSpace([string]$native.ImagePath)) {
             throw $failureCode
         }
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_FILE_REJECTED'
         Assert-Task051RegularFile -Path ([string]$native.ImagePath) -FailureCode $failureCode
         Assert-Task051RegularFile -Path $ExpectedExecutable -FailureCode $failureCode
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_NATIVE_IDENTITY_REJECTED'
@@ -1319,15 +1371,21 @@ function Get-Task051OwnedProcessEvidence {
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_CREATION_REJECTED'
         $ownerCreationFileTimeUtc = $OwnerProcess.StartTime.ToUniversalTime().ToFileTimeUtc()
         $observedUnixHundredNanoseconds = [decimal]$ObservedAtUnixNanos / [decimal]100
-        $observedFileTimeUtc = [long][decimal]::Floor($observedUnixHundredNanoseconds) + 116444736000000000L
+        $observedFileTimeFloorUtc = [long][decimal]::Floor($observedUnixHundredNanoseconds) + 116444736000000000L
+        $observedFileTimeCeilingUtc = [long][decimal]::Ceiling($observedUnixHundredNanoseconds) + 116444736000000000L
         if (
             [long]$native.CreationFileTimeUtc -lt $ownerCreationFileTimeUtc -or
-            [long]$native.CreationFileTimeUtc -gt $observedFileTimeUtc
+            [long]$native.CreationFileTimeUtc -gt $observedFileTimeFloorUtc
         ) {
             throw $failureCode
         }
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIVENESS_REJECTED'
-        if (-not $native.IsAlive()) {
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIFETIME_REJECTED'
+        if (-not (Test-Task051ProcessLifetime `
+            -CreationFileTimeUtc ([long]$native.CreationFileTimeUtc) `
+            -ObservedFileTimeFloorUtc $observedFileTimeFloorUtc `
+            -ObservedFileTimeCeilingUtc $observedFileTimeCeilingUtc `
+            -ExitFileTimeUtc ([long]$native.ExitFileTimeUtc) `
+            -WasRunningAtCapture ([bool]$native.WasRunningAtCapture))) {
             throw $failureCode
         }
         return [pscustomobject]@{
@@ -1336,6 +1394,8 @@ function Get-Task051OwnedProcessEvidence {
             ImageSha256 = $actualSha256
             NativeIdentity = [string]$actualIdentity
             CreationFileTimeUtc = [long]$native.CreationFileTimeUtc
+            ExitFileTimeUtc = [long]$native.ExitFileTimeUtc
+            WasRunningAtCapture = [bool]$native.WasRunningAtCapture
             Authority = $native
         }
     }
@@ -1783,13 +1843,15 @@ function Invoke-Task051CodexDiscovery {
         }
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_EVIDENCE_WRITE_REJECTED'
         $evidence = Write-Task051JsonEvidence -Path (Join-Path $EvidenceRoot ('task051-' + $Phase + '-discovery.json')) -Value ([ordered]@{
-            schema_version = 'lattice.task051.current-codex-discovery.v1'
+            schema_version = 'lattice.task051.current-codex-discovery.v2'
             phase = $Phase
             codex_process_id = [int]$process.Id
             latticed_process_id = $serverProcessId
             latticed_sha256 = [string]$processEvidence.ImageSha256
             latticed_native_identity = [string]$processEvidence.NativeIdentity
             latticed_creation_file_time_utc = [long]$processEvidence.CreationFileTimeUtc
+            latticed_exit_file_time_utc = [long]$processEvidence.ExitFileTimeUtc
+            latticed_was_running_at_capture = [bool]$processEvidence.WasRunningAtCapture
             session_open_event_sha256 = [string]$sessionOpen.EventSha256
             codex_sha256 = Get-Task051Sha256 -Path $codex
             config_sha256 = [string]$codexHome.ConfigSha256
@@ -3033,6 +3095,25 @@ function Invoke-Task051SelfTest {
         finally {
             $malformedPollReader.Dispose()
         }
+        foreach ($lifetimeFixture in @(
+            [pscustomobject]@{ Creation = 100L; Floor = 200L; Ceiling = 201L; Exit = 0L; Running = $true; Expected = $true },
+            [pscustomobject]@{ Creation = 100L; Floor = 200L; Ceiling = 201L; Exit = 200L; Running = $false; Expected = $false },
+            [pscustomobject]@{ Creation = 100L; Floor = 200L; Ceiling = 201L; Exit = 201L; Running = $false; Expected = $true },
+            [pscustomobject]@{ Creation = 100L; Floor = 200L; Ceiling = 201L; Exit = 201L; Running = $true; Expected = $false },
+            [pscustomobject]@{ Creation = 201L; Floor = 200L; Ceiling = 201L; Exit = 0L; Running = $true; Expected = $false },
+            [pscustomobject]@{ Creation = 100L; Floor = 200L; Ceiling = 201L; Exit = -1L; Running = $false; Expected = $false }
+        )) {
+            $lifetimeAccepted = Test-Task051ProcessLifetime `
+                -CreationFileTimeUtc ([long]$lifetimeFixture.Creation) `
+                -ObservedFileTimeFloorUtc ([long]$lifetimeFixture.Floor) `
+                -ObservedFileTimeCeilingUtc ([long]$lifetimeFixture.Ceiling) `
+                -ExitFileTimeUtc ([long]$lifetimeFixture.Exit) `
+                -WasRunningAtCapture ([bool]$lifetimeFixture.Running)
+            if ($lifetimeAccepted -ne [bool]$lifetimeFixture.Expected) {
+                throw 'TASK051_PROCESS_LIFETIME_SELF_TEST_REJECTED'
+            }
+        }
+        Write-Output 'TASK051_PROCESS_LIFETIME_SELF_TEST=PASS'
         $selfTestChild = $null
         $selfTestAuthority = $null
         try {
@@ -3052,6 +3133,8 @@ function Invoke-Task051SelfTest {
             if (
                 $null -eq $selfTestAuthority -or
                 -not $selfTestAuthority.IsAlive() -or
+                -not [bool]$selfTestAuthority.WasRunningAtCapture -or
+                [long]$selfTestAuthority.ExitFileTimeUtc -ne 0 -or
                 [IO.Path]::GetFullPath([string]$selfTestAuthority.ImagePath) -ine $selfTestPowerShell -or
                 (Get-Task051Sha256 -Path ([string]$selfTestAuthority.ImagePath)) -cne (Get-Task051Sha256 -Path $selfTestPowerShell)
             ) {
