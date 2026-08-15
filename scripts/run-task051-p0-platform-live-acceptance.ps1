@@ -767,26 +767,49 @@ function Get-Task051AppServerResponse {
     param(
         [Parameter(Mandatory = $true)][IO.TextReader]$Reader,
         [Parameter(Mandatory = $true)][int]$Id,
-        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
+        [scriptblock]$PollAction,
+        [ref]$PollResult,
+        [string]$PollTimeoutFailureCode = 'TASK051_APP_SERVER_RESPONSE_TIMEOUT'
     )
 
     $watch = [Diagnostics.Stopwatch]::StartNew()
+    $readTask = $null
+    $response = $null
+    $pollComplete = $null -eq $PollAction
     while ($watch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
-        $task = $Reader.ReadLineAsync()
-        if (-not $task.Wait([TimeSpan]::FromSeconds([Math]::Max(1, $TimeoutSeconds - [int]$watch.Elapsed.TotalSeconds)))) {
-            break
-        }
-        $line = [string]$task.GetAwaiter().GetResult()
-        if ($null -eq $line) { break }
-        try { $item = $line | ConvertFrom-Json -ErrorAction Stop }
-        catch { throw 'TASK051_APP_SERVER_JSON_REJECTED' }
-        if ($item.PSObject.Properties.Name -contains 'id' -and [int]$item.id -eq $Id) {
-            if ($item.PSObject.Properties.Name -contains 'error') {
-                throw 'TASK051_APP_SERVER_RESPONSE_REJECTED'
+        if (-not $pollComplete) {
+            $pollValues = @(& $PollAction)
+            if ($pollValues.Count -gt 1) { throw 'TASK051_APP_SERVER_RESPONSE_REJECTED' }
+            if ($pollValues.Count -eq 1 -and $null -ne $pollValues[0]) {
+                $pollComplete = $true
+                if ($null -ne $PollResult) { $PollResult.Value = $pollValues[0] }
             }
-            return $item
+        }
+        if ($null -ne $response -and $pollComplete) { return $response }
+        if ($null -eq $response) {
+            if ($null -eq $readTask) { $readTask = $Reader.ReadLineAsync() }
+            $remainingMilliseconds = [Math]::Max(1, [int](($TimeoutSeconds - $watch.Elapsed.TotalSeconds) * 1000))
+            $sliceMilliseconds = if ($null -ne $PollAction) { [Math]::Min(20, $remainingMilliseconds) } else { $remainingMilliseconds }
+            if ($readTask.Wait([TimeSpan]::FromMilliseconds($sliceMilliseconds))) {
+                $line = [string]$readTask.GetAwaiter().GetResult()
+                $readTask = $null
+                if ($null -eq $line) { break }
+                try { $item = $line | ConvertFrom-Json -ErrorAction Stop }
+                catch { throw 'TASK051_APP_SERVER_JSON_REJECTED' }
+                if ($item.PSObject.Properties.Name -contains 'id' -and [int]$item.id -eq $Id) {
+                    if ($item.PSObject.Properties.Name -contains 'error') {
+                        throw 'TASK051_APP_SERVER_RESPONSE_REJECTED'
+                    }
+                    $response = $item
+                }
+            }
+        }
+        else {
+            Start-Sleep -Milliseconds 20
         }
     }
+    if ($null -ne $response -and -not $pollComplete) { throw $PollTimeoutFailureCode }
     throw 'TASK051_APP_SERVER_RESPONSE_TIMEOUT'
 }
 
@@ -889,11 +912,76 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 
-public sealed class LatticeTask051OwnedProcessEvidence
+public sealed class LatticeTask051OwnedProcessAuthority : IDisposable
 {
-    public bool InJob { get; set; }
-    public string ImagePath { get; set; }
-    public long CreationFileTimeUtc { get; set; }
+    private readonly object sync = new object();
+    private IntPtr processHandle;
+
+    internal LatticeTask051OwnedProcessAuthority(IntPtr processHandle)
+    {
+        this.processHandle = processHandle;
+    }
+
+    internal IntPtr ProcessHandle { get { return processHandle; } }
+    public string ImagePath { get; internal set; }
+    public long CreationFileTimeUtc { get; internal set; }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetExitCodeProcess(IntPtr process, out UInt32 exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public bool IsAlive()
+    {
+        lock (sync)
+        {
+            if (processHandle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_LIVENESS_QUERY");
+            }
+            UInt32 exitCode;
+            if (!GetExitCodeProcess(processHandle, out exitCode))
+            {
+                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_LIVENESS_QUERY");
+            }
+            return exitCode == 259;
+        }
+    }
+
+    public void CloseExact()
+    {
+        lock (sync)
+        {
+            if (processHandle == IntPtr.Zero)
+            {
+                return;
+            }
+            if (!CloseHandle(processHandle))
+            {
+                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_CLOSE");
+            }
+            processHandle = IntPtr.Zero;
+            GC.SuppressFinalize(this);
+        }
+    }
+
+    public void Dispose()
+    {
+        CloseExact();
+    }
+
+    ~LatticeTask051OwnedProcessAuthority()
+    {
+        lock (sync)
+        {
+            if (processHandle != IntPtr.Zero)
+            {
+                CloseHandle(processHandle);
+                processHandle = IntPtr.Zero;
+            }
+        }
+    }
 }
 
 public static class LatticeTask051ProcessIdentityInterop
@@ -941,12 +1029,22 @@ public static class LatticeTask051ProcessIdentityInterop
         out FileTime kernel,
         out FileTime user);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr handle);
-
-    public static LatticeTask051OwnedProcessEvidence Inspect(IntPtr job, Int32 processId)
+    public static LatticeTask051OwnedProcessAuthority Acquire(IntPtr job, Int32 processId)
     {
-        if (job == IntPtr.Zero || processId < 1)
+        return AcquireCore(job, processId, true);
+    }
+
+    public static LatticeTask051OwnedProcessAuthority AcquireForSelfTest(Int32 processId)
+    {
+        return AcquireCore(IntPtr.Zero, processId, false);
+    }
+
+    private static LatticeTask051OwnedProcessAuthority AcquireCore(
+        IntPtr job,
+        Int32 processId,
+        bool requireExactJob)
+    {
+        if ((requireExactJob && job == IntPtr.Zero) || processId < 1)
         {
             throw new InvalidOperationException("TASK051_PROCESS_INTEROP_INPUT");
         }
@@ -956,25 +1054,21 @@ public static class LatticeTask051ProcessIdentityInterop
             int error = Marshal.GetLastWin32Error();
             throw new InvalidOperationException(ClassifyOpenFailure(error));
         }
+        var authority = new LatticeTask051OwnedProcessAuthority(process);
         try
         {
             bool inJob;
-            if (!IsProcessInJob(process, job, out inJob))
+            if (!IsProcessInJob(authority.ProcessHandle, job, out inJob))
             {
                 throw new InvalidOperationException("TASK051_PROCESS_INTEROP_JOB_QUERY");
             }
-            if (!inJob)
+            if (requireExactJob && !inJob)
             {
-                return new LatticeTask051OwnedProcessEvidence
-                {
-                    InJob = false,
-                    ImagePath = String.Empty,
-                    CreationFileTimeUtc = 0
-                };
+                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_JOB_MEMBERSHIP");
             }
             var imagePath = new StringBuilder(32768);
             UInt32 imagePathLength = (UInt32)imagePath.Capacity;
-            if (!QueryFullProcessImageName(process, 0, imagePath, ref imagePathLength))
+            if (!QueryFullProcessImageName(authority.ProcessHandle, 0, imagePath, ref imagePathLength))
             {
                 throw new InvalidOperationException("TASK051_PROCESS_INTEROP_IMAGE_QUERY");
             }
@@ -982,24 +1076,23 @@ public static class LatticeTask051ProcessIdentityInterop
             FileTime exit;
             FileTime kernel;
             FileTime user;
-            if (!GetProcessTimes(process, out creation, out exit, out kernel, out user))
+            if (!GetProcessTimes(authority.ProcessHandle, out creation, out exit, out kernel, out user))
             {
                 throw new InvalidOperationException("TASK051_PROCESS_INTEROP_TIME_QUERY");
             }
             UInt64 creationValue = ((UInt64)creation.High << 32) | creation.Low;
-            return new LatticeTask051OwnedProcessEvidence
+            authority.ImagePath = imagePath.ToString();
+            authority.CreationFileTimeUtc = checked((Int64)creationValue);
+            if (!authority.IsAlive())
             {
-                InJob = true,
-                ImagePath = imagePath.ToString(),
-                CreationFileTimeUtc = checked((Int64)creationValue)
-            };
-        }
-        finally
-        {
-            if (!CloseHandle(process))
-            {
-                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_CLOSE");
+                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_EXITED");
             }
+            return authority;
+        }
+        catch
+        {
+            authority.CloseExact();
+            throw;
         }
     }
 }
@@ -1098,6 +1191,38 @@ function Read-Task051McpSessionOpen {
     }
 }
 
+function Test-Task051McpSessionOpenReady {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedNativeIdentity,
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot
+    )
+
+    $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
+    $stream = $null
+    try {
+        $canonicalPath = [IO.Path]::GetFullPath($Path)
+        $canonicalRoot = [IO.Path]::GetFullPath($EvidenceRoot)
+        Assert-Task051NoReparseAncestor -Path $canonicalPath -Boundary $canonicalRoot -FailureCode $failureCode
+        Assert-Task051OwnerOnlyAcl -Path $canonicalPath -Directory $false
+        if (-not (Test-LatticeWindowsNativePathIdentity -Path $canonicalPath -Directory $false -ExpectedToken $ExpectedNativeIdentity)) {
+            throw $failureCode
+        }
+        $share = [IO.FileShare]([int][IO.FileShare]::ReadWrite -bor [int][IO.FileShare]::Delete)
+        $stream = [IO.FileStream]::new($canonicalPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+        if ($stream.Length -eq 0) { return $false }
+        if ($stream.Length -gt 65536) { throw $failureCode }
+        $stream.Position = $stream.Length - 1
+        return $stream.ReadByte() -eq 10
+    }
+    catch {
+        throw $failureCode
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
 function Get-Task051OwnedProcessEvidence {
     param(
         [Parameter(Mandatory = $true)][IntPtr]$Job,
@@ -1109,11 +1234,11 @@ function Get-Task051OwnedProcessEvidence {
         [Parameter(Mandatory = $true)][long]$ObservedAtUnixNanos
     )
 
-    $candidate = $null
+    $native = $null
     $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_INTEROP_REJECTED'
     Initialize-Task051ProcessIdentityInterop
     try {
-        $native = [LatticeTask051ProcessIdentityInterop]::Inspect($Job, $ProcessId)
+        $native = [LatticeTask051ProcessIdentityInterop]::Acquire($Job, $ProcessId)
     }
     catch {
         $leaf = $_.Exception
@@ -1123,19 +1248,18 @@ function Get-Task051OwnedProcessEvidence {
             'TASK051_PROCESS_INTEROP_OPEN_STALE_PID' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_OPEN_STALE_PID_REJECTED' }
             'TASK051_PROCESS_INTEROP_OPEN_OTHER' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_OPEN_OTHER_REJECTED' }
             'TASK051_PROCESS_INTEROP_JOB_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_JOB_QUERY_REJECTED' }
+            'TASK051_PROCESS_INTEROP_JOB_MEMBERSHIP' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_JOB_MEMBERSHIP_REJECTED' }
             'TASK051_PROCESS_INTEROP_IMAGE_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_IMAGE_QUERY_REJECTED' }
             'TASK051_PROCESS_INTEROP_TIME_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_TIME_QUERY_REJECTED' }
+            'TASK051_PROCESS_INTEROP_LIVENESS_QUERY' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIVENESS_REJECTED' }
+            'TASK051_PROCESS_INTEROP_EXITED' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIVENESS_REJECTED' }
             'TASK051_PROCESS_INTEROP_CLOSE' { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_CLOSE_REJECTED' }
             default { throw $failureCode }
         }
     }
-    if (-not [bool]$native.InJob) {
-        throw 'TASK038_CURRENT_CODEX_DISCOVERY_JOB_MEMBERSHIP_REJECTED'
-    }
     try {
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIVENESS_REJECTED'
-        $candidate = Get-Process -Id $ProcessId -ErrorAction Stop
-        if ($candidate.HasExited -or [string]::IsNullOrWhiteSpace([string]$native.ImagePath)) {
+        if (-not $native.IsAlive() -or [string]::IsNullOrWhiteSpace([string]$native.ImagePath)) {
             throw $failureCode
         }
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_FILE_REJECTED'
@@ -1160,20 +1284,17 @@ function Get-Task051OwnedProcessEvidence {
             throw $failureCode
         }
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_CREATION_REJECTED'
-        $candidateCreationUtc = $candidate.StartTime.ToUniversalTime()
         $ownerCreationFileTimeUtc = $OwnerProcess.StartTime.ToUniversalTime().ToFileTimeUtc()
         $observedUnixHundredNanoseconds = [decimal]$ObservedAtUnixNanos / [decimal]100
         $observedFileTimeUtc = [long][decimal]::Floor($observedUnixHundredNanoseconds) + 116444736000000000L
         if (
-            $candidateCreationUtc.ToFileTimeUtc() -ne [long]$native.CreationFileTimeUtc -or
             [long]$native.CreationFileTimeUtc -lt $ownerCreationFileTimeUtc -or
             [long]$native.CreationFileTimeUtc -gt $observedFileTimeUtc
         ) {
             throw $failureCode
         }
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_LIVENESS_REJECTED'
-        $candidate.Refresh()
-        if ($candidate.HasExited) {
+        if (-not $native.IsAlive()) {
             throw $failureCode
         }
         return [pscustomobject]@{
@@ -1182,15 +1303,15 @@ function Get-Task051OwnedProcessEvidence {
             ImageSha256 = $actualSha256
             NativeIdentity = [string]$actualIdentity
             CreationFileTimeUtc = [long]$native.CreationFileTimeUtc
+            Authority = $native
         }
     }
     catch {
         $message = [string]$_.Exception.Message
+        try { if ($null -ne $native) { $native.CloseExact() } }
+        catch { throw 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_CLOSE_REJECTED' }
         if ($message -match '^TASK038_CURRENT_CODEX_DISCOVERY_[A-Z0-9_]+_REJECTED$') { throw $message }
         throw $failureCode
-    }
-    finally {
-        if ($null -ne $candidate) { $candidate.Dispose() }
     }
 }
 
@@ -1269,13 +1390,32 @@ function Complete-Task051InvocationCleanup {
     param(
         $Owned,
         [Parameter(Mandatory = $true)]$CodexHome,
-        [int]$KnownServerProcessId = 0
+        [int]$KnownServerProcessId = 0,
+        $ServerAuthority
     )
 
     $cleanupFailure = $null
     if ($null -ne $Owned) {
         try { Stop-Task051OwnedProcess -Owned $Owned }
         catch { $cleanupFailure = [string]$_.Exception.Message }
+    }
+    if ($null -ne $ServerAuthority) {
+        try {
+            if ($ServerAuthority.IsAlive() -and $null -eq $cleanupFailure) {
+                $cleanupFailure = 'TASK051_LATTICED_PROCESS_CLEANUP_REJECTED'
+            }
+        }
+        catch {
+            if ($null -eq $cleanupFailure) {
+                $cleanupFailure = 'TASK051_LATTICED_PROCESS_CLEANUP_REJECTED'
+            }
+        }
+        try { $ServerAuthority.CloseExact() }
+        catch {
+            if ($null -eq $cleanupFailure) {
+                $cleanupFailure = 'TASK051_PROCESS_HANDLE_CLEANUP_REJECTED'
+            }
+        }
     }
     try { Remove-Task051CodexCredential -CodexHome $CodexHome }
     catch {
@@ -1412,6 +1552,14 @@ function Invoke-Task051CodexDiscovery {
     $owned = $null
     $process = $null
     $serverProcessId = 0
+    $sessionOpen = $null
+    $processEvidence = $null
+    $serverAuthority = $null
+    $watchState = [pscustomobject]@{
+        ServerProcessId = 0
+        SessionOpen = $null
+        ProcessEvidence = $null
+    }
     $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_HOME_REJECTED'
     try {
         if (
@@ -1462,6 +1610,32 @@ function Invoke-Task051CodexDiscovery {
         }
         $owned.Suspended.StandardInput.WriteLine('{"method":"initialized","params":{}}')
         $owned.Suspended.StandardInput.Flush()
+        $sessionOpenPoll = {
+            if ($null -ne $watchState.ProcessEvidence) { return $watchState }
+            $ready = Test-Task051McpSessionOpenReady `
+                -Path $AcceptanceEvidencePath `
+                -ExpectedNativeIdentity $AcceptanceNativeIdentity `
+                -EvidenceRoot $EvidenceRoot
+            if (-not $ready) { return $null }
+            $parsedSessionOpen = Read-Task051McpSessionOpen `
+                -Path $AcceptanceEvidencePath `
+                -ExpectedNativeIdentity $AcceptanceNativeIdentity `
+                -EvidenceRoot $EvidenceRoot `
+                -SessionId $AcceptanceSessionId `
+                -SafeConfigSha256 $SafeConfigSha256
+            $watchState.ServerProcessId = [int]$parsedSessionOpen.ProcessId
+            $capturedProcessEvidence = Get-Task051OwnedProcessEvidence `
+                -Job ([IntPtr]$owned.Job) `
+                -ProcessId ([int]$watchState.ServerProcessId) `
+                -ExpectedExecutable $script:Latticed `
+                -ExpectedExecutableSha256 $ExpectedLatticedSha256 `
+                -ExpectedExecutableNativeIdentity $ExpectedLatticedNativeIdentity `
+                -OwnerProcess $process `
+                -ObservedAtUnixNanos ([long]$parsedSessionOpen.ObservedAtUnixNanos)
+            $watchState.SessionOpen = $parsedSessionOpen
+            $watchState.ProcessEvidence = $capturedProcessEvidence
+            return $watchState
+        }
         $list = $null
         $listRequest = $null
         $server = $null
@@ -1473,7 +1647,26 @@ function Invoke-Task051CodexDiscovery {
             $owned.Suspended.StandardInput.WriteLine($listRequest)
             $owned.Suspended.StandardInput.Flush()
             $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_LIST_RESPONSE_REJECTED'
-            $list = Get-Task051AppServerResponse -Reader $owned.Suspended.StandardOutput -Id $requestId -TimeoutSeconds 60
+            if ($attempt -eq 0) {
+                $pollResult = $null
+                $list = Get-Task051AppServerResponse `
+                    -Reader $owned.Suspended.StandardOutput `
+                    -Id $requestId `
+                    -TimeoutSeconds 60 `
+                    -PollAction $sessionOpenPoll `
+                    -PollResult ([ref]$pollResult) `
+                    -PollTimeoutFailureCode 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_TIMEOUT_REJECTED'
+                if ($null -eq $pollResult -or $null -eq $watchState.ProcessEvidence) {
+                    throw 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
+                }
+                $serverProcessId = [int]$watchState.ServerProcessId
+                $sessionOpen = $watchState.SessionOpen
+                $processEvidence = $watchState.ProcessEvidence
+                $serverAuthority = $processEvidence.Authority
+            }
+            else {
+                $list = Get-Task051AppServerResponse -Reader $owned.Suspended.StandardOutput -Id $requestId -TimeoutSeconds 60
+            }
             $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SERVER_COUNT_ZERO_REJECTED'
             $servers = @($list.result.data)
             if ($servers.Count -eq 0) {
@@ -1512,22 +1705,22 @@ function Invoke-Task051CodexDiscovery {
             result = [pscustomobject]@{ tools = $toolRecords }
         })
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
-        $sessionOpen = Read-Task051McpSessionOpen `
+        $sessionOpenReplay = Read-Task051McpSessionOpen `
             -Path $AcceptanceEvidencePath `
             -ExpectedNativeIdentity $AcceptanceNativeIdentity `
             -EvidenceRoot $EvidenceRoot `
             -SessionId $AcceptanceSessionId `
             -SafeConfigSha256 $SafeConfigSha256
-        $serverProcessId = [int]$sessionOpen.ProcessId
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_JOB_MEMBERSHIP_REJECTED'
-        $processEvidence = Get-Task051OwnedProcessEvidence `
-            -Job ([IntPtr]$owned.Job) `
-            -ProcessId $serverProcessId `
-            -ExpectedExecutable $script:Latticed `
-            -ExpectedExecutableSha256 $ExpectedLatticedSha256 `
-            -ExpectedExecutableNativeIdentity $ExpectedLatticedNativeIdentity `
-            -OwnerProcess $process `
-            -ObservedAtUnixNanos ([long]$sessionOpen.ObservedAtUnixNanos)
+        if (
+            $null -eq $sessionOpen -or
+            $null -eq $processEvidence -or
+            $null -eq $serverAuthority -or
+            [int]$sessionOpenReplay.ProcessId -ne [int]$sessionOpen.ProcessId -or
+            [long]$sessionOpenReplay.ObservedAtUnixNanos -ne [long]$sessionOpen.ObservedAtUnixNanos -or
+            [string]$sessionOpenReplay.EventSha256 -cne [string]$sessionOpen.EventSha256
+        ) {
+            throw 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
+        }
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_EVIDENCE_WRITE_REJECTED'
         $evidence = Write-Task051JsonEvidence -Path (Join-Path $EvidenceRoot ('task051-' + $Phase + '-discovery.json')) -Value ([ordered]@{
             schema_version = 'lattice.task051.current-codex-discovery.v1'
@@ -1571,7 +1764,13 @@ function Invoke-Task051CodexDiscovery {
     finally {
         try { if ($null -ne $owned) { $owned.Suspended.StandardInput.Close() } } catch {}
         if ($null -ne $codexHome) {
-            Complete-Task051InvocationCleanup -Owned $owned -CodexHome $codexHome -KnownServerProcessId $serverProcessId
+            $knownServerProcessId = if ($serverProcessId -gt 0) { $serverProcessId } else { [int]$watchState.ServerProcessId }
+            $authorityForCleanup = if ($null -ne $serverAuthority) { $serverAuthority } elseif ($null -ne $watchState.ProcessEvidence) { $watchState.ProcessEvidence.Authority } else { $null }
+            Complete-Task051InvocationCleanup `
+                -Owned $owned `
+                -CodexHome $codexHome `
+                -KnownServerProcessId $knownServerProcessId `
+                -ServerAuthority $authorityForCleanup
         }
     }
 }
@@ -2595,6 +2794,79 @@ function Invoke-Task051SelfTest {
             [Environment]::SetEnvironmentVariable('TEMP', $selfTestTempBefore, 'Process')
             [Environment]::SetEnvironmentVariable('TMP', $selfTestTmpBefore, 'Process')
         }
+        $pollState = [pscustomobject]@{ Count = 0 }
+        $pollResult = $null
+        $pollReader = [IO.StringReader]::new("{`"id`":99,`"result`":{}}`n")
+        try {
+            $pollResponse = Get-Task051AppServerResponse `
+                -Reader $pollReader `
+                -Id 99 `
+                -TimeoutSeconds 5 `
+                -PollAction {
+                    $pollState.Count++
+                    if ($pollState.Count -ge 3) { return [pscustomobject]@{ Captured = $true } }
+                    return $null
+                } `
+                -PollResult ([ref]$pollResult)
+            if (
+                [int]$pollResponse.id -ne 99 -or
+                $pollState.Count -ne 3 -or
+                $null -eq $pollResult -or
+                -not [bool]$pollResult.Captured
+            ) {
+                throw 'TASK051_APP_SERVER_POLL_SELF_TEST_REJECTED'
+            }
+        }
+        finally {
+            $pollReader.Dispose()
+        }
+        $selfTestChild = $null
+        $selfTestAuthority = $null
+        try {
+            $selfTestPowerShell = [IO.Path]::GetFullPath((Join-Path $PSHOME 'powershell.exe'))
+            $selfTestInfo = [Diagnostics.ProcessStartInfo]::new()
+            $selfTestInfo.FileName = $selfTestPowerShell
+            $selfTestInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 30"'
+            $selfTestInfo.WorkingDirectory = $aclRoot
+            $selfTestInfo.UseShellExecute = $false
+            $selfTestInfo.CreateNoWindow = $true
+            $selfTestInfo.RedirectStandardInput = $true
+            $selfTestInfo.RedirectStandardOutput = $true
+            $selfTestInfo.RedirectStandardError = $true
+            Set-Task051ClosedEnvironment -StartInfo $selfTestInfo -Additional ([ordered]@{})
+            $selfTestChild = [Diagnostics.Process]::Start($selfTestInfo)
+            $selfTestAuthority = [LatticeTask051ProcessIdentityInterop]::AcquireForSelfTest([int]$selfTestChild.Id)
+            if (
+                $null -eq $selfTestAuthority -or
+                -not $selfTestAuthority.IsAlive() -or
+                [IO.Path]::GetFullPath([string]$selfTestAuthority.ImagePath) -ine $selfTestPowerShell -or
+                (Get-Task051Sha256 -Path ([string]$selfTestAuthority.ImagePath)) -cne (Get-Task051Sha256 -Path $selfTestPowerShell)
+            ) {
+                throw 'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST_REJECTED'
+            }
+            $selfTestChild.Kill()
+            $selfTestChild.WaitForExit()
+            if ($selfTestAuthority.IsAlive()) {
+                throw 'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST_REJECTED'
+            }
+            $selfTestAuthority.CloseExact()
+            $selfTestAuthority.CloseExact()
+            $selfTestAuthority = $null
+        }
+        finally {
+            $selfTestProcessCleanupFailure = $null
+            if ($null -ne $selfTestChild) {
+                try { if (-not $selfTestChild.HasExited) { $selfTestChild.Kill(); $selfTestChild.WaitForExit() } }
+                catch { $selfTestProcessCleanupFailure = 'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST_CLEANUP_REJECTED' }
+                try { $selfTestChild.Dispose() }
+                catch { $selfTestProcessCleanupFailure = 'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST_CLEANUP_REJECTED' }
+            }
+            if ($null -ne $selfTestAuthority) {
+                try { $selfTestAuthority.CloseExact() }
+                catch { $selfTestProcessCleanupFailure = 'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST_CLEANUP_REJECTED' }
+            }
+            if ($null -ne $selfTestProcessCleanupFailure) { throw $selfTestProcessCleanupFailure }
+        }
         $cargoLinkPathProbe = Join-Path $aclRoot 't\debug\deps\liblattice_postgres_codebase_memory-0123456789abcdef.rlib'
         if ($cargoLinkPathProbe.Length -ge 260) {
             throw 'TASK051_CARGO_LINK_PATH_BUDGET_REJECTED'
@@ -2677,7 +2949,21 @@ function Invoke-Task051SelfTest {
             [IO.File]::WriteAllText($sessionOpenPath, $text, [Text.UTF8Encoding]::new($false))
             Set-Task051OwnerOnlyAcl -Path $sessionOpenPath -Directory $false
         }
+        [IO.File]::WriteAllText($sessionOpenPath, '', [Text.UTF8Encoding]::new($false))
+        Set-Task051OwnerOnlyAcl -Path $sessionOpenPath -Directory $false
+        if (Test-Task051McpSessionOpenReady -Path $sessionOpenPath -ExpectedNativeIdentity 'task051-selftest-native' -EvidenceRoot $aclRoot) {
+            throw 'TASK051_MCP_SESSION_OPEN_READY_SELF_TEST_REJECTED'
+        }
+        $partialSessionOpen = $sessionOpenRecord | ConvertTo-Json -Compress -Depth 10
+        [IO.File]::WriteAllText($sessionOpenPath, $partialSessionOpen, [Text.UTF8Encoding]::new($false))
+        Set-Task051OwnerOnlyAcl -Path $sessionOpenPath -Directory $false
+        if (Test-Task051McpSessionOpenReady -Path $sessionOpenPath -ExpectedNativeIdentity 'task051-selftest-native' -EvidenceRoot $aclRoot) {
+            throw 'TASK051_MCP_SESSION_OPEN_READY_SELF_TEST_REJECTED'
+        }
         & $writeSessionOpen -Record $sessionOpenRecord
+        if (-not (Test-Task051McpSessionOpenReady -Path $sessionOpenPath -ExpectedNativeIdentity 'task051-selftest-native' -EvidenceRoot $aclRoot)) {
+            throw 'TASK051_MCP_SESSION_OPEN_READY_SELF_TEST_REJECTED'
+        }
         $parsedSessionOpen = Read-Task051McpSessionOpen -Path $sessionOpenPath -ExpectedNativeIdentity 'task051-selftest-native' -EvidenceRoot $aclRoot -SessionId $sessionOpenId -SafeConfigSha256 $sessionOpenSafeConfig
         if (
             [int]$parsedSessionOpen.ProcessId -ne $sessionOpenPid -or
@@ -3099,6 +3385,7 @@ function Invoke-Task051SelfTest {
     Write-Output 'TASK051_CODEX_EVENT_PARSER_SELF_TEST=PASS'
     Write-Output 'TASK051_APP_SERVER_DISCOVERY_SELF_TEST=PASS'
     Write-Output 'TASK051_PROCESS_OPEN_CLASSIFIER_SELF_TEST=PASS'
+    Write-Output 'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST=PASS'
     Write-Output 'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST=PASS'
     Write-Output 'TASK051_OWNER_ONLY_CREDENTIAL_SELF_TEST=PASS'
     Write-Output 'TASK051_PROCESS_CONTAINMENT_SELF_TEST=PASS'

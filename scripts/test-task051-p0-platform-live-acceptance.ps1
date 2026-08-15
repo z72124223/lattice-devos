@@ -102,10 +102,17 @@ $requiredFragments = @(
     'TASK038_CURRENT_CODEX_DISCOVERY_RESOURCES_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_RESOURCE_TEMPLATES_REJECTED',
     'Read-Task051McpSessionOpen',
+    'Test-Task051McpSessionOpenReady',
     'Get-Task051OwnedProcessEvidence',
+    'LatticeTask051OwnedProcessAuthority',
+    '::Acquire(',
+    '.IsAlive()',
+    '.CloseExact()',
+    '[scriptblock]$PollAction',
     'IsProcessInJob',
     'QueryFullProcessImageName',
     'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED',
+    'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_TIMEOUT_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_JOB_MEMBERSHIP_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_INTEROP_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_INTEROP_INIT_REJECTED',
@@ -121,6 +128,7 @@ $requiredFragments = @(
     'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_NATIVE_IDENTITY_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_SHA256_REJECTED',
     'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_CREATION_REJECTED',
+    'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST_CLEANUP_REJECTED',
     'TASK051_TASK038_CANDIDATE_BINARY_COMMITMENT_TRANSFORM_REJECTED',
     '$candidateLatticedNativeIdentity = Get-LatticeWindowsNativePathIdentityToken',
     '-ExpectedLatticedSha256 $candidateLatticedSha256',
@@ -181,20 +189,40 @@ if ($discoveryStart -lt 0 -or $discoveryEnd -le $discoveryStart) {
     throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_SHAPE_REJECTED'
 }
 $discoverySource = $runnerSource.Substring($discoveryStart, $discoveryEnd - $discoveryStart)
-$sessionOpenRead = $discoverySource.IndexOf('$sessionOpen = Read-Task051McpSessionOpen', [StringComparison]::Ordinal)
-$serverPidCapture = $discoverySource.IndexOf('$serverProcessId = [int]$sessionOpen.ProcessId', [StringComparison]::Ordinal)
-$processAuthority = $discoverySource.IndexOf('$processEvidence = Get-Task051OwnedProcessEvidence', [StringComparison]::Ordinal)
-if (
-    $sessionOpenRead -lt 0 -or
-    $serverPidCapture -le $sessionOpenRead -or
-    $processAuthority -le $serverPidCapture
-) {
+$pollActionCall = $discoverySource.IndexOf('-PollAction $sessionOpenPoll', [StringComparison]::Ordinal)
+$authorityCapture = $discoverySource.IndexOf('$serverAuthority = $processEvidence.Authority', [StringComparison]::Ordinal)
+if ($pollActionCall -lt 0 -or $authorityCapture -le $pollActionCall) {
     throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_SHAPE_REJECTED'
 }
 foreach ($forbiddenDiscoveryFragment in @('ParentProcessId =', '.ExecutablePath')) {
     if ($discoverySource.IndexOf($forbiddenDiscoveryFragment, [StringComparison]::Ordinal) -ge 0) {
         throw ('TASK051_APP_SERVER_PROCESS_AUTHORITY_SHAPE_REJECTED|' + $forbiddenDiscoveryFragment)
     }
+}
+if (
+    [regex]::Matches($runnerSource, [regex]::Escape('::Acquire(')).Count -ne 1 -or
+    $runnerSource.IndexOf('::Inspect(', [StringComparison]::Ordinal) -ge 0 -or
+    $runnerSource.IndexOf('Get-Process -Id $ProcessId', [StringComparison]::Ordinal) -ge 0
+) {
+    throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_SHAPE_REJECTED'
+}
+$cleanupStart = $runnerSource.IndexOf('function Complete-Task051InvocationCleanup', [StringComparison]::Ordinal)
+$cleanupEnd = $runnerSource.IndexOf('function Get-Task051McpEnvironment', $cleanupStart, [StringComparison]::Ordinal)
+if ($cleanupStart -lt 0 -or $cleanupEnd -le $cleanupStart) {
+    throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_CLEANUP_SHAPE_REJECTED'
+}
+$cleanupSource = $runnerSource.Substring($cleanupStart, $cleanupEnd - $cleanupStart)
+$cleanupStop = $cleanupSource.IndexOf('Stop-Task051OwnedProcess -Owned $Owned', [StringComparison]::Ordinal)
+$cleanupAlive = $cleanupSource.IndexOf('$ServerAuthority.IsAlive()', [StringComparison]::Ordinal)
+$cleanupClose = $cleanupSource.IndexOf('$ServerAuthority.CloseExact()', [StringComparison]::Ordinal)
+$cleanupCredential = $cleanupSource.IndexOf('Remove-Task051CodexCredential -CodexHome $CodexHome', [StringComparison]::Ordinal)
+if (
+    $cleanupStop -lt 0 -or
+    $cleanupAlive -le $cleanupStop -or
+    $cleanupClose -le $cleanupAlive -or
+    $cleanupCredential -le $cleanupClose
+) {
+    throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_CLEANUP_SHAPE_REJECTED'
 }
 
 $bundleStart = $runnerSource.IndexOf('function Get-Task051OfficialCodexBundlePolicy', [StringComparison]::Ordinal)
@@ -282,6 +310,7 @@ $expectedSelfTestMarkers = @(
     'TASK051_CODEX_EVENT_PARSER_SELF_TEST=PASS',
     'TASK051_APP_SERVER_DISCOVERY_SELF_TEST=PASS',
     'TASK051_PROCESS_OPEN_CLASSIFIER_SELF_TEST=PASS',
+    'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST=PASS',
     'TASK051_OFFICIAL_CODEX_BUNDLE_SELF_TEST=PASS',
     'TASK051_OWNER_ONLY_CREDENTIAL_SELF_TEST=PASS',
     'TASK051_PROCESS_CONTAINMENT_SELF_TEST=PASS',
