@@ -42,6 +42,8 @@ $requiredFragments = @(
     'mcpServerStatus/list',
     'app-server',
     '--stdio',
+    'Codex Desktop/',
+    'unknown (lattice-task051-acceptance; 1)',
     '--ephemeral',
     '--json',
     'lattice_delivery_run',

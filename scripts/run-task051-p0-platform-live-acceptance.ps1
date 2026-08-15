@@ -2430,7 +2430,8 @@ if ($currentCodexCandidates.Count -lt 1) { throw 'TASK051_CURRENT_CODEX_REJECTED
 $currentCodex = [IO.Path]::GetFullPath($currentCodexCandidates[0].FullName)
 $currentCodexVersion = (& $currentCodex --version).Trim()
 if ($currentCodexVersion -cne 'codex-cli 0.147.0-alpha.6.6') { throw 'TASK051_CURRENT_CODEX_REJECTED' }
-$currentCodexUserAgent = $currentCodexVersion.Replace('codex-cli ', 'codex_cli_rs/')
+$currentCodexSemanticVersion = $currentCodexVersion.Substring('codex-cli '.Length)
+$currentCodexUserAgent = 'Codex Desktop/' + $currentCodexSemanticVersion + ' (Windows ' + [Environment]::OSVersion.Version.ToString(3) + '; x86_64) unknown (lattice-task051-acceptance; 1)'
 $officialCodex = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $repositoryRoot) 'chatgpt-mcp\target\task038-official-codex\0.146.0\codex.exe'))
 Assert-Task051RegularFile -Path $officialCodex -FailureCode 'TASK051_TASK038_CODEX_REJECTED'
 $credentialSource = Join-Path $runRoot 'credential-source'
