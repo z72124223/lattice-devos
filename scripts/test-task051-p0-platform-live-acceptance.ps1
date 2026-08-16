@@ -263,6 +263,9 @@ $requiredFragments = @(
     'TASK038_CURRENT_CODEX_TOOL_EFFECT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_COUNTERS_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_EVIDENCE_REJECTED',
+    'Wait-Task051McpServerNaturalExit',
+    'TASK038_CURRENT_CODEX_TOOL_SERVER_EXIT_QUERY_REJECTED',
+    'TASK038_CURRENT_CODEX_TOOL_SERVER_EXIT_TIMEOUT_REJECTED',
     'TASK038_CURRENT_CODEX_TOOL_CLEANUP_REJECTED',
     '[mcp_servers.lattice.tools.lattice_task_submit]',
     '[mcp_servers.lattice.tools.lattice_task_status]',
@@ -458,6 +461,27 @@ if (
     [regex]::Matches($cleanupSource, [regex]::Escape('$ServerAuthority.IsAlive()')).Count -ne 1
 ) {
     throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_CLEANUP_SHAPE_REJECTED'
+}
+
+$naturalExitStart = $runnerSource.IndexOf('function Wait-Task051McpServerNaturalExit', [StringComparison]::Ordinal)
+$naturalExitEnd = $runnerSource.IndexOf('function Get-Task051McpEnvironment', $naturalExitStart, [StringComparison]::Ordinal)
+if ($naturalExitStart -lt 0 -or $naturalExitEnd -le $naturalExitStart) {
+    throw 'TASK051_MCP_SERVER_NATURAL_EXIT_SHAPE_REJECTED'
+}
+$naturalExitSource = $runnerSource.Substring($naturalExitStart, $naturalExitEnd - $naturalExitStart)
+$naturalExitOpenIndex = $naturalExitSource.IndexOf('[Diagnostics.Process]::GetProcessById($ProcessId)', [StringComparison]::Ordinal)
+$naturalExitWaitIndex = $naturalExitSource.IndexOf('$candidate.WaitForExit($TimeoutMilliseconds)', [StringComparison]::Ordinal)
+$naturalExitDisposeIndex = $naturalExitSource.IndexOf('$candidate.Dispose()', [StringComparison]::Ordinal)
+if (
+    $naturalExitOpenIndex -lt 0 -or
+    $naturalExitWaitIndex -le $naturalExitOpenIndex -or
+    $naturalExitDisposeIndex -le $naturalExitWaitIndex -or
+    [regex]::Matches($naturalExitSource, 'catch\s+\[ArgumentException\]\s*\{\s*return\s*\}').Count -ne 1 -or
+    [regex]::Matches($naturalExitSource, [regex]::Escape('TASK038_CURRENT_CODEX_TOOL_SERVER_EXIT_QUERY_REJECTED')).Count -ne 3 -or
+    [regex]::Matches($naturalExitSource, [regex]::Escape('TASK038_CURRENT_CODEX_TOOL_SERVER_EXIT_TIMEOUT_REJECTED')).Count -ne 1 -or
+    $naturalExitSource.IndexOf('Start-Sleep', [StringComparison]::OrdinalIgnoreCase) -ge 0
+) {
+    throw 'TASK051_MCP_SERVER_NATURAL_EXIT_SHAPE_REJECTED'
 }
 
 $codexToolResolverStart = $runnerSource.IndexOf('function Resolve-Task051CodexToolFailure', [StringComparison]::Ordinal)
@@ -839,6 +863,11 @@ $resultRethrowIndex = $codexToolInvokeSource.IndexOf('throw $resultFailure', $su
 $structuredProjectionIndex = $codexToolInvokeSource.IndexOf('$structured = $envelope.StructuredContent', $resultRethrowIndex, [StringComparison]::Ordinal)
 $metaCommitmentIndex = $codexToolInvokeSource.IndexOf('$metaCommitmentSha256 = Get-Task051CodexResultMetaCommitment', $structuredProjectionIndex, [StringComparison]::Ordinal)
 $toolEvidenceIndex = $codexToolInvokeSource.IndexOf("schema_version = 'lattice.task051.current-codex-tool-call.v2'", $metaCommitmentIndex, [StringComparison]::Ordinal)
+$serverProcessProjectionIndex = $codexToolInvokeSource.IndexOf('$serverProcessId = [int](($firstDispatchLine | ConvertFrom-Json -ErrorAction Stop).process_id)', [StringComparison]::Ordinal)
+$serverNaturalExitIndex = $codexToolInvokeSource.IndexOf('Wait-Task051McpServerNaturalExit -ProcessId $serverProcessId -TimeoutMilliseconds 30000', $serverProcessProjectionIndex, [StringComparison]::Ordinal)
+$dispatchEvidenceIndex = $codexToolInvokeSource.IndexOf('$dispatch = Read-Task038McpAcceptanceEvidence', $serverNaturalExitIndex, [StringComparison]::Ordinal)
+$effectEvidenceIndex = $codexToolInvokeSource.IndexOf('$effects = Read-Task038McpObservedEffectEvidence', $dispatchEvidenceIndex, [StringComparison]::Ordinal)
+$serverAbsenceIndex = $codexToolInvokeSource.IndexOf('Get-Process -Id $serverProcessId -ErrorAction SilentlyContinue', $effectEvidenceIndex, [StringComparison]::Ordinal)
 $callCountGuardSource = if ($callCountAllowListIndex -ge 0 -and $summaryWriterIndex -gt $callCountAllowListIndex) {
     $codexToolInvokeSource.Substring($callCountAllowListIndex, $summaryWriterIndex - $callCountAllowListIndex)
 }
@@ -874,6 +903,12 @@ if (
     $structuredProjectionIndex -le $resultRethrowIndex -or
     $metaCommitmentIndex -le $structuredProjectionIndex -or
     $toolEvidenceIndex -le $metaCommitmentIndex -or
+    $serverProcessProjectionIndex -le $structuredProjectionIndex -or
+    $serverNaturalExitIndex -le $serverProcessProjectionIndex -or
+    $dispatchEvidenceIndex -le $serverNaturalExitIndex -or
+    $effectEvidenceIndex -le $dispatchEvidenceIndex -or
+    $serverAbsenceIndex -le $effectEvidenceIndex -or
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape('Wait-Task051McpServerNaturalExit -ProcessId $serverProcessId -TimeoutMilliseconds 30000')).Count -ne 1 -or
     [regex]::Matches($codexToolInvokeSource, [regex]::Escape('meta_mode = [string]$envelope.MetaMode')).Count -ne 1 -or
     [regex]::Matches($codexToolInvokeSource, [regex]::Escape('meta_present = [bool]$envelope.MetaPresent')).Count -ne 1 -or
     [regex]::Matches($codexToolInvokeSource, [regex]::Escape('meta_sha256 = $envelope.MetaSha256')).Count -ne 1 -or
@@ -1103,6 +1138,7 @@ $expectedSelfTestMarkers = @(
     'TASK051_PROCESS_OPEN_CLASSIFIER_SELF_TEST=PASS',
     'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST=PASS',
     'TASK051_PROCESS_LIFETIME_SELF_TEST=PASS',
+    'TASK051_MCP_SERVER_NATURAL_EXIT_SELF_TEST=PASS',
     'TASK051_MCP_SESSION_OPEN_PARSE_DIAGNOSTIC_SELF_TEST=PASS',
     'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST=PASS',
     'TASK051_CODEX_CALL_COUNT_PHASE_SELF_TEST=PASS',

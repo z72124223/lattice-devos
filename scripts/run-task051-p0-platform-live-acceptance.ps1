@@ -1922,6 +1922,38 @@ function Complete-Task051InvocationCleanup {
     if ($null -ne $cleanupFailure) { throw $cleanupFailure }
 }
 
+function Wait-Task051McpServerNaturalExit {
+    param(
+        [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 30000)][int]$TimeoutMilliseconds
+    )
+
+    $candidate = $null
+    try {
+        try {
+            $candidate = [Diagnostics.Process]::GetProcessById($ProcessId)
+        }
+        catch [ArgumentException] {
+            return
+        }
+        catch {
+            throw 'TASK038_CURRENT_CODEX_TOOL_SERVER_EXIT_QUERY_REJECTED'
+        }
+
+        try { $exited = $candidate.WaitForExit($TimeoutMilliseconds) }
+        catch { throw 'TASK038_CURRENT_CODEX_TOOL_SERVER_EXIT_QUERY_REJECTED' }
+        if (-not $exited) {
+            throw 'TASK038_CURRENT_CODEX_TOOL_SERVER_EXIT_TIMEOUT_REJECTED'
+        }
+    }
+    finally {
+        if ($null -ne $candidate) {
+            try { $candidate.Dispose() }
+            catch { throw 'TASK038_CURRENT_CODEX_TOOL_SERVER_EXIT_QUERY_REJECTED' }
+        }
+    }
+}
+
 function Get-Task051McpEnvironment {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('FRESH', 'RESUME_EXISTING')][string]$RunMode,
@@ -2844,6 +2876,7 @@ function Invoke-Task051CodexTool {
         $failureStage = 'DISPATCH'
         $firstDispatchLine = Get-Content -LiteralPath ([string]$acceptanceSink.path) -TotalCount 1
         $serverProcessId = [int](($firstDispatchLine | ConvertFrom-Json -ErrorAction Stop).process_id)
+        Wait-Task051McpServerNaturalExit -ProcessId $serverProcessId -TimeoutMilliseconds 30000
         $dispatch = Read-Task038McpAcceptanceEvidence -Path ([string]$acceptanceSink.path) -ExpectedNativeIdentity ([string]$acceptanceSink.native_identity) -SessionId $sessionId -SafeConfigSha256 $safeConfig -ProcessId $serverProcessId -ExpectedDispatchCount 1
         $failureStage = 'EFFECT'
         $effects = Read-Task038McpObservedEffectEvidence -Path ([string]$observedSink.path) -ExpectedNativeIdentity ([string]$observedSink.native_identity) -SessionId $sessionId -SafeConfigSha256 $safeConfig -Nonce ([string]$observedSink.nonce) -ProcessId $serverProcessId
@@ -4479,6 +4512,41 @@ function Invoke-Task051SelfTest {
                 catch { $selfTestProcessCleanupFailure = 'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST_CLEANUP_REJECTED' }
             }
             if ($null -ne $selfTestProcessCleanupFailure) { throw $selfTestProcessCleanupFailure }
+        }
+        $naturalExitChild = $null
+        try {
+            $naturalExitInfo = [Diagnostics.ProcessStartInfo]::new()
+            $naturalExitInfo.FileName = [IO.Path]::GetFullPath((Join-Path $PSHOME 'powershell.exe'))
+            $naturalExitInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -Command "Start-Sleep -Milliseconds 500"'
+            $naturalExitInfo.WorkingDirectory = $aclRoot
+            $naturalExitInfo.UseShellExecute = $false
+            $naturalExitInfo.CreateNoWindow = $true
+            Set-Task051ClosedEnvironment -StartInfo $naturalExitInfo -Additional ([ordered]@{})
+            $naturalExitChild = [Diagnostics.Process]::Start($naturalExitInfo)
+            Wait-Task051McpServerNaturalExit -ProcessId ([int]$naturalExitChild.Id) -TimeoutMilliseconds 5000
+            $naturalExitChild.Refresh()
+            if (-not $naturalExitChild.HasExited) {
+                throw 'TASK051_MCP_SERVER_NATURAL_EXIT_SELF_TEST_REJECTED'
+            }
+            $timeoutFailure = $null
+            try {
+                Wait-Task051McpServerNaturalExit -ProcessId $PID -TimeoutMilliseconds 25
+            }
+            catch { $timeoutFailure = [string]$_.Exception.Message }
+            if ($timeoutFailure -cne 'TASK038_CURRENT_CODEX_TOOL_SERVER_EXIT_TIMEOUT_REJECTED') {
+                throw 'TASK051_MCP_SERVER_NATURAL_EXIT_SELF_TEST_REJECTED'
+            }
+            Wait-Task051McpServerNaturalExit -ProcessId ([int]::MaxValue) -TimeoutMilliseconds 25
+            Write-Output 'TASK051_MCP_SERVER_NATURAL_EXIT_SELF_TEST=PASS'
+        }
+        finally {
+            if ($null -ne $naturalExitChild) {
+                if (-not $naturalExitChild.HasExited) {
+                    $naturalExitChild.Kill()
+                    $naturalExitChild.WaitForExit()
+                }
+                $naturalExitChild.Dispose()
+            }
         }
         $cargoLinkPathProbe = Join-Path $aclRoot 't\debug\deps\liblattice_postgres_codebase_memory-0123456789abcdef.rlib'
         if ($cargoLinkPathProbe.Length -ge 260) {
