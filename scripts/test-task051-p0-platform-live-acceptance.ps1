@@ -41,6 +41,13 @@ $requiredFragments = @(
     'mcpServerStatus/list',
     'app-server',
     '--stdio',
+    '$script:Task051ExpectedCurrentCodexRelativePath = ''OpenAI\Codex\bin\e305f1c75d8da435\codex.exe''',
+    '$script:Task051ExpectedCurrentCodexVersion = ''codex-cli 0.148.0-alpha.9''',
+    '$script:Task051ExpectedCurrentCodexSha256 = ''f29f609375f3731d8db507a95124862a84e306982e30ba4300ddce5638bc6946''',
+    'Get-Task051CurrentCodexFileIdentity',
+    'codex_native_identity',
+    'codex_creation_file_time_utc',
+    'CodexAuthority',
     'lattice-task051-acceptance/',
     'unknown (lattice-task051-acceptance; 1)',
     '--ephemeral',
@@ -288,6 +295,64 @@ $requiredFragments = @(
 foreach ($fragment in $requiredFragments) {
     if ($runnerSource.IndexOf($fragment, [StringComparison]::Ordinal) -lt 0) {
         throw ('TASK051_RUNNER_SHAPE_REJECTED|' + $fragment)
+    }
+}
+
+$currentCodexIdentityStart = $runnerSource.IndexOf('function Get-Task051CurrentCodexFileIdentity', [StringComparison]::Ordinal)
+$currentCodexIdentityEnd = $runnerSource.IndexOf('function Assert-Task051NoReparseAncestor', $currentCodexIdentityStart, [StringComparison]::Ordinal)
+if ($currentCodexIdentityStart -lt 0 -or $currentCodexIdentityEnd -le $currentCodexIdentityStart) {
+    throw 'TASK051_CURRENT_CODEX_IDENTITY_SHAPE_REJECTED'
+}
+$currentCodexIdentitySource = $runnerSource.Substring($currentCodexIdentityStart, $currentCodexIdentityEnd - $currentCodexIdentityStart)
+$currentCodexPathIndex = $currentCodexIdentitySource.IndexOf('$currentCodex = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA $script:Task051ExpectedCurrentCodexRelativePath))', [StringComparison]::Ordinal)
+$currentCodexBoundaryIndex = $currentCodexIdentitySource.IndexOf('Assert-Task051NoReparseAncestor -Path $currentCodex -Boundary $currentCodexBoundary', [StringComparison]::Ordinal)
+$currentCodexRegularFileIndex = $currentCodexIdentitySource.IndexOf("Assert-Task051RegularFile -Path `$currentCodex -FailureCode 'TASK051_CURRENT_CODEX_REJECTED'", [StringComparison]::Ordinal)
+$currentCodexShaIndex = $currentCodexIdentitySource.IndexOf('$currentCodexSha256 = Get-Task051Sha256 -Path $currentCodex', [StringComparison]::Ordinal)
+$currentCodexShaGuardIndex = $currentCodexIdentitySource.IndexOf('$currentCodexSha256 -cne $script:Task051ExpectedCurrentCodexSha256', [StringComparison]::Ordinal)
+$currentCodexVersionIndex = $currentCodexIdentitySource.IndexOf('$currentCodexVersion -cne $script:Task051ExpectedCurrentCodexVersion', [StringComparison]::Ordinal)
+$currentCodexUserAgentIndex = $currentCodexIdentitySource.IndexOf("`$currentCodexUserAgent = 'lattice-task051-acceptance/' + `$currentCodexSemanticVersion", [StringComparison]::Ordinal)
+if (
+    $currentCodexPathIndex -lt 0 -or
+    $currentCodexBoundaryIndex -le $currentCodexPathIndex -or
+    $currentCodexRegularFileIndex -le $currentCodexBoundaryIndex -or
+    $currentCodexShaIndex -le $currentCodexRegularFileIndex -or
+    $currentCodexShaGuardIndex -le $currentCodexShaIndex -or
+    $currentCodexVersionIndex -le $currentCodexShaGuardIndex -or
+    $currentCodexUserAgentIndex -le $currentCodexVersionIndex -or
+    $currentCodexIdentitySource.IndexOf('Get-ChildItem', [StringComparison]::Ordinal) -ge 0 -or
+    $runnerSource.IndexOf('codex-cli 0.147.0-alpha.6.6', [StringComparison]::Ordinal) -ge 0 -or
+    [regex]::Matches($runnerSource, [regex]::Escape('Get-Task051CurrentCodexFileIdentity')).Count -ne 4
+) {
+    throw 'TASK051_CURRENT_CODEX_IDENTITY_SHAPE_REJECTED'
+}
+
+foreach ($identityBoundInvocation in @(
+    [pscustomobject]@{ Start = 'function Invoke-Task051CodexDiscovery'; End = 'function Get-Task051ExecStructuredContent' },
+    [pscustomobject]@{ Start = 'function Invoke-Task051CodexTool'; End = 'function Replace-Task051Exact' }
+)) {
+    $identityInvocationStart = $runnerSource.IndexOf([string]$identityBoundInvocation.Start, [StringComparison]::Ordinal)
+    $identityInvocationEnd = $runnerSource.IndexOf([string]$identityBoundInvocation.End, $identityInvocationStart, [StringComparison]::Ordinal)
+    if ($identityInvocationStart -lt 0 -or $identityInvocationEnd -le $identityInvocationStart) {
+        throw 'TASK051_CURRENT_CODEX_PROCESS_IDENTITY_SHAPE_REJECTED'
+    }
+    $identityInvocationSource = $runnerSource.Substring($identityInvocationStart, $identityInvocationEnd - $identityInvocationStart)
+    $identityRecheckIndex = $identityInvocationSource.IndexOf('$currentCodexIdentity = Get-Task051CurrentCodexFileIdentity', [StringComparison]::Ordinal)
+    $nativeIdentityIndex = $identityInvocationSource.IndexOf('$currentCodexNativeIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $codex -Directory $false', [StringComparison]::Ordinal)
+    $processStartIndex = $identityInvocationSource.IndexOf('$owned = Start-Task051OwnedProcess -StartInfo $info', [StringComparison]::Ordinal)
+    $processEvidenceIndex = $identityInvocationSource.IndexOf('$codexProcessEvidence = Get-Task051OwnedProcessEvidence', [StringComparison]::Ordinal)
+    $codexAuthorityIndex = $identityInvocationSource.IndexOf('$codexProcessAuthority = $codexProcessEvidence.Authority', [StringComparison]::Ordinal)
+    $cleanupBindingIndex = $identityInvocationSource.IndexOf('-CodexAuthority $codexProcessAuthority', [StringComparison]::Ordinal)
+    if (
+        $identityRecheckIndex -lt 0 -or
+        $nativeIdentityIndex -le $identityRecheckIndex -or
+        $processStartIndex -le $nativeIdentityIndex -or
+        $processEvidenceIndex -le $processStartIndex -or
+        $codexAuthorityIndex -le $processEvidenceIndex -or
+        $cleanupBindingIndex -le $codexAuthorityIndex -or
+        $identityInvocationSource.IndexOf('-ExpectedExecutableSha256 $script:Task051ExpectedCurrentCodexSha256', [StringComparison]::Ordinal) -lt 0 -or
+        $identityInvocationSource.IndexOf('-ExpectedExecutableNativeIdentity $currentCodexNativeIdentity', [StringComparison]::Ordinal) -lt 0
+    ) {
+        throw 'TASK051_CURRENT_CODEX_PROCESS_IDENTITY_SHAPE_REJECTED'
     }
 }
 

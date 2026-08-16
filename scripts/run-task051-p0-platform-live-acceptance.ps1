@@ -11,6 +11,9 @@ $ProgressPreference = 'SilentlyContinue'
 $script:Task051ExpectedTask050Commit = '8e5ba40d38b781afff7028841bd981c8dd2b9721'
 $script:Task051ExpectedTask050Tree = 'b4478be2801814ffc630cbf113b0a4ffa3a1b591'
 $script:Task051DependencyState = 'TASK050_FULLY_VERIFIED'
+$script:Task051ExpectedCurrentCodexRelativePath = 'OpenAI\Codex\bin\e305f1c75d8da435\codex.exe'
+$script:Task051ExpectedCurrentCodexVersion = 'codex-cli 0.148.0-alpha.9'
+$script:Task051ExpectedCurrentCodexSha256 = 'f29f609375f3731d8db507a95124862a84e306982e30ba4300ddce5638bc6946'
 $script:Task051PublicStatusSchema = 'lattice.task.status.v1'
 $script:Task051ExpectedTools = @(
     'lattice_delivery_run',
@@ -41,6 +44,42 @@ function Get-Task051StringSha256 {
     try { $hash = $algorithm.ComputeHash($bytes) }
     finally { $algorithm.Dispose() }
     return ([BitConverter]::ToString($hash)).Replace('-', '').ToLowerInvariant()
+}
+
+function Get-Task051CurrentCodexFileIdentity {
+    param([switch]$VerifyVersion)
+
+    $currentCodexBoundary = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'))
+    $currentCodex = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA $script:Task051ExpectedCurrentCodexRelativePath))
+    Assert-Task051NoReparseAncestor -Path $currentCodex -Boundary $currentCodexBoundary -FailureCode 'TASK051_CURRENT_CODEX_REJECTED'
+    Assert-Task051RegularFile -Path $currentCodex -FailureCode 'TASK051_CURRENT_CODEX_REJECTED'
+    $currentCodexSha256 = Get-Task051Sha256 -Path $currentCodex
+    if ($currentCodexSha256 -cne $script:Task051ExpectedCurrentCodexSha256) {
+        throw 'TASK051_CURRENT_CODEX_REJECTED'
+    }
+    $currentCodexVersion = $script:Task051ExpectedCurrentCodexVersion
+    if ($VerifyVersion) {
+        $currentCodexVersionOutput = @(& $currentCodex --version 2>&1 | ForEach-Object { [string]$_ })
+        if (
+            $LASTEXITCODE -ne 0 -or
+            $currentCodexVersionOutput.Count -ne 1 -or
+            [string]$currentCodexVersionOutput[0] -cne $script:Task051ExpectedCurrentCodexVersion
+        ) {
+            throw 'TASK051_CURRENT_CODEX_REJECTED'
+        }
+        $currentCodexVersion = [string]$currentCodexVersionOutput[0]
+    }
+    if ($currentCodexVersion -cne $script:Task051ExpectedCurrentCodexVersion) {
+        throw 'TASK051_CURRENT_CODEX_REJECTED'
+    }
+    $currentCodexSemanticVersion = $currentCodexVersion.Substring('codex-cli '.Length)
+    $currentCodexUserAgent = 'lattice-task051-acceptance/' + $currentCodexSemanticVersion + ' (Windows ' + [Environment]::OSVersion.Version.ToString(3) + '; x86_64) unknown (lattice-task051-acceptance; 1)'
+    return [pscustomobject]@{
+        Path = $currentCodex
+        Sha256 = $currentCodexSha256
+        Version = $currentCodexVersion
+        UserAgent = $currentCodexUserAgent
+    }
 }
 
 function Assert-Task051NoReparseAncestor {
@@ -1880,6 +1919,7 @@ function Complete-Task051InvocationCleanup {
         $Owned,
         [Parameter(Mandatory = $true)]$CodexHome,
         [int]$KnownServerProcessId = 0,
+        $CodexAuthority,
         $ServerAuthority
     )
 
@@ -1887,6 +1927,24 @@ function Complete-Task051InvocationCleanup {
     if ($null -ne $Owned) {
         try { Stop-Task051OwnedProcess -Owned $Owned }
         catch { $cleanupFailure = [string]$_.Exception.Message }
+    }
+    if ($null -ne $CodexAuthority) {
+        try {
+            if ($CodexAuthority.IsAlive() -and $null -eq $cleanupFailure) {
+                $cleanupFailure = 'TASK051_CODEX_PROCESS_CLEANUP_REJECTED'
+            }
+        }
+        catch {
+            if ($null -eq $cleanupFailure) {
+                $cleanupFailure = 'TASK051_CODEX_PROCESS_CLEANUP_REJECTED'
+            }
+        }
+        try { $CodexAuthority.CloseExact() }
+        catch {
+            if ($null -eq $cleanupFailure) {
+                $cleanupFailure = 'TASK051_PROCESS_HANDLE_CLEANUP_REJECTED'
+            }
+        }
     }
     if ($null -ne $ServerAuthority) {
         try {
@@ -2067,11 +2125,18 @@ function Invoke-Task051CodexDiscovery {
         [Parameter(Mandatory = $true)][string]$ExpectedLatticedNativeIdentity
     )
 
-    $codex = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_CURRENT_CODEX', 'Process')
-    Assert-Task051RegularFile -Path $codex -FailureCode 'TASK051_CURRENT_CODEX_REJECTED'
+    $currentCodexIdentity = Get-Task051CurrentCodexFileIdentity
+    $codexEnvironmentPath = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_CURRENT_CODEX', 'Process')
+    try { $codex = [IO.Path]::GetFullPath($codexEnvironmentPath) }
+    catch { throw 'TASK051_CURRENT_CODEX_REJECTED' }
+    if (-not $codex.Equals([string]$currentCodexIdentity.Path, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'TASK051_CURRENT_CODEX_REJECTED'
+    }
     $codexHome = $null
     $owned = $null
     $process = $null
+    $codexProcessEvidence = $null
+    $codexProcessAuthority = $null
     $serverProcessId = 0
     $sessionOpen = $null
     $processEvidence = $null
@@ -2104,9 +2169,20 @@ function Invoke-Task051CodexDiscovery {
         $childEnvironment = [ordered]@{ CODEX_HOME = [string]$codexHome.Path }
         foreach ($entry in $Environment.GetEnumerator()) { $childEnvironment[$entry.Key] = [string]$entry.Value }
         Set-Task051ClosedEnvironment -StartInfo $info -Additional $childEnvironment
+        $currentCodexNativeIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $codex -Directory $false
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_PROCESS_START_REJECTED'
         $owned = Start-Task051OwnedProcess -StartInfo $info
         $process = $owned.Process
+        $codexObservedAtUnixNanos = ([DateTime]::UtcNow.Ticks - 621355968000000000L) * 100L
+        $codexProcessEvidence = Get-Task051OwnedProcessEvidence `
+            -Job ([IntPtr]$owned.Job) `
+            -ProcessId ([int]$process.Id) `
+            -ExpectedExecutable $codex `
+            -ExpectedExecutableSha256 $script:Task051ExpectedCurrentCodexSha256 `
+            -ExpectedExecutableNativeIdentity $currentCodexNativeIdentity `
+            -OwnerProcess $process `
+            -ObservedAtUnixNanos $codexObservedAtUnixNanos
+        $codexProcessAuthority = $codexProcessEvidence.Authority
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_INITIALIZE_REQUEST_REJECTED'
         $initialize = [ordered]@{
             method = 'initialize'
@@ -2274,6 +2350,11 @@ function Invoke-Task051CodexDiscovery {
             schema_version = 'lattice.task051.current-codex-discovery.v2'
             phase = $Phase
             codex_process_id = [int]$process.Id
+            codex_sha256 = [string]$codexProcessEvidence.ImageSha256
+            codex_native_identity = [string]$codexProcessEvidence.NativeIdentity
+            codex_creation_file_time_utc = [long]$codexProcessEvidence.CreationFileTimeUtc
+            codex_exit_file_time_utc = [long]$codexProcessEvidence.ExitFileTimeUtc
+            codex_was_running_at_capture = [bool]$codexProcessEvidence.WasRunningAtCapture
             latticed_process_id = $serverProcessId
             latticed_sha256 = [string]$processEvidence.ImageSha256
             latticed_native_identity = [string]$processEvidence.NativeIdentity
@@ -2281,7 +2362,6 @@ function Invoke-Task051CodexDiscovery {
             latticed_exit_file_time_utc = [long]$processEvidence.ExitFileTimeUtc
             latticed_was_running_at_capture = [bool]$processEvidence.WasRunningAtCapture
             session_open_event_sha256 = [string]$sessionOpen.EventSha256
-            codex_sha256 = Get-Task051Sha256 -Path $codex
             config_sha256 = [string]$codexHome.ConfigSha256
             user_agent = [string]$init.result.userAgent
             tool_names = $toolNames
@@ -2297,7 +2377,7 @@ function Invoke-Task051CodexDiscovery {
             ServerSha256 = [string]$processEvidence.ImageSha256
             ServerNativeIdentity = [string]$processEvidence.NativeIdentity
             ConfigSha256 = [string]$codexHome.ConfigSha256
-            CodexSha256 = Get-Task051Sha256 -Path $codex
+            CodexSha256 = [string]$codexProcessEvidence.ImageSha256
             UserAgent = [string]$init.result.userAgent
             ToolNames = $toolNames
             EvidencePath = [string]$evidence.Path
@@ -2320,6 +2400,7 @@ function Invoke-Task051CodexDiscovery {
                 -Owned $owned `
                 -CodexHome $codexHome `
                 -KnownServerProcessId $knownServerProcessId `
+                -CodexAuthority $codexProcessAuthority `
                 -ServerAuthority $authorityForCleanup
         }
     }
@@ -2790,11 +2871,18 @@ function Invoke-Task051CodexTool {
     $codexHome = $null
     $owned = $null
     $process = $null
+    $codexProcessEvidence = $null
+    $codexProcessAuthority = $null
     $serverProcessId = 0
     try {
         Assert-Task051CodexPhaseTool -Phase $Phase -Tool $Tool
-        $codex = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_CURRENT_CODEX', 'Process')
-        Assert-Task051RegularFile -Path $codex -FailureCode 'TASK051_CURRENT_CODEX_REJECTED'
+        $currentCodexIdentity = Get-Task051CurrentCodexFileIdentity
+        $codexEnvironmentPath = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_CURRENT_CODEX', 'Process')
+        try { $codex = [IO.Path]::GetFullPath($codexEnvironmentPath) }
+        catch { throw 'TASK051_CURRENT_CODEX_REJECTED' }
+        if (-not $codex.Equals([string]$currentCodexIdentity.Path, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'TASK051_CURRENT_CODEX_REJECTED'
+        }
         $sessionId = [Guid]::NewGuid().ToString('N')
         $acceptanceSink = New-Task038McpAcceptanceEvidenceSink -EvidenceRoot $EvidenceRoot -SessionId $sessionId
         $observedSink = New-Task038McpObservedEffectEvidenceSink -AcceptanceEvidencePath ([string]$acceptanceSink.path) -SessionId $sessionId
@@ -2820,9 +2908,20 @@ function Invoke-Task051CodexTool {
         $childEnvironment = [ordered]@{ CODEX_HOME = [string]$codexHome.Path }
         foreach ($entry in $environment.GetEnumerator()) { $childEnvironment[$entry.Key] = [string]$entry.Value }
         Set-Task051ClosedEnvironment -StartInfo $info -Additional $childEnvironment
+        $currentCodexNativeIdentity = Get-LatticeWindowsNativePathIdentityToken -Path $codex -Directory $false
         $failureStage = 'PROCESS'
         $owned = Start-Task051OwnedProcess -StartInfo $info
         $process = $owned.Process
+        $codexObservedAtUnixNanos = ([DateTime]::UtcNow.Ticks - 621355968000000000L) * 100L
+        $codexProcessEvidence = Get-Task051OwnedProcessEvidence `
+            -Job ([IntPtr]$owned.Job) `
+            -ProcessId ([int]$process.Id) `
+            -ExpectedExecutable $codex `
+            -ExpectedExecutableSha256 $script:Task051ExpectedCurrentCodexSha256 `
+            -ExpectedExecutableNativeIdentity $currentCodexNativeIdentity `
+            -OwnerProcess $process `
+            -ObservedAtUnixNanos $codexObservedAtUnixNanos
+        $codexProcessAuthority = $codexProcessEvidence.Authority
         $failureStage = 'PROMPT'
         $prompt = if ($Tool -ceq 'lattice_task_submit') {
             'Execution-only request. Your first and only action before the final response must be exactly one MCP tool call: call lattice_task_submit on server lattice with client_request_id "' + [string]$Arguments.client_request_id + '" and intent "CONTROLLED_CODEX_CANARY". Do not reason aloud, explain, plan, ask for clarification, simulate success, or call any other tool. Do not produce a final response unless the required tool call has completed. After it returns, output only TASK051_CODEX_SUBMIT_OK.'
@@ -2911,8 +3010,12 @@ function Invoke-Task051CodexTool {
             tool = $Tool
             run_mode = $RunMode
             codex_process_id = [int]$process.Id
+            codex_sha256 = [string]$codexProcessEvidence.ImageSha256
+            codex_native_identity = [string]$codexProcessEvidence.NativeIdentity
+            codex_creation_file_time_utc = [long]$codexProcessEvidence.CreationFileTimeUtc
+            codex_exit_file_time_utc = [long]$codexProcessEvidence.ExitFileTimeUtc
+            codex_was_running_at_capture = [bool]$codexProcessEvidence.WasRunningAtCapture
             latticed_process_id = $serverProcessId
-            codex_sha256 = Get-Task051Sha256 -Path $codex
             config_sha256 = [string]$codexHome.ConfigSha256
             safe_config_sha256 = $safeConfig
             prompt_sha256 = Get-Task051StringSha256 -Value $prompt
@@ -2934,7 +3037,7 @@ function Invoke-Task051CodexTool {
             ServerProcessId = $serverProcessId
             StructuredContent = $structured
             ConfigSha256 = [string]$codexHome.ConfigSha256
-            CodexSha256 = Get-Task051Sha256 -Path $codex
+            CodexSha256 = [string]$codexProcessEvidence.ImageSha256
             DispatchRawSha256 = [string]$dispatch.raw_sha256
             ObservedEffectRawSha256 = [string]$effects.raw_sha256
             ObservedEffectFinalHmacSha256 = [string]$effects.final_hmac_sha256
@@ -2949,7 +3052,7 @@ function Invoke-Task051CodexTool {
     finally {
         if ($null -ne $codexHome) {
             try {
-                Complete-Task051InvocationCleanup -Owned $owned -CodexHome $codexHome -KnownServerProcessId $serverProcessId
+                Complete-Task051InvocationCleanup -Owned $owned -CodexHome $codexHome -KnownServerProcessId $serverProcessId -CodexAuthority $codexProcessAuthority
             }
             catch {
                 throw 'TASK038_CURRENT_CODEX_TOOL_CLEANUP_REJECTED'
@@ -5322,13 +5425,10 @@ if ($branch -cne 'feature/task-051-p0-platform-live-acceptance' -or $status.Coun
 if ($LASTEXITCODE -ne 0) { throw 'TASK051_TASK050_PROVENANCE_REJECTED' }
 $task050Tree = (& git -C $repositoryRoot rev-parse ($script:Task051ExpectedTask050Commit + '^{tree}')).Trim()
 if ($task050Tree -cne $script:Task051ExpectedTask050Tree) { throw 'TASK051_TASK050_PROVENANCE_REJECTED' }
-$currentCodexCandidates = @(Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin') -Filter codex.exe -Recurse -File -ErrorAction Stop | Sort-Object LastWriteTimeUtc -Descending)
-if ($currentCodexCandidates.Count -lt 1) { throw 'TASK051_CURRENT_CODEX_REJECTED' }
-$currentCodex = [IO.Path]::GetFullPath($currentCodexCandidates[0].FullName)
-$currentCodexVersion = (& $currentCodex --version).Trim()
-if ($currentCodexVersion -cne 'codex-cli 0.147.0-alpha.6.6') { throw 'TASK051_CURRENT_CODEX_REJECTED' }
-$currentCodexSemanticVersion = $currentCodexVersion.Substring('codex-cli '.Length)
-$currentCodexUserAgent = 'lattice-task051-acceptance/' + $currentCodexSemanticVersion + ' (Windows ' + [Environment]::OSVersion.Version.ToString(3) + '; x86_64) unknown (lattice-task051-acceptance; 1)'
+$currentCodexIdentity = Get-Task051CurrentCodexFileIdentity -VerifyVersion
+$currentCodex = [string]$currentCodexIdentity.Path
+$currentCodexVersion = [string]$currentCodexIdentity.Version
+$currentCodexUserAgent = [string]$currentCodexIdentity.UserAgent
 $workspaceRoot = [IO.Path]::GetFullPath((Split-Path -Parent $repositoryRoot))
 $officialCodexSourceTarget = [IO.Path]::GetFullPath((Join-Path $workspaceRoot 'chatgpt-mcp\target'))
 $officialCodex = $null
