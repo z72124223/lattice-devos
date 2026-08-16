@@ -15,8 +15,12 @@ accepted_task050_tree: b4478be2801814ffc630cbf113b0a4ffa3a1b591
 execution_authorized_by: direct_user_reply
 execution_authorized_at_utc: 2026-08-15T08:25:19Z
 execution_authorization_source_thread_id: 019ffee6-488a-70e0-8990-9aa9133892a7
+product_fix_authorized_by: direct_user_reply
+product_fix_authorized_at_utc: 2026-08-16T03:14:27Z
+product_fix_authorization_source_thread_id: 019ffee6-488a-70e0-8990-9aa9133892a7
 allowed_paths:
   - docs/tickets/TASK-051-p0-platform-live-acceptance.md
+  - apps/lattice-runtime/src/git_delivery.rs
   - scripts/run-task051-p0-platform-live-acceptance.ps1
   - scripts/test-task051-p0-platform-live-acceptance.ps1
   - target/task051-p0-platform-live-acceptance/**
@@ -30,13 +34,13 @@ branch: feature/task-051-p0-platform-live-acceptance
 Current contract reconciliation:
 
 - TASK-050 is accepted at commit `8e5ba40d38b781afff7028841bd981c8dd2b9721`, tree `b4478be2801814ffc630cbf113b0a4ffa3a1b591`, and is an ancestor of this branch.
-- This ticket is reconciled to `SPEC-003` version 5, `SPEC-002` version 35, and latticed constitution version 1.8. No public contract or product-code amendment is required.
+- This ticket is reconciled to `SPEC-003` version 5, `SPEC-002` version 35, and latticed constitution version 1.8. No public-contract, module, dependency, or data-ownership amendment is required. On 2026-08-16 the user separately authorized the exact Windows Git long-path defect repair in `apps/lattice-runtime/src/git_delivery.rs` after the live gate proved that product defect.
 - The current-machine gate uses an isolated, run-owned `CODEX_HOME` and process-local MCP registration. It does not mutate `C:\Users\f7212\.codex\config.toml`; the original file hash must remain byte-identical.
 - The user authorized TASK-051 completion and a non-force feature-branch push in source thread `019ffee6-488a-70e0-8990-9aa9133892a7`. Merge, Draft promotion, default-branch movement, deployment, and release remain unauthorized.
 
 After TASK-050 reaches an accepted completion state, prove on the current machine that Codex can discover the registered LATTICE MCP server, make one real typed call with semantic success, and recover the resulting PostgreSQL-backed task safely from a fresh client/server process after a physical database restart. Preserve the exact four-tool public surface and the existing six-field `lattice_task_status` wire result.
 
-This is an acceptance-only ticket. It does not repair product code or expand the public contract.
+This remains an acceptance-led ticket and does not expand the public contract. Its sole product-code exception is the user-authorized Windows-only, command-scoped `GitRunner::output` repair that adds `-c core.longpaths=true`, plus necessary same-file regression tests. It may not write system/global/local Git configuration, modify `windows_probe_output`, or expand into unrelated product code.
 
 ## Status vocabulary
 
@@ -73,7 +77,7 @@ Execution may start only when all of the following are recorded in a preflight r
 
 ## Exact execution and mutation scope
 
-Repository writes are limited to the frontmatter `allowed_paths`. Product source, migrations, existing specifications, existing tickets, `PLANS.md`, `HANDOFF.md`, module constitutions, and repository configuration are outside scope.
+Repository writes are limited to the frontmatter `allowed_paths`. Product source other than the one listed `apps/lattice-runtime/src/git_delivery.rs` exception, migrations, existing specifications, other tickets, `PLANS.md`, `HANDOFF.md`, module constitutions, and repository configuration are outside scope.
 
 The authorized implementation uses a run-owned isolated `CODEX_HOME` and process-local `[mcp_servers.lattice]` registration under the ticket evidence root. `C:\Users\f7212\.codex\config.toml` must not be written. Capture its pre-run hash and require the same byte hash after cleanup. Any attempted persistent registration change is `FAIL`.
 
@@ -143,11 +147,11 @@ TASK-051 is `VERIFIED` only when one current run proves all of the following:
 ## Non-goals
 
 - No TASK-050 implementation, repair, duplication, or acceptance substitution.
-- No product feature fix, migration change, module refactor, new MCP tool/schema/field, or public receipt exposure. A product defect found here is reported as `FAIL` and repaired under a separate authorized ticket.
+- No product feature, migration, module refactor, new MCP tool/schema/field, or public receipt exposure. The only authorized product repair is the already-proven `GitRunner::output` Windows command-scoped long-path defect and its same-file regression tests; any other product defect remains `FAIL` and requires separate authorization.
 - No Hermes, Graphify, Codebase Memory, model platform, scheduler, autonomous-control implementation, ChatGPT tunnel, or unrelated module acceptance.
 - The live acceptance does not treat Git/GitHub integration as evidence. After verified closure, the separately authorized non-force feature-branch push may publish the checkpoint; PR creation, merge, Draft promotion, default-branch change, deployment, and release remain non-goals without separate authorization. A run-owned local disposable Git repository is permitted only if the existing closed canary requires it; it is an effect counter, not Git platform acceptance.
 - No production database, credential/account change, package installation/update, security-control weakening, arbitrary SQL/shell/path surface, or unknown resource cleanup.
 
 ## Human gate
 
-The execution gate was explicitly authorized by the user in source thread `019ffee6-488a-70e0-8990-9aa9133892a7` at `2026-08-15T08:25:19Z` and is consumed only for the listed paths, current-machine acceptance, local reversible resources, bounded commits, and a non-force feature-branch push. It does not authorize PR creation, merge, Draft promotion, default-branch change, deployment, release, account/credential mutation, destructive unowned cleanup, or any action outside this ticket.
+The execution gate was explicitly authorized by the user in source thread `019ffee6-488a-70e0-8990-9aa9133892a7` at `2026-08-15T08:25:19Z`. The same user explicitly authorized the listed `apps/lattice-runtime/src/git_delivery.rs` product repair in that source thread on 2026-08-16, before delegating this goal-mode continuation. These gates are consumed only for the listed paths, current-machine acceptance, local reversible resources, bounded commits, and a non-force feature-branch push. They do not authorize PR creation, merge, Draft promotion, default-branch change, deployment, release, account/credential mutation, destructive unowned cleanup, or any action outside this ticket.

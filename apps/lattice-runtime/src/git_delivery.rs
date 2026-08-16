@@ -1423,7 +1423,10 @@ impl GitRunner {
             .env("GIT_AUTHOR_DATE", FIXED_GIT_TIMESTAMP)
             .env("GIT_COMMITTER_NAME", "LATTICE DevOS")
             .env("GIT_COMMITTER_EMAIL", "lattice@invalid.example")
-            .env("GIT_COMMITTER_DATE", FIXED_GIT_TIMESTAMP)
+            .env("GIT_COMMITTER_DATE", FIXED_GIT_TIMESTAMP);
+        #[cfg(windows)]
+        command.arg("-c").arg("core.longpaths=true");
+        command
             .arg("-c")
             .arg(prefixed_path_argument(
                 "core.hooksPath=",
@@ -1834,6 +1837,8 @@ fn verify_only_main_ref(bytes: &[u8], expected: &str) -> Result<(), GitDeliveryE
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStrExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1852,6 +1857,43 @@ mod tests {
                 "lattice-task032-git-{label}-{}-{nanos}-{nonce}",
                 std::process::id()
             )))
+        }
+
+        #[cfg(windows)]
+        fn cleanup_exact(&self) -> io::Result<()> {
+            const EXPECTED_PREFIX: &str = "lattice-task032-git-windows-longpath-lifecycle-";
+
+            let metadata = match fs::symlink_metadata(&self.0) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            let parent = self
+                .0
+                .parent()
+                .ok_or_else(|| io::Error::other("test root parent missing"))?;
+            let canonical_temp = fs::canonicalize(std::env::temp_dir())?;
+            let canonical_parent = fs::canonicalize(parent)?;
+            if !same_path(&canonical_parent, &canonical_temp)
+                || !self
+                    .0
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(EXPECTED_PREFIX))
+                || unsafe_file_type(&metadata)
+                || !metadata.is_dir()
+            {
+                return Err(io::Error::other("unsafe test root cleanup target"));
+            }
+            let canonical_root = fs::canonicalize(&self.0)?;
+            if !same_path(&canonical_root, &self.0) {
+                return Err(io::Error::other("test root path identity changed"));
+            }
+            fs::remove_dir_all(&self.0)?;
+            match fs::symlink_metadata(&self.0) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+                Ok(_) => Err(io::Error::other("test root remained after cleanup")),
+            }
         }
     }
 
@@ -1883,6 +1925,94 @@ mod tests {
         let delivery = IsolatedGitDelivery::provision(&root.0, git)
             .expect("isolated Git fixture should provision");
         Some((root, delivery))
+    }
+
+    #[cfg(windows)]
+    fn windows_utf16_len(path: &Path) -> usize {
+        path.as_os_str().encode_wide().count()
+    }
+
+    #[cfg(windows)]
+    fn loose_object_path(root: &Path, object_id: &str) -> PathBuf {
+        root.join("control")
+            .join("git-dir")
+            .join("objects")
+            .join(&object_id[..2])
+            .join(&object_id[2..])
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_git_delivery_supports_over_260_git_internal_paths_without_persisting_config() {
+        let git = git_executable().expect("Git is required for the Windows long-path regression");
+        let root_owner = TestRoot::new("windows-longpath-lifecycle");
+        fs::create_dir(&root_owner.0).expect("create long-path test owner");
+        let mut parent = root_owner.0.join("segment-0123456789");
+        fs::create_dir(&parent).expect("create first long-path parent segment");
+        let task_leaf = format!("task-{}", "a".repeat(64));
+        let mut delivery_root = parent.join(&task_leaf);
+        while windows_utf16_len(&delivery_root) < 210 {
+            parent = parent.join("segment-0123456789");
+            fs::create_dir(&parent).expect("create long-path parent segment");
+            delivery_root = parent.join(&task_leaf);
+        }
+        assert!(windows_utf16_len(&delivery_root) < 240);
+        let baseline_object_path = loose_object_path(&delivery_root, BASELINE_COMMIT_SHA);
+        assert!(windows_utf16_len(&baseline_object_path) >= 260);
+
+        let attempt = std::panic::catch_unwind(|| {
+            let delivery = IsolatedGitDelivery::provision(&delivery_root, &git)
+                .expect("Windows Git delivery must provision beyond 260 UTF-16 units");
+            assert!(baseline_object_path.is_file());
+            assert_eq!(
+                fs::read(&delivery.global_config_path).expect("read isolated global config"),
+                b""
+            );
+            let local_config =
+                fs::read(delivery.git_directory.join("config")).expect("read local Git config");
+            assert!(
+                !local_config
+                    .windows(b"longpaths".len())
+                    .any(|window| window.eq_ignore_ascii_case(b"longpaths"))
+            );
+
+            let longpaths = require_success(
+                delivery.runner.output(&string_args(&[
+                    "config",
+                    "--show-origin",
+                    "--get",
+                    "core.longpaths",
+                ])),
+                "LONGPATHS_POLICY_INSPECTION_FAILED",
+            )
+            .expect("inspect command-scoped long-path policy");
+            assert_eq!(longpaths.stdout, b"command line:\ttrue\n");
+
+            fs::write(
+                delivery.repo_path().join(ANSWER_FILE_NAME),
+                EXPECTED_ANSWER_BYTES,
+            )
+            .expect("write exact answer");
+            let evidence = delivery.verify_and_commit().expect("delivery commit");
+            assert_ne!(evidence.commit_sha, evidence.baseline_commit);
+            assert_eq!(evidence.changed_paths, [ANSWER_FILE_NAME]);
+            let delivery_object_path = loose_object_path(&delivery_root, &evidence.commit_sha);
+            assert!(windows_utf16_len(&delivery_object_path) >= 260);
+            assert!(delivery_object_path.is_file());
+            assert!(
+                fs::read_dir(&delivery.temp_directory)
+                    .expect("read isolated Git temp directory")
+                    .next()
+                    .is_none()
+            );
+        });
+
+        root_owner
+            .cleanup_exact()
+            .expect("remove exact Windows long-path test root");
+        if let Err(payload) = attempt {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     #[test]
