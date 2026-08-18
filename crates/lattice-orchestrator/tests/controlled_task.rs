@@ -11,9 +11,9 @@ use lattice_orchestrator::{
 use lattice_ports::{
     AutonomyDisposition, AutonomyModel, AutonomyReason, AutonomyReceiptProjection,
     AutonomyVerification, ControlledTaskExecutionError, ControlledTaskExecutionErrorKind,
-    ControlledTaskExecutionPort, ControlledTaskExecutionResult, TaskLifecycleError,
-    TaskLifecycleErrorKind, TaskLifecycleEvidence, TaskLifecyclePort, TaskLifecycleResult,
-    WriterAuthorityGuardPort,
+    ControlledTaskExecutionPort, ControlledTaskExecutionResult, TaskLifecycleAdmission,
+    TaskLifecycleAutonomyEvidence, TaskLifecycleError, TaskLifecycleErrorKind,
+    TaskLifecycleEvidence, TaskLifecyclePort, TaskLifecycleResult, WriterAuthorityGuardPort,
 };
 use lattice_task_domain::TaskState;
 use lattice_writer_lease::{
@@ -60,6 +60,7 @@ struct FakeLifecycle {
     state: TaskState,
     result_digest: Option<ContentDigest>,
     autonomy_receipt: Option<AutonomyReceiptProjection>,
+    historical_optional: bool,
     reject_stopping_authority_as_stale: bool,
 }
 
@@ -71,23 +72,27 @@ impl FakeLifecycle {
             state: TaskState::Draft,
             result_digest: None,
             autonomy_receipt: None,
+            historical_optional: false,
             reject_stopping_authority_as_stale: false,
         }
     }
 
     fn evidence(&self) -> TaskLifecycleEvidence {
-        let evidence = TaskLifecycleEvidence::new(
+        let autonomy_evidence = if self.historical_optional {
+            TaskLifecycleAutonomyEvidence::HistoricalOptional(None)
+        } else {
+            self.autonomy_receipt.clone().map_or(
+                TaskLifecycleAutonomyEvidence::Unadmitted,
+                TaskLifecycleAutonomyEvidence::RequiredComplete,
+            )
+        };
+        TaskLifecycleEvidence::new(
             self.binding.clone(),
-            true,
+            autonomy_evidence,
             self.state,
             digest('c'),
             self.result_digest.clone(),
-        );
-        self.autonomy_receipt
-            .clone()
-            .map_or(evidence.clone(), |receipt| {
-                evidence.with_autonomy_receipt(receipt)
-            })
+        )
     }
 }
 
@@ -96,11 +101,18 @@ impl TaskLifecyclePort for FakeLifecycle {
         &mut self,
         binding: &SubjectBinding,
         client_request_id: &str,
-    ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
+    ) -> TaskLifecycleResult<TaskLifecycleAdmission> {
         assert_eq!(binding, &self.binding);
         assert_eq!(client_request_id, "client-request-1");
         self.calls.borrow_mut().push("task:admit".to_owned());
-        Ok(self.evidence())
+        if self.historical_optional || self.autonomy_receipt.is_some() {
+            TaskLifecycleAdmission::existing(self.evidence())
+        } else {
+            Ok(TaskLifecycleAdmission::pending_required_receipt(
+                self.binding.clone(),
+                digest('c'),
+            ))
+        }
     }
 
     fn transition(
@@ -168,7 +180,7 @@ impl TaskLifecyclePort for FakeLifecycle {
             AutonomyReason::RoutineAuthorized,
             Some(AutonomyModel::GovernedCodexWriter),
             Some(AutonomyVerification::FocusedChecks),
-        ));
+        )?);
         Ok(self.evidence())
     }
 
@@ -411,6 +423,102 @@ fn controlled_success_keeps_one_ordered_fenced_codex_lane_and_releases_before_co
             .current_authority(binding().project_id())
             .expect("current authority")
             .is_none()
+    );
+}
+
+#[test]
+fn existing_ask_user_receipt_stops_before_writer_or_execution() {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut lifecycle = FakeLifecycle::new(calls.clone());
+    lifecycle.autonomy_receipt = Some(
+        AutonomyReceiptProjection::new(
+            digest('1'),
+            digest('2'),
+            digest('3'),
+            TaskState::Draft,
+            AutonomyDisposition::AskUser,
+            AutonomyReason::NewUserDecision,
+            None,
+            None,
+        )
+        .expect("ASK_USER projection"),
+    );
+    let mut lease = FakeLeaseRepository::new(calls.clone());
+    let mut execution = FakeExecution {
+        calls: calls.clone(),
+        failure: None,
+    };
+
+    let evidence = run_controlled_task(&request(), &mut lifecycle, &mut lease, &mut execution)
+        .expect("ASK_USER remains a bounded Draft outcome");
+
+    assert_eq!(evidence.state(), TaskState::Draft);
+    assert_eq!(
+        evidence
+            .autonomy_receipt()
+            .map(AutonomyReceiptProjection::disposition),
+        Some(AutonomyDisposition::AskUser)
+    );
+    assert_eq!(calls.borrow().as_slice(), ["task:admit"]);
+}
+
+#[test]
+fn existing_proceed_receipt_requires_reconciliation_before_a_new_writer() {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut lifecycle = FakeLifecycle::new(calls.clone());
+    lifecycle.autonomy_receipt = Some(
+        AutonomyReceiptProjection::new(
+            digest('1'),
+            digest('2'),
+            digest('3'),
+            TaskState::Draft,
+            AutonomyDisposition::Proceed,
+            AutonomyReason::RoutineAuthorized,
+            Some(AutonomyModel::GovernedCodexWriter),
+            Some(AutonomyVerification::FocusedChecks),
+        )
+        .expect("PROCEED projection"),
+    );
+    let mut lease = FakeLeaseRepository::new(calls.clone());
+    let mut execution = FakeExecution {
+        calls: calls.clone(),
+        failure: None,
+    };
+
+    let error = run_controlled_task(&request(), &mut lifecycle, &mut lease, &mut execution)
+        .expect_err("an existing PROCEED receipt cannot authorize a replacement Writer");
+
+    assert_eq!(
+        error,
+        ControlledTaskOrchestratorError::ReconciliationRequired
+    );
+    assert_eq!(calls.borrow().as_slice(), ["task:admit"]);
+}
+
+#[test]
+fn existing_historical_optional_draft_continues_without_synthesizing_a_receipt() {
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let mut lifecycle = FakeLifecycle::new(calls.clone());
+    lifecycle.historical_optional = true;
+    let mut lease = FakeLeaseRepository::new(calls.clone());
+    let mut execution = FakeExecution {
+        calls: calls.clone(),
+        failure: None,
+    };
+
+    let evidence = run_controlled_task(&request(), &mut lifecycle, &mut lease, &mut execution)
+        .expect("historical optional task remains runnable without a synthetic receipt");
+
+    assert_eq!(evidence.state(), TaskState::Completed);
+    assert!(matches!(
+        evidence.autonomy_evidence(),
+        TaskLifecycleAutonomyEvidence::HistoricalOptional(None)
+    ));
+    assert!(
+        calls
+            .borrow()
+            .iter()
+            .all(|call| !call.starts_with("task:autonomy-receipt"))
     );
 }
 

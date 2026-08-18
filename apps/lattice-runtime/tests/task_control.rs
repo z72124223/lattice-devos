@@ -1,13 +1,20 @@
 use lattice_contracts::{
-    AttemptId, ContentDigest, DaemonEpoch, GatewayChannelId, GatewayInstanceId, HolderProcessId,
-    ProjectId, ProjectSnapshotId, RuntimeAdmissionMode, RuntimeKind, StoreAuthorityHead,
-    StoreAuthorityRevision, StoreDaemonInstanceId, SubjectBinding, TaskId, TaskIngressPeerEvidence,
-    TaskLedgerStreamIdentity, WriterLeaseAuthorityHead, WriterLeaseAuthorityReceipt,
-    WriterLeaseIdentity,
+    AttemptId, ContentDigest, DaemonEpoch, FencingToken, GatewayChannelId, GatewayInstanceId,
+    HolderProcessId, ProjectId, ProjectSnapshotId, RuntimeAdmissionMode, RuntimeKind,
+    StoreAuthorityHead, StoreAuthorityRevision, StoreDaemonInstanceId, SubjectBinding, TaskId,
+    TaskIngressPeerEvidence, TaskLedgerStreamIdentity, WriterLeaseAuthorityHead,
+    WriterLeaseAuthorityReceipt, WriterLeaseIdentity,
 };
 use lattice_ports::{TaskLifecycleErrorKind, TaskLifecyclePort};
-use lattice_postgres_codebase_memory::verify_embedded_extension_manifest;
-use lattice_postgres_store::{MigrationTarget, PostgresTaskLedger, PostgresTaskLedgerErrorKind};
+use lattice_postgres_codebase_memory::{
+    ExtensionApplyOutcome as MemoryExtensionApplyOutcome,
+    ExtensionDatabaseRole as MemoryExtensionDatabaseRole, ExtensionTarget as MemoryExtensionTarget,
+    apply_extension as apply_memory_extension, verify_embedded_extension_manifest,
+    verify_extension as verify_memory_extension,
+};
+use lattice_postgres_store::{
+    MigrationTarget, PostgresTaskLedger, PostgresTaskLedgerErrorKind, PostgresTaskLedgerLoad,
+};
 use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome, ExtensionTarget, PostgresWriterLease, apply_extension, verify_extension,
 };
@@ -15,8 +22,12 @@ use lattice_runtime::delivery_ledger::DeliveryDatabaseBinding;
 use lattice_runtime::task_control::PostgresTaskLifecycle;
 use lattice_task_domain::TaskState;
 use lattice_task_ledger::{
-    ActionId, ActorId, AppendCommand, CommandId, CommandOutcome as LedgerCommandOutcome,
-    CorrelationId, LedgerEventKind, LedgerOutcome, ReasonCode,
+    ActionId, ActorId, AppendCommand, AutonomyAppendMetadata, AutonomyAuthorityEvidence,
+    AutonomyDecisionReason, AutonomyIntent, AutonomyModel, AutonomyObservedTaskState,
+    AutonomyReceiptAppendPlan, AutonomyRecommendation, AutonomyRiskClass, AutonomyTaskKind,
+    AutonomyVerification, CommandId, CommandOutcome as LedgerCommandOutcome, CorrelationId,
+    LedgerEventKind, LedgerOutcome, ReasonCode, VerifiedAutonomyReceiptState,
+    plan_autonomy_receipt_append,
 };
 use lattice_writer_lease::{
     CommandOutcome as LeaseCommandOutcome, WriterLeaseAcquireRequest, WriterLeaseReleaseRequest,
@@ -151,6 +162,227 @@ fn substitute_task_identity(
     .head()
 }
 
+fn substitute_writer_attempt_or_fence(
+    authority: &WriterLeaseAuthorityHead,
+    attempt_id: AttemptId,
+    fencing_token: FencingToken,
+) -> WriterLeaseAuthorityHead {
+    let current = authority.identity();
+    let substituted = WriterLeaseIdentity::new(
+        current.project_id().clone(),
+        current.project_snapshot_id().clone(),
+        current.task_id().clone(),
+        current.task_revision(),
+        current.task_spec_digest().clone(),
+        attempt_id,
+        current.lease_id(),
+        current.lease_holder_id(),
+        current.worktree_id(),
+        current.holder_process_id(),
+        current.holder_process_start_identity().clone(),
+        current.daemon_instance_id(),
+        current.daemon_epoch(),
+        fencing_token,
+    )
+    .expect("substituted writer identity");
+    WriterLeaseAuthorityReceipt::new(
+        authority.version(),
+        authority.producer_id(),
+        authority.producer_version(),
+        authority.runtime(),
+        substituted,
+        authority.status(),
+        authority.revision(),
+        authority.runtime_admission(),
+        authority.acquired_at(),
+        authority.heartbeat_at(),
+        authority.expires_at(),
+        authority.time_observation_digest().clone(),
+        authority.admission_observation_digest().clone(),
+        authority.transition_digest().clone(),
+        authority.receipt_digest().clone(),
+    )
+    .expect("substituted writer receipt")
+    .head()
+}
+
+fn task050_identity(case: &str) -> TaskLedgerStreamIdentity {
+    let (project, snapshot, task, task_spec_digest) = match case {
+        "exact" => (
+            "task050-proceed-matrix-current".to_owned(),
+            "task050-proceed-matrix-snapshot".to_owned(),
+            "TASK-050-PROCEED-MATRIX".to_owned(),
+            digest('1'),
+        ),
+        "stale" | "wrong-fence" | "substituted" => (
+            format!("task050-proceed-{case}"),
+            format!("task050-proceed-{case}-snapshot"),
+            format!("TASK-050-PROCEED-{}", case.to_ascii_uppercase()),
+            digest(match case {
+                "stale" => '2',
+                "wrong-fence" => '3',
+                "substituted" => '4',
+                _ => unreachable!("matched TASK-050 proceed case"),
+            }),
+        ),
+        _ => panic!("unexpected TASK-050 proceed case"),
+    };
+    TaskLedgerStreamIdentity::new(
+        ProjectId::new(project).expect("project"),
+        ProjectSnapshotId::new(snapshot).expect("snapshot"),
+        TaskId::new(task).expect("task"),
+        "1",
+        task_spec_digest,
+        "TWD",
+    )
+    .expect("TASK-050 proceed identity")
+}
+
+fn create_task050_required_stream(
+    ledger: &mut PostgresTaskLedger,
+    identity: &TaskLedgerStreamIdentity,
+    authority: &StoreAuthorityHead,
+    case: &str,
+) -> PostgresTaskLedgerLoad {
+    let vacant = ledger
+        .load_stream(identity.clone())
+        .unwrap_or_else(|error| panic!("vacant stream {case}: {error:?}"));
+    let command = AppendCommand::new_autonomy_required_task_created(
+        vacant.stream().head().clone(),
+        CommandId::new(format!("task050-proceed-{case}-create")).expect("command"),
+        CorrelationId::new(format!("task050-proceed-{case}")).expect("correlation"),
+        "2000-01-01T00:00:00Z",
+        ActorId::new("task050-local-acceptance").expect("actor"),
+        ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+        digest('f'),
+        None,
+    )
+    .expect("required task creation");
+    ledger
+        .execute(command, authority.clone())
+        .expect("required task created");
+    let created = ledger
+        .load_stream(identity.clone())
+        .expect("created stream");
+    assert_eq!(
+        created.autonomy_state(),
+        &VerifiedAutonomyReceiptState::PendingRequiredReceipt
+    );
+    created
+}
+
+fn task050_proceed_plan(
+    created: &PostgresTaskLedgerLoad,
+    authority: &StoreAuthorityHead,
+    writer_authority: WriterLeaseAuthorityHead,
+    case: &str,
+) -> AutonomyReceiptAppendPlan {
+    plan_autonomy_receipt_append(
+        created.stream(),
+        AutonomyAppendMetadata::new(
+            CommandId::new(format!("task050-proceed-{case}-autonomy")).expect("command"),
+            CorrelationId::new(format!("task050-proceed-{case}")).expect("correlation"),
+            "2000-01-01T00:00:00Z",
+            ActorId::new("task050-local-acceptance").expect("actor"),
+        )
+        .expect("autonomy metadata"),
+        AutonomyIntent::new(
+            AutonomyTaskKind::Feature,
+            AutonomyRiskClass::R0,
+            true,
+            false,
+            false,
+            AutonomyObservedTaskState::Draft,
+            AutonomyRecommendation::Proceed {
+                model: AutonomyModel::GovernedCodexWriter,
+                verification: AutonomyVerification::FocusedChecks,
+                reason: AutonomyDecisionReason::RoutineAuthorized,
+            },
+        ),
+        AutonomyAuthorityEvidence::new_p0_process_start_profile(
+            digest('c'),
+            digest('d'),
+            authority.head_digest().clone(),
+            Some(writer_authority),
+        )
+        .expect("autonomy authority"),
+    )
+    .expect("typed PROCEED plan")
+}
+
+fn acquire_task050_writer(
+    writer: &mut PostgresWriterLease,
+    identity: &TaskLedgerStreamIdentity,
+    case: &str,
+    generation: u8,
+) -> WriterLeaseAuthorityHead {
+    let command = WriterLeaseRepositoryCommand::Acquire(WriterLeaseAcquireRequest {
+        command_id: format!("task050-{case}-acquire-{generation}"),
+        expected_head: None,
+        project_id: identity.project_id().clone(),
+        project_snapshot_id: identity.project_snapshot_id().clone(),
+        task_id: identity.task_id().clone(),
+        task_revision: identity.task_revision().to_owned(),
+        task_spec_digest: identity.task_spec_digest().clone(),
+        attempt_id: AttemptId::new(format!("task050-{case}-attempt-{generation}"))
+            .expect("attempt"),
+        lease_id: format!("task050-{case}-lease-{generation}"),
+        lease_holder_id: "codex-writer".to_owned(),
+        worktree_id: "task050-controlled-worktree".to_owned(),
+        holder_process_id: HolderProcessId::new(std::process::id().into()).expect("pid"),
+        holder_process_start_identity: digest('e'),
+    });
+    let acquired = writer.execute(command).expect("writer acquire");
+    assert_eq!(acquired.outcome, LeaseCommandOutcome::Applied);
+    acquired.after.expect("current writer authority")
+}
+
+fn release_task050_writer(
+    writer: &mut PostgresWriterLease,
+    authority: WriterLeaseAuthorityHead,
+    case: &str,
+    generation: u8,
+) {
+    let released = writer
+        .execute(WriterLeaseRepositoryCommand::Release(
+            WriterLeaseReleaseRequest {
+                command_id: format!("task050-{case}-release-{generation}"),
+                project_id: authority.identity().project_id().clone(),
+                expected_head: authority,
+            },
+        ))
+        .expect("writer release");
+    assert_eq!(released.outcome, LeaseCommandOutcome::Applied);
+    assert!(released.after.is_none());
+}
+
+fn assert_task050_proceed_denied_without_mutation(
+    ledger: &mut PostgresTaskLedger,
+    identity: &TaskLedgerStreamIdentity,
+    plan: AutonomyReceiptAppendPlan,
+    authority: &StoreAuthorityHead,
+) {
+    let before = ledger
+        .load_stream(identity.clone())
+        .expect("stream before denial");
+    let denied = ledger
+        .execute_autonomy(plan, authority.clone())
+        .expect_err("non-current PROCEED must fail closed");
+    assert_eq!(
+        denied.kind(),
+        PostgresTaskLedgerErrorKind::AuthorityMismatch
+    );
+    let after = ledger
+        .load_stream(identity.clone())
+        .expect("stream after denial");
+    assert_eq!(after, before, "denial changed durable Ledger state");
+    assert_eq!(after.stream().events().len(), 1);
+    assert_eq!(
+        after.autonomy_state(),
+        &VerifiedAutonomyReceiptState::PendingRequiredReceipt
+    );
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn stale_writer_cannot_append_after_reacquire_in_the_same_transaction_when_provisioned() {
@@ -255,6 +487,38 @@ fn stale_writer_cannot_append_after_reacquire_in_the_same_transaction_when_provi
     lifecycle
         .admit(&lifecycle_binding, "task038-transition-policy-submit")
         .expect("admit lifecycle");
+    let policy_writer_runtime = connect_as(&database, "lattice_runtime");
+    let mut policy_writer = PostgresWriterLease::new(
+        policy_writer_runtime,
+        extension_target.clone(),
+        &store_authority(),
+        600,
+    )
+    .expect("policy writer repository");
+    let policy_acquired = policy_writer
+        .execute(WriterLeaseRepositoryCommand::Acquire(
+            WriterLeaseAcquireRequest {
+                command_id: "task038-transition-policy-acquire".to_owned(),
+                expected_head: None,
+                project_id: lifecycle_binding.project_id().clone(),
+                project_snapshot_id: lifecycle_binding.project_snapshot_id().clone(),
+                task_id: lifecycle_binding.task_id().clone(),
+                task_revision: lifecycle_binding.task_revision().to_owned(),
+                task_spec_digest: lifecycle_binding.task_spec_digest().clone(),
+                attempt_id: AttemptId::new("task038-transition-policy-attempt").expect("attempt"),
+                lease_id: "task038-transition-policy-lease".to_owned(),
+                lease_holder_id: "codex-writer".to_owned(),
+                worktree_id: "task038-transition-policy-worktree".to_owned(),
+                holder_process_id: HolderProcessId::new(std::process::id().into()).expect("pid"),
+                holder_process_start_identity: digest('6'),
+            },
+        ))
+        .expect("acquire policy writer");
+    assert_eq!(policy_acquired.outcome, LeaseCommandOutcome::Applied);
+    let policy_authority = policy_acquired.after.expect("policy authority");
+    lifecycle
+        .record_autonomy_receipt(&lifecycle_binding, Some(&policy_authority))
+        .expect("record required PROCEED receipt");
     lifecycle
         .transition(
             &lifecycle_binding,
@@ -291,6 +555,15 @@ fn stale_writer_cannot_append_after_reacquire_in_the_same_transaction_when_provi
         after_missing_authority.ledger_head_digest(),
         before_missing_authority.ledger_head_digest()
     );
+    policy_writer
+        .execute(WriterLeaseRepositoryCommand::Release(
+            WriterLeaseReleaseRequest {
+                command_id: "task038-transition-policy-release".to_owned(),
+                project_id: lifecycle_binding.project_id().clone(),
+                expected_head: policy_authority,
+            },
+        ))
+        .expect("release policy writer");
 
     let writer_runtime = connect_as(&database, "lattice_runtime");
     let mut writer =
@@ -433,4 +706,178 @@ fn stale_writer_cannot_append_after_reacquire_in_the_same_transaction_when_provi
         .expect("release current authority");
 
     println!("TASK038_SAME_TRANSACTION_FENCE_OK fencing_token=2 events=2");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn task050_proceed_requires_current_writer_and_retries_without_currentness_when_provisioned() {
+    if std::env::var("LATTICE_TASK050_LIVE").ok().as_deref() != Some("1") {
+        eprintln!("SKIP: LATTICE_TASK050_LIVE is not configured");
+        return;
+    }
+    assert_eq!(required_environment("LATTICE_TASK019_LIVE"), "1");
+    assert_eq!(required_environment("LATTICE_TASK019_PHASE"), "restart");
+    let run_id = required_environment("LATTICE_TASK019_RUN_ID");
+    assert_eq!(run_id.len(), 32);
+    let database = format!("lattice_task019_{}_base", &run_id[..8]);
+    let migration_target =
+        MigrationTarget::new(database.clone(), run_id.clone()).expect("migration target");
+    let authority = store_authority();
+
+    let probe_runtime = connect_as(&database, "lattice_runtime");
+    let mut probe =
+        PostgresTaskLedger::new(probe_runtime, &migration_target).expect("foundation probe");
+    let foundation = probe
+        .load_stream(task050_identity("exact"))
+        .expect("foundation load");
+    let database_identity = foundation.persistence().database_identity_digest().clone();
+    let global_manifest = foundation.persistence().manifest_digest().clone();
+    drop(probe);
+
+    let memory_target =
+        MemoryExtensionTarget::new(database.clone(), run_id).expect("memory extension target");
+    let mut migrator = connect_as(&database, "lattice_migrator");
+    assert!(matches!(
+        apply_memory_extension(&mut migrator, &memory_target).expect("apply memory extension"),
+        MemoryExtensionApplyOutcome::Installed | MemoryExtensionApplyOutcome::AlreadyCurrent
+    ));
+    verify_memory_extension(
+        &mut migrator,
+        &memory_target,
+        MemoryExtensionDatabaseRole::Migrator,
+    )
+    .expect("memory extension profile");
+    let memory_manifest = verify_embedded_extension_manifest().expect("memory manifest");
+    let writer_target = ExtensionTarget::new(
+        database.clone(),
+        database_identity,
+        global_manifest,
+        memory_manifest.manifest_sha256().clone(),
+    )
+    .expect("writer extension target");
+    apply_extension(&mut migrator, &writer_target).expect("apply writer extension");
+    verify_extension(&mut migrator, &writer_target).expect("writer extension profile");
+    drop(migrator);
+
+    let ledger_runtime = connect_as(&database, "lattice_runtime");
+    let mut ledger =
+        PostgresTaskLedger::new(ledger_runtime, &migration_target).expect("task ledger");
+    let writer_runtime = connect_as(&database, "lattice_runtime");
+    let mut writer = PostgresWriterLease::new(writer_runtime, writer_target, &authority, 600)
+        .expect("writer repository");
+
+    let exact_identity = task050_identity("exact");
+    let exact_created =
+        create_task050_required_stream(&mut ledger, &exact_identity, &authority, "exact");
+    let exact_writer = acquire_task050_writer(&mut writer, &exact_identity, "exact", 1);
+    let exact_plan =
+        task050_proceed_plan(&exact_created, &authority, exact_writer.clone(), "exact");
+    let exact_retry_plan = exact_plan.clone();
+    let first = ledger
+        .execute_autonomy(exact_plan, authority.clone())
+        .expect("current Writer PROCEED commit");
+    assert!(!first.is_exact_retry());
+    let committed = ledger
+        .load_stream(exact_identity.clone())
+        .expect("committed PROCEED stream");
+    assert_eq!(committed.stream().events().len(), 2);
+    let committed_receipt = committed.autonomy_receipt().expect("PROCEED receipt");
+    let committed_row = committed_receipt.to_untrusted();
+    assert_eq!(committed_row.disposition(), "PROCEED");
+    assert_eq!(committed_row.writer_fencing_token(), Some(1));
+    assert_eq!(
+        committed_row.writer_lease_receipt_digest(),
+        Some(exact_writer.receipt_digest())
+    );
+
+    release_task050_writer(&mut writer, exact_writer, "exact", 1);
+    let retry = ledger
+        .execute_autonomy(exact_retry_plan, authority.clone())
+        .expect("exact retry after Writer release");
+    assert!(retry.is_exact_retry());
+    assert_eq!(retry.receipt(), first.receipt());
+    assert_eq!(retry.result_checkpoint(), first.result_checkpoint());
+    assert_eq!(retry.outbox_admission(), first.outbox_admission());
+    assert_eq!(retry.store_receipt(), first.store_receipt());
+    assert_eq!(retry.persistence(), first.persistence());
+    assert_eq!(
+        ledger
+            .load_stream(exact_identity)
+            .expect("stream after exact retry"),
+        committed,
+        "exact retry changed durable receipt bytes or Ledger state"
+    );
+
+    let stale_identity = task050_identity("stale");
+    let stale_created =
+        create_task050_required_stream(&mut ledger, &stale_identity, &authority, "stale");
+    let stale_writer = acquire_task050_writer(&mut writer, &stale_identity, "stale", 1);
+    let stale_plan =
+        task050_proceed_plan(&stale_created, &authority, stale_writer.clone(), "stale");
+    release_task050_writer(&mut writer, stale_writer, "stale", 1);
+    let current_writer = acquire_task050_writer(&mut writer, &stale_identity, "stale", 2);
+    assert_eq!(current_writer.identity().fencing_token().get(), 2);
+    assert_task050_proceed_denied_without_mutation(
+        &mut ledger,
+        &stale_identity,
+        stale_plan,
+        &authority,
+    );
+    release_task050_writer(&mut writer, current_writer, "stale", 2);
+
+    let wrong_fence_identity = task050_identity("wrong-fence");
+    let wrong_fence_created = create_task050_required_stream(
+        &mut ledger,
+        &wrong_fence_identity,
+        &authority,
+        "wrong-fence",
+    );
+    let wrong_fence_current =
+        acquire_task050_writer(&mut writer, &wrong_fence_identity, "wrong-fence", 1);
+    let wrong_fence = substitute_writer_attempt_or_fence(
+        &wrong_fence_current,
+        wrong_fence_current.identity().attempt_id().clone(),
+        FencingToken::new(2).expect("wrong fence"),
+    );
+    let wrong_fence_plan =
+        task050_proceed_plan(&wrong_fence_created, &authority, wrong_fence, "wrong-fence");
+    assert_task050_proceed_denied_without_mutation(
+        &mut ledger,
+        &wrong_fence_identity,
+        wrong_fence_plan,
+        &authority,
+    );
+    release_task050_writer(&mut writer, wrong_fence_current, "wrong-fence", 1);
+
+    let substituted_identity = task050_identity("substituted");
+    let substituted_created = create_task050_required_stream(
+        &mut ledger,
+        &substituted_identity,
+        &authority,
+        "substituted",
+    );
+    let substituted_current =
+        acquire_task050_writer(&mut writer, &substituted_identity, "substituted", 1);
+    let substituted_writer = substitute_writer_attempt_or_fence(
+        &substituted_current,
+        AttemptId::new("task050-substituted-forged-attempt").expect("forged attempt"),
+        substituted_current.identity().fencing_token(),
+    );
+    let substituted_plan = task050_proceed_plan(
+        &substituted_created,
+        &authority,
+        substituted_writer,
+        "substituted",
+    );
+    assert_task050_proceed_denied_without_mutation(
+        &mut ledger,
+        &substituted_identity,
+        substituted_plan,
+        &authority,
+    );
+    release_task050_writer(&mut writer, substituted_current, "substituted", 1);
+
+    println!(
+        "TASK050_POSTGRES_PROCEED_WRITER_MATRIX_OK current=1 stale=1 wrong_fence=1 substituted=1 exact_retry=1"
+    );
 }

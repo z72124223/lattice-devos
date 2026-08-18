@@ -1,8 +1,185 @@
+# TASK-050 Autonomy Receipt Closure Handoff - 2026-08-15
+
+## Status
+
+`DONE` for TASK-050 implementation and its required local/runtime verification.
+Integration remains `NEEDS_REVIEW` because Draft promotion, human GitHub review,
+and merge authorization are absent; no merge was performed.
+
+## Objective And Scope
+
+- Objective: make Task Ledger the sole durable autonomy profile/receipt/hash
+  owner and prove exact PostgreSQL restart plus fresh canonical `latticed`
+  replay without changing the four-tool/six-field public MCP contract.
+- In scope: the 21 TASK-050 allowed implementation/governance/test paths and
+  this handoff.
+- Out of scope: migration `0006` bytes/catalog, Cargo dependencies, TASK-038,
+  product Git effects, credentials, merge, deployment, release, and public
+  exposure.
+
+## Completed Work
+
+- Implementation commit `8e5ba40d38b781afff7028841bd981c8dd2b9721`,
+  tree `b4478be2801814ffc630cbf113b0a4ffa3a1b591`, is published on
+  `feature/task-076-postgres-writer-lease-v2` and attached to Draft PR #12.
+- Task Ledger owns the closed profile, typed append plan, canonical hashes, and
+  24-scalar replay verifier. Store maps scalars and owns only transaction/I/O;
+  Orchestrator supplies a pure recommendation; Ports exposes only legal closed
+  lifecycle states.
+- ASK_USER performs no Writer/downstream effect. PROCEED binds the exact
+  current 15-scalar Writer tuple; stale, wrong-fence, and substituted authority
+  fail with zero mutation. Exact retry is replay-derived and read-only.
+- The acceptance runner proves initial/restart ASK_USER and PROCEED through four
+  fresh canonical `latticed` PIDs, exact startup diagnostics, four tools, six
+  public fields, zero prohibited effects, and cleanup.
+
+## Files Changed
+
+| Paths | Why | Verification |
+|---|---|---|
+| Task Ledger, Ports, Store, Orchestrator, Contracts, Runtime Rust paths | owner-boundary and fail-closed repair | focused suites, strict Clippy, full wrapper |
+| TASK-050 scripts | fresh-process PostgreSQL 17 acceptance and self-tests | wrapper exit 0, final PASS marker |
+| SPEC-002, Task Ledger/Ports constitutions, TASK-050 ticket, PLANS | approved versioned contract and trace | repository/scope/architecture checks |
+
+## Workflow Ledger
+
+| Stage | Status | Evidence / artifact |
+|---|---|---|
+| Governance and scope | PASS | SPEC-002 v35; Ledger 2.3; Ports 1.9; Store 1.10; Orchestrator 2.6; latticed 1.8; 21/21 allowed paths |
+| TDD and focused verification | PASS | generic-forgery, profile, 24-scalar, authority, retry, Ports, Runtime, Store, and runner RED/GREEN evidence |
+| PostgreSQL/fresh process | PASS | run `9f1907f07f5545be9927a8def04529f5`; PostgreSQL 17.10; initial/restart; cleanup complete |
+| Code/security review | PASS | independent P0-P3 = 0; `CLEAR_FOR_INTEGRATION` |
+| Architecture review | PASS | independent P0-P3 = 0; `CLEAR_FOR_INTEGRATION` |
+| GitHub CI | PASS | implementation run `31835654240` / job `94881263124` at `8e5ba40`; closure run `31836370497` / job `94883441544` at `0f4d5c3` |
+
+## Verification
+
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+  scripts/test-task050-autonomy-receipt-acceptance.ps1`: exit `0`,
+  `TASK050_AUTONOMY_RECEIPT_ACCEPTANCE=PASS`.
+- Receipt raw SHA-256:
+  `b2ba6aa3d5f5c6b145de146bbe5b59696322ab3713dabb07a44313f1fcfc2478`;
+  final HMAC SHA-256:
+  `e953e32d4cc7ab8d9509e18b5bb66c98f449b027d0d25b301dd8038e8da7cc04`;
+  10 events, `cleanup_complete=true`, listener and cluster root absent.
+- Full wrapper also passed format, changed-slice strict Clippy, affected Rust
+  suites, MCP four-tool/six-field regressions, `npm.cmd run check`, and final
+  diff checks. Migration/catalog/Cargo frozen paths remain unchanged.
+
+## Review And Integration
+
+- Feature branch is synchronized through GitHub-truth alignment descendants of
+  closure head `0f4d5c3`; accepted TASK-050 implementation remains `8e5ba40`,
+  and the PR target remains
+  `feature/task-075-schema-v5-migration-reconciliation@a3599c1`.
+- GitHub reports Draft PR #12 open. The implementation CI is green. Branch
+  protection/rules enforcement is not claimed.
+- GitHub's default branch remains
+  `feature/task-037-full-chain-integration@8828d2b` and trails this combined
+  source. Its local branch also has four independent fixes absent from
+  `0f4d5c3`, so default movement is blocked pending explicit reconciliation.
+- Decision: `NEEDS_REVIEW`. Machine checks pass, but no human review or merge
+  authorization exists. No Draft promotion, force push, protected mutation,
+  merge, deployment, or release occurred.
+
+## Risks And Open Decisions
+
+- TASK-051 current-machine MCP registration is visible but points to historical
+  commit `0b59b79`; it is not verified for accepted TASK-050 implementation
+  `8e5ba40`. Semantic invocation remains `UNKNOWN`.
+- The dedicated TASK-051 branch is synchronized to the GitHub-truth baseline
+  and preserves one untracked runner; its test wrapper is absent. Its ticket
+  still names SPEC-003 v4 and latticed 1.7 while current contracts are v5 and
+  1.8.
+- Any TASK-051 reversible `C:\Users\f7212\.codex\config.toml`
+  `[mcp_servers.lattice]` switch must meet that ticket's exact preflight and
+  rollback gate; credentials and other tables remain prohibited.
+
+## Next Action
+
+1. Continue TASK-051 on its synchronized dedicated branch: reconcile the
+   ticket/contracts, adopt the preserved runner, and complete its wrapper before
+   any live acceptance or configuration switch.
+
+## Restart Context
+
+- Current branch/worktree: `feature/task-076-postgres-writer-lease-v2` /
+  `lattice-worktrees/task-076-postgres-writer-lease-v2`.
+- Relevant plan: `PLANS.md`, section `Current P0 platform live acceptance -
+  TASK-051`.
+- First file: `docs/tickets/TASK-051-p0-platform-live-acceptance.md`.
+
+---
+
+# TASK-076 Writer Lease V2 Bridge Handoff - 2026-08-14
+
+## Current Outcome
+
+TASK-076 is complete at verified implementation/governance commit
+`f32531002a0c6588e96dc9fe0229db7e0ed546e0`, based on
+`8b6d5171759e28339d6fe2b66fab0c3b6718c64c`. TASK-075 commit `a3599c1` and
+the separately committed migration-byte preservation prerequisite remain
+unchanged. The Writer Lease v2 bridge closes the compatibility blocker that
+prevented the global-v3 + Codebase-Memory-v2 + Writer-Lease-v1 profile from
+advancing to global-v5 + Memory-v3.
+
+The completed ticket adds an append-only Writer Lease v2
+bridge while preserving v1 SQL and every semantic row, canonical receipt,
+checkpoint, lease revision, and fencing high-water. The fixed transition is
+`G3_M2_W1_CURRENT -> G3_M2_W2_BRIDGE -> G5_M2_W2_BRIDGE_PENDING ->
+G5_M3_W2_BRIDGE_PENDING -> G5_M3_W2_CURRENT`. Store, Memory, and Writer
+administrative runners take global -> Memory -> Writer transaction locks;
+only the Writer owner changes Writer identity/ledger, and both pending states
+reject runtime use.
+
+The implementation worktree is
+`lattice-worktrees/task-076-postgres-writer-lease-v2` on branch
+`feature/task-076-postgres-writer-lease-v2`, based on `8b6d517`. The post-fix
+official wrapper passed in 368.4 seconds with
+`TASK076_WRITER_LEASE_V2_BRIDGE_ACCEPTANCE=PASS`; its embedded TASK-075 and
+TASK-050 gates emitted their expected markers. The TASK-050 marker is partial
+baseline evidence only: later independent TASK-050 review proved that its
+runner did not launch a fresh canonical `latticed` process. Focused checks,
+strict Clippy, frozen-history, format, repository, and diff checks pass for
+TASK-076. Independent TASK-076 code re-review is clear,
+architecture review reports no findings, and integration found zero technical
+blockers. GitHub Actions run `31810017320` / job `94798123907` passed on the
+exact verified commit.
+
+Integration status is `NEEDS_REVIEW` only because merge/Draft-promotion
+authorization and GitHub human approval are absent. No merge or Draft promotion
+occurred. TASK-075 has completed its combined-candidate revalidation; TASK-050
+is now the sole `in_progress` ticket, and TASK-051 remains blocked. Existing
+PostgreSQL listeners at `5432`, `64272`, and `55432`, unrelated dirty
+worktrees, and the protected TASK-051 runner must not be touched.
+
+## GitHub Publication Authorization And Safety
+
+On 2026-08-14 the user explicitly authorized routine GitHub publication for
+ongoing LATTICE development. GitHub CLI is verified for `github.com` account
+`z72124223`, repository `z72124223/lattice-devos`, HTTPS transport, and a
+credential stored in the operating-system keyring. Within a bounded authorized
+ticket, Codex may create clean commits, push the exact feature branch without
+force, and create or update a Draft pull request without repeated approval.
+
+No OAuth token, device code, password, browser/mobile session, or confirmation
+value is stored. Merge, Draft promotion, force-push, protected-branch or
+repository-permission changes, tag/release, deployment, public exposure,
+history deletion, and credential/account/payment mutation remain outside this
+authorization.
+
+The first published implementation checkpoint is
+`172307c19ee5be3387646858a834b0aa1790d81e`. Its remote head is
+`feature/task-076-postgres-writer-lease-v2`; the separately published base is
+`feature/task-075-schema-v5-migration-reconciliation` at `a3599c1`. GitHub
+Draft PR `https://github.com/z72124223/lattice-devos/pull/12` targets that base
+and remains explicitly not authorized for merge or Draft promotion.
+
 # TASK-075 Schema-v5 Migration Reconciliation Handoff - 2026-08-14
 
 ## Current Outcome
 
-TASK-075 is `in_progress`. Governance selects the exact TASK-022 Project
+TASK-075 is complete. Governance selects the exact TASK-022 Project
 Registry `0005` source at commit `12f7100` (SHA-256
 `b7af1f8a8ac370bbfc8a5312497461587cb8a86eb32ff97e5b865c7ae9bf0dcf`)
 as global schema v4 and requires TASK-050 autonomy commit `714f3b9` to be
@@ -25,17 +202,28 @@ Codebase Memory v1/v2 bytes and v2/global-v3 receipts remain immutable;
 TASK-075 adds only extension v3/global-v5 plus per-analysis profile provenance
 for byte-identical mixed graph/reflection replay. Contracts 1.13 and Postgres
 Codebase Memory 1.1 own that compatibility amendment.
-Project Registry pure semantics stay at 1.2. TASK-050 is now a waiting
-dependency and cannot unlock TASK-051 until TASK-075 plus TASK-050 acceptance
-produce a clean identified candidate.
+Project Registry pure semantics stay at 1.2. The TASK-076 wrapper executed all
+16 TASK-075 gates, required the exact full-acceptance marker, and closed four
+distinct marker-owned PostgreSQL 17.10 receipts for Store-only, catalog,
+Memory-v3, and TASK-050 profiles. Code and architecture re-reviews found no
+issues, integration found zero technical blockers, and no additional heavy
+rerun was needed. The implementation source remains `a3599c1`; the exact
+combined revalidation source is `f325310`.
 
-This is a governance/implementation checkpoint only. No focused Rust,
-PostgreSQL, fresh-process, full workspace, review, integration, commit, push,
-merge, deployment, release, or completion result is claimed yet. Continue only
-inside
-`docs/tickets/TASK-075-schema-v5-registry-autonomy-migration-reconciliation.md`
-and its exact `allowed_paths`; preserve unrelated Hermes and TASK-051/052/053
-content.
+TASK-050 is now the sole `in_progress` ticket. Its original source `714f3b9`
+remains provenance only; closure must use the exact combined schema-v5
+candidate. Independent review invalidated the prior fresh-process claim and
+found unresolved P1 ownership, required-profile, Ports-versioning, and
+acceptance-runner gaps. On 2026-08-15 the user approved and consumed the narrow
+Human Gate recorded in the TASK-050 ticket: Task Ledger 2.3 owns the versioned
+profile discriminator and canonical autonomy receipt/hash semantics; Ports 1.9
+carries neutral lifecycle profile evidence; Store 1.10, Orchestrator 2.6, and
+`latticed` 1.8 consume that contract; the Contracts public SHA helper is
+removed while Contracts remains 1.13 and the six-field MCP wire is frozen.
+Governance validation and focused TDD repair are active. TASK-051 remains
+blocked until TASK-050 is repaired, freshly revalidated, re-reviewed, and
+records its own verified completion. No merge, Draft promotion, deployment,
+release, or public exposure is authorized.
 
 # TASK-074 Local Model Assist Handoff — 2026-08-14
 

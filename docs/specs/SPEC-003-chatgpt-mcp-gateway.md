@@ -1,12 +1,12 @@
 ---
 spec_id: SPEC-003
 status: ready
-version: 4
+version: 5
 modules:
   - module_id: latticed
     constitution_version: 1.4
   - module_id: lattice-contracts
-    constitution_version: 1.12
+    constitution_version: 1.13
   - module_id: lattice-ports
     constitution_version: 1.8
   - module_id: orchestrator-runtime
@@ -14,9 +14,11 @@ modules:
   - module_id: writer-lease
     constitution_version: 1.1
   - module_id: postgres-writer-lease
-    constitution_version: 1.0
+    constitution_version: 1.1
   - module_id: postgres-store
-    constitution_version: 1.6
+    constitution_version: 1.8
+  - module_id: postgres-codebase-memory
+    constitution_version: 1.2
   - module_id: codex-adapter
     constitution_version: 1.2
   - module_id: task-domain
@@ -362,6 +364,23 @@ acceptance merely by this specification amendment.
       durable result. Local canonical evidence cannot satisfy this item.
 - [x] TASK-037 remains explicitly open until its later production verifier
       proves `Hermes -> Memory -> Status`; TASK-038 evidence does not imply it.
+
+### Writer Lease v2 schema-v5 bridge
+
+SPEC-003 v5 keeps the four MCP tools, fixed actor, Task Spec, Task Ledger, and
+Writer Lease 1.1 semantics unchanged while versioning the PostgreSQL adapter
+profile. The exact route is Writer-owned v2 bridge, Store-owned global-v5
+advance, Memory-owned v3 advance with exact Writer companion verification,
+and Writer-owned v2 activation. All administrative transactions acquire
+global, Memory, and Writer locks in that order; both schema-v5 bridge states
+deny runtime and Task Submit.
+
+The v1 extension bytes and every command, transition, receipt, checkpoint,
+snapshot, lease-revision, and fencing value remain unchanged. Writer v2 only
+replaces the two fixed bind/load calls that encoded ledger ordinal 1; the
+other five v1 functions, including the same-transaction fencing assertion,
+remain exact. No public gateway, MCP, actor, task, status, credential, Codex,
+Git, or approval surface expands.
 
 ## Verification Plan
 

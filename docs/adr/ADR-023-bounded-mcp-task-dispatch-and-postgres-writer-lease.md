@@ -5,8 +5,9 @@
   discovery and two-session invocation remain incomplete
 - Date: 2026-08-09
 - Decision owner: user
-- Related: SPEC-003 v4, ADR-005, ADR-006, ADR-012, ADR-015, ADR-019,
-  ADR-021, TASK-037, TASK-038
+- Related: SPEC-002 v34, SPEC-003 v5, ADR-005, ADR-006, ADR-012,
+  ADR-015, ADR-017, ADR-019, ADR-021, ADR-022, TASK-037, TASK-038,
+  TASK-076
 
 ## Context
 
@@ -244,6 +245,55 @@ fallback is allowed.
 - Per-human identity, arbitrary project selection, generic task text, broader
   templates, and production TASK-037 downstream repair remain explicit later
   work.
+
+## TASK-076 Writer Lease V2 Bridge Amendment
+
+The v1 PostgreSQL extension remains immutable. Postgres Writer Lease 1.1 adds
+one append-only v2 successor so the accepted global-v3/Memory-v2/v1 database
+can reach schema v5 without losing or rehashing commands, transitions,
+receipts, snapshots, checkpoints, lease revisions, or fencing high-water.
+
+The sole accepted sequence is:
+
+`G3_M2_W1_CURRENT -> G3_M2_W2_BRIDGE ->
+G5_M2_W2_BRIDGE_PENDING -> G5_M3_W2_BRIDGE_PENDING ->
+G5_M3_W2_CURRENT`.
+
+Only the Writer owner creates the v2 bridge or final rebind. Store advances
+only the global profile, and Memory advances only its extension after exact
+companion verification. All three administrative runners acquire global,
+Memory, and Writer transaction locks in that order. Both schema-v5 pending
+states reject runtime and fenced Task Ledger writes. The G3/M2 v2 bridge is
+likewise runtime-quarantined because neither the historical v1 bind/load pair
+nor the final-only v2 pair is valid there. Fresh global-v5/Memory-v3
+installation produces the same final catalog/current identity with a truthful
+one-row fresh history; an upgrade retains the exact three-row v1/bridge/rebind
+history.
+
+The three state-mutation locks remain transaction-scoped
+`pg_advisory_xact_lock(bigint)` acquisitions in global, Memory, Writer order.
+To serialize the complete Writer apply boundary across its bounded
+serialization retries, the Writer adapter additionally holds the same global
+key through a nonblocking session `pg_try_advisory_lock(bigint)` gate. Gate
+acquire and release each run in a short transaction under
+`SET LOCAL ROLE lattice_migrator`; commit restores the NOINHERIT login role,
+and success, error, and Drop paths release the session gate. Postgres Store
+owns the protected-function ACL closure, not the gate or Writer semantics: no
+LOGIN receives either function directly, `lattice_migrator` alone receives
+the two exact non-grantable bigint acquisition grants, and the other fourteen
+acquisition overloads remain denied after role selection.
+
+For current schema-v5/Writer-v2 profiles, this amendment supersedes only
+ADR-017's earlier statement that exactly one post-role advisory acquisition
+grant exists. ADR-017 remains the immutable decision record for its historical
+profile; the second exact grant is unavailable to that profile and becomes
+valid only under the SPEC-002 v34 / Postgres Store 1.9 catalog closure.
+
+Writer v2 adds only the two runtime successors required to replace v1
+functions that hard-bound ledger ordinal 1. The other five v1 runtime
+functions, including the fixed 15-scalar current-authority assertion, retain
+their signatures and semantics. No MCP, Task Spec, lease transition, fencing,
+credential, public-network, or provider/model contract changes.
 
 ## Acceptance Evidence Required
 

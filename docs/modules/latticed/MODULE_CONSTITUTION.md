@@ -1,10 +1,10 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 1.7
+version: 1.8
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-15
 ---
 
 ## Mission
@@ -38,7 +38,7 @@ Orchestrator composition.
 
 ## Public Contracts
 
-- Construct one Orchestrator 2.5 instance with typed Contracts 1.12 / Ports 1.8
+- Construct one Orchestrator 2.6 instance with typed Contracts 1.13 / Ports 1.9
   implementations for the bounded delivery, graph-memory, and task-control
   paths.
 - Through canonical `latticed`, expose exactly four MCP tools: `lattice_delivery_run`,
@@ -92,9 +92,11 @@ Orchestrator composition.
   port. Production task dispatch cannot use `FakeWriterLease`, synthetic
   authority, or a process-memory task/status store.
 - The local Task lifecycle edge wrapper implements `TaskLifecyclePort` only by
-  translating typed admit/transition/result/load calls into the existing
-  `PostgresTaskLedger` public append/replay API. It owns no transition legality,
-  Task Ledger semantics, SQL/schema, alternate cache, or workflow order.
+  translating typed admit/transition/result/load calls into Task Ledger 2.3 and
+  `PostgresTaskLedger` public append/replay APIs. New admissions carry the
+  exact required-profile marker, and canonical autonomy receipt construction/
+  verification remains Task-Ledger-owned. The wrapper owns no transition
+  legality, receipt semantics, SQL/schema, alternate cache, or workflow order.
 - After the preconfigured scripted delivery receipt, the run tool invokes the
   same coordinator's exact-snapshot Graphify/memory node. The status tool loads
   delivery plus exact analysis/retrieval evidence from PostgreSQL; neither tool
@@ -167,11 +169,15 @@ Orchestrator composition.
     Registry currentness and normal Policy composition exist.
 16. Missing, active-at-completion, or physically corrupt Writer Lease history
     cannot be downgraded to a valid terminal Task status or recovery path.
+17. A required-profile stream without its exact second autonomy event cannot
+    transition, replay as completed, or produce normal Task Status. The
+    one-event prefix maps only to reconciliation; historical optional streams
+    remain byte-compatible.
 
 ## Allowed Dependencies
 
-- `lattice-contracts` 1.12, `lattice-ports` 1.8,
-  `orchestrator-runtime` 2.5, and Writer Lease 1.1 public APIs.
+- `lattice-contracts` 1.13, `lattice-ports` 1.9,
+  `orchestrator-runtime` 2.6, Task Ledger 2.3, and Writer Lease 1.1 public APIs.
 - Concrete Codex, PostgreSQL Task Ledger, bounded workspace/Git, and fixed-test
   adapters required by TASK-032, only for construction and port
   implementation.
@@ -227,6 +233,12 @@ Version 1.5 adds an exact standalone Hermes process-lifecycle flag to canonical
 `latticed`. It changes neither the four-tool MCP contract nor durable task
 truth, provider credentials, dependency direction, or orchestration order.
 
+Version 1.8 emits the Task Ledger 2.3 required-profile marker for new
+controlled-task admissions and fails closed when required receipt replay is
+incomplete. It keeps exactly four MCP tools and the existing six-field task
+status output, and requires fresh canonical `latticed` restart evidence rather
+than a Store test binary as acceptance.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -237,6 +249,7 @@ truth, provider credentials, dependency direction, or orchestration order.
 | One Gateway | both task tools invoke the same `FullChainService` / Orchestrator composition; MCP has no direct database/Codex/Git call path | Architecture review | yes |
 | Fixed identity | process profile supplies the actor/audit binding; tunnel/local commitments cannot substitute; hostile `clientInfo`/arguments grant no authority | Security review | yes |
 | Durable task control | Task creation/idempotency/audit/status replay from PostgreSQL with fresh-process equality | Engineering | yes |
+| Required autonomy profile | new marker, exact second receipt, historical optional replay, pending reconciliation, and fresh-`latticed` Status with no extra wire field | Engineering and security review | yes |
 | Writer authority | real PostgreSQL lease/fencing/current-head evidence; no fake/synthetic production path | Security review | yes |
 | Legacy command isolation | `lattice-runtime delivery-run` accepts only the exact scripted fixture; official Codex and MCP/tunnel provenance fail before effects | Compatibility review | yes |
 | Delivery acceptance | official Codex turn, isolated scope/test/commit, durable outcome and separate restart/status replay | Engineering | yes |
@@ -264,3 +277,4 @@ constitution cannot be weakened merely to excuse implementation drift.
 | 1.5 | 2026-08-13 | SPEC-002 v29, ADR-021 clarification, TASK-060 | Add canonical `latticed --hermes-launch` as bounded owner of the existing production Hermes runner without changing MCP, truth, credential, or dependency boundaries | User goal-mode direction to complete Hermes |
 | 1.6 | 2026-08-13 | SPEC-002 v30, ADR-021 clarification, TASK-064 | Add opt-in lazy production Hermes composition to canonical four-tool `latticed`; preserve task/status zero-effect paths and require explicit teardown | User goal-mode direction to integrate Hermes into LATTICE |
 | 1.7 | 2026-08-13 | SPEC-002 v31, TASK-065 | Remove two non-executed broker-helper settings from production admission while preserving the direct verified Codex proxy, lazy activation, and MCP contracts | User goal-mode direction to complete Hermes |
+| 1.8 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Emit and enforce the required Task-created autonomy profile through Task Ledger 2.3 while preserving the four-tool/six-field MCP wire | User-approved TASK-050 repair amendment |

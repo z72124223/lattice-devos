@@ -99,7 +99,17 @@ impl LiveConfig {
         assert!(is_lower_hex(&run_id, 32), "TASK019_LIVE_RUN_ID_INVALID");
         assert!(matches!(
             phase.as_str(),
-            "initial" | "restart" | "memory_setup" | "task075_memory_setup"
+            "initial"
+                | "restart"
+                | "memory_setup"
+                | "task075_memory_setup"
+                | "task076_writer_source_setup"
+                | "task076_global_upgrade"
+                | "task076_final_verify"
+                | "task076_writer_fresh_setup"
+                | "task076_writer_fresh_access"
+                | "task076_writer_base_access"
+                | "task076_writer_restart"
         ));
         Some(Self {
             host,
@@ -166,8 +176,22 @@ fn marker_owned_postgres_17_foundation() {
         run_restart_phase(&config);
     } else if config.phase == "memory_setup" {
         run_memory_setup_phase(&config);
-    } else {
+    } else if config.phase == "task075_memory_setup" {
         run_task075_memory_setup_phase(&config);
+    } else if config.phase == "task076_writer_source_setup" {
+        run_task076_writer_source_setup_phase(&config);
+    } else if config.phase == "task076_global_upgrade" {
+        run_task076_global_upgrade_phase(&config);
+    } else if config.phase == "task076_final_verify" {
+        run_task076_final_verify_phase(&config);
+    } else if config.phase == "task076_writer_fresh_setup" {
+        run_task076_writer_fresh_setup_phase(&config);
+    } else if config.phase == "task076_writer_fresh_access" {
+        run_task076_writer_access_phase(&config, "writer_fresh");
+    } else if config.phase == "task076_writer_base_access" {
+        run_task076_writer_access_phase(&config, "base");
+    } else {
+        run_task076_writer_restart_phase(&config);
     }
 }
 
@@ -263,6 +287,216 @@ fn run_task075_memory_setup_phase(config: &LiveConfig) {
         CURRENT_V5_MANIFEST_SHA256
     );
     println!("TASK075_MEMORY_V5_SETUP_OK");
+}
+
+fn run_task076_writer_source_setup_phase(config: &LiveConfig) {
+    let mut admin = config.connect("postgres", "lattice-devos-task076-writer-source");
+    create_fixed_roles(&mut admin, &config.password);
+    let base = provision_database(config, &mut admin, "base", true);
+    install_exact_v3(config, &base);
+    set_exact_database_access(&mut admin, base.database_name());
+    println!(
+        "TASK019_EVIDENCE database_uuid={} manifest_sha256={}",
+        base.expected_database_uuid(),
+        TASK_LEDGER_V3_MANIFEST_SHA256
+    );
+    println!("TASK076_WRITER_SOURCE_SETUP_OK");
+}
+
+fn run_task076_global_upgrade_phase(config: &LiveConfig) {
+    let target = config.target("base");
+    let mut migrator = config.role_client(
+        target.database_name(),
+        DatabaseRole::Migrator,
+        REQUIRED_APPLICATION_NAME,
+    );
+    let writer_before = task076_writer_lease_fingerprint(&mut migrator);
+    assert_eq!(
+        must_setup(apply_migrations(&mut migrator, &target)),
+        MigrationApplyOutcome::Applied {
+            executable_count: 2,
+        },
+        "TASK076_GLOBAL_UPGRADE_OUTCOME_MISMATCH"
+    );
+    let writer_after = task076_writer_lease_fingerprint(&mut migrator);
+    assert_eq!(
+        writer_after, writer_before,
+        "TASK076_GLOBAL_UPGRADE_CHANGED_WRITER_DATA"
+    );
+    let evidence = must_setup(verify_postgres_schema(
+        &mut migrator,
+        &target,
+        DatabaseRole::Migrator,
+    ));
+    assert_eq!(evidence.schema_version(), 5);
+    assert_eq!(
+        evidence.manifest_sha256().as_str(),
+        CURRENT_V5_MANIFEST_SHA256
+    );
+    drop(migrator);
+
+    let mut runtime = config.role_client(
+        target.database_name(),
+        DatabaseRole::Runtime,
+        REQUIRED_APPLICATION_NAME,
+    );
+    let pending = verify_postgres_schema(&mut runtime, &target, DatabaseRole::Runtime)
+        .expect_err("TASK076_PENDING_RUNTIME_ADMITTED");
+    assert_eq!(
+        pending.kind(),
+        PostgresStoreSetupErrorKind::CompatibilityMismatch
+    );
+    println!(
+        "TASK019_EVIDENCE database_uuid={} manifest_sha256={}",
+        evidence.database_uuid(),
+        evidence.manifest_sha256().as_str()
+    );
+    println!("TASK076_GLOBAL_UPGRADE_OK");
+}
+
+fn run_task076_final_verify_phase(config: &LiveConfig) {
+    let target = config.target("base");
+    let mut migrator = config.role_client(
+        target.database_name(),
+        DatabaseRole::Migrator,
+        REQUIRED_APPLICATION_NAME,
+    );
+    let writer_before = task076_writer_lease_fingerprint(&mut migrator);
+    assert_eq!(
+        must_setup(apply_migrations(&mut migrator, &target)),
+        MigrationApplyOutcome::AlreadyCurrent,
+        "TASK076_FINAL_STORE_APPLY_NOT_NOOP"
+    );
+    let evidence = must_setup(verify_postgres_schema(
+        &mut migrator,
+        &target,
+        DatabaseRole::Migrator,
+    ));
+    assert_eq!(
+        task076_writer_lease_fingerprint(&mut migrator),
+        writer_before,
+        "TASK076_FINAL_STORE_VERIFY_CHANGED_WRITER_DATA"
+    );
+    drop(migrator);
+    verify_task076_current_store_roles(config, &target);
+    println!(
+        "TASK019_EVIDENCE database_uuid={} manifest_sha256={}",
+        evidence.database_uuid(),
+        evidence.manifest_sha256().as_str()
+    );
+    println!("TASK076_FINAL_VERIFY_OK");
+}
+
+fn run_task076_writer_fresh_setup_phase(config: &LiveConfig) {
+    let mut admin = config.connect("postgres", "lattice-devos-task076-writer-fresh");
+    let target = provision_database(config, &mut admin, "writer_fresh", true);
+    install_exact_v5(config, &target);
+
+    let mut migrator = config.role_client(
+        target.database_name(),
+        DatabaseRole::Migrator,
+        REQUIRED_APPLICATION_NAME,
+    );
+    let evidence = must_setup(verify_postgres_schema(
+        &mut migrator,
+        &target,
+        DatabaseRole::Migrator,
+    ));
+    assert_eq!(evidence.schema_version(), 5);
+    assert_eq!(
+        evidence.manifest_sha256().as_str(),
+        CURRENT_V5_MANIFEST_SHA256
+    );
+    println!(
+        "TASK076_FRESH_G5_EVIDENCE database_uuid={} manifest_sha256={}",
+        evidence.database_uuid(),
+        evidence.manifest_sha256().as_str()
+    );
+    println!("TASK076_WRITER_FRESH_G5_SETUP_OK");
+}
+
+fn run_task076_writer_access_phase(config: &LiveConfig, database_tag: &str) {
+    assert!(
+        matches!(database_tag, "base" | "writer_fresh"),
+        "TASK076_DATABASE_ACCESS_TARGET_REJECTED"
+    );
+    let mut admin = config.connect("postgres", "lattice-devos-task076-access");
+    let database_name = config.database_name(database_tag);
+    set_exact_database_access(&mut admin, &database_name);
+    if database_tag == "base" {
+        println!("TASK076_WRITER_BASE_ACCESS_OK");
+    } else {
+        println!("TASK076_WRITER_FRESH_ACCESS_OK");
+    }
+}
+
+fn run_task076_writer_restart_phase(config: &LiveConfig) {
+    let target = config.target("base");
+    let mut migrator = config.role_client(
+        target.database_name(),
+        DatabaseRole::Migrator,
+        REQUIRED_APPLICATION_NAME,
+    );
+    let writer_before = task076_writer_lease_fingerprint(&mut migrator);
+    let evidence = must_setup(verify_postgres_schema(
+        &mut migrator,
+        &target,
+        DatabaseRole::Migrator,
+    ));
+    assert_eq!(
+        task076_writer_lease_fingerprint(&mut migrator),
+        writer_before,
+        "TASK076_RESTART_STORE_VERIFY_CHANGED_WRITER_DATA"
+    );
+    drop(migrator);
+    verify_task076_current_store_roles(config, &target);
+    println!(
+        "TASK019_EVIDENCE database_uuid={} manifest_sha256={}",
+        evidence.database_uuid(),
+        evidence.manifest_sha256().as_str()
+    );
+    println!("TASK076_WRITER_RESTART_OK");
+}
+
+fn verify_task076_current_store_roles(config: &LiveConfig, target: &MigrationTarget) {
+    for role in DatabaseRole::ALL {
+        let mut client =
+            config.role_client(target.database_name(), role, REQUIRED_APPLICATION_NAME);
+        let evidence = must_setup(verify_postgres_schema(&mut client, target, role));
+        assert_eq!(evidence.schema_version(), 5);
+        assert_eq!(
+            evidence.manifest_sha256().as_str(),
+            CURRENT_V5_MANIFEST_SHA256
+        );
+    }
+}
+
+fn task076_writer_lease_fingerprint(client: &mut Client) -> Vec<String> {
+    [
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+             pg_catalog.to_jsonb(t)::text,E'\n' ORDER BY t.singleton),'')) \
+           FROM ONLY writer_lease.writer_lease_extension_identity t",
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+             pg_catalog.to_jsonb(t)::text,E'\n' ORDER BY t.ledger_ordinal),'')) \
+           FROM ONLY writer_lease.writer_lease_extension_ledger t",
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+             pg_catalog.to_jsonb(t)::text,E'\n' ORDER BY t.project_id),'')) \
+           FROM ONLY writer_lease.writer_lease_heads t",
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+             pg_catalog.to_jsonb(t)::text,E'\n' ORDER BY t.project_id,t.ordinal),'')) \
+           FROM ONLY writer_lease.writer_lease_commands t",
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+             pg_catalog.to_jsonb(t)::text,E'\n' ORDER BY t.project_id,t.ordinal),'')) \
+           FROM ONLY writer_lease.writer_lease_transitions t",
+    ]
+    .into_iter()
+    .map(|query| {
+        client
+            .query_one(query, &[])
+            .unwrap_or_else(|_| panic!("TASK076_WRITER_FINGERPRINT_QUERY_FAILED"))
+            .get(0)
+    })
+    .collect()
 }
 
 fn run_initial_phase(config: &LiveConfig) {
@@ -4838,6 +5072,7 @@ fn set_exact_pre_role_function_access(config: &LiveConfig, target_database: &str
                  lattice_readonly, lattice_migrator_login, lattice_runtime_login, \
                  lattice_guardian_login, lattice_readonly_login; \
              GRANT EXECUTE ON FUNCTION \
+                 pg_catalog.pg_try_advisory_lock(bigint), \
                  pg_catalog.pg_advisory_xact_lock(bigint), \
                  pg_catalog.pg_current_xact_id() \
              TO lattice_migrator",

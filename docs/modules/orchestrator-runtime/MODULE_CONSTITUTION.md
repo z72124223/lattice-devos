@@ -1,10 +1,10 @@
 ---
 module_id: orchestrator-runtime
 name: Orchestrator and Runtime Port
-version: 2.5
+version: 2.6
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-15
 ---
 
 ## Mission
@@ -36,7 +36,8 @@ composition root.
 - Pure scripted workflow scenarios and typed call-order state; no concrete
   adapter, transport, driver, process, filesystem, test, or Git state.
 - Versioned, explainable autonomy-control recommendation/receipt types for an
-  already agreed task boundary; the receipt is not durable task truth.
+  already agreed task boundary. The recommendation is not durable task truth,
+  and Orchestrator does not own the canonical receipt subject or its hashes.
 - Pure coordination projections plus data-only dispatch and archive decisions;
   neither the snapshot nor decision is durable truth or execution authority.
 
@@ -56,11 +57,12 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
   Writer Lease, Codex, verification/Git, status, and downstream evidence.
 - Persist intent before an external effect and outcome after it.
 - For controlled task execution, call only injected boundaries in this order:
-  TaskCreated/admission audit, real Writer Lease acquire/current-head,
-  bounded workspace, Codex, scope verification, fixed test, Git commit, lease
-  release or reconciliation, durable outcome/status, then the configured
-  Graphify/Hermes/Memory continuation. The first failed or uncertain step
-  suppresses every later call.
+  TaskCreated/admission audit, autonomy recommendation, real Writer Lease
+  acquire/current-head when the recommendation can proceed, Task-Ledger-owned
+  autonomy receipt, bounded workspace, Codex, scope verification, fixed test,
+  Git commit, lease release or reconciliation, durable outcome/status, then
+  the configured Graphify/Hermes/Memory continuation. The first failed or
+  uncertain step suppresses every later call.
 - For typed delivery, call only injected ports in this order: durable intent,
   bounded workspace preparation, Codex, workspace changed-path inspection,
   fixed test, Git commit, durable terminal outcome/receipt. Codex is
@@ -126,12 +128,15 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
     into project selection/free-form work. Those surfaces require the normal
     independently current Registry and Policy composition first.
 19. Autonomy-control recommendation is non-authoritative: it cannot schedule,
-    create, persist, approve, or transition a task, and its receipt requires
-    existing Ledger binding before it can become durable evidence.
-20. Unknown/blocked/incomplete evidence, duplicate work/report IDs,
+    create, persist, approve, or transition a task. Only Task Ledger can build,
+    hash, order, and verify its durable receipt after an existing binding.
+20. A missing or rejected required receipt stops every task transition and
+    external effect. Orchestrator cannot turn a `PendingRequiredReceipt`
+    lifecycle projection into normal Draft success.
+21. Unknown/blocked/incomplete evidence, duplicate work/report IDs,
     undeclared/duplicate/self dependency, invalid resources, and resource
     collision fail closed without dispatch or archive from an invalid round.
-21. Dispatch/archive values are data only. They cannot create/control a window
+22. Dispatch/archive values are data only. They cannot create/control a window
     or process, reserve resources, invoke Codex, mutate files/PostgreSQL, access
     network/credentials, or bypass the governed execution path.
 
@@ -173,6 +178,11 @@ composition boundaries and does not claim model or scheduler control.
 Version 2.5 adds the pure TASK-055 coordination gate over typed snapshots. It
 adds no concrete scheduler, adapter, I/O, MCP, or durable authority.
 
+Version 2.6 makes the Task-Ledger-owned autonomy receipt an explicit gate after
+admission and before any task transition or external effect. It removes
+canonical receipt/hash ownership from Orchestrator while preserving the pure
+classifier, dependency direction, and public MCP surface.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -180,6 +190,7 @@ adds no concrete scheduler, adapter, I/O, MCP, or durable authority.
 | Gateway routing | closed action and exact binding tests | Engineering | yes when implemented |
 | Controlled submit | fixed actor/template, complete Task Spec 2.1 validation, exact idempotency/audit, and digest-unity matrices | Engineering | yes |
 | Writer authority order | fixed admission -> real lease/current head -> workspace -> Codex -> verification -> Git -> release/outcome, with stale/fake/synthetic substitution denial | Security review | yes |
+| Required autonomy order | admission -> recommendation -> required receipt -> transition/effect, with missing/late/duplicate/unknown profile suppression | Security review | yes |
 | Task status replay | fresh-process PostgreSQL projection equality and zero external-effect calls | Engineering | yes |
 | Call order | intent/effect/outcome/stop/review tests | Engineering | yes when implemented |
 | Delivery call order | intent -> workspace prepare -> Codex -> scope -> fixed test -> Git -> outcome/receipt, with first-failure call suppression | Engineering | yes |
@@ -205,3 +216,4 @@ SPEC/ADR update, architecture review, and responsible-user authorization.
 | 2.3 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Bounded Gateway Submit/Status, one Task Spec digest, PostgreSQL task control, and real Writer Lease/fencing before Codex | User TASK-038-first direction |
 | 2.4 | 2026-08-12 | Autonomous execution-control user direction | Pure versioned intent classification, safe writer/verification recommendation, and non-durable state receipt | Current user task |
 | 2.5 | 2026-08-13 | TASK-055 | Pure fail-closed work/evidence projection, next-round dispatch, and archive recommendation without I/O or execution authority | Current user task |
+| 2.6 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Gate controlled progression on the Task-Ledger-owned required receipt and retain only the pure autonomy recommendation in Orchestrator | User-approved TASK-050 repair amendment |

@@ -5,7 +5,8 @@
 - Date: 2026-08-05
 - Decision owner: user
 - Related: SPEC-002 v32, ADR-004, ADR-005, ADR-006, ADR-014, ADR-021,
-  ADR-019, ADR-020, TASK-022, TASK-032, TASK-033, TASK-075
+  ADR-019, ADR-020, ADR-023, TASK-022, TASK-032, TASK-033, TASK-075,
+  TASK-076
 
 ## Context
 
@@ -125,6 +126,23 @@ backfills old rows with their exact v2 profile, cross-checks related rows, and
 uses that row profile when replaying graph-memory or Hermes-reflection
 receipts. The current adapter identity never rehashes historical receipts. This changes no pure
 Codebase Memory/Graphify/Hermes semantics or MCP surface.
+
+## TASK-076 Writer Lease V2 Bridge Amendment
+
+Postgres Codebase Memory 1.2 preserves its no-Writer default path and accepts
+one additional migration-only companion: the exact Writer Lease v2 bridge.
+During Memory v2-to-v3 advancement it acquires the global, Memory, and Writer
+transaction locks in that order, takes fixed-order `SHARE` locks on the five
+Writer tables, and verifies the complete companion catalog, ownership, ACL,
+identity, and ledger before and after Memory DDL. It neither calls the Writer
+adapter nor changes Writer rows, functions, ACLs, identity, or semantics.
+
+The only accepted companion sequence is `G5_M2_W2_BRIDGE_PENDING` to
+`G5_M3_W2_BRIDGE_PENDING`. Both states remain runtime closed, and the latter
+requires a later Writer-owned activation to `G5_M3_W2_CURRENT`. Writer v1,
+partial, active, suspect, unknown, extra, drifted, or substituted profiles
+fail before Memory commit. This narrow versioned compatibility recognition
+does not join either extension manifest to the global Store manifest.
 
 ## Verification
 

@@ -56,20 +56,48 @@ check passed; its recovery-security classification check failed, so it is
 explicitly barred from security, architecture, authorization, and integration
 decisions.
 
-## Current migration reconciliation - TASK-075
+## Completed Writer Lease compatibility bridge - TASK-076
 
-CURRENT TASK-075 - reconcile the accepted Project Registry schema-v4 `0005`
-source with the TASK-050 autonomy receipt as schema-v5 `0006`. Preserve the
-exact Registry migration and its historical receipt profile; reject a database
-that already used autonomy at ordinal `0005` before any DDL; persist per-command
-Registry profile provenance so v4/v5 mixed replay is byte-identical. Preserve
-Codebase Memory v1/v2 bytes and receipt identities while adding only the
-separate extension-v3/global-v5 profile with per-analysis provenance; it does
-not alter base catalog counts. TASK-050
-is `waiting_dependency` on TASK-075, and TASK-051 remains blocked on the later
-clean, accepted TASK-050 schema-v5 candidate. No TASK-075 test, review,
-integration, commit, merge, deployment, or completion is claimed by this
-planning checkpoint.
+COMPLETED TASK-076 - the append-only Writer Lease v2 bridge preserves v1 SQL,
+semantic rows, receipts, checkpoints, lease revision, and fencing high-water
+while admitting only the five governed profiles. Official disposable
+PostgreSQL acceptance, focused checks, strict Clippy, repository checks,
+independent code review, architecture review, and integration review pass with
+no technical blocker. The verified implementation/governance checkpoint is
+`f32531002a0c6588e96dc9fe0229db7e0ed546e0`; GitHub Draft PR #12 remains not
+authorized for merge or Draft promotion.
+
+## Completed schema-v5 reconciliation - TASK-075
+
+COMPLETED TASK-075 - the exact Registry-v4 `0005`, autonomy-v5 `0006`,
+Memory-v3 provenance, and Writer-v2 bridge combined candidate passed all 16
+TASK-075 gates and four distinct marker-owned PostgreSQL receipt closures. The
+implementation source remains `a3599c1`; the exact combined revalidation source
+is `f32531002a0c6588e96dc9fe0229db7e0ed546e0`.
+
+## Completed autonomy receipt closure - TASK-050
+
+COMPLETED TASK-050 - commit `8e5ba40d38b781afff7028841bd981c8dd2b9721`
+makes Task Ledger the sole autonomy profile/receipt/hash owner, closes invalid
+Ports lifecycle states, delegates the 24-scalar durable row to the Ledger
+verifier, and binds PROCEED to the exact current 15-scalar Writer tuple.
+The full wrapper passed against PostgreSQL 17.10 through physical restart and
+four fresh canonical `latticed` processes with ASK_USER/PROCEED, exact four-tool
+and six-field MCP output, zero prohibited effects, eight atomic-failure
+boundaries, complete cleanup, and no unresolved P0-P3 finding. GitHub Actions
+run `31835654240` passed on the exact implementation commit. Draft PR #12
+remains not authorized for merge or Draft promotion.
+
+## Current P0 platform live acceptance - TASK-051
+
+CURRENT TASK-051 - TASK-050 now satisfies the ticket's
+`TASK050_FULLY_VERIFIED` prerequisite at `8e5ba40`. Begin with the ticket's
+read-only exact-source/configuration/runtime preflight. Current-machine Codex
+registration, discovery, semantic invocation, and restart acceptance remain
+unverified until TASK-051 produces its own run-bound evidence. Any reversible
+Codex MCP configuration-table mutation remains a separate exact ticket gate;
+no merge, deployment, release, credential change, or public exposure is
+authorized.
 
 ## Completed task update — TASK-072
 
@@ -130,23 +158,27 @@ The governing invariant remains:
 
 > **One Gateway. One Truth. One Writer.**
 
-## Current GitHub Handoff — 2026-08-10
+## Current GitHub Handoff — 2026-08-15
 
 Repository: `z72124223/lattice-devos`<br>
 GitHub URL: `https://github.com/z72124223/lattice-devos`<br>
 Remote: `origin` -> `https://github.com/z72124223/lattice-devos.git`<br>
-Default branch: not established; remote HEAD is currently
-`feature/task-037-full-chain-integration`<br>
-Current branch: `feature/task-038-chatgpt-mcp`<br>
-Upstream: none; this branch has not been pushed<br>
-Base checkpoint: local Phase 1 commit `512732d`<br>
-Latest fetched TASK-037 remote head: `8828d2b`<br>
+GitHub default branch: `feature/task-037-full-chain-integration@8828d2b`;
+it trails the accepted combined source, and moving it remains blocked until
+four local-only TASK-037 fixes are reconciled<br>
+Accepted combined implementation/closure source:
+`feature/task-076-postgres-writer-lease-v2` through `0f4d5c3`; later branch
+commits are GitHub-truth alignment only<br>
+Upstream: synchronized exactly with
+`origin/feature/task-076-postgres-writer-lease-v2` (`ahead 0`, `behind 0`)<br>
+Draft PR #12: open, mergeable/clean, latest `verify` green, no human review or
+merge authorization<br>
 
 Current Goal:
-- Preserve the accepted canonical-local TASK-038 Phase 2 checkpoint, publish
-  its exact feature commit, then refresh the real Secure MCP Tunnel so ChatGPT
-  can discover/invoke the two bounded task tools. Only after that separate live
-  ChatGPT gate resumes TASK-037 production-chain diagnosis/repair.
+- Preserve `0f4d5c3` as the accepted combined source for completed TASK-076,
+  TASK-075, and TASK-050; continue TASK-051 from a read-only preflight after
+  reconciling its SPEC/module versions and protected runner; keep PR #12 Draft
+  and leave default-branch movement, Draft promotion, and merge blocked.
 
 Historical TASK-055 — integrate the bounded coordination decision core into
 `orchestrator-runtime` and expose it through normal `lattice-runtime`
@@ -258,10 +290,10 @@ Deferred Until TASK-038 Phase 2 Completes:
 Known Boundaries:
 - The fixed profile actor is deliberately not a per-human ChatGPT identity.
   Broader identity and task templates require later versioned decisions.
-- No remote default/main branch, CI, push, merge, deployment, or release is
-  established/performed by this local phase.
-- Historical sections below are retained for evidence; this top section is the
-  authoritative current order and completion truth.
+- The 2026-08-10 statement that no remote/default/CI state existed is retained
+  only as historical evidence; the current GitHub truth is the handoff above.
+- No default-branch movement, Draft promotion, merge, deployment, or release is
+  authorized by the current alignment work.
 
 Relevant Issue:
 - GitHub Issue #4: `TASK-038 — GPT Web UI ↔ LATTICE MCP Gateway Interface`.
@@ -637,6 +669,31 @@ remain future Orchestrator/PostgreSQL responsibilities.
 | Installation and local component setup | Exact package/source/version plus post-install verification | Codex under a bounded ticket |
 | Credentials, account/payment actions, public exposure, irreversible actions | Authenticated protected-action evidence | User/protected system surface |
 | Primary-branch merge | Current checks, review, synchronization, explicit authorization | User |
+
+### Project-Scoped GitHub Development Authorization - 2026-08-14
+
+The user explicitly authorizes Codex, for ongoing development of this LATTICE
+repository, to reuse the GitHub CLI credential already stored by the operating
+system keyring without requesting approval for each routine action. Within an
+authorized bounded ticket, Codex may create clean local commits, push the exact
+task feature branch without force, and create or update a Draft pull request
+that reports current verification and review state. This standing authorization
+also covers later checkpoint pushes to that same task branch while its ticket
+and allowed paths remain authoritative.
+
+The verified publication identity is GitHub host `github.com`, account
+`z72124223`, repository `z72124223/lattice-devos`, and HTTPS Git transport.
+`gh auth status` reported the credential in the operating-system keyring with
+`repo`, `read:org`, and `gist` scopes. No OAuth token, one-time device code,
+password, browser session, mobile confirmation value, or other credential
+material may be copied into the repository, commits, logs, tickets, handoffs,
+pull-request text, or LATTICE memory.
+
+This authorization does not permit force-push, merge to a primary or protected
+branch, branch-protection or repository-permission changes, tag/release,
+deployment, public-network exposure, history deletion, credential/account/
+payment mutation, or publication outside the exact LATTICE repository. Those
+actions remain separately protected and require explicit current authorization.
 
 ## Implementation Steps
 

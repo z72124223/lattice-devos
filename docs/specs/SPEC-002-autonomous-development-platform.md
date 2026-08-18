@@ -1,29 +1,29 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 32
+version: 35
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
     constitution_version: 1.0
   - module_id: task-domain
-    constitution_version: 2.1
-  - module_id: task-ledger
     constitution_version: 2.2
+  - module_id: task-ledger
+    constitution_version: 2.3
   - module_id: policy-engine
     constitution_version: 2.6
   - module_id: project-registry
     constitution_version: 1.2
   - module_id: writer-lease
-    constitution_version: 1.0
+    constitution_version: 1.1
   - module_id: workspace-git
     constitution_version: 2.0
   - module_id: scope-check
     constitution_version: 1.1
   - module_id: orchestrator-runtime
-    constitution_version: 2.5
+    constitution_version: 2.6
   - module_id: latticed
-    constitution_version: 1.7
+    constitution_version: 1.8
   - module_id: openclaw-adapter
     constitution_version: 2.0
   - module_id: gateway-ipc
@@ -31,8 +31,10 @@ modules:
   - module_id: approval-verifier
     constitution_version: 1.0
   - module_id: postgres-store
-    constitution_version: 1.7
+    constitution_version: 1.10
   - module_id: postgres-codebase-memory
+    constitution_version: 1.2
+  - module_id: postgres-writer-lease
     constitution_version: 1.1
   - module_id: artifact-store
     constitution_version: 1.0
@@ -55,7 +57,7 @@ modules:
   - module_id: lattice-contracts
     constitution_version: 1.13
   - module_id: lattice-ports
-    constitution_version: 1.7
+    constitution_version: 1.9
 ---
 
 # Autonomous Development Platform
@@ -188,13 +190,31 @@ creating duplicate authorities or an unconstrained self-modifying agent.
   Ledger-v3, nine Project-Registry-v2, and the two autonomy-v1 fixed
   functions frozen by ADR-019/020 and TASK-075. All 17 schema-v4 runtime
   functions remain immutable ungranted catalog history.
-- Task Ledger 2.2 adds only the closed `AUTONOMY_RECEIPT_RECORDED` event and
-  event-owned fixed-scalar subject persistence. Historical profiles synthesize
-  no event; new profiles require exactly one after `TASK_CREATED` and before
-  any writable/external effect. Subject, event, terminal command receipt,
-  head/projection/checkpoint, and physical receipt commit atomically in the
-  fenced Ledger transaction. Existing Task Ledger hash domains and public MCP
-  tool names/input schemas/six-field output remain byte-identical.
+- Task Ledger 2.3 solely owns the versioned task-created profile domain
+  `lattice.task-ledger.task-created-profile/1.0`, carried by the existing
+  hash-bound `TASK_CREATED.action`. `CONTROLLED_CODEX_CANARY` is the closed
+  historical/receipt-optional profile and
+  `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` is the closed receipt-required profile.
+  Unknown values in the reserved `CONTROLLED_CODEX_CANARY*` namespace fail
+  closed; unrelated historical action families remain not-applicable and keep
+  their existing bytes.
+- A required-profile stream containing only `TASK_CREATED` is pending
+  reconciliation, not runnable or terminal. Its next event must be exactly one
+  `AUTONOMY_RECEIPT_RECORDED` at sequence `2`, before progress, status success,
+  dispatch, or any writable/external effect. A missing, late, duplicate, or
+  unknown-profile receipt fails closed. Historical optional streams may omit
+  the event; when present it is still unique and sequence `2`.
+- Task Ledger alone classifies the profile, constructs and verifies the
+  canonical authority/receipt subjects, and plans the typed append. Generic
+  Ledger append cannot forge `AUTONOMY_RECEIPT_RECORDED`; Postgres Store maps
+  verified scalar plans to I/O without recreating domain classification or
+  hashing. Subject, event, terminal command receipt, head/projection/checkpoint,
+  and physical receipt commit atomically in the fenced Ledger transaction.
+  The Writer head commitment covers exactly the fixed 15-scalar tuple asserted
+  current by Store in that transaction; it does not claim unasserted structural
+  receipt fields as owner-current.
+  The exact `0006` migration, existing hash domains, catalog bytes, and public
+  MCP tool names/input schemas/six-field output remain unchanged.
 - The independent Codebase Memory extension advances only through new
   `db/extensions/codebase-memory/v3.sql`. Extension v1/v2 SQL bytes and every
   v2/global-v3 receipt identity remain immutable. Contracts 1.13 keeps v1/v2
@@ -840,20 +860,21 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | Module | Proposed version | Impact |
 |---|---:|---|
 | lattice-cjson | 1.0 | Pure shared `lattice-cjson-1` byte/framing mechanism; caller modules retain hash-subject semantics |
-| task-domain | 2.1 | Rust contract and V2 schema; V1 read compatibility; accounting currency is hash-bound |
-| task-ledger | 2.2 | Preserve 2.1 hashes/planner/replay and add the closed internal autonomy-receipt event/subject semantics, exactly-one profile ordering, mixed historical replay, and atomic event-owned persistence contract; public MCP bytes remain unchanged and all I/O stays in Postgres Store |
+| task-domain | 2.2 | Preserve the task contract, V2 schema, V1 read compatibility, and hash-bound accounting currency |
+| task-ledger | 2.3 | Sole owner of the versioned task-created profile classifier, canonical autonomy authority/receipt subjects, typed append plan, exact required-profile ordering, mixed historical replay, and atomic event-owned persistence contract; generic append cannot forge the receipt and public MCP bytes remain unchanged |
 | policy-engine | 2.6 | Generic project/capability/upgrade policy; independent current Registry, Task Ledger, Writer Lease, and Approval Verifier full-head comparison; R3 denies pending Review Runtime authority |
 | project-registry | 1.2 | Canonical repository identity and lifecycle plus one pure runtime-aware global vacant/plan/apply/export/verify boundary, separately reconstructed retained checkpoint, acyclic command-core/logical-bytes/checkpoint/record-set commitments, complete bounded history, and byte-identical Registry-1.1 Fake vectors |
-| writer-lease | 1.0 | New lease/fencing/daemon-epoch domain owner |
+| writer-lease | 1.1 | Preserve the closed lease/fencing/daemon-epoch semantic owner and exact historical replay; no TASK-076 pure transition or receipt bytes change |
 | workspace-git | 2.0 | Worktree/Git/filesystem evidence only; consumes lease authority |
 | scope-check | 1.1 | Language-neutral contract; mission remains detection-only |
-| orchestrator-runtime | 2.5 | Preserve delivery ordering and pure injected-port coordination/dispatch plus snapshot -> Graphify -> validate -> memory persist/retrieve ordering; no concrete adapter or transport dependency |
-| latticed | 1.7 | Sole normal composition root; four bounded MCP tools preserve delivery/task contracts, exact `--hermes-launch` owns standalone lifecycle, opt-in `PRODUCTION` mode lazily activates Hermes only for Delivery Run, and production config contains only executed inputs |
+| orchestrator-runtime | 2.6 | Preserve pure recommendation/classification and injected-port coordination while observing Task-Ledger-verified lifecycle evidence only through Ports; no direct Task Ledger dependency, duplicate durable hash/receipt owner, concrete adapter, or transport dependency |
+| latticed | 1.8 | Sole normal composition root; the new autonomy-required canary is denied until the exact sequence-2 receipt is durable, fresh-process Status replays that decision, and the four bounded MCP tools/six fields remain unchanged |
 | openclaw-adapter | 2.0 | Inert scaffold becomes a thin local IPC gateway |
 | gateway-ipc | 1.1 | Bounded canonical six-action protocol, NFC-preserving encoder, truthful core-service errors, and deterministic fake loopback; live transport and OS authentication remain deferred |
 | approval-verifier | 1.0 | Pure typed-subject/challenge/proof/nonce/time/current-head owner and deterministic fake; live trust/claim remains deferred |
-| postgres-store | 1.7 | Preserve exact Registry schema-v4 `0005`, add autonomy schema-v5 `0006`, fail closed before DDL on misplaced autonomy-`0005` histories, retain per-command Registry persistence-profile provenance for byte-identical mixed replay, and expose only the exact `16/47/19/28` base catalog profile |
-| postgres-codebase-memory | 1.1 | Preserve extension v1/v2 bytes and historical v2/global-v3 receipt identity; add exact extension v3/global-v5 install/upgrade, per-analysis profile provenance, and byte-identical v2/v3 graph/reflection replay outside the global manifest |
+| postgres-store | 1.10 | Preserve the exact schema-v5 Registry/autonomy profile and catalog while consuming Task Ledger 2.3 verified scalar plans without duplicating profile classification or canonical hashing; retain the governed Memory/Writer companion profiles and closed advisory-function ACL |
+| postgres-codebase-memory | 1.2 | Preserve extension v1/v2 bytes and historical v2/global-v3 receipt identity; add exact extension v3/global-v5 install/upgrade plus the bounded Writer-v2 bridge recognizer, per-analysis profile provenance, and byte-identical v2/v3 graph/reflection replay outside the global manifest |
+| postgres-writer-lease | 1.1 | Preserve Writer v1 bytes and add the append-only v2 bridge/current adapter under exact Store/Memory profiles, ordered transaction locks, and the bounded post-role session apply gate |
 | artifact-store | 1.0 | Pure project-scoped object/reference/provenance/quota/delete-claim semantic owner and deterministic fake; PostgreSQL/filesystem I/O remains deferred |
 | codex-adapter | 1.1 | One writable app-server process/thread implementing the typed `DeliveryCodexPort`; generic `CodexPort` is not a second production path |
 | review-runtime | 1.0 | New independent read-only review boundary |
@@ -864,7 +885,7 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | lattice-core-bootstrap | 1.0 | Inert compile-time component manifest for the first Rust slice |
 | lattice-cli | 1.0 | Read-only bootstrap inspection/recovery command; no runtime authority |
 | lattice-contracts | 1.13 | Preserve every existing value and freeze v1/v2 Memory persistence identities to global schema 3 while adding a distinct v3/global-v5 identity constructor without I/O or authority |
-| lattice-ports | 1.7 | Preserve delivery ports and add exact snapshot, typed Graphify analysis and Codebase Memory repository ports; generic GraphifyPort remains frozen outside production composition |
+| lattice-ports | 1.9 | Preserve delivery ports and add a closed neutral lifecycle autonomy-evidence sum type plus the receipt-recording port; invalid profile/receipt combinations are unrepresentable and no seventh MCP field is exposed |
 
 The user approved this module direction, the local bootstrap slice, and
 continued local work on 2026-07-29. TASK-010 adds the pure technical
@@ -1214,10 +1235,17 @@ packaging modules do not activate functional provider modules.
   and `txid_current()`. Two concurrent sessions authenticated as the same fixed
   LOGIN also prove denial of `pg_cancel_backend(integer)` and
   `pg_terminate_backend(integer,bigint)`. Of the sixteen lock-acquisition
-  overloads, only `pg_advisory_xact_lock(bigint)` is granted to
-  `lattice_migrator`, and only after `SET ROLE`; no fixed LOGIN receives that
-  grant directly. That single direct grant is non-grantable and originates from
-  the protected function owner. The disposable harness proves these boundaries with one-time
+  overloads, only `pg_advisory_xact_lock(bigint)` and
+  `pg_try_advisory_lock(bigint)` are granted to `lattice_migrator`, and only
+  after `SET ROLE`; no fixed LOGIN receives either grant directly. Both direct
+  grants are non-grantable and originate from the protected function owner.
+  The transaction-scoped overload owns the ordered global/Memory/Writer
+  migration locks. The nonblocking session overload owns only the bounded
+  Writer apply gate: its acquire and release each execute inside a short
+  transaction with `SET LOCAL ROLE lattice_migrator`, the role is restored at
+  commit, and the gate is released on success, error, or Drop. The other
+  fourteen acquisition overloads remain denied after `SET ROLE`. The
+  disposable harness proves these boundaries with one-time
   test-only SCRAM identities instead of superuser impersonation. Normal runtime
   has no direct table DML,
   DDL, admission/history/identity write, role escalation, or effective CREATE
@@ -1434,7 +1462,7 @@ packaging modules do not activate functional provider modules.
   deadline-owned run. Stale helper variables have no effect and are never
   echoed. The legacy one-shot helper, direct contained provider route, four MCP
   schemas, PostgreSQL truth, and task/status zero-effect paths remain intact.
-- [ ] AC-43: TASK-075 preserves the exact TASK-022 Registry migration as
+- [x] AC-43: TASK-075 preserves the exact TASK-022 Registry migration as
   `0005_project_registry_repository.sql` at global schema v4 and moves the
   TASK-050 autonomy expansion to `0006_task_autonomy_receipt.sql` at global
   schema v5. A database whose migration ordinal `0005` identifies the
@@ -1452,6 +1480,39 @@ packaging modules do not activate functional provider modules.
   bytes and historical receipt identities also remain unchanged: extension v3
   accepts global schema v5, stores per-analysis persistence-profile
   provenance, and replays mixed v2/v3 graph/reflection receipts byte-identically.
+
+### Writer Lease v2 schema-v5 compatibility bridge
+
+SPEC-002 v33 preserves the complete TASK-075 schema-v5 candidate and adds the
+versioned Writer Lease v2 bridge required for an accepted exact
+global-v3/Memory-v2/Writer-v1 database to reach it. The five closed profiles
+are `G3_M2_W1_CURRENT`, `G3_M2_W2_BRIDGE`,
+`G5_M2_W2_BRIDGE_PENDING`, `G5_M3_W2_BRIDGE_PENDING`, and
+`G5_M3_W2_CURRENT`. No direct W1-to-global-v5 transition exists.
+
+Writer v1 SQL and semantic history remain immutable. Only the Writer owner
+creates the bridge and final rebind; Store changes only global history and
+Memory changes only its own extension. Each owner takes global, Memory, and
+Writer transaction locks in that order. Memory additionally locks the five
+Writer tables in `SHARE` mode and verifies the complete bridge before and
+after its DDL. Every v2 bridge or pending profile rejects runtime and fenced
+writes; only W1 current or final W2 current is executable. A fresh final
+install records truthful fresh-current history; an upgrade records exact v1
+`INSTALLED`, v2 bridge `UPGRADED`, and v2 final `REBOUND` rows.
+
+No Writer command, transition, receipt, snapshot, checkpoint, lease-revision,
+or fencing byte changes. Partial, extra, drifted, active, suspect, unknown,
+cross-profile, or substituted state fails closed without automatic repair.
+
+SPEC-002 v34 closes the TASK-076 protected-function amendment. All fixed LOGIN
+roles still have zero effective advisory-lock acquisition capability before
+role selection. After `SET ROLE`, `lattice_migrator` alone receives the exact
+non-grantable `pg_advisory_xact_lock(bigint)` and
+`pg_try_advisory_lock(bigint)` grants. The first remains the only
+transaction-scoped migration-lock primitive; the second is used only as the
+bounded session gate that spans a Writer apply attempt and its serialization
+retries. This does not grant a login role directly, add a generic lock API, or
+change Store/Memory/Writer state ownership.
 
 ## Verification Plan
 
@@ -1491,6 +1552,8 @@ packaging modules do not activate functional provider modules.
 | AC-41 | exact mode/redaction integration tests, recording lifecycle owner, one-shot activation and explicit teardown unit tests, plus complete runtime/MCP regression | default and `TASK_ONLY` preserve the old path; only production Delivery Run activates once before writer effects; status/task paths activate zero times; canonical MCP teardown ambiguity cannot exit 0; four tools and schemas remain unchanged |
 | AC-42 | exact missing-setting and ignored-sentinel integration tests, v2 receipt golden, direct launcher-plan and legacy helper regressions | only executed inputs gate production; stale helper values cannot deny or leak; old receipt domain cannot substitute; legacy helper remains isolated and the four-tool/product truth boundaries are unchanged |
 | AC-43 | exact source/blob checksum checks, fresh and exact-prefix disposable PostgreSQL schema-v5 migration matrices, misplaced-autonomy-0005 no-DDL rejection, base and Memory-extension catalog/ACL/profile assertions, Registry v4/v5 and Memory v2/v3 mixed-replay fixtures | exact Registry `0005` and autonomy `0006` history; stable fail-closed mismatch classification before DDL; base 16-table/47-function catalog with only 19 runtime functions; immutable Memory v1/v2 bytes and byte-identical historical Registry/Memory persistence receipts |
+| AC-44 | exact Writer v1/v2 manifests, five-state Store/Memory/Writer transition matrices, common lock-order concurrency, pending-runtime denial, non-empty replay, and marker-owned PostgreSQL restart acceptance | immutable v1 and semantic/fencing bytes; exact v2 bridge/current identities; no deadlock or partial state; final TASK-050 fenced assertion and fresh-process replay |
+| AC-45 | Task Ledger profile-classifier and typed-autonomy-plan tests, generic-forgery denial, historical/required/unknown replay matrices, lifecycle ordering tests, fresh canonical `latticed` restart/Status acceptance, and four-tool/six-field MCP regression | one canonical receipt/profile owner; required sequence-2 receipt before effects; missing/late/duplicate/unknown fail closed; exact `0006`, catalog, existing hashes, and MCP wire unchanged |
 
 ## Human Decisions
 
@@ -1511,6 +1574,12 @@ packaging modules do not activate functional provider modules.
   `714f3b9` supplies autonomy behavior re-authored only at schema v5, misplaced
   autonomy-`0005` history is rejected without repair, and historical Registry
   persistence receipts keep per-command profile provenance.
+- On 2026-08-15 the user approved the narrow TASK-050 repair amendment:
+  Task Ledger 2.3 owns the versioned task-created profile and canonical
+  autonomy receipt/hash semantics; Ports 1.9 carries neutral lifecycle profile
+  evidence; Postgres Store 1.10, Orchestrator Runtime 2.6, and `latticed` 1.8
+  consume that contract; the out-of-bound Contracts SHA helper is removed while
+  Contracts remains 1.13; the public four-tool/six-field MCP wire is frozen.
 - Account or credential changes, payment, public exposure, irreversible
   deletion, destructive/incompatible migrations, security-control changes,
   and protected release promotion remain on authenticated protected surfaces.
@@ -1525,5 +1594,6 @@ Resolved on 2026-07-29:
 - The user approved ADR-004 through ADR-007 and the V2 module direction by
   replying `好 開始執行`.
 
-No material question blocks TASK-032 or later safe, bounded local work.
+No material governance question blocks the bounded TASK-050 repair or later
+safe, dependency-ordered local work.
 Protected actions listed above remain fail-closed.

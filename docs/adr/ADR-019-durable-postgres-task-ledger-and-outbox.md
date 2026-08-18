@@ -3,8 +3,8 @@
 - Status: accepted under the approved V2 amendment and user's MVP-3 execution directive
 - Date: 2026-08-02
 - Decision owner: user
-- Related: SPEC-002 v32, ADR-005, ADR-008, ADR-011, ADR-018, ADR-020,
-  Task Ledger 2.2, Postgres Store 1.7, TASK-021, TASK-050, TASK-075
+- Related: SPEC-002 v35, ADR-005, ADR-008, ADR-011, ADR-018, ADR-020,
+  Task Ledger 2.3, Postgres Store 1.10, TASK-021, TASK-050, TASK-075
 
 ## Context
 
@@ -333,6 +333,28 @@ and append byte-identical historical Ledger and Store evidence, while one
 event with the command, projection, terminal domain receipt, and Store
 receipt. Registry persistence replay is profile-bound per command, so later
 schema v5 evidence cannot change a schema-v4 persistence receipt.
+
+### TASK-050 Task-created profile and Store-mapping amendment
+
+Task Ledger 2.3, not Postgres Store, owns the bounded Task-created profile and
+the canonical autonomy authority/receipt subject. Postgres Store 1.10 may keep
+a private fixed-scalar row representation, but it must obtain append fields
+from the Task Ledger plan and return untrusted scalar rows to the Task Ledger
+verifier. It cannot classify a decision, rebuild canonical subjects, or hash
+the `lattice.autonomy-authority` and `lattice.autonomy-receipt` domains.
+
+`TASK_CREATED` and its required receipt are two separately idempotent Task
+Ledger commands and may commit in two transactions. Therefore the exact
+TaskCreated-only required prefix is retained as reconciliation-required state,
+never normal runtime/status authority. The receipt transaction still performs
+the Writer currentness assertion and atomically commits the receipt event,
+fixed-scalar subject, command receipt, stream head/projection, checkpoint, and
+physical Store receipt. A later event without the required sequence-2 receipt
+is corruption.
+
+This amendment changes no SQL, migration, table, function, role, ACL, catalog,
+Store receipt, or global manifest byte. `0006_task_autonomy_receipt.sql` and
+the schema-v5 `16 / 47 / 19 / 28` catalog commitments remain frozen.
 
 ## Implementation And Verification Status
 

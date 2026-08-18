@@ -1,7 +1,7 @@
 ---
 module_id: postgres-codebase-memory
 name: LATTICE PostgreSQL Codebase Memory Adapter
-version: 1.1
+version: 1.2
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-14
@@ -15,6 +15,8 @@ replay mechanics for Codebase Memory without entering the global Store
 migration profile.
 Version 1.1 adds only the extension-v3/global-v5 compatibility profile and
 historical per-analysis persistence provenance.
+Version 1.2 adds only the migration-time exact Writer-v2 bridge companion
+verification required to upgrade a previously accepted combined profile.
 
 ## Non-Goals
 
@@ -107,6 +109,15 @@ byte-identical v2/v3 mixed replay. The extension remains outside the global
 manifest. Partial/drifted/extra/ambiguous state and provenance corruption fail
 closed without repair, downgrade, or false success.
 
+Version 1.2 does not install, mutate, rebind, or replay Writer Lease. During an
+exact Memory-v2 to v3 upgrade with the versioned Writer-v2 bridge present, the
+Memory runner takes global, Memory, and Writer advisory locks in that order,
+takes `SHARE` locks on the five Writer tables in a fixed order, and verifies
+the complete Writer catalog, owner, ACL, identity, and ledger before and after
+its own DDL. Unknown, v1, partial, drifted, active, or substituted companion
+state rolls back Memory. Both schema-v5 bridge states remain runtime closed
+until the Writer owner activates v2 on exact global-v5/Memory-v3.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -133,3 +144,4 @@ user approval.
 |---|---|---|---|---|
 | 1.0 | 2026-08-05 | SPEC-002 v28, ADR-022, TASK-033 | Independent same-database Codebase Memory extension and adapter without global Store migration changes | User continuation authorization |
 | 1.1 | 2026-08-14 | SPEC-002 v32, ADR-022, TASK-075 | Add extension-v3/global-v5 compatibility and retained per-analysis profile replay while preserving v1/v2 bytes and receipts | User-approved TASK-075 reconciliation |
+| 1.2 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-022/023, TASK-076 | Verify the exact Writer-v2 bridge companion under the common lock order during Memory-v3 migration without owning or mutating Writer state | User continuation authorization |

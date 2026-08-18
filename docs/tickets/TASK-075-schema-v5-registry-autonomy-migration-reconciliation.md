@@ -2,20 +2,25 @@
 ticket_id: TASK-075
 title: Schema-v5 Project Registry and autonomy migration reconciliation
 spec_id: SPEC-002
-spec_version: 32
+spec_version: 34
 module_id: postgres-store
-constitution_version: 1.7
-status: in_progress
+constitution_version: 1.9
+status: complete
 parallel_safe: false
 depends_on:
   - TASK-022
+  - TASK-076
 integration_sources:
   task_022_implementation: 12f71009b5baa3ff3ddd026e0912f90db6d87e56
   task_022_closure: a1aced9f5acc81e9081a966a1e953b3029e45163
   task_050_implementation: 714f3b9057db47e694adacf9aef5f37e09f31712
+  task_076_implementation: f32531002a0c6588e96dc9fe0229db7e0ed546e0
 branch: feature/task-075-schema-v5-migration-reconciliation
 implementation_worktree: lattice-worktrees/task-075-schema-v5-migration-reconciliation
 implementation_base: 0f8cee695e1089d8d883d9c7647a2e105b5bcae1
+implementation_head: a3599c18d9462732c3b82c9e7d302980657eeccc
+closure_branch: feature/task-076-postgres-writer-lease-v2
+combined_revalidation_head: f32531002a0c6588e96dc9fe0229db7e0ed546e0
 allowed_paths:
   - Cargo.lock
   - crates/lattice-project-registry/src/lib.rs
@@ -66,6 +71,17 @@ removal_only_paths:
 ---
 
 # TASK-075 - Schema-v5 Registry/autonomy migration reconciliation
+
+## Current Implementation Checkpoint
+
+Commit `a3599c18d9462732c3b82c9e7d302980657eeccc` is the clean,
+scope-reviewed TASK-075 implementation checkpoint. Its Registry/autonomy
+schema-v5, Memory-v3, deterministic, and disposable acceptance evidence is
+retained. TASK-076 completed the versioned Writer Lease v2 bridge that allows
+the previously accepted `G3_M2_W1` profile to enter schema v5 without rewriting
+history. The combined candidate passed final revalidation under SPEC-002 v34 /
+Postgres Store 1.9, so this ticket is complete. TASK-050 resumes from the exact
+same verified candidate.
 
 ## Authority And Objective
 
@@ -253,50 +269,69 @@ closed. The public four-tool/six-field MCP contract remains byte-identical.
 
 ## Acceptance Criteria
 
-- [ ] The working tree contains the exact TASK-022 `0005` bytes and no edited
+- [x] The working tree contains the exact TASK-022 `0005` bytes and no edited
   or alternate Project Registry migration.
-- [ ] The manifest is exactly six ordered entries, with Registry `0005` as
+- [x] The manifest is exactly six ordered entries, with Registry `0005` as
   schema v4 and autonomy `0006` as schema v5; `0001` through `0004` are
   byte-identical to their accepted sources.
-- [ ] An autonomy-at-ordinal-`0005` historical database returns exact
+- [x] An autonomy-at-ordinal-`0005` historical database returns exact
   `STORE_MIGRATION_HISTORY_MISMATCH` before any DDL and remains unmodified.
-- [ ] Fresh, exact v1/v2/v3, non-empty stopped v4, and exact v5 paths converge
+- [x] Fresh, exact v1/v2/v3, non-empty stopped v4, and exact v5 paths converge
   only through the immutable ordered manifest; partial/edited/reordered/
   unknown/ACTIVE sources fail closed.
-- [ ] The exact base v5 catalog closure is `16 / 47 / 19 / 28`, the 19-function
+- [x] The exact base v5 catalog closure is `16 / 47 / 19 / 28`, the 19-function
   allowlist above is complete, every v4 runtime function is ungranted, and
   runtime retains zero direct protected-table SELECT/DML.
-- [ ] Existing v4 Registry commands are deterministically backfilled with
+- [x] Existing v4 Registry commands are deterministically backfilled with
   schema `4` and the exact v4 manifest commitment; new commands retain schema
   `5` and the exact v5 commitment.
-- [ ] Fresh-process and PostgreSQL-restart mixed replay returns byte-identical
+- [x] Fresh-process and PostgreSQL-restart mixed replay returns byte-identical
   v4 Registry persistence receipts, valid v5 receipts, and the identical pure
   Registry 1.2 semantic state/checkpoint.
-- [ ] Registry provenance mutation, omission, cross-version substitution,
+- [x] Registry provenance mutation, omission, cross-version substitution,
   coherent-prefix rollback, or current-profile recomputation fails closed
   without authority or automatic repair.
-- [ ] Task Ledger mixed historical/autonomy replay, exact retry, fenced
+- [x] Task Ledger mixed historical/autonomy replay, exact retry, fenced
   persistence, restart reconstruction, and autonomy corruption matrices pass
   without changing historical event/receipt/checkpoint bytes.
-- [ ] Codebase Memory v1/v2 SQL bytes remain unchanged; the exact v2/global-v3
+- [x] Codebase Memory v1/v2 SQL bytes remain unchanged; the exact v2/global-v3
   identity remains constructible and historical graph/reflection receipt
   replay remains byte-identical after an exact extension-v3/global-v5 upgrade.
-- [ ] Fresh schema-v5 Memory installation and exact v2-to-v3 upgrade converge
+- [x] Fresh schema-v5 Memory installation and exact v2-to-v3 upgrade converge
   on the same v3 catalog/ACL/identity profile. Partial, extra, drifted,
   unsupported, or profile-substituted sources fail closed with no repair or
   false receipt.
-- [ ] Every existing authoritative Memory row is backfilled with exact
+- [x] Every existing authoritative Memory row is backfilled with exact
   v2/global-v3 profile provenance, new rows retain exact v3/global-v5
   provenance, all related rows agree, and
   missing/mutated/current-profile-substituted provenance fails closed.
-- [ ] MCP discovery/input/output remains exactly four tools and the existing
+- [x] MCP discovery/input/output remains exactly four tools and the existing
   six-field `lattice.task.status.v1` result; autonomy stays internal.
-- [ ] Focused Rust, disposable PostgreSQL 17, format/Clippy, repository,
+- [x] Focused Rust, disposable PostgreSQL 17, format/Clippy, repository,
   dependency, scope, and final diff gates pass with no unresolved P0/P1
   finding before either TASK-075 or TASK-050 may be completed.
 
-Unchecked criteria are requirements, not claims that this governance pass ran
-or passed them.
+## Completion Evidence - 2026-08-14
+
+- Implementation source `a3599c18d9462732c3b82c9e7d302980657eeccc`
+  and Writer-v2 combined revalidation source
+  `f32531002a0c6588e96dc9fe0229db7e0ed546e0` are pinned separately.
+- The post-fix TASK-076 official wrapper ran this ticket's static and full
+  wrappers, required exactly one
+  `TASK075_SCHEMA_V5_MIGRATION_RECONCILIATION_ACCEPTANCE=PASS`, and completed
+  all 16 TASK-075 gates before its own final PASS.
+- Four distinct PostgreSQL 17.10 holder receipts closed with cleanup complete:
+
+  | Profile | Receipt ID | Raw SHA-256 | Final HMAC SHA-256 | Events |
+  |---|---|---|---|---:|
+  | Store-only | `f087d47f0e8845aabddfe72face9b2d2` | `f96b363ede31265bd4c0b3bb31b0ccc7e5819e54fc8937c7bafeee55c113fd6d` | `5c5fbd2840f13cae31081a61fce810efc62a0ee7dbb4028b25fe27e91b090747` | 10 |
+  | Catalog | `d7ebeae842df49c1b978034c7c0961b3` | `93aeca5877c2916686f522be7320c57e286296a0c2276f5ee438382df4dcfdf9` | `f476b397f8b91dad39aa4ea3eef8140b3d76f88311b7105c3807fb951ab6eb6e` | 11 |
+  | Memory-v3 | `a55686ee1fcc46e1ab045cc43368c799` | `4206c82d298513b8bbd7c4e2eb1d0279be86c587e77add214900982fea3ee8ff` | `5370620f21e78cd9412bbbcc7a9714f6340f5194b97286310fff69fd87b32846` | 10 |
+  | TASK-050 | `b7b8ebac591e45b9acfd086ffe8f87a1` | `ffe3d4acc9f30ff8cb7cf279d133eec45ccd4ef50dc81ac22a69aa07f6771884` | `dcb151762fd928bb96040f2e8273d4a479130178a95eee950068bc3a4959e3d3` | 10 |
+- The exact combined candidate passed independent code and architecture
+  re-review with no findings, integration reported zero technical blockers,
+  and GitHub verification passed. `NEEDS_REVIEW` remains only the PR merge
+  decision because merge/Draft-promotion authorization is absent.
 
 ## TDD And Verification
 
@@ -337,10 +372,10 @@ Memory identity/extension compatibility, shared PostgreSQL harness, and
 migration acceptance scripts. No other work may change those paths or claim
 TASK-050/TASK-051 acceptance concurrently.
 
-TASK-050 is blocked on this ticket. TASK-051 remains blocked on TASK-050's
-later clean identified schema-v5 candidate and named acceptance receipt.
-TASK-022 is the sole ticket dependency. The TASK-022 and TASK-050 commits
-listed in `integration_sources` are immutable source inputs, not cyclic ticket
+TASK-050 is no longer blocked on this ticket. TASK-051 remains blocked on
+TASK-050's later clean identified schema-v5 candidate and named acceptance
+receipt. The TASK-022, TASK-050, and TASK-076 commits listed in
+`integration_sources` are immutable source inputs, not cyclic ticket
 dependencies or completed integration evidence for this worktree. Although
 the current TASK-022 ticket document is paused, its implementation commit
 `12f7100` and closure commit `a1aced9` are the unique completed source and
