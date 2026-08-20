@@ -51,7 +51,6 @@ allowed_paths:
   - docs/reviews/CODE_REVIEW_TASK_039_2026-08-20.md
   - docs/reviews/ARCHITECTURE_REVIEW_TASK_039_2026-08-20.md
   - docs/reviews/INTEGRATION_TASK_039_2026-08-20.md
-branch: feature/task-039-hermes-broker-protocol
 ---
 
 ## Objective
