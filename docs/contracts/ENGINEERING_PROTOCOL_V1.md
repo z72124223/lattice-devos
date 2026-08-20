@@ -1,6 +1,6 @@
 ---
 protocol_id: LATTICE_ENGINEERING_PROTOCOL
-version: 1.0.3
+version: 1.1.0
 status: active
 canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md
 ---
@@ -21,11 +21,23 @@ Before claiming completion, reread this protocol, inspect the final diff, run
 `npm.cmd run check` and focused verification, and report only current evidence.
 If an ordinary reproducible check fails, repair it within the authorized scope and rerun the same failed check.
 
-After the durable handoff is current, and again after any authorized push, run
-`npm.cmd run status:refresh`. This updates the local engineering-status
-projection for the user. A refresh failure or stale/unknown source must remain
-visible and be reported; the projection never replaces ticket, Git, test, CI,
-review, or LATTICE acceptance evidence.
+After the durable handoff is current and the logical commit is clean, do not use
+an ordinary manual push. Run `npm.cmd run delivery:finish`. The current TASK
+ticket must explicitly declare its named remote, canonical
+`delivery_repository` identity, `delivery_push` policy, and `delivery_archive`
+policy. The finisher may perform only the authorized non-force
+current-feature-branch push, verifies exact remote and upstream equality, and
+then runs the engineering-status refresh.
+
+`npm.cmd run status:refresh` remains the manual diagnostic and launcher
+fallback. A refresh failure or stale/unknown source must remain visible and be
+reported; the projection never replaces ticket, Git, test, CI, review, or
+LATTICE acceptance evidence.
+
+Only the exact successful marker `LATTICE_DELIVERY_READY_TO_ARCHIVE=1` permits
+Codex to use the Codex App native archive-task action as its final operation.
+Missing markers, `keep_open`, interruption, or every failure keeps the task open
+for diagnosis. Repository code never archives or edits Codex App task storage.
 
 Every new branch must add a plain Traditional-Chinese name and purpose to
 `tools/engineering-status-dashboard/branch-guide.zh-TW.json` and include that

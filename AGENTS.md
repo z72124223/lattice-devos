@@ -135,9 +135,15 @@ upstream automatically. Check related GitHub Issues/PRs when GitHub access is
 available.
 
 At a handoff checkpoint, run relevant tests, update the current sections of
-`PLANS.md` and `HANDOFF.md`, create one logical commit, and push only when the
-current task authorizes it. Never use `git reset --hard`, `git clean`, or
-force-push to resolve handoff state; do not overwrite or discard unknown
-changes, and compare local/remote state before merge or rebase. Do not delete
-unknown functionality merely to make a check pass. This is a convention, not
-a claim that hooks or CI enforce it.
+`PLANS.md` and `HANDOFF.md`, and create one clean logical commit. For an ordinary
+TASK branch, do not run a manual push; run `npm.cmd run delivery:finish`. The
+matching ticket must explicitly record whether its delivery is authorized for a
+non-force feature-branch push or is local-only. The finisher verifies any push
+and refreshes the local engineering map.
+
+Only after the exact marker `LATTICE_DELIVERY_READY_TO_ARCHIVE=1`, archive the
+current Codex task with the Codex App native archive action as the final task
+operation. On any failure or missing marker, keep the task open for diagnosis.
+Never use `git reset --hard`, `git clean`, force-push, or unknown-work deletion
+to resolve handoff state; do not overwrite or discard unknown changes, and
+compare local/remote state before merge or rebase.

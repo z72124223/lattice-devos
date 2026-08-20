@@ -45,6 +45,15 @@ function frontmatterListIncludes(frontmatter, key, expectedValue) {
   return false;
 }
 
+function frontmatterScalar(frontmatter, key) {
+  const pattern = new RegExp(`^${key}:\\s*(\\S+)\\s*$`, "gmu");
+  const matches = [...frontmatter.matchAll(pattern)];
+  return {
+    valid: matches.length === 1,
+    value: matches.length === 1 ? matches[0][1] : null,
+  };
+}
+
 const files = await walk(root);
 const errors = [];
 
@@ -58,7 +67,7 @@ if (!engineeringProtocolFile) {
   const protocol = await readFile(engineeringProtocolFile, "utf8");
   const requiredProtocolContent = [
     "protocol_id: LATTICE_ENGINEERING_PROTOCOL",
-    "version: 1.0.3",
+    "version: 1.1.0",
     "canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md",
     "## Mandatory Entry",
     "## Mandatory Delivery",
@@ -69,6 +78,10 @@ if (!engineeringProtocolFile) {
     "plain Traditional-Chinese name and purpose",
     "tools/engineering-status-dashboard/branch-guide.zh-TW.json",
     "active ticket `allowed_paths`",
+    "npm.cmd run delivery:finish",
+    "LATTICE_DELIVERY_READY_TO_ARCHIVE=1",
+    "native archive-task action",
+    "every failure keeps the task open",
     "## Knowledge Routing",
     "Personal preferences, historical cases, and detailed decision logic belong in LATTICE, Hermes, and the knowledge graph",
     "## Authority Boundary",
@@ -87,11 +100,21 @@ if (!agentsFile) {
   errors.push("AGENTS.md: missing repository instructions.");
 } else {
   const agents = await readFile(agentsFile, "utf8");
+  const normalizedAgents = agents.replaceAll(/\s+/gu, " ");
   if (!agents.includes(`\`${engineeringProtocolPath}\``)) {
     errors.push(`AGENTS.md: must point to ${engineeringProtocolPath}.`);
   }
   if (!agents.includes("Before editing") || !agents.includes("Before claiming completion")) {
     errors.push("AGENTS.md: must require engineering protocol checks before editing and completion.");
+  }
+  if (
+    !agents.includes("npm.cmd run delivery:finish") ||
+    !agents.includes("LATTICE_DELIVERY_READY_TO_ARCHIVE=1") ||
+    !normalizedAgents.includes("archive the current Codex task")
+  ) {
+    errors.push(
+      "AGENTS.md: must route completion through delivery:finish and archive the current Codex task only after its success marker.",
+    );
   }
 }
 
@@ -202,6 +225,10 @@ for (const file of ticketFiles) {
   const moduleId = moduleMatches[0][1];
   const branchMatches = [...frontmatter.matchAll(/^branch:\s*(\S+)\s*$/gmu)];
   const branch = branchMatches.length === 1 ? branchMatches[0][1] : null;
+  const deliveryRemote = frontmatterScalar(frontmatter, "delivery_remote");
+  const deliveryRepository = frontmatterScalar(frontmatter, "delivery_repository");
+  const deliveryPush = frontmatterScalar(frontmatter, "delivery_push");
+  const deliveryArchive = frontmatterScalar(frontmatter, "delivery_archive");
   const includesBranchGuide = frontmatterListIncludes(
     frontmatter,
     "allowed_paths",
@@ -218,6 +245,10 @@ for (const file of ticketFiles) {
       moduleId,
       branch,
       includesBranchGuide,
+      deliveryRemote,
+      deliveryRepository,
+      deliveryPush,
+      deliveryArchive,
     });
   }
 }
@@ -278,6 +309,42 @@ if (!plansFile) {
       if (!currentTicket.includesBranchGuide) {
         errors.push(
           `${currentTicket.file}: current ticket allowed_paths must include '${branchGuidePath}'.`,
+        );
+      }
+      if (
+        !currentTicket.deliveryRemote.valid ||
+        !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(currentTicket.deliveryRemote.value || "")
+      ) {
+        errors.push(
+          `${currentTicket.file}: current ticket delivery_remote must be exactly one safe named Git remote.`,
+        );
+      }
+      if (
+        !currentTicket.deliveryRepository.valid ||
+        !/^(?:[a-z0-9.-]+(?::[0-9]+)?\/[a-zA-Z0-9._/-]+|file:[^\r\n]+)$/u.test(
+          currentTicket.deliveryRepository.value || "",
+        )
+      ) {
+        errors.push(
+          `${currentTicket.file}: current ticket delivery_repository must name one credential-free canonical repository identity.`,
+        );
+      }
+      if (
+        !currentTicket.deliveryPush.valid ||
+        !new Set(["authorized_non_force_feature_branch", "local_only"]).has(
+          currentTicket.deliveryPush.value,
+        )
+      ) {
+        errors.push(
+          `${currentTicket.file}: current ticket delivery_push must be 'authorized_non_force_feature_branch' or 'local_only'.`,
+        );
+      }
+      if (
+        !currentTicket.deliveryArchive.valid ||
+        !new Set(["after_success", "keep_open"]).has(currentTicket.deliveryArchive.value)
+      ) {
+        errors.push(
+          `${currentTicket.file}: current ticket delivery_archive must be 'after_success' or 'keep_open'.`,
         );
       }
       const branchGuideFile = files.find((candidate) => relative(candidate) === branchGuidePath);

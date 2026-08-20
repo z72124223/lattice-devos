@@ -8,7 +8,7 @@ import test from "node:test";
 const checkScript = path.resolve("scripts/check-project.mjs");
 const engineeringProtocol = `---
 protocol_id: LATTICE_ENGINEERING_PROTOCOL
-version: 1.0.3
+version: 1.1.0
 status: active
 canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md
 ---
@@ -22,6 +22,7 @@ Read before work.
 If an ordinary reproducible check fails, repair it within the authorized scope and rerun the same failed check.
 After the durable handoff is current, run npm.cmd run status:refresh; the projection never replaces ticket, Git, test, CI, review, or LATTICE acceptance evidence.
 Every new branch must add a plain Traditional-Chinese name and purpose to tools/engineering-status-dashboard/branch-guide.zh-TW.json and include that path in the active ticket \`allowed_paths\`.
+After the clean logical commit, run npm.cmd run delivery:finish instead of an ordinary manual push. Only LATTICE_DELIVERY_READY_TO_ARCHIVE=1 permits Codex to call the native archive-task action; every failure keeps the task open.
 
 ## Knowledge Routing
 Personal preferences, historical cases, and detailed decision logic belong in LATTICE, Hermes, and the knowledge graph.
@@ -33,6 +34,7 @@ const agents = `# Fixture Instructions
 
 Before editing, read \`docs/contracts/ENGINEERING_PROTOCOL_V1.md\`.
 Before claiming completion, reread it and run the focused checks.
+After the clean logical commit, run \`npm.cmd run delivery:finish\`; archive the current Codex task only after \`LATTICE_DELIVERY_READY_TO_ARCHIVE=1\`.
 `;
 const constitution = `---
 module_id: fixture
@@ -93,6 +95,10 @@ async function runFixture({
   includeGuideEntry = true,
   guideEntryUsesChinese = true,
   decoyGuidePath = false,
+  deliveryPush = "local_only",
+  deliveryArchive = "keep_open",
+  deliveryRemote = "origin",
+  deliveryRepository = "github.com/example/fixture",
   gitBranch,
   detachedGitHead = false,
 }) {
@@ -130,7 +136,7 @@ async function runFixture({
       const branch = `feature/${ticketId.toLowerCase()}-fixture`;
       await writeFile(
         path.join(root, "docs", "tickets", name),
-        `---\nticket_id: ${ticketId}\nmodule_id: ${moduleId}\nallowed_paths:\n${includeGuideAllowedPath ? "  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}${decoyGuidePath ? "other_paths:\n  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}branch: ${branch}\n---\n`,
+        `---\nticket_id: ${ticketId}\nmodule_id: ${moduleId}\nallowed_paths:\n${includeGuideAllowedPath ? "  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}${decoyGuidePath ? "other_paths:\n  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}branch: ${branch}\n${deliveryRemote === null ? "" : `delivery_remote: ${deliveryRemote}\n`}${deliveryRepository === null ? "" : `delivery_repository: ${deliveryRepository}\n`}${deliveryPush === null ? "" : `delivery_push: ${deliveryPush}\n`}${deliveryArchive === null ? "" : `delivery_archive: ${deliveryArchive}\n`}---\n`,
         "utf8",
       );
       if (includeGuideEntry) {
@@ -255,6 +261,56 @@ test("project check enforces the post-handoff dashboard refresh rule", async () 
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /npm\.cmd run status:refresh/u);
+});
+
+test("project check requires the one-command delivery and archive-success rule", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    protocol: engineeringProtocol.replace(
+      "After the clean logical commit, run npm.cmd run delivery:finish instead of an ordinary manual push. Only LATTICE_DELIVERY_READY_TO_ARCHIVE=1 permits Codex to call the native archive-task action; every failure keeps the task open.",
+      "Finish manually.",
+    ),
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /npm\.cmd run delivery:finish/u);
+  assert.match(result.stderr, /LATTICE_DELIVERY_READY_TO_ARCHIVE=1/u);
+});
+
+test("project check requires current ticket push and archive policies", async () => {
+  for (const fixtureOptions of [
+    { deliveryPush: null },
+    { deliveryPush: "push_everything" },
+    { deliveryArchive: null },
+    { deliveryArchive: "always_archive" },
+    { deliveryRemote: null },
+    { deliveryRemote: "--force" },
+    { deliveryRepository: null },
+    { deliveryRepository: "https://user:secret@example.invalid/repo" },
+  ]) {
+    const result = await runFixture({
+      tickets: [["one.md", "TASK-017"]],
+      plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+      ...fixtureOptions,
+    });
+    assert.equal(result.status, 1, JSON.stringify(fixtureOptions));
+    assert.match(result.stderr, /delivery_(?:push|archive|remote|repository)/u);
+  }
+});
+
+test("project check requires AGENTS to route successful delivery to native archival", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    agentsContent: agents.replace(
+      "After the clean logical commit, run `npm.cmd run delivery:finish`; archive the current Codex task only after `LATTICE_DELIVERY_READY_TO_ARCHIVE=1`.",
+      "Finish manually.",
+    ),
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /AGENTS\.md.*delivery:finish/u);
 });
 
 test("project check requires the protocol to describe the Chinese purpose guide", async () => {

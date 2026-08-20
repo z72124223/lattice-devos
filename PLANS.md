@@ -88,17 +88,24 @@ boundaries, complete cleanup, and no unresolved P0-P3 finding. GitHub Actions
 run `31835654240` passed on the exact implementation commit. Draft PR #12
 remains not authorized for merge or Draft promotion.
 
-## Current local engineering status dashboard model guidance - TASK-077
+## Current engineering delivery finisher - TASK-078
 
-CURRENT TASK-077 - V3 model guidance is implemented and locally complete. The
-selected-work panel recommends Luna＋低 for clear mechanical work, Terra＋中等
-for everyday development, and Sol＋高 for high-consequence work; advice older
-than 30 days fails closed and requests a fresh inventory. Focused/full checks,
-self-review with explicit non-independent labeling, architecture assessment,
-and exact default-target integration simulation are complete and blocker-free.
-The page remains read-only and no default merge/release is authorized. Final
-handoff commit, the established non-force feature push, remote equality, and
-post-push refresh remain terminal delivery steps.
+CURRENT TASK-078 - implement one fail-closed command that reads explicit push
+repository-identity, and archive policies from the matching TASK ticket,
+permits only an exact-SHA non-force current-feature-branch push, verifies the
+live remote head and named upstream, refreshes the local engineering map, and
+emits archive permission only after every required gate succeeds. Codex App
+performs the final native archive action; repository code cannot impersonate
+it. TASK-077 is the completed,
+synchronized parent checkpoint. No PR, default merge, deployment, release,
+public hosting, destructive cleanup, or force operation is authorized.
+
+## Completed local engineering status dashboard guidance - TASK-077
+
+COMPLETED TASK-077 - V3 model guidance is committed, pushed, synchronized, and
+refreshed at `339b880`. The selected-work panel recommends Luna＋低 for clear
+mechanical work, Terra＋中等 for everyday development, and Sol＋高 for
+high-consequence work. The page remains a read-only projection.
 
 ## Paused P0 platform live acceptance - TASK-051
 
