@@ -1,6 +1,6 @@
 use lattice_foreman_state::{
-    DashboardIndex, ForemanSnapshot, ForemanState, LiveWorktree, SnapshotError, WatchdogFinding,
-    reconstruct, watchdog,
+    Confidence, DashboardIndex, EpistemicReferences, ForemanSnapshot, ForemanState, LiveWorktree,
+    RefreshTrigger, SnapshotError, WatchdogFinding, reconstruct, watchdog,
 };
 
 fn snapshot(
@@ -166,6 +166,98 @@ fn transcript_and_secret_like_fields_are_rejected_without_rejecting_task_identif
             "s𝕜-live-secret",
             "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             1,
+        ),
+        Err(SnapshotError::MalformedReference),
+    );
+}
+
+#[test]
+fn epistemic_references_are_expiring_pointers_not_authoritative_hypotheses() {
+    let references = EpistemicReferences::new(
+        vec!["fact:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()],
+        vec!["hypothesis:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()],
+        Confidence::Unknown,
+        vec!["unknown:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into()],
+        vec!["evidence:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into()],
+        vec!["counterevidence:sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into()],
+        "2026-08-21T00:00:00Z",
+        "2026-08-22T00:00:00Z",
+        RefreshTrigger::Expiry,
+        "decision:sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "probe:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "falsifier:sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    )
+    .unwrap();
+    let snapshot = snapshot(
+        "worker-a",
+        1,
+        ForemanState::Active,
+        "a".repeat(40).as_str(),
+        None,
+    )
+    .with_epistemic(references)
+    .unwrap();
+    assert_eq!(snapshot.state(), ForemanState::Active);
+    assert_eq!(
+        snapshot.epistemic().unwrap().schema(),
+        "lattice.foreman-epistemic/1.0"
+    );
+    assert_eq!(
+        snapshot.epistemic().unwrap().confidence(),
+        Confidence::Unknown
+    );
+    assert_eq!(snapshot.epistemic().unwrap().observed_facts().len(), 1);
+    assert_eq!(snapshot.epistemic().unwrap().hypotheses().len(), 1);
+    assert_eq!(snapshot.epistemic().unwrap().unknowns().len(), 1);
+    assert_eq!(snapshot.epistemic().unwrap().evidence().len(), 1);
+    assert_eq!(snapshot.epistemic().unwrap().counterevidence().len(), 1);
+    assert_eq!(
+        snapshot.epistemic().unwrap().checked_at(),
+        "2026-08-21T00:00:00Z"
+    );
+    assert_eq!(
+        snapshot.epistemic().unwrap().expires_at(),
+        "2026-08-22T00:00:00Z"
+    );
+    assert_eq!(
+        snapshot.epistemic().unwrap().refresh_trigger(),
+        RefreshTrigger::Expiry
+    );
+    assert!(
+        snapshot
+            .epistemic()
+            .unwrap()
+            .decision()
+            .starts_with("decision:sha256:")
+    );
+    assert!(
+        snapshot
+            .epistemic()
+            .unwrap()
+            .probe()
+            .starts_with("probe:sha256:")
+    );
+    assert!(
+        snapshot
+            .epistemic()
+            .unwrap()
+            .falsifier()
+            .starts_with("falsifier:sha256:")
+    );
+    assert_eq!(
+        EpistemicReferences::new(
+            vec![],
+            vec!["hypothesis:the worker is done".into()],
+            Confidence::High,
+            vec![],
+            vec![],
+            vec![],
+            "2026-08-21T00:00:00Z",
+            "2026-08-22T00:00:00Z",
+            RefreshTrigger::NewEvidence,
+            "decision:sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "probe:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "falsifier:sha256:2222222222222222222222222222222222222222222222222222222222222222",
         ),
         Err(SnapshotError::MalformedReference),
     );

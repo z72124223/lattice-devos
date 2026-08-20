@@ -1,7 +1,7 @@
 ---
 module_id: foreman-state
 name: Foreman State
-version: 1.0
+version: 1.1
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-21
@@ -27,6 +27,9 @@ second durable control-plane truth.
 - Snapshot schema/version, bounded worker/thread/task identity references,
   state, dependency/blocker, latest heartbeat/report digest, authority/evidence
   references, and generation ordering.
+- Versioned `lattice.foreman-epistemic/1.0` expiring-reference digests: observed facts, hypotheses, unknowns,
+  evidence/counterevidence, decision/probe/falsifier, confidence, checked/expiry
+  time, and a closed refresh trigger. These are never snapshot state.
 - Pure reconstruction and watchdog classifications over already loaded typed
   snapshots plus independently supplied live Git/worktree observations.
 
@@ -38,6 +41,8 @@ dashboard remains an untrusted read-only projection.
 
 - Construct only schema `lattice.foreman-snapshot/1.0` from bounded typed
   fields and reject secret-like or transcript-bearing inputs.
+- Accept hypotheses only as expiring digest pointers. Their text, promotion,
+  learning, and authority remain outside this module and are deferred to TASK-084.
 - Derive active, blocked, archive-ineligible, stale, duplicate-identity, and
   next-action projections without I/O.
 - Compare dashboard metadata with live Git/worktree observations and report
@@ -54,6 +59,9 @@ dashboard remains an untrusted read-only projection.
    schema/state, stale freshness, and secret/transcript content fail closed.
 5. The watchdog has no filesystem, Git, process, database, network, dashboard,
    MCP, or scheduler dependency.
+6. Epistemic references are opaque, bounded, separately typed inputs; no
+   hypothesis, confidence, or expired record can serialize as authoritative
+   lifecycle state or change it without a later Ledger-authorized decision.
 
 ## Allowed Dependencies
 
@@ -93,4 +101,5 @@ and responsible-user authorization.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 1.1 | 2026-08-21 | ADR-024, SPEC-006, TASK-079 | Add separately typed, expiring epistemic references without lifecycle authority | Foreman-delegated user authority |
 | 1.0 | 2026-08-21 | ADR-024, SPEC-006, TASK-079 | Initial secret-free snapshot and read-only watchdog boundary | Foreman-delegated user authority |

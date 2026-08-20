@@ -2,15 +2,16 @@
 ticket_id: TASK-079
 title: Durable foreman state and takeover acceptance
 spec_id: SPEC-006
-spec_version: 1
+spec_version: 2
 module_id: foreman-state
-constitution_version: 1.0
+constitution_version: 1.1
 status: blocked
 parallel_safe: false
 depends_on:
   - TASK-048
   - TASK-049
   - TASK-078
+  - TASK-084
 branch: feature/task-079-durable-foreman-state
 delivery_remote: origin
 delivery_repository: github.com/z72124223/lattice-devos
@@ -48,7 +49,7 @@ fresh-reader projection, and read-only dashboard watchdog described by SPEC-006.
 
 ## Acceptance criteria
 
-- The five SPEC-006 acceptance criteria are covered by focused lightweight
+- The six SPEC-006 acceptance criteria are covered by focused lightweight
   tests; no live PostgreSQL/TASK-051 gate is started.
 - TASK-048 worker observations and TASK-049 closure remain read-only inputs.
 - Snapshot persistence reaches only the approved Ledger/Postgres/port boundary
@@ -69,6 +70,8 @@ parallel-safe because it changes the shared Ledger/Port/Postgres contracts.
 3. RED/GREEN watchdog stale/old-HEAD/duplicate/all-missed detection.
 4. RED/GREEN dependency-blocked closure refusal and writer/fence substitution
    denial at the Ledger/port boundary.
+5. RED/GREEN expiring epistemic pointer characterization: hypotheses remain
+   non-authoritative and free-form hypothesis persistence rejects.
 
 ## Verification
 
@@ -97,3 +100,4 @@ requires a versioned `FOREMAN_SNAPSHOT_RECORDED` event, fixed control-stream
 identity, typed Port, PostgreSQL row/function/migration, and same-transaction
 Writer Lease/fencing proof. Those changes are deliberately not substituted by
 the new in-memory pure core and require the next bounded implementation ticket.
+Full epistemic learning or promotion is additionally deferred to TASK-084.

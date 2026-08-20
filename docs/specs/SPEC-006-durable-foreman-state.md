@@ -1,13 +1,13 @@
 ---
 spec_id: SPEC-006
 title: Durable foreman state and takeover acceptance
-version: 1
+version: 2
 status: approved
 approved_by: fixed_foreman_delegation
 approved_at_local: 2026-08-21
 modules:
   - module_id: foreman-state
-    constitution_version: 1.0
+    constitution_version: 1.1
   - module_id: task-ledger
     constitution_version: 2.3
   - module_id: postgres-store
@@ -31,6 +31,11 @@ LATTICE authority.
    worker/thread identity, task, branch/worktree reference, HEAD, state,
    dependency/blocker reference, latest heartbeat/report digest,
    authority/evidence pointers, and strictly monotonic generation.
+   It may separately reference versioned `lattice.foreman-epistemic/1.0`
+   expiring epistemic records: observed facts,
+   hypotheses, confidence/unknowns, evidence/counterevidence, checked/expiry
+   time, refresh trigger, and decision/probe/falsifier pointers. These records
+   cannot represent or mutate authoritative snapshot state.
 2. Task Ledger owns the append/replay event and Postgres Store owns its rows in
    the existing transaction/fencing boundary. No cache, dashboard, chat, or
    automation record can substitute for this authority.
@@ -50,6 +55,8 @@ LATTICE authority.
   secret migration, TASK-051 acceptance rerun, or heavy/live PostgreSQL tests.
 - Full chat, prompt, command, environment, credentials, tokens, raw stderr,
   provider output, or arbitrary path persistence.
+- Epistemic learning, promotion, or automatic authority changes; that capability
+  is explicitly deferred to TASK-084.
 
 ## Module impact
 
@@ -68,6 +75,8 @@ authority. The dashboard and delivery finisher remain read-only/non-owning.
   stale/fake/duplicate writer identity rejects.
 - Generation, identity, evidence pointer, task, branch, worktree reference,
   HEAD, state, blocker, and authority substitution change the canonical payload.
+- Hypotheses are bounded expiring digest references with confidence and
+  falsification metadata, never terminal lifecycle truth or free-form text.
 - A dependency-blocked task remains retain/open even with an old terminal
   dashboard outcome.
 
@@ -89,7 +98,10 @@ authority. The dashboard and delivery finisher remain read-only/non-owning.
    generated/dashboard mismatch, stale snapshot, and duplicate identity.
 4. Dependency-blocked snapshots never become archive-ready solely by dashboard
    outcome; TASK-049 retains the window.
-5. No change touches `scripts/export-lattice-engineering-status.mjs` or starts
+5. Focused characterization proves an expiring hypothesis pointer stays
+   separate from lifecycle state and rejects non-pointer/free-form hypothesis
+   content.
+6. No change touches `scripts/export-lattice-engineering-status.mjs` or starts
    TASK-051/live PostgreSQL acceptance.
 
 ## Verification plan

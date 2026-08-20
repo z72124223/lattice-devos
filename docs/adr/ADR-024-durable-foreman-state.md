@@ -21,6 +21,12 @@ heartbeat/report digest, authority/evidence pointers, schema version, and
 monotonic generation. It rejects complete chats, prompts, commands,
 environments, credentials, tokens, raw provider output, and arbitrary paths.
 
+The snapshot may carry separately typed, expiring digest references to observed
+facts, hypotheses, confidence/unknowns, evidence/counterevidence, checked/expiry
+time, a refresh trigger, and decision/probe/falsifier records. They are evidence
+about a decision, never lifecycle truth: they cannot mark work terminal or
+modify state. Learning or promotion is deferred to TASK-084.
+
 Fresh readers reconstruct active/blocked/next-action results only from verified
 Ledger replay. The dashboard watchdog is pure and consumes dashboard metadata
 only as an untrusted index plus separately supplied live Git/worktree evidence.

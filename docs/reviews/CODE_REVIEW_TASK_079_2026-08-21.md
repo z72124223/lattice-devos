@@ -11,7 +11,7 @@ self-review because no independent reviewer is available.
 `crates/lattice-foreman-state/src/lib.rs` provides only pure validation,
 reconstruction, and watchdog classification. It does not append a Task Ledger
 event, require/recheck Writer Lease fencing, expose a typed Port, or persist
-through Postgres Store. SPEC-006 acceptance criteria 2 and 5 therefore remain
+through Postgres Store. SPEC-006 acceptance criterion 2 therefore remains
 unmet; a fresh operating-system process cannot load durable foreman state.
 
 Resolution: intentionally not papered over. TASK-079 remains `blocked` until a
@@ -24,4 +24,6 @@ The completed pure foundation has focused coverage for generation rollback,
 identity collision, dependency-blocked retention, dashboard/Git drift, missed
 heartbeats, and secret/transcript rejection. It accepts normal `task-` branch
 and worktree references while rejecting exact secret-token prefixes and a
-non-ASCII confusable input fail-closed.
+non-ASCII confusable input fail-closed. The added `lattice.foreman-epistemic/1.0`
+references are bounded digest pointers, expose no hypothesis text, and cannot
+modify lifecycle state; learning/promotion remains TASK-084 scope.

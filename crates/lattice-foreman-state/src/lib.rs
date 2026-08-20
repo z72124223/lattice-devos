@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 const SNAPSHOT_SCHEMA: &str = "lattice.foreman-snapshot/1.0";
+const EPISTEMIC_SCHEMA: &str = "lattice.foreman-epistemic/1.0";
 const MAX_REFERENCE_BYTES: usize = 256;
 
 /// Closed worker coordination state.
@@ -11,6 +12,162 @@ pub enum ForemanState {
     Active,
     Blocked,
     Completed,
+}
+
+/// The explicit confidence of a non-authoritative epistemic record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Confidence {
+    Unknown,
+    Low,
+    Medium,
+    High,
+}
+
+/// A closed reason that forces an epistemic record to be checked again.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RefreshTrigger {
+    Expiry,
+    NewEvidence,
+    Counterevidence,
+    DependencyChange,
+}
+
+/// Bounded references for provisional facts and hypotheses. The text of a
+/// hypothesis is deliberately absent: its pointer cannot become task truth.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EpistemicReferences {
+    observed_facts: Vec<String>,
+    hypotheses: Vec<String>,
+    confidence: Confidence,
+    unknowns: Vec<String>,
+    evidence: Vec<String>,
+    counterevidence: Vec<String>,
+    checked_at: String,
+    expires_at: String,
+    refresh_trigger: RefreshTrigger,
+    decision: String,
+    probe: String,
+    falsifier: String,
+}
+
+impl EpistemicReferences {
+    /// # Errors
+    ///
+    /// Rejects non-pointer content, malformed timestamps, and an expiry that
+    /// does not follow its check time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        observed_facts: Vec<String>,
+        hypotheses: Vec<String>,
+        confidence: Confidence,
+        unknowns: Vec<String>,
+        evidence: Vec<String>,
+        counterevidence: Vec<String>,
+        checked_at: impl Into<String>,
+        expires_at: impl Into<String>,
+        refresh_trigger: RefreshTrigger,
+        decision: impl Into<String>,
+        probe: impl Into<String>,
+        falsifier: impl Into<String>,
+    ) -> Result<Self, SnapshotError> {
+        let checked_at = timestamp(checked_at.into())?;
+        let expires_at = timestamp(expires_at.into())?;
+        if expires_at <= checked_at {
+            return Err(SnapshotError::MalformedReference);
+        }
+        Ok(Self {
+            observed_facts: pointer_list(observed_facts, "fact")?,
+            hypotheses: pointer_list(hypotheses, "hypothesis")?,
+            confidence,
+            unknowns: pointer_list(unknowns, "unknown")?,
+            evidence: pointer_list(evidence, "evidence")?,
+            counterevidence: pointer_list(counterevidence, "counterevidence")?,
+            checked_at,
+            expires_at,
+            refresh_trigger,
+            decision: digest_pointer(decision.into(), "decision")?,
+            probe: digest_pointer(probe.into(), "probe")?,
+            falsifier: digest_pointer(falsifier.into(), "falsifier")?,
+        })
+    }
+
+    /// Versioned schema for non-authoritative epistemic pointers only.
+    #[must_use]
+    pub const fn schema(&self) -> &'static str {
+        EPISTEMIC_SCHEMA
+    }
+
+    #[must_use]
+    pub const fn confidence(&self) -> Confidence {
+        self.confidence
+    }
+
+    /// Observed-fact digest pointers; callers must resolve and assess them
+    /// independently rather than treating them as lifecycle state.
+    #[must_use]
+    pub fn observed_facts(&self) -> &[String] {
+        &self.observed_facts
+    }
+
+    /// Hypothesis digest pointers; they remain provisional by contract.
+    #[must_use]
+    pub fn hypotheses(&self) -> &[String] {
+        &self.hypotheses
+    }
+
+    /// Unknowns that must remain explicit in any later decision.
+    #[must_use]
+    pub fn unknowns(&self) -> &[String] {
+        &self.unknowns
+    }
+
+    /// Supporting evidence digest pointers.
+    #[must_use]
+    pub fn evidence(&self) -> &[String] {
+        &self.evidence
+    }
+
+    /// Counterevidence digest pointers.
+    #[must_use]
+    pub fn counterevidence(&self) -> &[String] {
+        &self.counterevidence
+    }
+
+    /// Time at which the epistemic record was checked.
+    #[must_use]
+    pub fn checked_at(&self) -> &str {
+        &self.checked_at
+    }
+
+    /// Time at which the record must be refreshed before reuse.
+    #[must_use]
+    pub fn expires_at(&self) -> &str {
+        &self.expires_at
+    }
+
+    /// Closed condition that requires reassessment.
+    #[must_use]
+    pub const fn refresh_trigger(&self) -> RefreshTrigger {
+        self.refresh_trigger
+    }
+
+    /// Digest pointer to the decision under examination.
+    #[must_use]
+    pub fn decision(&self) -> &str {
+        &self.decision
+    }
+
+    /// Digest pointer to the probe that can reduce the uncertainty.
+    #[must_use]
+    pub fn probe(&self) -> &str {
+        &self.probe
+    }
+
+    /// Digest pointer to the record that can falsify the hypothesis.
+    #[must_use]
+    pub fn falsifier(&self) -> &str {
+        &self.falsifier
+    }
 }
 
 /// Stable rejection and replay failures.
@@ -39,6 +196,7 @@ pub struct ForemanSnapshot {
     heartbeat: String,
     evidence: String,
     generation: u64,
+    epistemic: Option<EpistemicReferences>,
 }
 
 impl ForemanSnapshot {
@@ -94,7 +252,21 @@ impl ForemanSnapshot {
             heartbeat,
             evidence,
             generation,
+            epistemic: None,
         })
+    }
+
+    /// Attaches only expiring, non-authoritative pointers to this snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an epistemic record whose lifetime has already expired.
+    pub fn with_epistemic(mut self, epistemic: EpistemicReferences) -> Result<Self, SnapshotError> {
+        if epistemic.expires_at <= epistemic.checked_at {
+            return Err(SnapshotError::MalformedReference);
+        }
+        self.epistemic = Some(epistemic);
+        Ok(self)
     }
 
     #[must_use]
@@ -135,6 +307,12 @@ impl ForemanSnapshot {
     #[must_use]
     pub const fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Returns provisional pointers only; callers must not use them as state.
+    #[must_use]
+    pub const fn epistemic(&self) -> Option<&EpistemicReferences> {
+        self.epistemic.as_ref()
     }
 }
 
@@ -371,6 +549,36 @@ fn digest_pointer(value: String, prefix: &str) -> Result<String, SnapshotError> 
         } else {
             SnapshotError::MalformedReference
         });
+    }
+    Ok(value)
+}
+
+fn pointer_list(values: Vec<String>, prefix: &str) -> Result<Vec<String>, SnapshotError> {
+    if values.len() > 64 {
+        return Err(SnapshotError::MalformedReference);
+    }
+    values
+        .into_iter()
+        .map(|value| digest_pointer(value, prefix))
+        .collect()
+}
+
+fn timestamp(value: String) -> Result<String, SnapshotError> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+        || !bytes
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !matches!(index, 4 | 7 | 10 | 13 | 16 | 19))
+            .all(|(_, byte)| byte.is_ascii_digit())
+    {
+        return Err(SnapshotError::MalformedReference);
     }
     Ok(value)
 }

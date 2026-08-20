@@ -15,10 +15,12 @@ is deliberately not represented as complete.
   pure fresh-reader projection, and read-only dashboard/Git watchdog.
 - The snapshot has no free-form chat/command/environment/credential/path field;
   exact secret token prefixes and non-ASCII confusables fail closed.
+- Epistemic inputs are typed, expiring digest references; hypotheses cannot
+  become lifecycle state. Learning/promotion remains TASK-084 work.
 
 ## Verification
 
-- `cargo test -p lattice-foreman-state --test foreman_state --offline`: PASS 4/4.
+- `cargo test -p lattice-foreman-state --test foreman_state --offline`: PASS 5/5.
 - `cargo fmt --all -- --check`: PASS.
 - `cargo clippy -p lattice-foreman-state --all-targets --all-features --offline -- -D warnings`: PASS.
 - TASK-048 focused: PASS 9/9; TASK-049 focused: PASS 3/3.

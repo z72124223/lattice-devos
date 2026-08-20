@@ -7,6 +7,11 @@ Git, database, process, scheduler, MCP, or Writer Lease dependency. It is
 compatible with TASK-048 as a read-only identity input and TASK-049 as a
 read-only archive consumer. TASK-078 exporter files are unchanged.
 
+The `lattice.foreman-epistemic/1.0` reference schema is separately typed and
+expiring: it carries opaque digest pointers plus confidence and refresh metadata,
+not lifecycle transitions. This preserves the authority boundary; any learning
+or promotion remains an explicit TASK-084 dependency.
+
 Integration is **BLOCKED**. The existing Task Ledger only accepts a `TASK`
 stream and closed event kinds; `Diagnostic` is non-authoritative and cannot be
 repurposed for the snapshot. The next slice must version and test a fixed
