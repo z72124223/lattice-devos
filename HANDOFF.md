@@ -1,3 +1,67 @@
+# TASK-077 V2 中文分支工作地圖交接 — 2026-08-20
+
+## 狀態
+
+`DONE`：使用者授權的 V2 實作、測試、獨立程式碼／安全審查、架構審查與預設分支整合模擬均已完成。整合狀態維持 `NEEDS_REVIEW`，因為本工作未取得預設分支合併授權，GitHub 也沒有可替代人工決定的強制規則或 CI 關卡。功能分支尚待最後文件提交、非強制推送與推送後重新整理；未建立 PR，未合併、部署、發布或公開託管。
+
+## 目標與範圍
+
+- 目標：把原本偏工程師的卡片頁改成外行人也能閱讀的繁體中文、由上到下、可展開分支樹。
+- 使用者可直接看到每個分支的用途、目前狀態與「能不能從這裡安排新工作」。
+- 合格節點可選取、輸入工作內容，產生一段可複製給 Codex 的中文派工文字；頁面本身不建立 TASK、不建分支、不寫入 Git 或 LATTICE 權威資料。
+- 所有英文分支名稱與 SHA 收進「工程細節（平常不用看）」。
+- 不包含 TASK-051 runtime 重跑、PR、預設分支合併、部署、發布、公開託管、憑證變更或破壞性清理。
+
+## 已完成工作
+
+- 匯出器以即時 Git worktree、遠端 heads、ticket 與證據產生 `lattice.engineering-status/2.0` 快照。
+- Git commit ancestry 形成穩定的樹；支援沒有本機 worktree 的預設分支、重複 detached 名稱與完整圖形驗證。
+- 只有「終態證據完整、工作區乾淨、遠端同步、中文用途已登錄、非 detached/prunable」的節點可派工；任何時間、遠端或 ancestry 證據不可信時皆保守停用。
+- 40 個目前節點皆有人工整理的繁體中文名稱與用途；每個新分支也必須在允許路徑內同步更新用途表，專案檢查會阻止遺漏、錯分支或全英文內容。
+- 靜態頁支援展開／收合、狀態色、選取派工起點、輸入新工作與複製 Codex 指令；動態資料用安全文字 API 呈現。
+- `Open-LATTICE-Engineering-Status.cmd` 會先重新整理再打開 `%LOCALAPPDATA%\LATTICE\engineering-status\index.html`。
+- 工程協議 1.0.3 要求交接完成後及每次授權推送後重新整理此工具。
+
+## 主要變更檔案
+
+| 路徑 | 用途 |
+| --- | --- |
+| `scripts/export-lattice-engineering-status.mjs` | 蒐集即時證據、建立分支樹、保守計算派工資格、驗證後原子輸出 |
+| `tools/engineering-status-dashboard/index.template.html` | 繁體中文可展開樹狀介面與可複製派工文字 |
+| `tools/engineering-status-dashboard/branch-guide.zh-TW.json` | 每個現有分支的中文名稱與白話用途 |
+| `scripts/check-project.mjs` | 強制新分支與用途表、ticket `allowed_paths` 一致 |
+| `test/engineering-status-dashboard.test.js`、`test/project-governance-check.test.js` | UI／快照／Git／治理回歸測試 |
+| SPEC-004、TASK-077、module constitution、engineering protocol | V2 行為、邊界、驗收與更新規則 |
+| review、integration、workflow ledger | 獨立審查與整合證據 |
+
+## 驗證與審查
+
+| 項目 | 結果 |
+| --- | --- |
+| Dashboard focused tests | PASS，19/19 |
+| Governance focused tests | PASS，18/18 |
+| 最終提交後 `npm.cmd run verify` | PASS，75/75 |
+| 獨立程式碼／安全審查 | PASS，No findings；P0=P1=P2=P3=0 |
+| 架構審查 | PASS；無 truth/writer/authority 擴張，無 ADR、migration 或新 dependency |
+| 精確預設分支整合模擬 | PASS；`c88cc9293f3c521974afe7abe1f74f9e449cfaa4` 對 `8828d2b88faece6b399258744eea4ff8d46f0bea` 無衝突，combined verify 75/75 |
+| 模擬清理 | PASS；臨時 worktree／分支已移除 |
+| Live V2 refresh | PASS；40 節點、1 個 root、ancestry available、0 unmapped、3 個當時可派工起點 |
+
+第一次整合模擬在 detached HEAD 專用驗證環境中被分支檢查器保守拒絕；已加入只限「唯讀整合 worktree」及實際 `origin/HEAD` 預設分支的窄化例外，重新獨立審查後於精確 checkpoint 完整通過 75/75。這不放寬一般 TASK worktree 的真實分支檢查。
+
+GitHub 即時檢查顯示此 feature 尚無 PR 與 CI run；repository rulesets 為空，預設分支未受保護。因此「技術上可整合」不等於已取得合併授權，本工作未執行合併。
+
+## 交付收尾與恢復點
+
+- 已驗證實作 checkpoint：`c88cc9293f3c521974afe7abe1f74f9e449cfaa4`。
+- 接續動作：提交本交接文件，跑最後完整驗證，非強制推送 `feature/task-077-engineering-status-dashboard`，證明本機／遠端一致，再依協議重新整理並打開頁面。
+- 若中斷，從上述 feature worktree 執行 `git status --short --branch`，確認只剩預期文件變更後接續。
+- 頁面啟動與 JavaScript 結構已驗證；本次未宣稱做過 screenshot／pixel-level 視覺驗收。
+
+---
+
+# TASK-077 V1 舊版交接紀錄（保留供追溯）
+
 # TASK-077 Local Engineering Status Dashboard Handoff — 2026-08-20
 
 ## Status

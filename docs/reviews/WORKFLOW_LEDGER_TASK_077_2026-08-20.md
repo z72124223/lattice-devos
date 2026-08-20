@@ -25,8 +25,8 @@
 | User acceptance | FAIL_V1 | The user found the card-first page too technical, English-heavy, and unusable for choosing where new work may begin. |
 | Scope | PASS | Direct feedback approves SPEC-004 v2 and constitution 1.1: Chinese expandable Git-ancestry tree, purpose guide, fail-closed eligibility, and copy-only Codex request. |
 | TDD | GREEN | Observable V2 tests moved from unknown `--guide`/schema/tree behavior to 19/19 focused dashboard and 17/17 governance passes. |
-| Focused/full verification | PASS | Dashboard 19/19, governance 17/17, full repository 74/74; final narrow P3 repair passed affected tests, template JavaScript syntax, and diff check. |
+| Focused/full verification | PASS | Dashboard 19/19, governance 18/18, and final committed feature-source full repository verification 75/75 after the narrow P3 repair; template JavaScript syntax and diff check also pass. |
 | Code review | PASS | Independent review found P1=2/P2=4, then P2=2/P3=2, then P3=2; all were repaired and final exact-hunk confirmation reports `No findings`, P0=P1=P2=P3=0. |
 | Architecture review | PASS | Schema 2.0, hierarchy, guide, and copy-only selection preserve the disposable read-only adapter boundary; no ADR/migration/truth/writer expansion. |
-| Integration verification | PENDING | Must run against the current actual GitHub default target after the V2 implementation checkpoint. |
-| Handoff | NOT_READY | V2 still requires exact integration evidence, final handoff, non-force feature push, remote equality, and post-push refresh. |
+| Integration verification | NEEDS_REVIEW | Exact `c88cc92` into actual default `8828d2b`: no conflict, combined 75/75, cleanup PASS. Default merge remains unauthorized and GitHub enforcement is missing. |
+| Handoff | READY_TO_PUSH | V2 implementation/reviews/integration evidence are current. Durable handoff, final docs commit, non-force feature push, remote equality, and post-push refresh are terminal delivery steps. |

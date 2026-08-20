@@ -115,16 +115,19 @@ New V2 evidence replaces it only after the revised acceptance conditions pass.
 - Focused dashboard tests: 19/19 passed, including ancestry failure, snapshot
   freshness, same-commit detached priority, tree reachability, safe output
   replacement, unmapped/dirty/remote-changed denial, and the Windows launcher.
-- Focused governance tests: 17/17 passed, including live current-branch,
+- Focused governance tests: 18/18 passed, including live current-branch,
   `allowed_paths`, Chinese guide entry, decoy-list, mismatch, and English-only
   rejection.
-- Full repository verification: 74/74 passed before the final narrow P3
-  message/cleanup repair; affected tests, template JavaScript syntax, and
-  `git diff --check` passed afterward. A final full rerun is required after
-  completion artifacts are current.
+- Final committed feature-source repository verification: 75/75 passed after
+  the final narrow message/cleanup repair. The exact combined candidate against the
+  actual GitHub default target passed 75/75 with complete temporary-worktree
+  cleanup.
 - Independent final code/security review: `No findings`, P0=P1=P2=P3=0.
 - Architecture review: blocker-free, schema 2.0 is disposable, and no ADR,
   migration, dependency, truth, writer, or authority expansion is required.
 - Live V2 refresh: 40 nodes, one root, Git ancestry available, zero unmapped
   nodes, three currently eligible starting points; TASK-051 remains `FAIL` and
   TASK-077 remained non-eligible until this clean completion is pushed.
+- Verified implementation checkpoint:
+  `c88cc9293f3c521974afe7abe1f74f9e449cfaa4`; integration target:
+  `8828d2b88faece6b399258744eea4ff8d46f0bea`.
