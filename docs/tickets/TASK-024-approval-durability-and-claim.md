@@ -4,7 +4,7 @@ spec_id: SPEC-002
 spec_version: 36
 module_id: approval-verifier
 constitution_version: 1.1
-status: ready
+status: complete
 parallel_safe: false
 depends_on:
   - TASK-015
@@ -66,11 +66,11 @@ No normal repository API may expose a general protected consume command.
 | Pure normal-claim planning | complete | `ConsumeNormalApprovalCommand` and protected-lane denial exist |
 | Protected claim separation | complete | pure owner exposes protected pending state but no general protected consume |
 | Pure replay/checkpoint | complete | public untrusted replay and independent checkpoint comparison exist |
-| Canonical repository bytes and repository trait | missing | no Approval repository trait/error boundary exists at base `845328d` |
-| PostgreSQL currentness/nonce/claim repository | missing | no concrete approval persistence adapter/profile exists |
-| Same-transaction normal effect claim | missing | no durable composition proves nonce/current-head/DB-time/effect atomicity |
+| Canonical repository bytes and repository trait | complete | Approval Verifier 1.1 canonical requests, receipts, snapshots, checkpoints, and component-free repository trait |
+| PostgreSQL currentness/nonce/claim repository | complete | independent v1 extension and typed adapter pass exact install/no-op/live/restart verification |
+| Same-transaction normal effect claim | complete | live serializable claim persists one domain consume and exact immutable effect row atomically |
 | Guardian-only protected claim | blocked | belongs to the later Guardian transaction, not this normal claim adapter |
-| Stable physical profile convention | blocked | wait for TASK-038 stable checkpoint before choosing extension/schema/Cargo/harness paths |
+| Stable physical profile convention | complete | exact embedded SQL/manifest plus ten catalog/ACL profile signatures and namespace closure |
 
 ## Ready gate and dependency order
 
@@ -99,28 +99,28 @@ database crate, Guardian, Policy, Orchestrator or another concrete adapter.
 
 ## Acceptance criteria after the ready gate
 
-- [ ] Approval Verifier exports bounded canonical snapshot/checkpoint bytes and
+- [x] Approval Verifier exports bounded canonical snapshot/checkpoint bytes and
   one component-free repository contract reused by fake/conformance and live
   persistence without changing 1.0 subject/proof/receipt meaning.
-- [ ] A live repository persists challenge, verification, nonce binding,
+- [x] A live repository persists challenge, verification, nonce binding,
   revocation, current head, command receipts and an independently retained
   checkpoint atomically or not at all.
-- [ ] Global nonce uniqueness holds across approvals/projects/lanes and after
+- [x] Global nonce uniqueness holds across approvals/projects/lanes and after
   denial, expiry, claim or revocation; raw nonce/token/key/assertion bytes are
   never persisted, logged or returned.
-- [ ] Normal claim rechecks exact receipt/head, subject, trust lane, status,
+- [x] Normal claim rechecks exact receipt/head, subject, trust lane, status,
   database time, nonce availability, daemon epoch/admission and exact effect or
   transition claim in one transaction.
-- [ ] Two concurrent normal claimers yield one applied claim and one durable
+- [x] Two concurrent normal claimers yield one applied claim and one durable
   terminal denial. Exact retry is byte-identical; changed claim content denies.
-- [ ] A successful normal claim makes later current-head lookup unavailable and
+- [x] A successful normal claim makes later current-head lookup unavailable and
   replays identically after a new connection/process and database restart.
-- [ ] Normal claim rejects every protected approval. Protected state remains
+- [x] Normal claim rejects every protected approval. Protected state remains
   pending and unchanged; only a separately authenticated Guardian composition
   may call its dedicated protected claim transaction.
-- [ ] Commit-response uncertainty returns no approval/effect success and
+- [x] Commit-response uncertainty returns no approval/effect success and
   reconciles only through fresh current-state replay plus exact retry.
-- [ ] The physical layer uses fixed functions and exact verified catalog/ACL
+- [x] The physical layer uses fixed functions and exact verified catalog/ACL
   closure; no direct table DML, arbitrary SQL, DSN, credential, subject
   reconstruction or caller Boolean is exposed.
 
@@ -136,18 +136,31 @@ $source = Get-Content -LiteralPath 'crates/lattice-approval-verifier/src/lib.rs'
 if ($source -notmatch 'pub trait Approval[^\r\n]*Repository') { exit 1 }
 ```
 
-Expected now: non-zero because only the pure/fake owner exists. After the ready
-gate, the first behavioral RED consumes the fixture with two concurrent normal
-claimers and asserts exactly one claim without exposing a protected claim
-surface. Focused compilation must wait for a heavy-load slot and use
-`CARGO_BUILD_JOBS=2`.
+The readiness RED failed before Approval Verifier 1.1 existed. The subsequent
+behavioral RED/GREEN sequence covered canonical repository bytes, live setup,
+normal claim, two concurrent claimers, protected denial, physical corruption,
+and a loopback proxy that discards the server's successful `COMMIT` response.
 
-## Forbidden work
+## Completion evidence on 2026-08-20
+
+- `scripts/test-task024-postgres-approval-verifier.ps1` returned
+  `TASK024_APPROVAL_DURABILITY_ACCEPTANCE=PASS`.
+- The marker-owned PostgreSQL 17.10 fixture completed install, exact no-op,
+  independent process restart, replay, strict catalog/ACL closure, concurrent
+  claim, protected denial, commit-response uncertainty, and contained cleanup.
+- The verified 12-event holder receipt is
+  `target/task019-holder-receipts/560a1967fa6447bf8b34f0b0c2a38479.jsonl`,
+  raw SHA-256
+  `5c829e19580b990212479f3d44458df446a7551c38fd4615a27bbef7283e7d00`.
+- Strict package Clippy, package tests, format, project check, and diff check
+  passed inside the official wrapper. Push, primary merge, deployment, and
+  release were not performed.
+
+## Scope that remained forbidden
 
 - PostgreSQL must not decide subject/proof/nonce/revocation/claim semantics.
 - No normal protected-release consume command and no Guardian authority inside
   the normal adapter.
-- No schema, Postgres Store, root Cargo, harness, `PLANS.md` or `HANDOFF.md`
-  edit before TASK-038's stable checkpoint.
-- No full Cargo, PostgreSQL, WSL, service, push, merge, deploy or release action
-  in this readiness slice.
+- No production/user database, arbitrary target, WSL, push, primary merge,
+  deployment, release, public exposure, credential change, or permanent
+  deletion was used.

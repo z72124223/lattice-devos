@@ -362,6 +362,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-postgres-approval-verifier"
+version = "0.1.0"
+dependencies = [
+ "lattice-approval-verifier",
+ "lattice-contracts",
+ "postgres",
+ "sha2",
+ "time",
+]
+
+[[package]]
 name = "lattice-postgres-codebase-memory"
 version = "0.1.0"
 dependencies = [

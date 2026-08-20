@@ -99,16 +99,16 @@ Codex MCP configuration-table mutation remains a separate exact ticket gate;
 no merge, deployment, release, credential change, or public exposure is
 authorized.
 
-## Current durable Approval repository - TASK-024
+## Current Artifact durability slice - TASK-025
 
-CURRENT TASK-024 - the user explicitly brought the dependency-ordered
+CURRENT TASK-025 - the user explicitly brought the dependency-ordered
 TASK-023 through TASK-025 durability slice forward. TASK-023 is complete at
-local checkpoint `78b4e2e`; TASK-024 now freezes Approval Verifier 1.1 and the
-independent `postgres-approval-verifier` 1.0 boundary, then implements one
-serializable global aggregate repository and atomic normal effect claim using
-database time/admission. Protected approval claim, live OS/Guardian proof,
-push, primary merge, deployment, release, credentials, and public exposure
-remain excluded.
+local checkpoint `78b4e2e`; TASK-024's durable Approval repository and atomic
+normal effect claim now pass their official local acceptance wrapper. TASK-025
+must first freeze the Artifact Store repository plus PostgreSQL metadata and
+disposable owned-root filesystem boundaries before implementation. Product
+roots, recursive deletion, push, primary merge, deployment, release,
+credentials, and public exposure remain excluded.
 
 ## Completed task update — TASK-072
 
@@ -1081,11 +1081,15 @@ actions remain separately protected and require explicit current authorization.
     `MarkSuspect -> Revoke -> Acquire` recovery assertion, exact retry, newer
     fence, marker-owned listener shutdown, contained-root cleanup, and receipt
     closure. No second Writer Lease owner was created.
-  - **ACTIVE TASK-024:** freeze SPEC-002 v36, ADR-024, Approval Verifier 1.1,
-    and Postgres Approval Verifier 1.0, then implement bounded repository
-    bytes, fixed SQL functions, independently retained checkpoint comparison,
-    database-time currentness, global nonce replay, and same-transaction normal
-    effect claim. Protected claim and production authentication remain closed.
+  - TASK-024 is complete: Approval Verifier 1.1 and Postgres Approval Verifier
+    1.0 now provide bounded repository bytes, fixed SQL functions, independent
+    checkpoint and physical-history verification, database-time currentness,
+    global nonce replay, atomic normal effect claim, commit-unknown
+    reconciliation, exact catalog/ACL closure, and restart acceptance.
+  - **ACTIVE TASK-025:** resolve its ready gate by freezing the Artifact Store
+    repository contract, PostgreSQL metadata profile, and disposable
+    owned-root filesystem capability. No implementation begins until the
+    versioned SPEC/ADR/constitutions and exact allowlist are current.
 - [ ] **BLOCKED TASK-032 — executable Codex/PostgreSQL delivery node:** first
   record the approved versioned contract/port/orchestrator/`latticed` boundary,
   then implement it with TDD and prove an official Codex app-server repository

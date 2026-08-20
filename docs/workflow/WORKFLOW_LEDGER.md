@@ -17,12 +17,26 @@
 | Requirements | valid | user directly ordered TASK-023 through TASK-025 local development; protected/external actions remain excluded | user-authoritative + documented |
 | Specification | valid/current | SPEC-002 v36 and ADR-024 freeze global serialization, DB time/admission, normal claim and protected exclusion | documented + project check pass |
 | Module constitution | valid/current | Approval Verifier 1.1 and Postgres Approval Verifier 1.0 boundaries frozen; repository has no dedicated constitution validator | documented + project check pass |
-| Ticket/worktree | ready | TASK-024 dependency and exact allowlist updated on the dedicated branch; exactly one current marker | documented + project check pass |
-| TDD implementation | partial/pass for pure 1.1 boundary | four observable RED/GREEN cycles: repository trait/effect intent, canonical snapshot/checkpoint bytes, DB-observation command binding, and normal-effect/protected-denial planning | machine-executed locally |
-| Focused/full verification | partial/pass for pure crate | Approval package 32 tests including 31 integration tests; strict crate Clippy, format, project and diff checks pass | machine-enforced locally; PostgreSQL pending |
-| Code/architecture review | pending | required after implementation | missing |
-| Live PostgreSQL | pending | marker-owned loopback-only fixture; protected ports excluded | missing |
+| Ticket/worktree | complete | TASK-024 dependency, exact allowlist, and all acceptance boxes closed on the dedicated branch | documented + project check pass |
+| TDD implementation | pass | repository bytes/trait, live setup, claim concurrency, protected denial, corruption, and dropped-COMMIT-response RED/GREEN evidence | machine-executed locally |
+| Focused/full verification | pass | official wrapper passed format, strict package Clippy, package tests, harness self-test, project check, and diff check | machine-enforced locally |
+| Code/architecture review | pass for TASK-024; final branch review pending | separate read-only pass found and repaired one P1 transaction-boundary bypass; re-review found no blocker; reviewer independence not proven because agent delegation is disabled | checklist + regression/live evidence |
+| Live PostgreSQL | pass | PostgreSQL 17.10 install/no-op, exact catalog/ACL, live flows, independent restart/replay, receipt chain and contained cleanup | marker-owned machine evidence |
 | Integration/CI/merge | local-only/not performed | no push, default merge, deployment, or release authorization | external controls intentionally absent |
+
+Official TASK-024 acceptance returned
+`TASK024_APPROVAL_DURABILITY_ACCEPTANCE=PASS`. The 12-event holder receipt is
+`target/task019-holder-receipts/560a1967fa6447bf8b34f0b0c2a38479.jsonl`
+with raw SHA-256
+`5c829e19580b990212479f3d44458df446a7551c38fd4615a27bbef7283e7d00`.
+The architecture pass confirmed the approved one-way dependency
+`postgres-approval-verifier -> approval-verifier`, one global mutable owner,
+append-only v1 migration identity, no protected claim surface, and no new ADR
+or constitution amendment beyond the already accepted v36/ADR-024/1.1/1.0
+set. The review's P1 was that fixed SQL functions did not independently reject
+wrong transaction modes; all five now enforce runtime role plus exact reader
+or writer isolation, with direct read-committed bypass tests and a fresh live
+acceptance rerun. No P0-P3 finding remained in the TASK-024 re-review.
 
 ---
 

@@ -1,12 +1,12 @@
 use lattice_approval_verifier::{
     ApprovalChallenge, ApprovalCommand, ApprovalCommandOutcome, ApprovalCommandReceipt,
     ApprovalDenial, ApprovalEffectClaimIntent, ApprovalIssueRequest, ApprovalNormalClaimExecution,
-    ApprovalNormalClaimRequest, ApprovalPhase, ApprovalRepository, ApprovalRepositoryCommand,
-    ApprovalVerifierCheckpoint, ApprovalVerifierError, ConsumeNormalApprovalCommand,
-    FakeApprovalVerifier, FakeNormalSigner, FakeProtectedSigner, IssueApprovalCommand,
-    RevokeApprovalCommand, SecretMaterial, UntrustedApprovalSnapshot, VerifyApprovalCommand,
-    apply_normal_claim_plan, nonce_commitment, plan_normal_claim, verify_snapshot,
-    verify_snapshot_against_checkpoint,
+    ApprovalNormalClaimReceipt, ApprovalNormalClaimRequest, ApprovalPhase, ApprovalRepository,
+    ApprovalRepositoryCommand, ApprovalVerifierCheckpoint, ApprovalVerifierError,
+    ConsumeNormalApprovalCommand, FakeApprovalVerifier, FakeNormalSigner, FakeProtectedSigner,
+    IssueApprovalCommand, RevokeApprovalCommand, SecretMaterial, UntrustedApprovalSnapshot,
+    VerifyApprovalCommand, apply_normal_claim_plan, nonce_commitment, plan_normal_claim,
+    verify_snapshot, verify_snapshot_against_checkpoint,
 };
 use lattice_cjson::CanonicalValue;
 use lattice_contracts::{
@@ -45,6 +45,11 @@ fn repository_contract_binds_exact_normal_effect_intent_without_component_depend
         .canonical_bytes()
         .expect("canonical repository intent");
     assert!(!bytes.is_empty());
+    assert_eq!(
+        ApprovalNormalClaimRequest::from_canonical_bytes(&bytes)
+            .expect("strict normal claim intent parse"),
+        request
+    );
     assert_eq!(request.command_id(), "claim-effect-1");
     assert_eq!(request.effect().effect_id(), "effect-1");
 }
@@ -144,6 +149,37 @@ fn normal_effect_claim_plans_one_domain_consume_and_protected_lane_has_no_effect
     assert_eq!(
         claimed.approval_receipt().outcome,
         ApprovalCommandOutcome::Applied
+    );
+    assert!(
+        !claimed
+            .approval_receipt()
+            .request
+            .canonical_bytes()
+            .expect("command bytes")
+            .is_empty()
+    );
+    assert!(
+        !claimed
+            .approval_receipt()
+            .canonical_bytes()
+            .expect("terminal receipt bytes")
+            .is_empty()
+    );
+    let claimed_bytes = claimed.canonical_bytes().expect("effect receipt bytes");
+    let rebuilt = ApprovalNormalClaimReceipt::from_verified_parts(
+        claimed.request().clone(),
+        claimed.approval_receipt().clone(),
+        claimed.observed_at().to_owned(),
+        claimed.daemon_instance_id().to_owned(),
+        claimed.daemon_epoch(),
+        claimed.admission(),
+        claimed.claim_digest().clone(),
+    )
+    .expect("verified durable receipt reconstruction");
+    assert_eq!(rebuilt, *claimed);
+    assert_eq!(
+        rebuilt.canonical_bytes().expect("rebuilt bytes"),
+        claimed_bytes
     );
     let normal_after =
         apply_normal_claim_plan(&normal_aggregate, plan).expect("apply normal claim plan");

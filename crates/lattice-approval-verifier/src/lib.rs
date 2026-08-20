@@ -973,7 +973,8 @@ pub enum ApprovalCommand {
 }
 
 impl ApprovalCommand {
-    fn command_id(&self) -> &str {
+    #[must_use]
+    pub fn command_id(&self) -> &str {
         match self {
             Self::Issue(command) => &command.command_id,
             Self::Verify(command) => &command.command_id,
@@ -982,7 +983,8 @@ impl ApprovalCommand {
         }
     }
 
-    fn approval_id(&self) -> &str {
+    #[must_use]
+    pub fn approval_id(&self) -> &str {
         match self {
             Self::Issue(command) => command.identity.approval_id(),
             Self::Verify(command) => &command.approval_id,
@@ -998,6 +1000,16 @@ impl ApprovalCommand {
             Self::ConsumeNormal(command) => Some(&command.expected_head),
             Self::Revoke(command) => Some(&command.expected_head),
         }
+    }
+
+    /// Exports the exact bounded pure command bytes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid commands, canonicalization failure, or oversized bytes.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ApprovalVerifierError> {
+        validate_command(self)?;
+        bounded_repository_bytes(&command_value(self))
     }
 }
 
@@ -1272,6 +1284,56 @@ impl ApprovalNormalClaimRequest {
         }
         Ok(bytes)
     }
+
+    /// Strictly reconstructs one caller-owned normal claim intent.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, malformed, non-canonical, unknown, or
+    /// internally inconsistent bytes.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, ApprovalVerifierError> {
+        if bytes.is_empty() || bytes.len() > MAX_REPOSITORY_INTENT_BYTES {
+            return Err(ApprovalVerifierError::Canonical);
+        }
+        let text = std::str::from_utf8(bytes).map_err(|_| ApprovalVerifierError::Canonical)?;
+        let value = CanonicalJsonParser::new(text)
+            .parse()
+            .map_err(|()| ApprovalVerifierError::Canonical)?;
+        if canonicalize(&value)
+            .map_err(|_| ApprovalVerifierError::Canonical)?
+            .as_slice()
+            != bytes
+        {
+            return Err(ApprovalVerifierError::Canonical);
+        }
+        let object = RawObject::exact(
+            &value,
+            &[
+                "version",
+                "kind",
+                "command_id",
+                "approval_id",
+                "expected_head",
+                "effect",
+            ],
+        )?;
+        if raw_string(object.value("version")?)? != SCHEMA_VERSION
+            || raw_string(object.value("kind")?)? != "NORMAL_EFFECT_CLAIM"
+        {
+            return Err(ApprovalVerifierError::Canonical);
+        }
+        let effect = RawObject::exact(object.value("effect")?, &["kind", "id", "digest"])?;
+        Self::new(
+            raw_string(object.value("command_id")?)?,
+            raw_string(object.value("approval_id")?)?,
+            parse_state_head(object.value("expected_head")?)?,
+            ApprovalEffectClaimIntent::new(
+                raw_string(effect.value("kind")?)?,
+                raw_string(effect.value("id")?)?,
+                parse_digest(effect.value("digest")?)?,
+            )?,
+        )
+    }
 }
 
 /// Immutable repository receipt binding one applied normal consume to one
@@ -1332,6 +1394,33 @@ impl ApprovalNormalClaimReceipt {
             receipt_digest,
         })
     }
+
+    /// Reconstructs a durable effect receipt only from replay-verified parts.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any disagreement between the request, command receipt,
+    /// repository observation, daemon admission, or derived claim digest.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_verified_parts(
+        request: ApprovalNormalClaimRequest,
+        approval_receipt: ApprovalCommandReceipt,
+        observed_at: String,
+        daemon_instance_id: String,
+        daemon_epoch: DaemonEpoch,
+        admission: RuntimeAdmissionMode,
+        claim_digest: ContentDigest,
+    ) -> Result<Self, ApprovalVerifierError> {
+        Self::new(
+            request,
+            approval_receipt,
+            observed_at,
+            daemon_instance_id,
+            daemon_epoch,
+            admission,
+            claim_digest,
+        )
+    }
 }
 
 impl ApprovalNormalClaimReceipt {
@@ -1373,6 +1462,33 @@ impl ApprovalNormalClaimReceipt {
     #[must_use]
     pub const fn receipt_digest(&self) -> &ContentDigest {
         &self.receipt_digest
+    }
+
+    /// Exports the exact bounded normal effect-claim receipt bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns canonicalization or bounded-size failure.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ApprovalVerifierError> {
+        bounded_repository_bytes(&CanonicalValue::Object(vec![
+            ("version".to_owned(), string(SCHEMA_VERSION)),
+            (
+                "receipt".to_owned(),
+                normal_effect_receipt_subject_value(
+                    &self.request,
+                    &self.approval_receipt,
+                    &self.observed_at,
+                    &self.daemon_instance_id,
+                    self.daemon_epoch,
+                    self.admission,
+                    &self.claim_digest,
+                ),
+            ),
+            (
+                "receipt_digest".to_owned(),
+                string(self.receipt_digest.as_str()),
+            ),
+        ]))
     }
 }
 
@@ -1467,6 +1583,18 @@ pub struct ApprovalCommandReceipt {
     pub authority_receipt: Option<ApprovalAuthorityReceipt>,
     pub revocation: Option<ApprovalRevocation>,
     pub receipt_digest: ContentDigest,
+}
+
+impl ApprovalCommandReceipt {
+    /// Exports the exact bounded terminal receipt bytes used by durable
+    /// repositories and physical-history closure.
+    ///
+    /// # Errors
+    ///
+    /// Returns canonicalization or bounded-size failure.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ApprovalVerifierError> {
+        bounded_repository_bytes(&terminal_receipt_value(self))
+    }
 }
 
 /// Complete raw persistence payload. No nested field is trusted until replay.
@@ -4825,22 +4953,53 @@ fn normal_effect_receipt_digest(
 ) -> Result<ContentDigest, ApprovalVerifierError> {
     digest(
         "lattice-approval-normal-effect-claim-receipt",
-        CanonicalValue::Object(vec![
-            ("request".to_owned(), normal_claim_request_value(request)),
-            (
-                "approval_receipt".to_owned(),
-                terminal_receipt_value(approval_receipt),
-            ),
-            ("observed_at".to_owned(), string(observed_at)),
-            ("daemon_instance_id".to_owned(), string(daemon_instance_id)),
-            (
-                "daemon_epoch".to_owned(),
-                string(daemon_epoch.get().to_string()),
-            ),
-            ("admission".to_owned(), string(admission.as_str())),
-            ("claim_digest".to_owned(), string(claim_digest.as_str())),
-        ]),
+        normal_effect_receipt_subject_value(
+            request,
+            approval_receipt,
+            observed_at,
+            daemon_instance_id,
+            daemon_epoch,
+            admission,
+            claim_digest,
+        ),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normal_effect_receipt_subject_value(
+    request: &ApprovalNormalClaimRequest,
+    approval_receipt: &ApprovalCommandReceipt,
+    observed_at: &str,
+    daemon_instance_id: &str,
+    daemon_epoch: DaemonEpoch,
+    admission: RuntimeAdmissionMode,
+    claim_digest: &ContentDigest,
+) -> CanonicalValue {
+    CanonicalValue::Object(vec![
+        ("request".to_owned(), normal_claim_request_value(request)),
+        (
+            "approval_receipt".to_owned(),
+            terminal_receipt_value(approval_receipt),
+        ),
+        ("observed_at".to_owned(), string(observed_at)),
+        ("daemon_instance_id".to_owned(), string(daemon_instance_id)),
+        (
+            "daemon_epoch".to_owned(),
+            string(daemon_epoch.get().to_string()),
+        ),
+        ("admission".to_owned(), string(admission.as_str())),
+        ("claim_digest".to_owned(), string(claim_digest.as_str())),
+    ])
+}
+
+fn bounded_repository_bytes(value: &CanonicalValue) -> Result<Vec<u8>, ApprovalVerifierError> {
+    let bytes = canonicalize(value)
+        .map_err(|_| ApprovalVerifierError::Canonical)?
+        .into_vec();
+    if bytes.len() > MAX_REPOSITORY_INTENT_BYTES {
+        return Err(ApprovalVerifierError::Canonical);
+    }
+    Ok(bytes)
 }
 
 #[allow(clippy::needless_pass_by_value)]
