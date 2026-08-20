@@ -35,6 +35,12 @@ completion_receipt_raw_sha256: b2ba6aa3d5f5c6b145de146bbe5b59696322ab3713dabb07a
 completion_receipt_final_hmac_sha256: e953e32d4cc7ab8d9509e18b5bb66c98f449b027d0d25b301dd8038e8da7cc04
 completion_receipt_event_count: 10
 completion_review_state: clear_p0_p1_p2_p3
+terminal_evidence_model: retrospective_closure_chain_v1
+implementation_candidate_commit: 8e5ba40d38b781afff7028841bd981c8dd2b9721
+implementation_candidate_tree: b4478be2801814ffc630cbf113b0a4ffa3a1b591
+implementation_candidate_ticket_state: in_progress_at_candidate_commit
+terminal_closure_source_commit: 2027a8c30218cadedc897f6ef5f19d78505db49f
+terminal_closure_source_path: docs/tickets/TASK-050-autonomy-receipt-ledger-replay.md
 authorized_path_reconciliation:
   - path: crates/lattice-postgres-store/src/migrations.rs
     source_thread_id: 019ff693-b2c3-7a81-9704-49f1e6e3f2d1
