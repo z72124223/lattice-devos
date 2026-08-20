@@ -1,0 +1,16 @@
+schema=lattice.workflow-replay/1.0
+incident=TASK-080
+source_report_sha256=959d907bba7aef8423ca7b941a81a232bde662d615d455c41704cf0627f684f9
+source_dashboard_sha256=cd3984d588b6657a66b597bc74e27e40efaaf4d360a2bb06350df203af2153ed
+dashboard_complete=12
+dashboard_unknown=23
+dashboard_in_progress=3
+dashboard_partial=1
+dashboard_fail=1
+dashboard_blocked=1
+ticket_dashboard_contradictions=TASK-050,TASK-075
+ready_low_cost_candidates=TASK-081,TASK-082,TASK-083
+wrong_path_tool_failure=true
+stale_task079_conflict_report=true
+corrected_task079_head=47bf0a5f2d8cd4bc8c41ad499eba372ac0b17e40
+quiet_is_completion_evidence=false

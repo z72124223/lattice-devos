@@ -1,0 +1,8 @@
+schema=lattice.workflow-replay/1.0
+incident=FOREMAN-ZERO-WORK-MISJUDGMENT-2026-08-21
+source_thread=01a02049-9ebc-7501-b8a4-1a9326314f91
+source_turn=01a0209d-b208-7ec2-8551-1e1c76d884fb
+rejected_decision=ALL_WAITING_OR_ZERO_WORK
+counterevidence=UNKNOWN_NOT_UNAVAILABLE,IDLE_NOT_NO_WORK,UNOPENED_BACKLOG,STALE_DASHBOARD,TICKET_PLANS_GIT_CONTRADICTION,LOW_COST_GPT56_WORK
+required_action=RECONCILE_AND_DISPATCH
+quiet_is_completion_evidence=false
