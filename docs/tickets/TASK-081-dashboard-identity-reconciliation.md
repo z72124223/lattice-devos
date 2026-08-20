@@ -1,6 +1,8 @@
 ---
 ticket_id: TASK-081
 title: Engineering status identity reconciliation
+display_name_zh_tw: 任務 081：工程身分對帳
+display_purpose_zh_tw: 讓歷史分支仍能顯示已驗證成果，同時把過期、重複或依賴未解除的交付證據安全地擋在派工與封存之外。
 spec_id: SPEC-004
 spec_version: 4
 module_id: engineering-status-dashboard
