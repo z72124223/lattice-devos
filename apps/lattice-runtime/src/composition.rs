@@ -2717,7 +2717,7 @@ fn run_delivery_graph_memory(
     let graph_root = fixture.root.join(GRAPH_MEMORY_ROOT_NAME);
     let bridge = SnapshotBridge::new();
     let git_executable_sha256 =
-        graph_executable_sha256(&config.git_executable).map_err(|error| {
+        graph_executable_sha256(&config.git_executable).inspect_err(|_error| {
             eprintln!(
                 "{}",
                 json!({
@@ -2726,7 +2726,6 @@ fn run_delivery_graph_memory(
                     "stage": "git_executable_sha256"
                 })
             );
-            error
         })?;
     let snapshot_config = GitSnapshotConfig::new(
         config.git_executable.clone(),
