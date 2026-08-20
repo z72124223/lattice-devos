@@ -1,3 +1,124 @@
+# TASK-025 Durable Artifact Repository Handoff - 2026-08-21
+
+## Status
+
+`DONE` for TASK-025's bounded local implementation, adversarial filesystem
+tests, and marker-owned PostgreSQL 17.10 acceptance. Push, primary/default
+branch merge, deployment, release, credential changes, public exposure and the
+future external-owner currentness composition were not authorized or performed.
+
+## Objective And Scope
+
+- Objective: complete the TASK-023 through TASK-025 durability slice by adding
+  an Artifact Store 1.1 semantic repository boundary, a metadata-only durable
+  PostgreSQL adapter, and a disposable path-free owned-root byte adapter.
+- In scope: SPEC-002 v37, ADR-025, three module constitutions, the TASK-025
+  allowlist, canonical repository bytes and successor verification, exact
+  PostgreSQL catalog/ACL/CAS/restart behavior, and bounded owned-root
+  stage/publish/read/quarantine/unlink behavior.
+- Out of scope: live Registry/effect/daemon/capability-owner currentness and
+  publication composition, registered product-root provisioning, recursive
+  deletion, external CI, push, merge, deployment and release.
+
+## Completed Work
+
+- `lattice-artifact-store` now exposes bounded canonical snapshots, independent
+  checkpoint bytes, exact vacant initialization, and exact one-command
+  successor validation through one component-free repository trait.
+- `lattice-postgres-artifact-store` provides repeatable-read verified loads and
+  serializable compare-and-swap, exact PostgreSQL 17.10 catalog/function/ACL
+  closure, runtime-role/target guards, physical transition-chain checks,
+  corruption rejection and restart replay.
+- `lattice-artifact-owned-root` exposes no caller path after admission. It
+  verifies root/marker physical identity, product-root separation, junction,
+  hardlink, alternate-data-stream and unsafe-file denial; bounds and hashes
+  streamed bytes; publishes without clobber; verifies concurrent winners;
+  quarantines opaque staged files; and unlinks one claim-bound exact object.
+- TASK-025, PLANS and the workflow ledger now record AC-47 completion while
+  preserving the explicit external-owner currentness boundary.
+
+## Files Changed
+
+| Paths | Why | Verification |
+|---|---|---|
+| `crates/lattice-artifact-store/{src,tests}` | pure durable repository bytes and exact successor contract | focused vectors plus official wrapper |
+| `crates/lattice-postgres-artifact-store/**`, `db/extensions/artifact-store/v1.sql` | durable metadata adapter and exact PostgreSQL profile | catalog/ACL/corruption/concurrency/restart live harness |
+| `crates/lattice-artifact-owned-root/**` | disposable byte-only owned-root adapter | nine current-Windows adversarial/lifecycle tests |
+| `Cargo.toml`, `Cargo.lock`, `scripts/run-task019-postgres.ps1`, `scripts/test-task025-artifact-durability.ps1` | workspace wiring and bounded acceptance runner | format, strict Clippy, package tests, holder self-test and live wrapper |
+| SPEC-002 v37, ADR-025, three constitutions, TASK-025, PLANS, workflow ledger, this handoff | versioned ownership, scope and evidence | `npm.cmd run check`, allowlist inspection and `git diff --check` |
+
+## Workflow Ledger
+
+| Stage | Status | Evidence / artifact |
+|---|---|---|
+| Repository, requirements and dependencies | PASS | dedicated branch; TASK-023 `78b4e2e`; TASK-024 `13d0194` |
+| Specification and module ownership | PASS | SPEC-002 v37, ADR-025, Artifact Store 1.1, Postgres Artifact Store 1.0, Artifact Owned Root 1.0 |
+| TDD implementation | PASS | initial/successor, catalog drift, corruption, concurrency, junction/link/ADS, publish/read/unlink matrices |
+| Focused and live verification | PASS | official seven-gate wrapper and 12-event holder receipt |
+| Code/security and architecture review | PASS for local self-review | no unresolved P0-P3 finding; reviewer independence is not claimed |
+| External integration | NOT PERFORMED | no push, remote CI, merge, deployment, release or public exposure authorization |
+
+## Verification
+
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+  scripts/test-task025-artifact-durability.ps1`: exit `0`,
+  `TASK025_ARTIFACT_DURABILITY_ACCEPTANCE=PASS`.
+- The wrapper passed `cargo fmt`, strict Clippy for all three affected packages,
+  all-target package tests, TASK-019 holder self-test, marker-owned PostgreSQL
+  17.10 live acceptance, project governance check and final diff check.
+- Holder receipt:
+  `target/task019-holder-receipts/6fb51317e0854149b6c10dbef3b09a68.jsonl`;
+  12 events; raw SHA-256
+  `acc984195098c204e4a40e040eb00da9df6d6c6dd7d58ab8946cce850b659d44`.
+- After documentation-only completion updates: `cargo fmt --all -- --check`,
+  `npm.cmd run check` (`check=ok`, 533 files, 28 constitutions, 50 tickets,
+  one current marker), and `git diff --check` all returned exit `0`.
+- Runtime/visual classification: PostgreSQL/filesystem behavior was
+  machine-executed locally; no visual acceptance was applicable; external CI
+  was not run.
+
+## Review And Integration
+
+- Final local code/security and architecture self-review found no unresolved
+  P0, P1, P2 or P3 issue. The review repaired exact successor, catalog/ACL,
+  physical chain, marker/ADS/junction, publish race, identity and post-effect
+  ambiguity gaps before the official pass. No independent reviewer was used.
+- Branch: `feature/task-023-025-durable-repositories`; dependency HEAD before
+  the TASK-025 commit was `13d0194b6e55fdcd522734962046e0ff1755657d`.
+  The branch has no configured upstream.
+- Merge status: local candidate only. Default/primary merge and every external
+  publication action remain separately unauthorized.
+
+## Risks And Open Decisions
+
+- The current database has no durable capability-owner repository. Therefore
+  live Registry/effect/daemon/capability currentness and publication must be
+  composed later in the same authoritative transaction; no Boolean substitute
+  or current live-authority claim exists in TASK-025.
+- Seven exact `lattice-task025-*` directories from earlier failed/interrupted
+  test iterations remain under the user's temporary directory. They were not
+  deleted because permanent cleanup was not required for acceptance and no
+  deletion was authorized in this handoff.
+- External CI and integration against the repository's later long-lived
+  branches remain unverified.
+
+## Next Action
+
+1. With separate authorization, choose and verify the intended integration
+   target, reconcile its current divergence, run the combined required checks,
+   and only then merge or publish the local TASK-025 candidate.
+
+## Restart Context
+
+- Current branch: `feature/task-023-025-durable-repositories`.
+- Relevant plan: the single `CURRENT TASK-025` marker records local completion
+  while awaiting separately authorized integration.
+- First commands/files: `git status --short --branch`, `git log -1 --oneline`,
+  `docs/tickets/TASK-025-artifact-repository-owned-root-filesystem.md`, and
+  `docs/workflow/WORKFLOW_LEDGER.md`.
+
+---
+
 # TASK-050 Autonomy Receipt Closure Handoff - 2026-08-15
 
 ## Status

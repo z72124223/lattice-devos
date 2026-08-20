@@ -18,6 +18,7 @@ param(
     [switch]$RunTask075MemoryGate,
     [switch]$RunTask076WriterLeaseGate,
     [switch]$RunTask024ApprovalGate,
+    [switch]$RunTask025ArtifactGate,
     [ValidateSet('bridge', 'current')]
     [string]$MeasureTask076WriterCatalog,
     [switch]$MeasureTask075Catalog,
@@ -63,6 +64,19 @@ if ($RunTask024ApprovalGate) {
     }
     # Reuse the already-proved G5/Memory-v3/Writer-v2 fixture construction;
     # the Approval adapter remains independently catalogued and depended upon.
+    $RunTask076WriterLeaseGate = $true
+}
+if ($RunTask025ArtifactGate) {
+    if (
+        $RunTask024ApprovalGate -or $RunTask076WriterLeaseGate -or $MemoryOnly -or
+        $StoreOnly -or $RunTask075MemoryGate -or $task075CatalogMeasurementRequested -or
+        $RunLatticeDeliveryHook -or $RunFullChainAcceptanceHook -or
+        $RunTask038AcceptanceHook -or $RunTask038TunnelHook -or
+        $RunTask068HermesReplayGate
+    ) {
+        throw 'TASK025_ARTIFACT_GATE_PROFILE_CONFLICT'
+    }
+    # Reuse only the proven G5/Memory-v3/Writer-v2 fixture construction.
     $RunTask076WriterLeaseGate = $true
 }
 if ($MeasureTask075Catalog -and $MeasureTask075CurrentCatalog) {
@@ -221,6 +235,14 @@ $environmentNames = @(
     'LATTICE_APPROVAL_DATABASE_IDENTITY_SHA256',
     'LATTICE_APPROVAL_GLOBAL_MANIFEST_SHA256',
     'LATTICE_APPROVAL_MEMORY_MANIFEST_SHA256',
+    'LATTICE_TASK025_ARTIFACT_LIVE',
+    'LATTICE_TASK025_ARTIFACT_PHASE',
+    'LATTICE_ARTIFACT_MIGRATOR_URL',
+    'LATTICE_ARTIFACT_RUNTIME_URL',
+    'LATTICE_ARTIFACT_DATABASE_NAME',
+    'LATTICE_ARTIFACT_DATABASE_IDENTITY_SHA256',
+    'LATTICE_ARTIFACT_GLOBAL_MANIFEST_SHA256',
+    'LATTICE_ARTIFACT_MEMORY_MANIFEST_SHA256',
     'LATTICE_TASK068_EXPECTED_RECEIPT_SHA256',
     'LATTICE_TASK038_POSTGRES_PASSWORD',
     'LATTICE_WRITER_LEASE_MIGRATOR_URL',
@@ -461,7 +483,7 @@ function Get-Task019AllowlistedDiagnosticTokens {
     foreach ($item in $Output) {
         foreach ($match in [regex]::Matches(
             [string]$item,
-            '(?<![A-Z0-9_])(?:TASK019|TASK024|TASK075|TASK076|STORE|POSTGRES_TASK_LEDGER|POSTGRES_PROJECT_REGISTRY|MEMORY|WRITER_LEASE|OPENCLAW)_[A-Z0-9_]{1,63}(?![A-Z0-9_])'
+            '(?<![A-Z0-9_])(?:TASK019|TASK024|TASK025|TASK075|TASK076|STORE|POSTGRES_TASK_LEDGER|POSTGRES_PROJECT_REGISTRY|MEMORY|WRITER_LEASE|OPENCLAW)_[A-Z0-9_]{1,63}(?![A-Z0-9_])'
         )) {
             if ($seen.Add($match.Value)) {
                 $tokens += $match.Value
@@ -1136,21 +1158,24 @@ function Invoke-Task076CargoLivePhase {
             'lattice-postgres-store',
             'lattice-postgres-codebase-memory',
             'lattice-postgres-writer-lease',
-            'lattice-postgres-approval-verifier'
+            'lattice-postgres-approval-verifier',
+            'lattice-postgres-artifact-store'
         )][string]$Package,
         [Parameter(Mandatory = $true)][ValidateSet(
             'marker_owned_postgres_17_foundation',
             'exact_memory_extension_install_and_restart_profile',
             'live_postgres_acquire_restarts_and_replays_authority_when_provisioned',
-            'exact_approval_extension_install_and_restart_profile'
+            'exact_approval_extension_install_and_restart_profile',
+            'exact_artifact_extension_install_and_restart_profile'
         )][string]$TestName,
         [Parameter(Mandatory = $true)][ValidateSet(
             'LATTICE_TASK019_PHASE',
             'LATTICE_TASK076_WRITER_PHASE',
-            'LATTICE_TASK024_APPROVAL_PHASE'
+            'LATTICE_TASK024_APPROVAL_PHASE',
+            'LATTICE_TASK025_ARTIFACT_PHASE'
         )][string]$PhaseEnvironmentName,
         [Parameter(Mandatory = $true)][ValidatePattern('^[a-z0-9_]{1,48}$')][string]$Phase,
-        [Parameter(Mandatory = $true)][ValidatePattern('^TASK(?:024|076)_[A-Z0-9_]{1,63}$')][string]$ExpectedToken
+        [Parameter(Mandatory = $true)][ValidatePattern('^TASK(?:024|025|076)_[A-Z0-9_]{1,63}$')][string]$ExpectedToken
     )
 
     $originalPhase = [Environment]::GetEnvironmentVariable($PhaseEnvironmentName, 'Process')
@@ -1390,6 +1415,23 @@ function Set-Task024ApprovalEnvironment {
     }).GetEnumerator()) {
         if ([string]::IsNullOrWhiteSpace([string]$entry.Value)) {
             throw ('TASK024_APPROVAL_TARGET_ENVIRONMENT_REJECTED_' + [string]$entry.Key)
+        }
+        [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+    }
+}
+
+function Set-Task025ArtifactEnvironment {
+    foreach ($entry in ([ordered]@{
+        LATTICE_TASK025_ARTIFACT_LIVE = '1'
+        LATTICE_ARTIFACT_MIGRATOR_URL = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_MIGRATOR_URL', 'Process')
+        LATTICE_ARTIFACT_RUNTIME_URL = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_RUNTIME_URL', 'Process')
+        LATTICE_ARTIFACT_DATABASE_NAME = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_DATABASE_NAME', 'Process')
+        LATTICE_ARTIFACT_DATABASE_IDENTITY_SHA256 = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_DATABASE_IDENTITY_SHA256', 'Process')
+        LATTICE_ARTIFACT_GLOBAL_MANIFEST_SHA256 = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_GLOBAL_MANIFEST_SHA256', 'Process')
+        LATTICE_ARTIFACT_MEMORY_MANIFEST_SHA256 = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_MEMORY_MANIFEST_SHA256', 'Process')
+    }).GetEnumerator()) {
+        if ([string]::IsNullOrWhiteSpace([string]$entry.Value)) {
+            throw ('TASK025_ARTIFACT_TARGET_ENVIRONMENT_REJECTED_' + [string]$entry.Key)
         }
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
     }
@@ -3267,6 +3309,7 @@ function Add-Task019HolderEvent {
             'HOLDER_STOPPED', 'CATALOG_SIGNATURES_MEASURED', 'CATALOG_SIGNATURES_PARTIAL',
             'CATALOG_DIAGNOSTIC_FAILED', 'LIVE_GATE_FAILED', 'TASK076_WRITER_V2_VERIFIED',
             'TASK024_APPROVAL_VERIFIED',
+            'TASK025_ARTIFACT_VERIFIED',
             'CLEANUP_REQUESTED',
             'CLEANUP_COMPLETED', 'RECEIPT_CLOSED'
         )][string]$EventType,
@@ -3911,6 +3954,93 @@ try {
         })
         $restartedPostgresIdentity = $task024PostgresIdentity
     }
+    if ($RunTask025ArtifactGate) {
+        Set-Task076WriterTargetEnvironment -Psql $psql -Port $port -Password $oneTimePassword `
+            -RunId $runId -ExpectedProfile 'G5M3'
+        Set-Task076RuntimeAdmission -Psql $psql -Port $port -Password $oneTimePassword `
+            -RunId $runId -Mode 'ACTIVE'
+        Set-Task025ArtifactEnvironment
+        $null = Invoke-Task076CargoLivePhase `
+            -Cargo $cargoCommand.Source `
+            -RepositoryRoot $repositoryRoot `
+            -Package 'lattice-postgres-artifact-store' `
+            -TestName 'exact_artifact_extension_install_and_restart_profile' `
+            -PhaseEnvironmentName 'LATTICE_TASK025_ARTIFACT_PHASE' `
+            -Phase 'initial' `
+            -ExpectedToken 'TASK025_ARTIFACT_EXTENSION_INITIAL_PASS'
+
+        if (-not (Stop-TestCluster -PgCtl $pgCtl -DataDirectory $dataDirectory)) {
+            throw 'TASK025_ARTIFACT_POSTGRES_STOP_REJECTED'
+        }
+        $clusterStarted = $false
+        if (@(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue).Count -ne 0) {
+            throw 'TASK025_ARTIFACT_POSTGRES_LISTENER_STILL_PRESENT'
+        }
+        Remove-HarnessOutputFiles -Root $clusterRoot
+        Remove-VerifiedSafeServerLog -LogPath $serverLog -RepositoryRoot $repositoryRoot `
+            -OneTimePassword $oneTimePassword
+
+        $clusterStarted = $true
+        $null = Invoke-NativeChecked -Executable $pgCtl -Arguments @(
+            '-D', $dataDirectory,
+            '-l', $serverLog,
+            '-w',
+            '-t', '30',
+            'start'
+        ) -Operation 'PostgreSQL TASK025 artifact restart'
+        Set-HarnessEnvironment -Phase 'task025_restart' -HostName '127.0.0.1' -Port $port `
+            -Password $oneTimePassword -RunId $runId
+        $task025PostgresIdentity = Get-Task019PostmasterRuntimeEvidence `
+            -Psql $psql `
+            -Port $port `
+            -Password $oneTimePassword `
+            -RunId $runId `
+            -DataDirectory $dataDirectory `
+            -PostgresExecutable $postgres `
+            -ExpectedNativeIdentity $postgresExecutableNativeIdentity `
+            -ExpectedSha256 $expectedPostgresExecutableSha256
+        if (
+            [string]$task025PostgresIdentity.system_identifier -cne [string]$marker.system_identifier -or
+            [string]$task025PostgresIdentity.postmaster_started_at -ceq
+                [string]$restartedPostgresIdentity.postmaster_started_at -or
+            (
+                [long]$task025PostgresIdentity.listener_process_id -eq
+                    [long]$restartedPostgresIdentity.listener_process_id -and
+                [string]$task025PostgresIdentity.listener_process_creation_time -ceq
+                    [string]$restartedPostgresIdentity.listener_process_creation_time
+            )
+        ) {
+            throw 'TASK025_ARTIFACT_POSTGRES_RESTART_IDENTITY_REJECTED'
+        }
+        $marker['task025_restart_postmaster_started_at'] =
+            [string]$task025PostgresIdentity.postmaster_started_at
+        $marker['task025_restart_identity_verified'] = $true
+        Write-Task019IdentityMarker -Path $markerPath -Value $marker
+        if (-not (Test-LatticeWindowsNativeContainmentSnapshot -Snapshot $cleanupContainment)) {
+            throw 'TASK019_POSTGRES_IDENTITY_MARKER_REJECTED'
+        }
+        Set-Task076WriterTargetEnvironment -Psql $psql -Port $port -Password $oneTimePassword `
+            -RunId $runId -ExpectedProfile 'G5M3'
+        Set-Task025ArtifactEnvironment
+        $null = Invoke-Task076CargoLivePhase `
+            -Cargo $cargoCommand.Source `
+            -RepositoryRoot $repositoryRoot `
+            -Package 'lattice-postgres-artifact-store' `
+            -TestName 'exact_artifact_extension_install_and_restart_profile' `
+            -PhaseEnvironmentName 'LATTICE_TASK025_ARTIFACT_PHASE' `
+            -Phase 'restart' `
+            -ExpectedToken 'TASK025_ARTIFACT_EXTENSION_RESTART_PASS'
+        Add-Task019HolderEvent -Receipt $holderReceipt -EventType 'TASK025_ARTIFACT_VERIFIED' -Payload ([ordered]@{
+            database_uuid = [string]$restartEvidence.DatabaseId
+            initial_artifact_install = 'INSTALLED'
+            initial_artifact_reapply = 'ALREADY_CURRENT'
+            restart_artifact_reapply = 'ALREADY_CURRENT'
+            physical_restart_verified = $true
+            initial_restart_postmaster_started_at = [string]$restartedPostgresIdentity.postmaster_started_at
+            artifact_restart_postmaster_started_at = [string]$task025PostgresIdentity.postmaster_started_at
+        })
+        $restartedPostgresIdentity = $task025PostgresIdentity
+    }
     if ($RunTask068HermesReplayGate) {
         $task068RestartOutput = Invoke-Task068HermesReplayGate `
             -Cargo $cargoCommand.Source `
@@ -4229,6 +4359,9 @@ if ($RunTask076WriterLeaseGate -and -not $task076CatalogMeasurementRequested) {
 }
 if ($RunTask024ApprovalGate) {
     Write-Output 'TASK024_APPROVAL_POSTGRES_PROFILE=PASS'
+}
+if ($RunTask025ArtifactGate) {
+    Write-Output 'TASK025_ARTIFACT_POSTGRES_PROFILE=PASS'
 }
 if ($task076CatalogMeasurementRequested) {
     Write-Output "TASK076_WRITER_CATALOG_MEASUREMENT=$MeasureTask076WriterCatalog"

@@ -1,0 +1,15 @@
+[package]
+name = "lattice-postgres-artifact-store"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lattice-artifact-store = { path = "../lattice-artifact-store" }
+lattice-contracts = { path = "../lattice-contracts" }
+postgres = { version = "=0.19.14", default-features = false }
+sha2 = "=0.11.0"
+
+[lints]
+workspace = true

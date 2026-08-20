@@ -1,5 +1,41 @@
 # Workflow Ledger
 
+## TASK-025 Durable Artifact metadata and disposable owned-root bytes
+
+- Classification: Artifact Store repository boundary plus independent
+  PostgreSQL metadata and path-free disposable-filesystem adapters.
+- Repository/worktree:
+  `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\task-023-025-durable-repositories`.
+- Branch/base: `feature/task-023-025-durable-repositories`; TASK-024 checkpoint
+  `13d0194` and TASK-023 checkpoint `78b4e2e` are dependency inputs.
+- Specification/ticket: SPEC-002 v37; ADR-025; Artifact Store 1.1; Postgres
+  Artifact Store 1.0; Artifact Owned Root 1.0; TASK-025.
+
+| Stage | Status | Evidence | Enforcement |
+|---|---|---|---|
+| Repository/rules/state | valid | dedicated branch/worktree, dependency checkpoints and exact allowlist inspected | machine-observed + documented |
+| Requirements | valid | user ordered TASK-023 through TASK-025 local development; protected/external actions excluded | user-authoritative + documented |
+| Specification/constitutions | valid/current | SPEC-002 v37, ADR-025 and three module boundaries freeze semantic/durable/byte ownership | project check + documented |
+| Ticket/worktree | complete | all AC-47/TASK-025 boxes closed; no live external-owner currentness claim | documented + project check |
+| TDD implementation | pass | canonical initial/successor RED/GREEN, catalog drift, transition corruption, ADS/junction/marker substitution and publish race tests | machine-executed locally |
+| Focused/full verification | pass | official seven-gate wrapper passed format, strict Clippy, all three package tests, harness self-test, live PostgreSQL, project and diff checks | machine-enforced locally |
+| Code/architecture review | pass for local TASK-025; reviewer independence not proven | self-review repaired successor replacement, exact catalog/ACL, physical-chain, ADS/marker identity, rename and post-effect ambiguity gaps; final P0-P3 = 0 | checklist + regression/live evidence |
+| Live PostgreSQL/filesystem | pass | PostgreSQL 17.10 initial/restart plus nine current-Windows owned-root adversarial/lifecycle cases | marker-owned + exact disposable fixtures |
+| Integration/CI/merge | local-only/not performed | no push, default merge, deployment, release or public exposure authorization | external controls intentionally absent |
+
+Official TASK-025 acceptance returned
+`TASK025_ARTIFACT_DURABILITY_ACCEPTANCE=PASS`. The 12-event holder receipt is
+`target/task019-holder-receipts/6fb51317e0854149b6c10dbef3b09a68.jsonl`
+with raw SHA-256
+`acc984195098c204e4a40e040eb00da9df6d6c6dd7d58ab8946cce850b659d44`.
+The final code and architecture re-review found no P0-P3 finding. The adapter
+persists only pure owner-produced metadata and never treats filesystem state as
+authority. Registry/effect/daemon/capability currentness remains an explicit
+future composition-root transaction prerequisite because no durable
+capability-owner repository exists in the current schema.
+
+---
+
 ## TASK-024 Durable Approval repository and normal effect claim
 
 - Classification: versioned Approval Verifier repository boundary plus one

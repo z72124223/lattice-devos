@@ -1,10 +1,10 @@
 ---
 module_id: artifact-store
 name: Artifact Store
-version: 1.0
+version: 1.1
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-21
 ---
 
 ## Mission
@@ -50,6 +50,10 @@ physical serialization and transaction mechanics only. A future filesystem
 adapter owns byte staging/read/unlink mechanics only.
 
 ## Public Contracts
+
+- Export bounded canonical metadata snapshot/checkpoint bytes and a
+  component-free optimistic repository contract. A repository may persist and
+  compare these bytes, but it cannot construct a semantic transition.
 
 - Accept one complete immutable artifact binding, descriptor, provenance, and
   initial reference only with a typed owner receipt/current-head pair for
@@ -187,18 +191,20 @@ outcome-unknown, or unsupported input fails closed with stable typed errors or
 terminal denials. Denial never partially changes object, generation, bytes,
 reference, or quota state.
 
-A future PostgreSQL adapter must reuse the public planner/verifier, serialize
-metadata/reference/current-head/quota/delete-claim state, enforce daemon
-epoch/admission and database time in the same transaction, represent
-unknown outcomes durably, and must not duplicate lifecycle or hash semantics.
+A PostgreSQL adapter must reuse the public successor verifier, serialize
+metadata/reference/current-head/quota/delete-claim state, represent unknown
+outcomes durably, and must not duplicate lifecycle or hash semantics. Registry,
+effect, daemon/admission and capability-owner live currentness remains a
+composition-root transaction prerequisite; the metadata adapter accepts no
+Boolean substitute and grants no publication authority.
 
-A future filesystem adapter must stream to an owned staging file, enforce the
+An owned-root filesystem adapter must stream to an owned staging file, enforce the
 same incremental bounds/digest, flush data and directory metadata, atomically
 publish under an internal path, verify reads, reject links/junction escapes,
 and unlink only one exact claimed object. It cannot infer retention from a
 directory listing.
 
-Its future constitution must additionally enforce root physical identity and
+Its constitution additionally enforces root physical identity and
 product-root ancestor/descendant exclusion, case-fold collision checks,
 Windows reparse/junction/symlink/hardlink/ADS/device/non-regular-file denial,
 same-volume staging, exclusive temporary creation, no-clobber rename,
@@ -238,3 +244,4 @@ review, and responsible-user authorization.
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
 | 1.0 | 2026-07-30 | SPEC-002 v12, ADR-014, TASK-016 | Pure project-scoped artifact owner, deterministic fake, provenance/reference receipt/head, replay, and sweep plan split | User MVP-3 execution directive |
+| 1.1 | 2026-08-20 | SPEC-002 v37, ADR-025, TASK-025 | Bounded canonical repository bytes and metadata-only compare-and-swap contract; existing semantic hashes remain unchanged | User TASK-023-025 development directive |

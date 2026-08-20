@@ -99,16 +99,18 @@ Codex MCP configuration-table mutation remains a separate exact ticket gate;
 no merge, deployment, release, credential change, or public exposure is
 authorized.
 
-## Current Artifact durability slice - TASK-025
+## Completed Artifact durability slice - TASK-025
 
-CURRENT TASK-025 - the user explicitly brought the dependency-ordered
-TASK-023 through TASK-025 durability slice forward. TASK-023 is complete at
-local checkpoint `78b4e2e`; TASK-024's durable Approval repository and atomic
-normal effect claim now pass their official local acceptance wrapper. TASK-025
-must first freeze the Artifact Store repository plus PostgreSQL metadata and
-disposable owned-root filesystem boundaries before implementation. Product
-roots, recursive deletion, push, primary merge, deployment, release,
-credentials, and public exposure remain excluded.
+CURRENT TASK-025 - COMPLETE locally and awaiting separately authorized
+integration. Artifact Store 1.1 now exposes bounded canonical durable
+snapshots plus exact vacant/single-command successor verification. PostgreSQL
+17.10 persists and replay-verifies metadata/checkpoints/physical transitions
+under exact catalog and ACL closure. The disposable path-free owned root
+rejects product overlap, junctions, hardlinks and ADS, and proves bounded
+staging, atomic no-clobber publication, verified read, quarantine and exact
+claim-bound unlink. Official local acceptance is PASS. Live external-owner
+currentness/publication, product roots, recursive deletion, push, primary
+merge, deployment, release, credentials, and public exposure remain excluded.
 
 ## Completed task update — TASK-072
 
@@ -1086,10 +1088,11 @@ actions remain separately protected and require explicit current authorization.
     checkpoint and physical-history verification, database-time currentness,
     global nonce replay, atomic normal effect claim, commit-unknown
     reconciliation, exact catalog/ACL closure, and restart acceptance.
-  - **ACTIVE TASK-025:** resolve its ready gate by freezing the Artifact Store
-    repository contract, PostgreSQL metadata profile, and disposable
-    owned-root filesystem capability. No implementation begins until the
-    versioned SPEC/ADR/constitutions and exact allowlist are current.
+  - TASK-025 is complete: Artifact Store 1.1, Postgres Artifact Store 1.0 and
+    Artifact Owned Root 1.0 pass canonical successor, exact catalog/ACL,
+    corruption, concurrency, junction/link/ADS, restart and 12-event holder
+    receipt acceptance. AC-47 claims durability and path-free byte mechanics
+    only; live external-owner currentness/publication remains excluded.
 - [ ] **BLOCKED TASK-032 — executable Codex/PostgreSQL delivery node:** first
   record the approved versioned contract/port/orchestrator/`latticed` boundary,
   then implement it with TDD and prove an official Codex app-server repository

@@ -949,6 +949,90 @@ impl FakeArtifactStore {
         self.staging.len()
     }
 
+    /// Verifies that this state is the exact empty owner constructed from its
+    /// immutable identity and limits. Durable repositories use this instead
+    /// of treating an arbitrary self-consistent snapshot as an initial row.
+    pub(crate) fn validate_repository_initial(&self) -> Result<(), ArtifactStoreAggregateError> {
+        self.validate_snapshot_metadata()?;
+        let initial = Self::new(self.store_id.clone(), self.limits)?;
+        if self != &initial {
+            return Err(ArtifactStoreAggregateError::CorruptState);
+        }
+        Ok(())
+    }
+
+    /// Verifies one exact semantic successor for durable compare-and-swap.
+    ///
+    /// A successor retains every immutable command/task/terminal row, adds
+    /// exactly one terminal command, and proves that command's aggregate-state
+    /// commitment against the complete next metadata state. This prevents a
+    /// storage caller from replacing current state with an unrelated but
+    /// internally self-consistent snapshot.
+    pub(crate) fn validate_repository_successor(
+        &self,
+        next: &Self,
+    ) -> Result<(), ArtifactStoreAggregateError> {
+        self.validate_snapshot_metadata()?;
+        next.validate_snapshot_metadata()?;
+        if self.store_id != next.store_id
+            || self.limits != next.limits
+            || next.terminal_receipts.len() != self.terminal_receipts.len().saturating_add(1)
+            || self.command_tasks.iter().any(|(key, task)| {
+                next.command_tasks.get(key) != Some(task)
+                    || next.terminal_receipts.get(key) != self.terminal_receipts.get(key)
+            })
+        {
+            return Err(ArtifactStoreAggregateError::CorruptState);
+        }
+
+        let mut added = next
+            .terminal_receipts
+            .iter()
+            .filter(|(key, _)| !self.terminal_receipts.contains_key(*key));
+        let (key, receipt) = added
+            .next()
+            .ok_or(ArtifactStoreAggregateError::CorruptState)?;
+        if added.next().is_some()
+            || next.command_tasks.len() != self.command_tasks.len().saturating_add(1)
+            || !next.command_tasks.contains_key(key)
+        {
+            return Err(ArtifactStoreAggregateError::CorruptState);
+        }
+
+        let object_key =
+            ArtifactObjectKey::new(key.project_id().clone(), key.content_digest().clone());
+        let object_generation =
+            if receipt.history().request().kind() == ArtifactCommandKind::Staging {
+                None
+            } else {
+                let generation =
+                    request_source_string(receipt.history().request(), "object_generation")?
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|value| *value > 0)
+                        .ok_or(ArtifactStoreAggregateError::CorruptState)?;
+                if receipt.lifecycle().is_some_and(|lifecycle| {
+                    lifecycle.object().object().generation().get() != generation
+                }) {
+                    return Err(ArtifactStoreAggregateError::CorruptState);
+                }
+                Some(generation)
+            };
+        let mut state_before_receipt = next.clone();
+        state_before_receipt.terminal_receipts.remove(key);
+        let aggregate_state_digest = state_before_receipt.command_state_digest(
+            &object_key,
+            object_generation,
+            receipt.history().receipt_digest(),
+            receipt.lifecycle(),
+            receipt.quota_checkpoint_digest(),
+        )?;
+        if &aggregate_state_digest != receipt.aggregate_state_digest() {
+            return Err(ArtifactStoreAggregateError::CorruptState);
+        }
+        Ok(())
+    }
+
     /// Returns the complete current fixed-owner head for one exact generation.
     ///
     /// # Errors

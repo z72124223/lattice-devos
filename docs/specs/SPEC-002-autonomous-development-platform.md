@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 36
+version: 37
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -39,6 +39,10 @@ modules:
   - module_id: postgres-approval-verifier
     constitution_version: 1.0
   - module_id: artifact-store
+    constitution_version: 1.1
+  - module_id: postgres-artifact-store
+    constitution_version: 1.0
+  - module_id: artifact-owned-root
     constitution_version: 1.0
   - module_id: codex-adapter
     constitution_version: 1.1
@@ -1574,6 +1578,7 @@ change Store/Memory/Writer state ownership.
 | AC-44 | exact Writer v1/v2 manifests, five-state Store/Memory/Writer transition matrices, common lock-order concurrency, pending-runtime denial, non-empty replay, and marker-owned PostgreSQL restart acceptance | immutable v1 and semantic/fencing bytes; exact v2 bridge/current identities; no deadlock or partial state; final TASK-050 fenced assertion and fresh-process replay |
 | AC-45 | Task Ledger profile-classifier and typed-autonomy-plan tests, generic-forgery denial, historical/required/unknown replay matrices, lifecycle ordering tests, fresh canonical `latticed` restart/Status acceptance, and four-tool/six-field MCP regression | one canonical receipt/profile owner; required sequence-2 receipt before effects; missing/late/duplicate/unknown fail closed; exact `0006`, catalog, existing hashes, and MCP wire unchanged |
 | AC-46 | Approval Verifier 1.1 canonical repository vectors plus PostgreSQL 17.10 install/profile, global nonce, serializable concurrency, exact retry, normal effect-claim atomicity, protected-lane denial, corruption, commit-unknown reconciliation, fresh connection/process, restart, ACL, and cleanup matrices | one pure semantic owner and one fixed-function durable adapter; database-owned time/admission; exact normal claim or no claim; protected state unchanged; no raw nonce/key/assertion bytes, Guardian claim, production authentication, arbitrary SQL, credential, or public-network surface |
+| AC-47 | Artifact Store 1.1 bounded repository snapshot/checkpoint vectors, PostgreSQL serializable compare-and-swap/replay/corruption/restart matrices, and disposable owned-root staging/publish/read/unlink/adversarial path tests | one pure semantic owner, one metadata-only durable adapter, and one path-free byte adapter; the filesystem never grants authority, caller paths and recursive cleanup do not exist, unknown outcomes retain worst-case state, and no live Registry/effect/capability currentness or publication authority is claimed |
 
 ## Human Decisions
 
@@ -1601,7 +1606,7 @@ change Store/Memory/Writer state ownership.
   consume that contract; the out-of-bound Contracts SHA helper is removed while
   Contracts remains 1.13; the public four-tool/six-field MCP wire is frozen.
 - On 2026-08-20 the user directly ordered TASK-023 through TASK-025 local
-  development. TASK-024 is therefore authorized for bounded governance,
+  development. TASK-024 and TASK-025 are therefore authorized for bounded governance,
   implementation, disposable PostgreSQL verification, and local commits only;
   push, default-branch merge, deployment, release, public exposure, and
   credential/account mutation remain unauthorized.

@@ -8,6 +8,10 @@ use lattice_contracts::{
     ARTIFACT_STORE_PRODUCER_ID, ARTIFACT_STORE_PRODUCER_VERSION, ContentDigest, RuntimeKind,
 };
 
+use crate::repository::{
+    MAX_REPOSITORY_CHECKPOINT_BYTES, parse_canonical_bytes, repository_canonical_bytes,
+};
+use crate::snapshot_parse::{StrictSnapshotObject, parse_digest, parse_u64};
 use crate::{ArtifactStoreAggregateError, ArtifactStoreIdentity, FakeArtifactStore};
 
 const SNAPSHOT_VERSION: &str = "1.0";
@@ -84,6 +88,148 @@ impl ArtifactStoreCheckpoint {
     #[must_use]
     pub const fn checkpoint_digest(&self) -> &ContentDigest {
         &self.checkpoint_digest
+    }
+
+    /// Exports the exact bounded independently retained checkpoint bytes used
+    /// by durable repositories.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an internally invalid checkpoint or canonical byte overflow.
+    pub fn repository_canonical_bytes(&self) -> Result<Vec<u8>, ArtifactStoreReplayError> {
+        self.verify()?;
+        let bytes = repository_canonical_bytes(&self.repository_value())?;
+        if bytes.is_empty() || bytes.len() > MAX_REPOSITORY_CHECKPOINT_BYTES {
+            return Err(ArtifactStoreReplayError::ReplayLimit {
+                field: "repository_checkpoint_bytes",
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// Strictly reconstructs one independently retained repository
+    /// checkpoint from canonical bytes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed, non-canonical, substituted, unsupported, or
+    /// self-inconsistent checkpoint bytes.
+    pub fn from_repository_canonical_bytes(bytes: &[u8]) -> Result<Self, ArtifactStoreReplayError> {
+        let value = parse_canonical_bytes(bytes, MAX_REPOSITORY_CHECKPOINT_BYTES)?;
+        let root = StrictSnapshotObject::new(
+            &value,
+            &[
+                "version",
+                "producer_id",
+                "producer_version",
+                "runtime",
+                "store_id",
+                "limit_snapshot_digest",
+                "trust_anchor_digest",
+                "snapshot_digest",
+                "replay_bounds",
+                "checkpoint_digest",
+            ],
+        )
+        .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?;
+        if root
+            .string("version")
+            .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?
+            != SNAPSHOT_VERSION
+            || root
+                .string("producer_id")
+                .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?
+                != ARTIFACT_STORE_PRODUCER_ID
+            || root
+                .string("producer_version")
+                .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?
+                != ARTIFACT_STORE_PRODUCER_VERSION
+            || root
+                .string("runtime")
+                .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?
+                != "FAKE"
+        {
+            return Err(ArtifactStoreReplayError::TrustedCheckpointInvalid);
+        }
+        let bounds_value = root
+            .get("replay_bounds")
+            .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?;
+        let bounds = StrictSnapshotObject::new(
+            bounds_value,
+            &[
+                "max_depth",
+                "max_nodes",
+                "max_collection_entries",
+                "max_string_bytes",
+                "max_canonical_bytes",
+            ],
+        )
+        .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?;
+        let parse_bound = |name| {
+            let value = bounds
+                .string(name)
+                .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?;
+            let value =
+                parse_u64(value).map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?;
+            usize::try_from(value).map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)
+        };
+        let checkpoint = Self {
+            store_id: ArtifactStoreIdentity::new(
+                root.string("store_id")
+                    .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?,
+            )
+            .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?,
+            limit_snapshot_digest: parse_digest(
+                root.string("limit_snapshot_digest")
+                    .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?,
+            )
+            .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?,
+            trust_anchor_digest: parse_digest(
+                root.string("trust_anchor_digest")
+                    .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?,
+            )
+            .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?,
+            snapshot_digest: parse_digest(
+                root.string("snapshot_digest")
+                    .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?,
+            )
+            .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?,
+            checkpoint_digest: parse_digest(
+                root.string("checkpoint_digest")
+                    .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?,
+            )
+            .map_err(|_| ArtifactStoreReplayError::TrustedCheckpointInvalid)?,
+            replay_bounds: ReplayBounds {
+                depth: parse_bound("max_depth")?,
+                nodes: parse_bound("max_nodes")?,
+                collection_entries: parse_bound("max_collection_entries")?,
+                string_bytes: parse_bound("max_string_bytes")?,
+                canonical_bytes: parse_bound("max_canonical_bytes")?,
+            },
+        };
+        checkpoint.verify()?;
+        if checkpoint.repository_canonical_bytes()?.as_slice() != bytes {
+            return Err(ArtifactStoreReplayError::TrustedCheckpointInvalid);
+        }
+        Ok(checkpoint)
+    }
+
+    fn repository_value(&self) -> CanonicalValue {
+        CanonicalValue::Object(vec![
+            string("version", SNAPSHOT_VERSION),
+            string("producer_id", ARTIFACT_STORE_PRODUCER_ID),
+            string("producer_version", ARTIFACT_STORE_PRODUCER_VERSION),
+            string("runtime", "FAKE"),
+            string("store_id", self.store_id.as_str()),
+            string("limit_snapshot_digest", self.limit_snapshot_digest.as_str()),
+            string("trust_anchor_digest", self.trust_anchor_digest.as_str()),
+            string("snapshot_digest", self.snapshot_digest.as_str()),
+            (
+                "replay_bounds".to_owned(),
+                self.replay_bounds.canonical_value(),
+            ),
+            string("checkpoint_digest", self.checkpoint_digest.as_str()),
+        ])
     }
 
     fn verify(&self) -> Result<(), ArtifactStoreReplayError> {

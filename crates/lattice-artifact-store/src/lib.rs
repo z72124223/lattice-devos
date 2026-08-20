@@ -4,6 +4,7 @@ mod aggregate;
 mod history;
 mod quota;
 mod quota_owner;
+mod repository;
 mod semantics;
 mod snapshot;
 mod snapshot_contract;
@@ -13,6 +14,7 @@ mod snapshot_quota;
 pub use aggregate::*;
 pub use history::*;
 pub use quota::*;
+pub use repository::*;
 pub use semantics::*;
 pub use snapshot::*;
 
