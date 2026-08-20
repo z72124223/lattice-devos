@@ -11,7 +11,6 @@ depends_on:
   - TASK-048
   - TASK-049
   - TASK-078
-  - TASK-084
 branch: feature/task-079-durable-foreman-state
 delivery_remote: origin
 delivery_repository: github.com/z72124223/lattice-devos
@@ -62,6 +61,8 @@ TASK-048 `180a269` and TASK-049 `f03fcd8` are integrated as explicit merge
 commits from clean feature tips. TASK-078 `5a5da01` is the clean base; its six
 uncommitted source-worktree modifications are excluded. This ticket is not
 parallel-safe because it changes the shared Ledger/Port/Postgres contracts.
+TASK-084 is only the follow-up for epistemic learning/promotion; its
+non-terminal worktree is not a prerequisite for this durable snapshot slice.
 
 ## TDD behaviors
 
@@ -101,3 +102,12 @@ identity, typed Port, PostgreSQL row/function/migration, and same-transaction
 Writer Lease/fencing proof. Those changes are deliberately not substituted by
 the new in-memory pure core and require the next bounded implementation ticket.
 Full epistemic learning or promotion is additionally deferred to TASK-084.
+
+The 2026-08-21 durable-binding audit found that a new global Store migration
+after schema-v5 would invalidate the current Writer Lease v2 profile: its
+extension identity and runtime binding admit only global schema 3 or 5. A
+correct schema-v6 migration therefore requires a separately authorized Writer
+Lease successor bridge plus Store catalog/ACL profile and revalidation. TASK-050
+also has active uncommitted Ledger/Store governance edits. TASK-079 must not
+modify either boundary, use diagnostics, or create an independent foreman table
+to bypass this blocker.

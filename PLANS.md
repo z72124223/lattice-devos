@@ -97,6 +97,12 @@ read-only input contracts, TASK-078 exporter working files remain untouched,
 and PostgreSQL/TASK-051 live acceptance stays deferred. The dashboard remains
 an index, never coordination truth.
 
+TASK-079 durable binding is blocked by the current schema-v5/Writer Lease v2
+profile boundary: an append-only global schema-v6 migration requires a new
+authorized Writer Lease successor bridge and Store catalog/ACL profile. TASK-050
+has uncommitted overlapping Ledger/Store governance work. Preserve both; do not
+substitute a diagnostic, dashboard, cache, or independent foreman table.
+
 ## Completed engineering delivery finisher - TASK-078
 
 COMPLETED TASK-078 - implement one fail-closed command that reads explicit push

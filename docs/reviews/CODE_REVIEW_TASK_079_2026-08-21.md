@@ -18,6 +18,20 @@ Resolution: intentionally not papered over. TASK-079 remains `blocked` until a
 versioned fixed control-stream/event plus Postgres transaction/migration slice
 is implemented and tested.
 
+### P1 — the required global migration is not safe under the current Writer Lease v2 profile
+
+The durable-binding audit proved that the current global Store manifest ends at
+schema-v5, while `db/extensions/writer-lease/v2.sql` accepts only global schema
+3 or 5 in its extension identity and runtime bind/assert profile. A new global
+schema-v6 migration would therefore invalidate the exact current Writer Lease
+profile before a fenced append could be accepted. TASK-050 also has uncommitted
+changes in the same Ledger/Store governance paths.
+
+Resolution: no speculative `0007`, Store adapter, fake durable result, or
+diagnostic/table bypass was added. A separately owned Writer Lease successor
+bridge plus Store profile/migration implementation is required before this
+ticket can write a valid durable RED test.
+
 ## No additional findings
 
 The completed pure foundation has focused coverage for generation rollback,

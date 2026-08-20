@@ -35,6 +35,14 @@ and same-transaction Writer Lease/fencing assertion; then add injectable
 restart/replay tests before any disposable PostgreSQL gate. Keep TASK-078
 exporter unchanged and do not run TASK-051.
 
+Durable-binding re-audit blocker: the current global Store ends at schema-v5
+while `db/extensions/writer-lease/v2.sql` admits only global schema 3 or 5.
+An append-only schema-v6 foreman migration needs an authorized Writer Lease
+successor bridge, Store catalog/ACL profile, and combined revalidation. The
+TASK-050 worktree also has uncommitted Ledger/Store governance edits. Do not
+work around either condition with a diagnostic, dashboard, cache, or independent
+foreman table.
+
 ---
 
 # TASK-078 相容性修復交接 — 2026-08-21
