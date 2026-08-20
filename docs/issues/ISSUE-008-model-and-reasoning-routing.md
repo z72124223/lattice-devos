@@ -5,7 +5,7 @@ branch: feature/issue-008-model-routing
 delivery_push: authorized_non_force_feature_branch
 delivery_archive: keep_open
 delivery_remote: origin
-delivery_repository: z72124223/lattice-devos
+delivery_repository: github.com/z72124223/lattice-devos
 ---
 
 # ISSUE-008: Model and reasoning routing terminal evidence
@@ -56,4 +56,3 @@ claimed. Those remain later dependencies with independent acceptance evidence.
 The implementation is pure policy code. It performs no filesystem, database,
 network, provider, or model-runtime I/O. Capability availability is handled
 through injected/simulated contract data only.
-
