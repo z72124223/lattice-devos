@@ -46,6 +46,10 @@ $requiredFragments = @(
     '$script:Task051ExpectedCurrentCodexSha256 = ''18fbf51f77adfc543c9d86c78c0a54553f89ba79236ed8b0a3c48e2a3b4f010e''',
     'Get-Task051CurrentCodexFileIdentity',
     'Get-Task051UnclassifiedFailureClassification',
+    'Write-Task051UnclassifiedFailureEvidence',
+    '[IO.FileMode]::CreateNew',
+    '[IO.File]::ReadAllBytes($evidencePath)',
+    '$fingerprint.Substring(0, 32)',
     'lattice.task051.unclassified-failure.v1',
     'TASK051_TASK038_UNCLASSIFIED_TRANSFORM_REJECTED',
     'codex_native_identity',
@@ -135,6 +139,7 @@ $requiredFragments = @(
     'Get-Task051OwnedProcessEvidence',
     'LatticeTask051OwnedProcessAuthority',
     '::Acquire(',
+    '.WaitForExit(30000)',
     '.IsAlive()',
     '.CloseExact()',
     '[scriptblock]$PollAction',
@@ -520,14 +525,23 @@ if ($cleanupStart -lt 0 -or $cleanupEnd -le $cleanupStart) {
 }
 $cleanupSource = $runnerSource.Substring($cleanupStart, $cleanupEnd - $cleanupStart)
 $cleanupStop = $cleanupSource.IndexOf('Stop-Task051OwnedProcess -Owned $Owned', [StringComparison]::Ordinal)
+$cleanupCodexWait = $cleanupSource.IndexOf('$CodexAuthority.WaitForExit(30000)', [StringComparison]::Ordinal)
+$cleanupCodexAlive = $cleanupSource.IndexOf('$CodexAuthority.IsAlive()', [StringComparison]::Ordinal)
+$cleanupServerWait = $cleanupSource.IndexOf('$ServerAuthority.WaitForExit(30000)', [StringComparison]::Ordinal)
 $cleanupAlive = $cleanupSource.IndexOf('$ServerAuthority.IsAlive()', [StringComparison]::Ordinal)
 $cleanupClose = $cleanupSource.IndexOf('$ServerAuthority.CloseExact()', [StringComparison]::Ordinal)
 $cleanupCredential = $cleanupSource.IndexOf('Remove-Task051CodexCredential -CodexHome $CodexHome', [StringComparison]::Ordinal)
 if (
     $cleanupStop -lt 0 -or
-    $cleanupAlive -le $cleanupStop -or
+    $cleanupCodexWait -le $cleanupStop -or
+    $cleanupCodexAlive -le $cleanupCodexWait -or
+    $cleanupServerWait -le $cleanupCodexAlive -or
+    $cleanupAlive -le $cleanupServerWait -or
     $cleanupClose -le $cleanupAlive -or
     $cleanupCredential -le $cleanupClose -or
+    [regex]::Matches($cleanupSource, [regex]::Escape('$CodexAuthority.WaitForExit(30000)')).Count -ne 1 -or
+    [regex]::Matches($cleanupSource, [regex]::Escape('$ServerAuthority.WaitForExit(30000)')).Count -ne 1 -or
+    [regex]::Matches($cleanupSource, [regex]::Escape('$CodexAuthority.IsAlive()')).Count -ne 1 -or
     [regex]::Matches($cleanupSource, [regex]::Escape('$ServerAuthority.IsAlive()')).Count -ne 1
 ) {
     throw 'TASK051_APP_SERVER_PROCESS_AUTHORITY_CLEANUP_SHAPE_REJECTED'

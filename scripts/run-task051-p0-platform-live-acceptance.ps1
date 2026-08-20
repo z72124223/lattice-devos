@@ -104,27 +104,57 @@ function Write-Task051UnclassifiedFailureEvidence {
     ) {
         throw 'TASK051_UNCLASSIFIED_EVIDENCE_FINGERPRINT_REJECTED'
     }
-    if (Test-Path -LiteralPath $Path) {
-        throw 'TASK051_UNCLASSIFIED_EVIDENCE_NOT_FRESH'
-    }
-
     $writeFailureCode = 'TASK051_UNCLASSIFIED_EVIDENCE_SERIALIZE_REJECTED'
+    $stream = $null
     try {
         $json = ($Value | ConvertTo-Json -Compress -Depth 8) + [char]10
+        $jsonBytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+        $writeFailureCode = 'TASK051_UNCLASSIFIED_EVIDENCE_SECURITY_REJECTED'
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $security = [Security.AccessControl.FileSecurity]::new()
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        $security.SetOwner($sid)
+        $security.SetAccessRuleProtection($true, $false)
+        [void]$security.AddAccessRule($rule)
+        $writeFailureCode = 'TASK051_UNCLASSIFIED_EVIDENCE_FILE_CREATE_REJECTED'
+        $stream = [IO.FileStream]::new(
+            $Path,
+            [IO.FileMode]::CreateNew,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [IO.FileShare]::None,
+            4096,
+            [IO.FileOptions]::WriteThrough,
+            $security
+        )
         $writeFailureCode = 'TASK051_UNCLASSIFIED_EVIDENCE_FILE_WRITE_REJECTED'
-        [IO.File]::WriteAllText($Path, $json, [Text.UTF8Encoding]::new($false))
-        $writeFailureCode = 'TASK051_UNCLASSIFIED_EVIDENCE_ACL_REJECTED'
-        Set-Task051OwnerOnlyAcl -Path $Path -Directory $false
+        $stream.Write($jsonBytes, 0, $jsonBytes.Length)
+        $stream.Flush($true)
+    }
+    catch {
+        throw $writeFailureCode
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+
+    try {
+        Assert-Task051RegularFile -Path $Path -FailureCode 'TASK051_UNCLASSIFIED_EVIDENCE_VERIFY_REJECTED'
+        Assert-Task051OwnerOnlyAcl -Path $Path -Directory $false
+        $actualBytes = [IO.File]::ReadAllBytes($Path)
+        if ([Convert]::ToBase64String($actualBytes) -cne [Convert]::ToBase64String($jsonBytes)) {
+            throw 'TASK051_UNCLASSIFIED_EVIDENCE_VERIFY_REJECTED'
+        }
         return [pscustomobject]@{
             Path = [IO.Path]::GetFullPath($Path)
-            Sha256 = Get-Task051Sha256 -Path $Path
+            Sha256 = Get-Task051StringSha256 -Value $json
         }
     }
     catch {
-        if (Test-Path -LiteralPath $Path -PathType Leaf) {
-            try { [IO.File]::Delete($Path) } catch {}
-        }
-        throw $writeFailureCode
+        throw 'TASK051_UNCLASSIFIED_EVIDENCE_VERIFY_REJECTED'
     }
 }
 
@@ -175,14 +205,19 @@ function Get-Task051UnclassifiedFailureClassification {
             throw 'TASK051_UNCLASSIFIED_EVIDENCE_ROOT_REJECTED'
         }
         Assert-Task051NoReparseAncestor -Path $evidenceRoot -Boundary $runRoot -FailureCode 'TASK051_UNCLASSIFIED_EVIDENCE_ROOT_REJECTED'
-        $evidencePath = Join-Path $evidenceRoot 'u.json'
+        $evidencePath = Join-Path $evidenceRoot ('u-' + $fingerprint.Substring(0, 32) + '.json')
         if (Test-Path -LiteralPath $evidencePath) {
             $evidenceStage = 'REPLAY'
             Assert-Task051RegularFile -Path $evidencePath -FailureCode 'TASK051_UNCLASSIFIED_EVIDENCE_REPLAY_REJECTED'
             Assert-Task051OwnerOnlyAcl -Path $evidencePath -Directory $false
-            $expectedEvidence = ($record | ConvertTo-Json -Compress -Depth 8) + [char]10
-            $existingEvidence = [IO.File]::ReadAllText($evidencePath, [Text.Encoding]::UTF8)
-            if ($existingEvidence -cne $expectedEvidence) {
+            $expectedEvidenceBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+                (($record | ConvertTo-Json -Compress -Depth 8) + [char]10)
+            )
+            $existingEvidenceBytes = [IO.File]::ReadAllBytes($evidencePath)
+            if (
+                [Convert]::ToBase64String($existingEvidenceBytes) -cne
+                [Convert]::ToBase64String($expectedEvidenceBytes)
+            ) {
                 throw 'TASK051_UNCLASSIFIED_EVIDENCE_REPLAY_REJECTED'
             }
         }
@@ -198,10 +233,11 @@ function Get-Task051UnclassifiedFailureClassification {
             'TASK051_UNCLASSIFIED_EVIDENCE_SHAPE_REJECTED',
             'TASK051_UNCLASSIFIED_EVIDENCE_VALUE_REJECTED',
             'TASK051_UNCLASSIFIED_EVIDENCE_FINGERPRINT_REJECTED',
-            'TASK051_UNCLASSIFIED_EVIDENCE_NOT_FRESH',
             'TASK051_UNCLASSIFIED_EVIDENCE_SERIALIZE_REJECTED',
+            'TASK051_UNCLASSIFIED_EVIDENCE_SECURITY_REJECTED',
+            'TASK051_UNCLASSIFIED_EVIDENCE_FILE_CREATE_REJECTED',
             'TASK051_UNCLASSIFIED_EVIDENCE_FILE_WRITE_REJECTED',
-            'TASK051_UNCLASSIFIED_EVIDENCE_ACL_REJECTED',
+            'TASK051_UNCLASSIFIED_EVIDENCE_VERIFY_REJECTED',
             'TASK051_UNCLASSIFIED_EVIDENCE_ROOT_REJECTED',
             'TASK051_UNCLASSIFIED_EVIDENCE_REPLAY_REJECTED'
         )) {
@@ -1542,6 +1578,27 @@ public sealed class LatticeTask051OwnedProcessAuthority : IDisposable
         }
     }
 
+    public bool WaitForExit(UInt32 milliseconds)
+    {
+        lock (sync)
+        {
+            if (processHandle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("TASK051_PROCESS_INTEROP_WAIT");
+            }
+            UInt32 waitResult = WaitForSingleObject(processHandle, milliseconds);
+            if (waitResult == 0x00000000)
+            {
+                return true;
+            }
+            if (waitResult == 0x00000102)
+            {
+                return false;
+            }
+            throw new InvalidOperationException("TASK051_PROCESS_INTEROP_WAIT");
+        }
+    }
+
     public void CloseExact()
     {
         lock (sync)
@@ -2105,6 +2162,12 @@ function Complete-Task051InvocationCleanup {
     }
     if ($null -ne $CodexAuthority) {
         try {
+            if (
+                -not $CodexAuthority.WaitForExit(30000) -and
+                $null -eq $cleanupFailure
+            ) {
+                $cleanupFailure = 'TASK051_CODEX_PROCESS_CLEANUP_REJECTED'
+            }
             if ($CodexAuthority.IsAlive() -and $null -eq $cleanupFailure) {
                 $cleanupFailure = 'TASK051_CODEX_PROCESS_CLEANUP_REJECTED'
             }
@@ -2123,6 +2186,12 @@ function Complete-Task051InvocationCleanup {
     }
     if ($null -ne $ServerAuthority) {
         try {
+            if (
+                -not $ServerAuthority.WaitForExit(30000) -and
+                $null -eq $cleanupFailure
+            ) {
+                $cleanupFailure = 'TASK051_LATTICED_PROCESS_CLEANUP_REJECTED'
+            }
             if ($ServerAuthority.IsAlive() -and $null -eq $cleanupFailure) {
                 $cleanupFailure = 'TASK051_LATTICED_PROCESS_CLEANUP_REJECTED'
             }
@@ -4506,7 +4575,7 @@ function Invoke-Task051SelfTest {
         try { throw $unclassifiedFixtureMessage }
         catch { $unclassifiedError = $_ }
         $unclassifiedClassification = Get-Task051UnclassifiedFailureClassification -ErrorRecord $unclassifiedError
-        $unclassifiedEvidenceFiles = @(Get-ChildItem -LiteralPath $unclassifiedEvidenceRoot -Filter 'u.json' -File)
+        $unclassifiedEvidenceFiles = @(Get-ChildItem -LiteralPath $unclassifiedEvidenceRoot -Filter 'u-*.json' -File)
         if (
             $unclassifiedClassification -cnotmatch '^TASK038_UNCLASSIFIED_REJECTED\|TASK038_UNCLASSIFIED_LINE_[1-9][0-9]*\|[0-9a-f]{64}$' -or
             $unclassifiedEvidenceFiles.Count -ne 1
@@ -4514,6 +4583,7 @@ function Invoke-Task051SelfTest {
             throw ('TASK051_UNCLASSIFIED_FAILURE_EVIDENCE_SELF_TEST_REJECTED|' + $unclassifiedClassification + '|COUNT_' + $unclassifiedEvidenceFiles.Count)
         }
         $unclassifiedRaw = [IO.File]::ReadAllText($unclassifiedEvidenceFiles[0].FullName, [Text.Encoding]::UTF8)
+        $unclassifiedOriginalBytes = [IO.File]::ReadAllBytes($unclassifiedEvidenceFiles[0].FullName)
         $unclassifiedEvidence = $unclassifiedRaw | ConvertFrom-Json -ErrorAction Stop
         $unclassifiedFingerprint = [string]($unclassifiedClassification -split '\|')[-1]
         if (
@@ -4529,7 +4599,7 @@ function Invoke-Task051SelfTest {
             throw 'TASK051_UNCLASSIFIED_FAILURE_EVIDENCE_SELF_TEST_REJECTED'
         }
         $unclassifiedReplayClassification = Get-Task051UnclassifiedFailureClassification -ErrorRecord $unclassifiedError
-        $unclassifiedReplayEvidenceFiles = @(Get-ChildItem -LiteralPath $unclassifiedEvidenceRoot -Filter 'u.json' -File)
+        $unclassifiedReplayEvidenceFiles = @(Get-ChildItem -LiteralPath $unclassifiedEvidenceRoot -Filter 'u-*.json' -File)
         $unclassifiedReplayEvidenceCount = $unclassifiedReplayEvidenceFiles.Count
         if (
             $unclassifiedReplayClassification -cne $unclassifiedClassification -or
@@ -4541,6 +4611,41 @@ function Invoke-Task051SelfTest {
                 '|COUNT_' + [string]$unclassifiedReplayEvidenceCount
             )
         }
+        $unclassifiedSecondFixtureMessage = 'task051-second-unclassified-message-must-not-appear'
+        $unclassifiedSecondError = $null
+        try { throw $unclassifiedSecondFixtureMessage }
+        catch { $unclassifiedSecondError = $_ }
+        $unclassifiedSecondClassification = Get-Task051UnclassifiedFailureClassification -ErrorRecord $unclassifiedSecondError
+        $unclassifiedSecondFingerprint = [string]($unclassifiedSecondClassification -split '\|')[-1]
+        $unclassifiedDistinctEvidenceFiles = @(Get-ChildItem -LiteralPath $unclassifiedEvidenceRoot -Filter 'u-*.json' -File)
+        $unclassifiedSecondEvidencePath = Join-Path $unclassifiedEvidenceRoot ('u-' + $unclassifiedSecondFingerprint.Substring(0, 32) + '.json')
+        if (
+            $unclassifiedSecondClassification -cnotmatch '^TASK038_UNCLASSIFIED_REJECTED\|TASK038_UNCLASSIFIED_LINE_[1-9][0-9]*\|[0-9a-f]{64}$' -or
+            $unclassifiedSecondFingerprint -ceq $unclassifiedFingerprint -or
+            $unclassifiedDistinctEvidenceFiles.Count -ne 2 -or
+            -not (Test-Path -LiteralPath $unclassifiedSecondEvidencePath -PathType Leaf) -or
+            [IO.File]::ReadAllText($unclassifiedSecondEvidencePath, [Text.Encoding]::UTF8).IndexOf($unclassifiedSecondFixtureMessage, [StringComparison]::Ordinal) -ge 0
+        ) {
+            throw 'TASK051_UNCLASSIFIED_FAILURE_DISTINCT_RECORD_SELF_TEST_REJECTED'
+        }
+        $unclassifiedBomBytes = [byte[]]::new(3 + $unclassifiedOriginalBytes.Length)
+        [Buffer]::BlockCopy([Text.UTF8Encoding]::new($true).GetPreamble(), 0, $unclassifiedBomBytes, 0, 3)
+        [Buffer]::BlockCopy($unclassifiedOriginalBytes, 0, $unclassifiedBomBytes, 3, $unclassifiedOriginalBytes.Length)
+        [IO.File]::WriteAllBytes($unclassifiedEvidenceFiles[0].FullName, $unclassifiedBomBytes)
+        Set-Task051OwnerOnlyAcl -Path $unclassifiedEvidenceFiles[0].FullName -Directory $false
+        $unclassifiedBomClassification = Get-Task051UnclassifiedFailureClassification -ErrorRecord $unclassifiedError
+        if (
+            $unclassifiedBomClassification -cnotmatch (
+                '^TASK038_UNCLASSIFIED_REJECTED\|TASK038_UNCLASSIFIED_LINE_[1-9][0-9]*' +
+                '\|TASK038_UNCLASSIFIED_EVIDENCE_REPLAY_REJECTED\|' +
+                'TASK051_UNCLASSIFIED_EVIDENCE_REPLAY_REJECTED\|' +
+                [regex]::Escape($unclassifiedFingerprint) + '$'
+            )
+        ) {
+            throw 'TASK051_UNCLASSIFIED_FAILURE_REPLAY_BOM_SELF_TEST_REJECTED'
+        }
+        [IO.File]::WriteAllBytes($unclassifiedEvidenceFiles[0].FullName, $unclassifiedOriginalBytes)
+        Set-Task051OwnerOnlyAcl -Path $unclassifiedEvidenceFiles[0].FullName -Directory $false
         $unclassifiedTampered = ([ordered]@{
             fingerprint_sha256 = $unclassifiedFingerprint
         } | ConvertTo-Json -Compress) + [char]10
@@ -4828,6 +4933,7 @@ function Invoke-Task051SelfTest {
             $selfTestAuthority = [LatticeTask051ProcessIdentityInterop]::AcquireForSelfTest([int]$selfTestChild.Id)
             if (
                 $null -eq $selfTestAuthority -or
+                $selfTestAuthority.WaitForExit(1) -or
                 -not $selfTestAuthority.IsAlive() -or
                 -not [bool]$selfTestAuthority.WasRunningAtCapture -or
                 [long]$selfTestAuthority.ExitFileTimeUtc -ne 0 -or
@@ -4837,10 +4943,13 @@ function Invoke-Task051SelfTest {
                 throw 'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST_REJECTED'
             }
             $selfTestChild.Kill()
-            $selfTestChild.WaitForExit()
-            if ($selfTestAuthority.IsAlive()) {
+            if (
+                -not $selfTestAuthority.WaitForExit(30000) -or
+                $selfTestAuthority.IsAlive()
+            ) {
                 throw 'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST_REJECTED'
             }
+            $selfTestChild.WaitForExit()
             $selfTestAuthority.CloseExact()
             $selfTestAuthority.CloseExact()
             $selfTestAuthority = $null
