@@ -20,10 +20,12 @@ function Get-Task044StringSha256 {
     )
 
     $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
     try {
-        return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+        return ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
     }
     finally {
+        $algorithm.Dispose()
         [Array]::Clear($bytes, 0, $bytes.Length)
     }
 }
@@ -80,8 +82,15 @@ function Invoke-Task044Command {
     )
 
     $started = [DateTimeOffset]::UtcNow
-    $commandOutput = @(& $Executable @Arguments 2>&1 | ForEach-Object { [string]$_ })
-    $exitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $commandOutput = @(& $Executable @Arguments 2>&1 | ForEach-Object { [string]$_ })
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     $finished = [DateTimeOffset]::UtcNow
     $joined = [string]::Join("`n", $commandOutput)
     if ($joined.Length -gt $script:MaximumCapturedCharacters) {
@@ -164,6 +173,19 @@ function New-Task044Evidence {
 }
 
 function Invoke-Task044SelfTest {
+    $stderrRecord = Invoke-Task044Command `
+        -CommandId 'self-native-stderr' `
+        -Executable (Get-Command powershell.exe -ErrorAction Stop).Source `
+        -Arguments @(
+            '-NoLogo', '-NoProfile', '-Command',
+            "[Console]::Error.WriteLine('TASK044_SELF_TEST_STDERR'); Write-Output 'TASK044_SELF_TEST_STDOUT'; exit 0"
+        ) `
+        -Scenarios @('F01') `
+        -RequiredText @('TASK044_SELF_TEST_STDERR', 'TASK044_SELF_TEST_STDOUT')
+    if ([string]$stderrRecord.status -cne 'PASS') {
+        throw 'TASK044_NATIVE_STDERR_SELF_TEST_REJECTED'
+    }
+
     $records = @()
     foreach ($scenario in $script:Task044Scenarios) {
         $records += [pscustomobject][ordered]@{
