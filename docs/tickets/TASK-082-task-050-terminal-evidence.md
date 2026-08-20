@@ -10,6 +10,8 @@ constitution_version: 2.3
 status: complete
 parallel_safe: false
 depends_on:
+  []
+evidence_subjects:
   - TASK-050
 branch: feature/task-082-task-050-terminal-evidence
 delivery_remote: origin
