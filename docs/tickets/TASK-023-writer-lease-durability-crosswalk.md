@@ -1,17 +1,19 @@
 ---
 ticket_id: TASK-023
 spec_id: SPEC-002
-spec_version: 27
+spec_version: 35
 module_id: writer-lease
-constitution_version: 1.0
-status: blocked
+constitution_version: 1.1
+status: complete
 parallel_safe: false
 depends_on:
   - TASK-014
   - TASK-038
+  - TASK-076
 allowed_paths:
   - docs/tickets/TASK-023-writer-lease-durability-crosswalk.md
   - docs/tickets/red-fixtures/TASK-023-writer-lease-durability-red.json
+  - crates/lattice-postgres-writer-lease/tests/postgres_live.rs
 branch: feature/task-023-025-durable-repositories
 base_commit: 845328dcc06d51c7554c93a09739a27ddd827941
 ---
@@ -47,6 +49,34 @@ receipt/head, or become a second lease owner.
 | Ticket/file consistency | missing | TASK-038 names `tests/setup_api.rs`, but that file is absent in the observed dirty tree |
 | Stable checkpoint and acceptance | blocked | TASK-038 is dirty at `512732d5b71a5d373363b77bb23a29e4a8ae3b1b`; code presence is not a passed checkpoint |
 
+## Stable checkpoint rerun on 2026-08-20
+
+The clean TASK-076 dependency was integrated through merge commit
+`a854f784ad55862c6f3b86f64f8cf20f6319a67d`. The official wrapper then ran
+against this exact branch with `CARGO_BUILD_JOBS=2` and returned exit `0` plus
+`TASK076_WRITER_LEASE_V2_BRIDGE_ACCEPTANCE=PASS`. Marker-owned run
+`9b978761583a4f428084536d04574017` used loopback port `62874`, excluded
+`5432`, `64272`, and `55432`, stopped its listener, removed its contained
+cluster root, and closed its receipt at ordinal `10`; the receipt raw SHA-256
+is `009f3e2be5da032d207317136470d989b917a58010b1b4de0e5de974f86691db`.
+
+The rerun closed the stable checkpoint, adapter/profile, concurrency, restart,
+fencing, exact retry, stale-authority, fixed-function, ACL/catalog, atomic
+persistence, and commit-unknown rows. A gap-only live assertion was then added
+without changing production code. It exercised the existing repository
+`MarkSuspect -> Revoke -> Acquire` path using exact process-death evidence,
+proved exact revoke retry, proved the revoked current authority became absent,
+and proved reacquisition allocated fence `2` after fence `1`.
+
+The official wrapper passed again with exit `0` and
+`TASK076_WRITER_LEASE_V2_BRIDGE_ACCEPTANCE=PASS`. The closing marker-owned run
+`feccce0d58464cc99c7e5387c4fe2bfd` used loopback port `64711`, again excluded
+the three protected ports, removed its contained cluster root, and closed at
+receipt ordinal `10`. Its receipt raw SHA-256 is
+`fd160935987a413a1f19f8b445c8352ff5908ee86bc762fbf696abb268a5c577`.
+TASK-023 is therefore complete by the clean TASK-076 implementation plus this
+gap-only live regression test; it created no second Writer Lease owner.
+
 ## Ready gate
 
 This ticket becomes ready only after all of the following are true:
@@ -66,26 +96,26 @@ allowed.
 
 ## Acceptance criteria after the ready gate
 
-- [ ] The stable TASK-038 commit contains exactly one domain-owned repository
+- [x] The stable TASK-038 commit contains exactly one domain-owned repository
   trait and exactly one PostgreSQL implementation.
-- [ ] Canonical snapshot/checkpoint bytes round-trip through the Writer Lease
+- [x] Canonical snapshot/checkpoint bytes round-trip through the Writer Lease
   public verifier, and the adapter compares an independently retained current
   checkpoint rather than deriving trust from the history being checked.
-- [ ] Two concurrent acquires for one vacant project yield exactly one applied
+- [x] Two concurrent acquires for one vacant project yield exactly one applied
   lease and one durable terminal denial; another project remains independent.
-- [ ] Release/reacquire, reconnect, process restart and PostgreSQL restart
+- [x] Release/reacquire, reconnect, process restart and PostgreSQL restart
   allocate strictly newer non-wrapping positive `BIGINT` fences.
-- [ ] Exact retry returns the identical receipt; changed command content,
+- [x] Exact retry returns the identical receipt; changed command content,
   stale daemon/epoch/fence/current head and historical self-projection deny.
-- [ ] PostgreSQL time drives heartbeat/expiry; expiry only marks suspect.
+- [x] PostgreSQL time drives heartbeat/expiry; expiry only marks suspect.
   Holder-death or strictly newer-leadership evidence is required for revoke.
-- [ ] Command, transition, snapshot, checkpoint, current head and fencing
+- [x] Command, transition, snapshot, checkpoint, current head and fencing
   high-water commit atomically; unknown commit returns no success and converges
   only through a fresh client plus exact retry/reconciliation.
-- [ ] Runtime uses only the fixed extension function allowlist, has no direct
+- [x] Runtime uses only the fixed extension function allowlist, has no direct
   table mutation, and accepts no SQL, path, DSN, credential or caller-created
   authority.
-- [ ] Every daemon-authorized mutation boundary that consumes a writer fence
+- [x] Every daemon-authorized mutation boundary that consumes a writer fence
   reasserts the same current lease/daemon/epoch/fence in its transaction.
 
 ## RED fixture and first executable RED

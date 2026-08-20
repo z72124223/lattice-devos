@@ -10,11 +10,12 @@ use lattice_postgres_writer_lease::{
 };
 use lattice_writer_lease::{
     AcquireClaim, AcquireCommand, CommandOutcome, LeaseDenial, LeaseObservation,
-    MarkSuspectCommand, ReleaseCommand, UntrustedWriterLeaseSnapshot, VerifiedWriterLeaseAggregate,
-    WriterLeaseAcquireRequest, WriterLeaseCheckpoint, WriterLeaseCommand,
-    WriterLeaseCommandReceipt, WriterLeaseHeartbeatRequest, WriterLeaseMarkSuspectRequest,
-    WriterLeaseReleaseRequest, WriterLeaseRepository, WriterLeaseRepositoryCommand,
-    WriterLeaseRepositoryErrorKind, apply_plan, plan_command, verify_snapshot_against_checkpoint,
+    MarkSuspectCommand, RecoveryEvidence, ReleaseCommand, UntrustedWriterLeaseSnapshot,
+    VerifiedWriterLeaseAggregate, WriterLeaseAcquireRequest, WriterLeaseCheckpoint,
+    WriterLeaseCommand, WriterLeaseCommandReceipt, WriterLeaseHeartbeatRequest,
+    WriterLeaseMarkSuspectRequest, WriterLeaseReleaseRequest, WriterLeaseRepository,
+    WriterLeaseRepositoryCommand, WriterLeaseRepositoryErrorKind, WriterLeaseRevokeRequest,
+    apply_plan, plan_command, verify_snapshot_against_checkpoint,
 };
 use postgres::{Client, IsolationLevel, NoTls, Row, Transaction};
 use sha2::{Digest, Sha256};
@@ -2686,6 +2687,83 @@ fn live_postgres_acquire_restarts_and_replays_authority_when_provisioned() {
     } else {
         eprintln!("SKIP: LATTICE_WRITER_LEASE_ADMIN_URL is not configured");
     }
+
+    let recovery_project =
+        ProjectId::new(format!("task023-recovery-{run_suffix}")).expect("recovery project");
+    let recovery_runtime = Client::connect(&runtime_url, NoTls).expect("recovery runtime");
+    let mut recovery =
+        PostgresWriterLease::new(recovery_runtime, target.clone(), &store_authority, 1)
+            .expect("short-lived recovery repository");
+    let recovery_acquire = acquire_intent(
+        &recovery_project,
+        "task023-recovery-acquire",
+        "task023-recovery-lease",
+        "task023-recovery-attempt",
+    );
+    let active = recovery
+        .execute(recovery_acquire)
+        .expect("acquire short-lived recovery lease");
+    let active_head = active.after.expect("active recovery head");
+    assert_eq!(active_head.identity().fencing_token().get(), 1);
+    std::thread::sleep(Duration::from_millis(1_500));
+
+    let suspect = recovery
+        .execute(WriterLeaseRepositoryCommand::MarkSuspect(
+            WriterLeaseMarkSuspectRequest {
+                command_id: "task023-recovery-suspect".to_owned(),
+                project_id: recovery_project.clone(),
+                expected_head: active_head,
+            },
+        ))
+        .expect("expired lease reaches durable suspect state");
+    assert_eq!(suspect.outcome, CommandOutcome::Applied);
+    let suspect_head = suspect.after.expect("suspect recovery head");
+    assert_eq!(suspect_head.status().as_str(), "SUSPECT");
+    let suspect_identity = suspect_head.identity();
+    let revoke = WriterLeaseRepositoryCommand::Revoke(WriterLeaseRevokeRequest {
+        command_id: "task023-recovery-revoke".to_owned(),
+        project_id: recovery_project.clone(),
+        expected_head: suspect_head.clone(),
+        evidence: RecoveryEvidence::ProcessDeath {
+            holder_process_id: suspect_identity.holder_process_id(),
+            holder_process_start_identity: suspect_identity.holder_process_start_identity().clone(),
+            holder_daemon_instance_id: suspect_identity.daemon_instance_id().to_owned(),
+            evidence_digest: digest('9'),
+        },
+    });
+    let revoked = recovery
+        .execute(revoke.clone())
+        .expect("exact recovery evidence revokes suspect lease");
+    assert_eq!(revoked.outcome, CommandOutcome::Applied);
+    assert!(revoked.after.is_none());
+    assert_eq!(
+        recovery.execute(revoke).expect("exact revoke retry"),
+        revoked
+    );
+    assert!(
+        recovery
+            .current_authority(&recovery_project)
+            .expect("revoked project replay")
+            .is_none()
+    );
+    let reacquired = recovery
+        .execute(acquire_intent(
+            &recovery_project,
+            "task023-recovery-reacquire",
+            "task023-recovery-lease-2",
+            "task023-recovery-attempt-2",
+        ))
+        .expect("reacquire after evidence-bound revoke");
+    assert_eq!(
+        reacquired
+            .after
+            .expect("reacquired recovery head")
+            .identity()
+            .fencing_token()
+            .get(),
+        2
+    );
+    drop(recovery);
 
     let current_head = current.independent_head().clone();
     migrator
