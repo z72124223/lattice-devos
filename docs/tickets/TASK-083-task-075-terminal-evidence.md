@@ -6,8 +6,8 @@ display_name_zh_tw: 任務 083：TASK-075 終端證據
 display_purpose_zh_tw: 固定 TASK-075 已完成實作與整合重驗的終端證據，讓工程儀表板正確顯示交付狀態。
 status: complete
 parallel_safe: false
-depends_on:
-  - TASK-075
+depends_on: []
+evidence_subjects: [TASK-075]
 branch: feature/task-083-task-075-terminal-evidence
 delivery_remote: origin
 delivery_repository: github.com/z72124223/lattice-devos
