@@ -6,9 +6,6 @@ module_id: lattice-core-bootstrap
 constitution_version: 1.0
 status: blocked
 parallel_safe: true
-depends_on:
-  - TASK-041
-  - TASK-042
 allowed_paths:
   - docs/tickets/TASK-086-task-041-042-integration.md
   - docs/reviews/CODE_REVIEW_TASK_086_2026-08-21.md
