@@ -4,7 +4,7 @@ spec_id: SPEC-002
 spec_version: 35
 module_id: latticed
 constitution_version: 1.9
-status: done
+status: complete
 parallel_safe: false
 depends_on:
   - TASK-038
