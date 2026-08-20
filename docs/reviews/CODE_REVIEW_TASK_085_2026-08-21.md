@@ -21,6 +21,10 @@ independent reviewer was authorized for this worker task.
   validates its module, branch guide, and delivery metadata; a different
   parallel ticket must additionally match its branch, module, terminal status,
   branch guide, and delivery policy.
+- Ticket-local `display_name_zh_tw` / `display_purpose_zh_tw` is now the
+  exactly-once, non-empty Traditional-Chinese presentation authority. The
+  shared branch guide remains a legacy fallback only, removing shared JSON
+  writes from parallel-safe ticket delivery.
 - Unknown, missing, duplicate, branch-mismatched, non-terminal/cancelled,
   unauthorized, and default-branch cases emit errors rather than selecting a
   fallback authority.
@@ -34,10 +38,12 @@ independent reviewer was authorized for this worker task.
 
 - RED: the added parallel-branch assertions failed against the original
   CURRENT-branch coupling.
-- GREEN: `node --test test/project-governance-check.test.js` passed 28/28.
+- GREEN: `node --test test/project-governance-check.test.js` passed 30/30,
+  including generic TASK-081/082/083-shaped ticket-local success and closed
+  missing/duplicate/blank/non-Chinese metadata denial cases.
 - Governance: `npm.cmd run check` exited 0 with one CURRENT marker.
-- Final full regression after the nested-worktree gate: `npm.cmd run verify`
-  exited 0 with 130/130 tests passing.
+- Final full regression after the ticket-local repair: `npm.cmd run verify`
+  exited 0 with 132/132 tests passing.
 
 ## Architecture note
 

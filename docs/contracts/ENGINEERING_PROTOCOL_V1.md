@@ -39,11 +39,13 @@ Codex to use the Codex App native archive-task action as its final operation.
 Missing markers, `keep_open`, interruption, or every failure keeps the task open
 for diagnosis. Repository code never archives or edits Codex App task storage.
 
-Every new branch must add a plain Traditional-Chinese name and purpose to
-`tools/engineering-status-dashboard/branch-guide.zh-TW.json` and include that
-path in the active ticket `allowed_paths`. Complete this human-readable entry
-before the delivery refresh; an unmapped branch intentionally remains visible
-but cannot be selected as a new-work starting point.
+Every new branch must provide a plain Traditional-Chinese name and purpose
+through its own exactly-once non-empty `display_name_zh_tw` and
+`display_purpose_zh_tw` ticket fields. The shared
+`tools/engineering-status-dashboard/branch-guide.zh-TW.json` is the legacy branch-guide fallback only: a ticket without both local fields must include that
+path in its `allowed_paths`. Complete this human-readable evidence before the
+delivery refresh; an unmapped branch intentionally remains visible but cannot
+be selected as a new-work starting point.
 
 ## Knowledge Routing
 

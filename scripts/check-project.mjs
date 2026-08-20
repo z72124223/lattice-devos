@@ -54,6 +54,19 @@ function frontmatterScalar(frontmatter, key) {
   };
 }
 
+function frontmatterTextScalar(frontmatter, key) {
+  const pattern = new RegExp(`^${key}:[ \\t]*(.*?)[ \\t]*$`, "gmu");
+  const matches = [...frontmatter.matchAll(pattern)];
+  return {
+    valid: matches.length === 1,
+    value: matches.length === 1 ? matches[0][1] : null,
+  };
+}
+
+function frontmatterHasKey(frontmatter, key) {
+  return new RegExp(`^${key}:`, "mu").test(frontmatter);
+}
+
 const files = await walk(root);
 const errors = [];
 
@@ -95,9 +108,10 @@ if (!engineeringProtocolFile) {
     "npm.cmd run status:refresh",
     "the projection never replaces ticket, Git, test, CI",
     "LATTICE acceptance evidence",
-    "plain Traditional-Chinese name and purpose",
+    "display_name_zh_tw",
+    "display_purpose_zh_tw",
+    "legacy branch-guide fallback",
     "tools/engineering-status-dashboard/branch-guide.zh-TW.json",
-    "active ticket `allowed_paths`",
     "npm.cmd run delivery:finish",
     "LATTICE_DELIVERY_READY_TO_ARCHIVE=1",
     "native archive-task action",
@@ -250,6 +264,8 @@ for (const file of ticketFiles) {
   const deliveryPush = frontmatterScalar(frontmatter, "delivery_push");
   const deliveryArchive = frontmatterScalar(frontmatter, "delivery_archive");
   const status = frontmatterScalar(frontmatter, "status");
+  const displayName = frontmatterTextScalar(frontmatter, "display_name_zh_tw");
+  const displayPurpose = frontmatterTextScalar(frontmatter, "display_purpose_zh_tw");
   const includesBranchGuide = frontmatterListIncludes(
     frontmatter,
     "allowed_paths",
@@ -271,6 +287,10 @@ for (const file of ticketFiles) {
       deliveryPush,
       deliveryArchive,
       status,
+      displayName,
+      displayPurpose,
+      hasTicketLocalDisplay: frontmatterHasKey(frontmatter, "display_name_zh_tw") ||
+        frontmatterHasKey(frontmatter, "display_purpose_zh_tw"),
     });
   }
 }
@@ -293,7 +313,22 @@ const defaultGitBranch = defaultGitBranchResult.status === 0
   : "";
 const branchGuidePath = "tools/engineering-status-dashboard/branch-guide.zh-TW.json";
 
-async function validateBranchGuide(ticket, label) {
+async function validateBranchPresentation(ticket, label) {
+  if (ticket.hasTicketLocalDisplay) {
+    if (
+      !ticket.displayName.valid ||
+      !ticket.displayName.value?.trim() ||
+      !/\p{Script=Han}/u.test(ticket.displayName.value) ||
+      !ticket.displayPurpose.valid ||
+      !ticket.displayPurpose.value?.trim() ||
+      !/\p{Script=Han}/u.test(ticket.displayPurpose.value)
+    ) {
+      errors.push(
+        `${ticket.file}: ${label} ticket-local display_name_zh_tw and display_purpose_zh_tw must each be exactly one non-empty Traditional-Chinese value.`,
+      );
+    }
+    return;
+  }
   if (!ticket.includesBranchGuide) {
     errors.push(
       `${ticket.file}: ${label} ticket allowed_paths must include '${branchGuidePath}'.`,
@@ -301,7 +336,11 @@ async function validateBranchGuide(ticket, label) {
     return;
   }
   const branchGuideFile = files.find((candidate) => relative(candidate) === branchGuidePath);
-  if (!branchGuideFile || !ticket.branch) return;
+  if (!branchGuideFile) {
+    errors.push(`${branchGuidePath}: missing Traditional-Chinese branch guide.`);
+    return;
+  }
+  if (!ticket.branch) return;
   try {
     const guide = JSON.parse(await readFile(branchGuideFile, "utf8"));
     const entry = guide?.branches?.[ticket.branch];
@@ -394,7 +433,7 @@ if (currentGitBranch && defaultGitBranch && currentGitBranch === defaultGitBranc
       errors.push(`${parallelTicket.file}: parallel ticket must be terminal.`);
     }
     validateDeliveryMetadata(parallelTicket, "parallel");
-    await validateBranchGuide(parallelTicket, "parallel");
+    await validateBranchPresentation(parallelTicket, "parallel");
   }
 }
 if (!plansFile) {
@@ -435,11 +474,8 @@ if (!plansFile) {
         );
       }
       validateDeliveryMetadata(currentTicket, "current");
-      const branchGuideFile = files.find((candidate) => relative(candidate) === branchGuidePath);
-      if (!branchGuideFile) {
-        errors.push(`${branchGuidePath}: missing Traditional-Chinese branch guide.`);
-      } else if (currentTicket.branch) {
-        await validateBranchGuide(currentTicket, "current");
+      if (currentTicket.branch) {
+        await validateBranchPresentation(currentTicket, "current");
       }
     }
   }

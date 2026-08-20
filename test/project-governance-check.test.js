@@ -21,7 +21,7 @@ Read before work.
 ## Mandatory Delivery
 If an ordinary reproducible check fails, repair it within the authorized scope and rerun the same failed check.
 After the durable handoff is current, run npm.cmd run status:refresh; the projection never replaces ticket, Git, test, CI, review, or LATTICE acceptance evidence.
-Every new branch must add a plain Traditional-Chinese name and purpose to tools/engineering-status-dashboard/branch-guide.zh-TW.json and include that path in the active ticket \`allowed_paths\`.
+Every new branch must provide a plain Traditional-Chinese name and purpose through its own exactly-once non-empty \`display_name_zh_tw\` and \`display_purpose_zh_tw\` ticket fields. The shared tools/engineering-status-dashboard/branch-guide.zh-TW.json is a legacy branch-guide fallback only: a ticket without both local fields must include that path in its \`allowed_paths\`.
 After the clean logical commit, run npm.cmd run delivery:finish instead of an ordinary manual push. Only LATTICE_DELIVERY_READY_TO_ARCHIVE=1 permits Codex to call the native archive-task action; every failure keeps the task open.
 
 ## Knowledge Routing
@@ -150,9 +150,12 @@ async function runFixture({
     for (const [name, ticketId, moduleId = "fixture", overrides = {}] of tickets) {
       const branch = overrides.branch || `feature/${ticketId.toLowerCase()}-fixture`;
       const ticketStatus = overrides.status || "complete";
+      const displayMetadata = overrides.displayName === undefined && overrides.displayPurpose === undefined
+        ? ""
+        : `display_name_zh_tw: ${overrides.displayName ?? ""}\ndisplay_purpose_zh_tw: ${overrides.displayPurpose ?? ""}\n`;
       await writeFile(
         path.join(root, "docs", "tickets", name),
-        `---\nticket_id: ${ticketId}\nmodule_id: ${moduleId}\nstatus: ${ticketStatus}\nallowed_paths:\n${includeGuideAllowedPath ? "  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}${decoyGuidePath ? "other_paths:\n  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}branch: ${branch}\n${deliveryRemote === null ? "" : `delivery_remote: ${deliveryRemote}\n`}${deliveryRepository === null ? "" : `delivery_repository: ${deliveryRepository}\n`}${deliveryPush === null ? "" : `delivery_push: ${deliveryPush}\n`}${deliveryArchive === null ? "" : `delivery_archive: ${deliveryArchive}\n`}---\n`,
+        `---\nticket_id: ${ticketId}\nmodule_id: ${moduleId}\nstatus: ${ticketStatus}\n${displayMetadata}allowed_paths:\n${includeGuideAllowedPath ? "  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}${decoyGuidePath ? "other_paths:\n  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}branch: ${branch}\n${deliveryRemote === null ? "" : `delivery_remote: ${deliveryRemote}\n`}${deliveryRepository === null ? "" : `delivery_repository: ${deliveryRepository}\n`}${deliveryPush === null ? "" : `delivery_push: ${deliveryPush}\n`}${deliveryArchive === null ? "" : `delivery_archive: ${deliveryArchive}\n`}${overrides.extraFrontmatter || ""}---\n`,
         "utf8",
       );
       if (includeGuideEntry) {
@@ -334,7 +337,7 @@ test("project check requires the protocol to describe the Chinese purpose guide"
     tickets: [["one.md", "TASK-017"]],
     plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
     protocol: engineeringProtocol.replace(
-      "Every new branch must add a plain Traditional-Chinese name and purpose to tools/engineering-status-dashboard/branch-guide.zh-TW.json and include that path in the active ticket `allowed_paths`.",
+      "Every new branch must provide a plain Traditional-Chinese name and purpose through its own exactly-once non-empty `display_name_zh_tw` and `display_purpose_zh_tw` ticket fields. The shared tools/engineering-status-dashboard/branch-guide.zh-TW.json is a legacy branch-guide fallback only: a ticket without both local fields must include that path in its `allowed_paths`.",
       "Branch explanations are optional.",
     ),
   });
@@ -505,6 +508,62 @@ test("project check accepts TASK-081, TASK-082, and TASK-083 parallel branches w
 
     assert.equal(result.status, 0, `${taskId}: ${result.stderr}`);
     assert.match(result.stdout, /current_tasks=1/u);
+  }
+});
+
+test("project check accepts ticket-local display metadata for parallel tasks without the shared guide", async () => {
+  const parallelBranches = [
+    ["TASK-081", "feature/task-081-dashboard-identity-reconciliation"],
+    ["TASK-082", "feature/task-082-task-050-terminal-evidence"],
+    ["TASK-083", "feature/task-083-task-075-terminal-evidence"],
+  ];
+  for (const [taskId, branch] of parallelBranches) {
+    const result = await runFixture({
+      tickets: [
+        ["current.md", "TASK-078", "fixture", {
+          displayName: "目前規劃工作",
+          displayPurpose: "保留唯一規劃焦點的繁體中文說明。",
+        }],
+        [`${taskId.toLowerCase()}.md`, taskId, "fixture", {
+          branch,
+          displayName: `${taskId} 平行工作`,
+          displayPurpose: "從票券本身提供繁體中文交付用途。",
+        }],
+      ],
+      plans: "**CURRENT TASK-078 IMPLEMENTATION:** shared planning index\n",
+      gitBranch: branch,
+      includeGuideAllowedPath: false,
+      includeGuideEntry: false,
+    });
+
+    assert.equal(result.status, 0, `${taskId}: ${result.stderr}`);
+  }
+});
+
+test("project check rejects incomplete, duplicate, blank, or non-Chinese ticket-local display metadata", async () => {
+  const invalidMetadata = [
+    { displayName: "只有名稱" },
+    { displayName: "名稱", displayPurpose: "用途", extraFrontmatter: "display_name_zh_tw: 重複名稱\n" },
+    { displayName: "   ", displayPurpose: "用途" },
+    { displayName: "English only", displayPurpose: "English purpose" },
+  ];
+  for (const overrides of invalidMetadata) {
+    const result = await runFixture({
+      tickets: [
+        ["current.md", "TASK-017", "fixture", {
+          displayName: "目前工作",
+          displayPurpose: "目前工作用途。",
+        }],
+        ["parallel.md", "TASK-018", "fixture", overrides],
+      ],
+      plans: "**CURRENT TASK-017 IMPLEMENTATION:** shared planning index\n",
+      gitBranch: "feature/task-018-fixture",
+      includeGuideAllowedPath: false,
+      includeGuideEntry: false,
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /ticket-local display_name_zh_tw and display_purpose_zh_tw/u);
   }
 });
 
