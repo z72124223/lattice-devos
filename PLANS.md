@@ -33,13 +33,17 @@ Current Goal:
   can discover/invoke the two bounded task tools. Only after that separate live
   ChatGPT gate resumes TASK-037 production-chain diagnosis/repair.
 
-CURRENT TASK-038 — add `lattice_task_submit` and `lattice_task_status` through
+Historical TASK-038 context — add `lattice_task_submit` and `lattice_task_status` through
 the same `latticed` One Gateway. The first public intent is exactly
 `CONTROLLED_CODEX_CANARY`; LATTICE builds the complete Task Spec 2.1, preserves
 one spec digest, uses PostgreSQL Task Ledger truth and a real PostgreSQL Writer
 Lease/fence, governs the sole Codex writer, verification, Git, and fresh-process
 status replay. Canonical-local acceptance is `PASS`; actual ChatGPT tunnel
 discovery/invoke remains open and is not inferred from local NDJSON evidence.
+
+CURRENT TASK-049 — Window Closure terminal evidence: the pure
+Orchestrator eligibility decision is complete and awaiting only bounded feature
+branch delivery through the TASK-078 finisher.
 
 User Order Correction — 2026-08-09:
 1. TASK-038 bounded GPT -> LATTICE -> Codex Submit/Status first.
