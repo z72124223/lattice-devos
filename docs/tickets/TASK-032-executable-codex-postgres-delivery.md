@@ -45,7 +45,7 @@ allowed_paths:
   - docs/tickets/TASK-022-postgres-project-registry.md
   - docs/tickets/TASK-032-executable-codex-postgres-delivery.md
   - docs/workflow/WORKFLOW_LEDGER.md
-branch: feature/task-036-codex-app-server-repair
+branch: feature/v2-rust-postgres-bootstrap
 ---
 
 ## Objective
