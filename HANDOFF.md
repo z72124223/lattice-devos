@@ -2,9 +2,10 @@
 
 ## Status
 
-`DONE` for local TASK-044 implementation, review, and clean-source aggregate.
-Integration remains `NEEDS_REVIEW` because this branch has not been pushed or
-merged and no such authorization was provided.
+`DONE` for TASK-044 implementation, review, final clean-source aggregate,
+GitHub feature-branch synchronization, and local engineering-map refresh.
+Integration remains `NEEDS_REVIEW` because no PR, primary-branch merge,
+deployment, or release was requested or performed.
 
 ## Objective And Scope
 
@@ -14,8 +15,8 @@ merged and no such authorization was provided.
   Task019 current-profile initial/restart hook, bounded aggregate runner,
   self-test, ticket, latticed constitution, plan, and handoff.
 - Out of scope: active-child interruption, public MCP/OpenClaw authority,
-  schema or dependency changes, paid/provider paths, push, merge, deployment,
-  and release.
+  schema or dependency changes, paid/provider paths, PR creation,
+  primary-branch merge, deployment, and release.
 
 ## Completed Work
 
@@ -49,7 +50,9 @@ merged and no such authorization was provided.
 | PostgreSQL restart | PASS | `TASK044_POSTGRES_CANCEL_REPLAY=PASS`; Task068 combined replay PASS |
 | Fresh Status and regression | PASS | `TASK050_AUTONOMY_RECEIPT_ACCEPTANCE=PASS`; strict Clippy and affected suites PASS |
 | Code and architecture review | PASS | no unresolved P0-P3 finding; conditional admission preservation re-review PASS |
-| Clean-source aggregate | PASS | run `e5784371df1a46c78a64b8f1cf9c59cd`; exact source `f6e66da`; 13 commands, F01-F08 |
+| Clean-source aggregate | PASS | final run `f086500c61bd4350b3e1033bb8ef6013`; exact source `c800d19`; 13 commands, F01-F08 |
+| GitHub feature branch | PASS | upstream configured; non-force push and live remote equality verified through `da6f7e7` |
+| Engineering map | PASS | schema 2.0 refresh classified TASK-044 `COMPLETE`, synchronized, eligible, and error-free |
 
 ## Verification
 
@@ -61,10 +64,17 @@ merged and no such authorization was provided.
   wrapper and fresh-process PostgreSQL acceptance PASS.
 - `cargo fmt --all -- --check` and strict changed-slice Clippy: PASS.
 - `scripts/run-task044-component-fault-recovery-gate.ps1`: exit `0` on exact
-  source `f6e66da`; all four final PASS markers emitted. Bounded evidence is
+  source `c800d19`; all four final PASS markers emitted. Bounded evidence is
   16,236 bytes with 8 scenarios, 13 command hashes, zero six-component fresh
   Status deltas, and `unexpected_footprint_count=0`.
-- CI: not run for this local branch; no push was authorized.
+- GitHub branch: `origin/feature/task-044-component-fault-recovery-gate` was
+  created by non-force push and live remote equality was verified.
+- Engineering map refresh at `2026-08-20T15:25:18.880Z`: Task044 outcome
+  `COMPLETE`, sync `synced`, `remoteVerified=true`, `eligible=true`, zero node
+  errors. The overall 42-node snapshot remains `partial` due to unrelated
+  repository nodes; Task044 itself is complete.
+- CI: no remote CI run exists for Task044; local verification remains the
+  acceptance evidence.
 
 ## Review And Integration
 
@@ -79,20 +89,22 @@ merged and no such authorization was provided.
   dependency changed, and public MCP remains exactly four tools. The approved
   amendment is latticed constitution v1.9; no ADR is required.
 - Branch: `feature/task-044-component-fault-recovery-gate`, based on current
-  combined source `65f2902`; no upstream is configured.
-- Merge status: not merged; no push, Draft promotion, merge, deployment, or
-  release performed or authorized.
+  combined source `65f2902`, tracking
+  `origin/feature/task-044-component-fault-recovery-gate`.
+- Merge status: feature branch published and remote-equal; no PR, Draft
+  promotion, primary-branch merge, deployment, or release performed.
 
 ## Risks And Open Decisions
 
 - Remote CI and branch protection are not current evidence for TASK-044.
-- Push, review publication, merge, deployment, and release remain separately
-  unauthorized and unperformed.
+- PR creation, review publication, primary-branch merge, deployment, and
+  release remain separate future gates.
 
 ## Next Action
 
-1. If integration is desired, obtain explicit push/review/merge direction and
-   verify the intended remote target; do not infer it from the local PASS.
+1. This completed window is safe to archive. If integration is desired later,
+   obtain explicit PR/merge direction and verify the intended target; do not
+   infer merge authority from the local or feature-branch PASS.
 
 ## Restart Context
 

@@ -39,7 +39,7 @@ base_commit: 65f2902504e5ef5acba6f258b736905fd4d12a4d
 
 ## Current Gate
 
-`PASS / EXACT_IMPLEMENTATION_SOURCE f6e66dad6e8982d7a0d41692b96469cfbab98a04`
+`PASS / EXACT_IMPLEMENTATION_SOURCE c800d19a9a3ba29f5d342aded6c649f592f5281d`
 
 2026-08-20 修復重啟已把本 ticket 的單一設計提交搬到乾淨且與遠端一致的
 `feature/task-076-postgres-writer-lease-v2@65f2902`。該基底包含 TASK-038 的
@@ -59,8 +59,8 @@ adapter。除 aggregate runner 外，唯一 runtime 行為修復是讓既有 Pos
 總 PASS。這個 aggregate gate 不改寫 owner semantics，也不把歷史 PASS 當成 current
 evidence。
 
-2026-08-20 clean-source aggregate run
-`e5784371df1a46c78a64b8f1cf9c59cd` 在 exact source `f6e66da` 完成 13 個 current
+2026-08-20 final clean-source aggregate run
+`f086500c61bd4350b3e1033bb8ef6013` 在 exact source `c800d19` 完成 13 個 current
 commands、8/8 scenarios、六個 fresh-status effect delta 全為零，並輸出：
 
 ```text
@@ -69,6 +69,10 @@ SCENARIOS=F01,F02,F03,F04,F05,F06,F07,F08
 FRESH_STATUS_ZERO_RERUN=PASS
 CLEANUP_FOOTPRINT=PASS
 ```
+
+Task044 功能分支已建立 GitHub upstream 並以 non-force push 同步；工程地圖
+`lattice.engineering-status/2.0` 已即時辨識本票券為 `COMPLETE`、工作樹乾淨、
+遠端一致且可作為獨立新工作的起點。沒有建立 PR，也沒有合併、部署或發布。
 
 ## Historical Blocker (superseded 2026-08-20)
 
