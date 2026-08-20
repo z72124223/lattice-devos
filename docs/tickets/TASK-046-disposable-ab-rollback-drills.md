@@ -4,7 +4,7 @@ spec_id: SPEC-002
 spec_version: 27
 module_id: self-upgrade-guardian
 constitution_version: 1.0
-constitution_source: docs/modules/V2_AMENDMENT_PROPOSAL.md
+constitution_source: docs/modules/self-upgrade-guardian/MODULE_CONSTITUTION.md
 status: blocked
 parallel_safe: false
 depends_on:
