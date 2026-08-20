@@ -8,7 +8,7 @@ import test from "node:test";
 const checkScript = path.resolve("scripts/check-project.mjs");
 const engineeringProtocol = `---
 protocol_id: LATTICE_ENGINEERING_PROTOCOL
-version: 1.0.1
+version: 1.0.2
 status: active
 canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md
 ---
@@ -20,6 +20,7 @@ Read before work.
 
 ## Mandatory Delivery
 If an ordinary reproducible check fails, repair it within the authorized scope and rerun the same failed check.
+After the durable handoff is current, run npm.cmd run status:refresh; the projection never replaces ticket, Git, test, CI, review, or LATTICE acceptance evidence.
 
 ## Knowledge Routing
 Personal preferences, historical cases, and detailed decision logic belong in LATTICE, Hermes, and the knowledge graph.
@@ -182,6 +183,20 @@ test("project check requires detailed knowledge to route outside the protocol", 
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /missing required contract content/u);
+});
+
+test("project check enforces the post-handoff dashboard refresh rule", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    protocol: engineeringProtocol.replace(
+      "After the durable handoff is current, run npm.cmd run status:refresh; the projection never replaces ticket, Git, test, CI, review, or LATTICE acceptance evidence.",
+      "No local projection is required.",
+    ),
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /npm\.cmd run status:refresh/u);
 });
 
 test("an ordinary protocol error can be repaired and the same check rerun", async () => {

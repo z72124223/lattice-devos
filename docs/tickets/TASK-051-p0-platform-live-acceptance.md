@@ -5,7 +5,7 @@ spec_id: SPEC-003
 spec_version: 5
 module_id: latticed
 constitution_version: 1.8
-status: in_progress
+status: waiting_dependency
 parallel_safe: false
 depends_on:
   - TASK-050
@@ -172,3 +172,9 @@ The execution gate was explicitly authorized by the user in source thread `019ff
 - The invocation then failed closed with `TASK051_LIVE_ACCEPTANCE_REJECTED|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|TASK038_UNCLASSIFIED_REJECTED`. Preserved evidence bounds the failure after successful discovery and before any submit dispatch or controlled-task database mutation: the only MCP dispatch receipt is the discovery `SESSION_OPEN` with `dispatch_accepted_count=0`, while the controlled-task footprint remains at zero task events, commands, writer commands, and writer transitions. Because the TASK-038 classifier did not retain a more specific underlying exception, no narrower root cause is claimed and no tool call or full live run was retried.
 - Cleanup receipts prove `HOLDER_STOPPED`, `CLEANUP_COMPLETED`, and `RECEIPT_CLOSED`; the disposable cluster directory is empty, port `49158` has no listener, no process image or command line remains under run slot `1f1e26`, and no subst mapping remains. The runner's byte-hash rollback guard accepted the original Codex config; its post-run SHA-256 is `69712ba5da5685da34eed9ae8699cb16390b73948931a41d212cfd814feb6fc3`.
 - Current terminal state is `FAIL`, not `VERIFIED`. Discovery is proven for this run, but the required real typed submit, durable write, fresh-process status read, physical-restart replay, exact six-field status result, and zero-duplicate-effect proof did not complete. The run evidence is preserved; another live attempt requires a separately reviewed correction and new authorization rather than retrying this acceptance.
+
+## 2026-08-20 priority pause
+
+- The user directed Codex to pause another TASK-051 runtime attempt while TASK-077 builds a local engineering-status dashboard.
+- The preserved terminal state remains `FAIL`. TASK-077 is a visibility improvement, not an acceptance dependency or substitute.
+- Resuming this ticket still requires the separately reviewed correction and new live-run authorization already recorded above.

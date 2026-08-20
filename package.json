@@ -14,6 +14,8 @@
     "test": "node --test \"test/*.test.js\"",
     "test:domain": "node --test test/task-domain.test.js",
     "test:operator-entrypoint": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/test-lattice-full-chain-entrypoint.ps1",
+    "status:refresh": "node scripts/export-lattice-engineering-status.mjs",
+    "status:open": "node scripts/export-lattice-engineering-status.mjs --open",
     "verify": "npm run check && npm test"
   }
 }

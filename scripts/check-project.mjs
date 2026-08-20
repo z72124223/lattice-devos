@@ -45,11 +45,14 @@ if (!engineeringProtocolFile) {
   const protocol = await readFile(engineeringProtocolFile, "utf8");
   const requiredProtocolContent = [
     "protocol_id: LATTICE_ENGINEERING_PROTOCOL",
-    "version: 1.0.1",
+    "version: 1.0.2",
     "canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md",
     "## Mandatory Entry",
     "## Mandatory Delivery",
     "repair it within the authorized scope and rerun the same failed check",
+    "npm.cmd run status:refresh",
+    "the projection never replaces ticket, Git, test, CI",
+    "LATTICE acceptance evidence",
     "## Knowledge Routing",
     "Personal preferences, historical cases, and detailed decision logic belong in LATTICE, Hermes, and the knowledge graph",
     "## Authority Boundary",

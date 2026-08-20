@@ -88,16 +88,23 @@ boundaries, complete cleanup, and no unresolved P0-P3 finding. GitHub Actions
 run `31835654240` passed on the exact implementation commit. Draft PR #12
 remains not authorized for merge or Draft promotion.
 
-## Current P0 platform live acceptance - TASK-051
+## Current local engineering status dashboard - TASK-077
 
-CURRENT TASK-051 - TASK-050 now satisfies the ticket's
-`TASK050_FULLY_VERIFIED` prerequisite at `8e5ba40`. Begin with the ticket's
-read-only exact-source/configuration/runtime preflight. Current-machine Codex
-registration, discovery, semantic invocation, and restart acceptance remain
-unverified until TASK-051 produces its own run-bound evidence. Any reversible
-Codex MCP configuration-table mutation remains a separate exact ticket gate;
-no merge, deployment, release, credential change, or public exposure is
-authorized.
+CURRENT TASK-077 - build a local-only, static engineering status page that
+turns the live Git worktree, TASK, ISSUE, PR, and CI evidence into plain-language
+branch cards. A one-click launcher must refresh before opening, and the normal
+Codex delivery protocol must refresh the same projection after task handoff and
+any authorized push. The page is observational only: it cannot become LATTICE
+truth, authorize work, mutate a branch, merge, deploy, release, or expose data
+publicly.
+
+## Paused P0 platform live acceptance - TASK-051
+
+PAUSED TASK-051 - the last exact current-machine attempt remains `FAIL`, not
+`VERIFIED`. The user directed Codex on 2026-08-20 to pause any runtime rerun
+while TASK-077 makes engineering state visible. The preserved failure still
+requires a separately reviewed correction and new live-run authorization; the
+dashboard does not satisfy or replace that gate.
 
 ## Completed task update — TASK-072
 
