@@ -217,6 +217,10 @@ Lease/fence, governs the sole Codex writer, verification, Git, and fresh-process
 status replay. Canonical-local acceptance is `PASS`; actual ChatGPT tunnel
 discovery/invoke remains open and is not inferred from local NDJSON evidence.
 
+CURRENT TASK-049 — Window Closure terminal evidence: the pure
+Orchestrator eligibility decision is complete and awaiting only bounded feature
+branch delivery through the TASK-078 finisher.
+
 User Order Correction — 2026-08-09:
 1. TASK-038 bounded GPT -> LATTICE -> Codex Submit/Status first.
 2. TASK-037 production-chain repair second.

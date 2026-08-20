@@ -1011,3 +1011,10 @@ pub use coordination::{
     DispatchCandidate, EvidenceRecord, EvidenceState, ProjectedCompletion, WorkItem,
     WorkItemProjection, decide_coordination_round, project_work_item_status,
 };
+
+mod window_closure;
+
+pub use window_closure::{
+    DurableHandoffReceipt, HandoffFieldStatus, KeepWindowOpenReason, WindowClosureDecision,
+    WindowKind, classify_window_closure,
+};
