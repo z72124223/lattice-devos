@@ -1,17 +1,38 @@
 ---
 ticket_id: TASK-024
 spec_id: SPEC-002
-spec_version: 27
+spec_version: 36
 module_id: approval-verifier
-constitution_version: 1.0
-status: blocked
+constitution_version: 1.1
+status: ready
 parallel_safe: false
 depends_on:
   - TASK-015
   - TASK-023
+  - commit:78b4e2e
 allowed_paths:
   - docs/tickets/TASK-024-approval-durability-and-claim.md
   - docs/tickets/red-fixtures/TASK-024-approval-claim-durability-red.json
+  - docs/specs/SPEC-002-autonomous-development-platform.md
+  - docs/adr/ADR-024-durable-postgres-approval-normal-claim.md
+  - docs/modules/approval-verifier/MODULE_CONSTITUTION.md
+  - docs/modules/postgres-approval-verifier/MODULE_CONSTITUTION.md
+  - PLANS.md
+  - docs/workflow/WORKFLOW_LEDGER.md
+  - Cargo.toml
+  - Cargo.lock
+  - crates/lattice-approval-verifier/src/lib.rs
+  - crates/lattice-approval-verifier/tests/approval_verifier.rs
+  - crates/lattice-postgres-approval-verifier/Cargo.toml
+  - crates/lattice-postgres-approval-verifier/src/lib.rs
+  - crates/lattice-postgres-approval-verifier/src/setup.rs
+  - crates/lattice-postgres-approval-verifier/src/adapter.rs
+  - crates/lattice-postgres-approval-verifier/tests/adapter_api.rs
+  - crates/lattice-postgres-approval-verifier/tests/extension_contract.rs
+  - crates/lattice-postgres-approval-verifier/tests/postgres_live.rs
+  - db/extensions/approval-verifier/v1.sql
+  - scripts/run-task019-postgres.ps1
+  - scripts/test-task024-postgres-approval-verifier.ps1
 branch: feature/task-023-025-durable-repositories
 base_commit: 845328dcc06d51c7554c93a09739a27ddd827941
 ---
@@ -59,6 +80,18 @@ No normal repository API may expose a general protected consume command.
    profile in a versioned SPEC/ADR/constitution amendment.
 4. Only then expand `allowed_paths`; no implementation path is pre-authorized
    by this readiness ticket.
+
+## Ready gate resolution on 2026-08-20
+
+TASK-023 completed at local checkpoint `78b4e2e` after the clean TASK-076
+dependency and a current marker-owned PostgreSQL acceptance rerun. SPEC-002
+v36, ADR-024, Approval Verifier 1.1, and Postgres Approval Verifier 1.0 now
+freeze the repository bytes, global aggregate serialization, database-time
+observation, independently retained checkpoint, fixed-function physical
+profile, normal effect-claim transaction, and protected-lane exclusion.
+The exact paths above replace the former readiness-only allowlist. The first
+implementation action is the existing repository-trait RED; only TASK-024 is
+current.
 
 The physical adapter may depend one-way on Approval Verifier public
 planner/replay/checkpoint APIs. Approval Verifier may never depend on a

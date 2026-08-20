@@ -88,9 +88,9 @@ boundaries, complete cleanup, and no unresolved P0-P3 finding. GitHub Actions
 run `31835654240` passed on the exact implementation commit. Draft PR #12
 remains not authorized for merge or Draft promotion.
 
-## Current P0 platform live acceptance - TASK-051
+## Paused P0 platform live acceptance - TASK-051
 
-CURRENT TASK-051 - TASK-050 now satisfies the ticket's
+PAUSED TASK-051 - TASK-050 now satisfies the ticket's
 `TASK050_FULLY_VERIFIED` prerequisite at `8e5ba40`. Begin with the ticket's
 read-only exact-source/configuration/runtime preflight. Current-machine Codex
 registration, discovery, semantic invocation, and restart acceptance remain
@@ -98,6 +98,17 @@ unverified until TASK-051 produces its own run-bound evidence. Any reversible
 Codex MCP configuration-table mutation remains a separate exact ticket gate;
 no merge, deployment, release, credential change, or public exposure is
 authorized.
+
+## Current durable Approval repository - TASK-024
+
+CURRENT TASK-024 - the user explicitly brought the dependency-ordered
+TASK-023 through TASK-025 durability slice forward. TASK-023 is complete at
+local checkpoint `78b4e2e`; TASK-024 now freezes Approval Verifier 1.1 and the
+independent `postgres-approval-verifier` 1.0 boundary, then implements one
+serializable global aggregate repository and atomic normal effect claim using
+database time/admission. Protected approval claim, live OS/Guardian proof,
+push, primary merge, deployment, release, credentials, and public exposure
+remain excluded.
 
 ## Completed task update — TASK-072
 
@@ -1065,6 +1076,16 @@ actions remain separately protected and require explicit current authorization.
     AC-06 remains open for real Windows/Git inspection, Workspace Git, and
     Scope Check. Writer Lease, Approval, Artifact, external components,
     production/release/deployment, and the unrelated website remain excluded.
+  - TASK-023 is complete at local checkpoint `78b4e2e`. The current branch's
+    official TASK-076 wrapper passed with the gap-only PostgreSQL
+    `MarkSuspect -> Revoke -> Acquire` recovery assertion, exact retry, newer
+    fence, marker-owned listener shutdown, contained-root cleanup, and receipt
+    closure. No second Writer Lease owner was created.
+  - **ACTIVE TASK-024:** freeze SPEC-002 v36, ADR-024, Approval Verifier 1.1,
+    and Postgres Approval Verifier 1.0, then implement bounded repository
+    bytes, fixed SQL functions, independently retained checkpoint comparison,
+    database-time currentness, global nonce replay, and same-transaction normal
+    effect claim. Protected claim and production authentication remain closed.
 - [ ] **BLOCKED TASK-032 — executable Codex/PostgreSQL delivery node:** first
   record the approved versioned contract/port/orchestrator/`latticed` boundary,
   then implement it with TDD and prove an official Codex app-server repository
@@ -1095,7 +1116,7 @@ actions remain separately protected and require explicit current authorization.
 - [ ] Step 8: Preserve unfinished TASK-028 through TASK-031 controls as
   hardening backlog and pull forward only a control that blocks the executable
   delivery path; do not let the older fake-adapter sequence override TASK-032.
-- [ ] **CURRENT STEP 9:** Attach the OS-contained Hermes reflection lane to the
+- [ ] **PAUSED STEP 9:** Attach the OS-contained Hermes reflection lane to the
   same exact graph/memory receipt and persist/replay it only through PostgreSQL.
 - [ ] Step 10: After Hermes passes, attach and verify the bounded OpenClaw
   gateway against the same durable delivery request and receipt.

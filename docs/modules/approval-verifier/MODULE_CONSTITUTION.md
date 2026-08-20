@@ -1,10 +1,10 @@
 ---
 module_id: approval-verifier
 name: Approval Verifier
-version: 1.0
+version: 1.1
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-07-29
+last_reviewed: 2026-08-20
 ---
 
 ## Mission
@@ -12,7 +12,10 @@ last_reviewed: 2026-07-29
 Own pure Rust, replayable approval-subject, challenge, proof, nonce-lifecycle,
 availability, exact-command, and current-head semantics; issue fixed-owner
 receipts through a deterministic non-durable fake; and provide the one
-semantic core later reused by PostgreSQL and the protected Guardian claim.
+semantic core reused by PostgreSQL and the protected Guardian claim. Version
+1.1 additionally owns bounded canonical repository intent, snapshot,
+checkpoint, normal-effect-claim, current-authority, and stable repository-error
+contracts while remaining free of I/O and concrete adapters.
 
 ## Non-Goals
 
@@ -27,6 +30,8 @@ semantic core later reused by PostgreSQL and the protected Guardian claim.
 - Expose a general command that consumes a protected-release nonce.
 - Perform filesystem, Git, database, process, network, provider, credential,
   payment, publication, or deployment I/O.
+- Choose database time, daemon/admission observations, retry counts, SQL,
+  transaction isolation, physical schema, credentials, or effect execution.
 - Claim a fake proof or receipt is live, cryptographically secure, durable, or
   OS-authenticated.
 
@@ -39,6 +44,8 @@ semantic core later reused by PostgreSQL and the protected Guardian claim.
 - Exact command receipts, predecessor chain, command high-water/tail,
   aggregate replay, and rollback checkpoint semantics.
 - Fixed-owner receipt issuance and independent current-head projection.
+- Canonical repository request/effect-claim meaning and the component-free
+  `ApprovalRepository` boundary used by fake conformance and durable adapters.
 
 Contracts owns shared immutable representation only. PostgreSQL owns physical
 persistence/serialization only. Guardian owns protected activation authority
@@ -62,6 +69,12 @@ and order only.
 - Export and verify a strict untrusted raw aggregate snapshot.
 - Export and compare a validated trusted checkpoint for rollback-sensitive
   restore.
+- Export/import bounded canonical snapshot and checkpoint bytes without
+  trusting stored rows before replay.
+- Execute high-level repository requests whose observation time is supplied by
+  the repository owner, and atomically claim one normal approval with one exact
+  typed effect identity/digest. No repository request may consume protected
+  approval state.
 
 ## Invariants
 
@@ -101,6 +114,16 @@ and order only.
     snapshots, logs, errors, or `Debug`.
 14. Fake reads no hidden clock, random, environment, key, process, or I/O
     source and always emits `RuntimeKind::Fake`.
+15. Repository intent bytes exclude database time, daemon identity/epoch,
+    admission, and derived claim digest. Exact retry binds the original intent;
+    changed command or effect content never reuses a terminal receipt.
+16. A normal effect claim binds one approval/head, effect kind/identity/digest,
+    PostgreSQL observation, current daemon/epoch/admission, and the exact domain
+    consume receipt. Protected state has no repository claim constructor,
+    variant, or trait method.
+17. Canonical repository payloads are bounded before parsing. Snapshots are
+    untrusted until full replay and comparison with independently retained
+    checkpoint fields; self-consistency alone grants no current authority.
 
 ## Allowed Dependencies
 
@@ -147,6 +170,8 @@ atomically rechecks receipt/head and DB time, consumes the nonce, appends
 | Policy composition | actual fake-owner receipt/current head plus full substitution matrix | Security review | yes |
 | R3 fail closed | no caller review Boolean; missing Review Runtime owner denies | Architecture review | yes |
 | Dependency/no-I/O/secrets | Cargo tree plus forbidden source and leak scans | Architecture review | yes |
+| Repository boundary | golden intent/snapshot/checkpoint/effect-claim bytes, bounds, exact retry and changed-content denial | Security review | yes |
+| Durable conformance | fake repository vectors and live PostgreSQL adapter replay the same public planner/currentness semantics | Engineering | yes |
 | Full verification | workspace format, lint, Rust and preserved Node tests | Engineering | yes |
 
 ## Change Policy
@@ -162,3 +187,4 @@ authorization.
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
 | 1.0 | 2026-07-29 | SPEC-002 v11, ADR-013, TASK-015 | Pure approval owner, deterministic fake, receipt/head, nonce/currentness, and claim split | User MVP-3 execution directive |
+| 1.1 | 2026-08-20 | SPEC-002 v36, ADR-024, TASK-024 | Component-free durable repository intents, canonical bytes, stable failures, independently checked replay, and normal effect-claim contract; no protected claim | User TASK-023-025 development directive |

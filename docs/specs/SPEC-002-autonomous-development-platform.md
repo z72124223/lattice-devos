@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 35
+version: 36
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -29,13 +29,15 @@ modules:
   - module_id: gateway-ipc
     constitution_version: 1.1
   - module_id: approval-verifier
-    constitution_version: 1.0
+    constitution_version: 1.1
   - module_id: postgres-store
     constitution_version: 1.10
   - module_id: postgres-codebase-memory
     constitution_version: 1.2
   - module_id: postgres-writer-lease
     constitution_version: 1.1
+  - module_id: postgres-approval-verifier
+    constitution_version: 1.0
   - module_id: artifact-store
     constitution_version: 1.0
   - module_id: codex-adapter
@@ -711,6 +713,23 @@ creating duplicate authorities or an unconstrained self-modifying agent.
   the approved transition/effect. Protected-release nonce claim occurs only in
   Guardian `claim_activation`, atomically with `ACTIVATION_CLAIMED` and
   `DRAINING`.
+- Approval Verifier 1.1 adds bounded canonical repository requests, aggregate
+  snapshots/checkpoints, normal-effect claims, stable repository failures, and
+  one component-free repository trait without changing any 1.0 fake command,
+  receipt, subject, proof, nonce, revocation, or replay meaning.
+- `postgres-approval-verifier` is the only TASK-024 physical owner. It locks
+  one global approval aggregate, replays untrusted bytes against independently
+  retained checkpoint columns, obtains observation time and current
+  daemon/admission from PostgreSQL, and invokes only Approval Verifier public
+  planning/apply/currentness functions.
+- A normal claim commits the domain `ConsumeNormal` receipt and one exact,
+  immutable effect-claim row in the same serializable transaction. The effect
+  identity and digest are caller intent; database time, daemon identity/epoch,
+  admission, and the resulting claim digest are repository observations.
+  Exact retry is byte-identical and changed command/effect content fails.
+- The durable repository exposes no protected consume/claim command. A
+  protected approval remains `VERIFIED_PROTECTED_PENDING_CLAIM`; only the
+  later Guardian-owned transaction may consume it.
 - Approval Verifier cannot establish independent review acceptance. Until
   Review Runtime supplies its own owner receipt/current head, R3 and every
   independent-review-required allow path fail closed.
@@ -1554,6 +1573,7 @@ change Store/Memory/Writer state ownership.
 | AC-43 | exact source/blob checksum checks, fresh and exact-prefix disposable PostgreSQL schema-v5 migration matrices, misplaced-autonomy-0005 no-DDL rejection, base and Memory-extension catalog/ACL/profile assertions, Registry v4/v5 and Memory v2/v3 mixed-replay fixtures | exact Registry `0005` and autonomy `0006` history; stable fail-closed mismatch classification before DDL; base 16-table/47-function catalog with only 19 runtime functions; immutable Memory v1/v2 bytes and byte-identical historical Registry/Memory persistence receipts |
 | AC-44 | exact Writer v1/v2 manifests, five-state Store/Memory/Writer transition matrices, common lock-order concurrency, pending-runtime denial, non-empty replay, and marker-owned PostgreSQL restart acceptance | immutable v1 and semantic/fencing bytes; exact v2 bridge/current identities; no deadlock or partial state; final TASK-050 fenced assertion and fresh-process replay |
 | AC-45 | Task Ledger profile-classifier and typed-autonomy-plan tests, generic-forgery denial, historical/required/unknown replay matrices, lifecycle ordering tests, fresh canonical `latticed` restart/Status acceptance, and four-tool/six-field MCP regression | one canonical receipt/profile owner; required sequence-2 receipt before effects; missing/late/duplicate/unknown fail closed; exact `0006`, catalog, existing hashes, and MCP wire unchanged |
+| AC-46 | Approval Verifier 1.1 canonical repository vectors plus PostgreSQL 17.10 install/profile, global nonce, serializable concurrency, exact retry, normal effect-claim atomicity, protected-lane denial, corruption, commit-unknown reconciliation, fresh connection/process, restart, ACL, and cleanup matrices | one pure semantic owner and one fixed-function durable adapter; database-owned time/admission; exact normal claim or no claim; protected state unchanged; no raw nonce/key/assertion bytes, Guardian claim, production authentication, arbitrary SQL, credential, or public-network surface |
 
 ## Human Decisions
 
@@ -1580,6 +1600,11 @@ change Store/Memory/Writer state ownership.
   evidence; Postgres Store 1.10, Orchestrator Runtime 2.6, and `latticed` 1.8
   consume that contract; the out-of-bound Contracts SHA helper is removed while
   Contracts remains 1.13; the public four-tool/six-field MCP wire is frozen.
+- On 2026-08-20 the user directly ordered TASK-023 through TASK-025 local
+  development. TASK-024 is therefore authorized for bounded governance,
+  implementation, disposable PostgreSQL verification, and local commits only;
+  push, default-branch merge, deployment, release, public exposure, and
+  credential/account mutation remain unauthorized.
 - Account or credential changes, payment, public exposure, irreversible
   deletion, destructive/incompatible migrations, security-control changes,
   and protected release promotion remain on authenticated protected surfaces.

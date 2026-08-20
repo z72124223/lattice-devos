@@ -1,5 +1,31 @@
 # Workflow Ledger
 
+## TASK-024 Durable Approval repository and normal effect claim
+
+- Classification: versioned Approval Verifier repository boundary plus one
+  independent PostgreSQL extension and marker-owned live acceptance.
+- Repository/worktree:
+  `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\task-023-025-durable-repositories`.
+- Branch/base: `feature/task-023-025-durable-repositories`; TASK-023 local
+  checkpoint `78b4e2e` after merged TASK-076 dependency.
+- Specification/ticket: SPEC-002 v36; ADR-024; Approval Verifier 1.1;
+  Postgres Approval Verifier 1.0; TASK-024.
+
+| Stage | Status | Evidence | Enforcement |
+|---|---|---|---|
+| Repository/rules/state | valid | audit, rules, branch, dependency merge, clean TASK-023 checkpoint inspected | machine-observed + documented |
+| Requirements | valid | user directly ordered TASK-023 through TASK-025 local development; protected/external actions remain excluded | user-authoritative + documented |
+| Specification | valid/current | SPEC-002 v36 and ADR-024 freeze global serialization, DB time/admission, normal claim and protected exclusion | documented + project check pass |
+| Module constitution | valid/current | Approval Verifier 1.1 and Postgres Approval Verifier 1.0 boundaries frozen; repository has no dedicated constitution validator | documented + project check pass |
+| Ticket/worktree | ready | TASK-024 dependency and exact allowlist updated on the dedicated branch; exactly one current marker | documented + project check pass |
+| TDD implementation | pending | first repository-trait RED not yet executed | missing |
+| Focused/full verification | pending | commands frozen in TASK-024 and constitutions | missing |
+| Code/architecture review | pending | required after implementation | missing |
+| Live PostgreSQL | pending | marker-owned loopback-only fixture; protected ports excluded | missing |
+| Integration/CI/merge | local-only/not performed | no push, default merge, deployment, or release authorization | external controls intentionally absent |
+
+---
+
 ## TASK-038 ChatGPT MCP Gateway
 
 - Classification: bounded external transport integration and correction of a
