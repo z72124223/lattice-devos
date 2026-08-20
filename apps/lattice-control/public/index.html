@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LATTICE Control</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, "Noto Sans TC", system-ui, sans-serif; }
+    body { margin: 0; background: #0b1020; color: #e8eefc; }
+    main { width: min(1080px, calc(100% - 32px)); margin: 32px auto; }
+    h1 { margin-bottom: 4px; }
+    .muted { color: #9eabc7; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; }
+    section, article { background: #131b31; border: 1px solid #263353; border-radius: 14px; padding: 16px; }
+    form { display: grid; gap: 10px; }
+    input, textarea, select, button { font: inherit; border-radius: 8px; padding: 9px 11px; }
+    input, textarea, select { color: #f4f7ff; background: #0c1428; border: 1px solid #334267; }
+    textarea { min-height: 90px; resize: vertical; }
+    button { border: 0; background: #78a6ff; color: #071025; cursor: pointer; font-weight: 700; }
+    button.secondary { background: #263653; color: #e8eefc; }
+    button.danger { background: #ff9c9c; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    #items { display: grid; gap: 12px; margin-top: 16px; }
+    .item-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+    .pill { display: inline-block; border-radius: 999px; padding: 3px 9px; background: #263653; font-size: 12px; }
+    .priority-urgent { background: #722d3b; }.priority-high { background: #65451f; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .error { color: #ffb3b3; white-space: pre-wrap; }
+    code { word-break: break-all; color: #b9d2ff; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>LATTICE Control</h1>
+  <p class="muted">專案與工作由 LATTICE 保存；執行、續接、核准與封存交給 Codex。</p>
+  <p id="connection" class="muted"></p>
+  <div class="grid">
+    <section>
+      <h2>新增專案</h2>
+      <form id="project-form">
+        <input name="name" placeholder="專案名稱" required>
+        <input name="rootPath" placeholder="本機專案絕對路徑" required>
+        <button>保存專案</button>
+      </form>
+    </section>
+    <section>
+      <h2>新增工作</h2>
+      <form id="work-form">
+        <select name="projectId" required></select>
+        <input name="title" placeholder="工作名稱" required>
+        <textarea name="objective" placeholder="希望 Codex 完成什麼" required></textarea>
+        <select name="priority">
+          <option value="urgent">極需優先</option>
+          <option value="high">高</option>
+          <option value="normal" selected>一般</option>
+          <option value="low">低</option>
+        </select>
+        <button>保存工作</button>
+      </form>
+    </section>
+  </div>
+  <p id="error" class="error"></p>
+  <div id="items"></div>
+</main>
+<script type="module">
+  const state = { projects: [], workItems: [] };
+  const errorNode = document.querySelector("#error");
+
+  async function api(path, options = {}) {
+    const response = await fetch(path, {
+      ...options,
+      headers: { "content-type": "application/json", ...(options.headers || {}) },
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    return body;
+  }
+
+  function element(tag, text, className) {
+    const node = document.createElement(tag);
+    if (text !== undefined) node.textContent = text;
+    if (className) node.className = className;
+    return node;
+  }
+
+  function action(label, path, body = {}, className = "") {
+    const button = element("button", label, className);
+    button.addEventListener("click", async () => {
+      try {
+        button.disabled = true;
+        await api(path, { method: "POST", body: JSON.stringify(body) });
+        await refresh();
+      } catch (error) {
+        errorNode.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+    return button;
+  }
+
+  function render() {
+    const projectSelect = document.querySelector("#work-form select[name=projectId]");
+    const selected = projectSelect.value;
+    projectSelect.replaceChildren(...state.projects.map((project) => {
+      const option = element("option", project.name);
+      option.value = project.id;
+      return option;
+    }));
+    if (state.projects.some((project) => project.id === selected)) projectSelect.value = selected;
+
+    const items = document.querySelector("#items");
+    items.replaceChildren(...state.workItems.map((item) => {
+      const card = element("article");
+      const head = element("div", undefined, "item-head");
+      const heading = element("div");
+      heading.append(element("h3", item.title), element("div", item.project_name, "muted"));
+      head.append(heading, element("span", `${item.priority} · ${item.status}`, `pill priority-${item.priority}`));
+      card.append(head, element("p", item.objective));
+      card.append(element("p", item.progress || "尚未派工", "muted"));
+      if (item.codex_thread_id) {
+        const thread = element("code", `Codex: ${item.codex_thread_id}`);
+        card.append(thread);
+      }
+      if (item.failure_summary) card.append(element("p", item.failure_summary, "error"));
+      if (item.approval) {
+        card.append(element("p", item.approval.reason || item.approval.command || "Codex 正在等待核准"));
+      }
+      const actions = element("div", undefined, "actions");
+      if (item.status === "draft") actions.append(action("開始", `/api/work-items/${item.id}/start`));
+      if (["codex_done", "failed"].includes(item.status) && item.codex_thread_id) {
+        actions.append(action("續接", `/api/work-items/${item.id}/resume`, { prompt: "Continue from the current state." }, "secondary"));
+      }
+      if (item.status === "waiting_approval") {
+        actions.append(
+          action("允許一次", `/api/work-items/${item.id}/approve`, { decision: "accept" }),
+          action("拒絕", `/api/work-items/${item.id}/approve`, { decision: "decline" }, "danger"),
+        );
+      }
+      if (item.status === "codex_done") {
+        actions.append(action("確認完成", `/api/work-items/${item.id}/verify`, { notes: "使用者已確認" }));
+      }
+      if (item.status === "verified") {
+        actions.append(action("封存", `/api/work-items/${item.id}/archive`, {}, "secondary"));
+      }
+      card.append(actions);
+      return card;
+    }));
+  }
+
+  async function refresh() {
+    const next = await api("/api/state");
+    Object.assign(state, next);
+    document.querySelector("#connection").textContent = next.codexConnected
+      ? "Codex App Server：已連線"
+      : "Codex App Server：待命（開始工作時才連線，不浪費資源）";
+    render();
+  }
+
+  document.querySelector("#project-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      await api("/api/projects", { method: "POST", body: JSON.stringify(values) });
+      event.currentTarget.reset();
+      await refresh();
+    } catch (error) { errorNode.textContent = error.message; }
+  });
+
+  document.querySelector("#work-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      await api("/api/work-items", { method: "POST", body: JSON.stringify(values) });
+      event.currentTarget.reset();
+      await refresh();
+    } catch (error) { errorNode.textContent = error.message; }
+  });
+
+  await refresh();
+  setInterval(refresh, 2000);
+</script>
+</body>
+</html>

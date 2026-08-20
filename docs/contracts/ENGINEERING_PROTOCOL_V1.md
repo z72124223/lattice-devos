@@ -1,67 +1,52 @@
 ---
 protocol_id: LATTICE_ENGINEERING_PROTOCOL
-version: 1.2.0
+version: 2.0.0
 status: active
 canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md
 ---
 
-# LATTICE Engineering Protocol V1
+# LATTICE engineering protocol
 
-This version-controlled contract keeps only the mandatory engineering entry and
-delivery guards.
+## Entry
 
-## Mandatory Entry
+Inspect the current branch, HEAD, worktree status, relevant code, and this
+protocol. Preserve unrelated work and classify the actual risk before editing.
 
-Before editing, read `AGENTS.md`, this protocol, `PLANS.md`, `HANDOFF.md`, and
-the active task and module contracts. Confirm scope and preserve unrelated work.
+## Product priority
 
-## Mandatory Delivery
+Prefer a small usable product over closing every historical governance item.
+Use official Codex platform capabilities instead of recreating its agent loop.
+Keep optional modules independently testable and independently fallible.
 
-Before claiming completion, reread this protocol, inspect the final diff, run
-`npm.cmd run check` and focused verification, and report only current evidence.
-If an ordinary reproducible check fails, repair it within the authorized scope and rerun the same failed check.
+## Complexity circuit breaker
 
-After the durable handoff is current and the logical commit is clean, do not use
-an ordinary manual push. Run `npm.cmd run delivery:finish`. The current TASK
-ticket must explicitly declare its named remote, canonical
-`delivery_repository` identity, `delivery_push` policy, and `delivery_archive`
-policy. The finisher may perform only the authorized non-force
-current-feature-branch push, verifies exact remote and upstream equality, and
-then runs the engineering-status refresh.
+Dashboard, ticket, validator, finisher, label, historical branch, plan, or
+handoff defects do not by themselves make product behavior fail. Do not create
+another task only to repair governance. Do not require all optional modules in
+one acceptance. Do not add proof machinery larger than the behavior protected.
 
-`npm.cmd run status:refresh` remains the manual diagnostic and launcher
-fallback. A refresh failure or stale/unknown source must remain visible and be
-reported; the projection never replaces ticket, Git, test, CI, review, or
-LATTICE acceptance evidence.
+After two failed attempts at the same acceptance, preserve current evidence,
+stop retrying, and return to the shortest usable product path.
 
-Only the exact successful marker `LATTICE_DELIVERY_READY_TO_ARCHIVE=1` permits
-Codex to use the Codex App native archive-task action as its final operation.
-Missing markers, `keep_open`, interruption, or every failure keeps the task open
-for diagnosis. Repository code never archives or edits Codex App task storage.
+## Verification
 
-Every new branch must provide a plain Traditional-Chinese name and purpose
-through its own exactly-once non-empty `display_name_zh_tw` and
-`display_purpose_zh_tw` ticket fields. The shared
-`tools/engineering-status-dashboard/branch-guide.zh-TW.json` is the legacy branch-guide fallback only: a ticket without both local fields must include that
-path in its `allowed_paths`. Complete this human-readable evidence before the
-delivery refresh; an unmapped branch intentionally remains visible but cannot
-be selected as a new-work starting point.
+- Routine work: inspect the final diff and run focused checks.
+- Standard behavior: add affected integration checks.
+- High-risk authority, persistence, containment, live-service, default-branch,
+  deployment, or release work: add explicit scope, negative tests, disposable
+  resources where relevant, and independent review proportional to risk.
 
-When a TASK repairs, reconciles, or otherwise records evidence about another
-TASK, it declares the targets only in `evidence_subjects: [TASK-NNN, ...]`.
-This is provenance, not a delivery prerequisite: `depends_on` remains limited
-to work that must be uniquely and successfully terminal before delivery. Each
-subject must resolve uniquely to a legal committed TASK identity; duplicate,
-illegal, overlapping, self-referential, or cyclic declarations remain denied.
-Recording a subject never changes that subject's terminal state.
+Tests prove only what they execute. Static files do not prove live services.
 
-## Knowledge Routing
+## Delivery and authority
 
-Personal preferences, historical cases, and detailed decision logic belong in LATTICE, Hermes, and the knowledge graph.
-Retrieve them when relevant instead of copying them into this contract.
+Ordinary local completion does not require a ticket, finisher, dashboard
+refresh, root plan update, root handoff update, or separate review document.
 
-## Authority Boundary
+`npm.cmd run delivery:finish` is an optional boundary for an explicitly
+authorized non-force feature delivery. It never grants permission for a force
+push, default-branch mutation, merge, deployment, release, public exposure,
+credential change, destructive cleanup, or irreversible action.
 
-These guards do not change P0 MCP closure, One Gateway, One Truth, One Writer,
-PostgreSQL authority, lease or fencing, credentials, rollback, machine
-acceptance, push, merge, deployment, or release boundaries.
+Preserve unrelated work, credential confidentiality, local-only network
+defaults, and explicit user authority for consequential external actions.

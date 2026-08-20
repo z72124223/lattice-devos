@@ -1,123 +1,67 @@
-# LATTICE DevOS
+# LATTICE
 
-**LATTICE DevOS（織網 AI 開發中樞）** is a general-purpose, local-first
-autonomous AI development platform.
+LATTICE 是建立在官方 Codex Harness 上的本機工作控制台。
 
-> **One Gateway. One Truth. One Writer.**
+Codex 負責 agent loop、thread、context、sandbox、工具、MCP、核准事件、
+進度與封存；LATTICE 只保存專案、工作、優先度、Codex thread 對應、
+使用者驗證與簡短失敗資訊。
 
-Target composition:
-
-```text
-OpenClaw gateway
-        ↓
-Rust LATTICE control core
-        ↓
-PostgreSQL durable truth
-        ├─ Codex: exclusive code Implementer
-        ├─ Graphify: read-only source → derived graph artifact
-        ├─ Hermes: read-only product input → untrusted candidate
-        └─ Codebase Memory: provenance and review
-```
-
-This repository is not part of any particular website or user project.
-Projects become targets only after explicit registration and a bounded Task
-Packet.
-
-## Current Status
-
-`MVP-1 IN PROGRESS — TASK-021 COMPLETE; TASK-022 TDD IN PROGRESS`.
-
-TASK-021 completed the first durable domain repository. Task Ledger 2.1 remains
-the pure Rust semantic owner, while Postgres Store 1.3 atomically persists its
-terminal commands, optional events/outbox admissions, projection/checkpoint,
-and applied physical Store receipt in PostgreSQL. The latest completed baseline
-is 12/22 MVP-1 tickets (54.5%); this does not complete MVP-1, MVP-2, MVP-3, or
-the full platform.
-
-TASK-022 is the current TDD slice for durable global Project Registry
-persistence. Its first independent governance review returned
-`CHANGES REQUIRED — IMPLEMENTATION BLOCKED`; the corrected governance set then
-passed fresh independent re-review with P0=P1=P2=P3=0. Only the governance
-blocker is released. No TASK-022 Rust, SQL, migration, PostgreSQL acceptance,
-or completion claim exists yet.
-
-- Active plan: `PLANS.md`
-- Current charter: `docs/PROJECT_CHARTER.md`
-- Direction authority: `docs/source/DIRECTION_CHANGE_2026-07-29.md`
-- Ready V2 specification:
-  `docs/specs/SPEC-002-autonomous-development-platform.md`
-- Approved module direction: `docs/modules/V2_AMENDMENT_PROPOSAL.md`
-- Current governance ticket: `docs/tickets/TASK-022-postgres-project-registry.md`
-- Current workflow audit:
-  `docs/reviews/WORKFLOW_AUDIT_TASK_022_2026-08-03.md`
-- First TASK-022 governance review:
-  `docs/reviews/GOVERNANCE_REVIEW_TASK_022_2026-08-03.md`
-- Passing TASK-022 governance re-review:
-  `docs/reviews/GOVERNANCE_REREVIEW_TASK_022_2026-08-03.md`
-- Latest completed implementation handoff: `HANDOFF.md` (TASK-021)
-
-Completed TASK-021 evidence includes a marker-owned loopback PostgreSQL 17.10
-initial/restart harness, durable Store/Task-Ledger transactions, 432 Rust tests,
-44 preserved Node tests, strict Clippy, format, and dependency audit. That local
-disposable-database evidence is not production activation or TASK-022 evidence.
-OpenClaw, Codex, Graphify, Hermes, and Codebase Memory are not yet live-integrated;
-no account/payment action, production database change, publication, deployment,
-push, or merge is claimed here.
-
-## Quick Start
-
-The current CLI surface remains inspection-only:
+## 目前可用的 MVP
 
 ```powershell
-cargo run -p lattice-cli -- status
+npm.cmd run control:start
 ```
 
-It lists the approved component lanes and their authority modes. It does not
-start services, open network listeners, activate a daemon, connect the normal
-runtime to PostgreSQL, invoke Codex, or run Graphify/Hermes. PostgreSQL evidence
-to date comes only from the separate marker-owned disposable verification
-harness completed through TASK-021.
+接著開啟 [http://127.0.0.1:4317/](http://127.0.0.1:4317/)。
 
-## Architecture Position
-
-- Rust owns trusted orchestration, policy, scope, process supervision, and
-  local service behavior.
-- PostgreSQL owns durable tasks, events, approvals, leases, evidence references,
-  memory promotion, and release activation.
-- OpenClaw is a thin normal gateway and does not directly access PostgreSQL,
-  Git, providers, or product files.
-- Codex app-server is the approved exclusive product-code writer.
-- Graphify and Hermes are read-only with respect to product inputs/code. Their
-  writable output is confined to separate LATTICE artifact/candidate roots and
-  remains derived evidence or an untrusted candidate.
-- Self-improvement produces normal reviewed tasks. A separate guardian stages,
-  activates, monitors, and rolls back immutable release bundles.
-
-## Preserved V1 Prototype
-
-The existing Node.js source and tests are retained as characterization
-evidence. They are not the active V2 implementation and must not be reset,
-deleted, dual-written, or presented as a completed Rust/PostgreSQL platform.
-
-The current worktree is the intentional cumulative MVP-0-through-TASK-021 result
-plus TASK-022 governance and TDD work. It is not a clean per-ticket diff and
-must not be reset, cleaned, or switched. The preserved Node verification passed
-44/44 at TASK-021 closure; that result is a compatibility baseline, not
-TASK-022 acceptance.
-
-## Verification
+資料預設保存在：
 
 ```text
-npm.cmd run verify
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo test --workspace --all-targets --all-features --locked
-powershell -File scripts/run-task019-postgres.ps1
+%LOCALAPPDATA%\LATTICE\control\lattice-control.db
 ```
 
-These commands describe the completed TASK-021 verification baseline. TASK-022
-has passed governance re-review and must now rerun its own focused, full, and
-marker-owned PostgreSQL matrices after implementation. Live Project Registry
-inspection, Workspace Git/Scope Check, memory, providers, daemon activation,
-production, release, deployment, and A/B rollback remain future work with
-explicit capability gates.
+頁面可：
+
+- 建立專案與工作項目；
+- 設定工作優先度；
+- 建立或續接同一個 Codex thread；
+- 顯示進度與命令／檔案核准；
+- 分開記錄 Codex 已結束與使用者已驗證；
+- 驗證後封存 Codex thread；
+- 關閉並重開 LATTICE 後，從 SQLite 恢復工作與 thread 對應。
+
+Codex 只在按下「開始」或「續接」時連線，不會因開著頁面而呼叫模型。
+目前固定使用 `gpt-5.6-terra`。
+
+## 驗證
+
+```powershell
+npm.cmd run control:test
+npm.cmd run check
+npm.cmd test
+```
+
+`control:test` 不呼叫模型；它以假的 App Server 驗證保存、重開、續接、
+進度、核准、完成、驗證與封存流程。
+
+## 模組策略
+
+下列既有模組保留，但不是啟動 LATTICE 的必要條件：
+
+- Graphify；
+- Codebase Memory；
+- Project Registry 與 Task Domain；
+- 工程狀態頁；
+- Hermes、PostgreSQL、Writer Lease、Artifact Store 與舊 Task Ledger。
+
+模組應各自維護、各自測試、各自失敗。新 LATTICE 不再要求 Codex、
+PostgreSQL、Graphify、Hermes 與其他模組必須在同一次全鏈路驗收中全部
+通過。
+
+## 歷史程式
+
+舊 Rust／PostgreSQL 全鏈路、原有 tickets、plans、handoffs、reviews 與
+feature branches 保留作為程式和證據來源。它們不是目前 MVP 的啟動前置
+條件，也不應被逐一建立新 TASK 來補齊最新治理格式。
+
+推送、預設分支合併、部署、發布、公開網路與不可逆操作仍需明確授權。
