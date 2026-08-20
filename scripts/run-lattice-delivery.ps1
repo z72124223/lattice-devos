@@ -335,23 +335,301 @@ function Get-RequiredEnvironment {
     return $value
 }
 
+function ConvertTo-WindowsCommandLineArgument {
+    param([Parameter(Mandatory = $true)][string]$Argument)
+
+    if ($Argument.Length -eq 0) {
+        return '""'
+    }
+    if ($Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    $null = $builder.Append('"')
+    $backslashCount = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashCount++
+            continue
+        }
+        if ($character -eq '"') {
+            $null = $builder.Append('\', ($backslashCount * 2) + 1)
+            $null = $builder.Append('"')
+            $backslashCount = 0
+            continue
+        }
+        if ($backslashCount -gt 0) {
+            $null = $builder.Append('\', $backslashCount)
+            $backslashCount = 0
+        }
+        $null = $builder.Append($character)
+    }
+    if ($backslashCount -gt 0) {
+        $null = $builder.Append('\', $backslashCount * 2)
+    }
+    $null = $builder.Append('"')
+    return $builder.ToString()
+}
+
+function ConvertTo-RedactedRuntimeDiagnosticText {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    $redacted = $Value.Replace(([char]0xfffd).ToString(), '[INVALID_UTF8]')
+    $redacted = $redacted.Replace(([char]0).ToString(), '[INVALID_ENCODING]')
+    foreach ($name in @(
+        'LATTICE_TASK019_PASSWORD', 'PGPASSWORD', 'PGPASSFILE', 'OPENAI_API_KEY',
+        'CODEX_API_KEY', 'DATABASE_URL', 'PGDATABASE', 'PGUSER'
+    )) {
+        $secret = [Environment]::GetEnvironmentVariable($name, 'Process')
+        if (-not [string]::IsNullOrEmpty($secret)) {
+            $redacted = $redacted.Replace($secret, '[REDACTED]')
+        }
+    }
+    $redacted = $redacted -replace '(?i)\b(?:postgres|postgresql)://[^\s''"]+', '[REDACTED_DSN]'
+    $redacted = $redacted -replace '(?i)\bbearer\s+[A-Za-z0-9._~+/-]+', 'Bearer [REDACTED]'
+    return $redacted -replace '(?i)\b(password|passwd|pwd|token|api[_-]?key|secret|credential|authorization|dsn|connection[_-]?string)\b\s*([:=])\s*[^\s,;]+', '$1$2[REDACTED]'
+}
+
+function Add-BoundedRuntimeDiagnosticText {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][ValidateSet('stdout', 'stderr')][string]$Stream,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+
+    $text = ConvertTo-RedactedRuntimeDiagnosticText -Value $Value
+    $buffer = $State.$Stream
+    $truncatedProperty = $Stream + '_truncated'
+    if ($buffer.Length -gt 0) {
+        $text = "`n" + $text
+    }
+    $remaining = 4096 - [System.Text.Encoding]::UTF8.GetByteCount($buffer.ToString())
+    if ($remaining -le 0) {
+        $State.$truncatedProperty = $true
+        return
+    }
+    if ([System.Text.Encoding]::UTF8.GetByteCount($text) -le $remaining) {
+        $null = $buffer.Append($text)
+        return
+    }
+
+    $prefix = [System.Text.StringBuilder]::new()
+    foreach ($character in $text.ToCharArray()) {
+        $candidate = $character.ToString()
+        if ([System.Text.Encoding]::UTF8.GetByteCount($prefix.ToString() + $candidate) -gt $remaining) {
+            break
+        }
+        $null = $prefix.Append($candidate)
+    }
+    $null = $buffer.Append($prefix.ToString())
+    $State.$truncatedProperty = $true
+}
+
+function Add-BoundedRuntimeJsonText {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+
+    $text = $Value
+    if ($State.json_stdout.Length -gt 0) {
+        $text = "`n" + $text
+    }
+    if (($State.json_stdout.Length + $text.Length) -gt 32768) {
+        $State.json_stdout_too_large = $true
+        return
+    }
+    $null = $State.json_stdout.Append($text)
+}
+
+function Drain-RuntimeOutputEvents {
+    param(
+        [Parameter(Mandatory = $true)]$Capture,
+        [Parameter(Mandatory = $true)][string]$StdoutEventId,
+        [Parameter(Mandatory = $true)][string]$StderrEventId
+    )
+
+    $events = @(
+        @(Get-Event -SourceIdentifier $StdoutEventId -ErrorAction SilentlyContinue) +
+        @(Get-Event -SourceIdentifier $StderrEventId -ErrorAction SilentlyContinue)
+    )
+    foreach ($event in $events) {
+        try {
+            if ($null -ne $event.SourceEventArgs.Data) {
+                $stream = if ($event.SourceIdentifier -eq $StdoutEventId) { 'stdout' } else { 'stderr' }
+                Add-BoundedRuntimeDiagnosticText -State $Capture -Stream $stream -Value ([string]$event.SourceEventArgs.Data)
+                if ($stream -eq 'stdout') {
+                    Add-BoundedRuntimeJsonText -State $Capture -Value ([string]$event.SourceEventArgs.Data)
+                }
+                elseif (-not [string]::IsNullOrWhiteSpace([string]$event.SourceEventArgs.Data)) {
+                    $Capture.stderr_observed = $true
+                }
+            }
+        }
+        finally {
+            Remove-Event -EventIdentifier $event.EventIdentifier -ErrorAction SilentlyContinue
+        }
+    }
+    return $events.Count
+}
+
+function Write-RuntimeFailureDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][ValidateSet('DeliveryRun', 'DeliveryStatus')][string]$Phase,
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [Parameter(Mandatory = $true)]$Capture
+    )
+
+    $temporaryPath = $null
+    try {
+        Assert-NoReparseAncestor -Path $Path -Boundary $RepositoryRoot
+        $parent = Get-CanonicalPath -Path (Split-Path -Parent $Path)
+        $parentItem = Get-Item -LiteralPath $parent -Force -ErrorAction Stop
+        if (-not $parentItem.PSIsContainer -or ($parentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            throw 'LATTICE_DELIVERY_RUNTIME_DIAGNOSTIC_PARENT_REJECTED'
+        }
+        if (Test-Path -LiteralPath $Path) {
+            throw 'LATTICE_DELIVERY_RUNTIME_DIAGNOSTIC_TARGET_NOT_FRESH'
+        }
+
+        $value = [ordered]@{
+            kind = 'LATTICE_DELIVERY_RUNTIME_FAILURE_V1'
+            phase = $Phase
+            exit_code = $ExitCode
+            stdout = $Capture.stdout.ToString()
+            stderr = $Capture.stderr.ToString()
+            stdout_truncated = [bool]$Capture.stdout_truncated
+            stderr_truncated = [bool]$Capture.stderr_truncated
+        }
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes(($value | ConvertTo-Json -Compress) + "`n")
+        if ($bytes.Length -gt 32768) {
+            throw 'LATTICE_DELIVERY_RUNTIME_DIAGNOSTIC_TOO_LARGE'
+        }
+
+        $temporaryPath = Join-Path $parent ('.runtime-failure-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+        $stream = [System.IO.File]::Open(
+            $temporaryPath,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)
+        }
+        finally {
+            $stream.Dispose()
+        }
+        Assert-RegularFile -Path $temporaryPath
+        Assert-NoReparseAncestor -Path $Path -Boundary $RepositoryRoot
+        [System.IO.File]::Move($temporaryPath, $Path)
+        $temporaryPath = $null
+        Assert-RegularFile -Path $Path
+    }
+    catch {
+        throw 'LATTICE_DELIVERY_RUNTIME_DIAGNOSTIC_WRITE_FAILED'
+    }
+    finally {
+        if ($null -ne $temporaryPath -and (Test-Path -LiteralPath $temporaryPath)) {
+            $temporaryItem = Get-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+            if ($null -ne $temporaryItem -and -not ($temporaryItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 function Invoke-RuntimeJson {
     param(
         [Parameter(Mandatory = $true)][string]$Executable,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$FailureDiagnosticPath,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][ValidateSet('DeliveryRun', 'DeliveryStatus')][string]$Phase
     )
 
     Assert-RegularFile -Path $Executable
     if ($Arguments -contains '--password') {
         throw 'LATTICE_DELIVERY_PASSWORD_ARGUMENT_FORBIDDEN'
     }
-    $output = @(& $Executable @Arguments 2>&1 | ForEach-Object { [string]$_ })
-    $exitCode = $LASTEXITCODE
-    $raw = ($output -join "`n").Trim()
+    $capture = [pscustomobject]@{
+        stdout = [System.Text.StringBuilder]::new()
+        stderr = [System.Text.StringBuilder]::new()
+        stdout_truncated = $false
+        stderr_truncated = $false
+        json_stdout = [System.Text.StringBuilder]::new()
+        json_stdout_too_large = $false
+        stderr_observed = $false
+    }
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $Executable
+    $startInfo.Arguments = (@($Arguments | ForEach-Object { ConvertTo-WindowsCommandLineArgument -Argument $_ }) -join ' ')
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false, $false)
+    $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false, $false)
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $eventPrefix = 'lattice-runtime-output-' + [Guid]::NewGuid().ToString('N')
+    $stdoutEventId = $eventPrefix + '-stdout'
+    $stderrEventId = $eventPrefix + '-stderr'
+    $stdoutSubscription = $null
+    $stderrSubscription = $null
+    try {
+        if (-not $process.Start()) {
+            throw 'LATTICE_DELIVERY_RUNTIME_START_FAILED'
+        }
+        $stdoutSubscription = Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -SourceIdentifier $stdoutEventId
+        $stderrSubscription = Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -SourceIdentifier $stderrEventId
+        $process.BeginOutputReadLine()
+        $process.BeginErrorReadLine()
+        while (-not $process.HasExited) {
+            if ((Drain-RuntimeOutputEvents `
+                -Capture $capture `
+                -StdoutEventId $stdoutEventId `
+                -StderrEventId $stderrEventId) -eq 0) {
+                Start-Sleep -Milliseconds 10
+            }
+        }
+        $process.WaitForExit()
+        $null = Drain-RuntimeOutputEvents `
+            -Capture $capture `
+            -StdoutEventId $stdoutEventId `
+            -StderrEventId $stderrEventId
+        $exitCode = $process.ExitCode
+    }
+    finally {
+        if ($null -ne $stdoutSubscription) {
+            Unregister-Event -SubscriptionId $stdoutSubscription.Id -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $stderrSubscription) {
+            Unregister-Event -SubscriptionId $stderrSubscription.Id -ErrorAction SilentlyContinue
+        }
+        Get-Event -SourceIdentifier $stdoutEventId -ErrorAction SilentlyContinue | Remove-Event -ErrorAction SilentlyContinue
+        Get-Event -SourceIdentifier $stderrEventId -ErrorAction SilentlyContinue | Remove-Event -ErrorAction SilentlyContinue
+        $process.Dispose()
+    }
+    $raw = $capture.json_stdout.ToString().Trim()
     if ($exitCode -ne 0) {
+        Write-RuntimeFailureDiagnostic `
+            -Path $FailureDiagnosticPath `
+            -RepositoryRoot $RepositoryRoot `
+            -Phase $Phase `
+            -ExitCode $exitCode `
+            -Capture $capture
         throw 'LATTICE_DELIVERY_RUNTIME_FAILED'
     }
-    if ([string]::IsNullOrWhiteSpace($raw) -or $raw.Length -gt 32768) {
+    if (
+        $capture.json_stdout_too_large -or
+        $capture.stderr_observed -or
+        [string]::IsNullOrWhiteSpace($raw) -or
+        $raw.Length -gt 32768
+    ) {
         throw 'LATTICE_DELIVERY_RUNTIME_OUTPUT_INVALID'
     }
     $password = [Environment]::GetEnvironmentVariable('LATTICE_TASK019_PASSWORD', 'Process')
@@ -623,10 +901,11 @@ function Invoke-DeliveryRunPhase {
     $gitExe = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_GIT_EXE')
     $runEvidencePath = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_RUN_EVIDENCE')
     $graphFootprintEvidencePath = Get-CanonicalPath -Path (Join-Path (Split-Path -Parent $runEvidencePath) 'graph-execution-footprint.json')
+    $runtimeFailureDiagnosticPath = Get-CanonicalPath -Path (Join-Path (Split-Path -Parent $runEvidencePath) 'runtime-run-failure-diagnostic.json')
 
     $repositoryOwnedPaths = @(
         $fixtureRoot, $runtime, $schemaDirectory, $codexHome, $deliveryRoot,
-        $runEvidencePath, $graphFootprintEvidencePath
+        $runEvidencePath, $graphFootprintEvidencePath, $runtimeFailureDiagnosticPath
     )
     if ($codexMode -eq 'SCRIPTED_ACCEPTANCE') {
         $repositoryOwnedPaths += $launcher
@@ -641,7 +920,8 @@ function Invoke-DeliveryRunPhase {
         (Test-Path -LiteralPath $schemaDirectory) -or
         (Test-Path -LiteralPath $deliveryRoot) -or
         (Test-Path -LiteralPath $runEvidencePath) -or
-        (Test-Path -LiteralPath $graphFootprintEvidencePath)
+        (Test-Path -LiteralPath $graphFootprintEvidencePath) -or
+        (Test-Path -LiteralPath $runtimeFailureDiagnosticPath)
     ) {
         throw 'LATTICE_DELIVERY_RUN_TARGET_NOT_FRESH'
     }
@@ -663,7 +943,12 @@ function Invoke-DeliveryRunPhase {
         '--postgres-port', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_PORT'),
         '--postgres-run-id', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_RUN_ID')
     )
-    $evidence = Invoke-RuntimeJson -Executable $runtime -Arguments $arguments
+    $evidence = Invoke-RuntimeJson `
+        -Executable $runtime `
+        -Arguments $arguments `
+        -FailureDiagnosticPath $runtimeFailureDiagnosticPath `
+        -RepositoryRoot $repositoryRoot `
+        -Phase 'DeliveryRun'
     Assert-DeliveryRunEvidence `
         -Evidence $evidence `
         -Launcher $launcher `
@@ -700,10 +985,11 @@ function Invoke-DeliveryStatusPhase {
     $statusEvidencePath = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_STATUS_EVIDENCE')
     $finalEvidencePath = Get-CanonicalPath -Path (Get-RequiredEnvironment -Name 'LATTICE_DELIVERY_FINAL_EVIDENCE')
     $graphFootprintEvidencePath = Get-CanonicalPath -Path (Join-Path (Split-Path -Parent $runEvidencePath) 'graph-execution-footprint.json')
+    $runtimeFailureDiagnosticPath = Get-CanonicalPath -Path (Join-Path (Split-Path -Parent $statusEvidencePath) 'runtime-status-failure-diagnostic.json')
 
     $repositoryOwnedPaths = @(
         $fixtureRoot, $runtime, $deliveryRoot, $runEvidencePath, $statusEvidencePath,
-        $finalEvidencePath, $graphFootprintEvidencePath
+        $finalEvidencePath, $graphFootprintEvidencePath, $runtimeFailureDiagnosticPath
     )
     if ($codexMode -eq 'SCRIPTED_ACCEPTANCE') {
         $repositoryOwnedPaths += $launcher
@@ -713,7 +999,11 @@ function Invoke-DeliveryStatusPhase {
     }
     Assert-RegularFile -Path $runtime
     Assert-RegularFile -Path $gitExe
-    if ((Test-Path -LiteralPath $statusEvidencePath) -or (Test-Path -LiteralPath $finalEvidencePath)) {
+    if (
+        (Test-Path -LiteralPath $statusEvidencePath) -or
+        (Test-Path -LiteralPath $finalEvidencePath) -or
+        (Test-Path -LiteralPath $runtimeFailureDiagnosticPath)
+    ) {
         throw 'LATTICE_DELIVERY_STATUS_TARGET_NOT_FRESH'
     }
 
@@ -740,12 +1030,17 @@ function Invoke-DeliveryStatusPhase {
     if ($graphFootprintBeforeStatus -ne [string]$graphFootprintEvidence.graph_execution_footprint_digest) {
         throw 'LATTICE_GRAPH_EXECUTION_FOOTPRINT_CHANGED_BEFORE_STATUS'
     }
-    $status = Invoke-RuntimeJson -Executable $runtime -Arguments @(
-        'delivery-status',
-        '--postgres-host', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_HOST'),
-        '--postgres-port', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_PORT'),
-        '--postgres-run-id', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_RUN_ID')
-    )
+    $status = Invoke-RuntimeJson `
+        -Executable $runtime `
+        -Arguments @(
+            'delivery-status',
+            '--postgres-host', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_HOST'),
+            '--postgres-port', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_PORT'),
+            '--postgres-run-id', (Get-RequiredEnvironment -Name 'LATTICE_TASK019_RUN_ID')
+        ) `
+        -FailureDiagnosticPath $runtimeFailureDiagnosticPath `
+        -RepositoryRoot $repositoryRoot `
+        -Phase 'DeliveryStatus'
     $graphFootprintAfterStatus = Get-GraphExecutionFootprintDigest -FixtureRoot $fixtureRoot
     if ($graphFootprintAfterStatus -ne $graphFootprintBeforeStatus) {
         throw 'LATTICE_GRAPHIFY_REEXECUTED_DURING_FRESH_STATUS'
