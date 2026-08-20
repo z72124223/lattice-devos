@@ -3,7 +3,7 @@ ticket_id: TASK-096
 title: Runtime terminal cause preservation
 module_id: latticed
 constitution_version: 1.1
-status: in_progress
+status: completed
 parallel_safe: true
 depends_on: []
 evidence_subjects: [TASK-033]
