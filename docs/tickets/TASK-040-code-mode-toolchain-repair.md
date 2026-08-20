@@ -52,4 +52,3 @@ current feature branch.
 ```powershell
 npm.cmd test
 ```
-
