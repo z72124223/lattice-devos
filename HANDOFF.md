@@ -1,3 +1,35 @@
+# TASK-095 Runtime Root-Cause Diagnostic Handoff — 2026-08-21
+
+## Current status
+
+`NEEDS_REVIEW` / diagnostic evidence complete; underlying runtime leaf unknown.
+`TASK-095` is complete as a bounded diagnostic task. `TASK-033` remains
+`in_progress`; no product repair, success claim, rerun, or archive occurred.
+
+## Durable evidence
+
+- Exact source: `ef1c3741a862493a7edeea815ef5a7a101aecfcd`.
+- New fixture: `target/lattice-delivery/9c205fa8acc54aa2881fdba51cb6d68d`.
+- Diagnostic: `evidence/runtime-run-failure-diagnostic.json`, child exit 2, wrapper
+  exit 1, bounded 256-byte artifact, stdout/stderr truncation flags false; raw
+  streams and secrets are not present in this handoff.
+- Confirmed trace: runtime composition maps terminal Failed receipt to the broad
+  `LATTICE_DELIVERY_FAILED` enum and drops stage/cause code before main emits exit 2.
+  The downstream identity leaf is not proven. `schema/` and `answer.txt` absence
+  bounds the failure before scripted delivery completion.
+- Teardown proof: TASK-095-owned controller/postmaster/child and non-5432 listeners
+  are zero; nested PG root is gone. Old `dd8f708cf0ac4721b12575ce12f44a1a` remains
+  read-only.
+
+## Next action
+
+TASK-096 owns the minimal observability repair: preserve bounded stage/cause code
+through `apps/lattice-runtime/src/{composition.rs,lib.rs,main.rs}` with focused
+no-secret tests. Do not rerun live until a new authorization and observability
+repair are independently reviewed.
+
+---
+
 # TASK-033 Terminal Delivery Repair Handoff — 2026-08-21
 
 ## Status
