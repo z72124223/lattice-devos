@@ -1,5 +1,18 @@
 # LATTICE DevOS V2 Plan
 
+## Current task update — TASK-044
+
+VERIFIED IMPLEMENTATION / CLEAN-SOURCE AGGREGATE PENDING — TASK-044 now admits
+only the existing Task Domain-legal pre-writer `Draft -> Cancelled` edge after
+the required autonomy receipt, rejects ambient Writer authority, and proves
+the terminal state through marker-owned PostgreSQL 17.10 physical restart with
+zero downstream effects. The bounded F01-F08 aggregate runner and fail-closed
+self-test are implemented on the current Task076 combined profile. Focused,
+strict Clippy, Task050 fresh-process, and combined Task068/TASK-044 live checks
+pass. Read-only code and architecture review have no unresolved P0-P3 finding;
+create a clean local checkpoint, then run the aggregate against that exact
+commit. No push, merge, deployment, or release is authorized.
+
 ## Completed task update — TASK-066
 
 COMPLETED TASK-066 — the deterministic canonical reflection chain now proves

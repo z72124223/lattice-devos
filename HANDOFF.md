@@ -1,3 +1,102 @@
+# TASK-044 Component Fault Recovery Handoff - 2026-08-20
+
+## Status
+
+`NEEDS_REVIEW`: implementation and direct verification pass; the clean-source
+aggregate has not yet been executed on a committed TASK-044 checkpoint.
+
+## Objective And Scope
+
+- Objective: close the local F01-F08 component fault/restart/reconciliation
+  gate without adding a second truth, writer, gateway, or public stop surface.
+- In scope: the existing PostgreSQL lifecycle pre-writer cancellation edge,
+  Task019 current-profile initial/restart hook, bounded aggregate runner,
+  self-test, ticket, latticed constitution, plan, and handoff.
+- Out of scope: active-child interruption, public MCP/OpenClaw authority,
+  schema or dependency changes, paid/provider paths, push, merge, deployment,
+  and release.
+
+## Completed Work
+
+- `Draft -> Cancelled` is admitted only after required autonomy evidence and
+  without Writer authority; ambient Writer authority is rejected.
+- A marker-owned PostgreSQL 17.10 run proved initial durable cancellation,
+  physical restart, exact terminal replay, `effect_count=0`, and exact Store
+  admission restoration.
+- Task068 Hermes restart replay and TASK-044 cancellation pass in the same
+  Task076 current Writer Lease v2 profile.
+- The aggregate runner covers F01-F08 from current owner tests, rejects dirty or
+  drifting source and missing/skipped evidence, and persists only bounded
+  hashes/counts/timestamps rather than raw command output.
+
+## Files Changed
+
+| Path | Why | Verification |
+|---|---|---|
+| `apps/lattice-runtime/src/task_control.rs` | admit the exact unfenced pre-writer cancellation edge | RED/GREEN unit test; strict Clippy |
+| `apps/lattice-runtime/tests/task_control.rs` | PostgreSQL initial/restart terminal replay proof | Task019 live gate PASS |
+| `scripts/run-task019-postgres.ps1` | run TASK-044 beside Task068 on Task076 current profile | combined live PASS; Task050 wrapper PASS |
+| TASK-044 runner/self-test | bounded F01-F08 aggregation and fail-closed source/evidence checks | self-test PASS; clean-source aggregate pending |
+| ticket, latticed constitution, `PLANS.md`, `HANDOFF.md` | scope, invariant, acceptance, and restart context | repository check PASS before final edits |
+
+## Workflow Ledger
+
+| Stage | Status | Evidence / artifact |
+|---|---|---|
+| Dependency and current-source sync | PASS | base `65f2902`; TASK-038 stable `2b424ec`; Task076 branch remote-equal before rebase |
+| TDD | PASS | runner missing-shape RED then self-test GREEN; cancellation policy RED then unit GREEN |
+| PostgreSQL restart | PASS | `TASK044_POSTGRES_CANCEL_REPLAY=PASS`; Task068 combined replay PASS |
+| Fresh Status and regression | PASS | `TASK050_AUTONOMY_RECEIPT_ACCEPTANCE=PASS`; strict Clippy and affected suites PASS |
+| Code and architecture review | PASS | no unresolved P0-P3 finding; conditional admission preservation re-review PASS |
+| Clean-source aggregate | PENDING | requires committed clean TASK-044 source |
+
+## Verification
+
+- `scripts/test-task044-component-fault-recovery-gate.ps1`: exit `0`,
+  `TASK044_COMPONENT_FAULT_RECOVERY_SELF_TEST=PASS`.
+- Task019 with Task076, Task068, and TASK-044 hooks: exit `0`, both replay PASS
+  markers, physical `initial,restart`, PostgreSQL 17.10.
+- `scripts/test-task050-autonomy-receipt-acceptance.ps1`: exit `0`, Task050
+  wrapper and fresh-process PostgreSQL acceptance PASS.
+- `cargo fmt --all -- --check` and strict changed-slice Clippy: PASS.
+- CI: not run for this local branch; no push was authorized.
+
+## Review And Integration
+
+- Code review: separate read-only exact-diff pass found one integration defect
+  in an intermediate refactor (unconditional Task076 admission reset); it was
+  repaired with conditional preserve/restore semantics and the combined live
+  gate passed. No unresolved P0-P3 finding. Reviewer independence is not proven
+  because subagent delegation was not authorized.
+- Architecture review: PASS. The change aligns the existing PostgreSQL
+  lifecycle adapter with the Task Domain-legal edge; Task Ledger remains truth
+  owner, Writer ownership and dependency direction are unchanged, no schema or
+  dependency changed, and public MCP remains exactly four tools. The approved
+  amendment is latticed constitution v1.9; no ADR is required.
+- Branch: `feature/task-044-component-fault-recovery-gate`, based on current
+  combined source `65f2902`; no upstream is configured.
+- Merge status: not merged; no push, Draft promotion, merge, deployment, or
+  release performed or authorized.
+
+## Risks And Open Decisions
+
+- The aggregate must still pass from a clean committed source before `DONE`.
+- Remote CI and branch protection are not current evidence for TASK-044.
+
+## Next Action
+
+1. Commit a clean local checkpoint and run
+   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-task044-component-fault-recovery-gate.ps1`.
+
+## Restart Context
+
+- Current branch/worktree: `feature/task-044-component-fault-recovery-gate` /
+  `lattice-worktrees/task-044-component-fault-recovery-gate`.
+- Relevant plan: `PLANS.md`, section `Current task update — TASK-044`.
+- First command: `git status --short`.
+
+---
+
 # TASK-050 Autonomy Receipt Closure Handoff - 2026-08-15
 
 ## Status

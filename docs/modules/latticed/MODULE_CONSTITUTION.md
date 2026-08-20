@@ -1,10 +1,10 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 1.8
+version: 1.9
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-20
 ---
 
 ## Mission
@@ -120,6 +120,14 @@ Orchestrator composition.
   replayed Writer Lease project with no current authority and the fixed canary
   `1/2/2` fence/transition/command history. `Merging + result` recovery verifies
   active `1/1/1` or released `1/2/2` before any further Task Ledger mutation.
+- Through the existing PostgreSQL `TaskLifecyclePort`, permit exactly one
+  pre-writer cancellation edge from an admitted `Draft` task with its required
+  autonomy receipt already durable to terminal `Cancelled`. The transition is
+  unfenced, rejects ambient Writer Lease authority, performs no Codex,
+  verification, Git, Graphify, Hermes, or Memory effect, and must replay as the
+  same terminal projection after PostgreSQL restart. This is an internal
+  recovery-gate capability, not a new MCP tool, live OpenClaw authority, or
+  active-child interruption path.
 
 ## Invariants
 
@@ -173,6 +181,9 @@ Orchestrator composition.
     transition, replay as completed, or produce normal Task Status. The
     one-event prefix maps only to reconciliation; historical optional streams
     remain byte-compatible.
+18. Pre-writer cancellation requires an admitted required-profile stream with
+    its exact autonomy receipt, no Writer Lease authority, and current state
+    `Draft`; exact replay cannot become success or start a downstream effect.
 
 ## Allowed Dependencies
 
@@ -239,6 +250,11 @@ incomplete. It keeps exactly four MCP tools and the existing six-field task
 status output, and requires fresh canonical `latticed` restart evidence rather
 than a Store test binary as acceptance.
 
+Version 1.9 admits only the Task Domain-legal pre-writer `Draft -> Cancelled`
+edge through the existing PostgreSQL lifecycle adapter. It adds no public tool,
+transport authority, active-process stop semantics, lease behavior, database
+schema, or dependency, and preserves every existing MCP byte.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -256,6 +272,7 @@ than a Store test binary as acceptance.
 | Failure closure | startup/framing/adapter/timeout/unknown-effect cases never report success | Engineering | yes |
 | Standalone Hermes lifecycle | exact CLI routing, runner liveness, explicit bounded teardown, redacted errors, and local live-start evidence | Engineering and security review | yes |
 | Hermes executed-input closure | exact twelve-setting preflight, ignored legacy-helper sentinels, v2 adapter receipt and direct launcher plan | Engineering and security review | yes |
+| Pre-writer cancellation replay | marker-owned PostgreSQL initial/restart test proves one admitted ASK_USER task becomes and remains `Cancelled` with zero writer/downstream effect | Engineering and security review | yes |
 
 ## Change Policy
 
@@ -278,3 +295,4 @@ constitution cannot be weakened merely to excuse implementation drift.
 | 1.6 | 2026-08-13 | SPEC-002 v30, ADR-021 clarification, TASK-064 | Add opt-in lazy production Hermes composition to canonical four-tool `latticed`; preserve task/status zero-effect paths and require explicit teardown | User goal-mode direction to integrate Hermes into LATTICE |
 | 1.7 | 2026-08-13 | SPEC-002 v31, TASK-065 | Remove two non-executed broker-helper settings from production admission while preserving the direct verified Codex proxy, lazy activation, and MCP contracts | User goal-mode direction to complete Hermes |
 | 1.8 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Emit and enforce the required Task-created autonomy profile through Task Ledger 2.3 while preserving the four-tool/six-field MCP wire | User-approved TASK-050 repair amendment |
+| 1.9 | 2026-08-20 | SPEC-002 v35 MVP-2/AC-16, TASK-044 | Permit only durable pre-writer cancellation through the existing lifecycle adapter and require fresh PostgreSQL replay with zero effects | User TASK-044 repair direction |

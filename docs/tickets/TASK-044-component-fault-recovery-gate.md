@@ -1,26 +1,67 @@
 ---
 ticket_id: TASK-044
 spec_id: SPEC-002
-spec_version: 27
+spec_version: 35
 module_id: latticed
-constitution_version: 1.1
-status: blocked
+constitution_version: 1.9
+status: in-progress
 parallel_safe: false
 depends_on:
   - TASK-038
+  - TASK-050
+  - TASK-075
+  - TASK-076
 allowed_paths:
   - docs/tickets/TASK-044-component-fault-recovery-gate.md
+  - scripts/run-task044-component-fault-recovery-gate.ps1
+  - scripts/test-task044-component-fault-recovery-gate.ps1
+  - scripts/run-task019-postgres.ps1
+  - apps/lattice-runtime/src/task_control.rs
+  - apps/lattice-runtime/tests/task_control.rs
+  - docs/modules/latticed/MODULE_CONSTITUTION.md
+  - PLANS.md
+  - HANDOFF.md
 likely_files:
   - docs/tickets/TASK-044-component-fault-recovery-gate.md
+  - scripts/run-task044-component-fault-recovery-gate.ps1
+  - scripts/test-task044-component-fault-recovery-gate.ps1
+  - scripts/run-task019-postgres.ps1
+  - apps/lattice-runtime/src/task_control.rs
+  - apps/lattice-runtime/tests/task_control.rs
+  - docs/modules/latticed/MODULE_CONSTITUTION.md
+  - PLANS.md
+  - HANDOFF.md
 branch: feature/task-044-component-fault-recovery-gate
-base_commit: 845328dcc06d51c7554c93a09739a27ddd827941
+base_commit: 65f2902504e5ef5acba6f258b736905fd4d12a4d
 ---
 
 # TASK-044 — Local Component Fault / Restart / Reconciliation Exit Gate
 
 ## Current Gate
 
-`BLOCKED_PENDING_TASK_038_STABLE_CHECKPOINT`
+`VERIFIED_IMPLEMENTATION / CLEAN_SOURCE_AGGREGATE_PENDING`
+
+2026-08-20 修復重啟已把本 ticket 的單一設計提交搬到乾淨且與遠端一致的
+`feature/task-076-postgres-writer-lease-v2@65f2902`。該基底包含 TASK-038 的
+canonical-local task submit/status、TASK-050 的 fresh-`latticed` autonomy receipt
+replay、TASK-075 schema-v5 reconciliation 與 TASK-076 Writer Lease v2 bridge；
+原本的 shared-path checkpoint blocker 已解除。
+
+本輪不改 Contracts、Ports、Orchestrator、MCP/OpenClaw ingress 或任何 component
+adapter。除 aggregate runner 外，唯一 runtime 行為修復是讓既有 PostgreSQL
+`TaskLifecyclePort` 接受 Task Domain 已合法的 pre-writer `Draft -> Cancelled` transition；
+它必須在 required autonomy receipt 完成後、沒有 Writer Lease authority 時執行，且不
+新增 submit/stop 工具、active-child interrupt 或 live OpenClaw authority。
+
+實作範圍包含一個 fail-closed aggregate runner 及其靜態／行為自測：runner 只能把
+既有 owner tests 與 marker-owned PostgreSQL acceptance 的 current execution evidence
+彙整成 TASK-044 證據；缺少、skip、解析失敗、未清理或未證明的情境一律不得輸出
+總 PASS。這個 aggregate gate 不改寫 owner semantics，也不把歷史 PASS 當成 current
+evidence。
+
+## Historical Blocker (superseded 2026-08-20)
+
+下列限制只記錄 2026-08-10 的歷史狀態，不是目前執行閘門。
 
 本 ticket 是 Step 11 Phase B 的 bounded harness design。2026-08-10 盤點時，
 `feature/task-038-chatgpt-mcp` 仍有未提交的 Contracts、Ports、Orchestrator、
@@ -155,7 +196,7 @@ machine assertion exists but the combined live/full-chain proof is blocked.
 
 ## Required Machine Evidence
 
-未來 runner 只有在八個 scenario 全部通過時，才可輸出：
+目前 runner 只有在八個 scenario 全部通過時，才可輸出：
 
 ```text
 TASK044_COMPONENT_FAULT_RECOVERY_GATE=PASS
@@ -182,34 +223,20 @@ marker-owned evidence bundle 必須是 bounded JSON，至少包含：
 不得保存 raw prompt、source、diff、SQL、DSN、credential/token、provider response、
 child stderr、URL 或任意未界定錯誤文字。
 
-## Unlock And Exact Restart Commands
+## Current Execution
 
-只有 TASK-038 owner 交付一個乾淨 stable checkpoint，且其 task submit/status、real
-Writer Lease/fence 與 fresh-status acceptance 有 current evidence 後，才執行：
-
-```powershell
-$task038Checkpoint = '<TASK038_STABLE_CHECKPOINT_SHA>'
-git -C 'C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\chatgpt-mcp' status --short
-git -C 'C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\chatgpt-mcp' show -s --format='%H %s' $task038Checkpoint
-git -C 'C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\task-044-component-fault-recovery-gate' rebase --onto $task038Checkpoint 845328dcc06d51c7554c93a09739a27ddd827941 feature/task-044-component-fault-recovery-gate
-```
-
-Expected pre-implementation evidence:
-
-- `chatgpt-mcp` status output為空；
-- `$task038Checkpoint` 精確等於 owner 宣告並驗證的 clean SHA；
-- TASK-044 rebase 後只保留本 ticket 的 commit/diff；
-- 重新盤點 shared contracts/harness 後，先修訂本 ticket 的 `allowed_paths`，才能
-  實作任何 fixture 或 runner。
-
-待 ticket revision、依賴與 live-resource gate 都 ready 後，預定唯一整合入口為：
+本 branch 已同步到 current combined checkpoint `65f2902`，且保留 TASK-038 stable
+checkpoint `2b424ec` 作為追溯基礎。唯一整合入口為：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-task044-component-fault-recovery-gate.ps1
 ```
 
-該指令目前不存在且不得建立/執行；它是 stable checkpoint 之後的 design target，
-不是現況完成宣稱。
+runner 先拒絕 dirty worktree、錯誤 branch、缺少 base ancestry、skip、缺少固定
+marker、任一 command 非零、F01-F08 coverage 不完整，以及驗證後 source/HEAD 漂移。
+它只把 current owner tests、Task076 current PostgreSQL profile、Task068 Hermes replay、
+TASK-044 durable cancellation 與 TASK-050 fresh-status acceptance 彙整成 bounded JSON；
+不保存 raw prompt、source、SQL、credential 或 child output。
 
 ## Acceptance Criteria
 
@@ -219,15 +246,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-task044-co
 - [x] 鎖定 F01-F08 bounded scenarios、zero-rerun counters、restart evidence 與 cleanup
   allowlist。
 - [x] 保護 TASK-043 pure crate/ticket 與 One Gateway / One Truth / One Writer boundaries。
-- [ ] TASK-038 clean stable checkpoint 已提供、驗證並同步進本 branch。
-- [ ] 依同步後 contracts 修訂 versioned allowed paths 與 fault-fixture/runner contract。
-- [ ] 輕量 RED contract tests 先證明 scenario schema、first-failure suppression、
+- [x] TASK-038 clean stable checkpoint 已提供、驗證並同步進本 branch。
+- [x] 依同步後 contracts 修訂 versioned allowed paths 與 fault-fixture/runner contract。
+- [x] 輕量 RED contract tests 先證明 scenario schema、first-failure suppression、
   reconciliation/zero-rerun counters 與 cleanup manifest fail closed。
-- [ ] marker-owned disposable live gate 逐一通過 F01-F08；不使用 production service、
+- [x] marker-owned disposable live gate 逐一通過 F01-F08；不使用 production service、
   paid/provider、public listener、user repository 或非 marker resource。
-- [ ] fresh process/status equality、zero external rerun 與 exact cleanup 全部有 current
+- [x] fresh process/status equality、zero external rerun 與 exact cleanup 全部有 current
   machine evidence。
-- [ ] focused verification、scope/diff/secret checks 與必要 review 通過；full workspace
+- [x] focused verification、scope/diff/secret checks 與必要 review 通過；full workspace
   matrix 仍依當時資源與 owner gate 分開執行，不得由本 ticket 偷跑。
 
 ## Non-Goals
@@ -243,8 +270,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-task044-co
 
 ## Current Handoff
 
-`READY_DESIGN_ONLY / BLOCKED_IMPLEMENTATION`
+`VERIFIED_IMPLEMENTATION / CLEAN_SOURCE_AGGREGATE_PENDING`
 
-可立即進行的下一步只有保存並審閱本 ticket。可執行 implementation 的下一步是
-TASK-038 owner 交付 clean stable checkpoint SHA，然後依上方 exact commands 重新同步
-與再盤點；在此之前不得建立 runner、fixture 或執行 live/full tests。
+runtime、live PostgreSQL initial/restart、Task068 Hermes replay、Task050 fresh Status、
+strict Clippy、格式、repository check 與 read-only code/architecture review 已有 current
+PASS。剩餘步驟是建立乾淨 local checkpoint，然後在該 exact commit 執行
+`scripts/run-task044-component-fault-recovery-gate.ps1`。沒有 push、merge、deploy 或
+release 授權。

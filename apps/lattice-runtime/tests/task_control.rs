@@ -881,3 +881,106 @@ fn task050_proceed_requires_current_writer_and_retries_without_currentness_when_
         "TASK050_POSTGRES_PROCEED_WRITER_MATRIX_OK current=1 stale=1 wrong_fence=1 substituted=1 exact_retry=1"
     );
 }
+
+#[test]
+#[ignore = "requires the marker-owned TASK-019 PostgreSQL initial/restart harness"]
+fn admitted_pre_writer_cancel_is_durable_and_replays_without_effects_when_provisioned() {
+    if std::env::var("LATTICE_TASK044_LIVE").ok().as_deref() != Some("1") {
+        eprintln!("SKIP: LATTICE_TASK044_LIVE is not configured");
+        return;
+    }
+    assert_eq!(required_environment("LATTICE_TASK019_LIVE"), "1");
+    let phase = required_environment("LATTICE_TASK019_PHASE");
+    assert!(matches!(phase.as_str(), "initial" | "restart"));
+    let run_id = required_environment("LATTICE_TASK019_RUN_ID");
+    assert_eq!(run_id.len(), 32);
+    println!("TASK044_STAGE_ENVIRONMENT_VALIDATED");
+    let binding = SubjectBinding::new(
+        ProjectId::new("task044-pre-writer-cancel")
+            .unwrap_or_else(|_| panic!("TASK044_PROJECT_ID_REJECTED")),
+        ProjectSnapshotId::new("task044-pre-writer-cancel-snapshot")
+            .unwrap_or_else(|_| panic!("TASK044_PROJECT_SNAPSHOT_ID_REJECTED")),
+        TaskId::new("TASK-044-PRE-WRITER-CANCEL")
+            .unwrap_or_else(|_| panic!("TASK044_TASK_ID_REJECTED")),
+        "1",
+        digest('4'),
+    )
+    .unwrap_or_else(|_| panic!("TASK044_SUBJECT_BINDING_REJECTED"));
+    let identity = TaskLedgerStreamIdentity::new(
+        binding.project_id().clone(),
+        binding.project_snapshot_id().clone(),
+        binding.task_id().clone(),
+        binding.task_revision(),
+        binding.task_spec_digest().clone(),
+        "TWD",
+    )
+    .unwrap_or_else(|_| panic!("TASK044_STREAM_IDENTITY_REJECTED"));
+    let ingress_peer = TaskIngressPeerEvidence::new_local_canonical_mcp_acceptance_live(
+        GatewayInstanceId::new("lattice-task044-local-acceptance")
+            .unwrap_or_else(|_| panic!("TASK044_GATEWAY_ID_REJECTED")),
+        "1.0.0",
+        digest('5'),
+        digest('6'),
+        GatewayChannelId::new("stdio")
+            .unwrap_or_else(|_| panic!("TASK044_GATEWAY_CHANNEL_REJECTED")),
+        digest('7'),
+        digest('8'),
+    )
+    .unwrap_or_else(|_| panic!("TASK044_INGRESS_PEER_REJECTED"));
+    let database_binding = DeliveryDatabaseBinding::new(
+        required_environment("LATTICE_TASK019_HOST"),
+        required_environment("LATTICE_TASK019_PORT")
+            .parse::<u16>()
+            .unwrap_or_else(|_| panic!("TASK044_POSTGRES_PORT_REJECTED")),
+        run_id,
+    )
+    .unwrap_or_else(|_| panic!("TASK044_DATABASE_BINDING_REJECTED"));
+    println!("TASK044_STAGE_BINDINGS_CONSTRUCTED");
+    let mut lifecycle = PostgresTaskLifecycle::connect_with_ingress_peer(
+        &database_binding,
+        &required_environment("LATTICE_TASK019_PASSWORD"),
+        Instant::now() + Duration::from_secs(30),
+        identity,
+        store_authority(),
+        ingress_peer,
+    )
+    .unwrap_or_else(|_| panic!("TASK044_POSTGRES_LIFECYCLE_CONNECT_FAILED"));
+    println!("TASK044_STAGE_LIFECYCLE_CONNECTED");
+
+    let evidence = if phase == "initial" {
+        lifecycle
+            .admit(&binding, "task044-pre-writer-cancel-submit")
+            .unwrap_or_else(|_| panic!("TASK044_ADMISSION_FAILED"));
+        println!("TASK044_STAGE_ADMISSION_RECORDED");
+        let autonomy = lifecycle
+            .record_autonomy_receipt(&binding, None)
+            .unwrap_or_else(|_| panic!("TASK044_AUTONOMY_RECEIPT_FAILED"));
+        println!("TASK044_STAGE_AUTONOMY_RECEIPT_RECORDED");
+        assert_eq!(autonomy.state(), TaskState::Draft);
+        assert!(autonomy.autonomy_receipt().is_some());
+        lifecycle
+            .transition(&binding, TaskState::Draft, TaskState::Cancelled, None)
+            .unwrap_or_else(|_| panic!("TASK044_DURABLE_CANCELLATION_FAILED"))
+    } else {
+        let loaded = lifecycle
+            .load(&binding)
+            .unwrap_or_else(|_| panic!("TASK044_RESTART_LOAD_FAILED"));
+        println!("TASK044_STAGE_RESTART_STATE_LOADED");
+        assert_eq!(loaded.state(), TaskState::Cancelled);
+        assert_eq!(
+            loaded.ledger_head_digest().as_str(),
+            required_environment("LATTICE_TASK044_EXPECTED_LEDGER_HEAD_SHA256")
+        );
+        lifecycle
+            .transition(&binding, TaskState::Draft, TaskState::Cancelled, None)
+            .unwrap_or_else(|_| panic!("TASK044_TERMINAL_REPLAY_FAILED"))
+    };
+
+    assert_eq!(evidence.state(), TaskState::Cancelled);
+    assert!(evidence.result_digest().is_none());
+    assert!(evidence.autonomy_receipt().is_some());
+    println!(
+        "TASK044_POSTGRES_CANCEL_REPLAY_OK phase={phase} state=CANCELLED effect_count=0 ledger_head_sha256={}",
+        evidence.ledger_head_digest().as_str()
+    );
+}

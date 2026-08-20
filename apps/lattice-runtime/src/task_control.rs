@@ -627,7 +627,7 @@ fn transition_writer_policy(
         | (TaskState::AwaitingMergeApproval, TaskState::Merging) => {
             Ok(TransitionWriterPolicy::Fenced)
         }
-        (TaskState::Draft, TaskState::AwaitingExecutionApproval)
+        (TaskState::Draft, TaskState::AwaitingExecutionApproval | TaskState::Cancelled)
         | (TaskState::AwaitingExecutionApproval, TaskState::Preparing)
         | (TaskState::Merging, TaskState::Completed)
         | (TaskState::Stopping, TaskState::Failed) => Ok(TransitionWriterPolicy::Unfenced),
@@ -1457,6 +1457,24 @@ mod tests {
     }
 
     #[test]
+    fn admitted_pre_writer_cancel_is_unfenced_and_rejects_ambient_writer_authority() {
+        assert_eq!(
+            transition_writer_policy(TaskState::Draft, TaskState::Cancelled)
+                .expect("pre-writer cancellation policy"),
+            TransitionWriterPolicy::Unfenced
+        );
+        enforce_transition_writer_policy(TaskState::Draft, TaskState::Cancelled, false)
+            .expect("pre-writer cancellation requires no writer authority");
+        let error = enforce_transition_writer_policy(TaskState::Draft, TaskState::Cancelled, true)
+            .expect_err("ambient writer authority must reject pre-writer cancellation");
+        assert_eq!(error.kind(), TaskLifecycleErrorKind::Rejected);
+        assert_eq!(
+            error.code(),
+            "LATTICE_TASK_TRANSITION_WRITER_AUTHORITY_REJECTED"
+        );
+    }
+
+    #[test]
     fn controlled_transition_profile_enforces_the_writer_boundary() {
         for (from, to) in [
             (TaskState::Preparing, TaskState::Executing),
@@ -1483,6 +1501,7 @@ mod tests {
 
         for (from, to) in [
             (TaskState::Draft, TaskState::AwaitingExecutionApproval),
+            (TaskState::Draft, TaskState::Cancelled),
             (TaskState::AwaitingExecutionApproval, TaskState::Preparing),
             (TaskState::Merging, TaskState::Completed),
             (TaskState::Stopping, TaskState::Failed),
@@ -1503,7 +1522,6 @@ mod tests {
         }
 
         for (from, to) in [
-            (TaskState::Draft, TaskState::Cancelled),
             (TaskState::Executing, TaskState::Failed),
             (TaskState::Merging, TaskState::Stopping),
         ] {

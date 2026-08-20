@@ -13,6 +13,7 @@ param(
     [ValidateRange(60, 1800)]
     [int]$HolderTtlSeconds = 900,
     [switch]$RunTask068HermesReplayGate,
+    [switch]$RunTask044CancellationGate,
     [switch]$MemoryOnly,
     [switch]$StoreOnly,
     [switch]$RunTask075MemoryGate,
@@ -58,7 +59,8 @@ if ($task075CatalogMeasurementRequested) {
         $MemoryOnly -or $RunTask075MemoryGate -or $RunTask076WriterLeaseGate -or
         $RunLatticeDeliveryHook -or
         $RunFullChainAcceptanceHook -or
-        $RunTask038AcceptanceHook -or $RunTask038TunnelHook -or $RunTask068HermesReplayGate
+        $RunTask038AcceptanceHook -or $RunTask038TunnelHook -or
+        $RunTask068HermesReplayGate -or $RunTask044CancellationGate
     ) {
         throw 'TASK075_CATALOG_MEASUREMENT_PROFILE_CONFLICT'
     }
@@ -70,7 +72,7 @@ if ($task076CatalogMeasurementRequested) {
         $RunTask075MemoryGate -or $task075CatalogMeasurementRequested -or
         $RunLatticeDeliveryHook -or $RunFullChainAcceptanceHook -or
         $RunTask038AcceptanceHook -or $RunTask038TunnelHook -or
-        $RunTask068HermesReplayGate
+        $RunTask068HermesReplayGate -or $RunTask044CancellationGate
     ) {
         throw 'TASK076_CATALOG_MEASUREMENT_PROFILE_CONFLICT'
     }
@@ -83,7 +85,7 @@ if (
         $task075CatalogMeasurementRequested -or
         $RunLatticeDeliveryHook -or $RunFullChainAcceptanceHook -or
         $RunTask038AcceptanceHook -or $RunTask038TunnelHook -or
-        $RunTask068HermesReplayGate
+        $RunTask068HermesReplayGate -or $RunTask044CancellationGate
     )
 ) {
     throw 'TASK019_SELF_TEST_PROFILE_CONFLICT'
@@ -120,7 +122,7 @@ if (
     $RunTask075MemoryGate -and (
         $RunLatticeDeliveryHook -or $RunFullChainAcceptanceHook -or
         $RunTask038AcceptanceHook -or $RunTask038TunnelHook -or
-        $RunTask068HermesReplayGate
+        $RunTask068HermesReplayGate -or $RunTask044CancellationGate
     )
 ) {
     throw 'TASK075_MEMORY_GATE_HOOK_FORBIDDEN'
@@ -128,8 +130,7 @@ if (
 if (
     $RunTask076WriterLeaseGate -and (
         $RunLatticeDeliveryHook -or $RunFullChainAcceptanceHook -or
-        $RunTask038AcceptanceHook -or $RunTask038TunnelHook -or
-        $RunTask068HermesReplayGate
+        $RunTask038AcceptanceHook -or $RunTask038TunnelHook
     )
 ) {
     throw 'TASK076_WRITER_LEASE_GATE_HOOK_FORBIDDEN'
@@ -154,7 +155,9 @@ if (
     -not $RunTask075MemoryGate -and
     -not $RunTask076WriterLeaseGate -and
     -not $SelfTestOnly -and
-    -not $extensionHookRequested
+    -not $extensionHookRequested -and
+    -not $RunTask068HermesReplayGate -and
+    -not $RunTask044CancellationGate
 ) {
     & $PSCommandPath -StoreOnly
     & $PSCommandPath -MemoryOnly
@@ -199,6 +202,8 @@ $environmentNames = @(
     'LATTICE_TASK076_WRITER_PHASE',
     'LATTICE_TASK076_CATALOG_MEASURE',
     'LATTICE_TASK068_EXPECTED_RECEIPT_SHA256',
+    'LATTICE_TASK044_LIVE',
+    'LATTICE_TASK044_EXPECTED_LEDGER_HEAD_SHA256',
     'LATTICE_TASK038_POSTGRES_PASSWORD',
     'LATTICE_WRITER_LEASE_MIGRATOR_URL',
     'LATTICE_WRITER_LEASE_RUNTIME_URL',
@@ -2718,6 +2723,103 @@ function Get-Task068HermesReplayEvidence {
     return $evidence[0]
 }
 
+function Invoke-Task044CancellationReplayGate {
+    param(
+        [Parameter(Mandatory = $true)][string]$Cargo,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][ValidateSet('initial', 'restart')][string]$Phase
+    )
+
+    [Environment]::SetEnvironmentVariable('LATTICE_TASK019_PHASE', $Phase, 'Process')
+    [Environment]::SetEnvironmentVariable('LATTICE_TASK044_LIVE', '1', 'Process')
+    $stdoutPath = Join-Path $clusterRoot ".cargo-$Phase-task044-stdout.log"
+    $stderrPath = Join-Path $clusterRoot ".cargo-$Phase-task044-stderr.log"
+    $process = $null
+    $testExitCode = $null
+    $testOutput = @()
+    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+    try {
+        $process = Start-Process -FilePath $Cargo -ArgumentList @(
+            'test',
+            '-p', 'lattice-runtime',
+            '--test', 'task_control',
+            'admitted_pre_writer_cancel_is_durable_and_replays_without_effects_when_provisioned',
+            '--locked',
+            '--',
+            '--ignored',
+            '--exact',
+            '--nocapture',
+            '--test-threads=1'
+        ) -WorkingDirectory $RepositoryRoot -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru
+        $null = $process.Handle
+        $process.WaitForExit()
+        $testExitCode = $process.ExitCode
+        if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+            $testOutput += @(Get-Content -LiteralPath $stdoutPath -Encoding utf8)
+        }
+        if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            $testOutput += @(Get-Content -LiteralPath $stderrPath -Encoding utf8)
+        }
+    }
+    finally {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $path) {
+                throw 'TASK044_CARGO_OUTPUT_DELETE_FAILED'
+            }
+        }
+    }
+
+    if ($testExitCode -ne 0) {
+        $safeTokens = @(
+            $testOutput | ForEach-Object {
+                foreach ($match in [regex]::Matches(
+                    [string]$_,
+                    '(?<![A-Z0-9_])(?:TASK044|TASK019|LATTICE_TASK)_[A-Z0-9_]{1,63}(?![A-Z0-9_])'
+                )) {
+                    $match.Value
+                }
+            }
+        )
+        $safeTokens = @($safeTokens | Sort-Object -Unique)
+        $safeSummary = if ($safeTokens.Count -eq 0) {
+            'No allowlisted static diagnostic was emitted.'
+        }
+        else {
+            $safeTokens -join ' | '
+        }
+        throw "TASK044 postgres cancellation replay $Phase phase failed with exit code $testExitCode. Allowlisted diagnostics: $safeSummary"
+    }
+    return ,$testOutput
+}
+
+function Get-Task044CancellationReplayEvidence {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$TestOutput,
+        [Parameter(Mandatory = $true)][ValidateSet('initial', 'restart')][string]$Phase
+    )
+
+    $evidence = @()
+    foreach ($item in $TestOutput) {
+        $line = [string]$item
+        if ($line -cmatch '(?:^|\s)TASK044_POSTGRES_CANCEL_REPLAY_OK phase=(initial|restart) state=CANCELLED effect_count=0 ledger_head_sha256=([0-9a-f]{64})$') {
+            $evidence += [pscustomobject]@{
+                Phase = $Matches[1]
+                LedgerHeadSha256 = $Matches[2]
+            }
+        }
+    }
+    if ($evidence.Count -ne 1 -or $evidence[0].Phase -cne $Phase) {
+        throw "TASK044_CANCELLATION_REPLAY_EVIDENCE_MISSING_$Phase"
+    }
+    return $evidence[0]
+}
+
 function Get-RestartEvidence {
     param([Parameter(Mandatory = $true)][object[]]$TestOutput)
 
@@ -2993,9 +3095,16 @@ if (@($selectedHookCount).Count -gt 1) {
 }
 if (
     $RunTask068HermesReplayGate -and
-    (-not $MemoryOnly -or @($selectedHookCount).Count -ne 0)
+    ((-not $MemoryOnly -and -not $RunTask076WriterLeaseGate) -or
+        @($selectedHookCount).Count -ne 0)
 ) {
     throw 'TASK068_HARNESS_MODE_REJECTED'
+}
+if (
+    $RunTask044CancellationGate -and
+    (-not $RunTask076WriterLeaseGate -or @($selectedHookCount).Count -ne 0)
+) {
+    throw 'TASK044_HARNESS_MODE_REJECTED'
 }
 if ($RunLatticeDeliveryHook) {
     $deliveryHookPath = Get-LatticeDeliveryHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot
@@ -3636,6 +3745,67 @@ try {
             'Process'
         )
     }
+    $task044InitialEvidence = $null
+    if ($RunTask044CancellationGate) {
+        $task044InitialRestoreStopped = [string]::IsNullOrWhiteSpace(
+            [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_DAEMON_INSTANCE_ID', 'Process')
+        )
+        if ($task044InitialRestoreStopped) {
+            Set-Task076RuntimeAdmission `
+                -Psql $psql `
+                -Port $port `
+                -Password $oneTimePassword `
+                -RunId $runId `
+                -Mode 'ACTIVE'
+        }
+        else {
+            Assert-Task076RuntimeAdmissionActive `
+                -Psql $psql `
+                -Port $port `
+                -Password $oneTimePassword `
+                -RunId $runId
+        }
+        $task044InitialAuthority = [pscustomobject][ordered]@{
+            daemon_instance_id = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_DAEMON_INSTANCE_ID', 'Process')
+            daemon_epoch = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_DAEMON_EPOCH', 'Process')
+            authority_revision = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_AUTHORITY_REVISION', 'Process')
+            observation_digest = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_ADMISSION_OBSERVATION_SHA256', 'Process')
+            head_digest = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_AUTHORITY_HEAD_SHA256', 'Process')
+        }
+        foreach ($entry in ([ordered]@{
+            LATTICE_STORE_DAEMON_INSTANCE_ID = [string]$task044InitialAuthority.daemon_instance_id
+            LATTICE_STORE_DAEMON_EPOCH = [string]$task044InitialAuthority.daemon_epoch
+            LATTICE_STORE_AUTHORITY_REVISION = [string]$task044InitialAuthority.authority_revision
+            LATTICE_STORE_OBSERVATION_DIGEST = [string]$task044InitialAuthority.observation_digest
+            LATTICE_STORE_AUTHORITY_HEAD_DIGEST = [string]$task044InitialAuthority.head_digest
+        }).GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+        }
+        try {
+            $task044InitialOutput = Invoke-Task044CancellationReplayGate `
+                -Cargo $cargoCommand.Source `
+                -RepositoryRoot $repositoryRoot `
+                -Phase 'initial'
+        }
+        finally {
+            if ($task044InitialRestoreStopped) {
+                Set-Task076RuntimeAdmission `
+                    -Psql $psql `
+                    -Port $port `
+                    -Password $oneTimePassword `
+                    -RunId $runId `
+                    -Mode 'STOPPED'
+            }
+        }
+        $task044InitialEvidence = Get-Task044CancellationReplayEvidence `
+            -TestOutput $task044InitialOutput `
+            -Phase 'initial'
+        [Environment]::SetEnvironmentVariable(
+            'LATTICE_TASK044_EXPECTED_LEDGER_HEAD_SHA256',
+            [string]$task044InitialEvidence.LedgerHeadSha256,
+            'Process'
+        )
+    }
 
     if (-not (Stop-TestCluster -PgCtl $pgCtl -DataDirectory $dataDirectory)) {
         throw 'Could not prove the disposable PostgreSQL cluster stopped after the initial phase.'
@@ -3793,6 +3963,67 @@ try {
             [string]$task068InitialEvidence.ReceiptSha256
         ) {
             throw 'TASK068_HERMES_REPLAY_RECEIPT_SUBSTITUTION_REJECTED'
+        }
+    }
+    if ($RunTask044CancellationGate) {
+        $task044RestartRestoreStopped = [string]::IsNullOrWhiteSpace(
+            [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_DAEMON_INSTANCE_ID', 'Process')
+        )
+        if ($task044RestartRestoreStopped) {
+            Set-Task076RuntimeAdmission `
+                -Psql $psql `
+                -Port $port `
+                -Password $oneTimePassword `
+                -RunId $runId `
+                -Mode 'ACTIVE'
+        }
+        else {
+            Assert-Task076RuntimeAdmissionActive `
+                -Psql $psql `
+                -Port $port `
+                -Password $oneTimePassword `
+                -RunId $runId
+        }
+        $task044RestartAuthority = [pscustomobject][ordered]@{
+            daemon_instance_id = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_DAEMON_INSTANCE_ID', 'Process')
+            daemon_epoch = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_DAEMON_EPOCH', 'Process')
+            authority_revision = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_AUTHORITY_REVISION', 'Process')
+            observation_digest = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_ADMISSION_OBSERVATION_SHA256', 'Process')
+            head_digest = [Environment]::GetEnvironmentVariable('LATTICE_WRITER_LEASE_AUTHORITY_HEAD_SHA256', 'Process')
+        }
+        foreach ($entry in ([ordered]@{
+            LATTICE_STORE_DAEMON_INSTANCE_ID = [string]$task044RestartAuthority.daemon_instance_id
+            LATTICE_STORE_DAEMON_EPOCH = [string]$task044RestartAuthority.daemon_epoch
+            LATTICE_STORE_AUTHORITY_REVISION = [string]$task044RestartAuthority.authority_revision
+            LATTICE_STORE_OBSERVATION_DIGEST = [string]$task044RestartAuthority.observation_digest
+            LATTICE_STORE_AUTHORITY_HEAD_DIGEST = [string]$task044RestartAuthority.head_digest
+        }).GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
+        }
+        try {
+            $task044RestartOutput = Invoke-Task044CancellationReplayGate `
+                -Cargo $cargoCommand.Source `
+                -RepositoryRoot $repositoryRoot `
+                -Phase 'restart'
+        }
+        finally {
+            if ($task044RestartRestoreStopped) {
+                Set-Task076RuntimeAdmission `
+                    -Psql $psql `
+                    -Port $port `
+                    -Password $oneTimePassword `
+                    -RunId $runId `
+                    -Mode 'STOPPED'
+            }
+        }
+        $task044RestartEvidence = Get-Task044CancellationReplayEvidence `
+            -TestOutput $task044RestartOutput `
+            -Phase 'restart'
+        if (
+            [string]$task044RestartEvidence.LedgerHeadSha256 -cne
+            [string]$task044InitialEvidence.LedgerHeadSha256
+        ) {
+            throw 'TASK044_CANCELLATION_REPLAY_LEDGER_SUBSTITUTION_REJECTED'
         }
     }
 
@@ -4091,6 +4322,9 @@ Write-Output 'ENDPOINT=127.0.0.1:<dynamic-excludes-5432-64272-55432>'
 Write-Output 'PHASES=initial,restart'
 if ($RunTask068HermesReplayGate) {
     Write-Output 'TASK068_HERMES_POSTGRES_REPLAY=PASS'
+}
+if ($RunTask044CancellationGate) {
+    Write-Output 'TASK044_POSTGRES_CANCEL_REPLAY=PASS'
 }
 if ($RunTask076WriterLeaseGate -and -not $task076CatalogMeasurementRequested) {
     Write-Output 'TASK076_WRITER_LEASE_V2_BRIDGE=PASS'
