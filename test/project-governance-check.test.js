@@ -540,6 +540,59 @@ test("project check accepts ticket-local display metadata for parallel tasks wit
   }
 });
 
+test("project check accepts TASK-081, TASK-082, and TASK-083 ticket-local metadata with a legacy shared protocol", async () => {
+  const legacyProtocol = engineeringProtocol.replace(
+    "Every new branch must provide a plain Traditional-Chinese name and purpose through its own exactly-once non-empty `display_name_zh_tw` and `display_purpose_zh_tw` ticket fields. The shared tools/engineering-status-dashboard/branch-guide.zh-TW.json is a legacy branch-guide fallback only: a ticket without both local fields must include that path in its `allowed_paths`.",
+    "Every new branch must add a plain Traditional-Chinese name and purpose to tools/engineering-status-dashboard/branch-guide.zh-TW.json and include that path in the active ticket `allowed_paths`.",
+  );
+  const parallelBranches = [
+    ["TASK-081", "feature/task-081-dashboard-identity-reconciliation"],
+    ["TASK-082", "feature/task-082-task-050-terminal-evidence"],
+    ["TASK-083", "feature/task-083-task-075-terminal-evidence"],
+  ];
+  for (const [taskId, branch] of parallelBranches) {
+    const result = await runFixture({
+      tickets: [
+        ["current.md", "TASK-078", "fixture", {
+          displayName: "目前規劃工作",
+          displayPurpose: "保留唯一規劃焦點的繁體中文說明。",
+        }],
+        [`${taskId.toLowerCase()}.md`, taskId, "fixture", {
+          branch,
+          displayName: `${taskId} 平行工作`,
+          displayPurpose: "從票券本身提供繁體中文交付用途。",
+        }],
+      ],
+      plans: "**CURRENT TASK-078 IMPLEMENTATION:** shared planning index\n",
+      gitBranch: branch,
+      includeGuideAllowedPath: false,
+      includeGuideEntry: false,
+      protocol: legacyProtocol,
+    });
+
+    assert.equal(result.status, 0, `${taskId}: ${result.stderr}`);
+  }
+});
+
+test("project check does not accept display metadata in the engineering protocol as ticket identity", async () => {
+  const result = await runFixture({
+    tickets: [
+      ["current.md", "TASK-017", "fixture", {
+        displayName: "目前工作",
+        displayPurpose: "目前工作用途。",
+      }],
+      ["parallel.md", "TASK-018"],
+    ],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** shared planning index\n",
+    gitBranch: "feature/task-018-fixture",
+    includeGuideAllowedPath: false,
+    includeGuideEntry: false,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /parallel ticket allowed_paths must include/u);
+});
+
 test("project check rejects incomplete, duplicate, blank, or non-Chinese ticket-local display metadata", async () => {
   const invalidMetadata = [
     { displayName: "只有名稱" },

@@ -25,6 +25,9 @@ independent reviewer was authorized for this worker task.
   exactly-once, non-empty Traditional-Chinese presentation authority. The
   shared branch guide remains a legacy fallback only, removing shared JSON
   writes from parallel-safe ticket delivery.
+- The validator reads those fields only from `docs/tickets/` records and only
+  validates the selected terminal branch identity. Protocol prose and unrelated
+  frontmatter remain non-authoritative and legacy protocol text stays accepted.
 - Unknown, missing, duplicate, branch-mismatched, non-terminal/cancelled,
   unauthorized, and default-branch cases emit errors rather than selecting a
   fallback authority.
@@ -38,12 +41,12 @@ independent reviewer was authorized for this worker task.
 
 - RED: the added parallel-branch assertions failed against the original
   CURRENT-branch coupling.
-- GREEN: `node --test test/project-governance-check.test.js` passed 30/30,
+- GREEN: `node --test test/project-governance-check.test.js` passed 32/32,
   including generic TASK-081/082/083-shaped ticket-local success and closed
   missing/duplicate/blank/non-Chinese metadata denial cases.
 - Governance: `npm.cmd run check` exited 0 with one CURRENT marker.
-- Final full regression after the ticket-local repair: `npm.cmd run verify`
-  exited 0 with 132/132 tests passing.
+- Final full regression after the protocol-ownership repair: `npm.cmd run verify`
+  exited 0 with 134/134 tests passing.
 
 ## Architecture note
 

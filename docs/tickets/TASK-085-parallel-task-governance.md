@@ -2,7 +2,7 @@
 ticket_id: TASK-085
 title: Fail-closed parallel TASK governance
 spec_id: SPEC-006
-spec_version: 2
+spec_version: 3
 module_id: engineering-delivery-finisher
 constitution_version: 1.5
 status: complete
@@ -38,6 +38,8 @@ parallel TASK branch proves its own identity without modifying the sole
   with safe delivery metadata and ticket-local Traditional-Chinese display
   metadata on a non-CURRENT parallel branch. Shared branch-guide metadata is
   legacy fallback only and is not required for parallel-safe tickets.
+- Ticket-local metadata is read only from that selected terminal ticket;
+  ENGINEERING_PROTOCOL and unrelated frontmatter cannot satisfy task identity.
 - Missing, duplicate, mismatched, non-terminal, unauthorized, cancelled, and
   default-branch cases remain denied; TASK-081, TASK-082, and TASK-083 remain
   generic parallel-identity cases, not hardcoded exceptions.

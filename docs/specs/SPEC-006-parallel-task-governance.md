@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-006
 title: Parallel TASK governance check
-version: 2
+version: 3
 status: approved
 approved_by: delegated_user_instruction
 approved_at_local: 2026-08-21
@@ -28,6 +28,8 @@ and pressures workers to rewrite the shared planning index.
    push policy. Its exactly-once, non-empty Traditional-Chinese
    `display_name_zh_tw` and `display_purpose_zh_tw` fields are the preferred
    human-readable evidence; the shared branch guide is legacy fallback only.
+   This metadata validation applies only to the selected terminal TASK ticket
+   identity; protocol and other non-ticket documents cannot supply or satisfy it.
 4. Missing tickets, duplicate identity, branch mismatch, non-terminal status,
    malformed or unauthorized delivery metadata, and the configured default
    branch fail closed. No rule permits a parallel worker to create another
@@ -57,3 +59,6 @@ and pressures workers to rewrite the shared planning index.
 - v2 moves the parallel-safe branch presentation evidence from shared JSON to
   closed ticket-local fields, while retaining the shared guide as legacy
   fallback for existing tickets.
+- v3 removes the erroneous protocol-content gate for ticket-local field names:
+  a legacy protocol remains compatible when the selected terminal ticket itself
+  carries the closed metadata.
