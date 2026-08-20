@@ -15,7 +15,11 @@ additional_modules:
     constitution_version: 1.1
   - module_id: postgres-store
     constitution_version: 1.4
-status: needs-review
+status: partial
+delivery_remote: origin
+delivery_repository: github.com/z72124223/lattice-devos
+delivery_push: authorized_non_force_feature_branch
+delivery_archive: keep_open
 parallel_safe: false
 depends_on:
   - TASK-032
@@ -65,4 +69,3 @@ state from the authoritative ticket plus handoff evidence.
 - `rg -n "TASK-036|NEEDS_REVIEW|UNKNOWN" docs HANDOFF.md PLANS.md`
 - any focused status-projection test or generator check needed to prove the
   dashboard no longer reports `UNKNOWN`
-
