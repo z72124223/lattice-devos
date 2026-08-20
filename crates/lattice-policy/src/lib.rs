@@ -5,11 +5,13 @@ mod decimal;
 mod decision;
 mod evaluate;
 mod matrix;
+mod model_routing;
 mod types;
 pub mod v1_compat;
 
 pub use decision::{DecisionKind, DecisionStage, PolicyDecision, PolicyEvidence, PolicyReason};
 pub use evaluate::evaluate;
+pub use model_routing::*;
 pub use types::*;
 
 /// Public Policy Engine contract version.
