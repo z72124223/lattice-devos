@@ -1,6 +1,10 @@
 {
   "schema": "lattice.branch-guide.zh-TW/1.0",
   "branches": {
+    "feature/task-079-durable-foreman-state": {
+      "name": "任務 079：工頭狀態接管",
+      "purpose": "把背景工作協調摘要安全保存到 LATTICE 帳本，讓新程序能重建卡住與下一步；工程地圖仍只是索引。"
+    },
     "feature/task-078-engineering-delivery-finisher": {
       "name": "任務 078：一鍵工程收尾",
       "purpose": "工作完成後依票券決定是否安全推送、核對 GitHub、更新工程地圖，成功才封存 Codex 任務。"

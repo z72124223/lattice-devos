@@ -282,6 +282,10 @@ name = "lattice-core"
 version = "0.1.0"
 
 [[package]]
+name = "lattice-foreman-state"
+version = "0.1.0"
+
+[[package]]
 name = "lattice-gateway-ipc"
 version = "0.1.0"
 dependencies = [

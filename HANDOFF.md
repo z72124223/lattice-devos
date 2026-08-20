@@ -1,3 +1,40 @@
+# TASK-079 durable foreman state handoff — 2026-08-21
+
+## Status
+
+`NEEDS_REVIEW` — the pure, secret-free snapshot/replay/watchdog foundation is
+implemented and tested, but the required Task Ledger/Port/Postgres durable path
+is deliberately not represented as complete.
+
+## Completed work
+
+- Created isolated `feature/task-079-durable-foreman-state` from clean synced
+  TASK-078 commit `5a5da01`; did not modify its six dirty exporter/document files.
+- Merged clean TASK-048 and TASK-049 source tips with preserved merge ancestry.
+- Added `lattice-foreman-state` 0.1.0, ADR-024, SPEC-006, constitution, ticket,
+  pure fresh-reader projection, and read-only dashboard/Git watchdog.
+- The snapshot has no free-form chat/command/environment/credential/path field;
+  exact secret token prefixes and non-ASCII confusables fail closed.
+
+## Verification
+
+- `cargo test -p lattice-foreman-state --test foreman_state --offline`: PASS 4/4.
+- `cargo fmt --all -- --check`: PASS.
+- `cargo clippy -p lattice-foreman-state --all-targets --all-features --offline -- -D warnings`: PASS.
+- TASK-048 focused: PASS 9/9; TASK-049 focused: PASS 3/3.
+- `npm.cmd run check` and final `git diff --check` must be rerun after the
+  handoff commit.
+
+## Blocker and next action
+
+Do not claim durable takeover acceptance. Implement the versioned fixed
+foreman-control Ledger stream/event, typed Port, Postgres Store row/function,
+and same-transaction Writer Lease/fencing assertion; then add injectable
+restart/replay tests before any disposable PostgreSQL gate. Keep TASK-078
+exporter unchanged and do not run TASK-051.
+
+---
+
 # TASK-078 相容性修復交接 — 2026-08-21
 
 ## 狀態

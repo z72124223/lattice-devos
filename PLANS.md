@@ -88,9 +88,18 @@ boundaries, complete cleanup, and no unresolved P0-P3 finding. GitHub Actions
 run `31835654240` passed on the exact implementation commit. Draft PR #12
 remains not authorized for merge or Draft promotion.
 
-## Current engineering delivery finisher - TASK-078
+## Current durable foreman state - TASK-079
 
-CURRENT TASK-078 - implement one fail-closed command that reads explicit push
+CURRENT TASK-079 - establish the smallest versioned, secret-free foreman
+snapshot/replay/watchdog vertical slice through the existing Task Ledger,
+Postgres Store, and typed Ports boundaries. TASK-048/049 are integrated only as
+read-only input contracts, TASK-078 exporter working files remain untouched,
+and PostgreSQL/TASK-051 live acceptance stays deferred. The dashboard remains
+an index, never coordination truth.
+
+## Completed engineering delivery finisher - TASK-078
+
+COMPLETED TASK-078 - implement one fail-closed command that reads explicit push
 repository-identity, and archive policies from the matching terminal TASK
 ticket or unique committed terminal ISSUE evidence. It permits only an
 exact-SHA non-force `feature/task-nnn-*` or evidence-bound
@@ -217,7 +226,7 @@ Lease/fence, governs the sole Codex writer, verification, Git, and fresh-process
 status replay. Canonical-local acceptance is `PASS`; actual ChatGPT tunnel
 discovery/invoke remains open and is not inferred from local NDJSON evidence.
 
-CURRENT TASK-049 — Window Closure terminal evidence: the pure
+COMPLETED TASK-049 — Window Closure terminal evidence: the pure
 Orchestrator eligibility decision is complete and awaiting only bounded feature
 branch delivery through the TASK-078 finisher.
 
