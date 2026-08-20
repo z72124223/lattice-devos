@@ -230,6 +230,14 @@ const currentGitBranchResult = spawnSync("git", ["branch", "--show-current"], {
 });
 const currentGitBranch =
   currentGitBranchResult.status === 0 ? currentGitBranchResult.stdout.trim() : "";
+const defaultGitBranchResult = spawnSync(
+  "git",
+  ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+  { cwd: root, encoding: "utf8", windowsHide: true },
+);
+const defaultGitBranch = defaultGitBranchResult.status === 0
+  ? defaultGitBranchResult.stdout.trim().replace(/^origin\//u, "")
+  : "";
 if (!plansFile) {
   errors.push("PLANS.md: missing project plan.");
 } else {
@@ -256,9 +264,13 @@ if (!plansFile) {
       const branchGuidePath = "tools/engineering-status-dashboard/branch-guide.zh-TW.json";
       if (!currentTicket.branch) {
         errors.push(`${currentTicket.file}: current ticket requires exactly one branch.`);
-      } else if (!currentGitBranch) {
+      } else if (currentGitBranchResult.status !== 0) {
         errors.push(`${currentTicket.file}: current Git branch cannot be identified.`);
-      } else if (currentTicket.branch !== currentGitBranch) {
+      } else if (
+        currentGitBranch &&
+        currentGitBranch !== defaultGitBranch &&
+        currentTicket.branch !== currentGitBranch
+      ) {
         errors.push(
           `${currentTicket.file}: ticket branch '${currentTicket.branch}' does not match current Git branch '${currentGitBranch}'.`,
         );

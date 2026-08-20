@@ -94,6 +94,7 @@ async function runFixture({
   guideEntryUsesChinese = true,
   decoyGuidePath = false,
   gitBranch,
+  detachedGitHead = false,
 }) {
   const root = await mkdtemp(path.join(tmpdir(), "lattice-project-check-"));
   try {
@@ -149,6 +150,28 @@ async function runFixture({
       }, null, 2)}\n`,
       "utf8",
     );
+    if (detachedGitHead) {
+      const commit = spawnSync(
+        "git",
+        [
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          "commit",
+          "--allow-empty",
+          "-m",
+          "fixture detached check",
+        ],
+        { cwd: root, encoding: "utf8" },
+      );
+      assert.equal(commit.status, 0, commit.stderr);
+      const detach = spawnSync("git", ["switch", "--detach"], {
+        cwd: root,
+        encoding: "utf8",
+      });
+      assert.equal(detach.status, 0, detach.stderr);
+    }
     const initial = spawnSync(process.execPath, [checkScript], {
       cwd: root,
       encoding: "utf8",
@@ -291,6 +314,16 @@ test("project check requires current ticket branch to match Git", async () => {
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /does not match current Git branch/u);
+});
+
+test("project check permits a detached read-only integration verification", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    detachedGitHead: true,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("project check rejects English-only guide text", async () => {
