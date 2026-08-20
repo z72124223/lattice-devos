@@ -17,6 +17,22 @@
 characterize 的 production-chain failure，不是 production PASS，也不是已證實的
 leaf root cause。
 
+## 離線 characterization 結果
+
+在 TASK-097 clean HEAD `f6b75e3183bb69f34e30efd4d0c3920fd0df6019` 的父基底上，
+未啟動 Hermes、PostgreSQL、網路 listener 或模型的兩個入口檢查皆 fail-closed：
+
+- `scripts/test-task037-verifier-containment.ps1` 不存在，PowerShell `-File` 回報找不到
+  檔案。
+- `scripts/run-task037-full-chain-verification.ps1 -HarnessSelfTest` 回報
+  `NamedParameterNotFound`，因該 canonical 檔案沒有 `HarnessSelfTest`。
+
+Git 歷史指出 containment script 是本機未推送提交 `c12f6e5` 才加入，完整
+admission recovery 到 `9e4b5b4`；後者相對 remote canonical 多五個提交、11 個檔案。
+因此目前第一個 confirmed recovery blocker 是「production verifier 不在 canonical
+base」，不是 Hermes/Memory/Status 的已確認 leaf root cause，也不授權把該 11 檔案
+集合或既有 dirty 修正搬進 TASK-097。
+
 ## 治理結論
 
 TASK-097 以 `evidence_subjects: [TASK-037]` 追溯舊鏈路，`depends_on: []`，不改動
