@@ -441,9 +441,73 @@ async function readTicket(worktreePath, identity, branch, sourceHead) {
     if (frontmatter.branch !== branch) {
       return { ticket: null, error: "TASK 票券的 branch 不符合目前分支" };
     }
-    return { ticket: candidate, error: null };
+    return { ticket: { ...candidate, sourceHead }, error: null };
   } catch {
     return { ticket: null, error: "TASK 票券無法讀取" };
+  }
+}
+
+async function selectLatestTerminalEvidence(repository, candidates, label) {
+  const distinct = [...new Map(candidates.map((candidate) => [candidate.sourceHead, candidate])).values()];
+  if (distinct.length === 0) return { evidence: null, error: null };
+  if (distinct.length === 1) return { evidence: distinct[0], error: null };
+  const latest = [];
+  for (const candidate of distinct) {
+    let superseded = false;
+    for (const other of distinct) {
+      if (candidate === other) continue;
+      const ancestry = await optionalGit(repository, [
+        "merge-base",
+        "--is-ancestor",
+        candidate.sourceHead,
+        other.sourceHead,
+      ]);
+      if (ancestry.ok) {
+        superseded = true;
+        break;
+      }
+    }
+    if (!superseded) latest.push(candidate);
+  }
+  if (latest.length === 1) return { evidence: latest[0], error: null };
+  return { evidence: null, error: `目前分支有重複且無法排序的 ${label} 終端證據` };
+}
+
+async function readHistoricalTicketEvidence(repository, identity, branch, targetHead) {
+  if (identity.kind !== "TASK") return { ticket: null, error: null };
+  try {
+    const commits = (await gitAt(repository, [
+      "log",
+      "--all",
+      "--format=%H",
+      "--",
+      `:(glob)docs/tickets/${identity.id}-*.md`,
+    ])).split(/\r?\n/gu).filter(Boolean);
+    const candidates = [];
+    for (const sourceHead of [...new Set(commits)]) {
+      const supersededOnTarget = await optionalGit(repository, [
+        "merge-base", "--is-ancestor", sourceHead, targetHead,
+      ]);
+      if (supersededOnTarget.ok) continue;
+      const entries = (await gitAt(repository, [
+        "ls-tree", "-r", "--name-only", sourceHead, "--", "docs/tickets",
+      ])).split(/\r?\n/gu).filter(Boolean);
+      for (const entry of entries) {
+        if (!new RegExp(`^${escapeRegularExpression(identity.id)}-.+\\.md$`, "iu").test(path.posix.basename(entry))) continue;
+        const content = await gitAt(repository, ["show", `${sourceHead}:${entry}`]);
+        const parsed = parseFrontmatter(content);
+        if (
+          !parsed.valid || parsed.duplicateKeys.length > 0 ||
+          parsed.values.ticket_id !== identity.id || parsed.values.branch !== branch ||
+          !["COMPLETE", "VERIFIED"].includes(outcomeFromTicket(parsed.values, content))
+        ) continue;
+        candidates.push({ fileName: path.posix.basename(entry), content, frontmatter: parsed.values, sourceHead });
+      }
+    }
+    const selected = await selectLatestTerminalEvidence(repository, candidates, "TASK");
+    return { ticket: selected.evidence, error: selected.error };
+  } catch {
+    return { ticket: null, error: "TASK 歷史終端證據無法讀取" };
   }
 }
 
@@ -537,9 +601,47 @@ async function readCommittedIssueEvidence(worktreePath, identity, branch, source
     if (!new Set(["after_success", "keep_open"]).has(issue.frontmatter.delivery_archive)) {
       return { issue: null, error: "ISSUE 終端證據的 delivery_archive 無效" };
     }
-    return { issue, error: null };
+    return { issue: { ...issue, sourceHead }, error: null };
   } catch {
     return { issue: null, error: "ISSUE 終端證據無法讀取" };
+  }
+}
+
+async function readHistoricalIssueEvidence(repository, identity, branch, targetHead) {
+  if (identity.kind !== "ISSUE") return { issue: null, error: null };
+  try {
+    const commits = (await gitAt(repository, [
+      "log",
+      "--all",
+      "--format=%H",
+      "--",
+      `:(glob)docs/issues/${identity.id}-*.md`,
+    ])).split(/\r?\n/gu).filter(Boolean);
+    const candidates = [];
+    for (const sourceHead of [...new Set(commits)]) {
+      const supersededOnTarget = await optionalGit(repository, [
+        "merge-base", "--is-ancestor", sourceHead, targetHead,
+      ]);
+      if (supersededOnTarget.ok) continue;
+      const entries = (await gitAt(repository, [
+        "ls-tree", "-r", "--name-only", sourceHead, "--", "docs/issues",
+      ])).split(/\r?\n/gu).filter(Boolean);
+      for (const entry of entries) {
+        if (!new RegExp(`^${escapeRegularExpression(identity.id)}-.+\\.md$`, "iu").test(path.posix.basename(entry))) continue;
+        const content = await gitAt(repository, ["show", `${sourceHead}:${entry}`]);
+        const parsed = parseFrontmatter(content);
+        if (
+          !parsed.valid || parsed.duplicateKeys.length > 0 ||
+          parsed.values.issue_id !== identity.id || parsed.values.branch !== branch ||
+          !successfulDeliveryStatuses.has(normalizedDeliveryStatus(parsed.values.status))
+        ) continue;
+        candidates.push({ fileName: path.posix.basename(entry), content, frontmatter: parsed.values, sourceHead });
+      }
+    }
+    const selected = await selectLatestTerminalEvidence(repository, candidates, "ISSUE");
+    return { issue: selected.evidence, error: selected.error };
+  } catch {
+    return { issue: null, error: "ISSUE 歷史終端證據無法讀取" };
   }
 }
 
@@ -685,7 +787,7 @@ async function collectRemoteHeads(repository, offline) {
   };
 }
 
-async function collectWorktree(record, remoteEvidence) {
+async function collectWorktree(record, remoteEvidence, repository) {
   const identity = identityFromBranch(record.branch);
   const errors = [];
   const statusResult = await optionalGit(record.path, ["status", "--porcelain=v1"]);
@@ -796,9 +898,20 @@ async function collectWorktree(record, remoteEvidence) {
     }
   }
 
-  const evidenceResult = identity.kind === "ISSUE"
+  let evidenceResult = identity.kind === "ISSUE"
     ? await readCommittedIssueEvidence(record.path, identity, record.branch, record.head)
     : await readTicket(record.path, identity, record.branch, record.head);
+  if (
+    evidenceResult.error === "目前分支找不到對應 TASK 票券" ||
+    evidenceResult.error === "目前分支找不到已提交的 ISSUE 終端證據"
+  ) {
+    const historicalEvidence = identity.kind === "ISSUE"
+      ? await readHistoricalIssueEvidence(repository, identity, record.branch, record.head)
+      : await readHistoricalTicketEvidence(repository, identity, record.branch, record.head);
+    if (historicalEvidence.ticket || historicalEvidence.issue || historicalEvidence.error) {
+      evidenceResult = historicalEvidence;
+    }
+  }
   const ticket = evidenceResult.ticket || null;
   const issue = evidenceResult.issue || null;
   if (evidenceResult.error) {
@@ -808,11 +921,14 @@ async function collectWorktree(record, remoteEvidence) {
   const ticketContent = evidence?.content || "";
   const ticketMetadata = evidence?.frontmatter || {};
   const outcome = outcomeFromTicket(ticketMetadata, ticketContent);
-  const delivery = identity.kind === "TASK"
-    ? await taskDeliveryReadiness(record.path, ticket, record.head)
+  const deliveryReadiness = identity.kind === "TASK"
+    ? await taskDeliveryReadiness(record.path, ticket, ticket?.sourceHead || record.head)
     : identity.kind === "ISSUE"
       ? issueDeliveryReadiness(issue)
       : { state: "NOT_APPLICABLE", ready: false, reasonZh: "這不是可由 finisher 交付的規範分支。" };
+  const delivery = evidence && evidence.sourceHead !== record.head
+    ? { state: "STALE", ready: false, reasonZh: "終端證據不是目前分支 HEAD，不能視為可交付或可封存。" }
+    : deliveryReadiness;
   const commitParts = commitResult.ok
     ? commitResult.value.split("\0")
     : [record.head || "", String(record.head || "").slice(0, 7), "", ""];
@@ -1302,7 +1418,7 @@ export async function buildSnapshot({ repository, offline = false, guidePath = d
     throw new Error("Git did not report any registered worktrees");
   }
   const remoteEvidence = await collectRemoteHeads(repositoryRoot, offline);
-  const items = await mapLimit(records, 4, (record) => collectWorktree(record, remoteEvidence));
+  const items = await mapLimit(records, 4, (record) => collectWorktree(record, remoteEvidence, repositoryRoot));
   const defaultBranch = addDefaultBranchItem(items, remoteEvidence);
   const guide = await readBranchGuide(guidePath);
   const tree = await buildAncestryTree(repositoryRoot, items, defaultBranch);

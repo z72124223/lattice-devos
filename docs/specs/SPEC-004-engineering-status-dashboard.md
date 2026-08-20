@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-004
 title: Local engineering status dashboard
-version: 3
+version: 4
 status: approved
 approved_by: direct_user_reply
 approved_at_local: 2026-08-20
@@ -61,6 +61,14 @@ reconstruct that state repeatedly.
     copyable request both explain the choice, the relative cost principle, and
     that the user selects the model when creating the new Codex task. The page
     never claims that it changed the current task's model.
+12. When a registered canonical TASK or ISSUE branch no longer contains its
+   unique terminal evidence at its own HEAD, the collector may project exactly
+   one later committed terminal record from another reachable branch only when
+   that record names the same identity and exact branch. The functional outcome
+   remains visible, but its delivery state is `STALE` and it cannot be selected,
+   dispatched, or treated as archive-ready. Multiple incomparable historical
+   records, a malformed current record, or evidence removed by the current
+   branch remain fail-closed rather than being silently repaired from history.
 
 ## Plain-language status vocabulary
 
@@ -109,6 +117,9 @@ because that module forbids Git, process, and network ownership.
 - A named stable branch outranks a detached/prunable worktree at the same
   commit. Git ancestry read failure makes the snapshot partial, remains visible
   in the page, and cannot produce a recommended branch.
+- Terminal TASK/ISSUE evidence stored on a later closure branch can explain a
+  historical branch's completed outcome, while stale HEAD, duplicate identity,
+  and dependency-blocked delivery remain non-dispatchable and non-archive-ready.
 
 ## Acceptance criteria
 
@@ -167,3 +178,11 @@ practical model and reasoning-effort recommendation. The user requested enough
 plain-language guidance to achieve low-cost, efficient development. This
 direct feedback approves the advisory behavior in requirement 11 without
 authorizing model switching, paid API integration, or weaker verification.
+
+## Human acceptance feedback — version 4
+
+On 2026-08-21 the delegated engineering request approved a read-only identity
+reconciliation projection for terminal TASK and ISSUE evidence, historical
+branches, duplicate identities, outcome/delivery separation, and stale-HEAD
+fail-closed behavior. It does not add Git mutation, delivery, archive, runtime,
+database, MCP, Hermes, deployment, or release authority.

@@ -1,7 +1,7 @@
 ---
 module_id: engineering-status-dashboard
 name: Engineering Status Dashboard
-constitution_version: 1.2
+constitution_version: 1.3
 status: active
 ---
 
@@ -69,6 +69,11 @@ GitHub failures are represented in the snapshot instead of silently omitted.
 13. Model advice is non-authoritative: it recommends the smallest capable
     Codex tier, names when to escalate, never invokes a model or paid API, and
     never claims that the current task changed models.
+14. A historical terminal evidence record may explain a canonical branch's
+    functional outcome only when its identity and exact branch match uniquely;
+    it is never current delivery evidence. A non-current evidence HEAD, an
+    incomparable duplicate, or a malformed current record fails closed for
+    dispatch and archival.
 
 ## Allowed Dependencies
 
@@ -129,3 +134,6 @@ requires separate user authorization.
   branch tree and fail-closed, copy-only new-work selection for SPEC-004 v2.
 - 1.2 (2026-08-20): add dated, presentation-only Codex model and reasoning
   guidance while preserving the page's read-only and non-authoritative boundary.
+- 1.3 (2026-08-21): reconcile uniquely anchored historical TASK/ISSUE terminal
+  evidence for presentation while retaining stale-HEAD, duplicate, and delivery
+  fail-closed boundaries.

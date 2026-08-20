@@ -5,6 +5,10 @@
       "name": "任務 078：一鍵工程收尾",
       "purpose": "工作完成後依票券決定是否安全推送、核對 GitHub、更新工程地圖，成功才封存 Codex 任務。"
     },
+    "feature/task-081-dashboard-identity-reconciliation": {
+      "name": "任務 081：工程身分對帳",
+      "purpose": "讓歷史分支仍能顯示已驗證成果，同時把過期、重複或依賴未解除的交付證據安全地擋在派工與封存之外。"
+    },
     "feature/task-037-full-chain-integration": {
       "name": "專案預設根節點",
       "purpose": "GitHub 目前的預設分支；適合建立不需要尚未整合新功能的獨立工作。"

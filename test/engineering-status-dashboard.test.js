@@ -279,6 +279,103 @@ test("keeps a completed TASK dependency-blocked until its committed dependency s
   }
 });
 
+test("reconciles a historical TASK branch from one later committed terminal ticket, but fails delivery closed", () => {
+  const fixture = createFixture({ terminalState: "IN_PROGRESS", ticketStatus: "in_progress" });
+  const closure = path.join(fixture.root, "terminal-ticket-closure");
+  try {
+    git(fixture.repository, "worktree", "add", "-b", "feature/task-102-terminal-evidence", closure, "main");
+    const ticketPath = path.join(closure, "docs", "tickets", "TASK-101-demo.md");
+    writeFileSync(
+      ticketPath,
+      readFileSync(ticketPath, "utf8")
+        .replace("status: in_progress", "status: complete")
+        .replace("Current terminal state is `IN_PROGRESS`", "Current terminal state is `COMPLETE`"),
+      "utf8",
+    );
+    git(closure, "add", "docs/tickets/TASK-101-demo.md");
+    git(closure, "commit", "-m", "record terminal evidence for historical task");
+
+    git(fixture.repository, "rm", "docs/tickets/TASK-101-demo.md");
+    git(fixture.repository, "commit", "-m", "retain historical branch without ticket copy");
+
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+    const task = snapshot.items.find((candidate) => candidate.branch === "feature/task-101-demo");
+
+    assert.equal(task.outcome, "COMPLETE");
+    assert.equal(task.evidenceState, "complete");
+    assert.equal(task.delivery.state, "STALE");
+    assert.equal(task.delivery.ready, false);
+    assert.equal(task.dispatch.eligible, false);
+    assert.match(task.delivery.reasonZh, /不是目前分支 HEAD/u);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when multiple incomparable terminal tickets claim one historical TASK identity", () => {
+  const fixture = createFixture({ terminalState: "IN_PROGRESS", ticketStatus: "in_progress" });
+  const closureOne = path.join(fixture.root, "terminal-one");
+  const closureTwo = path.join(fixture.root, "terminal-two");
+  try {
+    for (const [branch, directory] of [
+      ["feature/task-102-terminal-one", closureOne],
+      ["feature/task-103-terminal-two", closureTwo],
+    ]) {
+      git(fixture.repository, "worktree", "add", "-b", branch, directory, "main");
+      const ticketPath = path.join(directory, "docs", "tickets", "TASK-101-demo.md");
+      writeFileSync(
+        ticketPath,
+        readFileSync(ticketPath, "utf8")
+          .replace("status: in_progress", "status: complete")
+          .replace("Current terminal state is `IN_PROGRESS`", "Current terminal state is `COMPLETE`"),
+        "utf8",
+      );
+      git(directory, "add", "docs/tickets/TASK-101-demo.md");
+      git(directory, "commit", "-m", `claim terminal TASK identity from ${branch}`);
+    }
+    git(fixture.repository, "rm", "docs/tickets/TASK-101-demo.md");
+    git(fixture.repository, "commit", "-m", "remove local historical ticket copy");
+
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+    const task = snapshot.items.find((candidate) => candidate.branch === "feature/task-101-demo");
+
+    assert.equal(task.outcome, "UNKNOWN");
+    assert.equal(task.evidenceState, "partial");
+    assert.match(task.errors.join(" "), /重複.*TASK.*終端證據/u);
+    assert.equal(task.dispatch.eligible, false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("reconciles one historical ISSUE terminal record without treating it as current delivery", () => {
+  const fixture = createIssueFixture();
+  const closure = path.join(fixture.root, "issue-terminal-closure");
+  try {
+    git(fixture.repository, "worktree", "add", "-b", "feature/task-102-issue-closure", closure, "main");
+    mkdirSync(path.join(closure, "docs", "issues"), { recursive: true });
+    copyFileSync(
+      path.join(fixture.repository, "docs", "issues", fixture.fileName),
+      path.join(closure, "docs", "issues", fixture.fileName),
+    );
+    git(closure, "add", "docs/issues");
+    git(closure, "commit", "-m", "preserve terminal issue evidence on closure branch");
+    git(fixture.repository, "rm", `docs/issues/${fixture.fileName}`);
+    git(fixture.repository, "commit", "-m", "remove current issue evidence");
+
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+    const issue = snapshot.items.find((candidate) => candidate.branch === fixture.branch);
+
+    assert.equal(issue.outcome, "COMPLETE");
+    assert.equal(issue.evidenceState, "complete");
+    assert.equal(issue.delivery.state, "STALE");
+    assert.equal(issue.delivery.ready, false);
+    assert.equal(issue.dispatch.eligible, false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("rejects ISSUE evidence that is uncommitted, duplicate, mismatched, or non-terminal", () => {
   const cases = [
     {
