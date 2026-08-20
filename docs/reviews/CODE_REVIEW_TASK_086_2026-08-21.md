@@ -26,6 +26,9 @@ No findings (P0=0, P1=0, P2=0, P3=0).
 
 ## Residual Gap
 
-The full workspace strict-Clippy gate remains red only for the separate
-runtime `manual_inspect` finding at `apps/lattice-runtime/src/composition.rs:2720`.
-That is an integration blocker, not a defect found in the Hermes change.
+TASK-088 resolves the former runtime `manual_inspect` gap. The integration
+worker performed a separate read-only review of merge commit `93bf2a8` and
+found no P0-P3 issue: `inspect_err` retains the original `LatticedError` for
+the existing `?` propagation and emits the unchanged diagnostic only on error.
+Reviewer independence remains not proven. Remote CI and primary-branch merge
+authorization are outside this local integration evidence.

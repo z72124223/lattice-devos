@@ -6,6 +6,7 @@
 |---|---|---|---|
 | TASK-041 | `e3b10b42a88fb7484fef1d4dc668b1ebdd40e9a0` | `origin/feature/task-041-rust-ci`: equal (0/0) | clean |
 | TASK-042 | `a41dc7c3d9d6440cc4df66007c92ce9eb30c8953` | `origin/feature/task-042-hermes-strict-clippy`: equal (0/0) | clean |
+| TASK-088 | `68fd1412bd7cc63a0569fae9251c626de0c49de0` | `origin/feature/task-088-runtime-manual-inspect`: equal (0/0) | clean |
 
 `TASK-086` was unoccupied in local/remote refs, registered worktrees, and
 tracked ticket text before this branch was created. The pre-existing
@@ -17,7 +18,7 @@ it was not modified.
 | Command | Result |
 |---|---|
 | `cargo +1.97.1 fmt --all -- --check` | pass |
-| `cargo +1.97.1 clippy --workspace --all-targets --all-features --locked -- -D warnings` | fail: one pre-existing `clippy::manual_inspect` at `apps/lattice-runtime/src/composition.rs:2720`; no Hermes finding |
+| `cargo +1.97.1 clippy --workspace --all-targets --all-features --locked -- -D warnings` | pass; no Hermes finding and no runtime `manual_inspect` finding |
 | `cargo +1.97.1 test --workspace --all-targets --all-features --locked` | pass, exit 0 |
 | `cargo +1.97.1 test -p lattice-hermes-adapter --all-targets --all-features --locked` | pass: 66 passed, 7 ignored |
 | `node --test test/ci-workflow.test.js` | pass: 1 test |
@@ -27,7 +28,7 @@ it was not modified.
 
 ## Integration Classification
 
-`BLOCKED`: the source histories merged cleanly and TASK-041's Hermes-specific
-blocker is resolved, but the exact Rust-CI workspace Clippy gate remains red
-for the unrelated runtime lint. No primary-branch merge, deployment, release,
-or remote GitHub Actions result is claimed.
+`NEEDS_REVIEW`: TASK-041, TASK-042, and TASK-088 histories merged cleanly and
+the exact Rust-CI matrix passes locally. Remote GitHub Actions, required
+checks, branch protection, and any primary-branch merge remain unverified and
+unauthorized; no deployment or release is claimed.

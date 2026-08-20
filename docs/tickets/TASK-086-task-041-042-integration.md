@@ -4,7 +4,7 @@ spec_id: SPEC-002
 spec_version: 27
 module_id: lattice-core-bootstrap
 constitution_version: 1.0
-status: blocked
+status: completed
 parallel_safe: true
 allowed_paths:
   - docs/tickets/TASK-086-task-041-042-integration.md
@@ -45,17 +45,18 @@ the combined local acceptance evidence.
 ## Result
 
 TASK-042 removes the eleven Hermes strict-Clippy errors that had blocked
-TASK-041. The combined workspace strict-Clippy command now fails solely on the
-pre-existing, out-of-scope `clippy::manual_inspect` at
-`apps/lattice-runtime/src/composition.rs:2720`. No Hermes error is emitted.
+TASK-041. TASK-088 at `68fd1412bd7cc63a0569fae9251c626de0c49de0` then removes
+the remaining runtime `clippy::manual_inspect` finding without changing its
+error propagation or diagnostic event. Integration commit
+`93bf2a8564b04d4c03f08cebfb0ff5b6356b5397` preserves both parent histories.
 
-Therefore TASK-041 is no longer blocked by Hermes, but the Rust-CI acceptance
-gate remains `BLOCKED` until the runtime owner resolves that separate lint. No
-shared contract or runtime file was changed to hide the failure.
+The combined workspace strict-Clippy command, full workspace tests, Hermes
+focused tests, Node check/verify, formatting, and diff checks all pass. Neither
+the Hermes eleven-error baseline nor the runtime `manual_inspect` error is
+present. No shared contract was changed to hide a failure.
 
-## Required Follow-up
+## Completion Boundary
 
-Have the owner of `apps/lattice-runtime/src/composition.rs` resolve the strict
-Clippy finding in a separately scoped ticket, then refresh this integration
-branch and rerun the complete matrix. This ticket stays open and is not a
-merge, release, deployment, or remote-Actions-success claim.
+This integration is locally complete and delivered to its feature branch. It
+does not claim a remote GitHub Actions execution, branch-protection result,
+primary-branch merge, deployment, or release. Those remain separate gates.

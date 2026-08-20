@@ -17,5 +17,7 @@ remain satisfied.
 ## Decision
 
 No ADR or constitution amendment is required. There is no architecture blocker.
-The remaining strict-Clippy failure belongs to `lattice-runtime` and must be
-addressed by its separately scoped owner rather than changing this integration.
+TASK-088 supplies that separately scoped runtime-only repair. Its
+`inspect_err` replacement changes neither the composition root's contract,
+adapter selection, ownership, effect order, nor failure semantics. No
+architecture-review trigger or blocker is introduced.
