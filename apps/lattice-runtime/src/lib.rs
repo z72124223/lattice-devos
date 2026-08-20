@@ -16,7 +16,9 @@ use lattice_codex_adapter::{
 use lattice_contracts::DeliveryRuntime;
 use serde_json::{Value, json};
 
-use crate::composition::{LatticedDeliveryConfig, LatticedDeliveryService, LatticedErrorKind};
+use crate::composition::{
+    LatticedDeliveryConfig, LatticedDeliveryService, LatticedError, LatticedErrorKind,
+};
 use crate::delivery_ledger::{DeliveryDatabaseBinding, DeliveryLedgerErrorKind};
 use crate::git_delivery::GitDeliveryErrorKind;
 
@@ -60,7 +62,7 @@ pub enum RuntimeError {
     DeliveryLedger(DeliveryLedgerErrorKind),
     DeliveryLedgerOperation(DeliveryLedgerStage, DeliveryLedgerErrorKind),
     GitDelivery(GitDeliveryErrorKind),
-    Latticed(LatticedErrorKind),
+    Latticed(LatticedError),
 }
 
 /// Exact durable-ledger operation that failed, without SQL or credentials.
@@ -90,8 +92,28 @@ impl RuntimeError {
                 DeliveryLedgerStage::Receipt => "LATTICE_RUNTIME_DELIVERY_RECEIPT_REJECTED",
             },
             Self::GitDelivery(_) => "LATTICE_RUNTIME_GIT_DELIVERY_REJECTED",
-            Self::Latticed(kind) => kind.code(),
+            Self::Latticed(error) => error.code(),
         }
+    }
+
+    /// Serializes the closed, secret-free command-line error envelope.
+    #[must_use]
+    pub fn error_envelope(self) -> Value {
+        let mut value = serde_json::Map::from_iter([
+            ("status".to_owned(), Value::String("ERROR".to_owned())),
+            ("code".to_owned(), Value::String(self.code().to_owned())),
+            ("message".to_owned(), Value::String(self.code().to_owned())),
+        ]);
+        if let Self::Latticed(error) = self
+            && let Some(cause) = error.terminal_cause()
+        {
+            value.insert("stage".to_owned(), Value::String(cause.stage().to_owned()));
+            value.insert(
+                "cause_code".to_owned(),
+                Value::String(cause.code().to_owned()),
+            );
+        }
+        Value::Object(value)
     }
 }
 
@@ -112,7 +134,7 @@ impl fmt::Display for RuntimeError {
                 write!(formatter, "delivery ledger {stage:?} rejected: {kind:?}")
             }
             Self::GitDelivery(kind) => write!(formatter, "Git delivery rejected: {kind:?}"),
-            Self::Latticed(kind) => formatter.write_str(kind.code()),
+            Self::Latticed(error) => formatter.write_str(error.code()),
         }
     }
 }
@@ -284,23 +306,19 @@ fn execute_delivery(input: DeliveryRunInput) -> Result<Value, RuntimeError> {
         timeout,
         runtime,
     )
-    .map_err(|error| RuntimeError::Latticed(error.kind()))?;
+    .map_err(RuntimeError::Latticed)?;
     let password = delivery_database_password()?;
     let mut service = LatticedDeliveryService::for_delivery(config, input.database, password)
-        .map_err(|error| RuntimeError::Latticed(error.kind()))?;
-    service
-        .run_json()
-        .map_err(|error| RuntimeError::Latticed(error.kind()))
+        .map_err(RuntimeError::Latticed)?;
+    service.run_json().map_err(RuntimeError::Latticed)
 }
 
 fn execute_delivery_status(database: DeliveryDatabaseBinding) -> Result<Value, RuntimeError> {
     let password = delivery_database_password()?;
     let mut service =
         LatticedDeliveryService::status_only(database, password, Duration::from_secs(30))
-            .map_err(|error| RuntimeError::Latticed(error.kind()))?;
-    service
-        .status_json()
-        .map_err(|error| RuntimeError::Latticed(error.kind()))
+            .map_err(RuntimeError::Latticed)?;
+    service.status_json().map_err(RuntimeError::Latticed)
 }
 
 fn delivery_database_password() -> Result<String, RuntimeError> {
@@ -314,7 +332,9 @@ fn delivery_runtime_environment() -> Result<DeliveryRuntime, RuntimeError> {
     match std::env::var("LATTICE_DELIVERY_CODEX_MODE").as_deref() {
         Ok("SCRIPTED_ACCEPTANCE") => Ok(DeliveryRuntime::ScriptedAcceptance),
         Ok("OFFICIAL_CODEX_APP_SERVER") => Ok(DeliveryRuntime::OfficialCodexAppServer),
-        _ => Err(RuntimeError::Latticed(LatticedErrorKind::Configuration)),
+        _ => Err(RuntimeError::Latticed(LatticedError::new(
+            LatticedErrorKind::Configuration,
+        ))),
     }
 }
 
@@ -352,4 +372,24 @@ fn is_lowercase_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_error_envelope_retains_only_the_generic_safe_fields_without_a_terminal_cause() {
+        let envelope = RuntimeError::Latticed(LatticedError::new(LatticedErrorKind::Configuration))
+            .error_envelope();
+
+        assert_eq!(
+            envelope,
+            json!({
+                "status": "ERROR",
+                "code": "LATTICED_CONFIGURATION_REJECTED",
+                "message": "LATTICED_CONFIGURATION_REJECTED"
+            })
+        );
+    }
 }

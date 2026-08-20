@@ -267,7 +267,11 @@ fn execution_failures_are_tool_errors_without_sensitive_messages() {
     struct FailingService;
     impl DeliveryToolService for FailingService {
         fn run(&mut self) -> Result<Value, ToolExecutionError> {
-            Err(ToolExecutionError::new("LATTICE_DELIVERY_REJECTED"))
+            Err(ToolExecutionError::terminal(
+                "LATTICE_DELIVERY_FAILED",
+                "CODEX",
+                "CODEX_APP_SERVER_TIMEOUT",
+            ))
         }
 
         fn status(&mut self) -> Result<Value, ToolExecutionError> {
@@ -298,8 +302,18 @@ fn execution_failures_are_tool_errors_without_sensitive_messages() {
     assert_eq!(response["result"]["isError"], true);
     assert_eq!(
         response["result"]["structuredContent"],
-        json!({"status":"ERROR","code":"LATTICE_DELIVERY_REJECTED"})
+        json!({
+            "status":"ERROR",
+            "code":"LATTICE_DELIVERY_FAILED",
+            "stage":"CODEX",
+            "cause_code":"CODEX_APP_SERVER_TIMEOUT"
+        })
     );
+    let rendered = response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("error text");
+    assert!(!rendered.contains("secret"));
+    assert!(!rendered.contains("stdout"));
 }
 
 #[test]

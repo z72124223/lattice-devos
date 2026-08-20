@@ -402,6 +402,132 @@ fn self_consistent_marker_and_wrapper_cannot_authorize_a_tampered_scripted_serve
 }
 
 #[cfg(windows)]
+#[test]
+#[allow(clippy::too_many_lines)]
+fn scripted_fixture_schema_marks_only_schema_and_server_writes_only_answer() {
+    let unique = NEXT_SCRIPTED_GATE_FIXTURE.fetch_add(1, Ordering::Relaxed);
+    let fixture_root = std::env::temp_dir().join(format!(
+        "lattice-scripted-protocol-{}-{unique}",
+        std::process::id()
+    ));
+    let repository_root = fixture_root.join("repo");
+    let schema_root = fixture_root.join("schema");
+    let codex_home = fixture_root.join("codex-home");
+    fs::create_dir_all(&repository_root).expect("repository root");
+    fs::create_dir_all(&codex_home).expect("codex home");
+    fs::write(
+        codex_home.join(".lattice-codex-home-v1"),
+        b"lattice.codex-home.v1\n",
+    )
+    .expect("codex home marker");
+    let script = fixture_root.join("scripted-codex.ps1");
+    fs::write(
+        &script,
+        include_bytes!("../src/fixtures/task032-scripted-codex.ps1"),
+    )
+    .expect("script");
+    let hash = test_sha256(&fs::read(&script).expect("script bytes"));
+    let system_root = std::env::var_os("SystemRoot").expect("Windows system root");
+    let powershell = PathBuf::from(&system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let modules = PathBuf::from(system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("Modules");
+
+    let schema = Command::new(&powershell)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&script)
+        .args([
+            "-ExpectedSelfSha256",
+            &hash,
+            "-Mode",
+            "Schema",
+            "-SchemaRoot",
+        ])
+        .arg(&schema_root)
+        .env("LATTICE_DELIVERY_CODEX_MODE", "SCRIPTED_ACCEPTANCE")
+        .env("PSModulePath", &modules)
+        .current_dir(&repository_root)
+        .output()
+        .expect("schema fixture starts");
+    assert!(
+        schema.status.success(),
+        "schema fixture exit={:?} stdout={} stderr={}",
+        schema.status.code(),
+        String::from_utf8_lossy(&schema.stdout),
+        String::from_utf8_lossy(&schema.stderr)
+    );
+    assert_eq!(
+        fs::read(schema_root.join("lattice-scripted-app-server.json")).expect("schema marker"),
+        br#"{"title":"LATTICE scripted app-server","type":"object"}"#
+    );
+    assert!(!repository_root.join("answer.txt").exists());
+
+    let mut server = Command::new(&powershell)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(&script)
+        .args(["-ExpectedSelfSha256", &hash, "-Mode", "Server"])
+        .env("LATTICE_DELIVERY_CODEX_MODE", "SCRIPTED_ACCEPTANCE")
+        .env("LATTICE_DELIVERY_CODEX_HOME", &codex_home)
+        .env("CODEX_HOME", &codex_home)
+        .env("PSModulePath", &modules)
+        .current_dir(&repository_root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("server fixture starts");
+    server
+        .stdin
+        .take()
+        .expect("server stdin")
+        .write_all(
+            concat!(
+                "{\"method\":\"initialize\",\"id\":0}\n",
+                "{\"method\":\"initialized\"}\n",
+                "{\"method\":\"thread/start\",\"id\":1,\"params\":{\"cwd\":\".\",\"approvalPolicy\":\"never\",\"sandbox\":\"workspace-write\"}}\n",
+                "{\"method\":\"turn/start\",\"id\":2,\"params\":{\"threadId\":\"thread-task032-scripted\",\"cwd\":\".\",\"approvalPolicy\":\"never\",\"sandboxPolicy\":{\"type\":\"workspaceWrite\",\"networkAccess\":false,\"writableRoots\":[\".\"]},\"input\":[{\"type\":\"text\",\"text\":\"Create answer.txt in the current repository with exactly the bytes LATTICE_DELIVERY_OK followed by one newline. Do not modify any other path. Do not stage or commit files and do not run Git commands.\"}]}}\n"
+            )
+            .as_bytes(),
+        )
+        .expect("server requests");
+    let answer = repository_root.join("answer.txt");
+    for _ in 0..60 {
+        if answer.is_file() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let answer_bytes = fs::read(&answer);
+    server.kill().expect("stop idle scripted server");
+    server.wait().expect("server stopped");
+    fs::remove_dir_all(&fixture_root).expect("remove owned fixture");
+    assert_eq!(
+        answer_bytes.expect("server answer"),
+        b"LATTICE_DELIVERY_OK\n"
+    );
+}
+
+#[cfg(windows)]
 fn test_sha256(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
