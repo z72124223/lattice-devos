@@ -16,6 +16,7 @@ import {
   classifyTicketStatus,
   isSnapshotFresh,
   openLocalFile,
+  recommendCodexSetup,
   writeDashboard,
 } from "../scripts/export-lattice-engineering-status.mjs";
 
@@ -130,6 +131,13 @@ test("exports explicit task failure safely without mutating the source tree", ()
     assert.match(html, /你現在可以從哪裡開始新工作/u);
     assert.match(html, /全部展開/u);
     assert.match(html, /選這裡安排新工作/u);
+    assert.match(html, /選好後會依工作內容推薦低成本且足夠可靠的模型/u);
+    assert.match(html, /建議模型與推理強度/u);
+    assert.match(html, /建立新 Codex 工作時，請在模型選擇器套用這個建議/u);
+    assert.match(html, /gpt-5\.6-luna/u);
+    assert.match(html, /gpt-5\.6-terra/u);
+    assert.match(html, /gpt-5\.6-sol/u);
+    assert.equal(html.includes("__LATTICE_MODEL_"), false);
     assert.match(html, /snapshotFresh/u);
     assert.match(html, /所有派工選擇均已停用/u);
     assert.match(html, /copied=document\.execCommand\("copy"\)/u);
@@ -208,6 +216,32 @@ test("treats old or implausibly future snapshots as stale", () => {
   assert.equal(isSnapshotFresh("2026-08-20T12:04:59.000Z", now), true);
   assert.equal(isSnapshotFresh("2026-08-20T12:05:01.000Z", now), false);
   assert.equal(isSnapshotFresh("not-a-date", now), false);
+});
+
+test("recommends the smallest capable Codex setup and escalates high-consequence work", () => {
+  const evidenceNow = Date.parse("2026-08-20T13:30:00.000Z");
+  assert.deepEqual(
+    recommendCodexSetup("", evidenceNow).selection,
+    { model: "gpt-5.6-terra", reasoning: "medium", reasoningZh: "中等" },
+  );
+  assert.deepEqual(
+    recommendCodexSetup("修正按鈕顏色和兩段文字", evidenceNow).selection,
+    { model: "gpt-5.6-luna", reasoning: "low", reasoningZh: "低" },
+  );
+  assert.deepEqual(
+    recommendCodexSetup("跨模組資料庫遷移與權限安全審查", evidenceNow).selection,
+    { model: "gpt-5.6-sol", reasoning: "high", reasoningZh: "高" },
+  );
+  assert.equal(
+    recommendCodexSetup("改文字，但也要變更權限", evidenceNow).selection.model,
+    "gpt-5.6-sol",
+  );
+  assert.match(recommendCodexSetup("一般功能開發", evidenceNow).reasonZh, /品質、速度與成本/u);
+  assert.equal(recommendCodexSetup("一般功能開發", evidenceNow).checkedAt, "2026-08-20");
+  const stale = recommendCodexSetup("改文字", Date.parse("2026-09-21T00:00:00.000Z"));
+  assert.equal(stale.fresh, false);
+  assert.equal(stale.selection.model, null);
+  assert.match(stale.reasonZh, /超過 30 天/u);
 });
 
 test("marks an unrecognized TASK status as partial unknown evidence", () => {

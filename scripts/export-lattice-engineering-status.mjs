@@ -33,6 +33,7 @@ const defaultGuidePath = path.resolve(
 const schema = "lattice.engineering-status/2.0";
 const snapshotMaximumAgeMs = 24 * 60 * 60 * 1000;
 const snapshotMaximumFutureSkewMs = 5 * 60 * 1000;
+const modelGuidanceCheckedAt = "2026-08-20";
 const terminalStates = new Set([
   "VERIFIED",
   "COMPLETE",
@@ -64,6 +65,58 @@ const ticketStatusOutcomes = new Map([
   ["user_action", "USER_ACTION"],
   ["stale", "STALE"],
 ]);
+
+export function recommendCodexSetup(description = "", now = Date.now()) {
+  const request = String(description ?? "").trim().toLocaleLowerCase("zh-TW");
+  const checkedAtValue = Date.parse(`${modelGuidanceCheckedAt}T00:00:00.000Z`);
+  const nowValue = typeof now === "number" ? now : new Date(now).valueOf();
+  const guidanceFresh =
+    Number.isFinite(nowValue) &&
+    nowValue >= checkedAtValue - 5 * 60 * 1000 &&
+    nowValue - checkedAtValue <= 30 * 24 * 60 * 60 * 1000;
+  if (!guidanceFresh) {
+    return {
+      selection: { model: null, reasoning: null, reasoningZh: "待重新核對" },
+      labelZh: "模型資料需要更新",
+      reasonZh: "這份模型建議已超過 30 天或時間不可信，請先讓 Codex 重新核對目前選單。",
+      costZh: "不要用過期名稱猜測；重新核對後再選最小但足夠可靠的配置。",
+      checkedAt: modelGuidanceCheckedAt,
+      fresh: false,
+    };
+  }
+  const highConsequence =
+    /(架構|安全|資安|權限|授權|認證|登入|憑證|密碼|秘密|隱私|加密|資料庫|遷移|重構|跨模組|核心|部署|發布|付款|支付|金流|不可逆|競態|併發|architecture|security|permission|authorization|authentication|credential|secret|privacy|encrypt|database|migration|refactor|cross-module|deploy|release|payment|irreversible|race|concurren)/u;
+  const mechanical =
+    /(改文字|修正文字|文案|拼字|格式|排版|顏色|重新命名|整理清單|固定欄位|註解|readme|rename|typo|format|colour|color|copy change|comment)/u;
+  if (highConsequence.test(request)) {
+    return {
+      selection: { model: "gpt-5.6-sol", reasoning: "high", reasoningZh: "高" },
+      labelZh: "高風險工作",
+      reasonZh: "涉及架構、安全、權限、資料或發布風險，值得用較強模型與較深推理降低返工。",
+      costZh: "成本較高；只在錯誤代價高的工作使用，完成後仍要靠測試與審查驗證。",
+      checkedAt: modelGuidanceCheckedAt,
+      fresh: true,
+    };
+  }
+  if (mechanical.test(request)) {
+    return {
+      selection: { model: "gpt-5.6-luna", reasoning: "low", reasoningZh: "低" },
+      labelZh: "清楚的小修改",
+      reasonZh: "工作描述明確且偏機械化，快速模型與低推理通常已足夠。",
+      costZh: "這是成本最低的起點；若範圍擴大或測試失敗，再升到 Terra＋中等推理。",
+      checkedAt: modelGuidanceCheckedAt,
+      fresh: true,
+    };
+  }
+  return {
+    selection: { model: "gpt-5.6-terra", reasoning: "medium", reasoningZh: "中等" },
+    labelZh: "一般開發（推薦預設）",
+    reasonZh: "適合一般功能、除錯與測試，在品質、速度與成本之間最均衡。",
+    costZh: "先用這個組合；只有工作明確很小才降級，或出現高風險範圍時才升級。",
+    checkedAt: modelGuidanceCheckedAt,
+    fresh: true,
+  };
+}
 
 export function isSnapshotFresh(generatedAt, now = Date.now()) {
   const generated = new Date(generatedAt).valueOf();
@@ -1238,17 +1291,23 @@ export async function writeDashboard(snapshot, outputDirectory) {
     throw new Error("Refusing to write an invalid engineering-status snapshot");
   }
   const template = await readFile(templatePath, "utf8");
-  const placeholder = "__LATTICE_STATUS_JSON__";
-  if (!template.includes(placeholder)) {
-    throw new Error("Dashboard template is missing its data placeholder");
+  const dataPlaceholder = "__LATTICE_STATUS_JSON__";
+  const advisorPlaceholder = "__LATTICE_MODEL_ADVISOR__";
+  const advisorDatePlaceholder = "__LATTICE_MODEL_GUIDANCE_CHECKED_AT__";
+  if (
+    !template.includes(dataPlaceholder) ||
+    !template.includes(advisorPlaceholder) ||
+    !template.includes(advisorDatePlaceholder)
+  ) {
+    throw new Error("Dashboard template is missing a required placeholder");
   }
   const output = path.resolve(outputDirectory || defaultOutputDirectory());
   await mkdir(output, { recursive: true });
   const prettyJson = `${JSON.stringify(snapshot, null, 2)}\n`;
-  const html = template.replace(
-    placeholder,
-    escapeEmbeddedJson(JSON.stringify(snapshot)),
-  );
+  const html = template
+    .replace(dataPlaceholder, escapeEmbeddedJson(JSON.stringify(snapshot)))
+    .replace(advisorPlaceholder, `(${recommendCodexSetup.toString()})`)
+    .replace(advisorDatePlaceholder, JSON.stringify(modelGuidanceCheckedAt));
   await replaceOutputPair(output, prettyJson, html);
   return {
     output,

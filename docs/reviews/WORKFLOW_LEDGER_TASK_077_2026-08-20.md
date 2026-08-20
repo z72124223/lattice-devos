@@ -30,3 +30,15 @@
 | Architecture review | PASS | Schema 2.0, hierarchy, guide, and copy-only selection preserve the disposable read-only adapter boundary; no ADR/migration/truth/writer expansion. |
 | Integration verification | NEEDS_REVIEW | Exact `c88cc92` into actual default `8828d2b`: no conflict, combined 75/75, cleanup PASS. Default merge remains unauthorized and GitHub enforcement is missing. |
 | Handoff | READY_TO_PUSH | V2 implementation/reviews/integration evidence are current. Durable handoff, final docs commit, non-force feature push, remote equality, and post-push refresh are terminal delivery steps. |
+
+## V3 model guidance extension
+
+| Stage | State | Evidence |
+| --- | --- | --- |
+| Inspect/model inventory | PASS | Clean synchronized TASK-077 branch at `315a0ee`; 2026-08-20 live advisor probe plus current Codex surface metadata identify Terra as the balanced default, Luna for clear low-cost work, and Sol for high-consequence work. |
+| Scope/governance | PASS | Direct user feedback approves SPEC-004 v3 and constitution 1.2. Advice remains dated, presentation-only, read-only, and cannot switch models or grant authority. |
+| TDD | GREEN | First RED failed because `recommendCodexSetup` did not exist; second RED failed on missing generated-page guidance. GREEN covers Terra default, Luna mechanical work, Sol high-consequence precedence, 30-day stale denial, visible copy, and complete placeholder replacement. |
+| Focused/full verification | PASS | Dashboard 20/20, governance 18/18, generated-page JavaScript syntax, and diff check pass. Final post-remediation full repository verification passed 76/76. |
+| Code review | PASS | Separate read-only self-review found P2=1 stale-catalog risk and P3=1 discoverability gap; both were repaired and affected checks pass. Final P0=P1=P2=P3=0, but reviewer independence is explicitly not proven. |
+| Architecture review | NOT_TRIGGERED | No schema, data ownership, dependency, network, writer, authority, migration, or public-host boundary changes. |
+| Integration/handoff | PENDING | Verify the exact V3 candidate against the actual default target, update handoff, then use the established non-force push and post-push refresh workflow. |

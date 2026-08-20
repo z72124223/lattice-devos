@@ -1,7 +1,7 @@
 ---
 module_id: engineering-status-dashboard
 name: Engineering Status Dashboard
-constitution_version: 1.1
+constitution_version: 1.2
 status: active
 ---
 
@@ -26,6 +26,8 @@ engineering status page that a non-engineer can refresh and understand quickly.
   `UNKNOWN` and `STALE` states.
 - The Git-ancestry presentation tree, Chinese purpose guide, and fail-closed
   new-work eligibility projection.
+- Presentation-only Codex model-tier and reasoning-effort advice derived from
+  the user's proposed work description and a dated, current surface inventory.
 
 The default output directory is outside Git worktrees. Generated data is a
 disposable projection, not authoritative repository state.
@@ -64,6 +66,9 @@ GitHub failures are represented in the snapshot instead of silently omitted.
     ancestry graph disables every new-work selection and recommendation.
 12. The V2 writer validates the complete tree, Chinese display, eligibility,
     freshness, and recommendation structure before replacing prior output.
+13. Model advice is non-authoritative: it recommends the smallest capable
+    Codex tier, names when to escalate, never invokes a model or paid API, and
+    never claims that the current task changed models.
 
 ## Allowed Dependencies
 
@@ -71,6 +76,7 @@ GitHub failures are represented in the snapshot instead of silently omitted.
 - Installed Git executable, read-only commands, and repository files.
 - Optional installed GitHub CLI for one bounded read-only enrichment query.
 - The operating system's default local-file opener when `--open` is requested.
+- Dated Codex surface metadata used only to maintain static presentation advice.
 
 No dependency on `lattice-cli`, PostgreSQL, MCP, Hermes, project runtime
 processes, or third-party JavaScript packages is allowed.
@@ -82,6 +88,8 @@ processes, or third-party JavaScript packages is allowed.
 - Third-party JavaScript packages, analytics, public hosts, or browser storage
   used as an authority source.
 - Git or GitHub mutation commands and credential/environment-value collection.
+- Model execution, model download, paid API integration, or automatic model
+  switching.
 
 ## Failure, Compatibility, And Migration
 
@@ -119,3 +127,5 @@ requires separate user authorization.
 - 1.0 (2026-08-20): initial local read-only dashboard boundary for SPEC-004.
 - 1.1 (2026-08-20): replace the card-first view with a Chinese Git-ancestry
   branch tree and fail-closed, copy-only new-work selection for SPEC-004 v2.
+- 1.2 (2026-08-20): add dated, presentation-only Codex model and reasoning
+  guidance while preserving the page's read-only and non-authoritative boundary.

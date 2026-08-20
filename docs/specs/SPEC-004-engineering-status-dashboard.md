@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-004
 title: Local engineering status dashboard
-version: 2
+version: 3
 status: approved
 approved_by: direct_user_reply
 approved_at_local: 2026-08-20
@@ -52,6 +52,15 @@ reconstruct that state repeatedly.
     Traditional-Chinese name and purpose to the guide before the normal
     post-handoff and post-push refresh. An unmapped future branch stays visible
     but cannot be selected.
+11. After a selectable branch is chosen, the dispatch panel recommends one
+    currently available Codex model tier and one reasoning effort in plain
+    Traditional Chinese. The default is the balanced everyday tier; clearly
+    mechanical work may use the faster lower-cost tier, while architecture,
+    security, authorization, migration, deployment, or other high-consequence
+    work escalates to the strongest tier. The visible recommendation and the
+    copyable request both explain the choice, the relative cost principle, and
+    that the user selects the model when creating the new Codex task. The page
+    never claims that it changed the current task's model.
 
 ## Plain-language status vocabulary
 
@@ -112,7 +121,8 @@ because that module forbids Git, process, and network ownership.
    as completion.
 3. The self-contained page opens locally, remains useful at narrow and wide
    widths, expands and collapses a top-down branch tree, selects only eligible
-   nodes, and exposes raw technical evidence only on demand.
+   nodes, exposes raw technical evidence only on demand, and shows a readable
+   model/reasoning recommendation that updates from the entered work description.
 4. `npm.cmd run check`, the focused dashboard test, and `npm.cmd run verify`
    pass from the identified implementation tree.
 5. Final code, security, architecture, and integration reviews have no unresolved
@@ -149,3 +159,11 @@ English, did not explain branch purpose, and did not show which branch could
 receive new work. The user explicitly requested the expandable top-down branch
 tree and selectable new-work starting point defined above. That feedback approves
 this version 2 behavior while preserving the same local-only, read-only boundary.
+
+## Human acceptance feedback — version 3
+
+On 2026-08-20 the user identified that the dispatch panel still omitted a
+practical model and reasoning-effort recommendation. The user requested enough
+plain-language guidance to achieve low-cost, efficient development. This
+direct feedback approves the advisory behavior in requirement 11 without
+authorizing model switching, paid API integration, or weaker verification.

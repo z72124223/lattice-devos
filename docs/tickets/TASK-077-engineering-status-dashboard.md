@@ -2,10 +2,10 @@
 ticket_id: TASK-077
 title: Local static engineering status dashboard
 spec_id: SPEC-004
-spec_version: 2
+spec_version: 3
 module_id: engineering-status-dashboard
-constitution_version: 1.1
-status: complete
+constitution_version: 1.2
+status: in_progress
 parallel_safe: false
 depends_on: []
 allowed_paths:
@@ -40,6 +40,10 @@ Traditional-Chinese branch tree. The tree must explain branch purpose, derive
 parentage from Git ancestry, fail closed when deciding whether a branch may
 start new work, and generate a copyable Codex request without mutating Git.
 
+V3 adds plain-language, cost-aware Codex model and reasoning-effort advice to
+the selected-branch dispatch panel and its copyable request. The advice must be
+deterministic, testable, dated, and explicitly non-authoritative.
+
 The repository validator's exact required engineering-protocol version is also
 advanced to 1.0.3 so the mandatory refresh rule and the Chinese purpose-guide
 update for every new branch are enforced by the existing `npm.cmd run check`
@@ -61,6 +65,13 @@ gate.
 - The completed feature checkpoint is committed and non-force pushed to this
   ticket's feature branch. PR, merge, deployment, release, and public hosting
   remain unauthorized.
+- The selected-work panel shows `gpt-5.6-luna` with low reasoning for clearly
+  mechanical work, `gpt-5.6-terra` with medium reasoning for everyday work,
+  and `gpt-5.6-sol` with high reasoning for high-consequence work.
+- Empty or ambiguous descriptions default to the balanced Terra tier; the
+  copied request includes the current recommendation, plain reason, escalation
+  rule, and a reminder that the model is selected when the new Codex task is
+  created.
 
 ## TDD evidence plan
 
@@ -94,6 +105,10 @@ credential mutation, or destructive cleanup.
 Create the V2 implementation checkpoint, verify it against the actual GitHub
 default target, update the durable handoff, non-force push the completed feature
 branch, prove remote equality, and refresh the local page after the push.
+
+For V3: implement the approved model guidance test-first, run focused/full
+verification and review, update this handoff, then perform the established
+non-force feature-branch push and post-push dashboard refresh.
 
 ## Completion evidence
 
@@ -131,3 +146,22 @@ New V2 evidence replaces it only after the revised acceptance conditions pass.
 - Verified implementation checkpoint:
   `c88cc9293f3c521974afe7abe1f74f9e449cfaa4`; integration target:
   `8828d2b88faece6b399258744eea4ff8d46f0bea`.
+
+## V3 implementation evidence
+
+- Live model inventory checked 2026-08-20: current Codex surface exposes the
+  Sol, Terra, and Luna tiers; the bundled advisor selected Terra for balanced
+  everyday coding.
+- Local Qwen3 1.7B is installed and has a basic Traditional-Chinese chat test,
+  but it has no LATTICE coding acceptance evidence and is not recommended for
+  authoritative implementation.
+- RED 1: focused test exit 1 because `recommendCodexSetup` did not exist.
+- RED 2: focused test exit 1 because the generated page omitted visible model
+  guidance. Review-remediation RED then proved stale advice and the empty-state
+  explanation were missing.
+- GREEN: dashboard 20/20, governance 18/18, generated-page JavaScript syntax,
+  placeholder replacement, `git diff --check`, and full repository 76/76 pass.
+- Read-only self-review repaired one P2 stale-catalog risk and one P3
+  discoverability gap. Final P0=P1=P2=P3=0; reviewer independence is not proven.
+- Exact implementation checkpoint, integration, push, remote equality, and
+  post-push refresh evidence remain to be recorded.

@@ -88,17 +88,16 @@ boundaries, complete cleanup, and no unresolved P0-P3 finding. GitHub Actions
 run `31835654240` passed on the exact implementation commit. Draft PR #12
 remains not authorized for merge or Draft promotion.
 
-## Current local engineering status dashboard - TASK-077
+## Current local engineering status dashboard model guidance - TASK-077
 
-CURRENT TASK-077 - V2 implementation, independent review, and exact
-default-target integration verification are complete and blocker-free. The
-local page is now a Traditional-Chinese expandable Git-ancestry tree with plain
-branch purposes, conservative new-work selection, and a copyable Codex request.
-The exact combined candidate passed 75/75 with no merge conflict and complete
-cleanup. It remains read-only and does not create a task or branch. Final
-handoff commit, non-force feature push, remote equality, and post-push refresh
-are the remaining delivery steps; no default-branch merge or release is
-authorized.
+CURRENT TASK-077 - V2 is complete and pushed. V3 is an approved, bounded
+extension that adds a plain Traditional-Chinese recommendation for the Codex
+model tier and reasoning effort after the user selects a starting branch and
+describes new work. The page remains read-only: it does not switch models,
+create a task or branch, call a paid API, or weaken verification. Test-first
+implementation, focused/full verification, review, handoff, the established
+non-force feature push, remote equality, and post-push refresh are current work;
+no default-branch merge or release is authorized.
 
 ## Paused P0 platform live acceptance - TASK-051
 

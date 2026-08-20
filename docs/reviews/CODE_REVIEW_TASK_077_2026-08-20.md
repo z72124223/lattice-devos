@@ -41,3 +41,37 @@
   automated real-browser interaction test. Browser launch was exercised; no
   pixel-level visual acceptance is claimed.
 - Blocker status: `PASS`, blocker-free and ready for architecture review.
+
+---
+
+# TASK-077 V3 model-guidance code and security review — 2026-08-20
+
+## Target and independence
+
+- Base: `315a0ee5f598052825d8efd4d46b87f8e100edf1`.
+- Scope: SPEC-004 v3, constitution 1.2, the deterministic model advisor,
+  generated static UI, copied request, and focused regressions.
+- Independence: `not proven`. Multi-agent delegation was not authorized for
+  this turn, so the implementing agent performed a separate read-only review
+  pass using the repository checklist and did not edit during that pass.
+
+## Findings and resolutions
+
+| Priority | Finding | Resolution evidence |
+| --- | --- | --- |
+| P2 | A dated model list could continue naming old models after the 30-day cloud-guidance freshness boundary. | The shared advisor now rejects invalid/future time and advice older than 30 days, returns no model name, and tells the page and copied request to require a fresh Codex inventory. A deterministic stale-date regression passes. |
+| P3 | Before selecting a branch, the dispatch panel did not reveal that model guidance would be provided. | The always-visible panel note and empty state now explain that selection and work text produce a low-cost, sufficiently reliable recommendation. |
+
+## Final result
+
+- Re-review of the changed hunks: `No findings`; P0=0, P1=0, P2=0, P3=0.
+- Focused dashboard tests after remediation: 20/20 passed.
+- Final post-remediation full repository verification: 76/76 passed.
+- Generated-page placeholders, model copy, executable JavaScript syntax, and
+  `git diff --check`: passed.
+- Residual evidence gap: no automated real-browser click/resize or pixel-level
+  visual test is claimed. The keyword advisor is intentionally conservative;
+  its visible explanation tells the user why it chose a tier, and high-risk
+  terms override low-cost terms.
+- Blocker status: `PASS` for local implementation; reviewer independence remains
+  explicitly `not proven` rather than being represented as independent review.
