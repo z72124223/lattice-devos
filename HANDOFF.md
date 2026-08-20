@@ -1,3 +1,88 @@
+# TASK-087 Writer Lease v3 Schema Bridge Handoff - 2026-08-21
+
+## Status
+
+`DONE` for the authorized offline bridge, catalog/ACL profile, tests, and local
+reviews. Integration remains `NEEDS_REVIEW`; no merge, deployment, release, or
+task archival was performed.
+
+## Objective and scope
+
+- Objective: remove TASK-079's schema-v6 Writer v2 incompatibility without
+  implementing the foreman event or weakening accepted v2/v5 semantics.
+- In scope: append-only Writer v3 SQL/manifest, closed v2-to-v3 transition,
+  Store schema-v6 migration/catalog/ACL contract, governance, tests, reviews.
+- Out of scope: migration `0007`, foreman persistence/event/Port, TASK-079
+  merge, TASK-050/051/078 worktrees, primary integration and release.
+
+## Completed work
+
+- Exact TASK-079 blocker evidence at `23a552e` and `92d93b1` is referenced;
+  no TASK-079 branch content was merged.
+- Writer v1/v2 and Store migrations `0001`-`0006` remain byte-identical.
+- Writer v3 accepts only global 5 bridge and global 6 current profiles; runtime
+  stays revoked until exact schema-v6 rebind. The future foreman append remains
+  bound to unchanged `writer_lease_assert_current_v1` in one Ledger transaction.
+- Store rejects missing/skipped/substituted `0007`, stream/event drift,
+  predecessor drift, catalog/ACL drift, direct table privilege and premature
+  Writer runtime exposure.
+
+## Files changed
+
+| Path | Why | Verification |
+|---|---|---|
+| Writer Lease Rust, tests, `db/extensions/writer-lease/v3.sql` | v3 manifest and closed bridge/rebind contract | crate all-targets, strict Clippy, workspace tests |
+| Store schema-v6 profile Rust and tests | exact future migration/catalog/ACL assertions | Store all-targets and focused profile tests |
+| SPEC, constitutions, ADR, TASK-087, reviews, plan/handoff | versioned ownership and evidence | `npm.cmd run verify`, diff checks |
+
+## Workflow ledger
+
+| Stage | Status | Evidence / artifact |
+|---|---|---|
+| Scope and blocker characterization | PASS | base `65f2902`; TASK-079 `23a552e` and `92d93b1` read-only |
+| TDD | PASS | unresolved-import RED followed by Store 5/5 and Writer 11/11 GREEN |
+| Focused/full verification | PASS | affected all-targets, strict Clippy, full workspace, npm verify |
+| Code/security review | PASS | `docs/reviews/CODE_REVIEW_TASK_087_2026-08-21.md`; P0-P3 = 0 |
+| Architecture review | PASS | `docs/reviews/ARCHITECTURE_REVIEW_TASK_087_2026-08-21.md`; P0-P3 = 0 |
+| Live PostgreSQL schema-v6 gate | NOT_RUN | `0007` absent; partial dashboard; existing PostgreSQL processes |
+
+## Verification
+
+- `cargo test -p lattice-postgres-writer-lease --all-targets --locked`: PASS.
+- `cargo test -p lattice-postgres-store --all-targets --locked`: PASS.
+- affected strict Clippy with `-D warnings`: PASS.
+- `cargo test --workspace --locked`: PASS; only explicitly provisioned tests ignored.
+- `npm.cmd run verify`: PASS (`check=ok`, 48/48 JavaScript tests).
+- `cargo fmt --all -- --check`, `git diff --check`, frozen-byte diff: PASS.
+- CI: not run; no CI or merge authorization requested.
+
+## Review and integration
+
+- Code/security and architecture self-reviews found no P0-P3 finding.
+- Branch: `feature/task-087-writer-lease-v3-schema-bridge` in isolated worktree.
+- Non-force feature push is authorized; remote SHA must be verified after commit.
+- No primary/default branch merge or TASK-079 merge is authorized.
+
+## Risks and open decisions
+
+- Runtime schema-v6 proof remains impossible until TASK-079 supplies reviewed
+  `0007` bytes and measured catalog/ACL signatures. This is preserved as
+  `NOT_RUN`, not inferred from offline success.
+
+## Next action
+
+1. TASK-079 consumes the exact v3 bridge contract, adds its owned `0007` event,
+   measures the candidate catalog/ACL, then runs combined disposable PostgreSQL
+   migration/rebind/stale-fence/rollback/restart acceptance.
+
+## Restart context
+
+- Current branch: `feature/task-087-writer-lease-v3-schema-bridge`.
+- Relevant plan: TASK-087 section in `PLANS.md` and its completed ticket.
+- First file: `docs/tickets/TASK-087-writer-lease-v3-schema-v6-bridge.md`.
+
+---
+
 # TASK-050 Autonomy Receipt Closure Handoff - 2026-08-15
 
 ## Status

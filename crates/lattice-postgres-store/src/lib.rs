@@ -4,6 +4,7 @@ mod live;
 mod migrations;
 mod postgres_setup;
 mod project_registry;
+mod schema_v6_profile;
 mod task_ledger;
 
 pub use live::PostgresControlStore;
@@ -22,6 +23,15 @@ pub use project_registry::{
     PostgresProjectRegistryExecution, PostgresProjectRegistryLoad,
     PostgresProjectRegistryPersistenceEvidence, PostgresProjectRegistryPersistenceReceipt,
     PostgresProjectRegistryResult,
+};
+pub use schema_v6_profile::{
+    FOREMAN_COORDINATION_EVENT_IDENTITY, FOREMAN_COORDINATION_MIGRATION_ID,
+    FOREMAN_COORDINATION_MIGRATION_ORDINAL, FOREMAN_COORDINATION_MIGRATION_PATH,
+    FOREMAN_COORDINATION_READ_FUNCTION, FOREMAN_COORDINATION_RECORD_FUNCTION,
+    FOREMAN_COORDINATION_SCHEMA_VERSION, FOREMAN_COORDINATION_STREAM_IDENTITY,
+    FOREMAN_COORDINATION_TABLE, ForemanSchemaV6Candidate, ForemanSchemaV6CatalogAcl,
+    SchemaV6ProfileError, VerifiedForemanSchemaV6Profile, WRITER_LEASE_ASSERT_CURRENT_FUNCTION,
+    WriterLeaseV3Profile, verify_foreman_schema_v6_profile,
 };
 pub use task_ledger::{
     PostgresTaskLedger, PostgresTaskLedgerError, PostgresTaskLedgerErrorKind,

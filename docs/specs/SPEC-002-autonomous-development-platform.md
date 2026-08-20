@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 35
+version: 36
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -31,11 +31,11 @@ modules:
   - module_id: approval-verifier
     constitution_version: 1.0
   - module_id: postgres-store
-    constitution_version: 1.10
+    constitution_version: 1.11
   - module_id: postgres-codebase-memory
     constitution_version: 1.2
   - module_id: postgres-writer-lease
-    constitution_version: 1.1
+    constitution_version: 1.2
   - module_id: artifact-store
     constitution_version: 1.0
   - module_id: codex-adapter
@@ -1514,6 +1514,29 @@ bounded session gate that spans a Writer apply attempt and its serialization
 retries. This does not grant a login role directly, add a generic lock API, or
 change Store/Memory/Writer state ownership.
 
+### Writer Lease v3 future schema-v6 compatibility bridge
+
+SPEC-002 v36 adds no global migration or Task Ledger event. It freezes the
+compatibility prerequisite that TASK-079 must satisfy before adding durable
+foreman coordination. Writer v2 remains exact and accepts only its existing
+global-schema 3/5 profiles. Writer v3 may move from exact
+`G5_M3_W2_CURRENT` to runtime-closed `G5_M3_W3_BRIDGE`; Store may later advance
+that exact bridge only through the v5 prefix plus ordinal 7 migration ID
+`0007_foreman_coordination` at
+`db/migrations/0007_foreman_coordination.sql`; Writer may reopen runtime only
+after exact global schema 6, stream identity `FOREMAN_COORDINATION`, event
+identity `FOREMAN_SNAPSHOT_RECORDED`, Store catalog/ACL closure, and v3 ledger
+rebind all verify together.
+
+Bridge and pending profiles expose zero Writer runtime authority. V3 current
+retains the same seven governed Writer functions and unchanged 15-scalar
+`writer_lease_assert_current_v1` same-transaction predicate. Unknown or skipped
+generation, absent/edited/reordered migration, missing stream/event or runtime
+ACL, direct protected-table access, stale lease, wrong fence, and cross-
+generation replay all fail closed. TASK-087 does not implement the foreman
+event, Port, row, function, or `0007` SQL; those remain TASK-079-owned and must
+land against this closed contract.
+
 ## Verification Plan
 
 | Criterion | Verification method | Expected evidence |
@@ -1554,6 +1577,7 @@ change Store/Memory/Writer state ownership.
 | AC-43 | exact source/blob checksum checks, fresh and exact-prefix disposable PostgreSQL schema-v5 migration matrices, misplaced-autonomy-0005 no-DDL rejection, base and Memory-extension catalog/ACL/profile assertions, Registry v4/v5 and Memory v2/v3 mixed-replay fixtures | exact Registry `0005` and autonomy `0006` history; stable fail-closed mismatch classification before DDL; base 16-table/47-function catalog with only 19 runtime functions; immutable Memory v1/v2 bytes and byte-identical historical Registry/Memory persistence receipts |
 | AC-44 | exact Writer v1/v2 manifests, five-state Store/Memory/Writer transition matrices, common lock-order concurrency, pending-runtime denial, non-empty replay, and marker-owned PostgreSQL restart acceptance | immutable v1 and semantic/fencing bytes; exact v2 bridge/current identities; no deadlock or partial state; final TASK-050 fenced assertion and fresh-process replay |
 | AC-45 | Task Ledger profile-classifier and typed-autonomy-plan tests, generic-forgery denial, historical/required/unknown replay matrices, lifecycle ordering tests, fresh canonical `latticed` restart/Status acceptance, and four-tool/six-field MCP regression | one canonical receipt/profile owner; required sequence-2 receipt before effects; missing/late/duplicate/unknown fail closed; exact `0006`, catalog, existing hashes, and MCP wire unchanged |
+| AC-46 | frozen v1/v2 byte checks, offline Writer-v3 bridge state matrix, exact schema-v6 successor identity/catalog/ACL assertions, migration ordering/idempotency/rollback characterization, and combined Store/Writer profile tests | v2 remains schema-3/5-only; v3 stays runtime-closed until exact v5+`0007_foreman_coordination`/`FOREMAN_COORDINATION`/`FOREMAN_SNAPSHOT_RECORDED` closure; unknown, missing, skipped, ACL-drifted, stale-fence and cross-generation inputs deny without a second truth |
 
 ## Human Decisions
 

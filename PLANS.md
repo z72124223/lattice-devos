@@ -1,5 +1,17 @@
 # LATTICE DevOS V2 Plan
 
+## Completed Writer Lease schema-v6 bridge - TASK-087
+
+COMPLETED TASK-087 - Writer Lease v3 is an append-only successor that keeps
+accepted v2/global-schema 3/5 semantics frozen and reserves only the exact
+schema-v6 `0007_foreman_coordination` / `FOREMAN_COORDINATION` /
+`FOREMAN_SNAPSHOT_RECORDED` identity. The Store exposes a closed offline
+catalog/ACL profile and migration-manifest successor assertion; bridge and
+pending phases expose zero Writer runtime authority. TASK-079 still owns the
+physical migration/event and must run its combined PostgreSQL revalidation.
+The TASK-087 live gate is honestly `NOT_RUN` because `0007` is absent and the
+current-machine resource view was not exclusive.
+
 ## Completed task update — TASK-066
 
 COMPLETED TASK-066 — the deterministic canonical reflection chain now proves
