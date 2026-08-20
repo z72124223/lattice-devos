@@ -100,7 +100,7 @@ if (!engineeringProtocolFile) {
   const protocol = await readFile(engineeringProtocolFile, "utf8");
   const requiredProtocolContent = [
     "protocol_id: LATTICE_ENGINEERING_PROTOCOL",
-    "version: 1.1.0",
+    "version: 1.2.0",
     "canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md",
     "## Mandatory Entry",
     "## Mandatory Delivery",
@@ -109,6 +109,9 @@ if (!engineeringProtocolFile) {
     "the projection never replaces ticket, Git, test, CI",
     "LATTICE acceptance evidence",
     "tools/engineering-status-dashboard/branch-guide.zh-TW.json",
+    "evidence_subjects: [TASK-NNN, ...]",
+    "This is provenance, not a delivery prerequisite",
+    "Recording a subject never changes that subject's terminal state",
     "npm.cmd run delivery:finish",
     "LATTICE_DELIVERY_READY_TO_ARCHIVE=1",
     "native archive-task action",

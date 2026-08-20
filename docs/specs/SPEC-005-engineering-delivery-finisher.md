@@ -1,9 +1,9 @@
 ---
 spec_id: SPEC-005
 title: Fail-closed engineering delivery finisher
-version: 6
+version: 7
 status: approved
-approved_by: direct_user_reply
+approved_by: delegated_user_instruction
 approved_at_local: 2026-08-20
 ---
 
@@ -78,6 +78,12 @@ The Codex task also remains open even when every delivery gate succeeded.
     delivery readiness separately from its work outcome. It reads the captured
     `HEAD` tree for terminal ISSUE evidence and declared TASK dependencies, so
     uncommitted, GitHub-only, or dependency-blocked work cannot be dispatched.
+13. A reconciliation/provenance TASK declares `evidence_subjects` separately
+    from `depends_on`. Each subject must be a unique legal TASK identity in the
+    captured tree; missing, duplicate, malformed, self-referential, cyclic, or
+    dependency-overlapping subject declarations fail closed. A subject's state
+    is never promoted or treated as a delivery prerequisite merely because it
+    is recorded as evidence provenance.
 
 ## Module impact
 
@@ -181,6 +187,9 @@ public exporter command.
 - v6 aligns dashboard projection with captured delivery authority: ISSUE
   evidence is HEAD-anchored and TASK dependency readiness is explicit rather
   than inferred from a completed implementation outcome.
+- v7 separates reconciliation evidence subjects from successful delivery
+  dependencies, with captured-tree identity validation and no subject-state
+  promotion.
 
 ## Verification commands
 

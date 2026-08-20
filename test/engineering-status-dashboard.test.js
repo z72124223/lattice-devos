@@ -279,6 +279,92 @@ test("keeps a completed TASK dependency-blocked until its committed dependency s
   }
 });
 
+test("exports nonterminal evidence subjects as provenance without blocking a completed TASK delivery", () => {
+  const fixture = createFixture({ terminalState: "COMPLETE", ticketStatus: "complete" });
+  try {
+    const ticketPath = path.join(fixture.repository, "docs", "tickets", "TASK-101-demo.md");
+    writeFileSync(
+      ticketPath,
+      readFileSync(ticketPath, "utf8").replace(
+        "branch: feature/task-101-demo\n",
+        "branch: feature/task-101-demo\nevidence_subjects: [TASK-033]\n",
+      ),
+      "utf8",
+    );
+    writeFileSync(
+      path.join(fixture.repository, "docs", "tickets", "TASK-033-subject.md"),
+      "---\nticket_id: TASK-033\nstatus: in_progress\nbranch: feature/task-033-subject\n---\n",
+      "utf8",
+    );
+    git(fixture.repository, "add", "docs/tickets");
+    git(fixture.repository, "commit", "-m", "record nonterminal evidence subject");
+
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+    const task = snapshot.items.find((candidate) => candidate.id === "TASK-101");
+
+    assert.equal(task.outcome, "COMPLETE");
+    assert.equal(task.delivery.state, "READY");
+    assert.equal(task.delivery.ready, true);
+    assert.deepEqual(task.ticket.evidenceSubjects, ["TASK-033"]);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("dashboard fails closed for invalid evidence-subject provenance", () => {
+  const cases = [
+    {
+      name: "missing subject",
+      lines: "evidence_subjects: [TASK-033]\n",
+    },
+    {
+      name: "overlap",
+      lines: "depends_on: [TASK-033]\nevidence_subjects: [TASK-033]\n",
+      subject: "---\nticket_id: TASK-033\nstatus: complete\nbranch: feature/task-033-subject\n---\n",
+    },
+    {
+      name: "self reference",
+      lines: "evidence_subjects: [TASK-101]\n",
+    },
+    {
+      name: "cycle",
+      lines: "evidence_subjects: [TASK-033]\n",
+      subject: "---\nticket_id: TASK-033\nstatus: in_progress\nbranch: feature/task-033-subject\nevidence_subjects: [TASK-101]\n---\n",
+    },
+  ];
+  for (const scenario of cases) {
+    const fixture = createFixture({ terminalState: "COMPLETE", ticketStatus: "complete" });
+    try {
+      const ticketPath = path.join(fixture.repository, "docs", "tickets", "TASK-101-demo.md");
+      writeFileSync(
+        ticketPath,
+        readFileSync(ticketPath, "utf8").replace(
+          "branch: feature/task-101-demo\n",
+          `branch: feature/task-101-demo\n${scenario.lines}`,
+        ),
+        "utf8",
+      );
+      if (scenario.subject) {
+        writeFileSync(
+          path.join(fixture.repository, "docs", "tickets", "TASK-033-subject.md"),
+          scenario.subject,
+          "utf8",
+        );
+      }
+      git(fixture.repository, "add", "docs/tickets");
+      git(fixture.repository, "commit", "-m", `record ${scenario.name} evidence subject`);
+
+      const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+      const task = snapshot.items.find((candidate) => candidate.id === "TASK-101");
+      assert.equal(task.delivery.state, "BLOCKED", scenario.name);
+      assert.equal(task.delivery.ready, false, scenario.name);
+      assert.equal(task.dispatch.eligible, false, scenario.name);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("rejects ISSUE evidence that is uncommitted, duplicate, mismatched, or non-terminal", () => {
   const cases = [
     {

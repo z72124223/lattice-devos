@@ -8,7 +8,7 @@ import test from "node:test";
 const checkScript = path.resolve("scripts/check-project.mjs");
 const engineeringProtocol = `---
 protocol_id: LATTICE_ENGINEERING_PROTOCOL
-version: 1.1.0
+version: 1.2.0
 status: active
 canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md
 ---
@@ -22,6 +22,7 @@ Read before work.
 If an ordinary reproducible check fails, repair it within the authorized scope and rerun the same failed check.
 After the durable handoff is current, run npm.cmd run status:refresh; the projection never replaces ticket, Git, test, CI, review, or LATTICE acceptance evidence.
 Every new branch must provide a plain Traditional-Chinese name and purpose through its own exactly-once non-empty \`display_name_zh_tw\` and \`display_purpose_zh_tw\` ticket fields. The shared tools/engineering-status-dashboard/branch-guide.zh-TW.json is a legacy branch-guide fallback only: a ticket without both local fields must include that path in its \`allowed_paths\`.
+When a TASK repairs, reconciles, or otherwise records evidence about another TASK, it declares the targets only in \`evidence_subjects: [TASK-NNN, ...]\`. This is provenance, not a delivery prerequisite: \`depends_on\` remains limited to work that must be uniquely and successfully terminal before delivery. Each subject must resolve uniquely to a legal committed TASK identity; duplicate, illegal, overlapping, self-referential, or cyclic declarations remain denied. Recording a subject never changes that subject's terminal state.
 After the clean logical commit, run npm.cmd run delivery:finish instead of an ordinary manual push. Only LATTICE_DELIVERY_READY_TO_ARCHIVE=1 permits Codex to call the native archive-task action; every failure keeps the task open.
 
 ## Knowledge Routing
@@ -344,6 +345,21 @@ test("project check requires the protocol to describe the Chinese purpose guide"
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /branch-guide\.zh-TW\.json/u);
+});
+
+test("project check requires the protocol to preserve evidence-subject governance", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    protocol: engineeringProtocol.replace(
+      "When a TASK repairs, reconciles, or otherwise records evidence about another TASK, it declares the targets only in `evidence_subjects: [TASK-NNN, ...]`. This is provenance, not a delivery prerequisite: `depends_on` remains limited to work that must be uniquely and successfully terminal before delivery. Each subject must resolve uniquely to a legal committed TASK identity; duplicate, illegal, overlapping, self-referential, or cyclic declarations remain denied. Recording a subject never changes that subject's terminal state.",
+      "Evidence is an unrestricted delivery dependency.",
+    ),
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /evidence_subjects/u);
+  assert.match(result.stderr, /Recording a subject never changes/u);
 });
 
 test("project check requires the current branch in the Chinese purpose guide", async () => {

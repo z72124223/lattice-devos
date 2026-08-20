@@ -47,6 +47,7 @@ function writeTicket(repository, {
   remoteIdentity = "test.invalid/missing",
   status = "complete",
   dependsOn,
+  evidenceSubjects,
 } = {}) {
   const ticketDirectory = path.join(repository, "docs", "tickets");
   mkdirSync(ticketDirectory, { recursive: true });
@@ -55,9 +56,12 @@ function writeTicket(repository, {
   const dependencyLine = dependsOn === undefined
     ? ""
     : `depends_on: [${dependsOn.join(", ")}]\n`;
+  const evidenceSubjectLine = evidenceSubjects === undefined
+    ? ""
+    : `evidence_subjects: [${evidenceSubjects.join(", ")}]\n`;
   writeFileSync(
     path.join(ticketDirectory, `${task}-demo.md`),
-    `---\nticket_id: ${task}\nstatus: ${status}\nbranch: ${branch}\ndelivery_remote: ${remote}\ndelivery_repository: ${remoteIdentity}\n${dependencyLine}${pushLine}${archiveLine}---\n\n# ${task}\n`,
+    `---\nticket_id: ${task}\nstatus: ${status}\nbranch: ${branch}\ndelivery_remote: ${remote}\ndelivery_repository: ${remoteIdentity}\n${dependencyLine}${evidenceSubjectLine}${pushLine}${archiveLine}---\n\n# ${task}\n`,
     "utf8",
   );
 }
@@ -1104,6 +1108,121 @@ test("a parallel TASK delivery verifies each declared dependency from the captur
         });
         assert.equal(result.success, true);
       }
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("evidence subjects record provenance without becoming successful delivery dependencies", async () => {
+  const branch = "feature/task-042-hermes-strict-clippy";
+  const fixture = createRepository({
+    branch,
+    currentTask: "TASK-033",
+    ticket: {
+      task: "TASK-042",
+      branch,
+      evidenceSubjects: ["TASK-041"],
+      archive: "keep_open",
+    },
+  });
+  try {
+    writeTicket(fixture.repository, {
+      task: "TASK-041",
+      branch: "feature/task-041-rust-ci",
+      status: "in_progress",
+    });
+    git(fixture.repository, "add", "docs/tickets");
+    git(fixture.repository, "commit", "-m", "record nonterminal evidence subject");
+
+    const result = await finishDelivery({
+      repository: fixture.repository,
+      outputDirectory: fixture.outputDirectory,
+      refresh: successfulRefresh,
+    });
+    assert.equal(result.success, true);
+    assert.equal(result.taskId, "TASK-042");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("evidence subjects fail closed for unresolved, overlapping, self-referential, and cyclic provenance", async () => {
+  const branch = "feature/task-042-hermes-strict-clippy";
+  const cases = [
+    {
+      name: "unresolved",
+      ticket: { evidenceSubjects: ["TASK-041"] },
+      expected: /evidence subject must resolve exactly once/u,
+    },
+    {
+      name: "illegal identity",
+      ticket: { evidenceSubjects: ["NOT-A-TASK"] },
+      expected: /evidence_subjects must be one unique canonical TASK list/u,
+    },
+    {
+      name: "duplicate subject identity",
+      ticket: { evidenceSubjects: ["TASK-041", "TASK-041"] },
+      expected: /evidence_subjects must be one unique canonical TASK list/u,
+    },
+    {
+      name: "duplicate resolved identity",
+      ticket: { evidenceSubjects: ["TASK-041"] },
+      subject: { task: "TASK-041", branch: "feature/task-041-rust-ci" },
+      duplicateSubject: true,
+      expected: /evidence subject must resolve exactly once/u,
+    },
+    {
+      name: "overlapping dependency",
+      ticket: { dependsOn: ["TASK-041"], evidenceSubjects: ["TASK-041"] },
+      subject: { task: "TASK-041", branch: "feature/task-041-rust-ci" },
+      expected: /cannot also be a delivery dependency/u,
+    },
+    {
+      name: "self reference",
+      ticket: { evidenceSubjects: ["TASK-042"] },
+      expected: /cannot reference itself/u,
+    },
+    {
+      name: "cycle",
+      ticket: { evidenceSubjects: ["TASK-041"] },
+      subject: {
+        task: "TASK-041",
+        branch: "feature/task-041-rust-ci",
+        evidenceSubjects: ["TASK-042"],
+      },
+      expected: /cannot form a cycle/u,
+    },
+  ];
+  for (const scenario of cases) {
+    const fixture = createRepository({
+      branch,
+      currentTask: "TASK-033",
+      ticket: { task: "TASK-042", branch, ...scenario.ticket },
+    });
+    try {
+      if (scenario.subject) {
+        writeTicket(fixture.repository, scenario.subject);
+        if (scenario.duplicateSubject) {
+          writeFileSync(
+            path.join(fixture.repository, "docs", "tickets", "TASK-041-duplicate.md"),
+            readFileSync(path.join(fixture.repository, "docs", "tickets", "TASK-041-demo.md"), "utf8"),
+            "utf8",
+          );
+        }
+        git(fixture.repository, "add", "docs/tickets");
+        git(fixture.repository, "commit", "-m", `record ${scenario.name} evidence subject`);
+      }
+      await assert.rejects(
+        finishDelivery({
+          repository: fixture.repository,
+          outputDirectory: fixture.outputDirectory,
+          refresh: successfulRefresh,
+        }),
+        scenario.expected,
+        scenario.name,
+      );
+      assert.equal(remoteHead(fixture.repository, branch), null, scenario.name);
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }

@@ -229,6 +229,106 @@ function parseTicketDependencies(metadata) {
   return dependencies;
 }
 
+function parseEvidenceSubjects(metadata) {
+  if (!Object.hasOwn(metadata, "evidence_subjects")) return [];
+  const match = String(metadata.evidence_subjects).match(/^\[(.*?)\]$/u);
+  if (!match) {
+    throw commandFailure("EVIDENCE_SUBJECT_INVALID", "evidence_subjects must be one canonical TASK list");
+  }
+  const subjects = match[1].trim() === ""
+    ? []
+    : match[1].split(",").map((value) => value.trim());
+  if (
+    subjects.some((subject) => !/^TASK-[0-9]{3}$/u.test(subject)) ||
+    new Set(subjects).size !== subjects.length
+  ) {
+    throw commandFailure(
+      "EVIDENCE_SUBJECT_INVALID",
+      "evidence_subjects must be one unique canonical TASK list",
+    );
+  }
+  return subjects;
+}
+
+function committedTaskIdentityIndex(repository, sourceHead) {
+  const entries = git(
+    repository,
+    ["ls-tree", "-r", "--name-only", sourceHead, "--", "docs/tickets"],
+    "TICKET_DIRECTORY_MISSING",
+    "committed TASK ticket directory is unavailable",
+  ).split(/\r?\n/gu).filter(Boolean);
+  const index = new Map();
+  for (const entry of entries) {
+    const name = path.posix.basename(entry.replaceAll("\\", "/"));
+    const filenameIdentity = name.match(/^(TASK-[0-9]{3})-.+\.md$/iu);
+    if (!filenameIdentity) continue;
+    const content = git(
+      repository,
+      ["show", `${sourceHead}:${entry.replaceAll("\\", "/")}`],
+      "TICKET_READ_FAILED",
+      "committed TASK ticket cannot be read",
+    );
+    let metadata;
+    try {
+      metadata = parseFrontmatter(content);
+    } catch {
+      continue;
+    }
+    const taskId = filenameIdentity[1].toUpperCase();
+    if (metadata.ticket_id !== taskId) continue;
+    const candidates = index.get(taskId) || [];
+    candidates.push(metadata);
+    index.set(taskId, candidates);
+  }
+  return index;
+}
+
+function verifyEvidenceSubjects(repository, ticket, sourceHead) {
+  const dependencies = parseTicketDependencies(ticket.metadata);
+  const subjects = parseEvidenceSubjects(ticket.metadata);
+  if (subjects.some((subject) => dependencies.includes(subject))) {
+    throw commandFailure(
+      "EVIDENCE_SUBJECT_OVERLAP",
+      "an evidence subject cannot also be a delivery dependency",
+    );
+  }
+  if (subjects.includes(ticket.metadata.ticket_id)) {
+    throw commandFailure("EVIDENCE_SUBJECT_SELF_REFERENCE", "an evidence subject cannot reference itself");
+  }
+  if (subjects.length === 0) return;
+
+  const taskIndex = committedTaskIdentityIndex(repository, sourceHead);
+  const active = new Set([ticket.metadata.ticket_id]);
+  const verifySubject = (subject) => {
+    if (active.has(subject)) {
+      throw commandFailure("EVIDENCE_SUBJECT_CYCLE", "evidence subjects cannot form a cycle");
+    }
+    const matches = taskIndex.get(subject) || [];
+    if (matches.length !== 1) {
+      throw commandFailure(
+        "EVIDENCE_SUBJECT_UNRESOLVED",
+        "an evidence subject must resolve exactly once to one legal TASK identity",
+      );
+    }
+    const subjectMetadata = matches[0];
+    const nestedSubjects = parseEvidenceSubjects(subjectMetadata);
+    const nestedDependencies = parseTicketDependencies(subjectMetadata);
+    if (
+      nestedSubjects.includes(subject) ||
+      nestedSubjects.some((nestedSubject) => nestedDependencies.includes(nestedSubject))
+    ) {
+      throw commandFailure(
+        "EVIDENCE_SUBJECT_INVALID",
+        "evidence subjects cannot reference themselves or also be delivery dependencies",
+      );
+    }
+    active.add(subject);
+    for (const nestedSubject of nestedSubjects) verifySubject(nestedSubject);
+    active.delete(subject);
+  };
+  for (const subject of subjects) verifySubject(subject);
+}
+
 async function verifyTicketDependencies(repository, ticket, sourceHead) {
   const dependencies = parseTicketDependencies(ticket.metadata);
   if (dependencies.length === 0) {
@@ -866,6 +966,7 @@ export async function finishDelivery({
       );
     if (deliveryBranch.kind === "TASK") {
       await verifyTicketDependencies(resolvedRepository, deliveryEvidence, state.localHead);
+      verifyEvidenceSubjects(resolvedRepository, deliveryEvidence, state.localHead);
       state.taskId = deliveryEvidence.metadata.ticket_id;
     } else {
       state.issueId = deliveryEvidence.metadata.issue_id;

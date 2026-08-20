@@ -554,6 +554,93 @@ function blockedDelivery(reasonZh) {
   return { state: "BLOCKED", ready: false, reasonZh };
 }
 
+function parseTaskReferenceList(frontmatter, field) {
+  if (!Object.hasOwn(frontmatter, field)) return [];
+  const match = String(frontmatter[field]).match(/^\[(.*?)\]$/u);
+  if (!match) return null;
+  const values = match[1].trim() === ""
+    ? []
+    : match[1].split(",").map((value) => value.trim());
+  if (
+    values.some((value) => !/^TASK-[0-9]{3}$/u.test(value)) ||
+    new Set(values).size !== values.length
+  ) {
+    return null;
+  }
+  return values;
+}
+
+async function committedTaskIdentityIndex(worktreePath, sourceHead) {
+  const entries = (await gitAt(worktreePath, [
+    "ls-tree",
+    "-r",
+    "--name-only",
+    sourceHead,
+    "--",
+    "docs/tickets",
+  ])).split(/\r?\n/gu).filter(Boolean);
+  const index = new Map();
+  for (const entry of entries) {
+    const fileName = path.posix.basename(entry.replaceAll("\\", "/"));
+    const filenameIdentity = fileName.match(/^(TASK-[0-9]{3})-.+\.md$/iu);
+    if (!filenameIdentity) continue;
+    const content = await gitAt(worktreePath, [
+      "show",
+      `${sourceHead}:${entry.replaceAll("\\", "/")}`,
+    ]);
+    const parsed = parseFrontmatter(content);
+    if (!parsed.valid || parsed.duplicateKeys.length > 0) continue;
+    const taskId = filenameIdentity[1].toUpperCase();
+    if (parsed.values.ticket_id !== taskId) continue;
+    const candidates = index.get(taskId) || [];
+    candidates.push(parsed.values);
+    index.set(taskId, candidates);
+  }
+  return index;
+}
+
+async function evidenceSubjectReadiness(worktreePath, ticket, sourceHead, dependencies) {
+  const subjects = parseTaskReferenceList(ticket.frontmatter, "evidence_subjects");
+  if (!subjects) {
+    return blockedDelivery("追溯對象宣告無法唯一驗證，不能視為可交付。");
+  }
+  if (subjects.some((subject) => dependencies.includes(subject))) {
+    return blockedDelivery("同一 TASK 不可同時是交付相依與追溯對象。");
+  }
+  if (subjects.includes(ticket.frontmatter.ticket_id)) {
+    return blockedDelivery("追溯對象不可指向自身。");
+  }
+  if (subjects.length === 0) return null;
+  try {
+    const taskIndex = await committedTaskIdentityIndex(worktreePath, sourceHead);
+    const active = new Set([ticket.frontmatter.ticket_id]);
+    const verifySubject = (subject) => {
+      if (active.has(subject)) return false;
+      const matches = taskIndex.get(subject) || [];
+      if (matches.length !== 1) return false;
+      const nestedSubjects = parseTaskReferenceList(matches[0], "evidence_subjects");
+      const nestedDependencies = parseTaskReferenceList(matches[0], "depends_on");
+      if (
+        !nestedSubjects ||
+        !nestedDependencies ||
+        nestedSubjects.includes(subject) ||
+        nestedSubjects.some((nestedSubject) => nestedDependencies.includes(nestedSubject))
+      ) {
+        return false;
+      }
+      active.add(subject);
+      const valid = nestedSubjects.every((nestedSubject) => verifySubject(nestedSubject));
+      active.delete(subject);
+      return valid;
+    };
+    return subjects.every((subject) => verifySubject(subject))
+      ? null
+      : blockedDelivery("追溯對象必須唯一、合法，且不得自指、重疊或形成循環。");
+  } catch {
+    return blockedDelivery("追溯對象證據無法從已提交版本讀取，不能交付。");
+  }
+}
+
 async function taskDeliveryReadiness(worktreePath, ticket, sourceHead) {
   if (!ticket) {
     return { state: "UNVERIFIED", ready: false, reasonZh: "尚無可驗證的 TASK 交付證據。" };
@@ -565,15 +652,7 @@ async function taskDeliveryReadiness(worktreePath, ticket, sourceHead) {
   if (!successfulDeliveryStatuses.has(status)) {
     return { state: "PRESERVED", ready: false, reasonZh: "TASK 的終態不允許封存或作為派工起點。" };
   }
-  if (!Object.hasOwn(ticket.frontmatter, "depends_on")) {
-    return { state: "READY", ready: true, reasonZh: "已提交 TASK 證據與相依條件均可交付。" };
-  }
-  const dependencyMatch = String(ticket.frontmatter.depends_on).match(/^\[(.*?)\]$/u);
-  const dependencies = dependencyMatch && dependencyMatch[1].trim() !== ""
-    ? dependencyMatch[1].split(",").map((value) => value.trim())
-    : dependencyMatch
-      ? []
-      : null;
+  const dependencies = parseTaskReferenceList(ticket.frontmatter, "depends_on");
   if (
     !dependencies ||
     dependencies.some((dependency) => !/^TASK-[0-9]{3}$/u.test(dependency)) ||
@@ -612,6 +691,13 @@ async function taskDeliveryReadiness(worktreePath, ticket, sourceHead) {
   } catch {
     return blockedDelivery("TASK 相依證據無法從已提交版本讀取，不能交付。");
   }
+  const evidenceSubjectFailure = await evidenceSubjectReadiness(
+    worktreePath,
+    ticket,
+    sourceHead,
+    dependencies,
+  );
+  if (evidenceSubjectFailure) return evidenceSubjectFailure;
   return { state: "READY", ready: true, reasonZh: "已提交 TASK 證據與相依條件均可交付。" };
 }
 
@@ -841,6 +927,7 @@ async function collectWorktree(record, remoteEvidence) {
       ? {
           status: ticketMetadata.status || "unknown",
           file: ticket.fileName,
+          evidenceSubjects: parseTaskReferenceList(ticketMetadata, "evidence_subjects") || [],
         }
       : null,
     issue: issue

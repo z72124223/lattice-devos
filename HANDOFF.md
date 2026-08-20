@@ -1,3 +1,37 @@
+# TASK-089 追溯對象治理修復交接 — 2026-08-21
+
+## 狀態
+
+`NEEDS_REVIEW`：已完成 fail-closed `evidence_subjects` 與獨立審查修復；等待
+本次乾淨提交後執行 `npm.cmd run delivery:finish` 的非強制推送、精確 remote SHA
+對帳與共用工程頁刷新。未合併、部署、發布或封存。
+
+## 本次完成範圍
+
+- 新欄位只保存 TASK-050／TASK-075 的追溯 provenance；`depends_on` 仍是唯一的
+  成功終態交付門檻。非終態 subject 不會阻擋引用它的修復票，也不會被標成完成。
+- finisher 和 dashboard 從 captured HEAD 共同拒絕缺失、重複、非法、重疊、自指與
+  provenance cycle；dashboard 輸出 `ticket.evidenceSubjects` 作為唯讀證據。
+- Protocol 1.2、SPEC-005 v7、module constitution 1.6 與 project validator 均已
+  同步；移除 protocol 規則會被治理測試拒絕。
+
+## 已驗證
+
+- focused finisher／dashboard RED→GREEN；governance 33/33 PASS。
+- `npm.cmd run check` PASS；完整 `npm.cmd run verify` 139/139 PASS；
+  `git diff --check` PASS。
+- 獨立 read-only code/security 與 architecture review：No findings。
+- 未執行 PR、合併、部署、發布或封存。
+
+## 後續
+
+1. 重看最終 diff 與乾淨狀態，建立單一 TASK-089 commit。
+2. 執行 `npm.cmd run delivery:finish`。
+3. 確認 local SHA、`ls-remote`、dashboard `generatedAt`／branch／HEAD／terminal
+   status，回報工頭；本 worker 不自行封存。
+
+---
+
 # TASK-078 看板交付就緒修復交接 — 2026-08-21
 
 ## 狀態

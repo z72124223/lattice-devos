@@ -1,7 +1,7 @@
 ---
 module_id: engineering-delivery-finisher
 name: Engineering Delivery Finisher
-constitution_version: 1.5
+constitution_version: 1.6
 status: active
 ---
 
@@ -86,6 +86,11 @@ repository state, recorded authorization, and task archival respectively.
     readiness. It uses captured-HEAD TASK dependency and ISSUE evidence only;
     a blocked dependency or non-canonical integration branch cannot become an
     archive or dispatch authority.
+21. `evidence_subjects` records only captured-tree reconciliation provenance.
+    Every subject is a unique legal TASK identity and cannot overlap a delivery
+    dependency, self-reference, or form a provenance cycle; its terminal state
+    neither
+    blocks delivery nor changes because another TASK cites it.
 
 ## Allowed Dependencies
 
@@ -150,3 +155,5 @@ approval and must not be added as a minor amendment.
 - 1.5 (2026-08-21): align read-only dashboard readiness with the finisher and
   make a successful implementation outcome insufficient when delivery remains
   dependency-blocked.
+- 1.6 (2026-08-21): add fail-closed reconciliation provenance subjects while
+  preserving `depends_on` as the sole successful-terminal delivery gate.
