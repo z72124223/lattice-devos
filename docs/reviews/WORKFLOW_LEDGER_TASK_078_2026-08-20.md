@@ -12,9 +12,9 @@
 | Full verification | valid | `npm.cmd run verify` PASS, 114/114 tests. | machine-enforced |
 | Code/security review | valid | Independent review PASS; unresolved P0=0, P1=0, P2 runtime/security=0. | independently reviewed |
 | Architecture review | valid | Git/authority boundary review PASS; no runtime port, MCP, schema, lease, or ADR change. | documented review |
-| Integration verification | pending | Exact checkpoint verification against the live GitHub default target is next. | unverified |
+| Integration verification | valid | `f04b462` merged without conflict into live default target `8828d2b`; combined 114/114 PASS; disposable worktree removed. | machine-enforced |
 | CI and merge authorization | blocked | No default-branch merge, deploy, or release authority; feature delivery only. | authority gate |
-| Handoff | pending | Final integration and live delivery evidence not yet recorded. | unverified |
+| Handoff | valid | HANDOFF records completion, evidence, protected gates, and the one-command live delivery/archive sequence. | documented-only |
 
 ## Current constraints
 

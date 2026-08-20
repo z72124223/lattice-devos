@@ -1,3 +1,38 @@
+# TASK-078 一鍵工程收尾交接 — 2026-08-21
+
+## 狀態
+
+`DONE`：已完成「提交後安全推送 GitHub、核對遠端、更新工程地圖，全部成功才封存 Codex 任務」的一鍵收尾工具。這份交接提交後，會由新工具親自完成 TASK-078 的非強制功能分支推送、地圖更新與最終核對；只有看到精確成功標記才封存本 Codex 任務。
+
+## 使用方式
+
+日後每張 TASK 票券明確寫入遠端、GitHub repository 身分、推送政策與封存政策。Codex 完成測試、審查、交接及乾淨提交後執行：
+
+```powershell
+npm.cmd run delivery:finish
+```
+
+成功時會完成三件事：
+
+1. 只把目前 TASK 功能分支的精確提交非強制推送到票券指定的 GitHub repository。
+2. 核對 GitHub 與本機 upstream 完全一致，再安全更新本機工程地圖。
+3. 僅在 TASK 成功終止且所有關卡通過時輸出 `LATTICE_DELIVERY_READY_TO_ARCHIVE=1`，接著由 Codex App 原生動作封存當下任務。
+
+任何失敗都會保留任務視窗，方便繼續診斷；不會誤推預設分支、不會 force、不會自動合併、部署或發布。
+
+## 驗證與審查
+
+- 專用測試 35/35、治理測試 21/21、完整專案 114/114 全數通過。
+- 獨立程式碼／安全審查：P0=0、P1=0、P2 runtime/security=0。
+- 架構審查：PASS，沒有新增產品 runtime、MCP、資料庫或 lease 邊界。
+- 精確整合：實作檢查點 `f04b462571e6bdd052db9c4cd343bfc26d158628` 對 GitHub 當時預設 target `8828d2b88faece6b399258744eea4ff8d46f0bea`，零衝突，combined 114/114 PASS，驗證 worktree 已移除。
+
+## 保護邊界
+
+本任務只獲准推送 `feature/task-078-engineering-delivery-finisher`。沒有 PR、預設分支合併、部署、release、公開 hosting、credential 變更、force 或一般資料夾刪除授權。
+
+---
+
 # TASK-077 V3 模型與推理建議交接 — 2026-08-20
 
 ## 狀態

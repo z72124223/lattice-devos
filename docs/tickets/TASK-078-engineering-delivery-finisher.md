@@ -5,7 +5,7 @@ spec_id: SPEC-005
 spec_version: 3
 module_id: engineering-delivery-finisher
 constitution_version: 1.2
-status: in_progress
+status: complete
 parallel_safe: false
 depends_on: [TASK-077]
 branch: feature/task-078-engineering-delivery-finisher
@@ -89,9 +89,13 @@ Codex task only after every delivery gate succeeds. PR, default-branch merge,
 deployment, release, publication, credentials, destructive cleanup, and
 archival after failure remain unauthorized.
 
-## Next action
+## Completion evidence
 
-Implement test-first, complete review and exact default-target integration
-simulation, commit the clean checkpoint, then run `npm.cmd run delivery:finish`.
-On its exact archive-ready marker, call the Codex App native archive action as
-the final task operation.
+- Finisher focused: 35/35 PASS; governance: 21/21 PASS.
+- Full feature and exact combined-default verification: 114/114 PASS each.
+- Independent code/security review: PASS, unresolved P0/P1/P2 runtime = 0.
+- Architecture review and zero-conflict exact default-target integration: PASS.
+- Implementation checkpoint: `f04b462571e6bdd052db9c4cd343bfc26d158628`.
+
+The final clean handoff commit is delivered by `npm.cmd run delivery:finish`.
+Only its exact archive marker permits the native Codex App archive action.
