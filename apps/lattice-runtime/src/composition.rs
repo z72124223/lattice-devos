@@ -75,6 +75,7 @@ pub enum LatticedErrorKind {
     ReceiptRead,
     ReceiptMismatch,
     DeliveryFailed,
+    TerminalCauseRejected,
     ReconciliationRequired,
     OfficialLiveBlocked,
     ScriptedFixtureRejected,
@@ -100,6 +101,7 @@ impl LatticedErrorKind {
             Self::ReceiptRead => "LATTICE_DELIVERY_RECEIPT_REJECTED",
             Self::ReceiptMismatch => "LATTICE_DELIVERY_RECEIPT_MISMATCH",
             Self::DeliveryFailed => "LATTICE_DELIVERY_FAILED",
+            Self::TerminalCauseRejected => "LATTICE_DELIVERY_TERMINAL_CAUSE_REJECTED",
             Self::ReconciliationRequired => "LATTICE_DELIVERY_RECONCILIATION_REQUIRED",
             Self::OfficialLiveBlocked => "LATTICE_OFFICIAL_CODEX_FAILED_DIAGNOSTIC",
             Self::ScriptedFixtureRejected => "LATTICE_SCRIPTED_FIXTURE_REJECTED",
@@ -115,11 +117,22 @@ impl LatticedErrorKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LatticedError {
     kind: LatticedErrorKind,
+    terminal_cause: Option<TerminalCause>,
 }
 
 impl LatticedError {
-    const fn new(kind: LatticedErrorKind) -> Self {
-        Self { kind }
+    pub(crate) const fn new(kind: LatticedErrorKind) -> Self {
+        Self {
+            kind,
+            terminal_cause: None,
+        }
+    }
+
+    const fn terminal(kind: LatticedErrorKind, terminal_cause: TerminalCause) -> Self {
+        Self {
+            kind,
+            terminal_cause: Some(terminal_cause),
+        }
     }
 
     #[must_use]
@@ -131,6 +144,12 @@ impl LatticedError {
     pub const fn code(self) -> &'static str {
         self.kind.code()
     }
+
+    /// Returns a stage/cause pair only for a verified closed terminal failure.
+    #[must_use]
+    pub const fn terminal_cause(self) -> Option<TerminalCause> {
+        self.terminal_cause
+    }
 }
 
 impl fmt::Display for LatticedError {
@@ -140,6 +159,25 @@ impl fmt::Display for LatticedError {
 }
 
 impl Error for LatticedError {}
+
+/// Closed, secret-free terminal identity suitable for CLI and MCP output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalCause {
+    stage: &'static str,
+    code: &'static str,
+}
+
+impl TerminalCause {
+    #[must_use]
+    pub const fn stage(self) -> &'static str {
+        self.stage
+    }
+
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        self.code
+    }
+}
 
 /// Fixed process-owned inputs for one executable delivery profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -392,9 +430,6 @@ impl LatticedDeliveryService {
                 )?;
                 composed_receipt_json(&receipt, "lattice-delivery", &graph_receipt)
             }
-            Err(DeliveryOrchestratorError::Terminal { receipt, .. }) => Err(LatticedError::new(
-                terminal_run_error_kind(receipt.status()),
-            )),
             Err(error) => Err(map_orchestrator_error(&error)),
         }
     }
@@ -438,13 +473,11 @@ impl LatticedDeliveryService {
 
 impl DeliveryToolService for LatticedDeliveryService {
     fn run(&mut self) -> Result<Value, ToolExecutionError> {
-        self.run_json()
-            .map_err(|error| ToolExecutionError::new(error.code()))
+        self.run_json().map_err(tool_execution_error)
     }
 
     fn status(&mut self) -> Result<Value, ToolExecutionError> {
-        self.status_json()
-            .map_err(|error| ToolExecutionError::new(error.code()))
+        self.status_json().map_err(tool_execution_error)
     }
 }
 
@@ -1221,21 +1254,235 @@ fn map_orchestrator_error(error: &DeliveryOrchestratorError) -> LatticedError {
         DeliveryOrchestratorError::ReceiptRead(_) => LatticedErrorKind::ReceiptRead,
         DeliveryOrchestratorError::ReceiptMismatch => LatticedErrorKind::ReceiptMismatch,
         DeliveryOrchestratorError::Terminal { cause, receipt } => match receipt.status() {
-            DeliveryTerminalStatus::Failed => LatticedErrorKind::DeliveryFailed,
+            DeliveryTerminalStatus::Failed => {
+                return terminal_error(cause.stage(), cause.code(), receipt);
+            }
             DeliveryTerminalStatus::ReconciliationRequired
                 if cause.certainty() == DeliveryFailureCertainty::Ambiguous
                     || cause.kind() == PortErrorKind::Ambiguous =>
             {
                 LatticedErrorKind::ReconciliationRequired
             }
-            DeliveryTerminalStatus::ReconciliationRequired => {
-                LatticedErrorKind::ReconciliationRequired
-            }
-            DeliveryTerminalStatus::Completed => LatticedErrorKind::ReceiptMismatch,
+            status => terminal_run_error_kind(status),
         },
     };
     LatticedError::new(kind)
 }
+
+fn terminal_error(stage: DeliveryStage, code: &str, receipt: &DeliveryReceipt) -> LatticedError {
+    let request = receipt.outcome().request();
+    if request.failure_stage() != Some(stage) || request.failure_code() != Some(code) {
+        return LatticedError::new(LatticedErrorKind::ReceiptMismatch);
+    }
+    let Some(cause) = terminal_cause(stage, code) else {
+        return LatticedError::new(LatticedErrorKind::TerminalCauseRejected);
+    };
+    LatticedError::terminal(LatticedErrorKind::DeliveryFailed, cause)
+}
+
+fn tool_execution_error(error: LatticedError) -> ToolExecutionError {
+    match error.terminal_cause() {
+        Some(cause) => ToolExecutionError::terminal(error.code(), cause.stage(), cause.code()),
+        None => ToolExecutionError::new(error.code()),
+    }
+}
+
+fn terminal_cause(stage: DeliveryStage, code: &str) -> Option<TerminalCause> {
+    let code = CLOSED_TERMINAL_CAUSE_CODES
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == code)?;
+    Some(TerminalCause {
+        stage: stage_name(stage),
+        code,
+    })
+}
+
+// This explicit allowlist is the complete safe vocabulary emitted by the
+// current delivery adapters. Unknown or malformed future leaves fail closed.
+const CLOSED_TERMINAL_CAUSE_CODES: &[&str] = &[
+    "ANSWER_ALTERNATE_DATA_STREAM_DRIFT",
+    "ANSWER_BYTES_DRIFT_BEFORE_STAGE",
+    "ANSWER_BYTES_MISMATCH",
+    "ANSWER_HARDLINK_COUNT_DRIFT",
+    "ROOT_CREATE_FAILED",
+    "ROOT_INSPECTION_FAILED",
+    "ROOT_MUST_BE_ABSENT",
+    "ROOT_MUST_BE_ABSOLUTE_AND_NORMALIZED",
+    "ROOT_PARENT_MISSING",
+    "DIRECTORY_CANONICALIZE_FAILED",
+    "DIRECTORY_INSPECTION_FAILED",
+    "DIRECTORY_NOT_CANONICAL",
+    "DIRECTORY_PATH_ESCAPE",
+    "CONTROL_DIRECTORY_CREATE_FAILED",
+    "CONTROL_FILE_CREATE_FAILED",
+    "CONTROL_FILE_WRITE_FAILED",
+    "BASELINE_SOURCE_BOUNDARY_DRIFT",
+    "BASELINE_SOURCE_BYTES_DRIFT",
+    "BASELINE_SOURCE_DIRECTORY_CREATE_FAILED",
+    "BASELINE_SOURCE_INSPECTION_FAILED",
+    "BASELINE_SOURCE_MISSING",
+    "BASELINE_TREE_INSPECTION_FAILED",
+    "GIT_INIT_FAILED",
+    "GIT_ADD_FAILED",
+    "GIT_CONFIG_DRIFT",
+    "GIT_CONFIG_INSPECTION_FAILED",
+    "GIT_CONFIG_UNSAFE",
+    "GIT_DELIVERY_ALREADY_PREPARED",
+    "GIT_DELIVERY_BINDING_MISMATCH",
+    "GIT_DELIVERY_COMMIT_EVIDENCE_DRIFT",
+    "GIT_DELIVERY_CONFIG_PATH_NOT_ABSOLUTE",
+    "GIT_DELIVERY_CONFIG_TIMEOUT_ZERO",
+    "GIT_DELIVERY_DEADLINE_EXPIRED",
+    "GIT_DELIVERY_DEADLINE_INVALID",
+    "GIT_DELIVERY_DIGEST_DOMAIN_INVALID",
+    "GIT_DELIVERY_DIGEST_FAILED",
+    "GIT_DELIVERY_DIGEST_INVALID",
+    "GIT_DELIVERY_STAGE_OUT_OF_ORDER",
+    "GIT_DELIVERY_TYPED_COMMIT_EVIDENCE_INVALID",
+    "GIT_DELIVERY_WORKSPACE_LOCATOR_INVALID",
+    "GIT_EXE_CANONICALIZE_FAILED",
+    "GIT_EXE_INSPECTION_FAILED",
+    "GIT_EXE_MUST_BE_ABSOLUTE",
+    "GIT_EXE_NOT_REGULAR",
+    "GIT_OBJECT_ID_MALFORMED",
+    "GIT_POINTER_DRIFT",
+    "GIT_POINTER_MISSING",
+    "GIT_POINTER_READ_FAILED",
+    "GIT_POINTER_UNSAFE",
+    "INITIAL_COMMIT_FAILED",
+    "INITIAL_REFS_FAILED",
+    "INITIAL_REPOSITORY_NOT_CLEAN",
+    "INITIAL_SOURCE_STAGE_FAILED",
+    "INITIAL_STATUS_FAILED",
+    "ATTRIBUTES_DRIFT",
+    "EXPECTED_ANSWER_DRIFT",
+    "GLOBAL_CONFIG_DRIFT",
+    "HEAD_DRIFT",
+    "HEAD_INSPECTION_FAILED",
+    "HOOKS_DIRECTORY_NOT_EMPTY",
+    "HOOKS_READ_FAILED",
+    "INDEX_DRIFT",
+    "INDEX_INSPECTION_FAILED",
+    "NON_REGULAR_REPOSITORY_ENTRY",
+    "FOREIGN_PATH",
+    "REPOSITORY_SCAN_FAILED",
+    "SCOPE_STATUS_FAILED",
+    "STAGED_ANSWER_BYTES_DRIFT",
+    "STAGED_BLOB_READ_FAILED",
+    "STAGED_SCOPE_DRIFT",
+    "STAGED_SCOPE_FAILED",
+    "STAGED_STATUS_DRIFT",
+    "STAGED_STATUS_FAILED",
+    "STREAM_INSPECTION_FAILED",
+    "STREAM_PROBE_UNAVAILABLE",
+    "HARDLINK_INSPECTION_FAILED",
+    "HARDLINK_PROBE_UNAVAILABLE",
+    "REF_DRIFT",
+    "REF_INSPECTION_FAILED",
+    "REF_OUTPUT_MALFORMED",
+    "UNEXPECTED_GIT_REFS",
+    "UNEXPECTED_GIT_STATUS",
+    "UNSAFE_LOCAL_GIT_CONFIG",
+    "ANSWER_MISSING",
+    "FIXED_TEST_START_FAILED",
+    "FIXED_TEST_FAILED",
+    "DEADLINE_INVALID",
+    "COMMIT_OUTCOME_UNKNOWN",
+    "COMMIT_WAIT_UNKNOWN",
+    "COMMIT_EXIT_UNKNOWN",
+    "COMMIT_DID_NOT_ADVANCE_HEAD",
+    "POST_COMMIT_EVIDENCE_REJECTED",
+    "POST_COMMIT_BLOB_FAILED",
+    "POST_COMMIT_DEADLINE_UNKNOWN",
+    "POST_COMMIT_DIFF_FAILED",
+    "POST_COMMIT_HEAD_UNKNOWN",
+    "POST_COMMIT_METADATA_UNKNOWN",
+    "POST_COMMIT_PARENT_FAILED",
+    "POST_COMMIT_REFS_FAILED",
+    "POST_COMMIT_STATUS_FAILED",
+    "POST_COMMIT_VERIFICATION_FAILED",
+    "DELIVERY_LEDGER_BINDING_MISMATCH",
+    "DELIVERY_LEDGER_CHECKPOINT_CORRUPT",
+    "DELIVERY_LEDGER_CONNECT_FAILED",
+    "DELIVERY_LEDGER_DEADLINE_EXPIRED",
+    "DELIVERY_LEDGER_EVIDENCE_INVALID",
+    "DELIVERY_LEDGER_INTENT_EVIDENCE_INVALID",
+    "DELIVERY_LEDGER_INVALID_BINDING",
+    "DELIVERY_LEDGER_MUTATION_DEADLINE_AMBIGUOUS",
+    "DELIVERY_LEDGER_COMMIT_OUTCOME_UNKNOWN",
+    "DELIVERY_LEDGER_OUTCOME_APPEND_CORRUPT",
+    "DELIVERY_LEDGER_OUTCOME_EVIDENCE_INVALID",
+    "DELIVERY_LEDGER_PERSISTED_INTENT_CORRUPT",
+    "DELIVERY_LEDGER_PHYSICAL_STATE_MISMATCH",
+    "DELIVERY_LEDGER_RETAINED_ROW_CORRUPT",
+    "DELIVERY_LEDGER_RECONCILIATION_REQUIRED",
+    "DELIVERY_LEDGER_REJECTED",
+    "DELIVERY_LEDGER_SCHEMA_REJECTED",
+    "DELIVERY_LEDGER_STATUS_ONLY",
+    "CONTRACT_EVIDENCE_REJECTED",
+    "OUTCOME_PERSISTENCE_AFTER_DURABLE_INTENT_UNKNOWN",
+    "CODEX_LAUNCHER_PATH_MISMATCH",
+    "CODEX_LAUNCHER_NOT_FILE",
+    "CODEX_LAUNCHER_READ_FAILED",
+    "CODEX_LAUNCHER_DIGEST_MISMATCH",
+    "CODEX_LAUNCHER_CHANGED",
+    "CODEX_VERSION_COMMAND_FAILED",
+    "CODEX_VERSION_OUTPUT_INVALID",
+    "CODEX_VERSION_MISMATCH",
+    "CODEX_SCHEMA_OUTPUT_EXISTS",
+    "CODEX_SCHEMA_GENERATION_FAILED",
+    "CODEX_SCHEMA_BUNDLE_INVALID",
+    "CODEX_SCHEMA_BUNDLE_EMPTY",
+    "CODEX_SCHEMA_READ_FAILED",
+    "CODEX_IDENTITY_TIMEOUT",
+    "CODEX_IDENTITY_PROCESS_CONTAINMENT_FAILED",
+    "CODEX_CONFIG_HOME_NOT_ABSOLUTE",
+    "CODEX_CONFIG_LAUNCHER_DIGEST_INVALID",
+    "CODEX_CONFIG_LAUNCHER_NOT_ABSOLUTE",
+    "CODEX_CONFIG_PROMPT_EMPTY",
+    "CODEX_CONFIG_SCHEMA_PATH_NOT_ABSOLUTE",
+    "CODEX_CONFIG_TIMEOUT_OVERFLOW",
+    "CODEX_CONFIG_TIMEOUT_ZERO",
+    "CODEX_CONFIG_VERSION_EMPTY",
+    "CODEX_IDENTITY_LAUNCHER_DIGEST_INVALID",
+    "CODEX_IDENTITY_LAUNCHER_PATH_INVALID",
+    "CODEX_IDENTITY_SCHEMA_COUNT_OVERFLOW",
+    "CODEX_IDENTITY_SCHEMA_DIGEST_INVALID",
+    "CODEX_METADATA_INSPECTION_FAILED",
+    "CODEX_METADATA_NOT_EMPTY",
+    "CODEX_METADATA_REMOVE_FAILED",
+    "CODEX_METADATA_UNSAFE",
+    "CODEX_DELIVERY_DEADLINE_EXPIRED",
+    "CODEX_DELIVERY_DEADLINE_INVALID",
+    "CODEX_DELIVERY_EVIDENCE_INVALID",
+    "CODEX_DELIVERY_NOT_ACTIVE",
+    "CODEX_APP_SERVER_INVALID_LAUNCHER",
+    "CODEX_APP_SERVER_INVALID_LAUNCHER_SHA256",
+    "CODEX_APP_SERVER_INVALID_CODEX_HOME",
+    "CODEX_APP_SERVER_CODEX_HOME_OWNERSHIP_MISSING",
+    "CODEX_APP_SERVER_CODEX_HOME_OVERLAP",
+    "CODEX_APP_SERVER_AMBIENT_CODEX_HOME_DENIED",
+    "CODEX_APP_SERVER_INVALID_WORKING_DIRECTORY",
+    "CODEX_APP_SERVER_INVALID_PROMPT",
+    "CODEX_APP_SERVER_INVALID_TIMEOUT",
+    "CODEX_APP_SERVER_LAUNCHER_READ_FAILED",
+    "CODEX_APP_SERVER_LAUNCHER_DIGEST_MISMATCH",
+    "CODEX_APP_SERVER_LAUNCHER_CHANGED",
+    "CODEX_APP_SERVER_SPAWN_FAILED",
+    "CODEX_APP_SERVER_PIPE_UNAVAILABLE",
+    "CODEX_APP_SERVER_WRITE_FAILED",
+    "CODEX_APP_SERVER_STDOUT_FAILED",
+    "CODEX_APP_SERVER_STDOUT_LINE_TOO_LARGE",
+    "CODEX_APP_SERVER_PROTOCOL_FAILED",
+    "CODEX_APP_SERVER_CODEX_HOME_MISMATCH",
+    "CODEX_APP_SERVER_TIMEOUT",
+    "CODEX_APP_SERVER_AMBIGUOUS_EOF",
+    "CODEX_APP_SERVER_CHILD_CLEANUP_FAILED",
+    "CODEX_APP_SERVER_JOB_OBJECT_FAILED",
+    "CODEX_APP_SERVER_TURN_FAILED",
+    "CODEX_APP_SERVER_TURN_INTERRUPTED",
+];
 
 const fn terminal_run_error_kind(status: DeliveryTerminalStatus) -> LatticedErrorKind {
     match status {
@@ -1309,6 +1556,86 @@ mod tests {
             LatticedErrorKind::ReceiptMismatch
         );
     }
+
+    #[test]
+    fn known_terminal_causes_are_closed_and_distinguishable_without_details() {
+        let matrix = [
+            (DeliveryStage::WorkspacePrepare, "ROOT_CREATE_FAILED"),
+            (DeliveryStage::Codex, "CODEX_LAUNCHER_NOT_FILE"),
+            (DeliveryStage::ScopeVerification, "FOREIGN_PATH"),
+            (DeliveryStage::FixedTest, "FIXED_TEST_FAILED"),
+            (DeliveryStage::GitCommit, "COMMIT_EXIT_UNKNOWN"),
+            (
+                DeliveryStage::Outcome,
+                "DELIVERY_LEDGER_COMMIT_OUTCOME_UNKNOWN",
+            ),
+            (
+                DeliveryStage::Receipt,
+                "DELIVERY_LEDGER_RETAINED_ROW_CORRUPT",
+            ),
+        ];
+
+        for (stage, code) in matrix {
+            let cause = terminal_cause(stage, code).expect("closed terminal cause");
+            assert_eq!(cause.stage(), stage_name(stage));
+            assert_eq!(cause.code(), code);
+            assert!(!format!("{cause:?}").contains("secret"));
+            assert!(!format!("{cause:?}").contains("C:\\"));
+        }
+
+        for &code in IDENTITY_TERMINAL_CAUSE_CODES {
+            let cause = terminal_cause(DeliveryStage::Codex, code)
+                .expect("every Codex identity/process leaf is closed");
+            assert_eq!(cause.stage(), "CODEX");
+            assert_eq!(cause.code(), code);
+        }
+
+        assert!(terminal_cause(DeliveryStage::Codex, "CODEX_TOKEN=secret").is_none());
+        assert!(terminal_cause(DeliveryStage::Codex, "UNKNOWN_LEAF").is_none());
+    }
+
+    const IDENTITY_TERMINAL_CAUSE_CODES: &[&str] = &[
+        "CODEX_LAUNCHER_PATH_MISMATCH",
+        "CODEX_LAUNCHER_NOT_FILE",
+        "CODEX_LAUNCHER_READ_FAILED",
+        "CODEX_LAUNCHER_DIGEST_MISMATCH",
+        "CODEX_LAUNCHER_CHANGED",
+        "CODEX_VERSION_COMMAND_FAILED",
+        "CODEX_VERSION_OUTPUT_INVALID",
+        "CODEX_VERSION_MISMATCH",
+        "CODEX_SCHEMA_OUTPUT_EXISTS",
+        "CODEX_SCHEMA_GENERATION_FAILED",
+        "CODEX_SCHEMA_BUNDLE_INVALID",
+        "CODEX_SCHEMA_BUNDLE_EMPTY",
+        "CODEX_SCHEMA_READ_FAILED",
+        "CODEX_IDENTITY_TIMEOUT",
+        "CODEX_IDENTITY_PROCESS_CONTAINMENT_FAILED",
+        "CODEX_APP_SERVER_INVALID_LAUNCHER",
+        "CODEX_APP_SERVER_INVALID_LAUNCHER_SHA256",
+        "CODEX_APP_SERVER_INVALID_CODEX_HOME",
+        "CODEX_APP_SERVER_CODEX_HOME_OWNERSHIP_MISSING",
+        "CODEX_APP_SERVER_CODEX_HOME_OVERLAP",
+        "CODEX_APP_SERVER_AMBIENT_CODEX_HOME_DENIED",
+        "CODEX_APP_SERVER_INVALID_WORKING_DIRECTORY",
+        "CODEX_APP_SERVER_INVALID_PROMPT",
+        "CODEX_APP_SERVER_INVALID_TIMEOUT",
+        "CODEX_APP_SERVER_LAUNCHER_READ_FAILED",
+        "CODEX_APP_SERVER_LAUNCHER_DIGEST_MISMATCH",
+        "CODEX_APP_SERVER_LAUNCHER_CHANGED",
+        "CODEX_APP_SERVER_SPAWN_FAILED",
+        "CODEX_APP_SERVER_PIPE_UNAVAILABLE",
+        "CODEX_APP_SERVER_WRITE_FAILED",
+        "CODEX_APP_SERVER_STDOUT_FAILED",
+        "CODEX_APP_SERVER_STDOUT_LINE_TOO_LARGE",
+        "CODEX_APP_SERVER_PROTOCOL_FAILED",
+        "CODEX_APP_SERVER_CODEX_HOME_MISMATCH",
+        "CODEX_APP_SERVER_TIMEOUT",
+        "CODEX_APP_SERVER_AMBIGUOUS_EOF",
+        "CODEX_APP_SERVER_CHILD_CLEANUP_FAILED",
+        "CODEX_APP_SERVER_JOB_OBJECT_FAILED",
+        "CODEX_APP_SERVER_TURN_FAILED",
+        "CODEX_APP_SERVER_TURN_INTERRUPTED",
+    ];
 
     #[test]
     fn ambiguous_outcome_persistence_requires_reconciliation() {

@@ -22,18 +22,59 @@ pub const MAX_TOOL_INVOCATIONS_PER_SESSION: usize = 64;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ToolExecutionError {
     code: &'static str,
+    terminal_cause: Option<ToolTerminalCause>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ToolTerminalCause {
+    stage: &'static str,
+    code: &'static str,
 }
 
 impl ToolExecutionError {
     /// Constructs one static, secret-free failure.
     #[must_use]
     pub const fn new(code: &'static str) -> Self {
-        Self { code }
+        Self {
+            code,
+            terminal_cause: None,
+        }
+    }
+
+    /// Constructs a previously validated closed terminal cause envelope.
+    #[must_use]
+    pub const fn terminal(
+        code: &'static str,
+        stage: &'static str,
+        cause_code: &'static str,
+    ) -> Self {
+        Self {
+            code,
+            terminal_cause: Some(ToolTerminalCause {
+                stage,
+                code: cause_code,
+            }),
+        }
     }
 
     #[must_use]
     pub const fn code(self) -> &'static str {
         self.code
+    }
+
+    fn envelope(self) -> Value {
+        let mut value = Map::from_iter([
+            ("status".to_owned(), Value::String("ERROR".to_owned())),
+            ("code".to_owned(), Value::String(self.code.to_owned())),
+        ]);
+        if let Some(cause) = self.terminal_cause {
+            value.insert("stage".to_owned(), Value::String(cause.stage.to_owned()));
+            value.insert(
+                "cause_code".to_owned(),
+                Value::String(cause.code.to_owned()),
+            );
+        }
+        Value::Object(value)
     }
 }
 
@@ -351,7 +392,7 @@ fn tool_result(result: Result<Value, ToolExecutionError>) -> Value {
             "isError": false
         }),
         Err(error) => {
-            let value = json!({"status": "ERROR", "code": error.code()});
+            let value = error.envelope();
             json!({
                 "content": [{"type": "text", "text": value.to_string()}],
                 "structuredContent": value,
