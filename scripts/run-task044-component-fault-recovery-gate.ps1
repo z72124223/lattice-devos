@@ -396,8 +396,7 @@ try {
         -RequiredText @(
             'TASK050_AUTONOMY_RECEIPT_ACCEPTANCE=PASS',
             'TASK050_POSTGRES_FRESH_PROCESS_ACCEPTANCE=PASS'
-        ) `
-        -RejectSkip
+        )
     $records += Invoke-Task044Command `
         -CommandId 'repository-verify' `
         -Executable $npm `
