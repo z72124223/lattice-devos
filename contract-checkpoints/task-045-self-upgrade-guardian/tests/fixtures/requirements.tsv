@@ -10,4 +10,4 @@ G08_CANARY_ADMISSION	self-upgrade-guardian-postgres	CANARY permits reserved heal
 G09_WRITE_CANARY	self-upgrade-guardian	reserved append and replay through normal epoch-checked path	RED_MISSING_OWNER	no canary executor exists
 G10_HEALTH_DISAGREEMENT	self-upgrade-guardian	immutable guardian health contract fails closed	RED_MISSING_OWNER	no health owner exists
 G11_HIGHER_EPOCH_ROLLBACK	self-upgrade-guardian	compatible prior slot starts at epoch greater than failed activation	RED_MISSING_OWNER	no rollback owner exists
-G12_ACTIVE_CONSTITUTION	module-governance	independent active self-upgrade-guardian constitution	BLOCKED_GOVERNANCE	only approved amendment proposal exists
+G12_ACTIVE_CONSTITUTION	module-governance	independent active self-upgrade-guardian constitution	READY	active 1.0 constitution exists without implementation authority

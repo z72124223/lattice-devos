@@ -49,12 +49,15 @@ fn fixture_release() -> ProtectedReleaseSubject {
 #[test]
 fn phase_a_fixtures_are_closed_unique_and_fail_closed() {
     let allowed_evidence = [
+        "READY",
         "BASELINE_GREEN_PURE",
         "RED_MISSING_OWNER",
         "BLOCKED_TASK038",
         "BLOCKED_GOVERNANCE",
     ];
     let mut requirement_ids = BTreeSet::new();
+    let mut ready_requirement_ids = BTreeSet::new();
+    let mut not_ready = 0usize;
     let mut rows = 0usize;
     for (line_number, line) in REQUIREMENTS
         .lines()
@@ -74,10 +77,20 @@ fn phase_a_fixtures_are_closed_unique_and_fail_closed() {
             "unknown evidence {}",
             columns[3]
         );
-        assert_ne!(columns[3], "READY", "Phase A cannot claim readiness");
+        if columns[3] == "READY" {
+            ready_requirement_ids.insert(columns[0]);
+        } else {
+            not_ready += 1;
+        }
         rows += 1;
     }
     assert_eq!(rows, 12, "closed TASK-045 requirement count");
+    assert_eq!(
+        ready_requirement_ids,
+        BTreeSet::from(["G12_ACTIVE_CONSTITUTION"]),
+        "only the independently validated constitution is ready"
+    );
+    assert!(not_ready > 0, "Phase A must remain fail-closed overall");
 
     let allowed_states = [
         "STAGED",

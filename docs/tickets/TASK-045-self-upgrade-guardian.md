@@ -4,7 +4,7 @@ spec_id: SPEC-002
 spec_version: 27
 module_id: self-upgrade-guardian
 constitution_version: 1.0
-constitution_source: docs/modules/V2_AMENDMENT_PROPOSAL.md
+constitution_source: docs/modules/self-upgrade-guardian/MODULE_CONSTITUTION.md
 status: blocked
 parallel_safe: false
 depends_on:
@@ -15,6 +15,7 @@ depends_on:
   - TASK-043
 allowed_paths:
   - docs/tickets/TASK-045-self-upgrade-guardian.md
+  - docs/modules/self-upgrade-guardian/MODULE_CONSTITUTION.md
   - contract-checkpoints/task-045-self-upgrade-guardian/**
 likely_files: []
 branch: feature/task-045-047-guardian-contracts-20260810
@@ -45,7 +46,7 @@ Gateway、OpenClaw、GPT、候選 binary、active daemon 與一般 task IPC 均�
 | Artifact Store / TASK-016 | pure/fake owner 已有；SPEC-002 AC-19 durable metadata/filesystem lifecycle 仍 open | `BLOCKED` |
 | TASK-038 | Task Submit/Status、controlled Codex、fresh-process durable status 尚未 PASS | `BLOCKED` |
 | TASK-043 / Step 11 | 現有工作樹有未提交變更，沒有可同步 stable checkpoint | `BLOCKED` |
-| `self-upgrade-guardian` constitution | 已批准的 1.0 內容只存在 `V2_AMENDMENT_PROPOSAL.md`；獨立 active constitution 尚不存在 | `BLOCKED` |
+| `self-upgrade-guardian` constitution | 已批准的 1.0 邊界已轉為獨立 active constitution；尚未因此取得 implementation 或 live authority | `READY_GOVERNANCE_ONLY` |
 
 任何一列未 ready 時，最多保留本 ticket 與 executable RED fixture，不得以 fake
 adapter、文件存在或 caller Boolean 模擬 authority。
@@ -95,7 +96,7 @@ stale expected state、duplicate first effect 或 epoch mismatch 必須 determin
       filesystem state、clock、environment、network 或 credential。
 - [x] Acceptance feature 目前產生可重現非零 RED，錯誤只列出缺少的 owner behavior，
       不宣稱 activation authority。
-- [ ] 獨立 active `self-upgrade-guardian` 1.0 constitution 已在 stable checkpoint 存在並
+- [x] 獨立 active `self-upgrade-guardian` 1.0 constitution 已在 stable checkpoint 存在並
       通過治理驗證。
 - [ ] Approval/Registry/Lease/Artifact/TASK-038/TASK-043 所有上表前置均有 current
       executable readiness evidence。
@@ -114,19 +115,20 @@ orchestrator/domain owner/truth/writer、push、merge、deploy、release。
 
 ## Module And Constitution Constraints
 
-- Governing source：`docs/modules/V2_AMENDMENT_PROPOSAL.md` 中已批准的
-  `self-upgrade-guardian 1.0`；它明載每個 implemented module 仍需獨立 active
-  constitution。
+- Governing source：`docs/modules/self-upgrade-guardian/MODULE_CONSTITUTION.md`
+  已把 `V2_AMENDMENT_PROPOSAL.md` 中獲批准的 `self-upgrade-guardian 1.0`
+  邊界轉為獨立 active constitution；這不解除其他 dependency 或 live gate。
 - 相容：ADR-007、ADR-009、ADR-013、SPEC-002 v27；本 ticket 不弱化其 nonce、epoch、
   admission、first-MVP-no-migration 與 protected-surface 要求。
-- 不相容／缺口：獨立 constitution 與 live narrow procedure owner 尚未 ready，因此
-  implementation activation 被硬阻擋。
+- 尚未完成／缺口：Guardian implementation 與 live narrow procedure owner 尚未 ready，因此
+  activation implementation 仍被硬阻擋。
 
 ## Dependencies And Overlap
 
 `parallel_safe: false`。TASK-038 正修改 Contracts、Ports、Writer Lease、Postgres Store、
 Orchestrator、runtime 與 governance root；TASK-045 不得複製或平行修改那些 dirty
-paths。本 Phase A allowlist 只有自己的 ticket 與獨立 checkpoint root。等正式 stable
+paths。本 Phase A allowlist 只有自己的 ticket、獨立 module constitution 與 contract
+checkpoint root。等正式 stable
 checkpoint 後必須重新同步並重新盤點 paths，不能直接把 Phase A branch 當
 implementation base。
 
@@ -150,7 +152,7 @@ Phase A 只完成 fixture 與 RED checkpoint；依 `implement-tdd`，因 precond
 |---|---|---|
 | Fixture structure | `CARGO_BUILD_JOBS=2 cargo test --manifest-path contract-checkpoints/task-045-self-upgrade-guardian/Cargo.toml --locked` | zero exit；closed rows/IDs/state/admission 與既有 normal-gateway denial guardrail 通過 |
 | Intentional RED | `CARGO_BUILD_JOBS=2 cargo test --manifest-path contract-checkpoints/task-045-self-upgrade-guardian/Cargo.toml --locked --features acceptance` | non-zero；列出尚非 `READY` 的 Guardian requirements |
-| Scope | `git diff --check` 與 changed-path allowlist | 僅本 ticket 與本 checkpoint root |
+| Scope | `git diff --check` 與 changed-path allowlist | 僅本 ticket、獨立 module constitution 與本 checkpoint root |
 
 ## Human Gate
 
