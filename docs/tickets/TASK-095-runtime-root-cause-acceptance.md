@@ -1,8 +1,8 @@
 ---
 ticket_id: TASK-095
 title: Runtime root-cause diagnostic acceptance
-module_id: engineering-delivery-finisher
-constitution_version: 1.6
+module_id: latticed
+constitution_version: 1.1
 status: complete
 parallel_safe: true
 depends_on: []
