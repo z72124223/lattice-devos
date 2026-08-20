@@ -3,7 +3,6 @@ import {
   access,
   mkdir,
   readFile,
-  readdir,
   rename,
   rm,
   writeFile,
@@ -65,6 +64,18 @@ const ticketStatusOutcomes = new Map([
   ["user_action", "USER_ACTION"],
   ["stale", "STALE"],
 ]);
+const terminalDeliveryStatuses = new Set([
+  "blocked",
+  "complete",
+  "completed",
+  "failed",
+  "fail",
+  "partial",
+  "paused",
+  "verified",
+  "waiting_dependency",
+]);
+const successfulDeliveryStatuses = new Set(["complete", "completed", "verified"]);
 
 export function recommendCodexSetup(description = "", now = Date.now()) {
   const request = String(description ?? "").trim().toLocaleLowerCase("zh-TW");
@@ -220,11 +231,11 @@ function parseWorktreeList(text) {
 }
 
 function identityFromBranch(branch) {
-  const task = branch.match(/(?:^|[\/_-])task[-_\/]?([0-9]{3})(?=$|[\/_-])/iu);
+  const task = branch.match(/^feature\/task-([0-9]{3})-[a-z0-9]+(?:-[a-z0-9]+)*$/u);
   if (task) {
     return { kind: "TASK", id: `TASK-${task[1]}` };
   }
-  const issue = branch.match(/(?:^|[\/_-])issue[-_\/]?([0-9]+)(?=$|[\/_-])/iu);
+  const issue = branch.match(/^feature\/issue-([0-9]{3})-[a-z0-9]+(?:-[a-z0-9]+)*$/u);
   if (issue) {
     return { kind: "ISSUE", id: `ISSUE-${issue[1]}` };
   }
@@ -372,20 +383,44 @@ function humanActionSummary(humanGate) {
   return stripMarkdown(humanGate, 180);
 }
 
-async function readTicket(worktreePath, identity, branch) {
+async function readTicket(worktreePath, identity, branch, sourceHead) {
   if (identity.kind !== "TASK") {
     return { ticket: null, error: null };
   }
-  const directory = path.join(worktreePath, "docs", "tickets");
   try {
-    const entries = await readdir(directory, { withFileTypes: true });
-    const prefix = `${identity.id}-`;
-    const candidates = entries.filter(
-      (entry) =>
-        entry.isFile() &&
-        entry.name.toUpperCase().startsWith(prefix) &&
-        entry.name.toLowerCase().endsWith(".md"),
-    );
+    const entries = (await gitAt(worktreePath, [
+      "ls-tree",
+      "-r",
+      "--name-only",
+      sourceHead,
+      "--",
+      "docs/tickets",
+    ])).split(/\r?\n/gu).filter(Boolean);
+    const candidates = [];
+    for (const entry of entries) {
+      const fileName = path.posix.basename(entry.replaceAll("\\", "/"));
+      if (!/^TASK-[0-9]{3}-.+\.md$/iu.test(fileName)) continue;
+      const content = await gitAt(worktreePath, [
+        "show",
+        `${sourceHead}:${entry.replaceAll("\\", "/")}`,
+      ]);
+      const parsedFrontmatter = parseFrontmatter(content);
+      if (!parsedFrontmatter.valid) {
+        if (new RegExp(`^branch:\\s*${escapeRegularExpression(branch)}\\s*$`, "mu").test(content)) {
+          return { ticket: null, error: "TASK 票券的 frontmatter 無法辨識" };
+        }
+        continue;
+      }
+      if (parsedFrontmatter.duplicateKeys.length > 0) {
+        if (parsedFrontmatter.values.branch === branch) {
+          return { ticket: null, error: "TASK 票券有重複的 frontmatter 欄位" };
+        }
+        continue;
+      }
+      if (parsedFrontmatter.values.branch === branch) {
+        candidates.push({ fileName, content, frontmatter: parsedFrontmatter.values });
+      }
+    }
     if (candidates.length === 0) {
       return { ticket: null, error: "目前分支找不到對應 TASK 票券" };
     }
@@ -393,15 +428,7 @@ async function readTicket(worktreePath, identity, branch) {
       return { ticket: null, error: "目前分支有重複的 TASK 票券" };
     }
     const candidate = candidates[0];
-    const content = await readFile(path.join(directory, candidate.name), "utf8");
-    const parsedFrontmatter = parseFrontmatter(content);
-    if (!parsedFrontmatter.valid) {
-      return { ticket: null, error: "TASK 票券的 frontmatter 無法辨識" };
-    }
-    if (parsedFrontmatter.duplicateKeys.length > 0) {
-      return { ticket: null, error: "TASK 票券有重複的 frontmatter 欄位" };
-    }
-    const frontmatter = parsedFrontmatter.values;
+    const frontmatter = candidate.frontmatter;
     if (frontmatter.ticket_id !== identity.id) {
       return { ticket: null, error: "TASK 票券的 ticket_id 不符合分支" };
     }
@@ -414,17 +441,187 @@ async function readTicket(worktreePath, identity, branch) {
     if (frontmatter.branch !== branch) {
       return { ticket: null, error: "TASK 票券的 branch 不符合目前分支" };
     }
-    return { ticket: {
-      fileName: candidate.name,
-      content,
-      frontmatter,
-    }, error: null };
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      return { ticket: null, error: "目前分支找不到對應 TASK 票券" };
-    }
+    return { ticket: candidate, error: null };
+  } catch {
     return { ticket: null, error: "TASK 票券無法讀取" };
   }
+}
+
+async function readCommittedIssueEvidence(worktreePath, identity, branch, sourceHead) {
+  if (identity.kind !== "ISSUE") {
+    return { issue: null, error: null };
+  }
+  const branchIdentity = branch.match(/^feature\/issue-([0-9]{3})-[a-z0-9]+(?:-[a-z0-9]+)*$/u);
+  if (!branchIdentity || identity.id !== `ISSUE-${branchIdentity[1]}`) {
+    return { issue: null, error: "ISSUE 終端交付分支格式無效" };
+  }
+  try {
+    const entries = (await gitAt(worktreePath, [
+      "ls-tree",
+      "-r",
+      "--name-only",
+      sourceHead,
+      "--",
+      "docs/issues",
+    ])).split(/\r?\n/gu).filter(Boolean);
+    const byIdentity = [];
+    const byBranch = [];
+    for (const entry of entries) {
+      const fileName = path.posix.basename(entry.replaceAll("\\", "/"));
+      const filenameIdentity = fileName.match(/^ISSUE-([0-9]{3})-.+\.md$/iu);
+      if (!filenameIdentity) continue;
+      const content = await gitAt(worktreePath, [
+        "show",
+        `${sourceHead}:${entry.replaceAll("\\", "/")}`,
+      ]);
+      const parsedFrontmatter = parseFrontmatter(content);
+      const fileIssueId = `ISSUE-${filenameIdentity[1]}`;
+      if (!parsedFrontmatter.valid || parsedFrontmatter.duplicateKeys.length > 0) {
+        if (
+          new RegExp(`^issue_id:\\s*${escapeRegularExpression(identity.id)}\\s*$`, "mu").test(content) ||
+          new RegExp(`^branch:\\s*${escapeRegularExpression(branch)}\\s*$`, "mu").test(content)
+        ) {
+          return { issue: null, error: "ISSUE 終端證據的 frontmatter 無法辨識" };
+        }
+        continue;
+      }
+      const frontmatter = parsedFrontmatter.values;
+      if (frontmatter.issue_id !== fileIssueId) {
+        if (
+          frontmatter.issue_id === identity.id ||
+          fileIssueId === identity.id ||
+          frontmatter.branch === branch
+        ) {
+          return { issue: null, error: "ISSUE 終端證據的 issue_id 與檔名或分支不符" };
+        }
+        continue;
+      }
+      const evidence = { fileName, content, frontmatter };
+      if (frontmatter.issue_id === identity.id) byIdentity.push(evidence);
+      if (frontmatter.branch === branch) byBranch.push(evidence);
+    }
+    if (byIdentity.length !== 1) {
+      if (byIdentity.length === 0 && byBranch.length > 0) {
+        return { issue: null, error: "ISSUE 終端證據的 issue_id 與檔名或分支不符" };
+      }
+      return {
+        issue: null,
+        error: byIdentity.length === 0
+          ? "目前分支找不到已提交的 ISSUE 終端證據"
+          : "目前分支有重複的 ISSUE 終端證據",
+      };
+    }
+    const issue = byIdentity[0];
+    if (issue.frontmatter.branch !== branch) {
+      return { issue: null, error: "ISSUE 終端證據的 branch 不符合目前分支" };
+    }
+    if (byBranch.length !== 1 || byBranch[0].frontmatter.issue_id !== identity.id) {
+      return { issue: null, error: "ISSUE 終端證據的 issue_id 與檔名或分支不符" };
+    }
+    const normalizedStatus = String(issue.frontmatter.status || "")
+      .trim()
+      .toLowerCase()
+      .replaceAll(/[-\s]+/gu, "_");
+    if (!terminalDeliveryStatuses.has(normalizedStatus)) {
+      return { issue: null, error: "ISSUE 終端證據尚未進入終態" };
+    }
+    if (!issue.frontmatter.delivery_repository) {
+      return { issue: null, error: "ISSUE 終端證據缺少 delivery_repository" };
+    }
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(issue.frontmatter.delivery_remote || "")) {
+      return { issue: null, error: "ISSUE 終端證據的 delivery_remote 無效" };
+    }
+    if (!new Set(["authorized_non_force_feature_branch", "local_only"]).has(issue.frontmatter.delivery_push)) {
+      return { issue: null, error: "ISSUE 終端證據的 delivery_push 無效" };
+    }
+    if (!new Set(["after_success", "keep_open"]).has(issue.frontmatter.delivery_archive)) {
+      return { issue: null, error: "ISSUE 終端證據的 delivery_archive 無效" };
+    }
+    return { issue, error: null };
+  } catch {
+    return { issue: null, error: "ISSUE 終端證據無法讀取" };
+  }
+}
+
+function normalizedDeliveryStatus(status) {
+  return String(status || "")
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[-\s]+/gu, "_");
+}
+
+function blockedDelivery(reasonZh) {
+  return { state: "BLOCKED", ready: false, reasonZh };
+}
+
+async function taskDeliveryReadiness(worktreePath, ticket, sourceHead) {
+  if (!ticket) {
+    return { state: "UNVERIFIED", ready: false, reasonZh: "尚無可驗證的 TASK 交付證據。" };
+  }
+  const status = normalizedDeliveryStatus(ticket.frontmatter.status);
+  if (!terminalDeliveryStatuses.has(status)) {
+    return { state: "NOT_TERMINAL", ready: false, reasonZh: "TASK 尚未進入可交付的終態。" };
+  }
+  if (!successfulDeliveryStatuses.has(status)) {
+    return { state: "PRESERVED", ready: false, reasonZh: "TASK 的終態不允許封存或作為派工起點。" };
+  }
+  if (!Object.hasOwn(ticket.frontmatter, "depends_on")) {
+    return { state: "READY", ready: true, reasonZh: "已提交 TASK 證據與相依條件均可交付。" };
+  }
+  const dependencyMatch = String(ticket.frontmatter.depends_on).match(/^\[(.*?)\]$/u);
+  const dependencies = dependencyMatch && dependencyMatch[1].trim() !== ""
+    ? dependencyMatch[1].split(",").map((value) => value.trim())
+    : dependencyMatch
+      ? []
+      : null;
+  if (
+    !dependencies ||
+    dependencies.some((dependency) => !/^TASK-[0-9]{3}$/u.test(dependency)) ||
+    new Set(dependencies).size !== dependencies.length ||
+    dependencies.includes(ticket.frontmatter.ticket_id)
+  ) {
+    return blockedDelivery("TASK 相依宣告無法唯一驗證，不能視為可交付。");
+  }
+  try {
+    const entries = (await gitAt(worktreePath, [
+      "ls-tree",
+      "-r",
+      "--name-only",
+      sourceHead,
+      "--",
+      "docs/tickets",
+    ])).split(/\r?\n/gu).filter(Boolean);
+    for (const dependency of dependencies) {
+      const matches = [];
+      for (const entry of entries) {
+        const fileName = path.posix.basename(entry.replaceAll("\\", "/"));
+        if (!/^TASK-[0-9]{3}-.+\.md$/iu.test(fileName)) continue;
+        const content = await gitAt(worktreePath, [
+          "show",
+          `${sourceHead}:${entry.replaceAll("\\", "/")}`,
+        ]);
+        const parsed = parseFrontmatter(content);
+        if (parsed.valid && parsed.duplicateKeys.length === 0 && parsed.values.ticket_id === dependency) {
+          matches.push(parsed.values);
+        }
+      }
+      if (matches.length !== 1 || !successfulDeliveryStatuses.has(normalizedDeliveryStatus(matches[0]?.status))) {
+        return blockedDelivery(`相依 ${dependency} 尚未唯一且成功終態，不能交付。`);
+      }
+    }
+  } catch {
+    return blockedDelivery("TASK 相依證據無法從已提交版本讀取，不能交付。");
+  }
+  return { state: "READY", ready: true, reasonZh: "已提交 TASK 證據與相依條件均可交付。" };
+}
+
+function issueDeliveryReadiness(issue) {
+  if (!issue) {
+    return { state: "UNVERIFIED", ready: false, reasonZh: "尚無可驗證的 ISSUE 交付證據。" };
+  }
+  return successfulDeliveryStatuses.has(normalizedDeliveryStatus(issue.frontmatter.status))
+    ? { state: "READY", ready: true, reasonZh: "已提交 ISSUE 終端證據可交付。" }
+    : { state: "PRESERVED", ready: false, reasonZh: "ISSUE 的終態不允許封存或作為派工起點。" };
 }
 
 async function optionalGit(repository, args) {
@@ -599,14 +796,23 @@ async function collectWorktree(record, remoteEvidence) {
     }
   }
 
-  const ticketResult = await readTicket(record.path, identity, record.branch);
-  const ticket = ticketResult.ticket;
-  if (ticketResult.error) {
-    errors.push(ticketResult.error);
+  const evidenceResult = identity.kind === "ISSUE"
+    ? await readCommittedIssueEvidence(record.path, identity, record.branch, record.head)
+    : await readTicket(record.path, identity, record.branch, record.head);
+  const ticket = evidenceResult.ticket || null;
+  const issue = evidenceResult.issue || null;
+  if (evidenceResult.error) {
+    errors.push(evidenceResult.error);
   }
-  const ticketContent = ticket?.content || "";
-  const ticketMetadata = ticket?.frontmatter || {};
+  const evidence = ticket || issue;
+  const ticketContent = evidence?.content || "";
+  const ticketMetadata = evidence?.frontmatter || {};
   const outcome = outcomeFromTicket(ticketMetadata, ticketContent);
+  const delivery = identity.kind === "TASK"
+    ? await taskDeliveryReadiness(record.path, ticket, record.head)
+    : identity.kind === "ISSUE"
+      ? issueDeliveryReadiness(issue)
+      : { state: "NOT_APPLICABLE", ready: false, reasonZh: "這不是可由 finisher 交付的規範分支。" };
   const commitParts = commitResult.ok
     ? commitResult.value.split("\0")
     : [record.head || "", String(record.head || "").slice(0, 7), "", ""];
@@ -637,6 +843,13 @@ async function collectWorktree(record, remoteEvidence) {
           file: ticket.fileName,
         }
       : null,
+    issue: issue
+      ? {
+          status: ticketMetadata.status || "unknown",
+          file: issue.fileName,
+        }
+      : null,
+    delivery,
     nextStep: nextStep || defaultNextStep(outcome),
     userAction: humanActionSummary(humanGate),
     evidenceState: errors.length === 0 ? "complete" : "partial",
@@ -842,6 +1055,8 @@ function addDefaultBranchItem(items, remoteEvidence) {
     summary: "GitHub 目前指定的穩定起點。",
     outcome: "DEFAULT_ROOT",
     ticket: null,
+    issue: null,
+    delivery: { state: "NOT_APPLICABLE", ready: false, reasonZh: "預設分支不使用 finisher 交付。" },
     nextStep: "可從這裡建立不依賴尚未整合功能的新工作。",
     userAction: "需要時選擇這個節點並填寫新工作。",
     evidenceState: "complete",
@@ -1047,6 +1262,9 @@ function applyGuideAndEligibility(items, guide, graphState) {
     } else if (!["COMPLETE", "VERIFIED"].includes(item.outcome)) {
       eligible = false;
       reasonZh = ineligibleOutcomeReason(item.outcome);
+    } else if (item.delivery?.ready !== true) {
+      eligible = false;
+      reasonZh = item.delivery?.reasonZh || "交付就緒狀態無法驗證，不能派工。";
     } else if (item.evidenceState !== "complete") {
       eligible = false;
       reasonZh = "完成證據不完整，需要先補齊或重新核對。";
@@ -1220,6 +1438,9 @@ function validSnapshot(snapshot) {
       !item.displayNameZh ||
       typeof item.purposeZh !== "string" ||
       !item.purposeZh ||
+      typeof item.delivery?.state !== "string" ||
+      typeof item.delivery?.ready !== "boolean" ||
+      typeof item.delivery?.reasonZh !== "string" ||
       typeof item.dispatch?.eligible !== "boolean" ||
       typeof item.dispatch?.reasonZh !== "string" ||
       !Array.isArray(item.tree?.childrenKeys) ||

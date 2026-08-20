@@ -91,6 +91,33 @@ function createFixture({
   return { root, repository, remote, output, guide };
 }
 
+function createIssueFixture({
+  issueNumber = "007",
+  status = "complete",
+  branch = `feature/issue-${issueNumber}-resource-aware-scheduler`,
+} = {}) {
+  const fixture = createFixture();
+  const issueId = `ISSUE-${issueNumber}`;
+  const fileName = `${issueId}-resource-aware-scheduler.md`;
+  git(fixture.repository, "switch", "-c", branch);
+  mkdirSync(path.join(fixture.repository, "docs", "issues"), { recursive: true });
+  writeFileSync(
+    path.join(fixture.repository, "docs", "issues", fileName),
+    `---\nissue_id: ${issueId}\ntitle: ${issueId} terminal evidence\nstatus: ${status}\nbranch: ${branch}\ndelivery_remote: origin\ndelivery_repository: github.com/example/lattice-devos\ndelivery_push: authorized_non_force_feature_branch\ndelivery_archive: keep_open\n---\n\n# ${issueId}\n\n## Objective\n\nProject committed terminal issue evidence into the engineering map.\n`,
+    "utf8",
+  );
+  git(fixture.repository, "add", "docs/issues");
+  git(fixture.repository, "commit", "-m", `add ${issueId} terminal evidence`);
+  git(fixture.repository, "push", "-u", "origin", branch);
+  const guide = JSON.parse(readFileSync(fixture.guide, "utf8"));
+  guide.branches[branch] = {
+    name: `${issueId}：終端證據`,
+    purpose: "驗證已提交的 Issue 終端證據能投影到工程地圖。",
+  };
+  writeFileSync(fixture.guide, `${JSON.stringify(guide, null, 2)}\n`, "utf8");
+  return { ...fixture, issueId, fileName, branch };
+}
+
 function exportFixture(repository, output, guide) {
   const result = spawnSync(
     process.execPath,
@@ -189,6 +216,146 @@ test("rejects duplicate TASK tickets instead of selecting one arbitrarily", () =
     assert.deepEqual(item.errors, ["目前分支有重複的 TASK 票券"]);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("projects committed terminal ISSUE-007 and ISSUE-008 evidence", () => {
+  for (const issueNumber of ["007", "008"]) {
+    const fixture = createIssueFixture({ issueNumber });
+    try {
+      const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+      const issue = snapshot.items.find((candidate) => candidate.id === fixture.issueId);
+
+      assert.equal(issue.outcome, "COMPLETE");
+      assert.equal(issue.evidenceState, "complete");
+      assert.deepEqual(issue.errors, []);
+      assert.equal(issue.ticket, null);
+      assert.deepEqual(issue.issue, { status: "complete", file: fixture.fileName });
+      assert.deepEqual(issue.delivery, {
+        state: "READY",
+        ready: true,
+        reasonZh: "已提交 ISSUE 終端證據可交付。",
+      });
+      assert.equal(issue.dispatch.eligible, true);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("keeps a completed TASK dependency-blocked until its committed dependency succeeds", () => {
+  const fixture = createFixture({ terminalState: "COMPLETE", ticketStatus: "complete" });
+  try {
+    const ticketPath = path.join(fixture.repository, "docs", "tickets", "TASK-101-demo.md");
+    writeFileSync(
+      ticketPath,
+      readFileSync(ticketPath, "utf8").replace(
+        "branch: feature/task-101-demo",
+        "branch: feature/task-101-demo\ndepends_on: [TASK-033]",
+      ),
+      "utf8",
+    );
+    writeFileSync(
+      path.join(fixture.repository, "docs", "tickets", "TASK-033-dependency.md"),
+      "---\nticket_id: TASK-033\nstatus: in_progress\nbranch: feature/task-033-dependency\n---\n",
+      "utf8",
+    );
+    git(fixture.repository, "add", "docs/tickets");
+    git(fixture.repository, "commit", "-m", "record incomplete task dependency");
+
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+    const task = snapshot.items.find((candidate) => candidate.id === "TASK-101");
+
+    assert.equal(task.outcome, "COMPLETE");
+    assert.deepEqual(task.delivery, {
+      state: "BLOCKED",
+      ready: false,
+      reasonZh: "相依 TASK-033 尚未唯一且成功終態，不能交付。",
+    });
+    assert.equal(task.dispatch.eligible, false);
+    assert.match(task.dispatch.reasonZh, /TASK-033/u);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects ISSUE evidence that is uncommitted, duplicate, mismatched, or non-terminal", () => {
+  const cases = [
+    {
+      name: "uncommitted",
+      mutate: (fixture) => {
+        writeFileSync(
+          path.join(fixture.repository, "docs", "issues", fixture.fileName),
+          readFileSync(path.join(fixture.repository, "docs", "issues", fixture.fileName), "utf8"),
+          "utf8",
+        );
+        git(fixture.repository, "rm", "docs/issues/ISSUE-007-resource-aware-scheduler.md");
+        git(fixture.repository, "commit", "-m", "remove committed issue evidence");
+        mkdirSync(path.join(fixture.repository, "docs", "issues"), { recursive: true });
+        writeFileSync(
+          path.join(fixture.repository, "docs", "issues", fixture.fileName),
+          "---\nissue_id: ISSUE-007\nstatus: complete\nbranch: feature/issue-007-resource-aware-scheduler\ndelivery_remote: origin\ndelivery_repository: github.com/example/lattice-devos\ndelivery_push: authorized_non_force_feature_branch\ndelivery_archive: keep_open\n---\n",
+          "utf8",
+        );
+      },
+      error: "目前分支找不到已提交的 ISSUE 終端證據",
+    },
+    {
+      name: "duplicate",
+      mutate: (fixture) => {
+        writeFileSync(
+          path.join(fixture.repository, "docs", "issues", "ISSUE-007-duplicate.md"),
+          readFileSync(path.join(fixture.repository, "docs", "issues", fixture.fileName), "utf8"),
+          "utf8",
+        );
+        git(fixture.repository, "add", "docs/issues");
+        git(fixture.repository, "commit", "-m", "add duplicate issue evidence");
+      },
+      error: "目前分支有重複的 ISSUE 終端證據",
+    },
+    {
+      name: "mismatch",
+      mutate: (fixture) => {
+        const evidencePath = path.join(fixture.repository, "docs", "issues", fixture.fileName);
+        writeFileSync(
+          evidencePath,
+          readFileSync(evidencePath, "utf8").replace("issue_id: ISSUE-007", "issue_id: ISSUE-008"),
+          "utf8",
+        );
+        git(fixture.repository, "add", "docs/issues");
+        git(fixture.repository, "commit", "-m", "mismatch issue identity");
+      },
+      error: "ISSUE 終端證據的 issue_id 與檔名或分支不符",
+    },
+    {
+      name: "non-terminal",
+      mutate: (fixture) => {
+        const evidencePath = path.join(fixture.repository, "docs", "issues", fixture.fileName);
+        writeFileSync(
+          evidencePath,
+          readFileSync(evidencePath, "utf8").replace("status: complete", "status: in_progress"),
+          "utf8",
+        );
+        git(fixture.repository, "add", "docs/issues");
+        git(fixture.repository, "commit", "-m", "mark issue evidence non-terminal");
+      },
+      error: "ISSUE 終端證據尚未進入終態",
+    },
+  ];
+  for (const scenario of cases) {
+    const fixture = createIssueFixture();
+    try {
+      scenario.mutate(fixture);
+      const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+      const issue = snapshot.items.find((candidate) => candidate.id === "ISSUE-007");
+
+      assert.equal(issue.outcome, "UNKNOWN", scenario.name);
+      assert.equal(issue.evidenceState, "partial", scenario.name);
+      assert.deepEqual(issue.errors, [scenario.error], scenario.name);
+      assert.equal(issue.issue, null, scenario.name);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -433,26 +600,31 @@ test(
   },
 );
 
-test("keeps remote divergence and issue worktrees visible as separate evidence", () => {
+test("keeps remote divergence while a non-canonical integration branch cannot impersonate a TASK", () => {
   const fixture = createFixture({ terminalState: "WAITING_DEPENDENCY" });
-  const issueWorktree = path.join(fixture.root, "issue-worktree");
+  const integrationWorktree = path.join(fixture.root, "integration-worktree");
   try {
     writeFileSync(path.join(fixture.repository, "ahead.txt"), "ahead\n", "utf8");
     git(fixture.repository, "add", "ahead.txt");
     git(fixture.repository, "commit", "-m", "local ahead commit");
-    git(fixture.repository, "worktree", "add", "-b", "issue/42-readable-cards", issueWorktree, "main");
+    git(fixture.repository, "worktree", "add", "-b", "integration/task-101-task-102", integrationWorktree, "main");
 
     const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
     const task = snapshot.items.find((candidate) => candidate.id === "TASK-101");
-    const issue = snapshot.items.find((candidate) => candidate.id === "ISSUE-42");
+    const integration = snapshot.items.find(
+      (candidate) => candidate.branch === "integration/task-101-task-102",
+    );
 
     assert.equal(task.outcome, "WAITING_DEPENDENCY");
     assert.equal(task.git.sync.state, "ahead");
     assert.equal(task.git.sync.ahead, 1);
     assert.equal(task.git.sync.behind, 0);
-    assert.equal(issue.kind, "ISSUE");
-    assert.equal(issue.outcome, "UNKNOWN");
-    assert.equal(issue.git.sync.state, "no-upstream");
+    assert.equal(integration.id, "integration/task-101-task-102");
+    assert.equal(integration.kind, "BRANCH");
+    assert.equal(integration.outcome, "UNKNOWN");
+    assert.equal(integration.delivery.state, "NOT_APPLICABLE");
+    assert.equal(integration.dispatch.eligible, false);
+    assert.equal(integration.git.sync.state, "no-upstream");
     assert.ok(snapshot.items.every((item) => typeof item.evidenceState === "string"));
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });

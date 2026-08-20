@@ -2,9 +2,9 @@
 ticket_id: TASK-078
 title: Fail-closed engineering delivery finisher
 spec_id: SPEC-005
-spec_version: 5
+spec_version: 6
 module_id: engineering-delivery-finisher
-constitution_version: 1.4
+constitution_version: 1.5
 status: complete
 parallel_safe: false
 depends_on: [TASK-077]
@@ -28,9 +28,12 @@ allowed_paths:
   - docs/reviews/ARCHITECTURE_REVIEW_TASK_078_2026-08-20.md
   - docs/reviews/INTEGRATION_TASK_078_2026-08-20.md
   - scripts/check-project.mjs
+  - scripts/export-lattice-engineering-status.mjs
   - scripts/finish-lattice-delivery.mjs
+  - tools/engineering-status-dashboard/index.template.html
   - tools/engineering-status-dashboard/branch-guide.zh-TW.json
   - test/engineering-delivery-finisher.test.js
+  - test/engineering-status-dashboard.test.js
   - test/project-governance-check.test.js
 ---
 
@@ -85,6 +88,13 @@ identity, and policies are all required. Missing/GitHub-only evidence,
 duplicates, number mismatch, arbitrary feature branches, non-terminal state,
 or an existing TASK number collision fail closed. Issue 7/8 windows add their
 own evidence and rerun the finisher; this TASK-078 branch does not alter them.
+
+The dashboard reads the same captured-`HEAD`, unique terminal ISSUE evidence
+grammar and records a canonical branch's `delivery` readiness separately from
+the functional `outcome`. A completed TASK with an incomplete dependency is
+therefore `delivery.state: BLOCKED`, cannot be dispatched, and never supplies
+an archive implication. Non-canonical `integration/...` names are displayed as
+ordinary branches, never as a duplicate TASK identity.
 
 For parallel TASK branches, the committed terminal ticket itself is delivery
 authority: its branch number and exact `branch` must match, and every declared

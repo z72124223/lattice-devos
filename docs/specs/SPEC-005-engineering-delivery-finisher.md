@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-005
 title: Fail-closed engineering delivery finisher
-version: 5
+version: 6
 status: approved
 approved_by: direct_user_reply
 approved_at_local: 2026-08-20
@@ -74,6 +74,10 @@ The Codex task also remains open even when every delivery gate succeeded.
     policy. GitHub branch metadata alone is never delivery evidence.
     `PLANS.md` remains a planning index, not a delivery lock across parallel
     worktrees, and is not consulted for delivery authorization.
+12. The read-only dashboard exporter projects a canonical feature branch's
+    delivery readiness separately from its work outcome. It reads the captured
+    `HEAD` tree for terminal ISSUE evidence and declared TASK dependencies, so
+    uncommitted, GitHub-only, or dependency-blocked work cannot be dispatched.
 
 ## Module impact
 
@@ -112,6 +116,9 @@ public exporter command.
   malformed frontmatter, branch mismatch, missing remote, unknown policies.
 - Duplicate ISSUE identities, issue-number/branch mismatch, missing committed
   ISSUE evidence, or non-terminal ISSUE evidence.
+- Dashboard projection of valid committed ISSUE-007 and ISSUE-008 evidence,
+  plus rejection of uncommitted, duplicate, mismatched, and non-terminal ISSUE
+  evidence; a completed TASK with an incomplete dependency stays delivery-blocked.
 - Dashboard refresh succeeds after a push failure; the command still reports
   failure and forbids archiving.
 - `skip-worktree` or `assume-unchanged` cannot substitute ticket/PLANS
@@ -145,6 +152,10 @@ public exporter command.
    only their exact branches, while duplicate identities, branch-number
    mismatches, arbitrary feature branches, non-terminal evidence, unanchored
    GitHub-only branches, and TASK-number collisions fail closed.
+7. Focused dashboard evidence proves the same committed terminal ISSUE grammar
+   projects Issue 7/8 correctly, separates functional outcome from delivery
+   readiness, and cannot let a dependency-blocked TASK or integration branch
+   masquerading as a TASK become dispatchable.
 
 ## Non-goals
 
@@ -167,6 +178,9 @@ public exporter command.
 - v5 makes committed terminal ticket/evidence identity the parallel-delivery
   authority. Declared TASK dependencies must be verifiably complete in the
   same captured tree; PLANS is a non-authoritative planning index.
+- v6 aligns dashboard projection with captured delivery authority: ISSUE
+  evidence is HEAD-anchored and TASK dependency readiness is explicit rather
+  than inferred from a completed implementation outcome.
 
 ## Verification commands
 

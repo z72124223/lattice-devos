@@ -1,3 +1,43 @@
+# TASK-078 看板交付就緒修復交接 — 2026-08-21
+
+## 狀態
+
+`NEEDS_REVIEW`：ISSUE 終端證據投影與 TASK 交付就緒修復已完成、測試通過，
+等待本次乾淨提交後執行 finisher 的非強制推送與共用工程頁刷新。未合併、部署、
+發布或封存。
+
+## 本次修復
+
+- 看板從各 worktree 的 captured `HEAD` 讀取唯一的 ISSUE-007／ISSUE-008
+  終端證據；未提交、GitHub-only、重複、號碼／分支不符或非終態，一律維持
+  `UNKNOWN`／partial，不會被派工。
+- `outcome` 表示功能成果，新增 `delivery` 表示 finisher 交付就緒性。成功的
+  TASK 若已提交的 `depends_on` 不是唯一成功終態，會是 `delivery.state: BLOCKED`
+  並停止派工／封存暗示；不再將 TASK-043 類型的完成實作誤當可交付。
+- 僅 canonical `feature/task-NNN-*` 或 `feature/issue-NNN-*` 取得 TASK／ISSUE
+  identity。`integration/task-041-task-042` 等分支保持一般 `BRANCH`，不會與
+  `feature/task-041-rust-ci` 產生重複 TASK identity。
+
+## 驗證與審查
+
+- Dashboard focused：23/23 PASS；包含 Issue 7/8 成功與全部拒絕、依賴阻擋、
+  integration identity 回歸。
+- Finisher focused：41/41 PASS；governance：21/21 PASS。
+- `npm.cmd run check` PASS；`npm.cmd run verify`：123/123 PASS；
+  `git diff --check` PASS。
+- 程式碼／安全與架構自審：No P0/P1 findings；沒有新增 writer、Git mutation、
+  remote authority、服務或資料庫。獨立 reviewer `not proven`。
+
+## 交付與使用
+
+1. 建立此修復的乾淨 commit，執行 `npm.cmd run delivery:finish`。
+2. 成功輸出必須有非強制 push、精確 remote equality 與 dashboard refreshed；
+   由工頭核驗，不自行封存。
+3. Issue 7／8 工作窗口只需保留各自已提交的唯一終端 ISSUE evidence 後重跑
+   finisher；不建立或冒用 TASK-007／TASK-008。
+
+---
+
 # TASK-078 相容性修復交接 — 2026-08-21
 
 ## 狀態

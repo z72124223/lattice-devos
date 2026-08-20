@@ -1,7 +1,7 @@
 ---
 module_id: engineering-delivery-finisher
 name: Engineering Delivery Finisher
-constitution_version: 1.4
+constitution_version: 1.5
 status: active
 ---
 
@@ -82,6 +82,10 @@ repository state, recorded authorization, and task archival respectively.
     bounded push or local metadata effects.
 19. Refresh success requires both fixed regular dashboard files in staging;
     empty or partial output preserves the prior map and blocks archival.
+20. Dashboard projection distinguishes functional outcome from delivery
+    readiness. It uses captured-HEAD TASK dependency and ISSUE evidence only;
+    a blocked dependency or non-canonical integration branch cannot become an
+    archive or dispatch authority.
 
 ## Allowed Dependencies
 
@@ -143,3 +147,6 @@ approval and must not be added as a minor amendment.
   legacy issue branches without weakening TASK binding or merging namespaces.
 - 1.4 (2026-08-21): make captured ticket/evidence identity, not PLANS current
   focus, the delivery authority; validate declared TASK dependencies locally.
+- 1.5 (2026-08-21): align read-only dashboard readiness with the finisher and
+  make a successful implementation outcome insufficient when delivery remains
+  dependency-blocked.
