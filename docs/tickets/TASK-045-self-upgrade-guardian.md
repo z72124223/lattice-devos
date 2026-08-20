@@ -40,12 +40,12 @@ Gateway、OpenClaw、GPT、候選 binary、active daemon 與一般 task IPC 均�
 
 | 前置 owner／ticket | 基準 `845328d` 與 live 證據 | 本 ticket 判定 |
 |---|---|---|
-| Approval Verifier / TASK-015 | pure/fake subject、nonce、expiry、replay/current-head 已有；OS trust root、live crypto、protected atomic claim 未通過 | `BLOCKED` |
-| Project Registry / TASK-022 | pure owner 已有；SPEC-002 AC-36 與 current durable readiness 尚未形成可依賴 checkpoint | `BLOCKED` |
-| Writer Lease / TASK-014 + TASK-038 | pure lease 已有；TASK-038 的 real PostgreSQL lease/fence、restart、unknown-outcome acceptance 仍 `in-progress` | `BLOCKED` |
-| Artifact Store / TASK-016 | pure/fake owner 已有；SPEC-002 AC-19 durable metadata/filesystem lifecycle 仍 open | `BLOCKED` |
-| TASK-038 | Task Submit/Status、controlled Codex、fresh-process durable status 尚未 PASS | `BLOCKED` |
-| TASK-043 / Step 11 | 工作樹已乾淨且 ticket `completed` 於 `1460af8`；尚未取得 feature-to-feature merge policy／authorization，未整合到本 branch | `BLOCKED_INTEGRATION_AUTH` |
+| Approval Verifier / TASK-015 | pure/fake subject、nonce、expiry、replay/current-head 已有；OS trust root、live crypto、protected atomic claim 未通過。`origin/feature/task-023-025-durable-repositories` 後續含 TASK-024 normal-claim durability checkpoint，但 protected Guardian claim 仍明確 blocked 且該大型 cross-cutting branch 未整合到本 branch。 | `BLOCKED` |
+| Project Registry / TASK-022 | 本 branch 仍保留 paused ticket；`origin/feature/task-022-postgres-project-registry` 已有 completed durable checkpoint，但 diff 大幅重疊 runtime/Postgres/TASK-038 活躍面，未在本 TASK-045 branch 內整合。 | `BLOCKED_INTEGRATION_PENDING` |
+| Writer Lease / TASK-014 + TASK-038 | pure lease 已有；`origin/feature/task-023-025-durable-repositories` 後續含 TASK-023/TASK-076 live durability checkpoint，但該大型 cross-cutting branch 未整合到本 branch，TASK-038 final platform gates 仍需另行同步驗證。 | `BLOCKED_INTEGRATION_PENDING` |
+| Artifact Store / TASK-016 | pure/fake owner 已有；`origin/feature/task-023-025-durable-repositories` 後續含 TASK-025 metadata/filesystem durability checkpoint，但該大型 cross-cutting branch 未整合到本 branch。 | `BLOCKED_INTEGRATION_PENDING` |
+| TASK-038 | 本 branch 僅有 Phase 1 transport decision；後續 Task Submit/Status、controlled Codex、fresh-process durable status checkpoint 存在於大型 cross-cutting branches，未在本 branch 內完成整合與 current acceptance。 | `BLOCKED_INTEGRATION_PENDING` |
+| TASK-043 / Step 11 | 來源 branch `feature/task-043-codebase-memory-benchmark` 於 `1460af8` 完成，worktree clean；本 branch 已以 ordinary feature-to-feature merge 整合其 two-file benchmark/ticket checkpoint，無 GH-9/Issue7/Issue8 內容重疊，與 TASK-051 同名檔案 blob 相同。 | `READY_INTEGRATED` |
 | `self-upgrade-guardian` constitution | 已批准的 1.0 邊界已轉為獨立 active constitution；尚未因此取得 implementation 或 live authority | `READY_GOVERNANCE_ONLY` |
 
 任何一列未 ready 時，最多保留本 ticket 與 executable RED fixture，不得以 fake
@@ -99,7 +99,8 @@ stale expected state、duplicate first effect 或 epoch mismatch 必須 determin
 - [x] 獨立 active `self-upgrade-guardian` 1.0 constitution 已在 stable checkpoint 存在並
       通過治理驗證。
 - [ ] Approval/Registry/Lease/Artifact/TASK-038/TASK-043 所有上表前置均有 current
-      executable readiness evidence。
+      executable readiness evidence；TASK-043 已整合，其他 owner/TASK-038 仍需安全同步其
+      durable/live checkpoints。
 - [ ] 重新同步 stable base 後，另行擴充 implementation allowlist，完成 pure Guardian
       planner 與 narrow ports 的逐項 RED/GREEN。
 - [ ] protected OS identity/ACL/trust root 與 Guardian-only atomic claim 由 disposable
