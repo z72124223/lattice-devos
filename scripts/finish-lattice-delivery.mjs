@@ -312,14 +312,10 @@ function verifyEvidenceSubjects(repository, ticket, sourceHead) {
     }
     const subjectMetadata = matches[0];
     const nestedSubjects = parseEvidenceSubjects(subjectMetadata);
-    const nestedDependencies = parseTicketDependencies(subjectMetadata);
-    if (
-      nestedSubjects.includes(subject) ||
-      nestedSubjects.some((nestedSubject) => nestedDependencies.includes(nestedSubject))
-    ) {
+    if (nestedSubjects.includes(subject)) {
       throw commandFailure(
         "EVIDENCE_SUBJECT_INVALID",
-        "evidence subjects cannot reference themselves or also be delivery dependencies",
+        "evidence subjects cannot reference themselves",
       );
     }
     active.add(subject);

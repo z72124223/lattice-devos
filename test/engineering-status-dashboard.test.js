@@ -293,7 +293,7 @@ test("exports nonterminal evidence subjects as provenance without blocking a com
     );
     writeFileSync(
       path.join(fixture.repository, "docs", "tickets", "TASK-033-subject.md"),
-      "---\nticket_id: TASK-033\nstatus: in_progress\nbranch: feature/task-033-subject\n---\n",
+      "---\nticket_id: TASK-033\nstatus: in_progress\ndepends_on:\n  - TASK-999\nbranch: feature/task-033-subject\n---\n",
       "utf8",
     );
     git(fixture.repository, "add", "docs/tickets");

@@ -27,9 +27,10 @@ Independent read-only review: **No findings** after remediation.
   governance behavior.
 - `node --test test/project-governance-check.test.js`: 33/33 PASS.
 - `npm.cmd run check`: PASS.
+- 修復後完整 `npm.cmd run verify`: 139/139 PASS.
 - `git diff --check`: PASS.
 
 ## Residual risk
 
-The dashboard is a read-only projection, not task truth. A full repository
-regression run remains the final machine gate before delivery.
+The dashboard is a read-only projection, not task truth. No unresolved review
+finding remains; delivery still requires the finisher's post-push live checks.

@@ -1132,6 +1132,15 @@ test("evidence subjects record provenance without becoming successful delivery d
       branch: "feature/task-041-rust-ci",
       status: "in_progress",
     });
+    const subjectPath = path.join(fixture.repository, "docs", "tickets", "TASK-041-demo.md");
+    writeFileSync(
+      subjectPath,
+      readFileSync(subjectPath, "utf8").replace(
+        "status: in_progress\n",
+        "status: in_progress\ndepends_on:\n  - TASK-999\n",
+      ),
+      "utf8",
+    );
     git(fixture.repository, "add", "docs/tickets");
     git(fixture.repository, "commit", "-m", "record nonterminal evidence subject");
 

@@ -12,21 +12,23 @@
   成功終態交付門檻。非終態 subject 不會阻擋引用它的修復票，也不會被標成完成。
 - finisher 和 dashboard 從 captured HEAD 共同拒絕缺失、重複、非法、重疊、自指與
   provenance cycle；dashboard 輸出 `ticket.evidenceSubjects` 作為唯讀證據。
+- 第一次 finisher 以 `DEPENDENCY_INVALID` 保守停止：遞迴 subject 檢查錯誤解析
+  TASK-050 歷史 multi-line dependency。已修正為只走 provenance edges，並新增
+  legacy dependency regression；修復後完整回歸已通過，尚待提交後重跑交付。
 - Protocol 1.2、SPEC-005 v7、module constitution 1.6 與 project validator 均已
   同步；移除 protocol 規則會被治理測試拒絕。
 
 ## 已驗證
 
 - focused finisher／dashboard RED→GREEN；governance 33/33 PASS。
-- `npm.cmd run check` PASS；完整 `npm.cmd run verify` 139/139 PASS；
-  `git diff --check` PASS。
+- 修復後 `npm.cmd run verify` 139/139 PASS；`git diff --check` PASS。
 - 獨立 read-only code/security 與 architecture review：No findings。
 - 未執行 PR、合併、部署、發布或封存。
 
 ## 後續
 
-1. 重看最終 diff 與乾淨狀態，建立單一 TASK-089 commit。
-2. 執行 `npm.cmd run delivery:finish`。
+1. 重看最終 diff 與乾淨狀態，建立修復 commit。
+2. 重跑 `npm.cmd run delivery:finish`。
 3. 確認 local SHA、`ls-remote`、dashboard `generatedAt`／branch／HEAD／terminal
    status，回報工頭；本 worker 不自行封存。
 

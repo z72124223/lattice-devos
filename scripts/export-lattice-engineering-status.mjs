@@ -619,13 +619,7 @@ async function evidenceSubjectReadiness(worktreePath, ticket, sourceHead, depend
       const matches = taskIndex.get(subject) || [];
       if (matches.length !== 1) return false;
       const nestedSubjects = parseTaskReferenceList(matches[0], "evidence_subjects");
-      const nestedDependencies = parseTaskReferenceList(matches[0], "depends_on");
-      if (
-        !nestedSubjects ||
-        !nestedDependencies ||
-        nestedSubjects.includes(subject) ||
-        nestedSubjects.some((nestedSubject) => nestedDependencies.includes(nestedSubject))
-      ) {
+      if (!nestedSubjects || nestedSubjects.includes(subject)) {
         return false;
       }
       active.add(subject);
