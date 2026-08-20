@@ -27,7 +27,7 @@ base_commit: 845328dcc06d51c7554c93a09739a27ddd827941
 ## Objective
 
 先凍結 MVP-3 `self-upgrade-guardian` 1.0 的可執行純契約與 RED
-fixtures；等前置 owner 與 TASK-038 形成正式 stable checkpoint 後，才重新同步並另行
+fixtures；等前置 owner、TASK-038 與 TASK-043 形成可整合的 stable checkpoint 後，才重新同步並另行
 擴充 implementation `allowed_paths`。本 checkpoint 不建立 Guardian credential、角色、
 service 或 PostgreSQL procedure，不改 active slot，不停止正式服務，也不執行
 activation、deployment、release。
@@ -45,7 +45,7 @@ Gateway、OpenClaw、GPT、候選 binary、active daemon 與一般 task IPC 均�
 | Writer Lease / TASK-014 + TASK-038 | pure lease 已有；TASK-038 的 real PostgreSQL lease/fence、restart、unknown-outcome acceptance 仍 `in-progress` | `BLOCKED` |
 | Artifact Store / TASK-016 | pure/fake owner 已有；SPEC-002 AC-19 durable metadata/filesystem lifecycle 仍 open | `BLOCKED` |
 | TASK-038 | Task Submit/Status、controlled Codex、fresh-process durable status 尚未 PASS | `BLOCKED` |
-| TASK-043 / Step 11 | 現有工作樹有未提交變更，沒有可同步 stable checkpoint | `BLOCKED` |
+| TASK-043 / Step 11 | 工作樹已乾淨且 ticket `completed` 於 `1460af8`；尚未取得 feature-to-feature merge policy／authorization，未整合到本 branch | `BLOCKED_INTEGRATION_AUTH` |
 | `self-upgrade-guardian` constitution | 已批准的 1.0 邊界已轉為獨立 active constitution；尚未因此取得 implementation 或 live authority | `READY_GOVERNANCE_ONLY` |
 
 任何一列未 ready 時，最多保留本 ticket 與 executable RED fixture，不得以 fake
