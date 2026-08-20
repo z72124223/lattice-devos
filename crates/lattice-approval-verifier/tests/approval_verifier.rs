@@ -1,9 +1,12 @@
 use lattice_approval_verifier::{
     ApprovalChallenge, ApprovalCommand, ApprovalCommandOutcome, ApprovalCommandReceipt,
-    ApprovalDenial, ApprovalPhase, ApprovalVerifierError, ConsumeNormalApprovalCommand,
+    ApprovalDenial, ApprovalEffectClaimIntent, ApprovalIssueRequest, ApprovalNormalClaimExecution,
+    ApprovalNormalClaimRequest, ApprovalPhase, ApprovalRepository, ApprovalRepositoryCommand,
+    ApprovalVerifierCheckpoint, ApprovalVerifierError, ConsumeNormalApprovalCommand,
     FakeApprovalVerifier, FakeNormalSigner, FakeProtectedSigner, IssueApprovalCommand,
-    RevokeApprovalCommand, SecretMaterial, VerifyApprovalCommand, nonce_commitment,
-    verify_snapshot, verify_snapshot_against_checkpoint,
+    RevokeApprovalCommand, SecretMaterial, UntrustedApprovalSnapshot, VerifyApprovalCommand,
+    apply_normal_claim_plan, nonce_commitment, plan_normal_claim, verify_snapshot,
+    verify_snapshot_against_checkpoint,
 };
 use lattice_cjson::CanonicalValue;
 use lattice_contracts::{
@@ -11,11 +14,175 @@ use lattice_contracts::{
     ApprovalSubject, ContentDigest, DaemonEpoch, ExternalCostSubject, GuardianRuntimeSubject,
     MemoryCandidateSubject, MemoryKind, MergeSubject, MergeTarget, ProjectId, ProjectSnapshotId,
     ProtectedChangeClass, ProtectedChangeSubject, ProtectedReleaseSubject, ReleaseSubject,
-    RuntimeKind, SubjectBinding, TaskId, UpgradeDelta,
+    RuntimeAdmissionMode, RuntimeKind, SubjectBinding, TaskId, UpgradeDelta,
 };
 
 fn digest(character: char) -> ContentDigest {
     ContentDigest::from_sha256(character.to_string().repeat(64)).expect("test digest")
+}
+
+#[test]
+fn repository_contract_binds_exact_normal_effect_intent_without_component_dependency() {
+    let _: Option<&mut dyn ApprovalRepository> = None;
+    let intent = ApprovalEffectClaimIntent::new("task-transition", "effect-1", digest('e'))
+        .expect("bounded effect intent");
+    assert_eq!(intent.effect_kind(), "task-transition");
+    assert_eq!(intent.effect_id(), "effect-1");
+    assert_eq!(intent.effect_digest(), &digest('e'));
+
+    let verifier = verified_normal_fixture("approval-repository-contract");
+    let expected_head = verifier
+        .state_head("approval-repository-contract")
+        .expect("verified normal head");
+    let request = ApprovalNormalClaimRequest::new(
+        "claim-effect-1",
+        "approval-repository-contract",
+        expected_head,
+        intent,
+    )
+    .expect("bounded normal claim request");
+    let bytes = request
+        .canonical_bytes()
+        .expect("canonical repository intent");
+    assert!(!bytes.is_empty());
+    assert_eq!(request.command_id(), "claim-effect-1");
+    assert_eq!(request.effect().effect_id(), "effect-1");
+}
+
+#[test]
+fn repository_snapshot_and_checkpoint_bytes_round_trip_through_strict_replay() {
+    let verifier = verified_normal_fixture("approval-repository-round-trip");
+    let snapshot = verifier.export_snapshot();
+    let snapshot_bytes = snapshot
+        .canonical_bytes()
+        .expect("bounded canonical snapshot bytes");
+    let decoded_snapshot = UntrustedApprovalSnapshot::from_canonical_bytes(&snapshot_bytes)
+        .expect("strict snapshot bytes");
+    assert_eq!(
+        decoded_snapshot
+            .canonical_bytes()
+            .expect("re-encoded snapshot bytes"),
+        snapshot_bytes
+    );
+
+    let checkpoint = verifier.current_checkpoint().expect("trusted checkpoint");
+    let checkpoint_bytes = checkpoint
+        .canonical_bytes()
+        .expect("bounded canonical checkpoint bytes");
+    let decoded_checkpoint = ApprovalVerifierCheckpoint::from_canonical_bytes(&checkpoint_bytes)
+        .expect("strict checkpoint bytes");
+    assert_eq!(decoded_checkpoint, checkpoint);
+    verify_snapshot_against_checkpoint(&decoded_snapshot, &decoded_checkpoint)
+        .expect("repository bytes replay against independent checkpoint");
+}
+
+#[test]
+fn repository_issue_intent_excludes_time_until_database_observation_is_bound() {
+    let signer = normal_signer();
+    let request = ApprovalRepositoryCommand::Issue(ApprovalIssueRequest {
+        command_id: "repository-issue-1".to_owned(),
+        expected_head: None,
+        identity: normal_identity_with(
+            "approval-repository-issue",
+            "challenge-repository-issue",
+            digest('a'),
+        ),
+        nonce_id: "nonce-repository-issue".to_owned(),
+        nonce_commitment: digest('b'),
+        ttl_seconds: 300,
+        authenticator_id: signer.authenticator_id().to_owned(),
+        key_id: signer.key_id().to_owned(),
+        verification_key_commitment: signer.verification_key_commitment().clone(),
+        evidence_digest: signer.evidence_digest().clone(),
+        review_set_digest: None,
+    });
+    let intent_bytes = request.canonical_bytes().expect("repository issue intent");
+    let intent_text = std::str::from_utf8(&intent_bytes).expect("canonical UTF-8");
+    assert!(!intent_text.contains("2026-08-20T00:00:00Z"));
+    assert!(!intent_text.contains("2026-08-20T00:05:00Z"));
+
+    let ApprovalCommand::Issue(bound) = request
+        .bind_observation("2026-08-20T00:00:00Z", Some("2026-08-20T00:05:00Z"))
+        .expect("database observation binding")
+    else {
+        panic!("issue intent must bind to issue command")
+    };
+    assert_eq!(bound.runtime, RuntimeKind::Fake);
+    assert_eq!(bound.issued_at, "2026-08-20T00:00:00Z");
+    assert_eq!(bound.expires_at, "2026-08-20T00:05:00Z");
+}
+
+#[test]
+fn normal_effect_claim_plans_one_domain_consume_and_protected_lane_has_no_effect_receipt() {
+    let normal = verified_normal_fixture("approval-normal-effect-plan");
+    let normal_snapshot = normal.export_snapshot();
+    let normal_aggregate = verify_snapshot(&normal_snapshot).expect("normal aggregate");
+    let normal_head = normal
+        .state_head("approval-normal-effect-plan")
+        .expect("normal head");
+    let request = ApprovalNormalClaimRequest::new(
+        "normal-effect-plan-1",
+        "approval-normal-effect-plan",
+        normal_head,
+        ApprovalEffectClaimIntent::new("task-transition", "effect-plan-1", digest('e'))
+            .expect("effect"),
+    )
+    .expect("normal request");
+    let plan = plan_normal_claim(
+        &normal_aggregate,
+        request,
+        "2026-07-29T00:03:00Z",
+        "daemon-1",
+        DaemonEpoch::new(1).expect("epoch"),
+        RuntimeAdmissionMode::Active,
+    )
+    .expect("normal claim plan");
+    let ApprovalNormalClaimExecution::Claimed(claimed) = plan.execution() else {
+        panic!("normal approval must produce one effect claim")
+    };
+    assert_eq!(claimed.request().effect().effect_id(), "effect-plan-1");
+    assert_eq!(
+        claimed.approval_receipt().outcome,
+        ApprovalCommandOutcome::Applied
+    );
+    let normal_after =
+        apply_normal_claim_plan(&normal_aggregate, plan).expect("apply normal claim plan");
+    assert!(
+        normal_after
+            .current_authority_at("approval-normal-effect-plan", "2026-07-29T00:03:00Z")
+            .expect("currentness")
+            .is_none()
+    );
+
+    let protected = verified_protected_fixture("approval-protected-effect-plan");
+    let protected_aggregate =
+        verify_snapshot(&protected.export_snapshot()).expect("protected aggregate");
+    let protected_request = ApprovalNormalClaimRequest::new(
+        "protected-effect-plan-1",
+        "approval-protected-effect-plan",
+        protected
+            .state_head("approval-protected-effect-plan")
+            .expect("protected head"),
+        ApprovalEffectClaimIntent::new("release-activation", "effect-protected-1", digest('f'))
+            .expect("protected effect intent"),
+    )
+    .expect("protected request shape");
+    let protected_plan = plan_normal_claim(
+        &protected_aggregate,
+        protected_request,
+        "2026-07-29T00:03:00Z",
+        "daemon-1",
+        DaemonEpoch::new(1).expect("epoch"),
+        RuntimeAdmissionMode::Active,
+    )
+    .expect("protected terminal denial plan");
+    let ApprovalNormalClaimExecution::Denied(denied) = protected_plan.execution() else {
+        panic!("protected lane must not produce an effect claim")
+    };
+    assert_eq!(
+        denied.outcome,
+        ApprovalCommandOutcome::Denied(ApprovalDenial::NormalClaimRequired)
+    );
 }
 
 fn normal_identity_with(

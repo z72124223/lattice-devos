@@ -18,8 +18,8 @@
 | Specification | valid/current | SPEC-002 v36 and ADR-024 freeze global serialization, DB time/admission, normal claim and protected exclusion | documented + project check pass |
 | Module constitution | valid/current | Approval Verifier 1.1 and Postgres Approval Verifier 1.0 boundaries frozen; repository has no dedicated constitution validator | documented + project check pass |
 | Ticket/worktree | ready | TASK-024 dependency and exact allowlist updated on the dedicated branch; exactly one current marker | documented + project check pass |
-| TDD implementation | pending | first repository-trait RED not yet executed | missing |
-| Focused/full verification | pending | commands frozen in TASK-024 and constitutions | missing |
+| TDD implementation | partial/pass for pure 1.1 boundary | four observable RED/GREEN cycles: repository trait/effect intent, canonical snapshot/checkpoint bytes, DB-observation command binding, and normal-effect/protected-denial planning | machine-executed locally |
+| Focused/full verification | partial/pass for pure crate | Approval package 32 tests including 31 integration tests; strict crate Clippy, format, project and diff checks pass | machine-enforced locally; PostgreSQL pending |
 | Code/architecture review | pending | required after implementation | missing |
 | Live PostgreSQL | pending | marker-owned loopback-only fixture; protected ports excluded | missing |
 | Integration/CI/merge | local-only/not performed | no push, default merge, deployment, or release authorization | external controls intentionally absent |

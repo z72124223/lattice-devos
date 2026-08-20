@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
+use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256, canonicalize};
 use lattice_contracts::{
     APPROVAL_VERIFIER_PRODUCER_ID, APPROVAL_VERIFIER_PRODUCER_VERSION, ApprovalAuthority,
     ApprovalAuthorityHead, ApprovalAuthorityReceipt, ApprovalIdentity, ApprovalLane,
@@ -12,13 +12,16 @@ use lattice_contracts::{
     ContentDigest, DaemonEpoch, ExternalCostSubject, GuardianRuntimeSubject,
     MemoryCandidateSubject, MemoryKind, MergeSubject, MergeTarget, ProjectId, ProjectSnapshotId,
     ProtectedChangeClass, ProtectedChangeSubject, ProtectedReleaseSubject, ReleaseSubject,
-    RuntimeKind, SubjectBinding, TaskId, UpgradeDelta,
+    RuntimeAdmissionMode, RuntimeKind, SubjectBinding, TaskId, UpgradeDelta,
 };
 use time::format_description::well_known::Rfc3339;
-use time::{OffsetDateTime, UtcOffset};
+use time::{Duration, OffsetDateTime, UtcOffset};
 
 const SCHEMA_VERSION: &str = "1.0";
 const MAX_SIGNED_BIGINT: u64 = i64::MAX as u64;
+const MAX_REPOSITORY_INTENT_BYTES: usize = 1_048_576;
+const MAX_CANONICAL_SNAPSHOT_BYTES: usize = 8_388_608;
+const MAX_CANONICAL_NESTING_DEPTH: usize = 128;
 
 /// One stable terminal approval denial.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,6 +133,68 @@ impl fmt::Display for ApprovalVerifierError {
 }
 
 impl Error for ApprovalVerifierError {}
+
+/// Stable closed failure classes shared by fake conformance and durable
+/// Approval repositories.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ApprovalRepositoryErrorKind {
+    Domain,
+    Unavailable,
+    SerializationExhausted,
+    CommitOutcomeUnknown,
+    Corrupt,
+    AuthorityMismatch,
+}
+
+/// Component-free Approval repository failure. Concrete driver or database
+/// details never cross the domain-owned boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ApprovalRepositoryError {
+    kind: ApprovalRepositoryErrorKind,
+}
+
+impl ApprovalRepositoryError {
+    #[must_use]
+    pub const fn new(kind: ApprovalRepositoryErrorKind) -> Self {
+        Self { kind }
+    }
+
+    #[must_use]
+    pub const fn from_domain(_error: ApprovalVerifierError) -> Self {
+        Self::new(ApprovalRepositoryErrorKind::Domain)
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> ApprovalRepositoryErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self.kind {
+            ApprovalRepositoryErrorKind::Domain => "APPROVAL_REPOSITORY_DOMAIN",
+            ApprovalRepositoryErrorKind::Unavailable => "APPROVAL_REPOSITORY_UNAVAILABLE",
+            ApprovalRepositoryErrorKind::SerializationExhausted => {
+                "APPROVAL_REPOSITORY_SERIALIZATION_EXHAUSTED"
+            }
+            ApprovalRepositoryErrorKind::CommitOutcomeUnknown => {
+                "APPROVAL_REPOSITORY_COMMIT_OUTCOME_UNKNOWN"
+            }
+            ApprovalRepositoryErrorKind::Corrupt => "APPROVAL_REPOSITORY_CORRUPT",
+            ApprovalRepositoryErrorKind::AuthorityMismatch => {
+                "APPROVAL_REPOSITORY_AUTHORITY_MISMATCH"
+            }
+        }
+    }
+}
+
+impl fmt::Display for ApprovalRepositoryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl Error for ApprovalRepositoryError {}
 
 /// Ephemeral raw material accepted only to derive a safe commitment.
 ///
@@ -936,6 +1001,450 @@ impl ApprovalCommand {
     }
 }
 
+/// Caller-owned issue intent for a durable repository. Database issue time,
+/// expiry instant, and runtime observation are deliberately absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalIssueRequest {
+    pub command_id: String,
+    pub expected_head: Option<ApprovalStateHead>,
+    pub identity: ApprovalIdentity,
+    pub nonce_id: String,
+    pub nonce_commitment: ContentDigest,
+    pub ttl_seconds: u32,
+    pub authenticator_id: String,
+    pub key_id: String,
+    pub verification_key_commitment: ContentDigest,
+    pub evidence_digest: ContentDigest,
+    pub review_set_digest: Option<ContentDigest>,
+}
+
+/// Caller-owned proof intent. The durable repository supplies only the
+/// observation time; TASK-024 proof material remains visibly fake.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalVerifyRequest {
+    pub command_id: String,
+    pub approval_id: String,
+    pub expected_head: ApprovalStateHead,
+    pub proof: FakeApprovalProof,
+}
+
+/// Caller-owned exact revocation intent. Database time remains repository
+/// owned; authentication of live evidence is outside TASK-024.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalRevokeRequest {
+    pub command_id: String,
+    pub approval_id: String,
+    pub expected_head: ApprovalStateHead,
+    pub revoker_id: String,
+    pub revocation_evidence_digest: ContentDigest,
+}
+
+/// Closed non-claim command surface for a durable Approval repository.
+/// Normal claim has its own typed transaction and protected claim is absent.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApprovalRepositoryCommand {
+    Issue(ApprovalIssueRequest),
+    Verify(ApprovalVerifyRequest),
+    Revoke(ApprovalRevokeRequest),
+}
+
+impl ApprovalRepositoryCommand {
+    #[must_use]
+    pub fn command_id(&self) -> &str {
+        match self {
+            Self::Issue(request) => &request.command_id,
+            Self::Verify(request) => &request.command_id,
+            Self::Revoke(request) => &request.command_id,
+        }
+    }
+
+    #[must_use]
+    pub fn approval_id(&self) -> &str {
+        match self {
+            Self::Issue(request) => request.identity.approval_id(),
+            Self::Verify(request) => &request.approval_id,
+            Self::Revoke(request) => &request.approval_id,
+        }
+    }
+
+    /// Exports exact caller intent without database time/admission.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed intent, canonicalization failure, or oversized bytes.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ApprovalVerifierError> {
+        validate_repository_command(self)?;
+        let bytes = canonicalize(&repository_command_value(self))
+            .map_err(|_| ApprovalVerifierError::Canonical)?
+            .into_vec();
+        if bytes.len() > MAX_REPOSITORY_INTENT_BYTES {
+            return Err(ApprovalVerifierError::Canonical);
+        }
+        Ok(bytes)
+    }
+
+    /// Binds one transaction-owned observation to the existing pure command.
+    /// Issue requires an exact expiry equal to its requested TTL; verify and
+    /// revoke reject an expiry argument.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed observations, TTL mismatch, or an invalid pure
+    /// command without performing I/O.
+    pub fn bind_observation(
+        self,
+        observed_at: &str,
+        issue_expires_at: Option<&str>,
+    ) -> Result<ApprovalCommand, ApprovalVerifierError> {
+        validate_repository_command(&self)?;
+        let command = match self {
+            Self::Issue(request) => {
+                let expires_at = issue_expires_at.ok_or(ApprovalVerifierError::InvalidExpiry)?;
+                let observed = parse_canonical_utc(observed_at)?;
+                let expires = parse_canonical_utc(expires_at)?;
+                if expires - observed != Duration::seconds(i64::from(request.ttl_seconds)) {
+                    return Err(ApprovalVerifierError::InvalidExpiry);
+                }
+                ApprovalCommand::Issue(IssueApprovalCommand {
+                    command_id: request.command_id,
+                    expected_head: request.expected_head,
+                    runtime: RuntimeKind::Fake,
+                    identity: request.identity,
+                    nonce_id: request.nonce_id,
+                    nonce_commitment: request.nonce_commitment,
+                    issued_at: observed_at.to_owned(),
+                    expires_at: expires_at.to_owned(),
+                    authenticator_id: request.authenticator_id,
+                    key_id: request.key_id,
+                    verification_key_commitment: request.verification_key_commitment,
+                    evidence_digest: request.evidence_digest,
+                    review_set_digest: request.review_set_digest,
+                })
+            }
+            Self::Verify(request) => {
+                if issue_expires_at.is_some() {
+                    return Err(ApprovalVerifierError::InvalidExpiry);
+                }
+                ApprovalCommand::Verify(VerifyApprovalCommand {
+                    command_id: request.command_id,
+                    approval_id: request.approval_id,
+                    expected_head: request.expected_head,
+                    observed_at: observed_at.to_owned(),
+                    proof: request.proof,
+                })
+            }
+            Self::Revoke(request) => {
+                if issue_expires_at.is_some() {
+                    return Err(ApprovalVerifierError::InvalidExpiry);
+                }
+                ApprovalCommand::Revoke(RevokeApprovalCommand {
+                    command_id: request.command_id,
+                    approval_id: request.approval_id,
+                    expected_head: request.expected_head,
+                    observed_at: observed_at.to_owned(),
+                    revoker_id: request.revoker_id,
+                    revocation_evidence_digest: request.revocation_evidence_digest,
+                })
+            }
+        };
+        validate_command(&command)?;
+        Ok(command)
+    }
+}
+
+/// Exact caller-owned effect identity claimed by one normal approval.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalEffectClaimIntent {
+    kind: String,
+    id: String,
+    digest: ContentDigest,
+}
+
+impl ApprovalEffectClaimIntent {
+    /// Constructs one bounded, digest-bound effect intent.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed identifiers or a zero digest.
+    pub fn new(
+        effect_kind: impl Into<String>,
+        effect_id: impl Into<String>,
+        effect_digest: ContentDigest,
+    ) -> Result<Self, ApprovalVerifierError> {
+        let effect_kind = effect_kind.into();
+        let effect_id = effect_id.into();
+        validate_identifiers([effect_kind.as_str(), effect_id.as_str()])?;
+        if is_zero_digest(&effect_digest) {
+            return Err(ApprovalVerifierError::ZeroDigest);
+        }
+        Ok(Self {
+            kind: effect_kind,
+            id: effect_id,
+            digest: effect_digest,
+        })
+    }
+
+    #[must_use]
+    pub fn effect_kind(&self) -> &str {
+        &self.kind
+    }
+
+    #[must_use]
+    pub fn effect_id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub const fn effect_digest(&self) -> &ContentDigest {
+        &self.digest
+    }
+}
+
+/// Caller-owned normal claim intent. Database time, daemon/admission, and the
+/// derived domain claim digest are deliberately absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalNormalClaimRequest {
+    command_id: String,
+    approval_id: String,
+    expected_head: ApprovalStateHead,
+    effect: ApprovalEffectClaimIntent,
+}
+
+impl ApprovalNormalClaimRequest {
+    /// Constructs one exact normal effect-claim intent.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed identifiers or a head for another approval.
+    pub fn new(
+        command_id: impl Into<String>,
+        approval_id: impl Into<String>,
+        expected_head: ApprovalStateHead,
+        effect: ApprovalEffectClaimIntent,
+    ) -> Result<Self, ApprovalVerifierError> {
+        let command_id = command_id.into();
+        let approval_id = approval_id.into();
+        validate_identifiers([command_id.as_str(), approval_id.as_str()])?;
+        if expected_head.approval_id() != approval_id {
+            return Err(ApprovalVerifierError::Contract);
+        }
+        Ok(Self {
+            command_id,
+            approval_id,
+            expected_head,
+            effect,
+        })
+    }
+
+    #[must_use]
+    pub fn command_id(&self) -> &str {
+        &self.command_id
+    }
+
+    #[must_use]
+    pub fn approval_id(&self) -> &str {
+        &self.approval_id
+    }
+
+    #[must_use]
+    pub const fn expected_head(&self) -> &ApprovalStateHead {
+        &self.expected_head
+    }
+
+    #[must_use]
+    pub const fn effect(&self) -> &ApprovalEffectClaimIntent {
+        &self.effect
+    }
+
+    /// Exports exact caller-owned intent bytes. Repository observations are
+    /// excluded so exact retry remains stable across reconnect/restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonicalization or bounded-size failure.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ApprovalVerifierError> {
+        let bytes = canonicalize(&normal_claim_request_value(self))
+            .map_err(|_| ApprovalVerifierError::Canonical)?
+            .into_vec();
+        if bytes.len() > MAX_REPOSITORY_INTENT_BYTES {
+            return Err(ApprovalVerifierError::Canonical);
+        }
+        Ok(bytes)
+    }
+}
+
+/// Immutable repository receipt binding one applied normal consume to one
+/// exact effect claim and repository-owned observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalNormalClaimReceipt {
+    request: ApprovalNormalClaimRequest,
+    approval_receipt: ApprovalCommandReceipt,
+    observed_at: String,
+    daemon_instance_id: String,
+    daemon_epoch: DaemonEpoch,
+    admission: RuntimeAdmissionMode,
+    claim_digest: ContentDigest,
+    receipt_digest: ContentDigest,
+}
+
+impl ApprovalNormalClaimReceipt {
+    fn new(
+        request: ApprovalNormalClaimRequest,
+        approval_receipt: ApprovalCommandReceipt,
+        observed_at: String,
+        daemon_instance_id: String,
+        daemon_epoch: DaemonEpoch,
+        admission: RuntimeAdmissionMode,
+        claim_digest: ContentDigest,
+    ) -> Result<Self, ApprovalVerifierError> {
+        if approval_receipt.outcome != ApprovalCommandOutcome::Applied {
+            return Err(ApprovalVerifierError::Contract);
+        }
+        let ApprovalCommand::ConsumeNormal(command) = &approval_receipt.request else {
+            return Err(ApprovalVerifierError::Contract);
+        };
+        if command.command_id != request.command_id
+            || command.approval_id != request.approval_id
+            || command.expected_head != request.expected_head
+            || command.observed_at != observed_at
+            || command.claim_digest != claim_digest
+        {
+            return Err(ApprovalVerifierError::Contract);
+        }
+        let receipt_digest = normal_effect_receipt_digest(
+            &request,
+            &approval_receipt,
+            &observed_at,
+            &daemon_instance_id,
+            daemon_epoch,
+            admission,
+            &claim_digest,
+        )?;
+        Ok(Self {
+            request,
+            approval_receipt,
+            observed_at,
+            daemon_instance_id,
+            daemon_epoch,
+            admission,
+            claim_digest,
+            receipt_digest,
+        })
+    }
+}
+
+impl ApprovalNormalClaimReceipt {
+    #[must_use]
+    pub const fn request(&self) -> &ApprovalNormalClaimRequest {
+        &self.request
+    }
+
+    #[must_use]
+    pub const fn approval_receipt(&self) -> &ApprovalCommandReceipt {
+        &self.approval_receipt
+    }
+
+    #[must_use]
+    pub fn observed_at(&self) -> &str {
+        &self.observed_at
+    }
+
+    #[must_use]
+    pub fn daemon_instance_id(&self) -> &str {
+        &self.daemon_instance_id
+    }
+
+    #[must_use]
+    pub const fn daemon_epoch(&self) -> DaemonEpoch {
+        self.daemon_epoch
+    }
+
+    #[must_use]
+    pub const fn admission(&self) -> RuntimeAdmissionMode {
+        self.admission
+    }
+
+    #[must_use]
+    pub const fn claim_digest(&self) -> &ContentDigest {
+        &self.claim_digest
+    }
+
+    #[must_use]
+    pub const fn receipt_digest(&self) -> &ContentDigest {
+        &self.receipt_digest
+    }
+}
+
+/// Domain-owned durable Approval repository boundary. Implementations obtain
+/// database time/admission inside their transaction and invoke only public
+/// pure planning, apply, replay, and currentness functions.
+pub trait ApprovalRepository {
+    /// Executes one non-claim repository intent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed domain, availability, serialization, ambiguity,
+    /// corruption, or authority failure.
+    fn execute(
+        &mut self,
+        command: ApprovalRepositoryCommand,
+    ) -> Result<ApprovalCommandReceipt, ApprovalRepositoryError>;
+
+    /// Claims one normal approval with one exact effect intent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed domain, availability, serialization, ambiguity,
+    /// corruption, or authority failure.
+    fn claim_normal(
+        &mut self,
+        request: ApprovalNormalClaimRequest,
+    ) -> Result<ApprovalNormalClaimExecution, ApprovalRepositoryError>;
+
+    /// Loads one replay-verified current authority at repository-owned time.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed availability, corruption, or authority failure.
+    fn current_authority(
+        &mut self,
+        approval_id: &str,
+    ) -> Result<Option<ApprovalAuthorityHead>, ApprovalRepositoryError>;
+}
+
+/// A normal claim either atomically creates one exact effect claim or retains
+/// only the pure terminal denial receipt. Protected state can only take the
+/// denied branch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum ApprovalNormalClaimExecution {
+    Claimed(ApprovalNormalClaimReceipt),
+    Denied(ApprovalCommandReceipt),
+}
+
+/// Pure normal claim plan guarded by the complete aggregate digest.
+#[derive(Clone, Debug)]
+pub struct ApprovalNormalClaimPlan {
+    domain_plan: ApprovalVerifierPlan,
+    execution: ApprovalNormalClaimExecution,
+}
+
+impl ApprovalNormalClaimPlan {
+    #[must_use]
+    pub const fn execution(&self) -> &ApprovalNormalClaimExecution {
+        &self.execution
+    }
+
+    #[must_use]
+    pub const fn approval_receipt(&self) -> &ApprovalCommandReceipt {
+        match &self.execution {
+            ApprovalNormalClaimExecution::Claimed(receipt) => receipt.approval_receipt(),
+            ApprovalNormalClaimExecution::Denied(receipt) => receipt,
+        }
+    }
+}
+
 /// Applied or denied terminal command result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApprovalCommandOutcome {
@@ -965,6 +1474,49 @@ pub struct ApprovalCommandReceipt {
 pub struct UntrustedApprovalSnapshot {
     /// Raw canonical-value payload supplied by a future persistence adapter.
     pub payload: CanonicalValue,
+}
+
+impl UntrustedApprovalSnapshot {
+    /// Strictly parses exact canonical repository bytes and replays the full
+    /// semantic aggregate before returning the still-untrusted shape.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty/oversized/malformed/non-canonical bytes and every replay
+    /// failure.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, ApprovalVerifierError> {
+        if bytes.is_empty() || bytes.len() > MAX_CANONICAL_SNAPSHOT_BYTES {
+            return Err(ApprovalVerifierError::CorruptSnapshot);
+        }
+        let text =
+            std::str::from_utf8(bytes).map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
+        let payload = CanonicalJsonParser::new(text)
+            .parse()
+            .map_err(|()| ApprovalVerifierError::CorruptSnapshot)?;
+        let canonical =
+            canonicalize(&payload).map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
+        if canonical.as_slice() != bytes {
+            return Err(ApprovalVerifierError::CorruptSnapshot);
+        }
+        let snapshot = Self { payload };
+        let verified = verify_snapshot_inner(&snapshot, SnapshotComparison::CanonicalBytes)?;
+        Ok(verified.export_untrusted())
+    }
+
+    /// Exports the exact bounded canonical repository bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns canonicalization or size failures.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ApprovalVerifierError> {
+        let bytes = canonicalize(&self.payload)
+            .map_err(|_| ApprovalVerifierError::Canonical)?
+            .into_vec();
+        if bytes.len() > MAX_CANONICAL_SNAPSHOT_BYTES {
+            return Err(ApprovalVerifierError::CorruptSnapshot);
+        }
+        Ok(bytes)
+    }
 }
 
 impl fmt::Debug for UntrustedApprovalSnapshot {
@@ -1034,6 +1586,83 @@ impl ApprovalVerifierCheckpoint {
     pub const fn snapshot_digest(&self) -> &ContentDigest {
         &self.snapshot_digest
     }
+
+    /// Strictly reconstructs independently persisted checkpoint bytes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed/non-canonical bytes, unknown fields, invalid digests,
+    /// and inconsistent high-water/tail combinations.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, ApprovalVerifierError> {
+        if bytes.is_empty() || bytes.len() > MAX_REPOSITORY_INTENT_BYTES {
+            return Err(ApprovalVerifierError::CheckpointMismatch);
+        }
+        let text =
+            std::str::from_utf8(bytes).map_err(|_| ApprovalVerifierError::CheckpointMismatch)?;
+        let value = CanonicalJsonParser::new(text)
+            .parse()
+            .map_err(|()| ApprovalVerifierError::CheckpointMismatch)?;
+        let canonical =
+            canonicalize(&value).map_err(|_| ApprovalVerifierError::CheckpointMismatch)?;
+        if canonical.as_slice() != bytes {
+            return Err(ApprovalVerifierError::CheckpointMismatch);
+        }
+        let object = RawObject::exact(
+            &value,
+            &[
+                "version",
+                "command_high_water",
+                "command_tail_digest",
+                "nonce_bindings_digest",
+                "snapshot_digest",
+            ],
+        )
+        .map_err(|_| ApprovalVerifierError::CheckpointMismatch)?;
+        if raw_string(object.value("version")?)? != "1.0" {
+            return Err(ApprovalVerifierError::CheckpointMismatch);
+        }
+        Self::new(
+            raw_u64(object.value("command_high_water")?)?,
+            parse_optional_digest(object.value("command_tail_digest")?)?,
+            parse_digest(object.value("nonce_bindings_digest")?)?,
+            parse_digest(object.value("snapshot_digest")?)?,
+        )
+    }
+
+    /// Exports the exact bounded canonical checkpoint bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns canonicalization or size failures.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ApprovalVerifierError> {
+        let bytes = canonicalize(&CanonicalValue::Object(vec![
+            ("version".to_owned(), string("1.0")),
+            (
+                "command_high_water".to_owned(),
+                string(self.command_high_water.to_string()),
+            ),
+            (
+                "command_tail_digest".to_owned(),
+                self.command_tail_digest
+                    .as_ref()
+                    .map_or(CanonicalValue::Null, |value| string(value.as_str())),
+            ),
+            (
+                "nonce_bindings_digest".to_owned(),
+                string(self.nonce_bindings_digest.as_str()),
+            ),
+            (
+                "snapshot_digest".to_owned(),
+                string(self.snapshot_digest.as_str()),
+            ),
+        ]))
+        .map_err(|_| ApprovalVerifierError::Canonical)?
+        .into_vec();
+        if bytes.len() > MAX_REPOSITORY_INTENT_BYTES {
+            return Err(ApprovalVerifierError::CheckpointMismatch);
+        }
+        Ok(bytes)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1078,6 +1707,38 @@ impl VerifiedApprovalAggregate {
         self.approvals
             .get(approval_id)
             .and_then(|record| state_head(record).ok())
+    }
+
+    /// Returns the complete authority head only while the approval is verified,
+    /// available, and current at one explicit owner observation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed observation timestamps.
+    pub fn current_authority_at(
+        &self,
+        approval_id: &str,
+        observed_at: &str,
+    ) -> Result<Option<ApprovalAuthorityHead>, ApprovalVerifierError> {
+        let observed = parse_canonical_utc(observed_at)?;
+        let Some(record) = self.approvals.get(approval_id) else {
+            return Ok(None);
+        };
+        if !matches!(
+            record.phase,
+            ApprovalPhase::VerifiedAvailable | ApprovalPhase::VerifiedProtectedPendingClaim
+        ) {
+            return Ok(None);
+        }
+        let issued = parse_canonical_utc(&record.challenge.issued_at)?;
+        let expires = parse_canonical_utc(&record.challenge.expires_at)?;
+        if observed < issued || observed >= expires {
+            return Ok(None);
+        }
+        Ok(record
+            .authority_receipt
+            .as_ref()
+            .map(ApprovalAuthorityReceipt::head))
     }
 
     /// Returns one issued challenge.
@@ -1243,6 +1904,75 @@ pub fn apply_plan(
     Ok(plan.next)
 }
 
+/// Plans one normal approval consume and, only for an applied domain outcome,
+/// one exact effect-claim receipt. No I/O or mutation occurs.
+///
+/// # Errors
+///
+/// Rejects malformed repository observations, non-ACTIVE admission, or any
+/// underlying pure planner/claim-receipt failure.
+pub fn plan_normal_claim(
+    current: &VerifiedApprovalAggregate,
+    request: ApprovalNormalClaimRequest,
+    observed_at: &str,
+    daemon_instance_id: &str,
+    daemon_epoch: DaemonEpoch,
+    admission: RuntimeAdmissionMode,
+) -> Result<ApprovalNormalClaimPlan, ApprovalVerifierError> {
+    request.canonical_bytes()?;
+    parse_canonical_utc(observed_at)?;
+    validate_identifier(daemon_instance_id)?;
+    if admission != RuntimeAdmissionMode::Active {
+        return Err(ApprovalVerifierError::Contract);
+    }
+    let claim_digest = normal_effect_claim_digest(
+        &request,
+        observed_at,
+        daemon_instance_id,
+        daemon_epoch,
+        admission,
+    )?;
+    let command = ApprovalCommand::ConsumeNormal(ConsumeNormalApprovalCommand {
+        command_id: request.command_id.clone(),
+        approval_id: request.approval_id.clone(),
+        expected_head: request.expected_head.clone(),
+        observed_at: observed_at.to_owned(),
+        claim_digest: claim_digest.clone(),
+    });
+    let domain_plan = plan_command(current, &command)?;
+    let domain_receipt = domain_plan.receipt().clone();
+    let execution = match domain_receipt.outcome {
+        ApprovalCommandOutcome::Applied => {
+            ApprovalNormalClaimExecution::Claimed(ApprovalNormalClaimReceipt::new(
+                request,
+                domain_receipt,
+                observed_at.to_owned(),
+                daemon_instance_id.to_owned(),
+                daemon_epoch,
+                admission,
+                claim_digest,
+            )?)
+        }
+        ApprovalCommandOutcome::Denied(_) => ApprovalNormalClaimExecution::Denied(domain_receipt),
+    };
+    Ok(ApprovalNormalClaimPlan {
+        domain_plan,
+        execution,
+    })
+}
+
+/// Applies one normal claim plan only to the exact aggregate used to plan it.
+///
+/// # Errors
+///
+/// Rejects a changed aggregate without partial mutation.
+pub fn apply_normal_claim_plan(
+    current: &VerifiedApprovalAggregate,
+    plan: ApprovalNormalClaimPlan,
+) -> Result<VerifiedApprovalAggregate, ApprovalVerifierError> {
+    apply_plan(current, plan.domain_plan)
+}
+
 /// Strictly decodes and replays every command from an untrusted snapshot.
 ///
 /// # Errors
@@ -1252,6 +1982,19 @@ pub fn apply_plan(
 /// and derived-state disagreement.
 pub fn verify_snapshot(
     snapshot: &UntrustedApprovalSnapshot,
+) -> Result<VerifiedApprovalAggregate, ApprovalVerifierError> {
+    verify_snapshot_inner(snapshot, SnapshotComparison::RawProjection)
+}
+
+#[derive(Clone, Copy)]
+enum SnapshotComparison {
+    RawProjection,
+    CanonicalBytes,
+}
+
+fn verify_snapshot_inner(
+    snapshot: &UntrustedApprovalSnapshot,
+    comparison: SnapshotComparison,
 ) -> Result<VerifiedApprovalAggregate, ApprovalVerifierError> {
     let decoded = decode_snapshot(&snapshot.payload)?;
     if decoded.command_high_water > MAX_SIGNED_BIGINT {
@@ -1284,21 +2027,51 @@ pub fn verify_snapshot(
         }
         let plan = plan_command(&replayed, &raw.request)
             .map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
+        let terminal_matches = snapshot_values_match(
+            &terminal_receipt_value(plan.receipt()),
+            &raw.raw,
+            comparison,
+        )?;
         if plan.is_exact_retry()
             || plan.receipt.receipt_digest != raw.receipt_digest
-            || terminal_receipt_value(plan.receipt()) != raw.raw
+            || !terminal_matches
         {
             return Err(ApprovalVerifierError::CorruptSnapshot);
         }
         replayed =
             apply_plan(&replayed, plan).map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
     }
-    if nonce_bindings_digest(&replayed)? != decoded.nonce_bindings_digest
-        || replayed.export_untrusted() != *snapshot
-    {
+    if nonce_bindings_digest(&replayed)? != decoded.nonce_bindings_digest {
+        return Err(ApprovalVerifierError::CorruptSnapshot);
+    }
+    let replayed_snapshot = replayed.export_untrusted();
+    let projection_matches = match comparison {
+        SnapshotComparison::RawProjection => replayed_snapshot == *snapshot,
+        SnapshotComparison::CanonicalBytes => {
+            replayed_snapshot.canonical_bytes()? == snapshot.canonical_bytes()?
+        }
+    };
+    if !projection_matches {
         return Err(ApprovalVerifierError::CorruptSnapshot);
     }
     Ok(replayed)
+}
+
+fn snapshot_values_match(
+    expected: &CanonicalValue,
+    actual: &CanonicalValue,
+    comparison: SnapshotComparison,
+) -> Result<bool, ApprovalVerifierError> {
+    match comparison {
+        SnapshotComparison::RawProjection => Ok(expected == actual),
+        SnapshotComparison::CanonicalBytes => {
+            let expected =
+                canonicalize(expected).map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
+            let actual =
+                canonicalize(actual).map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
+            Ok(expected == actual)
+        }
+    }
 }
 
 /// Verifies a raw snapshot against an independently retained current
@@ -1425,25 +2198,8 @@ impl FakeApprovalVerifier {
         approval_id: &str,
         observed_at: &str,
     ) -> Result<Option<ApprovalAuthorityHead>, ApprovalVerifierError> {
-        let observed = parse_canonical_utc(observed_at)?;
-        let Some(record) = self.aggregate.approvals.get(approval_id) else {
-            return Ok(None);
-        };
-        if !matches!(
-            record.phase,
-            ApprovalPhase::VerifiedAvailable | ApprovalPhase::VerifiedProtectedPendingClaim
-        ) {
-            return Ok(None);
-        }
-        let issued = parse_canonical_utc(&record.challenge.issued_at)?;
-        let expires = parse_canonical_utc(&record.challenge.expires_at)?;
-        if observed < issued || observed >= expires {
-            return Ok(None);
-        }
-        Ok(record
-            .authority_receipt
-            .as_ref()
-            .map(ApprovalAuthorityReceipt::head))
+        self.aggregate
+            .current_authority_at(approval_id, observed_at)
     }
 
     /// Returns immutable terminal command history.
@@ -2616,6 +3372,138 @@ fn guardian_value(guardian: &FakeGuardianBinding) -> CanonicalValue {
     ])
 }
 
+fn validate_repository_command(
+    command: &ApprovalRepositoryCommand,
+) -> Result<(), ApprovalVerifierError> {
+    validate_identifiers([command.command_id(), command.approval_id()])?;
+    match command {
+        ApprovalRepositoryCommand::Issue(request) => {
+            if request.ttl_seconds == 0 || request.ttl_seconds > 86_400 {
+                return Err(ApprovalVerifierError::InvalidExpiry);
+            }
+            validate_identifiers([
+                request.identity.challenge_id(),
+                request.identity.requester_id(),
+                request.identity.approver_id(),
+                request.identity.channel_id(),
+                request.identity.session_id(),
+                &request.nonce_id,
+                &request.authenticator_id,
+                &request.key_id,
+            ])?;
+            request
+                .identity
+                .subject()
+                .validate()
+                .map_err(|_| ApprovalVerifierError::Contract)?;
+            if request
+                .expected_head
+                .as_ref()
+                .is_some_and(|head| head.approval_id() != request.identity.approval_id())
+            {
+                return Err(ApprovalVerifierError::Contract);
+            }
+            for digest in [
+                &request.nonce_commitment,
+                &request.verification_key_commitment,
+                &request.evidence_digest,
+            ]
+            .into_iter()
+            .chain(request.review_set_digest.iter())
+            {
+                if is_zero_digest(digest) {
+                    return Err(ApprovalVerifierError::ZeroDigest);
+                }
+            }
+        }
+        ApprovalRepositoryCommand::Verify(request) => {
+            if request.expected_head.approval_id() != request.approval_id {
+                return Err(ApprovalVerifierError::Contract);
+            }
+        }
+        ApprovalRepositoryCommand::Revoke(request) => {
+            validate_identifier(&request.revoker_id)?;
+            if request.expected_head.approval_id() != request.approval_id {
+                return Err(ApprovalVerifierError::Contract);
+            }
+            if is_zero_digest(&request.revocation_evidence_digest) {
+                return Err(ApprovalVerifierError::ZeroDigest);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn repository_command_value(command: &ApprovalRepositoryCommand) -> CanonicalValue {
+    match command {
+        ApprovalRepositoryCommand::Issue(request) => CanonicalValue::Object(vec![
+            ("version".to_owned(), string("1.0")),
+            ("kind".to_owned(), string("ISSUE")),
+            ("command_id".to_owned(), string(&request.command_id)),
+            (
+                "expected_head".to_owned(),
+                optional_head(request.expected_head.as_ref()),
+            ),
+            ("identity".to_owned(), identity_value(&request.identity)),
+            ("nonce_id".to_owned(), string(&request.nonce_id)),
+            (
+                "nonce_commitment".to_owned(),
+                string(request.nonce_commitment.as_str()),
+            ),
+            (
+                "ttl_seconds".to_owned(),
+                string(request.ttl_seconds.to_string()),
+            ),
+            (
+                "authenticator_id".to_owned(),
+                string(&request.authenticator_id),
+            ),
+            ("key_id".to_owned(), string(&request.key_id)),
+            (
+                "verification_key_commitment".to_owned(),
+                string(request.verification_key_commitment.as_str()),
+            ),
+            (
+                "evidence_digest".to_owned(),
+                string(request.evidence_digest.as_str()),
+            ),
+            (
+                "review_set_digest".to_owned(),
+                request
+                    .review_set_digest
+                    .as_ref()
+                    .map_or(CanonicalValue::Null, |digest| string(digest.as_str())),
+            ),
+        ]),
+        ApprovalRepositoryCommand::Verify(request) => CanonicalValue::Object(vec![
+            ("version".to_owned(), string("1.0")),
+            ("kind".to_owned(), string("VERIFY")),
+            ("command_id".to_owned(), string(&request.command_id)),
+            ("approval_id".to_owned(), string(&request.approval_id)),
+            (
+                "expected_head".to_owned(),
+                state_head_value(&request.expected_head),
+            ),
+            ("proof".to_owned(), proof_value(&request.proof)),
+        ]),
+        ApprovalRepositoryCommand::Revoke(request) => CanonicalValue::Object(vec![
+            ("version".to_owned(), string("1.0")),
+            ("kind".to_owned(), string("REVOKE")),
+            ("command_id".to_owned(), string(&request.command_id)),
+            ("approval_id".to_owned(), string(&request.approval_id)),
+            (
+                "expected_head".to_owned(),
+                state_head_value(&request.expected_head),
+            ),
+            ("revoker_id".to_owned(), string(&request.revoker_id)),
+            (
+                "revocation_evidence_digest".to_owned(),
+                string(request.revocation_evidence_digest.as_str()),
+            ),
+        ]),
+    }
+}
+
 fn command_value(command: &ApprovalCommand) -> CanonicalValue {
     match command {
         ApprovalCommand::Issue(command) => CanonicalValue::Object(vec![
@@ -3011,6 +3899,191 @@ struct RawTerminalCommand {
     request: ApprovalCommand,
     receipt_digest: ContentDigest,
     raw: CanonicalValue,
+}
+
+/// Minimal bounded parser for the frozen canonical JSON value model. Numbers,
+/// whitespace, trailing bytes, and non-canonical alternate encodings are not
+/// accepted by the repository byte boundary.
+struct CanonicalJsonParser<'a> {
+    input: &'a str,
+    position: usize,
+}
+
+impl<'a> CanonicalJsonParser<'a> {
+    const fn new(input: &'a str) -> Self {
+        Self { input, position: 0 }
+    }
+
+    fn parse(mut self) -> Result<CanonicalValue, ()> {
+        let value = self.value(0)?;
+        if self.position != self.input.len() {
+            return Err(());
+        }
+        Ok(value)
+    }
+
+    fn value(&mut self, depth: usize) -> Result<CanonicalValue, ()> {
+        if depth > MAX_CANONICAL_NESTING_DEPTH {
+            return Err(());
+        }
+        match self.peek() {
+            Some(b'n') => {
+                self.literal("null")?;
+                Ok(CanonicalValue::Null)
+            }
+            Some(b't') => {
+                self.literal("true")?;
+                Ok(CanonicalValue::Bool(true))
+            }
+            Some(b'f') => {
+                self.literal("false")?;
+                Ok(CanonicalValue::Bool(false))
+            }
+            Some(b'"') => self.string().map(CanonicalValue::String),
+            Some(b'[') => self.array(depth),
+            Some(b'{') => self.object(depth),
+            _ => Err(()),
+        }
+    }
+
+    fn array(&mut self, depth: usize) -> Result<CanonicalValue, ()> {
+        self.byte(b'[')?;
+        let mut values = Vec::new();
+        if self.take(b']') {
+            return Ok(CanonicalValue::Array(values));
+        }
+        loop {
+            values.push(self.value(depth + 1)?);
+            if self.take(b']') {
+                break;
+            }
+            self.byte(b',')?;
+        }
+        Ok(CanonicalValue::Array(values))
+    }
+
+    fn object(&mut self, depth: usize) -> Result<CanonicalValue, ()> {
+        self.byte(b'{')?;
+        let mut entries = Vec::new();
+        if self.take(b'}') {
+            return Ok(CanonicalValue::Object(entries));
+        }
+        loop {
+            let key = self.string()?;
+            self.byte(b':')?;
+            entries.push((key, self.value(depth + 1)?));
+            if self.take(b'}') {
+                break;
+            }
+            self.byte(b',')?;
+        }
+        Ok(CanonicalValue::Object(entries))
+    }
+
+    fn string(&mut self) -> Result<String, ()> {
+        self.byte(b'"')?;
+        let mut output = String::new();
+        loop {
+            let byte = self.peek().ok_or(())?;
+            match byte {
+                b'"' => {
+                    self.position += 1;
+                    return Ok(output);
+                }
+                b'\\' => {
+                    self.position += 1;
+                    self.escape(&mut output)?;
+                }
+                0x00..=0x1f => return Err(()),
+                _ => {
+                    let character = self.input[self.position..].chars().next().ok_or(())?;
+                    output.push(character);
+                    self.position += character.len_utf8();
+                }
+            }
+        }
+    }
+
+    fn escape(&mut self, output: &mut String) -> Result<(), ()> {
+        let escaped = self.peek().ok_or(())?;
+        self.position += 1;
+        match escaped {
+            b'"' => output.push('"'),
+            b'\\' => output.push('\\'),
+            b'/' => output.push('/'),
+            b'b' => output.push('\u{8}'),
+            b'f' => output.push('\u{c}'),
+            b'n' => output.push('\n'),
+            b'r' => output.push('\r'),
+            b't' => output.push('\t'),
+            b'u' => self.unicode_escape(output)?,
+            _ => return Err(()),
+        }
+        Ok(())
+    }
+
+    fn unicode_escape(&mut self, output: &mut String) -> Result<(), ()> {
+        let first = self.hex_quad()?;
+        let scalar = if (0xd800..=0xdbff).contains(&first) {
+            self.byte(b'\\')?;
+            self.byte(b'u')?;
+            let second = self.hex_quad()?;
+            if !(0xdc00..=0xdfff).contains(&second) {
+                return Err(());
+            }
+            0x1_0000 + ((u32::from(first) - 0xd800) << 10) + (u32::from(second) - 0xdc00)
+        } else if (0xdc00..=0xdfff).contains(&first) {
+            return Err(());
+        } else {
+            u32::from(first)
+        };
+        output.push(char::from_u32(scalar).ok_or(())?);
+        Ok(())
+    }
+
+    fn hex_quad(&mut self) -> Result<u16, ()> {
+        let mut value = 0_u16;
+        for _ in 0..4 {
+            let digit = match self.peek().ok_or(())? {
+                b'0'..=b'9' => u16::from(self.input.as_bytes()[self.position] - b'0'),
+                b'a'..=b'f' => u16::from(self.input.as_bytes()[self.position] - b'a' + 10),
+                b'A'..=b'F' => u16::from(self.input.as_bytes()[self.position] - b'A' + 10),
+                _ => return Err(()),
+            };
+            self.position += 1;
+            value = value
+                .checked_mul(16)
+                .and_then(|current| current.checked_add(digit))
+                .ok_or(())?;
+        }
+        Ok(value)
+    }
+
+    fn literal(&mut self, value: &str) -> Result<(), ()> {
+        if self.input[self.position..].starts_with(value) {
+            self.position += value.len();
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    fn byte(&mut self, expected: u8) -> Result<(), ()> {
+        if self.take(expected) { Ok(()) } else { Err(()) }
+    }
+
+    fn take(&mut self, expected: u8) -> bool {
+        if self.peek() == Some(expected) {
+            self.position += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.input.as_bytes().get(self.position).copied()
+    }
 }
 
 struct RawObject<'a> {
@@ -3696,6 +4769,78 @@ fn raw_u64(value: &CanonicalValue) -> Result<u64, ApprovalVerifierError> {
     value
         .parse()
         .map_err(|_| ApprovalVerifierError::CorruptSnapshot)
+}
+
+fn normal_claim_request_value(request: &ApprovalNormalClaimRequest) -> CanonicalValue {
+    CanonicalValue::Object(vec![
+        ("version".to_owned(), string("1.0")),
+        ("kind".to_owned(), string("NORMAL_EFFECT_CLAIM")),
+        ("command_id".to_owned(), string(&request.command_id)),
+        ("approval_id".to_owned(), string(&request.approval_id)),
+        (
+            "expected_head".to_owned(),
+            state_head_value(&request.expected_head),
+        ),
+        (
+            "effect".to_owned(),
+            CanonicalValue::Object(vec![
+                ("kind".to_owned(), string(&request.effect.kind)),
+                ("id".to_owned(), string(&request.effect.id)),
+                ("digest".to_owned(), string(request.effect.digest.as_str())),
+            ]),
+        ),
+    ])
+}
+
+fn normal_effect_claim_digest(
+    request: &ApprovalNormalClaimRequest,
+    observed_at: &str,
+    daemon_instance_id: &str,
+    daemon_epoch: DaemonEpoch,
+    admission: RuntimeAdmissionMode,
+) -> Result<ContentDigest, ApprovalVerifierError> {
+    digest(
+        "lattice-approval-normal-effect-claim",
+        CanonicalValue::Object(vec![
+            ("request".to_owned(), normal_claim_request_value(request)),
+            ("observed_at".to_owned(), string(observed_at)),
+            ("daemon_instance_id".to_owned(), string(daemon_instance_id)),
+            (
+                "daemon_epoch".to_owned(),
+                string(daemon_epoch.get().to_string()),
+            ),
+            ("admission".to_owned(), string(admission.as_str())),
+        ]),
+    )
+}
+
+fn normal_effect_receipt_digest(
+    request: &ApprovalNormalClaimRequest,
+    approval_receipt: &ApprovalCommandReceipt,
+    observed_at: &str,
+    daemon_instance_id: &str,
+    daemon_epoch: DaemonEpoch,
+    admission: RuntimeAdmissionMode,
+    claim_digest: &ContentDigest,
+) -> Result<ContentDigest, ApprovalVerifierError> {
+    digest(
+        "lattice-approval-normal-effect-claim-receipt",
+        CanonicalValue::Object(vec![
+            ("request".to_owned(), normal_claim_request_value(request)),
+            (
+                "approval_receipt".to_owned(),
+                terminal_receipt_value(approval_receipt),
+            ),
+            ("observed_at".to_owned(), string(observed_at)),
+            ("daemon_instance_id".to_owned(), string(daemon_instance_id)),
+            (
+                "daemon_epoch".to_owned(),
+                string(daemon_epoch.get().to_string()),
+            ),
+            ("admission".to_owned(), string(admission.as_str())),
+            ("claim_digest".to_owned(), string(claim_digest.as_str())),
+        ]),
+    )
 }
 
 #[allow(clippy::needless_pass_by_value)]
