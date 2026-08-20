@@ -7,13 +7,18 @@ module_id: postgres-writer-lease
 constitution_version: 1.2
 status: completed
 parallel_safe: false
-depends_on:
+depends_on: []
+evidence_references:
   - commit:65f2902504e5ef5acba6f258b736905fd4d12a4d
   - evidence:23a552e
   - evidence:92d93b1
 branch: feature/task-087-writer-lease-v3-schema-bridge
 implementation_worktree: lattice-worktrees/task-087-writer-lease-v3-schema-bridge
 implementation_base: 65f2902504e5ef5acba6f258b736905fd4d12a4d
+delivery_remote: origin
+delivery_repository: github.com/z72124223/lattice-devos
+delivery_push: authorized_non_force_feature_branch
+delivery_archive: keep_open
 allowed_paths:
   - crates/lattice-postgres-writer-lease/src/lib.rs
   - crates/lattice-postgres-writer-lease/src/setup.rs
