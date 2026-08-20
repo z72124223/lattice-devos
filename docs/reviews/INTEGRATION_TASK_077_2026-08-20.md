@@ -1,3 +1,46 @@
+# TASK-077 V3 model-guidance integration verification — 2026-08-20
+
+## Identity and synchronization
+
+- Feature: `feature/task-077-engineering-status-dashboard` at exact checkpoint
+  `6ca83afc1eae10cba58e5cb49541d0cdd106c584`.
+- Actual GitHub default target:
+  `feature/task-037-full-chain-integration@8828d2b88faece6b399258744eea4ff8d46f0bea`.
+- Merge base equals the target. Target-only commits: 0; feature-only commits:
+  505.
+- A validated unique detached worktree below the operating-system temporary
+  directory combined the exact commits. Automatic merge succeeded with zero
+  conflicts; source and target refs were not moved.
+
+## Combined result and service gates
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Fetch and default-target discovery | PASS | `origin/HEAD` resolved to the target above. |
+| Detached merge simulation | PASS | `git merge --no-commit --no-ff 6ca83af`; conflicts 0. |
+| Combined project/full verification | PASS | `npm.cmd run verify` exit 0; 76/76 tests. |
+| Temporary-worktree cleanup | PASS | Validated path absent after `git worktree remove --force`. |
+| GitHub PR and CI | missing | Current `gh` queries returned `[]` for both. |
+| GitHub repository rulesets | missing | Current API result `[]`. |
+| Default-target protection | missing | Current API returned HTTP 404 `Branch not protected`. |
+
+## Review and decision
+
+- Code/security review: self-review independence `not proven`; repaired P2=1
+  and P3=1, then final P0=P1=P2=P3=0.
+- Architecture: no V3 trigger for schema, truth, writer, authority, network,
+  dependency, migration, or hosting. The approved constitution 1.2 preserves
+  the read-only presentation boundary.
+- Status: `NEEDS_REVIEW`. The exact combined result is clean and passes 76/76,
+  but no machine-enforced GitHub gate or default-branch merge authorization
+  exists.
+- Merge performed: no. PR, deployment, release, and public hosting also remain
+  unperformed and unauthorized.
+- Rollback: leave the default branch unchanged and revert/abandon the V3 feature
+  commit; generated HTML/JSON remains disposable local output.
+
+---
+
 # TASK-077 V2 integration verification — 2026-08-20
 
 ## Identity

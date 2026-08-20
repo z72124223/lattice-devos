@@ -41,4 +41,5 @@
 | Focused/full verification | PASS | Dashboard 20/20, governance 18/18, generated-page JavaScript syntax, and diff check pass. Final post-remediation full repository verification passed 76/76. |
 | Code review | PASS | Separate read-only self-review found P2=1 stale-catalog risk and P3=1 discoverability gap; both were repaired and affected checks pass. Final P0=P1=P2=P3=0, but reviewer independence is explicitly not proven. |
 | Architecture review | NOT_TRIGGERED | No schema, data ownership, dependency, network, writer, authority, migration, or public-host boundary changes. |
-| Integration/handoff | PENDING | Verify the exact V3 candidate against the actual default target, update handoff, then use the established non-force push and post-push refresh workflow. |
+| Integration verification | NEEDS_REVIEW | Exact `6ca83af` into actual default `8828d2b`: target-only 0, feature-only 505, no conflict, combined 76/76, cleanup PASS. GitHub PR/CI/rulesets/protection are missing and default merge remains unauthorized. |
+| Handoff | READY_TO_PUSH | V3 implementation, focused/full checks, review, architecture assessment, and exact integration evidence are current. Final docs commit, established non-force feature push, remote equality, and post-push refresh remain. |

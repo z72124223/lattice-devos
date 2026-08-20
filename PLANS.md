@@ -90,14 +90,15 @@ remains not authorized for merge or Draft promotion.
 
 ## Current local engineering status dashboard model guidance - TASK-077
 
-CURRENT TASK-077 - V2 is complete and pushed. V3 is an approved, bounded
-extension that adds a plain Traditional-Chinese recommendation for the Codex
-model tier and reasoning effort after the user selects a starting branch and
-describes new work. The page remains read-only: it does not switch models,
-create a task or branch, call a paid API, or weaken verification. Test-first
-implementation, focused/full verification, review, handoff, the established
-non-force feature push, remote equality, and post-push refresh are current work;
-no default-branch merge or release is authorized.
+CURRENT TASK-077 - V3 model guidance is implemented and locally complete. The
+selected-work panel recommends Luna＋低 for clear mechanical work, Terra＋中等
+for everyday development, and Sol＋高 for high-consequence work; advice older
+than 30 days fails closed and requests a fresh inventory. Focused/full checks,
+self-review with explicit non-independent labeling, architecture assessment,
+and exact default-target integration simulation are complete and blocker-free.
+The page remains read-only and no default merge/release is authorized. Final
+handoff commit, the established non-force feature push, remote equality, and
+post-push refresh remain terminal delivery steps.
 
 ## Paused P0 platform live acceptance - TASK-051
 

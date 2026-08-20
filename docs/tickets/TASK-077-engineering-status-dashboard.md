@@ -5,7 +5,7 @@ spec_id: SPEC-004
 spec_version: 3
 module_id: engineering-status-dashboard
 constitution_version: 1.2
-status: in_progress
+status: complete
 parallel_safe: false
 depends_on: []
 allowed_paths:
@@ -163,5 +163,12 @@ New V2 evidence replaces it only after the revised acceptance conditions pass.
   placeholder replacement, `git diff --check`, and full repository 76/76 pass.
 - Read-only self-review repaired one P2 stale-catalog risk and one P3
   discoverability gap. Final P0=P1=P2=P3=0; reviewer independence is not proven.
-- Exact implementation checkpoint, integration, push, remote equality, and
-  post-push refresh evidence remain to be recorded.
+- Final documentation commit, feature push, remote equality, and post-push
+  refresh evidence remain terminal delivery steps.
+- Exact implementation checkpoint:
+  `6ca83afc1eae10cba58e5cb49541d0cdd106c584`.
+- Exact integration against actual default
+  `8828d2b88faece6b399258744eea4ff8d46f0bea`: no conflict, combined 76/76,
+  target-only 0, feature-only 505, temporary-worktree cleanup passed.
+- GitHub currently has no TASK-077 PR, CI run, repository ruleset, or protected
+  default-target gate. Default merge remains unauthorized and unperformed.

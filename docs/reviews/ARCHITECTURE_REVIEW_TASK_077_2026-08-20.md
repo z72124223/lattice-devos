@@ -1,3 +1,20 @@
+# TASK-077 V3 architecture trigger assessment — 2026-08-20
+
+- The change adds deterministic, dated presentation advice to the existing
+  selected-work panel. It does not change snapshot schema 2.0, Git/ticket state
+  precedence, data ownership, writer authority, authorization, process/network
+  behavior, dependencies, migration, or hosting.
+- Constitution 1.2 explicitly keeps model advice non-authoritative: it cannot
+  run, download, purchase, or switch a model. Advice older than 30 days stops
+  naming a model and requests a fresh inventory.
+- Existing V2 dependency direction and rollback remain unchanged. The copied
+  request is still untrusted text and cannot grant TASK, branch, push, merge,
+  deployment, or release authority.
+- Architecture review trigger: `NOT_TRIGGERED`; new ADR/migration: not required;
+  constitution conflict: none; integration blocker: none.
+
+---
+
 # TASK-077 V2 architecture review — 2026-08-20
 
 ## Triggers

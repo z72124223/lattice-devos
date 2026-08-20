@@ -1,4 +1,55 @@
-# TASK-077 V2 中文分支工作地圖交接 — 2026-08-20
+# TASK-077 V3 模型與推理建議交接 — 2026-08-20
+
+## 狀態
+
+`DONE`：使用者要求的模型／推理強度補充已完成，測試與整合模擬均通過。整合仍為 `NEEDS_REVIEW`，因為預設分支沒有機器強制關卡，也沒有合併授權。本交接完成後只會依既定流程提交、非強制推送 TASK-077 功能分支並重新整理本機頁面；不建立 PR、不合併、不部署、不發布。
+
+## 目標與範圍
+
+- 在選取綠色分支並輸入新工作後，用白話推薦目前最省成本但足夠可靠的 Codex 模型與推理強度。
+- 把推薦、理由、成本原則與升級條件一併放入可複製的派工文字。
+- 保持頁面唯讀；它不會切換模型、建立 TASK／分支、呼叫付費 API 或授權工程動作。
+
+## 使用者現在會看到的建議
+
+| 工作類型 | 建議 | 白話原則 |
+| --- | --- | --- |
+| 改文字、格式、顏色、重新命名等明確小修改 | `gpt-5.6-luna`＋低推理 | 最快、成本最低；範圍擴大或測試失敗再升級 |
+| 一般功能、修正問題、補測試或描述不夠明確 | `gpt-5.6-terra`＋中等推理 | 品質、速度與成本最均衡的預設選擇 |
+| 架構、安全、權限、資料遷移、部署或高錯誤代價工作 | `gpt-5.6-sol`＋高推理 | 成本較高，只在風險值得時使用 |
+
+模型依據已標示核對日期 `2026-08-20`。超過 30 天或時間不可信時，頁面會停止指定模型並要求 Codex 重新核對，不會用舊名稱猜測。高風險詞永遠優先於低成本詞。
+
+## 完成內容與檔案
+
+| 路徑 | 用途 |
+| --- | --- |
+| `scripts/export-lattice-engineering-status.mjs` | 共用、可測試的三層模型建議與 30 天過期保護 |
+| `tools/engineering-status-dashboard/index.template.html` | 可見建議卡、三種配置說明及含模型資訊的派工文字 |
+| `test/engineering-status-dashboard.test.js` | Terra 預設、Luna 小改、Sol 高風險優先、過期拒絕與頁面輸出回歸 |
+| SPEC-004 v3、constitution 1.2、TASK-077、PLANS | 使用者要求、非權威邊界與驗收證據 |
+| review／integration／ledger | 審查、精確整合與缺少 GitHub 強制關卡的證據 |
+
+## 驗證與審查
+
+- Dashboard focused：20/20；governance：18/18。
+- 最終 feature-source `npm.cmd run verify`：76/76。
+- 生成頁面：三模型文字、placeholder 完整替換、可執行 JavaScript 語法與 `git diff --check` 均通過。
+- 程式碼／安全審查：先發現 P2 過期模型風險與 P3 提示不明顯，均已修復；最終 P0=P1=P2=P3=0。這次未獲准使用獨立代理，因此 reviewer independence 明確標為 `not proven`。
+- 架構評估：沒有 schema、truth、writer、authority、network、dependency、migration 或 hosting 觸發；頁面仍是唯讀展示層。
+- 精確整合 checkpoint：`6ca83afc1eae10cba58e5cb49541d0cdd106c584` 對實際預設 target `8828d2b88faece6b399258744eea4ff8d46f0bea`；0 conflict、combined 76/76、cleanup PASS。
+- GitHub 即時結果：PR `[]`、CI run `[]`、rulesets `[]`、預設 target 未受保護。技術通過不代表已授權合併。
+
+## 風險與下一步
+
+- 未執行真實瀏覽器點擊／縮放或像素級視覺驗收；生成頁面的結構與 JavaScript 已驗證。
+- 關鍵字建議刻意保守並顯示理由；實際工作範圍若不同，派工文字要求先重新評估。
+- 接續：提交本交接、跑提交後檢查、非強制推送 feature、核對遠端一致，再重新整理並打開頁面。
+- 恢復點：branch `feature/task-077-engineering-status-dashboard`；implementation checkpoint `6ca83af`；先看 `git status --short --branch`。
+
+---
+
+# TASK-077 V2 中文分支工作地圖交接（舊版紀錄）— 2026-08-20
 
 ## 狀態
 
