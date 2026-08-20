@@ -1,6 +1,6 @@
 ---
 protocol_id: LATTICE_ENGINEERING_PROTOCOL
-version: 1.1.0
+version: 1.2.0
 status: active
 canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md
 ---
@@ -46,6 +46,14 @@ through its own exactly-once non-empty `display_name_zh_tw` and
 path in its `allowed_paths`. Complete this human-readable evidence before the
 delivery refresh; an unmapped branch intentionally remains visible but cannot
 be selected as a new-work starting point.
+
+When a TASK repairs, reconciles, or otherwise records evidence about another
+TASK, it declares the targets only in `evidence_subjects: [TASK-NNN, ...]`.
+This is provenance, not a delivery prerequisite: `depends_on` remains limited
+to work that must be uniquely and successfully terminal before delivery. Each
+subject must resolve uniquely to a legal committed TASK identity; duplicate,
+illegal, overlapping, self-referential, or cyclic declarations remain denied.
+Recording a subject never changes that subject's terminal state.
 
 ## Knowledge Routing
 
