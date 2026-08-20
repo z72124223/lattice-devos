@@ -2,6 +2,8 @@
 ticket_id: TASK-083
 title: TASK-075 terminal evidence reconciliation
 module_id: engineering-delivery-finisher
+display_name_zh_tw: 任務 083：TASK-075 終端證據
+display_purpose_zh_tw: 固定 TASK-075 已完成實作與整合重驗的終端證據，讓工程儀表板正確顯示交付狀態。
 status: complete
 parallel_safe: false
 depends_on:
