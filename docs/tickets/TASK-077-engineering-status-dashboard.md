@@ -5,7 +5,7 @@ spec_id: SPEC-004
 spec_version: 1
 module_id: engineering-status-dashboard
 constitution_version: 1.0
-status: in_progress
+status: complete
 parallel_safe: false
 depends_on: []
 allowed_paths:
@@ -83,5 +83,18 @@ credential mutation, or destructive cleanup.
 
 ## Next action
 
-Implement and verify the dashboard. After its feature branch is pushed, the user
-may choose whether to authorize integration separately.
+The completed feature branch may be inspected through the local launcher. After
+its non-force push, the user may separately choose whether to authorize
+integration into the actual GitHub default branch; no merge is implied.
+
+## Completion evidence
+
+- Implementation checkpoint: `89de978404acfefcdb0eec23742657636d4cf16d`.
+- Focused dashboard and governance checks: 22/22 passed.
+- Independent code/security review: P0=0, P1=0, P2=0, P3=0.
+- Architecture review: blocker-free, no ADR or migration required.
+- Exact default-branch merge simulation against
+  `feature/task-037-full-chain-integration@8828d2b88faece6b399258744eea4ff8d46f0bea`:
+  no conflict; combined `npm.cmd run verify` passed 60/60.
+- TASK-051 was not rerun and remains explicitly `FAIL` in the live local
+  dashboard despite clean Git and passing PR CI evidence.

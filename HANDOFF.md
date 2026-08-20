@@ -1,3 +1,126 @@
+# TASK-077 Local Engineering Status Dashboard Handoff — 2026-08-20
+
+## Status
+
+`DONE` for the authorized local-only TASK-077 implementation, focused/full
+verification, independent code/security review, architecture review, and
+default-branch merge simulation. Integration is `NEEDS_REVIEW` because no merge
+authorization exists and GitHub has no enforcing rule/CI gate for this feature
+push. No PR, merge, deployment, release, or public hosting occurred.
+
+## Objective and scope
+
+- Objective: give a non-engineer one double-clickable, static local page that
+  refreshes and explains every registered LATTICE worktree/TASK/ISSUE with Git,
+  ticket, live remote, PR, and CI evidence.
+- In scope: SPEC-004 v1, the new read-only presentation module, exporter,
+  launcher, safe static UI, tests, delivery refresh rule, and local generated
+  snapshot.
+- Out of scope: task/Git/GitHub mutation, LATTICE truth or writer authority,
+  TASK-051 runtime rerun, public hosting, PR creation, merge, deployment,
+  release, credentials, and destructive cleanup.
+
+## Completed work
+
+- `Open-LATTICE-Engineering-Status.cmd` refreshes first and then opens the exact
+  generated page; actual Windows argv, spaces, trailing separator, and launch
+  acknowledgement are tested.
+- The Node standard-library collector reads 39 registered worktrees, validates
+  unique exact TASK tickets, normalizes repository status vocabulary, checks
+  live remote heads, enriches one bounded GitHub PR/CI query, and fails closed on
+  missing/conflicting/malformed/stale evidence.
+- The self-contained HTML shows current focus, plain-language counts, filters,
+  search, responsive cards, next actions, and collapsed technical evidence. It
+  uses safe text APIs and redacts verified common absolute-path formats.
+- Default output is outside Git at
+  `%LOCALAPPDATA%\LATTICE\engineering-status\{index.html,status.json}`; refresh
+  creates no repository status-update commit.
+- Engineering protocol v1.0.2 now requires `npm.cmd run status:refresh` after a
+  current handoff and after any authorized push, while explicitly preserving
+  the projection's non-authoritative boundary.
+- TASK-051 was paused without a runtime rerun. Its live card remains `FAIL`
+  while independently showing clean Git, synchronized live remote, PR #13, and
+  passing CI.
+
+## Files changed
+
+| Paths | Why | Verification |
+| --- | --- | --- |
+| `scripts/export-lattice-engineering-status.mjs`, static template, root launcher | read-only collection, safe rendering, one-click local UX | dashboard regressions, live 39-item refresh/open |
+| `test/engineering-status-dashboard.test.js` | fail-closed Git/ticket/remote/privacy/Windows coverage | focused dashboard suite passed |
+| SPEC-004, module constitution, TASK-077, PLANS | approved scope, ownership, vocabulary, acceptance | `npm.cmd run check` |
+| engineering protocol/checker/governance test | mandatory post-handoff/push refresh rule | removal regression and project check |
+| TASK-051 ticket | record user priority pause without changing terminal result | live card remains explicit `FAIL` |
+| review/ledger/integration artifacts and this handoff | durable evidence and next decision | independent review and combined verification |
+
+## Workflow ledger
+
+| Stage | Status | Evidence / artifact |
+| --- | --- | --- |
+| Inspect/scope/TDD | PASS | clean source at `6e393f6`; SPEC-004; TASK-077; observable RED then GREEN |
+| Focused verification | PASS | dashboard + governance 22/22 after review remediation |
+| Full/combined verification | PASS | implementation/default-target combined result 60/60 |
+| Code/security review | PASS | independent final P0=0/P1=0/P2=0/P3=0 |
+| Architecture review | PASS | no truth/writer conflict, cycle, migration, or ADR change |
+| Integration verification | NEEDS_REVIEW | no conflict and 60/60, but no merge authority or GitHub enforcement |
+
+## Verification
+
+- Implementation checkpoint:
+  `89de978404acfefcdb0eec23742657636d4cf16d`.
+- Combined `npm.cmd run verify`: exit 0, 60/60.
+- Combined `npm.cmd run check`: exit 0, 511 files, 26 constitutions, 48
+  tickets, one current task.
+- Final source-tree `npm.cmd run verify`: exit 0, 60/60; final handoff project
+  check: 512 files, 26 constitutions, 48 tickets, one current task.
+- `git diff --check`: exit 0 before checkpoint and after final handoff edits.
+- Live `npm.cmd run status:open`: exit 0, 39 items,
+  `LATTICE_STATUS_OPENED=1`; Git remote and GitHub sources available.
+- Browser launch is structurally verified. Pixel-level or screenshot visual QA
+  was not requested and is not claimed.
+
+## Review and integration
+
+- Independent code/security and architecture reviews are blocker-free.
+- GitHub default target is
+  `feature/task-037-full-chain-integration@8828d2b`, not `main`.
+- Feature is 500 commits ahead/0 behind that target; detached temporary merge
+  was conflict-free and its combined 60-test result passed. Temporary worktree
+  cleanup passed.
+- GitHub rulesets are empty; target branch protection is absent; workflow CI is
+  configured for PRs and pushes to nonexistent `main`, so feature-push CI is
+  `missing`, not claimed passing.
+- No merge was performed. The separately authorized non-force feature push is
+  the remaining terminal delivery command after this handoff commit.
+
+## Risks and open decisions
+
+- Path redaction is heuristic for uncommon mount roots; verified current-machine
+  drive, forward-slash drive, UNC, `/home`, `/root`, and `/data` formats pass.
+- The 39-item live snapshot is intentionally `partial`: 14 worktrees lack a
+  unique exact matching ticket and therefore remain visible as `UNKNOWN` rather
+  than being guessed successful.
+- The user may later decide whether to integrate TASK-077 into the actual
+  default branch. Review, merge, deployment, and release are separate gates.
+
+## Next action
+
+1. Non-force push `feature/task-077-engineering-status-dashboard`, verify remote
+   equality, and run the post-push dashboard refresh required by protocol v1.0.2.
+2. If desired later, explicitly authorize a separate default-branch integration
+   decision; otherwise continue using the local launcher from this feature.
+
+## Restart context
+
+- Current branch/worktree: `feature/task-077-engineering-status-dashboard` /
+  `lattice-worktrees/task-077-engineering-status-dashboard`.
+- Relevant plan: `PLANS.md`, current TASK-077 completion section.
+- First files: `HANDOFF.md`,
+  `docs/reviews/INTEGRATION_TASK_077_2026-08-20.md`, and
+  `docs/tickets/TASK-077-engineering-status-dashboard.md`.
+
+---
+
 # TASK-050 Autonomy Receipt Closure Handoff - 2026-08-15
 
 ## Status

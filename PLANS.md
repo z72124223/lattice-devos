@@ -90,13 +90,13 @@ remains not authorized for merge or Draft promotion.
 
 ## Current local engineering status dashboard - TASK-077
 
-CURRENT TASK-077 - build a local-only, static engineering status page that
-turns the live Git worktree, TASK, ISSUE, PR, and CI evidence into plain-language
-branch cards. A one-click launcher must refresh before opening, and the normal
-Codex delivery protocol must refresh the same projection after task handoff and
-any authorized push. The page is observational only: it cannot become LATTICE
-truth, authorize work, mutate a branch, merge, deploy, release, or expose data
-publicly.
+CURRENT TASK-077 - implementation is complete and blocker-free on
+`feature/task-077-engineering-status-dashboard`, with a clean default-branch
+merge simulation and combined `npm.cmd run verify` pass. The local page remains
+an observational projection only. The next decision is whether to authorize a
+separate integration into GitHub's actual default branch,
+`feature/task-037-full-chain-integration`; no merge, deployment, release, or
+public hosting is authorized by this completion.
 
 ## Paused P0 platform live acceptance - TASK-051
 
