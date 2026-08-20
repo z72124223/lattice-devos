@@ -55,6 +55,13 @@ $requiredFragments = @(
     'codex_native_identity',
     'codex_creation_file_time_utc',
     'CodexAuthority',
+    'New-Task051GracefulRelayScript',
+    'Start-Task051GracefulRelayHost',
+    'Stop-Task051GracefulRelayHost',
+    'lattice.task051.graceful-stdio-relay.v1',
+    'TASK051_GRACEFUL_RELAY_HOST_REJECTED',
+    'TASK051_GRACEFUL_RELAY_CLIENT_REJECTED',
+    'TASK051_GRACEFUL_RELAY_SELF_TEST=PASS',
     'lattice-task051-acceptance/',
     'unknown (lattice-task051-acceptance; 1)',
     '--ephemeral',
@@ -530,6 +537,7 @@ $cleanupCodexAlive = $cleanupSource.IndexOf('$CodexAuthority.IsAlive()', [String
 $cleanupServerWait = $cleanupSource.IndexOf('$ServerAuthority.WaitForExit(30000)', [StringComparison]::Ordinal)
 $cleanupAlive = $cleanupSource.IndexOf('$ServerAuthority.IsAlive()', [StringComparison]::Ordinal)
 $cleanupClose = $cleanupSource.IndexOf('$ServerAuthority.CloseExact()', [StringComparison]::Ordinal)
+$cleanupCredentialGuard = $cleanupSource.IndexOf('if ($null -ne $CodexHome)', [StringComparison]::Ordinal)
 $cleanupCredential = $cleanupSource.IndexOf('Remove-Task051CodexCredential -CodexHome $CodexHome', [StringComparison]::Ordinal)
 if (
     $cleanupStop -lt 0 -or
@@ -538,7 +546,8 @@ if (
     $cleanupServerWait -le $cleanupCodexAlive -or
     $cleanupAlive -le $cleanupServerWait -or
     $cleanupClose -le $cleanupAlive -or
-    $cleanupCredential -le $cleanupClose -or
+    $cleanupCredentialGuard -le $cleanupClose -or
+    $cleanupCredential -le $cleanupCredentialGuard -or
     [regex]::Matches($cleanupSource, [regex]::Escape('$CodexAuthority.WaitForExit(30000)')).Count -ne 1 -or
     [regex]::Matches($cleanupSource, [regex]::Escape('$ServerAuthority.WaitForExit(30000)')).Count -ne 1 -or
     [regex]::Matches($cleanupSource, [regex]::Escape('$CodexAuthority.IsAlive()')).Count -ne 1 -or
@@ -568,6 +577,47 @@ if (
     throw 'TASK051_MCP_SERVER_NATURAL_EXIT_SHAPE_REJECTED'
 }
 
+$relayCreateStart = $runnerSource.IndexOf('function New-Task051GracefulRelayScript', [StringComparison]::Ordinal)
+$relayStartStart = $runnerSource.IndexOf('function Start-Task051GracefulRelayHost', $relayCreateStart, [StringComparison]::Ordinal)
+$relayStopStart = $runnerSource.IndexOf('function Stop-Task051GracefulRelayHost', $relayStartStart, [StringComparison]::Ordinal)
+$relayEnd = $runnerSource.IndexOf('function Get-Task051McpEnvironment', $relayStopStart, [StringComparison]::Ordinal)
+if (
+    $relayCreateStart -lt 0 -or
+    $relayStartStart -le $relayCreateStart -or
+    $relayStopStart -le $relayStartStart -or
+    $relayEnd -le $relayStopStart
+) {
+    throw 'TASK051_GRACEFUL_RELAY_SHAPE_REJECTED'
+}
+$relaySource = $runnerSource.Substring($relayCreateStart, $relayEnd - $relayCreateStart)
+foreach ($relayFragment in @(
+    'new NamedPipeServerStream',
+    'new NamedPipeClientStream',
+    'SetAccessRuleProtection(true, false)',
+    'new PipeAccessRule(owner, PipeAccessRights.FullControl, AccessControlType.Allow)',
+    'mode == "Client" && parsed.Count != 2',
+    'mode == "Host" && parsed.Count != 6',
+    'requestCopy.Wait();',
+    'server.StandardInput.Close();',
+    'server.WaitForExit(30000)',
+    'Start-Task051OwnedProcess -StartInfo $hostInfo',
+    'TASK051_GRACEFUL_RELAY_HOST_REJECTED',
+    'TASK051_GRACEFUL_RELAY_CLIENT_REJECTED'
+)) {
+    if ($relaySource.IndexOf($relayFragment, [StringComparison]::Ordinal) -lt 0) {
+        throw ('TASK051_GRACEFUL_RELAY_SHAPE_REJECTED|' + $relayFragment)
+    }
+}
+$discoveryCleanupGuard = 'if ($null -ne $codexHome -or $null -ne $relayHost -or $null -ne $owned)'
+if ([regex]::Matches($discoverySource, [regex]::Escape($discoveryCleanupGuard)).Count -ne 1) {
+    throw 'TASK051_GRACEFUL_RELAY_EARLY_CLEANUP_SHAPE_REJECTED'
+}
+foreach ($forbiddenRelayFragment in @('SESSION_CLOSED', 'DISPATCH_ACCEPTED', 'Read-Task038McpAcceptanceEvidence')) {
+    if ($relaySource.IndexOf($forbiddenRelayFragment, [StringComparison]::Ordinal) -ge 0) {
+        throw ('TASK051_GRACEFUL_RELAY_SYNTHESIS_REJECTED|' + $forbiddenRelayFragment)
+    }
+}
+
 $codexToolResolverStart = $runnerSource.IndexOf('function Resolve-Task051CodexToolFailure', [StringComparison]::Ordinal)
 $codexToolInvokeStart = $runnerSource.IndexOf('function Invoke-Task051CodexTool', $codexToolResolverStart, [StringComparison]::Ordinal)
 $codexToolInvokeEnd = $runnerSource.IndexOf('function Replace-Task051Exact', $codexToolInvokeStart, [StringComparison]::Ordinal)
@@ -576,6 +626,9 @@ if ($codexToolResolverStart -lt 0 -or $codexToolInvokeStart -le $codexToolResolv
 }
 $codexToolResolverSource = $runnerSource.Substring($codexToolResolverStart, $codexToolInvokeStart - $codexToolResolverStart)
 $codexToolInvokeSource = $runnerSource.Substring($codexToolInvokeStart, $codexToolInvokeEnd - $codexToolInvokeStart)
+if ([regex]::Matches($codexToolInvokeSource, [regex]::Escape($discoveryCleanupGuard)).Count -ne 1) {
+    throw 'TASK051_GRACEFUL_RELAY_EARLY_CLEANUP_SHAPE_REJECTED'
+}
 $codexPhaseToolStart = $runnerSource.IndexOf('function Assert-Task051CodexPhaseTool', $codexToolResolverStart, [StringComparison]::Ordinal)
 if ($codexPhaseToolStart -lt 0 -or $codexToolInvokeStart -le $codexPhaseToolStart) {
     throw 'TASK051_CODEX_PHASE_TOOL_SHAPE_REJECTED'
@@ -947,8 +1000,10 @@ $resultRethrowIndex = $codexToolInvokeSource.IndexOf('throw $resultFailure', $su
 $structuredProjectionIndex = $codexToolInvokeSource.IndexOf('$structured = $envelope.StructuredContent', $resultRethrowIndex, [StringComparison]::Ordinal)
 $metaCommitmentIndex = $codexToolInvokeSource.IndexOf('$metaCommitmentSha256 = Get-Task051CodexResultMetaCommitment', $structuredProjectionIndex, [StringComparison]::Ordinal)
 $toolEvidenceIndex = $codexToolInvokeSource.IndexOf("schema_version = 'lattice.task051.current-codex-tool-call.v2'", $metaCommitmentIndex, [StringComparison]::Ordinal)
-$serverProcessProjectionIndex = $codexToolInvokeSource.IndexOf('$serverProcessId = [int](($firstDispatchLine | ConvertFrom-Json -ErrorAction Stop).process_id)', [StringComparison]::Ordinal)
-$serverNaturalExitIndex = $codexToolInvokeSource.IndexOf('Wait-Task051McpServerNaturalExit -ProcessId $serverProcessId -TimeoutMilliseconds 30000', $serverProcessProjectionIndex, [StringComparison]::Ordinal)
+$serverSessionOpenIndex = $codexToolInvokeSource.IndexOf('$sessionOpen = Read-Task051McpSessionOpen', [StringComparison]::Ordinal)
+$serverProcessProjectionIndex = $codexToolInvokeSource.IndexOf('$serverProcessId = [int]$sessionOpen.ProcessId', $serverSessionOpenIndex, [StringComparison]::Ordinal)
+$serverAuthorityCaptureIndex = $codexToolInvokeSource.IndexOf('$serverAuthority = $serverProcessEvidence.Authority', $serverProcessProjectionIndex, [StringComparison]::Ordinal)
+$serverNaturalExitIndex = $codexToolInvokeSource.IndexOf('$serverAuthority.WaitForExit(30000)', $serverAuthorityCaptureIndex, [StringComparison]::Ordinal)
 $dispatchEvidenceIndex = $codexToolInvokeSource.IndexOf('$dispatch = Read-Task038McpAcceptanceEvidence', $serverNaturalExitIndex, [StringComparison]::Ordinal)
 $effectEvidenceIndex = $codexToolInvokeSource.IndexOf('$effects = Read-Task038McpObservedEffectEvidence', $dispatchEvidenceIndex, [StringComparison]::Ordinal)
 $serverAbsenceIndex = $codexToolInvokeSource.IndexOf('Get-Process -Id $serverProcessId -ErrorAction SilentlyContinue', $effectEvidenceIndex, [StringComparison]::Ordinal)
@@ -987,12 +1042,15 @@ if (
     $structuredProjectionIndex -le $resultRethrowIndex -or
     $metaCommitmentIndex -le $structuredProjectionIndex -or
     $toolEvidenceIndex -le $metaCommitmentIndex -or
-    $serverProcessProjectionIndex -le $structuredProjectionIndex -or
+    $serverSessionOpenIndex -le $codexHomeCreateIndex -or
+    $serverProcessProjectionIndex -le $serverSessionOpenIndex -or
+    $serverAuthorityCaptureIndex -le $serverProcessProjectionIndex -or
     $serverNaturalExitIndex -le $serverProcessProjectionIndex -or
     $dispatchEvidenceIndex -le $serverNaturalExitIndex -or
     $effectEvidenceIndex -le $dispatchEvidenceIndex -or
     $serverAbsenceIndex -le $effectEvidenceIndex -or
-    [regex]::Matches($codexToolInvokeSource, [regex]::Escape('Wait-Task051McpServerNaturalExit -ProcessId $serverProcessId -TimeoutMilliseconds 30000')).Count -ne 1 -or
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape('$serverAuthority.WaitForExit(30000)')).Count -ne 1 -or
+    [regex]::Matches($codexToolInvokeSource, [regex]::Escape('-Job ([IntPtr]$relayHost.HostOwned.Job)')).Count -ne 1 -or
     [regex]::Matches($codexToolInvokeSource, [regex]::Escape('meta_mode = [string]$envelope.MetaMode')).Count -ne 1 -or
     [regex]::Matches($codexToolInvokeSource, [regex]::Escape('meta_present = [bool]$envelope.MetaPresent')).Count -ne 1 -or
     [regex]::Matches($codexToolInvokeSource, [regex]::Escape('meta_sha256 = $envelope.MetaSha256')).Count -ne 1 -or
@@ -1224,6 +1282,7 @@ $expectedSelfTestMarkers = @(
     'TASK051_RETAINED_PROCESS_AUTHORITY_SELF_TEST=PASS',
     'TASK051_PROCESS_LIFETIME_SELF_TEST=PASS',
     'TASK051_MCP_SERVER_NATURAL_EXIT_SELF_TEST=PASS',
+    'TASK051_GRACEFUL_RELAY_SELF_TEST=PASS',
     'TASK051_MCP_SESSION_OPEN_PARSE_DIAGNOSTIC_SELF_TEST=PASS',
     'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST=PASS',
     'TASK051_UNCLASSIFIED_FAILURE_EVIDENCE_SELF_TEST=PASS',

@@ -2057,6 +2057,7 @@ function New-Task051CodexHome {
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$Phase,
         [Parameter(Mandatory = $true)][string]$Latticed,
+        [string[]]$McpArguments = @(),
         [Parameter(Mandatory = $true)][string[]]$EnvironmentNames
     )
 
@@ -2088,9 +2089,10 @@ function New-Task051CodexHome {
             '',
             '[mcp_servers.lattice]',
             ('command = ' + (ConvertTo-Task051TomlLiteral -Value ([IO.Path]::GetFullPath($Latticed)))),
+            ('args = [' + (@($McpArguments | ForEach-Object { ConvertTo-Task051TomlLiteral -Value $_ }) -join ', ') + ']'),
             ('env_vars = [' + $envLiteral + ']'),
             'required = true',
-            'startup_timeout_sec = 30',
+            'startup_timeout_sec = 60',
             'tool_timeout_sec = 330'
         ) | ForEach-Object { $configLines.Add($_) }
         if ($null -ne $enabledToolsLine) {
@@ -2149,10 +2151,11 @@ function Remove-Task051CodexCredential {
 function Complete-Task051InvocationCleanup {
     param(
         $Owned,
-        [Parameter(Mandatory = $true)]$CodexHome,
+        $CodexHome,
         [int]$KnownServerProcessId = 0,
         $CodexAuthority,
-        $ServerAuthority
+        $ServerAuthority,
+        $RelayHost
     )
 
     $cleanupFailure = $null
@@ -2208,10 +2211,27 @@ function Complete-Task051InvocationCleanup {
             }
         }
     }
-    try { Remove-Task051CodexCredential -CodexHome $CodexHome }
-    catch {
-        if ($null -eq $cleanupFailure) {
-            $cleanupFailure = [string]$_.Exception.Message
+    if ($null -ne $RelayHost) {
+        try {
+            if ($null -eq $cleanupFailure) {
+                Stop-Task051GracefulRelayHost -RelayHost $RelayHost
+            }
+            else {
+                Stop-Task051GracefulRelayHost -RelayHost $RelayHost -CleanupOnly
+            }
+        }
+        catch {
+            if ($null -eq $cleanupFailure) {
+                $cleanupFailure = 'TASK051_GRACEFUL_RELAY_HOST_REJECTED'
+            }
+        }
+    }
+    if ($null -ne $CodexHome) {
+        try { Remove-Task051CodexCredential -CodexHome $CodexHome }
+        catch {
+            if ($null -eq $cleanupFailure) {
+                $cleanupFailure = [string]$_.Exception.Message
+            }
         }
     }
     if (
@@ -2254,6 +2274,358 @@ function Wait-Task051McpServerNaturalExit {
             catch { throw 'TASK038_CURRENT_CODEX_TOOL_SERVER_EXIT_QUERY_REJECTED' }
         }
     }
+}
+
+function New-Task051GracefulRelayScript {
+    param([Parameter(Mandatory = $true)][string]$EvidenceRoot)
+
+    $relaySourcePath = [IO.Path]::GetFullPath((Join-Path $EvidenceRoot 'task051-graceful-stdio-relay.cs'))
+    $relayPath = [IO.Path]::GetFullPath((Join-Path $EvidenceRoot 'task051-graceful-stdio-relay.exe'))
+    $relaySource = @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Pipes;
+using System.Security.AccessControl;
+using System.Security.Cryptography;
+using System.Security.Principal;
+using System.Text;
+using System.Threading.Tasks;
+
+public static class LatticeTask051GracefulRelay
+{
+    private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false);
+
+    public static int Main(string[] args)
+    {
+        try
+        {
+            Dictionary<string, string> parsed = Parse(args);
+            string mode = Required(parsed, "mode");
+            string pipe = Required(parsed, "pipe");
+            if (!System.Text.RegularExpressions.Regex.IsMatch(pipe, "^[0-9a-f]{32}$"))
+                throw new InvalidDataException();
+            if (mode == "Client" && parsed.Count != 2) throw new InvalidDataException();
+            if (mode == "Host" && parsed.Count != 6) throw new InvalidDataException();
+            if (mode == "Client") return Client(pipe);
+            if (mode == "Host") return Host(pipe, parsed);
+            throw new InvalidDataException();
+        }
+        catch
+        {
+            Console.Error.WriteLine("TASK051_GRACEFUL_RELAY_ARGUMENTS_REJECTED");
+            return 90;
+        }
+    }
+
+    private static int Client(string pipe)
+    {
+        try
+        {
+            using (var request = new NamedPipeClientStream(".", RequestName(pipe), PipeDirection.Out))
+            using (var response = new NamedPipeClientStream(".", ResponseName(pipe), PipeDirection.In))
+            {
+                request.Connect(60000);
+                response.Connect(60000);
+                Stream output = Console.OpenStandardOutput();
+                Task responseCopy = Task.Run(() => Pump(response, output));
+                Pump(Console.OpenStandardInput(), request);
+                request.Flush();
+                request.Close();
+                responseCopy.Wait();
+                output.Flush();
+            }
+            return 0;
+        }
+        catch
+        {
+            Console.Error.WriteLine("TASK051_GRACEFUL_RELAY_CLIENT_REJECTED");
+            return 91;
+        }
+    }
+
+    private static int Host(string pipe, Dictionary<string, string> parsed)
+    {
+        Process server = null;
+        try
+        {
+            string command = Path.GetFullPath(Required(parsed, "server"));
+            string serverArgs = Required(parsed, "server-args");
+            string ready = Path.GetFullPath(Required(parsed, "ready"));
+            string stderrPath = Path.GetFullPath(Required(parsed, "stderr"));
+            using (var request = CreateOwnerOnlyServer(RequestName(pipe), PipeDirection.In))
+            using (var response = CreateOwnerOnlyServer(ResponseName(pipe), PipeDirection.Out))
+            {
+                File.WriteAllText(ready, "PIPE_SERVERS_READY\n", Utf8);
+                request.WaitForConnection();
+                response.WaitForConnection();
+                File.AppendAllText(ready, "CLIENT_CONNECTED\n", Utf8);
+                var start = new ProcessStartInfo(command, serverArgs)
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                server = Process.Start(start);
+                File.AppendAllText(ready, "SERVER_STARTED\n", Utf8);
+                Task<string> stderrRead = server.StandardError.ReadToEndAsync();
+                Task requestCopy = Task.Run(() => Pump(request, server.StandardInput.BaseStream));
+                Task responseCopy = Task.Run(() => Pump(server.StandardOutput.BaseStream, response));
+                requestCopy.Wait();
+                File.AppendAllText(ready, "CLIENT_EOF\n", Utf8);
+                server.StandardInput.Close();
+                if (!server.WaitForExit(30000)) throw new TimeoutException();
+                File.AppendAllText(ready, "SERVER_EXITED\n", Utf8);
+                responseCopy.Wait();
+                response.Flush();
+                WriteStderrCommitment(stderrPath, stderrRead.Result);
+                if (server.ExitCode != 0) throw new InvalidDataException();
+            }
+            return 0;
+        }
+        catch
+        {
+            Console.Error.WriteLine("TASK051_GRACEFUL_RELAY_HOST_REJECTED");
+            return 92;
+        }
+        finally
+        {
+            if (server != null)
+            {
+                try { if (!server.HasExited) { server.Kill(); server.WaitForExit(); } } catch { }
+                server.Dispose();
+            }
+        }
+    }
+
+    private static Dictionary<string, string> Parse(string[] args)
+    {
+        if (args.Length < 4 || (args.Length % 2) != 0) throw new InvalidDataException();
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (int i = 0; i < args.Length; i += 2)
+        {
+            string key = args[i].StartsWith("--", StringComparison.Ordinal) ? args[i].Substring(2) : null;
+            if (key == null || result.ContainsKey(key))
+                throw new InvalidDataException();
+            result.Add(key, args[i + 1]);
+        }
+        return result;
+    }
+
+    private static string Required(Dictionary<string, string> parsed, string key)
+    {
+        string value;
+        if (!parsed.TryGetValue(key, out value) || value == null) throw new InvalidDataException();
+        return value;
+    }
+
+    private static NamedPipeServerStream CreateOwnerOnlyServer(string name, PipeDirection direction)
+    {
+        SecurityIdentifier owner = WindowsIdentity.GetCurrent().User;
+        if (owner == null) throw new InvalidDataException();
+        var security = new PipeSecurity();
+        security.SetOwner(owner);
+        security.SetAccessRuleProtection(true, false);
+        security.AddAccessRule(new PipeAccessRule(owner, PipeAccessRights.FullControl, AccessControlType.Allow));
+        return new NamedPipeServerStream(
+            name,
+            direction,
+            1,
+            PipeTransmissionMode.Byte,
+            PipeOptions.None,
+            4096,
+            4096,
+            security);
+    }
+
+    private static void WriteStderrCommitment(string path, string stderr)
+    {
+        byte[] bytes = Utf8.GetBytes(stderr ?? String.Empty);
+        byte[] digest;
+        using (SHA256 algorithm = SHA256.Create()) digest = algorithm.ComputeHash(bytes);
+        var hex = new StringBuilder(digest.Length * 2);
+        foreach (byte value in digest) hex.Append(value.ToString("x2"));
+        File.WriteAllText(path, "sha256=" + hex + "\nbyte_length=" + bytes.Length + "\n", Utf8);
+    }
+
+    private static void Pump(Stream source, Stream destination)
+    {
+        byte[] buffer = new byte[4096];
+        int read;
+        while ((read = source.Read(buffer, 0, buffer.Length)) != 0)
+        {
+            destination.Write(buffer, 0, read);
+            destination.Flush();
+        }
+    }
+
+    private static string RequestName(string pipe) { return "lattice-task051-" + pipe + "-request"; }
+    private static string ResponseName(string pipe) { return "lattice-task051-" + pipe + "-response"; }
+}
+'@
+    $relayBytes = [Text.UTF8Encoding]::new($false).GetBytes($relaySource)
+    if (Test-Path -LiteralPath $relaySourcePath) {
+        $existing = [IO.File]::ReadAllBytes($relaySourcePath)
+        if (-not [Linq.Enumerable]::SequenceEqual([byte[]]$existing, [byte[]]$relayBytes)) {
+            throw 'TASK051_GRACEFUL_RELAY_SCRIPT_REJECTED'
+        }
+    }
+    else {
+        [IO.File]::WriteAllBytes($relaySourcePath, $relayBytes)
+        Set-Task051OwnerOnlyAcl -Path $relaySourcePath -Directory $false
+    }
+    if (-not (Test-Path -LiteralPath $relayPath -PathType Leaf)) {
+        $compiler = [IO.Path]::GetFullPath((Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) 'csc.exe'))
+        Assert-Task051RegularFile -Path $compiler -FailureCode 'TASK051_GRACEFUL_RELAY_COMPILER_REJECTED'
+        $compileInfo = [Diagnostics.ProcessStartInfo]::new()
+        $compileInfo.FileName = $compiler
+        $compileInfo.Arguments = '/nologo /target:exe /optimize+ /checked+ /out:"' + $relayPath + '" "' + $relaySourcePath + '"'
+        $compileInfo.WorkingDirectory = $EvidenceRoot
+        $compileInfo.UseShellExecute = $false
+        $compileInfo.CreateNoWindow = $true
+        $compileInfo.RedirectStandardInput = $true
+        $compileInfo.RedirectStandardOutput = $true
+        $compileInfo.RedirectStandardError = $true
+        Set-Task051ClosedEnvironment -StartInfo $compileInfo -Additional ([ordered]@{})
+        $compileProcess = [Diagnostics.Process]::Start($compileInfo)
+        $compileStdout = $compileProcess.StandardOutput.ReadToEndAsync()
+        $compileStderr = $compileProcess.StandardError.ReadToEndAsync()
+        if (-not $compileProcess.WaitForExit(60000)) {
+            try { $compileProcess.Kill(); $compileProcess.WaitForExit() } catch {}
+            $compileProcess.Dispose()
+            throw 'TASK051_GRACEFUL_RELAY_COMPILER_REJECTED'
+        }
+        $compileOutput = [string]$compileStdout.GetAwaiter().GetResult() + [string]$compileStderr.GetAwaiter().GetResult()
+        $compileExitCode = $compileProcess.ExitCode
+        $compileProcess.Dispose()
+        if ($compileExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($compileOutput)) {
+            throw 'TASK051_GRACEFUL_RELAY_COMPILER_REJECTED'
+        }
+        Set-Task051OwnerOnlyAcl -Path $relayPath -Directory $false
+    }
+    return [pscustomobject]@{
+        SchemaVersion = 'lattice.task051.graceful-stdio-relay.v1'
+        Path = $relayPath
+        SourcePath = $relaySourcePath
+        SourceSha256 = Get-Task051Sha256 -Path $relaySourcePath
+        Sha256 = Get-Task051Sha256 -Path $relayPath
+    }
+}
+
+function Start-Task051GracefulRelayHost {
+    param(
+        [Parameter(Mandatory = $true)][string]$EvidenceRoot,
+        [Parameter(Mandatory = $true)][ValidatePattern('\A[0-9a-f]{32}\z')][string]$PipeId,
+        [Parameter(Mandatory = $true)][string]$ServerCommand,
+        [string]$ServerArguments = '',
+        [Parameter(Mandatory = $true)][Collections.IDictionary]$Environment,
+        [switch]$SelfTestDirect
+    )
+
+    $relay = New-Task051GracefulRelayScript -EvidenceRoot $EvidenceRoot
+    $readyPath = [IO.Path]::GetFullPath((Join-Path $EvidenceRoot ('task051-relay-' + $PipeId + '.ready')))
+    $stderrPath = [IO.Path]::GetFullPath((Join-Path $EvidenceRoot ('task051-relay-' + $PipeId + '-server-stderr.txt')))
+    foreach ($value in @($relay.Path, $readyPath, $stderrPath, $ServerCommand, $ServerArguments)) {
+        if ([string]$value -match '["\r\n]') { throw 'TASK051_GRACEFUL_RELAY_HOST_REJECTED' }
+    }
+    $hostInfo = [Diagnostics.ProcessStartInfo]::new()
+    $hostInfo.FileName = [string]$relay.Path
+    $hostInfo.Arguments = '--mode Host --pipe ' + $PipeId + ' --server "' + [IO.Path]::GetFullPath($ServerCommand) + '" --server-args "' + $ServerArguments + '" --ready "' + $readyPath + '" --stderr "' + $stderrPath + '"'
+    $hostInfo.WorkingDirectory = $EvidenceRoot
+    $hostInfo.UseShellExecute = $false
+    $hostInfo.CreateNoWindow = $true
+    $hostInfo.RedirectStandardInput = $true
+    $hostInfo.RedirectStandardOutput = $true
+    $hostInfo.RedirectStandardError = $true
+    Set-Task051ClosedEnvironment -StartInfo $hostInfo -Additional $Environment
+    $owned = if ($SelfTestDirect) {
+        $directProcess = [Diagnostics.Process]::Start($hostInfo)
+        [pscustomobject]@{
+            Job = [IntPtr]::Zero
+            Suspended = $directProcess
+            Process = $directProcess
+            Direct = $true
+        }
+    }
+    else {
+        $contained = Start-Task051OwnedProcess -StartInfo $hostInfo
+        $contained | Add-Member -NotePropertyName Direct -NotePropertyValue $false
+        $contained
+    }
+    $stderrTask = $owned.Suspended.StandardError.ReadToEndAsync()
+    $clientArguments = @(
+        '--mode', 'Client', '--pipe', $PipeId
+    )
+    return [pscustomobject]@{
+        SchemaVersion = [string]$relay.SchemaVersion
+        ScriptPath = [string]$relay.Path
+        ScriptSha256 = [string]$relay.Sha256
+        PipeId = $PipeId
+        ClientCommand = [string]$relay.Path
+        ClientArguments = $clientArguments
+        HostOwned = $owned
+        HostStderrTask = $stderrTask
+        ReadyPath = $readyPath
+        ServerStderrPath = $stderrPath
+    }
+}
+
+function Stop-Task051GracefulRelayHost {
+    param(
+        [Parameter(Mandatory = $true)]$RelayHost,
+        [switch]$CleanupOnly
+    )
+
+    if ($CleanupOnly) {
+        try {
+            if ([bool]$RelayHost.HostOwned.Direct) {
+                if (-not $RelayHost.HostOwned.Process.HasExited) {
+                    $RelayHost.HostOwned.Process.Kill()
+                    $RelayHost.HostOwned.Process.WaitForExit()
+                }
+                $RelayHost.HostOwned.Process.Dispose()
+            }
+            else {
+                Stop-Task051OwnedProcess -Owned $RelayHost.HostOwned
+            }
+        }
+        catch { throw 'TASK051_GRACEFUL_RELAY_HOST_REJECTED' }
+        return
+    }
+
+    $failure = $null
+    try {
+        if (-not $RelayHost.HostOwned.Process.WaitForExit(30000)) {
+            $failure = 'TASK051_GRACEFUL_RELAY_HOST_REJECTED'
+        }
+        elseif ($RelayHost.HostOwned.Process.ExitCode -ne 0) {
+            $failure = 'TASK051_GRACEFUL_RELAY_HOST_REJECTED'
+        }
+        $stderr = [string]$RelayHost.HostStderrTask.GetAwaiter().GetResult()
+        if (-not [string]::IsNullOrEmpty($stderr)) {
+            $failure = 'TASK051_GRACEFUL_RELAY_HOST_REJECTED'
+        }
+    }
+    catch { $failure = 'TASK051_GRACEFUL_RELAY_HOST_REJECTED' }
+    finally {
+        try {
+            if ([bool]$RelayHost.HostOwned.Direct) {
+                if (-not $RelayHost.HostOwned.Process.HasExited) {
+                    $RelayHost.HostOwned.Process.Kill()
+                    $RelayHost.HostOwned.Process.WaitForExit()
+                }
+                $RelayHost.HostOwned.Process.Dispose()
+            }
+            else {
+                Stop-Task051OwnedProcess -Owned $RelayHost.HostOwned
+            }
+        }
+        catch { $failure = 'TASK051_GRACEFUL_RELAY_HOST_REJECTED' }
+    }
+    if ($null -ne $failure) { throw $failure }
 }
 
 function Get-Task051McpEnvironment {
@@ -2385,6 +2757,7 @@ function Invoke-Task051CodexDiscovery {
     $sessionOpen = $null
     $processEvidence = $null
     $serverAuthority = $null
+    $relayHost = $null
     $watchState = [pscustomobject]@{
         ServerProcessId = 0
         SessionOpen = $null
@@ -2399,7 +2772,8 @@ function Invoke-Task051CodexDiscovery {
         ) {
             throw 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REJECTED'
         }
-        $codexHome = New-Task051CodexHome -Root $EvidenceRoot -Phase $Phase -Latticed $script:Latticed -EnvironmentNames @($Environment.Keys)
+        $relayHost = Start-Task051GracefulRelayHost -EvidenceRoot $EvidenceRoot -PipeId $AcceptanceSessionId -ServerCommand $script:Latticed -Environment $Environment
+        $codexHome = New-Task051CodexHome -Root $EvidenceRoot -Phase $Phase -Latticed ([string]$relayHost.ClientCommand) -McpArguments @($relayHost.ClientArguments) -EnvironmentNames @($Environment.Keys)
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_START_INFO_REJECTED'
         $info = [Diagnostics.ProcessStartInfo]::new()
         $info.FileName = $codex
@@ -2488,12 +2862,12 @@ function Invoke-Task051CodexDiscovery {
             }
             $watchState.ServerProcessId = [int]$parsedSessionOpen.ProcessId
             $capturedProcessEvidence = Get-Task051OwnedProcessEvidence `
-                -Job ([IntPtr]$owned.Job) `
+                -Job ([IntPtr]$relayHost.HostOwned.Job) `
                 -ProcessId ([int]$watchState.ServerProcessId) `
                 -ExpectedExecutable $script:Latticed `
                 -ExpectedExecutableSha256 $ExpectedLatticedSha256 `
                 -ExpectedExecutableNativeIdentity $ExpectedLatticedNativeIdentity `
-                -OwnerProcess $process `
+                -OwnerProcess $relayHost.HostOwned.Process `
                 -ObservedAtUnixNanos ([long]$parsedSessionOpen.ObservedAtUnixNanos)
             $watchState.SessionOpen = $parsedSessionOpen
             $watchState.ProcessEvidence = $capturedProcessEvidence
@@ -2605,6 +2979,9 @@ function Invoke-Task051CodexDiscovery {
             latticed_creation_file_time_utc = [long]$processEvidence.CreationFileTimeUtc
             latticed_exit_file_time_utc = [long]$processEvidence.ExitFileTimeUtc
             latticed_was_running_at_capture = [bool]$processEvidence.WasRunningAtCapture
+            relay_schema_version = [string]$relayHost.SchemaVersion
+            relay_script_sha256 = [string]$relayHost.ScriptSha256
+            relay_host_process_id = [int]$relayHost.HostOwned.Process.Id
             session_open_event_sha256 = [string]$sessionOpen.EventSha256
             config_sha256 = [string]$codexHome.ConfigSha256
             user_agent = [string]$init.result.userAgent
@@ -2637,7 +3014,7 @@ function Invoke-Task051CodexDiscovery {
     }
     finally {
         try { if ($null -ne $owned) { $owned.Suspended.StandardInput.Close() } } catch {}
-        if ($null -ne $codexHome) {
+        if ($null -ne $codexHome -or $null -ne $relayHost -or $null -ne $owned) {
             $knownServerProcessId = if ($serverProcessId -gt 0) { $serverProcessId } else { [int]$watchState.ServerProcessId }
             $authorityForCleanup = if ($null -ne $serverAuthority) { $serverAuthority } elseif ($null -ne $watchState.ProcessEvidence) { $watchState.ProcessEvidence.Authority } else { $null }
             Complete-Task051InvocationCleanup `
@@ -2645,7 +3022,8 @@ function Invoke-Task051CodexDiscovery {
                 -CodexHome $codexHome `
                 -KnownServerProcessId $knownServerProcessId `
                 -CodexAuthority $codexProcessAuthority `
-                -ServerAuthority $authorityForCleanup
+                -ServerAuthority $authorityForCleanup `
+                -RelayHost $relayHost
         }
     }
 }
@@ -3118,6 +3496,9 @@ function Invoke-Task051CodexTool {
     $codexProcessEvidence = $null
     $codexProcessAuthority = $null
     $serverProcessId = 0
+    $serverProcessEvidence = $null
+    $serverAuthority = $null
+    $relayHost = $null
     try {
         Assert-Task051CodexPhaseTool -Phase $Phase -Tool $Tool
         $currentCodexIdentity = Get-Task051CurrentCodexFileIdentity
@@ -3138,7 +3519,8 @@ function Invoke-Task051CodexTool {
             ($Arguments | ConvertTo-Json -Compress -Depth 8)
         ) -join [char]10)
         $environment = Get-Task051McpEnvironment -RunMode $RunMode -Authority $Authority -DatabasePassword $DatabasePassword -DeliveryRoot $DeliveryRoot -SchemaDirectory $SchemaDirectory -LauncherSha256 $LauncherSha256 -LauncherVersion $LauncherVersion -AcceptanceEvidencePath ([string]$acceptanceSink.path) -AcceptanceSessionId $sessionId -SafeConfigSha256 $safeConfig -ObservedEffectPath ([string]$observedSink.path) -ObservedEffectNonce ([string]$observedSink.nonce)
-        $codexHome = New-Task051CodexHome -Root $EvidenceRoot -Phase $Phase -Latticed $script:Latticed -EnvironmentNames @($environment.Keys)
+        $relayHost = Start-Task051GracefulRelayHost -EvidenceRoot $EvidenceRoot -PipeId $sessionId -ServerCommand $script:Latticed -Environment $environment
+        $codexHome = New-Task051CodexHome -Root $EvidenceRoot -Phase $Phase -Latticed ([string]$relayHost.ClientCommand) -McpArguments @($relayHost.ClientArguments) -EnvironmentNames @($environment.Keys)
         $failureStage = 'START'
         $info = [Diagnostics.ProcessStartInfo]::new()
         $info.FileName = $codex
@@ -3178,6 +3560,24 @@ function Invoke-Task051CodexTool {
         $failureStage = 'WAIT'
         $stdoutTask = $owned.Suspended.StandardOutput.ReadToEndAsync()
         $stderrTask = $owned.Suspended.StandardError.ReadToEndAsync()
+        $sessionDeadline = [DateTime]::UtcNow.AddSeconds(60)
+        while (-not (Test-Task051McpSessionOpenReady -Path ([string]$acceptanceSink.path) -ExpectedNativeIdentity ([string]$acceptanceSink.native_identity) -EvidenceRoot $EvidenceRoot)) {
+            if ($process.HasExited -or [DateTime]::UtcNow -ge $sessionDeadline) {
+                throw 'TASK038_CURRENT_CODEX_TOOL_SESSION_OPEN_TIMEOUT_REJECTED'
+            }
+            [Threading.Thread]::Sleep(20)
+        }
+        $sessionOpen = Read-Task051McpSessionOpen -Path ([string]$acceptanceSink.path) -ExpectedNativeIdentity ([string]$acceptanceSink.native_identity) -EvidenceRoot $EvidenceRoot -SessionId $sessionId -SafeConfigSha256 $safeConfig -DetailedFailure
+        $serverProcessId = [int]$sessionOpen.ProcessId
+        $serverProcessEvidence = Get-Task051OwnedProcessEvidence `
+            -Job ([IntPtr]$relayHost.HostOwned.Job) `
+            -ProcessId $serverProcessId `
+            -ExpectedExecutable $script:Latticed `
+            -ExpectedExecutableSha256 (Get-Task051Sha256 -Path $script:Latticed) `
+            -ExpectedExecutableNativeIdentity (Get-LatticeWindowsNativePathIdentityToken -Path $script:Latticed -Directory $false) `
+            -OwnerProcess $relayHost.HostOwned.Process `
+            -ObservedAtUnixNanos ([long]$sessionOpen.ObservedAtUnixNanos)
+        $serverAuthority = $serverProcessEvidence.Authority
         if (-not $process.WaitForExit(360000)) {
             throw 'TASK051_CODEX_EXEC_TIMEOUT'
         }
@@ -3217,9 +3617,9 @@ function Invoke-Task051CodexTool {
         $failureStage = 'PUBLIC_STATUS'
         Assert-Task051PublicStatus -Value $structured -Kind $(if ($Tool -ceq 'lattice_task_submit') { 'SUBMIT' } else { 'STATUS' })
         $failureStage = 'DISPATCH'
-        $firstDispatchLine = Get-Content -LiteralPath ([string]$acceptanceSink.path) -TotalCount 1
-        $serverProcessId = [int](($firstDispatchLine | ConvertFrom-Json -ErrorAction Stop).process_id)
-        Wait-Task051McpServerNaturalExit -ProcessId $serverProcessId -TimeoutMilliseconds 30000
+        if (-not $serverAuthority.WaitForExit(30000) -or $serverAuthority.IsAlive()) {
+            throw 'TASK038_CURRENT_CODEX_TOOL_SERVER_EXIT_TIMEOUT_REJECTED'
+        }
         $dispatch = Read-Task038McpAcceptanceEvidence -Path ([string]$acceptanceSink.path) -ExpectedNativeIdentity ([string]$acceptanceSink.native_identity) -SessionId $sessionId -SafeConfigSha256 $safeConfig -ProcessId $serverProcessId -ExpectedDispatchCount 1
         $failureStage = 'EFFECT'
         $effects = Read-Task038McpObservedEffectEvidence -Path ([string]$observedSink.path) -ExpectedNativeIdentity ([string]$observedSink.native_identity) -SessionId $sessionId -SafeConfigSha256 $safeConfig -Nonce ([string]$observedSink.nonce) -ProcessId $serverProcessId
@@ -3260,6 +3660,11 @@ function Invoke-Task051CodexTool {
             codex_exit_file_time_utc = [long]$codexProcessEvidence.ExitFileTimeUtc
             codex_was_running_at_capture = [bool]$codexProcessEvidence.WasRunningAtCapture
             latticed_process_id = $serverProcessId
+            latticed_sha256 = [string]$serverProcessEvidence.ImageSha256
+            latticed_native_identity = [string]$serverProcessEvidence.NativeIdentity
+            relay_schema_version = [string]$relayHost.SchemaVersion
+            relay_script_sha256 = [string]$relayHost.ScriptSha256
+            relay_host_process_id = [int]$relayHost.HostOwned.Process.Id
             config_sha256 = [string]$codexHome.ConfigSha256
             safe_config_sha256 = $safeConfig
             prompt_sha256 = Get-Task051StringSha256 -Value $prompt
@@ -3294,9 +3699,9 @@ function Invoke-Task051CodexTool {
         throw (Resolve-Task051CodexToolFailure -Stage $failureStage -Message ([string]$_.Exception.Message))
     }
     finally {
-        if ($null -ne $codexHome) {
+        if ($null -ne $codexHome -or $null -ne $relayHost -or $null -ne $owned) {
             try {
-                Complete-Task051InvocationCleanup -Owned $owned -CodexHome $codexHome -KnownServerProcessId $serverProcessId -CodexAuthority $codexProcessAuthority
+                Complete-Task051InvocationCleanup -Owned $owned -CodexHome $codexHome -KnownServerProcessId $serverProcessId -CodexAuthority $codexProcessAuthority -ServerAuthority $serverAuthority -RelayHost $relayHost
             }
             catch {
                 throw 'TASK038_CURRENT_CODEX_TOOL_CLEANUP_REJECTED'
@@ -5003,6 +5408,113 @@ function Invoke-Task051SelfTest {
                 $naturalExitChild.Dispose()
             }
         }
+        $relaySelfTestHost = $null
+        $relaySelfTestClient = $null
+        try {
+            $relayMarker = Join-Path $aclRoot 'relay-close.marker'
+            $relayReceivedMarker = Join-Path $aclRoot 'relay-received.marker'
+            [Environment]::SetEnvironmentVariable('LATTICE_TASK051_RELAY_SELF_TEST_MARKER', $relayMarker, 'Process')
+            $relayServerSource = @'
+$ErrorActionPreference = 'Stop'
+$line = [Console]::In.ReadLine()
+[IO.File]::WriteAllText($env:LATTICE_TASK051_RELAY_SELF_TEST_RECEIVED, 'received:' + $line, [Text.UTF8Encoding]::new($false))
+[Console]::Out.WriteLine('ACK:' + $line)
+[Console]::Out.Flush()
+while ($null -ne [Console]::In.ReadLine()) {}
+[IO.File]::WriteAllText($env:LATTICE_TASK051_RELAY_SELF_TEST_MARKER, 'closed:' + $line, [Text.UTF8Encoding]::new($false))
+'@
+            $relayServerEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($relayServerSource))
+            $relayPipeId = [Guid]::NewGuid().ToString('N')
+            $relaySelfTestHost = Start-Task051GracefulRelayHost `
+                -EvidenceRoot $aclRoot `
+                -PipeId $relayPipeId `
+                -ServerCommand ([IO.Path]::GetFullPath((Join-Path $PSHOME 'powershell.exe'))) `
+                -ServerArguments ('-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $relayServerEncoded) `
+                -Environment ([ordered]@{
+                    LATTICE_TASK051_RELAY_SELF_TEST_MARKER = $relayMarker
+                    LATTICE_TASK051_RELAY_SELF_TEST_RECEIVED = $relayReceivedMarker
+                }) `
+                -SelfTestDirect
+            $relayExpectedReadyPath = [IO.Path]::GetFullPath((Join-Path $aclRoot ('task051-relay-' + $relayPipeId + '.ready')))
+            if ([string]$relaySelfTestHost.ReadyPath -cne $relayExpectedReadyPath) {
+                throw 'TASK051_GRACEFUL_RELAY_SELF_TEST_READY_PATH_REJECTED'
+            }
+            $relayReadyDeadline = [DateTime]::UtcNow.AddSeconds(60)
+            while (-not (Test-Path -LiteralPath $relayExpectedReadyPath -PathType Leaf)) {
+                if ($relaySelfTestHost.HostOwned.Process.HasExited -or [DateTime]::UtcNow -ge $relayReadyDeadline) {
+                    throw 'TASK051_GRACEFUL_RELAY_SELF_TEST_READY_REJECTED'
+                }
+                [Threading.Thread]::Sleep(20)
+            }
+            $relayClientInfo = [Diagnostics.ProcessStartInfo]::new()
+            $relayClientInfo.FileName = [string]$relaySelfTestHost.ClientCommand
+            $relayClientInfo.Arguments = @($relaySelfTestHost.ClientArguments | ForEach-Object {
+                if ([string]$_ -match '\s') { '"' + [string]$_ + '"' } else { [string]$_ }
+            }) -join ' '
+            $relayClientInfo.WorkingDirectory = $aclRoot
+            $relayClientInfo.UseShellExecute = $false
+            $relayClientInfo.CreateNoWindow = $true
+            $relayClientInfo.RedirectStandardInput = $true
+            $relayClientInfo.RedirectStandardOutput = $true
+            $relayClientInfo.RedirectStandardError = $true
+            Set-Task051ClosedEnvironment -StartInfo $relayClientInfo -Additional ([ordered]@{})
+            $relaySelfTestClient = [Diagnostics.Process]::Start($relayClientInfo)
+            $relayAckTask = $relaySelfTestClient.StandardOutput.ReadLineAsync()
+            $relaySelfTestClient.StandardInput.WriteLine('probe')
+            $relaySelfTestClient.StandardInput.Flush()
+            $relayReceivedDeadline = [DateTime]::UtcNow.AddSeconds(30)
+            while (-not (Test-Path -LiteralPath $relayReceivedMarker -PathType Leaf)) {
+                if ($relaySelfTestClient.HasExited -or $relaySelfTestHost.HostOwned.Process.HasExited -or [DateTime]::UtcNow -ge $relayReceivedDeadline) {
+                    throw 'TASK051_GRACEFUL_RELAY_SELF_TEST_REQUEST_REJECTED'
+                }
+                [Threading.Thread]::Sleep(20)
+            }
+            if ([IO.File]::ReadAllText($relayReceivedMarker) -cne 'received:probe') {
+                throw 'TASK051_GRACEFUL_RELAY_SELF_TEST_REQUEST_REJECTED'
+            }
+            if (-not $relayAckTask.Wait(60000) -or [string]$relayAckTask.Result -cne 'ACK:probe') {
+                if (-not $relaySelfTestClient.HasExited) {
+                    $relaySelfTestClient.Kill()
+                    $relaySelfTestClient.WaitForExit()
+                }
+                $relayClientDiagnostic = [string]$relaySelfTestClient.StandardError.ReadToEnd()
+                $relayTrace = if (Test-Path -LiteralPath ([string]$relaySelfTestHost.ReadyPath)) { [IO.File]::ReadAllText([string]$relaySelfTestHost.ReadyPath) } else { '' }
+                $relayHostDiagnostic = if ($relaySelfTestHost.HostOwned.Process.HasExited) { [string]$relaySelfTestHost.HostStderrTask.GetAwaiter().GetResult() } else { '' }
+                $relayDiagnostic = if ($relayClientDiagnostic.Contains('TASK051_GRACEFUL_RELAY_CLIENT_REJECTED')) {
+                    'CLIENT'
+                }
+                elseif ($relayHostDiagnostic.Contains('TASK051_GRACEFUL_RELAY_HOST_REJECTED')) { 'HOST' }
+                elseif ($relayTrace.Contains('SERVER_STARTED')) { 'SERVER_STARTED_NO_ACK' }
+                elseif ($relayTrace.Contains('CLIENT_CONNECTED')) { 'CLIENT_CONNECTED_NO_SERVER' }
+                elseif ($relayTrace.Contains('PIPE_SERVERS_READY')) { 'PIPE_SERVERS_READY_NO_CLIENT' }
+                else { 'NO_CLIENT_CLASSIFICATION' }
+                throw ('TASK051_GRACEFUL_RELAY_SELF_TEST_REJECTED|' + $relayDiagnostic)
+            }
+            $relaySelfTestClient.Kill()
+            if (-not $relaySelfTestClient.WaitForExit(10000)) {
+                throw 'TASK051_GRACEFUL_RELAY_SELF_TEST_REJECTED'
+            }
+            Stop-Task051GracefulRelayHost -RelayHost $relaySelfTestHost
+            $relaySelfTestHost = $null
+            if (
+                -not (Test-Path -LiteralPath $relayMarker -PathType Leaf) -or
+                [IO.File]::ReadAllText($relayMarker) -cne 'closed:probe'
+            ) {
+                throw 'TASK051_GRACEFUL_RELAY_SELF_TEST_REJECTED'
+            }
+            Write-Output 'TASK051_GRACEFUL_RELAY_SELF_TEST=PASS'
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('LATTICE_TASK051_RELAY_SELF_TEST_MARKER', $null, 'Process')
+            [Environment]::SetEnvironmentVariable('LATTICE_TASK051_RELAY_SELF_TEST_RECEIVED', $null, 'Process')
+            if ($null -ne $relaySelfTestClient) {
+                try { if (-not $relaySelfTestClient.HasExited) { $relaySelfTestClient.Kill(); $relaySelfTestClient.WaitForExit() } } catch {}
+                $relaySelfTestClient.Dispose()
+            }
+            if ($null -ne $relaySelfTestHost) {
+                Stop-Task051GracefulRelayHost -RelayHost $relaySelfTestHost -CleanupOnly
+            }
+        }
         $cargoLinkPathProbe = Join-Path $aclRoot 't\debug\deps\liblattice_postgres_codebase_memory-0123456789abcdef.rlib'
         if ($cargoLinkPathProbe.Length -ge 260) {
             throw 'TASK051_CARGO_LINK_PATH_BUDGET_REJECTED'
@@ -5451,7 +5963,16 @@ function Invoke-Task051SelfTest {
         [Environment]::SetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', $authBefore, 'Process')
         [Environment]::SetEnvironmentVariable('LATTICE_TASK051_RUN_ROOT', $runRootBefore, 'Process')
         if (Test-Path -LiteralPath $aclRoot -PathType Container) {
-            [IO.Directory]::Delete(('\\?\' + $aclRoot), $true)
+            for ($cleanupAttempt = 0; $cleanupAttempt -lt 50; $cleanupAttempt++) {
+                try {
+                    [IO.Directory]::Delete(('\\?\' + $aclRoot), $true)
+                    break
+                }
+                catch [IO.IOException] {
+                    if ($cleanupAttempt -eq 49) { throw }
+                    [Threading.Thread]::Sleep(100)
+                }
+            }
         }
         if (Test-Path -LiteralPath $aclRoot) {
             throw 'TASK051_SELF_TEST_ROOT_CLEANUP_REJECTED'
