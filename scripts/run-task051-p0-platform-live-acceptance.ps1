@@ -11,9 +11,9 @@ $ProgressPreference = 'SilentlyContinue'
 $script:Task051ExpectedTask050Commit = '8e5ba40d38b781afff7028841bd981c8dd2b9721'
 $script:Task051ExpectedTask050Tree = 'b4478be2801814ffc630cbf113b0a4ffa3a1b591'
 $script:Task051DependencyState = 'TASK050_FULLY_VERIFIED'
-$script:Task051ExpectedCurrentCodexRelativePath = 'OpenAI\Codex\bin\e305f1c75d8da435\codex.exe'
-$script:Task051ExpectedCurrentCodexVersion = 'codex-cli 0.148.0-alpha.9'
-$script:Task051ExpectedCurrentCodexSha256 = 'f29f609375f3731d8db507a95124862a84e306982e30ba4300ddce5638bc6946'
+$script:Task051ExpectedCurrentCodexRelativePath = 'OpenAI\Codex\bin\1b8b258736e26786\codex.exe'
+$script:Task051ExpectedCurrentCodexVersion = 'codex-cli 0.148.0-alpha.21'
+$script:Task051ExpectedCurrentCodexSha256 = '18fbf51f77adfc543c9d86c78c0a54553f89ba79236ed8b0a3c48e2a3b4f010e'
 $script:Task051PublicStatusSchema = 'lattice.task.status.v1'
 $script:Task051ExpectedTools = @(
     'lattice_delivery_run',
@@ -44,6 +44,181 @@ function Get-Task051StringSha256 {
     try { $hash = $algorithm.ComputeHash($bytes) }
     finally { $algorithm.Dispose() }
     return ([BitConverter]::ToString($hash)).Replace('-', '').ToLowerInvariant()
+}
+
+function Write-Task051UnclassifiedFailureEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]$Value
+    )
+
+    $expectedKeys = @(
+        'schema_version',
+        'status',
+        'message_sha256',
+        'message_utf8_length',
+        'exception_type_sha256',
+        'fully_qualified_error_id_sha256',
+        'category',
+        'script_line_number',
+        'offset_in_line',
+        'statement_sha256',
+        'position_sha256',
+        'script_stack_trace_sha256',
+        'fingerprint_sha256'
+    )
+    $actualKeys = @($Value.Keys)
+    if (($actualKeys -join ',') -cne ($expectedKeys -join ',')) {
+        throw 'TASK051_UNCLASSIFIED_EVIDENCE_SHAPE_REJECTED'
+    }
+    if (
+        [string]$Value.schema_version -cne 'lattice.task051.unclassified-failure.v1' -or
+        [string]$Value.status -cne 'FAIL' -or
+        [string]$Value.category -cnotmatch '\A[A-Za-z]+\z' -or
+        [long]$Value.message_utf8_length -lt 0 -or
+        [long]$Value.script_line_number -lt 0 -or
+        [long]$Value.offset_in_line -lt 0
+    ) {
+        throw 'TASK051_UNCLASSIFIED_EVIDENCE_VALUE_REJECTED'
+    }
+    foreach ($key in @(
+        'message_sha256',
+        'exception_type_sha256',
+        'fully_qualified_error_id_sha256',
+        'statement_sha256',
+        'position_sha256',
+        'script_stack_trace_sha256',
+        'fingerprint_sha256'
+    )) {
+        if ([string]$Value[$key] -cnotmatch '\A[0-9a-f]{64}\z') {
+            throw 'TASK051_UNCLASSIFIED_EVIDENCE_VALUE_REJECTED'
+        }
+    }
+    $fingerprintInput = [ordered]@{}
+    foreach ($key in $expectedKeys | Select-Object -SkipLast 1) {
+        $fingerprintInput[$key] = $Value[$key]
+    }
+    if (
+        (Get-Task051StringSha256 -Value ($fingerprintInput | ConvertTo-Json -Compress -Depth 8)) -cne
+        [string]$Value.fingerprint_sha256
+    ) {
+        throw 'TASK051_UNCLASSIFIED_EVIDENCE_FINGERPRINT_REJECTED'
+    }
+    if (Test-Path -LiteralPath $Path) {
+        throw 'TASK051_UNCLASSIFIED_EVIDENCE_NOT_FRESH'
+    }
+
+    $writeFailureCode = 'TASK051_UNCLASSIFIED_EVIDENCE_SERIALIZE_REJECTED'
+    try {
+        $json = ($Value | ConvertTo-Json -Compress -Depth 8) + [char]10
+        $writeFailureCode = 'TASK051_UNCLASSIFIED_EVIDENCE_FILE_WRITE_REJECTED'
+        [IO.File]::WriteAllText($Path, $json, [Text.UTF8Encoding]::new($false))
+        $writeFailureCode = 'TASK051_UNCLASSIFIED_EVIDENCE_ACL_REJECTED'
+        Set-Task051OwnerOnlyAcl -Path $Path -Directory $false
+        return [pscustomobject]@{
+            Path = [IO.Path]::GetFullPath($Path)
+            Sha256 = Get-Task051Sha256 -Path $Path
+        }
+    }
+    catch {
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            try { [IO.File]::Delete($Path) } catch {}
+        }
+        throw $writeFailureCode
+    }
+}
+
+function Get-Task051UnclassifiedFailureClassification {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+
+    $message = [string]$ErrorRecord.Exception.Message
+    $exceptionType = [string]$ErrorRecord.Exception.GetType().FullName
+    $fullyQualifiedErrorId = [string]$ErrorRecord.FullyQualifiedErrorId
+    $scriptStackTrace = [string]$ErrorRecord.ScriptStackTrace
+    $invocation = $ErrorRecord.InvocationInfo
+    $scriptLineNumber = if ($null -eq $invocation) { 0L } else { [long]$invocation.ScriptLineNumber }
+    $offsetInLine = if ($null -eq $invocation) { 0L } else { [long]$invocation.OffsetInLine }
+    $statement = if ($null -eq $invocation) { '' } else { [string]$invocation.Line }
+    $position = if ($null -eq $invocation) { '' } else { [string]$invocation.PositionMessage }
+    $category = if ($null -eq $ErrorRecord.CategoryInfo) { 'NotSpecified' } else { [string]$ErrorRecord.CategoryInfo.Category }
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    $record = [ordered]@{
+        schema_version = 'lattice.task051.unclassified-failure.v1'
+        status = 'FAIL'
+        message_sha256 = Get-Task051StringSha256 -Value $message
+        message_utf8_length = [long]$utf8.GetByteCount($message)
+        exception_type_sha256 = Get-Task051StringSha256 -Value $exceptionType
+        fully_qualified_error_id_sha256 = Get-Task051StringSha256 -Value $fullyQualifiedErrorId
+        category = $category
+        script_line_number = $scriptLineNumber
+        offset_in_line = $offsetInLine
+        statement_sha256 = Get-Task051StringSha256 -Value $statement
+        position_sha256 = Get-Task051StringSha256 -Value $position
+        script_stack_trace_sha256 = Get-Task051StringSha256 -Value $scriptStackTrace
+    }
+    $fingerprint = Get-Task051StringSha256 -Value ($record | ConvertTo-Json -Compress -Depth 8)
+    $record['fingerprint_sha256'] = $fingerprint
+    $lineCode = if ($scriptLineNumber -ge 1 -and $scriptLineNumber -le 999999) {
+        'TASK038_UNCLASSIFIED_LINE_' + $scriptLineNumber
+    }
+    else {
+        'TASK038_UNCLASSIFIED_LINE_UNKNOWN'
+    }
+    $evidenceFailure = $false
+    $evidenceStage = 'RUN_ROOT'
+    $evidenceDetail = $null
+    try {
+        $runRoot = [IO.Path]::GetFullPath([Environment]::GetEnvironmentVariable('LATTICE_TASK051_RUN_ROOT', 'Process'))
+        $evidenceStage = 'ROOT'
+        $evidenceRoot = [IO.Path]::GetFullPath((Join-Path $runRoot 'd\e'))
+        if (-not (Test-Path -LiteralPath $evidenceRoot -PathType Container)) {
+            throw 'TASK051_UNCLASSIFIED_EVIDENCE_ROOT_REJECTED'
+        }
+        Assert-Task051NoReparseAncestor -Path $evidenceRoot -Boundary $runRoot -FailureCode 'TASK051_UNCLASSIFIED_EVIDENCE_ROOT_REJECTED'
+        $evidencePath = Join-Path $evidenceRoot 'u.json'
+        if (Test-Path -LiteralPath $evidencePath) {
+            $evidenceStage = 'REPLAY'
+            Assert-Task051RegularFile -Path $evidencePath -FailureCode 'TASK051_UNCLASSIFIED_EVIDENCE_REPLAY_REJECTED'
+            Assert-Task051OwnerOnlyAcl -Path $evidencePath -Directory $false
+            $expectedEvidence = ($record | ConvertTo-Json -Compress -Depth 8) + [char]10
+            $existingEvidence = [IO.File]::ReadAllText($evidencePath, [Text.Encoding]::UTF8)
+            if ($existingEvidence -cne $expectedEvidence) {
+                throw 'TASK051_UNCLASSIFIED_EVIDENCE_REPLAY_REJECTED'
+            }
+        }
+        else {
+            $evidenceStage = 'WRITE'
+            $null = Write-Task051UnclassifiedFailureEvidence -Path $evidencePath -Value $record
+        }
+    }
+    catch {
+        $evidenceFailure = $true
+        $candidateDetail = [string]$_.Exception.Message
+        if ($candidateDetail -in @(
+            'TASK051_UNCLASSIFIED_EVIDENCE_SHAPE_REJECTED',
+            'TASK051_UNCLASSIFIED_EVIDENCE_VALUE_REJECTED',
+            'TASK051_UNCLASSIFIED_EVIDENCE_FINGERPRINT_REJECTED',
+            'TASK051_UNCLASSIFIED_EVIDENCE_NOT_FRESH',
+            'TASK051_UNCLASSIFIED_EVIDENCE_SERIALIZE_REJECTED',
+            'TASK051_UNCLASSIFIED_EVIDENCE_FILE_WRITE_REJECTED',
+            'TASK051_UNCLASSIFIED_EVIDENCE_ACL_REJECTED',
+            'TASK051_UNCLASSIFIED_EVIDENCE_ROOT_REJECTED',
+            'TASK051_UNCLASSIFIED_EVIDENCE_REPLAY_REJECTED'
+        )) {
+            $evidenceDetail = $candidateDetail
+        }
+    }
+    $parts = [Collections.Generic.List[string]]::new()
+    $parts.Add('TASK038_UNCLASSIFIED_REJECTED')
+    $parts.Add($lineCode)
+    if ($evidenceFailure) {
+        $parts.Add('TASK038_UNCLASSIFIED_EVIDENCE_' + $evidenceStage + '_REJECTED')
+        if ($null -ne $evidenceDetail) {
+            $parts.Add($evidenceDetail)
+        }
+    }
+    $parts.Add($fingerprint)
+    return [string]::Join('|', $parts)
 }
 
 function Get-Task051CurrentCodexFileIdentity {
@@ -3085,6 +3260,7 @@ function Convert-Task051Task038Source {
     $qRunner = ConvertTo-Task051TomlLiteral -Value ([IO.Path]::GetFullPath($RunnerPath))
     $Source = $Source.Replace('$PSScriptRoot', $qScripts)
     $Source = Replace-Task051Exact -Source $Source -Old 'Set-StrictMode -Version Latest' -New ('. ' + $qRunner + ' -LibraryOnly' + [char]10 + 'Set-StrictMode -Version Latest') -FailureCode 'TASK051_TASK038_LIBRARY_INSERT_REJECTED'
+    $Source = Replace-Task051Exact -Source $Source -Old "    return 'TASK038_UNCLASSIFIED_REJECTED'" -New '    return (Get-Task051UnclassifiedFailureClassification -ErrorRecord $ErrorRecord)' -FailureCode 'TASK051_TASK038_UNCLASSIFIED_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '$repositoryTarget = Get-CanonicalPath -Path (Join-Path $script:RepositoryRoot ''target'')' -New '$repositoryTarget = Get-CanonicalPath -Path $env:LATTICE_TASK051_RUN_ROOT' -FailureCode 'TASK051_TASK038_TARGET_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old '$task038CargoTarget = Get-CanonicalPath -Path (Join-Path $repositoryTarget ''task038-main'')' -New '$task038CargoTarget = Get-CanonicalPath -Path $env:CARGO_TARGET_DIR' -FailureCode 'TASK051_TASK038_CARGO_TARGET_PATH_TRANSFORM_REJECTED'
     $Source = Replace-Task051Exact -Source $Source -Old 'Assert-NoReparseAncestor -Path $task038CargoTarget -Boundary $script:RepositoryRoot -FailureCode ''TASK038_CARGO_TARGET_REJECTED''' -New 'Assert-NoReparseAncestor -Path $task038CargoTarget -Boundary $env:CARGO_TARGET_DIR -FailureCode ''TASK038_CARGO_TARGET_REJECTED''' -FailureCode 'TASK051_TASK038_CARGO_TARGET_BOUNDARY_TRANSFORM_REJECTED'
@@ -4317,8 +4493,75 @@ function Invoke-Task051SelfTest {
     }
     $aclRoot = Join-Path $aclParent ('selftest-' + [Guid]::NewGuid().ToString('N'))
     $authBefore = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', 'Process')
+    $runRootBefore = [Environment]::GetEnvironmentVariable('LATTICE_TASK051_RUN_ROOT', 'Process')
     try {
         New-Task051OwnerOnlyDirectory -Path $aclRoot
+        $unclassifiedDataRoot = Join-Path $aclRoot 'd'
+        $unclassifiedEvidenceRoot = Join-Path $unclassifiedDataRoot 'e'
+        New-Task051OwnerOnlyDirectory -Path $unclassifiedDataRoot
+        New-Task051OwnerOnlyDirectory -Path $unclassifiedEvidenceRoot
+        [Environment]::SetEnvironmentVariable('LATTICE_TASK051_RUN_ROOT', $aclRoot, 'Process')
+        $unclassifiedFixtureMessage = 'task051-unclassified-message-must-not-appear'
+        $unclassifiedError = $null
+        try { throw $unclassifiedFixtureMessage }
+        catch { $unclassifiedError = $_ }
+        $unclassifiedClassification = Get-Task051UnclassifiedFailureClassification -ErrorRecord $unclassifiedError
+        $unclassifiedEvidenceFiles = @(Get-ChildItem -LiteralPath $unclassifiedEvidenceRoot -Filter 'u.json' -File)
+        if (
+            $unclassifiedClassification -cnotmatch '^TASK038_UNCLASSIFIED_REJECTED\|TASK038_UNCLASSIFIED_LINE_[1-9][0-9]*\|[0-9a-f]{64}$' -or
+            $unclassifiedEvidenceFiles.Count -ne 1
+        ) {
+            throw ('TASK051_UNCLASSIFIED_FAILURE_EVIDENCE_SELF_TEST_REJECTED|' + $unclassifiedClassification + '|COUNT_' + $unclassifiedEvidenceFiles.Count)
+        }
+        $unclassifiedRaw = [IO.File]::ReadAllText($unclassifiedEvidenceFiles[0].FullName, [Text.Encoding]::UTF8)
+        $unclassifiedEvidence = $unclassifiedRaw | ConvertFrom-Json -ErrorAction Stop
+        $unclassifiedFingerprint = [string]($unclassifiedClassification -split '\|')[-1]
+        if (
+            $unclassifiedRaw.IndexOf($unclassifiedFixtureMessage, [StringComparison]::Ordinal) -ge 0 -or
+            (@($unclassifiedEvidence.PSObject.Properties.Name) -join ',') -cne 'schema_version,status,message_sha256,message_utf8_length,exception_type_sha256,fully_qualified_error_id_sha256,category,script_line_number,offset_in_line,statement_sha256,position_sha256,script_stack_trace_sha256,fingerprint_sha256' -or
+            [string]$unclassifiedEvidence.schema_version -cne 'lattice.task051.unclassified-failure.v1' -or
+            [string]$unclassifiedEvidence.status -cne 'FAIL' -or
+            [string]$unclassifiedEvidence.message_sha256 -cne (Get-Task051StringSha256 -Value $unclassifiedFixtureMessage) -or
+            [long]$unclassifiedEvidence.message_utf8_length -ne [Text.UTF8Encoding]::new($false).GetByteCount($unclassifiedFixtureMessage) -or
+            [long]$unclassifiedEvidence.script_line_number -lt 1 -or
+            [string]$unclassifiedEvidence.fingerprint_sha256 -cne $unclassifiedFingerprint
+        ) {
+            throw 'TASK051_UNCLASSIFIED_FAILURE_EVIDENCE_SELF_TEST_REJECTED'
+        }
+        $unclassifiedReplayClassification = Get-Task051UnclassifiedFailureClassification -ErrorRecord $unclassifiedError
+        $unclassifiedReplayEvidenceFiles = @(Get-ChildItem -LiteralPath $unclassifiedEvidenceRoot -Filter 'u.json' -File)
+        $unclassifiedReplayEvidenceCount = $unclassifiedReplayEvidenceFiles.Count
+        if (
+            $unclassifiedReplayClassification -cne $unclassifiedClassification -or
+            $unclassifiedReplayEvidenceCount -ne 1
+        ) {
+            throw (
+                'TASK051_UNCLASSIFIED_FAILURE_REPLAY_SELF_TEST_REJECTED|' +
+                $unclassifiedClassification + '|' + $unclassifiedReplayClassification +
+                '|COUNT_' + [string]$unclassifiedReplayEvidenceCount
+            )
+        }
+        $unclassifiedTampered = ([ordered]@{
+            fingerprint_sha256 = $unclassifiedFingerprint
+        } | ConvertTo-Json -Compress) + [char]10
+        [IO.File]::WriteAllText(
+            $unclassifiedEvidenceFiles[0].FullName,
+            $unclassifiedTampered,
+            [Text.UTF8Encoding]::new($false)
+        )
+        Set-Task051OwnerOnlyAcl -Path $unclassifiedEvidenceFiles[0].FullName -Directory $false
+        $unclassifiedTamperedClassification = Get-Task051UnclassifiedFailureClassification -ErrorRecord $unclassifiedError
+        if (
+            $unclassifiedTamperedClassification -cnotmatch (
+                '^TASK038_UNCLASSIFIED_REJECTED\|TASK038_UNCLASSIFIED_LINE_[1-9][0-9]*' +
+                '\|TASK038_UNCLASSIFIED_EVIDENCE_REPLAY_REJECTED\|' +
+                'TASK051_UNCLASSIFIED_EVIDENCE_REPLAY_REJECTED\|' +
+                [regex]::Escape($unclassifiedFingerprint) + '$'
+            )
+        ) {
+            throw 'TASK051_UNCLASSIFIED_FAILURE_REPLAY_TAMPER_SELF_TEST_REJECTED'
+        }
+        Write-Output 'TASK051_UNCLASSIFIED_FAILURE_EVIDENCE_SELF_TEST=PASS'
         $phaseToolMismatchRoot = Join-Path $aclRoot 'phase-tool-mismatch'
         New-Task051OwnerOnlyDirectory -Path $phaseToolMismatchRoot
         $phaseToolMismatchMessage = $null
@@ -5097,6 +5340,7 @@ function Invoke-Task051SelfTest {
     }
     finally {
         [Environment]::SetEnvironmentVariable('LATTICE_TASK051_AUTH_SOURCE', $authBefore, 'Process')
+        [Environment]::SetEnvironmentVariable('LATTICE_TASK051_RUN_ROOT', $runRootBefore, 'Process')
         if (Test-Path -LiteralPath $aclRoot -PathType Container) {
             [IO.Directory]::Delete(('\\?\' + $aclRoot), $true)
         }

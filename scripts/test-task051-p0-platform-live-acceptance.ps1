@@ -41,10 +41,13 @@ $requiredFragments = @(
     'mcpServerStatus/list',
     'app-server',
     '--stdio',
-    '$script:Task051ExpectedCurrentCodexRelativePath = ''OpenAI\Codex\bin\e305f1c75d8da435\codex.exe''',
-    '$script:Task051ExpectedCurrentCodexVersion = ''codex-cli 0.148.0-alpha.9''',
-    '$script:Task051ExpectedCurrentCodexSha256 = ''f29f609375f3731d8db507a95124862a84e306982e30ba4300ddce5638bc6946''',
+    '$script:Task051ExpectedCurrentCodexRelativePath = ''OpenAI\Codex\bin\1b8b258736e26786\codex.exe''',
+    '$script:Task051ExpectedCurrentCodexVersion = ''codex-cli 0.148.0-alpha.21''',
+    '$script:Task051ExpectedCurrentCodexSha256 = ''18fbf51f77adfc543c9d86c78c0a54553f89ba79236ed8b0a3c48e2a3b4f010e''',
     'Get-Task051CurrentCodexFileIdentity',
+    'Get-Task051UnclassifiedFailureClassification',
+    'lattice.task051.unclassified-failure.v1',
+    'TASK051_TASK038_UNCLASSIFIED_TRANSFORM_REJECTED',
     'codex_native_identity',
     'codex_creation_file_time_utc',
     'CodexAuthority',
@@ -321,6 +324,8 @@ if (
     $currentCodexUserAgentIndex -le $currentCodexVersionIndex -or
     $currentCodexIdentitySource.IndexOf('Get-ChildItem', [StringComparison]::Ordinal) -ge 0 -or
     $runnerSource.IndexOf('codex-cli 0.147.0-alpha.6.6', [StringComparison]::Ordinal) -ge 0 -or
+    $runnerSource.IndexOf('codex-cli 0.148.0-alpha.9', [StringComparison]::Ordinal) -ge 0 -or
+    $runnerSource.IndexOf('OpenAI\Codex\bin\e305f1c75d8da435\codex.exe', [StringComparison]::Ordinal) -ge 0 -or
     [regex]::Matches($runnerSource, [regex]::Escape('Get-Task051CurrentCodexFileIdentity')).Count -ne 4
 ) {
     throw 'TASK051_CURRENT_CODEX_IDENTITY_SHAPE_REJECTED'
@@ -1164,6 +1169,7 @@ if (
     [regex]::Matches($task038TransformSource, [regex]::Escape("Join-Path `$deliveryRoot ('task-' + [string]`$submitted.task_ref)")).Count -ne 1 -or
     [regex]::Matches($task038TransformSource, [regex]::Escape("Join-Path `$taskDeliveryRoot 'repo'")).Count -ne 1 -or
     [regex]::Matches($task038TransformSource, [regex]::Escape("Join-Path `$deliveryRoot 'repo'")).Count -ne 0 -or
+    [regex]::Matches($task038TransformSource, [regex]::Escape('return (Get-Task051UnclassifiedFailureClassification -ErrorRecord $ErrorRecord)')).Count -ne 1 -or
     [regex]::Matches($runnerSource, [regex]::Escape('$runAllocation = New-Task051RunRoot -AllowedRoot $allowedRoot -RunId $runId')).Count -ne 1 -or
     [regex]::Matches($runnerSource, [regex]::Escape("schema_version = 'lattice.task051.p0-platform-live-acceptance.v2'")).Count -ne 1 -or
     [regex]::Matches($runnerSource, [regex]::Escape('$runRoot = [IO.Path]::GetFullPath((Join-Path $allowedRoot $runId))')).Count -ne 0
@@ -1206,6 +1212,7 @@ $expectedSelfTestMarkers = @(
     'TASK051_MCP_SERVER_NATURAL_EXIT_SELF_TEST=PASS',
     'TASK051_MCP_SESSION_OPEN_PARSE_DIAGNOSTIC_SELF_TEST=PASS',
     'TASK051_CODEX_TOOL_FAILURE_CLASSIFIER_SELF_TEST=PASS',
+    'TASK051_UNCLASSIFIED_FAILURE_EVIDENCE_SELF_TEST=PASS',
     'TASK051_CODEX_CALL_COUNT_PHASE_SELF_TEST=PASS',
     'TASK051_CODEX_EVENT_SUMMARY_SELF_TEST=PASS',
     'TASK051_CODEX_TOOL_FIELD_DIAGNOSTIC_SELF_TEST=PASS',
