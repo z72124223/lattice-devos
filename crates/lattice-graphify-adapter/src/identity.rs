@@ -36,8 +36,20 @@ pub const GRAPHIFY_WSL_PYTHON_VERSION_SHA256: &str =
 pub const GRAPHIFY_WSL_BWRAP_PATH: &str = "/usr/bin/bwrap";
 /// Exact reviewed bubblewrap version output, excluding its trailing newline.
 pub const GRAPHIFY_WSL_BWRAP_VERSION: &str = "bubblewrap 0.11.1";
+/// Exact Ubuntu security-package version that owns the reviewed executable.
+pub const GRAPHIFY_WSL_BWRAP_PACKAGE_VERSION: &str = "0.11.1-1ubuntu0.1";
+/// Official Ubuntu security provenance for the reviewed package.
+pub const GRAPHIFY_WSL_BWRAP_PACKAGE_SOURCE: &str =
+    "Ubuntu 26.04 LTS resolute-security USN-8288-1 CVE-2026-41163";
+/// SHA-256 from the signed Ubuntu package index for the reviewed `.deb`.
+pub const GRAPHIFY_WSL_BWRAP_PACKAGE_DEB_SHA256: &str =
+    "b353088d1003adb3f760deeccfb84c47928a36c8dc102bf680efc94eb19f4408";
 /// SHA-256 of the reviewed system-owned bubblewrap executable.
 pub const GRAPHIFY_WSL_BWRAP_SHA256: &str =
+    "0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0";
+/// Historical vulnerable identity retained only as a rejection fixture.
+#[cfg(test)]
+pub const GRAPHIFY_WSL_HISTORICAL_VULNERABLE_BWRAP_SHA256: &str =
     "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b";
 /// SHA-256 of `bwrap --version` with its trailing newline.
 pub const GRAPHIFY_WSL_BWRAP_VERSION_SHA256: &str =
@@ -88,7 +100,7 @@ pub const GRAPHIFY_PRIVATE_RUNNER_SHA256: &str =
     "98d0411709927a5687315f64efc6673a77f2241e2db6df8bd17c34886e3c2ad9";
 /// Digest binding the reviewed system trust boundary and LATTICE-owned payload.
 pub const GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256: &str =
-    "f270004749c7f4fc260dfc09925b52f3b7071bcc64ba5f7cbd9bd37ae1400dd5";
+    "beee062d8dec1e7430600b52ab99f87cf9c849d0014a43b7974fdd2f311e7e4c";
 
 const SITE_PACKAGES_RELATIVE: &str = "site-packages";
 const INSTALL_REPORT_RELATIVE: &str = "install-report.json";
@@ -405,7 +417,7 @@ fn reviewed_execution_identity_digest(
     let file_count = file_count.to_string();
     let byte_count = byte_count.to_string();
     let mut fields = vec![
-        b"lattice-graphify-wsl-execution-identity-1.0".as_slice(),
+        b"lattice-graphify-wsl-execution-identity-1.1".as_slice(),
         GRAPHIFY_WSL_DISTRO.as_bytes(),
         launcher_sha256.as_bytes(),
         manifest_sha256.as_bytes(),
@@ -424,6 +436,9 @@ fn reviewed_execution_identity_digest(
         GRAPHIFY_WSL_PYTHON_VERSION_SHA256.as_bytes(),
         GRAPHIFY_WSL_BWRAP_PATH.as_bytes(),
         GRAPHIFY_WSL_BWRAP_VERSION.as_bytes(),
+        GRAPHIFY_WSL_BWRAP_PACKAGE_VERSION.as_bytes(),
+        GRAPHIFY_WSL_BWRAP_PACKAGE_SOURCE.as_bytes(),
+        GRAPHIFY_WSL_BWRAP_PACKAGE_DEB_SHA256.as_bytes(),
         GRAPHIFY_WSL_BWRAP_SHA256.as_bytes(),
         GRAPHIFY_WSL_BWRAP_VERSION_SHA256.as_bytes(),
         GRAPHIFY_WSL_BWRAP_HELP_SHA256.as_bytes(),
@@ -484,6 +499,31 @@ mod tests {
     use super::*;
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn bubblewrap_security_package_provenance_is_part_of_the_current_identity() {
+        assert_eq!(GRAPHIFY_WSL_BWRAP_PACKAGE_VERSION, "0.11.1-1ubuntu0.1");
+        assert_eq!(
+            GRAPHIFY_WSL_BWRAP_PACKAGE_SOURCE,
+            "Ubuntu 26.04 LTS resolute-security USN-8288-1 CVE-2026-41163"
+        );
+        assert_eq!(
+            GRAPHIFY_WSL_BWRAP_PACKAGE_DEB_SHA256,
+            "b353088d1003adb3f760deeccfb84c47928a36c8dc102bf680efc94eb19f4408"
+        );
+        assert_eq!(
+            GRAPHIFY_WSL_BWRAP_SHA256,
+            "0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0"
+        );
+        assert_eq!(
+            GRAPHIFY_WSL_HISTORICAL_VULNERABLE_BWRAP_SHA256,
+            "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b"
+        );
+        assert_ne!(
+            GRAPHIFY_WSL_BWRAP_SHA256,
+            GRAPHIFY_WSL_HISTORICAL_VULNERABLE_BWRAP_SHA256
+        );
+    }
 
     #[test]
     fn dependency_outside_graphify_package_is_part_of_wsl_payload_identity() {

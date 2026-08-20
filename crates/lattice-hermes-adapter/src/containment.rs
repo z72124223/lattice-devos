@@ -23,6 +23,16 @@ use sha2::{Digest, Sha256};
 use crate::{HermesAdapterError, HermesAdapterErrorKind, HermesAdapterResult};
 
 const BWRAP_PATH: &str = "/usr/bin/bwrap";
+pub(crate) const HERMES_BWRAP_PACKAGE_VERSION: &str = "0.11.1-1ubuntu0.1";
+pub(crate) const HERMES_BWRAP_PACKAGE_SOURCE: &str =
+    "Ubuntu 26.04 LTS resolute-security USN-8288-1 CVE-2026-41163";
+pub(crate) const HERMES_BWRAP_PACKAGE_DEB_SHA256: &str =
+    "b353088d1003adb3f760deeccfb84c47928a36c8dc102bf680efc94eb19f4408";
+pub(crate) const HERMES_BWRAP_SHA256: &str =
+    "0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0";
+#[cfg(test)]
+pub(crate) const HERMES_HISTORICAL_VULNERABLE_BWRAP_SHA256: &str =
+    "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b";
 const PRIVATE_RUNNER_SOURCE: &str = include_str!("hermes_sandbox_runner.py");
 const PRIVATE_FRAME_MAGIC: &[u8] = b"LATTICE_HERMES_CONTAINED_V1\n";
 const PRIVATE_FRAME_FIELD_COUNT: usize = 7;
@@ -565,8 +575,6 @@ impl HermesSocketpairReceipt {
     pub(crate) fn validate_for_containment(&self) -> HermesAdapterResult<()> {
         if self.broker_read_fd != 0
             || self.broker_write_fd != 1
-            || self.bwrap_sha256
-                != "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b"
             || !self.descendants_reaped
             || self.python_version != "3.12.13"
         {
@@ -575,7 +583,19 @@ impl HermesSocketpairReceipt {
                 "HERMES_SOCKETPAIR_RECEIPT_BINDING_REJECTED",
             ));
         }
+        validate_approved_bwrap_digest(&self.bwrap_sha256)
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn validate_approved_bwrap_digest(digest: &str) -> HermesAdapterResult<()> {
+    if digest == HERMES_BWRAP_SHA256 {
         Ok(())
+    } else {
+        Err(HermesAdapterError::new(
+            HermesAdapterErrorKind::Identity,
+            "HERMES_BWRAP_SECURITY_IDENTITY_REJECTED",
+        ))
     }
 }
 
@@ -585,6 +605,9 @@ impl HermesSocketpairReceipt {
 struct SocketpairReceiptWire {
     broker_read_fd: u32,
     broker_write_fd: u32,
+    bwrap_package_deb_sha256: String,
+    bwrap_package_source: String,
+    bwrap_package_version: String,
     bwrap_sha256: String,
     descendants_reaped: bool,
     nonce_binding_sha256: String,
@@ -622,10 +645,12 @@ fn parse_socketpair_receipt(
     binding.update(nonce_bytes);
     binding.update(b"LATTICE_SOCKETPAIR_CANARY");
     let expected_binding = encode_digest(&binding.finalize());
-    if wire.schema != "lattice.hermes.socketpair-receipt.v1"
+    if wire.schema != "lattice.hermes.socketpair-receipt.v2"
         || wire.broker_read_fd != 0
         || wire.broker_write_fd != 1
-        || wire.bwrap_sha256 != "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b"
+        || wire.bwrap_package_version != HERMES_BWRAP_PACKAGE_VERSION
+        || wire.bwrap_package_source != HERMES_BWRAP_PACKAGE_SOURCE
+        || wire.bwrap_package_deb_sha256 != HERMES_BWRAP_PACKAGE_DEB_SHA256
         || !wire.descendants_reaped
         || wire.python_version != "3.12.13"
         || wire.nonce_binding_sha256 != expected_binding
@@ -635,6 +660,7 @@ fn parse_socketpair_receipt(
             "HERMES_SOCKETPAIR_RECEIPT_BINDING_REJECTED",
         ));
     }
+    validate_approved_bwrap_digest(&wire.bwrap_sha256)?;
     let receipt_digest = ContentDigest::from_sha256(encode_digest(&Sha256::digest(bytes)))
         .map_err(|_| malformed("HERMES_SOCKETPAIR_RECEIPT_DIGEST_REJECTED"))?;
     Ok(HermesSocketpairReceipt {

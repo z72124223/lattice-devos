@@ -15,7 +15,12 @@ import sys
 
 
 MAGIC = b"LATTICE_HERMES_SOCKETPAIR_V1\n"
-EXPECTED_BWRAP_SHA256 = "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b"
+APPROVED_BWRAP_PACKAGE_VERSION = "0.11.1-1ubuntu0.1"
+APPROVED_BWRAP_PACKAGE_SOURCE = "Ubuntu 26.04 LTS resolute-security USN-8288-1 CVE-2026-41163"
+APPROVED_BWRAP_PACKAGE_DEB_SHA256 = (
+    "b353088d1003adb3f760deeccfb84c47928a36c8dc102bf680efc94eb19f4408"
+)
+EXPECTED_BWRAP_SHA256 = "0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0"
 EXPECTED_PYTHON_VERSION = (3, 12, 13)
 MAX_DIAGNOSTIC_BYTES = 4096
 
@@ -172,11 +177,14 @@ def socketpair_canary(runtime_root, nonce):
         {
             "broker_read_fd": 0,
             "broker_write_fd": 1,
+            "bwrap_package_deb_sha256": APPROVED_BWRAP_PACKAGE_DEB_SHA256,
+            "bwrap_package_source": APPROVED_BWRAP_PACKAGE_SOURCE,
+            "bwrap_package_version": APPROVED_BWRAP_PACKAGE_VERSION,
             "bwrap_sha256": bwrap_sha256,
             "descendants_reaped": True,
             "nonce_binding_sha256": binding,
             "python_version": "3.12.13",
-            "schema": "lattice.hermes.socketpair-receipt.v1",
+            "schema": "lattice.hermes.socketpair-receipt.v2",
         }
     )
 

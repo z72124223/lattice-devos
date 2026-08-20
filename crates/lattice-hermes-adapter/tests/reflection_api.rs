@@ -27,12 +27,57 @@ use crate::broker::{
     verify_codex_no_marker_canary, verify_official_codex_bundle,
 };
 use crate::containment::{
-    HermesContainmentFrameLimits, HermesWslContainmentConfig, build_hermes_bwrap_arguments,
-    parse_containment_frame,
+    HERMES_BWRAP_PACKAGE_DEB_SHA256, HERMES_BWRAP_PACKAGE_SOURCE,
+    HERMES_BWRAP_PACKAGE_VERSION, HERMES_BWRAP_SHA256,
+    HERMES_HISTORICAL_VULNERABLE_BWRAP_SHA256, HermesContainmentFrameLimits,
+    HermesWslContainmentConfig, build_hermes_bwrap_arguments, parse_containment_frame,
+    validate_approved_bwrap_digest,
 };
 
 const SUBJECT_DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const GRAPH_DIGEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[test]
+fn bubblewrap_security_identity_accepts_only_the_approved_package_binary() {
+    assert_eq!(HERMES_BWRAP_PACKAGE_VERSION, "0.11.1-1ubuntu0.1");
+    assert_eq!(
+        HERMES_BWRAP_PACKAGE_SOURCE,
+        "Ubuntu 26.04 LTS resolute-security USN-8288-1 CVE-2026-41163"
+    );
+    assert_eq!(
+        HERMES_BWRAP_PACKAGE_DEB_SHA256,
+        "b353088d1003adb3f760deeccfb84c47928a36c8dc102bf680efc94eb19f4408"
+    );
+    assert_eq!(
+        HERMES_BWRAP_SHA256,
+        "0abea81db798ebf6b4742ac0664802d97521547a353c2a0dbdc21d76cbbfd2c0"
+    );
+    assert_eq!(
+        HERMES_HISTORICAL_VULNERABLE_BWRAP_SHA256,
+        "8e19e40e7d5f7a7e8b488c7926feb040eab6ed10c58fa360e266d2f70670e92b"
+    );
+
+    validate_approved_bwrap_digest(HERMES_BWRAP_SHA256).expect("security package accepted");
+    for rejected in [
+        HERMES_HISTORICAL_VULNERABLE_BWRAP_SHA256,
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    ] {
+        let failure = validate_approved_bwrap_digest(rejected).expect_err("digest rejected");
+        assert_eq!(failure.code(), "HERMES_BWRAP_SECURITY_IDENTITY_REJECTED");
+    }
+
+    let outer_runner = include_str!("../src/wsl_outer_runner.py");
+    for approved in [
+        HERMES_BWRAP_PACKAGE_VERSION,
+        HERMES_BWRAP_PACKAGE_SOURCE,
+        HERMES_BWRAP_PACKAGE_DEB_SHA256,
+        HERMES_BWRAP_SHA256,
+        "lattice.hermes.socketpair-receipt.v2",
+    ] {
+        assert!(outer_runner.contains(approved));
+    }
+    assert!(!outer_runner.contains(HERMES_HISTORICAL_VULNERABLE_BWRAP_SHA256));
+}
 
 #[test]
 fn pinned_runtime_sandbox_and_proxy_contract_are_closed_by_construction() {
