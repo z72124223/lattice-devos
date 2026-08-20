@@ -1,4 +1,4 @@
-import { readFile, readdir } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
@@ -56,6 +56,26 @@ function frontmatterScalar(frontmatter, key) {
 
 const files = await walk(root);
 const errors = [];
+
+async function isGitWorktreeRoot(candidate) {
+  try {
+    const dotGit = await lstat(path.join(candidate, ".git"));
+    return dotGit.isFile();
+  } catch {
+    return false;
+  }
+}
+
+const resolvedRoot = await realpath(root);
+if (path.resolve(root).toLowerCase() !== resolvedRoot.toLowerCase()) {
+  errors.push("worktree root must not resolve through a reparse point.");
+}
+for (let ancestor = path.dirname(resolvedRoot); ancestor !== path.dirname(ancestor); ancestor = path.dirname(ancestor)) {
+  if (await isGitWorktreeRoot(ancestor)) {
+    errors.push("worktree root must not be nested inside another Git worktree.");
+    break;
+  }
+}
 
 const engineeringProtocolPath = "docs/contracts/ENGINEERING_PROTOCOL_V1.md";
 const engineeringProtocolFile = files.find(
@@ -229,6 +249,7 @@ for (const file of ticketFiles) {
   const deliveryRepository = frontmatterScalar(frontmatter, "delivery_repository");
   const deliveryPush = frontmatterScalar(frontmatter, "delivery_push");
   const deliveryArchive = frontmatterScalar(frontmatter, "delivery_archive");
+  const status = frontmatterScalar(frontmatter, "status");
   const includesBranchGuide = frontmatterListIncludes(
     frontmatter,
     "allowed_paths",
@@ -249,6 +270,7 @@ for (const file of ticketFiles) {
       deliveryRepository,
       deliveryPush,
       deliveryArchive,
+      status,
     });
   }
 }
@@ -269,6 +291,112 @@ const defaultGitBranchResult = spawnSync(
 const defaultGitBranch = defaultGitBranchResult.status === 0
   ? defaultGitBranchResult.stdout.trim().replace(/^origin\//u, "")
   : "";
+const branchGuidePath = "tools/engineering-status-dashboard/branch-guide.zh-TW.json";
+
+async function validateBranchGuide(ticket, label) {
+  if (!ticket.includesBranchGuide) {
+    errors.push(
+      `${ticket.file}: ${label} ticket allowed_paths must include '${branchGuidePath}'.`,
+    );
+    return;
+  }
+  const branchGuideFile = files.find((candidate) => relative(candidate) === branchGuidePath);
+  if (!branchGuideFile || !ticket.branch) return;
+  try {
+    const guide = JSON.parse(await readFile(branchGuideFile, "utf8"));
+    const entry = guide?.branches?.[ticket.branch];
+    if (
+      guide?.schema !== "lattice.branch-guide.zh-TW/1.0" ||
+      typeof entry?.name !== "string" ||
+      !entry.name.trim() ||
+      !/\p{Script=Han}/u.test(entry.name) ||
+      typeof entry?.purpose !== "string" ||
+      !entry.purpose.trim() ||
+      !/\p{Script=Han}/u.test(entry.purpose)
+    ) {
+      errors.push(
+        `${branchGuidePath}: missing plain Traditional-Chinese name and purpose for '${ticket.branch}'.`,
+      );
+    }
+  } catch {
+    // The generic JSON validator already reports the parse failure.
+  }
+}
+
+function validateDeliveryMetadata(ticket, label) {
+  if (
+    !ticket.deliveryRemote.valid ||
+    !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(ticket.deliveryRemote.value || "")
+  ) {
+    errors.push(
+      `${ticket.file}: ${label} ticket delivery_remote must be exactly one safe named Git remote.`,
+    );
+  }
+  if (
+    !ticket.deliveryRepository.valid ||
+    !/^(?:[a-z0-9.-]+(?::[0-9]+)?\/[a-zA-Z0-9._/-]+|file:[^\r\n]+)$/u.test(
+      ticket.deliveryRepository.value || "",
+    )
+  ) {
+    errors.push(
+      `${ticket.file}: ${label} ticket delivery_repository must name one credential-free canonical repository identity.`,
+    );
+  }
+  if (
+    !ticket.deliveryPush.valid ||
+    !new Set(["authorized_non_force_feature_branch", "local_only"]).has(
+      ticket.deliveryPush.value,
+    )
+  ) {
+    errors.push(
+      `${ticket.file}: ${label} ticket delivery_push must be 'authorized_non_force_feature_branch' or 'local_only'.`,
+    );
+  }
+  if (
+    !ticket.deliveryArchive.valid ||
+    !new Set(["after_success", "keep_open"]).has(ticket.deliveryArchive.value)
+  ) {
+    errors.push(
+      `${ticket.file}: ${label} ticket delivery_archive must be 'after_success' or 'keep_open'.`,
+    );
+  }
+}
+
+const parallelTaskMatch = currentGitBranch.match(
+  /^feature\/(task-[0-9]{3})-[a-z0-9]+(?:-[a-z0-9]+)*$/u,
+);
+if (currentGitBranch && defaultGitBranch && currentGitBranch === defaultGitBranch) {
+  errors.push(`current Git branch '${currentGitBranch}' must not be the default branch.`);
+} else if (parallelTaskMatch) {
+  const parallelTaskId = parallelTaskMatch[1].toUpperCase();
+  const parallelTicket = ticketOwners.get(parallelTaskId);
+  if (!parallelTicket) {
+    errors.push(
+      `parallel branch '${currentGitBranch}' has no matching unique ticket '${parallelTaskId}'.`,
+    );
+  } else {
+    if (parallelTicket.branch !== currentGitBranch) {
+      errors.push(
+        `${parallelTicket.file}: parallel ticket branch '${parallelTicket.branch || ""}' does not match current Git branch '${currentGitBranch}'.`,
+      );
+    }
+    if (!constitutionOwners.has(parallelTicket.moduleId)) {
+      errors.push(
+        `${parallelTicket.file}: parallel module '${parallelTicket.moduleId}' has no MODULE_CONSTITUTION.md.`,
+      );
+    }
+    if (
+      !parallelTicket.status.valid ||
+      !new Set(["complete", "completed", "verified"]).has(
+        (parallelTicket.status.value || "").toLowerCase(),
+      )
+    ) {
+      errors.push(`${parallelTicket.file}: parallel ticket must be terminal.`);
+    }
+    validateDeliveryMetadata(parallelTicket, "parallel");
+    await validateBranchGuide(parallelTicket, "parallel");
+  }
+}
 if (!plansFile) {
   errors.push("PLANS.md: missing project plan.");
 } else {
@@ -292,7 +420,6 @@ if (!plansFile) {
         `${currentTicket.file}: current module '${currentTicket.moduleId}' has no MODULE_CONSTITUTION.md.`,
       );
     } else {
-      const branchGuidePath = "tools/engineering-status-dashboard/branch-guide.zh-TW.json";
       if (!currentTicket.branch) {
         errors.push(`${currentTicket.file}: current ticket requires exactly one branch.`);
       } else if (currentGitBranchResult.status !== 0) {
@@ -300,76 +427,19 @@ if (!plansFile) {
       } else if (
         currentGitBranch &&
         currentGitBranch !== defaultGitBranch &&
+        (!parallelTaskMatch || currentTaskId === parallelTaskMatch[1].toUpperCase()) &&
         currentTicket.branch !== currentGitBranch
       ) {
         errors.push(
           `${currentTicket.file}: ticket branch '${currentTicket.branch}' does not match current Git branch '${currentGitBranch}'.`,
         );
       }
-      if (!currentTicket.includesBranchGuide) {
-        errors.push(
-          `${currentTicket.file}: current ticket allowed_paths must include '${branchGuidePath}'.`,
-        );
-      }
-      if (
-        !currentTicket.deliveryRemote.valid ||
-        !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(currentTicket.deliveryRemote.value || "")
-      ) {
-        errors.push(
-          `${currentTicket.file}: current ticket delivery_remote must be exactly one safe named Git remote.`,
-        );
-      }
-      if (
-        !currentTicket.deliveryRepository.valid ||
-        !/^(?:[a-z0-9.-]+(?::[0-9]+)?\/[a-zA-Z0-9._/-]+|file:[^\r\n]+)$/u.test(
-          currentTicket.deliveryRepository.value || "",
-        )
-      ) {
-        errors.push(
-          `${currentTicket.file}: current ticket delivery_repository must name one credential-free canonical repository identity.`,
-        );
-      }
-      if (
-        !currentTicket.deliveryPush.valid ||
-        !new Set(["authorized_non_force_feature_branch", "local_only"]).has(
-          currentTicket.deliveryPush.value,
-        )
-      ) {
-        errors.push(
-          `${currentTicket.file}: current ticket delivery_push must be 'authorized_non_force_feature_branch' or 'local_only'.`,
-        );
-      }
-      if (
-        !currentTicket.deliveryArchive.valid ||
-        !new Set(["after_success", "keep_open"]).has(currentTicket.deliveryArchive.value)
-      ) {
-        errors.push(
-          `${currentTicket.file}: current ticket delivery_archive must be 'after_success' or 'keep_open'.`,
-        );
-      }
+      validateDeliveryMetadata(currentTicket, "current");
       const branchGuideFile = files.find((candidate) => relative(candidate) === branchGuidePath);
       if (!branchGuideFile) {
         errors.push(`${branchGuidePath}: missing Traditional-Chinese branch guide.`);
       } else if (currentTicket.branch) {
-        try {
-          const guide = JSON.parse(await readFile(branchGuideFile, "utf8"));
-          const entry = guide?.branches?.[currentTicket.branch];
-          if (
-            guide?.schema !== "lattice.branch-guide.zh-TW/1.0" ||
-            typeof entry?.name !== "string" ||
-            !entry.name.trim() ||
-            !/\p{Script=Han}/u.test(entry.name) ||
-            typeof entry?.purpose !== "string" ||
-            !entry.purpose.trim() ||
-            !/\p{Script=Han}/u.test(entry.purpose)
-          ) {
-            errors.push(
-              `${branchGuidePath}: missing plain Traditional-Chinese name and purpose for '${currentTicket.branch}'.`,
-            );
-          }
-        } catch {
-          // The generic JSON validator already reports the parse failure.
-        }
+        await validateBranchGuide(currentTicket, "current");
       }
     }
   }

@@ -1,6 +1,10 @@
 {
   "schema": "lattice.branch-guide.zh-TW/1.0",
   "branches": {
+    "feature/task-085-parallel-task-governance": {
+      "name": "平行任務治理檢查",
+      "purpose": "修正平行任務分支的治理身分驗證，保留唯一規劃焦點與拒絕不完整交付證據。"
+    },
     "feature/task-078-engineering-delivery-finisher": {
       "name": "任務 078：一鍵工程收尾",
       "purpose": "工作完成後依票券決定是否安全推送、核對 GitHub、更新工程地圖，成功才封存 Codex 任務。"

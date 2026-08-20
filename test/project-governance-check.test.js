@@ -101,9 +101,16 @@ async function runFixture({
   deliveryRepository = "github.com/example/fixture",
   gitBranch,
   detachedGitHead = false,
+  defaultGitBranch,
+  nestedGitWorktree = false,
 }) {
-  const root = await mkdtemp(path.join(tmpdir(), "lattice-project-check-"));
+  const fixtureContainer = await mkdtemp(path.join(tmpdir(), "lattice-project-check-"));
+  const root = nestedGitWorktree ? path.join(fixtureContainer, "child-worktree") : fixtureContainer;
   try {
+    if (nestedGitWorktree) {
+      await mkdir(root, { recursive: true });
+      await writeFile(path.join(fixtureContainer, ".git"), "gitdir: fixture-parent\n", "utf8");
+    }
     const currentTask = plans.match(/CURRENT (TASK-[0-9]{3})\b/u)?.[1] || tickets[0]?.[1];
     const fixtureGitBranch = gitBranch || `feature/${String(currentTask).toLowerCase()}-fixture`;
     const gitInit = spawnSync("git", ["init", "-b", fixtureGitBranch], {
@@ -111,6 +118,14 @@ async function runFixture({
       encoding: "utf8",
     });
     assert.equal(gitInit.status, 0, gitInit.stderr);
+    if (defaultGitBranch) {
+      const defaultRef = spawnSync(
+        "git",
+        ["symbolic-ref", "refs/remotes/origin/HEAD", `refs/remotes/origin/${defaultGitBranch}`],
+        { cwd: root, encoding: "utf8" },
+      );
+      assert.equal(defaultRef.status, 0, defaultRef.stderr);
+    }
     const constitutionFile = path.join(root, constitutionPath);
     await mkdir(path.dirname(constitutionFile), { recursive: true });
     await mkdir(path.join(root, "docs", "contracts"), { recursive: true });
@@ -132,11 +147,12 @@ async function runFixture({
     }
     await writeFile(path.join(root, "PLANS.md"), plans, "utf8");
     const guideBranches = {};
-    for (const [name, ticketId, moduleId = "fixture"] of tickets) {
-      const branch = `feature/${ticketId.toLowerCase()}-fixture`;
+    for (const [name, ticketId, moduleId = "fixture", overrides = {}] of tickets) {
+      const branch = overrides.branch || `feature/${ticketId.toLowerCase()}-fixture`;
+      const ticketStatus = overrides.status || "complete";
       await writeFile(
         path.join(root, "docs", "tickets", name),
-        `---\nticket_id: ${ticketId}\nmodule_id: ${moduleId}\nallowed_paths:\n${includeGuideAllowedPath ? "  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}${decoyGuidePath ? "other_paths:\n  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}branch: ${branch}\n${deliveryRemote === null ? "" : `delivery_remote: ${deliveryRemote}\n`}${deliveryRepository === null ? "" : `delivery_repository: ${deliveryRepository}\n`}${deliveryPush === null ? "" : `delivery_push: ${deliveryPush}\n`}${deliveryArchive === null ? "" : `delivery_archive: ${deliveryArchive}\n`}---\n`,
+        `---\nticket_id: ${ticketId}\nmodule_id: ${moduleId}\nstatus: ${ticketStatus}\nallowed_paths:\n${includeGuideAllowedPath ? "  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}${decoyGuidePath ? "other_paths:\n  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}branch: ${branch}\n${deliveryRemote === null ? "" : `delivery_remote: ${deliveryRemote}\n`}${deliveryRepository === null ? "" : `delivery_repository: ${deliveryRepository}\n`}${deliveryPush === null ? "" : `delivery_push: ${deliveryPush}\n`}${deliveryArchive === null ? "" : `delivery_archive: ${deliveryArchive}\n`}---\n`,
         "utf8",
       );
       if (includeGuideEntry) {
@@ -196,7 +212,7 @@ async function runFixture({
     });
     return { initial, rerun };
   } finally {
-    await rm(root, { recursive: true, force: true });
+    await rm(fixtureContainer, { recursive: true, force: true });
   }
 }
 
@@ -469,4 +485,112 @@ test("project check accepts unique tickets and one current-task marker", async (
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /check=ok/u);
+});
+
+test("project check accepts TASK-081, TASK-082, and TASK-083 parallel branches without changing PLANS", async () => {
+  const parallelBranches = [
+    ["TASK-081", "feature/task-081-dashboard-identity-reconciliation"],
+    ["TASK-082", "feature/task-082-task-050-terminal-evidence"],
+    ["TASK-083", "feature/task-083-task-075-terminal-evidence"],
+  ];
+  for (const [taskId, branch] of parallelBranches) {
+    const result = await runFixture({
+      tickets: [
+        ["current.md", "TASK-078"],
+        [`${taskId.toLowerCase()}.md`, taskId, "fixture", { branch }],
+      ],
+      plans: "**CURRENT TASK-078 IMPLEMENTATION:** shared planning index\n",
+      gitBranch: branch,
+    });
+
+    assert.equal(result.status, 0, `${taskId}: ${result.stderr}`);
+    assert.match(result.stdout, /current_tasks=1/u);
+  }
+});
+
+test("project check rejects a parallel TASK branch without a matching ticket", async () => {
+  const result = await runFixture({
+    tickets: [["current.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** shared planning index\n",
+    gitBranch: "feature/task-018-fixture",
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /parallel branch 'feature\/task-018-fixture' has no matching unique ticket 'TASK-018'/u);
+});
+
+test("project check rejects a parallel TASK ticket with a branch mismatch", async () => {
+  const result = await runFixture({
+    tickets: [
+      ["current.md", "TASK-017"],
+      ["parallel.md", "TASK-018", "fixture", { branch: "feature/task-018-other" }],
+    ],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** shared planning index\n",
+    gitBranch: "feature/task-018-fixture",
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /parallel ticket branch 'feature\/task-018-other' does not match current Git branch 'feature\/task-018-fixture'/u);
+});
+
+test("project check rejects a non-terminal parallel TASK ticket", async () => {
+  const result = await runFixture({
+    tickets: [
+      ["current.md", "TASK-017"],
+      ["parallel.md", "TASK-018", "fixture", { status: "in_progress" }],
+    ],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** shared planning index\n",
+    gitBranch: "feature/task-018-fixture",
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /parallel ticket must be terminal/u);
+});
+
+test("project check keeps a cancelled TASK-038 branch denied", async () => {
+  const result = await runFixture({
+    tickets: [
+      ["current.md", "TASK-017"],
+      ["task038.md", "TASK-038", "fixture", { status: "cancelled" }],
+    ],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** shared planning index\n",
+    gitBranch: "feature/task-038-fixture",
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /parallel ticket must be terminal/u);
+});
+
+test("project check rejects an unauthorized parallel delivery policy and the default branch", async () => {
+  const unauthorized = await runFixture({
+    tickets: [
+      ["current.md", "TASK-017"],
+      ["parallel.md", "TASK-018"],
+    ],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** shared planning index\n",
+    deliveryPush: "unauthorized_push",
+    gitBranch: "feature/task-018-fixture",
+  });
+  const defaultBranch = await runFixture({
+    tickets: [["current.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** shared planning index\n",
+    gitBranch: "main",
+    defaultGitBranch: "main",
+  });
+
+  assert.equal(unauthorized.status, 1);
+  assert.match(unauthorized.stderr, /delivery_push must be 'authorized_non_force_feature_branch' or 'local_only'/u);
+  assert.equal(defaultBranch.status, 1);
+  assert.match(defaultBranch.stderr, /current Git branch 'main' must not be the default branch/u);
+});
+
+test("project check rejects a worktree nested inside another Git worktree", async () => {
+  const result = await runFixture({
+    tickets: [["current.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    nestedGitWorktree: true,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /worktree root must not be nested inside another Git worktree/u);
 });
