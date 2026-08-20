@@ -2,7 +2,8 @@
 param(
     [ValidateSet('FullChainPreStatus', 'FullChainRun', 'FullChainStatus')]
     [string]$InternalPhase,
-    [string]$CodexAuthHome
+    [string]$CodexAuthHome,
+    [switch]$HarnessSelfTest
 )
 
 Set-StrictMode -Version Latest
@@ -436,6 +437,74 @@ function Remove-SafeTempRoot {
     }
     Remove-Item -LiteralPath $canonical -Recurse -Force -ErrorAction SilentlyContinue
     return -not (Test-Path -LiteralPath $canonical)
+}
+
+function Invoke-Task037HarnessSelfTest {
+    $tempBase = Get-CanonicalPath -Path ([IO.Path]::GetTempPath())
+    $testRoot = Join-Path $tempBase ('lattice-task037-harness-' + [Guid]::NewGuid().ToString('N'))
+    $markerPath = Join-Path $testRoot 'owned-marker.txt'
+    $child = $null
+    $childExited = $false
+
+    try {
+        New-Item -ItemType Directory -Path $testRoot -Force:$false | Out-Null
+        Assert-NoReparseAncestor -Path $testRoot -Boundary $tempBase
+        [IO.File]::WriteAllText($markerPath, "task037-harness-owned`n", [Text.UTF8Encoding]::new($false))
+        Assert-RegularFile -Path $markerPath
+
+        $powerShell = Join-Path $PSHOME 'powershell.exe'
+        Assert-RegularFile -Path $powerShell
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $powerShell
+        $startInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -Command "[Console]::Out.Write(''TASK037_HARNESS_CHILD=PASS'')"'
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.EnvironmentVariables.Clear()
+        foreach ($entry in ([ordered]@{
+            SystemRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+            WINDIR = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+            ComSpec = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)) 'System32\cmd.exe'
+            TEMP = $testRoot
+            TMP = $testRoot
+            PSModuleAnalysisCachePath = 'NUL'
+        }).GetEnumerator()) {
+            $startInfo.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
+        }
+        $child = [Diagnostics.Process]::new()
+        $child.StartInfo = $startInfo
+        if (-not $child.Start()) { throw 'TASK037_HARNESS_CHILD_START_REJECTED' }
+        $stdout = $child.StandardOutput.ReadToEndAsync()
+        $stderr = $child.StandardError.ReadToEndAsync()
+        if (-not $child.WaitForExit(5000)) { throw 'TASK037_HARNESS_CHILD_TIMEOUT_REJECTED' }
+        $childExited = $true
+        $output = $stdout.GetAwaiter().GetResult()
+        $errorOutput = $stderr.GetAwaiter().GetResult()
+        if (
+            $child.ExitCode -ne 0 -or
+            $output -cne 'TASK037_HARNESS_CHILD=PASS' -or
+            -not [string]::IsNullOrEmpty($errorOutput)
+        ) {
+            throw 'TASK037_HARNESS_CHILD_OUTPUT_REJECTED'
+        }
+    }
+    finally {
+        if ($null -ne $child) {
+            if (-not $childExited -and -not $child.HasExited) {
+                Stop-OwnedProcessTree -ProcessId $child.Id
+            }
+            $child.Dispose()
+        }
+        if (Test-Path -LiteralPath $testRoot) {
+            Assert-NoReparseAncestor -Path $testRoot -Boundary $tempBase
+            if (-not (Remove-SafeTempRoot -Path $testRoot)) {
+                throw 'TASK037_HARNESS_CLEANUP_REJECTED'
+            }
+        }
+    }
+
+    Write-Output 'TASK037_HARNESS_SELF_TEST=PASS'
 }
 
 function Copy-CodexCredentialFiles {
@@ -1432,6 +1501,11 @@ function Invoke-DefaultVerification {
         full_chain_receipt_digest = [string]$final.full_chain_receipt_digest
         hermes_reflection_digest = [string]$final.hermes_reflection_digest
     }) | ConvertTo-Json -Compress)
+}
+
+if ($HarnessSelfTest) {
+    Invoke-Task037HarnessSelfTest
+    return
 }
 
 if (-not [string]::IsNullOrEmpty($InternalPhase)) {

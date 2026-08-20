@@ -18,10 +18,6 @@ allowed_paths:
   - docs/tickets/TASK-097-task-037-production-recovery.md
   - docs/reviews/WORKFLOW_AUDIT_TASK_097_2026-08-21.md
   - docs/reviews/CODE_REVIEW_TASK_097_2026-08-21.md
-  - docs/reviews/ARCHITECTURE_REVIEW_TASK_097_2026-08-21.md
-  - crates/lattice-hermes-adapter/src/production.rs
-  - crates/lattice-hermes-adapter/src/wsl_outer_runner.py
-  - crates/lattice-hermes-adapter/tests/reflection_api.rs
   - scripts/run-task037-full-chain-verification.ps1
   - scripts/test-task037-verifier-containment.ps1
 ---
@@ -47,17 +43,18 @@ allowed_paths:
 ## 驗收條件
 
 - 工作樹與基底可精確追溯，且不複製既有 dirty TASK-037 內容。
-- 先以離線或既有 fixture 的 characterization 確認第一個真實失敗；若需要 live
-  依賴，保留 fail-closed 的 preflight 與等待授權。
-- 修復僅涵蓋已確認失敗，具 RED/GREEN 測試、focused 與可用完整驗證、格式與嚴格
-  Clippy；完成後另做程式碼／安全與架構審查。
+- 新增的 `HarnessSelfTest` 只可做離線、受界限的本機 child/process、timeout、
+  owned-temp cleanup 與 secret/env 非洩漏驗證；不得進入既有 full-chain、Hermes、
+  PostgreSQL、OpenClaw 或模型路徑。
+- 修復僅涵蓋兩個 verifier script，具 RED/GREEN、PowerShell AST、focused containment、
+  diff／secret scan、可用 npm check/verify 與程式碼／安全審查。
 - production PASS 只能由新的完整 E2E 證據宣稱；無該證據時狀態維持 `in_progress`。
 
 ## 下一步
 
-在此乾淨工作樹執行不啟動 live 依賴的 TASK-037 verifier characterization，保存
-第一個失敗的去秘密化證據；只有在它需要 Hermes、PostgreSQL 或 live runtime 時，才
-向工頭提出固定 run root、動態 port/socket/PID/marker 的資源申請。
+離線 verifier safety proof 已完成；等待工頭另行授權獨立的 live slice 前，維持
+`in_progress`，不啟動 Hermes、PostgreSQL 或 runtime。若取得授權，先提出固定 run
+root、動態 port/socket/PID/marker 的 preflight，再保存第一個真實失敗的去秘密化證據。
 
 ## 交付界線
 
