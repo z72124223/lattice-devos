@@ -16,6 +16,11 @@ additional_modules:
   - module_id: codex-adapter
     constitution_version: 1.1
 status: completed
+branch: feature/task-039-hermes-broker-protocol
+delivery_remote: origin
+delivery_repository: github.com/z72124223/lattice-devos
+delivery_push: authorized_non_force_feature_branch
+delivery_archive: after_success
 parallel_safe: false
 depends_on:
   - TASK-032
