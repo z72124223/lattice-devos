@@ -2,9 +2,11 @@
 
 mod delivery;
 mod graph_memory;
+mod worker_observation;
 
 pub use delivery::*;
 pub use graph_memory::*;
+pub use worker_observation::*;
 
 use std::error::Error;
 use std::fmt;
