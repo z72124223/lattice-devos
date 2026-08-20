@@ -26,6 +26,10 @@ task archival was performed.
 - Store rejects missing/skipped/substituted `0007`, stream/event drift,
   predecessor drift, catalog/ACL drift, direct table privilege and premature
   Writer runtime exposure.
+- Terminal delivery metadata moved non-TASK historical commit/evidence references
+  out of `depends_on`; `depends_on: []` now states truthfully that no terminal
+  TASK dependency remains. The authorized finisher refreshed the shared status
+  at exact delivery commit `85848da23fed755e0e20023b078c6fa800fcbcab`.
 
 ## Files changed
 
@@ -45,6 +49,7 @@ task archival was performed.
 | Code/security review | PASS | `docs/reviews/CODE_REVIEW_TASK_087_2026-08-21.md`; P0-P3 = 0 |
 | Architecture review | PASS | `docs/reviews/ARCHITECTURE_REVIEW_TASK_087_2026-08-21.md`; P0-P3 = 0 |
 | Live PostgreSQL schema-v6 gate | NOT_RUN | `0007` absent; partial dashboard; existing PostgreSQL processes |
+| Terminal delivery projection | PASS | finisher: `TASK-087`, `85848da`, `PUSHED_NON_FORCE`, remote verified, dashboard refreshed, archive kept open |
 
 ## Verification
 
@@ -55,12 +60,15 @@ task archival was performed.
 - `npm.cmd run verify`: PASS (`check=ok`, 48/48 JavaScript tests).
 - `cargo fmt --all -- --check`, `git diff --check`, frozen-byte diff: PASS.
 - CI: not run; no CI or merge authorization requested.
+- `finish-lattice-delivery.mjs --repository <TASK-087> --output <shared status>`:
+  exit `0`, `LATTICE_DELIVERY_FINISHED=1`; no archive-ready marker.
 
 ## Review and integration
 
 - Code/security and architecture self-reviews found no P0-P3 finding.
 - Branch: `feature/task-087-writer-lease-v3-schema-bridge` in isolated worktree.
-- Non-force feature push is authorized; remote SHA must be verified after commit.
+- Latest delivery commit is `85848da23fed755e0e20023b078c6fa800fcbcab`;
+  local/upstream/ls-remote are equal and ahead/behind is `0/0`.
 - No primary/default branch merge or TASK-079 merge is authorized.
 
 ## Risks and open decisions
