@@ -729,7 +729,7 @@ remain future Orchestrator/PostgreSQL responsibilities.
     AC-06 remains open for real Windows/Git inspection, Workspace Git, and
     Scope Check. Writer Lease, Approval, Artifact, external components,
     production/release/deployment, and the unrelated website remain excluded.
-- [ ] **CURRENT TASK-032 — executable Codex/PostgreSQL delivery node:** first
+- [ ] **CURRENT TASK-036 — Codex app-server status evidence repair:** preserve
   record the approved versioned contract/port/orchestrator/`latticed` boundary,
   then implement it with TDD and prove an official Codex app-server repository
   modification, fixed verification, Git commit, durable PostgreSQL result, and
