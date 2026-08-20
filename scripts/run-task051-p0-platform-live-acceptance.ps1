@@ -2941,14 +2941,19 @@ function Invoke-Task051CodexDiscovery {
         Assert-ToolDiscovery -Response ([pscustomobject]@{
             result = [pscustomobject]@{ tools = $toolRecords }
         })
-        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REPLAY_READ_REJECTED'
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_SERVER_EXIT_TIMEOUT_REJECTED'
+        if (-not $serverAuthority.WaitForExit(30000) -or $serverAuthority.IsAlive()) {
+            throw $failureCode
+        }
+        $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_DISPATCH_REJECTED'
         try {
-            $sessionOpenReplay = Read-Task051McpSessionOpen `
+            $discoveryDispatch = Read-Task038McpAcceptanceEvidence `
                 -Path $AcceptanceEvidencePath `
                 -ExpectedNativeIdentity $AcceptanceNativeIdentity `
-                -EvidenceRoot $EvidenceRoot `
                 -SessionId $AcceptanceSessionId `
-                -SafeConfigSha256 $SafeConfigSha256
+                -SafeConfigSha256 $SafeConfigSha256 `
+                -ProcessId $serverProcessId `
+                -ExpectedDispatchCount 0
         }
         catch {
             throw $failureCode
@@ -2957,11 +2962,11 @@ function Invoke-Task051CodexDiscovery {
             $null -eq $sessionOpen -or
             $null -eq $processEvidence -or
             $null -eq $serverAuthority -or
-            [int]$sessionOpenReplay.ProcessId -ne [int]$sessionOpen.ProcessId -or
-            [long]$sessionOpenReplay.ObservedAtUnixNanos -ne [long]$sessionOpen.ObservedAtUnixNanos -or
-            [string]$sessionOpenReplay.EventSha256 -cne [string]$sessionOpen.EventSha256
+            [int]$discoveryDispatch.process_id -ne [int]$sessionOpen.ProcessId -or
+            [int]$discoveryDispatch.dispatch_accepted_count -ne 0 -or
+            -not [bool]$discoveryDispatch.normal_close_complete
         ) {
-            throw 'TASK038_CURRENT_CODEX_DISCOVERY_SESSION_OPEN_REPLAY_MISMATCH_REJECTED'
+            throw $failureCode
         }
         $failureCode = 'TASK038_CURRENT_CODEX_DISCOVERY_EVIDENCE_WRITE_REJECTED'
         $evidence = Write-Task051JsonEvidence -Path (Join-Path $EvidenceRoot ('task051-' + $Phase + '-discovery.json')) -Value ([ordered]@{
@@ -2983,6 +2988,9 @@ function Invoke-Task051CodexDiscovery {
             relay_script_sha256 = [string]$relayHost.ScriptSha256
             relay_host_process_id = [int]$relayHost.HostOwned.Process.Id
             session_open_event_sha256 = [string]$sessionOpen.EventSha256
+            dispatch_raw_sha256 = [string]$discoveryDispatch.raw_sha256
+            dispatch_final_event_sha256 = [string]$discoveryDispatch.final_event_sha256
+            dispatch_normal_close_complete = [bool]$discoveryDispatch.normal_close_complete
             config_sha256 = [string]$codexHome.ConfigSha256
             user_agent = [string]$init.result.userAgent
             tool_names = $toolNames
