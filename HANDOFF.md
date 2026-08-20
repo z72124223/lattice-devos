@@ -27,43 +27,53 @@
 - Passed both focused Rust groups, format, strict workspace Clippy, locked full
   workspace tests, repository `npm.cmd run verify` (44/44 Node tests), and
   current diff/allowlist/secret checks.
+- Integrated exact TASK-096 delivery `5c13a9232ffc59afed4a172ccd860a47c899e196`
+  through the authorized history-preserving merge
+  `d5f238908e9d909a3954241a63623175d66e3478` (parents
+  `ef1c3741a862493a7edeea815ef5a7a101aecfcd` and TASK-096). The reviewed
+  change preserves a closed, receipt-equality-checked terminal-cause envelope
+  for the existing CLI/MCP boundary; it neither adds a tool nor changes live
+  component behavior. TASK-095 is deliberately absent from this product line.
+- The combined candidate passed offline `cargo test -p lattice-runtime`
+  (56 tests), `cargo fmt --check`, workspace strict Clippy,
+  `npm.cmd run check`, `npm.cmd run verify` (48/48 Node tests), merge-range
+  `git diff --check`, and Gitleaks. The separate read-only code and
+  architecture review found no P0--P3; reviewer independence remains
+  unproven.
 
 ## Exact Blocker
 
-The clean, remotely synchronized latest stable validator from
-`feature/task-085-parallel-task-governance`
-`e34bc9bfcf18c71e771f704d50128e1fbeba53ea` exits 1 against this branch:
+The exact external c6 validator
+`c6be912fae8e261527a07324833d68632aba8f3e` exits 1 against this branch only
+because TASK-033 is deliberately not terminal:
 
 ```text
-docs/contracts/ENGINEERING_PROTOCOL_V1.md: missing engineering protocol.
-AGENTS.md: must point to docs/contracts/ENGINEERING_PROTOCOL_V1.md.
-AGENTS.md: must require engineering protocol checks before editing and completion.
-AGENTS.md: must route completion through delivery:finish and archive the current Codex task only after its success marker.
 docs/tickets/TASK-033-graphify-postgres-codebase-memory.md: parallel ticket must be terminal.
 ```
 
-The final ticket-status error is expected until acceptance completes. The
-protocol/AGENTS errors are not repairable inside the TASK-033 allowlist. The
-ticket does not authorize `AGENTS.md` or `docs/contracts/**`; expanding its own
-allowlist to import them would be circular self-authorization.
+This is the expected staged terminal blocker. No contract, branch metadata, or
+allowed-path error remains. It does not authorize changing TASK-033 to
+`completed` before fresh live acceptance.
 
 ## Verification And Runtime State
 
-- Non-live validation: PASS as recorded in the four review artifacts.
-- Current stable validator: FAIL with the exact contract errors above.
-- Graphify/PostgreSQL combined live: `NOT_RUN`.
-- TASK-033 live run root/port/marker: not allocated.
-- TASK-033 live processes: none launched.
-- System PostgreSQL 5432 and TASK-079 resources: untouched.
-- Commit/push/remote equality/finisher/dashboard: `NOT_RUN`.
+- Non-live validation: PASS, including the TASK-096 combined-candidate checks
+  recorded above.
+- External c6 validator: only the expected TASK-033 terminal-status blocker.
+- Graphify/PostgreSQL combined live after the ABI-3 repair: `NOT_RUN`.
+- TASK-033 live run root/port/marker: not allocated; TASK-033 live processes:
+  none launched. System PostgreSQL 5432 and TASK-079 resources remain untouched.
+- This handoff is a pre-push checkpoint. It does not run a completion finisher
+  and does not claim terminal remote delivery or dashboard readiness.
 
 ## Exact Next Action
 
-The foreman must authorize or provide a history-preserving governance contract
-bridge that makes the current engineering protocol and AGENTS routing part of
-the legal TASK-033 candidate without self-expanding this ticket. After that,
-rerun the current stable validator, then perform the separately coordinated
-TASK-079 resource check before any disposable live command.
+Keep TASK-033 `in_progress`/`BLOCKED`. After this checkpoint's authorized
+non-force feature push and non-terminal dashboard refresh, the foreman must
+assign a new, independent acceptance worker. That worker must take a fresh
+resource-conflict snapshot and obtain explicit authorization before one
+disposable PostgreSQL/Graphify restart/replay attempt; this worktree must not
+self-accept or start that live run.
 
 ---
 

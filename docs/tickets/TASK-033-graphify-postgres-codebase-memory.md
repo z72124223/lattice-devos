@@ -155,6 +155,26 @@ Registry's reserved `0005`/schema-v4 authority remain unchanged.
 - `status` remains `in_progress` until the current non-live and disposable live
   gates, review pass, clean commit, and exact remote delivery evidence succeed.
 
+## Checkpoint Delivery — 2026-08-21
+
+- The current clean candidate includes the history-preserving TASK-096 merge
+  `d5f238908e9d909a3954241a63623175d66e3478`, whose parents are this
+  branch's prior clean head
+  `ef1c3741a862493a7edeea815ef5a7a101aecfcd` and the exact reviewed
+  TASK-096 delivery `5c13a9232ffc59afed4a172ccd860a47c899e196`.
+  TASK-096 is an ancestor of this checkpoint; TASK-095 is intentionally not
+  an ancestor and its diagnostic ticket/HANDOFF are not product-line evidence.
+- The TASK-096 integration passed offline `cargo test -p lattice-runtime`
+  (56 tests), `cargo fmt --check`, workspace strict Clippy,
+  `npm.cmd run check`, `npm.cmd run verify` (48 Node tests), merge-range
+  `git diff --check`, and Gitleaks with no findings. The exact external
+  c6 validator has no contract, path, or metadata error; its only result is
+  the expected staged terminal blocker that TASK-033 itself is not terminal.
+- The identity leaf acceptance, disposable PostgreSQL/Graphify restart/replay,
+  and all new live execution remain `NOT_RUN`. This checkpoint does not change
+  TASK-033 completion status or claim acceptance; a separate future acceptance
+  worker must receive fresh resource authorization before any live run.
+
 ## Human Gate
 
 Pure Codebase Memory, Graphify adapter, ports, and orchestrator need no further
