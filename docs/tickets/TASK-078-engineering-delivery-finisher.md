@@ -2,9 +2,9 @@
 ticket_id: TASK-078
 title: Fail-closed engineering delivery finisher
 spec_id: SPEC-005
-spec_version: 3
+spec_version: 5
 module_id: engineering-delivery-finisher
-constitution_version: 1.2
+constitution_version: 1.4
 status: complete
 parallel_safe: false
 depends_on: [TASK-077]
@@ -19,6 +19,7 @@ allowed_paths:
   - HANDOFF.md
   - package.json
   - docs/contracts/ENGINEERING_PROTOCOL_V1.md
+  - docs/issues/**
   - docs/specs/SPEC-005-engineering-delivery-finisher.md
   - docs/modules/engineering-delivery-finisher/MODULE_CONSTITUTION.md
   - docs/tickets/TASK-078-engineering-delivery-finisher.md
@@ -60,6 +61,37 @@ Codex to archive the current task only after full success.
   archive action.
 - No PR, default-branch merge, deployment, release, public host, credential
   change, worktree deletion, or force operation occurs.
+
+## ISSUE compatibility migration
+
+Legacy `feature/issue-nnn-*` branches do not create, reuse, or impersonate a
+`TASK-nnn` ticket. Before a terminal issue branch can run the finisher, its own
+committed tree must contain exactly one `docs/issues/ISSUE-nnn-*.md` record:
+
+```yaml
+---
+issue_id: ISSUE-007
+status: complete
+branch: feature/issue-007-resource-aware-scheduler
+delivery_remote: origin
+delivery_repository: github.com/z72124223/lattice-devos
+delivery_push: authorized_non_force_feature_branch
+delivery_archive: keep_open
+---
+```
+
+The issue number, exact branch, one committed terminal evidence record, remote
+identity, and policies are all required. Missing/GitHub-only evidence,
+duplicates, number mismatch, arbitrary feature branches, non-terminal state,
+or an existing TASK number collision fail closed. Issue 7/8 windows add their
+own evidence and rerun the finisher; this TASK-078 branch does not alter them.
+
+For parallel TASK branches, the committed terminal ticket itself is delivery
+authority: its branch number and exact `branch` must match, and every declared
+`depends_on` TASK must resolve uniquely to a successfully terminal ticket in
+the same captured commit tree. `PLANS.md` is a shared planning index, not a
+delivery lock; TASK-042 may finish while it names TASK-033 without either
+window editing PLANS.
 
 ## TDD evidence plan
 

@@ -1,7 +1,7 @@
 ---
 module_id: engineering-delivery-finisher
 name: Engineering Delivery Finisher
-constitution_version: 1.2
+constitution_version: 1.4
 status: active
 ---
 
@@ -59,16 +59,22 @@ repository state, recorded authorization, and task archival respectively.
 11. Dashboard output resolves outside the source repository.
 12. After refresh, the named branch, clean tree, local head, and any pushed
     remote head are rechecked before success or archive permission.
-13. The branch is an exact TASK feature branch bound to the matching terminal
-    ticket and one PLANS current-task marker; its remote is configured.
+13. The branch is exactly `feature/task-nnn-*` or `feature/issue-nnn-*`, with
+    a lowercase hyphenated slug. A task branch number equals its one unique
+    committed terminal TASK ticket; each declared dependency resolves uniquely
+    and successfully terminal in that same tree. An issue branch number equals
+    its one unique committed terminal ISSUE evidence `issue_id`, whose branch
+    is exact; both evidence types configure their remote and delivery policies.
+    PLANS is a planning index, never a parallel-delivery lock.
 14. Archive permission additionally requires a successful task terminal state;
     failed, blocked, partial, paused, and dependency-waiting tasks stay open even
     when their preservation push and dashboard refresh succeed.
 15. The selected remote has exactly one fetch URL and one push URL, both resolve
     to the same credential-free ticket identity, and its config plus live
     default branch are unchanged at the pre-push and final gates.
-16. Ticket and PLANS authorization comes from the captured commit tree, so Git
-    index visibility flags cannot substitute uncommitted policy text.
+16. TASK ticket and ISSUE evidence authorization comes from the captured commit
+    tree, so Git index visibility flags cannot substitute uncommitted policy
+    text; PLANS is not delivery authority.
 17. Dashboard generation writes only to a unique external staging directory;
     only a disjoint app-owned directory with the fixed dashboard file set may
     be replaced before archive permission. Unowned entries are never deleted.
@@ -81,7 +87,7 @@ repository state, recorded authorization, and task archival respectively.
 
 - Node.js standard library.
 - Installed Git executable through argument-array process execution.
-- Repository TASK tickets and Git metadata.
+- Repository TASK tickets, committed ISSUE evidence, and Git metadata.
 - The engineering-status dashboard's public exporter command.
 - A Codex App archive action performed by Codex after the command succeeds.
 
@@ -100,8 +106,10 @@ Git hook is required.
 
 - The command exits nonzero and emits no archive-ready marker after any failed
   required step. A best-effort refresh and sanitized failure code preserve diagnosis.
-- Existing tickets remain compatible but cannot use the finisher until they add
-  explicit push and archive policies.
+- Existing TASK tickets remain compatible but cannot use the finisher until
+  they add explicit policies. Legacy issue branches require their own committed
+  ISSUE evidence; GitHub metadata, branch names, and TASK-number collisions do
+  not substitute for it.
 
 ## Acceptance Gates
 
@@ -131,3 +139,7 @@ approval and must not be added as a minor amendment.
   reject credential-bearing endpoints, stage external dashboard publication,
   recheck live default/config state, and require an exact named upstream for
   map visibility.
+- 1.3 (2026-08-21): admit only uniquely anchored terminal ISSUE evidence for
+  legacy issue branches without weakening TASK binding or merging namespaces.
+- 1.4 (2026-08-21): make captured ticket/evidence identity, not PLANS current
+  focus, the delivery authority; validate declared TASK dependencies locally.

@@ -91,14 +91,19 @@ remains not authorized for merge or Draft promotion.
 ## Current engineering delivery finisher - TASK-078
 
 CURRENT TASK-078 - implement one fail-closed command that reads explicit push
-repository-identity, and archive policies from the matching TASK ticket,
-permits only an exact-SHA non-force current-feature-branch push, verifies the
-live remote head and named upstream, refreshes the local engineering map, and
-emits archive permission only after every required gate succeeds. Codex App
-performs the final native archive action; repository code cannot impersonate
-it. TASK-077 is the completed,
-synchronized parent checkpoint. No PR, default merge, deployment, release,
-public hosting, destructive cleanup, or force operation is authorized.
+repository-identity, and archive policies from the matching terminal TASK
+ticket or unique committed terminal ISSUE evidence. It permits only an
+exact-SHA non-force `feature/task-nnn-*` or evidence-bound
+`feature/issue-nnn-*` branch push, validates declared TASK dependencies from
+the captured tree, verifies the live remote head and named upstream, refreshes
+the local engineering map, and emits archive permission only after every
+required gate succeeds. PLANS is a planning index, not a parallel delivery
+lock. GitHub-only issue metadata, arbitrary branches, duplicate identities,
+branch-number mismatch, non-terminal evidence, and TASK-number collisions stay
+denied. Codex App performs the final native archive action; repository code
+cannot impersonate it. TASK-077 is the completed, synchronized parent
+checkpoint. No PR, default merge, deployment, release, public hosting,
+destructive cleanup, or force operation is authorized.
 
 ## Completed local engineering status dashboard guidance - TASK-077
 

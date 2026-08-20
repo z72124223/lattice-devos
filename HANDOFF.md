@@ -1,3 +1,45 @@
+# TASK-078 相容性修復交接 — 2026-08-21
+
+## 狀態
+
+`NEEDS_REVIEW`（僅等待本次乾淨提交後的 finisher delivery）：TASK-078 已補上
+fail-closed 相容性修復，尚未推送、合併、部署或封存。
+
+## 本次完成範圍
+
+- `feature/task-nnn-*`：從 captured commit tree 的唯一 terminal TASK ticket
+  授權；branch number 與 ticket ID 必須一致。`PLANS.md` 是共享規劃索引，不是
+  平行交付鎖。TASK-042 在 PLANS 指向 TASK-033 時的成功回歸已覆蓋。
+- 若 TASK 宣告 `depends_on`，每個依賴必須在同一 captured tree 中唯一存在且為
+  successful terminal；不存在或未完成均拒絕。
+- `feature/issue-nnn-*`：只接受其自身提交的
+  `docs/issues/ISSUE-nnn-*.md` terminal evidence。檔名、`issue_id`、分支號與
+  exact branch 必須一致，且 evidence 自帶 remote、identity、push/archive policy。
+  GitHub branch metadata、任意 feature branch 與 TASK 編號碰撞都不授權。
+
+## 驗證與審查
+
+- `node --test test/engineering-delivery-finisher.test.js`：聚焦 ISSUE 與平行
+  TASK 回歸 PASS。
+- `npm.cmd run check`：PASS（`files=522 constitutions=27 tickets=49 current_tasks=1`）。
+- `npm.cmd run verify`：PASS，120/120、0 fail；`git diff --check`：PASS。
+- 程式碼／安全審查：No findings，P0/P1=0；本窗口自行做只讀審查，獨立性
+  `not proven`。
+- 架構審查：PASS。ISSUE evidence 是同一 module 讀取的 committed static
+  authorization input；沒有新 writer、durable truth、服務、dependency 或 ADR。
+
+## 交付與後續
+
+1. 建立本次乾淨 commit。
+2. 在此 TASK-078 worktree 執行 `npm.cmd run delivery:finish`；它只能非強制
+   推送本 feature branch、核對 remote SHA，並刷新
+   `%LOCALAPPDATA%\LATTICE\engineering-status`。
+3. Issue 7／8 原工作窗口各自把 TASK-078 ticket 範例的 ISSUE evidence 加入
+   自己分支並提交後，再執行 finisher；不要建立或冒用 `TASK-007`。
+4. 不合併預設分支、不部署、不發布、不 force push，且本窗口不自行封存。
+
+---
+
 # TASK-078 一鍵工程收尾交接 — 2026-08-21
 
 ## 狀態

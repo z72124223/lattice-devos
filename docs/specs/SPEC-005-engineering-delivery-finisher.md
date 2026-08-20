@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-005
 title: Fail-closed engineering delivery finisher
-version: 3
+version: 5
 status: approved
 approved_by: direct_user_reply
 approved_at_local: 2026-08-20
@@ -62,10 +62,18 @@ The Codex task also remains open even when every delivery gate succeeded.
 10. After dashboard refresh, the command rechecks the current branch, exact
     local head, clean worktree, and (when pushed) live remote head. A concurrent
     local or remote change prevents success and archival.
-11. The current branch must be `feature/task-nnn-*`, match the exact TASK ticket
-    and the one `PLANS.md` CURRENT TASK marker, and the ticket must already be in
-    a recorded terminal state. Its named remote must exist in `git remote`, and
-    `delivery_repository` must match the credential-free canonical endpoint.
+11. The current branch must be exactly `feature/task-nnn-*` or
+    `feature/issue-nnn-*`, with a lowercase hyphenated slug. A task branch's
+    `nnn` must equal its one unique committed terminal TASK ticket ID. Any
+    declared TASK `depends_on` identities must each resolve exactly once from
+    that captured tree and already be successfully terminal. An issue branch's
+    `nnn` must equal one unique committed
+    `docs/issues/ISSUE-nnn-*.md` `issue_id`, whose `branch` equals the current
+    branch exactly. Both evidence types must be terminal and declare the named
+    remote, credential-free repository identity, push policy, and archive
+    policy. GitHub branch metadata alone is never delivery evidence.
+    `PLANS.md` remains a planning index, not a delivery lock across parallel
+    worktrees, and is not consulted for delivery authorization.
 
 ## Module impact
 
@@ -102,6 +110,8 @@ public exporter command.
 - Repository pre-push or reference hooks cannot add delivery side effects.
 - Detached HEAD, default branch, dirty/untracked file, duplicate TASK tickets,
   malformed frontmatter, branch mismatch, missing remote, unknown policies.
+- Duplicate ISSUE identities, issue-number/branch mismatch, missing committed
+  ISSUE evidence, or non-terminal ISSUE evidence.
 - Dashboard refresh succeeds after a push failure; the command still reports
   failure and forbids archiving.
 - `skip-worktree` or `assume-unchanged` cannot substitute ticket/PLANS
@@ -131,6 +141,10 @@ public exporter command.
 4. `npm.cmd run check`, focused finisher tests, and `npm.cmd run verify` pass.
 5. Code/security and architecture review have no unresolved P0/P1 finding;
    exact integration verification against the GitHub default target is recorded.
+6. Focused evidence proves terminal ISSUE-007 and ISSUE-008 records can deliver
+   only their exact branches, while duplicate identities, branch-number
+   mismatches, arbitrary feature branches, non-terminal evidence, unanchored
+   GitHub-only branches, and TASK-number collisions fail closed.
 
 ## Non-goals
 
@@ -147,6 +161,12 @@ public exporter command.
   credential-bearing endpoints, stages dashboard publication outside source,
   rechecks live default/config state, and makes the named upstream observable
   to the engineering map.
+- v4 preserves the TASK grammar and admits legacy `feature/issue-nnn-*` only
+  through unique, committed terminal ISSUE evidence; it never infers issue
+  authority from GitHub metadata or collides with the TASK namespace.
+- v5 makes committed terminal ticket/evidence identity the parallel-delivery
+  authority. Declared TASK dependencies must be verifiably complete in the
+  same captured tree; PLANS is a non-authoritative planning index.
 
 ## Verification commands
 

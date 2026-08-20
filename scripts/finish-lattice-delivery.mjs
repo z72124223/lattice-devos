@@ -166,7 +166,13 @@ async function findTicket(repository, branch, expectedTaskId, sourceHead) {
     );
   }
   const ticket = matches[0];
-  if (ticket.metadata.ticket_id !== expectedTaskId) {
+  if (!/^TASK-[0-9]{3}$/u.test(ticket.metadata.ticket_id || "")) {
+    throw commandFailure(
+      "TICKET_ID_INVALID",
+      "ticket_id must name one canonical TASK ticket",
+    );
+  }
+  if (expectedTaskId && ticket.metadata.ticket_id !== expectedTaskId) {
     throw commandFailure(
       "TICKET_ID_INVALID",
       "ticket_id must match the current TASK feature branch",
@@ -203,20 +209,199 @@ async function findTicket(repository, branch, expectedTaskId, sourceHead) {
   return { ...ticket, normalizedStatus };
 }
 
-async function verifyCurrentTask(repository, expectedTaskId, sourceHead) {
-  const plans = git(
+function parseTicketDependencies(metadata) {
+  if (!Object.hasOwn(metadata, "depends_on")) {
+    return [];
+  }
+  const match = String(metadata.depends_on).match(/^\[(.*?)\]$/u);
+  if (!match) {
+    throw commandFailure("DEPENDENCY_INVALID", "depends_on must be one canonical TASK list");
+  }
+  const dependencies = match[1].trim() === ""
+    ? []
+    : match[1].split(",").map((value) => value.trim());
+  if (
+    dependencies.some((dependency) => !/^TASK-[0-9]{3}$/u.test(dependency)) ||
+    new Set(dependencies).size !== dependencies.length
+  ) {
+    throw commandFailure("DEPENDENCY_INVALID", "depends_on must be one unique canonical TASK list");
+  }
+  return dependencies;
+}
+
+async function verifyTicketDependencies(repository, ticket, sourceHead) {
+  const dependencies = parseTicketDependencies(ticket.metadata);
+  if (dependencies.length === 0) {
+    return;
+  }
+  if (dependencies.includes(ticket.metadata.ticket_id)) {
+    throw commandFailure("DEPENDENCY_INVALID", "TASK ticket cannot depend on itself");
+  }
+  const entries = git(
     repository,
-    ["show", `${sourceHead}:PLANS.md`],
-    "CURRENT_TASK_MISSING",
-    "committed PLANS current TASK is unavailable",
-  );
-  const matches = [...plans.matchAll(/\bCURRENT (TASK-[0-9]{3})\b/gu)];
-  if (matches.length !== 1 || matches[0][1] !== expectedTaskId) {
+    ["ls-tree", "-r", "--name-only", sourceHead, "--", "docs/tickets"],
+    "TICKET_DIRECTORY_MISSING",
+    "committed TASK ticket directory is unavailable",
+  ).split(/\r?\n/gu).filter(Boolean);
+  for (const dependency of dependencies) {
+    const matches = [];
+    for (const entry of entries) {
+      const name = path.posix.basename(entry.replaceAll("\\", "/"));
+      if (!/^TASK-[0-9]{3}-.+\.md$/iu.test(name)) {
+        continue;
+      }
+      const content = git(
+        repository,
+        ["show", `${sourceHead}:${entry.replaceAll("\\", "/")}`],
+        "TICKET_READ_FAILED",
+        "committed TASK ticket cannot be read",
+      );
+      let metadata;
+      try {
+        metadata = parseFrontmatter(content);
+      } catch {
+        continue;
+      }
+      if (metadata.ticket_id === dependency) {
+        matches.push(metadata);
+      }
+    }
+    if (matches.length !== 1) {
+      throw commandFailure(
+        "DEPENDENCY_UNRESOLVED",
+        "declared TASK dependency must resolve exactly once",
+      );
+    }
+    const dependencyStatus = String(matches[0].status || "")
+      .trim()
+      .toLowerCase()
+      .replaceAll(/[-\s]+/gu, "_");
+    if (!successfulTerminalTicketStatuses.has(dependencyStatus)) {
+      throw commandFailure(
+        "DEPENDENCY_NOT_TERMINAL",
+        "declared TASK dependency must be successfully terminal",
+      );
+    }
+  }
+}
+
+async function findIssueEvidence(repository, branch, expectedIssueId, sourceHead) {
+  const entries = git(
+    repository,
+    ["ls-tree", "-r", "--name-only", sourceHead, "--", "docs/issues"],
+    "ISSUE_DIRECTORY_MISSING",
+    "committed ISSUE evidence directory is unavailable",
+  ).split(/\r?\n/gu).filter(Boolean);
+  const byIdentity = [];
+  const byBranch = [];
+  for (const entry of entries) {
+    const name = path.posix.basename(entry.replaceAll("\\", "/"));
+    const filenameIdentity = name.match(/^ISSUE-([0-9]{3})-.+\.md$/iu);
+    if (!filenameIdentity) {
+      continue;
+    }
+    const content = git(
+      repository,
+      ["show", `${sourceHead}:${entry.replaceAll("\\", "/")}`],
+      "ISSUE_READ_FAILED",
+      "committed ISSUE evidence cannot be read",
+    );
+    let metadata;
+    try {
+      metadata = parseFrontmatter(content);
+    } catch (error) {
+      if (
+        new RegExp(`^issue_id:\\s*${escapeRegularExpression(expectedIssueId)}\\s*$`, "mu").test(content) ||
+        new RegExp(`^branch:\\s*${escapeRegularExpression(branch)}\\s*$`, "mu").test(content)
+      ) {
+        throw error;
+      }
+      continue;
+    }
+    const fileIssueId = `ISSUE-${filenameIdentity[1]}`;
+    if (metadata.issue_id !== fileIssueId) {
+      if (
+        metadata.issue_id === expectedIssueId ||
+        fileIssueId === expectedIssueId ||
+        metadata.branch === branch
+      ) {
+        throw commandFailure(
+          "ISSUE_ID_MISMATCH",
+          "ISSUE evidence issue_id must match its filename and issue branch number",
+        );
+      }
+      continue;
+    }
+    const evidence = { file: name, metadata };
+    if (metadata.issue_id === expectedIssueId) {
+      byIdentity.push(evidence);
+    }
+    if (metadata.branch === branch) {
+      byBranch.push(evidence);
+    }
+  }
+  if (byIdentity.length !== 1) {
+    if (byIdentity.length === 0 && byBranch.length > 0) {
+      throw commandFailure(
+        "ISSUE_ID_MISMATCH",
+        "ISSUE evidence issue_id must match the issue branch number",
+      );
+    }
     throw commandFailure(
-      "CURRENT_TASK_MISMATCH",
-      "PLANS CURRENT TASK must match the delivery ticket",
+      byIdentity.length === 0 ? "ISSUE_EVIDENCE_NOT_FOUND" : "ISSUE_EVIDENCE_AMBIGUOUS",
+      byIdentity.length === 0
+        ? "exactly one committed ISSUE evidence record must match the issue branch"
+        : "multiple committed ISSUE evidence records match the issue identity",
     );
   }
+  const issue = byIdentity[0];
+  if (issue.metadata.branch !== branch) {
+    throw commandFailure("ISSUE_BRANCH_MISMATCH", "ISSUE evidence branch must match the current branch");
+  }
+  if (byBranch.length !== 1 || byBranch[0].metadata.issue_id !== expectedIssueId) {
+    throw commandFailure("ISSUE_ID_MISMATCH", "ISSUE evidence issue_id must match the issue branch number");
+  }
+  const normalizedStatus = String(issue.metadata.status || "")
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[-\s]+/gu, "_");
+  if (!terminalTicketStatuses.has(normalizedStatus)) {
+    throw commandFailure("ISSUE_NOT_TERMINAL", "ISSUE evidence must be terminal before delivery");
+  }
+  if (!pushPolicies.has(issue.metadata.delivery_push)) {
+    throw commandFailure(
+      "PUSH_POLICY_INVALID",
+      "delivery_push must explicitly be authorized_non_force_feature_branch or local_only",
+    );
+  }
+  if (!archivePolicies.has(issue.metadata.delivery_archive)) {
+    throw commandFailure(
+      "ARCHIVE_POLICY_INVALID",
+      "delivery_archive must explicitly be after_success or keep_open",
+    );
+  }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(issue.metadata.delivery_remote || "")) {
+    throw commandFailure(
+      "REMOTE_POLICY_INVALID",
+      "delivery_remote must be one safe named Git remote",
+    );
+  }
+  return { ...issue, normalizedStatus };
+}
+
+function parseDeliveryBranch(branch) {
+  const task = branch.match(/^feature\/task-([0-9]{3})-[a-z0-9]+(?:-[a-z0-9]+)*$/u);
+  if (task) {
+    return { kind: "TASK", expectedTaskId: `TASK-${task[1]}` };
+  }
+  const issue = branch.match(/^feature\/issue-([0-9]{3})-[a-z0-9]+(?:-[a-z0-9]+)*$/u);
+  if (issue) {
+    return { kind: "ISSUE", expectedIssueId: `ISSUE-${issue[1]}` };
+  }
+  throw commandFailure(
+    "TASK_BRANCH_INVALID",
+    "delivery requires a feature/task-nnn-* or feature/issue-nnn-* branch",
+  );
 }
 
 function escapeRegularExpression(value) {
@@ -616,6 +801,7 @@ export async function finishDelivery({
   }
   const state = {
     taskId: null,
+    issueId: null,
     branch: null,
     localHead: null,
     remote: null,
@@ -664,27 +850,31 @@ export async function finishDelivery({
       "local HEAD cannot be read",
     );
     verifyLocalSnapshot(resolvedRepository, branch, state.localHead, "during preflight");
-    const branchTask = branch.match(/^feature\/task-([0-9]{3})(?:-|$)/u);
-    if (!branchTask) {
-      throw commandFailure(
-        "TASK_BRANCH_INVALID",
-        "delivery requires a feature/task-nnn TASK feature branch",
+    const deliveryBranch = parseDeliveryBranch(branch);
+    const deliveryEvidence = deliveryBranch.kind === "TASK"
+      ? await findTicket(
+        resolvedRepository,
+        branch,
+        deliveryBranch.expectedTaskId,
+        state.localHead,
+      )
+      : await findIssueEvidence(
+        resolvedRepository,
+        branch,
+        deliveryBranch.expectedIssueId,
+        state.localHead,
       );
+    if (deliveryBranch.kind === "TASK") {
+      await verifyTicketDependencies(resolvedRepository, deliveryEvidence, state.localHead);
+      state.taskId = deliveryEvidence.metadata.ticket_id;
+    } else {
+      state.issueId = deliveryEvidence.metadata.issue_id;
     }
-    const expectedTaskId = `TASK-${branchTask[1]}`;
-    const ticket = await findTicket(
-      resolvedRepository,
-      branch,
-      expectedTaskId,
-      state.localHead,
-    );
-    await verifyCurrentTask(resolvedRepository, expectedTaskId, state.localHead);
-    state.taskId = ticket.metadata.ticket_id;
-    state.remote = ticket.metadata.delivery_remote;
-    state.pushPolicy = ticket.metadata.delivery_push;
-    state.archivePolicy = ticket.metadata.delivery_archive;
-    state.ticketStatus = ticket.normalizedStatus;
-    if (!ticket.metadata.delivery_repository) {
+    state.remote = deliveryEvidence.metadata.delivery_remote;
+    state.pushPolicy = deliveryEvidence.metadata.delivery_push;
+    state.archivePolicy = deliveryEvidence.metadata.delivery_archive;
+    state.ticketStatus = deliveryEvidence.normalizedStatus;
+    if (!deliveryEvidence.metadata.delivery_repository) {
       throw commandFailure(
         "REMOTE_IDENTITY_MISSING",
         "delivery_repository must identify the authorized Git repository",
@@ -707,7 +897,7 @@ export async function finishDelivery({
     state.remoteIdentity = captureRemoteIdentity(
       resolvedRepository,
       state.remote,
-      ticket.metadata.delivery_repository,
+      deliveryEvidence.metadata.delivery_repository,
     );
     const defaultBranch = remoteDefaultBranch(
       resolvedRepository,
@@ -895,6 +1085,7 @@ export async function finishDelivery({
   return {
     success: true,
     taskId: state.taskId,
+    issueId: state.issueId,
     branch: state.branch,
     localHead: state.localHead,
     push: {
@@ -915,7 +1106,7 @@ export async function finishDelivery({
 export function formatSuccessOutput(result) {
   const lines = [
     "LATTICE_DELIVERY_FINISHED=1",
-    `task=${result.taskId}`,
+    result.taskId ? `task=${result.taskId}` : `issue=${result.issueId}`,
     `branch=${result.branch}`,
     `head=${result.localHead}`,
     `push=${result.push.performed ? "PUSHED_NON_FORCE" : "SKIPPED_LOCAL_ONLY"}`,

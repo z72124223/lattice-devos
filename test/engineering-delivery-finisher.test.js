@@ -46,14 +46,38 @@ function writeTicket(repository, {
   remote = "origin",
   remoteIdentity = "test.invalid/missing",
   status = "complete",
+  dependsOn,
 } = {}) {
   const ticketDirectory = path.join(repository, "docs", "tickets");
   mkdirSync(ticketDirectory, { recursive: true });
   const pushLine = push === null ? "" : `delivery_push: ${push}\n`;
   const archiveLine = archive === null ? "" : `delivery_archive: ${archive}\n`;
+  const dependencyLine = dependsOn === undefined
+    ? ""
+    : `depends_on: [${dependsOn.join(", ")}]\n`;
   writeFileSync(
     path.join(ticketDirectory, `${task}-demo.md`),
-    `---\nticket_id: ${task}\nstatus: ${status}\nbranch: ${branch}\ndelivery_remote: ${remote}\ndelivery_repository: ${remoteIdentity}\n${pushLine}${archiveLine}---\n\n# ${task}\n`,
+    `---\nticket_id: ${task}\nstatus: ${status}\nbranch: ${branch}\ndelivery_remote: ${remote}\ndelivery_repository: ${remoteIdentity}\n${dependencyLine}${pushLine}${archiveLine}---\n\n# ${task}\n`,
+    "utf8",
+  );
+}
+
+function writeIssueEvidence(repository, {
+  issue = "ISSUE-007",
+  branch = "feature/issue-007-resource-aware-scheduler",
+  push = "authorized_non_force_feature_branch",
+  archive = "keep_open",
+  remote = "origin",
+  remoteIdentity = "test.invalid/missing",
+  status = "complete",
+} = {}) {
+  const issueDirectory = path.join(repository, "docs", "issues");
+  mkdirSync(issueDirectory, { recursive: true });
+  const pushLine = push === null ? "" : `delivery_push: ${push}\n`;
+  const archiveLine = archive === null ? "" : `delivery_archive: ${archive}\n`;
+  writeFileSync(
+    path.join(issueDirectory, `${issue}-delivery.md`),
+    `---\nissue_id: ${issue}\nstatus: ${status}\nbranch: ${branch}\ndelivery_remote: ${remote}\ndelivery_repository: ${remoteIdentity}\n${pushLine}${archiveLine}---\n\n# ${issue}\n`,
     "utf8",
   );
 }
@@ -78,8 +102,18 @@ function createRepository(options = {}) {
   git(repository, "switch", "-c", options.branch || "feature/task-901-demo");
   const testRemoteIdentity = `file:${path.resolve(remote).replaceAll("\\", "/").toLowerCase()}`;
   writeTicket(repository, { ...options.ticket, remoteIdentity: testRemoteIdentity });
-  writeFileSync(path.join(repository, "PLANS.md"), "CURRENT TASK-901 - fixture\n", "utf8");
-  git(repository, "add", "docs/tickets", "PLANS.md");
+  if (options.issueEvidence) {
+    writeIssueEvidence(repository, {
+      ...options.issueEvidence,
+      remoteIdentity: testRemoteIdentity,
+    });
+  }
+  writeFileSync(
+    path.join(repository, "PLANS.md"),
+    `CURRENT ${options.currentTask || "TASK-901"} - fixture\n`,
+    "utf8",
+  );
+  git(repository, "add", "docs", "PLANS.md");
   git(repository, "commit", "-m", "add task ticket");
   return { root, remote, repository, outputDirectory };
 }
@@ -433,6 +467,149 @@ test("completed is a successful terminal status eligible for after-success archi
   }
 });
 
+test("terminal ISSUE-007 and ISSUE-008 evidence may deliver their exact issue branches", async () => {
+  for (const [issue, branch] of [
+    ["ISSUE-007", "feature/issue-007-resource-aware-scheduler"],
+    ["ISSUE-008", "feature/issue-008-model-routing"],
+  ]) {
+    const fixture = createRepository({
+      branch,
+      issueEvidence: { issue, branch },
+    });
+    try {
+      if (issue === "ISSUE-007") {
+        writeTicket(fixture.repository, {
+          task: "TASK-007",
+          branch: "feature/task-007-openclaw-scaffold",
+        });
+        git(fixture.repository, "add", "docs/tickets");
+        git(fixture.repository, "commit", "-m", "retain unrelated TASK-007");
+      }
+      const result = await finishDelivery({
+        repository: fixture.repository,
+        outputDirectory: fixture.outputDirectory,
+        refresh: successfulRefresh,
+      });
+
+      assert.equal(result.success, true);
+      assert.equal(result.issueId, issue);
+      assert.equal(result.branch, branch);
+      assert.equal(result.archiveReady, false);
+      assert.equal(
+        remoteHead(fixture.repository, branch),
+        git(fixture.repository, "rev-parse", "HEAD"),
+      );
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("malformed or arbitrary feature branches remain rejected", async () => {
+  for (const branch of [
+    "feature/issue-008",
+    "feature/issue-008-Model-routing",
+    "feature/model-routing",
+  ]) {
+    const fixture = createRepository({ branch, ticket: { branch } });
+    try {
+      await assert.rejects(
+        finishDelivery({
+          repository: fixture.repository,
+          outputDirectory: fixture.outputDirectory,
+          refresh: successfulRefresh,
+        }),
+        /feature\/task-nnn-\* or feature\/issue-nnn-\*/u,
+      );
+      assert.equal(remoteHead(fixture.repository, branch), null);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("an issue branch must bind its exact terminal ISSUE evidence", async () => {
+  const branch = "feature/issue-008-model-routing";
+  const fixture = createRepository({
+    branch,
+    issueEvidence: { issue: "ISSUE-007", branch },
+  });
+  try {
+    await assert.rejects(
+      finishDelivery({
+        repository: fixture.repository,
+        outputDirectory: fixture.outputDirectory,
+        refresh: successfulRefresh,
+      }),
+      /issue_id must match/u,
+    );
+    assert.equal(remoteHead(fixture.repository, branch), null);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("issue delivery rejects unanchored, nonterminal, and duplicate ISSUE evidence", async () => {
+  const branch = "feature/issue-007-resource-aware-scheduler";
+  const cases = [
+    { name: "unanchored", options: { branch } },
+    {
+      name: "nonterminal",
+      options: { branch, issueEvidence: { issue: "ISSUE-007", branch, status: "in_progress" } },
+      expected: /ISSUE evidence must be terminal/u,
+    },
+    {
+      name: "duplicate",
+      options: { branch, issueEvidence: { issue: "ISSUE-007", branch } },
+      duplicate: true,
+      expected: /multiple committed ISSUE evidence/u,
+    },
+    {
+      name: "filename identity mismatch",
+      options: { branch, issueEvidence: { issue: "ISSUE-007", branch } },
+      filenameMismatch: true,
+      expected: /issue_id must match its filename/u,
+    },
+  ];
+  for (const fixtureCase of cases) {
+    const fixture = createRepository(fixtureCase.options);
+    try {
+      if (fixtureCase.duplicate) {
+        const endpoint = `file:${path.resolve(fixture.remote).replaceAll("\\", "/").toLowerCase()}`;
+        writeFileSync(
+          path.join(fixture.repository, "docs", "issues", "ISSUE-007-duplicate.md"),
+          `---\nissue_id: ISSUE-007\nstatus: complete\nbranch: ${branch}\ndelivery_remote: origin\ndelivery_repository: ${endpoint}\ndelivery_push: authorized_non_force_feature_branch\ndelivery_archive: keep_open\n---\n`,
+          "utf8",
+        );
+        git(fixture.repository, "add", "docs/issues");
+        git(fixture.repository, "commit", "-m", "duplicate issue identity");
+      }
+      if (fixtureCase.filenameMismatch) {
+        const endpoint = `file:${path.resolve(fixture.remote).replaceAll("\\", "/").toLowerCase()}`;
+        writeFileSync(
+          path.join(fixture.repository, "docs", "issues", "ISSUE-008-mislabeled.md"),
+          `---\nissue_id: ISSUE-007\nstatus: complete\nbranch: ${branch}\ndelivery_remote: origin\ndelivery_repository: ${endpoint}\ndelivery_push: authorized_non_force_feature_branch\ndelivery_archive: keep_open\n---\n`,
+          "utf8",
+        );
+        git(fixture.repository, "add", "docs/issues");
+        git(fixture.repository, "commit", "-m", "mismatch issue filename identity");
+      }
+      await assert.rejects(
+        finishDelivery({
+          repository: fixture.repository,
+          outputDirectory: fixture.outputDirectory,
+          refresh: successfulRefresh,
+        }),
+        fixtureCase.expected || /committed ISSUE evidence/u,
+        fixtureCase.name,
+      );
+      assert.equal(remoteHead(fixture.repository, branch), null, fixtureCase.name);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("dirty worktree fails before push, refreshes best-effort, and forbids archive", async () => {
   const fixture = createRepository();
   let refreshCount = 0;
@@ -485,7 +662,7 @@ test("default and detached branches are rejected without push", async () => {
         outputDirectory: defaultFixture.outputDirectory,
         refresh: successfulRefresh,
       }),
-      /default branch|TASK feature branch/u,
+      /default branch|feature\/task-nnn-\*/u,
     );
     assert.equal(remoteHead(defaultFixture.repository), null);
   } finally {
@@ -843,7 +1020,7 @@ test("a failed preflight cannot refresh through a swapped output junction", asyn
   }
 });
 
-test("only the current terminal TASK feature branch may finish", async () => {
+test("only a terminal TASK feature branch with an exact ticket may finish", async () => {
   for (const options of [
     { branch: "release", ticket: { branch: "release" } },
     { ticket: { status: "in_progress" } },
@@ -856,28 +1033,102 @@ test("only the current terminal TASK feature branch may finish", async () => {
           outputDirectory: fixture.outputDirectory,
           refresh: successfulRefresh,
         }),
-        /TASK feature branch|terminal before delivery/u,
+        /feature\/task-nnn-\*|terminal before delivery/u,
       );
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }
   }
 
-  const wrongCurrent = createRepository();
+  const parallelTask = createRepository({
+    branch: "feature/task-042-hermes-strict-clippy",
+    currentTask: "TASK-033",
+    ticket: {
+      task: "TASK-042",
+      branch: "feature/task-042-hermes-strict-clippy",
+      archive: "keep_open",
+    },
+  });
   try {
-    writeFileSync(path.join(wrongCurrent.repository, "PLANS.md"), "CURRENT TASK-902 - other\n", "utf8");
-    git(wrongCurrent.repository, "add", "PLANS.md");
-    git(wrongCurrent.repository, "commit", "-m", "move current task marker");
-    await assert.rejects(
-      finishDelivery({
-        repository: wrongCurrent.repository,
-        outputDirectory: wrongCurrent.outputDirectory,
-        refresh: successfulRefresh,
-      }),
-      /CURRENT TASK must match/u,
+    const result = await finishDelivery({
+      repository: parallelTask.repository,
+      outputDirectory: parallelTask.outputDirectory,
+      refresh: successfulRefresh,
+    });
+    assert.equal(result.success, true);
+    assert.equal(result.taskId, "TASK-042");
+    assert.equal(result.branch, "feature/task-042-hermes-strict-clippy");
+    assert.equal(
+      remoteHead(parallelTask.repository, result.branch),
+      git(parallelTask.repository, "rev-parse", "HEAD"),
     );
   } finally {
-    rmSync(wrongCurrent.root, { recursive: true, force: true });
+    rmSync(parallelTask.root, { recursive: true, force: true });
+  }
+});
+
+test("a parallel TASK delivery verifies each declared dependency from the captured tree", async () => {
+  const branch = "feature/task-042-hermes-strict-clippy";
+  for (const [status, expected] of [
+    ["complete", null],
+    ["in_progress", /declared TASK dependency must be successfully terminal/u],
+  ]) {
+    const fixture = createRepository({
+      branch,
+      currentTask: "TASK-033",
+      ticket: { task: "TASK-042", branch, dependsOn: ["TASK-041"] },
+    });
+    try {
+      writeTicket(fixture.repository, {
+        task: "TASK-041",
+        branch: "feature/task-041-rust-ci",
+        status,
+      });
+      git(fixture.repository, "add", "docs/tickets");
+      git(fixture.repository, "commit", "-m", "record TASK-042 dependency");
+      if (expected) {
+        await assert.rejects(
+          finishDelivery({
+            repository: fixture.repository,
+            outputDirectory: fixture.outputDirectory,
+            refresh: successfulRefresh,
+          }),
+          expected,
+        );
+        assert.equal(remoteHead(fixture.repository, branch), null);
+      } else {
+        const result = await finishDelivery({
+          repository: fixture.repository,
+          outputDirectory: fixture.outputDirectory,
+          refresh: successfulRefresh,
+        });
+        assert.equal(result.success, true);
+      }
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a TASK branch number cannot deliver another terminal ticket", async () => {
+  const branch = "feature/task-042-hermes-strict-clippy";
+  const fixture = createRepository({
+    branch,
+    currentTask: "TASK-033",
+    ticket: { task: "TASK-041", branch },
+  });
+  try {
+    await assert.rejects(
+      finishDelivery({
+        repository: fixture.repository,
+        outputDirectory: fixture.outputDirectory,
+        refresh: successfulRefresh,
+      }),
+      /ticket_id must match the current TASK feature branch/u,
+    );
+    assert.equal(remoteHead(fixture.repository, branch), null);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
   }
 });
 
