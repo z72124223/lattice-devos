@@ -16,6 +16,10 @@ allowed_paths:
   - docs/tickets/TASK-043-codebase-memory-benchmark.md
 branch: feature/task-043-codebase-memory-benchmark
 base_commit: 845328dcc06d51c7554c93a09739a27ddd827941
+delivery_remote: origin
+delivery_repository: github.com/z72124223/lattice-devos
+delivery_push: authorized_non_force_feature_branch
+delivery_archive: after_success
 ---
 
 ## Objective
