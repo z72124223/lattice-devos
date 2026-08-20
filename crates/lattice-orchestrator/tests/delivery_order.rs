@@ -3,16 +3,22 @@ use std::rc::Rc;
 
 use lattice_contracts::{
     AttemptId, CONTRACT_VERSION, CodexDeliveryEvidence, CodexDeliveryRequest, ContentDigest,
-    DeliveryOutcomeEvidence, DeliveryOutcomeRequest, DeliveryProfile, DeliveryReceipt,
+    DaemonEpoch, DeliveryOutcomeEvidence, DeliveryOutcomeRequest, DeliveryProfile, DeliveryReceipt,
     DeliveryRunRequest, DeliveryRuntime, DeliveryStage, DeliveryStatusRequest,
-    DeliveryTerminalStatus, DurableIntentEvidence, FixedTestEvidence, GitCommitEvidence,
-    Invocation, PreparedWorkspaceEvidence, ProjectSnapshotId, RequestId, TaskId,
-    WorkspaceChangeEvidence,
+    DeliveryTerminalStatus, DurableIntentEvidence, FencingToken, FixedTestEvidence,
+    GitCommitEvidence, HolderProcessId, Invocation, PreparedWorkspaceEvidence, ProjectId,
+    ProjectSnapshotId, RequestId, RuntimeAdmissionMode, RuntimeKind, TaskId,
+    WRITER_LEASE_PRODUCER_ID, WRITER_LEASE_PRODUCER_VERSION, WorkspaceChangeEvidence,
+    WriterLeaseAuthorityHead, WriterLeaseAuthorityReceipt, WriterLeaseIdentity,
+    WriterLeaseRevision, WriterLeaseStatus,
 };
-use lattice_orchestrator::{DeliveryOrchestratorError, delivery_status, run_delivery};
+use lattice_orchestrator::{
+    DeliveryOrchestratorError, delivery_status, run_delivery, run_delivery_governed,
+};
 use lattice_ports::{
+    ControlledTaskExecutionError, ControlledTaskExecutionErrorKind, ControlledTaskExecutionResult,
     DeliveryCodexPort, DeliveryFailureCertainty, DeliveryLedgerPort, DeliveryPortError,
-    DeliveryPortResult, PortErrorKind, TestRunnerPort, WorkspaceGitPort,
+    DeliveryPortResult, PortErrorKind, TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
 };
 
 type Calls = Rc<RefCell<Vec<&'static str>>>;
@@ -233,6 +239,30 @@ struct Scenario {
     codex: FakeCodex,
 }
 
+struct FakeWriterGuard {
+    calls: Calls,
+    check_count: usize,
+    fail_on: Option<usize>,
+}
+
+impl WriterAuthorityGuardPort for FakeWriterGuard {
+    fn assert_current(
+        &mut self,
+        _expected: &WriterLeaseAuthorityHead,
+    ) -> ControlledTaskExecutionResult<()> {
+        self.check_count += 1;
+        self.calls.borrow_mut().push("writer-current");
+        if self.fail_on == Some(self.check_count) {
+            Err(ControlledTaskExecutionError::new(
+                ControlledTaskExecutionErrorKind::Known,
+                "WRITER_AUTHORITY_STALE",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl Scenario {
     fn new(fail: Option<FailAt>, certainty: DeliveryFailureCertainty) -> Self {
         let calls = Rc::new(RefCell::new(Vec::new()));
@@ -286,6 +316,96 @@ fn success_uses_the_one_exact_effect_order() {
         scenario.call_log(),
         [
             "intent", "prepare", "codex", "scope", "test", "commit", "outcome", "receipt"
+        ]
+    );
+}
+
+#[test]
+fn governed_delivery_rechecks_writer_currentness_at_every_mutation_boundary() {
+    let mut scenario = Scenario::new(None, DeliveryFailureCertainty::Known);
+    let request = request("request-1");
+    let authority = writer_authority(&request);
+    let mut guard = FakeWriterGuard {
+        calls: scenario.calls.clone(),
+        check_count: 0,
+        fail_on: None,
+    };
+
+    let receipt = run_delivery_governed(
+        &request,
+        &authority,
+        &mut guard,
+        &mut scenario.ledger,
+        &mut scenario.workspace,
+        &mut scenario.codex,
+    )
+    .expect("governed delivery succeeds");
+
+    assert_eq!(receipt.status(), DeliveryTerminalStatus::Completed);
+    assert_eq!(guard.check_count, 6);
+    assert_eq!(
+        scenario.call_log(),
+        [
+            "intent",
+            "writer-current",
+            "prepare",
+            "writer-current",
+            "codex",
+            "writer-current",
+            "scope",
+            "writer-current",
+            "test",
+            "writer-current",
+            "commit",
+            "writer-current",
+            "outcome",
+            "receipt",
+        ]
+    );
+}
+
+#[test]
+fn stale_writer_before_git_suppresses_commit_and_requires_reconciliation() {
+    let mut scenario = Scenario::new(None, DeliveryFailureCertainty::Known);
+    let request = request("request-1");
+    let authority = writer_authority(&request);
+    let mut guard = FakeWriterGuard {
+        calls: scenario.calls.clone(),
+        check_count: 0,
+        fail_on: Some(5),
+    };
+
+    let Err(DeliveryOrchestratorError::Terminal { receipt, .. }) = run_delivery_governed(
+        &request,
+        &authority,
+        &mut guard,
+        &mut scenario.ledger,
+        &mut scenario.workspace,
+        &mut scenario.codex,
+    ) else {
+        panic!("stale writer must produce reconciliation");
+    };
+
+    assert_eq!(
+        receipt.status(),
+        DeliveryTerminalStatus::ReconciliationRequired
+    );
+    assert!(!scenario.call_log().contains(&"commit"));
+    assert_eq!(
+        scenario.call_log(),
+        [
+            "intent",
+            "writer-current",
+            "prepare",
+            "writer-current",
+            "codex",
+            "writer-current",
+            "scope",
+            "writer-current",
+            "test",
+            "writer-current",
+            "outcome",
+            "receipt",
         ]
     );
 }
@@ -470,6 +590,46 @@ fn request(request_id: &str) -> DeliveryRunRequest {
         digest('d'),
     )
     .expect("delivery request")
+}
+
+fn writer_authority(request: &DeliveryRunRequest) -> WriterLeaseAuthorityHead {
+    let invocation = request.invocation();
+    let identity = WriterLeaseIdentity::new(
+        ProjectId::new("project-1").expect("project"),
+        invocation.project_snapshot_id().clone(),
+        invocation.task_id().clone(),
+        "1",
+        invocation.subject_digest().clone(),
+        invocation.attempt_id().clone(),
+        "lease-1",
+        "codex-writer-1",
+        "workspace-1",
+        HolderProcessId::new(42).expect("process"),
+        digest('e'),
+        "daemon-1",
+        DaemonEpoch::new(1).expect("daemon epoch"),
+        FencingToken::new(1).expect("fence"),
+    )
+    .expect("writer identity");
+    WriterLeaseAuthorityReceipt::new(
+        CONTRACT_VERSION,
+        WRITER_LEASE_PRODUCER_ID,
+        WRITER_LEASE_PRODUCER_VERSION,
+        RuntimeKind::Live,
+        identity,
+        WriterLeaseStatus::Active,
+        WriterLeaseRevision::new(1).expect("lease revision"),
+        RuntimeAdmissionMode::Active,
+        "2026-08-09T00:00:00Z",
+        "2026-08-09T00:00:00Z",
+        "2026-08-09T00:10:00Z",
+        digest('f'),
+        digest('1'),
+        digest('2'),
+        digest('3'),
+    )
+    .expect("writer receipt")
+    .head()
 }
 
 fn other_request_receipt() -> DeliveryReceipt {

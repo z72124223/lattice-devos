@@ -8,9 +8,10 @@ use lattice_cjson::{
     CanonicalError, CanonicalValue, HashDomain, canonical_sha256, canonicalize, normalize_nfc,
 };
 use lattice_contracts::{
-    CONTRACT_VERSION, ContentDigest, ContractError, ResourceCounters, ResourceRequest, RuntimeKind,
-    TASK_LEDGER_PRODUCER_ID, TASK_LEDGER_PRODUCER_VERSION, TaskLedgerResourceHead,
-    TaskLedgerResourceReceipt, TaskLedgerStreamHead, TaskLedgerStreamIdentity,
+    CONTRACT_VERSION, ContentDigest, ContractError, ResourceCounters, ResourceRequest,
+    RuntimeAdmissionMode, RuntimeKind, TASK_LEDGER_PRODUCER_ID, TASK_LEDGER_PRODUCER_VERSION,
+    TaskLedgerResourceHead, TaskLedgerResourceReceipt, TaskLedgerStreamHead,
+    TaskLedgerStreamIdentity, WriterLeaseAuthorityHead, WriterLeaseStatus,
 };
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
@@ -52,6 +53,12 @@ pub enum LedgerError {
     InvalidStreamHead,
     /// An event kind/resource snapshot combination is invalid.
     InvalidResourceSnapshot,
+    /// An autonomy receipt event violates its fixed shape or exactly-once order.
+    InvalidAutonomyReceipt,
+    /// The supplied autonomy recommendation differs from Task Ledger policy.
+    AutonomyRecommendationMismatch,
+    /// A generic caller selected a reserved or unknown Task-created profile.
+    UnknownTaskCreatedProfile,
     /// Cumulative resource counters moved backwards.
     ResourceCounterRegression,
     /// A command ID was reused in one stream with another request digest.
@@ -110,6 +117,9 @@ impl LedgerError {
             Self::DiagnosticLimitExceeded => "LEDGER_DIAGNOSTIC_LIMIT_EXCEEDED",
             Self::InvalidStreamHead => "LEDGER_INVALID_HEAD",
             Self::InvalidResourceSnapshot => "LEDGER_INVALID_RESOURCE_SNAPSHOT",
+            Self::InvalidAutonomyReceipt => "LEDGER_INVALID_AUTONOMY_RECEIPT",
+            Self::AutonomyRecommendationMismatch => "LEDGER_AUTONOMY_RECOMMENDATION_MISMATCH",
+            Self::UnknownTaskCreatedProfile => "LEDGER_UNKNOWN_TASK_CREATED_PROFILE",
             Self::ResourceCounterRegression => "LEDGER_RESOURCE_COUNTER_REGRESSION",
             Self::CommandIdReuse => "LEDGER_COMMAND_ID_REUSE",
             Self::UnknownEventVersion => "LEDGER_UNKNOWN_EVENT_VERSION",
@@ -151,6 +161,15 @@ impl fmt::Display for LedgerError {
             Self::InvalidStreamHead => formatter.write_str("invalid full stream head"),
             Self::InvalidResourceSnapshot => {
                 formatter.write_str("invalid event/resource snapshot combination")
+            }
+            Self::InvalidAutonomyReceipt => {
+                formatter.write_str("invalid autonomy receipt event shape or order")
+            }
+            Self::AutonomyRecommendationMismatch => {
+                formatter.write_str("autonomy recommendation does not match Task Ledger policy")
+            }
+            Self::UnknownTaskCreatedProfile => {
+                formatter.write_str("unknown or caller-selected Task-created profile")
             }
             Self::ResourceCounterRegression => {
                 formatter.write_str("cumulative resource counter regressed")
@@ -242,6 +261,8 @@ ledger_identifier!(EffectClaimId, "effect_claim_id");
 pub enum LedgerEventKind {
     /// The immutable task subject was accepted.
     TaskCreated,
+    /// One canonical autonomy decision receipt was recorded.
+    AutonomyReceiptRecorded,
     /// A separately validated Task Domain transition was recorded.
     StateTransition,
     /// A pure Policy decision was recorded.
@@ -262,6 +283,7 @@ impl LedgerEventKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::TaskCreated => "TASK_CREATED",
+            Self::AutonomyReceiptRecorded => "AUTONOMY_RECEIPT_RECORDED",
             Self::StateTransition => "STATE_TRANSITION",
             Self::PolicyDecision => "POLICY_DECISION",
             Self::ResourceSnapshot => "RESOURCE_SNAPSHOT",
@@ -279,6 +301,7 @@ impl LedgerEventKind {
     pub fn parse(value: &str) -> Result<Self, LedgerError> {
         match value {
             "TASK_CREATED" => Ok(Self::TaskCreated),
+            "AUTONOMY_RECEIPT_RECORDED" => Ok(Self::AutonomyReceiptRecorded),
             "STATE_TRANSITION" => Ok(Self::StateTransition),
             "POLICY_DECISION" => Ok(Self::PolicyDecision),
             "RESOURCE_SNAPSHOT" => Ok(Self::ResourceSnapshot),
@@ -287,6 +310,730 @@ impl LedgerEventKind {
             "EVIDENCE_RECORDED" => Ok(Self::EvidenceRecorded),
             _ => Err(LedgerError::UnknownEventKind),
         }
+    }
+}
+
+/// Closed task-control profiles carried by `TASK_CREATED.action`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskCreatedProfile {
+    /// Frozen pre-TASK-050 profile; new admission cannot mint this marker.
+    HistoricalAutonomyOptionalV1,
+    /// Current profile requiring an exact sequence-two autonomy receipt.
+    AutonomyReceiptRequiredV1,
+}
+
+impl TaskCreatedProfile {
+    /// Returns the exact hash-bound action marker.
+    #[must_use]
+    pub const fn action(self) -> &'static str {
+        match self {
+            Self::HistoricalAutonomyOptionalV1 => "CONTROLLED_CODEX_CANARY",
+            Self::AutonomyReceiptRequiredV1 => "CONTROLLED_CODEX_CANARY_AUTONOMY_V1",
+        }
+    }
+}
+
+const AUTONOMY_RECEIPT_SCHEMA: &str = "lattice.autonomy-receipt/1.0";
+const AUTONOMY_RECEIPT_DOMAIN: &str = "lattice.autonomy-receipt";
+const AUTONOMY_AUTHORITY_DOMAIN: &str = "lattice.autonomy-authority";
+const AUTONOMY_HASH_VERSION: &str = "1.0";
+const AUTONOMY_AUTHORITY_MODE: &str = "P0_PROCESS_START_PROFILE_V1";
+
+/// Closed task kind stored in the canonical autonomy receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyTaskKind {
+    Feature,
+    BugFix,
+    Configuration,
+    Research,
+}
+
+impl AutonomyTaskKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Feature => "FEATURE",
+            Self::BugFix => "BUG_FIX",
+            Self::Configuration => "CONFIGURATION",
+            Self::Research => "RESEARCH",
+        }
+    }
+}
+
+/// Closed risk class consumed by the canonical autonomy classifier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyRiskClass {
+    R0,
+    R1,
+    R2,
+    R3,
+}
+
+impl AutonomyRiskClass {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::R0 => "R0",
+            Self::R1 => "R1",
+            Self::R2 => "R2",
+            Self::R3 => "R3",
+        }
+    }
+}
+
+/// Closed task state supported by TASK-050 receipt recording.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyObservedTaskState {
+    Draft,
+}
+
+impl AutonomyObservedTaskState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "DRAFT",
+        }
+    }
+}
+
+/// Closed model value stored only for an accepted `PROCEED` recommendation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyModel {
+    GovernedCodexWriter,
+    NoModel,
+}
+
+impl AutonomyModel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GovernedCodexWriter => "GOVERNED_CODEX_WRITER",
+            Self::NoModel => "NO_MODEL",
+        }
+    }
+}
+
+/// Closed verification recommendation stored only for `PROCEED`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyVerification {
+    FocusedChecks,
+    BuildAndFocusedChecks,
+    ReadOnlyEvidence,
+}
+
+impl AutonomyVerification {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FocusedChecks => "FOCUSED_CHECKS",
+            Self::BuildAndFocusedChecks => "BUILD_AND_FOCUSED_CHECKS",
+            Self::ReadOnlyEvidence => "READ_ONLY_EVIDENCE",
+        }
+    }
+}
+
+/// Closed reason stored in the canonical autonomy decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyDecisionReason {
+    RoutineAuthorized,
+    NewUserDecision,
+    NewAuthority,
+    HighRiskOrIrreversible,
+}
+
+impl AutonomyDecisionReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RoutineAuthorized => "ROUTINE_AUTHORIZED",
+            Self::NewUserDecision => "NEW_USER_DECISION",
+            Self::NewAuthority => "NEW_AUTHORITY",
+            Self::HighRiskOrIrreversible => "HIGH_RISK_OR_IRREVERSIBLE",
+        }
+    }
+}
+
+/// Pure Orchestrator recommendation that Task Ledger independently verifies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyRecommendation {
+    Proceed {
+        model: AutonomyModel,
+        verification: AutonomyVerification,
+        reason: AutonomyDecisionReason,
+    },
+    AskUser {
+        reason: AutonomyDecisionReason,
+    },
+}
+
+impl AutonomyRecommendation {
+    #[must_use]
+    pub const fn disposition(self) -> &'static str {
+        match self {
+            Self::Proceed { .. } => "PROCEED",
+            Self::AskUser { .. } => "ASK_USER",
+        }
+    }
+
+    #[must_use]
+    pub const fn reason(self) -> AutonomyDecisionReason {
+        match self {
+            Self::Proceed { reason, .. } | Self::AskUser { reason } => reason,
+        }
+    }
+
+    #[must_use]
+    pub const fn model(self) -> Option<AutonomyModel> {
+        match self {
+            Self::Proceed { model, .. } => Some(model),
+            Self::AskUser { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn verification(self) -> Option<AutonomyVerification> {
+        match self {
+            Self::Proceed { verification, .. } => Some(verification),
+            Self::AskUser { .. } => None,
+        }
+    }
+}
+
+/// Typed autonomy intent plus the pure recommendation Task Ledger must verify.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AutonomyIntent {
+    task_kind: AutonomyTaskKind,
+    risk_class: AutonomyRiskClass,
+    execution_preapproved: bool,
+    requires_new_authority: bool,
+    irreversible_or_high_risk: bool,
+    observed_task_state: AutonomyObservedTaskState,
+    recommendation: AutonomyRecommendation,
+}
+
+impl AutonomyIntent {
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub const fn new(
+        task_kind: AutonomyTaskKind,
+        risk_class: AutonomyRiskClass,
+        execution_preapproved: bool,
+        requires_new_authority: bool,
+        irreversible_or_high_risk: bool,
+        observed_task_state: AutonomyObservedTaskState,
+        recommendation: AutonomyRecommendation,
+    ) -> Self {
+        Self {
+            task_kind,
+            risk_class,
+            execution_preapproved,
+            requires_new_authority,
+            irreversible_or_high_risk,
+            observed_task_state,
+            recommendation,
+        }
+    }
+
+    #[must_use]
+    pub const fn task_kind(self) -> AutonomyTaskKind {
+        self.task_kind
+    }
+
+    #[must_use]
+    pub const fn risk_class(self) -> AutonomyRiskClass {
+        self.risk_class
+    }
+
+    #[must_use]
+    pub const fn execution_preapproved(self) -> bool {
+        self.execution_preapproved
+    }
+
+    #[must_use]
+    pub const fn requires_new_authority(self) -> bool {
+        self.requires_new_authority
+    }
+
+    #[must_use]
+    pub const fn irreversible_or_high_risk(self) -> bool {
+        self.irreversible_or_high_risk
+    }
+
+    #[must_use]
+    pub const fn observed_task_state(self) -> AutonomyObservedTaskState {
+        self.observed_task_state
+    }
+
+    #[must_use]
+    pub const fn recommendation(self) -> AutonomyRecommendation {
+        self.recommendation
+    }
+}
+
+/// Fixed command metadata for one typed autonomy append.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutonomyAppendMetadata {
+    command_id: CommandId,
+    correlation_id: CorrelationId,
+    occurred_at: String,
+    actor_id: ActorId,
+}
+
+impl AutonomyAppendMetadata {
+    /// Constructs bounded metadata without reading a clock.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical UTC timestamp.
+    pub fn new(
+        command_id: CommandId,
+        correlation_id: CorrelationId,
+        occurred_at: impl Into<String>,
+        actor_id: ActorId,
+    ) -> Result<Self, LedgerError> {
+        let occurred_at = occurred_at.into();
+        validate_utc_timestamp(&occurred_at)?;
+        Ok(Self {
+            command_id,
+            correlation_id,
+            occurred_at,
+            actor_id,
+        })
+    }
+}
+
+/// Complete P0 authority evidence consumed by one Task-Ledger-owned receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutonomyAuthorityEvidence {
+    process_start_authority_digest: ContentDigest,
+    ingress_profile_adapter_commitment: ContentDigest,
+    store_authority_head_digest: ContentDigest,
+    writer_authority: Option<WriterLeaseAuthorityHead>,
+}
+
+impl AutonomyAuthorityEvidence {
+    /// Constructs the only authority profile supported by TASK-050.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a zero mandatory authority digest.
+    pub fn new_p0_process_start_profile(
+        process_start_authority_digest: ContentDigest,
+        ingress_profile_adapter_commitment: ContentDigest,
+        store_authority_head_digest: ContentDigest,
+        writer_authority: Option<WriterLeaseAuthorityHead>,
+    ) -> Result<Self, LedgerError> {
+        if [
+            &process_start_authority_digest,
+            &ingress_profile_adapter_commitment,
+            &store_authority_head_digest,
+        ]
+        .into_iter()
+        .any(is_zero_digest)
+        {
+            return Err(LedgerError::InvalidAutonomyReceipt);
+        }
+        Ok(Self {
+            process_start_authority_digest,
+            ingress_profile_adapter_commitment,
+            store_authority_head_digest,
+            writer_authority,
+        })
+    }
+
+    #[must_use]
+    pub const fn process_start_authority_digest(&self) -> &ContentDigest {
+        &self.process_start_authority_digest
+    }
+
+    #[must_use]
+    pub const fn ingress_profile_adapter_commitment(&self) -> &ContentDigest {
+        &self.ingress_profile_adapter_commitment
+    }
+
+    #[must_use]
+    pub const fn store_authority_head_digest(&self) -> &ContentDigest {
+        &self.store_authority_head_digest
+    }
+
+    #[must_use]
+    pub const fn writer_authority(&self) -> Option<&WriterLeaseAuthorityHead> {
+        self.writer_authority.as_ref()
+    }
+}
+
+/// Canonical autonomy subject and fixed scalars verified by Task Ledger.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedAutonomyReceipt {
+    stream_id: ContentDigest,
+    event_sequence: u64,
+    event_digest: ContentDigest,
+    intent: AutonomyIntent,
+    process_start_authority_digest: ContentDigest,
+    ingress_profile_adapter_commitment: ContentDigest,
+    store_authority_head_digest: ContentDigest,
+    writer_lease_receipt_digest: Option<ContentDigest>,
+    writer_lease_head_digest: Option<ContentDigest>,
+    writer_fencing_token: Option<u64>,
+    authority_digest: ContentDigest,
+    receipt_digest: ContentDigest,
+}
+
+impl VerifiedAutonomyReceipt {
+    #[must_use]
+    pub const fn stream_id(&self) -> &ContentDigest {
+        &self.stream_id
+    }
+
+    #[must_use]
+    pub const fn event_sequence(&self) -> u64 {
+        self.event_sequence
+    }
+
+    #[must_use]
+    pub const fn event_digest(&self) -> &ContentDigest {
+        &self.event_digest
+    }
+
+    #[must_use]
+    pub const fn receipt_schema_version(&self) -> &'static str {
+        AUTONOMY_RECEIPT_SCHEMA
+    }
+
+    #[must_use]
+    pub const fn intent_version(&self) -> &'static str {
+        AUTONOMY_HASH_VERSION
+    }
+
+    #[must_use]
+    pub const fn intent(&self) -> AutonomyIntent {
+        self.intent
+    }
+
+    #[must_use]
+    pub const fn authority_mode(&self) -> &'static str {
+        AUTONOMY_AUTHORITY_MODE
+    }
+
+    #[must_use]
+    pub const fn process_start_authority_digest(&self) -> &ContentDigest {
+        &self.process_start_authority_digest
+    }
+
+    #[must_use]
+    pub const fn ingress_profile_adapter_commitment(&self) -> &ContentDigest {
+        &self.ingress_profile_adapter_commitment
+    }
+
+    #[must_use]
+    pub const fn store_authority_head_digest(&self) -> &ContentDigest {
+        &self.store_authority_head_digest
+    }
+
+    #[must_use]
+    pub const fn writer_lease_receipt_digest(&self) -> Option<&ContentDigest> {
+        self.writer_lease_receipt_digest.as_ref()
+    }
+
+    #[must_use]
+    pub const fn writer_lease_head_digest(&self) -> Option<&ContentDigest> {
+        self.writer_lease_head_digest.as_ref()
+    }
+
+    #[must_use]
+    pub const fn writer_fencing_token(&self) -> Option<u64> {
+        self.writer_fencing_token
+    }
+
+    #[must_use]
+    pub const fn authority_digest(&self) -> &ContentDigest {
+        &self.authority_digest
+    }
+
+    #[must_use]
+    pub const fn receipt_digest(&self) -> &ContentDigest {
+        &self.receipt_digest
+    }
+
+    /// Exports the already-verified receipt as untrusted persistence scalars.
+    /// Re-import must pass through `verify_untrusted_autonomy_receipt_rows`.
+    #[must_use]
+    pub fn to_untrusted(&self) -> UntrustedAutonomyReceiptRow {
+        UntrustedAutonomyReceiptRow {
+            stream_id: self.stream_id.clone(),
+            event_sequence: self.event_sequence,
+            event_digest: self.event_digest.clone(),
+            receipt_schema_version: AUTONOMY_RECEIPT_SCHEMA.to_owned(),
+            intent_version: AUTONOMY_HASH_VERSION.to_owned(),
+            task_kind: self.intent.task_kind.as_str().to_owned(),
+            risk_class: self.intent.risk_class.as_str().to_owned(),
+            execution_preapproved: self.intent.execution_preapproved,
+            requires_new_authority: self.intent.requires_new_authority,
+            irreversible_or_high_risk: self.intent.irreversible_or_high_risk,
+            observed_task_state: self.intent.observed_task_state.as_str().to_owned(),
+            disposition: self.intent.recommendation.disposition().to_owned(),
+            decision_reason: self.intent.recommendation.reason().as_str().to_owned(),
+            model: self
+                .intent
+                .recommendation
+                .model()
+                .map(|value| value.as_str().to_owned()),
+            verification: self
+                .intent
+                .recommendation
+                .verification()
+                .map(|value| value.as_str().to_owned()),
+            authority_mode: AUTONOMY_AUTHORITY_MODE.to_owned(),
+            process_start_authority_digest: self.process_start_authority_digest.clone(),
+            ingress_profile_adapter_commitment: self.ingress_profile_adapter_commitment.clone(),
+            store_authority_head_digest: self.store_authority_head_digest.clone(),
+            writer_lease_receipt_digest: self.writer_lease_receipt_digest.clone(),
+            writer_lease_head_digest: self.writer_lease_head_digest.clone(),
+            writer_fencing_token: self.writer_fencing_token,
+            authority_digest: self.authority_digest.clone(),
+            receipt_digest: self.receipt_digest.clone(),
+        }
+    }
+}
+
+/// Complete untrusted 24-scalar autonomy row decoded from persistence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UntrustedAutonomyReceiptRow {
+    stream_id: ContentDigest,
+    event_sequence: u64,
+    event_digest: ContentDigest,
+    receipt_schema_version: String,
+    intent_version: String,
+    task_kind: String,
+    risk_class: String,
+    execution_preapproved: bool,
+    requires_new_authority: bool,
+    irreversible_or_high_risk: bool,
+    observed_task_state: String,
+    disposition: String,
+    decision_reason: String,
+    model: Option<String>,
+    verification: Option<String>,
+    authority_mode: String,
+    process_start_authority_digest: ContentDigest,
+    ingress_profile_adapter_commitment: ContentDigest,
+    store_authority_head_digest: ContentDigest,
+    writer_lease_receipt_digest: Option<ContentDigest>,
+    writer_lease_head_digest: Option<ContentDigest>,
+    writer_fencing_token: Option<u64>,
+    authority_digest: ContentDigest,
+    receipt_digest: ContentDigest,
+}
+
+impl UntrustedAutonomyReceiptRow {
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        stream_id: ContentDigest,
+        event_sequence: u64,
+        event_digest: ContentDigest,
+        receipt_schema_version: impl Into<String>,
+        intent_version: impl Into<String>,
+        task_kind: impl Into<String>,
+        risk_class: impl Into<String>,
+        execution_preapproved: bool,
+        requires_new_authority: bool,
+        irreversible_or_high_risk: bool,
+        observed_task_state: impl Into<String>,
+        disposition: impl Into<String>,
+        decision_reason: impl Into<String>,
+        model: Option<String>,
+        verification: Option<String>,
+        authority_mode: impl Into<String>,
+        process_start_authority_digest: ContentDigest,
+        ingress_profile_adapter_commitment: ContentDigest,
+        store_authority_head_digest: ContentDigest,
+        writer_lease_receipt_digest: Option<ContentDigest>,
+        writer_lease_head_digest: Option<ContentDigest>,
+        writer_fencing_token: Option<u64>,
+        authority_digest: ContentDigest,
+        receipt_digest: ContentDigest,
+    ) -> Self {
+        Self {
+            stream_id,
+            event_sequence,
+            event_digest,
+            receipt_schema_version: receipt_schema_version.into(),
+            intent_version: intent_version.into(),
+            task_kind: task_kind.into(),
+            risk_class: risk_class.into(),
+            execution_preapproved,
+            requires_new_authority,
+            irreversible_or_high_risk,
+            observed_task_state: observed_task_state.into(),
+            disposition: disposition.into(),
+            decision_reason: decision_reason.into(),
+            model,
+            verification,
+            authority_mode: authority_mode.into(),
+            process_start_authority_digest,
+            ingress_profile_adapter_commitment,
+            store_authority_head_digest,
+            writer_lease_receipt_digest,
+            writer_lease_head_digest,
+            writer_fencing_token,
+            authority_digest,
+            receipt_digest,
+        }
+    }
+
+    #[must_use]
+    pub const fn stream_id(&self) -> &ContentDigest {
+        &self.stream_id
+    }
+
+    #[must_use]
+    pub const fn event_sequence(&self) -> u64 {
+        self.event_sequence
+    }
+
+    #[must_use]
+    pub const fn event_digest(&self) -> &ContentDigest {
+        &self.event_digest
+    }
+
+    #[must_use]
+    pub fn receipt_schema_version(&self) -> &str {
+        &self.receipt_schema_version
+    }
+
+    #[must_use]
+    pub fn intent_version(&self) -> &str {
+        &self.intent_version
+    }
+
+    #[must_use]
+    pub fn task_kind(&self) -> &str {
+        &self.task_kind
+    }
+
+    #[must_use]
+    pub fn risk_class(&self) -> &str {
+        &self.risk_class
+    }
+
+    #[must_use]
+    pub const fn execution_preapproved(&self) -> bool {
+        self.execution_preapproved
+    }
+
+    #[must_use]
+    pub const fn requires_new_authority(&self) -> bool {
+        self.requires_new_authority
+    }
+
+    #[must_use]
+    pub const fn irreversible_or_high_risk(&self) -> bool {
+        self.irreversible_or_high_risk
+    }
+
+    #[must_use]
+    pub fn observed_task_state(&self) -> &str {
+        &self.observed_task_state
+    }
+
+    #[must_use]
+    pub fn disposition(&self) -> &str {
+        &self.disposition
+    }
+
+    #[must_use]
+    pub fn decision_reason(&self) -> &str {
+        &self.decision_reason
+    }
+
+    #[must_use]
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    #[must_use]
+    pub fn verification(&self) -> Option<&str> {
+        self.verification.as_deref()
+    }
+
+    #[must_use]
+    pub fn authority_mode(&self) -> &str {
+        &self.authority_mode
+    }
+
+    #[must_use]
+    pub const fn process_start_authority_digest(&self) -> &ContentDigest {
+        &self.process_start_authority_digest
+    }
+
+    #[must_use]
+    pub const fn ingress_profile_adapter_commitment(&self) -> &ContentDigest {
+        &self.ingress_profile_adapter_commitment
+    }
+
+    #[must_use]
+    pub const fn store_authority_head_digest(&self) -> &ContentDigest {
+        &self.store_authority_head_digest
+    }
+
+    #[must_use]
+    pub const fn writer_lease_receipt_digest(&self) -> Option<&ContentDigest> {
+        self.writer_lease_receipt_digest.as_ref()
+    }
+
+    #[must_use]
+    pub const fn writer_lease_head_digest(&self) -> Option<&ContentDigest> {
+        self.writer_lease_head_digest.as_ref()
+    }
+
+    #[must_use]
+    pub const fn writer_fencing_token(&self) -> Option<u64> {
+        self.writer_fencing_token
+    }
+
+    #[must_use]
+    pub const fn authority_digest(&self) -> &ContentDigest {
+        &self.authority_digest
+    }
+
+    #[must_use]
+    pub const fn receipt_digest(&self) -> &ContentDigest {
+        &self.receipt_digest
+    }
+}
+
+/// Closed Task-Ledger-owned autonomy replay state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VerifiedAutonomyReceiptState {
+    NotApplicable,
+    HistoricalOptional(Option<VerifiedAutonomyReceipt>),
+    PendingRequiredReceipt,
+    RequiredComplete(VerifiedAutonomyReceipt),
+}
+
+/// Typed Task Ledger append plan paired with its canonical autonomy scalars.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutonomyReceiptAppendPlan {
+    append_plan: LedgerAppendPlan,
+    receipt: VerifiedAutonomyReceipt,
+    writer_authority: Option<WriterLeaseAuthorityHead>,
+}
+
+impl AutonomyReceiptAppendPlan {
+    #[must_use]
+    pub const fn append_plan(&self) -> &LedgerAppendPlan {
+        &self.append_plan
+    }
+
+    #[must_use]
+    pub const fn receipt(&self) -> &VerifiedAutonomyReceipt {
+        &self.receipt
+    }
+
+    #[must_use]
+    pub const fn writer_authority(&self) -> Option<&WriterLeaseAuthorityHead> {
+        self.writer_authority.as_ref()
     }
 }
 
@@ -408,6 +1155,14 @@ pub struct AppendCommand {
     resource_snapshot: Option<ResourceSnapshot>,
 }
 
+#[derive(Clone, Copy)]
+enum AppendConstruction {
+    Generic,
+    RequiredTaskCreated,
+    VerifiedAutonomy,
+    VerifiedReplay,
+}
+
 impl AppendCommand {
     /// Constructs one exact append request without reading a clock.
     ///
@@ -430,11 +1185,109 @@ impl AppendCommand {
         diagnostic: Option<Diagnostic>,
         resource_snapshot: Option<ResourceSnapshot>,
     ) -> Result<Self, LedgerError> {
+        Self::from_fields(
+            expected_head,
+            command_id,
+            correlation_id,
+            occurred_at,
+            kind,
+            actor_id,
+            action,
+            outcome,
+            reason_code,
+            subject_digest,
+            diagnostic,
+            resource_snapshot,
+            AppendConstruction::Generic,
+        )
+    }
+
+    /// Constructs the only Task-created profile that new task-control admission may mint.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid identifiers, timestamp, diagnostic, or subject fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_autonomy_required_task_created(
+        expected_head: TaskLedgerStreamHead,
+        command_id: CommandId,
+        correlation_id: CorrelationId,
+        occurred_at: impl Into<String>,
+        actor_id: ActorId,
+        reason_code: ReasonCode,
+        subject_digest: ContentDigest,
+        diagnostic: Option<Diagnostic>,
+    ) -> Result<Self, LedgerError> {
+        if expected_head.sequence() != 0 {
+            return Err(LedgerError::InvalidAutonomyReceipt);
+        }
+        Self::from_fields(
+            expected_head,
+            command_id,
+            correlation_id,
+            occurred_at,
+            LedgerEventKind::TaskCreated,
+            actor_id,
+            ActionId::new(TaskCreatedProfile::AutonomyReceiptRequiredV1.action())?,
+            LedgerOutcome::Recorded,
+            reason_code,
+            subject_digest,
+            diagnostic,
+            None,
+            AppendConstruction::RequiredTaskCreated,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_fields(
+        expected_head: TaskLedgerStreamHead,
+        command_id: CommandId,
+        correlation_id: CorrelationId,
+        occurred_at: impl Into<String>,
+        kind: LedgerEventKind,
+        actor_id: ActorId,
+        action: ActionId,
+        outcome: LedgerOutcome,
+        reason_code: ReasonCode,
+        subject_digest: ContentDigest,
+        diagnostic: Option<Diagnostic>,
+        resource_snapshot: Option<ResourceSnapshot>,
+        construction: AppendConstruction,
+    ) -> Result<Self, LedgerError> {
         let occurred_at = occurred_at.into();
         validate_utc_timestamp(&occurred_at)?;
         let resource_shape = matches!(kind, LedgerEventKind::ResourceSnapshot);
         if resource_shape != resource_snapshot.is_some() {
             return Err(LedgerError::InvalidResourceSnapshot);
+        }
+        if matches!(kind, LedgerEventKind::AutonomyReceiptRecorded)
+            && (!matches!(
+                construction,
+                AppendConstruction::VerifiedAutonomy | AppendConstruction::VerifiedReplay
+            ) || action.as_str() != "RECORD_AUTONOMY_RECEIPT_V1"
+                || outcome != LedgerOutcome::Recorded
+                || reason_code.as_str() != "AUTONOMY_DECISION_RECORDED"
+                || diagnostic.is_some()
+                || resource_snapshot.is_some())
+        {
+            return Err(LedgerError::InvalidAutonomyReceipt);
+        }
+        if matches!(kind, LedgerEventKind::TaskCreated) {
+            let profile = classify_task_created_action(action.as_str())?;
+            match construction {
+                AppendConstruction::Generic if profile.is_some() => {
+                    return Err(LedgerError::UnknownTaskCreatedProfile);
+                }
+                AppendConstruction::RequiredTaskCreated
+                    if profile != Some(TaskCreatedProfile::AutonomyReceiptRequiredV1) =>
+                {
+                    return Err(LedgerError::UnknownTaskCreatedProfile);
+                }
+                AppendConstruction::Generic
+                | AppendConstruction::RequiredTaskCreated
+                | AppendConstruction::VerifiedAutonomy
+                | AppendConstruction::VerifiedReplay => {}
+            }
         }
         Ok(Self {
             expected_head,
@@ -675,6 +1528,33 @@ impl LedgerEvent {
     #[must_use]
     pub fn to_untrusted(&self) -> UntrustedLedgerEvent {
         untrusted_event(self)
+    }
+}
+
+/// Classifies the Task-Ledger-owned profile carried by one verified event.
+///
+/// # Errors
+///
+/// Rejects unknown values in the reserved controlled-canary namespace.
+pub fn classify_task_created_profile(
+    event: &LedgerEvent,
+) -> Result<Option<TaskCreatedProfile>, LedgerError> {
+    if event.kind() != LedgerEventKind::TaskCreated {
+        return Ok(None);
+    }
+    classify_task_created_action(event.action().as_str())
+}
+
+fn classify_task_created_action(action: &str) -> Result<Option<TaskCreatedProfile>, LedgerError> {
+    match action {
+        "CONTROLLED_CODEX_CANARY" => Ok(Some(TaskCreatedProfile::HistoricalAutonomyOptionalV1)),
+        "CONTROLLED_CODEX_CANARY_AUTONOMY_V1" => {
+            Ok(Some(TaskCreatedProfile::AutonomyReceiptRequiredV1))
+        }
+        value if value.starts_with("CONTROLLED_CODEX_CANARY") => {
+            Err(LedgerError::UnknownTaskCreatedProfile)
+        }
+        _ => Ok(None),
     }
 }
 
@@ -1463,6 +2343,21 @@ pub fn plan_append(
         });
     }
 
+    if command.kind == LedgerEventKind::TaskCreated
+        && classify_task_created_action(command.action.as_str())?.is_some()
+        && !current.events.is_empty()
+    {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    if current.events.len() == 1
+        && classify_task_created_profile(&current.events[0])?
+            == Some(TaskCreatedProfile::AutonomyReceiptRequiredV1)
+        && command.kind != LedgerEventKind::AutonomyReceiptRecorded
+    {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    validate_autonomy_order(command.kind, &current.events)?;
+
     let before = current.head.clone();
     let (after, receipt, new_event, new_outbox, next_counters) = if before != command.expected_head
     {
@@ -1582,6 +2477,655 @@ pub fn plan_append(
         record_set_digest,
         next_state,
     })
+}
+
+/// Builds and plans the only canonical TASK-050 autonomy receipt append.
+///
+/// Task Ledger independently reclassifies the supplied recommendation, binds
+/// authority to the verified stream, computes both canonical digests, and uses
+/// a private event constructor. Generic append cannot supply the subject digest.
+///
+/// # Errors
+///
+/// Rejects a non-required profile, wrong event order, recommendation drift,
+/// missing/unexpected/stale writer authority, or canonical hashing failure.
+pub fn plan_autonomy_receipt_append(
+    current: &VerifiedStream,
+    metadata: AutonomyAppendMetadata,
+    intent: AutonomyIntent,
+    authority: AutonomyAuthorityEvidence,
+) -> Result<AutonomyReceiptAppendPlan, LedgerError> {
+    validate_verified_checkpoint(current)?;
+    if current.events().len() != 1
+        || classify_task_created_profile(&current.events()[0])?
+            != Some(TaskCreatedProfile::AutonomyReceiptRequiredV1)
+        || intent.risk_class != AutonomyRiskClass::R0
+    {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    if derive_autonomy_recommendation(intent) != intent.recommendation {
+        return Err(LedgerError::AutonomyRecommendationMismatch);
+    }
+    validate_autonomy_authority(current.identity(), intent.recommendation, &authority)?;
+    let writer_lease_head_digest =
+        autonomy_writer_head_digest(authority.writer_authority.as_ref())?;
+    let authority_value = autonomy_authority_value(
+        current.identity(),
+        &authority,
+        writer_lease_head_digest.as_ref(),
+    );
+    let authority_digest = hash_value_at_version(
+        AUTONOMY_AUTHORITY_DOMAIN,
+        AUTONOMY_HASH_VERSION,
+        &authority_value,
+    )?;
+    let receipt_value = autonomy_receipt_value(current.identity(), intent, &authority_digest);
+    let receipt_digest = hash_value_at_version(
+        AUTONOMY_RECEIPT_DOMAIN,
+        AUTONOMY_HASH_VERSION,
+        &receipt_value,
+    )?;
+    let writer_authority = authority.writer_authority.clone();
+    let command = AppendCommand::from_fields(
+        current.head().clone(),
+        metadata.command_id,
+        metadata.correlation_id,
+        metadata.occurred_at,
+        LedgerEventKind::AutonomyReceiptRecorded,
+        metadata.actor_id,
+        ActionId::new("RECORD_AUTONOMY_RECEIPT_V1")?,
+        LedgerOutcome::Recorded,
+        ReasonCode::new("AUTONOMY_DECISION_RECORDED")?,
+        receipt_digest.clone(),
+        None,
+        None,
+        AppendConstruction::VerifiedAutonomy,
+    )?;
+    let append_plan = plan_append(current, command)?;
+    let event = append_plan
+        .new_event()
+        .ok_or(LedgerError::InvalidAutonomyReceipt)?;
+    if event.sequence() != 2 || event.subject_digest() != &receipt_digest {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    let receipt = VerifiedAutonomyReceipt {
+        stream_id: current.head().stream_id().clone(),
+        event_sequence: event.sequence(),
+        event_digest: event.event_digest().clone(),
+        intent,
+        process_start_authority_digest: authority.process_start_authority_digest,
+        ingress_profile_adapter_commitment: authority.ingress_profile_adapter_commitment,
+        store_authority_head_digest: authority.store_authority_head_digest,
+        writer_lease_receipt_digest: writer_authority
+            .as_ref()
+            .map(|writer| writer.receipt_digest().clone()),
+        writer_lease_head_digest,
+        writer_fencing_token: writer_authority
+            .as_ref()
+            .map(|writer| writer.identity().fencing_token().get()),
+        authority_digest,
+        receipt_digest,
+    };
+    Ok(AutonomyReceiptAppendPlan {
+        append_plan,
+        receipt,
+        writer_authority,
+    })
+}
+
+/// Verifies that a candidate is the exact canonical retry of one retained
+/// autonomy receipt.
+///
+/// Task Ledger owns this comparison because only it owns the canonical Writer
+/// head, authority, receipt, and stream-binding commitments. Adapters must not
+/// approximate exact retry by comparing a subset of persistence scalars.
+///
+/// # Errors
+///
+/// Rejects binding drift, recommendation drift, missing or unexpected Writer
+/// authority, any substitution in the Store-asserted Writer tuple, or any
+/// canonical authority/receipt commitment mismatch.
+pub fn verify_exact_autonomy_receipt_retry(
+    identity: &TaskLedgerStreamIdentity,
+    existing: &VerifiedAutonomyReceipt,
+    candidate_intent: AutonomyIntent,
+    candidate_authority: &AutonomyAuthorityEvidence,
+) -> Result<(), LedgerError> {
+    validate_stream_identity(identity)?;
+    if candidate_intent.risk_class != AutonomyRiskClass::R0
+        || derive_autonomy_recommendation(candidate_intent) != candidate_intent.recommendation
+    {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    validate_autonomy_authority(
+        identity,
+        candidate_intent.recommendation,
+        candidate_authority,
+    )?;
+
+    let stream_id = hash_value("lattice.task-ledger.stream-id", &identity_value(identity))?;
+    let writer_lease_head_digest =
+        autonomy_writer_head_digest(candidate_authority.writer_authority.as_ref())?;
+    let authority_digest = hash_value_at_version(
+        AUTONOMY_AUTHORITY_DOMAIN,
+        AUTONOMY_HASH_VERSION,
+        &autonomy_authority_value(
+            identity,
+            candidate_authority,
+            writer_lease_head_digest.as_ref(),
+        ),
+    )?;
+    let receipt_digest = hash_value_at_version(
+        AUTONOMY_RECEIPT_DOMAIN,
+        AUTONOMY_HASH_VERSION,
+        &autonomy_receipt_value(identity, candidate_intent, &authority_digest),
+    )?;
+    let writer = candidate_authority.writer_authority.as_ref();
+
+    if existing.stream_id != stream_id
+        || existing.event_sequence != 2
+        || existing.intent != candidate_intent
+        || existing.process_start_authority_digest
+            != candidate_authority.process_start_authority_digest
+        || existing.ingress_profile_adapter_commitment
+            != candidate_authority.ingress_profile_adapter_commitment
+        || existing.store_authority_head_digest != candidate_authority.store_authority_head_digest
+        || existing.writer_lease_receipt_digest.as_ref()
+            != writer.map(WriterLeaseAuthorityHead::receipt_digest)
+        || existing.writer_lease_head_digest != writer_lease_head_digest
+        || existing.writer_fencing_token
+            != writer.map(|authority| authority.identity().fencing_token().get())
+        || existing.authority_digest != authority_digest
+        || existing.receipt_digest != receipt_digest
+    {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    Ok(())
+}
+
+/// Verifies complete untrusted persistence rows and classifies the stream's
+/// closed autonomy profile state.
+///
+/// # Errors
+///
+/// Rejects row cardinality drift, profile/event disagreement, substituted
+/// scalars, non-canonical decisions, incomplete writer tuples, or hash drift.
+pub fn verify_untrusted_autonomy_receipt_rows(
+    stream: &VerifiedStream,
+    rows: &[UntrustedAutonomyReceiptRow],
+) -> Result<VerifiedAutonomyReceiptState, LedgerError> {
+    validate_verified_checkpoint(stream)?;
+    if rows.len() > 1 {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    let autonomy_events = stream
+        .events()
+        .iter()
+        .filter(|event| event.kind() == LedgerEventKind::AutonomyReceiptRecorded)
+        .collect::<Vec<_>>();
+    let profile = stream
+        .events()
+        .first()
+        .map(classify_task_created_profile)
+        .transpose()?
+        .flatten();
+    match profile {
+        None => {
+            if rows.is_empty() && autonomy_events.is_empty() {
+                Ok(VerifiedAutonomyReceiptState::NotApplicable)
+            } else {
+                Err(LedgerError::InvalidAutonomyReceipt)
+            }
+        }
+        Some(TaskCreatedProfile::HistoricalAutonomyOptionalV1) => match rows {
+            [] if autonomy_events.is_empty() => {
+                Ok(VerifiedAutonomyReceiptState::HistoricalOptional(None))
+            }
+            [row] => verify_one_untrusted_autonomy_receipt(stream, row)
+                .map(|receipt| VerifiedAutonomyReceiptState::HistoricalOptional(Some(receipt))),
+            _ => Err(LedgerError::InvalidAutonomyReceipt),
+        },
+        Some(TaskCreatedProfile::AutonomyReceiptRequiredV1) => match rows {
+            [] if stream.events().len() == 1 && autonomy_events.is_empty() => {
+                Ok(VerifiedAutonomyReceiptState::PendingRequiredReceipt)
+            }
+            [row] => verify_one_untrusted_autonomy_receipt(stream, row)
+                .map(VerifiedAutonomyReceiptState::RequiredComplete),
+            _ => Err(LedgerError::InvalidAutonomyReceipt),
+        },
+    }
+}
+
+fn verify_one_untrusted_autonomy_receipt(
+    stream: &VerifiedStream,
+    row: &UntrustedAutonomyReceiptRow,
+) -> Result<VerifiedAutonomyReceipt, LedgerError> {
+    let events = stream.events();
+    if events.len() < 2
+        || events
+            .iter()
+            .filter(|event| event.kind() == LedgerEventKind::AutonomyReceiptRecorded)
+            .count()
+            != 1
+        || classify_task_created_profile(&events[0])?.is_none()
+        || events[1].kind() != LedgerEventKind::AutonomyReceiptRecorded
+        || row.stream_id != *stream.head().stream_id()
+        || row.event_sequence != 2
+        || row.event_sequence != events[1].sequence()
+        || row.event_digest != *events[1].event_digest()
+        || row.receipt_digest != *events[1].subject_digest()
+        || row.receipt_schema_version != AUTONOMY_RECEIPT_SCHEMA
+        || row.intent_version != AUTONOMY_HASH_VERSION
+        || row.observed_task_state != AutonomyObservedTaskState::Draft.as_str()
+        || row.authority_mode != AUTONOMY_AUTHORITY_MODE
+        || [
+            &row.process_start_authority_digest,
+            &row.ingress_profile_adapter_commitment,
+            &row.store_authority_head_digest,
+        ]
+        .into_iter()
+        .any(is_zero_digest)
+    {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    let recommendation = parse_autonomy_recommendation(row)?;
+    let intent = AutonomyIntent {
+        task_kind: parse_autonomy_task_kind(&row.task_kind)?,
+        risk_class: parse_autonomy_risk_class(&row.risk_class)?,
+        execution_preapproved: row.execution_preapproved,
+        requires_new_authority: row.requires_new_authority,
+        irreversible_or_high_risk: row.irreversible_or_high_risk,
+        observed_task_state: AutonomyObservedTaskState::Draft,
+        recommendation,
+    };
+    if intent.risk_class != AutonomyRiskClass::R0
+        || derive_autonomy_recommendation(intent) != recommendation
+    {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    let writer_complete = row.writer_lease_receipt_digest.is_some()
+        && row.writer_lease_head_digest.is_some()
+        && row.writer_fencing_token.is_some();
+    let writer_empty = row.writer_lease_receipt_digest.is_none()
+        && row.writer_lease_head_digest.is_none()
+        && row.writer_fencing_token.is_none();
+    if !valid_autonomy_writer_scalar_tuple(
+        row.writer_lease_receipt_digest.as_ref(),
+        row.writer_lease_head_digest.as_ref(),
+        row.writer_fencing_token,
+    ) || !matches!(
+        (recommendation, writer_complete, writer_empty),
+        (AutonomyRecommendation::Proceed { .. }, true, false)
+            | (AutonomyRecommendation::AskUser { .. }, false, true)
+    ) {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    let authority_value = autonomy_authority_value_from_scalars(
+        stream.identity(),
+        &row.process_start_authority_digest,
+        &row.ingress_profile_adapter_commitment,
+        &row.store_authority_head_digest,
+        row.writer_lease_receipt_digest.as_ref(),
+        row.writer_lease_head_digest.as_ref(),
+        row.writer_fencing_token,
+    );
+    let authority_digest = hash_value_at_version(
+        AUTONOMY_AUTHORITY_DOMAIN,
+        AUTONOMY_HASH_VERSION,
+        &authority_value,
+    )?;
+    if authority_digest != row.authority_digest {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    let receipt_value = autonomy_receipt_value(stream.identity(), intent, &authority_digest);
+    let receipt_digest = hash_value_at_version(
+        AUTONOMY_RECEIPT_DOMAIN,
+        AUTONOMY_HASH_VERSION,
+        &receipt_value,
+    )?;
+    if receipt_digest != row.receipt_digest {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    Ok(VerifiedAutonomyReceipt {
+        stream_id: row.stream_id.clone(),
+        event_sequence: row.event_sequence,
+        event_digest: row.event_digest.clone(),
+        intent,
+        process_start_authority_digest: row.process_start_authority_digest.clone(),
+        ingress_profile_adapter_commitment: row.ingress_profile_adapter_commitment.clone(),
+        store_authority_head_digest: row.store_authority_head_digest.clone(),
+        writer_lease_receipt_digest: row.writer_lease_receipt_digest.clone(),
+        writer_lease_head_digest: row.writer_lease_head_digest.clone(),
+        writer_fencing_token: row.writer_fencing_token,
+        authority_digest,
+        receipt_digest,
+    })
+}
+
+fn valid_autonomy_writer_scalar_tuple(
+    receipt_digest: Option<&ContentDigest>,
+    head_digest: Option<&ContentDigest>,
+    fencing_token: Option<u64>,
+) -> bool {
+    match (receipt_digest, head_digest, fencing_token) {
+        (None, None, None) => true,
+        (Some(receipt), Some(head), Some(token)) => {
+            !is_zero_digest(receipt)
+                && !is_zero_digest(head)
+                && lattice_contracts::FencingToken::new(token).is_ok()
+        }
+        _ => false,
+    }
+}
+
+fn parse_autonomy_task_kind(value: &str) -> Result<AutonomyTaskKind, LedgerError> {
+    match value {
+        "FEATURE" => Ok(AutonomyTaskKind::Feature),
+        "BUG_FIX" => Ok(AutonomyTaskKind::BugFix),
+        "CONFIGURATION" => Ok(AutonomyTaskKind::Configuration),
+        "RESEARCH" => Ok(AutonomyTaskKind::Research),
+        _ => Err(LedgerError::InvalidAutonomyReceipt),
+    }
+}
+
+fn parse_autonomy_risk_class(value: &str) -> Result<AutonomyRiskClass, LedgerError> {
+    match value {
+        "R0" => Ok(AutonomyRiskClass::R0),
+        "R1" => Ok(AutonomyRiskClass::R1),
+        "R2" => Ok(AutonomyRiskClass::R2),
+        "R3" => Ok(AutonomyRiskClass::R3),
+        _ => Err(LedgerError::InvalidAutonomyReceipt),
+    }
+}
+
+fn parse_autonomy_reason(value: &str) -> Result<AutonomyDecisionReason, LedgerError> {
+    match value {
+        "ROUTINE_AUTHORIZED" => Ok(AutonomyDecisionReason::RoutineAuthorized),
+        "NEW_USER_DECISION" => Ok(AutonomyDecisionReason::NewUserDecision),
+        "NEW_AUTHORITY" => Ok(AutonomyDecisionReason::NewAuthority),
+        "HIGH_RISK_OR_IRREVERSIBLE" => Ok(AutonomyDecisionReason::HighRiskOrIrreversible),
+        _ => Err(LedgerError::InvalidAutonomyReceipt),
+    }
+}
+
+fn parse_autonomy_recommendation(
+    row: &UntrustedAutonomyReceiptRow,
+) -> Result<AutonomyRecommendation, LedgerError> {
+    let reason = parse_autonomy_reason(&row.decision_reason)?;
+    match (
+        row.disposition.as_str(),
+        row.model.as_deref(),
+        row.verification.as_deref(),
+    ) {
+        ("PROCEED", Some(model), Some(verification)) => Ok(AutonomyRecommendation::Proceed {
+            model: match model {
+                "GOVERNED_CODEX_WRITER" => AutonomyModel::GovernedCodexWriter,
+                "NO_MODEL" => AutonomyModel::NoModel,
+                _ => return Err(LedgerError::InvalidAutonomyReceipt),
+            },
+            verification: match verification {
+                "FOCUSED_CHECKS" => AutonomyVerification::FocusedChecks,
+                "BUILD_AND_FOCUSED_CHECKS" => AutonomyVerification::BuildAndFocusedChecks,
+                "READ_ONLY_EVIDENCE" => AutonomyVerification::ReadOnlyEvidence,
+                _ => return Err(LedgerError::InvalidAutonomyReceipt),
+            },
+            reason,
+        }),
+        ("ASK_USER", None, None) => Ok(AutonomyRecommendation::AskUser { reason }),
+        _ => Err(LedgerError::InvalidAutonomyReceipt),
+    }
+}
+
+fn derive_autonomy_recommendation(intent: AutonomyIntent) -> AutonomyRecommendation {
+    if intent.requires_new_authority {
+        AutonomyRecommendation::AskUser {
+            reason: AutonomyDecisionReason::NewAuthority,
+        }
+    } else if intent.irreversible_or_high_risk || intent.risk_class == AutonomyRiskClass::R3 {
+        AutonomyRecommendation::AskUser {
+            reason: AutonomyDecisionReason::HighRiskOrIrreversible,
+        }
+    } else if !intent.execution_preapproved {
+        AutonomyRecommendation::AskUser {
+            reason: AutonomyDecisionReason::NewUserDecision,
+        }
+    } else {
+        let model = match intent.task_kind {
+            AutonomyTaskKind::Feature | AutonomyTaskKind::BugFix => {
+                AutonomyModel::GovernedCodexWriter
+            }
+            AutonomyTaskKind::Configuration | AutonomyTaskKind::Research => AutonomyModel::NoModel,
+        };
+        let verification = if intent.task_kind == AutonomyTaskKind::Research {
+            AutonomyVerification::ReadOnlyEvidence
+        } else if intent.risk_class == AutonomyRiskClass::R2 {
+            AutonomyVerification::BuildAndFocusedChecks
+        } else {
+            AutonomyVerification::FocusedChecks
+        };
+        AutonomyRecommendation::Proceed {
+            model,
+            verification,
+            reason: AutonomyDecisionReason::RoutineAuthorized,
+        }
+    }
+}
+
+fn validate_autonomy_authority(
+    identity: &TaskLedgerStreamIdentity,
+    recommendation: AutonomyRecommendation,
+    authority: &AutonomyAuthorityEvidence,
+) -> Result<(), LedgerError> {
+    match (recommendation, authority.writer_authority.as_ref()) {
+        (AutonomyRecommendation::Proceed { .. }, Some(writer))
+            if writer.runtime() == RuntimeKind::Live
+                && writer.status() == WriterLeaseStatus::Active
+                && writer.runtime_admission() == RuntimeAdmissionMode::Active
+                && writer_binding_matches(identity, writer) =>
+        {
+            Ok(())
+        }
+        (AutonomyRecommendation::AskUser { .. }, None) => Ok(()),
+        _ => Err(LedgerError::InvalidAutonomyReceipt),
+    }
+}
+
+fn writer_binding_matches(
+    identity: &TaskLedgerStreamIdentity,
+    writer: &WriterLeaseAuthorityHead,
+) -> bool {
+    let writer = writer.identity();
+    writer.project_id() == identity.project_id()
+        && writer.project_snapshot_id() == identity.project_snapshot_id()
+        && writer.task_id() == identity.task_id()
+        && writer.task_revision() == identity.task_revision()
+        && writer.task_spec_digest() == identity.task_spec_digest()
+}
+
+fn autonomy_writer_head_digest(
+    writer: Option<&WriterLeaseAuthorityHead>,
+) -> Result<Option<ContentDigest>, LedgerError> {
+    writer
+        .map(|writer| {
+            let identity = writer.identity();
+            hash_value_at_version(
+                "lattice.autonomy-writer-lease-head",
+                AUTONOMY_HASH_VERSION,
+                &object(vec![
+                    ("project_id", text(identity.project_id().as_str())),
+                    (
+                        "project_snapshot_id",
+                        text(identity.project_snapshot_id().as_str()),
+                    ),
+                    ("task_id", text(identity.task_id().as_str())),
+                    ("task_revision", text(identity.task_revision())),
+                    (
+                        "task_spec_digest",
+                        text(identity.task_spec_digest().as_str()),
+                    ),
+                    ("attempt_id", text(identity.attempt_id().as_str())),
+                    ("lease_id", text(identity.lease_id())),
+                    ("lease_holder_id", text(identity.lease_holder_id())),
+                    ("worktree_id", text(identity.worktree_id())),
+                    (
+                        "holder_process_id",
+                        text(identity.holder_process_id().get().to_string()),
+                    ),
+                    (
+                        "holder_process_start_identity",
+                        text(identity.holder_process_start_identity().as_str()),
+                    ),
+                    ("daemon_instance_id", text(identity.daemon_instance_id())),
+                    (
+                        "daemon_epoch",
+                        text(identity.daemon_epoch().get().to_string()),
+                    ),
+                    (
+                        "fencing_token",
+                        text(identity.fencing_token().get().to_string()),
+                    ),
+                    ("receipt_digest", text(writer.receipt_digest().as_str())),
+                ]),
+            )
+        })
+        .transpose()
+}
+
+fn autonomy_binding_value(identity: &TaskLedgerStreamIdentity) -> CanonicalValue {
+    object(vec![
+        ("project_id", text(identity.project_id().as_str())),
+        (
+            "project_snapshot_id",
+            text(identity.project_snapshot_id().as_str()),
+        ),
+        ("task_id", text(identity.task_id().as_str())),
+        ("task_revision", text(identity.task_revision())),
+        (
+            "task_spec_digest",
+            text(identity.task_spec_digest().as_str()),
+        ),
+    ])
+}
+
+fn autonomy_authority_value(
+    identity: &TaskLedgerStreamIdentity,
+    authority: &AutonomyAuthorityEvidence,
+    writer_head_digest: Option<&ContentDigest>,
+) -> CanonicalValue {
+    let writer = authority.writer_authority.as_ref();
+    autonomy_authority_value_from_scalars(
+        identity,
+        &authority.process_start_authority_digest,
+        &authority.ingress_profile_adapter_commitment,
+        &authority.store_authority_head_digest,
+        writer.map(WriterLeaseAuthorityHead::receipt_digest),
+        writer_head_digest,
+        writer.map(|writer| writer.identity().fencing_token().get()),
+    )
+}
+
+fn autonomy_authority_value_from_scalars(
+    identity: &TaskLedgerStreamIdentity,
+    process_start_authority_digest: &ContentDigest,
+    ingress_profile_adapter_commitment: &ContentDigest,
+    store_authority_head_digest: &ContentDigest,
+    writer_lease_receipt_digest: Option<&ContentDigest>,
+    writer_lease_head_digest: Option<&ContentDigest>,
+    writer_fencing_token: Option<u64>,
+) -> CanonicalValue {
+    object(vec![
+        ("binding", autonomy_binding_value(identity)),
+        ("authority_mode", text(AUTONOMY_AUTHORITY_MODE)),
+        (
+            "process_start_authority_digest",
+            text(process_start_authority_digest.as_str()),
+        ),
+        (
+            "ingress_profile_adapter_commitment",
+            text(ingress_profile_adapter_commitment.as_str()),
+        ),
+        (
+            "store_authority_head_digest",
+            text(store_authority_head_digest.as_str()),
+        ),
+        ("policy_decision_receipt_digest", CanonicalValue::Null),
+        ("policy_owner_head_digest", CanonicalValue::Null),
+        ("approval_receipt_digest", CanonicalValue::Null),
+        ("approval_owner_head_digest", CanonicalValue::Null),
+        (
+            "writer_lease_receipt_digest",
+            optional(writer_lease_receipt_digest.map(|digest| text(digest.as_str()))),
+        ),
+        (
+            "writer_lease_head_digest",
+            optional(writer_lease_head_digest.map(|digest| text(digest.as_str()))),
+        ),
+        (
+            "writer_fencing_token",
+            optional(writer_fencing_token.map(|token| text(token.to_string()))),
+        ),
+    ])
+}
+
+fn autonomy_receipt_value(
+    identity: &TaskLedgerStreamIdentity,
+    intent: AutonomyIntent,
+    authority_digest: &ContentDigest,
+) -> CanonicalValue {
+    object(vec![
+        ("schema_version", text(AUTONOMY_RECEIPT_SCHEMA)),
+        ("binding", autonomy_binding_value(identity)),
+        (
+            "intent",
+            object(vec![
+                ("version", text(AUTONOMY_HASH_VERSION)),
+                ("task_kind", text(intent.task_kind.as_str())),
+                ("risk_class", text(intent.risk_class.as_str())),
+                (
+                    "execution_preapproved",
+                    CanonicalValue::Bool(intent.execution_preapproved),
+                ),
+                (
+                    "requires_new_authority",
+                    CanonicalValue::Bool(intent.requires_new_authority),
+                ),
+                (
+                    "irreversible_or_high_risk",
+                    CanonicalValue::Bool(intent.irreversible_or_high_risk),
+                ),
+            ]),
+        ),
+        (
+            "observed_task_state",
+            text(intent.observed_task_state.as_str()),
+        ),
+        (
+            "decision",
+            object(vec![
+                ("disposition", text(intent.recommendation.disposition())),
+                ("reason", text(intent.recommendation.reason().as_str())),
+                (
+                    "model",
+                    optional(
+                        intent
+                            .recommendation
+                            .model()
+                            .map(|model| text(model.as_str())),
+                    ),
+                ),
+                (
+                    "verification",
+                    optional(
+                        intent
+                            .recommendation
+                            .verification()
+                            .map(|value| text(value.as_str())),
+                    ),
+                ),
+            ]),
+        ),
+        ("authority_digest", text(authority_digest.as_str())),
+    ])
 }
 
 /// Applies one indivisible pure plan only while its complete base checkpoint
@@ -2094,7 +3638,7 @@ fn command_from_untrusted_request(
     if raw.schema_version != LEDGER_SCHEMA_VERSION {
         return Err(LedgerError::UnknownRequestVersion);
     }
-    AppendCommand::new(
+    AppendCommand::from_fields(
         raw.expected_head.clone(),
         CommandId::new(raw.command_id.clone())?,
         CorrelationId::new(raw.correlation_id.clone())?,
@@ -2109,6 +3653,7 @@ fn command_from_untrusted_request(
         raw.resource_snapshot
             .as_ref()
             .map(|counters| ResourceSnapshot::new(counters.clone())),
+        AppendConstruction::VerifiedReplay,
     )
 }
 
@@ -2292,6 +3837,7 @@ pub fn verify_untrusted_snapshot(
             return Err(LedgerError::InvalidStreamHead);
         }
         let command = command_from_untrusted_event(&head, raw)?;
+        validate_autonomy_order(command.kind, &events)?;
         let reconstructed_request = request_digest(&command)?;
         if reconstructed_request != raw.request_digest {
             return Err(LedgerError::RequestBindingMismatch);
@@ -2434,6 +3980,19 @@ pub fn verify_untrusted_snapshot(
     };
     validate_command_checkpoint_chain(&verified)?;
     Ok(verified)
+}
+
+fn validate_autonomy_order(
+    kind: LedgerEventKind,
+    preceding_events: &[LedgerEvent],
+) -> Result<(), LedgerError> {
+    if kind == LedgerEventKind::AutonomyReceiptRecorded
+        && (preceding_events.len() != 1
+            || preceding_events[0].kind() != LedgerEventKind::TaskCreated)
+    {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    Ok(())
 }
 
 fn valid_identifier(value: &str) -> bool {
@@ -2706,6 +4265,10 @@ fn zero_digest() -> ContentDigest {
 
 fn zero_counters() -> ResourceCounters {
     ResourceCounters::new(0, 0, 0, 0, 0, "0").expect("constant zero resource counters")
+}
+
+fn is_zero_digest(value: &ContentDigest) -> bool {
+    value.as_str().bytes().all(|byte| byte == b'0')
 }
 
 fn hash_value(schema_id: &str, value: &CanonicalValue) -> Result<ContentDigest, LedgerError> {
@@ -3592,6 +5155,164 @@ mod tests {
             None,
         )
         .expect("append command")
+    }
+
+    #[test]
+    fn persisted_writer_tuple_rejects_zero_and_out_of_range_fences() {
+        let zero = zero_digest();
+        let nonzero = digest('a');
+        assert!(valid_autonomy_writer_scalar_tuple(None, None, None));
+        assert!(valid_autonomy_writer_scalar_tuple(
+            Some(&nonzero),
+            Some(&nonzero),
+            Some(1)
+        ));
+        assert!(!valid_autonomy_writer_scalar_tuple(
+            Some(&zero),
+            Some(&nonzero),
+            Some(1)
+        ));
+        assert!(!valid_autonomy_writer_scalar_tuple(
+            Some(&nonzero),
+            Some(&zero),
+            Some(1)
+        ));
+        assert!(!valid_autonomy_writer_scalar_tuple(
+            Some(&nonzero),
+            Some(&nonzero),
+            Some(0)
+        ));
+        assert!(!valid_autonomy_writer_scalar_tuple(
+            Some(&nonzero),
+            Some(&nonzero),
+            Some(u64::MAX)
+        ));
+    }
+
+    #[test]
+    fn autonomy_order_validator_is_shared_by_append_and_untrusted_replay() {
+        assert_eq!(
+            validate_autonomy_order(LedgerEventKind::AutonomyReceiptRecorded, &[]),
+            Err(LedgerError::InvalidAutonomyReceipt)
+        );
+
+        let identity = identity();
+        let zero = FakeTaskLedger::zero_head(identity.clone()).expect("zero");
+        let mut ledger = FakeTaskLedger::new();
+        ledger
+            .execute(append_command(zero.clone(), "create", 'b'))
+            .expect("created");
+        let created = ledger
+            .planning_stream(zero.stream_id(), &identity)
+            .expect("created stream");
+        validate_autonomy_order(LedgerEventKind::AutonomyReceiptRecorded, created.events())
+            .expect("exact sequence two");
+
+        let duplicated = vec![created.events()[0].clone(), created.events()[0].clone()];
+        assert_eq!(
+            validate_autonomy_order(
+                LedgerEventKind::AutonomyReceiptRecorded,
+                duplicated.as_slice()
+            ),
+            Err(LedgerError::InvalidAutonomyReceipt)
+        );
+    }
+
+    #[test]
+    fn untrusted_replay_rejects_a_self_consistent_late_required_profile() {
+        let vacant = VerifiedStream::vacant(identity(), RuntimeKind::Fake).expect("vacant");
+        let first_plan = plan_append(
+            &vacant,
+            append_command(vacant.head().clone(), "ordinary-first", 'b'),
+        )
+        .expect("ordinary first plan");
+        let first = apply_append_plan(&vacant, &first_plan).expect("ordinary first stream");
+        let late_command = AppendCommand::from_fields(
+            first.head().clone(),
+            CommandId::new("late-required").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-07-29T00:00:01Z",
+            LedgerEventKind::TaskCreated,
+            ActorId::new("lattice-runtime").expect("actor"),
+            ActionId::new(TaskCreatedProfile::AutonomyReceiptRequiredV1.action()).expect("action"),
+            LedgerOutcome::Recorded,
+            ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+            digest('c'),
+            None,
+            None,
+            AppendConstruction::VerifiedReplay,
+        )
+        .expect("shape-valid late required command");
+        let request_digest = request_digest(&late_command).expect("request digest");
+        let (counters, revision, projection_digest) =
+            next_resource_projection(first.head(), &first.counters, &late_command)
+                .expect("projection");
+        let late_event = build_event(
+            &late_command,
+            2,
+            request_digest.clone(),
+            revision,
+            projection_digest.clone(),
+        )
+        .expect("late event");
+        let head = build_head(
+            RuntimeKind::Fake,
+            first.identity.clone(),
+            first.head.stream_id().clone(),
+            2,
+            late_event.event_digest().clone(),
+            revision,
+            projection_digest,
+        )
+        .expect("head");
+        let receipt = command_receipt(
+            late_command.command_id.clone(),
+            request_digest,
+            first.head.clone(),
+            head.clone(),
+            CommandOutcome::Appended,
+            Some(late_event.event_digest().clone()),
+        )
+        .expect("receipt");
+        let mut events = first.events.clone();
+        events.push(late_event);
+        let mut commands = first.commands.clone();
+        commands.push(VerifiedCommandRecord {
+            request: late_command,
+            receipt,
+            base_checkpoint: first.checkpoint.clone(),
+            result_checkpoint: first.checkpoint.clone(),
+        });
+        canonicalize_commands(&mut commands);
+        let checkpoint = build_checkpoint(
+            &first.identity,
+            RuntimeKind::Fake,
+            &head,
+            &counters,
+            &events,
+            &commands,
+            &first.outboxes,
+        )
+        .expect("checkpoint");
+        commands
+            .iter_mut()
+            .find(|record| record.request.command_id.as_str() == "late-required")
+            .expect("late command")
+            .result_checkpoint = checkpoint.clone();
+        let late = VerifiedStream {
+            identity: first.identity,
+            head,
+            events,
+            commands,
+            outboxes: first.outboxes,
+            counters,
+            checkpoint,
+        };
+
+        assert_eq!(
+            verify_untrusted_snapshot(&export_untrusted_snapshot(&late)),
+            Err(LedgerError::InvalidAutonomyReceipt)
+        );
     }
 
     fn resource_command(

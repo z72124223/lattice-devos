@@ -1,0 +1,154 @@
+{
+  "schema": "lattice.task-contract-conformance.v1",
+  "version": 1,
+  "registry": {
+    "type_count": 1,
+    "mapped_intent": "CONTROLLED_CODEX_CANARY"
+  },
+  "cases": [
+    {
+      "id": "positive-current-controlled-canary",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"controlled_codex_canary\",\"parameters\":{}}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "accepted",
+        "mcp_tool": "lattice_task_submit"
+      }
+    },
+    {
+      "id": "wrong-schema",
+      "fixture": "{\"schema\":\"lattice.task-contract.v2\",\"task_type\":\"controlled_codex_canary\",\"parameters\":{}}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_SCHEMA_REJECTED"
+      }
+    },
+    {
+      "id": "wrong-task-type",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"arbitrary_task\",\"parameters\":{}}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_TYPE_REJECTED"
+      }
+    },
+    {
+      "id": "unknown-top-level-field",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"controlled_codex_canary\",\"parameters\":{},\"unknown\":false}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_UNKNOWN_TOP_LEVEL_FIELD"
+      }
+    },
+    {
+      "id": "missing-top-level-field",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"controlled_codex_canary\"}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_MISSING_TOP_LEVEL_FIELD"
+      }
+    },
+    {
+      "id": "duplicate-top-level-field",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"controlled_codex_canary\",\"parameters\":{}}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_DUPLICATE_TOP_LEVEL_FIELD"
+      }
+    },
+    {
+      "id": "non-empty-parameters",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"controlled_codex_canary\",\"parameters\":{\"shell\":\"blocked\"}}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_PARAMETERS_NOT_EMPTY"
+      }
+    },
+    {
+      "id": "bom-input",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"controlled_codex_canary\",\"parameters\":{}}",
+      "encoding": "utf8-bom",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_BOM_REJECTED"
+      }
+    },
+    {
+      "id": "invalid-json",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\"",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_JSON_REJECTED"
+      }
+    },
+    {
+      "id": "shell-top-level-field",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"controlled_codex_canary\",\"parameters\":{},\"shell\":\"blocked\"}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_UNKNOWN_TOP_LEVEL_FIELD"
+      }
+    },
+    {
+      "id": "command-top-level-field",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"controlled_codex_canary\",\"parameters\":{},\"command\":\"blocked\"}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_UNKNOWN_TOP_LEVEL_FIELD"
+      }
+    },
+    {
+      "id": "sql-top-level-field",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"controlled_codex_canary\",\"parameters\":{},\"sql\":\"blocked\"}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_UNKNOWN_TOP_LEVEL_FIELD"
+      }
+    },
+    {
+      "id": "path-top-level-field",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"controlled_codex_canary\",\"parameters\":{},\"path\":\"blocked\"}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_UNKNOWN_TOP_LEVEL_FIELD"
+      }
+    },
+    {
+      "id": "file-write-top-level-field",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"controlled_codex_canary\",\"parameters\":{},\"file_write\":\"blocked\"}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_UNKNOWN_TOP_LEVEL_FIELD"
+      }
+    },
+    {
+      "id": "env-top-level-field",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"controlled_codex_canary\",\"parameters\":{},\"env\":\"blocked\"}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_UNKNOWN_TOP_LEVEL_FIELD"
+      }
+    },
+    {
+      "id": "credential-top-level-field",
+      "fixture": "{\"schema\":\"lattice.task-contract.v1\",\"task_type\":\"controlled_codex_canary\",\"parameters\":{},\"credential\":\"blocked\"}",
+      "encoding": "utf8",
+      "expected": {
+        "result": "rejected",
+        "rejection_code": "TASK_CONTRACT_UNKNOWN_TOP_LEVEL_FIELD"
+      }
+    }
+  ]
+}

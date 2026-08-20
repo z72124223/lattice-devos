@@ -1,4 +1,701 @@
-# Current GitHub Handoff — 2026-08-09
+# TASK-050 Autonomy Receipt Closure Handoff - 2026-08-15
+
+## Status
+
+`DONE` for TASK-050 implementation and its required local/runtime verification.
+Integration remains `NEEDS_REVIEW` because Draft promotion, human GitHub review,
+and merge authorization are absent; no merge was performed.
+
+## Objective And Scope
+
+- Objective: make Task Ledger the sole durable autonomy profile/receipt/hash
+  owner and prove exact PostgreSQL restart plus fresh canonical `latticed`
+  replay without changing the four-tool/six-field public MCP contract.
+- In scope: the 21 TASK-050 allowed implementation/governance/test paths and
+  this handoff.
+- Out of scope: migration `0006` bytes/catalog, Cargo dependencies, TASK-038,
+  product Git effects, credentials, merge, deployment, release, and public
+  exposure.
+
+## Completed Work
+
+- Implementation commit `8e5ba40d38b781afff7028841bd981c8dd2b9721`,
+  tree `b4478be2801814ffc630cbf113b0a4ffa3a1b591`, is published on
+  `feature/task-076-postgres-writer-lease-v2` and attached to Draft PR #12.
+- Task Ledger owns the closed profile, typed append plan, canonical hashes, and
+  24-scalar replay verifier. Store maps scalars and owns only transaction/I/O;
+  Orchestrator supplies a pure recommendation; Ports exposes only legal closed
+  lifecycle states.
+- ASK_USER performs no Writer/downstream effect. PROCEED binds the exact
+  current 15-scalar Writer tuple; stale, wrong-fence, and substituted authority
+  fail with zero mutation. Exact retry is replay-derived and read-only.
+- The acceptance runner proves initial/restart ASK_USER and PROCEED through four
+  fresh canonical `latticed` PIDs, exact startup diagnostics, four tools, six
+  public fields, zero prohibited effects, and cleanup.
+
+## Files Changed
+
+| Paths | Why | Verification |
+|---|---|---|
+| Task Ledger, Ports, Store, Orchestrator, Contracts, Runtime Rust paths | owner-boundary and fail-closed repair | focused suites, strict Clippy, full wrapper |
+| TASK-050 scripts | fresh-process PostgreSQL 17 acceptance and self-tests | wrapper exit 0, final PASS marker |
+| SPEC-002, Task Ledger/Ports constitutions, TASK-050 ticket, PLANS | approved versioned contract and trace | repository/scope/architecture checks |
+
+## Workflow Ledger
+
+| Stage | Status | Evidence / artifact |
+|---|---|---|
+| Governance and scope | PASS | SPEC-002 v35; Ledger 2.3; Ports 1.9; Store 1.10; Orchestrator 2.6; latticed 1.8; 21/21 allowed paths |
+| TDD and focused verification | PASS | generic-forgery, profile, 24-scalar, authority, retry, Ports, Runtime, Store, and runner RED/GREEN evidence |
+| PostgreSQL/fresh process | PASS | run `9f1907f07f5545be9927a8def04529f5`; PostgreSQL 17.10; initial/restart; cleanup complete |
+| Code/security review | PASS | independent P0-P3 = 0; `CLEAR_FOR_INTEGRATION` |
+| Architecture review | PASS | independent P0-P3 = 0; `CLEAR_FOR_INTEGRATION` |
+| GitHub CI | PASS | implementation run `31835654240` / job `94881263124` at `8e5ba40`; closure run `31836370497` / job `94883441544` at `0f4d5c3` |
+
+## Verification
+
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+  scripts/test-task050-autonomy-receipt-acceptance.ps1`: exit `0`,
+  `TASK050_AUTONOMY_RECEIPT_ACCEPTANCE=PASS`.
+- Receipt raw SHA-256:
+  `b2ba6aa3d5f5c6b145de146bbe5b59696322ab3713dabb07a44313f1fcfc2478`;
+  final HMAC SHA-256:
+  `e953e32d4cc7ab8d9509e18b5bb66c98f449b027d0d25b301dd8038e8da7cc04`;
+  10 events, `cleanup_complete=true`, listener and cluster root absent.
+- Full wrapper also passed format, changed-slice strict Clippy, affected Rust
+  suites, MCP four-tool/six-field regressions, `npm.cmd run check`, and final
+  diff checks. Migration/catalog/Cargo frozen paths remain unchanged.
+
+## Review And Integration
+
+- Feature branch is synchronized through GitHub-truth alignment descendants of
+  closure head `0f4d5c3`; accepted TASK-050 implementation remains `8e5ba40`,
+  and the PR target remains
+  `feature/task-075-schema-v5-migration-reconciliation@a3599c1`.
+- GitHub reports Draft PR #12 open. The implementation CI is green. Branch
+  protection/rules enforcement is not claimed.
+- GitHub's default branch remains
+  `feature/task-037-full-chain-integration@8828d2b` and trails this combined
+  source. Its local branch also has four independent fixes absent from
+  `0f4d5c3`, so default movement is blocked pending explicit reconciliation.
+- Decision: `NEEDS_REVIEW`. Machine checks pass, but no human review or merge
+  authorization exists. No Draft promotion, force push, protected mutation,
+  merge, deployment, or release occurred.
+
+## Risks And Open Decisions
+
+- TASK-051 current-machine MCP registration is visible but points to historical
+  commit `0b59b79`; it is not verified for accepted TASK-050 implementation
+  `8e5ba40`. Semantic invocation remains `UNKNOWN`.
+- The dedicated TASK-051 branch is synchronized to the GitHub-truth baseline
+  and preserves one untracked runner; its test wrapper is absent. Its ticket
+  still names SPEC-003 v4 and latticed 1.7 while current contracts are v5 and
+  1.8.
+- Any TASK-051 reversible `C:\Users\f7212\.codex\config.toml`
+  `[mcp_servers.lattice]` switch must meet that ticket's exact preflight and
+  rollback gate; credentials and other tables remain prohibited.
+
+## Next Action
+
+1. Continue TASK-051 on its synchronized dedicated branch: reconcile the
+   ticket/contracts, adopt the preserved runner, and complete its wrapper before
+   any live acceptance or configuration switch.
+
+## Restart Context
+
+- Current branch/worktree: `feature/task-076-postgres-writer-lease-v2` /
+  `lattice-worktrees/task-076-postgres-writer-lease-v2`.
+- Relevant plan: `PLANS.md`, section `Current P0 platform live acceptance -
+  TASK-051`.
+- First file: `docs/tickets/TASK-051-p0-platform-live-acceptance.md`.
+
+---
+
+# TASK-076 Writer Lease V2 Bridge Handoff - 2026-08-14
+
+## Current Outcome
+
+TASK-076 is complete at verified implementation/governance commit
+`f32531002a0c6588e96dc9fe0229db7e0ed546e0`, based on
+`8b6d5171759e28339d6fe2b66fab0c3b6718c64c`. TASK-075 commit `a3599c1` and
+the separately committed migration-byte preservation prerequisite remain
+unchanged. The Writer Lease v2 bridge closes the compatibility blocker that
+prevented the global-v3 + Codebase-Memory-v2 + Writer-Lease-v1 profile from
+advancing to global-v5 + Memory-v3.
+
+The completed ticket adds an append-only Writer Lease v2
+bridge while preserving v1 SQL and every semantic row, canonical receipt,
+checkpoint, lease revision, and fencing high-water. The fixed transition is
+`G3_M2_W1_CURRENT -> G3_M2_W2_BRIDGE -> G5_M2_W2_BRIDGE_PENDING ->
+G5_M3_W2_BRIDGE_PENDING -> G5_M3_W2_CURRENT`. Store, Memory, and Writer
+administrative runners take global -> Memory -> Writer transaction locks;
+only the Writer owner changes Writer identity/ledger, and both pending states
+reject runtime use.
+
+The implementation worktree is
+`lattice-worktrees/task-076-postgres-writer-lease-v2` on branch
+`feature/task-076-postgres-writer-lease-v2`, based on `8b6d517`. The post-fix
+official wrapper passed in 368.4 seconds with
+`TASK076_WRITER_LEASE_V2_BRIDGE_ACCEPTANCE=PASS`; its embedded TASK-075 and
+TASK-050 gates emitted their expected markers. The TASK-050 marker is partial
+baseline evidence only: later independent TASK-050 review proved that its
+runner did not launch a fresh canonical `latticed` process. Focused checks,
+strict Clippy, frozen-history, format, repository, and diff checks pass for
+TASK-076. Independent TASK-076 code re-review is clear,
+architecture review reports no findings, and integration found zero technical
+blockers. GitHub Actions run `31810017320` / job `94798123907` passed on the
+exact verified commit.
+
+Integration status is `NEEDS_REVIEW` only because merge/Draft-promotion
+authorization and GitHub human approval are absent. No merge or Draft promotion
+occurred. TASK-075 has completed its combined-candidate revalidation; TASK-050
+is now the sole `in_progress` ticket, and TASK-051 remains blocked. Existing
+PostgreSQL listeners at `5432`, `64272`, and `55432`, unrelated dirty
+worktrees, and the protected TASK-051 runner must not be touched.
+
+## GitHub Publication Authorization And Safety
+
+On 2026-08-14 the user explicitly authorized routine GitHub publication for
+ongoing LATTICE development. GitHub CLI is verified for `github.com` account
+`z72124223`, repository `z72124223/lattice-devos`, HTTPS transport, and a
+credential stored in the operating-system keyring. Within a bounded authorized
+ticket, Codex may create clean commits, push the exact feature branch without
+force, and create or update a Draft pull request without repeated approval.
+
+No OAuth token, device code, password, browser/mobile session, or confirmation
+value is stored. Merge, Draft promotion, force-push, protected-branch or
+repository-permission changes, tag/release, deployment, public exposure,
+history deletion, and credential/account/payment mutation remain outside this
+authorization.
+
+The first published implementation checkpoint is
+`172307c19ee5be3387646858a834b0aa1790d81e`. Its remote head is
+`feature/task-076-postgres-writer-lease-v2`; the separately published base is
+`feature/task-075-schema-v5-migration-reconciliation` at `a3599c1`. GitHub
+Draft PR `https://github.com/z72124223/lattice-devos/pull/12` targets that base
+and remains explicitly not authorized for merge or Draft promotion.
+
+# TASK-075 Schema-v5 Migration Reconciliation Handoff - 2026-08-14
+
+## Current Outcome
+
+TASK-075 is complete. Governance selects the exact TASK-022 Project
+Registry `0005` source at commit `12f7100` (SHA-256
+`b7af1f8a8ac370bbfc8a5312497461587cb8a86eb32ff97e5b865c7ae9bf0dcf`)
+as global schema v4 and requires TASK-050 autonomy commit `714f3b9` to be
+re-authored as `0006_task_autonomy_receipt.sql`, global schema v5. TASK-022
+closure source `a1aced9` remains provenance; none of these commits is treated
+as already integrated merely because it is readable.
+
+The fixed compatibility rule is fail-closed: an existing database that placed
+autonomy at ordinal `0005` returns
+`STORE_MIGRATION_HISTORY_MISMATCH` before migration DDL and is not repaired.
+Every Registry command must retain the schema/manifest profile that created its
+persistence receipt. Existing v4 commands bind schema `4` and exact manifest
+`df3f7ca3687afaa0d1f676158725e6d2f06670e0612df7482aa9d4d244b59f0f`;
+new v5 commands bind the exact current v5 profile, and mixed replay must return
+the original byte-identical receipt for each command.
+
+The exact base v5 target is 16 `control` tables, 47 retained functions, 19
+runtime-executable successors, and 28 historical non-runtime functions.
+Codebase Memory v1/v2 bytes and v2/global-v3 receipts remain immutable;
+TASK-075 adds only extension v3/global-v5 plus per-analysis profile provenance
+for byte-identical mixed graph/reflection replay. Contracts 1.13 and Postgres
+Codebase Memory 1.1 own that compatibility amendment.
+Project Registry pure semantics stay at 1.2. The TASK-076 wrapper executed all
+16 TASK-075 gates, required the exact full-acceptance marker, and closed four
+distinct marker-owned PostgreSQL 17.10 receipts for Store-only, catalog,
+Memory-v3, and TASK-050 profiles. Code and architecture re-reviews found no
+issues, integration found zero technical blockers, and no additional heavy
+rerun was needed. The implementation source remains `a3599c1`; the exact
+combined revalidation source is `f325310`.
+
+TASK-050 is now the sole `in_progress` ticket. Its original source `714f3b9`
+remains provenance only; closure must use the exact combined schema-v5
+candidate. Independent review invalidated the prior fresh-process claim and
+found unresolved P1 ownership, required-profile, Ports-versioning, and
+acceptance-runner gaps. On 2026-08-15 the user approved and consumed the narrow
+Human Gate recorded in the TASK-050 ticket: Task Ledger 2.3 owns the versioned
+profile discriminator and canonical autonomy receipt/hash semantics; Ports 1.9
+carries neutral lifecycle profile evidence; Store 1.10, Orchestrator 2.6, and
+`latticed` 1.8 consume that contract; the Contracts public SHA helper is
+removed while Contracts remains 1.13 and the six-field MCP wire is frozen.
+Governance validation and focused TDD repair are active. TASK-051 remains
+blocked until TASK-050 is repaired, freshly revalidated, re-reviewed, and
+records its own verified completion. No merge, Draft promotion, deployment,
+release, or public exposure is authorized.
+
+# TASK-074 Local Model Assist Handoff — 2026-08-14
+
+## Outcome
+
+The preinstalled Qwen2.5-Coder 7B Q4_K_M model is active through the verified
+CUDA llama.cpp runtime on `127.0.0.1:18181`; health and model discovery pass,
+and GPU offload is bound to the exact process. A CPU LATTICE test and a local
+GPU inference ran concurrently. The Rust test passed, and the model correctly
+summarized its output.
+
+The model failed a security-sensitive recovery-classification benchmark by
+suggesting a broader retry policy. It is therefore limited to untrusted
+summaries, candidate test lists, and mechanical second opinions. Source,
+compiler, tests, and the primary agent remain authoritative. No model download,
+credential, external API/network, public listener, project write, Git change,
+database access, push, merge, or deployment occurred. PID `26732` remains
+intentionally running on loopback for bounded assistance.
+
+# TASK-073 Local Handoff — 2026-08-14
+
+## Outcome
+
+Hermes now retires same-process recovery receipts for authoritative initial or
+reconciled Failed/Cancelled terminals and for schema-valid immutable completed
+outputs that carry the supported Codex app-server failure sentinel. Retired
+receipts fail before endpoint I/O; uncertain, malformed, and cross-bound
+observations retain recovery state. Commits `1ecdd1d` and `d057ff6` together
+close the lifecycle boundary. Adapter all-target verification passed with 85
+ordinary tests and 11 explicit live-only ignores, plus 4 preparation tests;
+focused regression, format, diff, and independent review gates passed.
+
+# TASK-072 Local Handoff — 2026-08-14
+
+## Outcome
+
+The exact pinned Hermes v2026.8.3 runtime now has a concrete same-port
+recovery acceptance through its production WSL/bubblewrap owner. A gated
+in-process fake Codex acknowledges one turn, withholds its terminal, and makes
+the first observation return exact `HERMES_RUN_DEADLINE_EXCEEDED` with a known
+run receipt. Releasing that terminal lets one reconciliation return strict
+canonical reflection plus `RuntimeKind::Live` evidence without another
+`turn/start`.
+
+The first GREEN exposed a teardown bug: after the authenticated close and
+terminal barrier, outer EOF was still classified as failure. `7e83d55` accepts
+EOF only after authenticated open, clean terminal, exactly one turn, and
+adapter success. The outer WSL relay now ignores only broken-pipe or
+connection-reset delivery of an already-received inner response; deterministic
+Python tests prove all other socket errors remain fail closed.
+
+The exact recovery, existing success, and existing definitive-failure
+no-model live tests pass. Adapter all-target verification passes 81 ordinary
+tests with 10 explicit live-only ignores plus 4 preparation tests; Python
+relay tests pass 3/3; format/diff checks pass; three reviews report P0/P1/P2=0.
+No external/provider credential, real model/provider request, external
+network, public listener, database, MCP, push, merge, deployment, payment,
+account change, or release was used. The untracked TASK-051 script remains
+untouched and excluded.
+
+# TASK-071 Local Handoff — 2026-08-14
+
+## Outcome
+
+`FullChainHermes` now consumes the active, secret-free same-port recovery
+receipt without resubmission. Automatic reconciliation is restricted to a
+known run ID plus exact `HERMES_LOOPBACK_TIMEOUT`,
+`HERMES_RUN_DEADLINE_EXCEEDED`, or `HERMES_LOOPBACK_TRANSPORT_FAILED`.
+Malformed, cross-bound, cancelled, failed, HTTP-rejected, production-liveness,
+and every other kind/code pair preserve the exact initial failure and never
+inspect recovery state.
+
+The first implementation (`f7cd1b3`) exposed a real RED: structural failures
+also retain a receipt and could be washed into success. `fbbebbb` added the
+exact eligibility and run-ID gates. A second RED showed repeated observation
+uncertainty was collapsed to `HermesExecution`/gateway `Denied`; `27a7b7f`
+preserves it through the existing `LATTICE_DELIVERY_RECONCILIATION_REQUIRED`
+classification, while definitive reconciliation failures remain exact. No
+public error, receipt, MCP, database, credential, network, or ownership schema
+changed.
+
+Runtime all-target verification passes 97 tests with one explicit
+marker-owned PostgreSQL live-only ignore; the 20 composition, 1 coordination,
+5 dispatch, 31 MCP, and 1 task-control integration tests all pass. Project
+verification passes 48 Node tests; format and diff checks pass. Three
+independent final reviews found no P0/P1 correctness or architecture findings.
+No WSL, real provider/model, credential read, external network, database
+mutation, push, merge, deployment, payment, account change, or release was
+used. The untracked TASK-051 script remains untouched and excluded.
+
+# TASK-070 Local Handoff — 2026-08-14
+
+## Outcome
+
+Hermes same-process status reconciliation now returns the existing strict
+canonical reflection paired with normalized `RuntimeKind::Live` evidence from
+the exact same invocation and output digest. Both the base adapter and
+`ProductionHermesPort` expose the additive method; the production wrapper
+retains its existing prepare, successful proxy completion, child-liveness, and
+deadline gates. The prior canonical-only reconciliation API remains compatible.
+
+The scripted ambiguity test first failed to compile with `E0599`, then proved
+one submission, one status reconciliation, and exact invocation/input/output
+bindings. Adapter all-target tests pass 81 tests with 9 explicit live-only
+ignores, plus 4 preparation tests; Node, format, diff, code, and architecture
+gates pass. No WSL, real Hermes/provider/model, credential, external network,
+database, push, merge, deployment, payment, account change, or release was
+used. The untracked TASK-051 script remains untouched and excluded.
+
+# TASK-069 Local Handoff — 2026-08-14
+
+## Outcome
+
+`ProductionHermesPort` now exposes the adapter-owned, secret-free active
+recovery receipt as a borrowed same-process observation after post-submit
+ambiguity. It does not clone, persist, retry, resubmit, reconcile, launch, or
+grant authority; the existing bound-port reconciliation path remains the only
+consumer.
+
+The production API seam first failed with `E0599`, then passed after the
+one-line forwarding implementation. Same-process no-resubmission and timeout
+fail-closed regressions pass. The adapter all-target suite passed 81 tests with
+9 explicit live-only ignores, plus 4 preparation tests. Independent review
+found no P0/P1 findings. No WSL, Hermes process, provider/model, credential,
+external network, push, merge, deployment, payment, account change, or release
+was used. The untracked TASK-051 script remains untouched and excluded.
+
+# TASK-068 Partial Local Handoff — 2026-08-14
+
+## Outcome
+
+The new opt-in TASK-068 gate completed against marker-owned loopback
+PostgreSQL: initial canonical reflection persistence, a physical server
+stop/start, and a fresh Rust Status process replayed the exact receipt digest.
+The initial phase observed one ready, research, and persist call; restart
+observed zero of all three. The current contract-conflicted five-entry
+autonomy baseline passes the complete Store initial/restart profile; this does
+not prove the approved Registry-plus-autonomy combined profile. Runtime
+all-target tests, Node verification, format, diff, and PowerShell parse checks
+pass. The disposable listener and cluster root were cleaned, and the holder
+receipt reached its closed terminal event.
+
+The task remains `partial`, not integrated-complete. The inherited branch has
+an autonomy receipt migration at ordinal `0005`, while accepted ADR-020 keeps
+that ordinal for Project Registry. Completed Registry sources `12f7100` and
+`a1aced9` are not ancestors of this worktree; autonomy source `714f3b9` occupies
+the ordinal. `aa097e0`/`593112e` align only the inherited five-entry profile,
+and `3ac4b1c` proves replay mechanics only. The named follow-up is **Registry
+`0005` / autonomy `0006` migration reconciliation**, with durable identifier
+`POSTGRES-REGISTRY-AUTONOMY-MIGRATION-RECONCILIATION`. The stop boundary is:
+do not cherry-pick/merge TASK-022, reorder migrations, change schema/manifest
+contracts, or mark TASK-068 completed in this slice. A separately authorized
+ticket must preserve Registry `0005` and move autonomy to a later
+ordinal/profile. TASK-068 made no migration or schema change and does not claim
+that combined profile as proven. The untracked TASK-051 platform-acceptance
+script remains untouched and excluded.
+
+# TASK-067 Local Handoff — 2026-08-14
+
+## Outcome
+
+The credential-free Hermes integration gate now has a truthful two-leg
+compositional acceptance at the existing production-owner boundary. The
+canonical leg proves Delivery Run-only lazy activation, exact graph/provenance
+validation before persistence, replay, Status zero-rerun, and fail-closed
+teardown. The adapter leg actually started the pinned WSL2/bubblewrap/Hermes
+v2026.8.3 runtime and completed both successful and failed turns through an
+in-process fake Codex provider on loopback, without reading an external
+credential or calling a real provider/model.
+
+The live RED exposed that the provider control could receive three teardown
+calls through worker, host, and Drop paths. A private `OnceLock`-backed
+teardown gate now invokes the underlying control exactly once and replays the
+same success or ambiguity to every caller. Both live paths assert one teardown
+and removal of the owned root; startup timeout cleanup also passes.
+
+Current evidence: adapter all-targets 81 tests plus 4 preparation tests PASS
+with 9 explicit live-only ignores; runtime canonical focused tests 9/9 PASS;
+the ignored pinned-runtime success, failed-turn, and startup-timeout tests were
+run explicitly and PASS; format and diff checks PASS. No external credential,
+real provider/model request, public network, PostgreSQL restart, push, merge,
+deployment, payment, account change, or release occurred. The untracked
+TASK-051 platform-acceptance script remains untouched and excluded.
+
+# TASK-066 Local Handoff — 2026-08-14
+
+## Outcome
+
+Canonical production reflection orchestration now has a private deterministic
+seam that preserves the existing PostgreSQL and Hermes call paths. Run proves
+the exact ready, load-miss, graph-receipt, research, persist, and reload order;
+fresh Status loads the exact same receipt with no Hermes activation or rerun.
+A mismatched reload fails closed, and the production seal now remains true
+after the ready runner becomes a bound port.
+
+Runtime all-target tests passed serially: 96 library, 20 composition,
+1 coordination, 5 dispatch, 31 MCP, and 1 task-control tests. A parallel run
+hit one pre-existing timing-sensitive exact poll-count assertion; its isolated
+rerun passed. Format and diff checks passed, and independent code and
+architecture reviews reported no P0/P1/P2.
+
+No PostgreSQL instance, Hermes process, provider/model, credential, network,
+push, merge, deployment, or release was used. The existing untracked TASK-051
+platform-acceptance script remains untouched and excluded.
+
+# TASK-065 Local Handoff — 2026-08-13
+
+## Outcome
+
+Production Hermes admission no longer depends on the unexecuted
+`lattice-hermes-broker` helper. Canonical configuration now requires twelve
+executed-input settings, and the ephemeral production receipt uses domain v2
+without helper path/hash identity. The existing direct pinned Codex launcher,
+strict config, scrubbed environment, Job ownership, lazy activation, MCP tools,
+PostgreSQL truth, and teardown semantics are unchanged.
+
+The tracked TASK-037 verifier no longer treats the helper as a production
+build, input, gate, or evidence hash. The legacy helper remains independently
+buildable and its no-argument invocation fails closed with exit 64, empty
+stdout, and fixed stderr.
+
+Affected adapter and runtime all-target suites passed; Node verify passed
+48/48; format, diff, project, and PowerShell AST checks passed. One attempted
+workspace-wide run exceeded its outer bound in an unchanged fake-Codex process
+test, so it is not claimed PASS; the run-owned processes were stopped and both
+affected suites passed independently. No credential was read, no Hermes/model
+request ran, and no push, merge, deployment, or release was performed. The
+untracked TASK-051 acceptance script remains untouched and excluded.
+
+# TASK-064 Local Handoff — 2026-08-13
+
+## Outcome
+
+Canonical four-tool `latticed` now owns an opt-in lazy production Hermes path.
+The default and exact `TASK_ONLY` mode retain the previous behavior. Exact
+`LATTICE_HERMES_MODE=PRODUCTION` creates no child at process startup; only
+Delivery Run activates the governed production runner, before writer effects.
+Delivery Status and both Task tools remain zero-Hermes paths.
+
+Canonical MCP shutdown explicitly terminates an activated owner once, and an
+ambiguous teardown cannot become exit 0. Unknown mode values are rejected with
+fixed diagnostics without echoing their values. MCP discovery remains exactly
+four tools with unchanged schemas. Legacy `lattice-full-chain` exit behavior is
+unchanged.
+
+Verification on the final candidate snapshot: workspace Rust tests PASS;
+runtime all-targets PASS (92 library, 20 composition, 1 coordination,
+5 dispatch, 31 MCP, 1 task-control); Node verify PASS 48/48; format, diff, and
+project checks PASS. Independent code, test, and architecture reviews report
+no P0/P1/P2. Strict runtime Clippy remains blocked by 17 pre-existing
+diagnostics in unchanged `lattice-hermes-adapter` files; TASK-064 adds no
+suppression.
+
+No credential was read, no Hermes/model request was launched, and no push,
+merge, deployment, or release was performed. The existing untracked TASK-051
+platform-acceptance script remains excluded and untouched.
+
+# TASK-056 Local Handoff — 2026-08-13
+
+## Outcome
+
+LATTICE now provides canonical `latticed --hermes-preflight`, a local,
+no-effect static check for the sealed Hermes production configuration. It
+reports only a fixed classification plus missing setting names; it never
+exposes values, paths, credentials, or raw errors, and it never launches an
+external process. A statically accepted configuration is explicitly
+`CONFIGURATION_PRESENT_UNVERIFIED`, not ready or launch-authorized.
+
+On this machine the preflight reports missing production configuration. The
+full-chain launch remains fail-closed until the approved pinned runtime,
+containment, broker, and secret source pass their normal launch-time checks.
+The legacy `lattice-full-chain` observer still rejects extra arguments. This
+does not change the no-argument commands, MCP surface, or already verified
+TASK-050, TASK-054, and TASK-055 behavior.
+
+Status: `DONE` for the local TASK-056 product preflight on branch
+`feature/task-051-p0-platform-live-acceptance`; push, PR, merge, deployment,
+and release were not performed.
+
+- Independent review P1-P2 are addressed: the preflight moved off the legacy
+  observer and parsed configuration no longer reports ready. The P3 follow-up
+  retains unavailable-manifest redaction and adds a separate test-owned exact
+  pinned-manifest fixture whose digest is checked before `latticed` reaches an
+  invalid-secret sentinel. Both tests assert exact fixed stderr, no value leak,
+  and the new fixture is scope-cleaned. Independent re-review found no P0, P1,
+  P2, or P3 findings.
+
+- `lattice-orchestrator` now owns the pure typed work/evidence projection,
+  fail-closed dispatch round, next-round recomputation, and archive/retain
+  recommendation. `lattice-runtime::coordination` is the normal product gate.
+- Structural ambiguity rejects the round; unknown/blocked/incomplete work is
+  not dispatched; both sides of a current resource conflict are blocked.
+- Dispatch output is data-only and bound to the existing governed LATTICE
+  execution path. No MCP, window/process control, I/O, persistence, credential,
+  deployment, or self-modification surface was added.
+- Current verification: workspace Rust tests PASS; Node 48/48 PASS; runtime
+  81/81 PASS; orchestrator tests and strict Clippy PASS; format/project check
+  PASS. Full strict runtime/workspace Clippy remains blocked by pre-existing
+  unchanged runtime/Hermes diagnostics.
+- Review: no TASK-055 findings; independent reviewer separation is not proven.
+  The pre-existing untracked TASK-051 script was preserved and excluded.
+
+# Previous GitHub Handoff — 2026-08-10
+
+Status: `LOCAL_ACCEPTED / CHATGPT_TUNNEL_PENDING` for SPEC-003 v4 / TASK-038
+Phase 2. Production `latticed`, real PostgreSQL Writer Lease/fencing, governed
+Codex, verification/Git, physical database restart, and fresh-process durable
+Status passed the canonical-local gate. A refreshed real ChatGPT Secure MCP
+Tunnel discovery/invoke is still required. TASK-037 production repair remains
+intentionally second.
+
+Repository: `z72124223/lattice-devos`<br>
+Branch: `feature/task-038-chatgpt-mcp`<br>
+Upstream: none; local stable checkpoint not yet pushed<br>
+Base: local Phase 1 checkpoint `512732d`<br>
+Worktree:
+`C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\chatgpt-mcp`
+
+## User-Corrected Execution Order
+
+1. Complete bounded GPT -> LATTICE -> Codex dispatch under TASK-038.
+2. Then resume TASK-037 production-chain diagnosis and repair.
+3. Claim final combined production acceptance only after both gates pass.
+
+TASK-038 Phase 2 must add `lattice_task_submit` and `lattice_task_status` to
+the same `latticed` One Gateway. The first intent is exactly
+`CONTROLLED_CODEX_CANARY`; LATTICE, not GPT, owns the complete Task Spec,
+lease/fence, workspace, Codex prompt/profile, verification, Git, audit, and
+status binding. No Project Registry or Policy authority is fabricated for this
+fixed canary; broader templates remain closed until that live composition
+exists.
+
+## Retained Phase 1 Evidence
+
+- The private Secure MCP Tunnel is able to launch `latticed`; ChatGPT refreshed
+  and discovered exactly `lattice_delivery_run` and
+  `lattice_delivery_status`.
+- Both existing tools have closed zero-argument schemas. Legacy MCP
+  `2025-11-25` and stateless `2026-07-28` reach the same composition-owned
+  binding.
+- The earlier focused runtime/tunnel/governance checks passed at the Phase 1
+  checkpoint. Those results prove transport/discovery only and are not Phase 2
+  or production-execution evidence.
+
+## Approved Phase 2 Boundary
+
+- ADR-023, SPEC-003 v4, and TASK-038 select closed process-start ingress
+  evidence. Production Secure MCP Tunnel and local canonical acceptance use
+  distinct non-substitutable commitments. MCP `clientInfo`, model text, and
+  caller identity fields cannot grant authority.
+- Submit accepts only `CONTROLLED_CODEX_CANARY` plus one bounded
+  `client_request_id`. Status accepts only the returned lowercase SHA-256
+  `task_ref`. The public schema
+  contains no arbitrary task/prompt, shell, SQL, path, Git/test command,
+  credential, provider, actor/session, lease/fence, or Codex-thread control.
+- The server builds and Task Domain validates the complete Task Spec 2.1. Its
+  one digest must bind Gateway, Task Ledger, Writer Lease, Codex,
+  verification/Git and status evidence.
+- PostgreSQL is authoritative for task lifecycle, exact idempotency,
+  fixed-profile audit, Writer Lease/fencing, outcomes,
+  and status.
+- Writer Lease 1.1 owns snapshot/checkpoint bytes and the repository trait. New
+  `postgres-writer-lease` 1.0 owns physical persistence through independent
+  `db/extensions/writer-lease/v1.sql`.
+- Postgres Store 1.6 verifies the exact combined
+  `V3CodebaseMemoryV2WriterLeaseV1` catalog/ACL profile and may invoke only the
+  fixed same-transaction 15-field current-authority predicate for a fenced
+  Task Ledger append. It does not install, mutate, parse, depend on lease
+  crates, or own Writer Lease state.
+- Global migrations `0001` through `0004` and Codebase Memory v2 extension are
+  unchanged; no `0005` is introduced.
+- Task Submit/Status is `WriterOnly` and must leave Graphify/Hermes/Memory
+  footprints at zero. The `lattice_delivery_run` MCP tool reaches the same
+  governed writer and starts downstream only after durable Task completion and
+  lease release; the non-MCP compatibility command remains scripted-only.
+  Alternate `lattice-full-chain` is a read-only delivery observer: Run is
+  fixed-denied before dispatch and task tools are absent/unknown under both MCP
+  generations.
+- The fixed canary is limited to a 300-second Task deadline, reserves 30 seconds
+  for finalization, and uses a 600-second lease TTL. Longer profiles remain
+  closed until heartbeat, governed interruption, and orphan recovery exist.
+
+## Current Governance Checkpoint
+
+- New ADR: `docs/adr/ADR-023-bounded-mcp-task-dispatch-and-postgres-writer-lease.md`.
+- SPEC-003 is version 4; TASK-038 remains `in-progress` only because the real
+  ChatGPT tunnel/session gate is still open.
+- Versioned constitutions: `latticed` 1.4, Contracts 1.12, Ports 1.8,
+  Task Domain 2.2, Orchestrator 2.3, Writer Lease 1.1, PostgreSQL Writer Lease
+  1.0, Postgres Store 1.6, and Codex Adapter 1.2.
+- Canonical-local acceptance ID: `8c21e96b9bc44b1d87de0dea884b9678`.
+- Evidence root:
+  `target/lattice-delivery/8c21e96b9bc44b1d87de0dea884b9678/evidence`.
+- Canonical `latticed` SHA-256:
+  `130ef9f92f2582055d9828828c95526a58f01aa7772e43c4db31062219d278b2`.
+- Official Codex 0.146.0 SHA-256:
+  `bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb`.
+
+## Canonical-Local Acceptance Evidence
+
+- Production `latticed` advertised exactly four legacy/stateless tools with
+  closed task input and six-field output schemas. Prohibited authority,
+  shell/SQL/path/Git/credential/lease/thread properties failed before dispatch.
+- Submit and a fresh second `latticed` Status returned the exact same public
+  result: task ref
+  `ab8724dd51419cf190ad491f1f8973894bca56dc0c3aed55ebc3723f6214177d`,
+  ledger head
+  `f3d3b84625f80f26e90b6ed06514bb4f7e8a65f112c089fb6d8a3c82b7d6cdc2`,
+  result `457bab1f71b5bd69e99f3240ca170a25fb88895b94474efd7d747916b2c86bcd`.
+- PostgreSQL 17.10 physically restarted with the same system identifier and a
+  new postmaster start time before the fresh Status request. Database, Git, and
+  timestamp-sensitive Codex Home after-submit/after-status evidence files are
+  pairwise byte-identical.
+- Task Ledger contains one TaskCreated, eight legal transitions, one Codex
+  effect intent, one verified outcome, and one result. Writer Lease has fence
+  high-water `1`, two immutable commands, two transitions, and no current
+  writer. Exact retry was identical and different-key substitution was denied.
+- Codex ran once, fixed verification ran once, and Git produced one governed
+  task commit. Status caused zero rerun. Graphify/Hermes/Memory effect delta is
+  zero for the WriterOnly capability.
+- Both process jobs reported `ActiveProcesses=0`; the execution home was
+  removed and its read-only credential source remained unchanged.
+- Live Store profile and Writer Lease restart/concurrency/fault suites passed
+  without `SKIP:`. Workspace tests, changed-slice strict Clippy, format,
+  `npm.cmd run verify`, PowerShell static/tunnel tests, and diff-check pass.
+- Fresh Status and pre-existing `Merging + result` recovery independently
+  replay Writer Lease snapshot/checkpoint and physical command/transition rows.
+  Completed requires released `1/2/2`; recovery permits only active `1/1/1` or
+  released `1/2/2`, before any additional Task Ledger mutation.
+- Full workspace strict Clippy remains a recorded baseline exception: eleven
+  lints are in unchanged `lattice-hermes-adapter`, outside TASK-038's bounded
+  TASK-041/042-owned slice.
+
+## Required Evidence Still Open
+
+- Refresh the actual Secure MCP Tunnel against this stable feature checkpoint.
+- In a real ChatGPT session, discover and invoke `lattice_task_submit`.
+- In a separate new ChatGPT request/session, invoke `lattice_task_status` and
+  read the same PostgreSQL durable terminal result.
+- Do not relabel the passing scope
+  `LOCAL_CANONICAL_MCP_NOT_CHATGPT_TUNNEL` as ChatGPT evidence.
+
+## Deferred TASK-037 Truth
+
+- The newest ChatGPT observation is
+  `LATTICED_DATABASE_CONNECT_REJECTED`; this is the current first visible
+  production-chain failure and is not assumed to share the older Hermes cause.
+- Older formal evidence remains
+  `HERMES_PRODUCTION_CHILD_EXITED / LATTICE_HERMES_REFLECTION_REJECTED` after
+  reaching the later Hermes/Codex-broker boundary.
+- TASK-037 was not repaired or re-accepted in this Phase 2 governance update.
+  After TASK-038 completes, diagnosis must start from the then-current first
+  failure and proceed PostgreSQL -> Codex -> Graphify -> Hermes -> Memory ->
+  Status. No production E2E PASS is claimed.
+
+## Exact Next Action
+
+1. Commit the current clean stable checkpoint and publish the provider-neutral Task,
+   Writer Lease, process-start, and Codex thread/turn evidence boundary to
+   Issue #6; Issue #2 may consume it only as passive observation.
+2. Refresh the real Secure MCP Tunnel and complete the two-session ChatGPT
+   submit/status gate without changing or weakening the canonical-local proof.
+3. Only after TASK-038 Phase 2 acceptance, resume TASK-037 from the actual first
+   production blocker.
+
+No CI, PR, merge, tag, release, deployment, public exposure, or
+credential/account change is claimed. The exact feature branch may be pushed
+only after the authorized publish preflight; any missing GitHub authentication
+must be reported as `PUSH_PENDING_AUTH`. Historical TASK-037 sections below
+are retained for incident evidence; this top section is authoritative.
+
+# TASK-037 Production Gate Handoff — 2026-08-09
 
 Status: `NEEDS_REVIEW` for TASK-037. The formal
 `Hermes -> Memory -> Status` acceptance has not passed.
@@ -74,8 +771,8 @@ Workspace: expected clean after the handoff commit.
    decision is recorded in `docs/roadmap/TASK-038-MCP-COMPATIBILITY.md`.
    TASK-037 remains the production end-to-end acceptance gate only.
 
-Historical sections below are preserved; this section is the authoritative
-cross-session handoff.
+Historical TASK-037 sections below are preserved for incident diagnosis; the
+TASK-038 section at the top is the authoritative cross-session handoff.
 
 # LATTICE DevOS TASK-033 Graphify/PostgreSQL Memory Checkpoint Handoff
 

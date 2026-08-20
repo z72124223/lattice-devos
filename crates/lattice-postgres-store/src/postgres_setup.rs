@@ -12,10 +12,46 @@ use crate::migrations::{
     POSTGRES_SCHEMA_VERSION, PostgresStoreSetupError, PostgresStoreSetupErrorKind,
     STORE_V2_SCHEMA_VERSION, SUPPORTED_POSTGRES_MAJOR, Sha256Hex, migration_manifest,
     verify_embedded_manifest, verify_v1_manifest_prefix, verify_v2_manifest_prefix,
+    verify_v3_manifest_prefix, verify_v4_manifest_prefix,
 };
 
 const MIGRATION_ADVISORY_LOCK: i64 = 0x4c41_5454_4943_4501;
+const CODEBASE_MEMORY_ADVISORY_LOCK: i64 = 0x4c41_5443_4d45_4d31;
+const WRITER_LEASE_ADVISORY_LOCK: i64 = 0x4c41_5457_4c45_4131;
 const REQUIRED_APPLICATION_NAME: &str = "lattice-devos-task019";
+const CODEBASE_MEMORY_EXTENSION_ID: &str = "lattice-codebase-memory";
+const CODEBASE_MEMORY_V2_SCHEMA_VERSION: i16 = 2;
+const CODEBASE_MEMORY_V2_PATH: &str = "db/extensions/codebase-memory/v2.sql";
+const CODEBASE_MEMORY_V2_SQL_SHA256: &str =
+    "9db54342b88f554ca76054c7a33ae72f04b412d2dfe21fae6eb4d8faf3e854e2";
+const CODEBASE_MEMORY_V2_MANIFEST_SHA256: &str =
+    "0aedbd7d9ef7ca07fc2910d0da34c163cc83e3dd56f9b28292ae1f4f0c3c4d7e";
+const CODEBASE_MEMORY_V2_GLOBAL_SCHEMA_VERSION: i16 = 3;
+const CODEBASE_MEMORY_V2_GLOBAL_MANIFEST_SHA256: &str =
+    "09c431df18ad71a4f44239a5d2ddf6b1774b8ffec06c7f9223f0e41757f3d407";
+const CODEBASE_MEMORY_V3_SCHEMA_VERSION: i16 = 3;
+const CODEBASE_MEMORY_V3_PATH: &str = "db/extensions/codebase-memory/v3.sql";
+const CODEBASE_MEMORY_V3_SQL_SHA256: &str =
+    "7388f6bfe4c2d30a20306e4f9ebdff5862125bcab58f769ba286af542cb051c3";
+const CODEBASE_MEMORY_V3_MANIFEST_SHA256: &str =
+    "d4cc712d262ae1f7c96bd65526eab611c90e193363afd865af2126307b2903f0";
+const WRITER_LEASE_EXTENSION_ID: &str = "lattice-writer-lease";
+const WRITER_LEASE_V1_SCHEMA_VERSION: i16 = 1;
+const WRITER_LEASE_V1_SQL_SHA256: &str =
+    "63ffbf8f8b6c22bf35c3d393bd84e9462ca37e4ace94ceaedd6c27b729daa562";
+const WRITER_LEASE_V1_MANIFEST_SHA256: &str =
+    "0179e2a9b0976008902ab0d1cce6ab493a16047a649571f9ce4f13cc53cc6b33";
+const WRITER_LEASE_V2_SCHEMA_VERSION: i16 = 2;
+const WRITER_LEASE_V2_PATH: &str = "db/extensions/writer-lease/v2.sql";
+const WRITER_LEASE_V2_SQL_SHA256: &str =
+    "8243fd39a3565c641423fde3f15cf801a4a48a12c8d238ae8e1657acdcdc56e3";
+const WRITER_LEASE_V2_MANIFEST_SHA256: &str =
+    "5f54c182465c8e2dc8a6e6cc2ebd9a375f776adf500656586e59bfbc7dfd31a4";
+const WRITER_LEASE_V2_BRIDGE_LEDGER_PROFILE: &str = "1:INSTALLED,2:UPGRADED";
+const WRITER_LEASE_V2_UPGRADED_LEDGER_PROFILE: &str = "1:INSTALLED,2:UPGRADED,3:REBOUND";
+const WRITER_LEASE_V1_SQL: &str = include_str!("../../../db/extensions/writer-lease/v1.sql");
+const WRITER_LEASE_V2_SQL: &str = include_str!("../../../db/extensions/writer-lease/v2.sql");
+const CODEBASE_MEMORY_V3_GLOBAL_SCHEMA_VERSION: i16 = 5;
 const CATALOG_SIGNATURE_DOMAIN: &[u8] = b"LATTICE_POSTGRES_CATALOG_SIGNATURE_V1\0";
 const V1_EXPECTED_RELATION_SIGNATURE: &str =
     "53873b1f2624cab0e03aa257bcdff1e6ace1c3ba215958596dc5257ba0ea24eb";
@@ -36,6 +72,8 @@ const V3_EXPECTED_RELATION_SIGNATURE: &str =
 const V3_EXPECTED_COLUMN_SIGNATURE: &str =
     "7cd1aa5142dbccdc2ac2db466ba4ffdf0c9c41a1000ae0c59baf650e36bbaae8";
 const V3_EXPECTED_CONSTRAINT_SIGNATURE: &str =
+    "3d1d5fcdf290c2b0fce7641951417e3371a06271b62abc710bc55265b6f87236";
+const V3_PREFIX_EXPECTED_CONSTRAINT_SIGNATURE: &str =
     "f9d587125d792646b77ca68e6224c9866bd32c87a0e98c4d2f85b75dd0c22be8";
 const V3_EXPECTED_INDEX_SIGNATURE: &str =
     "40ca5ea0781b1be03efe9bead50ae9f78434314123d6f700d278874678d06a9b";
@@ -44,9 +82,39 @@ const V3_CODEBASE_MEMORY_V2_EXPECTED_RELATION_SIGNATURE: &str =
 const V3_CODEBASE_MEMORY_V2_EXPECTED_COLUMN_SIGNATURE: &str =
     "6c71b33bb6ce0adda52c7267a2e15d0f76e80a7da8db847c87155c21db6b574b";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_CONSTRAINT_SIGNATURE: &str =
+    "0b8c718a12925f0b88f24bf82b904fcff29d55203d42bb3412c5b05cca02e630";
+const V3_CODEBASE_MEMORY_V2_PREFIX_EXPECTED_CONSTRAINT_SIGNATURE: &str =
     "272147d02a06e9dd4863efcbc780cd6624d1d74257ae2ef28d8287b6390fe9f7";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_INDEX_SIGNATURE: &str =
     "1a7bc5e774689c8ad32c1416dc0cdc6b86a6afca402db2d5eed801c6d71afa5a";
+const V4_EXPECTED_RELATION_SIGNATURE: &str =
+    "f99237e005c77b7254ae6677d4052eb0397dec0da0333bc61085d5acebfe72ad";
+const V4_EXPECTED_COLUMN_SIGNATURE: &str =
+    "7376b058f9ce0a3d6564752c16b3e309dd2dfe14f8dde8453359b1c3206efdfe";
+const V4_EXPECTED_CONSTRAINT_SIGNATURE: &str =
+    "f4decac7be351ebff2b6a74c0a3e0b9cf2ec6ef333ef60e1482984149b807d79";
+const V4_EXPECTED_INDEX_SIGNATURE: &str =
+    "a1300cfa80ff7b61d41d593f76fece00712c4c16cb39c175e184e149f9926f86";
+const V5_EXPECTED_COLUMN_SIGNATURE: &str =
+    "17391d4847127893e024301adbb13a4baf43dc941170ac2115fabc4d17f1bdd4";
+const V5_EXPECTED_CONSTRAINT_SIGNATURE: &str =
+    "21e34b2acd0573a92f217a059f72c22c3d2a40798bed7a66c140024ec796d409";
+const V5_CODEBASE_MEMORY_V2_EXPECTED_RELATION_SIGNATURE: &str =
+    "15daeb91d57a30edd2621d19556d5424e4df19d5a6609ab0c11e7dcedac3027b";
+const V5_CODEBASE_MEMORY_V2_EXPECTED_COLUMN_SIGNATURE: &str =
+    "39abf31761956d539e9c7d5061a718e5dee115efaa5c04cc5f16e50aa67f0856";
+const V5_CODEBASE_MEMORY_V2_EXPECTED_CONSTRAINT_SIGNATURE: &str =
+    "7c6e1c8c11c0d077fa85251174f217f6c3089d21439fb994784331376463ff5f";
+const V5_CODEBASE_MEMORY_V2_EXPECTED_INDEX_SIGNATURE: &str =
+    "0739c63458a2960cf80ca61383d727bbe93510bb677eeee9229b68019d12e7db";
+const V5_CODEBASE_MEMORY_V3_EXPECTED_RELATION_SIGNATURE: &str =
+    "15daeb91d57a30edd2621d19556d5424e4df19d5a6609ab0c11e7dcedac3027b";
+const V5_CODEBASE_MEMORY_V3_EXPECTED_COLUMN_SIGNATURE: &str =
+    "d8039c589202c1990be9bc9f5c650cda8a55e56420ec29511626afc99cbce5ef";
+const V5_CODEBASE_MEMORY_V3_EXPECTED_CONSTRAINT_SIGNATURE: &str =
+    "9915118318c192046dea5ead9b0d620181f128518c5009d0ffa3ef4b9c9d905c";
+const V5_CODEBASE_MEMORY_V3_EXPECTED_INDEX_SIGNATURE: &str =
+    "187ce7ae2cc9468e3d2eb22749a15525107f897ca28a5f1f7601623b7e90666b";
 const EXPECTED_SCHEMA_ACL_SIGNATURE: &str =
     "1bd04ad6cebb5dab6a5a48f47a76e88d19a340bf25aaa49ed9c3270cac479568";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_SCHEMA_ACL_SIGNATURE: &str =
@@ -72,6 +140,7 @@ const RELATION_SIGNATURE_SQL: &str = r"
     JOIN pg_roles r ON r.oid = c.relowner
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
       AND c.relkind <> 'i'
+      AND NOT (n.nspname = 'control' AND c.relname = 'task_ledger_autonomy_receipts')
     ORDER BY n.nspname, c.relname
 ";
 
@@ -94,6 +163,7 @@ const COLUMN_SIGNATURE_SQL: &str = r"
     LEFT JOIN pg_namespace coll_ns ON coll_ns.oid = coll.collnamespace
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
       AND c.relkind IN ('r', 'p')
+      AND NOT (n.nspname = 'control' AND c.relname = 'task_ledger_autonomy_receipts')
       AND a.attnum > 0
     ORDER BY n.nspname, c.relname, a.attnum
 ";
@@ -113,6 +183,7 @@ const CONSTRAINT_SIGNATURE_SQL: &str = r"
     LEFT JOIN pg_class ref_class ON ref_class.oid = con.confrelid
     LEFT JOIN pg_namespace ref_ns ON ref_ns.oid = ref_class.relnamespace
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
+      AND NOT (n.nspname = 'control' AND c.relname = 'task_ledger_autonomy_receipts')
     ORDER BY n.nspname, c.relname, con.conname
 ";
 
@@ -128,6 +199,7 @@ const INDEX_SIGNATURE_SQL: &str = r"
     JOIN pg_class index_class ON index_class.oid = i.indexrelid
     JOIN pg_namespace n ON n.oid = table_class.relnamespace
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
+      AND NOT (n.nspname = 'control' AND table_class.relname = 'task_ledger_autonomy_receipts')
     ORDER BY n.nspname, table_class.relname, index_class.relname
 ";
 
@@ -159,6 +231,7 @@ const TABLE_ACL_SIGNATURE_SQL: &str = r"
     JOIN pg_roles grantor ON grantor.oid = acl.grantor
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
       AND c.relkind IN ('r', 'p')
+      AND NOT (n.nspname = 'control' AND c.relname = 'task_ledger_autonomy_receipts')
     ORDER BY n.nspname, c.relname, owner.rolname,
              COALESCE(grantee.rolname, 'PUBLIC'), grantor.rolname,
              acl.privilege_type, acl.is_grantable
@@ -178,6 +251,9 @@ const TYPE_SIGNATURE_SQL: &str = r"
     LEFT JOIN pg_type array_type ON array_type.oid = t.typarray
     LEFT JOIN pg_namespace array_ns ON array_ns.oid = array_type.typnamespace
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
+      AND NOT (n.nspname = 'control' AND t.typname IN (
+          'task_ledger_autonomy_receipts', '_task_ledger_autonomy_receipts'
+      ))
     ORDER BY n.nspname, t.typname
 ";
 
@@ -201,14 +277,30 @@ const FUNCTION_SIGNATURE_SQL: &str = r"
     JOIN pg_roles owner ON owner.oid = p.proowner
     JOIN pg_language language ON language.oid = p.prolang
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
+      AND NOT (n.nspname = 'control' AND p.proname IN (
+          'task_ledger_record_autonomy_receipt_v1',
+          'task_ledger_read_autonomy_receipts_v1'
+      ))
     ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid)
 ";
 const V2_EXPECTED_FUNCTION_SIGNATURE: &str =
     "1e0a53bff3e47d1accf1da1e0856b8edf77738fb5a20f9163b9d2d5747481064";
 const V3_EXPECTED_FUNCTION_SIGNATURE: &str =
+    "e38d34eb346dac00b3d2db13fe3b720f825d0d9d29f3c36e0e8b07b0892044ba";
+const V3_PREFIX_EXPECTED_FUNCTION_SIGNATURE: &str =
     "f2c8585e1da944b38a50c65c6b9f448963f4c3d96c909331be87fec0c30d2279";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_SIGNATURE: &str =
+    "4dd4e12591231499501d37527ba2bb4f4a68bd25ddbab5cedc15264f2b39086a";
+const V3_CODEBASE_MEMORY_V2_PREFIX_EXPECTED_FUNCTION_SIGNATURE: &str =
     "52e146d4e8190bf92ada1754f233423055a435cf281975f05fc83b262ff20db6";
+const V4_EXPECTED_FUNCTION_SIGNATURE: &str =
+    "557102df8882970df2c71a96b08998ee6d4c6a12d8cf312118ad80d8e1ad1c75";
+const V5_EXPECTED_FUNCTION_SIGNATURE: &str =
+    "b7d56229649886df72432ef296ccd81e0d93646b355fb387b02854a84dedeb4c";
+const V5_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_SIGNATURE: &str =
+    "6c627958a23e5602957fed0053b8aa840889cbc5aa48fabc45ca8314ddfcc132";
+const V5_CODEBASE_MEMORY_V3_EXPECTED_FUNCTION_SIGNATURE: &str =
+    "c26371ae6ad133bfc6fd619dadf03f7ecb9a4b862d6e9ad8d099beeaffa1328c";
 const FUNCTION_ACL_SIGNATURE_SQL: &str = r"
     SELECT jsonb_build_array(
         n.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
@@ -221,6 +313,10 @@ const FUNCTION_ACL_SIGNATURE_SQL: &str = r"
     LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
     JOIN pg_roles grantor ON grantor.oid = acl.grantor
     WHERE n.nspname IN ('control', 'memory', 'readmodel')
+      AND NOT (n.nspname = 'control' AND p.proname IN (
+          'task_ledger_record_autonomy_receipt_v1',
+          'task_ledger_read_autonomy_receipts_v1'
+      ))
     ORDER BY n.nspname, p.proname, pg_get_function_identity_arguments(p.oid),
              COALESCE(grantee.rolname, 'PUBLIC'), grantor.rolname,
              acl.privilege_type, acl.is_grantable
@@ -231,10 +327,24 @@ const V3_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
     "579b843df8e187eb0f4b7a75e9d1b0c4f109d596c55bcff5aa76a1a06bfcd91b";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
     "009fc8df8b1ec0867fdfdecf464d24ad694c61d639ff264f56ffb535a2f3038a";
+const V4_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
+    "d4556d81218a40d600a72c53096b939afc45efc8ab537baca556c69a3ea11a0f";
+const V5_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
+    "782a8869601b04ce61d722080db9e8742d26377afeff20718ca46e1948c19e43";
+const V5_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
+    "8a9ab2085db6ebc5b71c0fd3b92da3a499f999817e7e78322f0fe8ffe08f0982";
+const V5_CODEBASE_MEMORY_V3_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
+    "a13dc55ff84708829daa0e78494e12ae3aab66fae2ae6d0a89f5a617ad997b20";
 const V3_EXPECTED_TABLE_ACL_SIGNATURE: &str =
     "27a0879d1b709abd341653b445d3a64d59819bde2e20e868ac09d2624aab1993";
 const V3_CODEBASE_MEMORY_V2_EXPECTED_TABLE_ACL_SIGNATURE: &str =
     "273197d8086b87d4e3308afcc19e34d4b558c0723a23f6965fb07c8ad46f5770";
+const V4_EXPECTED_TABLE_ACL_SIGNATURE: &str =
+    "641f261e2cc1c93786eda9ac80fbcdb497e719708ad569bee65e9d451b43d2b0";
+const V5_CODEBASE_MEMORY_V2_EXPECTED_TABLE_ACL_SIGNATURE: &str =
+    "bb60c8b803c2eb2e6941f4523ff0eaaad804991bf674ee5a3d14331a262ab831";
+const V5_CODEBASE_MEMORY_V3_EXPECTED_TABLE_ACL_SIGNATURE: &str =
+    "bb60c8b803c2eb2e6941f4523ff0eaaad804991bf674ee5a3d14331a262ab831";
 
 const DATABASE_ACL_SIGNATURE_SQL: &str = r"
     SELECT jsonb_build_array(
@@ -264,6 +374,38 @@ const ROLE_SIGNATURE_SQL: &str = r"
                       'lattice_guardian_login', 'lattice_readonly_login')
     ORDER BY rolname
 ";
+
+const ROLE_DATABASE_BOUNDARY_SQL: &str = "SELECT r.rolname, d.datistemplate, d.datallowconn, d.datconnlimit, \
+     (SELECT count(*) FROM pg_auth_members m \
+      WHERE m.roleid IN (SELECT oid FROM pg_roles WHERE rolname LIKE 'lattice\\_%' ESCAPE '\\') \
+         OR m.member IN (SELECT oid FROM pg_roles WHERE rolname LIKE 'lattice\\_%' ESCAPE '\\')), \
+     (SELECT count(*) FROM pg_roles \
+       WHERE rolname LIKE 'lattice\\_%' ESCAPE '\\' \
+         AND rolname NOT IN ('lattice_migrator', 'lattice_runtime', \
+                             'lattice_guardian', 'lattice_readonly', \
+                             'lattice_migrator_login', 'lattice_runtime_login', \
+                             'lattice_guardian_login', 'lattice_readonly_login')), \
+     (SELECT count(*) FROM pg_db_role_setting s \
+      WHERE s.setrole IN (SELECT oid FROM pg_roles \
+           WHERE rolname IN ('lattice_migrator', 'lattice_runtime', \
+                             'lattice_guardian', 'lattice_readonly', \
+                             'lattice_migrator_login', 'lattice_runtime_login', \
+                             'lattice_guardian_login', 'lattice_readonly_login'))), \
+     (SELECT count(*) FROM pg_proc p \
+      JOIN pg_namespace n ON n.oid = p.pronamespace \
+      WHERE p.prosecdef \
+        AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' \
+        AND (has_function_privilege('lattice_runtime', p.oid, 'EXECUTE') \
+          OR has_function_privilege('lattice_guardian', p.oid, 'EXECUTE') \
+          OR has_function_privilege('lattice_readonly', p.oid, 'EXECUTE'))), \
+     has_database_privilege('public', current_database(), 'CONNECT'), \
+     has_database_privilege('public', current_database(), 'CREATE'), \
+     has_database_privilege('public', current_database(), 'TEMPORARY'), \
+     has_database_privilege('lattice_migrator', current_database(), 'CONNECT'), \
+     has_database_privilege('lattice_migrator', current_database(), 'CREATE'), \
+     has_database_privilege('lattice_migrator', current_database(), 'TEMPORARY') \
+     FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba \
+     WHERE d.datname = current_database()";
 
 const DEFAULT_ACL_SIGNATURE_SQL: &str = r"
     SELECT jsonb_build_array(
@@ -302,6 +444,23 @@ const V3_CONTROL_TABLES: [&str; 10] = [
     "task_ledger_streams",
     "terminal_transactions",
 ];
+const V4_CONTROL_TABLES: [&str; 15] = [
+    "database_identity",
+    "migration_history",
+    "physical_heads",
+    "project_registry_commands",
+    "project_registry_identity_reservations",
+    "project_registry_observations",
+    "project_registry_projects",
+    "project_registry_state",
+    "runtime_admission",
+    "schema_compatibility",
+    "task_ledger_commands",
+    "task_ledger_events",
+    "task_ledger_outbox",
+    "task_ledger_streams",
+    "terminal_transactions",
+];
 const READABLE_CONTROL_TABLES: [&str; 4] = [
     "database_identity",
     "migration_history",
@@ -311,6 +470,19 @@ const READABLE_CONTROL_TABLES: [&str; 4] = [
 const PROTECTED_CONTROL_TABLES: [&str; 2] = ["physical_heads", "terminal_transactions"];
 const V3_PROTECTED_CONTROL_TABLES: [&str; 6] = [
     "physical_heads",
+    "task_ledger_commands",
+    "task_ledger_events",
+    "task_ledger_outbox",
+    "task_ledger_streams",
+    "terminal_transactions",
+];
+const V4_PROTECTED_CONTROL_TABLES: [&str; 11] = [
+    "physical_heads",
+    "project_registry_commands",
+    "project_registry_identity_reservations",
+    "project_registry_observations",
+    "project_registry_projects",
+    "project_registry_state",
     "task_ledger_commands",
     "task_ledger_events",
     "task_ledger_outbox",
@@ -336,6 +508,300 @@ const CODEBASE_MEMORY_V2_FUNCTIONS: [&str; 7] = [
     "openclaw_gateway_finalize_terminal_v1",
     "openclaw_gateway_reconcile_and_claim_v1",
 ];
+const CODEBASE_MEMORY_V3_FUNCTIONS: [&str; 7] = [
+    "codebase_memory_persist_analysis_v3",
+    "codebase_memory_persist_retrieval_v3",
+    "codebase_memory_load_receipt_v3",
+    "codebase_memory_persist_reflection_v3",
+    "codebase_memory_load_reflection_v3",
+    "openclaw_gateway_reconcile_and_claim_v3",
+    "openclaw_gateway_finalize_terminal_v3",
+];
+const WRITER_LEASE_V1_TABLES: [&str; 5] = [
+    "writer_lease_commands",
+    "writer_lease_extension_identity",
+    "writer_lease_extension_ledger",
+    "writer_lease_heads",
+    "writer_lease_transitions",
+];
+const WRITER_LEASE_V1_FUNCTIONS: [&str; 7] = [
+    "writer_lease_assert_current_v1",
+    "writer_lease_bind_runtime_v1",
+    "writer_lease_commit_plan_v1",
+    "writer_lease_load_commands_v1",
+    "writer_lease_load_current_v1",
+    "writer_lease_load_for_update_v1",
+    "writer_lease_load_transitions_v1",
+];
+const WRITER_LEASE_V2_FUNCTIONS: [&str; 2] = [
+    "writer_lease_bind_runtime_v2",
+    "writer_lease_load_for_update_v2",
+];
+const WRITER_LEASE_V1_RELATION_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,c.relkind::text,o.rolname,c.relpersistence::text,c.relrowsecurity,\
+    c.relforcerowsecurity,c.relhassubclass,c.relispartition,c.relreplident::text,\
+    COALESCE(pg_catalog.array_to_string(c.reloptions,','),'<NULL>'),\
+    COALESCE(pg_catalog.obj_description(c.oid,'pg_class'),'<NULL>'))::text \
+    FROM pg_catalog.pg_class c \
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=c.relowner \
+    WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') \
+    ORDER BY n.nspname,c.relname";
+const WRITER_LEASE_V1_COLUMN_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,a.attnum,a.attname,pg_catalog.format_type(a.atttypid,a.atttypmod),\
+    a.attnotnull,a.attisdropped,COALESCE(pg_catalog.pg_get_expr(ad.adbin,ad.adrelid,false),'<NULL>'),\
+    a.attidentity::text,a.attgenerated::text,CASE WHEN coll.oid IS NULL THEN '<NULL>' \
+    ELSE coll_ns.nspname||'.'||coll.collname END,a.attstorage::text,a.attcompression::text,\
+    a.attstattarget)::text FROM pg_catalog.pg_class c \
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+    JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid \
+    LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid=c.oid AND ad.adnum=a.attnum \
+    LEFT JOIN pg_catalog.pg_collation coll ON coll.oid=a.attcollation \
+    LEFT JOIN pg_catalog.pg_namespace coll_ns ON coll_ns.oid=coll.collnamespace \
+    WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') AND a.attnum>0 \
+    ORDER BY n.nspname,c.relname,a.attnum";
+const WRITER_LEASE_V1_CONSTRAINT_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,con.conname,con.contype::text,con.convalidated,con.condeferrable,\
+    con.condeferred,con.connoinherit,con.conislocal,con.coninhcount,con.conkey,ref_ns.nspname,\
+    ref.relname,con.confkey,con.confupdtype::text,con.confdeltype::text,con.confmatchtype::text,\
+    pg_catalog.pg_get_constraintdef(con.oid,false))::text \
+    FROM pg_catalog.pg_constraint con \
+    JOIN pg_catalog.pg_namespace n ON n.oid=con.connamespace \
+    JOIN pg_catalog.pg_class c ON c.oid=con.conrelid \
+    LEFT JOIN pg_catalog.pg_class ref ON ref.oid=con.confrelid \
+    LEFT JOIN pg_catalog.pg_namespace ref_ns ON ref_ns.oid=ref.relnamespace \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,c.relname,con.conname";
+const WRITER_LEASE_V1_INDEX_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,t.relname,ix.relname,o.rolname,am.amname,ix.relpersistence::text,\
+    COALESCE(pg_catalog.array_to_string(ix.reloptions,','),'<NULL>'),\
+    COALESCE(ts.spcname,'<NULL>'),i.indisunique,i.indisprimary,i.indisvalid,i.indisready,\
+    i.indislive,i.indisclustered,i.indisreplident,i.indnullsnotdistinct,\
+    pg_catalog.pg_get_indexdef(i.indexrelid,0,true))::text \
+    FROM pg_catalog.pg_index i \
+    JOIN pg_catalog.pg_class t ON t.oid=i.indrelid \
+    JOIN pg_catalog.pg_class ix ON ix.oid=i.indexrelid \
+    JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=ix.relowner \
+    JOIN pg_catalog.pg_am am ON am.oid=ix.relam \
+    LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid=ix.reltablespace \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,t.relname,ix.relname";
+const WRITER_LEASE_V1_FUNCTION_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid),\
+    pg_catalog.pg_get_function_result(p.oid),o.rolname,l.lanname,p.prokind::text,p.prosecdef,\
+    p.proleakproof,p.provolatile::text,p.proparallel::text,p.proisstrict,p.proretset,p.pronargs,\
+    p.pronargdefaults,p.prorettype::regtype::text,p.proargtypes::text,\
+    COALESCE(p.proallargtypes::text,'<NULL>'),COALESCE(p.proargmodes::text,'<NULL>'),\
+    COALESCE(p.proargnames::text,'<NULL>'),COALESCE(pg_catalog.array_to_string(p.proconfig,','),'<NULL>'),\
+    COALESCE(p.probin,'<NULL>'),p.prosrc,pg_catalog.pg_get_functiondef(p.oid),\
+    COALESCE(pg_catalog.obj_description(p.oid,'pg_proc'),'<NULL>'))::text \
+    FROM pg_catalog.pg_proc p \
+    JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=p.proowner \
+    JOIN pg_catalog.pg_language l ON l.oid=p.prolang \
+    WHERE n.nspname='writer_lease' \
+    ORDER BY n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid)";
+const WRITER_LEASE_V1_SCHEMA_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,o.rolname,COALESCE(g.rolname,'PUBLIC'),r.rolname,a.privilege_type,a.is_grantable)::text \
+    FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_roles o ON o.oid=n.nspowner \
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
+    LEFT JOIN pg_catalog.pg_roles g ON g.oid=a.grantee JOIN pg_catalog.pg_roles r ON r.oid=a.grantor \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,o.rolname,COALESCE(g.rolname,'PUBLIC'),\
+    r.rolname,a.privilege_type,a.is_grantable";
+const WRITER_LEASE_V1_TABLE_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,o.rolname,COALESCE(g.rolname,'PUBLIC'),r.rolname,a.privilege_type,\
+    a.is_grantable)::text FROM pg_catalog.pg_class c \
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=c.relowner \
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl,pg_catalog.acldefault('r',c.relowner))) a \
+    LEFT JOIN pg_catalog.pg_roles g ON g.oid=a.grantee JOIN pg_catalog.pg_roles r ON r.oid=a.grantor \
+    WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') \
+    ORDER BY n.nspname,c.relname,o.rolname,COALESCE(g.rolname,'PUBLIC'),r.rolname,\
+    a.privilege_type,a.is_grantable";
+const WRITER_LEASE_V1_FUNCTION_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid),o.rolname,\
+    COALESCE(g.rolname,'PUBLIC'),r.rolname,a.privilege_type,a.is_grantable)::text \
+    FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=p.proowner \
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))) a \
+    LEFT JOIN pg_catalog.pg_roles g ON g.oid=a.grantee JOIN pg_catalog.pg_roles r ON r.oid=a.grantor \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,p.proname,\
+    pg_catalog.pg_get_function_identity_arguments(p.oid),o.rolname,COALESCE(g.rolname,'PUBLIC'),\
+    r.rolname,a.privilege_type,a.is_grantable";
+const WRITER_LEASE_V1_COLUMN_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,a.attnum,a.attname,COALESCE(g.rolname,'PUBLIC'),r.rolname,x.privilege_type,\
+    x.is_grantable)::text FROM pg_catalog.pg_class c \
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+    JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid \
+    CROSS JOIN LATERAL pg_catalog.aclexplode(a.attacl) x \
+    LEFT JOIN pg_catalog.pg_roles g ON g.oid=x.grantee JOIN pg_catalog.pg_roles r ON r.oid=x.grantor \
+    WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') AND a.attnum>0 \
+    ORDER BY n.nspname,c.relname,a.attnum,COALESCE(g.rolname,'PUBLIC'),r.rolname,\
+    x.privilege_type,x.is_grantable";
+const WRITER_LEASE_V1_TYPE_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,t.typname,t.typtype::text,t.typcategory::text,t.typispreferred,t.typisdefined,\
+    t.typdelim::text,o.rolname,COALESCE(c.relname,'<NULL>'),COALESCE(e.typname,'<NULL>'),\
+    COALESCE(pg_catalog.obj_description(t.oid,'pg_type'),'<NULL>'))::text \
+    FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=t.typowner \
+    LEFT JOIN pg_catalog.pg_class c ON c.oid=t.typrelid \
+    LEFT JOIN pg_catalog.pg_type e ON e.oid=t.typelem \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,t.typname";
+const WRITER_LEASE_V1_CATALOG_PROFILES: [(&str, &str, PostgresStoreSetupErrorKind); 10] = [
+    (
+        WRITER_LEASE_V1_RELATION_PROFILE_SQL,
+        "c20048700ff120bc6488c4608eb79df36d329ad817f2b0e45e47020d867b8251",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_COLUMN_PROFILE_SQL,
+        "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_CONSTRAINT_PROFILE_SQL,
+        "3deab2f6ee712692d5ec75682030462ebd4dd4712ff26e40bf323abdd683c5d3",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_INDEX_PROFILE_SQL,
+        "a30a0abfca0a824d75f2f29eb85a8424af35da485f1fef1bc5f852b9be7151a4",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_FUNCTION_PROFILE_SQL,
+        "638941fbd31edbec9d9f860974aac280845063693acc00bd5f6f8c3aa650adc9",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_SCHEMA_ACL_PROFILE_SQL,
+        "a2e1be8a403a96b679c18ddfa75e476fa1d6ceeccc1ccf62ff6424b2c259ef7b",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_TABLE_ACL_PROFILE_SQL,
+        "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_FUNCTION_ACL_PROFILE_SQL,
+        "4e1a2ba0c5abcfe928b66b839166f2bebeecca73a0514f02344c9bbb695b0c44",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_COLUMN_ACL_PROFILE_SQL,
+        "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_TYPE_PROFILE_SQL,
+        "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+];
+const WRITER_LEASE_V2_BRIDGE_CATALOG_PROFILES: [(&str, &str, PostgresStoreSetupErrorKind); 10] = [
+    (
+        WRITER_LEASE_V1_RELATION_PROFILE_SQL,
+        "382b81889838d60c02ce5c31f77454e93f23372d90b3137a47663c5de74f9670",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_COLUMN_PROFILE_SQL,
+        "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_CONSTRAINT_PROFILE_SQL,
+        "3463b3ac82c1a7c53e5a80c41995f882ffe5f3f07fc5a82a97d50582d4d26915",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_INDEX_PROFILE_SQL,
+        "66b315513cbf50c3c7dbc143eb7061c6dbb823d7eac853c50f83434caf1a1022",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_FUNCTION_PROFILE_SQL,
+        "caa34168b5f9da4c8d2d02fce6e98882d73456c7c1f5c1af2b71f404efc647d1",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_SCHEMA_ACL_PROFILE_SQL,
+        "f8a84b870fcb8b091dbc7f9cf6835fb4311064eec5c83b31159a9a936a11e738",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_TABLE_ACL_PROFILE_SQL,
+        "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_FUNCTION_ACL_PROFILE_SQL,
+        "73951f1b33a4d6b3c4742fb49f91cf0601f04fd472b21c4db8bb36815fed0e89",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_COLUMN_ACL_PROFILE_SQL,
+        "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_TYPE_PROFILE_SQL,
+        "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+];
+const WRITER_LEASE_V2_CURRENT_CATALOG_PROFILES: [(&str, &str, PostgresStoreSetupErrorKind); 10] = [
+    (
+        WRITER_LEASE_V1_RELATION_PROFILE_SQL,
+        "382b81889838d60c02ce5c31f77454e93f23372d90b3137a47663c5de74f9670",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_COLUMN_PROFILE_SQL,
+        "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_CONSTRAINT_PROFILE_SQL,
+        "3463b3ac82c1a7c53e5a80c41995f882ffe5f3f07fc5a82a97d50582d4d26915",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_INDEX_PROFILE_SQL,
+        "66b315513cbf50c3c7dbc143eb7061c6dbb823d7eac853c50f83434caf1a1022",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_FUNCTION_PROFILE_SQL,
+        "caa34168b5f9da4c8d2d02fce6e98882d73456c7c1f5c1af2b71f404efc647d1",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+    (
+        WRITER_LEASE_V1_SCHEMA_ACL_PROFILE_SQL,
+        "a2e1be8a403a96b679c18ddfa75e476fa1d6ceeccc1ccf62ff6424b2c259ef7b",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_TABLE_ACL_PROFILE_SQL,
+        "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_FUNCTION_ACL_PROFILE_SQL,
+        "bd5b05d60340a1b9f9fbf1de2b4bed8586b7eede4fd8d7c4825841c221e89b7a",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_COLUMN_ACL_PROFILE_SQL,
+        "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    ),
+    (
+        WRITER_LEASE_V1_TYPE_PROFILE_SQL,
+        "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    ),
+];
 const STORE_PREPARE_V2_IDENTITY: &str = "control.store_prepare_v2(smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea)";
 const STORE_FINALIZE_V2_IDENTITY: &str = "control.store_finalize_v2(smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,uuid,bytea,smallint,text,bigint,bytea,bytea,bigint,bytea,bytea,text,bytea,bytea)";
 const STORE_CURRENT_HEAD_V2_IDENTITY: &str = "control.store_current_head_v2(text,text,text,bytea)";
@@ -347,6 +813,214 @@ const TASK_LEDGER_READ_HEAD_V1_IDENTITY: &str = "control.task_ledger_read_head_v
 const TASK_LEDGER_READ_EVENTS_V1_IDENTITY: &str = "control.task_ledger_read_events_v1(bytea)";
 const TASK_LEDGER_READ_COMMANDS_V1_IDENTITY: &str = "control.task_ledger_read_commands_v1(bytea)";
 const TASK_LEDGER_FINALIZE_V1_IDENTITY: &str = "control.task_ledger_finalize_v1(bytea,text,text,text,text,bytea,text,text,bytea,text,bytea,bytea,text,text,text,text,text,text,text,text,text,bytea,bytea,text,bytea,text,bytea,text,bytea,bytea,text,text,text,text,text,text,text,bytea,jsonb,boolean,text,text,text,text,text,text,text,bytea,text,bytea,bytea,text,bytea,text,bytea,bytea,text,text,bytea,bytea,bytea,text,boolean,text,bytea,text,bytea,boolean,bytea,bytea)";
+const TASK_LEDGER_RECORD_AUTONOMY_RECEIPT_V1_IDENTITY: &str = "control.task_ledger_record_autonomy_receipt_v1(bytea,text,bytea,text,text,text,text,boolean,boolean,boolean,text,text,text,text,text,text,bytea,bytea,bytea,bytea,bytea,text,bytea,bytea)";
+const TASK_LEDGER_READ_AUTONOMY_RECEIPTS_V1_IDENTITY: &str =
+    "control.task_ledger_read_autonomy_receipts_v1(bytea)";
+const AUTONOMY_PROFILE_SIGNATURE_SQL: &str = r"
+    SELECT signature::text
+      FROM (
+        SELECT 0 AS ordinal,
+               jsonb_build_array(
+                   'relation', n.nspname, c.relname, owner.rolname,
+                   c.relkind::text, c.relpersistence::text, c.relrowsecurity,
+                   c.relforcerowsecurity, c.relhassubclass, c.relispartition,
+                   COALESCE(c.relacl::text, '<NULL>'),
+                   COALESCE((
+                       SELECT jsonb_agg(jsonb_build_array(
+                           a.attnum, a.attname,
+                           pg_catalog.format_type(a.atttypid, a.atttypmod),
+                           a.attlen, a.attndims, a.attbyval, a.attalign::text,
+                           a.attstorage::text, a.attcompression::text,
+                           a.attnotnull, a.atthasdef, a.attidentity::text,
+                           a.attgenerated::text,
+                           COALESCE(coll_ns.nspname || '.' || coll.collname, '<NULL>'),
+                           COALESCE(pg_catalog.pg_get_expr(def.adbin, def.adrelid), '<NULL>')
+                       ) ORDER BY a.attnum)
+                         FROM pg_catalog.pg_attribute a
+                         LEFT JOIN pg_catalog.pg_attrdef def
+                           ON def.adrelid = a.attrelid AND def.adnum = a.attnum
+                         LEFT JOIN pg_catalog.pg_collation coll ON coll.oid = a.attcollation
+                         LEFT JOIN pg_catalog.pg_namespace coll_ns
+                           ON coll_ns.oid = coll.collnamespace
+                        WHERE a.attrelid = c.oid AND a.attnum > 0
+                   ), '[]'::jsonb),
+                   COALESCE((
+                       SELECT jsonb_agg(jsonb_build_array(
+                           con.conname, con.contype::text, con.condeferrable,
+                           con.condeferred, con.convalidated,
+                           pg_catalog.pg_get_constraintdef(con.oid, true)
+                       ) ORDER BY con.conname)
+                         FROM pg_catalog.pg_constraint con
+                        WHERE con.conrelid = c.oid
+                   ), '[]'::jsonb),
+                   COALESCE((
+                       SELECT jsonb_agg(pg_catalog.pg_get_indexdef(i.indexrelid)
+                                        ORDER BY ix.relname)
+                         FROM pg_catalog.pg_index i
+                         JOIN pg_catalog.pg_class ix ON ix.oid = i.indexrelid
+                        WHERE i.indrelid = c.oid
+                   ), '[]'::jsonb)
+               ) AS signature
+          FROM pg_catalog.pg_class c
+          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          JOIN pg_catalog.pg_roles owner ON owner.oid = c.relowner
+         WHERE n.nspname = 'control'
+           AND c.relname = 'task_ledger_autonomy_receipts'
+        UNION ALL
+        SELECT 1 AS ordinal,
+               jsonb_build_array(
+                   'function', n.nspname, p.proname,
+                   pg_catalog.pg_get_function_identity_arguments(p.oid),
+                   pg_catalog.pg_get_function_result(p.oid), owner.rolname,
+                   language.lanname, p.prokind::text, p.prosecdef, p.proleakproof,
+                   p.provolatile::text, p.proparallel::text, p.proisstrict,
+                   p.proretset, p.pronargs, p.pronargdefaults,
+                   p.prorettype::regtype::text, p.proargtypes::text,
+                   COALESCE(p.proallargtypes::text, '<NULL>'),
+                   COALESCE(p.proargmodes::text, '<NULL>'),
+                   COALESCE(p.proargnames::text, '<NULL>'),
+                   COALESCE(array_to_string(p.proconfig, ','), '<NULL>'),
+                   COALESCE(p.proacl::text, '<NULL>'), COALESCE(p.probin, '<NULL>'),
+                   p.prosrc, pg_catalog.pg_get_functiondef(p.oid)
+               ) AS signature
+          FROM pg_catalog.pg_proc p
+          JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+          JOIN pg_catalog.pg_roles owner ON owner.oid = p.proowner
+          JOIN pg_catalog.pg_language language ON language.oid = p.prolang
+         WHERE n.nspname = 'control'
+           AND p.proname IN ('task_ledger_record_autonomy_receipt_v1',
+                             'task_ledger_read_autonomy_receipts_v1')
+      ) exact_profile
+     ORDER BY ordinal, signature::text
+";
+const AUTONOMY_PROFILE_SIGNATURE: &str =
+    "e4995f4127a8ad1fb7123c78ef4de3990d5d6493cbe999a860a6f7407577035d";
+const STORE_PREPARE_V4_IDENTITY: &str = "control.store_prepare_v4(smallint,text,smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea)";
+const STORE_FINALIZE_V4_IDENTITY: &str = "control.store_finalize_v4(smallint,text,smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,uuid,bytea,smallint,text,bigint,bytea,bytea,bigint,bytea,bytea,text,bytea,bytea)";
+const STORE_CURRENT_HEAD_V4_IDENTITY: &str =
+    "control.store_current_head_v4(smallint,text,text,text,text,bytea)";
+const TASK_LEDGER_PREPARE_V2_IDENTITY: &str =
+    "control.task_ledger_prepare_v2(smallint,text,bytea,text)";
+const TASK_LEDGER_READ_HEAD_V2_IDENTITY: &str =
+    "control.task_ledger_read_head_v2(smallint,text,bytea,text,text)";
+const TASK_LEDGER_READ_EVENTS_V2_IDENTITY: &str =
+    "control.task_ledger_read_events_v2(smallint,text,bytea)";
+const TASK_LEDGER_READ_COMMANDS_V2_IDENTITY: &str =
+    "control.task_ledger_read_commands_v2(smallint,text,bytea)";
+const TASK_LEDGER_FINALIZE_V2_IDENTITY: &str = "control.task_ledger_finalize_v2(smallint,text,bytea,text,text,text,text,bytea,text,text,bytea,text,bytea,bytea,text,text,text,text,text,text,text,text,text,bytea,bytea,text,bytea,text,bytea,text,bytea,bytea,text,text,text,text,text,text,text,bytea,jsonb,boolean,text,text,text,text,text,text,text,bytea,text,bytea,bytea,text,bytea,text,bytea,bytea,text,text,bytea,bytea,bytea,text,boolean,text,bytea,text,bytea,boolean,bytea,bytea)";
+const PROJECT_REGISTRY_PREPARE_V1_IDENTITY: &str = "control.project_registry_prepare_v1(smallint,text,text,bytea,text,text,bigint,text,bigint,bytea,bytea,bytea)";
+const PROJECT_REGISTRY_READ_STATE_V1_IDENTITY: &str =
+    "control.project_registry_read_state_v1(smallint,text)";
+const PROJECT_REGISTRY_READ_OBSERVATIONS_V1_IDENTITY: &str =
+    "control.project_registry_read_observations_v1(smallint,text)";
+const PROJECT_REGISTRY_READ_PROJECTS_V1_IDENTITY: &str =
+    "control.project_registry_read_projects_v1(smallint,text)";
+const PROJECT_REGISTRY_READ_COMMANDS_V1_IDENTITY: &str =
+    "control.project_registry_read_commands_v1(smallint,text)";
+const PROJECT_REGISTRY_READ_RESERVATIONS_V1_IDENTITY: &str =
+    "control.project_registry_read_reservations_v1(smallint,text)";
+const PROJECT_REGISTRY_STAGE_COMMAND_V1_IDENTITY: &str = "control.project_registry_stage_command_v1(smallint,text,bigint,text,text,text,text,bytea,boolean,text,text,text,text,text,numeric,text,text,text,bytea,bytea,bytea,text,bytea,bytea,text,text,text,text,text,text,text,bytea,bytea,bytea,boolean,boolean,boolean,boolean,boolean,bytea,text,bigint,bigint,bigint,bigint,bigint,bigint,bytea,text,bigint,bigint,bigint,bigint,bigint,bigint,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,bytea,bytea,boolean,text,bytea,bytea,bytea,text,bytea)";
+const PROJECT_REGISTRY_STAGE_PROJECT_V1_IDENTITY: &str = "control.project_registry_stage_project_v1(smallint,text,text,text,bytea,bytea,boolean,boolean,boolean,boolean,boolean,smallint,text,text,text,text,numeric,text,text,bytea,bytea,bytea)";
+const PROJECT_REGISTRY_FINALIZE_V1_IDENTITY: &str = "control.project_registry_finalize_v1(smallint,text,text,bigint,text,bigint,bigint,bigint,bigint,bigint,bigint,bytea,text,bigint,bigint,bigint,bigint,bigint,bigint,bytea,bytea,bytea,bytea,boolean,boolean,bigint,bigint)";
+const V4_RUNTIME_FUNCTION_IDENTITIES: [&str; 17] = [
+    STORE_PREPARE_V4_IDENTITY,
+    STORE_FINALIZE_V4_IDENTITY,
+    STORE_CURRENT_HEAD_V4_IDENTITY,
+    TASK_LEDGER_PREPARE_V2_IDENTITY,
+    TASK_LEDGER_READ_HEAD_V2_IDENTITY,
+    TASK_LEDGER_READ_EVENTS_V2_IDENTITY,
+    TASK_LEDGER_READ_COMMANDS_V2_IDENTITY,
+    TASK_LEDGER_FINALIZE_V2_IDENTITY,
+    PROJECT_REGISTRY_PREPARE_V1_IDENTITY,
+    PROJECT_REGISTRY_READ_STATE_V1_IDENTITY,
+    PROJECT_REGISTRY_READ_OBSERVATIONS_V1_IDENTITY,
+    PROJECT_REGISTRY_READ_PROJECTS_V1_IDENTITY,
+    PROJECT_REGISTRY_READ_COMMANDS_V1_IDENTITY,
+    PROJECT_REGISTRY_READ_RESERVATIONS_V1_IDENTITY,
+    PROJECT_REGISTRY_STAGE_COMMAND_V1_IDENTITY,
+    PROJECT_REGISTRY_STAGE_PROJECT_V1_IDENTITY,
+    PROJECT_REGISTRY_FINALIZE_V1_IDENTITY,
+];
+const STORE_PREPARE_V5_IDENTITY: &str = "control.store_prepare_v5(smallint,text,smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea)";
+const STORE_FINALIZE_V5_IDENTITY: &str = "control.store_finalize_v5(smallint,text,smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,uuid,bytea,smallint,text,bigint,bytea,bytea,bigint,bytea,bytea,text,bytea,bytea)";
+const STORE_CURRENT_HEAD_V5_IDENTITY: &str =
+    "control.store_current_head_v5(smallint,text,text,text,text,bytea)";
+const TASK_LEDGER_PREPARE_V3_IDENTITY: &str =
+    "control.task_ledger_prepare_v3(smallint,text,bytea,text)";
+const TASK_LEDGER_READ_HEAD_V3_IDENTITY: &str =
+    "control.task_ledger_read_head_v3(smallint,text,bytea,text,text)";
+const TASK_LEDGER_READ_EVENTS_V3_IDENTITY: &str =
+    "control.task_ledger_read_events_v3(smallint,text,bytea)";
+const TASK_LEDGER_READ_COMMANDS_V3_IDENTITY: &str =
+    "control.task_ledger_read_commands_v3(smallint,text,bytea)";
+const TASK_LEDGER_FINALIZE_V3_IDENTITY: &str = "control.task_ledger_finalize_v3(smallint,text,bytea,text,text,text,text,bytea,text,text,bytea,text,bytea,bytea,text,text,text,text,text,text,text,text,text,bytea,bytea,text,bytea,text,bytea,text,bytea,bytea,text,text,text,text,text,text,text,bytea,jsonb,boolean,text,text,text,text,text,text,text,bytea,text,bytea,bytea,text,bytea,text,bytea,bytea,text,text,bytea,bytea,bytea,text,boolean,text,bytea,text,bytea,boolean,bytea,bytea)";
+const PROJECT_REGISTRY_PREPARE_V2_IDENTITY: &str = "control.project_registry_prepare_v2(smallint,text,text,bytea,text,text,bigint,text,bigint,bytea,bytea,bytea)";
+const PROJECT_REGISTRY_READ_STATE_V2_IDENTITY: &str =
+    "control.project_registry_read_state_v2(smallint,text)";
+const PROJECT_REGISTRY_READ_OBSERVATIONS_V2_IDENTITY: &str =
+    "control.project_registry_read_observations_v2(smallint,text)";
+const PROJECT_REGISTRY_READ_PROJECTS_V2_IDENTITY: &str =
+    "control.project_registry_read_projects_v2(smallint,text)";
+const PROJECT_REGISTRY_READ_COMMANDS_V2_IDENTITY: &str =
+    "control.project_registry_read_commands_v2(smallint,text)";
+const PROJECT_REGISTRY_READ_RESERVATIONS_V2_IDENTITY: &str =
+    "control.project_registry_read_reservations_v2(smallint,text)";
+const PROJECT_REGISTRY_STAGE_COMMAND_V2_IDENTITY: &str = "control.project_registry_stage_command_v2(smallint,text,smallint,text,bigint,text,text,text,text,bytea,boolean,text,text,text,text,text,numeric,text,text,text,bytea,bytea,bytea,text,bytea,bytea,text,text,text,text,text,text,text,bytea,bytea,bytea,boolean,boolean,boolean,boolean,boolean,bytea,text,bigint,bigint,bigint,bigint,bigint,bigint,bytea,text,bigint,bigint,bigint,bigint,bigint,bigint,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,bytea,bytea,boolean,text,bytea,bytea,bytea,text,bytea)";
+const PROJECT_REGISTRY_STAGE_PROJECT_V2_IDENTITY: &str = "control.project_registry_stage_project_v2(smallint,text,text,text,bytea,bytea,boolean,boolean,boolean,boolean,boolean,smallint,text,text,text,text,numeric,text,text,bytea,bytea,bytea)";
+const PROJECT_REGISTRY_FINALIZE_V2_IDENTITY: &str = "control.project_registry_finalize_v2(smallint,text,text,bigint,text,bigint,bigint,bigint,bigint,bigint,bigint,bytea,text,bigint,bigint,bigint,bigint,bigint,bigint,bytea,bytea,bytea,bytea,boolean,boolean,bigint,bigint)";
+const V5_RUNTIME_FUNCTION_IDENTITIES: [&str; 19] = [
+    STORE_PREPARE_V5_IDENTITY,
+    STORE_FINALIZE_V5_IDENTITY,
+    STORE_CURRENT_HEAD_V5_IDENTITY,
+    TASK_LEDGER_PREPARE_V3_IDENTITY,
+    TASK_LEDGER_READ_HEAD_V3_IDENTITY,
+    TASK_LEDGER_READ_EVENTS_V3_IDENTITY,
+    TASK_LEDGER_READ_COMMANDS_V3_IDENTITY,
+    TASK_LEDGER_FINALIZE_V3_IDENTITY,
+    PROJECT_REGISTRY_PREPARE_V2_IDENTITY,
+    PROJECT_REGISTRY_READ_STATE_V2_IDENTITY,
+    PROJECT_REGISTRY_READ_OBSERVATIONS_V2_IDENTITY,
+    PROJECT_REGISTRY_READ_PROJECTS_V2_IDENTITY,
+    PROJECT_REGISTRY_READ_COMMANDS_V2_IDENTITY,
+    PROJECT_REGISTRY_READ_RESERVATIONS_V2_IDENTITY,
+    PROJECT_REGISTRY_STAGE_COMMAND_V2_IDENTITY,
+    PROJECT_REGISTRY_STAGE_PROJECT_V2_IDENTITY,
+    PROJECT_REGISTRY_FINALIZE_V2_IDENTITY,
+    TASK_LEDGER_RECORD_AUTONOMY_RECEIPT_V1_IDENTITY,
+    TASK_LEDGER_READ_AUTONOMY_RECEIPTS_V1_IDENTITY,
+];
+const V5_SUCCESSOR_FUNCTION_IDENTITIES: [&str; 17] = [
+    STORE_PREPARE_V5_IDENTITY,
+    STORE_FINALIZE_V5_IDENTITY,
+    STORE_CURRENT_HEAD_V5_IDENTITY,
+    TASK_LEDGER_PREPARE_V3_IDENTITY,
+    TASK_LEDGER_READ_HEAD_V3_IDENTITY,
+    TASK_LEDGER_READ_EVENTS_V3_IDENTITY,
+    TASK_LEDGER_READ_COMMANDS_V3_IDENTITY,
+    TASK_LEDGER_FINALIZE_V3_IDENTITY,
+    PROJECT_REGISTRY_PREPARE_V2_IDENTITY,
+    PROJECT_REGISTRY_READ_STATE_V2_IDENTITY,
+    PROJECT_REGISTRY_READ_OBSERVATIONS_V2_IDENTITY,
+    PROJECT_REGISTRY_READ_PROJECTS_V2_IDENTITY,
+    PROJECT_REGISTRY_READ_COMMANDS_V2_IDENTITY,
+    PROJECT_REGISTRY_READ_RESERVATIONS_V2_IDENTITY,
+    PROJECT_REGISTRY_STAGE_COMMAND_V2_IDENTITY,
+    PROJECT_REGISTRY_STAGE_PROJECT_V2_IDENTITY,
+    PROJECT_REGISTRY_FINALIZE_V2_IDENTITY,
+];
+const V3_CONTROL_FUNCTION_IDENTITIES: [&str; 11] = [
+    STORE_PREPARE_V2_IDENTITY,
+    STORE_FINALIZE_V2_IDENTITY,
+    STORE_CURRENT_HEAD_V2_IDENTITY,
+    STORE_PREPARE_V3_IDENTITY,
+    STORE_FINALIZE_V3_IDENTITY,
+    STORE_CURRENT_HEAD_V3_IDENTITY,
+    TASK_LEDGER_PREPARE_V1_IDENTITY,
+    TASK_LEDGER_READ_HEAD_V1_IDENTITY,
+    TASK_LEDGER_READ_EVENTS_V1_IDENTITY,
+    TASK_LEDGER_READ_COMMANDS_V1_IDENTITY,
+    TASK_LEDGER_FINALIZE_V1_IDENTITY,
+];
 const CODEBASE_MEMORY_LOAD_RECEIPT_V1_IDENTITY: &str = "memory.codebase_memory_load_receipt_v1(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint)";
 const CODEBASE_MEMORY_LOAD_REFLECTION_V2_IDENTITY: &str = "memory.codebase_memory_load_reflection_v2(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint)";
 const CODEBASE_MEMORY_PERSIST_ANALYSIS_V1_IDENTITY: &str = "memory.codebase_memory_persist_analysis_v1(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint,text,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,integer[],bytea[],text[],text[],text[],text[],text[],text[],bytea[],integer[],integer[],text[],bytea[])";
@@ -354,6 +1028,24 @@ const CODEBASE_MEMORY_PERSIST_REFLECTION_V2_IDENTITY: &str = "memory.codebase_me
 const CODEBASE_MEMORY_PERSIST_RETRIEVAL_V1_IDENTITY: &str = "memory.codebase_memory_persist_retrieval_v1(bytea,bytea,bytea,bytea,bytea,bytea,bytea,smallint,text,bytea[],bytea[],bigint[],bytea,bytea,bytea)";
 const OPENCLAW_GATEWAY_FINALIZE_TERMINAL_V1_IDENTITY: &str = "memory.openclaw_gateway_finalize_terminal_v1(bytea,bytea,bytea,bytea,text,text,bigint,text,bytea,bytea,bytea,bytea)";
 const OPENCLAW_GATEWAY_RECONCILE_AND_CLAIM_V1_IDENTITY: &str = "memory.openclaw_gateway_reconcile_and_claim_v1(bytea,bytea,bytea,bytea,text,text,bigint,text,bytea)";
+const CODEBASE_MEMORY_V2_FUNCTION_IDENTITIES: [&str; 7] = [
+    CODEBASE_MEMORY_LOAD_REFLECTION_V2_IDENTITY,
+    CODEBASE_MEMORY_LOAD_RECEIPT_V1_IDENTITY,
+    CODEBASE_MEMORY_PERSIST_ANALYSIS_V1_IDENTITY,
+    CODEBASE_MEMORY_PERSIST_REFLECTION_V2_IDENTITY,
+    CODEBASE_MEMORY_PERSIST_RETRIEVAL_V1_IDENTITY,
+    OPENCLAW_GATEWAY_FINALIZE_TERMINAL_V1_IDENTITY,
+    OPENCLAW_GATEWAY_RECONCILE_AND_CLAIM_V1_IDENTITY,
+];
+const CODEBASE_MEMORY_V3_FUNCTION_IDENTITIES: [&str; 7] = [
+    "memory.codebase_memory_load_reflection_v3(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint)",
+    "memory.codebase_memory_load_receipt_v3(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint)",
+    "memory.codebase_memory_persist_analysis_v3(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint,text,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,integer[],bytea[],text[],text[],text[],text[],text[],text[],bytea[],integer[],integer[],text[],bytea[])",
+    "memory.codebase_memory_persist_reflection_v3(bytea,bytea,bytea,bytea,smallint,text,text,text,text,bytea,text,text,bytea,bytea,smallint,bytea,text,text,bytea,bytea,bytea,bytea,text,text[],bytea[],text[])",
+    "memory.codebase_memory_persist_retrieval_v3(bytea,bytea,bytea,bytea,bytea,bytea,bytea,smallint,text,bytea[],bytea[],bigint[],bytea,bytea,bytea)",
+    "memory.openclaw_gateway_finalize_terminal_v3(bytea,bytea,bytea,bytea,text,text,bigint,text,bytea,bytea,bytea,bytea)",
+    "memory.openclaw_gateway_reconcile_and_claim_v3(bytea,bytea,bytea,bytea,text,text,bigint,text,bytea)",
+];
 const V1_CONTROL_CONSTRAINTS: [&str; 48] = [
     "database_identity_pkey",
     "database_identity_singleton_true",
@@ -510,6 +1202,46 @@ const TASK_LEDGER_CONTROL_CONSTRAINTS: [&str; 47] = [
     "task_ledger_streams_task_revision_u64",
     "task_ledger_streams_versions_exact",
 ];
+const PROJECT_REGISTRY_CONTROL_CONSTRAINTS: [&str; 38] = [
+    "project_registry_commands_action",
+    "project_registry_commands_before_shape",
+    "project_registry_commands_chain",
+    "project_registry_commands_command_id_key",
+    "project_registry_commands_digest_lengths",
+    "project_registry_commands_id",
+    "project_registry_commands_observation_digest_fkey",
+    "project_registry_commands_ordinal_positive",
+    "project_registry_commands_outcome",
+    "project_registry_commands_pkey",
+    "project_registry_commands_project_id",
+    "project_registry_commands_runtime",
+    "project_registry_observations_digest",
+    "project_registry_observations_identity_digests",
+    "project_registry_observations_pkey",
+    "project_registry_observations_primary_ref",
+    "project_registry_observations_root_bound",
+    "project_registry_projects_accepted_observation_digest_fkey",
+    "project_registry_projects_authority",
+    "project_registry_projects_authority_observation_digest_fkey",
+    "project_registry_projects_class",
+    "project_registry_projects_id",
+    "project_registry_projects_pending_distinct",
+    "project_registry_projects_pending_observation_digest_fkey",
+    "project_registry_projects_pkey",
+    "project_registry_projects_shape",
+    "project_registry_reservations_digest",
+    "project_registry_reservations_dimension",
+    "project_registry_identity_reservations_pkey",
+    "project_registry_identity_reservations_project_id_fkey",
+    "project_registry_reservations_status",
+    "project_registry_state_counts_nonnegative",
+    "project_registry_state_digest",
+    "project_registry_state_limits",
+    "project_registry_state_pkey",
+    "project_registry_state_runtime_live",
+    "project_registry_state_singleton_true",
+    "project_registry_state_stage_shape",
+];
 
 /// Result of one explicit administrative migration attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -642,7 +1374,9 @@ enum InstalledManifestState {
     Fresh,
     ExactV1Prefix,
     ExactV2Prefix,
-    ExactV3Full,
+    ExactV3Prefix,
+    ExactV4Prefix,
+    ExactV5Full,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -652,34 +1386,131 @@ enum CatalogProfile {
     V2,
     V3,
     V3CodebaseMemoryV2,
+    V3CodebaseMemoryV2WriterLeaseV1,
+    V3CodebaseMemoryV2WriterLeaseV2Bridge,
+    V4,
+    V5,
+    V5CodebaseMemoryV2UpgradePending,
+    V5CodebaseMemoryV3Current,
+    V5CodebaseMemoryV2WriterLeaseV2BridgePending,
+    V5CodebaseMemoryV3WriterLeaseV2BridgePending,
+    V5CodebaseMemoryV3WriterLeaseV2Current,
 }
 
-fn classify_memory_catalog_counts(
-    expected_relations: i64,
-    all_relations: i64,
-    expected_functions: i64,
-    all_functions: i64,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriterLeaseV2RuntimeProfile {
+    Bridge,
+    Current,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_extension_catalog_counts(
+    schema_version: u16,
+    expected_memory_relations: i64,
+    all_memory_relations: i64,
+    expected_memory_v2_functions: i64,
+    expected_memory_v3_functions: i64,
+    all_memory_functions: i64,
+    writer_lease_namespaces: i64,
+    expected_writer_lease_relations: i64,
+    all_writer_lease_relations: i64,
+    expected_writer_lease_functions: i64,
+    all_writer_lease_functions: i64,
+    runtime_writer_lease_functions: i64,
+    runtime_writer_lease_schema_usage: bool,
 ) -> Result<CatalogProfile, PostgresStoreSetupError> {
-    if expected_relations == 0
-        && all_relations == 0
-        && expected_functions == 0
-        && all_functions == 0
-    {
+    let no_memory = expected_memory_relations == 0
+        && all_memory_relations == 0
+        && expected_memory_v2_functions == 0
+        && expected_memory_v3_functions == 0
+        && all_memory_functions == 0;
+    let exact_memory_v2 = expected_memory_relations
+        == i64::try_from(CODEBASE_MEMORY_V2_TABLES.len()).expect("fixed count")
+        && all_memory_relations == expected_memory_relations
+        && expected_memory_v2_functions
+            == i64::try_from(CODEBASE_MEMORY_V2_FUNCTIONS.len()).expect("fixed count")
+        && expected_memory_v3_functions == 0
+        && all_memory_functions == expected_memory_v2_functions;
+    let exact_memory_v3 = expected_memory_relations
+        == i64::try_from(CODEBASE_MEMORY_V2_TABLES.len()).expect("fixed count")
+        && all_memory_relations == expected_memory_relations
+        && expected_memory_v2_functions
+            == i64::try_from(CODEBASE_MEMORY_V2_FUNCTIONS.len()).expect("fixed count")
+        && expected_memory_v3_functions
+            == i64::try_from(CODEBASE_MEMORY_V3_FUNCTIONS.len()).expect("fixed count")
+        && all_memory_functions == expected_memory_v2_functions + expected_memory_v3_functions;
+    let no_writer_lease = writer_lease_namespaces == 0
+        && expected_writer_lease_relations == 0
+        && all_writer_lease_relations == 0
+        && expected_writer_lease_functions == 0
+        && all_writer_lease_functions == 0
+        && runtime_writer_lease_functions == 0
+        && !runtime_writer_lease_schema_usage;
+    let exact_writer_lease_v1 = writer_lease_namespaces == 1
+        && expected_writer_lease_relations
+            == i64::try_from(WRITER_LEASE_V1_TABLES.len()).expect("fixed count")
+        && all_writer_lease_relations == expected_writer_lease_relations
+        && expected_writer_lease_functions
+            == i64::try_from(WRITER_LEASE_V1_FUNCTIONS.len()).expect("fixed count")
+        && all_writer_lease_functions == expected_writer_lease_functions
+        && runtime_writer_lease_functions
+            == i64::try_from(WRITER_LEASE_V1_FUNCTIONS.len()).expect("fixed count")
+        && runtime_writer_lease_schema_usage;
+    let exact_writer_lease_v2_shape = writer_lease_namespaces == 1
+        && expected_writer_lease_relations
+            == i64::try_from(WRITER_LEASE_V1_TABLES.len()).expect("fixed count")
+        && all_writer_lease_relations == expected_writer_lease_relations
+        && expected_writer_lease_functions
+            == i64::try_from(WRITER_LEASE_V1_FUNCTIONS.len() + WRITER_LEASE_V2_FUNCTIONS.len())
+                .expect("fixed count")
+        && all_writer_lease_functions == expected_writer_lease_functions;
+    let exact_writer_lease_v2_bridge = exact_writer_lease_v2_shape
+        && runtime_writer_lease_functions == 0
+        && !runtime_writer_lease_schema_usage;
+    let exact_writer_lease_v2_current = exact_writer_lease_v2_shape
+        && runtime_writer_lease_functions
+            == i64::try_from(WRITER_LEASE_V1_FUNCTIONS.len()).expect("fixed count")
+        && runtime_writer_lease_schema_usage;
+
+    if schema_version == 3 && no_memory && no_writer_lease {
         return Ok(CatalogProfile::V3);
     }
-    if expected_relations == i64::try_from(CODEBASE_MEMORY_V2_TABLES.len()).expect("fixed count")
-        && all_relations == expected_relations
-        && expected_functions
-            == i64::try_from(CODEBASE_MEMORY_V2_FUNCTIONS.len()).expect("fixed count")
-        && all_functions == expected_functions
-    {
+    if schema_version == 3 && exact_memory_v2 && no_writer_lease {
         return Ok(CatalogProfile::V3CodebaseMemoryV2);
+    }
+    if schema_version == 3 && exact_memory_v2 && exact_writer_lease_v1 {
+        return Ok(CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1);
+    }
+    if schema_version == 3 && exact_memory_v2 && exact_writer_lease_v2_bridge {
+        return Ok(CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge);
+    }
+    if schema_version == 4 && no_memory && no_writer_lease {
+        return Ok(CatalogProfile::V4);
+    }
+    if schema_version == 5 && no_memory && no_writer_lease {
+        return Ok(CatalogProfile::V5);
+    }
+    if schema_version == 5 && exact_memory_v2 && no_writer_lease {
+        return Ok(CatalogProfile::V5CodebaseMemoryV2UpgradePending);
+    }
+    if schema_version == 5 && exact_memory_v2 && exact_writer_lease_v2_bridge {
+        return Ok(CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending);
+    }
+    if schema_version == 5 && exact_memory_v3 && no_writer_lease {
+        return Ok(CatalogProfile::V5CodebaseMemoryV3Current);
+    }
+    if schema_version == 5 && exact_memory_v3 && exact_writer_lease_v2_bridge {
+        return Ok(CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending);
+    }
+    if schema_version == 5 && exact_memory_v3 && exact_writer_lease_v2_current {
+        return Ok(CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current);
     }
     Err(catalog_error())
 }
 
-fn classify_current_v3_catalog_profile<C: GenericClient>(
+fn classify_current_catalog_profile<C: GenericClient>(
     client: &mut C,
+    schema_version: u16,
 ) -> Result<CatalogProfile, PostgresStoreSetupError> {
     let row = client
         .query_one(
@@ -714,19 +1545,94 @@ fn classify_current_v3_catalog_profile<C: GenericClient>(
                  'codebase_memory_persist_retrieval_v1', \
                  'openclaw_gateway_finalize_terminal_v1', \
                  'openclaw_gateway_reconcile_and_claim_v1'))::bigint, \
+             count(*) FILTER (WHERE p.proname IN ( \
+                 'codebase_memory_persist_analysis_v3', \
+                 'codebase_memory_persist_retrieval_v3', \
+                 'codebase_memory_load_receipt_v3', \
+                 'codebase_memory_persist_reflection_v3', \
+                 'codebase_memory_load_reflection_v3', \
+                 'openclaw_gateway_reconcile_and_claim_v3', \
+                 'openclaw_gateway_finalize_terminal_v3'))::bigint, \
              count(*)::bigint \
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname = 'memory'",
             &[],
         )
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
-    classify_memory_catalog_counts(
+    let writer_lease_counts = writer_lease_catalog_counts(client)?;
+    classify_extension_catalog_counts(
+        schema_version,
         expected_relations,
         all_relations,
         row_value::<i64>(&row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?,
         row_value::<i64>(&row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?,
+        row_value::<i64>(&row, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?,
+        writer_lease_counts.0,
+        writer_lease_counts.1,
+        writer_lease_counts.2,
+        writer_lease_counts.3,
+        writer_lease_counts.4,
+        writer_lease_counts.5,
+        writer_lease_counts.6,
     )
 }
+
+fn writer_lease_catalog_counts<C: GenericClient>(
+    client: &mut C,
+) -> Result<WriterLeaseCatalogCounts, PostgresStoreSetupError> {
+    let row = client
+        .query_one(
+            "SELECT \
+             (SELECT count(*)::bigint FROM pg_namespace \
+               WHERE nspname = 'writer_lease'), \
+             count(*) FILTER (WHERE c.relname IN ( \
+                 'writer_lease_commands', \
+                 'writer_lease_extension_identity', \
+                 'writer_lease_extension_ledger', \
+                 'writer_lease_heads', \
+                 'writer_lease_transitions'))::bigint, \
+             count(*)::bigint, \
+             (SELECT count(*) FILTER (WHERE p.proname IN ( \
+                 'writer_lease_assert_current_v1', \
+                 'writer_lease_bind_runtime_v1', \
+                 'writer_lease_bind_runtime_v2', \
+                 'writer_lease_commit_plan_v1', \
+                 'writer_lease_load_commands_v1', \
+                 'writer_lease_load_current_v1', \
+                 'writer_lease_load_for_update_v1', \
+                 'writer_lease_load_for_update_v2', \
+                 'writer_lease_load_transitions_v1'))::bigint \
+                FROM pg_proc p JOIN pg_namespace function_ns ON function_ns.oid = p.pronamespace \
+               WHERE function_ns.nspname = 'writer_lease'), \
+             (SELECT count(*)::bigint \
+                FROM pg_proc p JOIN pg_namespace function_ns ON function_ns.oid = p.pronamespace \
+               WHERE function_ns.nspname = 'writer_lease'), \
+             (SELECT count(*) FILTER (WHERE \
+                       pg_catalog.has_function_privilege('lattice_runtime', p.oid, 'EXECUTE'))::bigint \
+                FROM pg_proc p JOIN pg_namespace function_ns ON function_ns.oid = p.pronamespace \
+               WHERE function_ns.nspname = 'writer_lease'), \
+             COALESCE((SELECT pg_catalog.has_schema_privilege( \
+                              'lattice_runtime', writer_ns.oid, 'USAGE') \
+                         FROM pg_namespace writer_ns \
+                        WHERE writer_ns.nspname = 'writer_lease'), false) \
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'writer_lease' \
+               AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    Ok((
+        row_value::<i64>(&row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?,
+        row_value::<i64>(&row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?,
+        row_value::<i64>(&row, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?,
+        row_value::<i64>(&row, 3, PostgresStoreSetupErrorKind::CorruptCatalog)?,
+        row_value::<i64>(&row, 4, PostgresStoreSetupErrorKind::CorruptCatalog)?,
+        row_value::<i64>(&row, 5, PostgresStoreSetupErrorKind::PermissionDenied)?,
+        row_value::<bool>(&row, 6, PostgresStoreSetupErrorKind::PermissionDenied)?,
+    ))
+}
+
+type WriterLeaseCatalogCounts = (i64, i64, i64, i64, i64, i64, bool);
 
 /// Applies only the exact embedded executable manifest under the migration role.
 ///
@@ -744,6 +1650,8 @@ pub fn apply_migrations(
     let manifest = verify_embedded_manifest()?;
     let legacy_manifest = verify_v1_manifest_prefix()?;
     let store_v2_manifest = verify_v2_manifest_prefix()?;
+    let v3_manifest = verify_v3_manifest_prefix()?;
+    let v4_manifest = verify_v4_manifest_prefix()?;
     let mut transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::ReadCommitted)
@@ -752,14 +1660,17 @@ pub fn apply_migrations(
             map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
         })?;
     harden_transaction(&mut transaction)?;
-    transaction
-        .query_one(
-            "SELECT pg_advisory_xact_lock($1)",
-            &[&MIGRATION_ADVISORY_LOCK],
-        )
-        .map_err(|error| {
-            map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
-        })?;
+    for advisory_lock in [
+        &MIGRATION_ADVISORY_LOCK,
+        &CODEBASE_MEMORY_ADVISORY_LOCK,
+        &WRITER_LEASE_ADVISORY_LOCK,
+    ] {
+        transaction
+            .query_one("SELECT pg_advisory_xact_lock($1)", &[advisory_lock])
+            .map_err(|error| {
+                map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+            })?;
+    }
     let connection = preflight_connection(
         &mut transaction,
         target,
@@ -770,7 +1681,7 @@ pub fn apply_migrations(
     let installed = classify_installed_manifest_state(&mut transaction)?;
     let outcome = match installed {
         InstalledManifestState::Fresh => {
-            verify_role_and_database_boundary(&mut transaction, CatalogProfile::PreSchema)?;
+            verify_role_and_database_boundary(&mut transaction, CatalogProfile::PreSchema, false)?;
             let executable_count = apply_missing_entries(&mut transaction, 0)?;
             seed_database_identity(&mut transaction, target)?;
             insert_current_compatibility(&mut transaction, &manifest)?;
@@ -788,7 +1699,19 @@ pub fn apply_migrations(
             advance_compatibility_from_v2(&mut transaction, &store_v2_manifest, &manifest)?;
             MigrationApplyOutcome::Applied { executable_count }
         }
-        InstalledManifestState::ExactV3Full => {
+        InstalledManifestState::ExactV3Prefix => {
+            verify_v3_upgrade_source(&mut transaction, &v3_manifest, target)?;
+            let executable_count = apply_missing_entries(&mut transaction, 4)?;
+            advance_compatibility_from_v3(&mut transaction, &v3_manifest, &manifest)?;
+            MigrationApplyOutcome::Applied { executable_count }
+        }
+        InstalledManifestState::ExactV4Prefix => {
+            verify_v4_upgrade_source(&mut transaction, &v4_manifest, target)?;
+            let executable_count = apply_missing_entries(&mut transaction, 5)?;
+            advance_compatibility_from_v4(&mut transaction, &v4_manifest, &manifest)?;
+            MigrationApplyOutcome::Applied { executable_count }
+        }
+        InstalledManifestState::ExactV5Full => {
             verify_catalog(
                 &mut transaction,
                 &manifest,
@@ -806,8 +1729,9 @@ pub fn apply_migrations(
         DatabaseRole::Migrator,
         SetupOperation::Migration,
     )?;
-    let current_profile = classify_current_v3_catalog_profile(&mut transaction)?;
-    verify_role_and_database_boundary(&mut transaction, current_profile)?;
+    let current_profile =
+        classify_current_catalog_profile(&mut transaction, POSTGRES_SCHEMA_VERSION)?;
+    verify_role_and_database_boundary(&mut transaction, current_profile, false)?;
 
     transaction.commit().map_err(|_| {
         PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::CommitOutcomeUnknown)
@@ -864,7 +1788,6 @@ pub(crate) fn verify_runtime_store_schema(
     client: &mut Client,
     target: &MigrationTarget,
 ) -> Result<RuntimeStoreSchemaEvidence, PostgresStoreSetupError> {
-    let manifest = verify_embedded_manifest()?;
     let store_v2_manifest = verify_v2_manifest_prefix()?;
     let mut transaction = client
         .build_transaction()
@@ -884,13 +1807,59 @@ pub(crate) fn verify_runtime_store_schema(
     if owned_schema_presence(&mut transaction)? != [true, true, true] {
         return Err(history_error());
     }
-    let current_profile = classify_current_v3_catalog_profile(&mut transaction)?;
-    verify_schema_objects(&mut transaction, current_profile)?;
-    verify_history(&mut transaction)?;
+    let compatibility = transaction
+        .query(
+            "SELECT current_schema_version FROM ONLY control.schema_compatibility \
+             WHERE singleton = true",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    if compatibility.len() != 1 {
+        return Err(catalog_error());
+    }
+    let installed_schema_version: i16 = row_value(
+        &compatibility[0],
+        0,
+        PostgresStoreSetupErrorKind::CompatibilityMismatch,
+    )?;
+    let installed_schema_version = u16::try_from(installed_schema_version).map_err(|_| {
+        PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::CompatibilityMismatch)
+    })?;
+    let manifest = match installed_schema_version {
+        3 => verify_v3_manifest_prefix()?,
+        POSTGRES_SCHEMA_VERSION => verify_embedded_manifest()?,
+        _ => {
+            return Err(PostgresStoreSetupError::new(
+                PostgresStoreSetupErrorKind::CompatibilityMismatch,
+            ));
+        }
+    };
+    let current_profile =
+        classify_current_catalog_profile(&mut transaction, installed_schema_version)?;
+    if matches!(
+        current_profile,
+        CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+            | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+            | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+    ) {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    let v3_prefix = installed_schema_version == 3;
+    verify_schema_objects_with_contract(&mut transaction, current_profile, v3_prefix)?;
+    let rows = read_history_rows(&mut transaction)?;
+    let expected_history = if installed_schema_version == 3 {
+        &migration_manifest()[..4]
+    } else {
+        migration_manifest()
+    };
+    verify_history_rows(&rows, expected_history)?;
     verify_compatibility(&mut transaction, &manifest, current_profile)?;
     let database_uuid = read_database_identity(&mut transaction, target)?;
     verify_runtime_admission_present(&mut transaction)?;
-    verify_roles_and_grants(&mut transaction, current_profile)?;
+    verify_roles_and_grants_with_contract(&mut transaction, current_profile, v3_prefix)?;
     preflight_connection(
         &mut transaction,
         target,
@@ -903,7 +1872,7 @@ pub(crate) fn verify_runtime_store_schema(
     Ok(RuntimeStoreSchemaEvidence {
         database_uuid,
         global_manifest_sha256: manifest.manifest_sha256().clone(),
-        global_schema_version: manifest.schema_version(),
+        global_schema_version: installed_schema_version,
         store_manifest_sha256: store_v2_manifest.manifest_sha256().clone(),
         store_schema_version: STORE_V2_SCHEMA_VERSION,
     })
@@ -1071,9 +2040,17 @@ fn classify_installed_manifest_state<C: GenericClient>(
                     verify_history_rows(&rows, &migration_manifest()[..3])?;
                     Ok(InstalledManifestState::ExactV2Prefix)
                 }
+                4 => {
+                    verify_history_rows(&rows, &migration_manifest()[..4])?;
+                    Ok(InstalledManifestState::ExactV3Prefix)
+                }
+                5 => {
+                    verify_history_rows(&rows, &migration_manifest()[..5])?;
+                    Ok(InstalledManifestState::ExactV4Prefix)
+                }
                 length if length == migration_manifest().len() => {
                     verify_history_rows(&rows, migration_manifest())?;
-                    Ok(InstalledManifestState::ExactV3Full)
+                    Ok(InstalledManifestState::ExactV5Full)
                 }
                 _ => Err(history_error()),
             }
@@ -1156,11 +2133,11 @@ fn advance_compatibility_from_v1<C: GenericClient>(
                AND min_writer = 1 AND max_writer = 1",
             &[
                 &current_manifest.manifest_sha256().as_str(),
-                &3_i16,
-                &3_i16,
-                &3_i16,
-                &3_i16,
-                &3_i16,
+                &5_i16,
+                &5_i16,
+                &5_i16,
+                &5_i16,
+                &5_i16,
                 &legacy_manifest.manifest_sha256().as_str(),
             ],
         )
@@ -1183,8 +2160,8 @@ fn advance_compatibility_from_v2<C: GenericClient>(
     let updated = client
         .execute(
             "UPDATE ONLY control.schema_compatibility \
-             SET manifest_sha256 = $1, current_schema_version = 3, \
-                 min_reader = 3, max_reader = 3, min_writer = 3, max_writer = 3, \
+             SET manifest_sha256 = $1, current_schema_version = 5, \
+                 min_reader = 5, max_reader = 5, min_writer = 5, max_writer = 5, \
                  updated_at = clock_timestamp() \
              WHERE singleton = true \
                AND manifest_sha256 = $2 \
@@ -1194,6 +2171,70 @@ fn advance_compatibility_from_v2<C: GenericClient>(
             &[
                 &current_manifest.manifest_sha256().as_str(),
                 &store_v2_manifest.manifest_sha256().as_str(),
+            ],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?;
+    if updated != 1 {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    Ok(())
+}
+
+fn advance_compatibility_from_v3<C: GenericClient>(
+    client: &mut C,
+    v3_manifest: &ManifestEvidence,
+    current_manifest: &ManifestEvidence,
+) -> Result<(), PostgresStoreSetupError> {
+    let updated = client
+        .execute(
+            "UPDATE ONLY control.schema_compatibility \
+             SET manifest_sha256 = $1, current_schema_version = 5, \
+                 min_reader = 5, max_reader = 5, min_writer = 5, max_writer = 5, \
+                 updated_at = clock_timestamp() \
+             WHERE singleton = true \
+               AND manifest_sha256 = $2 \
+               AND current_schema_version = 3 \
+               AND min_reader = 3 AND max_reader = 3 \
+               AND min_writer = 3 AND max_writer = 3",
+            &[
+                &current_manifest.manifest_sha256().as_str(),
+                &v3_manifest.manifest_sha256().as_str(),
+            ],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?;
+    if updated != 1 {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    Ok(())
+}
+
+fn advance_compatibility_from_v4<C: GenericClient>(
+    client: &mut C,
+    v4_manifest: &ManifestEvidence,
+    current_manifest: &ManifestEvidence,
+) -> Result<(), PostgresStoreSetupError> {
+    let updated = client
+        .execute(
+            "UPDATE ONLY control.schema_compatibility \
+             SET manifest_sha256 = $1, current_schema_version = 5, \
+                 min_reader = 5, max_reader = 5, min_writer = 5, max_writer = 5, \
+                 updated_at = clock_timestamp() \
+             WHERE singleton = true \
+               AND manifest_sha256 = $2 \
+               AND current_schema_version = 4 \
+               AND min_reader = 4 AND max_reader = 4 \
+               AND min_writer = 4 AND max_writer = 4",
+            &[
+                &current_manifest.manifest_sha256().as_str(),
+                &v4_manifest.manifest_sha256().as_str(),
             ],
         )
         .map_err(|error| {
@@ -1275,11 +2316,70 @@ fn verify_catalog<C: GenericClient>(
     role: DatabaseRole,
     server_version_num: u32,
 ) -> Result<PostgresSchemaEvidence, PostgresStoreSetupError> {
-    let current_profile = classify_current_v3_catalog_profile(client)?;
+    let current_profile = classify_current_catalog_profile(client, POSTGRES_SCHEMA_VERSION)?;
+    if matches!(
+        current_profile,
+        CatalogProfile::V5CodebaseMemoryV2UpgradePending
+            | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+    ) && role != DatabaseRole::Migrator
+    {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
     verify_schema_objects(client, current_profile)?;
+    verify_autonomy_receipt_profile(client)?;
     verify_history(client)?;
     verify_compatibility(client, manifest, current_profile)?;
     let database_uuid = read_database_identity(client, target)?;
+    match current_profile {
+        CatalogProfile::V5CodebaseMemoryV2UpgradePending => {
+            verify_codebase_memory_v2_identity(client, target)?;
+        }
+        CatalogProfile::V5CodebaseMemoryV3Current => {
+            verify_codebase_memory_v3_identity_for_role(client, target, manifest, role)?;
+        }
+        CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending => {
+            verify_codebase_memory_v2_identity(client, target)?;
+            verify_writer_lease_v2_identity_for_role(
+                client,
+                target,
+                manifest,
+                role,
+                WriterLeaseV2RuntimeProfile::Bridge,
+            )?;
+        }
+        CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending => {
+            verify_codebase_memory_v3_identity_for_role(client, target, manifest, role)?;
+            verify_writer_lease_v2_identity_for_role(
+                client,
+                target,
+                manifest,
+                role,
+                WriterLeaseV2RuntimeProfile::Bridge,
+            )?;
+        }
+        CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => {
+            verify_codebase_memory_v3_identity_for_role(client, target, manifest, role)?;
+            verify_writer_lease_v2_identity_for_role(
+                client,
+                target,
+                manifest,
+                role,
+                WriterLeaseV2RuntimeProfile::Current,
+            )?;
+        }
+        CatalogProfile::PreSchema
+        | CatalogProfile::V1
+        | CatalogProfile::V2
+        | CatalogProfile::V3
+        | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+        | CatalogProfile::V4
+        | CatalogProfile::V5 => {}
+    }
     verify_stopped_admission(client)?;
     verify_roles_and_grants(client, current_profile)?;
 
@@ -1291,6 +2391,124 @@ fn verify_catalog<C: GenericClient>(
         role,
         bootstrap_admission: BootstrapAdmission::StoppedNoLeader,
     })
+}
+
+fn verify_autonomy_receipt_profile<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), PostgresStoreSetupError> {
+    verify_autonomy_receipt_catalog_signature(client)?;
+    let table = client
+        .query_one(
+            "SELECT owner.rolname, c.relkind::text, c.relpersistence::text, \
+                    c.relhassubclass, c.relispartition, \
+                    (SELECT count(*) FROM pg_attribute a \
+                      WHERE a.attrelid = c.oid AND a.attnum > 0), \
+                    (SELECT count(*) FROM pg_constraint con \
+                      WHERE con.conrelid = c.oid), \
+                    (SELECT count(*) FROM pg_trigger tr \
+                      WHERE tr.tgrelid = c.oid AND NOT tr.tgisinternal), \
+                    (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid) \
+               FROM pg_class c \
+               JOIN pg_namespace n ON n.oid = c.relnamespace \
+               JOIN pg_roles owner ON owner.oid = c.relowner \
+              WHERE n.nspname = 'control' \
+                AND c.relname = 'task_ledger_autonomy_receipts'",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    if row_value::<String>(&table, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?
+        != DatabaseRole::Migrator.as_str()
+        || row_value::<String>(&table, 1, PostgresStoreSetupErrorKind::CorruptCatalog)? != "r"
+        || row_value::<String>(&table, 2, PostgresStoreSetupErrorKind::CorruptCatalog)? != "p"
+        || row_value::<bool>(&table, 3, PostgresStoreSetupErrorKind::CorruptCatalog)?
+        || row_value::<bool>(&table, 4, PostgresStoreSetupErrorKind::CorruptCatalog)?
+        || row_value::<i64>(&table, 5, PostgresStoreSetupErrorKind::CorruptCatalog)? != 28
+        || row_value::<i64>(&table, 6, PostgresStoreSetupErrorKind::CorruptCatalog)? != 10
+        || row_value::<i64>(&table, 7, PostgresStoreSetupErrorKind::CorruptCatalog)? != 0
+        || row_value::<i64>(&table, 8, PostgresStoreSetupErrorKind::CorruptCatalog)? != 0
+    {
+        return Err(catalog_error());
+    }
+    let rows = client
+        .query(
+            "SELECT n.nspname || '.' || p.proname || '(' || \
+                    replace(pg_catalog.oidvectortypes(p.proargtypes), ' ', '') || ')', \
+                    pg_get_userbyid(p.proowner), p.prosecdef, p.proleakproof, \
+                    COALESCE(array_to_string(p.proconfig, ','), '<NULL>'), \
+                    has_function_privilege('public', p.oid, 'EXECUTE'), \
+                    has_function_privilege('lattice_runtime', p.oid, 'EXECUTE') \
+               FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+              WHERE n.nspname = 'control' AND p.proname IN ( \
+                    'task_ledger_record_autonomy_receipt_v1', \
+                    'task_ledger_read_autonomy_receipts_v1') \
+              ORDER BY p.proname",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    let expected = BTreeSet::from([
+        TASK_LEDGER_RECORD_AUTONOMY_RECEIPT_V1_IDENTITY.to_owned(),
+        TASK_LEDGER_READ_AUTONOMY_RECEIPTS_V1_IDENTITY.to_owned(),
+    ]);
+    let mut actual = BTreeSet::new();
+    for row in &rows {
+        actual.insert(row_value::<String>(
+            row,
+            0,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        )?);
+        if row_value::<String>(row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            != DatabaseRole::Migrator.as_str()
+            || !row_value::<bool>(row, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            || row_value::<bool>(row, 3, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            || row_value::<String>(row, 4, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != "search_path=pg_catalog,row_security=on,lock_timeout=5s,statement_timeout=30s"
+            || row_value::<bool>(row, 5, PostgresStoreSetupErrorKind::PermissionDenied)?
+            || !row_value::<bool>(row, 6, PostgresStoreSetupErrorKind::PermissionDenied)?
+        {
+            return Err(catalog_error());
+        }
+    }
+    if actual != expected {
+        return Err(catalog_error());
+    }
+    for role in [
+        DatabaseRole::Runtime,
+        DatabaseRole::Guardian,
+        DatabaseRole::ReadOnly,
+    ] {
+        let privileges = client
+            .query_one(
+                "SELECT has_table_privilege($1, \
+                    'control.task_ledger_autonomy_receipts', \
+                    'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')",
+                &[&role.as_str()],
+            )
+            .map_err(|error| {
+                map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
+            })?;
+        if row_value::<bool>(
+            &privileges,
+            0,
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        )? {
+            return Err(permission_error());
+        }
+    }
+    Ok(())
+}
+
+fn verify_autonomy_receipt_catalog_signature<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), PostgresStoreSetupError> {
+    let signature = catalog_signature(
+        client,
+        AUTONOMY_PROFILE_SIGNATURE_SQL,
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    )?;
+    if signature != AUTONOMY_PROFILE_SIGNATURE {
+        return Err(catalog_error());
+    }
+    Ok(())
 }
 
 fn verify_v1_upgrade_source<C: GenericClient>(
@@ -1338,6 +2556,685 @@ fn verify_v2_upgrade_source<C: GenericClient>(
     read_database_identity(client, target)?;
     verify_stopped_admission(client)?;
     verify_roles_and_grants(client, CatalogProfile::V2)
+}
+
+fn verify_v3_upgrade_source<C: GenericClient>(
+    client: &mut C,
+    v3_manifest: &ManifestEvidence,
+    target: &MigrationTarget,
+) -> Result<(), PostgresStoreSetupError> {
+    client
+        .batch_execute(
+            "LOCK TABLE control.runtime_admission IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.physical_heads IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.terminal_transactions IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_streams IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_commands IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_events IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_outbox IN ACCESS EXCLUSIVE MODE",
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+        })?;
+    let mut profile = classify_current_catalog_profile(client, 3)?;
+    if v3_upgrade_source_has_memory(profile)? {
+        client
+            .batch_execute(
+                "LOCK TABLE memory.codebase_memory_analyses IN ACCESS EXCLUSIVE MODE; \
+                 LOCK TABLE memory.codebase_memory_extension_identity IN ACCESS EXCLUSIVE MODE; \
+                 LOCK TABLE memory.codebase_memory_extension_ledger IN ACCESS EXCLUSIVE MODE; \
+                 LOCK TABLE memory.codebase_memory_receipts IN ACCESS EXCLUSIVE MODE; \
+                 LOCK TABLE memory.codebase_memory_records IN ACCESS EXCLUSIVE MODE; \
+                 LOCK TABLE memory.codebase_memory_reflections IN ACCESS EXCLUSIVE MODE; \
+                 LOCK TABLE memory.codebase_memory_retrieval_audits IN ACCESS EXCLUSIVE MODE; \
+                 LOCK TABLE memory.openclaw_gateway_commands IN ACCESS EXCLUSIVE MODE",
+            )
+            .map_err(|error| {
+                map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+            })?;
+        if profile == CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge {
+            client
+                .batch_execute(
+                    "LOCK TABLE writer_lease.writer_lease_commands IN ACCESS EXCLUSIVE MODE; \
+                     LOCK TABLE writer_lease.writer_lease_extension_identity IN ACCESS EXCLUSIVE MODE; \
+                     LOCK TABLE writer_lease.writer_lease_extension_ledger IN ACCESS EXCLUSIVE MODE; \
+                     LOCK TABLE writer_lease.writer_lease_heads IN ACCESS EXCLUSIVE MODE; \
+                     LOCK TABLE writer_lease.writer_lease_transitions IN ACCESS EXCLUSIVE MODE",
+                )
+                .map_err(|error| {
+                    map_postgres_error(
+                        &error,
+                        PostgresStoreSetupErrorKind::TransactionFailed,
+                    )
+                })?;
+        }
+        let expected_profile = profile;
+        profile = classify_current_catalog_profile(client, 3)?;
+        if profile != expected_profile {
+            return Err(PostgresStoreSetupError::new(
+                PostgresStoreSetupErrorKind::CompatibilityMismatch,
+            ));
+        }
+    }
+    verify_schema_objects_with_contract(client, profile, true)?;
+    let rows = read_history_rows(client)?;
+    verify_history_rows(&rows, &migration_manifest()[..4])?;
+    verify_compatibility(client, v3_manifest, profile)?;
+    read_database_identity(client, target)?;
+    if profile == CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge {
+        verify_codebase_memory_v2_identity(client, target)?;
+        verify_writer_lease_v2_identity_and_ledger(
+            client,
+            target,
+            v3_manifest,
+            WriterLeaseV2RuntimeProfile::Bridge,
+        )?;
+    }
+    verify_stopped_admission(client)?;
+    verify_roles_and_grants_with_contract(client, profile, true)
+}
+
+fn v3_upgrade_source_has_memory(profile: CatalogProfile) -> Result<bool, PostgresStoreSetupError> {
+    match profile {
+        CatalogProfile::V3 => Ok(false),
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => Ok(true),
+        CatalogProfile::PreSchema
+        | CatalogProfile::V1
+        | CatalogProfile::V2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V4
+        | CatalogProfile::V5
+        | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => Err(
+            PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::CompatibilityMismatch),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+#[derive(Clone, Copy)]
+struct CodebaseMemoryIdentityProfile<'a> {
+    extension_id: &'a str,
+    extension_schema_version: i16,
+    extension_path: &'a str,
+    extension_sql_sha256: &'a str,
+    extension_manifest_sha256: &'a str,
+    database_uuid: &'a str,
+    database_identity_sha256: &'a str,
+    global_schema_version: i16,
+    global_manifest_sha256: &'a str,
+}
+
+fn codebase_memory_identity_profile_matches(
+    actual: CodebaseMemoryIdentityProfile<'_>,
+    expected: CodebaseMemoryIdentityProfile<'_>,
+) -> bool {
+    actual.extension_id == expected.extension_id
+        && actual.extension_schema_version == expected.extension_schema_version
+        && actual.extension_path == expected.extension_path
+        && actual.extension_sql_sha256 == expected.extension_sql_sha256
+        && actual.extension_manifest_sha256 == expected.extension_manifest_sha256
+        && actual.database_uuid == expected.database_uuid
+        && actual.database_identity_sha256 == expected.database_identity_sha256
+        && actual.global_schema_version == expected.global_schema_version
+        && actual.global_manifest_sha256 == expected.global_manifest_sha256
+}
+
+// Keep the singleton and ledger-row comparisons together so a historical
+// profile cannot pass after only one side of its frozen identity is checked.
+#[allow(clippy::too_many_lines)]
+fn verify_codebase_memory_v2_identity<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+) -> Result<(), PostgresStoreSetupError> {
+    let identities = client
+        .query(
+            "SELECT extension_id::text, extension_schema_version, extension_path::text, \
+                    btrim(extension_sql_sha256)::text, \
+                    btrim(extension_manifest_sha256)::text, database_uuid::text, \
+                    btrim(database_identity_sha256)::text, global_schema_version, \
+                    btrim(global_manifest_sha256)::text \
+               FROM ONLY memory.codebase_memory_extension_identity \
+              WHERE singleton",
+            &[],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?;
+    if identities.len() != 1 {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    let identity = &identities[0];
+    if row_value::<String>(
+        identity,
+        0,
+        PostgresStoreSetupErrorKind::CompatibilityMismatch,
+    )? != CODEBASE_MEMORY_EXTENSION_ID
+        || row_value::<i16>(
+            identity,
+            1,
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        )? != CODEBASE_MEMORY_V2_SCHEMA_VERSION
+        || row_value::<String>(
+            identity,
+            2,
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        )? != CODEBASE_MEMORY_V2_PATH
+        || row_value::<String>(
+            identity,
+            3,
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        )? != CODEBASE_MEMORY_V2_SQL_SHA256
+        || row_value::<String>(
+            identity,
+            4,
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        )? != CODEBASE_MEMORY_V2_MANIFEST_SHA256
+        || row_value::<String>(
+            identity,
+            5,
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        )? != target.expected_database_uuid()
+        || row_value::<String>(
+            identity,
+            6,
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        )? != target.expected_database_identity_sha256().as_str()
+        || row_value::<i16>(
+            identity,
+            7,
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        )? != CODEBASE_MEMORY_V2_GLOBAL_SCHEMA_VERSION
+        || row_value::<String>(
+            identity,
+            8,
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        )? != CODEBASE_MEMORY_V2_GLOBAL_MANIFEST_SHA256
+    {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+
+    let ledger = client
+        .query(
+            "SELECT ledger_ordinal, singleton, extension_id::text, \
+                    extension_schema_version, btrim(extension_sql_sha256)::text, \
+                    btrim(extension_manifest_sha256)::text, database_uuid::text, \
+                    btrim(database_identity_sha256)::text, global_schema_version, \
+                    btrim(global_manifest_sha256)::text, event_kind::text \
+               FROM ONLY memory.codebase_memory_extension_ledger \
+              ORDER BY ledger_ordinal",
+            &[],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?;
+    if ledger.len() != 1 {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    let row = &ledger[0];
+    if row_value::<i16>(row, 0, PostgresStoreSetupErrorKind::CompatibilityMismatch)? != 1
+        || !row_value::<bool>(row, 1, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+        || row_value::<String>(row, 2, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+            != CODEBASE_MEMORY_EXTENSION_ID
+        || row_value::<i16>(row, 3, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+            != CODEBASE_MEMORY_V2_SCHEMA_VERSION
+        || row_value::<String>(row, 4, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+            != CODEBASE_MEMORY_V2_SQL_SHA256
+        || row_value::<String>(row, 5, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+            != CODEBASE_MEMORY_V2_MANIFEST_SHA256
+        || row_value::<String>(row, 6, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+            != target.expected_database_uuid()
+        || row_value::<String>(row, 7, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+            != target.expected_database_identity_sha256().as_str()
+        || row_value::<i16>(row, 8, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+            != CODEBASE_MEMORY_V2_GLOBAL_SCHEMA_VERSION
+        || row_value::<String>(row, 9, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+            != CODEBASE_MEMORY_V2_GLOBAL_MANIFEST_SHA256
+        || row_value::<String>(row, 10, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+            != "INSTALLED"
+    {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    Ok(())
+}
+
+fn verify_codebase_memory_v3_identity_for_role<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+    global_manifest: &ManifestEvidence,
+    role: DatabaseRole,
+) -> Result<(), PostgresStoreSetupError> {
+    if role == DatabaseRole::Migrator {
+        verify_codebase_memory_v3_identity(client, target, global_manifest)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_codebase_memory_v3_identity<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+    global_manifest: &ManifestEvidence,
+) -> Result<(), PostgresStoreSetupError> {
+    let identities = client
+        .query(
+            "SELECT extension_id::text, extension_schema_version, extension_path::text, \
+                    btrim(extension_sql_sha256)::text, \
+                    btrim(extension_manifest_sha256)::text, database_uuid::text, \
+                    btrim(database_identity_sha256)::text, global_schema_version, \
+                    btrim(global_manifest_sha256)::text \
+               FROM ONLY memory.codebase_memory_extension_identity \
+              WHERE singleton",
+            &[],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?;
+    if identities.len() != 1 {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    let row = &identities[0];
+    let extension_id =
+        row_value::<String>(row, 0, PostgresStoreSetupErrorKind::CompatibilityMismatch)?;
+    let extension_schema_version =
+        row_value::<i16>(row, 1, PostgresStoreSetupErrorKind::CompatibilityMismatch)?;
+    let extension_path =
+        row_value::<String>(row, 2, PostgresStoreSetupErrorKind::CompatibilityMismatch)?;
+    let extension_sql_sha256 =
+        row_value::<String>(row, 3, PostgresStoreSetupErrorKind::CompatibilityMismatch)?;
+    let extension_manifest_sha256 =
+        row_value::<String>(row, 4, PostgresStoreSetupErrorKind::CompatibilityMismatch)?;
+    let database_uuid =
+        row_value::<String>(row, 5, PostgresStoreSetupErrorKind::CompatibilityMismatch)?;
+    let database_identity_sha256 =
+        row_value::<String>(row, 6, PostgresStoreSetupErrorKind::CompatibilityMismatch)?;
+    let global_schema_version =
+        row_value::<i16>(row, 7, PostgresStoreSetupErrorKind::CompatibilityMismatch)?;
+    let global_manifest_sha256 =
+        row_value::<String>(row, 8, PostgresStoreSetupErrorKind::CompatibilityMismatch)?;
+    let actual = CodebaseMemoryIdentityProfile {
+        extension_id: &extension_id,
+        extension_schema_version,
+        extension_path: &extension_path,
+        extension_sql_sha256: &extension_sql_sha256,
+        extension_manifest_sha256: &extension_manifest_sha256,
+        database_uuid: &database_uuid,
+        database_identity_sha256: &database_identity_sha256,
+        global_schema_version,
+        global_manifest_sha256: &global_manifest_sha256,
+    };
+    let expected = CodebaseMemoryIdentityProfile {
+        extension_id: CODEBASE_MEMORY_EXTENSION_ID,
+        extension_schema_version: CODEBASE_MEMORY_V3_SCHEMA_VERSION,
+        extension_path: CODEBASE_MEMORY_V3_PATH,
+        extension_sql_sha256: CODEBASE_MEMORY_V3_SQL_SHA256,
+        extension_manifest_sha256: CODEBASE_MEMORY_V3_MANIFEST_SHA256,
+        database_uuid: target.expected_database_uuid(),
+        database_identity_sha256: target.expected_database_identity_sha256().as_str(),
+        global_schema_version: CODEBASE_MEMORY_V3_GLOBAL_SCHEMA_VERSION,
+        global_manifest_sha256: global_manifest.manifest_sha256().as_str(),
+    };
+    if !codebase_memory_identity_profile_matches(actual, expected) {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+
+    let ledger = client
+        .query(
+            "SELECT ledger_ordinal, singleton, extension_id::text, \
+                    extension_schema_version, btrim(extension_sql_sha256)::text, \
+                    btrim(extension_manifest_sha256)::text, database_uuid::text, \
+                    btrim(database_identity_sha256)::text, global_schema_version, \
+                    btrim(global_manifest_sha256)::text, event_kind::text \
+               FROM ONLY memory.codebase_memory_extension_ledger \
+              ORDER BY ledger_ordinal",
+            &[],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?;
+    if ledger.len() != 2 {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    let expected_ledger = [
+        (
+            1_i16,
+            CODEBASE_MEMORY_V2_SCHEMA_VERSION,
+            CODEBASE_MEMORY_V2_SQL_SHA256,
+            CODEBASE_MEMORY_V2_MANIFEST_SHA256,
+            CODEBASE_MEMORY_V2_GLOBAL_SCHEMA_VERSION,
+            CODEBASE_MEMORY_V2_GLOBAL_MANIFEST_SHA256,
+            "INSTALLED",
+        ),
+        (
+            2_i16,
+            CODEBASE_MEMORY_V3_SCHEMA_VERSION,
+            CODEBASE_MEMORY_V3_SQL_SHA256,
+            CODEBASE_MEMORY_V3_MANIFEST_SHA256,
+            CODEBASE_MEMORY_V3_GLOBAL_SCHEMA_VERSION,
+            global_manifest.manifest_sha256().as_str(),
+            "UPGRADED",
+        ),
+    ];
+    for (row, expected) in ledger.iter().zip(expected_ledger) {
+        if row_value::<i16>(row, 0, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+            != expected.0
+            || !row_value::<bool>(row, 1, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+            || row_value::<String>(row, 2, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+                != CODEBASE_MEMORY_EXTENSION_ID
+            || row_value::<i16>(row, 3, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+                != expected.1
+            || row_value::<String>(row, 4, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+                != expected.2
+            || row_value::<String>(row, 5, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+                != expected.3
+            || row_value::<String>(row, 6, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+                != target.expected_database_uuid()
+            || row_value::<String>(row, 7, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+                != target.expected_database_identity_sha256().as_str()
+            || row_value::<i16>(row, 8, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+                != expected.4
+            || row_value::<String>(row, 9, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+                != expected.5
+            || row_value::<String>(row, 10, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+                != expected.6
+        {
+            return Err(PostgresStoreSetupError::new(
+                PostgresStoreSetupErrorKind::CompatibilityMismatch,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_writer_lease_v2_identity_for_role<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+    global_manifest: &ManifestEvidence,
+    role: DatabaseRole,
+    runtime: WriterLeaseV2RuntimeProfile,
+) -> Result<(), PostgresStoreSetupError> {
+    if role == DatabaseRole::Migrator {
+        verify_writer_lease_v2_identity_and_ledger(client, target, global_manifest, runtime)?;
+    }
+    Ok(())
+}
+
+fn verify_writer_lease_v2_identity_and_ledger<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+    global_manifest: &ManifestEvidence,
+    runtime: WriterLeaseV2RuntimeProfile,
+) -> Result<(), PostgresStoreSetupError> {
+    let identities = client
+        .query(
+            "SELECT pg_catalog.concat_ws('|', i.extension_id, i.extension_schema_version, \
+                    i.extension_path, pg_catalog.btrim(i.extension_sql_sha256), \
+                    pg_catalog.btrim(i.extension_manifest_sha256), i.database_uuid, \
+                    pg_catalog.btrim(i.database_identity_sha256), i.global_schema_version, \
+                    pg_catalog.btrim(i.global_manifest_sha256), \
+                    i.required_memory_schema_version, \
+                    pg_catalog.btrim(i.required_memory_manifest_sha256))::text \
+               FROM ONLY writer_lease.writer_lease_extension_identity i \
+              ORDER BY i.singleton",
+            &[],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?;
+    if identities.len() != 1 {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    let (
+        identity_global_version,
+        identity_global_manifest,
+        identity_memory_version,
+        identity_memory_manifest,
+    ) = match runtime {
+        WriterLeaseV2RuntimeProfile::Bridge => (
+            3_i16,
+            CODEBASE_MEMORY_V2_GLOBAL_MANIFEST_SHA256,
+            CODEBASE_MEMORY_V2_SCHEMA_VERSION,
+            CODEBASE_MEMORY_V2_MANIFEST_SHA256,
+        ),
+        WriterLeaseV2RuntimeProfile::Current => (
+            i16::try_from(POSTGRES_SCHEMA_VERSION).map_err(|_| {
+                PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::CompatibilityMismatch)
+            })?,
+            global_manifest.manifest_sha256().as_str(),
+            CODEBASE_MEMORY_V3_SCHEMA_VERSION,
+            CODEBASE_MEMORY_V3_MANIFEST_SHA256,
+        ),
+    };
+    let expected_identity = writer_lease_identity_shape(
+        target,
+        identity_global_version,
+        identity_global_manifest,
+        identity_memory_version,
+        identity_memory_manifest,
+    );
+    if row_value::<String>(
+        &identities[0],
+        0,
+        PostgresStoreSetupErrorKind::CompatibilityMismatch,
+    )? != expected_identity
+    {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+
+    verify_writer_lease_v2_ledger(client, target, global_manifest, runtime)
+}
+
+fn verify_writer_lease_v2_ledger<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+    global_manifest: &ManifestEvidence,
+    runtime: WriterLeaseV2RuntimeProfile,
+) -> Result<(), PostgresStoreSetupError> {
+    let ledger = client
+        .query(
+            "SELECT pg_catalog.concat_ws('|', l.ledger_ordinal, l.singleton, l.extension_id, \
+                    l.extension_schema_version, pg_catalog.btrim(l.extension_sql_sha256), \
+                    pg_catalog.btrim(l.extension_manifest_sha256), l.database_uuid, \
+                    pg_catalog.btrim(l.database_identity_sha256), l.global_schema_version, \
+                    pg_catalog.btrim(l.global_manifest_sha256), \
+                    l.required_memory_schema_version, \
+                    pg_catalog.btrim(l.required_memory_manifest_sha256), l.event_kind)::text \
+               FROM ONLY writer_lease.writer_lease_extension_ledger l \
+              ORDER BY l.ledger_ordinal",
+            &[],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?
+        .into_iter()
+        .map(|row| row_value::<String>(&row, 0, PostgresStoreSetupErrorKind::CompatibilityMismatch))
+        .collect::<Result<Vec<_>, _>>()?;
+    let historical_v1 = writer_lease_ledger_shape(
+        1,
+        target,
+        WRITER_LEASE_V1_SCHEMA_VERSION,
+        WRITER_LEASE_V1_SQL_SHA256,
+        WRITER_LEASE_V1_MANIFEST_SHA256,
+        3,
+        CODEBASE_MEMORY_V2_GLOBAL_MANIFEST_SHA256,
+        CODEBASE_MEMORY_V2_SCHEMA_VERSION,
+        CODEBASE_MEMORY_V2_MANIFEST_SHA256,
+        "INSTALLED",
+    );
+    let bridge = writer_lease_ledger_shape(
+        2,
+        target,
+        WRITER_LEASE_V2_SCHEMA_VERSION,
+        WRITER_LEASE_V2_SQL_SHA256,
+        WRITER_LEASE_V2_MANIFEST_SHA256,
+        3,
+        CODEBASE_MEMORY_V2_GLOBAL_MANIFEST_SHA256,
+        CODEBASE_MEMORY_V2_SCHEMA_VERSION,
+        CODEBASE_MEMORY_V2_MANIFEST_SHA256,
+        "UPGRADED",
+    );
+    let expected_bridge = vec![historical_v1.clone(), bridge.clone()];
+    if runtime == WriterLeaseV2RuntimeProfile::Bridge {
+        if ledger.len() != WRITER_LEASE_V2_BRIDGE_LEDGER_PROFILE.split(',').count()
+            || ledger != expected_bridge
+        {
+            return Err(PostgresStoreSetupError::new(
+                PostgresStoreSetupErrorKind::CompatibilityMismatch,
+            ));
+        }
+        return Ok(());
+    }
+    let current = writer_lease_ledger_shape(
+        1,
+        target,
+        WRITER_LEASE_V2_SCHEMA_VERSION,
+        WRITER_LEASE_V2_SQL_SHA256,
+        WRITER_LEASE_V2_MANIFEST_SHA256,
+        i16::try_from(POSTGRES_SCHEMA_VERSION).map_err(|_| {
+            PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?,
+        global_manifest.manifest_sha256().as_str(),
+        CODEBASE_MEMORY_V3_SCHEMA_VERSION,
+        CODEBASE_MEMORY_V3_MANIFEST_SHA256,
+        "INSTALLED",
+    );
+    let rebound = writer_lease_ledger_shape(
+        3,
+        target,
+        WRITER_LEASE_V2_SCHEMA_VERSION,
+        WRITER_LEASE_V2_SQL_SHA256,
+        WRITER_LEASE_V2_MANIFEST_SHA256,
+        i16::try_from(POSTGRES_SCHEMA_VERSION).map_err(|_| {
+            PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?,
+        global_manifest.manifest_sha256().as_str(),
+        CODEBASE_MEMORY_V3_SCHEMA_VERSION,
+        CODEBASE_MEMORY_V3_MANIFEST_SHA256,
+        "REBOUND",
+    );
+    let upgraded = vec![historical_v1, bridge, rebound];
+    if ledger != [current]
+        && (ledger.len() != WRITER_LEASE_V2_UPGRADED_LEDGER_PROFILE.split(',').count()
+            || ledger != upgraded)
+    {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    Ok(())
+}
+
+fn writer_lease_identity_shape(
+    target: &MigrationTarget,
+    global_version: i16,
+    global_manifest: &str,
+    memory_version: i16,
+    memory_manifest: &str,
+) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        WRITER_LEASE_EXTENSION_ID,
+        WRITER_LEASE_V2_SCHEMA_VERSION,
+        WRITER_LEASE_V2_PATH,
+        WRITER_LEASE_V2_SQL_SHA256,
+        WRITER_LEASE_V2_MANIFEST_SHA256,
+        target.expected_database_uuid(),
+        target.expected_database_identity_sha256().as_str(),
+        global_version,
+        global_manifest,
+        memory_version,
+        memory_manifest,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn writer_lease_ledger_shape(
+    ordinal: i16,
+    target: &MigrationTarget,
+    extension_version: i16,
+    extension_sql: &str,
+    extension_manifest: &str,
+    global_version: i16,
+    global_manifest: &str,
+    memory_version: i16,
+    memory_manifest: &str,
+    event: &str,
+) -> String {
+    format!(
+        "{}|t|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        ordinal,
+        WRITER_LEASE_EXTENSION_ID,
+        extension_version,
+        extension_sql,
+        extension_manifest,
+        target.expected_database_uuid(),
+        target.expected_database_identity_sha256().as_str(),
+        global_version,
+        global_manifest,
+        memory_version,
+        memory_manifest,
+        event,
+    )
+}
+
+fn verify_v4_upgrade_source<C: GenericClient>(
+    client: &mut C,
+    v4_manifest: &ManifestEvidence,
+    target: &MigrationTarget,
+) -> Result<(), PostgresStoreSetupError> {
+    client
+        .batch_execute(
+            "LOCK TABLE control.runtime_admission IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.physical_heads IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.terminal_transactions IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_streams IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_commands IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_events IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_outbox IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.project_registry_state IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.project_registry_projects IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.project_registry_commands IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.project_registry_identity_reservations IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.project_registry_observations IN ACCESS EXCLUSIVE MODE",
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+        })?;
+    let profile = classify_current_catalog_profile(client, 4)?;
+    if profile != CatalogProfile::V4 {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    verify_schema_objects(client, profile)?;
+    let rows = read_history_rows(client)?;
+    verify_history_rows(&rows, &migration_manifest()[..5])?;
+    verify_compatibility(client, v4_manifest, profile)?;
+    read_database_identity(client, target)?;
+    verify_stopped_admission(client)?;
+    verify_roles_and_grants(client, profile)
 }
 
 fn verify_v1_store_empty<C: GenericClient>(client: &mut C) -> Result<(), PostgresStoreSetupError> {
@@ -1390,7 +3287,17 @@ fn verify_compatibility<C: GenericClient>(
     let expected_versions = match profile {
         CatalogProfile::V1 => [1, 1, 1, 1, 1],
         CatalogProfile::V2 => [2, 2, 2, 2, 2],
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => [3, 3, 3, 3, 3],
+        CatalogProfile::V3
+        | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => [3, 3, 3, 3, 3],
+        CatalogProfile::V4 => [4, 4, 4, 4, 4],
+        CatalogProfile::V5
+        | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => [5, 5, 5, 5, 5],
         CatalogProfile::PreSchema => {
             return Err(PostgresStoreSetupError::new(
                 PostgresStoreSetupErrorKind::CompatibilityMismatch,
@@ -1596,21 +3503,662 @@ fn verify_schema_objects<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
 ) -> Result<(), PostgresStoreSetupError> {
-    verify_catalog_signatures(client, profile)?;
+    verify_schema_objects_with_contract(client, profile, false)
+}
+
+fn verify_schema_objects_with_contract<C: GenericClient>(
+    client: &mut C,
+    profile: CatalogProfile,
+    v3_prefix: bool,
+) -> Result<(), PostgresStoreSetupError> {
+    verify_catalog_signatures(client, profile, v3_prefix)?;
     verify_schema_headers(client, profile)?;
-    verify_forbidden_schema_objects(client, profile)?;
+    verify_forbidden_schema_objects(client, profile, v3_prefix)?;
     if matches!(
         profile,
-        CatalogProfile::V2 | CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2
+        CatalogProfile::V2
+            | CatalogProfile::V3
+            | CatalogProfile::V3CodebaseMemoryV2
+            | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+            | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+            | CatalogProfile::V4
+            | CatalogProfile::V5
+            | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+            | CatalogProfile::V5CodebaseMemoryV3Current
+            | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current
     ) {
-        verify_owned_function_boundary(client, profile)?;
+        verify_owned_function_boundary(client, profile, v3_prefix)?;
     }
-    verify_forbidden_namespace_objects(client)
+    if matches!(profile, CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1) {
+        verify_writer_lease_v1_profile(client)?;
+    }
+    match profile {
+        CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending => {
+            verify_writer_lease_v2_catalog(client, WriterLeaseV2RuntimeProfile::Bridge)?;
+        }
+        CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => {
+            verify_writer_lease_v2_catalog(client, WriterLeaseV2RuntimeProfile::Current)?;
+        }
+        CatalogProfile::PreSchema
+        | CatalogProfile::V1
+        | CatalogProfile::V2
+        | CatalogProfile::V3
+        | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V4
+        | CatalogProfile::V5
+        | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV3Current => {}
+    }
+    verify_forbidden_namespace_objects(client)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_writer_lease_v1_profile<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), PostgresStoreSetupError> {
+    let header = client
+        .query_one(
+            "SELECT owner.rolname, pg_catalog.obj_description(n.oid, 'pg_namespace') \
+               FROM pg_catalog.pg_namespace n \
+               JOIN pg_catalog.pg_roles owner ON owner.oid = n.nspowner \
+              WHERE n.nspname = 'writer_lease'",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    if row_value::<String>(&header, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?
+        != DatabaseRole::Migrator.as_str()
+        || row_value::<Option<String>>(&header, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            .as_deref()
+            != Some("LATTICE_WRITER_LEASE_SCHEMA_V1")
+    {
+        return Err(catalog_error());
+    }
+
+    for (query, expected, error_kind) in WRITER_LEASE_V1_CATALOG_PROFILES {
+        if catalog_signature(client, query, error_kind)? != expected {
+            return Err(PostgresStoreSetupError::new(error_kind));
+        }
+    }
+
+    let closure = client
+        .query_one(
+            "SELECT \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger tr \
+               JOIN pg_catalog.pg_class c ON c.oid=tr.tgrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease' AND tr.tgisinternal \
+                AND tr.tgenabled='O' AND tr.tgconstraint<>0), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger tr \
+               JOIN pg_catalog.pg_class c ON c.oid=tr.tgrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease' AND NOT tr.tgisinternal), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_rewrite rw \
+               JOIN pg_catalog.pg_class c ON c.oid=rw.ev_class \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease'), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_policy p \
+               JOIN pg_catalog.pg_class c ON c.oid=p.polrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease'), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_inherits i \
+               JOIN pg_catalog.pg_class c ON c.oid=i.inhrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease'), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_default_acl d \
+               JOIN pg_catalog.pg_namespace n ON n.oid=d.defaclnamespace \
+              WHERE n.nspname='writer_lease'), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease' AND c.relkind NOT IN ('r','i')), \
+             ((SELECT pg_catalog.count(*) FROM pg_catalog.pg_collation x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.collnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_conversion x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.connamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_operator x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.oprnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_opclass x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.opcnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_opfamily x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.opfnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_statistic_ext x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.stxnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_config x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.cfgnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_dict x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.dictnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_parser x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.prsnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_template x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.tmplnamespace WHERE n.nspname='writer_lease')), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+               CROSS JOIN pg_catalog.pg_roles roles \
+              WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') \
+                AND NOT roles.rolsuper AND roles.rolname !~ '^pg_' \
+                AND roles.rolname <> 'lattice_migrator' \
+                AND pg_catalog.has_table_privilege(roles.rolname,c.oid, \
+                  'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               CROSS JOIN pg_catalog.pg_roles roles \
+              WHERE n.nspname='writer_lease' \
+                AND NOT roles.rolsuper AND roles.rolname !~ '^pg_' \
+                AND roles.rolname NOT IN ('lattice_migrator','lattice_runtime') \
+                AND pg_catalog.has_function_privilege(roles.rolname,p.oid,'EXECUTE')), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+              WHERE n.nspname='writer_lease' \
+                AND NOT pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE')), \
+             (NOT pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE') \
+               OR pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','CREATE') \
+               OR EXISTS (SELECT 1 FROM pg_catalog.pg_roles roles \
+                  WHERE NOT roles.rolsuper AND roles.rolname !~ '^pg_' \
+                    AND roles.rolname NOT IN ('lattice_migrator','lattice_runtime') \
+                    AND (pg_catalog.has_schema_privilege(roles.rolname,'writer_lease','USAGE') \
+                      OR pg_catalog.has_schema_privilege(roles.rolname,'writer_lease','CREATE'))))",
+            &[],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog)
+        })?;
+    for (index, expected) in [12_i64, 0, 0, 0, 0, 0, 0, 0].into_iter().enumerate() {
+        if row_value::<i64>(&closure, index, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            != expected
+        {
+            return Err(catalog_error());
+        }
+    }
+    for index in 8..=10 {
+        if row_value::<i64>(
+            &closure,
+            index,
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        )? != 0
+        {
+            return Err(permission_error());
+        }
+    }
+    if row_value::<bool>(&closure, 11, PostgresStoreSetupErrorKind::PermissionDenied)? {
+        return Err(permission_error());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_writer_lease_v2_catalog<C: GenericClient>(
+    client: &mut C,
+    runtime: WriterLeaseV2RuntimeProfile,
+) -> Result<(), PostgresStoreSetupError> {
+    if WRITER_LEASE_V1_SQL.len() != 44_366
+        || hex_digest(Sha256::digest(WRITER_LEASE_V1_SQL.as_bytes()).as_ref())
+            != WRITER_LEASE_V1_SQL_SHA256
+        || WRITER_LEASE_V2_SQL.len() != 22_985
+        || hex_digest(Sha256::digest(WRITER_LEASE_V2_SQL.as_bytes()).as_ref())
+            != WRITER_LEASE_V2_SQL_SHA256
+    {
+        return Err(catalog_error());
+    }
+    let catalog_profiles = match runtime {
+        WriterLeaseV2RuntimeProfile::Bridge => &WRITER_LEASE_V2_BRIDGE_CATALOG_PROFILES,
+        WriterLeaseV2RuntimeProfile::Current => &WRITER_LEASE_V2_CURRENT_CATALOG_PROFILES,
+    };
+    for &(query, expected, error_kind) in catalog_profiles {
+        if catalog_signature(client, query, error_kind)? != expected {
+            return Err(PostgresStoreSetupError::new(error_kind));
+        }
+    }
+    let expected_runtime_functions = match runtime {
+        WriterLeaseV2RuntimeProfile::Bridge => 0_i64,
+        WriterLeaseV2RuntimeProfile::Current => 7_i64,
+    };
+    let expected_runtime_usage = runtime == WriterLeaseV2RuntimeProfile::Current;
+    let header = client
+        .query_one(
+            "SELECT \
+             (SELECT count(*) FROM pg_catalog.pg_namespace n \
+               JOIN pg_catalog.pg_roles owner ON owner.oid=n.nspowner \
+              WHERE n.nspname='writer_lease' AND owner.rolname='lattice_migrator'), \
+             (SELECT count(*) FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+               JOIN pg_catalog.pg_roles owner ON owner.oid=c.relowner \
+              WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') \
+                AND owner.rolname='lattice_migrator'), \
+             (SELECT count(*) FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               JOIN pg_catalog.pg_roles owner ON owner.oid=p.proowner \
+              WHERE n.nspname='writer_lease' AND p.prosecdef \
+                AND owner.rolname='lattice_migrator'), \
+             (SELECT count(*) FROM pg_catalog.pg_constraint con \
+               JOIN pg_catalog.pg_namespace n ON n.oid=con.connamespace \
+              WHERE n.nspname='writer_lease'), \
+             (SELECT count(*) FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease' AND c.relkind='i'), \
+             (SELECT count(*) FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+              WHERE n.nspname='writer_lease' \
+                AND pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE')), \
+             (SELECT count(*) FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') \
+                AND pg_catalog.has_table_privilege('lattice_runtime',c.oid, \
+                    'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')), \
+             pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE'), \
+             pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','CREATE'), \
+             (SELECT pg_catalog.obj_description(n.oid,'pg_namespace') \
+                FROM pg_catalog.pg_namespace n WHERE n.nspname='writer_lease')",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    for (index, expected) in [1_i64, 5, 9, 27, 8, expected_runtime_functions, 0]
+        .into_iter()
+        .enumerate()
+    {
+        if row_value::<i64>(&header, index, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            != expected
+        {
+            return Err(catalog_error());
+        }
+    }
+    if row_value::<bool>(&header, 7, PostgresStoreSetupErrorKind::PermissionDenied)?
+        != expected_runtime_usage
+        || row_value::<bool>(&header, 8, PostgresStoreSetupErrorKind::PermissionDenied)?
+        || row_value::<Option<String>>(&header, 9, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            .as_deref()
+            != Some("LATTICE_WRITER_LEASE_SCHEMA_V2")
+    {
+        return Err(permission_error());
+    }
+
+    let relations = client
+        .query(
+            "SELECT c.relname::text || '|' || c.relkind::text || '|' || owner.rolname || '|' \
+                    || c.relpersistence::text || '|' || c.relrowsecurity::text || '|' \
+                    || c.relforcerowsecurity::text || '|' || c.relhassubclass::text || '|' \
+                    || c.relispartition::text || '|' || c.relreplident::text || '|' \
+                    || COALESCE(pg_catalog.array_to_string(c.reloptions,','),'<NULL>') || '|' \
+                    || COALESCE(pg_catalog.obj_description(c.oid,'pg_class'),'<NULL>') \
+               FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+               JOIN pg_catalog.pg_roles owner ON owner.oid=c.relowner \
+              WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') \
+              ORDER BY c.relname",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
+        .into_iter()
+        .map(|row| row_value::<String>(&row, 0, PostgresStoreSetupErrorKind::CorruptCatalog))
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected_relations = [
+        "writer_lease_commands|r|lattice_migrator|p|false|false|false|false|d|<NULL>|LATTICE_WRITER_LEASE_COMMANDS_V1",
+        "writer_lease_extension_identity|r|lattice_migrator|p|false|false|false|false|d|<NULL>|LATTICE_WRITER_LEASE_EXTENSION_IDENTITY_V2",
+        "writer_lease_extension_ledger|r|lattice_migrator|p|false|false|false|false|d|<NULL>|LATTICE_WRITER_LEASE_EXTENSION_LEDGER_V2",
+        "writer_lease_heads|r|lattice_migrator|p|false|false|false|false|d|<NULL>|LATTICE_WRITER_LEASE_HEADS_V1",
+        "writer_lease_transitions|r|lattice_migrator|p|false|false|false|false|d|<NULL>|LATTICE_WRITER_LEASE_TRANSITIONS_V1",
+    ];
+    if relations.iter().map(String::as_str).ne(expected_relations) {
+        return Err(catalog_error());
+    }
+
+    let constraints = client
+        .query(
+            "SELECT c.relname::text || '.' || con.conname || '|' || con.contype::text \
+               FROM pg_catalog.pg_constraint con \
+               JOIN pg_catalog.pg_namespace n ON n.oid=con.connamespace \
+               JOIN pg_catalog.pg_class c ON c.oid=con.conrelid \
+              WHERE n.nspname='writer_lease' \
+              ORDER BY c.relname,con.conname",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
+        .into_iter()
+        .map(|row| row_value::<String>(&row, 0, PostgresStoreSetupErrorKind::CorruptCatalog))
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected_constraints = [
+        "writer_lease_commands.writer_lease_commands_bytes|c",
+        "writer_lease_commands.writer_lease_commands_digests|c",
+        "writer_lease_commands.writer_lease_commands_id|c",
+        "writer_lease_commands.writer_lease_commands_id_unique|u",
+        "writer_lease_commands.writer_lease_commands_ordinal|c",
+        "writer_lease_commands.writer_lease_commands_outcome|c",
+        "writer_lease_commands.writer_lease_commands_pkey|p",
+        "writer_lease_commands.writer_lease_commands_project_fk|f",
+        "writer_lease_commands.writer_lease_commands_receipt_unique|u",
+        "writer_lease_extension_identity.writer_lease_extension_identity_hashes|c",
+        "writer_lease_extension_identity.writer_lease_extension_identity_pkey|p",
+        "writer_lease_extension_identity.writer_lease_extension_identity_profile|c",
+        "writer_lease_extension_identity.writer_lease_extension_identity_singleton|c",
+        "writer_lease_extension_ledger.writer_lease_extension_ledger_identity_fk|f",
+        "writer_lease_extension_ledger.writer_lease_extension_ledger_pkey|p",
+        "writer_lease_extension_ledger.writer_lease_extension_ledger_profile|c",
+        "writer_lease_extension_ledger.writer_lease_extension_ledger_singleton|c",
+        "writer_lease_heads.writer_lease_heads_command_tail|c",
+        "writer_lease_heads.writer_lease_heads_current_closed|c",
+        "writer_lease_heads.writer_lease_heads_pkey|p",
+        "writer_lease_heads.writer_lease_heads_project|c",
+        "writer_lease_heads.writer_lease_heads_snapshot|c",
+        "writer_lease_heads.writer_lease_heads_versions|c",
+        "writer_lease_transitions.writer_lease_transitions_command_fk|f",
+        "writer_lease_transitions.writer_lease_transitions_digest_unique|u",
+        "writer_lease_transitions.writer_lease_transitions_identity|c",
+        "writer_lease_transitions.writer_lease_transitions_pkey|p",
+    ];
+    if constraints
+        .iter()
+        .map(String::as_str)
+        .ne(expected_constraints)
+    {
+        return Err(catalog_error());
+    }
+
+    let indexes = client
+        .query(
+            "SELECT ix.relname::text FROM pg_catalog.pg_index i \
+               JOIN pg_catalog.pg_class ix ON ix.oid=i.indexrelid \
+               JOIN pg_catalog.pg_class tbl ON tbl.oid=i.indrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=tbl.relnamespace \
+               JOIN pg_catalog.pg_roles owner ON owner.oid=ix.relowner \
+              WHERE n.nspname='writer_lease' AND owner.rolname='lattice_migrator' \
+                AND i.indisvalid AND i.indisready AND i.indislive \
+                AND NOT i.indisclustered AND NOT i.indisreplident \
+              ORDER BY ix.relname",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
+        .into_iter()
+        .map(|row| row_value::<String>(&row, 0, PostgresStoreSetupErrorKind::CorruptCatalog))
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected_indexes = [
+        "writer_lease_commands_id_unique",
+        "writer_lease_commands_pkey",
+        "writer_lease_commands_receipt_unique",
+        "writer_lease_extension_identity_pkey",
+        "writer_lease_extension_ledger_pkey",
+        "writer_lease_heads_pkey",
+        "writer_lease_transitions_digest_unique",
+        "writer_lease_transitions_pkey",
+    ];
+    if indexes.iter().map(String::as_str).ne(expected_indexes) {
+        return Err(catalog_error());
+    }
+
+    for (query, expected, error_kind) in [
+        (
+            WRITER_LEASE_V1_COLUMN_PROFILE_SQL,
+            "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            WRITER_LEASE_V1_TABLE_ACL_PROFILE_SQL,
+            "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        ),
+        (
+            WRITER_LEASE_V1_COLUMN_ACL_PROFILE_SQL,
+            "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        ),
+        (
+            WRITER_LEASE_V1_TYPE_PROFILE_SQL,
+            "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+    ] {
+        if catalog_signature(client, query, error_kind)? != expected {
+            return Err(PostgresStoreSetupError::new(error_kind));
+        }
+    }
+
+    verify_writer_lease_v2_function_catalog(client, runtime)?;
+    verify_writer_lease_v2_function_sources(client)?;
+    verify_writer_lease_v2_acl_closure(client, runtime)?;
+    Ok(())
+}
+
+fn verify_writer_lease_v2_function_catalog<C: GenericClient>(
+    client: &mut C,
+    runtime: WriterLeaseV2RuntimeProfile,
+) -> Result<(), PostgresStoreSetupError> {
+    let observed = client
+        .query(
+            "SELECT p.proname::text || '(' || pg_catalog.oidvectortypes(p.proargtypes) \
+                    || ')|' || p.provolatile::text || '|' || p.proparallel::text || '|' \
+                    || pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE')::text \
+               FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               JOIN pg_catalog.pg_roles owner ON owner.oid=p.proowner \
+               JOIN pg_catalog.pg_language language ON language.oid=p.prolang \
+              WHERE n.nspname='writer_lease' AND owner.rolname='lattice_migrator' \
+                AND language.lanname='plpgsql' AND p.prokind='f' AND p.prosecdef \
+                AND NOT p.proleakproof AND NOT p.proisstrict \
+                AND p.pronargdefaults=0 \
+                AND pg_catalog.array_to_string(p.proconfig,',') = \
+                    'search_path=pg_catalog,row_security=on,lock_timeout=5s,statement_timeout=30s' \
+              ORDER BY p.proname",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
+        .into_iter()
+        .map(|row| row_value::<String>(&row, 0, PostgresStoreSetupErrorKind::CorruptCatalog))
+        .collect::<Result<Vec<_>, _>>()?;
+    let allowed = |name: &str| {
+        runtime == WriterLeaseV2RuntimeProfile::Current
+            && !matches!(
+                name,
+                "writer_lease_bind_runtime_v1" | "writer_lease_load_for_update_v1"
+            )
+    };
+    let expected = [
+        ("writer_lease_assert_current_v1", "text, text, text, text, bytea, text, text, text, text, bigint, bytea, text, bigint, bigint, bytea", "s", "s"),
+        ("writer_lease_bind_runtime_v1", "text, bigint, bytea, text, text, text, text, text", "s", "s"),
+        ("writer_lease_bind_runtime_v2", "text, bigint, bytea, text, text, text, text, text", "s", "s"),
+        ("writer_lease_commit_plan_v1", "text, bigint, bytea, bigint, bytea, text, bytea, text, text, bigint, bytea, bytea, bytea, bytea, bigint, bigint, bigint, bytea, text, bytea, text, text, text, bytea, text, text, text, text, bigint, bytea, text, bigint, bigint, text, bigint, text, bytea, bytea, bytea, bytea, bytea, text, text, bytea, bytea, bytea, text, bytea", "v", "u"),
+        ("writer_lease_load_commands_v1", "text", "s", "s"),
+        ("writer_lease_load_current_v1", "text", "s", "s"),
+        ("writer_lease_load_for_update_v1", "text, bytea, bytea, bytea, text", "v", "u"),
+        ("writer_lease_load_for_update_v2", "text, bytea, bytea, bytea, text", "v", "u"),
+        ("writer_lease_load_transitions_v1", "text", "s", "s"),
+    ]
+    .map(|(name, args, volatility, parallel)| {
+        format!("{name}({args})|{volatility}|{parallel}|{}", allowed(name))
+    });
+    if observed != expected {
+        return Err(catalog_error());
+    }
+    Ok(())
+}
+
+fn verify_writer_lease_v2_function_sources<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), PostgresStoreSetupError> {
+    let descriptors = [
+        (
+            "writer_lease_assert_current_v1",
+            "lattice_writer_lease_assert_current_v1",
+            WRITER_LEASE_V1_SQL,
+        ),
+        (
+            "writer_lease_bind_runtime_v1",
+            "lattice_writer_lease_bind_runtime_v1",
+            WRITER_LEASE_V1_SQL,
+        ),
+        (
+            "writer_lease_bind_runtime_v2",
+            "lattice_writer_lease_bind_runtime_v2",
+            WRITER_LEASE_V2_SQL,
+        ),
+        (
+            "writer_lease_commit_plan_v1",
+            "lattice_writer_lease_commit_plan_v1",
+            WRITER_LEASE_V1_SQL,
+        ),
+        (
+            "writer_lease_load_commands_v1",
+            "lattice_writer_lease_load_commands_v1",
+            WRITER_LEASE_V1_SQL,
+        ),
+        (
+            "writer_lease_load_current_v1",
+            "lattice_writer_lease_load_current_v1",
+            WRITER_LEASE_V1_SQL,
+        ),
+        (
+            "writer_lease_load_for_update_v1",
+            "lattice_writer_lease_load_for_update_v1",
+            WRITER_LEASE_V1_SQL,
+        ),
+        (
+            "writer_lease_load_for_update_v2",
+            "lattice_writer_lease_load_for_update_v2",
+            WRITER_LEASE_V2_SQL,
+        ),
+        (
+            "writer_lease_load_transitions_v1",
+            "lattice_writer_lease_load_transitions_v1",
+            WRITER_LEASE_V1_SQL,
+        ),
+    ];
+    let rows = client
+        .query(
+            "SELECT p.proname::text,p.prosrc::text FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+              WHERE n.nspname='writer_lease' ORDER BY p.proname",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    if rows.len() != descriptors.len() {
+        return Err(catalog_error());
+    }
+    for (row, (name, delimiter, sql)) in rows.iter().zip(descriptors) {
+        if row_value::<String>(row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)? != name
+            || row_value::<String>(row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != embedded_writer_function_source(sql, delimiter)?
+        {
+            return Err(catalog_error());
+        }
+    }
+    Ok(())
+}
+
+fn embedded_writer_function_source<'a>(
+    sql: &'a str,
+    delimiter: &str,
+) -> Result<&'a str, PostgresStoreSetupError> {
+    let open = format!("AS ${delimiter}$");
+    let close = format!("${delimiter}$;");
+    let start = sql.find(&open).ok_or_else(catalog_error)? + open.len();
+    let remainder = &sql[start..];
+    let end = remainder.find(&close).ok_or_else(catalog_error)?;
+    Ok(&remainder[..end])
+}
+
+fn verify_writer_lease_v2_acl_closure<C: GenericClient>(
+    client: &mut C,
+    runtime: WriterLeaseV2RuntimeProfile,
+) -> Result<(), PostgresStoreSetupError> {
+    let expected_missing = match runtime {
+        WriterLeaseV2RuntimeProfile::Bridge => 9_i64,
+        WriterLeaseV2RuntimeProfile::Current => 2_i64,
+    };
+    let expected_usage = runtime == WriterLeaseV2RuntimeProfile::Current;
+    let closure = client
+        .query_one(
+            "SELECT \
+             (SELECT count(*) FROM pg_catalog.pg_trigger tr \
+               JOIN pg_catalog.pg_class c ON c.oid=tr.tgrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease' AND tr.tgisinternal \
+                AND tr.tgenabled='O' AND tr.tgconstraint<>0), \
+             (SELECT count(*) FROM pg_catalog.pg_trigger tr \
+               JOIN pg_catalog.pg_class c ON c.oid=tr.tgrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease' AND NOT tr.tgisinternal), \
+             (SELECT count(*) FROM pg_catalog.pg_rewrite rw \
+               JOIN pg_catalog.pg_class c ON c.oid=rw.ev_class \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease'), \
+             (SELECT count(*) FROM pg_catalog.pg_policy p \
+               JOIN pg_catalog.pg_class c ON c.oid=p.polrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease'), \
+             (SELECT count(*) FROM pg_catalog.pg_inherits i \
+               JOIN pg_catalog.pg_class c ON c.oid=i.inhrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease'), \
+             (SELECT count(*) FROM pg_catalog.pg_default_acl d \
+               JOIN pg_catalog.pg_namespace n ON n.oid=d.defaclnamespace \
+              WHERE n.nspname='writer_lease'), \
+             (SELECT count(*) FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease' AND c.relkind NOT IN ('r','i')), \
+             (SELECT count(*) FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               CROSS JOIN pg_catalog.pg_roles roles \
+              WHERE n.nspname='writer_lease' AND NOT roles.rolsuper \
+                AND roles.rolname !~ '^pg_' \
+                AND roles.rolname NOT IN ('lattice_migrator','lattice_runtime') \
+                AND pg_catalog.has_function_privilege(roles.rolname,p.oid,'EXECUTE')), \
+             (SELECT count(*) FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+               CROSS JOIN pg_catalog.pg_roles roles \
+              WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') \
+                AND NOT roles.rolsuper AND roles.rolname !~ '^pg_' \
+                AND roles.rolname <> 'lattice_migrator' \
+                AND pg_catalog.has_table_privilege(roles.rolname,c.oid, \
+                    'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')), \
+             (SELECT count(*) FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+              WHERE n.nspname='writer_lease' \
+                AND NOT pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE')), \
+             (SELECT count(*) FROM pg_catalog.pg_roles roles \
+              WHERE NOT roles.rolsuper AND roles.rolname !~ '^pg_' \
+                AND roles.rolname NOT IN ('lattice_migrator','lattice_runtime') \
+                AND (pg_catalog.has_schema_privilege(roles.rolname,'writer_lease','USAGE') \
+                  OR pg_catalog.has_schema_privilege(roles.rolname,'writer_lease','CREATE')))",
+            &[],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
+        })?;
+    for (index, expected) in [12_i64, 0, 0, 0, 0, 0, 0, 0, 0, expected_missing, 0]
+        .into_iter()
+        .enumerate()
+    {
+        if row_value::<i64>(
+            &closure,
+            index,
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        )? != expected
+        {
+            return Err(permission_error());
+        }
+    }
+    let usage = client
+        .query_one(
+            "SELECT pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE')",
+            &[],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
+        })?;
+    if row_value::<bool>(&usage, 0, PostgresStoreSetupErrorKind::PermissionDenied)?
+        != expected_usage
+    {
+        return Err(permission_error());
+    }
+    Ok(())
 }
 
 fn verify_catalog_signatures<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
+    v3_prefix: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let expected = match profile {
         CatalogProfile::V1 => [
@@ -1628,14 +4176,51 @@ fn verify_catalog_signatures<C: GenericClient>(
         CatalogProfile::V3 => [
             V3_EXPECTED_RELATION_SIGNATURE,
             V3_EXPECTED_COLUMN_SIGNATURE,
-            V3_EXPECTED_CONSTRAINT_SIGNATURE,
+            if v3_prefix {
+                V3_PREFIX_EXPECTED_CONSTRAINT_SIGNATURE
+            } else {
+                V3_EXPECTED_CONSTRAINT_SIGNATURE
+            },
             V3_EXPECTED_INDEX_SIGNATURE,
         ],
-        CatalogProfile::V3CodebaseMemoryV2 => [
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => [
             V3_CODEBASE_MEMORY_V2_EXPECTED_RELATION_SIGNATURE,
             V3_CODEBASE_MEMORY_V2_EXPECTED_COLUMN_SIGNATURE,
-            V3_CODEBASE_MEMORY_V2_EXPECTED_CONSTRAINT_SIGNATURE,
+            if v3_prefix {
+                V3_CODEBASE_MEMORY_V2_PREFIX_EXPECTED_CONSTRAINT_SIGNATURE
+            } else {
+                V3_CODEBASE_MEMORY_V2_EXPECTED_CONSTRAINT_SIGNATURE
+            },
             V3_CODEBASE_MEMORY_V2_EXPECTED_INDEX_SIGNATURE,
+        ],
+        CatalogProfile::V4 => [
+            V4_EXPECTED_RELATION_SIGNATURE,
+            V4_EXPECTED_COLUMN_SIGNATURE,
+            V4_EXPECTED_CONSTRAINT_SIGNATURE,
+            V4_EXPECTED_INDEX_SIGNATURE,
+        ],
+        CatalogProfile::V5 => [
+            V4_EXPECTED_RELATION_SIGNATURE,
+            V5_EXPECTED_COLUMN_SIGNATURE,
+            V5_EXPECTED_CONSTRAINT_SIGNATURE,
+            V4_EXPECTED_INDEX_SIGNATURE,
+        ],
+        CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending => [
+            V5_CODEBASE_MEMORY_V2_EXPECTED_RELATION_SIGNATURE,
+            V5_CODEBASE_MEMORY_V2_EXPECTED_COLUMN_SIGNATURE,
+            V5_CODEBASE_MEMORY_V2_EXPECTED_CONSTRAINT_SIGNATURE,
+            V5_CODEBASE_MEMORY_V2_EXPECTED_INDEX_SIGNATURE,
+        ],
+        CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => [
+            V5_CODEBASE_MEMORY_V3_EXPECTED_RELATION_SIGNATURE,
+            V5_CODEBASE_MEMORY_V3_EXPECTED_COLUMN_SIGNATURE,
+            V5_CODEBASE_MEMORY_V3_EXPECTED_CONSTRAINT_SIGNATURE,
+            V5_CODEBASE_MEMORY_V3_EXPECTED_INDEX_SIGNATURE,
         ],
         CatalogProfile::PreSchema => return Err(catalog_error()),
     };
@@ -1656,6 +4241,7 @@ fn verify_catalog_signatures<C: GenericClient>(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn verify_schema_headers<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
@@ -1674,7 +4260,17 @@ fn verify_schema_headers<C: GenericClient>(
     let suffix = match profile {
         CatalogProfile::V1 => "V1",
         CatalogProfile::V2 => "V2",
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => "V3",
+        CatalogProfile::V3
+        | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => "V3",
+        CatalogProfile::V4 => "V4",
+        CatalogProfile::V5
+        | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => "V5",
         CatalogProfile::PreSchema => return Err(catalog_error()),
     };
     let expected_comments = [
@@ -1697,19 +4293,31 @@ fn verify_schema_headers<C: GenericClient>(
             return Err(catalog_error());
         }
     }
-
     let tables = string_set(
         client,
         "SELECT c.relname FROM pg_class c \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = 'control' AND c.relkind = 'r' ORDER BY c.relname",
+         WHERE n.nspname = 'control' AND c.relkind = 'r' \
+           AND c.relname <> 'task_ledger_autonomy_receipts' ORDER BY c.relname",
     )?;
     let expected_tables: BTreeSet<String> = match profile {
         CatalogProfile::V1 | CatalogProfile::V2 => {
             CONTROL_TABLES.into_iter().map(str::to_owned).collect()
         }
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => {
+        CatalogProfile::V3
+        | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => {
             V3_CONTROL_TABLES.into_iter().map(str::to_owned).collect()
+        }
+        CatalogProfile::V4
+        | CatalogProfile::V5
+        | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => {
+            V4_CONTROL_TABLES.into_iter().map(str::to_owned).collect()
         }
         CatalogProfile::PreSchema => return Err(catalog_error()),
     };
@@ -1720,7 +4328,9 @@ fn verify_schema_headers<C: GenericClient>(
         client,
         "SELECT con.conname FROM pg_constraint con \
          JOIN pg_namespace n ON n.oid = con.connamespace \
-         WHERE n.nspname = 'control' ORDER BY con.conname",
+         JOIN pg_class c ON c.oid = con.conrelid \
+         WHERE n.nspname = 'control' \
+           AND c.relname <> 'task_ledger_autonomy_receipts' ORDER BY con.conname",
     )?;
     let expected_constraints: BTreeSet<String> = match profile {
         CatalogProfile::V1 => V1_CONTROL_CONSTRAINTS
@@ -1731,9 +4341,30 @@ fn verify_schema_headers<C: GenericClient>(
             .into_iter()
             .map(str::to_owned)
             .collect(),
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => V2_CONTROL_CONSTRAINTS
+        CatalogProfile::V3
+        | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => V2_CONTROL_CONSTRAINTS
             .into_iter()
             .chain(TASK_LEDGER_CONTROL_CONSTRAINTS)
+            .map(str::to_owned)
+            .collect(),
+        CatalogProfile::V4 => V2_CONTROL_CONSTRAINTS
+            .into_iter()
+            .chain(TASK_LEDGER_CONTROL_CONSTRAINTS)
+            .chain(PROJECT_REGISTRY_CONTROL_CONSTRAINTS)
+            .map(str::to_owned)
+            .collect(),
+        CatalogProfile::V5
+        | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => V2_CONTROL_CONSTRAINTS
+            .into_iter()
+            .chain(TASK_LEDGER_CONTROL_CONSTRAINTS)
+            .chain(PROJECT_REGISTRY_CONTROL_CONSTRAINTS)
+            .chain(["project_registry_commands_persistence_profile"])
             .map(str::to_owned)
             .collect(),
         CatalogProfile::PreSchema => return Err(catalog_error()),
@@ -1741,7 +4372,8 @@ fn verify_schema_headers<C: GenericClient>(
     if constraints != expected_constraints {
         return Err(catalog_error());
     }
-    verify_owned_type_closure(client, profile)
+    verify_owned_type_closure(client, profile)?;
+    Ok(())
 }
 
 fn verify_owned_type_closure<C: GenericClient>(
@@ -1784,6 +4416,33 @@ fn verify_owned_type_closure<C: GenericClient>(
                     .map(|table| ("memory", table)),
             )
             .collect(),
+        CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => V3_CONTROL_TABLES
+            .into_iter()
+            .map(|table| ("control", table))
+            .chain(
+                CODEBASE_MEMORY_V2_TABLES
+                    .into_iter()
+                    .map(|table| ("memory", table)),
+            )
+            .collect(),
+        CatalogProfile::V4 | CatalogProfile::V5 => V4_CONTROL_TABLES
+            .into_iter()
+            .map(|table| ("control", table))
+            .collect(),
+        CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => V4_CONTROL_TABLES
+            .into_iter()
+            .map(|table| ("control", table))
+            .chain(
+                CODEBASE_MEMORY_V2_TABLES
+                    .into_iter()
+                    .map(|table| ("memory", table)),
+            )
+            .collect(),
         CatalogProfile::PreSchema => return Err(catalog_error()),
     };
     for (schema, table) in expected_tables {
@@ -1814,15 +4473,11 @@ fn verify_owned_type_closure<C: GenericClient>(
     Ok(())
 }
 
-fn verify_forbidden_schema_objects<C: GenericClient>(
-    client: &mut C,
-    profile: CatalogProfile,
-) -> Result<(), PostgresStoreSetupError> {
-    let forbidden = client
-        .query_one(
-            "SELECT \
+const FORBIDDEN_SCHEMA_OBJECTS_SQL: &str = "SELECT \
              (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
-              WHERE n.nspname IN ('control', 'memory', 'readmodel')), \
+              WHERE n.nspname IN ('control', 'memory', 'readmodel') \
+                AND p.proname NOT IN ('task_ledger_record_autonomy_receipt_v1', \
+                                      'task_ledger_read_autonomy_receipts_v1')), \
              (SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
               JOIN pg_namespace n ON n.oid = c.relnamespace \
               WHERE n.nspname IN ('control', 'memory', 'readmodel') AND NOT t.tgisinternal), \
@@ -1846,6 +4501,7 @@ fn verify_forbidden_schema_objects<C: GenericClient>(
               (SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
                JOIN pg_namespace n ON n.oid = c.relnamespace \
                WHERE n.nspname IN ('control', 'memory', 'readmodel') \
+                 AND c.relname <> 'task_ledger_autonomy_receipts' \
                  AND t.tgisinternal AND t.tgenabled = 'O'), \
               (SELECT count(*) FROM pg_inherits i \
                JOIN pg_class parent ON parent.oid = i.inhparent \
@@ -1857,60 +4513,118 @@ fn verify_forbidden_schema_objects<C: GenericClient>(
               (SELECT count(*) FROM pg_class c \
                JOIN pg_namespace n ON n.oid = c.relnamespace \
                WHERE n.nspname IN ('control', 'memory', 'readmodel') \
-                 AND (c.relhassubclass OR c.relispartition))",
-            &[],
-        )
+                 AND (c.relhassubclass OR c.relispartition))";
+
+fn read_forbidden_schema_object_counts<C: GenericClient>(
+    client: &mut C,
+) -> Result<[i64; 10], PostgresStoreSetupError> {
+    let row = client
+        .query_one(FORBIDDEN_SCHEMA_OBJECTS_SQL, &[])
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
-    let expected_functions = match profile {
-        CatalogProfile::V1 | CatalogProfile::PreSchema => 0,
-        CatalogProfile::V2 => 3,
-        CatalogProfile::V3 => 11,
-        CatalogProfile::V3CodebaseMemoryV2 => 18,
-    };
-    if row_value::<i64>(&forbidden, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?
-        != expected_functions
-    {
+    let mut counts = [0_i64; 10];
+    for (index, count) in counts.iter_mut().enumerate() {
+        *count = row_value::<i64>(&row, index, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    }
+    Ok(counts)
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_forbidden_schema_objects<C: GenericClient>(
+    client: &mut C,
+    profile: CatalogProfile,
+    v3_prefix: bool,
+) -> Result<(), PostgresStoreSetupError> {
+    let forbidden = read_forbidden_schema_object_counts(client)?;
+    let expected_functions = expected_owned_function_count(profile);
+    if forbidden[0] != expected_functions {
         return Err(catalog_error());
     }
-    for index in 1..6 {
-        if row_value::<i64>(
-            &forbidden,
-            index,
-            PostgresStoreSetupErrorKind::CorruptCatalog,
-        )? != 0
-        {
-            return Err(catalog_error());
-        }
+    if forbidden[1..6].iter().any(|count| *count != 0) {
+        return Err(catalog_error());
     }
-    let expected_scope_head_triggers = match profile {
-        CatalogProfile::V1 => 4,
-        CatalogProfile::V2
-        | CatalogProfile::V3
-        | CatalogProfile::V3CodebaseMemoryV2
-        | CatalogProfile::PreSchema => 0,
-    };
-    let expected_internal_triggers = match profile {
-        CatalogProfile::V1 => 4,
-        CatalogProfile::V2 | CatalogProfile::PreSchema => 0,
-        CatalogProfile::V3 => 20,
-        CatalogProfile::V3CodebaseMemoryV2 => 44,
-    };
-    if row_value::<i64>(&forbidden, 6, PostgresStoreSetupErrorKind::CorruptCatalog)?
-        != expected_scope_head_triggers
-        || row_value::<i64>(&forbidden, 7, PostgresStoreSetupErrorKind::CorruptCatalog)?
-            != expected_internal_triggers
-        || row_value::<i64>(&forbidden, 8, PostgresStoreSetupErrorKind::CorruptCatalog)? != 0
-        || row_value::<i64>(&forbidden, 9, PostgresStoreSetupErrorKind::CorruptCatalog)? != 0
+    let expected_scope_head_triggers = expected_scope_head_trigger_count(profile);
+    let expected_internal_triggers = expected_internal_trigger_count(profile, v3_prefix);
+    if forbidden[6] != expected_scope_head_triggers
+        || forbidden[7] != expected_internal_triggers
+        || forbidden[8] != 0
+        || forbidden[9] != 0
     {
         return Err(catalog_error());
     }
     Ok(())
 }
 
+fn expected_owned_function_count(profile: CatalogProfile) -> i64 {
+    match profile {
+        CatalogProfile::V1 | CatalogProfile::PreSchema => 0,
+        CatalogProfile::V2 => 3,
+        CatalogProfile::V3 => 11,
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => 18,
+        CatalogProfile::V4 => 28,
+        CatalogProfile::V5 => 45,
+        CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending => 52,
+        CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => 59,
+    }
+}
+
+fn expected_scope_head_trigger_count(profile: CatalogProfile) -> i64 {
+    match profile {
+        CatalogProfile::V1 => 4,
+        CatalogProfile::V2
+        | CatalogProfile::V3
+        | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+        | CatalogProfile::V4
+        | CatalogProfile::V5
+        | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current
+        | CatalogProfile::PreSchema => 0,
+    }
+}
+
+fn expected_internal_trigger_count(profile: CatalogProfile, v3_prefix: bool) -> i64 {
+    match profile {
+        CatalogProfile::V1 => 4,
+        CatalogProfile::V2 | CatalogProfile::PreSchema => 0,
+        CatalogProfile::V3 if v3_prefix => 20,
+        CatalogProfile::V3 => 22,
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+            if v3_prefix =>
+        {
+            44
+        }
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => 46,
+        CatalogProfile::V4 => 40,
+        // The autonomy receipt FK adds two enabled internal triggers on the
+        // referenced task_ledger_events table; its two local triggers are
+        // excluded with the autonomy relation itself above.
+        CatalogProfile::V5 => 42,
+        CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => 66,
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn verify_owned_function_boundary<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
+    v3_prefix: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let signature = catalog_signature(
         client,
@@ -1919,8 +4633,31 @@ fn verify_owned_function_boundary<C: GenericClient>(
     )?;
     let expected_signature = match profile {
         CatalogProfile::V2 => V2_EXPECTED_FUNCTION_SIGNATURE,
+        CatalogProfile::V3 if v3_prefix => V3_PREFIX_EXPECTED_FUNCTION_SIGNATURE,
         CatalogProfile::V3 => V3_EXPECTED_FUNCTION_SIGNATURE,
-        CatalogProfile::V3CodebaseMemoryV2 => V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+            if v3_prefix =>
+        {
+            V3_CODEBASE_MEMORY_V2_PREFIX_EXPECTED_FUNCTION_SIGNATURE
+        }
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => {
+            V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_SIGNATURE
+        }
+        CatalogProfile::V4 => V4_EXPECTED_FUNCTION_SIGNATURE,
+        CatalogProfile::V5 => V5_EXPECTED_FUNCTION_SIGNATURE,
+        CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending => {
+            V5_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_SIGNATURE
+        }
+        CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => {
+            V5_CODEBASE_MEMORY_V3_EXPECTED_FUNCTION_SIGNATURE
+        }
         CatalogProfile::V1 | CatalogProfile::PreSchema => return Err(catalog_error()),
     };
     if signature != expected_signature {
@@ -1952,7 +4689,9 @@ fn verify_owned_function_boundary<C: GenericClient>(
         .into_iter()
         .map(str::to_owned)
         .collect(),
-        CatalogProfile::V3CodebaseMemoryV2 => [
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => [
             STORE_PREPARE_V2_IDENTITY,
             STORE_FINALIZE_V2_IDENTITY,
             STORE_CURRENT_HEAD_V2_IDENTITY,
@@ -1975,6 +4714,37 @@ fn verify_owned_function_boundary<C: GenericClient>(
         .into_iter()
         .map(str::to_owned)
         .collect(),
+        CatalogProfile::V4 => V3_CONTROL_FUNCTION_IDENTITIES
+            .into_iter()
+            .chain(V4_RUNTIME_FUNCTION_IDENTITIES)
+            .map(str::to_owned)
+            .collect(),
+        CatalogProfile::V5 => V3_CONTROL_FUNCTION_IDENTITIES
+            .into_iter()
+            .chain(V4_RUNTIME_FUNCTION_IDENTITIES)
+            .chain(V5_SUCCESSOR_FUNCTION_IDENTITIES)
+            .map(str::to_owned)
+            .collect(),
+        CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending => {
+            V3_CONTROL_FUNCTION_IDENTITIES
+                .into_iter()
+                .chain(V4_RUNTIME_FUNCTION_IDENTITIES)
+                .chain(V5_SUCCESSOR_FUNCTION_IDENTITIES)
+                .chain(CODEBASE_MEMORY_V2_FUNCTION_IDENTITIES)
+                .map(str::to_owned)
+                .collect()
+        }
+        CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => V3_CONTROL_FUNCTION_IDENTITIES
+            .into_iter()
+            .chain(V4_RUNTIME_FUNCTION_IDENTITIES)
+            .chain(V5_SUCCESSOR_FUNCTION_IDENTITIES)
+            .chain(CODEBASE_MEMORY_V2_FUNCTION_IDENTITIES)
+            .chain(CODEBASE_MEMORY_V3_FUNCTION_IDENTITIES)
+            .map(str::to_owned)
+            .collect(),
         CatalogProfile::V1 | CatalogProfile::PreSchema => return Err(catalog_error()),
     };
     let rows = client
@@ -1985,6 +4755,8 @@ fn verify_owned_function_boundary<C: GenericClient>(
                     COALESCE(array_to_string(p.proconfig, ','), '<NULL>') \
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname IN ('control', 'memory', 'readmodel') \
+               AND p.proname NOT IN ('task_ledger_record_autonomy_receipt_v1', \
+                                     'task_ledger_read_autonomy_receipts_v1') \
              ORDER BY n.nspname, p.proname, pg_catalog.oidvectortypes(p.proargtypes)",
             &[],
         )
@@ -2010,12 +4782,14 @@ fn verify_owned_function_boundary<C: GenericClient>(
             OPENCLAW_GATEWAY_RECONCILE_AND_CLAIM_V1_IDENTITY,
         ]
         .contains(&identity.as_str())
+            || V4_RUNTIME_FUNCTION_IDENTITIES.contains(&identity.as_str())
+            || V5_SUCCESSOR_FUNCTION_IDENTITIES.contains(&identity.as_str())
+            || CODEBASE_MEMORY_V3_FUNCTION_IDENTITIES.contains(&identity.as_str())
         {
             "search_path=pg_catalog,row_security=on,lock_timeout=5s,statement_timeout=30s"
         } else {
             "search_path=pg_catalog,row_security=on"
         };
-        actual_identities.insert(identity);
         if row_value::<String>(row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?
             != DatabaseRole::Migrator.as_str()
             || !row_value::<bool>(row, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?
@@ -2025,6 +4799,7 @@ fn verify_owned_function_boundary<C: GenericClient>(
         {
             return Err(catalog_error());
         }
+        actual_identities.insert(identity);
     }
     if actual_identities != expected_identities {
         return Err(catalog_error());
@@ -2073,20 +4848,53 @@ fn verify_roles_and_grants<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
 ) -> Result<(), PostgresStoreSetupError> {
-    verify_role_and_database_boundary(client, profile)?;
+    verify_roles_and_grants_with_contract(client, profile, false)
+}
+
+fn verify_roles_and_grants_with_contract<C: GenericClient>(
+    client: &mut C,
+    profile: CatalogProfile,
+    v3_prefix: bool,
+) -> Result<(), PostgresStoreSetupError> {
+    verify_role_and_database_boundary(client, profile, v3_prefix)?;
     let expected_schema_acl = match profile {
-        CatalogProfile::V3CodebaseMemoryV2 => V3_CODEBASE_MEMORY_V2_EXPECTED_SCHEMA_ACL_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+        | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => {
+            V3_CODEBASE_MEMORY_V2_EXPECTED_SCHEMA_ACL_SIGNATURE
+        }
         CatalogProfile::PreSchema
         | CatalogProfile::V1
         | CatalogProfile::V2
-        | CatalogProfile::V3 => EXPECTED_SCHEMA_ACL_SIGNATURE,
+        | CatalogProfile::V3
+        | CatalogProfile::V4
+        | CatalogProfile::V5 => EXPECTED_SCHEMA_ACL_SIGNATURE,
     };
     let expected_table_acl = match profile {
         CatalogProfile::PreSchema | CatalogProfile::V1 | CatalogProfile::V2 => {
             EXPECTED_TABLE_ACL_SIGNATURE
         }
         CatalogProfile::V3 => V3_EXPECTED_TABLE_ACL_SIGNATURE,
-        CatalogProfile::V3CodebaseMemoryV2 => V3_CODEBASE_MEMORY_V2_EXPECTED_TABLE_ACL_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => {
+            V3_CODEBASE_MEMORY_V2_EXPECTED_TABLE_ACL_SIGNATURE
+        }
+        CatalogProfile::V4 | CatalogProfile::V5 => V4_EXPECTED_TABLE_ACL_SIGNATURE,
+        CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending => {
+            V5_CODEBASE_MEMORY_V2_EXPECTED_TABLE_ACL_SIGNATURE
+        }
+        CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => {
+            V5_CODEBASE_MEMORY_V3_EXPECTED_TABLE_ACL_SIGNATURE
+        }
     };
     for (query, expected) in [
         (SCHEMA_ACL_SIGNATURE_SQL, expected_schema_acl),
@@ -2101,7 +4909,18 @@ fn verify_roles_and_grants<C: GenericClient>(
     }
     if matches!(
         profile,
-        CatalogProfile::V2 | CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2
+        CatalogProfile::V2
+            | CatalogProfile::V3
+            | CatalogProfile::V3CodebaseMemoryV2
+            | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+            | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+            | CatalogProfile::V4
+            | CatalogProfile::V5
+            | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+            | CatalogProfile::V5CodebaseMemoryV3Current
+            | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current
     ) {
         verify_owned_function_acl(client, profile)?;
     }
@@ -2128,7 +4947,22 @@ fn verify_owned_function_acl<C: GenericClient>(
     let expected_signature = match profile {
         CatalogProfile::V2 => V2_EXPECTED_FUNCTION_ACL_SIGNATURE,
         CatalogProfile::V3 => V3_EXPECTED_FUNCTION_ACL_SIGNATURE,
-        CatalogProfile::V3CodebaseMemoryV2 => V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_ACL_SIGNATURE,
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => {
+            V3_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_ACL_SIGNATURE
+        }
+        CatalogProfile::V4 => V4_EXPECTED_FUNCTION_ACL_SIGNATURE,
+        CatalogProfile::V5 => V5_EXPECTED_FUNCTION_ACL_SIGNATURE,
+        CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending => {
+            V5_CODEBASE_MEMORY_V2_EXPECTED_FUNCTION_ACL_SIGNATURE
+        }
+        CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => {
+            V5_CODEBASE_MEMORY_V3_EXPECTED_FUNCTION_ACL_SIGNATURE
+        }
         CatalogProfile::V1 | CatalogProfile::PreSchema => return Err(permission_error()),
     };
     if signature != expected_signature {
@@ -2157,7 +4991,9 @@ fn verify_owned_function_acl<C: GenericClient>(
         .into_iter()
         .map(str::to_owned)
         .collect(),
-        CatalogProfile::V3CodebaseMemoryV2 => [
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => [
             STORE_PREPARE_V3_IDENTITY,
             STORE_FINALIZE_V3_IDENTITY,
             STORE_CURRENT_HEAD_V3_IDENTITY,
@@ -2177,6 +5013,31 @@ fn verify_owned_function_acl<C: GenericClient>(
         .into_iter()
         .map(str::to_owned)
         .collect(),
+        CatalogProfile::V4 => V4_RUNTIME_FUNCTION_IDENTITIES
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        CatalogProfile::V5 => V5_SUCCESSOR_FUNCTION_IDENTITIES
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending => {
+            V5_SUCCESSOR_FUNCTION_IDENTITIES
+                .into_iter()
+                .chain(CODEBASE_MEMORY_V2_FUNCTION_IDENTITIES)
+                .map(str::to_owned)
+                .collect()
+        }
+        CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => {
+            V5_SUCCESSOR_FUNCTION_IDENTITIES
+                .into_iter()
+                .chain(CODEBASE_MEMORY_V3_FUNCTION_IDENTITIES)
+                .map(str::to_owned)
+                .collect()
+        }
         CatalogProfile::V1 | CatalogProfile::PreSchema => return Err(permission_error()),
     };
     let rows = client
@@ -2206,6 +5067,8 @@ fn verify_owned_function_acl<C: GenericClient>(
                        AND acl.privilege_type = 'EXECUTE' AND NOT acl.is_grantable) \
              FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
              WHERE n.nspname IN ('control', 'memory', 'readmodel') \
+               AND p.proname NOT IN ('task_ledger_record_autonomy_receipt_v1', \
+                                     'task_ledger_read_autonomy_receipts_v1') \
              ORDER BY n.nspname, p.proname, pg_catalog.oidvectortypes(p.proargtypes)",
             &[],
         )
@@ -2242,6 +5105,7 @@ fn verify_owned_function_acl<C: GenericClient>(
 fn verify_role_and_database_boundary<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
+    v3_prefix: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let role_signature = catalog_signature(
         client,
@@ -2260,40 +5124,7 @@ fn verify_role_and_database_boundary<C: GenericClient>(
     }
 
     let boundary = client
-        .query_one(
-            "SELECT r.rolname, d.datistemplate, d.datallowconn, d.datconnlimit, \
-             (SELECT count(*) FROM pg_auth_members m \
-              WHERE m.roleid IN (SELECT oid FROM pg_roles WHERE rolname LIKE 'lattice\\_%' ESCAPE '\\') \
-                 OR m.member IN (SELECT oid FROM pg_roles WHERE rolname LIKE 'lattice\\_%' ESCAPE '\\')), \
-             (SELECT count(*) FROM pg_roles \
-               WHERE rolname LIKE 'lattice\\_%' ESCAPE '\\' \
-                 AND rolname NOT IN ('lattice_migrator', 'lattice_runtime', \
-                                     'lattice_guardian', 'lattice_readonly', \
-                                     'lattice_migrator_login', 'lattice_runtime_login', \
-                                     'lattice_guardian_login', 'lattice_readonly_login')), \
-             (SELECT count(*) FROM pg_db_role_setting s \
-              WHERE s.setrole IN (SELECT oid FROM pg_roles \
-                   WHERE rolname IN ('lattice_migrator', 'lattice_runtime', \
-                                     'lattice_guardian', 'lattice_readonly', \
-                                     'lattice_migrator_login', 'lattice_runtime_login', \
-                                     'lattice_guardian_login', 'lattice_readonly_login'))), \
-             (SELECT count(*) FROM pg_proc p \
-              JOIN pg_namespace n ON n.oid = p.pronamespace \
-              WHERE p.prosecdef \
-                AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' \
-                AND (has_function_privilege('lattice_runtime', p.oid, 'EXECUTE') \
-                  OR has_function_privilege('lattice_guardian', p.oid, 'EXECUTE') \
-                  OR has_function_privilege('lattice_readonly', p.oid, 'EXECUTE'))), \
-             has_database_privilege('public', current_database(), 'CONNECT'), \
-             has_database_privilege('public', current_database(), 'CREATE'), \
-             has_database_privilege('public', current_database(), 'TEMPORARY'), \
-             has_database_privilege('lattice_migrator', current_database(), 'CONNECT'), \
-             has_database_privilege('lattice_migrator', current_database(), 'CREATE'), \
-             has_database_privilege('lattice_migrator', current_database(), 'TEMPORARY') \
-             FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba \
-             WHERE d.datname = current_database()",
-            &[],
-        )
+        .query_one(ROLE_DATABASE_BOUNDARY_SQL, &[])
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
         })?;
@@ -2320,12 +5151,7 @@ fn verify_role_and_database_boundary<C: GenericClient>(
         row_value::<bool>(&boundary, 12, PostgresStoreSetupErrorKind::PermissionDenied)?,
         row_value::<bool>(&boundary, 13, PostgresStoreSetupErrorKind::PermissionDenied)?,
     ];
-    let expected_dangerous_functions = match profile {
-        CatalogProfile::PreSchema | CatalogProfile::V1 => 0,
-        CatalogProfile::V2 => 3,
-        CatalogProfile::V3 => 8,
-        CatalogProfile::V3CodebaseMemoryV2 => 15,
-    };
+    let expected_dangerous_functions = expected_dangerous_function_count(profile, v3_prefix);
     if owner != DatabaseRole::Migrator.as_str()
         || is_template
         || !allows_connections
@@ -2338,12 +5164,49 @@ fn verify_role_and_database_boundary<C: GenericClient>(
     {
         return Err(permission_error());
     }
-    verify_cluster_wide_acl_closure(client)?;
+    verify_cluster_wide_acl_closure(client, profile)?;
     verify_login_principal_closure(client)
+}
+
+fn expected_dangerous_function_count(profile: CatalogProfile, v3_prefix: bool) -> i64 {
+    match profile {
+        CatalogProfile::PreSchema | CatalogProfile::V1 => 0,
+        CatalogProfile::V2 => 3,
+        CatalogProfile::V3 if v3_prefix => 8,
+        CatalogProfile::V3 => 10,
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+            if v3_prefix =>
+        {
+            15
+        }
+        CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V4
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => 17,
+        CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 if v3_prefix => 22,
+        CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 => 24,
+        CatalogProfile::V5 => {
+            i64::try_from(V5_RUNTIME_FUNCTION_IDENTITIES.len()).expect("fixed count")
+        }
+        CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending => i64::try_from(
+            V5_RUNTIME_FUNCTION_IDENTITIES.len() + CODEBASE_MEMORY_V2_FUNCTION_IDENTITIES.len(),
+        )
+        .expect("fixed count"),
+        CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => i64::try_from(
+            V5_RUNTIME_FUNCTION_IDENTITIES.len()
+                + CODEBASE_MEMORY_V2_FUNCTION_IDENTITIES.len()
+                + WRITER_LEASE_V1_FUNCTIONS.len(),
+        )
+        .expect("fixed count"),
+    }
 }
 
 fn verify_cluster_wide_acl_closure<C: GenericClient>(
     client: &mut C,
+    profile: CatalogProfile,
 ) -> Result<(), PostgresStoreSetupError> {
     let parameter_grants = client
         .query_one(
@@ -2387,14 +5250,23 @@ fn verify_cluster_wide_acl_closure<C: GenericClient>(
     {
         return Err(permission_error());
     }
-    verify_external_relation_principal_closure(client)?;
-    verify_external_function_principal_closure(client)?;
+    let writer_lease_is_owned = matches!(
+        profile,
+        CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+            | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+            | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current
+    );
+    verify_external_relation_principal_closure(client, writer_lease_is_owned)?;
+    verify_external_function_principal_closure(client, writer_lease_is_owned)?;
     verify_pre_role_system_function_boundary(client)?;
     verify_large_object_boundary(client)
 }
 
 fn verify_external_relation_principal_closure<C: GenericClient>(
     client: &mut C,
+    writer_lease_is_owned: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let forbidden = client
         .query_one(
@@ -2411,6 +5283,7 @@ fn verify_external_relation_principal_closure<C: GenericClient>(
                  WHERE n.nspname !~ '^pg_' \
                    AND n.nspname <> 'information_schema' \
                    AND n.nspname NOT IN ('control', 'memory', 'readmodel') \
+                   AND (NOT $1 OR n.nspname <> 'writer_lease') \
              ) \
              SELECT \
                (SELECT count(*) FROM external_relations c \
@@ -2424,7 +5297,7 @@ fn verify_external_relation_principal_closure<C: GenericClient>(
                 CROSS JOIN LATERAL aclexplode(a.attacl) acl \
                 WHERE acl.grantee = 0 \
                    OR acl.grantee IN (SELECT oid FROM fixed_principals))",
-            &[],
+            &[&writer_lease_is_owned],
         )
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
@@ -2444,6 +5317,7 @@ fn verify_external_relation_principal_closure<C: GenericClient>(
 
 fn verify_external_function_principal_closure<C: GenericClient>(
     client: &mut C,
+    writer_lease_is_owned: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let forbidden = client
         .query_one(
@@ -2462,9 +5336,10 @@ fn verify_external_function_principal_closure<C: GenericClient>(
              WHERE n.nspname !~ '^pg_' \
                AND n.nspname <> 'information_schema' \
                AND n.nspname NOT IN ('control', 'memory', 'readmodel') \
+               AND (NOT $1 OR n.nspname <> 'writer_lease') \
                AND (acl.grantee = 0 \
                     OR acl.grantee IN (SELECT oid FROM fixed_principals))",
-            &[],
+            &[&writer_lease_is_owned],
         )
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
@@ -2492,7 +5367,7 @@ fn verify_pre_role_system_function_boundary<C: GenericClient>(
                  ('pg_catalog.pg_advisory_lock(integer,integer)', NULL::text), \
                  ('pg_catalog.pg_advisory_lock_shared(bigint)', NULL::text), \
                  ('pg_catalog.pg_advisory_lock_shared(integer,integer)', NULL::text), \
-                 ('pg_catalog.pg_try_advisory_lock(bigint)', NULL::text), \
+                 ('pg_catalog.pg_try_advisory_lock(bigint)', 'lattice_migrator'::text), \
                  ('pg_catalog.pg_try_advisory_lock(integer,integer)', NULL::text), \
                  ('pg_catalog.pg_try_advisory_lock_shared(bigint)', NULL::text), \
                  ('pg_catalog.pg_try_advisory_lock_shared(integer,integer)', NULL::text), \
@@ -2764,6 +5639,9 @@ fn verify_login_database_acl<C: GenericClient>(
     Ok(())
 }
 
+// This is one fail-closed capability matrix: splitting it would make it easy
+// to admit a role after checking only its schema or table half.
+#[allow(clippy::too_many_lines)]
 fn verify_nonwriter_capabilities<C: GenericClient>(
     client: &mut C,
     role: DatabaseRole,
@@ -2786,7 +5664,17 @@ fn verify_nonwriter_capabilities<C: GenericClient>(
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
         })?;
     let memory_usage = matches!(role, DatabaseRole::Runtime)
-        && matches!(profile, CatalogProfile::V3CodebaseMemoryV2);
+        && matches!(
+            profile,
+            CatalogProfile::V3CodebaseMemoryV2
+                | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+                | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+                | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+                | CatalogProfile::V5CodebaseMemoryV3Current
+                | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+                | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+                | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current
+        );
     let expected = [true, false, memory_usage, false, true, false, false, false];
     for (index, expected_value) in expected.into_iter().enumerate() {
         if row_value::<bool>(
@@ -2803,8 +5691,20 @@ fn verify_nonwriter_capabilities<C: GenericClient>(
 
     let protected_tables: Vec<&str> = match profile {
         CatalogProfile::V1 | CatalogProfile::V2 => PROTECTED_CONTROL_TABLES.into_iter().collect(),
-        CatalogProfile::V3 | CatalogProfile::V3CodebaseMemoryV2 => {
+        CatalogProfile::V3
+        | CatalogProfile::V3CodebaseMemoryV2
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge => {
             V3_PROTECTED_CONTROL_TABLES.into_iter().collect()
+        }
+        CatalogProfile::V4
+        | CatalogProfile::V5
+        | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => {
+            V4_PROTECTED_CONTROL_TABLES.into_iter().collect()
         }
         CatalogProfile::PreSchema => Vec::new(),
     };
@@ -2817,7 +5717,17 @@ fn verify_nonwriter_capabilities<C: GenericClient>(
                 .map(|table| ("control", table, false)),
         )
         .collect();
-    if matches!(profile, CatalogProfile::V3CodebaseMemoryV2) {
+    if matches!(
+        profile,
+        CatalogProfile::V3CodebaseMemoryV2
+            | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+            | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+            | CatalogProfile::V5CodebaseMemoryV2UpgradePending
+            | CatalogProfile::V5CodebaseMemoryV3Current
+            | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current
+    ) {
         bounded_tables.extend(
             CODEBASE_MEMORY_V2_TABLES
                 .into_iter()
@@ -3063,10 +5973,411 @@ fn permission_error() -> PostgresStoreSetupError {
 #[cfg(test)]
 mod tests {
     use super::{
-        CatalogProfile, classify_memory_catalog_counts, verify_network_boundary,
-        verify_server_version,
+        AUTONOMY_PROFILE_SIGNATURE_SQL, CODEBASE_MEMORY_EXTENSION_ID,
+        CODEBASE_MEMORY_V3_GLOBAL_SCHEMA_VERSION, CODEBASE_MEMORY_V3_MANIFEST_SHA256,
+        CODEBASE_MEMORY_V3_PATH, CODEBASE_MEMORY_V3_SCHEMA_VERSION, CODEBASE_MEMORY_V3_SQL_SHA256,
+        COLUMN_SIGNATURE_SQL, CONSTRAINT_SIGNATURE_SQL, CatalogProfile,
+        CodebaseMemoryIdentityProfile, DATABASE_ACL_SIGNATURE_SQL, EXPECTED_DATABASE_ACL_SIGNATURE,
+        EXPECTED_ROLE_SIGNATURE, FUNCTION_ACL_SIGNATURE_SQL, FUNCTION_SIGNATURE_SQL,
+        INDEX_SIGNATURE_SQL, RELATION_SIGNATURE_SQL, REQUIRED_APPLICATION_NAME,
+        ROLE_DATABASE_BOUNDARY_SQL, ROLE_SIGNATURE_SQL, SCHEMA_ACL_SIGNATURE_SQL,
+        TABLE_ACL_SIGNATURE_SQL, apply_migrations, catalog_error, catalog_signature,
+        classify_current_catalog_profile, classify_extension_catalog_counts,
+        codebase_memory_identity_profile_matches, expected_dangerous_function_count,
+        expected_internal_trigger_count, expected_owned_function_count,
+        expected_scope_head_trigger_count, is_loopback, permission_error, read_database_identity,
+        read_forbidden_schema_object_counts, read_history_rows, row_value,
+        v3_upgrade_source_has_memory, verify_autonomy_receipt_profile, verify_catalog_signatures,
+        verify_cluster_wide_acl_closure, verify_compatibility, verify_effective_default_privileges,
+        verify_forbidden_namespace_objects, verify_forbidden_schema_objects, verify_history,
+        verify_history_rows, verify_login_principal_closure, verify_network_boundary,
+        verify_nonwriter_capabilities, verify_owned_function_acl, verify_owned_function_boundary,
+        verify_role_and_database_boundary, verify_roles_and_grants, verify_runtime_store_schema,
+        verify_schema_headers, verify_schema_objects, verify_server_version,
+        verify_stopped_admission,
     };
-    use crate::migrations::PostgresStoreSetupErrorKind;
+    use crate::migrations::{
+        DatabaseRole, MigrationTarget, PostgresStoreSetupError, PostgresStoreSetupErrorKind,
+        migration_manifest, verify_embedded_manifest, verify_v3_manifest_prefix,
+    };
+    use postgres::{Client, NoTls};
+
+    const LIVE_PROFILE_GATE: &str = "LATTICE_STORE_PROFILE_LIVE";
+    const LIVE_PROFILE_EXPECTED: &str = "LATTICE_STORE_PROFILE_EXPECTED";
+    const LIVE_PROFILE_RUNTIME_URL: &str = "LATTICE_STORE_PROFILE_RUNTIME_URL";
+    const LIVE_PROFILE_MIGRATOR_URL: &str = "LATTICE_STORE_PROFILE_MIGRATOR_URL";
+    const LIVE_PROFILE_RUN_ID: &str = "LATTICE_TASK019_RUN_ID";
+
+    fn diagnostic_condition(condition: bool) -> Result<(), PostgresStoreSetupError> {
+        if condition {
+            Ok(())
+        } else {
+            Err(permission_error())
+        }
+    }
+
+    fn diagnostic_catalog_condition(condition: bool) -> Result<(), PostgresStoreSetupError> {
+        if condition {
+            Ok(())
+        } else {
+            Err(catalog_error())
+        }
+    }
+
+    fn diagnose_forbidden_schema_object(label: &str, result: Result<(), PostgresStoreSetupError>) {
+        result
+            .unwrap_or_else(|error| panic!("TASK075_CATALOG_DIAGNOSTIC_{label}_{}", error.code()));
+        println!("TASK075_CATALOG_DIAGNOSTIC_{label}=PASS");
+    }
+
+    fn diagnose_forbidden_schema_objects(client: &mut Client, profile: CatalogProfile) {
+        let counts = read_forbidden_schema_object_counts(client).unwrap_or_else(|error| {
+            panic!(
+                "TASK075_CATALOG_DIAGNOSTIC_FORBIDDEN_OBJECT_QUERY_{}",
+                error.code()
+            )
+        });
+        for (label, actual, expected) in [
+            (
+                "FUNCTION_COUNT",
+                counts[0],
+                expected_owned_function_count(profile),
+            ),
+            ("NONINTERNAL_TRIGGER", counts[1], 0),
+            ("REWRITE", counts[2], 0),
+            ("POLICY", counts[3], 0),
+            ("SPECIAL_TYPE", counts[4], 0),
+            ("EVENT_TRIGGER", counts[5], 0),
+            (
+                "SCOPE_TRIGGER",
+                counts[6],
+                expected_scope_head_trigger_count(profile),
+            ),
+            (
+                "INTERNAL_TRIGGER",
+                counts[7],
+                expected_internal_trigger_count(profile, false),
+            ),
+            ("INHERITS", counts[8], 0),
+            ("SUBCLASS", counts[9], 0),
+        ] {
+            diagnose_forbidden_schema_object(
+                label,
+                diagnostic_catalog_condition(actual == expected),
+            );
+        }
+    }
+
+    fn diagnose_role_boundary(label: &str, result: Result<(), PostgresStoreSetupError>) {
+        result
+            .unwrap_or_else(|error| panic!("TASK075_CATALOG_DIAGNOSTIC_{label}_{}", error.code()));
+        println!("TASK075_CATALOG_DIAGNOSTIC_{label}=PASS");
+    }
+
+    fn diagnose_role_and_database_boundary(client: &mut Client, profile: CatalogProfile) {
+        diagnose_role_boundary(
+            "ROLE_SIGNATURE",
+            catalog_signature(
+                client,
+                ROLE_SIGNATURE_SQL,
+                PostgresStoreSetupErrorKind::PermissionDenied,
+            )
+            .and_then(|actual| diagnostic_condition(actual == EXPECTED_ROLE_SIGNATURE)),
+        );
+        diagnose_role_boundary(
+            "DB_ACL_SIGNATURE",
+            catalog_signature(
+                client,
+                DATABASE_ACL_SIGNATURE_SQL,
+                PostgresStoreSetupErrorKind::PermissionDenied,
+            )
+            .and_then(|actual| diagnostic_condition(actual == EXPECTED_DATABASE_ACL_SIGNATURE)),
+        );
+
+        let boundary = client
+            .query_one(ROLE_DATABASE_BOUNDARY_SQL, &[])
+            .unwrap_or_else(|_| {
+                panic!(
+                    "TASK075_CATALOG_DIAGNOSTIC_ROLE_BOUNDARY_ROW_STORE_DATABASE_PERMISSION_DENIED"
+                )
+            });
+        diagnose_role_boundary(
+            "OWNER",
+            row_value::<String>(&boundary, 0, PostgresStoreSetupErrorKind::PermissionDenied)
+                .and_then(|actual| diagnostic_condition(actual == DatabaseRole::Migrator.as_str())),
+        );
+        diagnose_role_boundary(
+            "TEMPLATE",
+            row_value::<bool>(&boundary, 1, PostgresStoreSetupErrorKind::PermissionDenied)
+                .and_then(|actual| diagnostic_condition(!actual)),
+        );
+        diagnose_role_boundary(
+            "ALLOWCONN",
+            row_value::<bool>(&boundary, 2, PostgresStoreSetupErrorKind::PermissionDenied)
+                .and_then(diagnostic_condition),
+        );
+        diagnose_role_boundary(
+            "CONNLIMIT",
+            row_value::<i32>(&boundary, 3, PostgresStoreSetupErrorKind::PermissionDenied)
+                .and_then(|actual| diagnostic_condition(actual == -1)),
+        );
+        diagnose_role_boundary(
+            "MEMBERSHIPS",
+            row_value::<i64>(&boundary, 4, PostgresStoreSetupErrorKind::PermissionDenied)
+                .and_then(|actual| diagnostic_condition(actual == 4)),
+        );
+        diagnose_role_boundary(
+            "EXTRA_ROLES",
+            row_value::<i64>(&boundary, 5, PostgresStoreSetupErrorKind::PermissionDenied)
+                .and_then(|actual| diagnostic_condition(actual == 0)),
+        );
+        diagnose_role_boundary(
+            "ROLE_SETTINGS",
+            row_value::<i64>(&boundary, 6, PostgresStoreSetupErrorKind::PermissionDenied)
+                .and_then(|actual| diagnostic_condition(actual == 0)),
+        );
+        diagnose_role_boundary(
+            "DANGEROUS_FUNCTIONS",
+            row_value::<i64>(&boundary, 7, PostgresStoreSetupErrorKind::PermissionDenied).and_then(
+                |actual| {
+                    diagnostic_condition(
+                        actual == expected_dangerous_function_count(profile, false),
+                    )
+                },
+            ),
+        );
+        let database_privileges = (|| {
+            Ok([
+                row_value::<bool>(&boundary, 8, PostgresStoreSetupErrorKind::PermissionDenied)?,
+                row_value::<bool>(&boundary, 9, PostgresStoreSetupErrorKind::PermissionDenied)?,
+                row_value::<bool>(&boundary, 10, PostgresStoreSetupErrorKind::PermissionDenied)?,
+                row_value::<bool>(&boundary, 11, PostgresStoreSetupErrorKind::PermissionDenied)?,
+                row_value::<bool>(&boundary, 12, PostgresStoreSetupErrorKind::PermissionDenied)?,
+                row_value::<bool>(&boundary, 13, PostgresStoreSetupErrorKind::PermissionDenied)?,
+            ])
+        })();
+        diagnose_role_boundary(
+            "DB_PRIVILEGES",
+            database_privileges.and_then(|actual| {
+                diagnostic_condition(actual == [false, false, false, true, true, true])
+            }),
+        );
+        diagnose_role_boundary(
+            "CLUSTER_ACL",
+            verify_cluster_wide_acl_closure(client, profile),
+        );
+        diagnose_role_boundary("LOGIN_CLOSURE", verify_login_principal_closure(client));
+    }
+
+    #[test]
+    #[ignore = "requires the coordinated marker-owned disposable PostgreSQL fixture"]
+    // Keep signature emission and the matching diagnostic matrix in one
+    // ignored fixture entry so a measured digest cannot omit its verifier.
+    #[allow(clippy::too_many_lines)]
+    fn measure_catalog_signatures() {
+        let connection = std::env::var("LATTICE_STORE_CATALOG_SIGNATURE_URL")
+            .expect("coordinator supplies fixture URL");
+        let mut client = postgres::Client::connect(&connection, postgres::NoTls)
+            .expect("connect to coordinated fixture");
+        client
+            .batch_execute("SET search_path = pg_catalog")
+            .expect("harden measurement search path");
+        for (label, query) in [
+            ("RELATION", RELATION_SIGNATURE_SQL),
+            ("COLUMN", COLUMN_SIGNATURE_SQL),
+            ("CONSTRAINT", CONSTRAINT_SIGNATURE_SQL),
+            ("INDEX", INDEX_SIGNATURE_SQL),
+            ("FUNCTION", FUNCTION_SIGNATURE_SQL),
+            ("TABLE_ACL", TABLE_ACL_SIGNATURE_SQL),
+            ("FUNCTION_ACL", FUNCTION_ACL_SIGNATURE_SQL),
+            ("SCHEMA_ACL", SCHEMA_ACL_SIGNATURE_SQL),
+            ("AUTONOMY", AUTONOMY_PROFILE_SIGNATURE_SQL),
+        ] {
+            let signature = catalog_signature(
+                &mut client,
+                query,
+                PostgresStoreSetupErrorKind::CorruptCatalog,
+            )
+            .expect("catalog signature");
+            println!("STORE_CATALOG_{label}_SIGNATURE={signature}");
+        }
+
+        let database_name: String = client
+            .query_one("SELECT current_database()::text", &[])
+            .expect("read fixture database")
+            .get(0);
+        let run_id = std::env::var(LIVE_PROFILE_RUN_ID).expect("coordinator supplies run id");
+        let target = MigrationTarget::new(database_name, run_id).expect("exact fixture target");
+        let manifest = verify_embedded_manifest().expect("embedded manifest");
+        let profile = classify_current_catalog_profile(&mut client, 5).expect("catalog profile");
+        diagnose_forbidden_schema_objects(&mut client, profile);
+        for (label, result) in [
+            (
+                "CATALOG_SIGNATURES",
+                verify_catalog_signatures(&mut client, profile, false),
+            ),
+            (
+                "SCHEMA_HEADERS",
+                verify_schema_headers(&mut client, profile),
+            ),
+            (
+                "FORBIDDEN_SCHEMA_OBJECTS",
+                verify_forbidden_schema_objects(&mut client, profile, false),
+            ),
+            (
+                "FUNCTION_BOUNDARY",
+                verify_owned_function_boundary(&mut client, profile, false),
+            ),
+            (
+                "FORBIDDEN_NAMESPACE_OBJECTS",
+                verify_forbidden_namespace_objects(&mut client),
+            ),
+            ("AUTONOMY", verify_autonomy_receipt_profile(&mut client)),
+            ("HISTORY", verify_history(&mut client)),
+            (
+                "COMPATIBILITY",
+                verify_compatibility(&mut client, &manifest, profile),
+            ),
+            (
+                "DATABASE_IDENTITY",
+                read_database_identity(&mut client, &target).map(|_| ()),
+            ),
+            ("ADMISSION", verify_stopped_admission(&mut client)),
+        ] {
+            result.unwrap_or_else(|error| {
+                panic!("TASK075_CATALOG_DIAGNOSTIC_{label}_{}", error.code())
+            });
+            println!("TASK075_CATALOG_DIAGNOSTIC_{label}=PASS");
+        }
+
+        diagnose_role_and_database_boundary(&mut client, profile);
+        for (label, result) in [
+            (
+                "ROLE_DATABASE_BOUNDARY",
+                verify_role_and_database_boundary(&mut client, profile, false),
+            ),
+            (
+                "FUNCTION_ACL_BOUNDARY",
+                verify_owned_function_acl(&mut client, profile),
+            ),
+            (
+                "RUNTIME_CAPABILITIES",
+                verify_nonwriter_capabilities(&mut client, DatabaseRole::Runtime, profile),
+            ),
+            (
+                "GUARDIAN_CAPABILITIES",
+                verify_nonwriter_capabilities(&mut client, DatabaseRole::Guardian, profile),
+            ),
+            (
+                "READONLY_CAPABILITIES",
+                verify_nonwriter_capabilities(&mut client, DatabaseRole::ReadOnly, profile),
+            ),
+            (
+                "DEFAULT_PRIVILEGES",
+                verify_effective_default_privileges(&mut client),
+            ),
+            ("ROLES", verify_roles_and_grants(&mut client, profile)),
+        ] {
+            result.unwrap_or_else(|error| {
+                panic!("TASK075_CATALOG_DIAGNOSTIC_{label}_{}", error.code())
+            });
+            println!("TASK075_CATALOG_DIAGNOSTIC_{label}=PASS");
+        }
+    }
+
+    #[test]
+    fn autonomy_catalog_signature_pins_table_constraints_indexes_and_function_bodies() {
+        for required in [
+            "pg_catalog.pg_get_constraintdef",
+            "pg_catalog.pg_get_indexdef",
+            "pg_catalog.pg_get_functiondef",
+            "p.prosrc",
+            "p.proacl::text",
+            "c.relacl::text",
+        ] {
+            assert!(AUTONOMY_PROFILE_SIGNATURE_SQL.contains(required));
+        }
+    }
+
+    struct LiveProfileFixture {
+        target: MigrationTarget,
+        runtime_url: String,
+        migrator_url: String,
+        expected_profile: CatalogProfile,
+        expected_name: &'static str,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct LiveDatabaseIdentity {
+        database_name: String,
+        database_uuid: String,
+        server_address: String,
+        server_port: i32,
+    }
+
+    struct LiveProfileMutation {
+        apply_sql: &'static str,
+        restore_sql: &'static str,
+        expected_kind: PostgresStoreSetupErrorKind,
+    }
+
+    const WRITER_LEASE_PROFILE_MUTATIONS: [LiveProfileMutation; 9] = [
+        LiveProfileMutation {
+            apply_sql: "ALTER TABLE writer_lease.writer_lease_extension_ledger \
+                        RENAME TO writer_lease_extension_ledger_profile_drift",
+            restore_sql: "ALTER TABLE writer_lease.writer_lease_extension_ledger_profile_drift \
+                          RENAME TO writer_lease_extension_ledger",
+            expected_kind: PostgresStoreSetupErrorKind::CorruptCatalog,
+        },
+        LiveProfileMutation {
+            apply_sql: "CREATE TABLE writer_lease.store_profile_live_extra (id bigint NOT NULL)",
+            restore_sql: "DROP TABLE writer_lease.store_profile_live_extra",
+            expected_kind: PostgresStoreSetupErrorKind::CorruptCatalog,
+        },
+        LiveProfileMutation {
+            apply_sql: "ALTER TABLE writer_lease.writer_lease_extension_identity \
+                        DROP CONSTRAINT writer_lease_extension_identity_singleton",
+            restore_sql: "ALTER TABLE writer_lease.writer_lease_extension_identity \
+                          ADD CONSTRAINT writer_lease_extension_identity_singleton \
+                          CHECK (singleton)",
+            expected_kind: PostgresStoreSetupErrorKind::CorruptCatalog,
+        },
+        LiveProfileMutation {
+            apply_sql: "CREATE TYPE writer_lease.store_profile_live_extra_type AS ENUM ('DRIFT')",
+            restore_sql: "DROP TYPE writer_lease.store_profile_live_extra_type",
+            expected_kind: PostgresStoreSetupErrorKind::CorruptCatalog,
+        },
+        LiveProfileMutation {
+            apply_sql: "ALTER FUNCTION writer_lease.writer_lease_load_current_v1(text) VOLATILE",
+            restore_sql: "ALTER FUNCTION writer_lease.writer_lease_load_current_v1(text) STABLE",
+            expected_kind: PostgresStoreSetupErrorKind::CorruptCatalog,
+        },
+        LiveProfileMutation {
+            apply_sql: "GRANT USAGE ON SCHEMA writer_lease TO lattice_readonly",
+            restore_sql: "REVOKE USAGE ON SCHEMA writer_lease FROM lattice_readonly",
+            expected_kind: PostgresStoreSetupErrorKind::PermissionDenied,
+        },
+        LiveProfileMutation {
+            apply_sql: "GRANT SELECT ON TABLE writer_lease.writer_lease_heads TO lattice_readonly",
+            restore_sql: "REVOKE SELECT ON TABLE writer_lease.writer_lease_heads \
+                          FROM lattice_readonly",
+            expected_kind: PostgresStoreSetupErrorKind::PermissionDenied,
+        },
+        LiveProfileMutation {
+            apply_sql: "GRANT EXECUTE ON FUNCTION \
+                        writer_lease.writer_lease_load_current_v1(text) TO lattice_readonly",
+            restore_sql: "REVOKE EXECUTE ON FUNCTION \
+                          writer_lease.writer_lease_load_current_v1(text) FROM lattice_readonly",
+            expected_kind: PostgresStoreSetupErrorKind::PermissionDenied,
+        },
+        LiveProfileMutation {
+            apply_sql: "GRANT SELECT (project_id) ON TABLE \
+                        writer_lease.writer_lease_heads TO lattice_readonly",
+            restore_sql: "REVOKE SELECT (project_id) ON TABLE \
+                          writer_lease.writer_lease_heads FROM lattice_readonly",
+            expected_kind: PostgresStoreSetupErrorKind::PermissionDenied,
+        },
+    ];
 
     #[test]
     fn server_version_gate_rejects_every_non_seventeen_major() {
@@ -3101,31 +6412,458 @@ mod tests {
     }
 
     #[test]
-    fn memory_catalog_profile_accepts_only_empty_v3_or_the_complete_fixed_extension() {
+    fn extension_catalog_profile_accepts_only_closed_supported_combinations() {
         assert_eq!(
-            classify_memory_catalog_counts(0, 0, 0, 0).expect("strict V3"),
+            classify_extension_catalog_counts(3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false)
+                .expect("strict V3"),
             CatalogProfile::V3
         );
         assert_eq!(
-            classify_memory_catalog_counts(8, 8, 7, 7).expect("exact Memory v2"),
+            classify_extension_catalog_counts(3, 8, 8, 7, 0, 7, 0, 0, 0, 0, 0, 0, false)
+                .expect("exact V3 Memory v2"),
             CatalogProfile::V3CodebaseMemoryV2
+        );
+        assert_eq!(
+            classify_extension_catalog_counts(3, 8, 8, 7, 0, 7, 1, 5, 5, 7, 7, 7, true)
+                .expect("exact V3 Memory v2 plus Writer Lease v1"),
+            CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                classify_extension_catalog_counts(3, 8, 8, 7, 0, 7, 1, 5, 5, 9, 9, 0, false)
+                    .expect("exact V3 Memory v2 plus Writer Lease v2 bridge")
+            ),
+            "V3CodebaseMemoryV2WriterLeaseV2Bridge"
+        );
+        assert_eq!(
+            classify_extension_catalog_counts(4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false)
+                .expect("strict V4"),
+            CatalogProfile::V4
+        );
+        assert_eq!(
+            classify_extension_catalog_counts(5, 8, 8, 7, 0, 7, 0, 0, 0, 0, 0, 0, false)
+                .expect("schema-v5 with exact frozen Memory v2"),
+            CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                classify_extension_catalog_counts(5, 8, 8, 7, 0, 7, 1, 5, 5, 9, 9, 0, false)
+                    .expect("schema-v5 Memory v2 plus Writer Lease v2 bridge")
+            ),
+            "V5CodebaseMemoryV2WriterLeaseV2BridgePending"
+        );
+        assert_eq!(
+            classify_extension_catalog_counts(5, 8, 8, 7, 7, 14, 0, 0, 0, 0, 0, 0, false)
+                .expect("schema-v5 with exact Memory v3"),
+            CatalogProfile::V5CodebaseMemoryV3Current
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                classify_extension_catalog_counts(5, 8, 8, 7, 7, 14, 1, 5, 5, 9, 9, 0, false)
+                    .expect("schema-v5 Memory v3 plus Writer Lease v2 bridge")
+            ),
+            "V5CodebaseMemoryV3WriterLeaseV2BridgePending"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                classify_extension_catalog_counts(5, 8, 8, 7, 7, 14, 1, 5, 5, 9, 9, 7, true,)
+                    .expect("schema-v5 Memory v3 plus current Writer Lease v2")
+            ),
+            "V5CodebaseMemoryV3WriterLeaseV2Current"
+        );
+    }
+
+    #[test]
+    fn extension_catalog_profile_rejects_unsupported_combinations() {
+        assert_eq!(
+            classify_extension_catalog_counts(5, 8, 8, 7, 0, 7, 1, 5, 5, 7, 7, 7, true)
+                .expect_err("Writer Lease v1 cannot enter a schema-v5 transitional profile")
+                .kind(),
+            PostgresStoreSetupErrorKind::CorruptCatalog
         );
 
         for counts in [
-            (1, 1, 0, 0),
-            (7, 7, 6, 6),
-            (7, 7, 5, 5),
-            (7, 8, 6, 6),
-            (7, 7, 6, 7),
-            (8, 8, 6, 6),
-            (7, 7, 7, 7),
+            (8, 8, 7, 7, 0, 0, 0, 0, 0),
+            (8, 8, 7, 7, 1, 5, 5, 7, 7),
+            (1, 1, 0, 0, 0, 0, 0, 0, 0),
+            (7, 7, 6, 6, 0, 0, 0, 0, 0),
+            (7, 7, 5, 5, 0, 0, 0, 0, 0),
+            (7, 8, 6, 6, 0, 0, 0, 0, 0),
+            (7, 7, 6, 7, 0, 0, 0, 0, 0),
+            (8, 8, 6, 6, 0, 0, 0, 0, 0),
+            (7, 7, 7, 7, 0, 0, 0, 0, 0),
+            (0, 0, 0, 0, 1, 0, 0, 0, 0),
+            (0, 0, 0, 0, 1, 5, 5, 7, 7),
+            (8, 8, 7, 7, 0, 5, 5, 7, 7),
+            (8, 8, 7, 7, 1, 4, 5, 7, 7),
+            (8, 8, 7, 7, 1, 5, 5, 6, 7),
+            (8, 8, 7, 7, 1, 5, 6, 7, 7),
+            (8, 8, 7, 7, 1, 5, 5, 7, 8),
         ] {
+            let writer_present = counts.4 == 1;
             assert_eq!(
-                classify_memory_catalog_counts(counts.0, counts.1, counts.2, counts.3)
-                    .expect_err("partial, unknown, extra, or overload must fail")
-                    .kind(),
+                classify_extension_catalog_counts(
+                    4,
+                    counts.0,
+                    counts.1,
+                    counts.2,
+                    0,
+                    counts.3,
+                    counts.4,
+                    counts.5,
+                    counts.6,
+                    counts.7,
+                    counts.8,
+                    if writer_present { 7 } else { 0 },
+                    writer_present,
+                )
+                .expect_err("partial, unknown, extra, or overload must fail")
+                .kind(),
                 PostgresStoreSetupErrorKind::CorruptCatalog
             );
         }
+    }
+
+    #[test]
+    fn v3_upgrade_source_preserves_legacy_sources_and_adds_the_exact_writer_bridge() {
+        assert!(!v3_upgrade_source_has_memory(CatalogProfile::V3).expect("exact plain V3 source"));
+        assert!(
+            v3_upgrade_source_has_memory(CatalogProfile::V3CodebaseMemoryV2)
+                .expect("exact V3 Memory-v2 source")
+        );
+        assert!(
+            v3_upgrade_source_has_memory(CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge)
+                .expect("exact V3 Memory-v2 Writer-Lease-v2 bridge source")
+        );
+        for profile in [
+            CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1,
+            CatalogProfile::V4,
+            CatalogProfile::V5,
+            CatalogProfile::V5CodebaseMemoryV2UpgradePending,
+            CatalogProfile::V5CodebaseMemoryV3Current,
+        ] {
+            assert_eq!(
+                v3_upgrade_source_has_memory(profile)
+                    .expect_err("unsupported upgrade source must fail closed")
+                    .kind(),
+                PostgresStoreSetupErrorKind::CompatibilityMismatch
+            );
+        }
+    }
+
+    #[test]
+    fn memory_v3_identity_rejects_every_profile_substitution() {
+        let exact = CodebaseMemoryIdentityProfile {
+            extension_id: CODEBASE_MEMORY_EXTENSION_ID,
+            extension_schema_version: CODEBASE_MEMORY_V3_SCHEMA_VERSION,
+            extension_path: CODEBASE_MEMORY_V3_PATH,
+            extension_sql_sha256: CODEBASE_MEMORY_V3_SQL_SHA256,
+            extension_manifest_sha256: CODEBASE_MEMORY_V3_MANIFEST_SHA256,
+            database_uuid: "database-uuid",
+            database_identity_sha256: "database-identity",
+            global_schema_version: CODEBASE_MEMORY_V3_GLOBAL_SCHEMA_VERSION,
+            global_manifest_sha256: "global-manifest",
+        };
+        assert!(codebase_memory_identity_profile_matches(exact, exact));
+        for substituted in [
+            CodebaseMemoryIdentityProfile {
+                extension_id: "substituted",
+                ..exact
+            },
+            CodebaseMemoryIdentityProfile {
+                extension_schema_version: 2,
+                ..exact
+            },
+            CodebaseMemoryIdentityProfile {
+                extension_path: "db/extensions/codebase-memory/v2.sql",
+                ..exact
+            },
+            CodebaseMemoryIdentityProfile {
+                extension_sql_sha256: "substituted",
+                ..exact
+            },
+            CodebaseMemoryIdentityProfile {
+                extension_manifest_sha256: "substituted",
+                ..exact
+            },
+            CodebaseMemoryIdentityProfile {
+                database_uuid: "substituted",
+                ..exact
+            },
+            CodebaseMemoryIdentityProfile {
+                database_identity_sha256: "substituted",
+                ..exact
+            },
+            CodebaseMemoryIdentityProfile {
+                global_schema_version: 3,
+                ..exact
+            },
+            CodebaseMemoryIdentityProfile {
+                global_manifest_sha256: "substituted",
+                ..exact
+            },
+        ] {
+            assert!(!codebase_memory_identity_profile_matches(
+                substituted,
+                exact
+            ));
+        }
+    }
+
+    #[test]
+    fn live_store_profile_accepts_exact_profiles_and_rejects_writer_lease_drift_when_provisioned() {
+        if std::env::var(LIVE_PROFILE_GATE).as_deref() != Ok("1") {
+            eprintln!("SKIP: {LIVE_PROFILE_GATE} is not enabled");
+            return;
+        }
+
+        let fixture = live_profile_fixture();
+        let runtime_identity = assert_live_profile_accepted(&fixture);
+        if fixture.expected_profile == CatalogProfile::V3CodebaseMemoryV2 {
+            assert!(
+                v3_upgrade_source_has_memory(fixture.expected_profile)
+                    .expect("exact Memory-v2 profile is an eligible V3 upgrade source")
+            );
+            assert_eq!(assert_live_profile_accepted(&fixture), runtime_identity);
+        }
+        if fixture.expected_profile == CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1 {
+            assert_v3_extension_profile_rejected_as_upgrade_source(&fixture);
+            let migrator_url = required_live_environment(LIVE_PROFILE_MIGRATOR_URL);
+            let mut migrator = connect_live_role(&migrator_url, DatabaseRole::Migrator);
+            let migrator_identity = verify_live_connection_identity(
+                &mut migrator,
+                &fixture.target,
+                DatabaseRole::Migrator,
+            );
+            assert!(
+                migrator_identity == runtime_identity,
+                "live profile runtime and migrator connections target different databases"
+            );
+            for mutation in &WRITER_LEASE_PROFILE_MUTATIONS {
+                assert_live_profile_mutation_rejected_and_restored(
+                    &fixture,
+                    &mut migrator,
+                    mutation,
+                );
+            }
+        }
+
+        eprintln!(
+            "PASS: Store live profile {} accepted with exact fail-closed matrix",
+            fixture.expected_name
+        );
+    }
+
+    fn live_profile_fixture() -> LiveProfileFixture {
+        let runtime_url = required_live_environment(LIVE_PROFILE_RUNTIME_URL);
+        let run_id = required_live_environment(LIVE_PROFILE_RUN_ID);
+        let expected = required_live_environment(LIVE_PROFILE_EXPECTED);
+        let (expected_profile, expected_name) = match expected.as_str() {
+            "V5" => (CatalogProfile::V5, "V5"),
+            "V5_MEMORY_V3" => (CatalogProfile::V5CodebaseMemoryV3Current, "V5_MEMORY_V3"),
+            "V3_MEMORY_V2" => (CatalogProfile::V3CodebaseMemoryV2, "V3_MEMORY_V2"),
+            "V3_MEMORY_V2_WRITER_LEASE_V1" => (
+                CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1,
+                "V3_MEMORY_V2_WRITER_LEASE_V1",
+            ),
+            _ => panic!("unsupported Store live profile expectation"),
+        };
+        let database_name = live_database_name(&runtime_url);
+        let target = MigrationTarget::new(database_name, run_id)
+            .unwrap_or_else(|_| panic!("Store live profile target is not marker-owned disposable"));
+        LiveProfileFixture {
+            target,
+            runtime_url,
+            migrator_url: required_live_environment(LIVE_PROFILE_MIGRATOR_URL),
+            expected_profile,
+            expected_name,
+        }
+    }
+
+    fn required_live_environment(name: &str) -> String {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| panic!("required Store live profile environment is missing"))
+    }
+
+    fn live_database_name(url: &str) -> String {
+        let config = url
+            .parse::<postgres::Config>()
+            .unwrap_or_else(|_| panic!("Store live profile connection configuration is invalid"));
+        config
+            .get_dbname()
+            .filter(|name| !name.is_empty())
+            .map_or_else(
+                || panic!("Store live profile database name is missing"),
+                str::to_owned,
+            )
+    }
+
+    fn connect_live_role(url: &str, role: DatabaseRole) -> Client {
+        let mut config = url
+            .parse::<postgres::Config>()
+            .unwrap_or_else(|_| panic!("Store live profile connection configuration is invalid"));
+        config.application_name(REQUIRED_APPLICATION_NAME);
+        let mut client = config
+            .connect(NoTls)
+            .unwrap_or_else(|_| panic!("Store live profile connection was rejected"));
+        let set_role = match role {
+            DatabaseRole::Migrator => "SET ROLE lattice_migrator",
+            DatabaseRole::Runtime => "SET ROLE lattice_runtime",
+            DatabaseRole::Guardian | DatabaseRole::ReadOnly => {
+                panic!("unsupported Store live profile role")
+            }
+        };
+        client
+            .batch_execute(set_role)
+            .unwrap_or_else(|_| panic!("Store live profile role transition was rejected"));
+        client
+    }
+
+    fn verify_live_connection_identity(
+        client: &mut Client,
+        target: &MigrationTarget,
+        role: DatabaseRole,
+    ) -> LiveDatabaseIdentity {
+        let row = client
+            .query_one(
+                "SELECT current_database()::text, current_user::text, session_user::text, \
+                 inet_server_addr()::text, inet_client_addr()::text, inet_server_port(), \
+                 current_setting('application_name'), \
+                 COALESCE((SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()), false), \
+                 (SELECT database_uuid::text FROM ONLY control.database_identity \
+                   WHERE singleton=true)",
+                &[],
+            )
+            .unwrap_or_else(|_| panic!("Store live profile connection identity was unavailable"));
+        let database_name = live_row_value::<String>(&row, 0);
+        let current_role = live_row_value::<String>(&row, 1);
+        let session_role = live_row_value::<String>(&row, 2);
+        let server_address = live_row_value::<String>(&row, 3);
+        let client_address = live_row_value::<String>(&row, 4);
+        let server_port = live_row_value::<i32>(&row, 5);
+        let application_name = live_row_value::<String>(&row, 6);
+        let ssl = live_row_value::<bool>(&row, 7);
+        let database_uuid = live_row_value::<String>(&row, 8);
+        assert!(
+            database_name == target.database_name()
+                && database_uuid == target.expected_database_uuid()
+                && current_role == role.as_str()
+                && session_role == role.login_role()
+                && application_name == REQUIRED_APPLICATION_NAME
+                && is_loopback(&server_address)
+                && is_loopback(&client_address)
+                && !ssl,
+            "Store live profile connection identity failed closed"
+        );
+        LiveDatabaseIdentity {
+            database_name,
+            database_uuid,
+            server_address,
+            server_port,
+        }
+    }
+
+    fn live_row_value<T: postgres::types::FromSqlOwned>(row: &postgres::Row, index: usize) -> T {
+        row.try_get(index)
+            .unwrap_or_else(|_| panic!("Store live profile row was malformed"))
+    }
+
+    fn assert_live_profile_accepted(fixture: &LiveProfileFixture) -> LiveDatabaseIdentity {
+        if matches!(
+            fixture.expected_profile,
+            CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        ) {
+            return assert_frozen_v3_extension_profile_accepted(fixture);
+        }
+        eprintln!("TASK075_PROFILE_RUNTIME_CONNECT_ENTER");
+        let mut runtime = connect_live_role(&fixture.runtime_url, DatabaseRole::Runtime);
+        eprintln!("TASK075_PROFILE_RUNTIME_CONNECT_PASS");
+        eprintln!("TASK075_PROFILE_RUNTIME_IDENTITY_ENTER");
+        let identity =
+            verify_live_connection_identity(&mut runtime, &fixture.target, DatabaseRole::Runtime);
+        eprintln!("TASK075_PROFILE_RUNTIME_IDENTITY_PASS");
+        eprintln!("TASK075_PROFILE_CLASSIFICATION_ENTER");
+        let profile = classify_current_catalog_profile(&mut runtime, 5)
+            .unwrap_or_else(|_| panic!("Store live profile classification was rejected"));
+        assert_eq!(profile, fixture.expected_profile);
+        eprintln!("TASK075_PROFILE_CLASSIFICATION_PASS");
+        eprintln!("TASK075_PROFILE_RUNTIME_VERIFY_ENTER");
+        verify_runtime_store_schema(&mut runtime, &fixture.target)
+            .unwrap_or_else(|error| panic!("TASK075_PROFILE_RUNTIME_VERIFY_{}", error.code()));
+        eprintln!("TASK075_PROFILE_RUNTIME_VERIFY_PASS");
+        identity
+    }
+
+    fn verify_live_profile(fixture: &LiveProfileFixture) -> Result<(), PostgresStoreSetupError> {
+        if matches!(
+            fixture.expected_profile,
+            CatalogProfile::V3CodebaseMemoryV2 | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+        ) {
+            return verify_frozen_v3_extension_profile(fixture).map(|_| ());
+        }
+        let mut runtime = connect_live_role(&fixture.runtime_url, DatabaseRole::Runtime);
+        verify_runtime_store_schema(&mut runtime, &fixture.target).map(|_| ())
+    }
+
+    fn assert_frozen_v3_extension_profile_accepted(
+        fixture: &LiveProfileFixture,
+    ) -> LiveDatabaseIdentity {
+        verify_frozen_v3_extension_profile(fixture)
+            .unwrap_or_else(|_| panic!("frozen V3 Store extension profile was rejected"))
+    }
+
+    fn verify_frozen_v3_extension_profile(
+        fixture: &LiveProfileFixture,
+    ) -> Result<LiveDatabaseIdentity, PostgresStoreSetupError> {
+        let v3_manifest = verify_v3_manifest_prefix()?;
+        let mut migrator = connect_live_role(&fixture.migrator_url, DatabaseRole::Migrator);
+        let identity =
+            verify_live_connection_identity(&mut migrator, &fixture.target, DatabaseRole::Migrator);
+        let profile = classify_current_catalog_profile(&mut migrator, 3)?;
+        if profile != fixture.expected_profile {
+            return Err(catalog_error());
+        }
+        verify_schema_objects(&mut migrator, profile)?;
+        let rows = read_history_rows(&mut migrator)?;
+        verify_history_rows(&rows, &migration_manifest()[..4])?;
+        verify_compatibility(&mut migrator, &v3_manifest, profile)?;
+        read_database_identity(&mut migrator, &fixture.target)?;
+        verify_stopped_admission(&mut migrator)?;
+        verify_roles_and_grants(&mut migrator, profile)?;
+        Ok(identity)
+    }
+
+    fn assert_v3_extension_profile_rejected_as_upgrade_source(fixture: &LiveProfileFixture) {
+        let mut migrator = connect_live_role(&fixture.migrator_url, DatabaseRole::Migrator);
+        let rejected = apply_migrations(&mut migrator, &fixture.target)
+            .expect_err("V3 Memory plus Writer Lease profile must not be a V5 migration source");
+        assert_eq!(
+            rejected.kind(),
+            PostgresStoreSetupErrorKind::CompatibilityMismatch
+        );
+    }
+
+    fn assert_live_profile_mutation_rejected_and_restored(
+        fixture: &LiveProfileFixture,
+        migrator: &mut Client,
+        mutation: &LiveProfileMutation,
+    ) {
+        migrator
+            .batch_execute(mutation.apply_sql)
+            .unwrap_or_else(|_| panic!("Store live profile fault injection was rejected"));
+        let rejected = verify_live_profile(fixture);
+        migrator
+            .batch_execute(mutation.restore_sql)
+            .unwrap_or_else(|_| panic!("Store live profile fault restoration was rejected"));
+        let error =
+            rejected.expect_err("drifted or over-privileged Store live profile must fail closed");
+        assert_eq!(error.kind(), mutation.expected_kind);
+        assert_live_profile_accepted(fixture);
     }
 }

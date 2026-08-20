@@ -1,0 +1,16 @@
+[package]
+name = "lattice-postgres-writer-lease"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lattice-contracts = { path = "../lattice-contracts" }
+lattice-writer-lease = { path = "../lattice-writer-lease" }
+postgres = { version = "=0.19.14", default-features = false }
+sha2 = "=0.11.0"
+time = { version = "=0.3.54", default-features = false, features = ["formatting", "parsing"] }
+
+[lints]
+workspace = true

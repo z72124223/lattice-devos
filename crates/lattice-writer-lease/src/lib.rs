@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
+use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256, canonicalize};
 use lattice_contracts::{
     AttemptId, CONTRACT_VERSION, ContentDigest, DaemonEpoch, FencingToken, HolderProcessId,
     ProjectId, ProjectSnapshotId, RuntimeAdmissionMode, RuntimeKind, TaskId,
@@ -16,6 +16,9 @@ use time::{OffsetDateTime, UtcOffset};
 
 const SNAPSHOT_VERSION: &str = "1.0";
 const MAX_SIGNED_BIGINT: u64 = i64::MAX as u64;
+/// Maximum accepted canonical snapshot payload at the persistence boundary.
+pub const MAX_CANONICAL_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CANONICAL_NESTING_DEPTH: usize = 128;
 
 /// One stable Writer Lease denial.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,7 +46,9 @@ pub enum LeaseDenial {
 }
 
 impl LeaseDenial {
-    const fn as_str(self) -> &'static str {
+    /// Returns the stable receipt-facing denial code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::StaleHead => "STALE_HEAD",
             Self::WriterAlreadyHeld => "WRITER_ALREADY_HELD",
@@ -122,6 +127,86 @@ impl fmt::Display for WriterLeaseError {
 }
 
 impl Error for WriterLeaseError {}
+
+/// Stable persistence-boundary failure classification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriterLeaseRepositoryErrorKind {
+    /// Pure Writer Lease validation or planning rejected the request.
+    Domain,
+    /// The durable owner could not be reached or admitted.
+    Unavailable,
+    /// Bounded serialization retries were exhausted.
+    SerializationExhausted,
+    /// `PostgreSQL` may have committed but the result could not be observed.
+    CommitOutcomeUnknown,
+    /// Durable history, checkpoint, catalog, or projection is corrupt.
+    Corrupt,
+    /// The independently loaded current authority does not match.
+    AuthorityMismatch,
+}
+
+/// Closed error returned by a durable Writer Lease repository.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WriterLeaseRepositoryError {
+    kind: WriterLeaseRepositoryErrorKind,
+    domain: Option<WriterLeaseError>,
+}
+
+impl WriterLeaseRepositoryError {
+    /// Constructs one non-domain repository failure.
+    #[must_use]
+    pub const fn new(kind: WriterLeaseRepositoryErrorKind) -> Self {
+        Self { kind, domain: None }
+    }
+
+    /// Wraps an exact pure-domain failure without changing its meaning.
+    #[must_use]
+    pub const fn from_domain(error: WriterLeaseError) -> Self {
+        Self {
+            kind: WriterLeaseRepositoryErrorKind::Domain,
+            domain: Some(error),
+        }
+    }
+
+    /// Returns the stable failure class.
+    #[must_use]
+    pub const fn kind(self) -> WriterLeaseRepositoryErrorKind {
+        self.kind
+    }
+
+    /// Returns the underlying pure-domain failure when present.
+    #[must_use]
+    pub const fn domain(self) -> Option<WriterLeaseError> {
+        self.domain
+    }
+
+    /// Returns a stable non-secret machine code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self.kind {
+            WriterLeaseRepositoryErrorKind::Domain => "WRITER_LEASE_REPOSITORY_DOMAIN",
+            WriterLeaseRepositoryErrorKind::Unavailable => "WRITER_LEASE_REPOSITORY_UNAVAILABLE",
+            WriterLeaseRepositoryErrorKind::SerializationExhausted => {
+                "WRITER_LEASE_REPOSITORY_SERIALIZATION_EXHAUSTED"
+            }
+            WriterLeaseRepositoryErrorKind::CommitOutcomeUnknown => {
+                "WRITER_LEASE_REPOSITORY_COMMIT_OUTCOME_UNKNOWN"
+            }
+            WriterLeaseRepositoryErrorKind::Corrupt => "WRITER_LEASE_REPOSITORY_CORRUPT",
+            WriterLeaseRepositoryErrorKind::AuthorityMismatch => {
+                "WRITER_LEASE_REPOSITORY_AUTHORITY_MISMATCH"
+            }
+        }
+    }
+}
+
+impl fmt::Display for WriterLeaseRepositoryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.code())
+    }
+}
+
+impl Error for WriterLeaseRepositoryError {}
 
 /// Exact injected owner observation. No clock, process, or runtime is read.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -243,7 +328,9 @@ pub enum WriterLeaseCommand {
 }
 
 impl WriterLeaseCommand {
-    fn command_id(&self) -> &str {
+    /// Returns the exact idempotency command identifier.
+    #[must_use]
+    pub fn command_id(&self) -> &str {
         match self {
             Self::Acquire(command) => &command.command_id,
             Self::Heartbeat(command) => &command.command_id,
@@ -253,7 +340,9 @@ impl WriterLeaseCommand {
         }
     }
 
-    fn project_id(&self) -> &ProjectId {
+    /// Returns the exact project aggregate identity.
+    #[must_use]
+    pub const fn project_id(&self) -> &ProjectId {
         match self {
             Self::Acquire(command) => &command.claim.project_id,
             Self::Heartbeat(command) => &command.project_id,
@@ -263,7 +352,9 @@ impl WriterLeaseCommand {
         }
     }
 
-    fn observation(&self) -> &LeaseObservation {
+    /// Returns the owner observation bound to this command.
+    #[must_use]
+    pub const fn observation(&self) -> &LeaseObservation {
         match self {
             Self::Acquire(command) => &command.observation,
             Self::Heartbeat(command) => &command.observation,
@@ -273,7 +364,9 @@ impl WriterLeaseCommand {
         }
     }
 
-    fn expected_head(&self) -> Option<&WriterLeaseAuthorityHead> {
+    /// Returns the complete expected current head when required.
+    #[must_use]
+    pub const fn expected_head(&self) -> Option<&WriterLeaseAuthorityHead> {
         match self {
             Self::Acquire(command) => command.expected_head.as_ref(),
             Self::Heartbeat(command) => Some(&command.expected_head),
@@ -281,6 +374,140 @@ impl WriterLeaseCommand {
             Self::Release(command) => Some(&command.expected_head),
             Self::Revoke(command) => Some(&command.expected_head),
         }
+    }
+
+    /// Exports the exact canonical pure-command bytes retained in one command
+    /// receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonicalization failure without changing the command.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, WriterLeaseError> {
+        canonicalize(&command_value(self))
+            .map(lattice_cjson::CanonicalBytes::into_vec)
+            .map_err(|_| WriterLeaseError::Canonical)
+    }
+
+    /// Reconstructs the caller-only repository intent bytes from one persisted
+    /// live command. Database observation, expiry, daemon allocation, and a
+    /// newly allocated fence remain excluded.
+    ///
+    /// # Errors
+    ///
+    /// Rejects fake commands and canonicalization failures.
+    pub fn repository_intent_canonical_bytes(&self) -> Result<Vec<u8>, WriterLeaseError> {
+        if !self.observation().runtime.is_live() {
+            return Err(WriterLeaseError::FakeRuntimeRequired);
+        }
+        repository_command_from_live_command(self).canonical_bytes()
+    }
+}
+
+/// Caller-owned acquire intent for a durable live repository.
+///
+/// `PostgreSQL` time, runtime admission, daemon identity/epoch, expiry, and the
+/// fencing token are deliberately absent. The repository observes or allocates
+/// them inside the same transaction that commits the pure owner plan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriterLeaseAcquireRequest {
+    pub command_id: String,
+    pub expected_head: Option<WriterLeaseAuthorityHead>,
+    pub project_id: ProjectId,
+    pub project_snapshot_id: ProjectSnapshotId,
+    pub task_id: TaskId,
+    pub task_revision: String,
+    pub task_spec_digest: ContentDigest,
+    pub attempt_id: AttemptId,
+    pub lease_id: String,
+    pub lease_holder_id: String,
+    pub worktree_id: String,
+    pub holder_process_id: HolderProcessId,
+    pub holder_process_start_identity: ContentDigest,
+}
+
+/// Caller-owned heartbeat intent; time and expiry remain repository-owned.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriterLeaseHeartbeatRequest {
+    pub command_id: String,
+    pub project_id: ProjectId,
+    pub expected_head: WriterLeaseAuthorityHead,
+}
+
+/// Caller-owned request to mark one exact expired lease suspect.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriterLeaseMarkSuspectRequest {
+    pub command_id: String,
+    pub project_id: ProjectId,
+    pub expected_head: WriterLeaseAuthorityHead,
+}
+
+/// Caller-owned exact release intent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriterLeaseReleaseRequest {
+    pub command_id: String,
+    pub project_id: ProjectId,
+    pub expected_head: WriterLeaseAuthorityHead,
+}
+
+/// Caller-owned evidence-bound revoke intent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriterLeaseRevokeRequest {
+    pub command_id: String,
+    pub project_id: ProjectId,
+    pub expected_head: WriterLeaseAuthorityHead,
+    pub evidence: RecoveryEvidence,
+}
+
+/// Closed high-level command set accepted by a live durable repository.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WriterLeaseRepositoryCommand {
+    Acquire(WriterLeaseAcquireRequest),
+    Heartbeat(WriterLeaseHeartbeatRequest),
+    MarkSuspect(WriterLeaseMarkSuspectRequest),
+    Release(WriterLeaseReleaseRequest),
+    Revoke(WriterLeaseRevokeRequest),
+}
+
+impl WriterLeaseRepositoryCommand {
+    /// Returns the exact caller-owned idempotency command identifier.
+    #[must_use]
+    pub fn command_id(&self) -> &str {
+        match self {
+            Self::Acquire(request) => &request.command_id,
+            Self::Heartbeat(request) => &request.command_id,
+            Self::MarkSuspect(request) => &request.command_id,
+            Self::Release(request) => &request.command_id,
+            Self::Revoke(request) => &request.command_id,
+        }
+    }
+
+    /// Returns the exact project aggregate addressed by this command.
+    #[must_use]
+    pub const fn project_id(&self) -> &ProjectId {
+        match self {
+            Self::Acquire(request) => &request.project_id,
+            Self::Heartbeat(request) => &request.project_id,
+            Self::MarkSuspect(request) => &request.project_id,
+            Self::Release(request) => &request.project_id,
+            Self::Revoke(request) => &request.project_id,
+        }
+    }
+
+    /// Exports the byte-exact canonical caller intent used for durable
+    /// repository idempotency.
+    ///
+    /// Database time, admission, daemon observation, expiry, and a newly
+    /// allocated fencing token are deliberately absent. An adapter can retain
+    /// these bytes beside the pure command receipt and, on retry, re-run the
+    /// pure planner with the originally persisted live command.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonicalization failure without changing the request.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, WriterLeaseError> {
+        canonicalize(&repository_command_value(self))
+            .map(lattice_cjson::CanonicalBytes::into_vec)
+            .map_err(|_| WriterLeaseError::Canonical)
     }
 }
 
@@ -295,7 +522,9 @@ pub enum TransitionKind {
 }
 
 impl TransitionKind {
-    const fn as_str(self) -> &'static str {
+    /// Returns the stable physical persistence code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Acquire => "ACQUIRE",
             Self::Heartbeat => "HEARTBEAT",
@@ -325,6 +554,19 @@ pub struct WriterLeaseTransitionRecord {
     pub transition_digest: ContentDigest,
 }
 
+impl WriterLeaseTransitionRecord {
+    /// Exports the exact canonical physical transition bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonicalization failure without changing the record.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, WriterLeaseError> {
+        canonicalize(&transition_record_value(self))
+            .map(lattice_cjson::CanonicalBytes::into_vec)
+            .map_err(|_| WriterLeaseError::Canonical)
+    }
+}
+
 /// Immutable terminal command receipt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriterLeaseCommandReceipt {
@@ -337,6 +579,19 @@ pub struct WriterLeaseCommandReceipt {
     pub outcome: CommandOutcome,
     pub transition_digest: Option<ContentDigest>,
     pub receipt_digest: ContentDigest,
+}
+
+impl WriterLeaseCommandReceipt {
+    /// Exports the exact canonical physical receipt bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonicalization failure without changing the receipt.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, WriterLeaseError> {
+        canonicalize(&command_receipt_value(self))
+            .map(lattice_cjson::CanonicalBytes::into_vec)
+            .map_err(|_| WriterLeaseError::Canonical)
+    }
 }
 
 /// Complete raw persistence payload. No nested field is trusted until replayed.
@@ -418,6 +673,234 @@ impl fmt::Debug for UntrustedWriterLeaseSnapshot {
             .debug_struct("UntrustedWriterLeaseSnapshot")
             .field("raw_fields", &"[ELIDED]")
             .finish_non_exhaustive()
+    }
+}
+
+impl UntrustedWriterLeaseSnapshot {
+    /// Parses one byte-exact `lattice-cjson-1` snapshot payload.
+    ///
+    /// The parser preserves duplicate object entries, accepts no JSON number,
+    /// and re-canonicalizes before running the pure snapshot verifier. Thus
+    /// whitespace, alternate escaping, key reordering, duplicate keys,
+    /// trailing bytes, and malformed UTF-8 all fail closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WriterLeaseError::CorruptSnapshot`] for any non-canonical or
+    /// semantically invalid payload.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, WriterLeaseError> {
+        if bytes.is_empty() || bytes.len() > MAX_CANONICAL_SNAPSHOT_BYTES {
+            return Err(WriterLeaseError::CorruptSnapshot);
+        }
+        let text = std::str::from_utf8(bytes).map_err(|_| WriterLeaseError::CorruptSnapshot)?;
+        let payload = CanonicalJsonParser::new(text)
+            .parse()
+            .map_err(|()| WriterLeaseError::CorruptSnapshot)?;
+        let canonical = canonicalize(&payload).map_err(|_| WriterLeaseError::CorruptSnapshot)?;
+        if canonical.as_slice() != bytes {
+            return Err(WriterLeaseError::CorruptSnapshot);
+        }
+        let snapshot = Self { payload };
+        verify_snapshot(&snapshot)?;
+        Ok(snapshot)
+    }
+
+    /// Returns the exact canonical byte representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonicalization failure for duplicate normalized keys or an
+    /// invalid value tree, and rejects output beyond the durable boundary.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, WriterLeaseError> {
+        let bytes = canonicalize(&self.payload)
+            .map(lattice_cjson::CanonicalBytes::into_vec)
+            .map_err(|_| WriterLeaseError::Canonical)?;
+        if bytes.len() > MAX_CANONICAL_SNAPSHOT_BYTES {
+            return Err(WriterLeaseError::CorruptSnapshot);
+        }
+        Ok(bytes)
+    }
+}
+
+struct CanonicalJsonParser<'a> {
+    input: &'a str,
+    position: usize,
+}
+
+impl<'a> CanonicalJsonParser<'a> {
+    const fn new(input: &'a str) -> Self {
+        Self { input, position: 0 }
+    }
+
+    fn parse(mut self) -> Result<CanonicalValue, ()> {
+        let value = self.value(0)?;
+        if self.position != self.input.len() {
+            return Err(());
+        }
+        Ok(value)
+    }
+
+    fn value(&mut self, depth: usize) -> Result<CanonicalValue, ()> {
+        if depth > MAX_CANONICAL_NESTING_DEPTH {
+            return Err(());
+        }
+        match self.peek() {
+            Some(b'n') => {
+                self.literal("null")?;
+                Ok(CanonicalValue::Null)
+            }
+            Some(b't') => {
+                self.literal("true")?;
+                Ok(CanonicalValue::Bool(true))
+            }
+            Some(b'f') => {
+                self.literal("false")?;
+                Ok(CanonicalValue::Bool(false))
+            }
+            Some(b'\"') => self.string().map(CanonicalValue::String),
+            Some(b'[') => self.array(depth),
+            Some(b'{') => self.object(depth),
+            _ => Err(()),
+        }
+    }
+
+    fn array(&mut self, depth: usize) -> Result<CanonicalValue, ()> {
+        self.byte(b'[')?;
+        let mut values = Vec::new();
+        if self.take(b']') {
+            return Ok(CanonicalValue::Array(values));
+        }
+        loop {
+            values.push(self.value(depth + 1)?);
+            if self.take(b']') {
+                break;
+            }
+            self.byte(b',')?;
+        }
+        Ok(CanonicalValue::Array(values))
+    }
+
+    fn object(&mut self, depth: usize) -> Result<CanonicalValue, ()> {
+        self.byte(b'{')?;
+        let mut entries = Vec::new();
+        if self.take(b'}') {
+            return Ok(CanonicalValue::Object(entries));
+        }
+        loop {
+            let key = self.string()?;
+            self.byte(b':')?;
+            entries.push((key, self.value(depth + 1)?));
+            if self.take(b'}') {
+                break;
+            }
+            self.byte(b',')?;
+        }
+        Ok(CanonicalValue::Object(entries))
+    }
+
+    fn string(&mut self) -> Result<String, ()> {
+        self.byte(b'\"')?;
+        let mut output = String::new();
+        loop {
+            let byte = self.peek().ok_or(())?;
+            match byte {
+                b'\"' => {
+                    self.position += 1;
+                    return Ok(output);
+                }
+                b'\\' => {
+                    self.position += 1;
+                    self.escape(&mut output)?;
+                }
+                0x00..=0x1f => return Err(()),
+                _ => {
+                    let character = self.input[self.position..].chars().next().ok_or(())?;
+                    output.push(character);
+                    self.position += character.len_utf8();
+                }
+            }
+        }
+    }
+
+    fn escape(&mut self, output: &mut String) -> Result<(), ()> {
+        let escaped = self.peek().ok_or(())?;
+        self.position += 1;
+        match escaped {
+            b'\"' => output.push('"'),
+            b'\\' => output.push('\\'),
+            b'/' => output.push('/'),
+            b'b' => output.push('\u{8}'),
+            b'f' => output.push('\u{c}'),
+            b'n' => output.push('\n'),
+            b'r' => output.push('\r'),
+            b't' => output.push('\t'),
+            b'u' => self.unicode_escape(output)?,
+            _ => return Err(()),
+        }
+        Ok(())
+    }
+
+    fn unicode_escape(&mut self, output: &mut String) -> Result<(), ()> {
+        let first = self.hex_quad()?;
+        let scalar = if (0xd800..=0xdbff).contains(&first) {
+            self.byte(b'\\')?;
+            self.byte(b'u')?;
+            let second = self.hex_quad()?;
+            if !(0xdc00..=0xdfff).contains(&second) {
+                return Err(());
+            }
+            0x1_0000 + ((u32::from(first) - 0xd800) << 10) + (u32::from(second) - 0xdc00)
+        } else if (0xdc00..=0xdfff).contains(&first) {
+            return Err(());
+        } else {
+            u32::from(first)
+        };
+        output.push(char::from_u32(scalar).ok_or(())?);
+        Ok(())
+    }
+
+    fn hex_quad(&mut self) -> Result<u16, ()> {
+        let mut value = 0_u16;
+        for _ in 0..4 {
+            let digit = match self.peek().ok_or(())? {
+                b'0'..=b'9' => u16::from(self.input.as_bytes()[self.position] - b'0'),
+                b'a'..=b'f' => u16::from(self.input.as_bytes()[self.position] - b'a' + 10),
+                b'A'..=b'F' => u16::from(self.input.as_bytes()[self.position] - b'A' + 10),
+                _ => return Err(()),
+            };
+            self.position += 1;
+            value = value
+                .checked_mul(16)
+                .and_then(|v| v.checked_add(digit))
+                .ok_or(())?;
+        }
+        Ok(value)
+    }
+
+    fn literal(&mut self, value: &str) -> Result<(), ()> {
+        if self.input[self.position..].starts_with(value) {
+            self.position += value.len();
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    fn byte(&mut self, expected: u8) -> Result<(), ()> {
+        if self.take(expected) { Ok(()) } else { Err(()) }
+    }
+
+    fn take(&mut self, expected: u8) -> bool {
+        if self.peek() == Some(expected) {
+            self.position += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.input.as_bytes().get(self.position).copied()
     }
 }
 
@@ -516,6 +999,181 @@ impl VerifiedWriterLeaseAggregate {
             payload: aggregate_value(self),
         }
     }
+
+    /// Exports the exact canonical bytes persisted by a durable repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonicalization or bounded-size failure without changing the
+    /// aggregate.
+    pub fn export_canonical_bytes(&self) -> Result<Vec<u8>, WriterLeaseError> {
+        self.export_untrusted().canonical_bytes()
+    }
+}
+
+/// One current receipt paired with its independently loaded owner head.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriterLeaseCurrentAuthority {
+    receipt: WriterLeaseAuthorityReceipt,
+    independent_head: WriterLeaseAuthorityHead,
+}
+
+impl WriterLeaseCurrentAuthority {
+    /// Constructs a current authority only when both independent shapes agree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authority-mismatch failure for a historical or substituted
+    /// head.
+    pub fn new(
+        receipt: WriterLeaseAuthorityReceipt,
+        independent_head: WriterLeaseAuthorityHead,
+    ) -> Result<Self, WriterLeaseRepositoryError> {
+        if receipt.head() != independent_head {
+            return Err(WriterLeaseRepositoryError::new(
+                WriterLeaseRepositoryErrorKind::AuthorityMismatch,
+            ));
+        }
+        Ok(Self {
+            receipt,
+            independent_head,
+        })
+    }
+
+    /// Returns the exact current owner receipt.
+    #[must_use]
+    pub const fn receipt(&self) -> &WriterLeaseAuthorityReceipt {
+        &self.receipt
+    }
+
+    /// Returns the independently loaded current head.
+    #[must_use]
+    pub const fn independent_head(&self) -> &WriterLeaseAuthorityHead {
+        &self.independent_head
+    }
+}
+
+/// Replay-verified state summary for one existing Writer Lease project.
+///
+/// This value deliberately distinguishes an existing released aggregate, whose
+/// current authority is `None` but whose high-water marks remain durable, from
+/// a repository lookup that found no project history at all.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriterLeaseProjectEvidence {
+    project_id: ProjectId,
+    current_authority: Option<WriterLeaseCurrentAuthority>,
+    fencing_high_water: u64,
+    transition_high_water: u64,
+    command_high_water: u64,
+}
+
+impl WriterLeaseProjectEvidence {
+    /// Builds one evidence value from an already replay-verified aggregate.
+    ///
+    /// A persistence adapter must first verify its independent snapshot,
+    /// checkpoint, current projection, and physical command/transition rows.
+    /// This constructor performs no I/O and grants no writer authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed repository failure if the verified aggregate cannot
+    /// produce a coherent checkpoint or current receipt/head pair.
+    pub fn from_verified_aggregate(
+        aggregate: &VerifiedWriterLeaseAggregate,
+    ) -> Result<Self, WriterLeaseRepositoryError> {
+        let current_authority = aggregate
+            .current_receipt()
+            .cloned()
+            .map(|receipt| {
+                let head = aggregate.current_head().ok_or_else(|| {
+                    WriterLeaseRepositoryError::new(
+                        WriterLeaseRepositoryErrorKind::AuthorityMismatch,
+                    )
+                })?;
+                WriterLeaseCurrentAuthority::new(receipt, head)
+            })
+            .transpose()?;
+        let checkpoint = aggregate
+            .checkpoint()
+            .map_err(WriterLeaseRepositoryError::from_domain)?;
+        Ok(Self {
+            project_id: aggregate.project_id().clone(),
+            current_authority,
+            fencing_high_water: aggregate.fencing_high_water(),
+            transition_high_water: aggregate.revision(),
+            command_high_water: checkpoint.command_high_water(),
+        })
+    }
+
+    /// Returns the exact project whose history was replayed.
+    #[must_use]
+    pub const fn project_id(&self) -> &ProjectId {
+        &self.project_id
+    }
+
+    /// Returns the current active/suspect authority, or `None` after release.
+    #[must_use]
+    pub const fn current_authority(&self) -> Option<&WriterLeaseCurrentAuthority> {
+        self.current_authority.as_ref()
+    }
+
+    /// Returns the last fencing token ever allocated for this project.
+    #[must_use]
+    pub const fn fencing_high_water(&self) -> u64 {
+        self.fencing_high_water
+    }
+
+    /// Returns the last applied transition revision.
+    #[must_use]
+    pub const fn transition_high_water(&self) -> u64 {
+        self.transition_high_water
+    }
+
+    /// Returns the number of immutable terminal command receipts.
+    #[must_use]
+    pub const fn command_high_water(&self) -> u64 {
+        self.command_high_water
+    }
+}
+
+/// Domain-owned durable Writer Lease repository boundary.
+///
+/// Implementations must create `PostgreSQL` observations inside their own
+/// transaction and then invoke the public pure plan/apply/verify functions.
+/// Callers never supply database time, admission, daemon epoch, expiry, or a
+/// fencing token through this contract.
+pub trait WriterLeaseRepository {
+    /// Executes one high-level typed command and returns its immutable terminal
+    /// receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed domain, availability, serialization, ambiguity,
+    /// corruption, or current-authority failure.
+    fn execute(
+        &mut self,
+        command: WriterLeaseRepositoryCommand,
+    ) -> Result<WriterLeaseCommandReceipt, WriterLeaseRepositoryError>;
+
+    /// Loads the current authority from replay-verified durable state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed availability, corruption, or current-authority failure.
+    fn current_authority(
+        &mut self,
+        project_id: &ProjectId,
+    ) -> Result<Option<WriterLeaseCurrentAuthority>, WriterLeaseRepositoryError>;
+
+    /// Rejects a historical/substituted authority at the durable owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authority mismatch or a closed durable-owner failure.
+    fn assert_current(
+        &mut self,
+        expected: &WriterLeaseAuthorityHead,
+    ) -> Result<(), WriterLeaseRepositoryError>;
 }
 
 /// One pure command plan. Applying it rechecks the complete aggregate digest.
@@ -691,7 +1349,9 @@ pub fn verify_snapshot(
         || replayed.current_receipt != decoded.current_receipt
         || replayed.transitions != decoded.transitions
         || replayed.command_receipts != decoded.command_receipts
-        || replayed.export_untrusted() != *snapshot
+        || canonicalize(&replayed.export_untrusted().payload)
+            .map_err(|_| WriterLeaseError::CorruptSnapshot)?
+            != canonicalize(&snapshot.payload).map_err(|_| WriterLeaseError::CorruptSnapshot)?
     {
         return Err(WriterLeaseError::CorruptSnapshot);
     }
@@ -2119,6 +2779,145 @@ fn command_value(command: &WriterLeaseCommand) -> CanonicalValue {
             &command.observation,
             vec![("evidence".to_owned(), recovery_value(&command.evidence))],
         ),
+    }
+}
+
+fn repository_command_value(command: &WriterLeaseRepositoryCommand) -> CanonicalValue {
+    let common = |kind: &str,
+                  command_id: &str,
+                  project_id: &ProjectId,
+                  expected: Option<&WriterLeaseAuthorityHead>,
+                  extras: Vec<(String, CanonicalValue)>| {
+        let mut fields = vec![
+            ("schema_version".to_owned(), string(SNAPSHOT_VERSION)),
+            ("kind".to_owned(), string(kind)),
+            ("command_id".to_owned(), string(command_id)),
+            ("project_id".to_owned(), string(project_id.as_str())),
+            ("expected_head".to_owned(), optional_head_value(expected)),
+        ];
+        fields.extend(extras);
+        CanonicalValue::Object(fields)
+    };
+    match command {
+        WriterLeaseRepositoryCommand::Acquire(request) => common(
+            "ACQUIRE",
+            &request.command_id,
+            &request.project_id,
+            request.expected_head.as_ref(),
+            vec![(
+                "claim".to_owned(),
+                CanonicalValue::Object(vec![
+                    ("schema_version".to_owned(), string(SNAPSHOT_VERSION)),
+                    ("project_id".to_owned(), string(request.project_id.as_str())),
+                    (
+                        "project_snapshot_id".to_owned(),
+                        string(request.project_snapshot_id.as_str()),
+                    ),
+                    ("task_id".to_owned(), string(request.task_id.as_str())),
+                    ("task_revision".to_owned(), string(&request.task_revision)),
+                    (
+                        "task_spec_digest".to_owned(),
+                        string(request.task_spec_digest.as_str()),
+                    ),
+                    ("attempt_id".to_owned(), string(request.attempt_id.as_str())),
+                    ("lease_id".to_owned(), string(&request.lease_id)),
+                    (
+                        "lease_holder_id".to_owned(),
+                        string(&request.lease_holder_id),
+                    ),
+                    ("worktree_id".to_owned(), string(&request.worktree_id)),
+                    (
+                        "holder_process_id".to_owned(),
+                        string(request.holder_process_id.get().to_string()),
+                    ),
+                    (
+                        "holder_process_start_identity".to_owned(),
+                        string(request.holder_process_start_identity.as_str()),
+                    ),
+                ]),
+            )],
+        ),
+        WriterLeaseRepositoryCommand::Heartbeat(request) => common(
+            "HEARTBEAT",
+            &request.command_id,
+            &request.project_id,
+            Some(&request.expected_head),
+            Vec::new(),
+        ),
+        WriterLeaseRepositoryCommand::MarkSuspect(request) => common(
+            "MARK_SUSPECT",
+            &request.command_id,
+            &request.project_id,
+            Some(&request.expected_head),
+            Vec::new(),
+        ),
+        WriterLeaseRepositoryCommand::Release(request) => common(
+            "RELEASE",
+            &request.command_id,
+            &request.project_id,
+            Some(&request.expected_head),
+            Vec::new(),
+        ),
+        WriterLeaseRepositoryCommand::Revoke(request) => common(
+            "REVOKE",
+            &request.command_id,
+            &request.project_id,
+            Some(&request.expected_head),
+            vec![("evidence".to_owned(), recovery_value(&request.evidence))],
+        ),
+    }
+}
+
+fn repository_command_from_live_command(
+    command: &WriterLeaseCommand,
+) -> WriterLeaseRepositoryCommand {
+    match command {
+        WriterLeaseCommand::Acquire(command) => {
+            WriterLeaseRepositoryCommand::Acquire(WriterLeaseAcquireRequest {
+                command_id: command.command_id.clone(),
+                expected_head: command.expected_head.clone(),
+                project_id: command.claim.project_id.clone(),
+                project_snapshot_id: command.claim.project_snapshot_id.clone(),
+                task_id: command.claim.task_id.clone(),
+                task_revision: command.claim.task_revision.clone(),
+                task_spec_digest: command.claim.task_spec_digest.clone(),
+                attempt_id: command.claim.attempt_id.clone(),
+                lease_id: command.claim.lease_id.clone(),
+                lease_holder_id: command.claim.lease_holder_id.clone(),
+                worktree_id: command.claim.worktree_id.clone(),
+                holder_process_id: command.claim.holder_process_id,
+                holder_process_start_identity: command.claim.holder_process_start_identity.clone(),
+            })
+        }
+        WriterLeaseCommand::Heartbeat(command) => {
+            WriterLeaseRepositoryCommand::Heartbeat(WriterLeaseHeartbeatRequest {
+                command_id: command.command_id.clone(),
+                project_id: command.project_id.clone(),
+                expected_head: command.expected_head.clone(),
+            })
+        }
+        WriterLeaseCommand::MarkSuspect(command) => {
+            WriterLeaseRepositoryCommand::MarkSuspect(WriterLeaseMarkSuspectRequest {
+                command_id: command.command_id.clone(),
+                project_id: command.project_id.clone(),
+                expected_head: command.expected_head.clone(),
+            })
+        }
+        WriterLeaseCommand::Release(command) => {
+            WriterLeaseRepositoryCommand::Release(WriterLeaseReleaseRequest {
+                command_id: command.command_id.clone(),
+                project_id: command.project_id.clone(),
+                expected_head: command.expected_head.clone(),
+            })
+        }
+        WriterLeaseCommand::Revoke(command) => {
+            WriterLeaseRepositoryCommand::Revoke(WriterLeaseRevokeRequest {
+                command_id: command.command_id.clone(),
+                project_id: command.project_id.clone(),
+                expected_head: command.expected_head.clone(),
+                evidence: command.evidence.clone(),
+            })
+        }
     }
 }
 

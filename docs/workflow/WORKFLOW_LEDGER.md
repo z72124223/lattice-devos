@@ -1,5 +1,29 @@
 # Workflow Ledger
 
+## TASK-038 ChatGPT MCP Gateway
+
+- Classification: bounded external transport integration and correction of a
+  drifted public MCP schema to the approved `latticed` 1.1 contract.
+- Repository/worktree:
+  `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\chatgpt-mcp`.
+- Branch/base: `feature/task-038-chatgpt-mcp` from `845328d`.
+- Specification/ticket: SPEC-003 v2; TASK-038; Issue #4 sequencing amendment.
+
+| Stage | Status | Evidence | Enforcement |
+|---|---|---|---|
+| Repository/rules/state | valid | audit, current Issue #4, clean dedicated worktree, branch/base inspected | machine-observed + documented |
+| Requirements | valid | Issue #4 and user instruction authorize Phase 1-5 local work; production E2E remains gated | user-authoritative + documented |
+| Specification | valid | SPEC-003 v2, including dual MCP generations and bounded live discovery | project check + documented |
+| Module constitution | valid | `latticed` 1.1 already requires two zero-argument tools and server-owned binding | documented + existing tests |
+| Ticket/worktree | valid | TASK-038 exact allowlist on dedicated branch/worktree | project check + Git |
+| TDD implementation | pass for Phase 1 | zero-arg/binding RED/GREEN; stateless discovery, metadata downgrade/schema, legacy lifecycle, modern lifetime, and hostile-env RED/GREEN | machine-executed locally |
+| Focused/full verification | pass with baseline lint record | MCP 21, legacy+modern real binaries, runtime package, tunnel harness, Node checks, format and parser gates pass | machine-enforced locally |
+| Code/architecture review | pass | independent final reviews, P0-P3 = 0, no amendment required | independent read-only review |
+| Live tunnel/ChatGPT discovery | pass | restricted Tunnels Read+Use key, health/ready 200, discover/list HTTP 200 without errors, exact two-tool refresh | live account + local machine + UI evidence |
+| Integration/CI/merge | partial | Phase 1 combined result passes; no successful production call, CI, push, or merge | local/live evidence + remaining gates |
+
+---
+
 ## TASK-033 Graphify/PostgreSQL Memory Production Checkpoint
 
 - Scope: typed contracts/ports, pure Codebase Memory and orchestration, exact

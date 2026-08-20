@@ -5,34 +5,46 @@ use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 
-use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256, canonicalize};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, FILE_SHARE_READ, GetFileInformationByHandle,
+};
+
+use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
 use lattice_codebase_memory::digest_query_text;
 use lattice_codex_adapter::{
     CodexDeliveryAdapter, CodexDeliveryAdapterConfig, CodexIdentityExpectation,
     PinnedCodexResourceDigests, PinnedCodexResources,
 };
 use lattice_contracts::{
-    AttemptId, CONTRACT_VERSION, CompletedDeliveryEvidence, Component, ContentDigest,
-    DeliveryProfile, DeliveryReceipt, DeliveryRunRequest, DeliveryRuntime, DeliveryStage,
-    DeliveryTerminalStatus, GATEWAY_TASK_SPEC_SCHEMA_VERSION, GatewayActorId, GatewayActorKind,
-    GatewayAdapterId, GatewayChannelId, GatewayClientKind, GatewayDenialCode, GatewayInstanceId,
-    GatewayPeerContext, GatewayReply, GatewayReplyBody, GatewayRequest, GatewayRequestBody,
-    GatewaySessionId, GatewayStatusObservation, GatewayStatusTarget, GatewayTaskProjection,
-    GatewayTaskState, GitObjectId, GraphMemoryReceipt, GraphMemoryRunRequest, HermesEvidence,
+    AttemptId, CONTRACT_VERSION, CodexDeliveryEvidence, CodexDeliveryRequest,
+    CompletedDeliveryEvidence, Component, ContentDigest, DeliveryOutcomeEvidence,
+    DeliveryOutcomeRequest, DeliveryProfile, DeliveryReceipt, DeliveryRunRequest, DeliveryRuntime,
+    DeliveryStage, DeliveryStatusRequest, DeliveryTerminalStatus, DurableIntentEvidence,
+    FixedTestEvidence, GatewayActorId, GatewayActorKind, GatewayAdapterId, GatewayChannelId,
+    GatewayClientKind, GatewayDenialCode, GatewayInstanceId, GatewayPeerContext, GatewayReply,
+    GatewayReplyBody, GatewayRequest, GatewayRequestBody, GatewaySessionId,
+    GatewayStatusObservation, GatewayStatusTarget, GatewayTaskProjection, GatewayTaskState,
+    GitCommitEvidence, GitObjectId, GraphMemoryReceipt, GraphMemoryRunRequest, HermesEvidence,
     HermesReflectionCandidate, HermesReflectionContent, HermesReflectionFinding,
-    HermesReflectionReceipt, HermesResearchRequest, Invocation, MemoryQuery, ProjectId,
-    ProjectSnapshotId, RequestId, RuntimeKind, SubjectBinding, TaskId, TaskSpecSubmission,
+    HermesReflectionReceipt, HermesResearchRequest, HolderProcessId, Invocation, MemoryQuery,
+    PreparedWorkspaceEvidence, ProjectId, ProjectSnapshotId, RequestId, RuntimeAdmissionMode,
+    RuntimeKind, StoreAuthorityHead, StoreAuthorityRevision, StoreDaemonInstanceId, SubjectBinding,
+    TaskId, TaskIngressPeerEvidence, TaskSpecSubmission, WorkspaceChangeEvidence,
+    WriterLeaseAuthorityHead,
 };
 use lattice_gateway_ipc::{build_reply, task_spec_document_digest};
 use lattice_graphify_adapter::{
@@ -47,7 +59,7 @@ use lattice_hermes_adapter::{
 use lattice_hermes_adapter::{
     CodexReflectionBrokerConfig, HermesOfflineRuntimeManifest, HermesProductionRunnerConfig,
     HermesWslContainmentConfig, ProductionHermesPort as HermesAdapterProductionPort,
-    ProductionHermesRunner,
+    ProductionHermesRunner, preparation::verify_official_preparation_for_launch,
 };
 use lattice_openclaw_adapter::{
     AuthenticationKey, GatewayTransportErrorKind, OpenClawGatewayConfig, OpenClawGatewayServer,
@@ -55,14 +67,33 @@ use lattice_openclaw_adapter::{
     OpenClawOfficialLaunchRecord, OpenClawProcessStartNonce,
 };
 use lattice_orchestrator::{
-    DeliveryOrchestratorError, delivery_status, graph_memory_status, run_delivery, run_graph_memory,
+    ControlledTaskOrchestratorError, ControlledTaskRequest, DeliveryOrchestratorError,
+    delivery_status, graph_memory_status, run_controlled_task, run_delivery, run_delivery_governed,
+    run_graph_memory,
 };
+#[cfg(test)]
+use lattice_ports::TaskLifecycleAutonomyEvidence;
 use lattice_ports::{
-    DeliveryFailureCertainty, GatewayService, GatewayServiceError, GatewayServiceResult,
+    ControlledTaskExecutionError, ControlledTaskExecutionErrorKind, ControlledTaskExecutionPort,
+    DeliveryCodexPort, DeliveryFailureCertainty, DeliveryLedgerPort, DeliveryPortError,
+    DeliveryPortResult, GatewayService, GatewayServiceError, GatewayServiceResult,
     GraphMemoryFailureCertainty, GraphMemoryPortError, GraphMemoryStage, HermesPort,
-    HermesReflectionMemoryPort, PortError, PortErrorKind, PortResult,
+    HermesReflectionMemoryPort, PortError, PortErrorKind, PortResult, TaskLifecycleError,
+    TaskLifecycleErrorKind, TaskLifecycleEvidence, TaskLifecyclePort, TaskLifecycleResult,
+    TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
 };
-use lattice_postgres_codebase_memory::{ExtensionTarget, PostgresCodebaseMemory};
+use lattice_postgres_codebase_memory::{
+    ExtensionTarget, PostgresCodebaseMemory, verify_embedded_extension_manifest,
+};
+use lattice_postgres_writer_lease::{
+    ExtensionTarget as WriterLeaseExtensionTarget, PostgresWriterLease,
+};
+use lattice_task_domain::{
+    AcceptanceCriterion, ApprovalRequirement, ApprovalRequirements, Capability, CapabilityRequest,
+    DeploymentPolicy, EvidenceType, NetworkPolicy, RequiredCheck, RiskClass, RuntimeProfile,
+    ScopeOperation, TASK_SPEC_SCHEMA_VERSION, TaskBudget, TaskScope, TaskSpec, TaskSpecInput,
+    TaskState,
+};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -72,20 +103,45 @@ use crate::delivery_ledger::{
     LEGACY_RECEIPT_FORMAT, PostgresDeliveryLedgerAdapter, PostgresDeliveryStatusReplay,
     connect_fixed_runtime_client,
 };
-use crate::git_delivery::{DeliveryWorkspaceGitAdapter, DeliveryWorkspaceGitAdapterConfig};
-use crate::mcp::{self, DeliveryToolArguments, DeliveryToolService, ToolExecutionError};
+use crate::git_delivery::{
+    BASELINE_COMMIT_SHA, DeliveryWorkspaceGitAdapter, DeliveryWorkspaceGitAdapterConfig,
+};
+use crate::mcp::{
+    self, DeliveryToolArguments, DeliveryToolService, ObservedEffectKind, TaskStatusArguments,
+    TaskSubmitArguments, ToolExecutionError, record_observed_effect,
+};
+use crate::task_control::{
+    PostgresTaskLifecycle, TaskPersistenceFoundation, task_admission_command_id,
+};
 
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 3_600;
 const FINALIZATION_RESERVE: Duration = Duration::from_secs(30);
+const CONTROLLED_TASK_MAX_RUNTIME: Duration = Duration::from_mins(5);
 const TASK_ID: &str = "TASK-032";
 const PROJECT_SNAPSHOT_ID: &str = "task032-delivery:snapshot:1";
+const CONTROLLED_TASK_ID: &str = "TASK-038-CANARY";
+const CONTROLLED_PROJECT_ID: &str = "task038-controlled-canary";
+const CONTROLLED_PROJECT_SNAPSHOT_ID: &str = "task038-controlled-canary:snapshot:1";
+const TASK050_ACCEPTANCE_PROFILE_ENV: &str = "LATTICE_TASK050_ACCEPTANCE_PROFILE";
+const TASK050_ACCEPTANCE_TASK_SPEC_SHA256_ENV: &str = "LATTICE_TASK050_ACCEPTANCE_TASK_SPEC_SHA256";
+const TASK050_ASK_USER_PROJECT_ID: &str = "task050-fresh-process";
+const TASK050_ASK_USER_PROJECT_SNAPSHOT_ID: &str = "task050-snapshot";
+const TASK050_ASK_USER_TASK_ID: &str = "TASK-050-FRESH";
+const TASK050_PROCEED_PROJECT_ID: &str = "task050-proceed-current";
+const TASK050_PROCEED_PROJECT_SNAPSHOT_ID: &str = "task050-proceed-snapshot";
+const TASK050_PROCEED_TASK_ID: &str = "TASK-050-PROCEED";
+const CONTROLLED_WRITER_FENCING_HIGH_WATER: u64 = 1;
+const CONTROLLED_WRITER_ACQUIRED_HIGH_WATER: u64 = 1;
+const CONTROLLED_WRITER_TRANSITION_HIGH_WATER: u64 = 2;
+const CONTROLLED_WRITER_COMMAND_HIGH_WATER: u64 = 2;
 const SCRIPTED_FIXTURE_MARKER_NAME: &str = ".lattice-delivery-fixture-v1.json";
 const SCRIPTED_FIXTURE_KIND: &str = "LATTICE_DELIVERY_SCRIPTED_ACCEPTANCE_V1";
 const MAX_SCRIPTED_MARKER_BYTES: u64 = 4 * 1024;
 const MAX_SCRIPTED_LAUNCHER_BYTES: u64 = 64 * 1024;
 const MAX_SCRIPTED_SERVER_BYTES: u64 = 64 * 1024;
 const MAX_GIT_EXECUTABLE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_LATTICED_EXECUTABLE_BYTES: u64 = 64 * 1024 * 1024;
 const GRAPH_TASK_ID: &str = "TASK-033";
 const GRAPH_PROJECT_ID: &str = "task032-delivery";
 const GRAPH_PROJECT_SNAPSHOT_ID: &str = "task032-delivery:graph-snapshot:1";
@@ -94,6 +150,15 @@ const GRAPH_RETRIEVAL_LIMIT: u16 = 10;
 const GRAPH_MEMORY_ROOT_NAME: &str = "graph-memory";
 const GRAPHIFY_RUNTIME_RELATIVE_PATH: &str = "target/supply-chain/graphify-v0.9.33/wsl-runtime";
 const FULL_CHAIN_HERMES_TASK_ID: &str = "TASK-037";
+const STORE_DAEMON_INSTANCE_ID_ENV: &str = "LATTICE_STORE_DAEMON_INSTANCE_ID";
+const STORE_DAEMON_EPOCH_ENV: &str = "LATTICE_STORE_DAEMON_EPOCH";
+const STORE_AUTHORITY_REVISION_ENV: &str = "LATTICE_STORE_AUTHORITY_REVISION";
+const STORE_OBSERVATION_DIGEST_ENV: &str = "LATTICE_STORE_OBSERVATION_DIGEST";
+const STORE_AUTHORITY_HEAD_DIGEST_ENV: &str = "LATTICE_STORE_AUTHORITY_HEAD_DIGEST";
+const TASK_INGRESS_KIND_ENV: &str = "LATTICE_TASK_INGRESS_KIND";
+const TASK_INGRESS_PROFILE_DIGEST_ENV: &str = "LATTICE_TASK_INGRESS_PROFILE_SHA256";
+const TASK_INGRESS_SECURE_TUNNEL: &str = "CHATGPT_SECURE_MCP_TUNNEL";
+const TASK_INGRESS_LOCAL_ACCEPTANCE: &str = "LOCAL_CANONICAL_MCP_ACCEPTANCE";
 #[cfg(windows)]
 const FULL_CHAIN_HERMES_MODEL: &str = "hermes-agent";
 #[cfg(windows)]
@@ -124,23 +189,96 @@ const OFFICIAL_HERMES_RUNTIME_BYTE_COUNT: u64 = 722_643_145;
 const OPENCLAW_ADAPTER_VERSION: &str = "1.0.0";
 const FIXED_GATEWAY_TASK_REVISION: &str = "1";
 const SCRIPTED_SERVER_BYTES: &[u8] = include_bytes!("fixtures/task032-scripted-codex.ps1");
-const OFFICIAL_CODEX_VERSION: &str = "codex-cli 0.146.0";
-const OFFICIAL_CODEX_LAUNCHER_SHA256: &str =
-    "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb";
-const OFFICIAL_SANDBOX_SETUP_SHA256: &str =
-    "c12d225b34e7f82cdab6bbc714797abed661f40e158104694953889750121cef";
-const OFFICIAL_COMMAND_RUNNER_SHA256: &str =
-    "0102fa1820ecd03bb03a991fd2303a1a484118f7da8a71864f88ec94bca61d6d";
-const OFFICIAL_CODE_MODE_HOST_SHA256: &str =
-    "6ef1de0e04d859f8f4f6d4d64f0f3ceeec28658423d91de160f5e804280d1c36";
-const OFFICIAL_RG_SHA256: &str = "14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680";
-const OFFICIAL_PACKAGE_MANIFEST_SHA256: &str =
-    "aaa0646d6b615da94187b51efd50c69621a00867761161ae55cc16cfd545bec7";
-const OFFICIAL_MANAGED_PACKAGE_MANIFEST_SHA256: &str =
-    "24dd8c63a4d2b7bc2ded86c887974f842093ce4f2ed8473267a91e036c38da20";
 const MAX_OFFICIAL_LAUNCHER_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_OFFICIAL_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_OFFICIAL_MANIFEST_BYTES: u64 = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OfficialBundleFileRole {
+    Launcher,
+    SandboxSetup,
+    CommandRunner,
+    CodeModeHost,
+    Rg,
+    PackageManifest,
+    ManagedPackageManifest,
+}
+
+const OFFICIAL_BUNDLE_FILE_ROLES: [OfficialBundleFileRole; 7] = [
+    OfficialBundleFileRole::Launcher,
+    OfficialBundleFileRole::SandboxSetup,
+    OfficialBundleFileRole::CommandRunner,
+    OfficialBundleFileRole::CodeModeHost,
+    OfficialBundleFileRole::Rg,
+    OfficialBundleFileRole::PackageManifest,
+    OfficialBundleFileRole::ManagedPackageManifest,
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OfficialBundleFilePolicy {
+    role: OfficialBundleFileRole,
+    relative_path: &'static str,
+    sha256: &'static str,
+    max_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OfficialBundlePolicy {
+    version: &'static str,
+    package_version: &'static str,
+    target: &'static str,
+    files: [OfficialBundleFilePolicy; 7],
+}
+
+const OFFICIAL_BUNDLE_POLICY: OfficialBundlePolicy = OfficialBundlePolicy {
+    version: "codex-cli 0.146.0",
+    package_version: "0.146.0",
+    target: "x86_64-pc-windows-msvc",
+    files: [
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::Launcher,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
+            sha256: "bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb",
+            max_bytes: MAX_OFFICIAL_LAUNCHER_BYTES,
+        },
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::SandboxSetup,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex-resources/codex-windows-sandbox-setup.exe",
+            sha256: "c12d225b34e7f82cdab6bbc714797abed661f40e158104694953889750121cef",
+            max_bytes: MAX_OFFICIAL_RESOURCE_BYTES,
+        },
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::CommandRunner,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex-resources/codex-command-runner.exe",
+            sha256: "0102fa1820ecd03bb03a991fd2303a1a484118f7da8a71864f88ec94bca61d6d",
+            max_bytes: MAX_OFFICIAL_RESOURCE_BYTES,
+        },
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::CodeModeHost,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex-code-mode-host.exe",
+            sha256: "6ef1de0e04d859f8f4f6d4d64f0f3ceeec28658423d91de160f5e804280d1c36",
+            max_bytes: MAX_OFFICIAL_RESOURCE_BYTES,
+        },
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::Rg,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex-path/rg.exe",
+            sha256: "14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680",
+            max_bytes: MAX_OFFICIAL_RESOURCE_BYTES,
+        },
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::PackageManifest,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex-package.json",
+            sha256: "aaa0646d6b615da94187b51efd50c69621a00867761161ae55cc16cfd545bec7",
+            max_bytes: MAX_OFFICIAL_MANIFEST_BYTES,
+        },
+        OfficialBundleFilePolicy {
+            role: OfficialBundleFileRole::ManagedPackageManifest,
+            relative_path: "codex-official/0.146.0/node_modules/@openai/codex/package.json",
+            sha256: "24dd8c63a4d2b7bc2ded86c887974f842093ce4f2ed8473267a91e036c38da20",
+            max_bytes: MAX_OFFICIAL_MANIFEST_BYTES,
+        },
+    ],
+};
 
 /// Static, secret-free composition failure classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,9 +301,16 @@ pub enum LatticedErrorKind {
     GraphConfiguration,
     GraphExecution,
     GraphReceiptRead,
+    HermesPreparationMissing,
+    HermesPreparationRequired,
+    HermesProductionLivenessRejected,
     HermesProductionRunnerRequired,
+    HermesTeardownRejected,
     HermesExecution,
     HermesReceiptRead,
+    TaskControl,
+    TaskReconciliationRequired,
+    WriterLease,
     Transport,
 }
 
@@ -191,9 +336,16 @@ impl LatticedErrorKind {
             Self::GraphConfiguration => "LATTICE_GRAPH_MEMORY_CONFIGURATION_REJECTED",
             Self::GraphExecution => "LATTICE_GRAPH_MEMORY_RUN_REJECTED",
             Self::GraphReceiptRead => "LATTICE_GRAPH_MEMORY_RECEIPT_REJECTED",
+            Self::HermesPreparationMissing => "LATTICE_HERMES_PREPARATION_REQUIRED",
+            Self::HermesPreparationRequired => "LATTICE_HERMES_PREPARATION_REJECTED",
+            Self::HermesProductionLivenessRejected => "LATTICE_HERMES_PRODUCTION_LIVENESS_REJECTED",
             Self::HermesProductionRunnerRequired => "LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED",
+            Self::HermesTeardownRejected => "LATTICE_HERMES_TEARDOWN_REJECTED",
             Self::HermesExecution => "LATTICE_HERMES_REFLECTION_REJECTED",
             Self::HermesReceiptRead => "LATTICE_HERMES_MEMORY_RECEIPT_REJECTED",
+            Self::TaskControl => "LATTICE_TASK_CONTROL_REJECTED",
+            Self::TaskReconciliationRequired => "LATTICE_TASK_RECONCILIATION_REQUIRED",
+            Self::WriterLease => "LATTICE_WRITER_LEASE_REJECTED",
             Self::Transport => "LATTICED_STDIO_REJECTED",
         }
     }
@@ -227,7 +379,351 @@ impl fmt::Display for LatticedError {
     }
 }
 
+const STARTUP_DIAGNOSTIC_SCHEMA: &str = "lattice.latticed.startup-diagnostic.v1";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupDiagnosticStage {
+    ConfigurationValidationStarted,
+    ConfigurationValidated,
+    ServiceAssemblyStarted,
+    ServiceAssembled,
+    StdioLoopEntered,
+    WaitingForMcpInput,
+    McpInitializeReceived,
+    McpInitializedNotificationReceived,
+    McpToolsListReceived,
+    McpEndOfStream,
+    StartupFailed,
+}
+
+impl StartupDiagnosticStage {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::ConfigurationValidationStarted => "CONFIGURATION_VALIDATION_STARTED",
+            Self::ConfigurationValidated => "CONFIGURATION_VALIDATED",
+            Self::ServiceAssemblyStarted => "SERVICE_ASSEMBLY_STARTED",
+            Self::ServiceAssembled => "SERVICE_ASSEMBLED",
+            Self::StdioLoopEntered => "STDIO_LOOP_ENTERED",
+            Self::WaitingForMcpInput => "WAITING_FOR_MCP_INPUT",
+            Self::McpInitializeReceived => "MCP_INITIALIZE_RECEIVED",
+            Self::McpInitializedNotificationReceived => "MCP_INITIALIZED_NOTIFICATION_RECEIVED",
+            Self::McpToolsListReceived => "MCP_TOOLS_LIST_RECEIVED",
+            Self::McpEndOfStream => "MCP_END_OF_STREAM",
+            Self::StartupFailed => "STARTUP_FAILED",
+        }
+    }
+}
+
+/// Fixed-vocabulary, non-authoritative startup state safe to mirror to stderr.
+///
+/// Every field is selected from compile-time constants. This prevents process
+/// configuration, request contents, credentials, paths, and raw errors from
+/// entering the product diagnostic stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StartupDiagnostic {
+    stage: StartupDiagnosticStage,
+    last_completed_stage: &'static str,
+    waiting_reason: &'static str,
+    configuration_health: &'static str,
+    dependency_health: &'static str,
+    failure_classification: &'static str,
+}
+
+impl StartupDiagnostic {
+    const fn new(
+        stage: StartupDiagnosticStage,
+        last_completed_stage: &'static str,
+        waiting_reason: &'static str,
+        configuration_health: &'static str,
+        dependency_health: &'static str,
+        failure_classification: &'static str,
+    ) -> Self {
+        Self {
+            stage,
+            last_completed_stage,
+            waiting_reason,
+            configuration_health,
+            dependency_health,
+            failure_classification,
+        }
+    }
+
+    const fn configuration_validation_started() -> Self {
+        Self::new(
+            StartupDiagnosticStage::ConfigurationValidationStarted,
+            "NONE",
+            "CONFIGURATION_VALIDATION",
+            "CHECKING",
+            "NOT_CHECKED",
+            "NONE",
+        )
+    }
+
+    const fn configuration_validated() -> Self {
+        Self::new(
+            StartupDiagnosticStage::ConfigurationValidated,
+            "CONFIGURATION_VALIDATED",
+            "SERVICE_ASSEMBLY",
+            "VALID",
+            "CONFIGURED_NO_CONNECTIVITY_PROBE",
+            "NONE",
+        )
+    }
+
+    const fn service_assembly_started() -> Self {
+        Self::new(
+            StartupDiagnosticStage::ServiceAssemblyStarted,
+            "CONFIGURATION_VALIDATED",
+            "SERVICE_ASSEMBLY",
+            "VALID",
+            "ASSEMBLY_IN_PROGRESS",
+            "NONE",
+        )
+    }
+
+    const fn service_assembled() -> Self {
+        Self::new(
+            StartupDiagnosticStage::ServiceAssembled,
+            "SERVICE_ASSEMBLED",
+            "STDIO_ENTRY",
+            "VALID",
+            "ASSEMBLED_NO_CONNECTIVITY_PROBE",
+            "NONE",
+        )
+    }
+
+    const fn stdio_loop_entered() -> Self {
+        Self::new(
+            StartupDiagnosticStage::StdioLoopEntered,
+            "STDIO_LOOP_ENTERED",
+            "MCP_INPUT",
+            "VALID",
+            "MCP_SESSION_PENDING",
+            "NONE",
+        )
+    }
+
+    const fn from_mcp_event(event: mcp::StdioLifecycleEvent) -> Self {
+        match event {
+            mcp::StdioLifecycleEvent::WaitingForInput => Self::new(
+                StartupDiagnosticStage::WaitingForMcpInput,
+                "STDIO_LOOP_ENTERED",
+                "MCP_INPUT",
+                "VALID",
+                "MCP_SESSION_PENDING",
+                "NONE",
+            ),
+            mcp::StdioLifecycleEvent::InitializeReceived => Self::new(
+                StartupDiagnosticStage::McpInitializeReceived,
+                "MCP_INITIALIZE_RECEIVED",
+                "INITIALIZED_NOTIFICATION",
+                "VALID",
+                "MCP_SESSION_PENDING",
+                "NONE",
+            ),
+            mcp::StdioLifecycleEvent::InitializedNotificationReceived => Self::new(
+                StartupDiagnosticStage::McpInitializedNotificationReceived,
+                "MCP_INITIALIZED_NOTIFICATION_RECEIVED",
+                "MCP_INPUT",
+                "VALID",
+                "MCP_SESSION_ACTIVE",
+                "NONE",
+            ),
+            mcp::StdioLifecycleEvent::ToolsListReceived => Self::new(
+                StartupDiagnosticStage::McpToolsListReceived,
+                "MCP_TOOLS_LIST_RECEIVED",
+                "MCP_INPUT",
+                "VALID",
+                "MCP_SESSION_ACTIVE",
+                "NONE",
+            ),
+            mcp::StdioLifecycleEvent::EndOfStream => Self::new(
+                StartupDiagnosticStage::McpEndOfStream,
+                "MCP_END_OF_STREAM",
+                "NONE",
+                "VALID",
+                "STDIN_EOF",
+                "NONE",
+            ),
+        }
+    }
+
+    const fn failure(
+        last_completed_stage: &'static str,
+        configuration_health: &'static str,
+        dependency_health: &'static str,
+        failure: LatticedErrorKind,
+    ) -> Self {
+        Self::new(
+            StartupDiagnosticStage::StartupFailed,
+            last_completed_stage,
+            "NONE",
+            configuration_health,
+            dependency_health,
+            failure.code(),
+        )
+    }
+
+    fn render(self) -> String {
+        format!(
+            concat!(
+                "{{\"schema\":\"{}\",",
+                "\"stage\":\"{}\",\"last_completed_stage\":\"{}\",",
+                "\"waiting_reason\":\"{}\",\"configuration_health\":\"{}\",",
+                "\"dependency_health\":\"{}\",\"failure_classification\":\"{}\"}}"
+            ),
+            STARTUP_DIAGNOSTIC_SCHEMA,
+            self.stage.code(),
+            self.last_completed_stage,
+            self.waiting_reason,
+            self.configuration_health,
+            self.dependency_health,
+            self.failure_classification,
+        )
+    }
+}
+
+fn write_startup_diagnostic<W: Write>(writer: &mut W, diagnostic: StartupDiagnostic) {
+    // Diagnostics are non-authoritative. A closed or failed stderr consumer
+    // must not terminate the MCP server or change its stdout protocol.
+    let _ = writeln!(writer, "{}", diagnostic.render());
+}
+
+fn emit_startup_diagnostic(diagnostic: StartupDiagnostic) {
+    write_startup_diagnostic(&mut io::stderr().lock(), diagnostic);
+}
+
 impl Error for LatticedError {}
+
+fn observed_port_effect(kind: ObservedEffectKind, stage: DeliveryStage) -> DeliveryPortResult<()> {
+    record_observed_effect(kind).map_err(|_| {
+        DeliveryPortError::new(
+            stage,
+            PortErrorKind::Malformed,
+            DeliveryFailureCertainty::Known,
+            "LATTICE_MCP_OBSERVED_EFFECT_REJECTED",
+        )
+    })
+}
+
+fn observed_database_attempt(stage: DeliveryStage) -> DeliveryPortResult<()> {
+    observed_port_effect(ObservedEffectKind::Database, stage)?;
+    observed_port_effect(ObservedEffectKind::Network, stage)
+}
+
+struct ObservedLedger<L> {
+    inner: L,
+}
+
+impl<L: DeliveryLedgerPort> DeliveryLedgerPort for ObservedLedger<L> {
+    fn record_intent(
+        &mut self,
+        request: &DeliveryRunRequest,
+    ) -> DeliveryPortResult<DurableIntentEvidence> {
+        observed_database_attempt(DeliveryStage::Intent)?;
+        self.inner.record_intent(request)
+    }
+
+    fn record_outcome(
+        &mut self,
+        request: &DeliveryOutcomeRequest,
+    ) -> DeliveryPortResult<DeliveryOutcomeEvidence> {
+        observed_database_attempt(DeliveryStage::Outcome)?;
+        self.inner.record_outcome(request)
+    }
+
+    fn load_receipt(
+        &mut self,
+        request: &DeliveryStatusRequest,
+    ) -> DeliveryPortResult<DeliveryReceipt> {
+        observed_database_attempt(DeliveryStage::Receipt)?;
+        self.inner.load_receipt(request)
+    }
+}
+
+struct ObservedWorkspace<W> {
+    inner: W,
+}
+
+impl<W: WorkspaceGitPort> WorkspaceGitPort for ObservedWorkspace<W> {
+    fn prepare(
+        &mut self,
+        request: &DeliveryRunRequest,
+        intent: &DurableIntentEvidence,
+    ) -> DeliveryPortResult<PreparedWorkspaceEvidence> {
+        observed_port_effect(
+            ObservedEffectKind::Filesystem,
+            DeliveryStage::WorkspacePrepare,
+        )?;
+        observed_port_effect(ObservedEffectKind::Process, DeliveryStage::WorkspacePrepare)?;
+        self.inner.prepare(request, intent)
+    }
+
+    fn inspect_changes(
+        &mut self,
+        request: &DeliveryRunRequest,
+        intent: &DurableIntentEvidence,
+        workspace: &PreparedWorkspaceEvidence,
+        codex: &CodexDeliveryEvidence,
+    ) -> DeliveryPortResult<WorkspaceChangeEvidence> {
+        observed_port_effect(
+            ObservedEffectKind::Filesystem,
+            DeliveryStage::ScopeVerification,
+        )?;
+        observed_port_effect(
+            ObservedEffectKind::Process,
+            DeliveryStage::ScopeVerification,
+        )?;
+        self.inner
+            .inspect_changes(request, intent, workspace, codex)
+    }
+
+    fn commit(
+        &mut self,
+        request: &DeliveryRunRequest,
+        workspace: &PreparedWorkspaceEvidence,
+        changes: &WorkspaceChangeEvidence,
+        test: &FixedTestEvidence,
+    ) -> DeliveryPortResult<GitCommitEvidence> {
+        observed_port_effect(ObservedEffectKind::Filesystem, DeliveryStage::GitCommit)?;
+        observed_port_effect(ObservedEffectKind::Process, DeliveryStage::GitCommit)?;
+        self.inner.commit(request, workspace, changes, test)
+    }
+}
+
+impl<W: TestRunnerPort> TestRunnerPort for ObservedWorkspace<W> {
+    fn run_fixed(
+        &mut self,
+        request: &DeliveryRunRequest,
+        workspace: &PreparedWorkspaceEvidence,
+        changes: &WorkspaceChangeEvidence,
+    ) -> DeliveryPortResult<FixedTestEvidence> {
+        observed_port_effect(ObservedEffectKind::Filesystem, DeliveryStage::FixedTest)?;
+        observed_port_effect(ObservedEffectKind::Process, DeliveryStage::FixedTest)?;
+        self.inner.run_fixed(request, workspace, changes)
+    }
+}
+
+struct ObservedCodex<C> {
+    inner: C,
+}
+
+impl<C: DeliveryCodexPort> DeliveryCodexPort for ObservedCodex<C> {
+    fn run_delivery(
+        &mut self,
+        request: CodexDeliveryRequest,
+    ) -> DeliveryPortResult<CodexDeliveryEvidence> {
+        observed_port_effect(ObservedEffectKind::Codex, DeliveryStage::Codex)?;
+        observed_port_effect(ObservedEffectKind::Process, DeliveryStage::Codex)?;
+        self.inner.run_delivery(request)
+    }
+
+    fn interrupt_delivery(&mut self, request_id: &RequestId) -> DeliveryPortResult<()> {
+        observed_port_effect(ObservedEffectKind::Codex, DeliveryStage::Codex)?;
+        observed_port_effect(ObservedEffectKind::Process, DeliveryStage::Codex)?;
+        self.inner.interrupt_delivery(request_id)
+    }
+}
 
 /// Fixed process-owned inputs for one executable delivery profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -241,7 +737,7 @@ pub struct LatticedDeliveryConfig {
     git_executable: PathBuf,
     timeout: Duration,
     runtime: DeliveryRuntime,
-    pinned_codex_resources: Option<PinnedCodexResources>,
+    official_bundle: Option<LaunchReadyOfficialBundle>,
 }
 
 impl LatticedDeliveryConfig {
@@ -268,12 +764,11 @@ impl LatticedDeliveryConfig {
         }
         let version = version.into();
         let launcher_sha256 = launcher_sha256.into();
-        let pinned_codex_resources = if runtime == DeliveryRuntime::OfficialCodexAppServer {
+        let official_bundle = if runtime == DeliveryRuntime::OfficialCodexAppServer {
             Some(validate_official_codex_identity(
                 &launcher,
                 &version,
                 &launcher_sha256,
-                &delivery_root,
             )?)
         } else {
             None
@@ -290,7 +785,9 @@ impl LatticedDeliveryConfig {
             DELIVERY_PROMPT,
             timeout,
             runtime,
-            pinned_codex_resources.clone(),
+            official_bundle
+                .as_ref()
+                .map(|bundle| bundle.resources().clone()),
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::CodexConfiguration))?;
         DeliveryWorkspaceGitAdapterConfig::new(
@@ -309,8 +806,431 @@ impl LatticedDeliveryConfig {
             git_executable,
             timeout,
             runtime,
-            pinned_codex_resources,
+            official_bundle,
         })
+    }
+
+    fn status_process(timeout: Duration) -> Self {
+        Self {
+            launcher: PathBuf::new(),
+            version: String::new(),
+            launcher_sha256: String::new(),
+            schema_directory: PathBuf::new(),
+            codex_home: PathBuf::new(),
+            delivery_root: PathBuf::new(),
+            git_executable: PathBuf::new(),
+            timeout,
+            runtime: DeliveryRuntime::OfficialCodexAppServer,
+            official_bundle: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OfficialBundleEvidenceProvenance {
+    RealWindowsFilesystem,
+    #[cfg(test)]
+    SyntheticTest,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OfficialFileIdentity {
+    volume_serial_number: u64,
+    file_index: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OfficialBundleFileFacts {
+    role: OfficialBundleFileRole,
+    declared_path: PathBuf,
+    expected_path: PathBuf,
+    canonical_path: PathBuf,
+    canonical_expected_path: PathBuf,
+    is_regular_file: bool,
+    reparse_component_count: u32,
+    byte_count: u64,
+    sha256: Option<String>,
+    captured_identity: Option<OfficialFileIdentity>,
+    observed_identity: Option<OfficialFileIdentity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OfficialBundleFacts {
+    provenance: OfficialBundleEvidenceProvenance,
+    version: String,
+    declared_launcher_sha256: String,
+    official_target_root: PathBuf,
+    launcher_target_root: Option<PathBuf>,
+    files: Vec<OfficialBundleFileFacts>,
+}
+
+mod official_bundle_provider_sealed {
+    pub trait Sealed {}
+}
+
+trait OfficialBundleEvidenceProvider: official_bundle_provider_sealed::Sealed {
+    fn facts(&self) -> &OfficialBundleFacts;
+}
+
+#[derive(Debug)]
+struct PinnedOfficialFile {
+    path: PathBuf,
+    boundary: PathBuf,
+    identity: OfficialFileIdentity,
+    handle: fs::File,
+}
+
+#[derive(Clone, Debug)]
+struct RealPinnedOfficialBundle {
+    facts: OfficialBundleFacts,
+    pinned_files: Arc<[PinnedOfficialFile]>,
+}
+
+impl PartialEq for RealPinnedOfficialBundle {
+    fn eq(&self, other: &Self) -> bool {
+        self.facts == other.facts
+    }
+}
+
+impl Eq for RealPinnedOfficialBundle {}
+
+impl official_bundle_provider_sealed::Sealed for RealPinnedOfficialBundle {}
+
+impl OfficialBundleEvidenceProvider for RealPinnedOfficialBundle {
+    fn facts(&self) -> &OfficialBundleFacts {
+        &self.facts
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SyntheticOfficialBundleEvidenceProvider {
+    facts: OfficialBundleFacts,
+}
+
+#[cfg(test)]
+impl official_bundle_provider_sealed::Sealed for SyntheticOfficialBundleEvidenceProvider {}
+
+#[cfg(test)]
+impl OfficialBundleEvidenceProvider for SyntheticOfficialBundleEvidenceProvider {
+    fn facts(&self) -> &OfficialBundleFacts {
+        &self.facts
+    }
+}
+
+#[cfg(test)]
+impl SyntheticOfficialBundleEvidenceProvider {
+    fn complete(policy: &OfficialBundlePolicy) -> Self {
+        let target_root = PathBuf::from(r"C:\lattice\target");
+        Self::complete_at(policy, &target_root)
+    }
+
+    fn complete_at(policy: &OfficialBundlePolicy, target_root: &Path) -> Self {
+        let files = OFFICIAL_BUNDLE_FILE_ROLES
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, role)| {
+                let path = policy.expected_path(&target_root, role);
+                let identity = OfficialFileIdentity {
+                    volume_serial_number: 7,
+                    file_index: (index + 1) as u64,
+                };
+                OfficialBundleFileFacts {
+                    role,
+                    declared_path: path.clone(),
+                    expected_path: path.clone(),
+                    canonical_path: path.clone(),
+                    canonical_expected_path: path,
+                    is_regular_file: true,
+                    reparse_component_count: 0,
+                    byte_count: 1,
+                    sha256: Some(policy.file_policy(role).sha256.to_owned()),
+                    captured_identity: Some(identity),
+                    observed_identity: Some(identity),
+                }
+            })
+            .collect();
+        Self {
+            facts: OfficialBundleFacts {
+                provenance: OfficialBundleEvidenceProvenance::SyntheticTest,
+                version: policy.version.to_owned(),
+                declared_launcher_sha256: policy
+                    .file_policy(OfficialBundleFileRole::Launcher)
+                    .sha256
+                    .to_owned(),
+                official_target_root: target_root.to_path_buf(),
+                launcher_target_root: Some(target_root.to_path_buf()),
+                files,
+            },
+        }
+    }
+
+    fn remove(&mut self, role: OfficialBundleFileRole) {
+        self.facts.files.retain(|file| file.role != role);
+    }
+
+    fn file_mut(&mut self, role: OfficialBundleFileRole) -> &mut OfficialBundleFileFacts {
+        self.facts
+            .files
+            .iter_mut()
+            .find(|file| file.role == role)
+            .expect("complete synthetic bundle facts")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OfficialIdentityRejection {
+    Layout,
+    Version,
+    DeclaredLauncherDigest,
+    TargetSplit,
+    MissingFile(OfficialBundleFileRole),
+    UnexpectedFileFacts,
+    PathMismatch(OfficialBundleFileRole),
+    ReparsePath(OfficialBundleFileRole),
+    NotRegularFile(OfficialBundleFileRole),
+    OversizedFile(OfficialBundleFileRole),
+    UnreadableFile(OfficialBundleFileRole),
+    DigestMismatch(OfficialBundleFileRole),
+    FileIdentityUnavailable(OfficialBundleFileRole),
+    FileIdentityChanged(OfficialBundleFileRole),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ValidatedOfficialBundleFacts;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LaunchReadyOfficialBundle {
+    resources: PinnedCodexResources,
+    real_bundle: RealPinnedOfficialBundle,
+    _validated: ValidatedOfficialBundleFacts,
+}
+
+impl OfficialBundlePolicy {
+    const fn production() -> &'static Self {
+        &OFFICIAL_BUNDLE_POLICY
+    }
+
+    fn file_policy(&self, role: OfficialBundleFileRole) -> &OfficialBundleFilePolicy {
+        self.files
+            .iter()
+            .find(|policy| policy.role == role)
+            .expect("complete fixed official bundle policy")
+    }
+
+    fn expected_path(&self, target_root: &Path, role: OfficialBundleFileRole) -> PathBuf {
+        self.file_policy(role)
+            .relative_path
+            .split('/')
+            .fold(target_root.to_path_buf(), |path, component| {
+                path.join(component)
+            })
+    }
+
+    fn launcher_target_root(launcher: &Path) -> Result<PathBuf, OfficialIdentityRejection> {
+        launcher
+            .ancestors()
+            .nth(9)
+            .map(Path::to_path_buf)
+            .ok_or(OfficialIdentityRejection::Layout)
+    }
+
+    fn evaluate(
+        &self,
+        provider: &impl OfficialBundleEvidenceProvider,
+    ) -> Result<ValidatedOfficialBundleFacts, OfficialIdentityRejection> {
+        let facts = provider.facts();
+        if facts.version != self.version {
+            return Err(OfficialIdentityRejection::Version);
+        }
+        if facts.declared_launcher_sha256
+            != self.file_policy(OfficialBundleFileRole::Launcher).sha256
+        {
+            return Err(OfficialIdentityRejection::DeclaredLauncherDigest);
+        }
+        let launcher_target_root = facts
+            .launcher_target_root
+            .as_deref()
+            .ok_or(OfficialIdentityRejection::TargetSplit)?;
+        if !same_declared_path(&facts.official_target_root, launcher_target_root) {
+            return Err(OfficialIdentityRejection::TargetSplit);
+        }
+        if facts.files.len() != OFFICIAL_BUNDLE_FILE_ROLES.len() {
+            for role in OFFICIAL_BUNDLE_FILE_ROLES {
+                if facts.files.iter().all(|file| file.role != role) {
+                    return Err(OfficialIdentityRejection::MissingFile(role));
+                }
+            }
+            return Err(OfficialIdentityRejection::UnexpectedFileFacts);
+        }
+        for file_policy in &self.files {
+            let file = facts
+                .files
+                .iter()
+                .find(|file| file.role == file_policy.role)
+                .ok_or(OfficialIdentityRejection::MissingFile(file_policy.role))?;
+            let expected_path = self.expected_path(&facts.official_target_root, file_policy.role);
+            if !same_declared_path(&file.declared_path, &expected_path)
+                || !same_declared_path(&file.expected_path, &expected_path)
+                || file.canonical_path != file.canonical_expected_path
+            {
+                return Err(OfficialIdentityRejection::PathMismatch(file_policy.role));
+            }
+            if file.reparse_component_count != 0 {
+                return Err(OfficialIdentityRejection::ReparsePath(file_policy.role));
+            }
+            if !file.is_regular_file {
+                return Err(OfficialIdentityRejection::NotRegularFile(file_policy.role));
+            }
+            if file.byte_count > file_policy.max_bytes {
+                return Err(OfficialIdentityRejection::OversizedFile(file_policy.role));
+            }
+            let sha256 = file
+                .sha256
+                .as_deref()
+                .ok_or(OfficialIdentityRejection::UnreadableFile(file_policy.role))?;
+            if sha256 != file_policy.sha256 {
+                return Err(OfficialIdentityRejection::DigestMismatch(file_policy.role));
+            }
+            let captured = file.captured_identity.ok_or(
+                OfficialIdentityRejection::FileIdentityUnavailable(file_policy.role),
+            )?;
+            let observed = file.observed_identity.ok_or(
+                OfficialIdentityRejection::FileIdentityUnavailable(file_policy.role),
+            )?;
+            if captured != observed {
+                return Err(OfficialIdentityRejection::FileIdentityChanged(
+                    file_policy.role,
+                ));
+            }
+        }
+        Ok(ValidatedOfficialBundleFacts)
+    }
+}
+
+impl RealPinnedOfficialBundle {
+    fn capture(
+        policy: &OfficialBundlePolicy,
+        launcher: &Path,
+        version: &str,
+        launcher_sha256: &str,
+    ) -> Result<Self, OfficialIdentityRejection> {
+        let target_root = OfficialBundlePolicy::launcher_target_root(launcher)?;
+        let launcher_target_root = Some(target_root.clone());
+        let mut files = Vec::with_capacity(OFFICIAL_BUNDLE_FILE_ROLES.len());
+        let mut pinned_files = Vec::with_capacity(OFFICIAL_BUNDLE_FILE_ROLES.len());
+        for role in OFFICIAL_BUNDLE_FILE_ROLES {
+            let expected_path = policy.expected_path(&target_root, role);
+            let declared_path = if role == OfficialBundleFileRole::Launcher {
+                launcher.to_path_buf()
+            } else {
+                expected_path.clone()
+            };
+            if let Some((facts, pinned)) = capture_official_file(
+                role,
+                declared_path,
+                expected_path,
+                &target_root,
+                policy.file_policy(role).max_bytes,
+            ) {
+                files.push(facts);
+                pinned_files.push(pinned);
+            }
+        }
+        Ok(Self {
+            facts: OfficialBundleFacts {
+                provenance: OfficialBundleEvidenceProvenance::RealWindowsFilesystem,
+                version: version.to_owned(),
+                declared_launcher_sha256: launcher_sha256.to_owned(),
+                official_target_root: target_root,
+                launcher_target_root,
+                files,
+            },
+            pinned_files: Arc::from(pinned_files),
+        })
+    }
+
+    fn ensure_current(&self) -> Result<(), OfficialIdentityRejection> {
+        for pinned in &*self.pinned_files {
+            let role = file_role_for_path(&self.facts, &pinned.path)
+                .ok_or(OfficialIdentityRejection::UnexpectedFileFacts)?;
+            let handle_identity = official_file_identity(&pinned.handle)
+                .ok_or(OfficialIdentityRejection::FileIdentityUnavailable(role))?;
+            let path_identity = fs::File::open(&pinned.path)
+                .ok()
+                .and_then(|current| official_file_identity(&current))
+                .ok_or(OfficialIdentityRejection::FileIdentityUnavailable(role))?;
+            let reparse_count = reparse_component_count(&pinned.path, &pinned.boundary)
+                .ok_or(OfficialIdentityRejection::ReparsePath(role))?;
+            if handle_identity != pinned.identity || path_identity != pinned.identity {
+                return Err(OfficialIdentityRejection::FileIdentityChanged(role));
+            }
+            if reparse_count != 0 {
+                return Err(OfficialIdentityRejection::ReparsePath(role));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LaunchReadyOfficialBundle {
+    fn from_real(
+        policy: &OfficialBundlePolicy,
+        real_bundle: RealPinnedOfficialBundle,
+        validated: ValidatedOfficialBundleFacts,
+    ) -> Result<Self, OfficialIdentityRejection> {
+        let target_root = &real_bundle.facts.official_target_root;
+        let install_root = target_root
+            .join("codex-official")
+            .join(policy.package_version);
+        let managed_package_root = install_root
+            .join("node_modules")
+            .join("@openai")
+            .join("codex");
+        let bundle_root = install_root
+            .join("node_modules")
+            .join("@openai")
+            .join("codex-win32-x64")
+            .join("vendor")
+            .join(policy.target);
+        let resources = PinnedCodexResources::new(
+            managed_package_root,
+            bundle_root.join("codex-resources"),
+            PinnedCodexResourceDigests::new(
+                policy
+                    .file_policy(OfficialBundleFileRole::SandboxSetup)
+                    .sha256,
+                policy
+                    .file_policy(OfficialBundleFileRole::CommandRunner)
+                    .sha256,
+                policy
+                    .file_policy(OfficialBundleFileRole::CodeModeHost)
+                    .sha256,
+                policy.file_policy(OfficialBundleFileRole::Rg).sha256,
+                policy
+                    .file_policy(OfficialBundleFileRole::PackageManifest)
+                    .sha256,
+                policy
+                    .file_policy(OfficialBundleFileRole::ManagedPackageManifest)
+                    .sha256,
+            )
+            .map_err(|_| OfficialIdentityRejection::Layout)?,
+        )
+        .map_err(|_| OfficialIdentityRejection::Layout)?;
+        Ok(Self {
+            resources,
+            real_bundle,
+            _validated: validated,
+        })
+    }
+
+    fn resources(&self) -> &PinnedCodexResources {
+        &self.resources
+    }
+
+    fn ensure_current(&self) -> Result<(), OfficialIdentityRejection> {
+        self.real_bundle.ensure_current()
     }
 }
 
@@ -318,105 +1238,13 @@ fn validate_official_codex_identity(
     launcher: &Path,
     version: &str,
     launcher_sha256: &str,
-    delivery_root: &Path,
-) -> Result<PinnedCodexResources, LatticedError> {
+) -> Result<LaunchReadyOfficialBundle, LatticedError> {
     let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
-    if version != OFFICIAL_CODEX_VERSION
-        || launcher_sha256 != OFFICIAL_CODEX_LAUNCHER_SHA256
-        || delivery_root.file_name() != Some(OsStr::new("delivery"))
-    {
-        return Err(rejected());
-    }
-    let fixture_root = delivery_root.parent().ok_or_else(rejected)?;
-    let fixture_id = fixture_root
-        .file_name()
-        .and_then(OsStr::to_str)
-        .ok_or_else(rejected)?;
-    if !is_lower_hex(fixture_id, 32) {
-        return Err(rejected());
-    }
-    let lattice_delivery_root = fixture_root.parent().ok_or_else(rejected)?;
-    if lattice_delivery_root.file_name() != Some(OsStr::new("lattice-delivery")) {
-        return Err(rejected());
-    }
-    let target_root = lattice_delivery_root.parent().ok_or_else(rejected)?;
-    if target_root.file_name() != Some(OsStr::new("target")) {
-        return Err(rejected());
-    }
-    let install_root = target_root.join("codex-official").join("0.146.0");
-    let managed_package_root = install_root
-        .join("node_modules")
-        .join("@openai")
-        .join("codex");
-    let managed_package_manifest = managed_package_root.join("package.json");
-    let expected_launcher = install_root
-        .join("node_modules")
-        .join("@openai")
-        .join("codex-win32-x64")
-        .join("vendor")
-        .join("x86_64-pc-windows-msvc")
-        .join("bin")
-        .join("codex.exe");
-    let bundle_root = expected_launcher
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(rejected)?;
-    let sandbox_setup = bundle_root
-        .join("codex-resources")
-        .join("codex-windows-sandbox-setup.exe");
-    let command_runner = bundle_root
-        .join("codex-resources")
-        .join("codex-command-runner.exe");
-    let code_mode_host = bundle_root.join("bin").join("codex-code-mode-host.exe");
-    let rg = bundle_root.join("codex-path").join("rg.exe");
-    let package_manifest = bundle_root.join("codex-package.json");
-    if !same_declared_path(launcher, &expected_launcher) {
-        return Err(rejected());
-    }
-    for path in [
-        expected_launcher.as_path(),
-        sandbox_setup.as_path(),
-        command_runner.as_path(),
-        code_mode_host.as_path(),
-        rg.as_path(),
-        package_manifest.as_path(),
-        managed_package_manifest.as_path(),
-    ] {
-        reject_reparse_path(path, target_root)?;
-    }
-    let canonical_expected = fs::canonicalize(&expected_launcher).map_err(|_| rejected())?;
-    let canonical_launcher = fs::canonicalize(launcher).map_err(|_| rejected())?;
-    if canonical_launcher != canonical_expected
-        || official_file_sha256(&canonical_launcher, MAX_OFFICIAL_LAUNCHER_BYTES)?
-            != OFFICIAL_CODEX_LAUNCHER_SHA256
-        || official_file_sha256(&sandbox_setup, MAX_OFFICIAL_RESOURCE_BYTES)?
-            != OFFICIAL_SANDBOX_SETUP_SHA256
-        || official_file_sha256(&command_runner, MAX_OFFICIAL_RESOURCE_BYTES)?
-            != OFFICIAL_COMMAND_RUNNER_SHA256
-        || official_file_sha256(&code_mode_host, MAX_OFFICIAL_RESOURCE_BYTES)?
-            != OFFICIAL_CODE_MODE_HOST_SHA256
-        || official_file_sha256(&rg, MAX_OFFICIAL_RESOURCE_BYTES)? != OFFICIAL_RG_SHA256
-        || official_file_sha256(&package_manifest, MAX_OFFICIAL_MANIFEST_BYTES)?
-            != OFFICIAL_PACKAGE_MANIFEST_SHA256
-        || official_file_sha256(&managed_package_manifest, MAX_OFFICIAL_MANIFEST_BYTES)?
-            != OFFICIAL_MANAGED_PACKAGE_MANIFEST_SHA256
-    {
-        return Err(rejected());
-    }
-    PinnedCodexResources::new(
-        managed_package_root,
-        bundle_root.join("codex-resources"),
-        PinnedCodexResourceDigests::new(
-            OFFICIAL_SANDBOX_SETUP_SHA256,
-            OFFICIAL_COMMAND_RUNNER_SHA256,
-            OFFICIAL_CODE_MODE_HOST_SHA256,
-            OFFICIAL_RG_SHA256,
-            OFFICIAL_PACKAGE_MANIFEST_SHA256,
-            OFFICIAL_MANAGED_PACKAGE_MANIFEST_SHA256,
-        )
-        .map_err(|_| rejected())?,
-    )
-    .map_err(|_| rejected())
+    let policy = OfficialBundlePolicy::production();
+    let real_bundle = RealPinnedOfficialBundle::capture(policy, launcher, version, launcher_sha256)
+        .map_err(|_| rejected())?;
+    let validated = policy.evaluate(&real_bundle).map_err(|_| rejected())?;
+    LaunchReadyOfficialBundle::from_real(policy, real_bundle, validated).map_err(|_| rejected())
 }
 
 #[cfg(windows)]
@@ -432,18 +1260,25 @@ fn same_declared_path(actual: &Path, expected: &Path) -> bool {
     actual == expected
 }
 
-fn reject_reparse_path(path: &Path, boundary: &Path) -> Result<(), LatticedError> {
-    let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
+fn reparse_component_count(path: &Path, boundary: &Path) -> Option<u32> {
     let mut current = path;
+    let mut count = 0_u32;
     loop {
-        let metadata = fs::symlink_metadata(current).map_err(|_| rejected())?;
+        let metadata = fs::symlink_metadata(current).ok()?;
         if metadata_is_reparse(&metadata) {
-            return Err(rejected());
+            count = count.checked_add(1)?;
         }
         if current == boundary {
-            return Ok(());
+            return Some(count);
         }
-        current = current.parent().ok_or_else(rejected)?;
+        current = current.parent()?;
+    }
+}
+
+fn reject_reparse_path(path: &Path, boundary: &Path) -> Result<(), LatticedError> {
+    match reparse_component_count(path, boundary) {
+        Some(0) => Ok(()),
+        Some(_) | None => Err(LatticedError::new(LatticedErrorKind::OfficialLiveBlocked)),
     }
 }
 
@@ -458,17 +1293,60 @@ fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
-fn official_file_sha256(path: &Path, max_bytes: u64) -> Result<String, LatticedError> {
-    let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
-    let metadata = fs::symlink_metadata(path).map_err(|_| rejected())?;
-    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
-        return Err(rejected());
-    }
-    let mut file = fs::File::open(path).map_err(|_| rejected())?;
+fn capture_official_file(
+    role: OfficialBundleFileRole,
+    declared_path: PathBuf,
+    expected_path: PathBuf,
+    boundary: &Path,
+    max_bytes: u64,
+) -> Option<(OfficialBundleFileFacts, PinnedOfficialFile)> {
+    let reparse_component_count = reparse_component_count(&declared_path, boundary)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    options.share_mode(FILE_SHARE_READ);
+    let mut handle = options.open(&declared_path).ok()?;
+    let handle_metadata = handle.metadata().ok()?;
+    let captured_identity = official_file_identity(&handle);
+    let observed_identity = fs::File::open(&declared_path)
+        .ok()
+        .and_then(|observed| official_file_identity(&observed));
+    let sha256 = (handle_metadata.len() <= max_bytes)
+        .then(|| official_file_sha256_from_handle(&mut handle))
+        .flatten();
+    let canonical_path = fs::canonicalize(&declared_path).ok()?;
+    let canonical_expected_path =
+        fs::canonicalize(&expected_path).unwrap_or_else(|_| expected_path.clone());
+    let facts = OfficialBundleFileFacts {
+        role,
+        declared_path: declared_path.clone(),
+        expected_path,
+        canonical_path,
+        canonical_expected_path,
+        is_regular_file: handle_metadata.is_file(),
+        reparse_component_count,
+        byte_count: handle_metadata.len(),
+        sha256,
+        captured_identity,
+        observed_identity,
+    };
+    let identity = captured_identity?;
+    Some((
+        facts,
+        PinnedOfficialFile {
+            path: declared_path,
+            boundary: boundary.to_path_buf(),
+            identity,
+            handle,
+        },
+    ))
+}
+
+fn official_file_sha256_from_handle(file: &mut fs::File) -> Option<String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
-        let read = file.read(&mut buffer).map_err(|_| rejected())?;
+        let read = file.read(&mut buffer).ok()?;
         if read == 0 {
             break;
         }
@@ -477,9 +1355,47 @@ fn official_file_sha256(path: &Path, max_bytes: u64) -> Result<String, LatticedE
     let mut output = String::with_capacity(64);
     for byte in hasher.finalize() {
         use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").map_err(|_| rejected())?;
+        write!(&mut output, "{byte:02x}").ok()?;
     }
-    Ok(output)
+    Some(output)
+}
+
+fn official_file_sha256(path: &Path, max_bytes: u64) -> Result<String, LatticedError> {
+    let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
+    let metadata = fs::symlink_metadata(path).map_err(|_| rejected())?;
+    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
+        return Err(rejected());
+    }
+    let mut file = fs::File::open(path).map_err(|_| rejected())?;
+    official_file_sha256_from_handle(&mut file).ok_or_else(rejected)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn official_file_identity(file: &fs::File) -> Option<OfficialFileIdentity> {
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &raw mut information) } == 0
+    {
+        return None;
+    }
+    Some(OfficialFileIdentity {
+        volume_serial_number: u64::from(information.dwVolumeSerialNumber),
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+    })
+}
+
+#[cfg(not(windows))]
+fn official_file_identity(_file: &fs::File) -> Option<OfficialFileIdentity> {
+    None
+}
+
+fn file_role_for_path(facts: &OfficialBundleFacts, path: &Path) -> Option<OfficialBundleFileRole> {
+    facts
+        .files
+        .iter()
+        .find(|file| same_declared_path(&file.declared_path, path))
+        .map(|file| file.role)
 }
 
 /// One shared service used by the canonical `latticed` MCP process and the
@@ -490,6 +1406,24 @@ pub struct LatticedDeliveryService {
     password: String,
     timeout: Duration,
     delivery: Option<LatticedDeliveryConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeliveryContinuation {
+    WriterOnly,
+    GraphMemory,
+}
+
+fn validate_scripted_execution_lane(runtime: DeliveryRuntime) -> Result<(), LatticedError> {
+    if runtime == DeliveryRuntime::ScriptedAcceptance {
+        Ok(())
+    } else {
+        Err(LatticedError::new(LatticedErrorKind::OfficialLiveBlocked))
+    }
+}
+
+const fn requires_scripted_fixture_validation(runtime: DeliveryRuntime) -> bool {
+    matches!(runtime, DeliveryRuntime::ScriptedAcceptance)
 }
 
 impl LatticedDeliveryService {
@@ -554,50 +1488,146 @@ impl LatticedDeliveryService {
         self.request.as_ref()
     }
 
-    /// Executes the one fixed delivery through the pure orchestrator.
+    /// Executes the repository-owned scripted acceptance fixture.
     ///
     /// # Errors
     ///
-    /// Returns only a bounded composition classification when no independently
-    /// verified terminal receipt is available.
-    pub fn run_json(&mut self) -> Result<Value, LatticedError> {
+    /// Rejects every official runtime before a database connection or writer
+    /// effect. Production and compatibility delivery runs must enter through
+    /// the controlled Task coordinator instead.
+    pub fn run_scripted_acceptance_json(&mut self) -> Result<Value, LatticedError> {
         let config = self
             .delivery
             .as_ref()
-            .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?;
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?
+            .clone();
+        validate_scripted_execution_lane(config.runtime)?;
         let request = self
             .request
-            .as_ref()
+            .clone()
             .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?;
-        let scripted_graph_paths = if config.runtime == DeliveryRuntime::ScriptedAcceptance {
+        self.run_request_json(
+            &config,
+            &request,
+            None,
+            None,
+            None,
+            None,
+            DeliveryContinuation::GraphMemory,
+        )
+    }
+
+    /// Executes the controlled canary under its complete Task Spec binding.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for a substituted Task Spec, missing delivery
+    /// configuration, invalid ledger identity, or any governed delivery error.
+    pub fn run_task_json(
+        &mut self,
+        binding: &SubjectBinding,
+        store_authority: &StoreAuthorityHead,
+        writer_authority: &WriterLeaseAuthorityHead,
+        writer_guard: &mut dyn WriterAuthorityGuardPort,
+        delivery_root: &Path,
+    ) -> Result<Value, LatticedError> {
+        let expected = fixed_gateway_submission()?;
+        if expected.binding() != binding {
+            return Err(LatticedError::new(LatticedErrorKind::Contract));
+        }
+        let config = controlled_task_delivery_config(
+            self.delivery
+                .as_ref()
+                .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?,
+            delivery_root,
+            FullChainRunMode::Fresh,
+        )
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?;
+        let request = request_for_task_delivery(self.database.run_id(), &config, binding)?;
+        let identity = task_ledger_identity(binding)?;
+        self.run_request_json(
+            &config,
+            &request,
+            Some(identity),
+            Some(store_authority),
+            Some(writer_authority),
+            Some(writer_guard),
+            DeliveryContinuation::WriterOnly,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_request_json(
+        &mut self,
+        config: &LatticedDeliveryConfig,
+        request: &DeliveryRunRequest,
+        identity: Option<lattice_contracts::TaskLedgerStreamIdentity>,
+        store_authority: Option<&StoreAuthorityHead>,
+        writer_authority: Option<&WriterLeaseAuthorityHead>,
+        writer_guard: Option<&mut dyn WriterAuthorityGuardPort>,
+        continuation: DeliveryContinuation,
+    ) -> Result<Value, LatticedError> {
+        if let Some(bundle) = &config.official_bundle {
+            bundle
+                .ensure_current()
+                .map_err(|_| LatticedError::new(LatticedErrorKind::OfficialLiveBlocked))?;
+        }
+        let scripted_graph_paths = if requires_scripted_fixture_validation(config.runtime) {
             Some(validate_scripted_fixture(config)?)
         } else {
             None
         };
         let finalization_deadline = deadline(self.timeout)?;
         let effect_deadline = effect_deadline(finalization_deadline)?;
-        let ledger = DeliveryLedger::connect(&self.database, &self.password, finalization_deadline)
-            .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+        record_observed_effect(ObservedEffectKind::Database)
+            .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+        let ledger = match (identity, writer_authority) {
+            (Some(identity), Some(authority)) => DeliveryLedger::connect_for_identity_and_writer(
+                &self.database,
+                &self.password,
+                finalization_deadline,
+                identity,
+                store_authority
+                    .cloned()
+                    .ok_or_else(|| LatticedError::new(LatticedErrorKind::Contract))?,
+                authority.clone(),
+            ),
+            (Some(identity), None) => DeliveryLedger::connect_for_identity(
+                &self.database,
+                &self.password,
+                finalization_deadline,
+                identity,
+            ),
+            (None, None) => {
+                DeliveryLedger::connect(&self.database, &self.password, finalization_deadline)
+            }
+            (None, Some(_)) => return Err(LatticedError::new(LatticedErrorKind::Contract)),
+        }
+        .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
         let repository = config.delivery_root.join("repo");
-        let mut ledger = PostgresDeliveryLedgerAdapter::for_delivery(
-            ledger,
-            request.clone(),
-            path_text(&config.launcher)?,
-            config.version.clone(),
-            config.launcher_sha256.clone(),
-            path_text(&config.schema_directory)?,
-            path_text(&config.codex_home)?,
-            path_text(&repository)?,
-        )
-        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+        let mut ledger = ObservedLedger {
+            inner: PostgresDeliveryLedgerAdapter::for_delivery(
+                ledger,
+                request.clone(),
+                path_text(&config.launcher)?,
+                config.version.clone(),
+                config.launcher_sha256.clone(),
+                path_text(&config.schema_directory)?,
+                path_text(&config.codex_home)?,
+                path_text(&repository)?,
+            )
+            .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?,
+        };
         let workspace_config = DeliveryWorkspaceGitAdapterConfig::new(
             config.delivery_root.clone(),
             config.git_executable.clone(),
             config.timeout,
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::WorkspaceConfiguration))?;
-        let mut workspace_git =
-            DeliveryWorkspaceGitAdapter::with_deadline(workspace_config, effect_deadline);
+        let mut workspace_git = ObservedWorkspace {
+            inner: DeliveryWorkspaceGitAdapter::with_deadline(workspace_config, effect_deadline),
+        };
         let identity = CodexIdentityExpectation::new(
             config.launcher.clone(),
             config.version.clone(),
@@ -610,26 +1640,48 @@ impl LatticedDeliveryService {
             DELIVERY_PROMPT,
             config.timeout,
             config.runtime,
-            config.pinned_codex_resources.clone(),
+            config
+                .official_bundle
+                .as_ref()
+                .map(|bundle| bundle.resources().clone()),
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::CodexConfiguration))?;
-        let mut codex = CodexDeliveryAdapter::with_deadline(codex_config, effect_deadline);
-        match run_delivery(request, &mut ledger, &mut workspace_git, &mut codex) {
-            Ok(receipt) => {
-                let graph_paths = match scripted_graph_paths {
-                    Some(paths) => paths,
-                    None => official_graph_paths(config)?,
-                };
-                let graph_receipt = run_delivery_graph_memory(
-                    &self.database,
-                    &self.password,
-                    config,
-                    &graph_paths,
-                    finalization_deadline,
-                    &receipt,
-                )?;
-                composed_receipt_json(&receipt, "lattice-delivery", &graph_receipt)
+        let mut codex = ObservedCodex {
+            inner: CodexDeliveryAdapter::with_deadline(codex_config, effect_deadline),
+        };
+        let delivery_result = match (writer_authority, writer_guard) {
+            (Some(authority), Some(guard)) => run_delivery_governed(
+                request,
+                authority,
+                guard,
+                &mut ledger,
+                &mut workspace_git,
+                &mut codex,
+            ),
+            (None, None) => run_delivery(request, &mut ledger, &mut workspace_git, &mut codex),
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(LatticedError::new(LatticedErrorKind::Contract));
             }
+        };
+        match delivery_result {
+            Ok(receipt) => match continuation {
+                DeliveryContinuation::WriterOnly => receipt_json(&receipt, "lattice-task-writer"),
+                DeliveryContinuation::GraphMemory => {
+                    let graph_paths = match scripted_graph_paths {
+                        Some(paths) => paths,
+                        None => official_graph_paths(config)?,
+                    };
+                    let graph_receipt = run_delivery_graph_memory(
+                        &self.database,
+                        &self.password,
+                        config,
+                        &graph_paths,
+                        finalization_deadline,
+                        &receipt,
+                    )?;
+                    composed_receipt_json(&receipt, "lattice-delivery", &graph_receipt)
+                }
+            },
             Err(DeliveryOrchestratorError::Terminal { receipt, .. }) => Err(LatticedError::new(
                 terminal_run_error_kind(receipt.status()),
             )),
@@ -644,13 +1696,94 @@ impl LatticedDeliveryService {
     /// Fails closed when the connection, persisted evidence, or binding cannot
     /// be independently verified.
     pub fn status_json(&mut self) -> Result<Value, LatticedError> {
-        let ledger =
-            DeliveryLedger::connect(&self.database, &self.password, deadline(self.timeout)?)
-                .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
         let expected_invocation = invocation_for_run(self.database.run_id())?;
+        self.status_request_json(
+            &expected_invocation,
+            None,
+            DeliveryContinuation::GraphMemory,
+        )
+    }
+
+    /// Replays one controlled task result from `PostgreSQL` under its Task Spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for a substituted Task Spec or any invalid, missing, or
+    /// cross-bound durable delivery evidence.
+    pub fn status_task_json(&mut self, binding: &SubjectBinding) -> Result<Value, LatticedError> {
+        let expected = fixed_gateway_submission()?;
+        if expected.binding() != binding {
+            return Err(LatticedError::new(LatticedErrorKind::Contract));
+        }
+        let invocation = invocation_for_task(self.database.run_id(), binding)?;
+        self.status_request_json(
+            &invocation,
+            Some(task_ledger_identity(binding)?),
+            DeliveryContinuation::WriterOnly,
+        )
+    }
+
+    fn run_task_downstream_json(
+        &mut self,
+        binding: &SubjectBinding,
+    ) -> Result<Value, LatticedError> {
+        let base = self.status_task_json(binding)?;
+        let config = self
+            .delivery
+            .as_ref()
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::Configuration))?;
+        let graph_paths = official_graph_paths(config)?;
+        let request = graph_request_from_json(self.database.run_id(), &base)?;
+        let graph_receipt = run_graph_memory_request(
+            &self.database,
+            &self.password,
+            config,
+            &graph_paths,
+            deadline(self.timeout)?,
+            &request,
+        )?;
+        append_graph_receipt_to_json(base, &graph_receipt)
+    }
+
+    fn status_task_downstream_json(
+        &mut self,
+        binding: &SubjectBinding,
+    ) -> Result<Value, LatticedError> {
+        let base = self.status_task_json(binding)?;
+        let request = graph_request_from_json(self.database.run_id(), &base)?;
+        let graph_receipt = load_delivery_graph_receipt(
+            &self.database,
+            &self.password,
+            deadline(self.timeout)?,
+            &request,
+        )?;
+        append_graph_receipt_to_json(base, &graph_receipt)
+    }
+
+    fn status_request_json(
+        &mut self,
+        expected_invocation: &Invocation,
+        identity: Option<lattice_contracts::TaskLedgerStreamIdentity>,
+        continuation: DeliveryContinuation,
+    ) -> Result<Value, LatticedError> {
+        record_observed_effect(ObservedEffectKind::Database)
+            .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+        let ledger = match identity {
+            Some(identity) => DeliveryLedger::connect_for_identity(
+                &self.database,
+                &self.password,
+                deadline(self.timeout)?,
+                identity,
+            ),
+            None => {
+                DeliveryLedger::connect(&self.database, &self.password, deadline(self.timeout)?)
+            }
+        }
+        .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
         match PostgresDeliveryLedgerAdapter::for_status(
             ledger,
-            &expected_invocation,
+            expected_invocation,
             DeliveryProfile::Task032CodexPostgres,
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::ReconciliationRequired))?
@@ -660,31 +1793,24 @@ impl LatticedDeliveryService {
                 let status_request = ledger.request().status_request();
                 let receipt = delivery_status(&status_request, ledger.as_mut())
                     .map_err(|error| map_orchestrator_error(&error))?;
-                let graph_request =
-                    graph_request_for_delivery_receipt(self.database.run_id(), &receipt)?;
-                let graph_receipt = load_delivery_graph_receipt(
-                    &self.database,
-                    &self.password,
-                    deadline(self.timeout)?,
-                    &graph_request,
-                )?;
-                composed_receipt_json(&receipt, "delivery-ledger", &graph_receipt)
+                match continuation {
+                    DeliveryContinuation::WriterOnly => {
+                        receipt_json(&receipt, "task-delivery-ledger")
+                    }
+                    DeliveryContinuation::GraphMemory => {
+                        let graph_request =
+                            graph_request_for_delivery_receipt(self.database.run_id(), &receipt)?;
+                        let graph_receipt = load_delivery_graph_receipt(
+                            &self.database,
+                            &self.password,
+                            deadline(self.timeout)?,
+                            &graph_request,
+                        )?;
+                        composed_receipt_json(&receipt, "delivery-ledger", &graph_receipt)
+                    }
+                }
             }
         }
-    }
-}
-
-impl DeliveryToolService for LatticedDeliveryService {
-    fn run(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
-        validate_mcp_task_binding(arguments)?;
-        self.run_json()
-            .map_err(|error| ToolExecutionError::new(error.code()))
-    }
-
-    fn status(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
-        validate_mcp_task_binding(arguments)?;
-        self.status_json()
-            .map_err(|error| ToolExecutionError::new(error.code()))
     }
 }
 
@@ -729,17 +1855,169 @@ fn delivery_environment()
     ))
 }
 
-/// Starts the canonical newline-delimited MCP stdio server.
+fn delivery_environment_for_mode(
+    run_mode: FullChainRunMode,
+) -> Result<(LatticedDeliveryConfig, DeliveryDatabaseBinding, String), LatticedError> {
+    if run_mode == FullChainRunMode::Fresh {
+        return delivery_environment();
+    }
+    let timeout = match env::var("LATTICE_DELIVERY_TIMEOUT_SECONDS") {
+        Ok(value) => parse_timeout(&value)?,
+        Err(env::VarError::NotPresent) => Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(LatticedError::new(LatticedErrorKind::Configuration));
+        }
+    };
+    if required_environment("LATTICE_DELIVERY_CODEX_MODE")? != "OFFICIAL_CODEX_APP_SERVER" {
+        return Err(LatticedError::new(LatticedErrorKind::Configuration));
+    }
+    let port = required_environment("LATTICE_TASK019_PORT")?
+        .parse::<u16>()
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))?;
+    let database = DeliveryDatabaseBinding::new(
+        required_environment("LATTICE_TASK019_HOST")?,
+        port,
+        required_environment("LATTICE_TASK019_RUN_ID")?,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))?;
+    Ok((
+        LatticedDeliveryConfig::status_process(timeout),
+        database,
+        required_environment("LATTICE_TASK019_PASSWORD")?,
+    ))
+}
+
+/// Starts the canonical newline-delimited MCP stdio server. The default
+/// `TASK_ONLY` mode remains Hermes-free; exact `PRODUCTION` mode may lazily
+/// activate Hermes only when Delivery Run is invoked.
 ///
 /// # Errors
 ///
 /// Returns a bounded startup/configuration or transport failure.
 pub fn serve_stdio_from_environment() -> Result<(), LatticedError> {
-    let service = LatticedDeliveryService::from_environment()?;
+    serve_stdio_from_environment_with_diagnostics(&mut emit_startup_diagnostic)
+}
+
+fn serve_stdio_from_environment_with_diagnostics<F>(diagnostic: &mut F) -> Result<(), LatticedError>
+where
+    F: FnMut(StartupDiagnostic),
+{
+    diagnostic(StartupDiagnostic::configuration_validation_started());
+    let run_mode = match full_chain_run_mode_from_environment() {
+        Ok(run_mode) => run_mode,
+        Err(error) => {
+            diagnostic(StartupDiagnostic::failure(
+                "NONE",
+                "REJECTED",
+                "NOT_CHECKED",
+                error.kind(),
+            ));
+            return Err(error);
+        }
+    };
+    let hermes_mode = match canonical_hermes_mode_from_environment() {
+        Ok(mode) => mode,
+        Err(error) => {
+            diagnostic(StartupDiagnostic::failure(
+                "NONE",
+                "REJECTED",
+                "NOT_CHECKED",
+                error.kind(),
+            ));
+            return Err(error);
+        }
+    };
+    #[cfg(not(windows))]
+    if hermes_mode == CanonicalHermesMode::Production {
+        let error = LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired);
+        diagnostic(StartupDiagnostic::failure(
+            "NONE",
+            "REJECTED",
+            "NOT_CHECKED",
+            error.kind(),
+        ));
+        return Err(error);
+    }
+    let (config, database, password) = match delivery_environment_for_mode(run_mode) {
+        Ok(environment) => environment,
+        Err(error) => {
+            diagnostic(StartupDiagnostic::failure(
+                "NONE",
+                "REJECTED",
+                "NOT_CHECKED",
+                error.kind(),
+            ));
+            return Err(error);
+        }
+    };
+    let submission = match gateway_submission_from_environment(run_mode) {
+        Ok(submission) => submission,
+        Err(error) => {
+            diagnostic(StartupDiagnostic::failure(
+                "NONE",
+                "REJECTED",
+                "NOT_CHECKED",
+                error.kind(),
+            ));
+            return Err(error);
+        }
+    };
+    diagnostic(StartupDiagnostic::configuration_validated());
+    diagnostic(StartupDiagnostic::service_assembly_started());
+    let hermes = match hermes_mode {
+        CanonicalHermesMode::TaskOnly => CanonicalHermes::TaskOnly(DeferredTaskHermes),
+        #[cfg(windows)]
+        CanonicalHermesMode::Production => CanonicalHermes::Production {
+            active: None,
+            activation_attempted: false,
+        },
+        #[cfg(not(windows))]
+        CanonicalHermesMode::Production => {
+            unreachable!("non-Windows production mode returns before composition")
+        }
+    };
+    let (service, binding) = assemble_full_chain_service_with_mode(
+        config,
+        &database,
+        &password,
+        hermes,
+        submission,
+        run_mode,
+        hermes_mode == CanonicalHermesMode::Production,
+    )
+    .inspect_err(|error| {
+        diagnostic(StartupDiagnostic::failure(
+            "CONFIGURATION_VALIDATED",
+            "VALID",
+            "ASSEMBLY_REJECTED",
+            error.kind(),
+        ));
+    })?;
+    diagnostic(StartupDiagnostic::service_assembled());
+    diagnostic(StartupDiagnostic::stdio_loop_entered());
     let input = io::stdin();
     let output = io::stdout();
-    mcp::serve(service, input.lock(), output.lock())
-        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))
+    let shutdown = service.clone();
+    let serve_result = mcp::serve_with_lifecycle_observer(
+        service,
+        binding,
+        input.lock(),
+        output.lock(),
+        |event| {
+            diagnostic(StartupDiagnostic::from_mcp_event(event));
+        },
+    )
+    .map_err(|_| {
+        let error = LatticedError::new(LatticedErrorKind::Transport);
+        diagnostic(StartupDiagnostic::failure(
+            "STDIO_LOOP_ENTERED",
+            "VALID",
+            "MCP_TRANSPORT_REJECTED",
+            error.kind(),
+        ));
+        error
+    });
+    shutdown.finish_hermes_session(serve_result)
 }
 
 /// One live Hermes result carrying both normalized evidence and persistable content.
@@ -757,8 +2035,13 @@ struct HermesProductionSeal {
 }
 
 mod production_hermes_sealed {
+    use super::LatticedError;
+
     pub trait Sealed {
         fn has_production_seal(&self) -> bool;
+        fn is_production_configured(&self) -> bool;
+        fn ensure_ready(&mut self, run_id: &str) -> Result<(), LatticedError>;
+        fn terminate(&mut self) -> Result<(), LatticedError>;
     }
 }
 
@@ -825,6 +2108,223 @@ pub trait FullChainHermesPort: HermesPort + Send + production_hermes_sealed::Sea
     ) -> PortResult<ProductionHermesOutput>;
 }
 
+/// Deliberately inert Hermes edge used by the canonical task-only `latticed`
+/// process. No method can mint live evidence; TASK-037 reconnects the verified
+/// production runner only after the governed writer slice is complete.
+struct DeferredTaskHermes;
+
+impl production_hermes_sealed::Sealed for DeferredTaskHermes {
+    fn has_production_seal(&self) -> bool {
+        false
+    }
+
+    fn is_production_configured(&self) -> bool {
+        false
+    }
+
+    fn ensure_ready(&mut self, _run_id: &str) -> Result<(), LatticedError> {
+        Err(LatticedError::new(
+            LatticedErrorKind::HermesProductionRunnerRequired,
+        ))
+    }
+
+    fn terminate(&mut self) -> Result<(), LatticedError> {
+        Ok(())
+    }
+}
+
+impl HermesPort for DeferredTaskHermes {
+    fn research(&mut self, _request: HermesResearchRequest) -> PortResult<HermesEvidence> {
+        Err(PortError::new(
+            Component::Hermes,
+            PortErrorKind::Denied,
+            "HERMES_DEFERRED_UNTIL_TASK037",
+        ))
+    }
+
+    fn interrupt(&mut self, _request_id: &RequestId) -> PortResult<()> {
+        Err(PortError::new(
+            Component::Hermes,
+            PortErrorKind::Denied,
+            "HERMES_DEFERRED_UNTIL_TASK037",
+        ))
+    }
+}
+
+impl FullChainHermesPort for DeferredTaskHermes {
+    fn runtime_kind(&self) -> RuntimeKind {
+        RuntimeKind::Fake
+    }
+
+    fn research_canonical(
+        &mut self,
+        _request: &HermesResearchRequest,
+        _graph_request: &GraphMemoryRunRequest,
+        _graph_receipt: &GraphMemoryReceipt,
+    ) -> PortResult<ProductionHermesOutput> {
+        Err(PortError::new(
+            Component::Hermes,
+            PortErrorKind::Denied,
+            "HERMES_DEFERRED_UNTIL_TASK037",
+        ))
+    }
+}
+
+enum CanonicalHermes {
+    TaskOnly(DeferredTaskHermes),
+    #[cfg(windows)]
+    Production {
+        active: Option<Box<FullChainHermes>>,
+        activation_attempted: bool,
+    },
+}
+
+fn activate_canonical_hermes_once<'a, T, F>(
+    active: &'a mut Option<T>,
+    activation_attempted: &mut bool,
+    launch: F,
+) -> Result<&'a mut T, LatticedError>
+where
+    F: FnOnce() -> Result<T, LatticedError>,
+{
+    if active.is_none() {
+        if *activation_attempted {
+            return Err(LatticedError::new(
+                LatticedErrorKind::HermesProductionRunnerRequired,
+            ));
+        }
+        *activation_attempted = true;
+        *active = Some(launch()?);
+    }
+    active
+        .as_mut()
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))
+}
+
+impl production_hermes_sealed::Sealed for CanonicalHermes {
+    fn has_production_seal(&self) -> bool {
+        match self {
+            Self::TaskOnly(hermes) => hermes.has_production_seal(),
+            #[cfg(windows)]
+            Self::Production { active, .. } => active.as_ref().is_some_and(|hermes| {
+                production_hermes_sealed::Sealed::has_production_seal(hermes.as_ref())
+            }),
+        }
+    }
+
+    fn is_production_configured(&self) -> bool {
+        #[cfg(windows)]
+        {
+            matches!(self, Self::Production { .. })
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    fn ensure_ready(&mut self, run_id: &str) -> Result<(), LatticedError> {
+        match self {
+            Self::TaskOnly(hermes) => hermes.ensure_ready(run_id),
+            #[cfg(windows)]
+            Self::Production {
+                active,
+                activation_attempted,
+            } => {
+                let hermes = activate_canonical_hermes_once(active, activation_attempted, || {
+                    require_hermes_preparation_environment()?;
+                    HermesEnvironmentConfig::from_environment()?
+                        .launch(run_id)
+                        .map(Box::new)
+                })?;
+                hermes.ensure_ready(run_id)
+            }
+        }
+    }
+
+    fn terminate(&mut self) -> Result<(), LatticedError> {
+        match self {
+            Self::TaskOnly(hermes) => hermes.terminate(),
+            #[cfg(windows)]
+            Self::Production { active, .. } => active.take().map_or(Ok(()), |mut hermes| {
+                production_hermes_sealed::Sealed::terminate(hermes.as_mut())
+            }),
+        }
+    }
+}
+
+impl HermesPort for CanonicalHermes {
+    fn research(&mut self, request: HermesResearchRequest) -> PortResult<HermesEvidence> {
+        match self {
+            Self::TaskOnly(hermes) => hermes.research(request),
+            #[cfg(windows)]
+            Self::Production { active, .. } => active.as_mut().map_or_else(
+                || {
+                    Err(PortError::new(
+                        Component::Hermes,
+                        PortErrorKind::Denied,
+                        "HERMES_PRODUCTION_RUNNER_REQUIRED",
+                    ))
+                },
+                |hermes| hermes.research(request),
+            ),
+        }
+    }
+
+    fn interrupt(&mut self, request_id: &RequestId) -> PortResult<()> {
+        match self {
+            Self::TaskOnly(hermes) => hermes.interrupt(request_id),
+            #[cfg(windows)]
+            Self::Production { active, .. } => active.as_mut().map_or_else(
+                || {
+                    Err(PortError::new(
+                        Component::Hermes,
+                        PortErrorKind::Denied,
+                        "HERMES_PRODUCTION_RUNNER_REQUIRED",
+                    ))
+                },
+                |hermes| hermes.interrupt(request_id),
+            ),
+        }
+    }
+}
+
+impl FullChainHermesPort for CanonicalHermes {
+    fn runtime_kind(&self) -> RuntimeKind {
+        match self {
+            Self::TaskOnly(hermes) => hermes.runtime_kind(),
+            #[cfg(windows)]
+            Self::Production { active, .. } => active
+                .as_ref()
+                .map_or(RuntimeKind::Fake, |hermes| hermes.runtime_kind()),
+        }
+    }
+
+    fn research_canonical(
+        &mut self,
+        request: &HermesResearchRequest,
+        graph_request: &GraphMemoryRunRequest,
+        graph_receipt: &GraphMemoryReceipt,
+    ) -> PortResult<ProductionHermesOutput> {
+        match self {
+            Self::TaskOnly(hermes) => {
+                hermes.research_canonical(request, graph_request, graph_receipt)
+            }
+            #[cfg(windows)]
+            Self::Production { active, .. } => active.as_mut().map_or_else(
+                || {
+                    Err(PortError::new(
+                        Component::Hermes,
+                        PortErrorKind::Denied,
+                        "HERMES_PRODUCTION_RUNNER_REQUIRED",
+                    ))
+                },
+                |hermes| hermes.research_canonical(request, graph_request, graph_receipt),
+            ),
+        }
+    }
+}
+
 #[cfg(windows)]
 struct FullChainHermes {
     ready: Option<ProductionHermesRunner>,
@@ -837,9 +2337,16 @@ struct FullChainHermes {
 #[cfg(windows)]
 impl FullChainHermes {
     fn from_ready(mut runner: ProductionHermesRunner, run_id: &str) -> Result<Self, LatticedError> {
-        runner
-            .verify_live()
-            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        if runner.verify_live().is_err() {
+            return match runner.terminate() {
+                Ok(()) => Err(LatticedError::new(
+                    LatticedErrorKind::HermesProductionLivenessRejected,
+                )),
+                Err(_) => Err(LatticedError::new(
+                    LatticedErrorKind::HermesTeardownRejected,
+                )),
+            };
+        }
         let receipt_digest = runner.containment_receipt().receipt_digest().clone();
         Ok(Self {
             ready: Some(runner),
@@ -851,10 +2358,95 @@ impl FullChainHermes {
     }
 }
 
+#[cfg(any(windows, test))]
+fn full_chain_hermes_state_has_seal<R, B>(ready: Option<&R>, bound: Option<&B>) -> bool {
+    ready.is_some() || bound.is_some()
+}
+
+#[cfg(any(windows, test))]
+fn hermes_failure_allows_reconciliation(failure: &PortError) -> bool {
+    matches!(
+        (failure.kind(), failure.code()),
+        (
+            PortErrorKind::Timeout,
+            "HERMES_LOOPBACK_TIMEOUT" | "HERMES_RUN_DEADLINE_EXCEEDED"
+        ) | (
+            PortErrorKind::Unavailable,
+            "HERMES_LOOPBACK_TRANSPORT_FAILED"
+        )
+    )
+}
+
+#[cfg(any(windows, test))]
+fn run_or_reconcile_active_hermes<P, R, O>(
+    port: &mut P,
+    run: impl FnOnce(&mut P) -> PortResult<O>,
+    known_run_receipt: impl FnOnce(&P) -> Option<R>,
+    reconcile: impl FnOnce(&mut P, &R) -> PortResult<O>,
+) -> PortResult<O> {
+    match run(port) {
+        Ok(output) => Ok(output),
+        Err(initial_failure) if hermes_failure_allows_reconciliation(&initial_failure) => {
+            match known_run_receipt(port) {
+                Some(receipt) => reconcile(port, &receipt).map_err(|failure| {
+                    if hermes_failure_allows_reconciliation(&failure) {
+                        PortError::new(
+                            Component::Hermes,
+                            PortErrorKind::Ambiguous,
+                            "HERMES_RUN_RECONCILIATION_REQUIRED",
+                        )
+                    } else {
+                        failure
+                    }
+                }),
+                None => Err(initial_failure),
+            }
+        }
+        Err(initial_failure) => Err(initial_failure),
+    }
+}
+
 #[cfg(windows)]
 impl production_hermes_sealed::Sealed for FullChainHermes {
     fn has_production_seal(&self) -> bool {
-        self.ready.is_some()
+        full_chain_hermes_state_has_seal(self.ready.as_ref(), self.bound.as_ref())
+    }
+
+    fn is_production_configured(&self) -> bool {
+        true
+    }
+
+    fn ensure_ready(&mut self, _run_id: &str) -> Result<(), LatticedError> {
+        if let Some(runner) = self.ready.as_mut() {
+            if runner.verify_live().is_ok() {
+                return Ok(());
+            }
+            match production_hermes_sealed::Sealed::terminate(self) {
+                Ok(()) => Err(LatticedError::new(
+                    LatticedErrorKind::HermesProductionLivenessRejected,
+                )),
+                Err(teardown) => Err(teardown),
+            }
+        } else if self.bound.is_some() {
+            Ok(())
+        } else {
+            Err(LatticedError::new(
+                LatticedErrorKind::HermesProductionRunnerRequired,
+            ))
+        }
+    }
+
+    fn terminate(&mut self) -> Result<(), LatticedError> {
+        if let Some(port) = self.bound.take() {
+            return port
+                .terminate()
+                .map_err(|_| LatticedError::new(LatticedErrorKind::HermesTeardownRejected));
+        }
+        self.ready.take().map_or(Ok(()), |runner| {
+            runner
+                .terminate()
+                .map_err(|_| LatticedError::new(LatticedErrorKind::HermesTeardownRejected))
+        })
     }
 }
 
@@ -926,11 +2518,20 @@ impl FullChainHermesPort for FullChainHermes {
             ));
         }
         self.bound = Some(port);
-        let output = self
+        let port = self
             .bound
             .as_mut()
-            .expect("bound port installed immediately above")
-            .run_reflection_evidence(request)?;
+            .expect("bound port installed immediately above");
+        let output = run_or_reconcile_active_hermes(
+            port,
+            |port| port.run_reflection_evidence(request),
+            |port| {
+                port.active_recovery_receipt()
+                    .filter(|receipt| receipt.run_id().is_some())
+                    .cloned()
+            },
+            |port, receipt| port.reconcile_reflection_evidence(request, receipt),
+        )?;
         let (reflection, evidence) = output.into_parts();
         let candidate = reflection_candidate(
             request,
@@ -966,6 +2567,23 @@ struct HermesEnvironmentConfig {
 #[cfg(windows)]
 impl HermesEnvironmentConfig {
     fn from_environment() -> Result<Self, LatticedError> {
+        let product_root = PathBuf::from(
+            std::env::var_os("LATTICE_HERMES_PRODUCT_ROOT")
+                .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesPreparationRequired))?,
+        );
+        let preparation_root = PathBuf::from(
+            std::env::var_os("LATTICE_HERMES_PREPARATION_ROOT")
+                .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesPreparationRequired))?,
+        );
+        let preparation_receipt = std::env::var("LATTICE_HERMES_PREPARATION_RECEIPT_SHA256")
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesPreparationRequired))?;
+        verify_official_preparation_for_launch(
+            &preparation_root,
+            &product_root,
+            &preparation_receipt,
+        )
+        .map_err(|_| LatticedError::new(LatticedErrorKind::HermesPreparationRequired))?;
+
         let runtime_manifest_path =
             PathBuf::from(hermes_environment("LATTICE_HERMES_RUNTIME_MANIFEST")?);
         let runtime_manifest_bytes =
@@ -984,7 +2602,6 @@ impl HermesEnvironmentConfig {
         )?;
         let api_key = hermes_environment("LATTICE_HERMES_API_KEY")?;
         validate_hermes_api_key(&api_key)?;
-        let product_root = PathBuf::from(hermes_environment("LATTICE_HERMES_PRODUCT_ROOT")?);
         let containment = HermesWslContainmentConfig::new(
             PathBuf::from(hermes_environment("LATTICE_HERMES_WSL_EXE")?),
             runtime_guest_root,
@@ -993,8 +2610,6 @@ impl HermesEnvironmentConfig {
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
         let broker = CodexReflectionBrokerConfig::new(
-            PathBuf::from(hermes_environment("LATTICE_HERMES_BROKER_HELPER")?),
-            hermes_environment("LATTICE_HERMES_BROKER_HELPER_SHA256")?,
             PathBuf::from(hermes_environment("LATTICE_HERMES_CODEX_LAUNCHER")?),
             PathBuf::from(hermes_environment("LATTICE_HERMES_CODEX_HOME")?),
             PathBuf::from(hermes_environment("LATTICE_HERMES_BROKER_ISOLATION_ROOT")?),
@@ -1086,6 +2701,188 @@ fn validate_hermes_api_key(api_key: &str) -> Result<(), LatticedError> {
 fn hermes_environment(name: &'static str) -> Result<String, LatticedError> {
     required_environment(name)
         .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))
+}
+
+/// Fixed, redacted result of the canonical Hermes configuration preflight.
+///
+/// It is operational output only. It never contains an environment value, a
+/// file path, a credential, or a raw validation error.
+#[derive(Debug, Eq, PartialEq)]
+pub enum HermesProductionPreflight {
+    /// One or more required settings are absent. The names are safe to report.
+    MissingConfiguration(Vec<&'static str>),
+    /// Present configuration did not satisfy the pinned local validation.
+    ConfigurationRejected,
+    /// Required configuration passed static parsing, but launch-time asset,
+    /// identity, containment, and broker verification has not run.
+    ConfigurationPresentUnverified,
+}
+
+/// Fixed, redacted result of the secret-free Hermes runtime/isolation check.
+#[derive(Debug, Eq, PartialEq)]
+pub enum HermesRuntimePreflight {
+    MissingConfiguration(Vec<&'static str>),
+    ConfigurationRejected,
+    ConfigurationPresentUnverified,
+}
+
+impl HermesRuntimePreflight {
+    /// Renders one stable, stderr-safe record.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            Self::MissingConfiguration(names) => format!(
+                "LATTICE_HERMES_RUNTIME_PREFLIGHT_MISSING_CONFIGURATION:{}",
+                names.join(",")
+            ),
+            Self::ConfigurationRejected => {
+                "LATTICE_HERMES_RUNTIME_PREFLIGHT_CONFIGURATION_REJECTED".to_owned()
+            }
+            Self::ConfigurationPresentUnverified => {
+                "LATTICE_HERMES_RUNTIME_PREFLIGHT_CONFIGURATION_PRESENT_UNVERIFIED".to_owned()
+            }
+        }
+    }
+}
+
+/// Validates only the secret-free runtime and isolation configuration without
+/// launching WSL, Hermes, a broker, a provider, or any child process.
+#[must_use]
+pub fn hermes_runtime_preflight_from_environment() -> HermesRuntimePreflight {
+    #[cfg(not(windows))]
+    {
+        HermesRuntimePreflight::ConfigurationRejected
+    }
+    #[cfg(windows)]
+    {
+        const REQUIRED: [&str; 7] = [
+            "LATTICE_HERMES_PREPARATION_ROOT",
+            "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
+            "LATTICE_HERMES_RUNTIME_MANIFEST",
+            "LATTICE_HERMES_RUNTIME_GUEST_ROOT",
+            "LATTICE_HERMES_PRODUCT_ROOT",
+            "LATTICE_HERMES_WSL_EXE",
+            "LATTICE_HERMES_ISOLATION_ROOT",
+        ];
+        let missing = REQUIRED
+            .into_iter()
+            .filter(|name| std::env::var_os(name).is_none())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return HermesRuntimePreflight::MissingConfiguration(missing);
+        }
+
+        let result = (|| {
+            let product_root = PathBuf::from(hermes_environment("LATTICE_HERMES_PRODUCT_ROOT")?);
+            let preparation_root =
+                PathBuf::from(hermes_environment("LATTICE_HERMES_PREPARATION_ROOT")?);
+            let preparation_receipt =
+                hermes_environment("LATTICE_HERMES_PREPARATION_RECEIPT_SHA256")?;
+            verify_official_preparation_for_launch(
+                &preparation_root,
+                &product_root,
+                &preparation_receipt,
+            )
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesPreparationRequired))?;
+            let runtime_manifest_path =
+                PathBuf::from(hermes_environment("LATTICE_HERMES_RUNTIME_MANIFEST")?);
+            let runtime_manifest_bytes =
+                read_regular_file(&runtime_manifest_path, MAX_HERMES_RUNTIME_MANIFEST_BYTES)
+                    .map_err(|_| {
+                        LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired)
+                    })?;
+            let runtime_manifest =
+                HermesOfflineRuntimeManifest::from_canonical_json(&runtime_manifest_bytes)
+                    .map_err(|_| {
+                        LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired)
+                    })?;
+            let runtime_guest_root = hermes_environment("LATTICE_HERMES_RUNTIME_GUEST_ROOT")?;
+            validate_official_hermes_runtime_identity(
+                &runtime_guest_root,
+                &runtime_manifest_bytes,
+                &runtime_manifest,
+            )?;
+            HermesWslContainmentConfig::new(
+                PathBuf::from(hermes_environment("LATTICE_HERMES_WSL_EXE")?),
+                runtime_guest_root,
+                PathBuf::from(hermes_environment("LATTICE_HERMES_ISOLATION_ROOT")?),
+                product_root,
+            )
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+            Ok::<(), LatticedError>(())
+        })();
+        if result.is_ok() {
+            HermesRuntimePreflight::ConfigurationPresentUnverified
+        } else {
+            HermesRuntimePreflight::ConfigurationRejected
+        }
+    }
+}
+
+impl HermesProductionPreflight {
+    /// Renders one stable, stderr-safe record.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            Self::MissingConfiguration(names) => format!(
+                "LATTICE_HERMES_PREFLIGHT_MISSING_CONFIGURATION:{}",
+                names.join(",")
+            ),
+            Self::ConfigurationRejected => {
+                "LATTICE_HERMES_PREFLIGHT_CONFIGURATION_REJECTED".to_owned()
+            }
+            Self::ConfigurationPresentUnverified => {
+                "LATTICE_HERMES_PREFLIGHT_CONFIGURATION_PRESENT_UNVERIFIED".to_owned()
+            }
+        }
+    }
+}
+
+fn classify_hermes_production_preflight(
+    missing: Vec<&'static str>,
+    configuration_passed_static_validation: bool,
+) -> HermesProductionPreflight {
+    if !missing.is_empty() {
+        HermesProductionPreflight::MissingConfiguration(missing)
+    } else if configuration_passed_static_validation {
+        HermesProductionPreflight::ConfigurationPresentUnverified
+    } else {
+        HermesProductionPreflight::ConfigurationRejected
+    }
+}
+
+/// Checks the local Hermes production prerequisite without launching a process
+/// or accessing a network, database, MCP, or provider.
+#[must_use]
+pub fn hermes_production_preflight_from_environment() -> HermesProductionPreflight {
+    #[cfg(not(windows))]
+    {
+        classify_hermes_production_preflight(Vec::new(), false)
+    }
+    #[cfg(windows)]
+    {
+        const REQUIRED: [&str; 12] = [
+            "LATTICE_HERMES_PREPARATION_ROOT",
+            "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
+            "LATTICE_HERMES_RUNTIME_MANIFEST",
+            "LATTICE_HERMES_RUNTIME_GUEST_ROOT",
+            "LATTICE_HERMES_API_KEY",
+            "LATTICE_HERMES_PRODUCT_ROOT",
+            "LATTICE_HERMES_WSL_EXE",
+            "LATTICE_HERMES_ISOLATION_ROOT",
+            "LATTICE_HERMES_CODEX_LAUNCHER",
+            "LATTICE_HERMES_CODEX_HOME",
+            "LATTICE_HERMES_BROKER_ISOLATION_ROOT",
+            "LATTICE_HERMES_DEADLINE_SECONDS",
+        ];
+        let missing = REQUIRED
+            .into_iter()
+            .filter(|name| std::env::var_os(name).is_none())
+            .collect::<Vec<_>>();
+        let configuration_passed_static_validation =
+            missing.is_empty() && HermesEnvironmentConfig::from_environment().is_ok();
+        classify_hermes_production_preflight(missing, configuration_passed_static_validation)
+    }
 }
 
 #[cfg(windows)]
@@ -1273,6 +3070,159 @@ enum FullChainRunMode {
     ResumeExisting,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Task050AcceptanceProfile {
+    AskUser,
+    Proceed,
+}
+
+impl Task050AcceptanceProfile {
+    const fn identity(self) -> GatewaySubmissionIdentity {
+        match self {
+            Self::AskUser => GatewaySubmissionIdentity {
+                project: TASK050_ASK_USER_PROJECT_ID,
+                snapshot: TASK050_ASK_USER_PROJECT_SNAPSHOT_ID,
+                task: TASK050_ASK_USER_TASK_ID,
+            },
+            Self::Proceed => GatewaySubmissionIdentity {
+                project: TASK050_PROCEED_PROJECT_ID,
+                snapshot: TASK050_PROCEED_PROJECT_SNAPSHOT_ID,
+                task: TASK050_PROCEED_TASK_ID,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Task050AcceptanceSelectorInput<'a> {
+    profile: Option<&'a str>,
+    task_spec_sha256: Option<&'a str>,
+    task050_live: Option<&'a str>,
+    task019_live: Option<&'a str>,
+    phase: Option<&'a str>,
+    host: Option<&'a str>,
+    run_id: Option<&'a str>,
+    ingress_kind: Option<&'a str>,
+}
+
+fn select_task050_acceptance_profile(
+    run_mode: FullChainRunMode,
+    input: Task050AcceptanceSelectorInput<'_>,
+) -> Result<Option<Task050AcceptanceProfile>, LatticedErrorKind> {
+    let profile = match (input.profile, input.task_spec_sha256) {
+        (None, None) => return Ok(None),
+        (Some("ASK_USER"), Some(_)) => Task050AcceptanceProfile::AskUser,
+        (Some("PROCEED"), Some(_)) => Task050AcceptanceProfile::Proceed,
+        _ => return Err(LatticedErrorKind::Configuration),
+    };
+    if run_mode != FullChainRunMode::ResumeExisting
+        || input.task050_live != Some("1")
+        || input.task019_live != Some("1")
+        || !matches!(input.phase, Some("initial" | "restart"))
+        || input.host != Some("127.0.0.1")
+        || !input.run_id.is_some_and(|run_id| {
+            run_id.len() == 32
+                && run_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        || input.ingress_kind != Some(TASK_INGRESS_LOCAL_ACCEPTANCE)
+    {
+        return Err(LatticedErrorKind::Configuration);
+    }
+    let submission = match task050_acceptance_gateway_submission(profile) {
+        Ok(submission) => submission,
+        Err(error) => return Err(error.kind()),
+    };
+    if input.task_spec_sha256 != Some(submission.binding().task_spec_digest().as_str()) {
+        return Err(LatticedErrorKind::Configuration);
+    }
+    Ok(Some(profile))
+}
+
+fn optional_unicode_environment(name: &str) -> Result<Option<String>, LatticedError> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(LatticedError::new(LatticedErrorKind::Configuration))
+        }
+    }
+}
+
+fn gateway_submission_from_environment(
+    run_mode: FullChainRunMode,
+) -> Result<TaskSpecSubmission, LatticedError> {
+    let profile = optional_unicode_environment(TASK050_ACCEPTANCE_PROFILE_ENV)?;
+    let task_spec_sha256 = optional_unicode_environment(TASK050_ACCEPTANCE_TASK_SPEC_SHA256_ENV)?;
+    if profile.is_none() && task_spec_sha256.is_none() {
+        return fixed_gateway_submission();
+    }
+    let task050_live = optional_unicode_environment("LATTICE_TASK050_LIVE")?;
+    let task019_live = optional_unicode_environment("LATTICE_TASK019_LIVE")?;
+    let phase = optional_unicode_environment("LATTICE_TASK019_PHASE")?;
+    let host = optional_unicode_environment("LATTICE_TASK019_HOST")?;
+    let run_id = optional_unicode_environment("LATTICE_TASK019_RUN_ID")?;
+    let ingress_kind = optional_unicode_environment(TASK_INGRESS_KIND_ENV)?;
+    let selected = select_task050_acceptance_profile(
+        run_mode,
+        Task050AcceptanceSelectorInput {
+            profile: profile.as_deref(),
+            task_spec_sha256: task_spec_sha256.as_deref(),
+            task050_live: task050_live.as_deref(),
+            task019_live: task019_live.as_deref(),
+            phase: phase.as_deref(),
+            host: host.as_deref(),
+            run_id: run_id.as_deref(),
+            ingress_kind: ingress_kind.as_deref(),
+        },
+    )
+    .map_err(LatticedError::new)?;
+    selected.map_or_else(
+        fixed_gateway_submission,
+        task050_acceptance_gateway_submission,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CanonicalHermesMode {
+    TaskOnly,
+    Production,
+}
+
+const CONTROLLED_TASK_SCHEMA_OUTPUT_CHILD: &str = "codex-schema-output";
+
+fn controlled_task_delivery_config(
+    configured: &LatticedDeliveryConfig,
+    delivery_root: &Path,
+    run_mode: FullChainRunMode,
+) -> Option<LatticedDeliveryConfig> {
+    if run_mode == FullChainRunMode::ResumeExisting {
+        return None;
+    }
+    let mut config = configured.clone();
+    config.delivery_root = delivery_root.to_path_buf();
+    config.schema_directory = delivery_root.join(CONTROLLED_TASK_SCHEMA_OUTPUT_CHILD);
+    Some(config)
+}
+
+fn controlled_submit_delivery_root(
+    configured_root: &Path,
+    task_identity: &ContentDigest,
+    run_mode: FullChainRunMode,
+) -> Result<PathBuf, LatticedError> {
+    if run_mode == FullChainRunMode::ResumeExisting {
+        return Ok(configured_root.to_path_buf());
+    }
+    let delivery_root = configured_root.join(format!("task-{}", task_identity.as_str()));
+    match fs::symlink_metadata(&delivery_root) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(delivery_root),
+        Ok(_) | Err(_) => Err(LatticedError::new(
+            LatticedErrorKind::WorkspaceConfiguration,
+        )),
+    }
+}
+
 fn parse_full_chain_run_mode(value: Option<&str>) -> Result<FullChainRunMode, LatticedError> {
     match value {
         None | Some("FRESH") => Ok(FullChainRunMode::Fresh),
@@ -1288,6 +3238,26 @@ fn full_chain_run_mode_from_environment() -> Result<FullChainRunMode, LatticedEr
         Err(env::VarError::NotUnicode(_)) => {
             Err(LatticedError::new(LatticedErrorKind::Configuration))
         }
+    }
+}
+
+fn canonical_hermes_mode_from_environment() -> Result<CanonicalHermesMode, LatticedError> {
+    match env::var("LATTICE_HERMES_MODE") {
+        Ok(value) => canonical_hermes_mode_from_value(Some(&value)),
+        Err(env::VarError::NotPresent) => canonical_hermes_mode_from_value(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(LatticedError::new(LatticedErrorKind::Configuration))
+        }
+    }
+}
+
+fn canonical_hermes_mode_from_value(
+    value: Option<&str>,
+) -> Result<CanonicalHermesMode, LatticedError> {
+    match value {
+        None | Some("TASK_ONLY") => Ok(CanonicalHermesMode::TaskOnly),
+        Some("PRODUCTION") => Ok(CanonicalHermesMode::Production),
+        Some(_) => Err(LatticedError::new(LatticedErrorKind::Configuration)),
     }
 }
 
@@ -1319,28 +3289,130 @@ struct FullChainCore<H> {
     hermes: H,
     submission: TaskSpecSubmission,
     run_mode: FullChainRunMode,
+    process_start_identity: ContentDigest,
+    task_ingress_peer: TaskIngressPeerEvidence,
+    store_authority: StoreAuthorityHead,
+}
+
+fn load_canonical_reflection<L>(
+    request: &GraphMemoryRunRequest,
+    load_reflection: L,
+) -> Result<HermesReflectionReceipt, LatticedError>
+where
+    L: FnOnce(&GraphMemoryRunRequest) -> Result<HermesReflectionReceipt, GraphMemoryPortError>,
+{
+    load_reflection(request).map_err(|error| map_reflection_read_error(&error))
+}
+
+fn map_hermes_research_error(error: &PortError) -> LatticedError {
+    if error.kind() == PortErrorKind::Ambiguous
+        && error.code() == "HERMES_RUN_RECONCILIATION_REQUIRED"
+    {
+        LatticedError::new(LatticedErrorKind::ReconciliationRequired)
+    } else {
+        LatticedError::new(LatticedErrorKind::HermesExecution)
+    }
+}
+
+fn load_or_run_canonical_reflection<H, L, G, P>(
+    hermes: &mut H,
+    run_id: &str,
+    request: &GraphMemoryRunRequest,
+    mut load_reflection: L,
+    load_graph_receipt: G,
+    persist_reflection: P,
+) -> Result<HermesReflectionReceipt, LatticedError>
+where
+    H: FullChainHermesPort,
+    L: FnMut(&GraphMemoryRunRequest) -> Result<HermesReflectionReceipt, GraphMemoryPortError>,
+    G: FnOnce(&GraphMemoryRunRequest) -> Result<GraphMemoryReceipt, LatticedError>,
+    P: FnOnce(&HermesReflectionCandidate) -> Result<HermesReflectionReceipt, LatticedError>,
+{
+    match load_reflection(request) {
+        Ok(receipt) => return Ok(receipt),
+        Err(error)
+            if error.kind() == PortErrorKind::Unavailable
+                && error.code() == "MEMORY_RECEIPT_UNAVAILABLE" => {}
+        Err(error) => return Err(map_reflection_read_error(&error)),
+    }
+
+    let graph_receipt = load_graph_receipt(request)?;
+    let hermes_request = hermes_request_for_graph(run_id, request, &graph_receipt)?;
+    let output = hermes
+        .research_canonical(&hermes_request, request, &graph_receipt)
+        .map_err(|error| map_hermes_research_error(&error))?;
+    let candidate = output.into_candidate();
+    let persisted = persist_reflection(&candidate)?;
+    let replayed = load_reflection(request).map_err(|error| map_reflection_read_error(&error))?;
+    if replayed != persisted {
+        return Err(LatticedError::new(LatticedErrorKind::HermesReceiptRead));
+    }
+    Ok(replayed)
 }
 
 impl<H: FullChainHermesPort> FullChainCore<H> {
-    fn run_json(&mut self, entry: FullChainEntry) -> Result<Value, LatticedError> {
-        let base = match self.run_mode {
-            FullChainRunMode::Fresh => self.delivery.run_json()?,
-            FullChainRunMode::ResumeExisting => self.delivery.status_json()?,
-        };
+    fn status_json(&mut self, entry: FullChainEntry) -> Result<Value, LatticedError> {
+        let base = self.delivery.status_json()?;
+        let request = graph_request_from_json(self.delivery.database.run_id(), &base)?;
+        let reflection = load_canonical_reflection(&request, |request| {
+            load_reflection_from_postgres(
+                &self.delivery.database,
+                &self.delivery.password,
+                self.delivery.timeout,
+                request,
+            )
+        })?;
+        append_full_chain_json(base, &reflection, entry)
+    }
+
+    fn run_task_json(
+        &mut self,
+        binding: &SubjectBinding,
+        writer_authority: &WriterLeaseAuthorityHead,
+        writer_guard: &mut dyn WriterAuthorityGuardPort,
+        delivery_root: &Path,
+    ) -> Result<Value, LatticedError> {
+        match self.run_mode {
+            FullChainRunMode::Fresh => self.delivery.run_task_json(
+                binding,
+                &self.store_authority,
+                writer_authority,
+                writer_guard,
+                delivery_root,
+            ),
+            FullChainRunMode::ResumeExisting => self.delivery.status_task_json(binding),
+        }
+    }
+
+    fn status_task_json(&mut self, binding: &SubjectBinding) -> Result<Value, LatticedError> {
+        self.delivery.status_task_json(binding)
+    }
+
+    fn run_task_downstream_json(
+        &mut self,
+        entry: FullChainEntry,
+        binding: &SubjectBinding,
+    ) -> Result<Value, LatticedError> {
+        let base = self.delivery.run_task_downstream_json(binding)?;
         let reflection = self.load_or_run_reflection(&base)?;
         append_full_chain_json(base, &reflection, entry)
     }
 
-    fn status_json(&mut self, entry: FullChainEntry) -> Result<Value, LatticedError> {
-        let base = self.delivery.status_json()?;
+    fn status_task_downstream_json(
+        &mut self,
+        entry: FullChainEntry,
+        binding: &SubjectBinding,
+    ) -> Result<Value, LatticedError> {
+        let base = self.delivery.status_task_downstream_json(binding)?;
         let request = graph_request_from_json(self.delivery.database.run_id(), &base)?;
-        let reflection = load_reflection_from_postgres(
-            &self.delivery.database,
-            &self.delivery.password,
-            self.delivery.timeout,
-            &request,
-        )
-        .map_err(|error| map_reflection_read_error(&error))?;
+        let reflection = load_canonical_reflection(&request, |request| {
+            load_reflection_from_postgres(
+                &self.delivery.database,
+                &self.delivery.password,
+                self.delivery.timeout,
+                request,
+            )
+        })?;
         append_full_chain_json(base, &reflection, entry)
     }
 
@@ -1349,65 +3421,501 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         base: &Value,
     ) -> Result<HermesReflectionReceipt, LatticedError> {
         let request = graph_request_from_json(self.delivery.database.run_id(), base)?;
-        match load_reflection_from_postgres(
-            &self.delivery.database,
-            &self.delivery.password,
-            self.delivery.timeout,
+        let database = &self.delivery.database;
+        let password = &self.delivery.password;
+        let timeout = self.delivery.timeout;
+        let run_id = database.run_id().to_owned();
+        load_or_run_canonical_reflection(
+            &mut self.hermes,
+            &run_id,
             &request,
-        ) {
-            Ok(receipt) => return Ok(receipt),
-            Err(error)
-                if error.kind() == PortErrorKind::Unavailable
-                    && error.code() == "MEMORY_RECEIPT_UNAVAILABLE" => {}
-            Err(error) => return Err(map_reflection_read_error(&error)),
-        }
-
-        let graph_receipt = load_delivery_graph_receipt(
-            &self.delivery.database,
-            &self.delivery.password,
-            deadline(self.delivery.timeout)?,
-            &request,
-        )?;
-        let hermes_request =
-            hermes_request_for_graph(self.delivery.database.run_id(), &request, &graph_receipt)?;
-        let output = self
-            .hermes
-            .research_canonical(&hermes_request, &request, &graph_receipt)
-            .map_err(|error| {
-                eprintln!(
-                    "{}",
-                    json!({
-                        "component": "Hermes",
-                        "error_code": error.code(),
-                        "event": "reflection_rejected"
-                    })
-                );
-                LatticedError::new(LatticedErrorKind::HermesExecution)
-            })?;
-        let candidate = output.into_candidate();
-        let persisted = persist_reflection_to_postgres(
-            &self.delivery.database,
-            &self.delivery.password,
-            self.delivery.timeout,
-            &candidate,
-        )?;
-        let replayed = load_reflection_from_postgres(
-            &self.delivery.database,
-            &self.delivery.password,
-            self.delivery.timeout,
-            &request,
+            |request| load_reflection_from_postgres(database, password, timeout, request),
+            |request| load_delivery_graph_receipt(database, password, deadline(timeout)?, request),
+            |candidate| persist_reflection_to_postgres(database, password, timeout, candidate),
         )
-        .map_err(|error| map_reflection_read_error(&error))?;
-        if replayed != persisted {
-            return Err(LatticedError::new(LatticedErrorKind::HermesReceiptRead));
+    }
+}
+
+struct FullChainTaskExecution<'a, H> {
+    core: &'a mut FullChainCore<H>,
+    task_identity: ContentDigest,
+}
+
+impl<H: FullChainHermesPort> ControlledTaskExecutionPort for FullChainTaskExecution<'_, H> {
+    fn execute(
+        &mut self,
+        binding: &SubjectBinding,
+        writer_authority: &WriterLeaseAuthorityHead,
+        writer_guard: &mut dyn WriterAuthorityGuardPort,
+    ) -> Result<ContentDigest, ControlledTaskExecutionError> {
+        let delivery_root = controlled_submit_delivery_root(
+            &self
+                .core
+                .delivery
+                .delivery
+                .as_ref()
+                .ok_or_else(|| {
+                    ControlledTaskExecutionError::new(
+                        ControlledTaskExecutionErrorKind::Known,
+                        LatticedErrorKind::Configuration.code(),
+                    )
+                })?
+                .delivery_root,
+            &self.task_identity,
+            self.core.run_mode,
+        )
+        .map_err(|error| {
+            ControlledTaskExecutionError::new(
+                controlled_execution_error_kind(error.kind()),
+                error.code(),
+            )
+        })?;
+        let value = self
+            .core
+            .run_task_json(binding, writer_authority, writer_guard, &delivery_root)
+            .map_err(|error| {
+                let kind = controlled_execution_error_kind(error.kind());
+                ControlledTaskExecutionError::new(kind, error.code())
+            })?;
+        delivery_receipt_digest(&value).map_err(|error| {
+            ControlledTaskExecutionError::new(
+                ControlledTaskExecutionErrorKind::Ambiguous,
+                error.code(),
+            )
+        })
+    }
+}
+
+const fn controlled_execution_error_kind(
+    kind: LatticedErrorKind,
+) -> ControlledTaskExecutionErrorKind {
+    match kind {
+        LatticedErrorKind::Configuration
+        | LatticedErrorKind::DatabaseSecret
+        | LatticedErrorKind::LedgerConfiguration
+        | LatticedErrorKind::WorkspaceConfiguration
+        | LatticedErrorKind::CodexConfiguration
+        | LatticedErrorKind::Contract
+        | LatticedErrorKind::OfficialLiveBlocked
+        | LatticedErrorKind::ScriptedFixtureRejected
+        | LatticedErrorKind::DeliveryFailed => ControlledTaskExecutionErrorKind::Known,
+        _ => ControlledTaskExecutionErrorKind::Ambiguous,
+    }
+}
+
+fn task_lifecycle<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+) -> TaskLifecycleResult<PostgresTaskLifecycle> {
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| {
+            TaskLifecycleError::new(
+                TaskLifecycleErrorKind::Corrupt,
+                "LATTICE_MCP_OBSERVED_EFFECT_REJECTED",
+            )
+        })?;
+    PostgresTaskLifecycle::connect_with_ingress_peer(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout).map_err(|_| {
+            TaskLifecycleError::new(
+                TaskLifecycleErrorKind::Unavailable,
+                "LATTICE_TASK_LEDGER_DEADLINE_REJECTED",
+            )
+        })?,
+        task_ledger_identity(core.submission.binding()).map_err(|_| {
+            TaskLifecycleError::new(
+                TaskLifecycleErrorKind::Corrupt,
+                "LATTICE_TASK_LEDGER_IDENTITY_REJECTED",
+            )
+        })?,
+        core.store_authority.clone(),
+        core.task_ingress_peer.clone(),
+    )
+}
+
+fn configured_store_authority() -> Result<StoreAuthorityHead, LatticedError> {
+    let rejected = || LatticedError::new(LatticedErrorKind::LedgerConfiguration);
+    let daemon_instance_id = StoreDaemonInstanceId::new(
+        required_environment(STORE_DAEMON_INSTANCE_ID_ENV).map_err(|_| rejected())?,
+    )
+    .map_err(|_| rejected())?;
+    let daemon_epoch = required_environment(STORE_DAEMON_EPOCH_ENV)
+        .map_err(|_| rejected())?
+        .parse::<u64>()
+        .ok()
+        .and_then(|value| lattice_contracts::DaemonEpoch::new(value).ok())
+        .ok_or_else(rejected)?;
+    let authority_revision = required_environment(STORE_AUTHORITY_REVISION_ENV)
+        .map_err(|_| rejected())?
+        .parse::<u64>()
+        .ok()
+        .and_then(|value| StoreAuthorityRevision::new(value).ok())
+        .ok_or_else(rejected)?;
+    let observation_digest = ContentDigest::from_sha256(
+        required_environment(STORE_OBSERVATION_DIGEST_ENV).map_err(|_| rejected())?,
+    )
+    .map_err(|_| rejected())?;
+    let head_digest = ContentDigest::from_sha256(
+        required_environment(STORE_AUTHORITY_HEAD_DIGEST_ENV).map_err(|_| rejected())?,
+    )
+    .map_err(|_| rejected())?;
+    StoreAuthorityHead::new(
+        RuntimeKind::Live,
+        daemon_instance_id,
+        daemon_epoch,
+        RuntimeAdmissionMode::Active,
+        authority_revision,
+        observation_digest,
+        head_digest,
+    )
+    .map_err(|_| rejected())
+}
+
+fn configured_task_ingress_peer(
+    process_start_identity: &ContentDigest,
+) -> Result<TaskIngressPeerEvidence, LatticedError> {
+    let rejected = || LatticedError::new(LatticedErrorKind::Configuration);
+    let ingress_kind = required_environment(TASK_INGRESS_KIND_ENV)?;
+    let profile_digest =
+        ContentDigest::from_sha256(required_environment(TASK_INGRESS_PROFILE_DIGEST_ENV)?)
+            .map_err(|_| rejected())?;
+    let executable = env::current_exe().map_err(|_| rejected())?;
+    let adapter_binary_digest = ContentDigest::from_sha256(official_file_sha256(
+        &executable,
+        MAX_LATTICED_EXECUTABLE_BYTES,
+    )?)
+    .map_err(|_| rejected())?;
+    let schema_digest = mcp::task_ingress_schema_digest().ok_or_else(rejected)?;
+    let channel_id = GatewayChannelId::new("main").map_err(|_| rejected())?;
+
+    match ingress_kind.as_str() {
+        TASK_INGRESS_SECURE_TUNNEL => TaskIngressPeerEvidence::new_chatgpt_secure_mcp_tunnel_live(
+            GatewayInstanceId::new("latticed-chatgpt-secure-mcp").map_err(|_| rejected())?,
+            env!("CARGO_PKG_VERSION"),
+            adapter_binary_digest,
+            schema_digest,
+            channel_id,
+            profile_digest,
+            process_start_identity.clone(),
+        )
+        .map_err(|_| rejected()),
+        TASK_INGRESS_LOCAL_ACCEPTANCE => {
+            TaskIngressPeerEvidence::new_local_canonical_mcp_acceptance_live(
+                GatewayInstanceId::new("latticed-local-canonical-acceptance")
+                    .map_err(|_| rejected())?,
+                env!("CARGO_PKG_VERSION"),
+                adapter_binary_digest,
+                schema_digest,
+                channel_id,
+                profile_digest,
+                process_start_identity.clone(),
+            )
+            .map_err(|_| rejected())
         }
-        Ok(replayed)
+        _ => Err(rejected()),
+    }
+}
+
+fn task_writer_lease<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    foundation: &TaskPersistenceFoundation,
+) -> Result<PostgresWriterLease, LatticedError> {
+    let memory_manifest = verify_embedded_extension_manifest()
+        .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+    let target = WriterLeaseExtensionTarget::new(
+        core.delivery.database.database_name(),
+        foundation.database_identity_digest().clone(),
+        foundation.global_manifest_digest().clone(),
+        memory_manifest.manifest_sha256().clone(),
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+    let client = connect_fixed_runtime_client(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout)?,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+    PostgresWriterLease::new(client, target, &core.store_authority, 600)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))
+}
+
+fn controlled_task_request<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    client_request_id: &str,
+) -> Result<ControlledTaskRequest, LatticedError> {
+    let binding = core.submission.binding().clone();
+    let invocation = invocation_for_task(core.delivery.database.run_id(), &binding)?;
+    ControlledTaskRequest::new(
+        binding,
+        client_request_id,
+        invocation.attempt_id().clone(),
+        "task038-controlled-canary-lease",
+        "codex-writer",
+        "task038-controlled-canary-worktree",
+        HolderProcessId::new(u64::from(process::id()))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?,
+        core.process_start_identity.clone(),
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))
+}
+
+fn controlled_task_reference(
+    binding: &SubjectBinding,
+    admission_command_id: &str,
+    run_id: &str,
+    ingress_profile_digest: &ContentDigest,
+) -> Result<ContentDigest, LatticedError> {
+    let value = CanonicalValue::Object(vec![
+        (
+            "admission_command_id".to_owned(),
+            CanonicalValue::String(admission_command_id.to_owned()),
+        ),
+        (
+            "ingress_profile_digest".to_owned(),
+            CanonicalValue::String(ingress_profile_digest.as_str().to_owned()),
+        ),
+        (
+            "run_id".to_owned(),
+            CanonicalValue::String(run_id.to_owned()),
+        ),
+        (
+            "task_spec_digest".to_owned(),
+            CanonicalValue::String(binding.task_spec_digest().as_str().to_owned()),
+        ),
+    ]);
+    digest("lattice.task.public-reference", &value)
+}
+
+fn verified_controlled_task_reference<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    binding: &SubjectBinding,
+) -> Result<ContentDigest, LatticedError> {
+    let mut lifecycle =
+        task_lifecycle(core).map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
+    let admission_command_id = lifecycle
+        .verified_admission_command_id(binding)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
+    controlled_task_reference(
+        binding,
+        &admission_command_id,
+        core.delivery.database.run_id(),
+        core.task_ingress_peer.profile_digest(),
+    )
+}
+
+fn task_public_status(evidence: &TaskLifecycleEvidence, task_ref: &ContentDigest) -> Value {
+    let task_state = if evidence.admitted() {
+        evidence.state().as_str()
+    } else {
+        "NOT_SUBMITTED"
+    };
+    let status = if evidence.admitted() {
+        match evidence.state() {
+            TaskState::Completed => "COMPLETED",
+            TaskState::Rejected | TaskState::Blocked | TaskState::Failed | TaskState::Cancelled => {
+                "FAILED"
+            }
+            // Submit is synchronous and serialized by the sole coordinator. A
+            // separately observable non-terminal state therefore means the
+            // owning call ended without a durable terminal projection.
+            TaskState::Draft
+            | TaskState::AwaitingExecutionApproval
+            | TaskState::Preparing
+            | TaskState::Executing
+            | TaskState::Verifying
+            | TaskState::Reviewing
+            | TaskState::AwaitingMergeApproval
+            | TaskState::Merging
+            | TaskState::Stopping => "RECONCILIATION_REQUIRED",
+        }
+    } else {
+        "NOT_SUBMITTED"
+    };
+    json!({
+        "ledger_head_digest": evidence.ledger_head_digest().as_str(),
+        "result_digest": evidence.result_digest().map(ContentDigest::as_str),
+        "schema_version": "lattice.task.status.v1",
+        "status": status,
+        "task_ref": task_ref.as_str(),
+        "task_state": task_state,
+    })
+}
+
+const fn expected_completed_writer_history(
+    has_current_authority: bool,
+    fencing_high_water: u64,
+    transition_high_water: u64,
+    command_high_water: u64,
+) -> bool {
+    !has_current_authority
+        && fencing_high_water == CONTROLLED_WRITER_FENCING_HIGH_WATER
+        && transition_high_water == CONTROLLED_WRITER_TRANSITION_HIGH_WATER
+        && command_high_water == CONTROLLED_WRITER_COMMAND_HIGH_WATER
+}
+
+const fn expected_merging_writer_history(
+    has_current_authority: bool,
+    fencing_high_water: u64,
+    transition_high_water: u64,
+    command_high_water: u64,
+) -> bool {
+    fencing_high_water == CONTROLLED_WRITER_FENCING_HIGH_WATER
+        && if has_current_authority {
+            transition_high_water == CONTROLLED_WRITER_ACQUIRED_HIGH_WATER
+                && command_high_water == CONTROLLED_WRITER_ACQUIRED_HIGH_WATER
+        } else {
+            transition_high_water == CONTROLLED_WRITER_TRANSITION_HIGH_WATER
+                && command_high_water == CONTROLLED_WRITER_COMMAND_HIGH_WATER
+        }
+}
+
+fn verify_merging_writer_history(
+    writer_lease: &mut PostgresWriterLease,
+    evidence: &TaskLifecycleEvidence,
+) -> Result<(), LatticedError> {
+    if evidence.state() != TaskState::Merging || evidence.result_digest().is_none() {
+        return Ok(());
+    }
+
+    let project_id = evidence.binding().project_id();
+    let persisted = writer_lease
+        .inspect_project(project_id)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::TaskReconciliationRequired))?;
+    if persisted.project_id() != project_id
+        || !expected_merging_writer_history(
+            persisted.current_authority().is_some(),
+            persisted.fencing_high_water(),
+            persisted.transition_high_water(),
+            persisted.command_high_water(),
+        )
+    {
+        return Err(LatticedError::new(
+            LatticedErrorKind::TaskReconciliationRequired,
+        ));
+    }
+    Ok(())
+}
+
+fn verify_completed_writer_history(
+    writer_lease: &mut PostgresWriterLease,
+    evidence: &TaskLifecycleEvidence,
+) -> Result<(), LatticedError> {
+    if evidence.state() != TaskState::Completed {
+        return Ok(());
+    }
+
+    let project_id = evidence.binding().project_id();
+    let persisted = writer_lease
+        .inspect_project(project_id)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::TaskReconciliationRequired))?;
+    if persisted.project_id() != project_id
+        || !expected_completed_writer_history(
+            persisted.current_authority().is_some(),
+            persisted.fencing_high_water(),
+            persisted.transition_high_water(),
+            persisted.command_high_water(),
+        )
+    {
+        return Err(LatticedError::new(
+            LatticedErrorKind::TaskReconciliationRequired,
+        ));
+    }
+    Ok(())
+}
+
+fn verified_task_status<H: FullChainHermesPort>(
+    core: &mut FullChainCore<H>,
+    evidence: &TaskLifecycleEvidence,
+    task_ref: &ContentDigest,
+) -> Result<Value, LatticedError> {
+    if evidence.state() == TaskState::Completed {
+        let mut lifecycle =
+            task_lifecycle(core).map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
+        let foundation = lifecycle
+            .persistence_foundation(evidence.binding())
+            .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
+        let mut writer_lease = task_writer_lease(core, &foundation)?;
+        verify_completed_writer_history(&mut writer_lease, evidence)?;
+        let expected = evidence
+            .result_digest()
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
+        let receipt = core.status_task_json(evidence.binding())?;
+        if &delivery_receipt_digest(&receipt)? != expected {
+            return Err(LatticedError::new(LatticedErrorKind::ReceiptMismatch));
+        }
+    }
+    Ok(task_public_status(evidence, task_ref))
+}
+
+const fn controlled_task_error_code(error: &ControlledTaskOrchestratorError) -> &'static str {
+    match error {
+        ControlledTaskOrchestratorError::RequestRejected => "LATTICE_TASK_REQUEST_REJECTED",
+        ControlledTaskOrchestratorError::Lifecycle(error) => error.code(),
+        ControlledTaskOrchestratorError::Lease(error) => error.code(),
+        ControlledTaskOrchestratorError::Execution(error) => error.code(),
+        ControlledTaskOrchestratorError::StateMismatch => "LATTICE_TASK_STATE_MISMATCH",
+        ControlledTaskOrchestratorError::LeaseMismatch => "LATTICE_WRITER_LEASE_MISMATCH",
+        ControlledTaskOrchestratorError::ReconciliationRequired => {
+            "LATTICE_TASK_RECONCILIATION_REQUIRED"
+        }
     }
 }
 
 /// Shared service used by both typed MCP tools and typed `OpenClaw` ingress.
 pub struct FullChainService<H> {
     inner: Arc<Mutex<FullChainCore<H>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExistingCompletionPolicy {
+    Ignore,
+    AcceptOrExecute,
+    Require,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlledWriterDecision {
+    Execute,
+    ReplayExisting,
+}
+
+fn controlled_writer_decision(
+    policy: ExistingCompletionPolicy,
+    binding: &SubjectBinding,
+    existing: Option<&TaskLifecycleEvidence>,
+) -> Result<ControlledWriterDecision, ToolExecutionError> {
+    if policy == ExistingCompletionPolicy::Ignore {
+        return Ok(ControlledWriterDecision::Execute);
+    }
+    let existing =
+        existing.ok_or_else(|| ToolExecutionError::new("LATTICE_TASK_RECONCILIATION_REQUIRED"))?;
+    if existing.binding() != binding {
+        return Err(ToolExecutionError::new(
+            "LATTICE_TASK_RECONCILIATION_REQUIRED",
+        ));
+    }
+    if !existing.admitted() {
+        return if policy == ExistingCompletionPolicy::AcceptOrExecute {
+            Ok(ControlledWriterDecision::Execute)
+        } else {
+            Err(ToolExecutionError::new(
+                "LATTICE_TASK_RECONCILIATION_REQUIRED",
+            ))
+        };
+    }
+    if existing.state() == TaskState::Completed && existing.result_digest().is_some() {
+        Ok(ControlledWriterDecision::ReplayExisting)
+    } else {
+        Err(ToolExecutionError::new(
+            "LATTICE_TASK_RECONCILIATION_REQUIRED",
+        ))
+    }
 }
 
 impl<H> Clone for FullChainService<H> {
@@ -1419,28 +3927,182 @@ impl<H> Clone for FullChainService<H> {
 }
 
 impl<H: FullChainHermesPort> FullChainService<H> {
+    fn finish_hermes_session(
+        &self,
+        serve_result: Result<(), LatticedError>,
+    ) -> Result<(), LatticedError> {
+        let mut core = self
+            .inner
+            .lock()
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesTeardownRejected))?;
+        finish_hermes_owner(serve_result, &mut core.hermes)
+    }
+}
+
+fn finish_hermes_owner<H: FullChainHermesPort>(
+    serve_result: Result<(), LatticedError>,
+    hermes: &mut H,
+) -> Result<(), LatticedError> {
+    finish_hermes_session(
+        serve_result,
+        production_hermes_sealed::Sealed::terminate(hermes),
+    )
+}
+
+fn finish_hermes_session(
+    serve_result: Result<(), LatticedError>,
+    teardown_result: Result<(), LatticedError>,
+) -> Result<(), LatticedError> {
+    match teardown_result {
+        Ok(()) => serve_result,
+        Err(teardown) => Err(teardown),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CanonicalHermesTool {
+    DeliveryRun,
+    DeliveryStatus,
+    TaskSubmit,
+    TaskStatus,
+}
+
+fn apply_canonical_hermes_tool_policy<H: FullChainHermesPort>(
+    hermes: &mut H,
+    run_id: &str,
+    tool: CanonicalHermesTool,
+) -> Result<(), ToolExecutionError> {
+    if tool == CanonicalHermesTool::DeliveryRun
+        && production_hermes_sealed::Sealed::is_production_configured(hermes)
+    {
+        production_hermes_sealed::Sealed::ensure_ready(hermes, run_id)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+    }
+    Ok(())
+}
+
+impl<H: FullChainHermesPort> FullChainService<H> {
+    fn run_delivery_tool_core(
+        core: &mut FullChainCore<H>,
+        entry: FullChainEntry,
+    ) -> Result<Value, ToolExecutionError> {
+        if core.run_mode != FullChainRunMode::Fresh {
+            return Err(ToolExecutionError::new("LATTICE_DELIVERY_RUN_STATUS_ONLY"));
+        }
+        let run_id = core.delivery.database.run_id().to_owned();
+        apply_canonical_hermes_tool_policy(
+            &mut core.hermes,
+            &run_id,
+            CanonicalHermesTool::DeliveryRun,
+        )?;
+        let binding = core.submission.binding().clone();
+        let evidence = Self::run_controlled_writer(
+            core,
+            "delivery-run-controlled-compatibility",
+            ExistingCompletionPolicy::AcceptOrExecute,
+        )?;
+        let task_ref = verified_controlled_task_reference(core, evidence.binding())
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        verified_task_status(core, &evidence, &task_ref)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        core.run_task_downstream_json(entry, &binding)
+            .map_err(|error| ToolExecutionError::new(error.code()))
+    }
+
+    fn run_controlled_writer(
+        core: &mut FullChainCore<H>,
+        client_request_id: &str,
+        existing_completion_policy: ExistingCompletionPolicy,
+    ) -> Result<TaskLifecycleEvidence, ToolExecutionError> {
+        let binding = core.submission.binding().clone();
+        let mut lifecycle =
+            task_lifecycle(core).map_err(|error| ToolExecutionError::new(error.code()))?;
+        let foundation = lifecycle
+            .persistence_foundation(&binding)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let mut writer_lease = task_writer_lease(core, &foundation)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let existing = if existing_completion_policy == ExistingCompletionPolicy::Ignore {
+            None
+        } else {
+            Some(
+                lifecycle
+                    .load(&binding)
+                    .map_err(|error| ToolExecutionError::new(error.code()))?,
+            )
+        };
+        match controlled_writer_decision(existing_completion_policy, &binding, existing.as_ref())? {
+            ControlledWriterDecision::ReplayExisting => {
+                let existing = existing.ok_or_else(|| {
+                    ToolExecutionError::new("LATTICE_TASK_RECONCILIATION_REQUIRED")
+                })?;
+                verify_completed_writer_history(&mut writer_lease, &existing)
+                    .map_err(|error| ToolExecutionError::new(error.code()))?;
+                return Ok(existing);
+            }
+            ControlledWriterDecision::Execute => {}
+        }
+        let preexisting = lifecycle
+            .load(&binding)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        verify_merging_writer_history(&mut writer_lease, &preexisting)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let request = controlled_task_request(core, client_request_id)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let task_identity = controlled_task_reference(
+            &binding,
+            &task_admission_command_id(client_request_id),
+            core.delivery.database.run_id(),
+            core.task_ingress_peer.profile_digest(),
+        )
+        .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let outcome = {
+            let mut execution = FullChainTaskExecution {
+                core,
+                task_identity,
+            };
+            run_controlled_task(&request, &mut lifecycle, &mut writer_lease, &mut execution)
+        };
+        match outcome {
+            Ok(evidence) => Ok(evidence),
+            Err(error @ ControlledTaskOrchestratorError::Execution(_)) => {
+                let evidence = lifecycle
+                    .load(&binding)
+                    .map_err(|load| ToolExecutionError::new(load.code()))?;
+                if !matches!(
+                    evidence.state(),
+                    TaskState::Failed | TaskState::Stopping | TaskState::Completed
+                ) {
+                    return Err(ToolExecutionError::new(controlled_task_error_code(&error)));
+                }
+                Ok(evidence)
+            }
+            Err(error @ ControlledTaskOrchestratorError::ReconciliationRequired) => {
+                let evidence = lifecycle
+                    .load(&binding)
+                    .map_err(|load| ToolExecutionError::new(load.code()))?;
+                if !evidence.admitted() {
+                    return Err(ToolExecutionError::new(controlled_task_error_code(&error)));
+                }
+                Ok(evidence)
+            }
+            Err(error) => Err(ToolExecutionError::new(controlled_task_error_code(&error))),
+        }
+    }
+
     fn handle_submit(
         core: &mut FullChainCore<H>,
         request: &GatewayRequest,
         submission: &TaskSpecSubmission,
     ) -> GatewayServiceResult<GatewayReply> {
-        if submission != &core.submission {
-            return gateway_reply(
-                request,
-                GatewayReplyBody::Denied(GatewayDenialCode::CommandSubstitution),
-            );
-        }
-        let result = core
-            .run_json(FullChainEntry::OpenClawTyped)
-            .map_err(map_gateway_service_error)?;
-        let receipt_digest =
-            full_chain_receipt_digest(&result).map_err(map_gateway_service_error)?;
+        // The existing OpenClaw peer is intentionally Fake/preflight-only and
+        // cannot be promoted into the new live MCP Task ingress authority.
+        // Its read-only transport/status surface remains available. A future
+        // live OpenClaw submit requires a distinct closed ingress contract and
+        // per-call authority binding.
         gateway_reply(
             request,
-            GatewayReplyBody::SubmitAccepted {
-                binding: core.submission.binding().clone(),
-                command_receipt_digest: receipt_digest,
-            },
+            GatewayReplyBody::Denied(openclaw_submit_denial(submission, &core.submission)),
         )
     }
 
@@ -1474,9 +4136,17 @@ impl<H: FullChainHermesPort> FullChainService<H> {
             }
             GatewayStatusTarget::Project(_) | GatewayStatusTarget::Task(_) => {}
         }
-        let result = core
-            .status_json(FullChainEntry::OpenClawTyped)
-            .map_err(map_gateway_service_error)?;
+        let mut lifecycle =
+            task_lifecycle(core).map_err(|error| map_task_lifecycle_gateway_error(&error))?;
+        let task_evidence = lifecycle
+            .load(&fixed_binding)
+            .map_err(|error| GatewayServiceError::new(PortErrorKind::Denied, error.code()))?;
+        let result = if task_evidence.admitted() {
+            core.status_task_downstream_json(FullChainEntry::OpenClawTyped, &fixed_binding)
+        } else {
+            core.status_json(FullChainEntry::OpenClawTyped)
+        }
+        .map_err(map_gateway_service_error)?;
         let receipt_digest =
             full_chain_receipt_digest(&result).map_err(map_gateway_service_error)?;
         if matches!(
@@ -1514,6 +4184,17 @@ impl<H: FullChainHermesPort> FullChainService<H> {
     }
 }
 
+fn openclaw_submit_denial(
+    submission: &TaskSpecSubmission,
+    expected: &TaskSpecSubmission,
+) -> GatewayDenialCode {
+    if submission == expected {
+        GatewayDenialCode::DownstreamDenied
+    } else {
+        GatewayDenialCode::CommandSubstitution
+    }
+}
+
 impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
     fn run(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
         let mut core = self
@@ -1525,8 +4206,7 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
                 "LATTICE_FULL_CHAIN_BINDING_REJECTED",
             ));
         }
-        core.run_json(FullChainEntry::CodexAppMcp)
-            .map_err(|error| ToolExecutionError::new(error.code()))
+        Self::run_delivery_tool_core(&mut core, FullChainEntry::CodexAppMcp)
     }
 
     fn status(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
@@ -1539,7 +4219,93 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
                 "LATTICE_FULL_CHAIN_BINDING_REJECTED",
             ));
         }
-        core.status_json(FullChainEntry::CodexAppMcp)
+        let run_id = core.delivery.database.run_id().to_owned();
+        apply_canonical_hermes_tool_policy(
+            &mut core.hermes,
+            &run_id,
+            CanonicalHermesTool::DeliveryStatus,
+        )?;
+        let binding = core.submission.binding().clone();
+        let mut lifecycle =
+            task_lifecycle(&core).map_err(|error| ToolExecutionError::new(error.code()))?;
+        let evidence = lifecycle
+            .load(&binding)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        if evidence.admitted() {
+            core.status_task_downstream_json(FullChainEntry::CodexAppMcp, &binding)
+                .map_err(|error| ToolExecutionError::new(error.code()))
+        } else {
+            core.status_json(FullChainEntry::CodexAppMcp)
+                .map_err(|error| ToolExecutionError::new(error.code()))
+        }
+    }
+
+    fn task_submit(
+        &mut self,
+        arguments: &TaskSubmitArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        if arguments.intent() != mcp::CONTROLLED_CODEX_CANARY_INTENT {
+            return Err(ToolExecutionError::new("LATTICE_TASK_REQUEST_REJECTED"));
+        }
+        let mut core = self
+            .inner
+            .lock()
+            .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Transport.code()))?;
+        let run_id = core.delivery.database.run_id().to_owned();
+        apply_canonical_hermes_tool_policy(
+            &mut core.hermes,
+            &run_id,
+            CanonicalHermesTool::TaskSubmit,
+        )?;
+        let existing_completion_policy = match core.run_mode {
+            FullChainRunMode::Fresh => ExistingCompletionPolicy::Ignore,
+            FullChainRunMode::ResumeExisting => ExistingCompletionPolicy::Require,
+        };
+        let evidence = Self::run_controlled_writer(
+            &mut core,
+            arguments.client_request_id(),
+            existing_completion_policy,
+        )?;
+        let task_ref = verified_controlled_task_reference(&core, evidence.binding())
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        verified_task_status(&mut core, &evidence, &task_ref)
+            .map_err(|error| ToolExecutionError::new(error.code()))
+    }
+
+    fn task_status(
+        &mut self,
+        arguments: &TaskStatusArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        let mut core = self
+            .inner
+            .lock()
+            .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Transport.code()))?;
+        let run_id = core.delivery.database.run_id().to_owned();
+        apply_canonical_hermes_tool_policy(
+            &mut core.hermes,
+            &run_id,
+            CanonicalHermesTool::TaskStatus,
+        )?;
+        let binding = core.submission.binding().clone();
+        let mut lifecycle =
+            task_lifecycle(&core).map_err(|error| ToolExecutionError::new(error.code()))?;
+        let evidence = lifecycle
+            .load(&binding)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let admission_command_id = lifecycle
+            .verified_admission_command_id(&binding)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let task_ref = controlled_task_reference(
+            &binding,
+            &admission_command_id,
+            core.delivery.database.run_id(),
+            core.task_ingress_peer.profile_digest(),
+        )
+        .map_err(|error| ToolExecutionError::new(error.code()))?;
+        if arguments.task_ref() != task_ref.as_str() {
+            return Err(ToolExecutionError::new("LATTICE_TASK_REFERENCE_REJECTED"));
+        }
+        verified_task_status(&mut core, &evidence, &task_ref)
             .map_err(|error| ToolExecutionError::new(error.code()))
     }
 }
@@ -1592,6 +4358,7 @@ where
     H: FullChainHermesPort + 'static,
 {
     mcp_service: FullChainService<H>,
+    mcp_binding: SubjectBinding,
     openclaw_server: OpenClawGatewayServer<FullChainService<H>>,
 }
 
@@ -1605,9 +4372,10 @@ where
         self,
     ) -> (
         FullChainService<H>,
+        SubjectBinding,
         OpenClawGatewayServer<FullChainService<H>>,
     ) {
-        (self.mcp_service, self.openclaw_server)
+        (self.mcp_service, self.mcp_binding, self.openclaw_server)
     }
 }
 
@@ -1630,7 +4398,7 @@ pub fn serve_full_chain_from_environment() -> Result<(), LatticedError> {
     {
         let hermes_environment = HermesEnvironmentConfig::from_environment()?;
         let run_mode = full_chain_run_mode_from_environment()?;
-        let (config, database, password) = delivery_environment()?;
+        let (config, database, password) = delivery_environment_for_mode(run_mode)?;
         let (openclaw_config, launch_record) = openclaw_from_environment()?;
         let hermes = hermes_environment.launch(database.run_id())?;
         let runtime = assemble_full_chain_runtime_with_mode(
@@ -1643,6 +4411,180 @@ pub fn serve_full_chain_from_environment() -> Result<(), LatticedError> {
             run_mode,
         )?;
         serve_full_chain_runtime(runtime)
+    }
+}
+
+/// Starts and owns the production Hermes runner until standard input closes.
+///
+/// This is the standalone process entry for the same production runner used by
+/// the full-chain composition. Closing stdin is the bounded shutdown signal;
+/// dropping the owner reaps the contained process tree.
+///
+/// # Errors
+///
+/// Returns the existing production configuration or runner failure before
+/// reporting a successful process exit.
+pub fn launch_hermes_from_environment() -> Result<(), LatticedError> {
+    require_hermes_preparation_environment()?;
+    #[cfg(not(windows))]
+    {
+        Err(LatticedError::new(
+            LatticedErrorKind::HermesProductionRunnerRequired,
+        ))
+    }
+    #[cfg(windows)]
+    {
+        let hermes_environment = HermesEnvironmentConfig::from_environment()?;
+        launch_hermes_until_eof(
+            io::stdin(),
+            HERMES_POLL_INTERVAL,
+            |run_id| hermes_environment.launch(run_id),
+            emit_hermes_launch_ready,
+        )
+    }
+}
+
+fn require_hermes_preparation_environment() -> Result<(), LatticedError> {
+    if [
+        "LATTICE_HERMES_PRODUCT_ROOT",
+        "LATTICE_HERMES_PREPARATION_ROOT",
+        "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
+    ]
+    .iter()
+    .any(|name| std::env::var_os(name).is_none())
+    {
+        return Err(LatticedError::new(
+            LatticedErrorKind::HermesPreparationMissing,
+        ));
+    }
+    Ok(())
+}
+
+fn emit_hermes_launch_ready() -> Result<(), LatticedError> {
+    let stderr = io::stderr();
+    let mut output = stderr.lock();
+    writeln!(output, "LATTICE_HERMES_READY")
+        .and_then(|()| output.flush())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))
+}
+
+trait HermesStandaloneOwner {
+    fn verify_live(&mut self) -> Result<(), LatticedError>;
+    fn terminate(self) -> Result<(), LatticedError>;
+}
+
+#[cfg(windows)]
+impl HermesStandaloneOwner for FullChainHermes {
+    fn verify_live(&mut self) -> Result<(), LatticedError> {
+        self.ready
+            .as_mut()
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?
+            .verify_live()
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionLivenessRejected))
+    }
+
+    fn terminate(mut self) -> Result<(), LatticedError> {
+        self.ready
+            .take()
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?
+            .terminate()
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesTeardownRejected))
+    }
+}
+
+fn launch_hermes_until_eof<R, H, F, G>(
+    mut input: R,
+    poll_interval: Duration,
+    launch: F,
+    ready: G,
+) -> Result<(), LatticedError>
+where
+    R: Read + Send + 'static,
+    H: HermesStandaloneOwner,
+    F: FnOnce(&str) -> Result<H, LatticedError>,
+    G: FnOnce() -> Result<(), LatticedError>,
+{
+    let mut owner = launch("standalone-hermes")?;
+    if let Err(failure) = owner.verify_live() {
+        return match owner.terminate() {
+            Ok(()) => Err(failure),
+            Err(teardown) => Err(teardown),
+        };
+    }
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let (reader_gate_sender, reader_gate_receiver) = std::sync::mpsc::sync_channel(1);
+    let (reader_ready_sender, reader_ready_receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = thread::Builder::new()
+        .name("lattice-hermes-stdin".to_owned())
+        .spawn(move || {
+            let _ = reader_ready_sender.send(());
+            if reader_gate_receiver.recv().is_err() {
+                return;
+            }
+            let result = io::copy(&mut input, &mut io::sink())
+                .map(|_| ())
+                .map_err(|_| LatticedError::new(LatticedErrorKind::Transport));
+            let _ = sender.send(result);
+        });
+    if reader.is_err() {
+        let failure = LatticedError::new(LatticedErrorKind::Transport);
+        return match owner.terminate() {
+            Ok(()) => Err(failure),
+            Err(teardown) => Err(teardown),
+        };
+    }
+    if reader_ready_receiver.recv().is_err() {
+        let failure = LatticedError::new(LatticedErrorKind::Transport);
+        return match owner.terminate() {
+            Ok(()) => Err(failure),
+            Err(teardown) => Err(teardown),
+        };
+    }
+    if let Err(failure) = owner.verify_live() {
+        return match owner.terminate() {
+            Ok(()) => Err(failure),
+            Err(teardown) => Err(teardown),
+        };
+    }
+    if let Err(failure) = ready() {
+        return match owner.terminate() {
+            Ok(()) => Err(failure),
+            Err(teardown) => Err(teardown),
+        };
+    }
+    if reader_gate_sender.send(()).is_err() {
+        let failure = LatticedError::new(LatticedErrorKind::Transport);
+        return match owner.terminate() {
+            Ok(()) => Err(failure),
+            Err(teardown) => Err(teardown),
+        };
+    }
+
+    loop {
+        match receiver.recv_timeout(poll_interval) {
+            Ok(input_result) => {
+                let live_result = owner.verify_live();
+                return match owner.terminate() {
+                    Ok(()) => live_result.and(input_result),
+                    Err(teardown) => Err(teardown),
+                };
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Err(failure) = owner.verify_live() {
+                    return match owner.terminate() {
+                        Ok(()) => Err(failure),
+                        Err(teardown) => Err(teardown),
+                    };
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let input_failure = LatticedError::new(LatticedErrorKind::Transport);
+                return match owner.terminate() {
+                    Ok(()) => Err(input_failure),
+                    Err(teardown) => Err(teardown),
+                };
+            }
+        }
     }
 }
 
@@ -1661,42 +4603,31 @@ pub fn serve_full_chain_runtime<H>(runtime: FullChainRuntime<H>) -> Result<(), L
 where
     H: FullChainHermesPort + 'static,
 {
-    let (mcp_service, openclaw_server) = runtime.into_parts();
-    let endpoint = openclaw_server
+    let (mcp_service, mcp_binding, openclaw_server) = runtime.into_parts();
+    openclaw_server
         .local_addr()
         .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
     thread::Builder::new()
         .name("lattice-openclaw-full-chain".to_owned())
         .spawn(move || {
             run_openclaw_pump(openclaw_server, |failure| {
-                eprintln!("{}", failure.code);
                 if fatal_openclaw_pump_error(failure.kind) {
+                    eprintln!("{}", LatticedErrorKind::Transport.code());
                     process::exit(2);
                 }
                 OpenClawPumpControl::Continue
             });
         })
         .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
-    eprintln!(
-        "{}",
-        json!({
-            "classification": "official-package-transport",
-            "endpoint": endpoint.to_string(),
-            "entrypoint": "openclaw-typed",
-            "event": "ready",
-            "runtime_kind": "Fake"
-        })
-    );
     let input = io::stdin();
     let output = io::stdout();
-    mcp::serve(mcp_service, input.lock(), output.lock())
+    mcp::serve_legacy_delivery_observer(mcp_service, mcp_binding, input.lock(), output.lock())
         .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct OpenClawPumpFailure {
     kind: GatewayTransportErrorKind,
-    code: &'static str,
 }
 
 trait FullChainOpenClawPump: Send + 'static {
@@ -1708,10 +4639,8 @@ where
     S: GatewayService + Send + 'static,
 {
     fn pump_once(&mut self) -> Result<(), OpenClawPumpFailure> {
-        self.serve_once().map_err(|error| OpenClawPumpFailure {
-            kind: error.kind(),
-            code: error.code(),
-        })
+        self.serve_once()
+            .map_err(|error| OpenClawPumpFailure { kind: error.kind() })
     }
 }
 
@@ -1806,31 +4735,14 @@ fn assemble_full_chain_runtime_with_mode<H>(
 where
     H: FullChainHermesPort + 'static,
 {
-    if config.runtime != DeliveryRuntime::OfficialCodexAppServer {
-        return Err(LatticedError::new(LatticedErrorKind::OfficialLiveBlocked));
-    }
-    if hermes.runtime_kind() != RuntimeKind::Live
-        || !production_hermes_sealed::Sealed::has_production_seal(&hermes)
-    {
-        return Err(LatticedError::new(
-            LatticedErrorKind::HermesProductionRunnerRequired,
-        ));
-    }
     let submission = fixed_gateway_submission()?;
     let openclaw_config = openclaw_config
         .with_frozen_submission(submission.clone())
         .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
     let timeout = config.timeout;
-    let delivery = full_chain_delivery_service(config, database, password, run_mode)?;
-    let core = FullChainCore {
-        delivery,
-        hermes,
-        submission,
-        run_mode,
-    };
-    let mcp_service = FullChainService {
-        inner: Arc::new(Mutex::new(core)),
-    };
+    let (mcp_service, mcp_binding) = assemble_full_chain_service_with_mode(
+        config, database, password, hermes, submission, run_mode, true,
+    )?;
     let client = connect_fixed_runtime_client(database, password, deadline(timeout)?)
         .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
     let target = ExtensionTarget::new(database.database_name(), database.run_id())
@@ -1846,66 +4758,182 @@ where
     .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
     Ok(FullChainRuntime {
         mcp_service,
+        mcp_binding,
         openclaw_server,
     })
 }
 
-/// Returns the one server-owned immutable Task Spec admitted by typed `OpenClaw` submit.
+#[allow(clippy::too_many_arguments)]
+fn assemble_full_chain_service_with_mode<H>(
+    config: LatticedDeliveryConfig,
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    hermes: H,
+    submission: TaskSpecSubmission,
+    run_mode: FullChainRunMode,
+    require_production_hermes: bool,
+) -> Result<(FullChainService<H>, SubjectBinding), LatticedError>
+where
+    H: FullChainHermesPort + 'static,
+{
+    validate_controlled_task_timeout(config.timeout, run_mode)?;
+    if config.runtime != DeliveryRuntime::OfficialCodexAppServer {
+        return Err(LatticedError::new(LatticedErrorKind::OfficialLiveBlocked));
+    }
+    let is_production_configured =
+        production_hermes_sealed::Sealed::is_production_configured(&hermes);
+    if require_production_hermes != is_production_configured {
+        return Err(LatticedError::new(
+            LatticedErrorKind::HermesProductionRunnerRequired,
+        ));
+    }
+    let store_authority = configured_store_authority()?;
+    let mcp_binding = submission.binding().clone();
+    let delivery = full_chain_delivery_service(config, database, password, run_mode)?;
+    let process_start_identity = daemon_process_start_identity()?;
+    let task_ingress_peer = configured_task_ingress_peer(&process_start_identity)?;
+    let core = FullChainCore {
+        delivery,
+        hermes,
+        submission,
+        run_mode,
+        process_start_identity,
+        task_ingress_peer,
+        store_authority,
+    };
+    Ok((
+        FullChainService {
+            inner: Arc::new(Mutex::new(core)),
+        },
+        mcp_binding,
+    ))
+}
+
+fn validate_controlled_task_timeout(
+    timeout: Duration,
+    run_mode: FullChainRunMode,
+) -> Result<(), LatticedError> {
+    if run_mode == FullChainRunMode::Fresh
+        && (timeout <= FINALIZATION_RESERVE || timeout > CONTROLLED_TASK_MAX_RUNTIME)
+    {
+        return Err(LatticedError::new(LatticedErrorKind::Configuration));
+    }
+    Ok(())
+}
+
+/// Returns the one server-owned immutable Task Spec admitted by bounded MCP Task submit.
 ///
 /// # Errors
 ///
 /// Returns a contract failure if canonical hashing or fixed binding construction fails.
 pub fn fixed_gateway_submission() -> Result<TaskSpecSubmission, LatticedError> {
-    let document = CanonicalValue::Object(vec![
-        (
-            "project_id".to_owned(),
-            CanonicalValue::String(GRAPH_PROJECT_ID.to_owned()),
-        ),
-        (
-            "project_snapshot_id".to_owned(),
-            CanonicalValue::String(PROJECT_SNAPSHOT_ID.to_owned()),
-        ),
-        (
-            "revision".to_owned(),
-            CanonicalValue::String(FIXED_GATEWAY_TASK_REVISION.to_owned()),
-        ),
-        (
-            "schema_version".to_owned(),
-            CanonicalValue::String(GATEWAY_TASK_SPEC_SCHEMA_VERSION.to_owned()),
-        ),
-        (
-            "task_id".to_owned(),
-            CanonicalValue::String(TASK_ID.to_owned()),
-        ),
-    ]);
-    let bytes = canonicalize(&document)
-        .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?
-        .into_vec();
+    gateway_submission(GatewaySubmissionIdentity {
+        project: CONTROLLED_PROJECT_ID,
+        snapshot: CONTROLLED_PROJECT_SNAPSHOT_ID,
+        task: CONTROLLED_TASK_ID,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct GatewaySubmissionIdentity {
+    project: &'static str,
+    snapshot: &'static str,
+    task: &'static str,
+}
+
+fn task050_acceptance_gateway_submission(
+    profile: Task050AcceptanceProfile,
+) -> Result<TaskSpecSubmission, LatticedError> {
+    gateway_submission(profile.identity())
+}
+
+fn gateway_submission(
+    identity: GatewaySubmissionIdentity,
+) -> Result<TaskSpecSubmission, LatticedError> {
+    let task_spec = TaskSpec::new(TaskSpecInput {
+        schema_version: TASK_SPEC_SCHEMA_VERSION.to_owned(),
+        task_id: TaskId::new(identity.task)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        revision: FIXED_GATEWAY_TASK_REVISION.to_owned(),
+        created_at: "2026-08-09T00:00:00Z".to_owned(),
+        created_by: "chatgpt-mcp-controlled-profile".to_owned(),
+        project_id: identity.project.to_owned(),
+        project_snapshot_id: ProjectSnapshotId::new(identity.snapshot)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        base_ref: "main".to_owned(),
+        base_commit_id: BASELINE_COMMIT_SHA.to_owned(),
+        goal: "Create answer.txt with the exact approved LATTICE delivery sentinel.".to_owned(),
+        non_goals: vec![
+            "Do not modify any other product path.".to_owned(),
+            "Do not deploy, publish, or merge a protected branch.".to_owned(),
+        ],
+        risk_class: RiskClass::R0,
+        depends_on: Vec::new(),
+        scope: TaskScope {
+            allowed_paths: vec!["answer.txt".to_owned()],
+            forbidden_paths: vec![".git/**".to_owned()],
+            allowed_operations: vec![ScopeOperation::Create],
+        },
+        acceptance_criteria: vec![AcceptanceCriterion {
+            id: "AC-038-CANARY".to_owned(),
+            description: "The controlled writer creates only the approved sentinel file."
+                .to_owned(),
+            evidence_type: EvidenceType::Test,
+            expected_result: "answer.txt is exactly LATTICE_DELIVERY_OK followed by LF.".to_owned(),
+        }],
+        verification_commands: vec!["git-diff-no-index-exact-answer-v1".to_owned()],
+        required_checks: vec![RequiredCheck::Scope, RequiredCheck::Test],
+        requested_capabilities: [
+            Capability::ReadRepository,
+            Capability::WriteProductCode,
+            Capability::RunTests,
+            Capability::GitWorktree,
+            Capability::UseCodex,
+        ]
+        .into_iter()
+        .map(|capability| CapabilityRequest {
+            capability,
+            contract_version: "1".to_owned(),
+        })
+        .collect(),
+        budget: TaskBudget {
+            accounting_currency: "TWD".to_owned(),
+            max_agents: "1".to_owned(),
+            max_duration_seconds: "300".to_owned(),
+            max_attempts: "1".to_owned(),
+            max_model_calls: "1".to_owned(),
+            max_external_cost: "0".to_owned(),
+        },
+        runtime_profile: RuntimeProfile::Codex,
+        network_policy: NetworkPolicy::LoopbackOnly,
+        deployment_policy: DeploymentPolicy::Deny,
+        approval_requirements: ApprovalRequirements {
+            execution: ApprovalRequirement::NotRequired,
+            merge: ApprovalRequirement::NotRequired,
+            protected_release: ApprovalRequirement::ProtectedGuardian,
+        },
+    })
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
+    let bytes = task_spec
+        .canonical_document()
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
     let digest = task_spec_document_digest(&bytes)
         .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
+    if digest.as_str() != task_spec.spec_hash().to_hex() {
+        return Err(LatticedError::new(LatticedErrorKind::Contract));
+    }
     let binding = SubjectBinding::new(
-        ProjectId::new(GRAPH_PROJECT_ID)
+        ProjectId::new(identity.project)
             .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
-        ProjectSnapshotId::new(PROJECT_SNAPSHOT_ID)
+        ProjectSnapshotId::new(identity.snapshot)
             .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
-        TaskId::new(TASK_ID).map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        TaskId::new(identity.task).map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
         FIXED_GATEWAY_TASK_REVISION,
         digest.clone(),
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
     TaskSpecSubmission::new(binding, bytes, digest)
         .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))
-}
-
-fn validate_mcp_task_binding(arguments: &DeliveryToolArguments) -> Result<(), ToolExecutionError> {
-    let submission = fixed_gateway_submission()
-        .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Contract.code()))?;
-    if arguments.binding() != submission.binding() {
-        return Err(ToolExecutionError::new(
-            "LATTICE_FULL_CHAIN_BINDING_REJECTED",
-        ));
-    }
-    Ok(())
 }
 
 fn graph_request_from_json(
@@ -2383,6 +5411,13 @@ fn full_chain_receipt_digest(value: &Value) -> Result<ContentDigest, LatticedErr
     json_digest(object, "full_chain_receipt_digest")
 }
 
+fn delivery_receipt_digest(value: &Value) -> Result<ContentDigest, LatticedError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
+    json_digest(object, "receipt_digest")
+}
+
 fn gateway_reply(
     request: &GatewayRequest,
     body: GatewayReplyBody,
@@ -2397,10 +5432,13 @@ fn gateway_reply(
 
 const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
     match kind {
-        LatticedErrorKind::ReconciliationRequired => PortErrorKind::Ambiguous,
+        LatticedErrorKind::ReconciliationRequired
+        | LatticedErrorKind::TaskReconciliationRequired
+        | LatticedErrorKind::HermesTeardownRejected => PortErrorKind::Ambiguous,
         LatticedErrorKind::DatabaseConnect
         | LatticedErrorKind::GraphReceiptRead
-        | LatticedErrorKind::HermesReceiptRead => PortErrorKind::Unavailable,
+        | LatticedErrorKind::HermesReceiptRead
+        | LatticedErrorKind::HermesProductionLivenessRejected => PortErrorKind::Unavailable,
         LatticedErrorKind::Configuration
         | LatticedErrorKind::Contract
         | LatticedErrorKind::ReceiptMismatch => PortErrorKind::Malformed,
@@ -2410,6 +5448,8 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         | LatticedErrorKind::OfficialLiveBlocked
         | LatticedErrorKind::ScriptedFixtureRejected
         | LatticedErrorKind::GraphExecution
+        | LatticedErrorKind::HermesPreparationMissing
+        | LatticedErrorKind::HermesPreparationRequired
         | LatticedErrorKind::HermesProductionRunnerRequired
         | LatticedErrorKind::HermesExecution
         | LatticedErrorKind::DatabaseSecret
@@ -2418,12 +5458,24 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         | LatticedErrorKind::CodexConfiguration
         | LatticedErrorKind::ReceiptRead
         | LatticedErrorKind::GraphConfiguration
+        | LatticedErrorKind::TaskControl
+        | LatticedErrorKind::WriterLease
         | LatticedErrorKind::Transport => PortErrorKind::Denied,
     }
 }
 
 fn map_gateway_service_error(error: LatticedError) -> GatewayServiceError {
     GatewayServiceError::new(gateway_error_kind(error.kind()), error.code())
+}
+
+fn map_task_lifecycle_gateway_error(error: &TaskLifecycleError) -> GatewayServiceError {
+    let kind = match error.kind() {
+        TaskLifecycleErrorKind::Rejected => PortErrorKind::Denied,
+        TaskLifecycleErrorKind::Unavailable => PortErrorKind::Unavailable,
+        TaskLifecycleErrorKind::Ambiguous => PortErrorKind::Ambiguous,
+        TaskLifecycleErrorKind::Corrupt => PortErrorKind::Malformed,
+    };
+    GatewayServiceError::new(kind, error.code())
 }
 
 fn stable_run_binding(run_id: &str) -> CanonicalValue {
@@ -2437,6 +5489,31 @@ fn stable_run_binding(run_id: &str) -> CanonicalValue {
             CanonicalValue::String(run_id.to_owned()),
         ),
     ])
+}
+
+fn daemon_process_start_identity() -> Result<ContentDigest, LatticedError> {
+    let executable =
+        env::current_exe().map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))?;
+    let observed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))?;
+    digest(
+        "lattice.latticed.process-start",
+        &CanonicalValue::Object(vec![
+            (
+                "executable".to_owned(),
+                CanonicalValue::String(path_text(&executable)?),
+            ),
+            (
+                "observed_unix_nanos".to_owned(),
+                CanonicalValue::String(observed.as_nanos().to_string()),
+            ),
+            (
+                "process_id".to_owned(),
+                CanonicalValue::String(process::id().to_string()),
+            ),
+        ]),
+    )
 }
 
 fn invocation_for_run(run_id: &str) -> Result<Invocation, LatticedError> {
@@ -2456,9 +5533,55 @@ fn invocation_for_run(run_id: &str) -> Result<Invocation, LatticedError> {
     .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))
 }
 
+fn invocation_for_task(
+    run_id: &str,
+    binding: &SubjectBinding,
+) -> Result<Invocation, LatticedError> {
+    Invocation::new(
+        CONTRACT_VERSION,
+        RequestId::new(format!("task038-request-{run_id}"))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        binding.task_id().clone(),
+        AttemptId::new(format!("task038-attempt-{run_id}"))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        binding.project_snapshot_id().clone(),
+        binding.task_spec_digest().clone(),
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))
+}
+
+fn task_ledger_identity(
+    binding: &SubjectBinding,
+) -> Result<lattice_contracts::TaskLedgerStreamIdentity, LatticedError> {
+    lattice_contracts::TaskLedgerStreamIdentity::new(
+        binding.project_id().clone(),
+        binding.project_snapshot_id().clone(),
+        binding.task_id().clone(),
+        binding.task_revision(),
+        binding.task_spec_digest().clone(),
+        "TWD",
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))
+}
+
 fn request_for_delivery(
     run_id: &str,
     config: &LatticedDeliveryConfig,
+) -> Result<DeliveryRunRequest, LatticedError> {
+    request_for_delivery_invocation(config, invocation_for_run(run_id)?)
+}
+
+fn request_for_task_delivery(
+    run_id: &str,
+    config: &LatticedDeliveryConfig,
+    binding: &SubjectBinding,
+) -> Result<DeliveryRunRequest, LatticedError> {
+    request_for_delivery_invocation(config, invocation_for_task(run_id, binding)?)
+}
+
+fn request_for_delivery_invocation(
+    config: &LatticedDeliveryConfig,
+    invocation: Invocation,
 ) -> Result<DeliveryRunRequest, LatticedError> {
     let prompt_digest = digest(
         "lattice.task032.delivery-prompt",
@@ -2527,7 +5650,6 @@ fn request_for_delivery(
         "lattice.task032.delivery-execution-configuration-v2",
         &binding,
     )?;
-    let invocation = invocation_for_run(run_id)?;
     DeliveryRunRequest::new(
         invocation,
         DeliveryProfile::Task032CodexPostgres,
@@ -2708,7 +5830,18 @@ fn run_delivery_graph_memory(
     delivery_receipt: &DeliveryReceipt,
 ) -> Result<GraphMemoryReceipt, LatticedError> {
     let request = graph_request_for_delivery_receipt(database.run_id(), delivery_receipt)?;
-    let query = MemoryQuery::new(&request, GRAPH_QUERY, GRAPH_RETRIEVAL_LIMIT)
+    run_graph_memory_request(database, password, config, fixture, deadline, &request)
+}
+
+fn run_graph_memory_request(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    config: &LatticedDeliveryConfig,
+    fixture: &DeliveryGraphPaths,
+    deadline: Instant,
+    request: &GraphMemoryRunRequest,
+) -> Result<GraphMemoryReceipt, LatticedError> {
+    let query = MemoryQuery::new(request, GRAPH_QUERY, GRAPH_RETRIEVAL_LIMIT)
         .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
     let remaining = deadline
         .checked_duration_since(Instant::now())
@@ -2716,18 +5849,7 @@ fn run_delivery_graph_memory(
         .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphExecution))?;
     let graph_root = fixture.root.join(GRAPH_MEMORY_ROOT_NAME);
     let bridge = SnapshotBridge::new();
-    let git_executable_sha256 =
-        graph_executable_sha256(&config.git_executable).map_err(|error| {
-            eprintln!(
-                "{}",
-                json!({
-                    "component": "GraphMemory",
-                    "event": "configuration_rejected",
-                    "stage": "git_executable_sha256"
-                })
-            );
-            error
-        })?;
+    let git_executable_sha256 = graph_executable_sha256(&config.git_executable)?;
     let snapshot_config = GitSnapshotConfig::new(
         config.git_executable.clone(),
         git_executable_sha256,
@@ -2735,32 +5857,12 @@ fn run_delivery_graph_memory(
         graph_root.join("snapshots"),
         SnapshotLimits::default(),
     )
-    .map_err(|_| {
-        eprintln!(
-            "{}",
-            json!({
-                "component": "GraphMemory",
-                "event": "configuration_rejected",
-                "stage": "snapshot_config"
-            })
-        );
-        LatticedError::new(LatticedErrorKind::GraphConfiguration)
-    })?;
+    .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let mut snapshot = ExactGitSnapshotMaterializer::with_bridge(snapshot_config, bridge.clone());
 
     let system_root = env::var_os("SystemRoot")
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            eprintln!(
-                "{}",
-                json!({
-                    "component": "GraphMemory",
-                    "event": "configuration_rejected",
-                    "stage": "system_root"
-                })
-            );
-            LatticedError::new(LatticedErrorKind::GraphConfiguration)
-        })?;
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let graphify_config = GraphifyRuntimeConfig::new(
         PathBuf::from(system_root).join("System32/wsl.exe"),
         fixture.repository_root.join(GRAPHIFY_RUNTIME_RELATIVE_PATH),
@@ -2768,45 +5870,16 @@ fn run_delivery_graph_memory(
         remaining,
         GraphOutputLimits::default(),
     )
-    .map_err(|_| {
-        eprintln!(
-            "{}",
-            json!({
-                "component": "GraphMemory",
-                "event": "configuration_rejected",
-                "stage": "graphify_runtime_config"
-            })
-        );
-        LatticedError::new(LatticedErrorKind::GraphConfiguration)
-    })?;
+    .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let mut graphify = PinnedGraphifyAdapter::new(graphify_config, bridge);
     let client = connect_fixed_runtime_client(database, password, deadline)
         .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
-    let target =
-        ExtensionTarget::new(database.database_name(), database.run_id()).map_err(|_| {
-            eprintln!(
-                "{}",
-                json!({
-                    "component": "GraphMemory",
-                    "event": "configuration_rejected",
-                    "stage": "memory_extension_target"
-                })
-            );
-            LatticedError::new(LatticedErrorKind::GraphConfiguration)
-        })?;
-    let mut memory = PostgresCodebaseMemory::new(client, target).map_err(|_| {
-        eprintln!(
-            "{}",
-            json!({
-                "component": "GraphMemory",
-                "event": "configuration_rejected",
-                "stage": "memory_adapter"
-            })
-        );
-        LatticedError::new(LatticedErrorKind::GraphConfiguration)
-    })?;
+    let target = ExtensionTarget::new(database.database_name(), database.run_id())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let mut memory = PostgresCodebaseMemory::new(client, target)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
 
-    run_graph_memory(&request, &query, &mut snapshot, &mut graphify, &mut memory)
+    run_graph_memory(request, &query, &mut snapshot, &mut graphify, &mut memory)
         .map_err(|_| LatticedError::new(LatticedErrorKind::GraphExecution))
 }
 
@@ -2951,6 +6024,13 @@ fn composed_receipt_json(
     component: &'static str,
     graph_receipt: &GraphMemoryReceipt,
 ) -> Result<Value, LatticedError> {
+    append_graph_receipt_to_json(receipt_json(delivery_receipt, component)?, graph_receipt)
+}
+
+fn append_graph_receipt_to_json(
+    value: Value,
+    graph_receipt: &GraphMemoryReceipt,
+) -> Result<Value, LatticedError> {
     let request = graph_receipt.persistence().request();
     let persistence = graph_receipt.persistence();
     let retrieval = graph_receipt.retrieval();
@@ -2969,7 +6049,7 @@ fn composed_receipt_json(
         database_identity_digest: identity.database_identity_digest().as_str(),
         extension_manifest_digest: identity.extension_manifest_digest().as_str(),
     };
-    append_graph_receipt_fields(receipt_json(delivery_receipt, component)?, &fields)
+    append_graph_receipt_fields(value, &fields)
 }
 
 fn append_graph_receipt_fields(
@@ -3353,7 +6433,556 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use lattice_ports::{DeliveryFailureCertainty, DeliveryPortError};
+    use lattice_codebase_memory::{normalize_analysis, plan_retrieval};
+    use lattice_contracts::{
+        CodeSnapshotEvidence, CodebaseMemoryPersistenceIdentity, DaemonEpoch, GraphConfidence,
+        GraphMemoryPersistenceEvidence, GraphSourceProvenance, GraphifyIdentity,
+        GraphifyRawEvidence, GraphifyRawNode, MemoryRetrievalDisposition, MemoryRetrievalEvidence,
+        MemoryRetrievalPlan, NormalizedGraphAnalysis, TrackedSource,
+    };
+    use lattice_ports::{
+        AutonomyDisposition, AutonomyReceiptProjection, CodebaseMemoryPort,
+        DeliveryFailureCertainty, DeliveryPortError,
+    };
+    use lattice_postgres_codebase_memory::{
+        ExtensionApplyOutcome as MemoryExtensionApplyOutcome,
+        ExtensionDatabaseRole as MemoryExtensionDatabaseRole,
+        ExtensionTarget as MemoryExtensionTarget, apply_extension as apply_memory_extension,
+        verify_extension as verify_memory_extension,
+    };
+    use lattice_postgres_writer_lease::{
+        ExtensionApplyOutcome as WriterExtensionApplyOutcome,
+        apply_extension as apply_writer_extension, verify_extension as verify_writer_extension,
+    };
+    use lattice_writer_lease::{
+        CommandOutcome as WriterCommandOutcome, WriterLeaseAcquireRequest, WriterLeaseRepository,
+        WriterLeaseRepositoryCommand,
+    };
+    use postgres::config::SslMode;
+    use postgres::{Client, Config, NoTls};
+
+    const TASK050_PROFILE_MARKER_PREFIX: &str = "TASK050_LATTICED_PROFILE_INPUT=";
+
+    fn task050_test_digest(value: char) -> ContentDigest {
+        ContentDigest::from_sha256(value.to_string().repeat(64)).expect("TASK050 digest")
+    }
+
+    fn task050_store_authority() -> StoreAuthorityHead {
+        StoreAuthorityHead::new(
+            RuntimeKind::Live,
+            StoreDaemonInstanceId::new("task050-fresh-process").expect("TASK050 daemon"),
+            DaemonEpoch::new(50).expect("TASK050 epoch"),
+            RuntimeAdmissionMode::Active,
+            StoreAuthorityRevision::new(50).expect("TASK050 revision"),
+            task050_test_digest('a'),
+            task050_test_digest('b'),
+        )
+        .expect("TASK050 Store authority")
+    }
+
+    fn task050_connect_as(database: &str, role: &str) -> Result<Client, Box<dyn Error>> {
+        let host = required_environment("LATTICE_TASK019_HOST")?;
+        let port = required_environment("LATTICE_TASK019_PORT")?.parse::<u16>()?;
+        let password = required_environment("LATTICE_TASK019_PASSWORD")?;
+        let mut config = Config::new();
+        config
+            .host(&host)
+            .port(port)
+            .user(&format!("{role}_login"))
+            .password(password)
+            .dbname(database)
+            .application_name("lattice-devos-task050-canonical-profile")
+            .ssl_mode(SslMode::Disable);
+        let mut client = config.connect(NoTls)?;
+        client.batch_execute(&format!("SET ROLE {role}"))?;
+        Ok(client)
+    }
+
+    fn task050_ingress_peer(
+        profile: Task050AcceptanceProfile,
+    ) -> Result<TaskIngressPeerEvidence, Box<dyn Error>> {
+        let executable = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("debug")
+            .join("latticed.exe");
+        let binary_digest = ContentDigest::from_sha256(official_file_sha256(
+            &executable,
+            MAX_LATTICED_EXECUTABLE_BYTES,
+        )?)?;
+        let profile_digest = match profile {
+            Task050AcceptanceProfile::AskUser => task050_test_digest('c'),
+            Task050AcceptanceProfile::Proceed => task050_test_digest('d'),
+        };
+        Ok(
+            TaskIngressPeerEvidence::new_local_canonical_mcp_acceptance_live(
+                GatewayInstanceId::new("latticed-local-canonical-acceptance")?,
+                env!("CARGO_PKG_VERSION"),
+                binary_digest,
+                mcp::task_ingress_schema_digest().ok_or("TASK050 MCP schema digest missing")?,
+                GatewayChannelId::new("main")?,
+                profile_digest,
+                task050_test_digest('e'),
+            )?,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn task050_autonomy_marker(
+        phase: &str,
+        profile: Task050AcceptanceProfile,
+        run_id: &str,
+        ingress_peer: &TaskIngressPeerEvidence,
+        authority: &StoreAuthorityHead,
+        binding: &SubjectBinding,
+        evidence: &TaskLifecycleEvidence,
+        task_ref: &ContentDigest,
+    ) -> Result<Value, Box<dyn Error>> {
+        let profile_name = match profile {
+            Task050AcceptanceProfile::AskUser => "ASK_USER",
+            Task050AcceptanceProfile::Proceed => "PROCEED",
+        };
+        let autonomy = evidence
+            .autonomy_receipt()
+            .ok_or("TASK050 autonomy projection missing")?;
+        Ok(json!({
+            "authority_head_digest": authority.head_digest().as_str(),
+            "authority_revision": authority.revision().get(),
+            "autonomy_projection_sha256": autonomy.receipt_digest().as_str(),
+            "daemon_epoch": authority.daemon_epoch().get(),
+            "daemon_instance_id": authority.daemon_instance_id().as_str(),
+            "database_run_id": run_id,
+            "expected_status": task_public_status(evidence, task_ref),
+            "ingress_profile_sha256": ingress_peer.profile_digest().as_str(),
+            "observation_digest": authority.observation_digest().as_str(),
+            "phase": phase,
+            "profile": profile_name,
+            "schema": "lattice.task050.latticed-profile-input.v2",
+            "task_ref": task_ref.as_str(),
+            "task_spec_digest": binding.task_spec_digest().as_str(),
+        }))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run_task050_canonical_latticed_profiles() -> Result<(), Box<dyn Error>> {
+        if required_environment("LATTICE_TASK019_LIVE")? != "1"
+            || required_environment("LATTICE_TASK019_HOST")? != "127.0.0.1"
+        {
+            return Err("TASK050 live boundary rejected".into());
+        }
+        let phase = required_environment("LATTICE_TASK019_PHASE")?;
+        if !matches!(phase.as_str(), "initial" | "restart") {
+            return Err("TASK050 phase rejected".into());
+        }
+        let run_id = required_environment("LATTICE_TASK019_RUN_ID")?;
+        let port = required_environment("LATTICE_TASK019_PORT")?.parse::<u16>()?;
+        let password = required_environment("LATTICE_TASK019_PASSWORD")?;
+        let database = DeliveryDatabaseBinding::new("127.0.0.1", port, run_id.clone())?;
+        let authority = task050_store_authority();
+        let ask_submission =
+            task050_acceptance_gateway_submission(Task050AcceptanceProfile::AskUser)?;
+        let ask_peer = task050_ingress_peer(Task050AcceptanceProfile::AskUser)?;
+        let mut foundation_probe = PostgresTaskLifecycle::connect_with_ingress_peer(
+            &database,
+            &password,
+            Instant::now() + Duration::from_mins(2),
+            task_ledger_identity(ask_submission.binding())?,
+            authority.clone(),
+            ask_peer,
+        )?;
+        let foundation = foundation_probe.persistence_foundation(ask_submission.binding())?;
+        drop(foundation_probe);
+
+        let memory_target = MemoryExtensionTarget::new(database.database_name(), &run_id)?;
+        let memory_manifest = verify_embedded_extension_manifest()?;
+        let writer_target = WriterLeaseExtensionTarget::new(
+            database.database_name(),
+            foundation.database_identity_digest().clone(),
+            foundation.global_manifest_digest().clone(),
+            memory_manifest.manifest_sha256().clone(),
+        )?;
+        let mut migrator = task050_connect_as(&database.database_name(), "lattice_migrator")?;
+        if phase == "initial" {
+            assert!(matches!(
+                apply_memory_extension(&mut migrator, &memory_target)?,
+                MemoryExtensionApplyOutcome::Installed
+                    | MemoryExtensionApplyOutcome::AlreadyCurrent
+            ));
+            assert!(matches!(
+                apply_writer_extension(&mut migrator, &writer_target)?,
+                WriterExtensionApplyOutcome::Installed
+                    | WriterExtensionApplyOutcome::Activated
+                    | WriterExtensionApplyOutcome::AlreadyCurrent
+            ));
+        } else {
+            verify_memory_extension(
+                &mut migrator,
+                &memory_target,
+                MemoryExtensionDatabaseRole::Migrator,
+            )?;
+            verify_writer_extension(&mut migrator, &writer_target)?;
+        }
+        drop(migrator);
+
+        for profile in [
+            Task050AcceptanceProfile::AskUser,
+            Task050AcceptanceProfile::Proceed,
+        ] {
+            let submission = task050_acceptance_gateway_submission(profile)?;
+            let binding = submission.binding().clone();
+            let ingress_peer = task050_ingress_peer(profile)?;
+            let client_request_id = match profile {
+                Task050AcceptanceProfile::AskUser => "task050-canonical-ask-user",
+                Task050AcceptanceProfile::Proceed => "task050-canonical-proceed",
+            };
+            let mut lifecycle = PostgresTaskLifecycle::connect_with_ingress_peer(
+                &database,
+                &password,
+                Instant::now() + Duration::from_mins(2),
+                task_ledger_identity(&binding)?,
+                authority.clone(),
+                ingress_peer.clone(),
+            )?;
+            lifecycle.admit(&binding, client_request_id)?;
+            let mut writer = None;
+            let writer_authority = if profile == Task050AcceptanceProfile::Proceed {
+                let runtime = connect_fixed_runtime_client(
+                    &database,
+                    &password,
+                    Instant::now() + Duration::from_mins(2),
+                )?;
+                let mut repository =
+                    PostgresWriterLease::new(runtime, writer_target.clone(), &authority, 600)?;
+                let current = if phase == "initial" {
+                    let receipt = repository.execute(WriterLeaseRepositoryCommand::Acquire(
+                        WriterLeaseAcquireRequest {
+                            command_id: "task050-canonical-proceed-acquire".to_owned(),
+                            expected_head: None,
+                            project_id: binding.project_id().clone(),
+                            project_snapshot_id: binding.project_snapshot_id().clone(),
+                            task_id: binding.task_id().clone(),
+                            task_revision: binding.task_revision().to_owned(),
+                            task_spec_digest: binding.task_spec_digest().clone(),
+                            attempt_id: AttemptId::new("task050-canonical-proceed-attempt")?,
+                            lease_id: "task050-canonical-proceed-lease".to_owned(),
+                            lease_holder_id: "codex-writer".to_owned(),
+                            worktree_id: "task050-canonical-acceptance".to_owned(),
+                            holder_process_id: HolderProcessId::new(u64::from(process::id()))?,
+                            holder_process_start_identity: task050_test_digest('f'),
+                        },
+                    ))?;
+                    if receipt.outcome != WriterCommandOutcome::Applied {
+                        return Err("TASK050 writer acquire denied".into());
+                    }
+                    receipt.after.ok_or("TASK050 writer authority missing")?
+                } else {
+                    repository
+                        .current_authority(binding.project_id())?
+                        .ok_or("TASK050 current writer authority missing")?
+                        .independent_head()
+                        .clone()
+                };
+                repository.assert_current(&current)?;
+                writer = Some(repository);
+                Some(current)
+            } else {
+                None
+            };
+            let evidence =
+                lifecycle.record_autonomy_receipt(&binding, writer_authority.as_ref())?;
+            if evidence.state() != TaskState::Draft
+                || evidence.result_digest().is_some()
+                || evidence
+                    .autonomy_receipt()
+                    .map(AutonomyReceiptProjection::disposition)
+                    != Some(match profile {
+                        Task050AcceptanceProfile::AskUser => AutonomyDisposition::AskUser,
+                        Task050AcceptanceProfile::Proceed => AutonomyDisposition::Proceed,
+                    })
+            {
+                return Err("TASK050 autonomy projection rejected".into());
+            }
+            if let (Some(repository), Some(current)) = (writer.as_mut(), writer_authority.as_ref())
+            {
+                repository.assert_current(current)?;
+            }
+            let task_ref = controlled_task_reference(
+                &binding,
+                &task_admission_command_id(client_request_id),
+                &run_id,
+                ingress_peer.profile_digest(),
+            )?;
+            let marker = task050_autonomy_marker(
+                &phase,
+                profile,
+                &run_id,
+                &ingress_peer,
+                &authority,
+                &binding,
+                &evidence,
+                &task_ref,
+            )?;
+            println!("\n{TASK050_PROFILE_MARKER_PREFIX}{marker}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn task050_acceptance_profile_selector_is_private_exact_and_fail_closed() {
+        let ask = task050_acceptance_gateway_submission(Task050AcceptanceProfile::AskUser)
+            .expect("ASK_USER submission");
+        let proceed = task050_acceptance_gateway_submission(Task050AcceptanceProfile::Proceed)
+            .expect("PROCEED submission");
+
+        assert_eq!(
+            ask.binding().task_spec_digest().as_str(),
+            "0915bc62fe4613bebda5a82e65863a325b7102124a61aa0efc9310a33a18be59"
+        );
+        assert_eq!(
+            proceed.binding().task_spec_digest().as_str(),
+            "0cdfb9ee77f8f3b819ddbd74bf2d58537da11ec065bb1526889bb08adf77e86d"
+        );
+        assert_ne!(ask.binding(), proceed.binding());
+
+        let exact = Task050AcceptanceSelectorInput {
+            profile: Some("ASK_USER"),
+            task_spec_sha256: Some(ask.binding().task_spec_digest().as_str()),
+            task050_live: Some("1"),
+            task019_live: Some("1"),
+            phase: Some("initial"),
+            host: Some("127.0.0.1"),
+            run_id: Some("05000000000000000000000000000001"),
+            ingress_kind: Some(TASK_INGRESS_LOCAL_ACCEPTANCE),
+        };
+        assert_eq!(
+            select_task050_acceptance_profile(FullChainRunMode::ResumeExisting, exact),
+            Ok(Some(Task050AcceptanceProfile::AskUser))
+        );
+        assert_eq!(
+            select_task050_acceptance_profile(
+                FullChainRunMode::ResumeExisting,
+                Task050AcceptanceSelectorInput {
+                    profile: Some("PROCEED"),
+                    task_spec_sha256: Some(proceed.binding().task_spec_digest().as_str()),
+                    phase: Some("restart"),
+                    ..exact
+                }
+            ),
+            Ok(Some(Task050AcceptanceProfile::Proceed))
+        );
+        assert_eq!(
+            select_task050_acceptance_profile(FullChainRunMode::Fresh, exact),
+            Err(LatticedErrorKind::Configuration)
+        );
+        for rejected in [
+            Task050AcceptanceSelectorInput {
+                task050_live: None,
+                ..exact
+            },
+            Task050AcceptanceSelectorInput {
+                task019_live: None,
+                ..exact
+            },
+            Task050AcceptanceSelectorInput {
+                phase: Some("memory_setup"),
+                ..exact
+            },
+            Task050AcceptanceSelectorInput {
+                host: Some("localhost"),
+                ..exact
+            },
+            Task050AcceptanceSelectorInput {
+                run_id: None,
+                ..exact
+            },
+            Task050AcceptanceSelectorInput {
+                run_id: Some("0500000000000000000000000000000A"),
+                ..exact
+            },
+            Task050AcceptanceSelectorInput {
+                ingress_kind: Some(TASK_INGRESS_SECURE_TUNNEL),
+                ..exact
+            },
+        ] {
+            assert_eq!(
+                select_task050_acceptance_profile(FullChainRunMode::ResumeExisting, rejected),
+                Err(LatticedErrorKind::Configuration)
+            );
+        }
+        assert_eq!(
+            select_task050_acceptance_profile(
+                FullChainRunMode::ResumeExisting,
+                Task050AcceptanceSelectorInput {
+                    task_spec_sha256: Some(proceed.binding().task_spec_digest().as_str()),
+                    ..exact
+                }
+            ),
+            Err(LatticedErrorKind::Configuration)
+        );
+        assert_eq!(
+            select_task050_acceptance_profile(
+                FullChainRunMode::ResumeExisting,
+                Task050AcceptanceSelectorInput {
+                    profile: None,
+                    task_spec_sha256: None,
+                    task050_live: None,
+                    task019_live: None,
+                    phase: None,
+                    host: None,
+                    run_id: None,
+                    ingress_kind: None,
+                }
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the coordinated marker-owned TASK-019 PostgreSQL fixture"]
+    fn task050_canonical_latticed_profiles_when_provisioned() {
+        if env::var("LATTICE_TASK050_LIVE").ok().as_deref() != Some("1") {
+            return;
+        }
+        run_task050_canonical_latticed_profiles().expect("TASK050 canonical profiles");
+    }
+
+    #[test]
+    fn synthetic_official_bundle_facts_exercise_only_the_pure_fixed_policy() {
+        let policy = OfficialBundlePolicy::production();
+        let complete = SyntheticOfficialBundleEvidenceProvider::complete(policy);
+
+        assert!(policy.evaluate(&complete).is_ok());
+        assert_eq!(
+            complete.facts().provenance,
+            OfficialBundleEvidenceProvenance::SyntheticTest
+        );
+
+        let mut missing_sandbox = complete.clone();
+        missing_sandbox.remove(OfficialBundleFileRole::SandboxSetup);
+        assert_eq!(
+            policy.evaluate(&missing_sandbox),
+            Err(OfficialIdentityRejection::MissingFile(
+                OfficialBundleFileRole::SandboxSetup
+            ))
+        );
+
+        let mut missing_runner = complete.clone();
+        missing_runner.remove(OfficialBundleFileRole::CommandRunner);
+        assert_eq!(
+            policy.evaluate(&missing_runner),
+            Err(OfficialIdentityRejection::MissingFile(
+                OfficialBundleFileRole::CommandRunner
+            ))
+        );
+    }
+
+    #[test]
+    fn synthetic_official_bundle_facts_reject_manifest_drift_and_target_split() {
+        let policy = OfficialBundlePolicy::production();
+
+        let mut manifest_drift = SyntheticOfficialBundleEvidenceProvider::complete(policy);
+        manifest_drift
+            .file_mut(OfficialBundleFileRole::PackageManifest)
+            .sha256 = Some("0".repeat(64));
+        assert_eq!(
+            policy.evaluate(&manifest_drift),
+            Err(OfficialIdentityRejection::DigestMismatch(
+                OfficialBundleFileRole::PackageManifest
+            ))
+        );
+
+        let mut target_split = SyntheticOfficialBundleEvidenceProvider::complete(policy);
+        target_split.facts.launcher_target_root = Some(PathBuf::from(r"D:\foreign\target"));
+        assert_eq!(
+            policy.evaluate(&target_split),
+            Err(OfficialIdentityRejection::TargetSplit)
+        );
+    }
+
+    #[test]
+    fn synthetic_official_bundle_facts_reject_file_id_replacement_capture_mix() {
+        let policy = OfficialBundlePolicy::production();
+        let mut replacement_mix = SyntheticOfficialBundleEvidenceProvider::complete(policy);
+        replacement_mix
+            .file_mut(OfficialBundleFileRole::CommandRunner)
+            .observed_identity = Some(OfficialFileIdentity {
+            volume_serial_number: 7,
+            file_index: 999,
+        });
+
+        assert_eq!(
+            policy.evaluate(&replacement_mix),
+            Err(OfficialIdentityRejection::FileIdentityChanged(
+                OfficialBundleFileRole::CommandRunner
+            ))
+        );
+    }
+
+    #[test]
+    fn official_bundle_target_root_is_launcher_owned_for_short_external_delivery_base() {
+        let policy = OfficialBundlePolicy::production();
+        let official_target_root = PathBuf::from(r"C:\lattice-official\target");
+        let launcher =
+            policy.expected_path(&official_target_root, OfficialBundleFileRole::Launcher);
+        let user_owned_delivery_base = PathBuf::from(r"C:\d");
+        let derived_target_root = OfficialBundlePolicy::launcher_target_root(&launcher)
+            .expect("official target root from validated launcher ancestry");
+
+        assert_eq!(derived_target_root, official_target_root);
+        assert_ne!(derived_target_root, user_owned_delivery_base);
+
+        let valid =
+            SyntheticOfficialBundleEvidenceProvider::complete_at(policy, &derived_target_root);
+        assert!(policy.evaluate(&valid).is_ok());
+
+        let mut identity_drift = valid;
+        identity_drift
+            .file_mut(OfficialBundleFileRole::CommandRunner)
+            .observed_identity = Some(OfficialFileIdentity {
+            volume_serial_number: 7,
+            file_index: 999,
+        });
+        assert_eq!(
+            policy.evaluate(&identity_drift),
+            Err(OfficialIdentityRejection::FileIdentityChanged(
+                OfficialBundleFileRole::CommandRunner
+            ))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_pinned_file_handle_blocks_replacement_for_guard_lifetime() {
+        static NEXT_PINNED_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+        let unique = NEXT_PINNED_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!(
+            "lattice-official-pinned-file-{}-{unique}",
+            process::id()
+        ));
+        let path = root.join("codex-command-runner.exe");
+        fs::create_dir_all(&root).expect("create pinned-file fixture root");
+        fs::write(&path, b"captured official file facts").expect("write pinned-file fixture");
+
+        let (facts, pinned) = capture_official_file(
+            OfficialBundleFileRole::CommandRunner,
+            path.clone(),
+            path.clone(),
+            &root,
+            MAX_OFFICIAL_RESOURCE_BYTES,
+        )
+        .expect("capture pinned-file facts and handle");
+        let replacement_while_pinned = fs::write(&path, b"replacement");
+        let content_while_pinned = fs::read(&path).expect("read pinned-file fixture");
+        drop(pinned);
+        let replacement_after_drop = fs::write(&path, b"replacement");
+        fs::remove_dir_all(&root).expect("remove pinned-file fixture root");
+
+        assert_eq!(facts.captured_identity, facts.observed_identity);
+        assert!(replacement_while_pinned.is_err());
+        assert_eq!(content_while_pinned, b"captured official file facts");
+        assert!(replacement_after_drop.is_ok());
+    }
 
     fn test_content_digest(fill: char) -> ContentDigest {
         ContentDigest::from_sha256(fill.to_string().repeat(64)).expect("test digest")
@@ -3372,12 +7001,493 @@ mod tests {
     }
 
     #[test]
+    fn production_composition_stderr_uses_only_fixed_public_diagnostics() {
+        let source = include_str!("composition.rs");
+        let stderr_macro = ["eprint", "ln!"].concat();
+        let stderr_inline_macro = ["eprint", "!"].concat();
+        let fixed_emission = [
+            "eprint",
+            "ln!(\"{}\", LatticedErrorKind::Transport.code());",
+        ]
+        .concat();
+        let diagnostic_emission = [
+            "write_startup_diagnostic(&mut io::",
+            "stderr().lock(), diagnostic);",
+        ]
+        .concat();
+        let direct_stderr = ["io::", "stderr"].concat();
+        let inherited_stdio = ["Stdio", "::inherit"].concat();
+
+        assert_eq!(source.matches(&stderr_macro).count(), 1);
+        assert!(source.contains(&fixed_emission));
+        assert!(source.contains(&diagnostic_emission));
+        assert_eq!(
+            LatticedErrorKind::Transport.code(),
+            "LATTICED_STDIO_REJECTED"
+        );
+        assert!(!source.contains(&stderr_inline_macro));
+        assert_eq!(source.matches(&direct_stderr).count(), 2);
+        assert!(!source.contains(&inherited_stdio));
+    }
+
+    #[test]
+    fn startup_diagnostic_write_failure_is_non_authoritative() {
+        struct ClosedDiagnosticSink;
+
+        impl Write for ClosedDiagnosticSink {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "closed diagnostic sink",
+                ))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "closed diagnostic sink",
+                ))
+            }
+        }
+
+        write_startup_diagnostic(
+            &mut ClosedDiagnosticSink,
+            StartupDiagnostic::configuration_validation_started(),
+        );
+    }
+
+    #[test]
+    fn startup_diagnostic_is_fixed_vocabulary_and_omits_secret_like_input() {
+        let progress = StartupDiagnostic::configuration_validation_started().render();
+        let progress_value: Value =
+            serde_json::from_str(&progress).expect("progress diagnostic JSON");
+        let rendered = StartupDiagnostic::failure(
+            "CONFIGURATION_VALIDATED",
+            "VALID",
+            "ASSEMBLY_REJECTED",
+            LatticedErrorKind::Configuration,
+        )
+        .render();
+        let value: Value = serde_json::from_str(&rendered).expect("diagnostic JSON");
+
+        assert_eq!(progress_value["waiting_reason"], "CONFIGURATION_VALIDATION");
+        assert_eq!(value["schema"], STARTUP_DIAGNOSTIC_SCHEMA);
+        assert_eq!(value["stage"], "STARTUP_FAILED");
+        assert_eq!(value["last_completed_stage"], "CONFIGURATION_VALIDATED");
+        assert_eq!(value["configuration_health"], "VALID");
+        assert_eq!(value["dependency_health"], "ASSEMBLY_REJECTED");
+        assert_eq!(
+            value["failure_classification"],
+            "LATTICED_CONFIGURATION_REJECTED"
+        );
+        assert!(!rendered.contains("LATTICE_TASK019_PASSWORD"));
+        assert!(!rendered.contains("ignored-secret"));
+        assert!(!rendered.contains("127.0.0.1"));
+    }
+
+    #[test]
     fn effect_deadline_reserves_time_for_cleanup_and_terminal_ledger_finalization() {
         let finalization = deadline(Duration::from_mins(2)).expect("finalization deadline");
         let effect = effect_deadline(finalization).expect("effect deadline");
 
         assert_eq!(finalization.duration_since(effect), FINALIZATION_RESERVE);
         assert!(effect > Instant::now());
+    }
+
+    #[test]
+    fn controlled_task_timeout_is_bounded_inside_the_lease_ttl() {
+        assert!(
+            validate_controlled_task_timeout(CONTROLLED_TASK_MAX_RUNTIME, FullChainRunMode::Fresh)
+                .is_ok()
+        );
+        assert!(
+            validate_controlled_task_timeout(
+                CONTROLLED_TASK_MAX_RUNTIME + Duration::from_secs(1),
+                FullChainRunMode::Fresh
+            )
+            .is_err()
+        );
+        assert!(
+            validate_controlled_task_timeout(FINALIZATION_RESERVE, FullChainRunMode::Fresh)
+                .is_err()
+        );
+        assert!(
+            validate_controlled_task_timeout(
+                Duration::from_secs(MAX_TIMEOUT_SECONDS),
+                FullChainRunMode::ResumeExisting
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn completed_task_requires_one_released_and_replay_verified_writer_history() {
+        assert!(expected_completed_writer_history(false, 1, 2, 2));
+        assert!(!expected_completed_writer_history(true, 1, 2, 2));
+        assert!(!expected_completed_writer_history(false, 0, 0, 0));
+        assert!(!expected_completed_writer_history(false, 2, 4, 4));
+        assert_eq!(
+            LatticedErrorKind::TaskReconciliationRequired.code(),
+            "LATTICE_TASK_RECONCILIATION_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn resume_existing_task_submit_replays_only_completed_evidence() {
+        let binding = fixed_gateway_submission()
+            .expect("fixed controlled canary")
+            .binding()
+            .clone();
+        let completed = TaskLifecycleEvidence::new(
+            binding.clone(),
+            TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
+            TaskState::Completed,
+            test_content_digest('7'),
+            Some(test_content_digest('8')),
+        );
+
+        assert_eq!(
+            controlled_writer_decision(
+                ExistingCompletionPolicy::Require,
+                &binding,
+                Some(&completed),
+            ),
+            Ok(ControlledWriterDecision::ReplayExisting)
+        );
+    }
+
+    #[test]
+    fn resume_existing_task_submit_never_selects_execution_for_invalid_evidence() {
+        let binding = fixed_gateway_submission()
+            .expect("fixed controlled canary")
+            .binding()
+            .clone();
+        let mismatched_binding = SubjectBinding::new(
+            binding.project_id().clone(),
+            binding.project_snapshot_id().clone(),
+            binding.task_id().clone(),
+            FIXED_GATEWAY_TASK_REVISION,
+            test_content_digest('9'),
+        )
+        .expect("mismatched test binding");
+        let cases = [
+            TaskLifecycleEvidence::new(
+                binding.clone(),
+                TaskLifecycleAutonomyEvidence::Unadmitted,
+                TaskState::Draft,
+                test_content_digest('7'),
+                None,
+            ),
+            TaskLifecycleEvidence::new(
+                binding.clone(),
+                TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
+                TaskState::Executing,
+                test_content_digest('7'),
+                None,
+            ),
+            TaskLifecycleEvidence::new(
+                binding.clone(),
+                TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
+                TaskState::Failed,
+                test_content_digest('7'),
+                Some(test_content_digest('8')),
+            ),
+            TaskLifecycleEvidence::new(
+                binding.clone(),
+                TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
+                TaskState::Stopping,
+                test_content_digest('7'),
+                Some(test_content_digest('8')),
+            ),
+            TaskLifecycleEvidence::new(
+                mismatched_binding,
+                TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
+                TaskState::Completed,
+                test_content_digest('7'),
+                Some(test_content_digest('8')),
+            ),
+        ];
+
+        for existing in cases {
+            let error = controlled_writer_decision(
+                ExistingCompletionPolicy::Require,
+                &binding,
+                Some(&existing),
+            )
+            .expect_err("resume must not select a new controlled execution");
+            assert_eq!(error.code(), "LATTICE_TASK_RECONCILIATION_REQUIRED");
+        }
+        let missing = controlled_writer_decision(ExistingCompletionPolicy::Require, &binding, None)
+            .expect_err("missing evidence must not select execution");
+        assert_eq!(missing.code(), "LATTICE_TASK_RECONCILIATION_REQUIRED");
+    }
+
+    #[test]
+    fn fresh_task_submit_still_selects_controlled_execution() {
+        let binding = fixed_gateway_submission()
+            .expect("fixed controlled canary")
+            .binding()
+            .clone();
+
+        assert_eq!(
+            controlled_writer_decision(ExistingCompletionPolicy::Ignore, &binding, None),
+            Ok(ControlledWriterDecision::Execute)
+        );
+    }
+
+    #[test]
+    fn controlled_submit_delivery_root_selection_is_task_scoped_and_resume_safe() {
+        static NEXT_DELIVERY_BASE: AtomicUsize = AtomicUsize::new(0);
+        let unique = NEXT_DELIVERY_BASE.fetch_add(1, Ordering::Relaxed);
+        let base = env::temp_dir().join(format!(
+            "lattice-controlled-delivery-base-{}-{unique}",
+            process::id()
+        ));
+        fs::create_dir_all(&base).expect("create configured delivery base");
+        let first_identity = test_content_digest('1');
+        let second_identity = test_content_digest('2');
+
+        let first =
+            controlled_submit_delivery_root(&base, &first_identity, FullChainRunMode::Fresh)
+                .expect("first fresh task root");
+        let second =
+            controlled_submit_delivery_root(&base, &second_identity, FullChainRunMode::Fresh)
+                .expect("second fresh task root");
+        let existing = base.join("existing-task-root");
+        fs::create_dir(&existing).expect("create existing resume root");
+        let resumed = controlled_submit_delivery_root(
+            &existing,
+            &first_identity,
+            FullChainRunMode::ResumeExisting,
+        )
+        .expect("resume existing task root");
+
+        assert_eq!(first.parent(), Some(base.as_path()));
+        assert_eq!(second.parent(), Some(base.as_path()));
+        assert!(!first.exists());
+        assert!(!second.exists());
+        assert_ne!(first, second);
+        assert_eq!(resumed, existing);
+        fs::remove_dir_all(&base).expect("remove controlled delivery fixture");
+    }
+
+    #[test]
+    fn controlled_task_schema_output_is_absent_deterministic_and_task_scoped() {
+        static NEXT_SCHEMA_BASE: AtomicUsize = AtomicUsize::new(0);
+        let unique = NEXT_SCHEMA_BASE.fetch_add(1, Ordering::Relaxed);
+        let base = env::temp_dir().join(format!(
+            "lattice-controlled-schema-base-{}-{unique}",
+            process::id()
+        ));
+        let configured_schema_bundle = base.join("configured-schema-bundle");
+        let task_base = base.join("tasks");
+        fs::create_dir_all(&configured_schema_bundle).expect("create configured schema bundle");
+        fs::create_dir_all(&task_base).expect("create task base");
+        for index in 0..275 {
+            fs::write(
+                configured_schema_bundle.join(format!("schema-{index:03}.json")),
+                b"configured-read-only-schema",
+            )
+            .expect("write configured schema fixture");
+        }
+
+        let mut configured = LatticedDeliveryConfig::status_process(Duration::from_secs(30));
+        configured.schema_directory = configured_schema_bundle.clone();
+        configured.delivery_root = task_base.clone();
+        let first_identity = test_content_digest('1');
+        let second_identity = test_content_digest('2');
+        let first_root =
+            controlled_submit_delivery_root(&task_base, &first_identity, FullChainRunMode::Fresh)
+                .expect("first task root");
+        let retry_root =
+            controlled_submit_delivery_root(&task_base, &first_identity, FullChainRunMode::Fresh)
+                .expect("same task retry root");
+        let second_root =
+            controlled_submit_delivery_root(&task_base, &second_identity, FullChainRunMode::Fresh)
+                .expect("second task root");
+        let first =
+            controlled_task_delivery_config(&configured, &first_root, FullChainRunMode::Fresh)
+                .expect("first fresh task config");
+        let retry =
+            controlled_task_delivery_config(&configured, &retry_root, FullChainRunMode::Fresh)
+                .expect("same task retry config");
+        let second =
+            controlled_task_delivery_config(&configured, &second_root, FullChainRunMode::Fresh)
+                .expect("second fresh task config");
+        let resumed = controlled_task_delivery_config(
+            &configured,
+            &base.join("existing-task-root"),
+            FullChainRunMode::ResumeExisting,
+        );
+        let first_expected = first_root.join(CONTROLLED_TASK_SCHEMA_OUTPUT_CHILD);
+        let second_expected = second_root.join(CONTROLLED_TASK_SCHEMA_OUTPUT_CHILD);
+        let configured_file_count = fs::read_dir(&configured_schema_bundle)
+            .expect("read configured schema bundle")
+            .count();
+        let configured_bundle_unchanged = configured.schema_directory == configured_schema_bundle;
+        let first_output_was_absent = !first.schema_directory.exists();
+        let retry_output_was_absent = !retry.schema_directory.exists();
+        let second_output_was_absent = !second.schema_directory.exists();
+        fs::remove_dir_all(&base).expect("remove controlled schema fixture");
+
+        assert!(configured_bundle_unchanged);
+        assert_eq!(configured_file_count, 275);
+        assert_eq!(first.schema_directory, first_expected);
+        assert_eq!(retry.schema_directory, first_expected);
+        assert_eq!(second.schema_directory, second_expected);
+        assert_ne!(first.schema_directory, second.schema_directory);
+        assert!(first_output_was_absent);
+        assert!(retry_output_was_absent);
+        assert!(second_output_was_absent);
+        assert!(resumed.is_none());
+    }
+
+    #[test]
+    fn fresh_task_reference_binds_client_request_and_does_not_reuse_fixed_spec_digest() {
+        let binding = fixed_gateway_submission()
+            .expect("fixed controlled canary")
+            .binding()
+            .clone();
+        let profile_digest = test_content_digest('a');
+        let first = controlled_task_reference(
+            &binding,
+            "mcp-submit:fresh-request-1",
+            "fresh-run-1",
+            &profile_digest,
+        )
+        .expect("first fresh task reference");
+        let retry = controlled_task_reference(
+            &binding,
+            "mcp-submit:fresh-request-1",
+            "fresh-run-1",
+            &profile_digest,
+        )
+        .expect("deterministic fresh task reference retry");
+        let second = controlled_task_reference(
+            &binding,
+            "mcp-submit:fresh-request-2",
+            "fresh-run-1",
+            &profile_digest,
+        )
+        .expect("second fresh task reference");
+
+        assert_eq!(retry, first);
+        assert_ne!(&first, binding.task_spec_digest());
+        assert_ne!(&second, binding.task_spec_digest());
+        assert_ne!(second, first);
+        let public_status = task_public_status(
+            &TaskLifecycleEvidence::new(
+                binding,
+                TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
+                TaskState::Executing,
+                test_content_digest('7'),
+                None,
+            ),
+            &first,
+        );
+        assert_eq!(
+            public_status.get("task_ref").and_then(Value::as_str),
+            Some(first.as_str())
+        );
+    }
+
+    #[test]
+    fn merging_recovery_requires_exact_acquired_or_released_writer_history() {
+        assert!(expected_merging_writer_history(true, 1, 1, 1));
+        assert!(expected_merging_writer_history(false, 1, 2, 2));
+        assert!(!expected_merging_writer_history(false, 0, 0, 0));
+        assert!(!expected_merging_writer_history(true, 1, 2, 2));
+        assert!(!expected_merging_writer_history(false, 1, 1, 1));
+    }
+
+    #[test]
+    fn official_runtime_cannot_enter_the_unfenced_scripted_acceptance_lane() {
+        assert!(validate_scripted_execution_lane(DeliveryRuntime::ScriptedAcceptance).is_ok());
+        let error = validate_scripted_execution_lane(DeliveryRuntime::OfficialCodexAppServer)
+            .expect_err("official Codex must enter through the controlled Task coordinator");
+        assert_eq!(error.kind(), LatticedErrorKind::OfficialLiveBlocked);
+        assert!(requires_scripted_fixture_validation(
+            DeliveryRuntime::ScriptedAcceptance
+        ));
+        assert!(!requires_scripted_fixture_validation(
+            DeliveryRuntime::OfficialCodexAppServer
+        ));
+    }
+
+    #[test]
+    fn durable_delivery_failure_is_a_known_controlled_task_outcome() {
+        assert_eq!(
+            controlled_execution_error_kind(LatticedErrorKind::DeliveryFailed),
+            ControlledTaskExecutionErrorKind::Known
+        );
+        assert_eq!(
+            controlled_execution_error_kind(LatticedErrorKind::ReconciliationRequired),
+            ControlledTaskExecutionErrorKind::Ambiguous
+        );
+        assert_eq!(
+            controlled_execution_error_kind(LatticedErrorKind::DatabaseConnect),
+            ControlledTaskExecutionErrorKind::Ambiguous
+        );
+    }
+
+    #[test]
+    fn controlled_canary_has_an_independent_task_subject() {
+        let submission = fixed_gateway_submission().expect("fixed controlled canary");
+        let binding = submission.binding();
+
+        assert_eq!(binding.project_id().as_str(), CONTROLLED_PROJECT_ID);
+        assert_eq!(binding.task_id().as_str(), CONTROLLED_TASK_ID);
+        assert_eq!(
+            binding.project_snapshot_id().as_str(),
+            CONTROLLED_PROJECT_SNAPSHOT_ID
+        );
+        assert_ne!(binding.task_id().as_str(), TASK_ID);
+        assert_ne!(binding.project_snapshot_id().as_str(), PROJECT_SNAPSHOT_ID);
+    }
+
+    #[test]
+    fn openclaw_submit_is_always_fail_closed() {
+        let expected = fixed_gateway_submission().expect("fixed controlled canary");
+        assert_eq!(
+            openclaw_submit_denial(&expected, &expected),
+            GatewayDenialCode::DownstreamDenied
+        );
+
+        let substituted = TaskSpecSubmission::new(
+            expected.binding().clone(),
+            b"{}".to_vec(),
+            expected.claimed_spec_digest().clone(),
+        )
+        .expect("bounded substituted document");
+        assert_eq!(
+            openclaw_submit_denial(&substituted, &expected),
+            GatewayDenialCode::CommandSubstitution
+        );
+    }
+
+    #[test]
+    fn separately_observed_non_terminal_task_requires_reconciliation() {
+        let binding = fixed_gateway_submission()
+            .expect("fixed controlled canary")
+            .binding()
+            .clone();
+        let evidence = TaskLifecycleEvidence::new(
+            binding,
+            TaskLifecycleAutonomyEvidence::HistoricalOptional(None),
+            TaskState::Executing,
+            test_content_digest('7'),
+            None,
+        );
+        let status = task_public_status(&evidence, &test_content_digest('9'));
+
+        assert_eq!(
+            status.get("status").and_then(Value::as_str),
+            Some("RECONCILIATION_REQUIRED")
+        );
+        assert_eq!(
+            status.get("task_state").and_then(Value::as_str),
+            Some("EXECUTING")
+        );
     }
 
     #[test]
@@ -3550,6 +7660,1108 @@ mod tests {
     }
 
     #[test]
+    fn canonical_hermes_mode_is_explicit_and_fail_closed() {
+        assert_eq!(
+            canonical_hermes_mode_from_value(None).expect("default task-only mode"),
+            CanonicalHermesMode::TaskOnly
+        );
+        assert_eq!(
+            canonical_hermes_mode_from_value(Some("TASK_ONLY")).expect("explicit task-only mode"),
+            CanonicalHermesMode::TaskOnly
+        );
+        assert_eq!(
+            canonical_hermes_mode_from_value(Some("PRODUCTION")).expect("production mode"),
+            CanonicalHermesMode::Production
+        );
+        assert!(canonical_hermes_mode_from_value(Some("production")).is_err());
+        assert!(canonical_hermes_mode_from_value(Some("")).is_err());
+    }
+
+    #[test]
+    fn canonical_hermes_activation_launches_once_and_does_not_retry_failure() {
+        let mut active = None;
+        let mut attempted = false;
+        let mut launch_calls = 0;
+
+        assert_eq!(
+            *activate_canonical_hermes_once(&mut active, &mut attempted, || {
+                launch_calls += 1;
+                Ok(7_u8)
+            })
+            .expect("first activation"),
+            7
+        );
+        assert_eq!(
+            *activate_canonical_hermes_once(&mut active, &mut attempted, || {
+                launch_calls += 1;
+                Ok(9_u8)
+            })
+            .expect("reuse active owner"),
+            7
+        );
+        assert_eq!(launch_calls, 1);
+
+        let mut failed_active: Option<u8> = None;
+        let mut failed_attempted = false;
+        let first =
+            activate_canonical_hermes_once(&mut failed_active, &mut failed_attempted, || {
+                Err(LatticedError::new(LatticedErrorKind::Configuration))
+            })
+            .expect_err("first activation failure");
+        assert_eq!(first.kind(), LatticedErrorKind::Configuration);
+        let second =
+            activate_canonical_hermes_once(&mut failed_active, &mut failed_attempted, || {
+                panic!("failed activation must not be retried")
+            })
+            .expect_err("failed activation stays closed");
+        assert_eq!(
+            second.kind(),
+            LatticedErrorKind::HermesProductionRunnerRequired
+        );
+    }
+
+    struct RecordingHermesLifecycle {
+        ready_calls: usize,
+        terminate_calls: usize,
+        teardown_fails: bool,
+    }
+
+    impl production_hermes_sealed::Sealed for RecordingHermesLifecycle {
+        fn has_production_seal(&self) -> bool {
+            true
+        }
+
+        fn is_production_configured(&self) -> bool {
+            true
+        }
+
+        fn ensure_ready(&mut self, _run_id: &str) -> Result<(), LatticedError> {
+            self.ready_calls += 1;
+            Ok(())
+        }
+
+        fn terminate(&mut self) -> Result<(), LatticedError> {
+            self.terminate_calls += 1;
+            if self.teardown_fails {
+                Err(LatticedError::new(
+                    LatticedErrorKind::HermesTeardownRejected,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl HermesPort for RecordingHermesLifecycle {
+        fn research(&mut self, _request: HermesResearchRequest) -> PortResult<HermesEvidence> {
+            Err(PortError::new(
+                Component::Hermes,
+                PortErrorKind::Denied,
+                "TEST_HERMES_RESEARCH_NOT_AVAILABLE",
+            ))
+        }
+
+        fn interrupt(&mut self, _request_id: &RequestId) -> PortResult<()> {
+            Ok(())
+        }
+    }
+
+    impl FullChainHermesPort for RecordingHermesLifecycle {
+        fn runtime_kind(&self) -> RuntimeKind {
+            RuntimeKind::Live
+        }
+
+        fn research_canonical(
+            &mut self,
+            _request: &HermesResearchRequest,
+            _graph_request: &GraphMemoryRunRequest,
+            _graph_receipt: &GraphMemoryReceipt,
+        ) -> PortResult<ProductionHermesOutput> {
+            Err(PortError::new(
+                Component::Hermes,
+                PortErrorKind::Denied,
+                "TEST_HERMES_RESEARCH_NOT_AVAILABLE",
+            ))
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CanonicalReflectionEvent {
+        Ready,
+        ReflectionLoadMiss,
+        GraphReceiptLoad,
+        Research,
+        Persist,
+        ReflectionReload,
+        ReflectionLoadHit,
+    }
+
+    struct RecordingReflectionHermes {
+        events: Arc<Mutex<Vec<CanonicalReflectionEvent>>>,
+        ready_calls: usize,
+        research_calls: usize,
+        research_failure: Option<PortError>,
+        sealed: bool,
+        seal: HermesProductionSeal,
+    }
+
+    impl production_hermes_sealed::Sealed for RecordingReflectionHermes {
+        fn has_production_seal(&self) -> bool {
+            self.sealed
+        }
+
+        fn is_production_configured(&self) -> bool {
+            true
+        }
+
+        fn ensure_ready(&mut self, _run_id: &str) -> Result<(), LatticedError> {
+            self.ready_calls += 1;
+            self.events
+                .lock()
+                .expect("events lock")
+                .push(CanonicalReflectionEvent::Ready);
+            Ok(())
+        }
+
+        fn terminate(&mut self) -> Result<(), LatticedError> {
+            Ok(())
+        }
+    }
+
+    impl HermesPort for RecordingReflectionHermes {
+        fn research(&mut self, _request: HermesResearchRequest) -> PortResult<HermesEvidence> {
+            Err(PortError::new(
+                Component::Hermes,
+                PortErrorKind::Denied,
+                "TEST_CANONICAL_HERMES_RESEARCH_REQUIRES_GRAPH",
+            ))
+        }
+
+        fn interrupt(&mut self, _request_id: &RequestId) -> PortResult<()> {
+            Ok(())
+        }
+    }
+
+    impl FullChainHermesPort for RecordingReflectionHermes {
+        fn runtime_kind(&self) -> RuntimeKind {
+            RuntimeKind::Live
+        }
+
+        fn research_canonical(
+            &mut self,
+            request: &HermesResearchRequest,
+            graph_request: &GraphMemoryRunRequest,
+            graph_receipt: &GraphMemoryReceipt,
+        ) -> PortResult<ProductionHermesOutput> {
+            self.research_calls += 1;
+            self.events
+                .lock()
+                .expect("events lock")
+                .push(CanonicalReflectionEvent::Research);
+            if let Some(failure) = self.research_failure.clone() {
+                return Err(failure);
+            }
+            let content = HermesReflectionContent::new(
+                "The exact graph receipt supports one deterministic finding.",
+                vec![
+                    HermesReflectionFinding::new(
+                        "Persist only the exact graph-bound Hermes candidate.",
+                        test_content_digest('6'),
+                    )
+                    .expect("finding"),
+                ],
+                vec!["Replay the persisted candidate for Status.".to_owned()],
+            )
+            .expect("reflection content");
+            let candidate = HermesReflectionCandidate::new(
+                graph_request,
+                graph_receipt,
+                content,
+                self.seal.receipt_digest.clone(),
+                test_content_digest('7'),
+                test_content_digest('8'),
+            )
+            .expect("reflection candidate");
+            let evidence = HermesEvidence::new(
+                request.invocation().clone(),
+                RuntimeKind::Live,
+                candidate.reflection_digest().clone(),
+            );
+            ProductionHermesOutput::new(
+                &self.seal,
+                request,
+                graph_request,
+                graph_receipt,
+                evidence,
+                candidate,
+            )
+        }
+    }
+
+    fn canonical_reflection_request() -> GraphMemoryRunRequest {
+        GraphMemoryRunRequest::new(
+            Invocation::new(
+                CONTRACT_VERSION,
+                RequestId::new("task066-graph-request").expect("request"),
+                TaskId::new(GRAPH_TASK_ID).expect("task"),
+                AttemptId::new("task066-graph-attempt").expect("attempt"),
+                ProjectSnapshotId::new(GRAPH_PROJECT_SNAPSHOT_ID).expect("snapshot"),
+                test_content_digest('a'),
+            )
+            .expect("invocation"),
+            ProjectId::new(GRAPH_PROJECT_ID).expect("project"),
+            GitObjectId::new("1".repeat(40)).expect("commit"),
+            test_content_digest('b'),
+            test_content_digest('c'),
+            GRAPH_RETRIEVAL_LIMIT,
+        )
+        .expect("graph request")
+    }
+
+    fn canonical_graph_receipt(request: &GraphMemoryRunRequest) -> GraphMemoryReceipt {
+        let persistence = GraphMemoryPersistenceEvidence::replay(
+            request.clone(),
+            CodebaseMemoryPersistenceIdentity::v2(
+                test_content_digest('1'),
+                test_content_digest('2'),
+                test_content_digest('3'),
+                test_content_digest('4'),
+            )
+            .expect("persistence identity"),
+            test_content_digest('d'),
+            test_content_digest('e'),
+            1,
+            test_content_digest('f'),
+        )
+        .expect("persistence evidence");
+        let retrieval = MemoryRetrievalEvidence::replay(
+            &persistence,
+            request.retrieval_limit(),
+            MemoryRetrievalDisposition::NoAnswer,
+            Vec::new(),
+            test_content_digest('5'),
+            test_content_digest('6'),
+        )
+        .expect("retrieval evidence");
+        GraphMemoryReceipt::new(persistence, retrieval, test_content_digest('7'))
+            .expect("graph receipt")
+    }
+
+    fn task068_graph_memory_fixture() -> (NormalizedGraphAnalysis, MemoryRetrievalPlan) {
+        let query_text = "TASK068CanonicalHermesReflection";
+        let request = GraphMemoryRunRequest::new(
+            Invocation::new(
+                CONTRACT_VERSION,
+                RequestId::new("task068-live-request").expect("request id"),
+                TaskId::new("TASK-068").expect("task id"),
+                AttemptId::new("task068-live-attempt").expect("attempt id"),
+                ProjectSnapshotId::new("task068-live-snapshot").expect("snapshot id"),
+                test_content_digest('a'),
+            )
+            .expect("invocation"),
+            ProjectId::new("task068-hermes-replay").expect("project"),
+            GitObjectId::new("3".repeat(40)).expect("commit"),
+            digest_query_text(query_text).expect("query digest"),
+            test_content_digest('c'),
+            5,
+        )
+        .expect("graph request");
+        let source =
+            TrackedSource::new("src/task068.rs", test_content_digest('d')).expect("tracked source");
+        let snapshot = CodeSnapshotEvidence::new(
+            &request,
+            GitObjectId::new("4".repeat(40)).expect("tree"),
+            vec![source.clone()],
+            test_content_digest('e'),
+            test_content_digest('f'),
+        )
+        .expect("snapshot");
+        let provenance = GraphSourceProvenance::new(&source, Some(1), Some(2)).expect("provenance");
+        let raw = GraphifyRawEvidence::new(
+            &request,
+            &snapshot,
+            GraphifyIdentity::task033(
+                test_content_digest('1'),
+                test_content_digest('2'),
+                test_content_digest('3'),
+            )
+            .expect("graphify identity"),
+            vec![
+                GraphifyRawNode::new(
+                    "node-task068-canonical-hermes-reflection",
+                    query_text,
+                    "trait",
+                    provenance,
+                    GraphConfidence::Extracted,
+                )
+                .expect("graph node"),
+            ],
+            Vec::new(),
+            test_content_digest('4'),
+            test_content_digest('5'),
+            test_content_digest('6'),
+        )
+        .expect("raw graph evidence");
+        let analysis = normalize_analysis(&request, &snapshot, &raw).expect("normalized analysis");
+        let query = MemoryQuery::new(&request, query_text, 5).expect("memory query");
+        let plan = plan_retrieval(&analysis, &query).expect("retrieval plan");
+        (analysis, plan)
+    }
+
+    fn task068_reflection_candidate(
+        graph_receipt: &GraphMemoryReceipt,
+    ) -> HermesReflectionCandidate {
+        HermesReflectionCandidate::new(
+            graph_receipt.persistence().request(),
+            graph_receipt,
+            HermesReflectionContent::new(
+                "The exact graph receipt supports one deterministic finding.",
+                vec![
+                    HermesReflectionFinding::new(
+                        "Persist only the exact graph-bound Hermes candidate.",
+                        test_content_digest('6'),
+                    )
+                    .expect("finding"),
+                ],
+                vec!["Replay the persisted candidate for Status.".to_owned()],
+            )
+            .expect("reflection content"),
+            test_content_digest('9'),
+            test_content_digest('7'),
+            test_content_digest('8'),
+        )
+        .expect("reflection candidate")
+    }
+
+    fn assert_task068_reflection(
+        receipt: &HermesReflectionReceipt,
+        candidate: &HermesReflectionCandidate,
+    ) {
+        assert_eq!(receipt.request(), candidate.request());
+        assert_eq!(
+            receipt.graph_receipt_digest(),
+            candidate.graph_receipt_digest()
+        );
+        assert_eq!(receipt.content(), candidate.content());
+        assert_eq!(
+            receipt.hermes_identity_digest(),
+            candidate.hermes_identity_digest()
+        );
+        assert_eq!(receipt.input_digest(), candidate.input_digest());
+        assert_eq!(receipt.reflection_digest(), candidate.reflection_digest());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the marker-owned TASK-019 PostgreSQL restart harness"]
+    fn canonical_hermes_reflection_survives_postgres_restart_when_provisioned() {
+        assert_eq!(
+            required_environment("LATTICE_TASK019_LIVE").expect("live gate"),
+            "1"
+        );
+        let phase = required_environment("LATTICE_TASK019_PHASE").expect("phase");
+        assert!(matches!(phase.as_str(), "initial" | "restart"));
+        let port = required_environment("LATTICE_TASK019_PORT")
+            .expect("port")
+            .parse::<u16>()
+            .expect("valid port");
+        let database = DeliveryDatabaseBinding::new(
+            required_environment("LATTICE_TASK019_HOST").expect("host"),
+            port,
+            required_environment("LATTICE_TASK019_RUN_ID").expect("run id"),
+        )
+        .expect("marker-owned database binding");
+        let password = required_environment("LATTICE_TASK019_PASSWORD").expect("password");
+        let timeout = Duration::from_secs(30);
+        let (analysis, plan) = task068_graph_memory_fixture();
+        let request = analysis.request().clone();
+        let (ready_calls, research_calls, persist_calls);
+
+        let receipt = if phase == "initial" {
+            let mut memory =
+                reflection_memory(&database, &password, timeout, GraphMemoryStage::Persistence)
+                    .expect("production memory owner");
+            let persistence = memory
+                .persist_analysis(&analysis)
+                .expect("persist deterministic graph analysis");
+            let graph_receipt = memory
+                .retrieve(&persistence, plan)
+                .expect("persist deterministic graph receipt");
+            drop(memory);
+            let candidate = task068_reflection_candidate(&graph_receipt);
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut hermes = RecordingReflectionHermes {
+                events,
+                ready_calls: 0,
+                research_calls: 0,
+                research_failure: None,
+                sealed: true,
+                seal: HermesProductionSeal {
+                    receipt_digest: test_content_digest('9'),
+                },
+            };
+            apply_canonical_hermes_tool_policy(
+                &mut hermes,
+                database.run_id(),
+                CanonicalHermesTool::DeliveryRun,
+            )
+            .expect("Delivery Run readies the canonical Hermes owner");
+            let mut reflection_load_calls = 0;
+            let mut graph_load_calls = 0;
+            let mut persistence_calls = 0;
+            let replayed = load_or_run_canonical_reflection(
+                &mut hermes,
+                database.run_id(),
+                &request,
+                |request| {
+                    reflection_load_calls += 1;
+                    load_reflection_from_postgres(&database, &password, timeout, request)
+                },
+                |request| {
+                    graph_load_calls += 1;
+                    load_delivery_graph_receipt(
+                        &database,
+                        &password,
+                        deadline(timeout).expect("deadline"),
+                        request,
+                    )
+                },
+                |candidate| {
+                    persistence_calls += 1;
+                    persist_reflection_to_postgres(&database, &password, timeout, candidate)
+                },
+            )
+            .expect("production reflection round");
+            assert_task068_reflection(&replayed, &candidate);
+            assert_eq!(reflection_load_calls, 2);
+            assert_eq!(graph_load_calls, 1);
+            assert_eq!(persistence_calls, 1);
+            ready_calls = hermes.ready_calls;
+            research_calls = hermes.research_calls;
+            persist_calls = persistence_calls;
+            assert_eq!(ready_calls, 1);
+            assert_eq!(research_calls, 1);
+            replayed
+        } else {
+            let graph_receipt = load_delivery_graph_receipt(
+                &database,
+                &password,
+                deadline(timeout).expect("deadline"),
+                &request,
+            )
+            .expect("restart graph receipt");
+            let candidate = task068_reflection_candidate(&graph_receipt);
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut hermes = RecordingReflectionHermes {
+                events: Arc::clone(&events),
+                ready_calls: 0,
+                research_calls: 0,
+                research_failure: None,
+                sealed: false,
+                seal: HermesProductionSeal {
+                    receipt_digest: test_content_digest('8'),
+                },
+            };
+            apply_canonical_hermes_tool_policy(
+                &mut hermes,
+                database.run_id(),
+                CanonicalHermesTool::DeliveryStatus,
+            )
+            .expect("fresh Status stays Hermes-free");
+            let load_events = Arc::clone(&events);
+            let replayed = load_canonical_reflection(&request, |request| {
+                load_events
+                    .lock()
+                    .expect("events lock")
+                    .push(CanonicalReflectionEvent::ReflectionLoadHit);
+                load_reflection_from_postgres(&database, &password, timeout, request)
+            })
+            .expect("fresh Status exact replay");
+            assert_eq!(hermes.ready_calls, 0);
+            assert_eq!(hermes.research_calls, 0);
+            assert!(!production_hermes_sealed::Sealed::has_production_seal(
+                &hermes
+            ));
+            assert_eq!(
+                *events.lock().expect("events lock"),
+                vec![CanonicalReflectionEvent::ReflectionLoadHit]
+            );
+            assert_task068_reflection(&replayed, &candidate);
+            let expected = ContentDigest::from_sha256(
+                required_environment("LATTICE_TASK068_EXPECTED_RECEIPT_SHA256")
+                    .expect("initial receipt digest"),
+            )
+            .expect("valid initial receipt digest");
+            assert_eq!(replayed.receipt_digest(), &expected);
+            ready_calls = hermes.ready_calls;
+            research_calls = hermes.research_calls;
+            persist_calls = 0;
+            replayed
+        };
+
+        println!(
+            "TASK068_HERMES_POSTGRES_REPLAY_OK phase={} receipt_sha256={} ready_calls={} research_calls={} persist_calls={}",
+            phase,
+            receipt.receipt_digest().as_str(),
+            ready_calls,
+            research_calls,
+            persist_calls
+        );
+    }
+
+    #[test]
+    fn canonical_delivery_run_reflects_once_persists_and_replays_exact_receipt() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let stored = Arc::new(Mutex::new(None::<HermesReflectionReceipt>));
+        let request = canonical_reflection_request();
+        let graph_receipt = canonical_graph_receipt(&request);
+        let mut hermes = RecordingReflectionHermes {
+            events: Arc::clone(&events),
+            ready_calls: 0,
+            research_calls: 0,
+            research_failure: None,
+            sealed: true,
+            seal: HermesProductionSeal {
+                receipt_digest: test_content_digest('9'),
+            },
+        };
+
+        apply_canonical_hermes_tool_policy(
+            &mut hermes,
+            "task066-run",
+            CanonicalHermesTool::DeliveryRun,
+        )
+        .expect("delivery run readies Hermes");
+        assert!(production_hermes_sealed::Sealed::has_production_seal(
+            &hermes
+        ));
+
+        let load_events = Arc::clone(&events);
+        let load_stored = Arc::clone(&stored);
+        let graph_events = Arc::clone(&events);
+        let persist_events = Arc::clone(&events);
+        let persist_stored = Arc::clone(&stored);
+        let expected_graph_receipt = graph_receipt.clone();
+        let replayed = load_or_run_canonical_reflection(
+            &mut hermes,
+            "task066-run",
+            &request,
+            move |_request| {
+                let stored = load_stored.lock().expect("stored lock");
+                if let Some(receipt) = stored.as_ref() {
+                    load_events
+                        .lock()
+                        .expect("events lock")
+                        .push(CanonicalReflectionEvent::ReflectionReload);
+                    Ok(receipt.clone())
+                } else {
+                    load_events
+                        .lock()
+                        .expect("events lock")
+                        .push(CanonicalReflectionEvent::ReflectionLoadMiss);
+                    Err(GraphMemoryPortError::new(
+                        GraphMemoryStage::ReflectionReceipt,
+                        PortErrorKind::Unavailable,
+                        GraphMemoryFailureCertainty::Known,
+                        "MEMORY_RECEIPT_UNAVAILABLE",
+                    ))
+                }
+            },
+            move |_request| {
+                graph_events
+                    .lock()
+                    .expect("events lock")
+                    .push(CanonicalReflectionEvent::GraphReceiptLoad);
+                Ok(expected_graph_receipt)
+            },
+            move |candidate| {
+                persist_events
+                    .lock()
+                    .expect("events lock")
+                    .push(CanonicalReflectionEvent::Persist);
+                let receipt = HermesReflectionReceipt::from_candidate(
+                    candidate.clone(),
+                    test_content_digest('a'),
+                )
+                .expect("persisted reflection receipt");
+                *persist_stored.lock().expect("stored lock") = Some(receipt.clone());
+                Ok(receipt)
+            },
+        )
+        .expect("canonical reflection round");
+
+        let persisted = stored
+            .lock()
+            .expect("stored lock")
+            .clone()
+            .expect("persisted receipt");
+        assert_eq!(replayed, persisted);
+        assert_eq!(replayed.receipt_digest(), persisted.receipt_digest());
+        assert_eq!(hermes.ready_calls, 1);
+        assert_eq!(hermes.research_calls, 1);
+        assert!(production_hermes_sealed::Sealed::has_production_seal(
+            &hermes
+        ));
+        assert_eq!(
+            *events.lock().expect("events lock"),
+            vec![
+                CanonicalReflectionEvent::Ready,
+                CanonicalReflectionEvent::ReflectionLoadMiss,
+                CanonicalReflectionEvent::GraphReceiptLoad,
+                CanonicalReflectionEvent::Research,
+                CanonicalReflectionEvent::Persist,
+                CanonicalReflectionEvent::ReflectionReload,
+            ]
+        );
+
+        events.lock().expect("events lock").clear();
+        let mut status_hermes = RecordingReflectionHermes {
+            events: Arc::clone(&events),
+            ready_calls: 0,
+            research_calls: 0,
+            research_failure: None,
+            sealed: false,
+            seal: HermesProductionSeal {
+                receipt_digest: test_content_digest('9'),
+            },
+        };
+        apply_canonical_hermes_tool_policy(
+            &mut status_hermes,
+            "task066-run",
+            CanonicalHermesTool::DeliveryStatus,
+        )
+        .expect("fresh status keeps Hermes inactive");
+        let status_events = Arc::clone(&events);
+        let expected = persisted.clone();
+        let status_replay = load_canonical_reflection(&request, move |_request| {
+            status_events
+                .lock()
+                .expect("events lock")
+                .push(CanonicalReflectionEvent::ReflectionLoadHit);
+            Ok(expected)
+        })
+        .expect("fresh status replays the persisted Run candidate");
+
+        assert_eq!(status_replay, persisted);
+        assert_eq!(status_hermes.ready_calls, 0);
+        assert_eq!(status_hermes.research_calls, 0);
+        assert!(!production_hermes_sealed::Sealed::has_production_seal(
+            &status_hermes
+        ));
+        assert_eq!(
+            *events.lock().expect("events lock"),
+            vec![CanonicalReflectionEvent::ReflectionLoadHit]
+        );
+    }
+
+    #[test]
+    fn canonical_reflection_reload_mismatch_fails_closed() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let request = canonical_reflection_request();
+        let graph_receipt = canonical_graph_receipt(&request);
+        let mismatched = HermesReflectionReceipt::new(
+            &request,
+            &graph_receipt,
+            HermesReflectionContent::new("Substituted replay.", Vec::new(), Vec::new())
+                .expect("reflection content"),
+            test_content_digest('8'),
+            test_content_digest('9'),
+            test_content_digest('a'),
+            test_content_digest('b'),
+        )
+        .expect("mismatched receipt");
+        let mut hermes = RecordingReflectionHermes {
+            events,
+            ready_calls: 0,
+            research_calls: 0,
+            research_failure: None,
+            sealed: true,
+            seal: HermesProductionSeal {
+                receipt_digest: test_content_digest('c'),
+            },
+        };
+        let expected_graph_receipt = graph_receipt.clone();
+        let mut load_calls = 0;
+
+        let error = load_or_run_canonical_reflection(
+            &mut hermes,
+            "task066-mismatch",
+            &request,
+            |_request| {
+                load_calls += 1;
+                if load_calls == 1 {
+                    Err(GraphMemoryPortError::new(
+                        GraphMemoryStage::ReflectionReceipt,
+                        PortErrorKind::Unavailable,
+                        GraphMemoryFailureCertainty::Known,
+                        "MEMORY_RECEIPT_UNAVAILABLE",
+                    ))
+                } else {
+                    Ok(mismatched.clone())
+                }
+            },
+            move |_request| Ok(expected_graph_receipt),
+            move |candidate| {
+                HermesReflectionReceipt::from_candidate(candidate.clone(), test_content_digest('d'))
+                    .map_err(|_| LatticedError::new(LatticedErrorKind::HermesExecution))
+            },
+        )
+        .expect_err("substituted reload must fail closed");
+
+        assert_eq!(error.kind(), LatticedErrorKind::HermesReceiptRead);
+        assert_eq!(hermes.research_calls, 1);
+    }
+
+    #[test]
+    fn canonical_hermes_reconciliation_required_is_not_collapsed_to_execution_failure() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let request = canonical_reflection_request();
+        let graph_receipt = canonical_graph_receipt(&request);
+        let expected_graph_receipt = graph_receipt.clone();
+        let mut hermes = RecordingReflectionHermes {
+            events: Arc::clone(&events),
+            ready_calls: 0,
+            research_calls: 0,
+            research_failure: Some(PortError::new(
+                Component::Hermes,
+                PortErrorKind::Ambiguous,
+                "HERMES_RUN_RECONCILIATION_REQUIRED",
+            )),
+            sealed: true,
+            seal: HermesProductionSeal {
+                receipt_digest: test_content_digest('d'),
+            },
+        };
+        let mut load_calls = 0;
+
+        let error = load_or_run_canonical_reflection(
+            &mut hermes,
+            "task071-reconcile",
+            &request,
+            |_request| {
+                load_calls += 1;
+                Err(GraphMemoryPortError::new(
+                    GraphMemoryStage::ReflectionReceipt,
+                    PortErrorKind::Unavailable,
+                    GraphMemoryFailureCertainty::Known,
+                    "MEMORY_RECEIPT_UNAVAILABLE",
+                ))
+            },
+            move |_request| Ok(expected_graph_receipt),
+            |_candidate| panic!("reconciliation-required output must not persist"),
+        )
+        .expect_err("active Hermes run remains reconciliation-required");
+
+        assert_eq!(error.kind(), LatticedErrorKind::ReconciliationRequired);
+        assert_eq!(error.code(), "LATTICE_DELIVERY_RECONCILIATION_REQUIRED");
+        assert_eq!(load_calls, 1);
+        assert_eq!(hermes.research_calls, 1);
+        assert_eq!(
+            *events.lock().expect("events lock"),
+            vec![CanonicalReflectionEvent::Research]
+        );
+
+        for failure in [
+            PortError::new(
+                Component::Hermes,
+                PortErrorKind::Ambiguous,
+                "HERMES_RUN_NOT_RECOVERABLE",
+            ),
+            PortError::new(
+                Component::Hermes,
+                PortErrorKind::Malformed,
+                "HERMES_STATUS_MALFORMED",
+            ),
+        ] {
+            assert_eq!(
+                map_hermes_research_error(&failure).kind(),
+                LatticedErrorKind::HermesExecution
+            );
+        }
+    }
+
+    #[test]
+    fn production_owner_seal_survives_ready_to_bound_transition() {
+        let mut ready = Some(());
+        let mut bound = None;
+        assert!(full_chain_hermes_state_has_seal(
+            ready.as_ref(),
+            bound.as_ref()
+        ));
+
+        bound = ready.take();
+        assert!(full_chain_hermes_state_has_seal(
+            ready.as_ref(),
+            bound.as_ref()
+        ));
+
+        bound = None;
+        assert!(!full_chain_hermes_state_has_seal(
+            ready.as_ref(),
+            bound.as_ref()
+        ));
+    }
+
+    #[test]
+    fn canonical_hermes_recovery_is_receipt_gated_and_never_resubmits() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let output = run_or_reconcile_active_hermes(
+            &mut (),
+            |()| Ok::<_, PortError>("initial"),
+            |()| panic!("successful run must not inspect recovery state"),
+            |(), _: &u8| panic!("successful run must not reconcile"),
+        )
+        .expect("initial success is unchanged");
+        assert_eq!(output, "initial");
+
+        for (kind, code) in [
+            (
+                PortErrorKind::VersionMismatch,
+                "HERMES_PACKAGE_VERSION_MISMATCH",
+            ),
+            (
+                PortErrorKind::CapabilityMismatch,
+                "HERMES_UNEXPECTED_EXECUTION_EVENT",
+            ),
+            (
+                PortErrorKind::Malformed,
+                "HERMES_EVENT_DISCRIMINATOR_REJECTED",
+            ),
+            (PortErrorKind::Cancelled, "HERMES_RUN_CANCELLED"),
+            (PortErrorKind::Denied, "HERMES_EVENT_STATUS_OUTPUT_MISMATCH"),
+            (PortErrorKind::Ambiguous, "HERMES_RUN_NOT_RECOVERABLE"),
+            (
+                PortErrorKind::Timeout,
+                "HERMES_PRODUCTION_DEADLINE_EXCEEDED",
+            ),
+            (PortErrorKind::Unavailable, "HERMES_RUN_FAILED"),
+            (PortErrorKind::Unavailable, "HERMES_STATUS_HTTP_REJECTED"),
+        ] {
+            let initial_failure = run_or_reconcile_active_hermes(
+                &mut (),
+                |()| Err::<&str, _>(PortError::new(Component::Hermes, kind, code)),
+                |()| panic!("non-recoverable failure must not inspect recovery state"),
+                |(), _: &u8| panic!("non-recoverable failure must not reconcile"),
+            )
+            .expect_err("non-recoverable failure remains fail-closed");
+            assert_eq!(initial_failure.kind(), kind);
+            assert_eq!(initial_failure.code(), code);
+        }
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let run_events = Rc::clone(&events);
+        let receipt_events = Rc::clone(&events);
+        let initial_failure = run_or_reconcile_active_hermes(
+            &mut (),
+            move |()| {
+                run_events.borrow_mut().push("run");
+                Err::<&str, _>(PortError::new(
+                    Component::Hermes,
+                    PortErrorKind::Unavailable,
+                    "HERMES_LOOPBACK_TRANSPORT_FAILED",
+                ))
+            },
+            move |()| {
+                receipt_events.borrow_mut().push("active_receipt");
+                None::<u8>
+            },
+            |(), _| panic!("missing receipt must not reconcile"),
+        )
+        .expect_err("missing receipt preserves the initial failure");
+        assert_eq!(initial_failure.kind(), PortErrorKind::Unavailable);
+        assert_eq!(initial_failure.code(), "HERMES_LOOPBACK_TRANSPORT_FAILED");
+        assert_eq!(&*events.borrow(), &["run", "active_receipt"]);
+
+        for (kind, code) in [
+            (PortErrorKind::Timeout, "HERMES_LOOPBACK_TIMEOUT"),
+            (PortErrorKind::Timeout, "HERMES_RUN_DEADLINE_EXCEEDED"),
+            (
+                PortErrorKind::Unavailable,
+                "HERMES_LOOPBACK_TRANSPORT_FAILED",
+            ),
+        ] {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let run_events = Rc::clone(&events);
+            let receipt_events = Rc::clone(&events);
+            let reconcile_events = Rc::clone(&events);
+            let recovered = run_or_reconcile_active_hermes(
+                &mut (),
+                move |()| {
+                    run_events.borrow_mut().push("run");
+                    Err::<&str, _>(PortError::new(Component::Hermes, kind, code))
+                },
+                move |()| {
+                    receipt_events.borrow_mut().push("active_receipt");
+                    Some(7_u8)
+                },
+                move |(), receipt| {
+                    reconcile_events.borrow_mut().push("reconcile");
+                    assert_eq!(*receipt, 7);
+                    Ok("normalized-evidence")
+                },
+            )
+            .expect("active known-run receipt permits one same-port reconciliation");
+            assert_eq!(recovered, "normalized-evidence");
+            assert_eq!(&*events.borrow(), &["run", "active_receipt", "reconcile"]);
+        }
+
+        for (kind, code) in [
+            (PortErrorKind::Timeout, "HERMES_LOOPBACK_TIMEOUT"),
+            (PortErrorKind::Timeout, "HERMES_RUN_DEADLINE_EXCEEDED"),
+            (
+                PortErrorKind::Unavailable,
+                "HERMES_LOOPBACK_TRANSPORT_FAILED",
+            ),
+        ] {
+            let repeated_uncertainty = run_or_reconcile_active_hermes(
+                &mut (),
+                |()| {
+                    Err::<&str, _>(PortError::new(
+                        Component::Hermes,
+                        PortErrorKind::Timeout,
+                        "HERMES_LOOPBACK_TIMEOUT",
+                    ))
+                },
+                |()| Some(7_u8),
+                |(), receipt| {
+                    assert_eq!(*receipt, 7);
+                    Err(PortError::new(Component::Hermes, kind, code))
+                },
+            )
+            .expect_err("a second transient observation remains reconciliation-required");
+            assert_eq!(repeated_uncertainty.kind(), PortErrorKind::Ambiguous);
+            assert_eq!(
+                repeated_uncertainty.code(),
+                "HERMES_RUN_RECONCILIATION_REQUIRED"
+            );
+        }
+
+        let definitive_failure = run_or_reconcile_active_hermes(
+            &mut (),
+            |()| {
+                Err::<&str, _>(PortError::new(
+                    Component::Hermes,
+                    PortErrorKind::Timeout,
+                    "HERMES_LOOPBACK_TIMEOUT",
+                ))
+            },
+            |()| Some(7_u8),
+            |(), _| {
+                Err(PortError::new(
+                    Component::Hermes,
+                    PortErrorKind::Malformed,
+                    "HERMES_STATUS_MALFORMED",
+                ))
+            },
+        )
+        .expect_err("definitive reconciliation failure remains exact");
+        assert_eq!(definitive_failure.kind(), PortErrorKind::Malformed);
+        assert_eq!(definitive_failure.code(), "HERMES_STATUS_MALFORMED");
+    }
+
+    #[test]
+    fn canonical_tool_policy_activates_only_delivery_run_and_terminates_once() {
+        let mut hermes = RecordingHermesLifecycle {
+            ready_calls: 0,
+            terminate_calls: 0,
+            teardown_fails: false,
+        };
+        for tool in [
+            CanonicalHermesTool::DeliveryStatus,
+            CanonicalHermesTool::TaskSubmit,
+            CanonicalHermesTool::TaskStatus,
+        ] {
+            apply_canonical_hermes_tool_policy(&mut hermes, "task064-run", tool)
+                .expect("non-delivery tools keep Hermes inactive");
+        }
+        assert_eq!(hermes.ready_calls, 0);
+
+        apply_canonical_hermes_tool_policy(
+            &mut hermes,
+            "task064-run",
+            CanonicalHermesTool::DeliveryRun,
+        )
+        .expect("delivery run activates Hermes");
+        assert_eq!(hermes.ready_calls, 1);
+
+        finish_hermes_owner(Ok(()), &mut hermes).expect("explicit teardown succeeds");
+        assert_eq!(hermes.terminate_calls, 1);
+
+        let mut task_only = DeferredTaskHermes;
+        apply_canonical_hermes_tool_policy(
+            &mut task_only,
+            "task064-task-only",
+            CanonicalHermesTool::DeliveryRun,
+        )
+        .expect("task-only delivery retains the pre-TASK-064 path");
+    }
+
+    #[test]
+    fn canonical_session_calls_teardown_once_and_propagates_failure() {
+        let mut hermes = RecordingHermesLifecycle {
+            ready_calls: 0,
+            terminate_calls: 0,
+            teardown_fails: true,
+        };
+
+        let error = finish_hermes_owner(
+            Err(LatticedError::new(LatticedErrorKind::Transport)),
+            &mut hermes,
+        )
+        .expect_err("teardown ambiguity overrides transport failure");
+
+        assert_eq!(error.kind(), LatticedErrorKind::HermesTeardownRejected);
+        assert_eq!(hermes.terminate_calls, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_production_hermes_is_configured_but_inactive_until_delivery_run() {
+        let mut hermes = CanonicalHermes::Production {
+            active: None,
+            activation_attempted: false,
+        };
+
+        assert!(production_hermes_sealed::Sealed::is_production_configured(
+            &hermes
+        ));
+        assert!(!production_hermes_sealed::Sealed::has_production_seal(
+            &hermes
+        ));
+        assert_eq!(hermes.runtime_kind(), RuntimeKind::Fake);
+        production_hermes_sealed::Sealed::terminate(&mut hermes)
+            .expect("inactive production mode has no process to reap");
+    }
+
+    #[test]
+    fn hermes_teardown_failure_overrides_stdio_success_or_failure() {
+        assert_eq!(
+            finish_hermes_session(
+                Ok(()),
+                Err(LatticedError::new(
+                    LatticedErrorKind::HermesTeardownRejected,
+                )),
+            )
+            .expect_err("teardown ambiguity cannot become success")
+            .kind(),
+            LatticedErrorKind::HermesTeardownRejected
+        );
+        assert_eq!(
+            finish_hermes_session(
+                Err(LatticedError::new(LatticedErrorKind::Transport)),
+                Err(LatticedError::new(
+                    LatticedErrorKind::HermesTeardownRejected,
+                )),
+            )
+            .expect_err("teardown ambiguity has precedence")
+            .kind(),
+            LatticedErrorKind::HermesTeardownRejected
+        );
+    }
+
+    #[test]
     fn resume_existing_mode_removes_delivery_run_capability() {
         let config = LatticedDeliveryConfig::new(
             PathBuf::from(r"C:\tools\codex.exe"),
@@ -3587,14 +8799,23 @@ mod tests {
     }
 
     #[test]
-    fn full_chain_startup_requires_a_true_production_hermes_runner() {
+    fn full_chain_startup_requires_prepared_assets_before_a_production_hermes_runner() {
         let error = serve_full_chain_from_environment()
             .expect_err("incomplete official Hermes chain fails before external effects");
+        assert_eq!(error.kind(), LatticedErrorKind::HermesPreparationRequired);
+        assert_eq!(error.code(), "LATTICE_HERMES_PREPARATION_REJECTED");
+    }
+
+    #[test]
+    fn parsed_hermes_configuration_is_not_launch_authority() {
         assert_eq!(
-            error.kind(),
-            LatticedErrorKind::HermesProductionRunnerRequired
+            classify_hermes_production_preflight(Vec::new(), true),
+            HermesProductionPreflight::ConfigurationPresentUnverified
         );
-        assert_eq!(error.code(), "LATTICE_HERMES_PRODUCTION_RUNNER_REQUIRED");
+        assert_eq!(
+            classify_hermes_production_preflight(Vec::new(), true).render(),
+            "LATTICE_HERMES_PREFLIGHT_CONFIGURATION_PRESENT_UNVERIFIED"
+        );
     }
 
     #[cfg(windows)]
@@ -3699,12 +8920,10 @@ mod tests {
             outcomes: VecDeque::from([
                 Err(OpenClawPumpFailure {
                     kind: GatewayTransportErrorKind::Authentication,
-                    code: "OPENCLAW_GATEWAY_AUTH_REJECTED",
                 }),
                 Ok(()),
                 Err(OpenClawPumpFailure {
                     kind: GatewayTransportErrorKind::Unavailable,
-                    code: "OPENCLAW_GATEWAY_UNAVAILABLE",
                 }),
             ]),
         };
@@ -3724,11 +8943,9 @@ mod tests {
             vec![
                 OpenClawPumpFailure {
                     kind: GatewayTransportErrorKind::Authentication,
-                    code: "OPENCLAW_GATEWAY_AUTH_REJECTED",
                 },
                 OpenClawPumpFailure {
                     kind: GatewayTransportErrorKind::Unavailable,
-                    code: "OPENCLAW_GATEWAY_UNAVAILABLE",
                 },
             ]
         );
@@ -3799,6 +9016,271 @@ mod tests {
         assert_eq!(
             full_chain_receipt_digest(&value).expect("typed final digest"),
             test_content_digest('3')
+        );
+    }
+
+    #[test]
+    fn hermes_launch_lifecycle_launches_once_and_terminates_owner_on_stdin_eof() {
+        use std::cell::Cell;
+        use std::io::Cursor;
+        use std::rc::Rc;
+
+        struct FakeOwner {
+            verifies: Rc<Cell<usize>>,
+            terminations: Rc<Cell<usize>>,
+        }
+
+        impl HermesStandaloneOwner for FakeOwner {
+            fn verify_live(&mut self) -> Result<(), LatticedError> {
+                self.verifies.set(self.verifies.get() + 1);
+                Ok(())
+            }
+
+            fn terminate(self) -> Result<(), LatticedError> {
+                self.terminations.set(self.terminations.get() + 1);
+                Ok(())
+            }
+        }
+
+        let launches = Rc::new(Cell::new(0));
+        let verifies = Rc::new(Cell::new(0));
+        let terminations = Rc::new(Cell::new(0));
+        let observed_launches = Rc::clone(&launches);
+        let observed_verifies = Rc::clone(&verifies);
+        let observed_terminations = Rc::clone(&terminations);
+
+        launch_hermes_until_eof(
+            Cursor::new(Vec::<u8>::new()),
+            Duration::from_millis(1),
+            move |run_id| {
+                assert_eq!(run_id, "standalone-hermes");
+                observed_launches.set(observed_launches.get() + 1);
+                Ok(FakeOwner {
+                    verifies: observed_verifies,
+                    terminations: observed_terminations,
+                })
+            },
+            || Ok(()),
+        )
+        .expect("EOF explicitly terminates the standalone Hermes owner");
+
+        assert_eq!(launches.get(), 1);
+        assert_eq!(verifies.get(), 3);
+        assert_eq!(terminations.get(), 1);
+    }
+
+    #[test]
+    fn hermes_launch_lifecycle_reports_child_exit_and_still_terminates_owner() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::sync::mpsc;
+
+        struct BlockingReader(mpsc::Receiver<()>);
+
+        impl Read for BlockingReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                let _ = self.0.recv();
+                Ok(0)
+            }
+        }
+
+        struct ExitingOwner {
+            verifies: Rc<Cell<usize>>,
+            terminations: Rc<Cell<usize>>,
+        }
+
+        impl HermesStandaloneOwner for ExitingOwner {
+            fn verify_live(&mut self) -> Result<(), LatticedError> {
+                let next = self.verifies.get() + 1;
+                self.verifies.set(next);
+                if next >= 3 {
+                    Err(LatticedError::new(
+                        LatticedErrorKind::HermesProductionLivenessRejected,
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+
+            fn terminate(self) -> Result<(), LatticedError> {
+                self.terminations.set(self.terminations.get() + 1);
+                Ok(())
+            }
+        }
+
+        let verifies = Rc::new(Cell::new(0));
+        let terminations = Rc::new(Cell::new(0));
+        let ready = Rc::new(Cell::new(false));
+        let observed_verifies = Rc::clone(&verifies);
+        let observed_terminations = Rc::clone(&terminations);
+        let observed_ready = Rc::clone(&ready);
+        let (release, blocked) = mpsc::channel();
+
+        let failure = launch_hermes_until_eof(
+            BlockingReader(blocked),
+            Duration::from_millis(1),
+            move |_| {
+                Ok(ExitingOwner {
+                    verifies: observed_verifies,
+                    terminations: observed_terminations,
+                })
+            },
+            move || {
+                observed_ready.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("child exit cannot remain falsely healthy");
+        drop(release);
+
+        assert_eq!(
+            failure.kind(),
+            LatticedErrorKind::HermesProductionLivenessRejected
+        );
+        assert!(ready.get());
+        assert!(verifies.get() >= 3);
+        assert_eq!(terminations.get(), 1);
+    }
+
+    #[test]
+    fn hermes_launch_lifecycle_reports_ambiguous_teardown_at_stdin_eof() {
+        use std::io::Cursor;
+
+        struct AmbiguousTeardownOwner;
+
+        impl HermesStandaloneOwner for AmbiguousTeardownOwner {
+            fn verify_live(&mut self) -> Result<(), LatticedError> {
+                Ok(())
+            }
+
+            fn terminate(self) -> Result<(), LatticedError> {
+                Err(LatticedError::new(
+                    LatticedErrorKind::HermesTeardownRejected,
+                ))
+            }
+        }
+
+        let failure = launch_hermes_until_eof(
+            Cursor::new(Vec::<u8>::new()),
+            Duration::from_millis(1),
+            |_| Ok(AmbiguousTeardownOwner),
+            || Ok(()),
+        )
+        .expect_err("teardown ambiguity cannot become success");
+
+        assert_eq!(failure.kind(), LatticedErrorKind::HermesTeardownRejected);
+    }
+
+    #[test]
+    fn hermes_launch_lifecycle_reports_stdin_failure_after_live_check_and_teardown() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct FailingReader;
+
+        impl Read for FailingReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("controlled stdin failure"))
+            }
+        }
+
+        struct LiveOwner {
+            verifies: Rc<Cell<usize>>,
+            terminations: Rc<Cell<usize>>,
+        }
+
+        impl HermesStandaloneOwner for LiveOwner {
+            fn verify_live(&mut self) -> Result<(), LatticedError> {
+                self.verifies.set(self.verifies.get() + 1);
+                Ok(())
+            }
+
+            fn terminate(self) -> Result<(), LatticedError> {
+                self.terminations.set(self.terminations.get() + 1);
+                Ok(())
+            }
+        }
+
+        let verifies = Rc::new(Cell::new(0));
+        let terminations = Rc::new(Cell::new(0));
+        let observed_verifies = Rc::clone(&verifies);
+        let observed_terminations = Rc::clone(&terminations);
+
+        let failure = launch_hermes_until_eof(
+            FailingReader,
+            Duration::from_millis(1),
+            move |_| {
+                Ok(LiveOwner {
+                    verifies: observed_verifies,
+                    terminations: observed_terminations,
+                })
+            },
+            || Ok(()),
+        )
+        .expect_err("stdin failure cannot become success");
+
+        assert_eq!(failure.kind(), LatticedErrorKind::Transport);
+        assert_eq!(verifies.get(), 3);
+        assert_eq!(terminations.get(), 1);
+    }
+
+    #[test]
+    fn hermes_launch_lifecycle_emits_ready_after_live_verification_before_input() {
+        use std::sync::{Arc, Mutex};
+
+        struct EventReader(Arc<Mutex<Vec<&'static str>>>);
+
+        impl Read for EventReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                self.0.lock().expect("event lock").push("input");
+                Ok(0)
+            }
+        }
+
+        struct EventOwner(Arc<Mutex<Vec<&'static str>>>);
+
+        impl HermesStandaloneOwner for EventOwner {
+            fn verify_live(&mut self) -> Result<(), LatticedError> {
+                self.0.lock().expect("event lock").push("verify");
+                Ok(())
+            }
+
+            fn terminate(self) -> Result<(), LatticedError> {
+                self.0.lock().expect("event lock").push("terminate");
+                Ok(())
+            }
+        }
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let reader_events = Arc::clone(&events);
+        let launch_events = Arc::clone(&events);
+        let ready_events = Arc::clone(&events);
+
+        launch_hermes_until_eof(
+            EventReader(reader_events),
+            Duration::from_millis(1),
+            move |_| {
+                launch_events.lock().expect("event lock").push("launch");
+                Ok(EventOwner(Arc::clone(&launch_events)))
+            },
+            move || {
+                ready_events.lock().expect("event lock").push("ready");
+                Ok(())
+            },
+        )
+        .expect("ready signal participates in the bounded lifecycle");
+
+        assert_eq!(
+            events.lock().expect("event lock").as_slice(),
+            [
+                "launch",
+                "verify",
+                "verify",
+                "ready",
+                "input",
+                "verify",
+                "terminate",
+            ]
         );
     }
 }

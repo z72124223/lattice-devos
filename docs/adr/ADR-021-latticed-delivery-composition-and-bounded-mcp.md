@@ -4,7 +4,8 @@
   implementation window
 - Date: 2026-08-05
 - Decision owner: user
-- Related: SPEC-002 v26, ADR-004, ADR-005, ADR-006, ADR-015, TASK-032
+- Related: SPEC-002 v30, ADR-004, ADR-005, ADR-006, ADR-015, ADR-023,
+  TASK-032, TASK-060, TASK-064
 
 ## Context
 
@@ -121,3 +122,29 @@ this bounded local implementation.
 The 1.6 wording clarification records a trait that was already introduced by
 that approved typed-delivery expansion; it does not add a second writer or a
 new approval decision.
+
+## 2026-08-13 Hermes Lifecycle Clarification
+
+The user-approved SPEC-002 v29 / TASK-060 adds exact canonical
+`latticed --hermes-launch` as an operational owner of the already composed
+production Hermes runner. It is not a second gateway or orchestrator: it adds
+no MCP tool, accepts no CLI/MCP-provided configuration or credential, and only
+reuses adapter-private process-start configuration. It owns no durable truth
+and preserves the dependency direction above. Startup success
+requires continuous runner liveness; EOF/error must explicitly reap the owned
+process tree, and teardown ambiguity fails closed. Stdin bytes are discarded
+and never reach Hermes; only EOF/read failure is a lifecycle signal. The fixed
+`LATTICE_HERMES_READY` stderr diagnostic means only that the reader exists and
+the runner passed live verification; it is not durable truth or acceptance. The legacy
+`lattice-full-chain` observer remains unchanged.
+
+## 2026-08-13 Canonical Hermes Composition Clarification
+
+TASK-064 adds no gateway, tool, schema, provider, credential source, or durable
+authority. Canonical no-argument `latticed` may opt into the already-owned
+production Hermes adapter through exact process configuration. The runner is
+not started at process startup: only Delivery Run may activate it, before any
+writer effect. Delivery Status and both Task tools remain zero-Hermes paths.
+The same composition root explicitly terminates an activated runner when MCP
+stdio ends; an ambiguous teardown is the terminal result even when stdio
+otherwise succeeded or already failed.

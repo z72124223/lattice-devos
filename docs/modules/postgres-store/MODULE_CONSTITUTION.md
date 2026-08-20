@@ -1,10 +1,10 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.4
+version: 1.10
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-03
+last_reviewed: 2026-08-15
 ---
 
 ## Mission
@@ -16,6 +16,32 @@ explicitly governed Project-Registry-planned global persistence exception.
 Preserve PostgreSQL as the sole durable control-plane truth and every domain
 module as the sole owner of transition legality. `StoreScope` remains strictly
 project-scoped; the Registry exception is a separate typed repository contract.
+Version 1.5 additionally recognizes one exact read-only catalog/ACL profile
+when the independent Codebase Memory v2 and Writer Lease v1 extensions are
+present; it acquires ownership of neither extension.
+Version 1.6 permits the Task Ledger physical transaction adapter to invoke
+exactly one fixed 15-scalar Writer Lease current-authority assertion inside
+the same `SERIALIZABLE` transaction as a fenced Ledger mutation. It does not
+load, plan, transition, persist, or own Writer Lease state.
+Version 1.7 preserves the exact Registry `0005` as schema v4, places the closed
+autonomy expansion at `0006` as schema v5, retains per-command Registry
+persistence-profile provenance, and exposes only the exact schema-v5 successor
+function profile. It also recognizes the separately governed exact Codebase
+Memory v3/global-v5 extension profile without joining its manifest or owning
+its state. Project Registry 1.2 remains the semantic owner.
+Version 1.8 recognizes only the exact Writer Lease v2 bridge and current
+companion profiles needed to advance an accepted global-v3/Memory-v2/
+Writer-v1 database to schema v5. It holds global, Memory, and Writer migration
+locks in that order and keeps both schema-v5 bridge states runtime closed. It
+does not install, mutate, rebind, replay, or semantically interpret Writer
+Lease state and adds no dependency on the Writer adapter.
+Version 1.9 closes the TASK-076 protected-function ACL amendment. Every fixed
+LOGIN remains denied every advisory-lock acquisition before `SET ROLE`.
+`lattice_migrator` alone receives the two exact non-grantable bigint
+acquisitions required by the governed runners: transaction-scoped
+`pg_advisory_xact_lock(bigint)` and nonblocking session-scoped
+`pg_try_advisory_lock(bigint)`. The latter is only the bounded Writer apply
+gate; it does not become a Store migration primitive or Writer state ownership.
 
 ## Non-Goals
 
@@ -31,6 +57,8 @@ project-scoped; the Registry exception is a separate typed repository contract.
   authority for a registration denial.
 - Auto-migrate during normal daemon startup, discover migrations by directory,
   accept edited/applied SQL, or execute the superseded bootstrap draft.
+- Repair, rename, reorder, delete, or reinterpret a historical database whose
+  ordinal `0005` contains autonomy rather than the exact Registry migration.
 - Create/alter a production login, password, real user database, installed
   PostgreSQL service, credential source, or production role membership. The
   disposable harness may create fixed LOGIN fixtures with its one-time secret.
@@ -47,6 +75,11 @@ project-scoped; the Registry exception is a separate typed repository contract.
 - Claim that physical live durability alone proves One Writer composition,
   Guardian activation, domain repository completeness, effect delivery, or
   release safety.
+- Install, migrate, write, replay, repair, or expose Writer Lease extension
+  state. The sole exception is executing the fixed
+  `writer_lease_assert_current_v1` predicate at a Task Ledger mutation
+  boundary; PostgreSQL Writer Lease remains the persistence adapter and Writer
+  Lease remains the semantic owner.
 
 ## Owned Data
 
@@ -110,6 +143,21 @@ project-scoped; the Registry exception is a separate typed repository contract.
 - The exact schema-v4 catalog closure: 15 `control` tables, 28 retained catalog
   functions, 17 runtime-executable functions, and all 11 historical functions
   retained without runtime EXECUTE.
+- Read-only expected catalog, ownership, ACL, and fixed-function signatures for
+  the exact `V3CodebaseMemoryV2WriterLeaseV1` compatibility profile. These
+  constants are verifier evidence only; they are not extension bytes, a
+  migration manifest entry, or a Writer Lease repository API.
+- The physical Task Ledger transaction wiring for the fixed
+  `writer_lease_assert_current_v1` predicate. It consumes the complete typed
+  15-field authority from Contracts and retains no Writer Lease state.
+- The exact global schema-v5 profile: unchanged Registry migration `0005`,
+  autonomy migration `0006`, the autonomy-receipt table, Registry command
+  persistence schema/manifest provenance, and the 19 current successor
+  functions. Historical function definitions remain catalog evidence without
+  runtime EXECUTE.
+- The exact base schema-v5 catalog closure: 16 `control` tables, 47 retained
+  functions, 19 runtime-executable functions, and 28 historical non-runtime
+  functions. Separately governed extension profiles are counted independently.
 
 ## Public Contracts
 
@@ -160,6 +208,12 @@ project-scoped; the Registry exception is a separate typed repository contract.
 - A durable Ledger load returns a pure verified stream plus independently
   matched Ledger checkpoint, physical head, and global schema evidence; no
   database row is authoritative before the pure verifier passes.
+- `PostgresTaskLedger::execute_fenced` invokes exactly
+  `writer_lease_assert_current_v1` with the complete typed 15-field authority
+  inside the same `SERIALIZABLE` transaction and before a new Ledger/Store
+  mutation. It exposes no generic SQL or lease repository API. Exact retained
+  command retry remains read-only and returns before mutable currentness
+  checks, including this assertion.
 - `StoreScope`, `ControlStore`, Store heads, and Store receipts remain strictly
   project/snapshot-scoped. `PostgresProjectRegistry` is the only approved global
   persistence exception; it does not call `PostgresControlStore`, construct a
@@ -192,6 +246,11 @@ project-scoped; the Registry exception is a separate typed repository contract.
   below PostgreSQL's 100-input limit. Composite/table arguments, builtin arrays
   as row maps, JSON payloads, omitted positional fields, and extra runtime type
   privileges are forbidden.
+- `SchemaVerifier` may classify exactly the base V3 profile, the approved
+  Codebase Memory v2 extension profile, or the approved combined Codebase
+  Memory v2 plus Writer Lease v1 profile. Partial, extra, drifted, wrong-owner,
+  or wrong-ACL Writer Lease objects fail closed. The verifier cannot install,
+  execute, mutate, or reconstruct Writer Lease state.
 - Project Registry 1.2 owns the canonical command core, logical retained-state
   bytes, checkpoints, record set, and independent retained-checkpoint APIs.
   The adapter stores and independently reads the singleton checkpoint, then
@@ -202,6 +261,18 @@ project-scoped; the Registry exception is a separate typed repository contract.
   the ordinal. Changed command reuse returns no retained receipt. Every new
   terminal command, including `Denied`, `Blocked`, and exact read-only
   observation, advances the global command ordinal/checkpoint exactly once.
+- `MigrationRunner` recognizes Fresh and exact v1/v2/v3/v4/v5 prefixes only.
+  Exact Registry `0005` advances to autonomy `0006`; autonomy content at
+  ordinal `0005` returns `PostgresStoreSetupErrorKind::HistoryMismatch` /
+  `STORE_MIGRATION_HISTORY_MISMATCH` before migration DDL and is never repaired.
+- At schema v5, the only base runtime surface is three `store_*_v5`, five
+  `task_ledger_*_v3`, nine `project_registry_*_v2`, and two
+  `task_ledger_*_autonomy*_v1` functions frozen by TASK-075. All prior Store,
+  Ledger, and Registry runtime generations remain immutable but ungranted.
+- Registry reads use each command's retained `persistence_schema_version` and
+  `persistence_manifest_sha256` when reconstructing its persistence receipt.
+  Existing v4 commands use schema `4` plus the exact v4 manifest; new v5
+  commands use schema `5` plus the constructor-frozen current manifest.
 
 ## Invariants
 
@@ -318,9 +389,15 @@ project-scoped; the Registry exception is a separate typed repository contract.
     authenticated as the same fixed LOGIN prove that
     `pg_cancel_backend(integer)` and `pg_terminate_backend(integer,bigint)` are
     also denied. Of the sixteen lock-acquisition overloads, only
-    `pg_advisory_xact_lock(bigint)` is granted to `lattice_migrator` after
-    `SET ROLE`; no fixed LOGIN has that direct grant. The one allowed direct
-    grant is non-grantable and its grantor is the protected function owner.
+    `pg_advisory_xact_lock(bigint)` and `pg_try_advisory_lock(bigint)` are
+    granted to `lattice_migrator` after `SET ROLE`; no fixed LOGIN has either
+    direct grant. Both allowed direct grants are non-grantable and their
+    grantor is the protected function owner. The former is the ordered
+    transaction-scoped migration lock. The latter is restricted to the
+    bounded Writer apply session gate, whose acquire/release each run in a
+    short `SET LOCAL ROLE lattice_migrator` transaction and restore the login
+    role at commit. The other fourteen acquisition overloads remain denied
+    after `SET ROLE`.
 30. `max_prepared_transactions` is exactly zero. `LISTEN`/`NOTIFY` is never a
     truth, admission, evidence, authority, or effect-delivery source. Because
     `NOTIFY` is a SQL command rather than a function call, function revocation
@@ -519,13 +596,91 @@ project-scoped; the Registry exception is a separate typed repository contract.
     the 30-second idle-in-transaction limit is a known pre-commit
     `Unavailable`, rolls back, returns no receipt, and is never automatically
     retried.
+71. Writer Lease v1 remains an independent extension outside the global Store
+    migration manifest. Migrations `0001` through `0004` and
+    `db/extensions/codebase-memory/v2.sql` remain byte-identical under this
+    amendment; no `0005` is created or required by TASK-038.
+72. The combined Writer Lease profile is accepted only after exact relation,
+    column, constraint, index, function, schema/table/function ACL, owner,
+    role, and extension-checksum closure succeeds.
+73. Postgres Store imports no Writer Lease or PostgreSQL Writer Lease crate and
+    cannot call its repository, installer, transition planner, or state parser.
+    Its only Writer Lease function execution is the fixed 15-scalar
+    `writer_lease_assert_current_v1` predicate inside the same transaction as
+    a new fenced Task Ledger mutation. It cannot load or change lease state;
+    profile recognition and the assertion do not confer semantic authority.
+74. A partial Writer Lease install, extra overload, direct runtime table grant,
+    unexpected owner, changed extension byte, or extra object is incompatible;
+    it cannot fall back to the base or Memory-only profile.
+75. Store receipts, heads, transaction semantics, migrations, and global
+    Registry ownership remain unchanged by Writer Lease profile recognition.
+76. Migration `0005` is exactly the TASK-022 Registry blob from commit
+    `12f7100`, SHA-256
+    `b7af1f8a8ac370bbfc8a5312497461587cb8a86eb32ff97e5b865c7ae9bf0dcf`,
+    and remains global schema v4. Migration `0006` alone adds autonomy and
+    advances the global schema to v5; migrations `0001` through `0005` are not
+    rewritten.
+77. Misplaced autonomy content at ordinal `0005` is incompatible history. The
+    runner classifies it after beginning its transaction, taking the advisory
+    lock, and completing read-only preflight, but before any migration DDL or
+    `batch_execute`; it returns only the stable history-mismatch kind/code and
+    performs no automatic repair.
+78. The base schema-v5 catalog has exactly 16 tables and 47 retained
+    functions. Exactly 19 functions are runtime-executable: three Store-v5,
+    five Ledger-v3, nine Registry-v2, and two autonomy-v1 functions. The other
+    28 functions are retained historical non-runtime objects. Extension
+    profiles do not change these base counts.
+79. The current Store functions are exactly `store_prepare_v5`,
+    `store_finalize_v5`, and `store_current_head_v5`. The current Ledger
+    functions are exactly `task_ledger_prepare_v3`,
+    `task_ledger_read_head_v3`, `task_ledger_read_events_v3`,
+    `task_ledger_read_commands_v3`, and `task_ledger_finalize_v3`. Autonomy
+    uses exactly `task_ledger_record_autonomy_receipt_v1` and
+    `task_ledger_read_autonomy_receipts_v1`.
+80. The current Registry functions are exactly `project_registry_prepare_v2`,
+    `project_registry_read_state_v2`,
+    `project_registry_read_observations_v2`,
+    `project_registry_read_projects_v2`,
+    `project_registry_read_commands_v2`,
+    `project_registry_read_reservations_v2`,
+    `project_registry_stage_command_v2`,
+    `project_registry_stage_project_v2`, and
+    `project_registry_finalize_v2`. All 17 schema-v4 runtime functions remain
+    immutable catalog history without runtime EXECUTE.
+81. Every Registry command row retains its persistence schema version and
+    manifest SHA-256. Schema-v5 migration backfills every v4 row with schema
+    `4` and manifest
+    `df3f7ca3687afaa0d1f676158725e6d2f06670e0612df7482aa9d4d244b59f0f`;
+    every new v5 row stores schema `5` and the exact constructor-frozen current
+    manifest. Missing, malformed, substituted, or future provenance fails
+    closed, and replay never substitutes the adapter's current profile.
+82. Historical v4 and new v5 Registry commands replay in one verified stream
+    while preserving every semantic and persistence receipt byte-for-byte.
+    Project Registry remains version 1.2; SQL and the adapter do not construct,
+    reinterpret, or version its pure command/checkpoint/record-set semantics.
+83. One schema-v5 `SERIALIZABLE` Ledger transaction atomically commits the
+    command, optional closed autonomy event and subject, stream projection,
+    checkpoint, terminal domain receipt, and physical Store receipt. Partial,
+    duplicate, late, reordered, or substituted autonomy state fails closed.
+84. Autonomy scalar rows are reconstructed only through the Task Ledger 2.3
+    canonical subject/verifier API. Store does not classify decisions, build
+    canonical subjects, or hash autonomy authority/receipt domains.
+85. Codebase Memory v1/v2 SQL bytes and v2/global-v3 receipt identities remain
+    immutable. Schema v5 recognizes only the exact separately governed Memory
+    v3 profile; it never inserts that extension into the global manifest or
+    base catalog counts.
+86. An exact Memory-v2 extension retained while the global schema advances to
+    v5 is only a versioned v3-upgrade source, never a current runtime profile.
+87. Memory v3 verification closes its own relation/function/owner/ACL and
+    extension-ledger profile. Partial, extra, drifted, wrong-owner, or
+    wrong-profile objects fail closed and cannot fall back to base schema v5.
 
 ## Allowed Dependencies
 
-- `lattice-contracts` 1.9.
+- `lattice-contracts` 1.13.
 - `lattice-ports` 1.4.
 - `lattice-cjson` 1.0.
-- `lattice-task-ledger` 2.1 pure planner/checkpoint/replay API.
+- `lattice-task-ledger` 2.3 pure planner/checkpoint/replay/profile/autonomy-subject API.
 - `lattice-project-registry` 1.2 pure planner/checkpoint/replay API, one-way
   from this adapter only.
 - Exact `postgres` 0.19.14 with default features disabled.
@@ -539,10 +694,10 @@ project-scoped; the Registry exception is a separate typed repository contract.
 - SQLx, Diesel, direct `tokio-postgres`, pools, TLS adapters, libpq, dynamic SQL
   or migration discovery, environment/credential loaders, provider/model SDKs,
   Git, product repositories, and companion/playmate website code.
-- Task Domain, Writer Lease, Approval, Artifact, Policy,
+- Task Domain, Writer Lease, PostgreSQL Writer Lease, Approval, Artifact, Policy,
   Orchestrator, Gateway, another concrete adapter, Review Runtime, Codebase
-  Memory, or Guardian crates. Task Ledger 2.1 and Project Registry 1.2 are the
-  only approved domain-owner dependencies in version 1.4.
+  Memory, or Guardian crates. Task Ledger 2.3 and Project Registry 1.2 are the
+  only approved domain-owner dependencies in version 1.10.
 - Any adapter-to-adapter dependency or reverse dependency from a domain owner.
 
 ## Failure, Compatibility, And Migration
@@ -593,6 +748,36 @@ Windows/Git inspection, other domain repositories, activation, production
 connectivity, providers/products, effect delivery, and protected release do
 not change.
 
+Version 1.5 adds only fail-closed read-only recognition of the exact
+`V3CodebaseMemoryV2WriterLeaseV1` catalog/ACL profile. Writer Lease installation,
+state, receipts, snapshots, checkpoints, functions, and transactions remain
+owned by Writer Lease 1.1 and PostgreSQL Writer Lease 1.0. This amendment adds
+no global migration, no dependency on either lease crate, and no alternate
+Store, Registry, or Task Ledger write path.
+
+Version 1.6 adds only the atomic fenced-mutation assertion described above.
+The Store adapter accepts the already typed `WriterLeaseAuthorityHead` from
+Contracts and invokes the exact fixed function before its own Task Ledger
+mutation; it neither constructs that authority nor calls the Writer Lease
+repository. No new relation, migration, role grant, domain dependency, or
+truth source is introduced.
+
+Version 1.7 preserves the exact TASK-022 Registry `0005` as schema v4 and adds
+only the TASK-050 autonomy expansion at `0006` as schema v5. It rejects a
+misplaced autonomy-`0005` history before DDL without repair, publishes the
+exact `16 / 47 / 19 / 28` base catalog profile, and records per-command
+Registry persistence schema/manifest provenance so mixed v4/v5 replay is
+byte-identical. It recognizes only the separately verified Codebase Memory
+v3/global-v5 extension while preserving v1/v2 bytes and receipt identities.
+Task Ledger advances to 2.2; Project Registry remains 1.2 and the MCP surface
+is unchanged.
+
+Version 1.10 preserves the schema-v5 migration, catalog, SQL functions, and
+physical scalar rows. It replaces Store-local autonomy classification,
+canonicalization, and hashing with Task Ledger 2.3 typed construction and
+verification. This is a consumer/ownership correction only: no migration,
+row, ACL, MCP, or Store receipt byte changes.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -609,7 +794,7 @@ not change.
 | Transactional migration | apply/no-op/concurrent runner/rollback/unknown-response and committed-unverified reconciliation | Engineering | yes |
 | Ownership and roles | exact target sentinel, cluster-wide database/PUBLIC/parameter ACL closure, all-catalog LOGIN direct grants, cluster-wide `pg_shdepend` plus explicit local fixed-LOGIN owner checks, external relation/column/effective-function closure, all-owner default-ACL closure, and migrator/runtime/guardian/reader matrix | Security review | yes |
 | Catalog and type closure | exact column ACL signature, table-row/array type allowlist, shell/extra type denial | Architecture review | yes |
-| Protected function/settings closure | exact 5 large-object creator, 2 four-argument logical-message, 16 advisory-lock, same-LOGIN backend-control, snapshot-export, and transaction-ID function proof; only one exact non-grantable post-`SET ROLE` migrator advisory-lock grant from the function owner; `max_prepared_transactions = 0`; no notification-authority claim | Security review | yes |
+| Protected function/settings closure | exact 5 large-object creator, 2 four-argument logical-message, 16 advisory-lock, same-LOGIN backend-control, snapshot-export, and transaction-ID function proof; only two exact non-grantable post-`SET ROLE` migrator advisory-lock grants from the function owner, with the nonblocking session overload restricted to the bounded Writer apply gate; `max_prepared_transactions = 0`; no notification-authority claim | Security review | yes |
 | Admission bootstrap | exact STOPPED/no-leader row; runtime cannot mutate or self-activate | Architecture review | yes |
 | Disposable PostgreSQL | owned isolated 17.10 cluster, loopback/settings/checksums/restart/cleanup evidence | Integration review | yes |
 | Secret/error hygiene | redacted static errors and zero credential/DSN persistence | Security review | yes |
@@ -618,7 +803,7 @@ not change.
 | Durable reconciliation | commit-response loss, reconnect exact retry, restart, and corrupt-row denial | Security review | yes |
 | Runtime function ACL | exact function signature/source/property/grant manifest plus direct table denial | Security review | yes |
 | Historical Store profile | v2 receipt before/after v3 upgrade replays byte-identically; old v2 functions become ungranted | Compatibility review | yes |
-| Ledger planner parity | fake and PostgreSQL use Task Ledger 2.1 plan/checkpoint/replay; no duplicated domain builder | Architecture review | yes |
+| Ledger planner parity | fake and PostgreSQL use Task Ledger 2.3 plan/checkpoint/replay/profile/autonomy verifier; no duplicated domain builder or hash | Architecture review | yes |
 | Ledger atomicity | command plus optional event/outbox, projection/checkpoint, and physical receipt all-or-none | Engineering | yes |
 | Ledger restart/corruption | restart replay plus event/command/denial/outbox/head/checkpoint/physical mismatch matrices | Security review | yes |
 | Ledger concurrency/reconciliation | same command, same stream, cross-stream, bounded retry, response loss, reconnect replay | Engineering | yes |
@@ -634,6 +819,14 @@ not change.
 | Registry bounds | exact and plus-one 4,096-project, 65,536-command, 67,108,864-byte retained-state, and 131,072-byte canonical-root matrices | Security review | yes |
 | Schema-v4 migration and function profile | fresh/v1/v2/non-empty stopped-v3/v4, rollback/concurrent/ACTIVE; exact 15 tables/28 catalog functions/17 runtime functions/11 historical-ungranted; Registry scalar counts 12, five reads at 2, 73, 22, 27 with max 73 and no composite/array/JSON escape | Integration review | yes |
 | Historical Store/Ledger compatibility | `0001`-`0004` byte-identical; Store-v2 receipts and existing Ledger receipts/checkpoints replay identically after v4 | Compatibility review | yes |
+| Schema-v5 migration identity | exact Registry `0005` source/hash plus autonomy `0006`; fresh/v1/v2/v3/v4/v5 and no-op matrices | Integration review | yes |
+| Misplaced autonomy-0005 rejection | stable history-mismatch kind/code after lock/preflight and before any DDL, with zero automatic repair or catalog/history mutation | Security review | yes |
+| Schema-v5 function profile | exact 16 tables/47 retained functions/19 runtime functions/28 historical non-runtime functions and complete Store-v5/Ledger-v3/Registry-v2/autonomy-v1 signature/ACL closure | Architecture review | yes |
+| Registry profile provenance | v4 backfill plus new-v5 persistence profile fields, corruption/substitution rejection, and byte-identical mixed v4/v5 semantic/persistence replay | Compatibility review | yes |
+| Autonomy Ledger atomicity | command, optional closed autonomy event/subject, projection/checkpoint, terminal receipt, and physical receipt all-or-none with restart/retry/corruption matrices | Engineering | yes |
+| Memory-v3 extension recognition | exact separate global-v5 catalog/owner/ACL profile, immutable v1/v2 bytes, v2-upgrade-only classification, and no base-manifest/count change | Compatibility review | yes |
+| Writer Lease profile closure | exact V3+Memory-v2+Writer-Lease-v1 catalog/owner/ACL/function/checksum acceptance plus partial/extra/drift/wrong-owner/direct-grant denial | Security review | yes |
+| Extension ownership | static/dependency tests prove Store cannot install, mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate is executable | Architecture review | yes |
 
 ## Change Policy
 
@@ -656,3 +849,9 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.2 | 2026-08-02 | SPEC-002 v22, ADR-018, TASK-020 | Exact schema-v1-to-v2 expansion plus narrow function-gated live durable physical ControlStore | User MVP-3 execution directive |
 | 1.3 | 2026-08-02 | SPEC-002 v23, ADR-019, TASK-021 | Global schema-v3 profile, immutable Store-v2 receipt compatibility, and Task-Ledger-planned durable event/receipt/projection/outbox repository | Approved V2 amendment and user MVP-3 execution directive |
 | 1.4 | 2026-08-03 | SPEC-002 v24, ADR-020, TASK-022 | Global schema-v4 profile and sole typed Registry persistence exception, corrected with the seeded vacant singleton, Registry-owned canonical/current checkpoint, exact catalog/signature budgets, and bounded transaction semantics without changing Contracts/Ports | Approved V2 amendment and user MVP-3 execution directive |
+| 1.5 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Read-only exact V3+Codebase-Memory-v2+Writer-Lease-v1 catalog/ACL compatibility recognition without installation, mutation, lease ownership, or global migration changes | User TASK-038-first direction |
+| 1.6 | 2026-08-10 | SPEC-003 v3, ADR-023, TASK-038 | Permit only the fixed 15-field Writer Lease current-authority assertion inside a fenced Task Ledger transaction, without lease repository dependency, state ownership, or mutation | User TASK-038-first direction |
+| 1.7 | 2026-08-14 | SPEC-002 v32, ADR-011/019/020/022, TASK-075 | Preserve exact Registry schema-v4 `0005`, add autonomy schema-v5 `0006`, fail closed on misplaced history, freeze exact successor/catalog profile, retain Registry persistence provenance, and recognize separate Memory-v3/global-v5 compatibility without changing historical bytes | User-approved TASK-075 reconciliation |
+| 1.8 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-022/023, TASK-076 | Recognize exact Writer-v2 bridge/current companion profiles under global-to-Memory-to-Writer locking and keep schema-v5 pending states runtime closed without taking Writer ownership | User continuation authorization |
+| 1.9 | 2026-08-14 | SPEC-002 v34, ADR-023 TASK-076 amendment, TASK-076 | Freeze the exact second post-role migrator acquisition grant for the bounded Writer session gate while keeping all LOGIN roles and the other fourteen overloads denied | User TASK-076 continuation directive |
+| 1.10 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Delegate autonomy subject/profile semantics and hashes exclusively to Task Ledger 2.3 while preserving schema-v5 physical bytes and Store ownership | User-approved TASK-050 repair amendment |

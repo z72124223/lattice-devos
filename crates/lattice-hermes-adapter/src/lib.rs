@@ -8,6 +8,7 @@ mod broker;
 #[cfg(windows)]
 mod codex_proxy;
 mod containment;
+pub mod preparation;
 #[cfg(windows)]
 mod production;
 mod runtime;
@@ -1341,20 +1342,13 @@ impl HermesReflectionAdapter {
             {
                 None
             }
-            Err(failure) => return Err(failure.with_recovery_receipt(receipt.clone())),
+            Err(failure) => {
+                return Err(self.finish_terminal_observation_failure(failure, receipt.clone()));
+            }
         };
         let status_output = match self.poll_terminal(&run_id, deadline) {
             Ok(output) => output,
-            Err(failure) => {
-                if matches!(
-                    failure.kind(),
-                    HermesAdapterErrorKind::Failed | HermesAdapterErrorKind::Cancelled
-                ) {
-                    self.active_run = None;
-                    return Err(failure);
-                }
-                return Err(failure.with_recovery_receipt(receipt));
-            }
+            Err(failure) => return Err(self.finish_terminal_observation_failure(failure, receipt)),
         };
         if event_output
             .as_ref()
@@ -1364,8 +1358,12 @@ impl HermesReflectionAdapter {
                 cross_binding("HERMES_EVENT_STATUS_OUTPUT_MISMATCH").with_recovery_receipt(receipt)
             );
         }
-        let reflection = parse_reflection(&status_output, &self.job)
-            .map_err(|failure| failure.with_recovery_receipt(receipt))?;
+        let reflection = match parse_reflection(&status_output, &self.job) {
+            Ok(reflection) => reflection,
+            Err(failure) => {
+                return Err(self.finish_completed_output_failure(failure, receipt));
+            }
+        };
         self.active_run = None;
         Ok(reflection)
     }
@@ -1424,18 +1422,85 @@ impl HermesReflectionAdapter {
         validate_run_id(run_id)?;
         let deadline = self.operation_deadline()?;
         self.verify_capabilities(deadline)?;
-        let output = self
-            .poll_terminal(run_id, deadline)
-            .map_err(|failure| failure.with_recovery_receipt(receipt.clone()))?;
-        let reflection = parse_reflection(&output, &self.job)
-            .map_err(|failure| failure.with_recovery_receipt(receipt.clone()))?;
+        let output = match self.poll_terminal(run_id, deadline) {
+            Ok(output) => output,
+            Err(failure) => {
+                return Err(self.finish_terminal_observation_failure(failure, receipt.clone()));
+            }
+        };
+        let reflection = match parse_reflection(&output, &self.job) {
+            Ok(reflection) => reflection,
+            Err(failure) => {
+                return Err(self.finish_completed_output_failure(failure, receipt.clone()));
+            }
+        };
         self.active_run = None;
         Ok(reflection)
+    }
+
+    /// Reconciles one known run and returns its canonical payload together
+    /// with normalized Live evidence derived from the same output digest.
+    ///
+    /// # Errors
+    ///
+    /// Preserves every containment, request, receipt, capability, transport,
+    /// recovery, and schema failure from [`Self::reconcile_reflection`].
+    pub fn reconcile_reflection_evidence(
+        &mut self,
+        request: &HermesResearchRequest,
+        receipt: &HermesRunRecoveryReceipt,
+    ) -> PortResult<HermesReflectionEvidence> {
+        let invocation = request.invocation().clone();
+        let reflection = self
+            .reconcile_reflection(request, receipt)
+            .map_err(|failure| map_port_error(&failure))?;
+        let evidence = HermesEvidence::new(
+            invocation,
+            RuntimeKind::Live,
+            reflection.output_digest().clone(),
+        );
+        Ok(HermesReflectionEvidence {
+            reflection,
+            evidence,
+        })
     }
 
     #[must_use]
     pub const fn active_recovery_receipt(&self) -> Option<&HermesRunRecoveryReceipt> {
         self.active_run.as_ref()
+    }
+
+    fn finish_terminal_observation_failure(
+        &mut self,
+        failure: HermesAdapterError,
+        receipt: HermesRunRecoveryReceipt,
+    ) -> HermesAdapterError {
+        if matches!(
+            failure.kind(),
+            HermesAdapterErrorKind::Failed | HermesAdapterErrorKind::Cancelled
+        ) {
+            debug_assert_eq!(self.active_run.as_ref(), Some(&receipt));
+            self.active_run = None;
+            failure
+        } else {
+            failure.with_recovery_receipt(receipt)
+        }
+    }
+
+    fn finish_completed_output_failure(
+        &mut self,
+        failure: HermesAdapterError,
+        receipt: HermesRunRecoveryReceipt,
+    ) -> HermesAdapterError {
+        if failure.kind() == HermesAdapterErrorKind::Failed
+            && failure.code() == "HERMES_CODEX_APP_SERVER_RUN_FAILED"
+        {
+            debug_assert_eq!(self.active_run.as_ref(), Some(&receipt));
+            self.active_run = None;
+            failure
+        } else {
+            failure.with_recovery_receipt(receipt)
+        }
     }
 
     fn require_containment_receipt(&self) -> HermesAdapterResult<&HermesContainmentReceipt> {

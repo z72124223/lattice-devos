@@ -22,6 +22,8 @@ use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+const DESCENDANT_DEADLINE_TRIGGER_NAME: &str = "descendant-deadline-trigger.txt";
+const DESCENDANT_TRIGGER_NAME: &str = "descendant-trigger.txt";
 
 #[test]
 fn pinned_resource_binding_requires_an_absolute_directory_and_exact_digests() {
@@ -176,9 +178,9 @@ struct ProcessFixture {
     launcher: PathBuf,
     codex_home: PathBuf,
     working_directory: PathBuf,
-    interrupt_log: PathBuf,
     effect_log: PathBuf,
     descendant_pid_log: PathBuf,
+    descendant_trigger: PathBuf,
     descendant_effect_log: PathBuf,
     launcher_sha256: String,
 }
@@ -214,12 +216,15 @@ impl ProcessFixture {
                 "\n",
                 "[windows]\n",
                 "sandbox = \"unelevated\"\n",
+                "\n",
+                "[features]\n",
+                "plugins = false\n",
             ),
         )
         .expect("write safe fixture configuration");
-        let interrupt_log = root.join("interrupt.jsonl");
         let effect_log = root.join("thread-started.txt");
         let descendant_pid_log = root.join("descendant.pid");
+        let descendant_trigger = root.join(DESCENDANT_TRIGGER_NAME);
         let descendant_effect_log = root.join("descendant-effect.txt");
         let server = root.join("fake-app-server.ps1");
         fs::write(
@@ -228,7 +233,6 @@ impl ProcessFixture {
                 mode,
                 &codex_home,
                 &wrong_home,
-                &interrupt_log,
                 &effect_log,
                 &descendant_pid_log,
                 &descendant_effect_log,
@@ -247,9 +251,9 @@ impl ProcessFixture {
             launcher,
             codex_home,
             working_directory,
-            interrupt_log,
             effect_log,
             descendant_pid_log,
+            descendant_trigger,
             descendant_effect_log,
             launcher_sha256,
         }
@@ -395,6 +399,9 @@ fn write_pinned_codex_home(codex_home: &Path) {
             "\n",
             "[windows]\n",
             "sandbox = \"unelevated\"\n",
+            "\n",
+            "[features]\n",
+            "plugins = false\n",
         ),
     )
     .expect("write exact safe fixture config");
@@ -1078,6 +1085,9 @@ fn rejects_unsafe_isolated_home_config_before_spawn() {
             "\n",
             "[windows]\n",
             "sandbox = \"elevated\"\n",
+            "\n",
+            "[features]\n",
+            "plugins = false\n",
         ),
     )
     .expect("replace fixture with elevated config");
@@ -1085,6 +1095,25 @@ fn rejects_unsafe_isolated_home_config_before_spawn() {
         .expect_err("implicit elevated setup must fail before spawn");
     assert_eq!(error.kind(), AppServerRunErrorKind::InvalidCodexHome);
     assert!(!elevated.effect_log.exists());
+
+    let plugins_enabled = ProcessFixture::new(FakeMode::Success);
+    fs::write(
+        plugins_enabled.codex_home.join("config.toml"),
+        concat!(
+            "approval_policy = \"never\"\n",
+            "sandbox_mode = \"workspace-write\"\n",
+            "model = \"gpt-5.6-sol\"\n",
+            "model_reasoning_effort = \"low\"\n",
+            "\n",
+            "[windows]\n",
+            "sandbox = \"unelevated\"\n",
+        ),
+    )
+    .expect("replace fixture with plugin-capable config");
+    let error = run_codex_app_server(&plugins_enabled.config(Duration::from_secs(5)))
+        .expect_err("plugin-capable config must fail before spawn");
+    assert_eq!(error.kind(), AppServerRunErrorKind::InvalidCodexHome);
+    assert!(!plugins_enabled.effect_log.exists());
 }
 
 #[cfg(windows)]
@@ -1118,7 +1147,7 @@ fn scripted_malformed_eof_and_wrong_home_fail_closed() {
 
 #[cfg(windows)]
 #[test]
-fn timeout_sends_interrupt_then_terminates_the_owned_tree() {
+fn timeout_immediately_terminates_and_reaps_the_owned_tree() {
     let fixture = ProcessFixture::new(FakeMode::Timeout);
     let started = Instant::now();
     let error = run_codex_app_server(&fixture.config(Duration::from_secs(10)))
@@ -1126,19 +1155,18 @@ fn timeout_sends_interrupt_then_terminates_the_owned_tree() {
 
     assert_eq!(error.kind(), AppServerRunErrorKind::Timeout);
     assert!(started.elapsed() < Duration::from_secs(20));
-    let interrupt = fs::read_to_string(&fixture.interrupt_log)
-        .expect("scripted child observed the interrupt request");
+    let descendant_pid = fs::read_to_string(&fixture.descendant_pid_log)
+        .expect("the timed-out turn proved that it spawned a writable descendant");
     assert!(
-        interrupt.contains(r#""method":"turn/interrupt""#),
-        "observed interrupt: {interrupt:?}"
+        descendant_pid.trim().parse::<u32>().is_ok(),
+        "descendant PID: {descendant_pid:?}"
     );
+    fs::write(&fixture.descendant_trigger, b"post-return\n")
+        .expect("release a surviving descendant only after cleanup returned");
+    std::thread::sleep(Duration::from_millis(1500));
     assert!(
-        interrupt.contains(r#""threadId":"thread-scripted""#),
-        "observed interrupt: {interrupt:?}"
-    );
-    assert!(
-        interrupt.contains(r#""turnId":"turn-scripted""#),
-        "observed interrupt: {interrupt:?}"
+        !fixture.descendant_effect_log.exists(),
+        "the timed-out turn left a writable descendant after cleanup returned"
     );
 }
 
@@ -1168,12 +1196,14 @@ fn fake_launcher_script(
     mode: FakeMode,
     codex_home: &std::path::Path,
     wrong_home: &std::path::Path,
-    interrupt_log: &std::path::Path,
     effect_log: &std::path::Path,
     descendant_pid_log: &std::path::Path,
     descendant_effect_log: &std::path::Path,
 ) -> String {
     let quote = |path: &std::path::Path| path.display().to_string().replace('\'', "''");
+    let descendant_deadline_trigger =
+        descendant_effect_log.with_file_name(DESCENDANT_DEADLINE_TRIGGER_NAME);
+    let descendant_trigger = descendant_effect_log.with_file_name(DESCENDANT_TRIGGER_NAME);
     let configured_home = quote(codex_home);
     let reported_home = match mode {
         FakeMode::WrongHome => wrong_home,
@@ -1207,8 +1237,13 @@ Start-Sleep -Seconds 60
         }
         FakeMode::Eof => "exit 0\n".to_owned(),
         FakeMode::Timeout => format!(
-            "$interrupt = [Console]::In.ReadLine()\n[IO.File]::WriteAllText('{}', $interrupt + [Environment]::NewLine)\n[Console]::Out.WriteLine('{{\"id\":4,\"result\":{{}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"turn/completed\",\"params\":{{\"threadId\":\"thread-scripted\",\"turn\":{{\"id\":\"turn-scripted\",\"items\":[],\"status\":\"interrupted\",\"error\":null}}}}}}')\nStart-Sleep -Seconds 60\n",
-            quote(interrupt_log)
+            "$grandchild = \"`$stop = [DateTime]::UtcNow.AddSeconds(30); while (!(Test-Path -LiteralPath '{}') -and !(Test-Path -LiteralPath '{}')) {{ if ([DateTime]::UtcNow -ge `$stop) {{ exit 91 }}; Start-Sleep -Milliseconds 10 }}; if (Test-Path -LiteralPath '{}') {{ Start-Sleep -Milliseconds 250 }}; [IO.File]::WriteAllText('{}', 'survived')\"\n$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($grandchild))\n$descendant = Start-Process -FilePath \"$PSHOME\\powershell.exe\" -WindowStyle Hidden -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -PassThru\n[IO.File]::WriteAllText('{}', [string]$descendant.Id)\n$null = [Console]::In.ReadLine()\n[IO.File]::WriteAllText('{}', 'deadline')\n[Console]::Out.WriteLine('{{\"id\":4,\"result\":{{}}}}')\nStart-Sleep -Seconds 60\n",
+            quote(&descendant_deadline_trigger),
+            quote(&descendant_trigger),
+            quote(&descendant_deadline_trigger),
+            quote(descendant_effect_log),
+            quote(descendant_pid_log),
+            quote(&descendant_deadline_trigger)
         ),
         FakeMode::Premature => concat!(
             "[Console]::Out.WriteLine('{\"id\":1,\"result\":{\"thread\":{\"id\":\"thread-scripted\"}}}')\n",

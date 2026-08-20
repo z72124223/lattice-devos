@@ -3,7 +3,7 @@ use std::fmt::{self, Write as _};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,9 +11,9 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::process::{
-    OwnedProcessTree, OwnedSandboxTemp, PinnedCodexResources, cleanup_sandbox_temp,
-    configure_pinned_child_environment, stop_owned_child,
-    terminate_uncontained_process_tree_bounded, validate_pinned_resources_for_launcher,
+    AppServerRunErrorKind, OwnedChild, OwnedChildStdio, OwnedSandboxTemp, PinnedCodexResources,
+    cleanup_sandbox_temp, configure_pinned_child_environment, spawn_owned_child, stop_owned_child,
+    validate_pinned_resources_for_launcher,
 };
 
 const SCHEMA_BUNDLE_DOMAIN: &[u8] = b"lattice.codex-app-server.schema-bundle.v1\0";
@@ -340,29 +340,25 @@ fn run_version_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     validate_identity_resources_before_spawn(launcher, pinned_resources)?;
-    let Ok(mut child) = command.spawn() else {
-        cleanup_identity_sandbox_temp(sandbox_temp)?;
-        return Err(error(CodexIdentityErrorKind::VersionCommandFailed));
-    };
-    let Ok(process_tree) = OwnedProcessTree::attach(&child) else {
-        let _ = terminate_uncontained_process_tree_bounded(&mut child);
-        cleanup_identity_sandbox_temp(sandbox_temp)?;
-        return Err(error(CodexIdentityErrorKind::ProcessContainmentFailed));
-    };
-    let process_tree = match validate_identity_resources_after_attach(
-        &mut child,
-        process_tree,
-        launcher,
-        pinned_resources,
-    ) {
-        Ok(process_tree) => process_tree,
-        Err(error) => {
+    let mut child = match spawn_owned_child(&mut command, OwnedChildStdio::Stdout) {
+        Ok(child) => child,
+        Err(spawn_error) => {
             cleanup_identity_sandbox_temp(sandbox_temp)?;
-            return Err(error);
+            return Err(map_owned_spawn_error(
+                spawn_error.kind(),
+                CodexIdentityErrorKind::VersionCommandFailed,
+            ));
         }
     };
-    let Some(stdout) = child.stdout.take() else {
-        let _ = stop_owned_child(&mut child, process_tree);
+    if let Err(validation_error) =
+        validate_identity_resources_after_spawn(&mut child, launcher, pinned_resources)
+    {
+        cleanup_identity_sandbox_temp(sandbox_temp)?;
+        return Err(validation_error);
+    }
+    let Some(stdout) = child.take_stdout() else {
+        stop_owned_child(&mut child)
+            .map_err(|_| error(CodexIdentityErrorKind::ProcessContainmentFailed))?;
         cleanup_identity_sandbox_temp(sandbox_temp)?;
         return Err(error(CodexIdentityErrorKind::VersionCommandFailed));
     };
@@ -375,7 +371,6 @@ fn run_version_command(
     });
     let status = wait_for_owned_child(
         &mut child,
-        process_tree,
         deadline,
         CodexIdentityErrorKind::VersionCommandFailed,
     );
@@ -406,30 +401,24 @@ fn run_schema_command(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     validate_identity_resources_before_spawn(launcher, pinned_resources)?;
-    let Ok(mut child) = command.spawn() else {
-        cleanup_identity_sandbox_temp(sandbox_temp)?;
-        return Err(error(CodexIdentityErrorKind::SchemaGenerationFailed));
-    };
-    let Ok(process_tree) = OwnedProcessTree::attach(&child) else {
-        let _ = terminate_uncontained_process_tree_bounded(&mut child);
-        cleanup_identity_sandbox_temp(sandbox_temp)?;
-        return Err(error(CodexIdentityErrorKind::ProcessContainmentFailed));
-    };
-    let process_tree = match validate_identity_resources_after_attach(
-        &mut child,
-        process_tree,
-        launcher,
-        pinned_resources,
-    ) {
-        Ok(process_tree) => process_tree,
-        Err(error) => {
+    let mut child = match spawn_owned_child(&mut command, OwnedChildStdio::Null) {
+        Ok(child) => child,
+        Err(spawn_error) => {
             cleanup_identity_sandbox_temp(sandbox_temp)?;
-            return Err(error);
+            return Err(map_owned_spawn_error(
+                spawn_error.kind(),
+                CodexIdentityErrorKind::SchemaGenerationFailed,
+            ));
         }
     };
+    if let Err(validation_error) =
+        validate_identity_resources_after_spawn(&mut child, launcher, pinned_resources)
+    {
+        cleanup_identity_sandbox_temp(sandbox_temp)?;
+        return Err(validation_error);
+    }
     let status = wait_for_owned_child(
         &mut child,
-        process_tree,
         deadline,
         CodexIdentityErrorKind::SchemaGenerationFailed,
     );
@@ -478,18 +467,29 @@ fn validate_identity_resources_before_spawn(
         .map_err(|_| error(CodexIdentityErrorKind::PinnedResourcesRejected))
 }
 
-fn validate_identity_resources_after_attach(
-    child: &mut Child,
-    process_tree: OwnedProcessTree,
+fn validate_identity_resources_after_spawn(
+    child: &mut OwnedChild,
     launcher: &Path,
     pinned_resources: Option<&PinnedCodexResources>,
-) -> Result<OwnedProcessTree, CodexIdentityError> {
+) -> Result<(), CodexIdentityError> {
     if validate_pinned_resources_for_launcher(launcher, pinned_resources).is_err() {
-        stop_owned_child(child, process_tree)
+        stop_owned_child(child)
             .map_err(|_| error(CodexIdentityErrorKind::ProcessContainmentFailed))?;
         return Err(error(CodexIdentityErrorKind::PinnedResourcesChanged));
     }
-    Ok(process_tree)
+    Ok(())
+}
+
+fn map_owned_spawn_error(
+    kind: AppServerRunErrorKind,
+    command_failure: CodexIdentityErrorKind,
+) -> CodexIdentityError {
+    match kind {
+        AppServerRunErrorKind::JobObjectFailed | AppServerRunErrorKind::ChildCleanupFailed => {
+            error(CodexIdentityErrorKind::ProcessContainmentFailed)
+        }
+        _ => error(command_failure),
+    }
 }
 
 fn ensure_before_deadline(deadline: Instant) -> Result<(), CodexIdentityError> {
@@ -501,27 +501,29 @@ fn ensure_before_deadline(deadline: Instant) -> Result<(), CodexIdentityError> {
 }
 
 fn wait_for_owned_child(
-    child: &mut Child,
-    process_tree: OwnedProcessTree,
+    child: &mut OwnedChild,
     deadline: Instant,
     command_failure: CodexIdentityErrorKind,
 ) -> Result<ExitStatus, CodexIdentityError> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                drop(process_tree);
+                stop_owned_child(child)
+                    .map_err(|_| error(CodexIdentityErrorKind::ProcessContainmentFailed))?;
                 return Ok(status);
             }
             Ok(None) => {}
             Err(_) => {
-                let _ = stop_owned_child(child, process_tree);
+                stop_owned_child(child)
+                    .map_err(|_| error(CodexIdentityErrorKind::ProcessContainmentFailed))?;
                 return Err(error(command_failure));
             }
         }
 
         let now = Instant::now();
         if now >= deadline {
-            let _ = stop_owned_child(child, process_tree);
+            stop_owned_child(child)
+                .map_err(|_| error(CodexIdentityErrorKind::ProcessContainmentFailed))?;
             return Err(error(CodexIdentityErrorKind::Timeout));
         }
         thread::sleep(PROCESS_POLL_INTERVAL.min(deadline.duration_since(now)));

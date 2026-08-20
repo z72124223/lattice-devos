@@ -1,0 +1,52 @@
+{
+  "schema": "lattice.direct-stdio-client.self-test.v1",
+  "passed": true,
+  "checks": [
+    {
+      "name": "json-lines-framing",
+      "passed": true,
+      "evidence": "DISCOVERY_OK"
+    },
+    {
+      "name": "exact-four-tools",
+      "passed": true,
+      "evidence": "lattice_delivery_run,lattice_delivery_status,lattice_task_submit,lattice_task_status"
+    },
+    {
+      "name": "task-submit-parameterization",
+      "passed": true,
+      "evidence": "CALL_OK"
+    },
+    {
+      "name": "task-status-separate-session",
+      "passed": true,
+      "evidence": "__SUBMIT_SESSION_ID__|__STATUS_SESSION_ID__"
+    },
+    {
+      "name": "tool-set-error-classification",
+      "passed": true,
+      "evidence": "TOOL_SET_MISMATCH"
+    },
+    {
+      "name": "protocol-error-classification",
+      "passed": true,
+      "evidence": "PROTOCOL_ERROR"
+    },
+    {
+      "name": "tool-error-classification",
+      "passed": true,
+      "evidence": "TOOL_ERROR|FAKE_TOOL_REJECTED"
+    },
+    {
+      "name": "timeout-classification",
+      "passed": true,
+      "evidence": "TIMEOUT"
+    },
+    {
+      "name": "child-tree-cleanup",
+      "passed": true,
+      "evidence": "child_stopped=True;cleanup=True"
+    }
+  ],
+  "run_directory": "__SELF_TEST_RUN_DIRECTORY__"
+}

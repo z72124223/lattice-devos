@@ -1,0 +1,180 @@
+---
+module_id: postgres-writer-lease
+name: PostgreSQL Writer Lease Repository
+version: 1.1
+status: active
+owner: LATTICE maintainers
+last_reviewed: 2026-08-14
+---
+
+## Mission
+
+Persist and independently replay Writer Lease 1.1 commands, transitions,
+current authority, monotonic fencing high-water, and checkpoints in PostgreSQL
+through one exact extension and repository implementation, without acquiring
+lease semantic ownership.
+Version 1.1 preserves the v1 extension and semantic history while adding the
+Writer-owned v2 schema-v5 bridge and exact current v2 runtime profile.
+
+## Non-Goals
+
+- Decide lease transition legality, identity, expiry, recovery, fencing, exact
+  retry, snapshot, or checkpoint meaning; Writer Lease owns those semantics.
+- Own Task Spec, Task Ledger, policy, orchestration, workspace, Codex, Git,
+  verification, Gateway, rate policy, or task status.
+- Add or modify a global Store migration, install itself during normal daemon
+  startup, or make Postgres Store its persistence owner.
+- Accept arbitrary SQL, table/function names, credentials, paths, actor data,
+  lease state fragments, or caller-constructed receipts.
+- Treat expiry alone, a receipt projected from itself, process memory, or an
+  unverified row set as current writer authority.
+
+## Owned Data
+
+- The exact `db/extensions/writer-lease/v1.sql` and append-only
+  `db/extensions/writer-lease/v2.sql` bytes, extension identities, checksums,
+  explicit administrative state transitions, and read-only verifiers.
+- Physical PostgreSQL tables, indexes, constraints, fixed functions, roles,
+  ownership, ACLs, transactions, and bounded retry/poison state used only for
+  Writer Lease persistence.
+- Immutable physical command/transition rows, the current aggregate row,
+  independently retained checkpoint, and monotonic fencing high-water value.
+- The complete current lease identity projection used by same-transaction
+  fenced writers; a copied digest/fence cannot authorize another Task binding.
+- Adapter-level database/schema/extension persistence evidence.
+
+Writer Lease 1.1 owns every semantic request, terminal receipt, authority
+receipt/head, transition, snapshot, checkpoint, and recovery decision.
+
+## Public Contracts
+
+- Implement the Writer Lease 1.1 repository trait for exact command execution,
+  replay-verified current-authority observation, and durable current-head
+  assertion.
+- Inspect one existing project in a repeatable-read read-only transaction and
+  return `None` only when no durable head/history exists. A returned project
+  summary means snapshot, independent checkpoint, current projection, and every
+  physical command/transition row were replayed byte-exactly; inspection never
+  creates a head, allocates a fence, or appends a command.
+- Consume one caller-supplied already-authenticated PostgreSQL client and one
+  exact verified target; read no environment, DSN, password, or credential
+  source.
+- Delegate all construction, transition, replay, exact retry, and checkpoint
+  verification to Writer Lease 1.1.
+- Commit the semantic command/receipt, optional transition, aggregate snapshot,
+  independently retained checkpoint, and fencing high-water atomically in one
+  bounded serializable transaction.
+- Classify exact retry before mutable admission/currentness checks. Changed
+  content under one command ID is denied without revealing the retained
+  receipt.
+- Install or verify only the exact extension manifest through explicit
+  administrative entrypoints. Normal runtime never auto-installs or repairs it.
+- Use fixed function calls only; expose no generic CRUD, arbitrary row, SQL,
+  schema/table name, raw client, migration, or credential API.
+
+## Invariants
+
+1. PostgreSQL contains at most one current `ACTIVE` or `SUSPECT` Writer Lease
+   aggregate per project.
+2. Fencing tokens are positive signed-BIGINT-safe, increase monotonically, and
+   are never reset, rolled back, wrapped, or reused across release, reconnect,
+   process restart, or database restart.
+3. The current authority row, fencing high-water, command/transition rows,
+   aggregate snapshot, and independent checkpoint advance atomically or not at
+   all.
+4. The adapter cannot construct or reinterpret a lease transition, receipt,
+   authority head, snapshot, or checkpoint outside Writer Lease 1.1 public
+   APIs.
+5. An untrusted row set becomes usable only after context-free replay, an
+   independent checkpoint/current-head match, and byte-exact comparison of
+   every physical command and transition row against domain canonical bytes.
+6. Runtime database identity, exact extension checksum, role, ownership, ACL,
+   relation, column/default/tombstone, constraint, index, type, function body/
+   result/configuration, and all-principal schema/table/function/column closure
+   are verified before repository use.
+7. The runtime role has no direct table mutation and may execute only the exact
+   fixed Writer Lease function allowlist.
+8. Unknown commit outcome never reports success or denial; exact retry or
+   reconciliation is required.
+9. Expiry is an observation, not proof of holder death. Revoke requires the
+   exact Writer Lease 1.1 recovery evidence.
+10. No secret, DSN, password, raw SQL, process output, or arbitrary diagnostic
+    is persisted in semantic rows, receipts, errors, or `Debug`.
+11. The extension does not alter global migrations, Store physical receipts,
+    Task Ledger rows, Codebase Memory rows, or another module's ACLs.
+12. A Fake Writer Lease, synthetic authority, or caller-supplied fencing token
+    cannot be represented as live repository evidence.
+13. Released history and absent history are not interchangeable. Terminal task
+    acceptance may require an existing replayed project with no current
+    authority and exact bounded high-water values.
+
+## Allowed Dependencies
+
+- `lattice-writer-lease` 1.1 public planner, repository, snapshot, checkpoint,
+  and replay APIs.
+- `lattice-contracts` immutable project, authority, and persistence evidence.
+- Exact pinned synchronous PostgreSQL, hashing, and bounded error libraries.
+- Rust standard library.
+
+## Forbidden Dependencies
+
+- Postgres Store implementation, Task Domain, Task Ledger, Policy,
+  Orchestrator, Gateway IPC, MCP, Codex, Workspace/Git, verification, Graphify,
+  Hermes, Codebase Memory, Guardian, provider/model SDKs, product repositories,
+  environment/credential loaders, dynamic SQL, migration discovery, or another
+  concrete adapter.
+
+## Failure, Compatibility, And Migration
+
+Missing, partial, drifted, unknown-version, wrong-checksum, wrong-owner,
+wrong-ACL, stale-head, serialization-exhausted, corrupt, overflowed, or
+outcome-unknown state fails closed with bounded typed errors. No adapter repair,
+row skipping, fallback fake, or synthetic genesis is allowed.
+
+Version 1.0 is an independent extension and does not change the immutable
+global migration history. Installation and rollback are explicit
+administrative operations. Rollback is allowed only before live lease state is
+admitted or through a later versioned migration that preserves fencing
+high-water/currentness; dropping durable authority to make tests pass is
+forbidden.
+
+Version 1.1 accepts only the closed bridge sequence defined by SPEC-003 v5 and
+TASK-076. The Writer owner may move an exact global-v3/Memory-v2/v1 profile to
+v2 bridge state only when replay proves all retained state and no current
+`ACTIVE` or `SUSPECT` lease exists. It later activates the same v2 identity
+only after exact global-v5/Memory-v3 verification. Both steps hold global,
+Memory, and Writer advisory locks in that order, preserve every semantic row
+and high-water, append exact ledger provenance, and fail closed on ambiguity.
+Every v2 bridge or pending profile, including `G3_M2_W2_BRIDGE`, never admits
+runtime use. Only the exact W1 current profile and the exact final W2 current
+profile are executable.
+
+## Acceptance Gates
+
+| Gate | Evidence | Owner | Required for merge |
+|---|---|---|---|
+| Extension closure | exact bytes/checksum, install/no-op, partial/drift/collision, columns/defaults/tombstones, constraints/indexes, function body/result/proconfig, namespace objects, and all-principal ACL matrices | Security review | yes |
+| Planner parity | PostgreSQL adapter uses Writer Lease 1.1 planner/replay/checkpoint without duplicate semantic builders | Architecture review | yes |
+| Concurrent authority | two concurrent acquire attempts yield one current writer and durable exact denial/retry evidence | Engineering | yes |
+| Fence safety | release/reacquire, reconnect, process/database restart, max/overflow, and stale-fence rejection prove monotonic non-reuse | Security review | yes |
+| Atomic durability | command/transition/snapshot/checkpoint/high-water commit together; physical rows replay exactly; real commit-response interruption reconciles safely | Engineering | yes |
+| Recovery | expiry, heartbeat, suspect, exact release, holder death, and newer-leadership matrices | Security review | yes |
+| Runtime isolation | fixed runtime functions only, direct table denial, no dynamic SQL/credential/environment input | Architecture review | yes |
+| Fresh replay | new client/process reconstructs exact current authority and checkpoint after PostgreSQL restart | Integration review | yes |
+| Full verification | format, strict lint, focused/workspace Rust tests, repository checks, and diff check | Engineering | yes |
+
+## Change Policy
+
+Extension identity, physical ownership, repository behavior, transaction
+boundary, fencing persistence, currentness, dependency direction, roles/ACLs,
+failure semantics, or acceptance gates require a versioned constitution
+amendment, SPEC/ADR trace, security and architecture review, and responsible-
+user authorization. This constitution cannot be weakened to relabel fake or
+synthetic evidence as production authority.
+
+## Amendment History
+
+| Version | Date | Decision reference | Summary | Approver |
+|---|---|---|---|---|
+| 1.0 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Independent exact PostgreSQL extension and repository for Writer Lease 1.1 with atomic replay/currentness and monotonic fencing | User TASK-038-first direction |
+| 1.1 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-023, TASK-076 | Preserve v1 history and add the Writer-owned v2 bridge/current profiles for global-v5/Memory-v3 without changing lease semantics or fencing bytes | User continuation authorization |

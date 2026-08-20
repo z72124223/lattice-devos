@@ -63,6 +63,16 @@ These rules add to, and do not weaken, the global Codex workflow.
 
 ## Development Workflow
 
+### Engineering Protocol
+
+- Before editing, read `docs/contracts/ENGINEERING_PROTOCOL_V1.md` and the
+  existing scope contracts it names.
+- Before claiming completion, reread it, inspect the final diff, run
+  `npm.cmd run check` and focused checks, and repair/retest reproducible
+  ordinary failures within the authorized scope.
+- Keep personal preferences, historical cases, and detailed decision logic in
+  LATTICE, Hermes, and the knowledge graph rather than expanding this entry.
+
 1. Read `PLANS.md`, the active specification/ticket, applicable ADRs, and every
    affected module constitution before editing.
 2. Keep exactly one current ticket after the V2 approval gate.

@@ -1,10 +1,10 @@
 ---
 module_id: lattice-ports
 name: LATTICE I/O Ports
-version: 1.7
+version: 1.9
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-05
+last_reviewed: 2026-08-15
 ---
 
 ## Mission
@@ -12,7 +12,7 @@ last_reviewed: 2026-08-05
 Define the abstract Rust traits through which orchestration reaches the gateway,
 sole product-code writer, read-only knowledge lane, untrusted research lane,
 typed physical control store, durable delivery ledger, bounded workspace/Git
-lane, and fixed-test lane.
+lane, fixed-test lane, and authoritative Task lifecycle repository lane.
 
 ## Non-Goals
 
@@ -28,6 +28,9 @@ lane, and fixed-test lane.
 
 - Port traits, external-port errors, and a component-free inbound
   `GatewayServiceError`.
+- Bounded `TaskLifecycleError` and replay-derived `TaskLifecycleEvidence`
+  transport values. Task Domain remains the semantic owner of `TaskState` and
+  transition legality.
 - No runtime, durable, product, credential, or provider-session data.
 
 ## Public Contracts
@@ -38,7 +41,9 @@ lane, and fixed-test lane.
 - `GatewayService` returns `GatewayServiceResult`: Rust-core routing or
   reply-binding failures cannot be attributed to an external component.
 - `DeliveryCodexPort` is the sole typed product-code mutation contract used by
-  Orchestrator 2.1. The earlier generic `CodexPort` remains source-compatible
+  Orchestrator 2.3. Its request binds the complete Task Spec digest, durable
+  intent, prepared workspace, and current Writer Lease/fencing evidence. The
+  earlier generic `CodexPort` remains source-compatible
   only for pre-delivery consumers; it is frozen and cannot be wired as a
   second production writer beside the typed delivery lane.
 - `GraphifyPort` returns derived read-only evidence.
@@ -52,6 +57,14 @@ lane, and fixed-test lane.
 - `DeliveryLedgerPort` records typed intent before an effect, records typed
   terminal outcome/receipt after it, and loads exact status without exposing a
   database client, SQL, credential, or schema detail.
+- `TaskLifecyclePort` admits one exact Task binding/client request, appends one
+  Task-Ledger-owned autonomy receipt, appends one caller-validated state
+  transition, records one result digest, and loads one replay-derived
+  authoritative lifecycle projection. The neutral projection carries one
+  closed `TaskLifecycleAutonomyEvidence` sum type: `Unadmitted`,
+  `HistoricalOptional(Option<receipt>)`, or `RequiredComplete(receipt)`. It exposes no
+  SQL, database client, event fragment, arbitrary payload, cache, or alternate
+  state mutation, and it does not decide transition or receipt legality.
 - `WorkspaceGitPort` prepares/inspects the preconfigured bounded workspace and
   creates a local commit only from typed passing scope/test evidence. It
   exposes no arbitrary command or caller-selected path.
@@ -69,7 +82,9 @@ lane, and fixed-test lane.
 
 ## Invariants
 
-1. This crate depends only on `lattice-contracts`.
+1. This crate depends only on `lattice-contracts` and Task Domain 2.2. The Task
+   Domain dependency is limited to the closed `TaskState` value used by
+   `TaskLifecyclePort`; no validation/planning implementation enters Ports.
 2. OpenClaw is an inbound gateway client, never a second control core or an
    outbound provider selected by orchestration.
 3. Traits expose no concrete database, filesystem, or process type.
@@ -103,15 +118,43 @@ lane, and fixed-test lane.
     scope and fixed-test evidence.
 15. Unknown ledger, Codex, workspace, test, or Git outcome never becomes a
     successful port result.
+16. The Task lifecycle port owns no Task Domain legality or workflow
+    order. Orchestrator supplies validated typed transitions/effects and the
+    adapter delegates append/replay to Task Ledger semantics.
+17. A Task-control status load performs no workspace, Codex, verification,
+    Git, Graphify, Hermes, or Memory effect and returns no raw event,
+    diagnostic, prompt, command, path, SQL, secret, lease/fence, or child
+    output.
+18. No task port accepts caller-selected actor authority, project path,
+    verification command, writer lease, fencing token, or Codex thread.
+19. Writer Lease repository semantics/traits remain owned by Writer Lease 1.1;
+    this crate neither duplicates nor wraps them into a second authority.
+20. `TaskLifecycleAutonomyEvidence` is only a transport of Task Ledger verified
+    state. Its closed variants prevent a required profile without a receipt,
+    a missing profile with a receipt, or an unadmitted stream from being
+    represented as admitted. Ports does not parse `TASK_CREATED.action` or
+    select a profile.
+21. `record_autonomy_receipt` transports an already bound Writer authority to
+    the adapter and returns replay-derived evidence. Ports cannot build,
+    classify, hash, persist, or independently validate the receipt.
+22. A required profile with a missing receipt is Ledger reconciliation and has
+    no successful `TaskLifecycleEvidence` representation. `admit` may expose
+    only the bounded `TaskLifecycleAdmission::PendingRequiredReceipt` result so
+    the exact sequence-2 append can reconcile it; normal `load`, transition,
+    dispatch, and Status must reject it. It is never normal Draft success or
+    terminal Status. Historical optional evidence may contain `None`; no caller
+    Boolean or independent `Option` selects the rule.
 
 ## Allowed Dependencies
 
 - `lattice-contracts`.
+- `lattice-task-domain` 2.2 only for the closed `TaskState` representation in
+  Task lifecycle request/evidence signatures.
 - Rust standard library.
 
 ## Forbidden Dependencies
 
-- Concrete adapters, Orchestrator, policy, database drivers, network/process
+- Concrete adapters, Orchestrator, policy implementation, database drivers, network/process
   clients, model SDKs, credentials, and product repositories.
 
 ## Failure, Compatibility, And Migration
@@ -137,6 +180,19 @@ with `(GatewayPeerContext, GatewayRequest) -> GatewayReply`; physical codec and
 authentication remain outside this crate. Later signature or semantic changes
 require a versioned amendment and coordinated consumer migration.
 
+Version 1.8 adds the neutral Task lifecycle repository boundary and lease-bound
+Codex-delivery request shape for Orchestrator 2.3. It retains the contracts-only
+core boundary except for an explicit one-way Task Domain 2.2 dependency on the
+closed `TaskState` value. It adds no database, domain transition implementation,
+lease, process, filesystem, Git, MCP, actor-authentication, or workflow
+implementation.
+
+Version 1.9 records the internal autonomy-receipt method and projection as a
+versioned lifecycle contract and adds the neutral closed autonomy-evidence sum type.
+Task Ledger 2.3 remains the semantic owner; adapters fail closed on required
+profile progress or Status without the receipt. No public MCP field, SQL type,
+profile selector, or caller authority is added.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -144,7 +200,9 @@ require a versioned amendment and coordinated consumer migration.
 | Port contract tests | `cargo test -p lattice-ports` | Engineering | yes |
 | Store error/trait shape | complete transaction/current-head compile and failure matrix | Security review | yes |
 | Delivery effect traits | compile-time lane separation plus intent/outcome, fixed-test, scope-before-commit, and unknown-outcome matrices | Engineering | yes |
-| Dependency direction | Cargo metadata inspection | Architecture review | yes |
+| Task lifecycle trait | compile-time exact admit/transition/result/load separation, typed failure/replay evidence, and no raw event/SQL/cache surface | Engineering | yes |
+| Lease-bound writer | complete spec/intent/workspace/lease/fence mutation matrix and generic-writer non-wiring proof | Security review | yes |
+| Dependency direction | Cargo metadata proves only Contracts plus Task Domain's closed `TaskState`, with no adapter/orchestrator/I/O dependency | Architecture review | yes |
 | Full Rust verification | workspace format, lint, and tests | Engineering | yes |
 
 ## Change Policy
@@ -164,3 +222,6 @@ approval.
 | 1.4 | 2026-08-02 | SPEC-002 v22, ADR-018, TASK-020 | Explicit mutable current-head query and live physical receipt semantics without exposing a driver | User MVP-3 execution directive |
 | 1.5 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Typed delivery-ledger, bounded workspace/Git, and fixed-test traits while retaining contracts-only dependency direction | User approval in preceding implementation window |
 | 1.6 | 2026-08-05 | SPEC-002 v26, ADR-021 clarification, TASK-032 | Record the approved typed `DeliveryCodexPort` specialization; freeze generic `CodexPort` outside the production delivery composition | User approval of typed delivery contracts/ports in preceding implementation window |
+| 1.7 | 2026-08-05 | SPEC-002 v26, ADR-022, TASK-033 | Add exact snapshot, Graphify analysis, PostgreSQL Memory, and retrieval ports while retaining contracts-only dependencies | User TASK-033 direction |
+| 1.8 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Add neutral Task lifecycle operations, an explicit Task Domain `TaskState` dependency, and lease-bound sole-writer requests for bounded MCP Submit/Status | User TASK-038-first direction |
+| 1.9 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Version the internal autonomy-receipt/profile projection boundary and required-profile fail-closed transport semantics without changing public MCP | User-approved TASK-050 repair amendment |

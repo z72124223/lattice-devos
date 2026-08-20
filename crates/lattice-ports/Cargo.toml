@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 lattice-contracts = { path = "../lattice-contracts" }
+lattice-task-domain = { path = "../lattice-task-domain" }
 
 [lints]
 workspace = true

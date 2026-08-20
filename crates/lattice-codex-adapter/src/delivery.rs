@@ -263,6 +263,15 @@ fn delivery_output_digest(
     ] {
         hash_field(&mut hasher, field.as_bytes());
     }
+    if let Some(authority) = request.writer_authority() {
+        hash_field(&mut hasher, b"WRITER_LEASE_PRESENT");
+        hash_field(&mut hasher, authority.receipt_digest().as_str().as_bytes());
+        hash_field(&mut hasher, authority.identity().lease_id().as_bytes());
+        hash_field(
+            &mut hasher,
+            &authority.identity().fencing_token().get().to_le_bytes(),
+        );
+    }
     hash_field(
         &mut hasher,
         &u64::try_from(identity.schema_file_count())

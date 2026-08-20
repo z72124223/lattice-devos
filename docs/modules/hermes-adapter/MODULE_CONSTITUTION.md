@@ -1,10 +1,10 @@
 ---
 module_id: hermes-adapter
 name: LATTICE Hermes Reflection Adapter
-version: 1.0
+version: 1.1
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-05
+last_reviewed: 2026-08-13
 ---
 
 ## Mission
@@ -32,6 +32,11 @@ a verified whole-process OS containment boundary after an exact graph receipt.
 - Use one absolute deadline across capability, submit, event, and status work.
 - Return only a closed schema-valid `INFERENCE/CANDIDATE` envelope with exact
   provenance and digest; post-submit ambiguity never causes resubmission.
+- Production admission and its ephemeral receipt bind only inputs that the
+  production process path actually executes or consumes. A non-executed
+  helper path or caller-supplied matching digest cannot become a trust gate.
+- Retain `lattice-hermes-broker` only as an independent legacy one-shot entry;
+  it cannot mint or substitute for the production Codex-proxy receipt.
 
 ## Invariants
 
@@ -41,6 +46,8 @@ a verified whole-process OS containment boundary after an exact graph receipt.
 3. Version probes receive no API key or provider credential.
 4. Hermes output cannot authorize, mutate, persist itself, or become truth.
 5. Fresh LATTICE status reads PostgreSQL only and performs zero Hermes calls.
+6. The contained production proxy executes the exact verified Codex launcher;
+   legacy helper identity has no production admission authority.
 
 ## Allowed Dependencies
 
@@ -68,6 +75,7 @@ must not be claimed because that release is not published there.
 | Closed context/output | substitution, secret, schema and provenance matrix | Engineering | yes |
 | Deadline/recovery | one deadline and no post-submit resubmission | Engineering | yes |
 | Durable replay | PostgreSQL survives restart; fresh status makes zero Hermes calls | Integration | yes |
+| Executed-input identity | v2 receipt golden, stale helper-variable no-effect test, exact launcher plan, legacy helper isolation | Engineering and security review | yes |
 
 ## Change Policy
 
@@ -78,4 +86,5 @@ changes require a versioned amendment and responsible-user approval.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 1.1 | 2026-08-13 | SPEC-002 v31, TASK-065 | Remove the non-executed broker helper from production admission and receipt identity; retain its legacy one-shot protocol separately | User goal-mode direction to complete Hermes |
 | 1.0 | 2026-08-05 | SPEC-002 v27, V2 amendment, PLANS Step 9, TASK-033 | Contained reflection with PostgreSQL-owned replay | User full-chain directive |

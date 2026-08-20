@@ -1,9 +1,13 @@
 use lattice_contracts::{
     AttemptId, CONTRACT_VERSION, CodexDeliveryEvidence, CodexDeliveryRequest,
-    CompletedDeliveryEvidence, ContentDigest, DeliveryOutcomeEvidence, DeliveryOutcomeRequest,
-    DeliveryProfile, DeliveryReceipt, DeliveryRunRequest, DeliveryRuntime, DeliveryStage,
-    DeliveryTerminalStatus, FixedTestEvidence, GitCommitEvidence, Invocation,
-    PreparedWorkspaceEvidence, ProjectSnapshotId, RequestId, TaskId, WorkspaceChangeEvidence,
+    CompletedDeliveryEvidence, ContentDigest, DaemonEpoch, DeliveryContractError,
+    DeliveryOutcomeEvidence, DeliveryOutcomeRequest, DeliveryProfile, DeliveryReceipt,
+    DeliveryRunRequest, DeliveryRuntime, DeliveryStage, DeliveryTerminalStatus, FencingToken,
+    FixedTestEvidence, GitCommitEvidence, HolderProcessId, Invocation, PreparedWorkspaceEvidence,
+    ProjectId, ProjectSnapshotId, RequestId, RuntimeAdmissionMode, RuntimeKind, TaskId,
+    WRITER_LEASE_PRODUCER_ID, WRITER_LEASE_PRODUCER_VERSION, WorkspaceChangeEvidence,
+    WriterLeaseAuthorityHead, WriterLeaseAuthorityReceipt, WriterLeaseIdentity,
+    WriterLeaseRevision, WriterLeaseStatus,
 };
 
 fn digest(byte: char) -> ContentDigest {
@@ -175,6 +179,196 @@ fn failure_and_reconciliation_are_distinct_terminal_states() {
         DeliveryOutcomeRequest::failed(&request, &intent, DeliveryStage::FixedTest, "bad\ncode",)
             .is_err()
     );
+}
+
+#[test]
+fn governed_codex_request_retains_only_an_exact_live_active_writer_head() {
+    let (run, intent, workspace) = governed_request_parts("request-governed");
+    let authority = writer_authority(
+        "snapshot-1",
+        "TASK-032",
+        "attempt-1",
+        digest('a'),
+        RuntimeKind::Live,
+        WriterLeaseStatus::Active,
+        RuntimeAdmissionMode::Active,
+        1,
+    );
+
+    let governed = CodexDeliveryRequest::new_governed(run, intent, workspace, authority.clone())
+        .expect("exact live authority is admitted");
+
+    assert_eq!(governed.writer_authority(), Some(&authority));
+}
+
+#[test]
+fn governed_codex_request_rejects_cross_bound_or_inactive_writer_authority() {
+    let (run, intent, workspace) = governed_request_parts("request-governed-mismatch");
+    let mismatches = [
+        (
+            "different-snapshot",
+            "TASK-032",
+            "attempt-1",
+            'a',
+            RuntimeKind::Live,
+            WriterLeaseStatus::Active,
+            RuntimeAdmissionMode::Active,
+        ),
+        (
+            "snapshot-1",
+            "TASK-999",
+            "attempt-1",
+            'a',
+            RuntimeKind::Live,
+            WriterLeaseStatus::Active,
+            RuntimeAdmissionMode::Active,
+        ),
+        (
+            "snapshot-1",
+            "TASK-032",
+            "different-attempt",
+            'a',
+            RuntimeKind::Live,
+            WriterLeaseStatus::Active,
+            RuntimeAdmissionMode::Active,
+        ),
+        (
+            "snapshot-1",
+            "TASK-032",
+            "attempt-1",
+            '9',
+            RuntimeKind::Live,
+            WriterLeaseStatus::Active,
+            RuntimeAdmissionMode::Active,
+        ),
+        (
+            "snapshot-1",
+            "TASK-032",
+            "attempt-1",
+            'a',
+            RuntimeKind::Fake,
+            WriterLeaseStatus::Active,
+            RuntimeAdmissionMode::Active,
+        ),
+        (
+            "snapshot-1",
+            "TASK-032",
+            "attempt-1",
+            'a',
+            RuntimeKind::Live,
+            WriterLeaseStatus::Suspect,
+            RuntimeAdmissionMode::Active,
+        ),
+        (
+            "snapshot-1",
+            "TASK-032",
+            "attempt-1",
+            'a',
+            RuntimeKind::Live,
+            WriterLeaseStatus::Active,
+            RuntimeAdmissionMode::ReconciliationRequired,
+        ),
+    ];
+
+    for (snapshot, task, attempt, subject, runtime, status, admission) in mismatches {
+        let mismatch = writer_authority(
+            snapshot,
+            task,
+            attempt,
+            digest(subject),
+            runtime,
+            status,
+            admission,
+            1,
+        );
+        assert_eq!(
+            CodexDeliveryRequest::new_governed(
+                run.clone(),
+                intent.clone(),
+                workspace.clone(),
+                mismatch,
+            ),
+            Err(DeliveryContractError::CrossBinding {
+                field: "codex_writer_authority"
+            })
+        );
+    }
+}
+
+fn governed_request_parts(
+    request_id: &str,
+) -> (
+    DeliveryRunRequest,
+    lattice_contracts::DurableIntentEvidence,
+    PreparedWorkspaceEvidence,
+) {
+    let run = DeliveryRunRequest::new(
+        invocation(request_id),
+        DeliveryProfile::Task032CodexPostgres,
+        digest('b'),
+    )
+    .expect("request");
+    let intent =
+        lattice_contracts::DurableIntentEvidence::new(&run, digest('1')).expect("intent evidence");
+    let workspace = PreparedWorkspaceEvidence::new(
+        &run,
+        &intent,
+        "workspace-1",
+        r"C:\bounded\repo",
+        "1".repeat(40),
+        digest('2'),
+    )
+    .expect("workspace");
+    (run, intent, workspace)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn writer_authority(
+    snapshot: &str,
+    task: &str,
+    attempt: &str,
+    task_spec_digest: ContentDigest,
+    runtime: RuntimeKind,
+    status: WriterLeaseStatus,
+    admission: RuntimeAdmissionMode,
+    fence: u64,
+) -> WriterLeaseAuthorityHead {
+    let identity = WriterLeaseIdentity::new(
+        ProjectId::new("project-1").expect("project"),
+        ProjectSnapshotId::new(snapshot).expect("snapshot"),
+        TaskId::new(task).expect("task"),
+        "1",
+        task_spec_digest,
+        AttemptId::new(attempt).expect("attempt"),
+        "lease-1",
+        "codex-writer-1",
+        "worktree-1",
+        HolderProcessId::new(42).expect("process"),
+        digest('6'),
+        "daemon-1",
+        DaemonEpoch::new(1).expect("daemon epoch"),
+        FencingToken::new(fence).expect("fencing token"),
+    )
+    .expect("writer identity");
+    WriterLeaseAuthorityReceipt::new(
+        CONTRACT_VERSION,
+        WRITER_LEASE_PRODUCER_ID,
+        WRITER_LEASE_PRODUCER_VERSION,
+        runtime,
+        identity,
+        status,
+        WriterLeaseRevision::new(1).expect("writer revision"),
+        admission,
+        "2026-08-09T00:00:00Z",
+        "2026-08-09T00:00:30Z",
+        "2026-08-09T00:05:00Z",
+        digest('3'),
+        digest('4'),
+        digest('5'),
+        digest('7'),
+    )
+    .expect("writer receipt")
+    .head()
 }
 
 fn completed_chain(

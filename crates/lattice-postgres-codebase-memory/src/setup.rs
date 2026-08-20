@@ -7,15 +7,426 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     CODEBASE_MEMORY_EXTENSION_ID, CODEBASE_MEMORY_EXTENSION_PATH,
-    CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION, verify_embedded_extension_manifest,
+    CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION, CODEBASE_MEMORY_V2_EXTENSION_PATH,
+    verify_embedded_extension_manifest, verify_embedded_v2_extension_manifest,
 };
 
 const SUPPORTED_POSTGRES_MAJOR: u32 = 17;
-const REQUIRED_GLOBAL_SCHEMA_VERSION: u16 = 3;
+const REQUIRED_GLOBAL_SCHEMA_VERSION: u16 = 5;
+// Updated only after the exact six-entry global manifest is frozen.
 const REQUIRED_GLOBAL_MANIFEST_SHA256: &str =
+    "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
+const HISTORICAL_V2_GLOBAL_SCHEMA_VERSION: u16 = 3;
+const HISTORICAL_V2_GLOBAL_MANIFEST_SHA256: &str =
     "09c431df18ad71a4f44239a5d2ddf6b1774b8ffec06c7f9223f0e41757f3d407";
 const DATABASE_IDENTITY_DOMAIN: &[u8] = b"LATTICE_POSTGRES_DATABASE_IDENTITY_V1\0";
+const GLOBAL_MIGRATION_ADVISORY_LOCK: i64 = 0x4c41_5454_4943_4501;
 const EXTENSION_ADVISORY_LOCK: i64 = 0x4c41_5443_4d45_4d31;
+const WRITER_LEASE_ADVISORY_LOCK: i64 = 0x4c41_5457_4c45_4131;
+const CATALOG_SIGNATURE_DOMAIN: &[u8] = b"LATTICE_POSTGRES_CATALOG_SIGNATURE_V1\0";
+
+const WRITER_LEASE_EXTENSION_ID: &str = "lattice-writer-lease";
+const WRITER_LEASE_V1_SCHEMA_VERSION: i16 = 1;
+const WRITER_LEASE_V1_SQL_SHA256: &str =
+    "63ffbf8f8b6c22bf35c3d393bd84e9462ca37e4ace94ceaedd6c27b729daa562";
+const WRITER_LEASE_V1_MANIFEST_SHA256: &str =
+    "0179e2a9b0976008902ab0d1cce6ab493a16047a649571f9ce4f13cc53cc6b33";
+const WRITER_LEASE_V2_SCHEMA_VERSION: i16 = 2;
+const WRITER_LEASE_V2_PATH: &str = "db/extensions/writer-lease/v2.sql";
+// Frozen with the Writer-owned append-only v2 profile before live acceptance.
+const WRITER_LEASE_V2_SQL_SHA256: &str =
+    "8243fd39a3565c641423fde3f15cf801a4a48a12c8d238ae8e1657acdcdc56e3";
+const WRITER_LEASE_V2_MANIFEST_SHA256: &str =
+    "5f54c182465c8e2dc8a6e6cc2ebd9a375f776adf500656586e59bfbc7dfd31a4";
+const MEMORY_V2_MANIFEST_SHA256: &str =
+    "0aedbd7d9ef7ca07fc2910d0da34c163cc83e3dd56f9b28292ae1f4f0c3c4d7e";
+const MEMORY_V3_MANIFEST_SHA256: &str =
+    "d4cc712d262ae1f7c96bd65526eab611c90e193363afd865af2126307b2903f0";
+
+const WRITER_LEASE_EXPECTED_TABLES: [&str; 5] = [
+    "writer_lease_commands",
+    "writer_lease_extension_identity",
+    "writer_lease_extension_ledger",
+    "writer_lease_heads",
+    "writer_lease_transitions",
+];
+const WRITER_LEASE_EXPECTED_FUNCTIONS: [&str; 9] = [
+    "writer_lease_assert_current_v1",
+    "writer_lease_bind_runtime_v1",
+    "writer_lease_bind_runtime_v2",
+    "writer_lease_commit_plan_v1",
+    "writer_lease_load_commands_v1",
+    "writer_lease_load_current_v1",
+    "writer_lease_load_for_update_v1",
+    "writer_lease_load_for_update_v2",
+    "writer_lease_load_transitions_v1",
+];
+const WRITER_LEASE_BRIDGE_RUNTIME_FUNCTIONS: [&str; 0] = [];
+const WRITER_LEASE_CURRENT_RUNTIME_FUNCTIONS: [&str; 7] = [
+    "writer_lease_assert_current_v1",
+    "writer_lease_bind_runtime_v2",
+    "writer_lease_commit_plan_v1",
+    "writer_lease_load_commands_v1",
+    "writer_lease_load_current_v1",
+    "writer_lease_load_for_update_v2",
+    "writer_lease_load_transitions_v1",
+];
+
+// Frozen from the coordinated marker-owned disposable PostgreSQL 17 fixture.
+const V2_EXPECTED_RELATION_SIGNATURE: &str =
+    "5631c99dc7aa577e9a27fd0ed5fcf6c4f5f497bb912c66e2a3cb7ef1d58e44a9";
+const V2_EXPECTED_COLUMN_SIGNATURE: &str =
+    "b5a5532fdf430ac33fed991a1911e03a00796c1903913735fe7d21c1ccc9192c";
+const V2_EXPECTED_CONSTRAINT_SIGNATURE: &str =
+    "146b3a028be4a53594d1e5fb6f1467b47bcd7e8a51adfb917adcb37d2896aafa";
+const V2_EXPECTED_INDEX_SIGNATURE: &str =
+    "fa3057263dff10100258845861a0f186b699f8e687f50afcb2ab42af9c4fc9d4";
+const V2_EXPECTED_FUNCTION_SIGNATURE: &str =
+    "40a74ca1e6c7c51dc70d4ec87e02a07ed2de5650d7c87db3fc1b9d4b8298e573";
+const V2_EXPECTED_TABLE_ACL_SIGNATURE: &str =
+    "e7c870b9c6283f4878f3669f14269f0ee6f00e97819a3a484cd86a0314f69960";
+const V2_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
+    "0f30496f3b905e73fa907c716d77e6a8a6a2a72de91b07c35b8b5160af1f7a51";
+const V2_EXPECTED_SCHEMA_ACL_SIGNATURE: &str =
+    "9b049b7344630b703b9550c0ec7c7c917d47d3b3f24de170334f247447ebdb0b";
+const V3_EXPECTED_RELATION_SIGNATURE: &str =
+    "1a1da07041f8164ffa4b3a1ca0062019ffa9ef570d2be8313de8278222e7be33";
+const V3_EXPECTED_COLUMN_SIGNATURE: &str =
+    "8cbcc9e650d09f31982f20d12e0e85c756ddd03a7524392d429804c2b3cd1b9a";
+const V3_EXPECTED_CONSTRAINT_SIGNATURE: &str =
+    "e1d460c1e5aeceff8912301335b94926b959ec34d5e2e8fc98541e9a342a6456";
+const V3_EXPECTED_INDEX_SIGNATURE: &str =
+    "118108a135f2482ea6e0cba99de6fafbef5a1262184c042798cdde2ce2a462b5";
+const V3_EXPECTED_FUNCTION_SIGNATURE: &str =
+    "552617bd2f5ef441b6db07db94d87fadd62c8d1b1bccc1f01f2958e269ca34a9";
+const V3_EXPECTED_TABLE_ACL_SIGNATURE: &str =
+    "e7c870b9c6283f4878f3669f14269f0ee6f00e97819a3a484cd86a0314f69960";
+const V3_EXPECTED_FUNCTION_ACL_SIGNATURE: &str =
+    "501f47077e0b58b6694f7ff778a646de210252aa6f129083fa17b7d2cc7030fb";
+const V3_EXPECTED_SCHEMA_ACL_SIGNATURE: &str =
+    "9b049b7344630b703b9550c0ec7c7c917d47d3b3f24de170334f247447ebdb0b";
+
+const RELATION_SIGNATURE_SQL: &str = r"
+    SELECT pg_catalog.jsonb_build_array(
+        n.nspname, c.relname, c.relkind::text, owner.rolname,
+        c.relpersistence::text, c.relrowsecurity, c.relforcerowsecurity,
+        c.relhassubclass, c.relispartition, c.relreplident::text,
+        COALESCE(pg_catalog.array_to_string(c.reloptions, ','), '<NULL>'),
+        COALESCE(pg_catalog.obj_description(c.oid, 'pg_class'), '<NULL>')
+    )::text
+    FROM pg_catalog.pg_class AS c
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+    JOIN pg_catalog.pg_roles AS owner ON owner.oid = c.relowner
+    WHERE n.nspname = 'memory' AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+    ORDER BY c.relname
+";
+
+const COLUMN_SIGNATURE_SQL: &str = r"
+    SELECT pg_catalog.jsonb_build_array(
+        c.relname, a.attnum, a.attname,
+        pg_catalog.format_type(a.atttypid, a.atttypmod),
+        a.attnotnull, a.attisdropped,
+        COALESCE(pg_catalog.pg_get_expr(ad.adbin, ad.adrelid, false), '<NULL>'),
+        a.attidentity::text, a.attgenerated::text,
+        CASE WHEN coll.oid IS NULL THEN '<NULL>'
+             ELSE coll_ns.nspname || '.' || coll.collname END,
+        a.attstorage::text, a.attcompression::text, a.attstattarget,
+        COALESCE(a.attacl::text, '<NULL>')
+    )::text
+    FROM pg_catalog.pg_class AS c
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+    JOIN pg_catalog.pg_attribute AS a ON a.attrelid = c.oid
+    LEFT JOIN pg_catalog.pg_attrdef AS ad ON ad.adrelid = c.oid AND ad.adnum = a.attnum
+    LEFT JOIN pg_catalog.pg_collation AS coll ON coll.oid = a.attcollation
+    LEFT JOIN pg_catalog.pg_namespace AS coll_ns ON coll_ns.oid = coll.collnamespace
+    WHERE n.nspname = 'memory' AND c.relkind IN ('r', 'p') AND a.attnum > 0
+    ORDER BY c.relname, a.attnum
+";
+
+const CONSTRAINT_SIGNATURE_SQL: &str = r"
+    SELECT pg_catalog.jsonb_build_array(
+        c.relname, con.conname, con.contype::text, con.convalidated,
+        con.condeferrable, con.condeferred, con.connoinherit,
+        con.conislocal, con.coninhcount, con.conkey,
+        ref_ns.nspname, ref_class.relname, con.confkey,
+        con.confupdtype::text, con.confdeltype::text, con.confmatchtype::text,
+        pg_catalog.pg_get_constraintdef(con.oid, false)
+    )::text
+    FROM pg_catalog.pg_constraint AS con
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = con.connamespace
+    JOIN pg_catalog.pg_class AS c ON c.oid = con.conrelid
+    LEFT JOIN pg_catalog.pg_class AS ref_class ON ref_class.oid = con.confrelid
+    LEFT JOIN pg_catalog.pg_namespace AS ref_ns ON ref_ns.oid = ref_class.relnamespace
+    WHERE n.nspname = 'memory'
+    ORDER BY c.relname, con.conname
+";
+
+const INDEX_SIGNATURE_SQL: &str = r"
+    SELECT pg_catalog.jsonb_build_array(
+        table_class.relname, index_class.relname, i.indisunique, i.indisprimary,
+        i.indisvalid, i.indisready, i.indislive, i.indisclustered,
+        i.indisreplident, i.indnullsnotdistinct,
+        pg_catalog.pg_get_indexdef(i.indexrelid, 0, true)
+    )::text
+    FROM pg_catalog.pg_index AS i
+    JOIN pg_catalog.pg_class AS table_class ON table_class.oid = i.indrelid
+    JOIN pg_catalog.pg_class AS index_class ON index_class.oid = i.indexrelid
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = table_class.relnamespace
+    WHERE n.nspname = 'memory'
+    ORDER BY table_class.relname, index_class.relname
+";
+
+const FUNCTION_SIGNATURE_SQL: &str = r"
+    SELECT pg_catalog.jsonb_build_array(
+        p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid),
+        pg_catalog.pg_get_function_result(p.oid), owner.rolname, language.lanname,
+        p.prokind::text, p.prosecdef, p.proleakproof, p.provolatile::text,
+        p.proparallel::text, p.proisstrict, p.proretset, p.pronargs,
+        p.pronargdefaults, p.prorettype::regtype::text, p.proargtypes::text,
+        COALESCE(p.proallargtypes::text, '<NULL>'),
+        COALESCE(p.proargmodes::text, '<NULL>'),
+        COALESCE(p.proargnames::text, '<NULL>'),
+        COALESCE(pg_catalog.array_to_string(p.proconfig, ','), '<NULL>'),
+        COALESCE(p.probin, '<NULL>'), p.prosrc,
+        pg_catalog.pg_get_functiondef(p.oid),
+        COALESCE(pg_catalog.obj_description(p.oid, 'pg_proc'), '<NULL>')
+    )::text
+    FROM pg_catalog.pg_proc AS p
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+    JOIN pg_catalog.pg_roles AS owner ON owner.oid = p.proowner
+    JOIN pg_catalog.pg_language AS language ON language.oid = p.prolang
+    WHERE n.nspname = 'memory'
+    ORDER BY p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid)
+";
+
+const TABLE_ACL_SIGNATURE_SQL: &str = r"
+    SELECT pg_catalog.jsonb_build_array(
+        c.relname, owner.rolname, COALESCE(grantee.rolname, 'PUBLIC'),
+        grantor.rolname, acl.privilege_type, acl.is_grantable
+    )::text
+    FROM pg_catalog.pg_class AS c
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+    JOIN pg_catalog.pg_roles AS owner ON owner.oid = c.relowner
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+        COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))
+    ) AS acl
+    LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
+    JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = acl.grantor
+    WHERE n.nspname = 'memory' AND c.relkind IN ('r', 'p')
+    ORDER BY c.relname, owner.rolname, COALESCE(grantee.rolname, 'PUBLIC'),
+             grantor.rolname, acl.privilege_type, acl.is_grantable
+";
+
+const FUNCTION_ACL_SIGNATURE_SQL: &str = r"
+    SELECT pg_catalog.jsonb_build_array(
+        p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid),
+        owner.rolname, COALESCE(grantee.rolname, 'PUBLIC'), grantor.rolname,
+        acl.privilege_type, acl.is_grantable
+    )::text
+    FROM pg_catalog.pg_proc AS p
+    JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+    JOIN pg_catalog.pg_roles AS owner ON owner.oid = p.proowner
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+        COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))
+    ) AS acl
+    LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
+    JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = acl.grantor
+    WHERE n.nspname = 'memory'
+    ORDER BY p.proname, pg_catalog.pg_get_function_identity_arguments(p.oid),
+             owner.rolname, COALESCE(grantee.rolname, 'PUBLIC'), grantor.rolname,
+             acl.privilege_type, acl.is_grantable
+";
+
+const SCHEMA_ACL_SIGNATURE_SQL: &str = r"
+    SELECT pg_catalog.jsonb_build_array(
+        n.nspname, owner.rolname, COALESCE(grantee.rolname, 'PUBLIC'),
+        grantor.rolname, acl.privilege_type, acl.is_grantable
+    )::text
+    FROM pg_catalog.pg_namespace AS n
+    JOIN pg_catalog.pg_roles AS owner ON owner.oid = n.nspowner
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+        COALESCE(n.nspacl, pg_catalog.acldefault('n', n.nspowner))
+    ) AS acl
+    LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = acl.grantee
+    JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = acl.grantor
+    WHERE n.nspname = 'memory'
+    ORDER BY owner.rolname, COALESCE(grantee.rolname, 'PUBLIC'), grantor.rolname,
+             acl.privilege_type, acl.is_grantable
+";
+
+const WRITER_LEASE_RELATION_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,c.relkind::text,o.rolname,c.relpersistence::text,c.relrowsecurity,\
+    c.relforcerowsecurity,c.relhassubclass,c.relispartition,c.relreplident::text,\
+    COALESCE(pg_catalog.array_to_string(c.reloptions,','),'<NULL>'),\
+    COALESCE(pg_catalog.obj_description(c.oid,'pg_class'),'<NULL>'))::text \
+    FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=c.relowner \
+    WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') \
+    ORDER BY n.nspname,c.relname";
+const WRITER_LEASE_COLUMN_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,a.attnum,a.attname,pg_catalog.format_type(a.atttypid,a.atttypmod),\
+    a.attnotnull,a.attisdropped,COALESCE(pg_catalog.pg_get_expr(ad.adbin,ad.adrelid,false),'<NULL>'),\
+    a.attidentity::text,a.attgenerated::text,CASE WHEN coll.oid IS NULL THEN '<NULL>' \
+    ELSE coll_ns.nspname||'.'||coll.collname END,a.attstorage::text,a.attcompression::text,\
+    a.attstattarget)::text FROM pg_catalog.pg_class c \
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+    JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid \
+    LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid=c.oid AND ad.adnum=a.attnum \
+    LEFT JOIN pg_catalog.pg_collation coll ON coll.oid=a.attcollation \
+    LEFT JOIN pg_catalog.pg_namespace coll_ns ON coll_ns.oid=coll.collnamespace \
+    WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') AND a.attnum>0 \
+    ORDER BY n.nspname,c.relname,a.attnum";
+const WRITER_LEASE_CONSTRAINT_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,con.conname,con.contype::text,con.convalidated,con.condeferrable,\
+    con.condeferred,con.connoinherit,con.conislocal,con.coninhcount,con.conkey,ref_ns.nspname,\
+    ref.relname,con.confkey,con.confupdtype::text,con.confdeltype::text,con.confmatchtype::text,\
+    pg_catalog.pg_get_constraintdef(con.oid,false))::text \
+    FROM pg_catalog.pg_constraint con JOIN pg_catalog.pg_namespace n ON n.oid=con.connamespace \
+    JOIN pg_catalog.pg_class c ON c.oid=con.conrelid \
+    LEFT JOIN pg_catalog.pg_class ref ON ref.oid=con.confrelid \
+    LEFT JOIN pg_catalog.pg_namespace ref_ns ON ref_ns.oid=ref.relnamespace \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,c.relname,con.conname";
+const WRITER_LEASE_INDEX_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,t.relname,ix.relname,o.rolname,am.amname,ix.relpersistence::text,\
+    COALESCE(pg_catalog.array_to_string(ix.reloptions,','),'<NULL>'),COALESCE(ts.spcname,'<NULL>'),\
+    i.indisunique,i.indisprimary,i.indisvalid,i.indisready,i.indislive,i.indisclustered,\
+    i.indisreplident,i.indnullsnotdistinct,pg_catalog.pg_get_indexdef(i.indexrelid,0,true))::text \
+    FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class t ON t.oid=i.indrelid \
+    JOIN pg_catalog.pg_class ix ON ix.oid=i.indexrelid \
+    JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=ix.relowner JOIN pg_catalog.pg_am am ON am.oid=ix.relam \
+    LEFT JOIN pg_catalog.pg_tablespace ts ON ts.oid=ix.reltablespace \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,t.relname,ix.relname";
+const WRITER_LEASE_FUNCTION_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid),\
+    pg_catalog.pg_get_function_result(p.oid),o.rolname,l.lanname,p.prokind::text,p.prosecdef,\
+    p.proleakproof,p.provolatile::text,p.proparallel::text,p.proisstrict,p.proretset,p.pronargs,\
+    p.pronargdefaults,p.prorettype::regtype::text,p.proargtypes::text,\
+    COALESCE(p.proallargtypes::text,'<NULL>'),COALESCE(p.proargmodes::text,'<NULL>'),\
+    COALESCE(p.proargnames::text,'<NULL>'),COALESCE(pg_catalog.array_to_string(p.proconfig,','),'<NULL>'),\
+    COALESCE(p.probin,'<NULL>'),p.prosrc,pg_catalog.pg_get_functiondef(p.oid),\
+    COALESCE(pg_catalog.obj_description(p.oid,'pg_proc'),'<NULL>'))::text \
+    FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=p.proowner JOIN pg_catalog.pg_language l ON l.oid=p.prolang \
+    WHERE n.nspname='writer_lease' \
+    ORDER BY n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid)";
+const WRITER_LEASE_SCHEMA_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,o.rolname,COALESCE(g.rolname,'PUBLIC'),r.rolname,a.privilege_type,a.is_grantable)::text \
+    FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_roles o ON o.oid=n.nspowner \
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
+    LEFT JOIN pg_catalog.pg_roles g ON g.oid=a.grantee JOIN pg_catalog.pg_roles r ON r.oid=a.grantor \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,o.rolname,COALESCE(g.rolname,'PUBLIC'),\
+    r.rolname,a.privilege_type,a.is_grantable";
+const WRITER_LEASE_TABLE_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,o.rolname,COALESCE(g.rolname,'PUBLIC'),r.rolname,a.privilege_type,\
+    a.is_grantable)::text FROM pg_catalog.pg_class c \
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_roles o ON o.oid=c.relowner \
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl,pg_catalog.acldefault('r',c.relowner))) a \
+    LEFT JOIN pg_catalog.pg_roles g ON g.oid=a.grantee JOIN pg_catalog.pg_roles r ON r.oid=a.grantor \
+    WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') \
+    ORDER BY n.nspname,c.relname,o.rolname,COALESCE(g.rolname,'PUBLIC'),r.rolname,\
+    a.privilege_type,a.is_grantable";
+const WRITER_LEASE_FUNCTION_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid),o.rolname,\
+    COALESCE(g.rolname,'PUBLIC'),r.rolname,a.privilege_type,a.is_grantable)::text \
+    FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=p.proowner \
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))) a \
+    LEFT JOIN pg_catalog.pg_roles g ON g.oid=a.grantee JOIN pg_catalog.pg_roles r ON r.oid=a.grantor \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,p.proname,\
+    pg_catalog.pg_get_function_identity_arguments(p.oid),o.rolname,COALESCE(g.rolname,'PUBLIC'),\
+    r.rolname,a.privilege_type,a.is_grantable";
+const WRITER_LEASE_COLUMN_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,c.relname,a.attnum,a.attname,COALESCE(g.rolname,'PUBLIC'),r.rolname,x.privilege_type,\
+    x.is_grantable)::text FROM pg_catalog.pg_class c \
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+    JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid \
+    CROSS JOIN LATERAL pg_catalog.aclexplode(a.attacl) x \
+    LEFT JOIN pg_catalog.pg_roles g ON g.oid=x.grantee JOIN pg_catalog.pg_roles r ON r.oid=x.grantor \
+    WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') AND a.attnum>0 \
+    ORDER BY n.nspname,c.relname,a.attnum,COALESCE(g.rolname,'PUBLIC'),r.rolname,\
+    x.privilege_type,x.is_grantable";
+const WRITER_LEASE_TYPE_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,t.typname,t.typtype::text,t.typcategory::text,t.typispreferred,t.typisdefined,\
+    t.typdelim::text,o.rolname,COALESCE(c.relname,'<NULL>'),COALESCE(e.typname,'<NULL>'),\
+    COALESCE(pg_catalog.obj_description(t.oid,'pg_type'),'<NULL>'))::text \
+    FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=t.typowner LEFT JOIN pg_catalog.pg_class c ON c.oid=t.typrelid \
+    LEFT JOIN pg_catalog.pg_type e ON e.oid=t.typelem \
+    WHERE n.nspname='writer_lease' ORDER BY n.nspname,t.typname";
+
+// The Writer owner freezes these common physical digests and both distinct ACL
+// profiles from the same marker-owned PostgreSQL 17 catalog query set before
+// acceptance. Bridge has no runtime schema/function privilege; current has the
+// exact seven-function allowlist.
+const WRITER_LEASE_V2_BASE_CATALOG_PROFILES: [(&str, usize, &str); 8] = [
+    (
+        WRITER_LEASE_RELATION_PROFILE_SQL,
+        5,
+        "382b81889838d60c02ce5c31f77454e93f23372d90b3137a47663c5de74f9670",
+    ),
+    (
+        WRITER_LEASE_COLUMN_PROFILE_SQL,
+        73,
+        "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+    ),
+    (
+        WRITER_LEASE_CONSTRAINT_PROFILE_SQL,
+        27,
+        "3463b3ac82c1a7c53e5a80c41995f882ffe5f3f07fc5a82a97d50582d4d26915",
+    ),
+    (
+        WRITER_LEASE_INDEX_PROFILE_SQL,
+        8,
+        "66b315513cbf50c3c7dbc143eb7061c6dbb823d7eac853c50f83434caf1a1022",
+    ),
+    (
+        WRITER_LEASE_FUNCTION_PROFILE_SQL,
+        9,
+        "caa34168b5f9da4c8d2d02fce6e98882d73456c7c1f5c1af2b71f404efc647d1",
+    ),
+    (
+        WRITER_LEASE_TABLE_ACL_PROFILE_SQL,
+        40,
+        "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+    ),
+    (
+        WRITER_LEASE_COLUMN_ACL_PROFILE_SQL,
+        0,
+        "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+    ),
+    (
+        WRITER_LEASE_TYPE_PROFILE_SQL,
+        10,
+        "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+    ),
+];
+
+const WRITER_LEASE_V2_BRIDGE_ACL_PROFILES: [(&str, usize, &str); 2] = [
+    (
+        WRITER_LEASE_SCHEMA_ACL_PROFILE_SQL,
+        2,
+        "f8a84b870fcb8b091dbc7f9cf6835fb4311064eec5c83b31159a9a936a11e738",
+    ),
+    (
+        WRITER_LEASE_FUNCTION_ACL_PROFILE_SQL,
+        9,
+        "73951f1b33a4d6b3c4742fb49f91cf0601f04fd472b21c4db8bb36815fed0e89",
+    ),
+];
+
+const WRITER_LEASE_V2_CURRENT_ACL_PROFILES: [(&str, usize, &str); 2] = [
+    (
+        WRITER_LEASE_SCHEMA_ACL_PROFILE_SQL,
+        3,
+        "a2e1be8a403a96b679c18ddfa75e476fa1d6ceeccc1ccf62ff6424b2c259ef7b",
+    ),
+    (
+        WRITER_LEASE_FUNCTION_ACL_PROFILE_SQL,
+        16,
+        "bd5b05d60340a1b9f9fbf1de2b4bed8586b7eede4fd8d7c4825841c221e89b7a",
+    ),
+];
 
 const EXPECTED_TABLES: [&str; 8] = [
     "codebase_memory_analyses",
@@ -27,14 +438,21 @@ const EXPECTED_TABLES: [&str; 8] = [
     "codebase_memory_retrieval_audits",
     "openclaw_gateway_commands",
 ];
-const EXPECTED_FUNCTIONS: [&str; 7] = [
+const EXPECTED_FUNCTIONS: [&str; 14] = [
     "codebase_memory_load_receipt_v1",
+    "codebase_memory_load_receipt_v3",
     "codebase_memory_load_reflection_v2",
+    "codebase_memory_load_reflection_v3",
     "codebase_memory_persist_analysis_v1",
+    "codebase_memory_persist_analysis_v3",
     "codebase_memory_persist_reflection_v2",
+    "codebase_memory_persist_reflection_v3",
     "codebase_memory_persist_retrieval_v1",
+    "codebase_memory_persist_retrieval_v3",
     "openclaw_gateway_finalize_terminal_v1",
+    "openclaw_gateway_finalize_terminal_v3",
     "openclaw_gateway_reconcile_and_claim_v1",
+    "openclaw_gateway_reconcile_and_claim_v3",
 ];
 
 /// Closed database roles admitted by the extension setup and verifier.
@@ -231,8 +649,62 @@ impl Error for ExtensionSetupError {}
 enum ExtensionPreState {
     Fresh,
     ExactV2,
+    ExactV3,
     Partial,
     Collision,
+}
+
+fn memory_pre_state_error(state: ExtensionPreState) -> Option<ExtensionSetupError> {
+    match state {
+        ExtensionPreState::Partial => Some(ExtensionSetupError::new(
+            ExtensionSetupErrorKind::PartialProfile,
+            "MEMORY_EXTENSION_PARTIAL_PROFILE",
+        )),
+        ExtensionPreState::Collision => Some(ExtensionSetupError::new(
+            ExtensionSetupErrorKind::SchemaCollision,
+            "MEMORY_EXTENSION_SCHEMA_COLLISION",
+        )),
+        ExtensionPreState::Fresh | ExtensionPreState::ExactV2 | ExtensionPreState::ExactV3 => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExactCatalogProfile {
+    V2,
+    V3,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriterLeaseCompanionProfile {
+    Absent,
+    ExactV2Bridge,
+    ExactV2Current,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriterLeaseAclProfile {
+    BridgeQuarantined,
+    CurrentRuntime,
+}
+
+impl WriterLeaseAclProfile {
+    const fn acl_catalog_profiles(self) -> &'static [(&'static str, usize, &'static str)] {
+        match self {
+            Self::BridgeQuarantined => &WRITER_LEASE_V2_BRIDGE_ACL_PROFILES,
+            Self::CurrentRuntime => &WRITER_LEASE_V2_CURRENT_ACL_PROFILES,
+        }
+    }
+
+    const fn runtime_functions(self) -> &'static [&'static str] {
+        match self {
+            Self::BridgeQuarantined => &WRITER_LEASE_BRIDGE_RUNTIME_FUNCTIONS,
+            Self::CurrentRuntime => &WRITER_LEASE_CURRENT_RUNTIME_FUNCTIONS,
+        }
+    }
+
+    const fn schema_usage_expected(self) -> bool {
+        matches!(self, Self::CurrentRuntime)
+    }
 }
 
 /// Runs the fixed administrative extension transaction.
@@ -251,81 +723,92 @@ pub fn apply_extension(
             "MEMORY_EXTENSION_MANIFEST_INVALID",
         )
     })?;
+    let v2_manifest = verify_embedded_v2_extension_manifest().map_err(|_| {
+        ExtensionSetupError::new(
+            ExtensionSetupErrorKind::ManifestInvalid,
+            "MEMORY_EXTENSION_V2_MANIFEST_INVALID",
+        )
+    })?;
     let mut transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::ReadCommitted)
         .start()
         .map_err(|_| stage_error("MEMORY_EXTENSION_TRANSACTION_START_FAILED"))?;
     harden_transaction(&mut transaction)?;
-    transaction
-        .query_one(
-            "SELECT pg_catalog.pg_advisory_xact_lock($1)",
-            &[&EXTENSION_ADVISORY_LOCK],
-        )
-        .map_err(|_| stage_error("MEMORY_EXTENSION_ADVISORY_LOCK_FAILED"))?;
+    acquire_writer_companion_advisory_locks(&mut transaction)?;
     let server_version_num = preflight(&mut transaction, target, ExtensionDatabaseRole::Migrator)?;
-    match classify_pre_state(&mut transaction)? {
+    let pre_state = classify_pre_state(&mut transaction)?;
+    if let Some(error) = memory_pre_state_error(pre_state) {
+        return Err(error);
+    }
+    let writer_companion = classify_writer_lease_companion(&mut transaction, target, true)?;
+    validate_writer_companion_for_memory_state(pre_state, writer_companion)?;
+    match pre_state {
         ExtensionPreState::Fresh => {
-            let sql = std::str::from_utf8(manifest.bytes()).map_err(|_| {
+            let v2_sql = std::str::from_utf8(v2_manifest.bytes()).map_err(|_| {
                 ExtensionSetupError::new(
                     ExtensionSetupErrorKind::ManifestInvalid,
                     "MEMORY_EXTENSION_MANIFEST_INVALID",
                 )
             })?;
             transaction
-                .batch_execute(sql)
+                .batch_execute(v2_sql)
                 .map_err(|error| map_extension_sql_error(&error))?;
-            insert_identity(&mut transaction, target, &manifest)?;
+            insert_v2_identity(&mut transaction, target, &v2_manifest)?;
             if classify_pre_state(&mut transaction)? != ExtensionPreState::ExactV2 {
                 return Err(catalog_error());
             }
-            verify_catalog_closure(&mut transaction)?;
-            read_identity(
-                &mut transaction,
-                target,
-                ExtensionDatabaseRole::Migrator,
-                server_version_num,
-                &manifest,
-            )?;
-            transaction.commit().map_err(|_| {
-                ExtensionSetupError::new(
-                    ExtensionSetupErrorKind::CommitOutcomeUnknown,
-                    "MEMORY_EXTENSION_COMMIT_OUTCOME_UNKNOWN",
-                )
-            })?;
-            verify_extension(client, target, ExtensionDatabaseRole::Migrator).map_err(|_| {
-                ExtensionSetupError::new(
-                    ExtensionSetupErrorKind::PostApplyVerificationFailed,
-                    "MEMORY_EXTENSION_POST_APPLY_VERIFICATION_FAILED",
-                )
-            })?;
-            Ok(ExtensionApplyOutcome::Installed)
+            verify_v2_source(&mut transaction, target, &v2_manifest)?;
+            verify_exact_catalog_profile(&mut transaction, ExactCatalogProfile::V2)?;
+            apply_v3_successor(&mut transaction, target, &manifest)?;
         }
-        ExtensionPreState::Partial => Err(ExtensionSetupError::new(
-            ExtensionSetupErrorKind::PartialProfile,
-            "MEMORY_EXTENSION_PARTIAL_PROFILE",
-        )),
-        ExtensionPreState::Collision => Err(ExtensionSetupError::new(
-            ExtensionSetupErrorKind::SchemaCollision,
-            "MEMORY_EXTENSION_SCHEMA_COLLISION",
-        )),
+        ExtensionPreState::Partial | ExtensionPreState::Collision => {
+            return Err(stage_error("MEMORY_EXTENSION_PRESTATE_CONTROL_FLOW_FAILED"));
+        }
         ExtensionPreState::ExactV2 => {
-            verify_catalog_closure(&mut transaction)?;
-            read_identity(
-                &mut transaction,
-                target,
-                ExtensionDatabaseRole::Migrator,
-                server_version_num,
-                &manifest,
-            )?;
-            transaction.commit().map_err(|_| {
-                ExtensionSetupError::new(
-                    ExtensionSetupErrorKind::CommitOutcomeUnknown,
-                    "MEMORY_EXTENSION_COMMIT_OUTCOME_UNKNOWN",
-                )
-            })?;
-            Ok(ExtensionApplyOutcome::AlreadyCurrent)
+            verify_v2_source(&mut transaction, target, &v2_manifest)?;
+            verify_exact_catalog_profile(&mut transaction, ExactCatalogProfile::V2)?;
+            apply_v3_successor(&mut transaction, target, &manifest)?;
         }
+        ExtensionPreState::ExactV3 => {}
+    }
+    if classify_pre_state(&mut transaction)? != ExtensionPreState::ExactV3 {
+        return Err(catalog_error());
+    }
+    verify_exact_catalog_profile(&mut transaction, ExactCatalogProfile::V3)?;
+    verify_catalog_closure(&mut transaction)?;
+    verify_writer_lease_companion(&mut transaction, target, writer_companion, true)?;
+    read_identity(
+        &mut transaction,
+        target,
+        ExtensionDatabaseRole::Migrator,
+        server_version_num,
+        &manifest,
+    )?;
+    transaction.commit().map_err(|_| {
+        ExtensionSetupError::new(
+            ExtensionSetupErrorKind::CommitOutcomeUnknown,
+            "MEMORY_EXTENSION_COMMIT_OUTCOME_UNKNOWN",
+        )
+    })?;
+    if pre_state == ExtensionPreState::ExactV3 {
+        Ok(ExtensionApplyOutcome::AlreadyCurrent)
+    } else if writer_companion == WriterLeaseCompanionProfile::ExactV2Bridge {
+        verify_bridge_pending_after_commit(client, target).map_err(|_| {
+            ExtensionSetupError::new(
+                ExtensionSetupErrorKind::PostApplyVerificationFailed,
+                "MEMORY_EXTENSION_POST_APPLY_VERIFICATION_FAILED",
+            )
+        })?;
+        Ok(ExtensionApplyOutcome::Installed)
+    } else {
+        verify_extension(client, target, ExtensionDatabaseRole::Migrator).map_err(|_| {
+            ExtensionSetupError::new(
+                ExtensionSetupErrorKind::PostApplyVerificationFailed,
+                "MEMORY_EXTENSION_POST_APPLY_VERIFICATION_FAILED",
+            )
+        })?;
+        Ok(ExtensionApplyOutcome::Installed)
     }
 }
 
@@ -359,9 +842,10 @@ pub fn verify_extension(
         .start()
         .map_err(|_| transaction_error())?;
     harden_transaction(&mut transaction)?;
+    acquire_writer_companion_advisory_locks(&mut transaction)?;
     let server_version_num = preflight(&mut transaction, target, role)?;
     let state = classify_pre_state(&mut transaction)?;
-    if state != ExtensionPreState::ExactV2 {
+    if state != ExtensionPreState::ExactV3 {
         return Err(match state {
             ExtensionPreState::Fresh => ExtensionSetupError::new(
                 ExtensionSetupErrorKind::InstallationRequired,
@@ -375,10 +859,22 @@ pub fn verify_extension(
                 ExtensionSetupErrorKind::SchemaCollision,
                 "MEMORY_EXTENSION_SCHEMA_COLLISION",
             ),
-            ExtensionPreState::ExactV2 => unreachable!(),
+            ExtensionPreState::ExactV2 => ExtensionSetupError::new(
+                ExtensionSetupErrorKind::InstallationRequired,
+                "MEMORY_EXTENSION_UPGRADE_REQUIRED",
+            ),
+            ExtensionPreState::ExactV3 => unreachable!(),
         });
     }
+    let writer_companion = classify_writer_lease_companion(&mut transaction, target, true)?;
+    if writer_companion == WriterLeaseCompanionProfile::ExactV2Bridge {
+        return Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_BRIDGE_PENDING",
+        ));
+    }
+    verify_exact_catalog_profile(&mut transaction, ExactCatalogProfile::V3)?;
     verify_catalog_closure(&mut transaction)?;
+    verify_writer_lease_companion(&mut transaction, target, writer_companion, true)?;
     let evidence = read_identity(
         &mut transaction,
         target,
@@ -490,6 +986,688 @@ fn preflight(
     Ok(server_version_num)
 }
 
+fn writer_companion_error(code: &'static str) -> ExtensionSetupError {
+    ExtensionSetupError::new(ExtensionSetupErrorKind::CatalogMismatch, code)
+}
+
+fn acquire_writer_companion_advisory_locks(
+    client: &mut impl GenericClient,
+) -> Result<(), ExtensionSetupError> {
+    for (key, code) in [
+        (
+            GLOBAL_MIGRATION_ADVISORY_LOCK,
+            "MEMORY_EXTENSION_GLOBAL_ADVISORY_LOCK_FAILED",
+        ),
+        (
+            EXTENSION_ADVISORY_LOCK,
+            "MEMORY_EXTENSION_ADVISORY_LOCK_FAILED",
+        ),
+        (
+            WRITER_LEASE_ADVISORY_LOCK,
+            "MEMORY_EXTENSION_WRITER_LEASE_ADVISORY_LOCK_FAILED",
+        ),
+    ] {
+        client
+            .query_one("SELECT pg_catalog.pg_advisory_xact_lock($1)", &[&key])
+            .map_err(|_| stage_error(code))?;
+    }
+    Ok(())
+}
+
+fn lock_writer_lease_tables(client: &mut impl GenericClient) -> Result<(), ExtensionSetupError> {
+    client
+        .batch_execute(
+            "LOCK TABLE writer_lease.writer_lease_commands IN SHARE MODE; \
+             LOCK TABLE writer_lease.writer_lease_extension_identity IN SHARE MODE; \
+             LOCK TABLE writer_lease.writer_lease_extension_ledger IN SHARE MODE; \
+             LOCK TABLE writer_lease.writer_lease_heads IN SHARE MODE; \
+             LOCK TABLE writer_lease.writer_lease_transitions IN SHARE MODE;",
+        )
+        .map_err(|_| writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_TABLE_LOCK_FAILED"))
+}
+
+fn writer_lease_namespace_exists(
+    client: &mut impl GenericClient,
+) -> Result<bool, ExtensionSetupError> {
+    client
+        .query_one(
+            "SELECT pg_catalog.to_regnamespace('writer_lease') IS NOT NULL",
+            &[],
+        )
+        .map_err(|_| writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_PROFILE_QUERY_FAILED"))?
+        .try_get(0)
+        .map_err(|_| writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_PROFILE_QUERY_FAILED"))
+}
+
+fn classify_writer_lease_companion(
+    client: &mut impl GenericClient,
+    target: &ExtensionTarget,
+    lock_tables: bool,
+) -> Result<WriterLeaseCompanionProfile, ExtensionSetupError> {
+    if !writer_lease_namespace_exists(client)? {
+        return Ok(WriterLeaseCompanionProfile::Absent);
+    }
+    if lock_tables {
+        lock_writer_lease_tables(client)?;
+    }
+    let identity = read_writer_lease_identity(client)?;
+    if writer_lease_binding_matches(
+        &identity.binding,
+        target,
+        WRITER_LEASE_V2_SCHEMA_VERSION,
+        WRITER_LEASE_V2_SQL_SHA256,
+        WRITER_LEASE_V2_MANIFEST_SHA256,
+        3,
+        HISTORICAL_V2_GLOBAL_MANIFEST_SHA256,
+        2,
+        MEMORY_V2_MANIFEST_SHA256,
+    ) && identity.path == WRITER_LEASE_V2_PATH
+    {
+        verify_writer_lease_v2_bridge(client, target)?;
+        return Ok(WriterLeaseCompanionProfile::ExactV2Bridge);
+    }
+    if writer_lease_binding_matches(
+        &identity.binding,
+        target,
+        WRITER_LEASE_V2_SCHEMA_VERSION,
+        WRITER_LEASE_V2_SQL_SHA256,
+        WRITER_LEASE_V2_MANIFEST_SHA256,
+        5,
+        REQUIRED_GLOBAL_MANIFEST_SHA256,
+        3,
+        MEMORY_V3_MANIFEST_SHA256,
+    ) && identity.path == WRITER_LEASE_V2_PATH
+    {
+        verify_writer_lease_v2_current(client, target)?;
+        return Ok(WriterLeaseCompanionProfile::ExactV2Current);
+    }
+    Err(writer_companion_error(
+        "MEMORY_EXTENSION_WRITER_LEASE_PROFILE_MISMATCH",
+    ))
+}
+
+fn validate_writer_companion_for_memory_state(
+    memory: ExtensionPreState,
+    writer: WriterLeaseCompanionProfile,
+) -> Result<(), ExtensionSetupError> {
+    let accepted = matches!(
+        (memory, writer),
+        (
+            ExtensionPreState::Fresh | ExtensionPreState::ExactV2 | ExtensionPreState::ExactV3,
+            WriterLeaseCompanionProfile::Absent
+        ) | (
+            ExtensionPreState::ExactV2 | ExtensionPreState::ExactV3,
+            WriterLeaseCompanionProfile::ExactV2Bridge
+        ) | (
+            ExtensionPreState::ExactV3,
+            WriterLeaseCompanionProfile::ExactV2Current
+        )
+    );
+    if accepted {
+        Ok(())
+    } else {
+        Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_PROFILE_MISMATCH",
+        ))
+    }
+}
+
+fn verify_writer_lease_companion(
+    client: &mut impl GenericClient,
+    target: &ExtensionTarget,
+    profile: WriterLeaseCompanionProfile,
+    tables_locked: bool,
+) -> Result<(), ExtensionSetupError> {
+    match profile {
+        WriterLeaseCompanionProfile::Absent => {
+            if writer_lease_namespace_exists(client)? {
+                Err(writer_companion_error(
+                    "MEMORY_EXTENSION_WRITER_LEASE_PROFILE_CHANGED",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        WriterLeaseCompanionProfile::ExactV2Bridge => {
+            if !tables_locked {
+                return Err(writer_companion_error(
+                    "MEMORY_EXTENSION_WRITER_LEASE_BRIDGE_LOCK_REQUIRED",
+                ));
+            }
+            verify_writer_lease_v2_bridge(client, target)
+        }
+        WriterLeaseCompanionProfile::ExactV2Current => {
+            verify_writer_lease_v2_current(client, target)
+        }
+    }
+}
+
+fn verify_writer_lease_v2_catalog(
+    client: &mut impl GenericClient,
+    acl_profile: WriterLeaseAclProfile,
+) -> Result<(), ExtensionSetupError> {
+    if !writer_lease_v2_profile_is_frozen(acl_profile) {
+        return Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_PROFILE_NOT_FROZEN",
+        ));
+    }
+    for &(query, expected_count, expected_digest) in WRITER_LEASE_V2_BASE_CATALOG_PROFILES
+        .iter()
+        .chain(acl_profile.acl_catalog_profiles())
+    {
+        let rows = client.query(query, &[]).map_err(|_| {
+            writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_CATALOG_QUERY_FAILED")
+        })?;
+        if rows.len() != expected_count {
+            return Err(writer_companion_error(
+                "MEMORY_EXTENSION_WRITER_LEASE_CATALOG_MISMATCH",
+            ));
+        }
+        let mut values = Vec::with_capacity(rows.len());
+        for row in rows {
+            values.push(row.try_get::<_, String>(0).map_err(|_| {
+                writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_CATALOG_MISMATCH")
+            })?);
+        }
+        let actual = catalog_signature_digest(&values)?;
+        if !catalog_signature_matches(&actual, expected_digest) {
+            return Err(writer_companion_error(
+                "MEMORY_EXTENSION_WRITER_LEASE_CATALOG_MISMATCH",
+            ));
+        }
+    }
+    verify_writer_lease_v2_surface(client, acl_profile)
+}
+
+fn writer_lease_v2_profile_is_frozen(acl_profile: WriterLeaseAclProfile) -> bool {
+    [WRITER_LEASE_V2_SQL_SHA256, WRITER_LEASE_V2_MANIFEST_SHA256]
+        .into_iter()
+        .chain(
+            WRITER_LEASE_V2_BASE_CATALOG_PROFILES
+                .iter()
+                .map(|(_, _, digest)| *digest),
+        )
+        .chain(
+            acl_profile
+                .acl_catalog_profiles()
+                .iter()
+                .map(|(_, _, digest)| *digest),
+        )
+        .all(|digest| {
+            digest.len() == 64
+                && digest.bytes().any(|byte| byte != b'0')
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+fn verify_writer_lease_v2_surface(
+    client: &mut impl GenericClient,
+    acl_profile: WriterLeaseAclProfile,
+) -> Result<(), ExtensionSetupError> {
+    let relations = client
+        .query(
+            "SELECT c.relname::text FROM pg_catalog.pg_class AS c \
+             JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace \
+             WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p') \
+             ORDER BY c.relname",
+            &[],
+        )
+        .map_err(|_| {
+            writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_SURFACE_QUERY_FAILED")
+        })?;
+    let relation_names = relations
+        .iter()
+        .map(|row| row.try_get::<_, String>(0))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_SURFACE_MISMATCH"))?;
+    if relation_names != WRITER_LEASE_EXPECTED_TABLES {
+        return Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_SURFACE_MISMATCH",
+        ));
+    }
+    let functions = client
+        .query(
+            "SELECT p.proname::text FROM pg_catalog.pg_proc AS p \
+             JOIN pg_catalog.pg_namespace AS n ON n.oid=p.pronamespace \
+             WHERE n.nspname='writer_lease' ORDER BY p.proname",
+            &[],
+        )
+        .map_err(|_| {
+            writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_SURFACE_QUERY_FAILED")
+        })?;
+    let function_names = functions
+        .iter()
+        .map(|row| row.try_get::<_, String>(0))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_SURFACE_MISMATCH"))?;
+    if function_names != WRITER_LEASE_EXPECTED_FUNCTIONS {
+        return Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_SURFACE_MISMATCH",
+        ));
+    }
+    let runtime_schema_usage: bool = client
+        .query_one(
+            "SELECT pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE')",
+            &[],
+        )
+        .map_err(|_| {
+            writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_RUNTIME_ACL_QUERY_FAILED")
+        })?
+        .try_get(0)
+        .map_err(|_| {
+            writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_RUNTIME_ACL_MISMATCH")
+        })?;
+    if runtime_schema_usage != acl_profile.schema_usage_expected() {
+        return Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_RUNTIME_ACL_MISMATCH",
+        ));
+    }
+    let runtime = client
+        .query(
+            "SELECT p.proname::text FROM pg_catalog.pg_proc AS p \
+             JOIN pg_catalog.pg_namespace AS n ON n.oid=p.pronamespace \
+             WHERE n.nspname='writer_lease' \
+               AND pg_catalog.has_function_privilege( \
+                    'lattice_runtime',p.oid,'EXECUTE') ORDER BY p.proname",
+            &[],
+        )
+        .map_err(|_| {
+            writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_RUNTIME_ACL_QUERY_FAILED")
+        })?;
+    let runtime_names = runtime
+        .iter()
+        .map(|row| row.try_get::<_, String>(0))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_RUNTIME_ACL_MISMATCH")
+        })?;
+    if runtime_names
+        .iter()
+        .map(String::as_str)
+        .ne(acl_profile.runtime_functions().iter().copied())
+    {
+        return Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_RUNTIME_ACL_MISMATCH",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct WriterLeaseBinding {
+    extension_id: String,
+    extension_schema_version: i16,
+    extension_sql_sha256: String,
+    extension_manifest_sha256: String,
+    database_uuid: String,
+    database_identity_sha256: String,
+    global_schema_version: i16,
+    global_manifest_sha256: String,
+    required_memory_schema_version: i16,
+    required_memory_manifest_sha256: String,
+}
+
+#[derive(Debug)]
+struct WriterLeaseIdentity {
+    binding: WriterLeaseBinding,
+    path: String,
+}
+
+#[derive(Debug)]
+struct WriterLeaseLedgerRow {
+    ordinal: i16,
+    binding: WriterLeaseBinding,
+    event_kind: String,
+}
+
+fn read_writer_lease_identity(
+    client: &mut impl GenericClient,
+) -> Result<WriterLeaseIdentity, ExtensionSetupError> {
+    let rows = client
+        .query(
+            "SELECT extension_id::text,extension_schema_version,extension_path::text,\
+                    pg_catalog.btrim(extension_sql_sha256)::text,\
+                    pg_catalog.btrim(extension_manifest_sha256)::text,database_uuid::text,\
+                    pg_catalog.btrim(database_identity_sha256)::text,global_schema_version,\
+                    pg_catalog.btrim(global_manifest_sha256)::text,required_memory_schema_version,\
+                    pg_catalog.btrim(required_memory_manifest_sha256)::text \
+             FROM ONLY writer_lease.writer_lease_extension_identity WHERE singleton",
+            &[],
+        )
+        .map_err(|_| {
+            writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_IDENTITY_QUERY_FAILED")
+        })?;
+    let [row] = rows.as_slice() else {
+        return Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_IDENTITY_MISMATCH",
+        ));
+    };
+    Ok(WriterLeaseIdentity {
+        binding: writer_lease_binding_from_row(
+            row,
+            0,
+            true,
+            "MEMORY_EXTENSION_WRITER_LEASE_IDENTITY_MISMATCH",
+        )?,
+        path: row.try_get(2).map_err(|_| {
+            writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_IDENTITY_MISMATCH")
+        })?,
+    })
+}
+
+fn read_writer_lease_ledger(
+    client: &mut impl GenericClient,
+) -> Result<Vec<WriterLeaseLedgerRow>, ExtensionSetupError> {
+    client
+        .query(
+            "SELECT ledger_ordinal,extension_id::text,extension_schema_version,\
+                    pg_catalog.btrim(extension_sql_sha256)::text,\
+                    pg_catalog.btrim(extension_manifest_sha256)::text,database_uuid::text,\
+                    pg_catalog.btrim(database_identity_sha256)::text,global_schema_version,\
+                    pg_catalog.btrim(global_manifest_sha256)::text,required_memory_schema_version,\
+                    pg_catalog.btrim(required_memory_manifest_sha256)::text,event_kind::text \
+             FROM ONLY writer_lease.writer_lease_extension_ledger ORDER BY ledger_ordinal",
+            &[],
+        )
+        .map_err(|_| writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_LEDGER_QUERY_FAILED"))?
+        .iter()
+        .map(|row| {
+            Ok(WriterLeaseLedgerRow {
+                ordinal: row.try_get(0).map_err(|_| {
+                    writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_LEDGER_MISMATCH")
+                })?,
+                binding: writer_lease_binding_from_row(
+                    row,
+                    1,
+                    false,
+                    "MEMORY_EXTENSION_WRITER_LEASE_LEDGER_MISMATCH",
+                )?,
+                event_kind: row.try_get(11).map_err(|_| {
+                    writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_LEDGER_MISMATCH")
+                })?,
+            })
+        })
+        .collect()
+}
+
+fn writer_lease_binding_from_row(
+    row: &postgres::Row,
+    offset: usize,
+    has_path_column: bool,
+    mismatch_code: &'static str,
+) -> Result<WriterLeaseBinding, ExtensionSetupError> {
+    let mismatch = || writer_companion_error(mismatch_code);
+    let digest_offset = offset + if has_path_column { 3 } else { 2 };
+    Ok(WriterLeaseBinding {
+        extension_id: row.try_get(offset).map_err(|_| mismatch())?,
+        extension_schema_version: row.try_get(offset + 1).map_err(|_| mismatch())?,
+        extension_sql_sha256: row.try_get(digest_offset).map_err(|_| mismatch())?,
+        extension_manifest_sha256: row.try_get(digest_offset + 1).map_err(|_| mismatch())?,
+        database_uuid: row.try_get(digest_offset + 2).map_err(|_| mismatch())?,
+        database_identity_sha256: row.try_get(digest_offset + 3).map_err(|_| mismatch())?,
+        global_schema_version: row.try_get(digest_offset + 4).map_err(|_| mismatch())?,
+        global_manifest_sha256: row.try_get(digest_offset + 5).map_err(|_| mismatch())?,
+        required_memory_schema_version: row.try_get(digest_offset + 6).map_err(|_| mismatch())?,
+        required_memory_manifest_sha256: row.try_get(digest_offset + 7).map_err(|_| mismatch())?,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn writer_lease_binding_matches(
+    actual: &WriterLeaseBinding,
+    target: &ExtensionTarget,
+    extension_schema_version: i16,
+    extension_sql_sha256: &str,
+    extension_manifest_sha256: &str,
+    global_schema_version: i16,
+    global_manifest_sha256: &str,
+    memory_schema_version: i16,
+    memory_manifest_sha256: &str,
+) -> bool {
+    actual.extension_id == WRITER_LEASE_EXTENSION_ID
+        && actual.extension_schema_version == extension_schema_version
+        && actual.extension_sql_sha256 == extension_sql_sha256
+        && actual.extension_manifest_sha256 == extension_manifest_sha256
+        && actual.database_uuid == target.expected_database_uuid()
+        && actual.database_identity_sha256 == target.expected_database_identity_digest().as_str()
+        && actual.global_schema_version == global_schema_version
+        && actual.global_manifest_sha256 == global_manifest_sha256
+        && actual.required_memory_schema_version == memory_schema_version
+        && actual.required_memory_manifest_sha256 == memory_manifest_sha256
+}
+
+#[allow(clippy::too_many_arguments)]
+fn writer_lease_ledger_row_matches(
+    actual: &WriterLeaseLedgerRow,
+    target: &ExtensionTarget,
+    ordinal: i16,
+    extension_schema_version: i16,
+    extension_sql_sha256: &str,
+    extension_manifest_sha256: &str,
+    global_schema_version: i16,
+    global_manifest_sha256: &str,
+    memory_schema_version: i16,
+    memory_manifest_sha256: &str,
+    event_kind: &str,
+) -> bool {
+    actual.ordinal == ordinal
+        && actual.event_kind == event_kind
+        && writer_lease_binding_matches(
+            &actual.binding,
+            target,
+            extension_schema_version,
+            extension_sql_sha256,
+            extension_manifest_sha256,
+            global_schema_version,
+            global_manifest_sha256,
+            memory_schema_version,
+            memory_manifest_sha256,
+        )
+}
+
+fn historical_writer_lease_v1_row_matches(
+    row: &WriterLeaseLedgerRow,
+    target: &ExtensionTarget,
+) -> bool {
+    writer_lease_ledger_row_matches(
+        row,
+        target,
+        1,
+        WRITER_LEASE_V1_SCHEMA_VERSION,
+        WRITER_LEASE_V1_SQL_SHA256,
+        WRITER_LEASE_V1_MANIFEST_SHA256,
+        3,
+        HISTORICAL_V2_GLOBAL_MANIFEST_SHA256,
+        2,
+        MEMORY_V2_MANIFEST_SHA256,
+        "INSTALLED",
+    )
+}
+
+fn writer_lease_v2_bridge_row_matches(
+    row: &WriterLeaseLedgerRow,
+    target: &ExtensionTarget,
+) -> bool {
+    writer_lease_ledger_row_matches(
+        row,
+        target,
+        2,
+        WRITER_LEASE_V2_SCHEMA_VERSION,
+        WRITER_LEASE_V2_SQL_SHA256,
+        WRITER_LEASE_V2_MANIFEST_SHA256,
+        3,
+        HISTORICAL_V2_GLOBAL_MANIFEST_SHA256,
+        2,
+        MEMORY_V2_MANIFEST_SHA256,
+        "UPGRADED",
+    )
+}
+
+fn writer_lease_v2_rebound_row_matches(
+    row: &WriterLeaseLedgerRow,
+    target: &ExtensionTarget,
+) -> bool {
+    writer_lease_ledger_row_matches(
+        row,
+        target,
+        3,
+        WRITER_LEASE_V2_SCHEMA_VERSION,
+        WRITER_LEASE_V2_SQL_SHA256,
+        WRITER_LEASE_V2_MANIFEST_SHA256,
+        5,
+        REQUIRED_GLOBAL_MANIFEST_SHA256,
+        3,
+        MEMORY_V3_MANIFEST_SHA256,
+        "REBOUND",
+    )
+}
+
+fn writer_lease_v2_fresh_row_matches(row: &WriterLeaseLedgerRow, target: &ExtensionTarget) -> bool {
+    writer_lease_ledger_row_matches(
+        row,
+        target,
+        1,
+        WRITER_LEASE_V2_SCHEMA_VERSION,
+        WRITER_LEASE_V2_SQL_SHA256,
+        WRITER_LEASE_V2_MANIFEST_SHA256,
+        5,
+        REQUIRED_GLOBAL_MANIFEST_SHA256,
+        3,
+        MEMORY_V3_MANIFEST_SHA256,
+        "INSTALLED",
+    )
+}
+
+fn verify_writer_lease_v2_bridge(
+    client: &mut impl GenericClient,
+    target: &ExtensionTarget,
+) -> Result<(), ExtensionSetupError> {
+    verify_writer_lease_v2_catalog(client, WriterLeaseAclProfile::BridgeQuarantined)?;
+    let identity = read_writer_lease_identity(client)?;
+    if identity.path != WRITER_LEASE_V2_PATH
+        || !writer_lease_binding_matches(
+            &identity.binding,
+            target,
+            WRITER_LEASE_V2_SCHEMA_VERSION,
+            WRITER_LEASE_V2_SQL_SHA256,
+            WRITER_LEASE_V2_MANIFEST_SHA256,
+            3,
+            HISTORICAL_V2_GLOBAL_MANIFEST_SHA256,
+            2,
+            MEMORY_V2_MANIFEST_SHA256,
+        )
+    {
+        return Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_BRIDGE_IDENTITY_MISMATCH",
+        ));
+    }
+    let ledger = read_writer_lease_ledger(client)?;
+    if ledger.len() != 2
+        || !historical_writer_lease_v1_row_matches(&ledger[0], target)
+        || !writer_lease_v2_bridge_row_matches(&ledger[1], target)
+    {
+        return Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_BRIDGE_LEDGER_MISMATCH",
+        ));
+    }
+    let current_count: i64 = client
+        .query_one(
+            "SELECT pg_catalog.count(*)::bigint FROM ONLY writer_lease.writer_lease_heads \
+             WHERE current_status IN ('ACTIVE','SUSPECT')",
+            &[],
+        )
+        .map_err(|_| writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_CURRENT_QUERY_FAILED"))?
+        .try_get(0)
+        .map_err(|_| {
+            writer_companion_error("MEMORY_EXTENSION_WRITER_LEASE_CURRENT_QUERY_FAILED")
+        })?;
+    if current_count != 0 {
+        return Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_CURRENT_AUTHORITY_PRESENT",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_writer_lease_v2_current(
+    client: &mut impl GenericClient,
+    target: &ExtensionTarget,
+) -> Result<(), ExtensionSetupError> {
+    verify_writer_lease_v2_catalog(client, WriterLeaseAclProfile::CurrentRuntime)?;
+    let identity = read_writer_lease_identity(client)?;
+    if identity.path != WRITER_LEASE_V2_PATH
+        || !writer_lease_binding_matches(
+            &identity.binding,
+            target,
+            WRITER_LEASE_V2_SCHEMA_VERSION,
+            WRITER_LEASE_V2_SQL_SHA256,
+            WRITER_LEASE_V2_MANIFEST_SHA256,
+            5,
+            REQUIRED_GLOBAL_MANIFEST_SHA256,
+            3,
+            MEMORY_V3_MANIFEST_SHA256,
+        )
+    {
+        return Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_CURRENT_IDENTITY_MISMATCH",
+        ));
+    }
+    let ledger = read_writer_lease_ledger(client)?;
+    let fresh = ledger.len() == 1 && writer_lease_v2_fresh_row_matches(&ledger[0], target);
+    let upgraded = ledger.len() == 3
+        && historical_writer_lease_v1_row_matches(&ledger[0], target)
+        && writer_lease_v2_bridge_row_matches(&ledger[1], target)
+        && writer_lease_v2_rebound_row_matches(&ledger[2], target);
+    if !fresh && !upgraded {
+        return Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_CURRENT_LEDGER_MISMATCH",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_bridge_pending_after_commit(
+    client: &mut Client,
+    target: &ExtensionTarget,
+) -> Result<(), ExtensionSetupError> {
+    let manifest = verify_embedded_extension_manifest().map_err(|_| {
+        ExtensionSetupError::new(
+            ExtensionSetupErrorKind::ManifestInvalid,
+            "MEMORY_EXTENSION_MANIFEST_INVALID",
+        )
+    })?;
+    let mut transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
+        .map_err(|_| transaction_error())?;
+    harden_transaction(&mut transaction)?;
+    acquire_writer_companion_advisory_locks(&mut transaction)?;
+    let server_version_num = preflight(&mut transaction, target, ExtensionDatabaseRole::Migrator)?;
+    if classify_pre_state(&mut transaction)? != ExtensionPreState::ExactV3 {
+        return Err(catalog_error());
+    }
+    let writer = classify_writer_lease_companion(&mut transaction, target, true)?;
+    if writer != WriterLeaseCompanionProfile::ExactV2Bridge {
+        return Err(writer_companion_error(
+            "MEMORY_EXTENSION_WRITER_LEASE_BRIDGE_PENDING_MISMATCH",
+        ));
+    }
+    verify_exact_catalog_profile(&mut transaction, ExactCatalogProfile::V3)?;
+    verify_catalog_closure(&mut transaction)?;
+    read_identity(
+        &mut transaction,
+        target,
+        ExtensionDatabaseRole::Migrator,
+        server_version_num,
+        &manifest,
+    )?;
+    verify_writer_lease_v2_bridge(&mut transaction, target)?;
+    transaction.commit().map_err(|_| transaction_error())
+}
+
 fn classify_pre_state(
     client: &mut impl GenericClient,
 ) -> Result<ExtensionPreState, ExtensionSetupError> {
@@ -520,12 +1698,19 @@ fn classify_pre_state(
             "SELECT \
                 count(*) FILTER (WHERE p.proname IN ( \
                     'codebase_memory_load_receipt_v1', \
+                    'codebase_memory_load_receipt_v3', \
                     'codebase_memory_load_reflection_v2', \
+                    'codebase_memory_load_reflection_v3', \
                     'codebase_memory_persist_analysis_v1', \
+                    'codebase_memory_persist_analysis_v3', \
                     'codebase_memory_persist_reflection_v2', \
+                    'codebase_memory_persist_reflection_v3', \
                     'codebase_memory_persist_retrieval_v1', \
+                    'codebase_memory_persist_retrieval_v3', \
                     'openclaw_gateway_finalize_terminal_v1', \
-                    'openclaw_gateway_reconcile_and_claim_v1' \
+                    'openclaw_gateway_finalize_terminal_v3', \
+                    'openclaw_gateway_reconcile_and_claim_v1', \
+                    'openclaw_gateway_reconcile_and_claim_v3' \
                 ))::bigint, \
                 count(*)::bigint \
                FROM pg_catalog.pg_proc AS p \
@@ -541,7 +1726,7 @@ fn classify_pre_state(
     }
     if all_tables != i64::try_from(EXPECTED_TABLES.len()).expect("fixed table count")
         || expected_tables != all_tables
-        || all_functions != i64::try_from(EXPECTED_FUNCTIONS.len()).expect("fixed function count")
+        || !matches!(all_functions, 7 | 14)
         || expected_functions != all_functions
     {
         let has_expected = expected_tables > 0 || expected_functions > 0;
@@ -554,7 +1739,7 @@ fn classify_pre_state(
             ExtensionPreState::Collision
         });
     }
-    let identity: i64 = client
+    let identity_rows: i64 = client
         .query_one(
             "SELECT (SELECT count(*) FROM ONLY memory.codebase_memory_extension_identity) \
                   + (SELECT count(*) FROM ONLY memory.codebase_memory_extension_ledger)",
@@ -562,14 +1747,14 @@ fn classify_pre_state(
         )
         .map_err(|_| stage_error("MEMORY_EXTENSION_PRESTATE_IDENTITY_QUERY_FAILED"))?
         .get(0);
-    Ok(if identity == 2 {
-        ExtensionPreState::ExactV2
-    } else {
-        ExtensionPreState::Partial
+    Ok(match (all_functions, identity_rows) {
+        (7, 2) => ExtensionPreState::ExactV2,
+        (14, 3) => ExtensionPreState::ExactV3,
+        _ => ExtensionPreState::Partial,
     })
 }
 
-fn insert_identity(
+fn insert_v2_identity(
     client: &mut impl GenericClient,
     target: &ExtensionTarget,
     manifest: &crate::ExtensionManifestEvidence,
@@ -585,15 +1770,15 @@ fn insert_identity(
              )",
             &[
                 &CODEBASE_MEMORY_EXTENSION_ID,
-                &i16::try_from(CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION)
+                &i16::try_from(HISTORICAL_V2_GLOBAL_SCHEMA_VERSION - 1)
                     .expect("fixed extension version"),
-                &CODEBASE_MEMORY_EXTENSION_PATH,
+                &CODEBASE_MEMORY_V2_EXTENSION_PATH,
                 &manifest.sql_sha256().as_str(),
                 &manifest.manifest_sha256().as_str(),
                 &target.expected_database_uuid(),
                 &target.expected_database_identity_digest().as_str(),
-                &i16::try_from(REQUIRED_GLOBAL_SCHEMA_VERSION).expect("fixed global version"),
-                &REQUIRED_GLOBAL_MANIFEST_SHA256,
+                &i16::try_from(HISTORICAL_V2_GLOBAL_SCHEMA_VERSION).expect("fixed global version"),
+                &HISTORICAL_V2_GLOBAL_MANIFEST_SHA256,
             ],
         )
         .map_err(|_| stage_error("MEMORY_EXTENSION_IDENTITY_WRITE_FAILED"))?;
@@ -610,6 +1795,123 @@ fn insert_identity(
              ) VALUES (1, true, $1, $2, $3, $4, $5::text::uuid, $6, $7, $8, 'INSTALLED')",
             &[
                 &CODEBASE_MEMORY_EXTENSION_ID,
+                &i16::try_from(HISTORICAL_V2_GLOBAL_SCHEMA_VERSION - 1)
+                    .expect("fixed extension version"),
+                &manifest.sql_sha256().as_str(),
+                &manifest.manifest_sha256().as_str(),
+                &target.expected_database_uuid(),
+                &target.expected_database_identity_digest().as_str(),
+                &i16::try_from(HISTORICAL_V2_GLOBAL_SCHEMA_VERSION).expect("fixed global version"),
+                &HISTORICAL_V2_GLOBAL_MANIFEST_SHA256,
+            ],
+        )
+        .map_err(|_| stage_error("MEMORY_EXTENSION_LEDGER_WRITE_FAILED"))?;
+    if changed != 1 {
+        return Err(stage_error("MEMORY_EXTENSION_LEDGER_WRITE_FAILED"));
+    }
+    Ok(())
+}
+
+fn verify_v2_source(
+    client: &mut impl GenericClient,
+    target: &ExtensionTarget,
+    manifest: &crate::ExtensionManifestEvidence,
+) -> Result<(), ExtensionSetupError> {
+    let count: i64 = client
+        .query_one(
+            "SELECT pg_catalog.count(*)::bigint \
+               FROM ONLY memory.codebase_memory_extension_identity AS i \
+               JOIN ONLY memory.codebase_memory_extension_ledger AS l USING (singleton) \
+              WHERE i.singleton AND l.ledger_ordinal = 1 \
+                AND i.extension_id = $1 AND i.extension_schema_version = 2 \
+                AND i.extension_path = $2 \
+                AND i.extension_sql_sha256 = $3 \
+                AND i.extension_manifest_sha256 = $4 \
+                AND i.database_uuid = $5::text::uuid \
+                AND i.database_identity_sha256 = $6 \
+                AND i.global_schema_version = $7 \
+                AND i.global_manifest_sha256 = $8 \
+                AND l.extension_id = i.extension_id \
+                AND l.extension_schema_version = i.extension_schema_version \
+                AND l.extension_sql_sha256 = i.extension_sql_sha256 \
+                AND l.extension_manifest_sha256 = i.extension_manifest_sha256 \
+                AND l.database_uuid = i.database_uuid \
+                AND l.database_identity_sha256 = i.database_identity_sha256 \
+                AND l.global_schema_version = i.global_schema_version \
+                AND l.global_manifest_sha256 = i.global_manifest_sha256 \
+                AND l.event_kind = 'INSTALLED'",
+            &[
+                &CODEBASE_MEMORY_EXTENSION_ID,
+                &CODEBASE_MEMORY_V2_EXTENSION_PATH,
+                &manifest.sql_sha256().as_str(),
+                &manifest.manifest_sha256().as_str(),
+                &target.expected_database_uuid(),
+                &target.expected_database_identity_digest().as_str(),
+                &i16::try_from(HISTORICAL_V2_GLOBAL_SCHEMA_VERSION)
+                    .expect("fixed historical global version"),
+                &HISTORICAL_V2_GLOBAL_MANIFEST_SHA256,
+            ],
+        )
+        .map_err(|_| catalog_stage("MEMORY_EXTENSION_V2_IDENTITY_QUERY_FAILED"))?
+        .get(0);
+    if count != 1 {
+        return Err(catalog_stage("MEMORY_EXTENSION_V2_IDENTITY_MISMATCH"));
+    }
+    Ok(())
+}
+
+fn apply_v3_successor(
+    client: &mut impl GenericClient,
+    target: &ExtensionTarget,
+    manifest: &crate::ExtensionManifestEvidence,
+) -> Result<(), ExtensionSetupError> {
+    let sql = std::str::from_utf8(manifest.bytes()).map_err(|_| {
+        ExtensionSetupError::new(
+            ExtensionSetupErrorKind::ManifestInvalid,
+            "MEMORY_EXTENSION_MANIFEST_INVALID",
+        )
+    })?;
+    client
+        .batch_execute(sql)
+        .map_err(|error| map_extension_sql_error(&error))?;
+    let changed = client
+        .execute(
+            "UPDATE ONLY memory.codebase_memory_extension_identity \
+                SET extension_schema_version = $1, extension_path = $2, \
+                    extension_sql_sha256 = $3, extension_manifest_sha256 = $4, \
+                    global_schema_version = $5, global_manifest_sha256 = $6 \
+              WHERE singleton AND extension_schema_version = 2 \
+                AND extension_path = $7 \
+                AND global_schema_version = $8 \
+                AND global_manifest_sha256 = $9",
+            &[
+                &i16::try_from(CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION)
+                    .expect("fixed extension version"),
+                &CODEBASE_MEMORY_EXTENSION_PATH,
+                &manifest.sql_sha256().as_str(),
+                &manifest.manifest_sha256().as_str(),
+                &i16::try_from(REQUIRED_GLOBAL_SCHEMA_VERSION).expect("fixed global version"),
+                &REQUIRED_GLOBAL_MANIFEST_SHA256,
+                &CODEBASE_MEMORY_V2_EXTENSION_PATH,
+                &i16::try_from(HISTORICAL_V2_GLOBAL_SCHEMA_VERSION)
+                    .expect("fixed historical global version"),
+                &HISTORICAL_V2_GLOBAL_MANIFEST_SHA256,
+            ],
+        )
+        .map_err(|_| stage_error("MEMORY_EXTENSION_V3_IDENTITY_WRITE_FAILED"))?;
+    if changed != 1 {
+        return Err(stage_error("MEMORY_EXTENSION_V3_IDENTITY_WRITE_FAILED"));
+    }
+    let changed = client
+        .execute(
+            "INSERT INTO memory.codebase_memory_extension_ledger ( \
+                 ledger_ordinal, singleton, extension_id, extension_schema_version, \
+                 extension_sql_sha256, extension_manifest_sha256, database_uuid, \
+                 database_identity_sha256, global_schema_version, global_manifest_sha256, \
+                 event_kind \
+             ) VALUES (2, true, $1, $2, $3, $4, $5::text::uuid, $6, $7, $8, 'UPGRADED')",
+            &[
+                &CODEBASE_MEMORY_EXTENSION_ID,
                 &i16::try_from(CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION)
                     .expect("fixed extension version"),
                 &manifest.sql_sha256().as_str(),
@@ -620,11 +1922,99 @@ fn insert_identity(
                 &REQUIRED_GLOBAL_MANIFEST_SHA256,
             ],
         )
-        .map_err(|_| stage_error("MEMORY_EXTENSION_LEDGER_WRITE_FAILED"))?;
+        .map_err(|_| stage_error("MEMORY_EXTENSION_V3_LEDGER_WRITE_FAILED"))?;
     if changed != 1 {
-        return Err(stage_error("MEMORY_EXTENSION_LEDGER_WRITE_FAILED"));
+        return Err(stage_error("MEMORY_EXTENSION_V3_LEDGER_WRITE_FAILED"));
     }
     Ok(())
+}
+
+fn verify_exact_catalog_profile(
+    client: &mut impl GenericClient,
+    profile: ExactCatalogProfile,
+) -> Result<(), ExtensionSetupError> {
+    let expected = match profile {
+        ExactCatalogProfile::V2 => [
+            V2_EXPECTED_RELATION_SIGNATURE,
+            V2_EXPECTED_COLUMN_SIGNATURE,
+            V2_EXPECTED_CONSTRAINT_SIGNATURE,
+            V2_EXPECTED_INDEX_SIGNATURE,
+            V2_EXPECTED_FUNCTION_SIGNATURE,
+            V2_EXPECTED_TABLE_ACL_SIGNATURE,
+            V2_EXPECTED_FUNCTION_ACL_SIGNATURE,
+            V2_EXPECTED_SCHEMA_ACL_SIGNATURE,
+        ],
+        ExactCatalogProfile::V3 => [
+            V3_EXPECTED_RELATION_SIGNATURE,
+            V3_EXPECTED_COLUMN_SIGNATURE,
+            V3_EXPECTED_CONSTRAINT_SIGNATURE,
+            V3_EXPECTED_INDEX_SIGNATURE,
+            V3_EXPECTED_FUNCTION_SIGNATURE,
+            V3_EXPECTED_TABLE_ACL_SIGNATURE,
+            V3_EXPECTED_FUNCTION_ACL_SIGNATURE,
+            V3_EXPECTED_SCHEMA_ACL_SIGNATURE,
+        ],
+    };
+    for (query, expected) in [
+        RELATION_SIGNATURE_SQL,
+        COLUMN_SIGNATURE_SQL,
+        CONSTRAINT_SIGNATURE_SQL,
+        INDEX_SIGNATURE_SQL,
+        FUNCTION_SIGNATURE_SQL,
+        TABLE_ACL_SIGNATURE_SQL,
+        FUNCTION_ACL_SIGNATURE_SQL,
+        SCHEMA_ACL_SIGNATURE_SQL,
+    ]
+    .into_iter()
+    .zip(expected)
+    {
+        let actual = catalog_signature(client, query)?;
+        if !catalog_signature_matches(&actual, expected) {
+            return Err(catalog_stage("MEMORY_EXTENSION_CATALOG_SIGNATURE_MISMATCH"));
+        }
+    }
+    Ok(())
+}
+
+fn catalog_signature(
+    client: &mut impl GenericClient,
+    query: &str,
+) -> Result<String, ExtensionSetupError> {
+    let rows = client
+        .query(query, &[])
+        .map_err(|_| catalog_stage("MEMORY_EXTENSION_CATALOG_SIGNATURE_QUERY_FAILED"))?;
+    let mut values = Vec::with_capacity(rows.len());
+    for row in rows {
+        values.push(row.try_get::<_, String>(0).map_err(|_| catalog_error())?);
+    }
+    catalog_signature_digest(&values)
+}
+
+fn catalog_signature_digest(values: &[String]) -> Result<String, ExtensionSetupError> {
+    let mut hasher = Sha256::new();
+    hasher.update(CATALOG_SIGNATURE_DOMAIN);
+    hasher.update(
+        u64::try_from(values.len())
+            .map_err(|_| catalog_error())?
+            .to_be_bytes(),
+    );
+    for value in values {
+        hasher.update(
+            u64::try_from(value.len())
+                .map_err(|_| catalog_error())?
+                .to_be_bytes(),
+        );
+        hasher.update(value.as_bytes());
+    }
+    Ok(bytes_to_hex(&hasher.finalize()))
+}
+
+fn catalog_signature_matches(actual: &str, expected: &str) -> bool {
+    expected.len() == 64
+        && expected
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && actual == expected
 }
 
 #[allow(clippy::too_many_lines)]
@@ -646,14 +2036,14 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
         return Err(catalog_stage("MEMORY_EXTENSION_RELATION_COUNT_MISMATCH"));
     }
     let expected_comments = [
-        "LATTICE_CODEBASE_MEMORY_ANALYSES_V1",
-        "LATTICE_CODEBASE_MEMORY_EXTENSION_IDENTITY_V2",
-        "LATTICE_CODEBASE_MEMORY_EXTENSION_LEDGER_V2",
-        "LATTICE_CODEBASE_MEMORY_RECEIPTS_V1",
-        "LATTICE_CODEBASE_MEMORY_RECORDS_V1",
-        "LATTICE_CODEBASE_MEMORY_REFLECTIONS_V2",
-        "LATTICE_CODEBASE_MEMORY_RETRIEVAL_AUDITS_V1",
-        "LATTICE_OPENCLAW_GATEWAY_COMMANDS_V1",
+        "LATTICE_CODEBASE_MEMORY_ANALYSES_V3",
+        "LATTICE_CODEBASE_MEMORY_EXTENSION_IDENTITY_V3",
+        "LATTICE_CODEBASE_MEMORY_EXTENSION_LEDGER_V3",
+        "LATTICE_CODEBASE_MEMORY_RECEIPTS_V3",
+        "LATTICE_CODEBASE_MEMORY_RECORDS_V3",
+        "LATTICE_CODEBASE_MEMORY_REFLECTIONS_V3",
+        "LATTICE_CODEBASE_MEMORY_RETRIEVAL_AUDITS_V3",
+        "LATTICE_OPENCLAW_GATEWAY_COMMANDS_V3",
     ];
     for ((row, expected_name), expected_comment) in
         relations.iter().zip(EXPECTED_TABLES).zip(expected_comments)
@@ -778,6 +2168,15 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
             "r",
             "bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea, text, text, bytea, bytea, smallint",
             "LATTICE_CODEBASE_MEMORY_LOAD_RECEIPT_V1",
+            false,
+        ),
+        (
+            "codebase_memory_load_receipt_v3",
+            "s",
+            "r",
+            "bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea, text, text, bytea, bytea, smallint",
+            "LATTICE_CODEBASE_MEMORY_LOAD_RECEIPT_V3",
+            true,
         ),
         (
             "codebase_memory_load_reflection_v2",
@@ -785,6 +2184,15 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
             "r",
             "bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea, text, text, bytea, bytea, smallint",
             "LATTICE_CODEBASE_MEMORY_LOAD_REFLECTION_V2",
+            false,
+        ),
+        (
+            "codebase_memory_load_reflection_v3",
+            "s",
+            "r",
+            "bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea, text, text, bytea, bytea, smallint",
+            "LATTICE_CODEBASE_MEMORY_LOAD_REFLECTION_V3",
+            true,
         ),
         (
             "codebase_memory_persist_analysis_v1",
@@ -792,6 +2200,15 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
             "u",
             "bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea, text, text, bytea, bytea, smallint, text, bytea, bytea, bytea, bytea, bytea, bytea, bytea, bytea, bytea, integer[], bytea[], text[], text[], text[], text[], text[], text[], bytea[], integer[], integer[], text[], bytea[]",
             "LATTICE_CODEBASE_MEMORY_PERSIST_ANALYSIS_V1",
+            false,
+        ),
+        (
+            "codebase_memory_persist_analysis_v3",
+            "v",
+            "u",
+            "bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea, text, text, bytea, bytea, smallint, text, bytea, bytea, bytea, bytea, bytea, bytea, bytea, bytea, bytea, integer[], bytea[], text[], text[], text[], text[], text[], text[], bytea[], integer[], integer[], text[], bytea[]",
+            "LATTICE_CODEBASE_MEMORY_PERSIST_ANALYSIS_V3",
+            true,
         ),
         (
             "codebase_memory_persist_reflection_v2",
@@ -799,6 +2216,15 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
             "u",
             "bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea, text, text, bytea, bytea, smallint, bytea, text, text, bytea, bytea, bytea, bytea, text, text[], bytea[], text[]",
             "LATTICE_CODEBASE_MEMORY_PERSIST_REFLECTION_V2",
+            false,
+        ),
+        (
+            "codebase_memory_persist_reflection_v3",
+            "v",
+            "u",
+            "bytea, bytea, bytea, bytea, smallint, text, text, text, text, bytea, text, text, bytea, bytea, smallint, bytea, text, text, bytea, bytea, bytea, bytea, text, text[], bytea[], text[]",
+            "LATTICE_CODEBASE_MEMORY_PERSIST_REFLECTION_V3",
+            true,
         ),
         (
             "codebase_memory_persist_retrieval_v1",
@@ -806,6 +2232,15 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
             "u",
             "bytea, bytea, bytea, bytea, bytea, bytea, bytea, smallint, text, bytea[], bytea[], bigint[], bytea, bytea, bytea",
             "LATTICE_CODEBASE_MEMORY_PERSIST_RETRIEVAL_V1",
+            false,
+        ),
+        (
+            "codebase_memory_persist_retrieval_v3",
+            "v",
+            "u",
+            "bytea, bytea, bytea, bytea, bytea, bytea, bytea, smallint, text, bytea[], bytea[], bigint[], bytea, bytea, bytea",
+            "LATTICE_CODEBASE_MEMORY_PERSIST_RETRIEVAL_V3",
+            true,
         ),
         (
             "openclaw_gateway_finalize_terminal_v1",
@@ -813,6 +2248,15 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
             "u",
             "bytea, bytea, bytea, bytea, text, text, bigint, text, bytea, bytea, bytea, bytea",
             "LATTICE_OPENCLAW_GATEWAY_FINALIZE_TERMINAL_V1",
+            false,
+        ),
+        (
+            "openclaw_gateway_finalize_terminal_v3",
+            "v",
+            "u",
+            "bytea, bytea, bytea, bytea, text, text, bigint, text, bytea, bytea, bytea, bytea",
+            "LATTICE_OPENCLAW_GATEWAY_FINALIZE_TERMINAL_V3",
+            true,
         ),
         (
             "openclaw_gateway_reconcile_and_claim_v1",
@@ -820,9 +2264,18 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
             "u",
             "bytea, bytea, bytea, bytea, text, text, bigint, text, bytea",
             "LATTICE_OPENCLAW_GATEWAY_RECONCILE_AND_CLAIM_V1",
+            false,
+        ),
+        (
+            "openclaw_gateway_reconcile_and_claim_v3",
+            "v",
+            "u",
+            "bytea, bytea, bytea, bytea, text, text, bigint, text, bytea",
+            "LATTICE_OPENCLAW_GATEWAY_RECONCILE_AND_CLAIM_V3",
+            true,
         ),
     ];
-    for (row, (name, volatility, parallel, arguments, comment)) in
+    for (row, (name, volatility, parallel, arguments, comment, runtime_execute)) in
         functions.iter().zip(expected_function_profiles)
     {
         let observed_name: String = row.get(0);
@@ -866,7 +2319,7 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
             return Err(catalog_stage("MEMORY_EXTENSION_FUNCTION_ACL_MISMATCH"));
         }
         for (role, expected_execute) in [
-            ("lattice_runtime", true),
+            ("lattice_runtime", runtime_execute),
             ("lattice_guardian", false),
             ("lattice_readonly", false),
             ("lattice_migrator_login", false),
@@ -916,10 +2369,11 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
         let admitted_acl_count: i64 = acl_closure.get(1);
         let owner_acl_count: i64 = acl_closure.get(2);
         let runtime_acl_count: i64 = acl_closure.get(3);
-        if acl_count != 2
+        let expected_acl_count = if runtime_execute { 2 } else { 1 };
+        if acl_count != expected_acl_count
             || admitted_acl_count != acl_count
             || owner_acl_count != 1
-            || runtime_acl_count != 1
+            || runtime_acl_count != i64::from(runtime_execute)
         {
             return Err(catalog_stage("MEMORY_EXTENSION_FUNCTION_ACL_MISMATCH"));
         }
@@ -1033,7 +2487,7 @@ fn verify_catalog_closure(client: &mut impl GenericClient) -> Result<(), Extensi
         )
         .map_err(|_| catalog_stage("MEMORY_EXTENSION_CONSTRAINT_COUNT_QUERY_FAILED"))?
         .get(0);
-    if columns != 115 || constraints != 58 {
+    if columns != 143 || constraints != 59 {
         return Err(catalog_stage(
             "MEMORY_EXTENSION_COLUMN_CONSTRAINT_COUNT_MISMATCH",
         ));
@@ -1081,9 +2535,48 @@ fn read_identity(
     {
         return Err(catalog_error());
     }
+    let ledger_count: i64 = client
+        .query_one(
+            "SELECT pg_catalog.count(*)::bigint \
+               FROM ONLY memory.codebase_memory_extension_ledger AS l \
+              WHERE (l.ledger_ordinal = 1 \
+                     AND l.extension_id = $1 AND l.extension_schema_version = 2 \
+                     AND l.extension_sql_sha256 = $2 \
+                     AND l.extension_manifest_sha256 = $3 \
+                     AND l.database_uuid = $4::text::uuid \
+                     AND l.database_identity_sha256 = $5 \
+                     AND l.global_schema_version = 3 \
+                     AND l.global_manifest_sha256 = $6 \
+                     AND l.event_kind = 'INSTALLED') \
+                 OR (l.ledger_ordinal = 2 \
+                     AND l.extension_id = $1 AND l.extension_schema_version = 3 \
+                     AND l.extension_sql_sha256 = $7 \
+                     AND l.extension_manifest_sha256 = $8 \
+                     AND l.database_uuid = $4::text::uuid \
+                     AND l.database_identity_sha256 = $5 \
+                     AND l.global_schema_version = 5 \
+                     AND l.global_manifest_sha256 = $9 \
+                     AND l.event_kind = 'UPGRADED')",
+            &[
+                &CODEBASE_MEMORY_EXTENSION_ID,
+                &"9db54342b88f554ca76054c7a33ae72f04b412d2dfe21fae6eb4d8faf3e854e2",
+                &"0aedbd7d9ef7ca07fc2910d0da34c163cc83e3dd56f9b28292ae1f4f0c3c4d7e",
+                &target.expected_database_uuid(),
+                &target.expected_database_identity_digest().as_str(),
+                &HISTORICAL_V2_GLOBAL_MANIFEST_SHA256,
+                &manifest.sql_sha256().as_str(),
+                &manifest.manifest_sha256().as_str(),
+                &REQUIRED_GLOBAL_MANIFEST_SHA256,
+            ],
+        )
+        .map_err(|_| catalog_error())?
+        .get(0);
+    if ledger_count != 2 {
+        return Err(catalog_error());
+    }
     let global_manifest_digest =
         ContentDigest::from_sha256(global_manifest_sha256).map_err(|_| catalog_error())?;
-    let identity = CodebaseMemoryPersistenceIdentity::v2(
+    let identity = CodebaseMemoryPersistenceIdentity::v3(
         target.expected_database_identity_digest().clone(),
         global_manifest_digest,
         manifest.sql_sha256().clone(),
@@ -1189,6 +2682,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn memory_pre_state_errors_take_precedence_over_companion_classification() {
+        let partial = memory_pre_state_error(ExtensionPreState::Partial).expect("partial error");
+        assert_eq!(partial.kind(), ExtensionSetupErrorKind::PartialProfile);
+        assert_eq!(partial.code(), "MEMORY_EXTENSION_PARTIAL_PROFILE");
+
+        let collision =
+            memory_pre_state_error(ExtensionPreState::Collision).expect("collision error");
+        assert_eq!(collision.kind(), ExtensionSetupErrorKind::SchemaCollision);
+        assert_eq!(collision.code(), "MEMORY_EXTENSION_SCHEMA_COLLISION");
+
+        for accepted in [
+            ExtensionPreState::Fresh,
+            ExtensionPreState::ExactV2,
+            ExtensionPreState::ExactV3,
+        ] {
+            assert!(memory_pre_state_error(accepted).is_none());
+        }
+    }
+
+    #[test]
     fn target_identity_matches_the_store_domain_vector() {
         let target = ExtensionTarget::new(
             "lattice_task019_12345678_base",
@@ -1201,5 +2714,81 @@ mod tests {
             target.expected_database_identity_digest().as_str().len(),
             64
         );
+    }
+
+    #[test]
+    fn frozen_catalog_signatures_are_exact_lowercase_digests() {
+        for expected in [
+            V2_EXPECTED_RELATION_SIGNATURE,
+            V2_EXPECTED_COLUMN_SIGNATURE,
+            V2_EXPECTED_CONSTRAINT_SIGNATURE,
+            V2_EXPECTED_INDEX_SIGNATURE,
+            V2_EXPECTED_FUNCTION_SIGNATURE,
+            V2_EXPECTED_TABLE_ACL_SIGNATURE,
+            V2_EXPECTED_FUNCTION_ACL_SIGNATURE,
+            V2_EXPECTED_SCHEMA_ACL_SIGNATURE,
+            V3_EXPECTED_RELATION_SIGNATURE,
+            V3_EXPECTED_COLUMN_SIGNATURE,
+            V3_EXPECTED_CONSTRAINT_SIGNATURE,
+            V3_EXPECTED_INDEX_SIGNATURE,
+            V3_EXPECTED_FUNCTION_SIGNATURE,
+            V3_EXPECTED_TABLE_ACL_SIGNATURE,
+            V3_EXPECTED_FUNCTION_ACL_SIGNATURE,
+            V3_EXPECTED_SCHEMA_ACL_SIGNATURE,
+        ] {
+            assert!(catalog_signature_matches(expected, expected));
+        }
+        assert!(!catalog_signature_matches(
+            &"1".repeat(64),
+            "TASK075_MEMORY_SIGNATURE_PENDING"
+        ));
+    }
+
+    #[test]
+    fn same_count_catalog_definition_and_acl_substitution_changes_signature() {
+        let frozen = vec![
+            r#"["memory","codebase_memory_receipts","CHECK (octet_length(receipt_digest) = 32)"]"#
+                .to_owned(),
+            r#"["memory","codebase_memory_load_receipt_v3","lattice_runtime","EXECUTE"]"#
+                .to_owned(),
+        ];
+        let mut definition_drift = frozen.clone();
+        definition_drift[0] =
+            r#"["memory","codebase_memory_receipts","CHECK (octet_length(receipt_digest) = 31)"]"#
+                .to_owned();
+        let mut acl_drift = frozen.clone();
+        acl_drift[1] =
+            r#"["memory","codebase_memory_load_receipt_v3","PUBLIC","EXECUTE"]"#.to_owned();
+        let expected = catalog_signature_digest(&frozen).expect("signature");
+        let definition_drift =
+            catalog_signature_digest(&definition_drift).expect("definition drift signature");
+        let acl_drift = catalog_signature_digest(&acl_drift).expect("ACL drift signature");
+        assert!(!catalog_signature_matches(&definition_drift, &expected));
+        assert!(!catalog_signature_matches(&acl_drift, &expected));
+    }
+
+    #[test]
+    #[ignore = "requires the coordinated marker-owned disposable PostgreSQL fixture"]
+    fn measure_catalog_signatures() {
+        let connection = std::env::var("LATTICE_MEMORY_CATALOG_SIGNATURE_URL")
+            .expect("coordinator supplies fixture URL");
+        let mut client = postgres::Client::connect(&connection, postgres::NoTls)
+            .expect("connect to coordinated fixture");
+        client
+            .batch_execute("SET search_path = pg_catalog")
+            .expect("harden measurement search path");
+        for (label, query) in [
+            ("RELATION", RELATION_SIGNATURE_SQL),
+            ("COLUMN", COLUMN_SIGNATURE_SQL),
+            ("CONSTRAINT", CONSTRAINT_SIGNATURE_SQL),
+            ("INDEX", INDEX_SIGNATURE_SQL),
+            ("FUNCTION", FUNCTION_SIGNATURE_SQL),
+            ("TABLE_ACL", TABLE_ACL_SIGNATURE_SQL),
+            ("FUNCTION_ACL", FUNCTION_ACL_SIGNATURE_SQL),
+            ("SCHEMA_ACL", SCHEMA_ACL_SIGNATURE_SQL),
+        ] {
+            let signature = catalog_signature(&mut client, query).expect("catalog signature");
+            println!("MEMORY_CATALOG_{label}_SIGNATURE={signature}");
+        }
     }
 }

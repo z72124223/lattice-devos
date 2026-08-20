@@ -4,8 +4,9 @@
   implementation pending an explicit versioned owning-module amendment
 - Date: 2026-08-05
 - Decision owner: user
-- Related: SPEC-002 v27, ADR-004, ADR-005, ADR-006, ADR-014, ADR-021,
-  TASK-022, TASK-032, TASK-033
+- Related: SPEC-002 v32, ADR-004, ADR-005, ADR-006, ADR-014, ADR-021,
+  ADR-019, ADR-020, ADR-023, TASK-022, TASK-032, TASK-033, TASK-075,
+  TASK-076
 
 ## Context
 
@@ -107,6 +108,41 @@ independent extension identity and ledger cannot masquerade as
   cross-snapshot evidence cannot become a durable success.
 - Hermes and OpenClaw remain later nodes. Official Codex live remains
   `FAILED_DIAGNOSTIC`; this ADR does not alter its safety posture.
+
+## TASK-075 Schema-v5 Compatibility Amendment
+
+Codebase Memory remains outside the global Store manifest. Its v1/v2 SQL bytes
+and v2 identity (extension schema 2, global schema 3) are immutable. TASK-075
+adds only `db/extensions/codebase-memory/v3.sql`: fresh global-v5 installation
+and exact v2-to-v3 upgrade converge on the same verified catalog/ACL profile;
+partial, drifted, extra, ambiguous, or substituted profiles fail closed with
+no automatic repair.
+
+Contracts 1.13 keeps v1/v2 persistence-identity constructors bound to global
+schema 3 and adds a distinct extension-v3/global-v5 constructor. Postgres
+Codebase Memory 1.1 retains complete global/extension profile provenance on
+every authoritative analysis, retrieval, graph-receipt, and reflection row,
+backfills old rows with their exact v2 profile, cross-checks related rows, and
+uses that row profile when replaying graph-memory or Hermes-reflection
+receipts. The current adapter identity never rehashes historical receipts. This changes no pure
+Codebase Memory/Graphify/Hermes semantics or MCP surface.
+
+## TASK-076 Writer Lease V2 Bridge Amendment
+
+Postgres Codebase Memory 1.2 preserves its no-Writer default path and accepts
+one additional migration-only companion: the exact Writer Lease v2 bridge.
+During Memory v2-to-v3 advancement it acquires the global, Memory, and Writer
+transaction locks in that order, takes fixed-order `SHARE` locks on the five
+Writer tables, and verifies the complete companion catalog, ownership, ACL,
+identity, and ledger before and after Memory DDL. It neither calls the Writer
+adapter nor changes Writer rows, functions, ACLs, identity, or semantics.
+
+The only accepted companion sequence is `G5_M2_W2_BRIDGE_PENDING` to
+`G5_M3_W2_BRIDGE_PENDING`. Both states remain runtime closed, and the latter
+requires a later Writer-owned activation to `G5_M3_W2_CURRENT`. Writer v1,
+partial, active, suspect, unknown, extra, drifted, or substituted profiles
+fail before Memory commit. This narrow versioned compatibility recognition
+does not join either extension manifest to the global Store manifest.
 
 ## Verification
 

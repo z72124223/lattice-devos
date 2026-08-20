@@ -9,6 +9,8 @@ rust-version.workspace = true
 lattice-codebase-memory = { path = "../lattice-codebase-memory" }
 lattice-contracts = { path = "../lattice-contracts" }
 lattice-ports = { path = "../lattice-ports" }
+lattice-task-domain = { path = "../lattice-task-domain" }
+lattice-writer-lease = { path = "../lattice-writer-lease" }
 
 [lints]
 workspace = true

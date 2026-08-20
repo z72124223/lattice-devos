@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use lattice_cjson::{CanonicalValue, HashDomain, Sha256Digest, canonical_sha256, normalize_nfc};
+use lattice_cjson::{
+    CanonicalValue, HashDomain, Sha256Digest, canonical_sha256, canonicalize, normalize_nfc,
+};
 use lattice_contracts::ProjectSnapshotId;
 
 use crate::validation::{
@@ -67,6 +69,25 @@ impl TaskSpec {
     #[must_use]
     pub const fn spec_hash(&self) -> &Sha256Digest {
         &self.spec_hash
+    }
+
+    /// Returns the complete normalized Task Spec V2.1 canonical subject.
+    ///
+    /// This is the domain-owned carrier used by the gateway and persistence
+    /// adapters; callers must not rebuild a reduced or alternate document.
+    #[must_use]
+    pub fn canonical_subject(&self) -> CanonicalValue {
+        canonical_subject(&self.fields)
+    }
+
+    /// Encodes the complete normalized Task Spec using `lattice-cjson-1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonicalization error if the already-normalized subject
+    /// cannot be encoded exactly.
+    pub fn canonical_document(&self) -> Result<Vec<u8>, TaskDomainError> {
+        Ok(canonicalize(&self.canonical_subject())?.into_vec())
     }
 }
 

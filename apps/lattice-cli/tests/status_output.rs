@@ -1,4 +1,4 @@
-use lattice_cli::{dispatch, render_status};
+use lattice_cli::{dispatch, render_status, render_status_json};
 
 #[test]
 fn status_renders_the_inert_platform_manifest() {
@@ -22,5 +22,27 @@ fn only_the_read_only_status_command_is_accepted() {
     assert_eq!(
         dispatch(&["status".to_owned(), "extra".to_owned()]),
         Err("usage: lattice status")
+    );
+}
+
+#[test]
+fn status_json_is_a_stable_read_only_manifest_projection() {
+    let expected = concat!(
+        "{\"platform\":\"LATTICE DevOS\",\"state\":\"bootstrap-ready\",\"components\":[",
+        "{\"id\":\"rust-core\",\"mode\":\"control-core\"},",
+        "{\"id\":\"openclaw\",\"mode\":\"gateway\"},",
+        "{\"id\":\"postgresql\",\"mode\":\"durable-truth\"},",
+        "{\"id\":\"codex\",\"mode\":\"sole-writer\"},",
+        "{\"id\":\"graphify\",\"mode\":\"read-only-evidence\"},",
+        "{\"id\":\"hermes\",\"mode\":\"read-only-evidence\"},",
+        "{\"id\":\"codebase-memory\",\"mode\":\"durable-memory\"},",
+        "{\"id\":\"guardian\",\"mode\":\"approval-gated\"}]}",
+        "\n"
+    );
+
+    assert_eq!(render_status_json(), expected);
+    assert_eq!(
+        dispatch(&["status".to_owned(), "--json".to_owned()]),
+        Ok(expected.to_owned())
     );
 }

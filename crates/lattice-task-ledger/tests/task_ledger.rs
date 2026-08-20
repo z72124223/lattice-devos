@@ -1,14 +1,22 @@
 use lattice_cjson::CanonicalValue;
 use lattice_contracts::{
-    ContentDigest, ProjectId, ProjectSnapshotId, ResourceCounters, ResourceRequest, RuntimeKind,
-    TaskId, TaskLedgerStreamIdentity,
+    AttemptId, CONTRACT_VERSION, ContentDigest, DaemonEpoch, FencingToken, HolderProcessId,
+    ProjectId, ProjectSnapshotId, ResourceCounters, ResourceRequest, RuntimeAdmissionMode,
+    RuntimeKind, TaskId, TaskLedgerStreamIdentity, WRITER_LEASE_PRODUCER_ID,
+    WRITER_LEASE_PRODUCER_VERSION, WriterLeaseAuthorityHead, WriterLeaseAuthorityReceipt,
+    WriterLeaseIdentity, WriterLeaseRevision, WriterLeaseStatus,
 };
 use lattice_task_ledger::{
-    ActionId, ActorId, AppendCommand, CommandId, CommandOutcome, CorrelationId, Diagnostic,
-    EffectClaimId, FakeTaskLedger, LedgerCheckpoint, LedgerDenial, LedgerError, LedgerEventKind,
-    LedgerOutcome, OutboxAdmissionState, ReasonCode, ResourceSnapshot, VerifiedStream,
-    apply_append_plan, export_untrusted_snapshot, plan_append, verify_untrusted_snapshot,
-    verify_untrusted_snapshot_against_checkpoint,
+    ActionId, ActorId, AppendCommand, AutonomyAppendMetadata, AutonomyAuthorityEvidence,
+    AutonomyDecisionReason, AutonomyIntent, AutonomyModel, AutonomyObservedTaskState,
+    AutonomyRecommendation, AutonomyRiskClass, AutonomyTaskKind, AutonomyVerification, CommandId,
+    CommandOutcome, CorrelationId, Diagnostic, EffectClaimId, FakeTaskLedger, LedgerCheckpoint,
+    LedgerDenial, LedgerError, LedgerEventKind, LedgerOutcome, OutboxAdmissionState, ReasonCode,
+    ResourceSnapshot, TaskCreatedProfile, UntrustedAutonomyReceiptRow,
+    VerifiedAutonomyReceiptState, VerifiedStream, apply_append_plan, classify_task_created_profile,
+    export_untrusted_snapshot, plan_append, plan_autonomy_receipt_append,
+    verify_exact_autonomy_receipt_retry, verify_untrusted_autonomy_receipt_rows,
+    verify_untrusted_snapshot, verify_untrusted_snapshot_against_checkpoint,
 };
 
 fn digest(byte: char) -> ContentDigest {
@@ -25,6 +33,331 @@ fn identity(project: &str, task: &str) -> TaskLedgerStreamIdentity {
         "TWD",
     )
     .expect("stream identity")
+}
+
+fn autonomy_identity() -> TaskLedgerStreamIdentity {
+    TaskLedgerStreamIdentity::new(
+        ProjectId::new("project-1").expect("project"),
+        ProjectSnapshotId::new("snapshot-1").expect("snapshot"),
+        TaskId::new("TASK-050").expect("task"),
+        "1",
+        digest('a'),
+        "TWD",
+    )
+    .expect("stream identity")
+}
+
+fn writer_authority(identity: &TaskLedgerStreamIdentity) -> WriterLeaseAuthorityHead {
+    writer_authority_variant(identity, 1, 'e')
+}
+
+fn writer_authority_variant(
+    identity: &TaskLedgerStreamIdentity,
+    revision: u64,
+    transition_digest: char,
+) -> WriterLeaseAuthorityHead {
+    let lease_identity = WriterLeaseIdentity::new(
+        identity.project_id().clone(),
+        identity.project_snapshot_id().clone(),
+        identity.task_id().clone(),
+        identity.task_revision(),
+        identity.task_spec_digest().clone(),
+        AttemptId::new("attempt-1").expect("attempt"),
+        "lease-1",
+        "codex-writer-1",
+        "workspace-1",
+        HolderProcessId::new(42).expect("process"),
+        digest('b'),
+        "daemon-1",
+        DaemonEpoch::new(1).expect("daemon epoch"),
+        FencingToken::new(7).expect("fence"),
+    )
+    .expect("lease identity");
+    WriterLeaseAuthorityReceipt::new(
+        CONTRACT_VERSION,
+        WRITER_LEASE_PRODUCER_ID,
+        WRITER_LEASE_PRODUCER_VERSION,
+        RuntimeKind::Live,
+        lease_identity,
+        WriterLeaseStatus::Active,
+        WriterLeaseRevision::new(revision).expect("revision"),
+        RuntimeAdmissionMode::Active,
+        "2026-08-12T00:00:00Z",
+        "2026-08-12T00:00:00Z",
+        "2026-08-12T00:10:00Z",
+        digest('c'),
+        digest('d'),
+        digest(transition_digest),
+        digest('f'),
+    )
+    .expect("writer receipt")
+    .head()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WriterAuthoritySubstitution {
+    Project,
+    Attempt,
+    Lease,
+    Holder,
+    Process,
+    Daemon,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AutonomyRowScalar {
+    StreamId,
+    EventSequence,
+    EventDigest,
+    ReceiptSchemaVersion,
+    IntentVersion,
+    TaskKind,
+    RiskClass,
+    ExecutionPreapproved,
+    RequiresNewAuthority,
+    IrreversibleOrHighRisk,
+    ObservedTaskState,
+    Disposition,
+    DecisionReason,
+    Model,
+    Verification,
+    AuthorityMode,
+    ProcessStartAuthorityDigest,
+    IngressProfileAdapterCommitment,
+    StoreAuthorityHeadDigest,
+    WriterLeaseReceiptDigest,
+    WriterLeaseHeadDigest,
+    WriterFencingToken,
+    AuthorityDigest,
+    ReceiptDigest,
+}
+
+const AUTONOMY_ROW_SCALARS: [AutonomyRowScalar; 24] = [
+    AutonomyRowScalar::StreamId,
+    AutonomyRowScalar::EventSequence,
+    AutonomyRowScalar::EventDigest,
+    AutonomyRowScalar::ReceiptSchemaVersion,
+    AutonomyRowScalar::IntentVersion,
+    AutonomyRowScalar::TaskKind,
+    AutonomyRowScalar::RiskClass,
+    AutonomyRowScalar::ExecutionPreapproved,
+    AutonomyRowScalar::RequiresNewAuthority,
+    AutonomyRowScalar::IrreversibleOrHighRisk,
+    AutonomyRowScalar::ObservedTaskState,
+    AutonomyRowScalar::Disposition,
+    AutonomyRowScalar::DecisionReason,
+    AutonomyRowScalar::Model,
+    AutonomyRowScalar::Verification,
+    AutonomyRowScalar::AuthorityMode,
+    AutonomyRowScalar::ProcessStartAuthorityDigest,
+    AutonomyRowScalar::IngressProfileAdapterCommitment,
+    AutonomyRowScalar::StoreAuthorityHeadDigest,
+    AutonomyRowScalar::WriterLeaseReceiptDigest,
+    AutonomyRowScalar::WriterLeaseHeadDigest,
+    AutonomyRowScalar::WriterFencingToken,
+    AutonomyRowScalar::AuthorityDigest,
+    AutonomyRowScalar::ReceiptDigest,
+];
+
+#[allow(clippy::too_many_lines)]
+fn mutate_untrusted_autonomy_row(
+    row: &UntrustedAutonomyReceiptRow,
+    scalar: AutonomyRowScalar,
+) -> UntrustedAutonomyReceiptRow {
+    UntrustedAutonomyReceiptRow::new(
+        if matches!(scalar, AutonomyRowScalar::StreamId) {
+            digest('0')
+        } else {
+            row.stream_id().clone()
+        },
+        if matches!(scalar, AutonomyRowScalar::EventSequence) {
+            row.event_sequence() + 1
+        } else {
+            row.event_sequence()
+        },
+        if matches!(scalar, AutonomyRowScalar::EventDigest) {
+            digest('0')
+        } else {
+            row.event_digest().clone()
+        },
+        if matches!(scalar, AutonomyRowScalar::ReceiptSchemaVersion) {
+            "lattice.autonomy-receipt/unknown"
+        } else {
+            row.receipt_schema_version()
+        },
+        if matches!(scalar, AutonomyRowScalar::IntentVersion) {
+            "unknown"
+        } else {
+            row.intent_version()
+        },
+        if matches!(scalar, AutonomyRowScalar::TaskKind) {
+            "BUG_FIX"
+        } else {
+            row.task_kind()
+        },
+        if matches!(scalar, AutonomyRowScalar::RiskClass) {
+            "R1"
+        } else {
+            row.risk_class()
+        },
+        if matches!(scalar, AutonomyRowScalar::ExecutionPreapproved) {
+            !row.execution_preapproved()
+        } else {
+            row.execution_preapproved()
+        },
+        if matches!(scalar, AutonomyRowScalar::RequiresNewAuthority) {
+            !row.requires_new_authority()
+        } else {
+            row.requires_new_authority()
+        },
+        if matches!(scalar, AutonomyRowScalar::IrreversibleOrHighRisk) {
+            !row.irreversible_or_high_risk()
+        } else {
+            row.irreversible_or_high_risk()
+        },
+        if matches!(scalar, AutonomyRowScalar::ObservedTaskState) {
+            "COMPLETED"
+        } else {
+            row.observed_task_state()
+        },
+        if matches!(scalar, AutonomyRowScalar::Disposition) {
+            "ASK_USER"
+        } else {
+            row.disposition()
+        },
+        if matches!(scalar, AutonomyRowScalar::DecisionReason) {
+            "UNKNOWN_REASON"
+        } else {
+            row.decision_reason()
+        },
+        if matches!(scalar, AutonomyRowScalar::Model) {
+            None
+        } else {
+            row.model().map(str::to_owned)
+        },
+        if matches!(scalar, AutonomyRowScalar::Verification) {
+            None
+        } else {
+            row.verification().map(str::to_owned)
+        },
+        if matches!(scalar, AutonomyRowScalar::AuthorityMode) {
+            "UNKNOWN_AUTHORITY_MODE"
+        } else {
+            row.authority_mode()
+        },
+        if matches!(scalar, AutonomyRowScalar::ProcessStartAuthorityDigest) {
+            digest('0')
+        } else {
+            row.process_start_authority_digest().clone()
+        },
+        if matches!(scalar, AutonomyRowScalar::IngressProfileAdapterCommitment) {
+            digest('0')
+        } else {
+            row.ingress_profile_adapter_commitment().clone()
+        },
+        if matches!(scalar, AutonomyRowScalar::StoreAuthorityHeadDigest) {
+            digest('0')
+        } else {
+            row.store_authority_head_digest().clone()
+        },
+        if matches!(scalar, AutonomyRowScalar::WriterLeaseReceiptDigest) {
+            None
+        } else {
+            row.writer_lease_receipt_digest().cloned()
+        },
+        if matches!(scalar, AutonomyRowScalar::WriterLeaseHeadDigest) {
+            None
+        } else {
+            row.writer_lease_head_digest().cloned()
+        },
+        if matches!(scalar, AutonomyRowScalar::WriterFencingToken) {
+            Some(0)
+        } else {
+            row.writer_fencing_token()
+        },
+        if matches!(scalar, AutonomyRowScalar::AuthorityDigest) {
+            digest('0')
+        } else {
+            row.authority_digest().clone()
+        },
+        if matches!(scalar, AutonomyRowScalar::ReceiptDigest) {
+            digest('0')
+        } else {
+            row.receipt_digest().clone()
+        },
+    )
+}
+
+fn substituted_writer_authority(
+    identity: &TaskLedgerStreamIdentity,
+    substitution: WriterAuthoritySubstitution,
+) -> WriterLeaseAuthorityHead {
+    let lease_identity = WriterLeaseIdentity::new(
+        if matches!(substitution, WriterAuthoritySubstitution::Project) {
+            ProjectId::new("project-2").expect("project")
+        } else {
+            identity.project_id().clone()
+        },
+        identity.project_snapshot_id().clone(),
+        identity.task_id().clone(),
+        identity.task_revision(),
+        identity.task_spec_digest().clone(),
+        AttemptId::new(
+            if matches!(substitution, WriterAuthoritySubstitution::Attempt) {
+                "attempt-2"
+            } else {
+                "attempt-1"
+            },
+        )
+        .expect("attempt"),
+        if matches!(substitution, WriterAuthoritySubstitution::Lease) {
+            "lease-2"
+        } else {
+            "lease-1"
+        },
+        if matches!(substitution, WriterAuthoritySubstitution::Holder) {
+            "codex-writer-2"
+        } else {
+            "codex-writer-1"
+        },
+        "workspace-1",
+        HolderProcessId::new(
+            if matches!(substitution, WriterAuthoritySubstitution::Process) {
+                43
+            } else {
+                42
+            },
+        )
+        .expect("process"),
+        digest('b'),
+        if matches!(substitution, WriterAuthoritySubstitution::Daemon) {
+            "daemon-2"
+        } else {
+            "daemon-1"
+        },
+        DaemonEpoch::new(1).expect("daemon epoch"),
+        FencingToken::new(7).expect("fence"),
+    )
+    .expect("lease identity");
+    WriterLeaseAuthorityReceipt::new(
+        CONTRACT_VERSION,
+        WRITER_LEASE_PRODUCER_ID,
+        WRITER_LEASE_PRODUCER_VERSION,
+        RuntimeKind::Live,
+        lease_identity,
+        WriterLeaseStatus::Active,
+        WriterLeaseRevision::new(1).expect("revision"),
+        RuntimeAdmissionMode::Active,
+        "2026-08-12T00:00:00Z",
+        "2026-08-12T00:00:00Z",
+        "2026-08-12T00:10:00Z",
+        digest('c'),
+        digest('d'),
+        digest('e'),
+        digest('f'),
+    )
+    .expect("writer receipt")
+    .head()
 }
 
 fn append(
@@ -47,6 +380,711 @@ fn append(
         None,
     )
     .expect("append command")
+}
+
+#[test]
+fn generic_append_cannot_forge_autonomy_receipt_subject() {
+    let zero = FakeTaskLedger::zero_head(identity("project-1", "TASK-050")).expect("zero");
+    assert_eq!(
+        AppendCommand::new(
+            zero,
+            CommandId::new("forged-autonomy").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:01Z",
+            LedgerEventKind::AutonomyReceiptRecorded,
+            ActorId::new("caller-controlled").expect("actor"),
+            ActionId::new("RECORD_AUTONOMY_RECEIPT_V1").expect("action"),
+            LedgerOutcome::Recorded,
+            ReasonCode::new("AUTONOMY_DECISION_RECORDED").expect("reason"),
+            digest('d'),
+            None,
+            None,
+        ),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
+}
+
+#[test]
+fn generic_append_cannot_select_controlled_task_profile() {
+    let zero = FakeTaskLedger::zero_head(identity("project-1", "TASK-050")).expect("zero");
+    let error = AppendCommand::new(
+        zero,
+        CommandId::new("forged-profile").expect("command"),
+        CorrelationId::new("correlation-1").expect("correlation"),
+        "2026-08-13T00:00:00Z",
+        LedgerEventKind::TaskCreated,
+        ActorId::new("caller-controlled").expect("actor"),
+        ActionId::new("CONTROLLED_CODEX_CANARY").expect("action"),
+        LedgerOutcome::Recorded,
+        ReasonCode::new("TASK_ACCEPTED").expect("reason"),
+        digest('c'),
+        None,
+        None,
+    )
+    .expect_err("generic append must not choose a governed task-created profile");
+    assert_eq!(error.code(), "LEDGER_UNKNOWN_TASK_CREATED_PROFILE");
+}
+
+#[test]
+fn typed_task_admission_uses_required_profile_marker() {
+    let stream = VerifiedStream::vacant(identity("project-1", "TASK-050"), RuntimeKind::Fake)
+        .expect("vacant stream");
+    let command = AppendCommand::new_autonomy_required_task_created(
+        stream.head().clone(),
+        CommandId::new("typed-profile").expect("command"),
+        CorrelationId::new("correlation-1").expect("correlation"),
+        "2026-08-13T00:00:00Z",
+        ActorId::new("lattice-runtime").expect("actor"),
+        ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+        digest('c'),
+        None,
+    )
+    .expect("typed required profile");
+    let plan = plan_append(&stream, command).expect("typed profile plan");
+    let event = plan.new_event().expect("task-created event");
+    assert_eq!(
+        event.action().as_str(),
+        "CONTROLLED_CODEX_CANARY_AUTONOMY_V1"
+    );
+    assert_eq!(
+        classify_task_created_profile(event),
+        Ok(Some(TaskCreatedProfile::AutonomyReceiptRequiredV1))
+    );
+}
+
+#[test]
+fn required_profile_is_first_and_receipt_is_immediate_sequence_two() {
+    let vacant = VerifiedStream::vacant(identity("project-1", "TASK-050"), RuntimeKind::Fake)
+        .expect("vacant stream");
+    let historical_first = plan_append(&vacant, append(vacant.head().clone(), "first", '1'))
+        .expect("ordinary first event");
+    let existing = apply_append_plan(&vacant, &historical_first).expect("existing stream");
+    assert_eq!(
+        AppendCommand::new_autonomy_required_task_created(
+            existing.head().clone(),
+            CommandId::new("late-required").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:00Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+            ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+            digest('9'),
+            None,
+        ),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
+
+    let required_plan = plan_append(
+        &vacant,
+        AppendCommand::new_autonomy_required_task_created(
+            vacant.head().clone(),
+            CommandId::new("required-first").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:00Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+            ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+            digest('9'),
+            None,
+        )
+        .expect("required command"),
+    )
+    .expect("required plan");
+    let pending = apply_append_plan(&vacant, &required_plan).expect("pending stream");
+    assert_eq!(
+        plan_append(
+            &pending,
+            append(pending.head().clone(), "skip-receipt", '2')
+        ),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
+}
+
+#[test]
+fn task_ledger_owns_canonical_autonomy_plan_and_golden_digests() {
+    let identity = autonomy_identity();
+    let vacant = VerifiedStream::vacant(identity.clone(), RuntimeKind::Fake).expect("vacant");
+    let created_plan = plan_append(
+        &vacant,
+        AppendCommand::new_autonomy_required_task_created(
+            vacant.head().clone(),
+            CommandId::new("typed-profile").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:00Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+            ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+            digest('9'),
+            None,
+        )
+        .expect("typed profile"),
+    )
+    .expect("create plan");
+    let created = apply_append_plan(&vacant, &created_plan).expect("created stream");
+    let input = AutonomyIntent::new(
+        AutonomyTaskKind::Feature,
+        AutonomyRiskClass::R0,
+        true,
+        false,
+        false,
+        AutonomyObservedTaskState::Draft,
+        AutonomyRecommendation::Proceed {
+            model: AutonomyModel::GovernedCodexWriter,
+            verification: AutonomyVerification::FocusedChecks,
+            reason: AutonomyDecisionReason::RoutineAuthorized,
+        },
+    );
+    let authority = AutonomyAuthorityEvidence::new_p0_process_start_profile(
+        digest('1'),
+        digest('2'),
+        digest('3'),
+        Some(writer_authority(&identity)),
+    )
+    .expect("authority");
+    let plan = plan_autonomy_receipt_append(
+        &created,
+        AutonomyAppendMetadata::new(
+            CommandId::new("task050-autonomy-receipt-v1").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:01Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+        )
+        .expect("metadata"),
+        input,
+        authority,
+    )
+    .expect("autonomy plan");
+    assert_eq!(plan.append_plan().new_event().expect("event").sequence(), 2);
+    assert_eq!(
+        plan.append_plan()
+            .new_event()
+            .expect("event")
+            .subject_digest(),
+        plan.receipt().receipt_digest()
+    );
+    assert_eq!(
+        plan.receipt().authority_digest().as_str(),
+        "076aabfeb37d459ca1e001d765c81a42c0f0a5167f01ed8cc7b0d9a6ff8b2164"
+    );
+    assert_eq!(
+        plan.receipt().receipt_digest().as_str(),
+        "ce283bd49ecba4ba040757d74bdd915aa356d7fcc0f065a83e7917ea97c53673"
+    );
+}
+
+#[test]
+fn autonomy_writer_head_digest_uses_only_the_owner_asserted_tuple() {
+    let identity = autonomy_identity();
+    let vacant = VerifiedStream::vacant(identity.clone(), RuntimeKind::Fake).expect("vacant");
+    let created_plan = plan_append(
+        &vacant,
+        AppendCommand::new_autonomy_required_task_created(
+            vacant.head().clone(),
+            CommandId::new("typed-profile").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:00Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+            ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+            digest('9'),
+            None,
+        )
+        .expect("typed profile"),
+    )
+    .expect("create plan");
+    let created = apply_append_plan(&vacant, &created_plan).expect("created stream");
+    let intent = AutonomyIntent::new(
+        AutonomyTaskKind::Feature,
+        AutonomyRiskClass::R0,
+        true,
+        false,
+        false,
+        AutonomyObservedTaskState::Draft,
+        AutonomyRecommendation::Proceed {
+            model: AutonomyModel::GovernedCodexWriter,
+            verification: AutonomyVerification::FocusedChecks,
+            reason: AutonomyDecisionReason::RoutineAuthorized,
+        },
+    );
+    let metadata = AutonomyAppendMetadata::new(
+        CommandId::new("task050-autonomy-receipt-v1").expect("command"),
+        CorrelationId::new("correlation-1").expect("correlation"),
+        "2026-08-13T00:00:01Z",
+        ActorId::new("lattice-runtime").expect("actor"),
+    )
+    .expect("metadata");
+    let plan = |writer| {
+        plan_autonomy_receipt_append(
+            &created,
+            metadata.clone(),
+            intent,
+            AutonomyAuthorityEvidence::new_p0_process_start_profile(
+                digest('1'),
+                digest('2'),
+                digest('3'),
+                Some(writer),
+            )
+            .expect("authority"),
+        )
+        .expect("autonomy plan")
+    };
+    let owner_projection = plan(writer_authority_variant(&identity, 1, 'e'));
+    let substituted_unasserted_projection = plan(writer_authority_variant(&identity, 2, '6'));
+
+    assert_eq!(
+        owner_projection.receipt().writer_lease_head_digest(),
+        substituted_unasserted_projection
+            .receipt()
+            .writer_lease_head_digest()
+    );
+    assert_eq!(
+        owner_projection.receipt().authority_digest(),
+        substituted_unasserted_projection
+            .receipt()
+            .authority_digest()
+    );
+    assert_eq!(
+        owner_projection.receipt().receipt_digest(),
+        substituted_unasserted_projection.receipt().receipt_digest()
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn exact_autonomy_retry_rejects_every_writer_identity_substitution() {
+    let identity = autonomy_identity();
+    let vacant = VerifiedStream::vacant(identity.clone(), RuntimeKind::Fake).expect("vacant");
+    let created_plan = plan_append(
+        &vacant,
+        AppendCommand::new_autonomy_required_task_created(
+            vacant.head().clone(),
+            CommandId::new("typed-profile").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:00Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+            ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+            digest('9'),
+            None,
+        )
+        .expect("typed profile"),
+    )
+    .expect("create plan");
+    let created = apply_append_plan(&vacant, &created_plan).expect("created stream");
+    let intent = AutonomyIntent::new(
+        AutonomyTaskKind::Feature,
+        AutonomyRiskClass::R0,
+        true,
+        false,
+        false,
+        AutonomyObservedTaskState::Draft,
+        AutonomyRecommendation::Proceed {
+            model: AutonomyModel::GovernedCodexWriter,
+            verification: AutonomyVerification::FocusedChecks,
+            reason: AutonomyDecisionReason::RoutineAuthorized,
+        },
+    );
+    let authority = AutonomyAuthorityEvidence::new_p0_process_start_profile(
+        digest('1'),
+        digest('2'),
+        digest('3'),
+        Some(writer_authority(&identity)),
+    )
+    .expect("authority");
+    let plan = plan_autonomy_receipt_append(
+        &created,
+        AutonomyAppendMetadata::new(
+            CommandId::new("task050-autonomy-receipt-v1").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:01Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+        )
+        .expect("metadata"),
+        intent,
+        authority.clone(),
+    )
+    .expect("autonomy plan");
+
+    verify_exact_autonomy_receipt_retry(&identity, plan.receipt(), intent, &authority)
+        .expect("exact owner retry");
+
+    for substitution in [
+        WriterAuthoritySubstitution::Project,
+        WriterAuthoritySubstitution::Attempt,
+        WriterAuthoritySubstitution::Lease,
+        WriterAuthoritySubstitution::Holder,
+        WriterAuthoritySubstitution::Process,
+        WriterAuthoritySubstitution::Daemon,
+    ] {
+        let candidate = AutonomyAuthorityEvidence::new_p0_process_start_profile(
+            digest('1'),
+            digest('2'),
+            digest('3'),
+            Some(substituted_writer_authority(&identity, substitution)),
+        )
+        .expect("candidate authority");
+        assert_eq!(
+            verify_exact_autonomy_receipt_retry(&identity, plan.receipt(), intent, &candidate),
+            Err(LedgerError::InvalidAutonomyReceipt),
+            "{substitution:?} substitution must fail closed"
+        );
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn untrusted_autonomy_rows_roundtrip_only_through_task_ledger() {
+    let identity = autonomy_identity();
+    let vacant = VerifiedStream::vacant(identity, RuntimeKind::Fake).expect("vacant");
+    let created_plan = plan_append(
+        &vacant,
+        AppendCommand::new_autonomy_required_task_created(
+            vacant.head().clone(),
+            CommandId::new("typed-profile").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:00Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+            ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+            digest('9'),
+            None,
+        )
+        .expect("typed profile"),
+    )
+    .expect("create plan");
+    let created = apply_append_plan(&vacant, &created_plan).expect("created stream");
+    assert_eq!(
+        verify_untrusted_autonomy_receipt_rows(&created, &[]),
+        Ok(VerifiedAutonomyReceiptState::PendingRequiredReceipt)
+    );
+    let plan = plan_autonomy_receipt_append(
+        &created,
+        AutonomyAppendMetadata::new(
+            CommandId::new("task050-autonomy-receipt-v1").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:01Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+        )
+        .expect("metadata"),
+        AutonomyIntent::new(
+            AutonomyTaskKind::Feature,
+            AutonomyRiskClass::R0,
+            false,
+            false,
+            false,
+            AutonomyObservedTaskState::Draft,
+            AutonomyRecommendation::AskUser {
+                reason: AutonomyDecisionReason::NewUserDecision,
+            },
+        ),
+        AutonomyAuthorityEvidence::new_p0_process_start_profile(
+            digest('1'),
+            digest('2'),
+            digest('3'),
+            None,
+        )
+        .expect("authority"),
+    )
+    .expect("autonomy plan");
+    let completed = apply_append_plan(&created, plan.append_plan()).expect("complete stream");
+    let row = plan.receipt().to_untrusted();
+    assert_eq!(
+        verify_untrusted_autonomy_receipt_rows(&completed, std::slice::from_ref(&row)),
+        Ok(VerifiedAutonomyReceiptState::RequiredComplete(
+            plan.receipt().clone()
+        ))
+    );
+
+    let later_plan = plan_append(
+        &completed,
+        append(completed.head().clone(), "post-receipt-event", '7'),
+    )
+    .expect("later lifecycle event");
+    let later = apply_append_plan(&completed, &later_plan).expect("later stream");
+    assert_eq!(
+        verify_untrusted_autonomy_receipt_rows(&later, std::slice::from_ref(&row)),
+        Ok(VerifiedAutonomyReceiptState::RequiredComplete(
+            plan.receipt().clone()
+        ))
+    );
+
+    let proceed_plan = plan_autonomy_receipt_append(
+        &created,
+        AutonomyAppendMetadata::new(
+            CommandId::new("task050-autonomy-proceed-v1").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:02Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+        )
+        .expect("metadata"),
+        AutonomyIntent::new(
+            AutonomyTaskKind::Feature,
+            AutonomyRiskClass::R0,
+            true,
+            false,
+            false,
+            AutonomyObservedTaskState::Draft,
+            AutonomyRecommendation::Proceed {
+                model: AutonomyModel::GovernedCodexWriter,
+                verification: AutonomyVerification::FocusedChecks,
+                reason: AutonomyDecisionReason::RoutineAuthorized,
+            },
+        ),
+        AutonomyAuthorityEvidence::new_p0_process_start_profile(
+            digest('1'),
+            digest('2'),
+            digest('3'),
+            Some(writer_authority(created.identity())),
+        )
+        .expect("authority"),
+    )
+    .expect("proceed autonomy plan");
+    let proceed_completed =
+        apply_append_plan(&created, proceed_plan.append_plan()).expect("proceed complete stream");
+    let proceed_row = proceed_plan.receipt().to_untrusted();
+    assert_eq!(
+        verify_untrusted_autonomy_receipt_rows(
+            &proceed_completed,
+            std::slice::from_ref(&proceed_row),
+        ),
+        Ok(VerifiedAutonomyReceiptState::RequiredComplete(
+            proceed_plan.receipt().clone()
+        ))
+    );
+
+    assert_eq!(AUTONOMY_ROW_SCALARS.len(), 24);
+    for scalar in AUTONOMY_ROW_SCALARS {
+        let corrupted = mutate_untrusted_autonomy_row(&proceed_row, scalar);
+        assert_eq!(
+            verify_untrusted_autonomy_receipt_rows(&proceed_completed, &[corrupted]),
+            Err(LedgerError::InvalidAutonomyReceipt),
+            "{scalar:?} corruption must fail closed"
+        );
+    }
+}
+
+#[test]
+fn typed_autonomy_plan_rejects_substituted_recommendation() {
+    let identity = autonomy_identity();
+    let vacant = VerifiedStream::vacant(identity, RuntimeKind::Fake).expect("vacant");
+    let created_plan = plan_append(
+        &vacant,
+        AppendCommand::new_autonomy_required_task_created(
+            vacant.head().clone(),
+            CommandId::new("typed-profile").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:00Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+            ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+            digest('9'),
+            None,
+        )
+        .expect("typed profile"),
+    )
+    .expect("create plan");
+    let created = apply_append_plan(&vacant, &created_plan).expect("created stream");
+    let substituted = AutonomyIntent::new(
+        AutonomyTaskKind::Feature,
+        AutonomyRiskClass::R0,
+        false,
+        false,
+        false,
+        AutonomyObservedTaskState::Draft,
+        AutonomyRecommendation::Proceed {
+            model: AutonomyModel::GovernedCodexWriter,
+            verification: AutonomyVerification::FocusedChecks,
+            reason: AutonomyDecisionReason::RoutineAuthorized,
+        },
+    );
+    let error = plan_autonomy_receipt_append(
+        &created,
+        AutonomyAppendMetadata::new(
+            CommandId::new("task050-autonomy-receipt-v1").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:01Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+        )
+        .expect("metadata"),
+        substituted,
+        AutonomyAuthorityEvidence::new_p0_process_start_profile(
+            digest('1'),
+            digest('2'),
+            digest('3'),
+            None,
+        )
+        .expect("authority"),
+    )
+    .expect_err("substituted recommendation");
+    assert_eq!(error.code(), "LEDGER_AUTONOMY_RECOMMENDATION_MISMATCH");
+}
+
+#[test]
+fn typed_autonomy_plan_rejects_every_non_p0_risk() {
+    let identity = autonomy_identity();
+    let vacant = VerifiedStream::vacant(identity.clone(), RuntimeKind::Fake).expect("vacant");
+    let created_plan = plan_append(
+        &vacant,
+        AppendCommand::new_autonomy_required_task_created(
+            vacant.head().clone(),
+            CommandId::new("typed-profile").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:00Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+            ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+            digest('9'),
+            None,
+        )
+        .expect("typed profile"),
+    )
+    .expect("create plan");
+    let created = apply_append_plan(&vacant, &created_plan).expect("created stream");
+    let cases = [
+        (
+            AutonomyRiskClass::R1,
+            AutonomyRecommendation::Proceed {
+                model: AutonomyModel::GovernedCodexWriter,
+                verification: AutonomyVerification::FocusedChecks,
+                reason: AutonomyDecisionReason::RoutineAuthorized,
+            },
+            Some(writer_authority(&identity)),
+        ),
+        (
+            AutonomyRiskClass::R2,
+            AutonomyRecommendation::Proceed {
+                model: AutonomyModel::GovernedCodexWriter,
+                verification: AutonomyVerification::BuildAndFocusedChecks,
+                reason: AutonomyDecisionReason::RoutineAuthorized,
+            },
+            Some(writer_authority(&identity)),
+        ),
+        (
+            AutonomyRiskClass::R3,
+            AutonomyRecommendation::AskUser {
+                reason: AutonomyDecisionReason::HighRiskOrIrreversible,
+            },
+            None,
+        ),
+    ];
+    for (index, (risk, recommendation, writer)) in cases.into_iter().enumerate() {
+        let error = plan_autonomy_receipt_append(
+            &created,
+            AutonomyAppendMetadata::new(
+                CommandId::new(format!("non-p0-{index}")).expect("command"),
+                CorrelationId::new("correlation-1").expect("correlation"),
+                "2026-08-13T00:00:01Z",
+                ActorId::new("lattice-runtime").expect("actor"),
+            )
+            .expect("metadata"),
+            AutonomyIntent::new(
+                AutonomyTaskKind::Feature,
+                risk,
+                true,
+                false,
+                false,
+                AutonomyObservedTaskState::Draft,
+                recommendation,
+            ),
+            AutonomyAuthorityEvidence::new_p0_process_start_profile(
+                digest('1'),
+                digest('2'),
+                digest('3'),
+                writer,
+            )
+            .expect("authority"),
+        )
+        .expect_err("non-P0 risk must fail closed");
+        assert_eq!(error, LedgerError::InvalidAutonomyReceipt);
+    }
+}
+
+#[test]
+fn autonomy_receipt_event_is_closed_ordered_and_exactly_once() {
+    assert_eq!(
+        LedgerEventKind::parse("AUTONOMY_RECEIPT_RECORDED"),
+        Ok(LedgerEventKind::AutonomyReceiptRecorded)
+    );
+    assert_eq!(
+        LedgerEventKind::parse("AUTONOMY_RECEIPT_V2"),
+        Err(LedgerError::UnknownEventKind)
+    );
+
+    let vacant = VerifiedStream::vacant(autonomy_identity(), RuntimeKind::Fake).expect("vacant");
+    let autonomy_input = || {
+        AutonomyIntent::new(
+            AutonomyTaskKind::Feature,
+            AutonomyRiskClass::R0,
+            false,
+            false,
+            false,
+            AutonomyObservedTaskState::Draft,
+            AutonomyRecommendation::AskUser {
+                reason: AutonomyDecisionReason::NewUserDecision,
+            },
+        )
+    };
+    let autonomy_authority = || {
+        AutonomyAuthorityEvidence::new_p0_process_start_profile(
+            digest('1'),
+            digest('2'),
+            digest('3'),
+            None,
+        )
+        .expect("authority")
+    };
+    let autonomy_metadata = |command_id: &str| {
+        AutonomyAppendMetadata::new(
+            CommandId::new(command_id).expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:01Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+        )
+        .expect("metadata")
+    };
+    assert_eq!(
+        plan_autonomy_receipt_append(
+            &vacant,
+            autonomy_metadata("autonomy-before-create"),
+            autonomy_input(),
+            autonomy_authority(),
+        ),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
+    let created_plan = plan_append(
+        &vacant,
+        AppendCommand::new_autonomy_required_task_created(
+            vacant.head().clone(),
+            CommandId::new("create").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-13T00:00:00Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+            ReasonCode::new("TASK038_TASK_ACCEPTED").expect("reason"),
+            digest('c'),
+            None,
+        )
+        .expect("create command"),
+    )
+    .expect("create plan");
+    let created = apply_append_plan(&vacant, &created_plan).expect("created");
+    let receipt_plan = plan_autonomy_receipt_append(
+        &created,
+        autonomy_metadata("autonomy"),
+        autonomy_input(),
+        autonomy_authority(),
+    )
+    .expect("receipt plan");
+    assert_eq!(
+        receipt_plan.receipt().authority_digest().as_str(),
+        "f83650cc14a6e05b1150597fa80ce26131f8a6d69d2280c7c82b567892b2bb1f"
+    );
+    assert_eq!(
+        receipt_plan.receipt().receipt_digest().as_str(),
+        "68d59dd274d151d0c37ca6bfaceafbbb12d7b5c424f34370aeb6f5352037b536"
+    );
+    let receipt = apply_append_plan(&created, receipt_plan.append_plan()).expect("receipt");
+    assert_eq!(receipt.head().sequence(), 2);
+    assert_eq!(
+        plan_autonomy_receipt_append(
+            &receipt,
+            autonomy_metadata("autonomy-2"),
+            autonomy_input(),
+            autonomy_authority(),
+        ),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
 }
 
 #[test]

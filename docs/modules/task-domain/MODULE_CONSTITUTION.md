@@ -1,10 +1,10 @@
 ---
 module_id: task-domain
 name: Task Domain
-version: 2.1
+version: 2.2
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-07-29
+last_reviewed: 2026-08-09
 ---
 
 ## Mission
@@ -32,6 +32,9 @@ transitions so every LATTICE component uses the same workflow language.
   compatibility.
 - Task dependency DAG semantics and stable cycle evidence.
 - Selection of fields and schema domain used for Task Spec `spec_hash`.
+- The complete normalized canonical subject and canonical Task Spec 2.1
+  document bytes used by Gateway/persistence consumers. Reduced or alternate
+  documents are not domain-owned representations.
 
 `lattice-cjson` owns only the mechanical canonical-byte and generic
 domain-framing algorithm. Task Ledger owns persisted task events, event
@@ -46,6 +49,9 @@ data.
   requirements.
 - Derive `spec_hash` from its immutable fields using the
   `lattice.task-spec/2.1` `lattice-cjson-1` domain.
+- Export the complete normalized canonical subject and byte-stable canonical
+  document from the validated Task Spec itself so callers never rebuild an
+  incomplete hash carrier.
 - Validate V2 transitions and expose the frozen V1 transition matrix only as
   compatibility evidence.
 - Detect unknown dependencies and cyclic task graphs with stable cycle paths.
@@ -68,6 +74,11 @@ data.
    performs no currency conversion. Canonical decimal budget strings are at
    most 256 ASCII bytes, with at most 127 integer digits and 128 fractional
    digits; those public bounds are shared with Policy.
+10. `canonical_subject`, `canonical_document`, and `spec_hash` cover the exact
+    same complete normalized immutable fields. Re-encoding is byte-stable and
+    recomputing the frozen hash domain yields the owned `spec_hash`.
+11. A Gateway, template, adapter, or persistence layer cannot supply a reduced
+    canonical document and call it Task Spec 2.1 domain evidence.
 
 ## Allowed Dependencies
 
@@ -90,6 +101,10 @@ schema versions require an explicit migration design and ADR. V1 and Task Spec
 2.0 data remain read-only characterization evidence and are never silently
 rewritten or hashed through the 2.1 path.
 
+Version 2.2 adds only the public complete canonical subject/document carrier
+for an already validated Task Spec 2.1. It changes no schema field,
+normalization, hash domain, transition, dependency, or I/O boundary.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -97,6 +112,7 @@ rewritten or hashed through the 2.1 path.
 | V2 construction | focused valid/invalid Task Spec tests | Engineering | yes |
 | V1/V2 transitions | complete frozen matrices and stable error tests | Engineering | yes |
 | Hash stability | canonical-byte fixtures and immutable-field mutation matrix | Engineering | yes |
+| Canonical document | byte-stable document equals the complete subject and recomputes the owned spec hash; reduced/alternate carriers fail comparison | Security review | yes |
 | Dependency graph | acyclic/unknown/cycle fixtures with stable evidence | Engineering | yes |
 | No-I/O/dependencies | Cargo metadata and forbidden-reference scan | Architecture review | yes |
 | Full verification | Rust workspace plus preserved Node suite | Engineering | yes |
@@ -114,3 +130,4 @@ update, architecture review, and explicit responsible-user authorization.
 | 1.0 | 2026-07-29 | SPEC-001, ADR-001 | Initial offline task contract | Current user task |
 | 2.0 | 2026-07-29 | SPEC-002 v4, ADR-004/005, approved V2 amendment, TASK-010 | Rust Task Spec V2, V1 transition compatibility, and separated canonical mechanism | User execution directive |
 | 2.1 | 2026-07-29 | SPEC-002 v6, ADR-008/009, TASK-011 review RED | Immutable external-cost accounting currency added to Task Spec hash | User MVP-3 execution directive |
+| 2.2 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Export the complete normalized canonical subject/document from the validated Task Spec so every boundary uses one hash carrier | User TASK-038-first direction |

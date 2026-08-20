@@ -1,0 +1,1188 @@
+# HANDOFF
+
+## Status
+
+`DONE` — all five completed windows in this batch were saved on GitHub, remotely verified, and archived by the central coordinator. The overall GPT/Codex → LATTICE live goal remains active.
+
+## Objective and scope
+
+- Objective: preserve completed P0 window results, durations, local commit provenance, and GitHub-save evidence before the central coordinator archives those tasks.
+- In scope: `feature/p0-clean-seed-rebuild`, the five completed task receipts listed in `WINDOW_LEDGER.jsonl`, exact-path ledger/handoff commits, push to the same non-default feature branch, and remote-SHA verification.
+- Out of scope: product/runtime edits, TASK-037, GH-9, Hermes/reflection, PostgreSQL `64272`, default-branch changes, merge, deployment, release, and task archiving performed by this saver.
+
+## Completed work
+
+- Recorded authoritative Codex task metadata for production evidence closure, read-only dogfooding, the independent direct-stdio client, the client asset saver, and the read-only Canary FAILED diagnostic.
+- Verified `2b2f112bc3289f206bc85968db6a39ee6bdf576e` is an ancestor of asset commit `458ce3b29ddc3e8b823b23e0b8c08a2b92cef960`.
+- Verified the asset commit has tree `6b4542a8eaa87cdd8aec079c58804ed051478486` and exactly five new paths below `tools/lattice-mcp-kit/direct-stdio/`.
+- Pushed the first durable ledger checkpoint `8d34d62cb43d82308ed13f1df7ead13802cb1685` to `origin/feature/p0-clean-seed-rebuild` and verified exact remote/local SHA equality at `2026-08-11T11:59:24.897Z`.
+- Recorded the read-only Canary FAILED diagnostic as a distinct fifth window: it confirmed the earlier known failure `CODEX_APP_SERVER_CODEX_HOME_OWNERSHIP_MISSING`; later `STOPPING / RECONCILIATION_REQUIRED` live state is explicitly not part of that diagnostic result.
+- Pushed the fifth window's first durable checkpoint `6b9e728dd52436ce43a1f711a576cd2e6b5c002c` and verified exact remote/local SHA equality at `2026-08-11T12:02:13.455Z`.
+- Received central archive confirmation for all five task IDs and recorded `archived_at_utc=2026-08-11T12:04:01.012Z` in every ledger entry.
+- Preserved the unrelated modified `scripts/test-task038-four-tool-acceptance.ps1` without reading, editing, staging, resetting, or cleaning it.
+
+## Files changed
+
+| Path | Why | Verification |
+|---|---|---|
+| `tools/lattice-mcp-kit/WINDOW_LEDGER.jsonl` | Durable per-window timing, scope, artifacts, local commit/tree, tests, remote-save, and archive fields | Each line parses as one JSON object; remote checkpoint/time and central-confirmed archive timestamp are populated |
+| `tools/lattice-mcp-kit/HANDOFF.md` | Evidence-backed GitHub saver and archive-coordination state | Re-read after write; no secrets or unsupported completion claims |
+
+## Workflow ledger
+
+| Stage | Status | Evidence / artifact |
+|---|---|---|
+| Scope and dirty-tree boundary | verified | branch `feature/p0-clean-seed-rebuild`; one unrelated modified script remains unstaged |
+| Completed task receipts | verified | five task metadata/final receipts read through Codex task tools |
+| Commit ancestry and exact asset paths | verified | `git merge-base --is-ancestor`; `git diff-tree` |
+| Local ledger/handoff commits | verified | `8d34d62cb43d82308ed13f1df7ead13802cb1685`, `6b9e728dd52436ce43a1f711a576cd2e6b5c002c`, and confirmation commit `b8d93b0f5373eec7eedda9cc59301973000fb502`; exact ledger/handoff staging only |
+| GitHub branch save | verified | `origin/feature/p0-clean-seed-rebuild` exactly matched `8d34d62cb43d82308ed13f1df7ead13802cb1685` |
+| Fifth-window first durable save | verified | `origin/feature/p0-clean-seed-rebuild` exactly matched `6b9e728dd52436ce43a1f711a576cd2e6b5c002c` |
+| Draft PR | verified | GitHub app created draft PR `#11`; no merge, deployment, or release |
+| Central archive completion | verified | central archived all five exact task IDs and supplied the common archive timestamp `2026-08-11T12:04:01.012Z` |
+
+## Verification
+
+- Commands and exit codes:
+  - `git fetch --all --prune`: exit 0.
+  - `git status -sb`: exit 0; only the protected modified script remained after asset commit.
+  - `git merge-base --is-ancestor 2b2f112... HEAD`: exit 0.
+  - `git ls-remote --heads origin feature/p0-clean-seed-rebuild`: exit 0 with no matching ref before publication.
+  - `git push -u origin feature/p0-clean-seed-rebuild`: exit 0; new branch created.
+  - post-push `git ls-remote --heads origin feature/p0-clean-seed-rebuild`: exit 0; SHA exactly equaled local `8d34d62cb43d82308ed13f1df7ead13802cb1685`.
+  - second-batch `git push origin feature/p0-clean-seed-rebuild`: exit 0; fast-forwarded to `6b9e728dd52436ce43a1f711a576cd2e6b5c002c`.
+  - second-batch `git ls-remote --heads origin feature/p0-clean-seed-rebuild`: exit 0; SHA exactly equaled local `6b9e728dd52436ce43a1f711a576cd2e6b5c002c`.
+  - confirmation `git push origin feature/p0-clean-seed-rebuild`: exit 0; fast-forwarded to `b8d93b0f5373eec7eedda9cc59301973000fb502`.
+  - confirmation `git ls-remote --heads origin feature/p0-clean-seed-rebuild`: exit 0; SHA exactly equaled local `b8d93b0f5373eec7eedda9cc59301973000fb502`.
+  - `gh --version`: exit 0; version 2.97.0.
+  - `gh auth status`: exit 1; no authenticated GitHub CLI host.
+- Tests/build/lint: window-specific results are preserved in the ledger; this saver parsed all five JSONL records, verified unique task IDs and required remote fields, and ran `git diff --check` successfully before each commit.
+- CI: not run or claimed; the branch is saved and draft PR `#11` exists.
+- Runtime or visual inspection: not performed by this saver; active Live Integration remains separately owned.
+
+## Review and integration
+
+- Code review: asset saver reported no findings; independent review was not proven. This saver changes only ledger/handoff data.
+- Architecture review: not triggered; no product module, public contract, data ownership, or dependency changed.
+- Branch/worktree synchronization: local branch tracks `origin/feature/p0-clean-seed-rebuild` after the first push; remote default remains `feature/task-037-full-chain-integration`, so this branch is non-default.
+- Merge status and authorization: no merge, default-branch modification, deployment, or release is authorized or performed.
+
+## Risks and open decisions
+
+- The rolling GPT/Codex → LATTICE live goal is not complete. Live Integration and switch watcher remain active and must not be archived by this checkpoint.
+- `gh` CLI remains unauthenticated, but the installed GitHub app successfully created draft PR `#11`; this does not authorize merge, deployment, or release.
+- All five batch entries have the central-confirmed `archived_at_utc`; no archive claim is made for Live Integration or the switch watcher.
+- `remote_sha` means the first confirmed GitHub checkpoint containing the durable window record and its reachable artifact commits; it is populated only after that checkpoint is observed remotely.
+
+## Next action
+
+1. Continue the rolling saver for future completed P0 windows: append receipt, commit, push, verify remote equality, then request archive and record its actual timestamp.
+2. Do not archive the still-active Live Integration or switch watcher, and do not treat this completed save/archive batch as completion of the GPT/Codex → LATTICE live goal.
+
+## Restart context
+
+- Current branch: `feature/p0-clean-seed-rebuild`.
+- Relevant plan: active P0 GPT/Codex → LATTICE live completion goal coordinated by task `019fef39-6c03-76f0-9115-0171c7d44f10`.
+- First command or file to inspect: `git status -sb`, then `tools/lattice-mcp-kit/WINDOW_LEDGER.jsonl`.
+
+## Successor saver checkpoint — predecessor window `019ff0ab-96b4-7ca0-8a0d-677b864961e3`
+
+- Source window status: `completed`; started `2026-08-11T11:53:27.000Z`, finished `2026-08-11T12:06:54.695Z`, elapsed `807695 ms`.
+- Source scope: saved five completed P0 window receipts/assets to GitHub, verified remote equality, created Draft PR `#11`, recorded central archive evidence, and preserved active-task boundaries.
+- Source artifacts: `tools/lattice-mcp-kit/WINDOW_LEDGER.jsonl`; `tools/lattice-mcp-kit/HANDOFF.md`.
+- Source final local commit/tree: `eecd7a85348f34d7b119979d608ec23baace5156` / `5c5059464651fea15728613d637cd67e1366774d`.
+- Remote branch: `feature/p0-clean-seed-rebuild`; Draft PR: <https://github.com/z72124223/lattice-devos/pull/11>.
+- Successor durable save: first exact-path commit `f65e7036adc1428b06a47efae80c1ce315cf135d` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:09:53.579Z`; central confirmed `archived_at_utc=2026-08-11T12:11:17.979Z`.
+- Archive boundary: central archived only predecessor window `019ff0ab-96b4-7ca0-8a0d-677b864961e3`. Live Integration, its watcher, and a future fresh verifier remain active and must not be archived or modified by this saver.
+- Protected dirty boundary: keep `scripts/test-task038-four-tool-acceptance.ps1` unstaged, unread, and unmodified; no reset or clean.
+
+## Watcher checkpoint — `019ff0a7-f47c-7bc2-a343-439562131b18`
+
+- Window status: `completed`; started `2026-08-11T11:51:45.6793391+00:00`, finished `2026-08-11T12:13:51.1399058+00:00`, elapsed `1325461 ms`.
+- Preflight 1: `PASS` — `handoff_status=READY_FOR_FRESH_CODEX_WINDOW`; `global_mcp.switch_active=true`.
+- Preflight 2: `PASS` — current MCP `enabled=true`; `transport=stdio`; `command_matches_candidate=true`.
+- Preflight 3: `PASS` — fresh PostgreSQL port `63238` is not `64272`; TTL valid; PID `760` and its listener exist and ownership matches.
+- Created fresh verifier: `019ff0bd-14c1-7d40-b104-65c4fdd6fc82`; watcher then stopped monitoring it.
+- Runtime source commit: `2b2f112bc3289f206bc85968db6a39ee6bdf576e`; handoff/current Git head at watcher completion: `81fee735ffa935b00966c0ba2a8c283f64384106`.
+- Mutation boundary: no repository, global MCP, or PostgreSQL change; no rollback. The verifier and Live Integration remain independently active.
+- Successor durable save: first exact-path commit `6dedddbc2805da59d6e502f8f1bfdab22bf777fc` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:16:13.448Z`; central confirmed `archived_at_utc=2026-08-11T12:18:15.787Z`.
+
+## Live Integration checkpoint — `019ff08e-f969-75e3-a3ba-bbd3b096ed00`
+
+- Window status: `completed_ready_for_fresh_codex_window`; started `2026-08-11T11:22:10.000Z`, finished `2026-08-11T12:14:17.000Z`, elapsed `3126186 ms`.
+- Runtime source commit/tree: `2b2f112bc3289f206bc85968db6a39ee6bdf576e` / `ea5ab0502092a35780c7ed159055316a5c3164e4`; no code commit was created by this task.
+- Candidate binary SHA-256: `d66ecdd905b76bf709d73b35a0b04688410b46b3c53823e9e0e85763e0ba1a35`.
+- Fresh PostgreSQL 17.10 ran at `127.0.0.1:63238`, excluding `5432`, `64272`, and `55432`; exact four-tool discovery, real `task_submit`, independent status, and restart durability all passed with `durable_equal=true`.
+- Durable result identity: task ref `ab8724dd51419cf190ad491f1f8973894bca56dc0c3aed55ebc3723f6214177d`; result digest `c8d4cc65e7e4b4834276900afae08eff1223d8f488251a69283126ca74689c22`; ledger head `21098246fb32a1a1beb39a18cafef491c89cfa4a4e84bb9fb00b550a4bfe3c0e`.
+- Reversible global MCP switch is active; fresh verifier `019ff0bd-14c1-7d40-b104-65c4fdd6fc82` remains independently active.
+- Secret-free artifacts: `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-p0-live-handoff.json` and backup projections under `C:\Users\f7212\.codex\backups\lattice-p0-ae02434e9be9465c8aec29a5ce80eef8`. No opaque configuration content or secret is recorded here.
+- Successor durable save: first exact-path commit `6dedddbc2805da59d6e502f8f1bfdab22bf777fc` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:16:13.448Z`; central confirmed `archived_at_utc=2026-08-11T12:18:15.787Z`.
+- Archive boundary: central archived only watcher `019ff0a7-f47c-7bc2-a343-439562131b18` and Live Integration `019ff08e-f969-75e3-a3ba-bbd3b096ed00`. Fresh verifier `019ff0bd-14c1-7d40-b104-65c4fdd6fc82` and the next runtime remediation task remain active.
+
+## Fresh verifier checkpoint — `019ff0bd-14c1-7d40-b104-65c4fdd6fc82`
+
+- Window status: `NEEDS_REVIEW/core-connectivity-gap`; started `2026-08-11T12:12:31.297Z`, finished `2026-08-11T12:19:48.406Z`, elapsed `437109 ms` (`437.109 s`).
+- Current handoff is `READY_FOR_FRESH_CODEX_WINDOW`; global MCP switch is active; runtime source is `2b2f112bc3289f206bc85968db6a39ee6bdf576e`, recorded branch head is `81fee735ffa935b00966c0ba2a8c283f64384106`, and the candidate binary path/hash match.
+- Global discovery is exactly `lattice_delivery_run`, `lattice_delivery_status`, `lattice_task_submit`, and `lattice_task_status`.
+- Current-session `lattice_task_submit` returned `isError=true`, code `LATTICE_TASK_SUBMIT_STATUS_ONLY`, and created no new task ref; source confirms this fixed result when `core.run_mode != Fresh`.
+- The current global projection check for `LATTICE_FULL_CHAIN_RUN_MODE` matched `RESUME_EXISTING=true`; no environment values or opaque configuration content are recorded.
+- `lattice_task_status` read handoff task ref `ab8724dd51419cf190ad491f1f8973894bca56dc0c3aed55ebc3723f6214177d` as `COMPLETED`; result digest `c8d4cc65e7e4b4834276900afae08eff1223d8f488251a69283126ca74689c22` and ledger head `21098246fb32a1a1beb39a18cafef491c89cfa4a4e84bb9fb00b550a4bfe3c0e` match the durable restart handoff.
+- Fresh PostgreSQL remains on `63238`, not `64272`; PID `760`, owned listener, and TTL were valid at the final check. Cleanup/rollback commands and exact targets exist and exclude `64272`; neither cleanup nor rollback was executed.
+- Conclusion: connectivity and status read are proven, but the required new-submit/new-independent-status pair is blocked by `RESUME_EXISTING`. This is not a reproducible PostgreSQL connection failure; do not rollback. Runtime remediation is required outside this saver.
+- Mutation boundary: no repository edit, reset/clean, remote write, deployment, new task, or reviewer.
+- Successor durable save: first exact-path commit `142b5b9fd66c1055a9a0347f1f7f6d9eb00ad1e5` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:21:21.353Z`; central confirmed `archived_at_utc=2026-08-11T12:23:32.022Z`.
+- Archive boundary: central archived only fresh verifier `019ff0bd-14c1-7d40-b104-65c4fdd6fc82`. Runtime remediation and its future verifier remain active; this saver must not modify or archive them.
+
+## Runtime remediation checkpoint — `019ff0c2-d0fd-7e40-8a07-726fe722982e`
+
+- Window status: `DONE/READY_FOR_NEW_FRESH_VERIFIER`; started `2026-08-11T12:19:05.915Z`, Phase A green `2026-08-11T12:26:51.316Z`, finished `2026-08-11T12:33:01.095Z`, elapsed `835180 ms` (`835.180 s`).
+- Exact owned source: `apps/lattice-runtime/src/composition.rs`; commit/tree `5155f626405faa2fa9e01ad6ceba7329eb9e6b93` / `ee7f35a1756cd8021fa81326717aa11e48b38c6d`, parent `94328a3d1d3b6b35fda4975c2e35b3abb492ab13`; remote equality was verified by the remediation task.
+- Behavior: ResumeExisting `task_submit` now requires exact-binding admitted `COMPLETED` evidence with a result digest, then reverifies Writer Lease history and durable receipt equality before public replay. Missing, unadmitted, incomplete, failed, stopping, mismatched, or unreadable evidence fails before execution. Fresh execution and ResumeExisting `delivery_run` status-only behavior remain unchanged.
+- TDD and verification: expected RED exit `101`; focused ResumeExisting `2/2`, Fresh `1/1`; isolated runtime lib `73/73`, composition `10/10`, MCP contract `30/30`, dispatch `5/5`, task_control `1/1`; format, scoped diff check, and isolated build exit `0`.
+- Advisory baseline: strict Clippy remains blocked by 11 unchanged `lattice-hermes-adapter` findings and 3 unchanged `mcp.rs` `too_many_lines` findings; no remediation-owned finding was emitted. Read-only review found no issue; independence was not proven.
+- New isolated binary: `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\p0-clean-seed-rebuild\target\p0-runtime-remediation\debug\latticed.exe`, `10258432` bytes, SHA-256 `0ba38c05e572a08f999e07cc8f4942756956421b37e6b41f99947931a3572bfc`. The locked old binary was not waited on, stopped, or overwritten.
+- Global MCP switch: enabled STDIO, `0` args, exact 14-key set; all 14 values compare equal to pre-switch without recording them; command and actual binary hash match the new isolated binary. Existing durable rollback backup was retained; new pre-remediation backup SHA-256 is `9f0a749d80920d6bf69a0911c7677a1cc86dbdea62ed679eab321ec656347897`.
+- External secret-free handoff `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-p0-live-handoff.json` was updated at `2026-08-11T12:32:07.771Z`; commit/tree/head, new binary, global switch, key set, Git/remote/config/backup equality were current-read verified.
+- PostgreSQL, holder, and `64272` were unchanged. Fresh-window success is not claimed by remediation; central created new verifier `019ff0cf-8265-7082-bed2-b4f9db33395e` for that acceptance.
+- Mutation boundary: no merge, deployment, release, default-branch change, or final modification to this repo HANDOFF by remediation; protected script remained unread, unmodified, unstaged, and uncleaned.
+- Successor durable save: first exact-path commit `66664e10453463471810d22f60e6117ca2ed7749` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:35:13.612Z`; central confirmed `archived_at_utc=2026-08-11T12:36:51.394Z`.
+- Archive boundary: central archived only runtime remediation `019ff0c2-d0fd-7e40-8a07-726fe722982e`. Fresh verifier 2 `019ff0cf-8265-7082-bed2-b4f9db33395e` remains unarchived until its failure receipt is remotely saved.
+
+## Fresh verifier 2 checkpoint — `019ff0cf-8265-7082-bed2-b4f9db33395e`
+
+- Window status: `FAILED`; `DONE=false`; started `2026-08-11T12:33:32.222Z`, finished `2026-08-11T12:36:31.476Z`, elapsed `179254 ms`.
+- Preflight passed: handoff `READY_FOR_FRESH_CODEX_WINDOW`, switch active, global enabled, command exact, environment key names only, and PostgreSQL `127.0.0.1:63238` with PID `760`, owned listener, and valid TTL.
+- Catalog was exactly `lattice_delivery_run`, `lattice_delivery_status`, `lattice_task_submit`, and `lattice_task_status`; source commit `5155f626405faa2fa9e01ad6ceba7329eb9e6b93`, binary SHA-256 `0ba38c05e572a08f999e07cc8f4942756956421b37e6b41f99947931a3572bfc`.
+- One and only one `lattice_task_submit` used client request `codex-p0-fresh-20260811123332222-0efw7ib9jm` with `CONTROLLED_CODEX_CANARY`; it returned `isError=true`, code `LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH`, status `ERROR`.
+- No task ref was returned, so `lattice_task_status` was not called. Expected prior task ref/result digest remain `ab8724dd51419cf190ad491f1f8973894bca56dc0c3aed55ebc3723f6214177d` / `c8d4cc65e7e4b4834276900afae08eff1223d8f488251a69283126ca74689c22`; `consistency_verified=false`, `zero_new_execution_verified=false`.
+- Cleanup and rollback paths exist and do not target `64272`; candidate remains active; neither cleanup nor rollback was executed.
+- Conclusion: fresh acceptance failed at ingress profile commitment before a task ref was issued. Preserve this exact fixed code for the next bounded remediation; do not claim success or retry from this verifier.
+- Successor durable save: first exact-path commit `88cc11d78d487a05a438208733a6fa4d01c5e090` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:38:59.554Z`; central confirmed `archived_at_utc=2026-08-11T12:40:35.1034794Z`.
+- Archive boundary: central archived only fresh verifier 2 `019ff0cf-8265-7082-bed2-b4f9db33395e`. Global MCP FRESH-switch remediation `019ff0d5-7553-7bd1-8ee1-9db36123e61a` remains active and must not be archived or modified by this saver.
+
+## FRESH MCP config checkpoint — `019ff0d5-7553-7bd1-8ee1-9db36123e61a`
+
+- Window status: `READY_FOR_FRESH_CODEX_WINDOW`; started `2026-08-11T12:40:56.137Z`, finished `2026-08-11T12:57:07.1951521Z`, elapsed `971058 ms`.
+- Runtime source `5155f626405faa2fa9e01ad6ceba7329eb9e6b93`; binary `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\p0-clean-seed-rebuild\target\p0-runtime-remediation\debug\latticed.exe`, SHA-256 `0ba38c05e572a08f999e07cc8f4942756956421b37e6b41f99947931a3572bfc`.
+- Atomic mutation: global LATTICE MCP changed from `RESUME_EXISTING` to `FRESH` and gained the exact seven source-required delivery fields; current env key count is `21`. The other 13 assignment lines and command are byte-equivalent, transport remains stdio, and args remain `0`.
+- Config SHA-256 before/after: `0cea6db5f78105e96185a1aadbee2890893da42be63bf410edf80fe5ded8c5df` / `68e67812486308c46ba397ccdae3803387275b6737a14c030db741eb0e0b61ed`; exact rollback backup retains the before hash.
+- Canonical holder-lifetime binding ID `e69e603e1c4f4785a3d7d0bf35971567`; execution home `C:\Users\f7212\Documents\Codex\2026-07-29\task038-execution-homes\e69e603e1c4f4785a3d7d0bf35971567`; fixture root `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-worktrees\p0-clean-seed-rebuild\target\lattice-delivery\e69e603e1c4f4785a3d7d0bf35971567`.
+- Binding evidence follows canonical builder semantics at `scripts/run-task038-task-submit.ps1:616-795`; execution-home config SHA-256 `1a9bc2b325476a4679e5ad9202329c97952ed8ea958162bd0ffadd2196833189`, four fixed files, credential source unchanged, no reparse.
+- Direct-stdio preflight: `DISCOVERY_OK`, exact `lattice_delivery_run`, `lattice_delivery_status`, `lattice_task_status`, `lattice_task_submit`; `tool_call_count=0`, process exit `0`.
+- PostgreSQL remained unmodified at `127.0.0.1:63238`, PID `760`, owned listener; TTL valid at finish with `241` seconds remaining, expiring `2026-08-11T13:01:09.0516926Z`.
+- External secret-free handoff records rollback and cleanup targets; retain execution home and fixture root through verifier/holder lifetime.
+- Boundary truth: two broad `rg` searches scanned the protected script because Windows exclusion globs did not apply; no matching content was displayed, and the file was not edited or staged. Subsequent searches were explicit-file only.
+- Not done: no submit/status/delivery_run, PostgreSQL connect/write/stop/restart, Rust source change, push/PR/merge/deploy/release/default-branch change.
+- Successor durable save: first exact-path commit `c113aa3a1cc16946476d0454d696916a43d922b5` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T12:59:12.337Z`; central confirmed `archived_at_utc=2026-08-11T13:01:17.5775961Z`.
+- Archive boundary: central archived only FRESH config remediation `019ff0d5-7553-7bd1-8ee1-9db36123e61a`. Verifier 3 `019ff0e7-f650-7922-b014-78a4fb5ed020` remains active and must not be archived or modified by this saver.
+
+## Fresh verifier 3 checkpoint — `019ff0e7-f650-7922-b014-78a4fb5ed020`
+
+- Window status: `FAILED/PREFLIGHT`; `done=false`; started `2026-08-11T13:01:44.500Z`, finished `2026-08-11T13:01:45.765Z`, elapsed `1265 ms`.
+- Fixed preflight codes: `P0_PREFLIGHT_TTL_EXPIRED` and `P0_PREFLIGHT_PG_LISTENER_UNAVAILABLE`. This is a preflight failure, not a submit failure.
+- Handoff, active switch, enabled STDIO transport, zero args, exact command, exact binary/config hashes, exact 21-key environment name set, and FRESH mode all passed. No environment value is recorded.
+- PostgreSQL preflight expected `127.0.0.1:63238` / PID `760`, but the TTL had expired at `2026-08-11T13:01:09.0516926Z`; no listener or live process was observed at verifier start.
+- Discovery was not run because preflight failed. `lattice_task_submit` was not attempted (`call_count=0`), no task ref exists, independent status was not run, and digest equality was not evaluated.
+- Cleanup and rollback paths were present and excluded protected port `64272`; neither cleanup nor rollback was executed. The verifier did not connect, stop, or delete protected port `64272`, and did not read, modify, or stage the protected script.
+- Secret-redaction incident: a metadata inspection emitted raw MCP environment values in tool output before filtering; the durable receipt intentionally records only key names and no values.
+- Candidate remains active. Do not retry from this verifier and do not stop any PostgreSQL holder. New holder/config writer `019ff0eb-485f-7ba0-94dc-d7903c385287` remains active and must not be archived or modified by this saver.
+- Successor durable save: first exact-path commit `39913f829a36075e0a2daaa91ee3616bc5515543` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T13:04:44.010Z`.
+- Archive boundary: central archived verifier 3 at `2026-08-11T13:06:00.6098228Z`. New holder/config writer `019ff0eb-485f-7ba0-94dc-d7903c385287` remains active and must not be archived or modified by this saver.
+
+## Connectivity-first holder/config checkpoint — `019ff0eb-485f-7ba0-94dc-d7903c385287`
+
+- Window status: `READY_FOR_FRESH_CODEX_WINDOW`; `READY=true`; started `2026-08-11T13:06:58.5774308Z`, finished `2026-08-11T13:21:53.5089945Z`, elapsed `894932 ms`.
+- New PostgreSQL 17.10 holder: `127.0.0.1:51666`, run ID `56b85b31fdfc447f9347ead0170a807a`, PID `28752`, database `lattice_task019_56b85b31_base`, system identifier `7672759870255195048`; listener ownership, database connection, and authority preflight passed.
+- Credential was rotated and remains `OPAQUE_DPAPI_CURRENT_USER`; no credential value is recorded. Old credential is invalid after switch. Excluded ports are `5432`, `64272`, `55432`, and `63238`; protected `127.0.0.1:64272` PID `18236` is unchanged.
+- Refreshed TTL: `2700` seconds from `2026-08-11T13:19:01.4831107Z`, expires `2026-08-11T14:04:01.4831107Z`; valid at receipt `2026-08-11T13:23:52.433Z` with `2409` seconds remaining; cleanup PID `32132`.
+- Global config switched from SHA-256 `68e67812486308c46ba397ccdae3803387275b6737a14c030db741eb0e0b61ed` to `dc83687cf3d0964682ce80616273c07dc0663e64b955350f2a3a3c3b837c4191`. Nine PG/authority env fields changed; 12 non-PG env fields, FRESH mode, seven delivery fields, ingress binding, command, implicit stdio, and zero args were preserved.
+- Both exact and atomic backups hash to the before-config hash. Rollback is config-file-only; it cannot revive the invalid old 63238 holder or credential.
+- Direct-stdio preflight: `DISCOVERY_OK`, protocol `2025-11-25`, exact `lattice_delivery_run`, `lattice_delivery_status`, `lattice_task_status`, `lattice_task_submit`; `tool_call_count=0`, exit `0`, evidence SHA-256 `50f5f0ed7272b6d806617057c5c8eead8d3db682e61ab5740f2482a7dd41cff0`.
+- Secret-free handoff `C:\Users\f7212\Documents\Codex\2026-07-29\lattice-p0-live-handoff.json` has SHA-256 `3e615a8edf51c82146a89c82dfab24febf3196700eec72b4d416600711e845fa` and status `READY_FOR_FRESH_CODEX_WINDOW`; it contains no new credential.
+- Not done: no `lattice_task_submit`, `lattice_task_status`, or `lattice_delivery_run`; no verifier was created. Central should immediately create one genuinely fresh Codex verifier after the first durable remote checkpoint.
+- Repository boundary: protected dirty `scripts/test-task038-four-tool-acceptance.ps1` remains unstaged and unmodified. P0 only; no TASK-037/GH-9/Hermes/reflection/reset/clean/PR/merge/deploy/release/default-branch change.
+- Successor durable save: first exact-path commit `b4d81abcdc9d7740517304696f0fd5641604a8e7` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T13:25:15.789Z`. Central was signaled immediately without waiting for this second-stage confirmation.
+- Archive boundary: holder/config writer task was archived successfully; saver immediately captured actual `archived_at_utc=2026-08-11T13:28:06.4093034Z`. Archival affects only the completed Codex task and does not stop, clean up, or roll back live PostgreSQL `127.0.0.1:51666` PID `28752`. Active verifier `019ff100-d07a-7ee1-bfb8-ae0f6b733abe` remains independently owned and must not be archived or modified.
+
+## Fresh verifier bounded checkpoint — `019ff100-d07a-7ee1-bfb8-ae0f6b733abe`
+
+- Window ran from `2026-08-11T13:26:40.0000000Z` to `2026-08-11T13:35:02.2384642Z`, elapsed `502238 ms`. Discovery passed with exact four tools and typed submit/status schemas.
+- Exactly one submit used client request `codex-p0-fresh-20260811132840-019ff100` and returned `isError=false`, status `COMPLETED`, but reused prior task ref `ab8724dd51419cf190ad491f1f8973894bca56dc0c3aed55ebc3723f6214177d`; result digest `6a661ba5f9f7c16d996c970b13df3244eef82af2a7e4ff07c9c164766057c512`, ledger head `9d0ff171fa7293e6ffce15da7ac9ce9810816758d5ad5f4b9e77b9d629867bc7`.
+- Primary failure is `P0_FRESH_TASK_REF_REUSED` at `submit_identity`: the required new task ref was not created. This is distinct from earlier status-only, ingress commitment mismatch, and TTL/listener preflight failures.
+- Independent status was `NOT_RUN`. There was no retry, second submit, rollback, protected-64272 mutation, or verifier commit/push.
+- Secondary failure is separately recorded as `P0_CLEANUP_ROOT_LOCKED` at `cleanup_root_delete`: one cleanup attempt stopped PID `28752` and removed the `51666` listener, then exited `1` because `ttl-cleanup-20260811T131901456Z.err` remained open.
+- Actual cleanup residual at `2026-08-11T13:35:02.2384642Z`: PostgreSQL PID `28752` is not alive; port `51666` has no listener; TTL cleanup PID `32132` is alive; holder root and locked `.err` remain. `holder_preserved=false`.
+- Do not retry submit or independent status, retry cleanup, force-kill, manually delete the root, or execute rollback from this verifier. Central should assign a new bounded remediation for deterministic task-ref reuse.
+- Successor durable save: first exact-path commit `2b8446e68f3a8ea440f79a985c58aec9c3aaef36` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T13:36:59.101Z`.
+- Archive boundary: verifier task was archived successfully; saver immediately captured actual `archived_at_utc=2026-08-11T13:38:40.7448993Z`. Cleanup residual remains untouched and belongs to a separate bounded task.
+
+## Fresh deterministic task-ref remediation checkpoint — `019ff10d-7ece-7071-8e2a-309bd4a16d6e`
+
+- Window status: `SOURCE_REMEDIATION_READY_NOT_LIVE_ACCEPTANCE`; started `2026-08-11T13:40:35.0000000Z`, finished `2026-08-11T13:49:11.9516774Z`, elapsed `516952 ms`.
+- Root cause: the public task ref was the immutable fixed Task Spec digest. The durable admission command/client request, run binding, and ingress profile did not participate, so a new Fresh execution could reuse old canonical ref `ab8724dd51419cf190ad491f1f8973894bca56dc0c3aed55ebc3723f6214177d`.
+- Minimal owned change: `apps/lattice-runtime/src/composition.rs` and `apps/lattice-runtime/src/task_control.rs`; commit/tree `abe4b7bafd916d8d6db0195fd10dec6e1b012bcf` / `de22bde7d251c007ba50d61358f9c8fcf11bd7f8`, parent/upstream-before-save `31bb7ca7fb7d444dacd9d595a02dad2567fcbebb`.
+- Implementation: a domain-separated lowercase SHA-256 public reference binds the fixed Task Spec digest, verified durable `TaskCreated` admission command (and therefore client request ID), run ID, and ingress profile digest. A new Status process replays that verified command and deterministically recomputes the same reference.
+- Verification: expected RED exit `101` for missing `controlled_task_reference`; GREEN `1/1`; final GREEN `1/1` with `73` filtered; focused format and diff checks exit `0`; commit scope guard matched exactly the two Rust files.
+- Preserved boundaries: no public JSON or PostgreSQL schema, Task Spec, One Writer, lease/fencing, config, script, live MCP/tool call, PostgreSQL, PID `32132`, or cleanup residual change. Protected script remained unread, unmodified, unstaged, and uncommitted by the worker.
+- Tradeoff: Status must replay `TaskCreated` before comparing a syntactically valid ref, and pre-remediation refs are not aliases for the derived reference. Alternatives that vary/persist first-class identity would expand Task Domain, Ledger, Writer Lease, status, or PostgreSQL ownership.
+- Live acceptance remains `NOT_RUN`; this source remediation is not a P0 PASS. A separate brand-new verifier must perform Fresh submit/status after GitHub publication.
+- Successor durable save: exact-path ledger/handoff commit `432472745d40d1047515ea197e74f2ff63994d6f` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality and source commit `abe4b7bafd916d8d6db0195fd10dec6e1b012bcf` reachability at `2026-08-11T13:51:45.993Z`.
+- Archive boundary: remediation worker was archived successfully; saver immediately captured actual `archived_at_utc=2026-08-11T13:55:46.6061227Z`. Runtime-materialization worker `019ff11b-5d3c-7633-a45f-8cfb3829978a` remains active and independently owned. Cleanup residual remains a separate prohibited scope.
+
+## Runtime materialization failure checkpoint — `019ff11b-5d3c-7633-a45f-8cfb3829978a`
+
+- Window result: `FAILED_AT_PROVISION_RECEIPT_CAPTURE_READY_HOLDER_PRESERVED`, not READY; started `2026-08-11T13:55:42.000Z`, finished `2026-08-11T14:23:27.887Z`, elapsed `1665887 ms`.
+- Source commit/tree `abe4b7bafd916d8d6db0195fd10dec6e1b012bcf` / `de22bde7d251c007ba50d61358f9c8fcf11bd7f8` is an ancestor of recorded remote head `0c6544e912c757ddda73694fc17caf0ca778b706`; build inputs matched source.
+- New isolated binary build passed in `42653 ms`: `10268160` bytes, SHA-256 `d600110de4249aeb0ef2e7d2996a81960a8c996d1d612ae0806fb85eac0a4c65`.
+- Primary failure: `P0_POSTGRES_PROVISION_RECEIPT_CAPTURE_TIMEOUT` at `postgres_provision_receipt_capture`. The one controlled provision call hit the 20-minute shell capture limit with exit `124`; no exit-0 wrapper receipt was captured, so finalize/config/discovery did not run.
+- Read-only evidence nevertheless found a live marker-READY holder at `127.0.0.1:55061`, run ID `04517df6a8ed496fa465046b5e4b20d1`, PID `30476`, system identifier `7672773976043398424`; listener ownership, authority marker, and database marker passed.
+- Holder TTL: `7200` seconds, deadline `2026-08-11T16:01:50.0257480Z`, `5902` seconds remaining at receipt; cleanup PID `14212` was alive. Excluded ports: `5432`, `64272`, `55432`, `63238`, `51666`.
+- Capture diagnosis is an inference: the TTL cleanup child inherited stdout/stderr, consistent with shell capture staying open after the wrapper wrote READY. No rerun was performed.
+- Global MCP config was not mutated; before/after hash stayed `dc83687cf3d0964682ce80616273c07dc0663e64b955350f2a3a3c3b837c4191`; no backup, rollback command, handoff update, or discovery occurred. Tool-call count is `0`.
+- Protected boundaries held: no saver-path or repository commit/push, submit/status/delivery, old PID `32132`, old residual, protected script content, or protected `64272` mutation. Cleanup was not executed.
+- Next action: after this failure receipt is remotely durable, central must dispatch one bounded resume-from-live-holder worker before TTL expiry. Do not rerun provision, cleanup/kill either holder/residual, or create the fresh verifier yet.
+- Successor durable save: exact-path commit `4e6584141705ef0d2299a18144a843e32f30c89f` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T14:26:10.416Z`.
+- Archive boundary: do not archive this failed/partial worker until total engineering handles the failure. The live holder and both cleanup scopes remain independently owned.
+
+## Runtime materialization continuation 2 — `019ff11b-5d3c-7633-a45f-8cfb3829978a`
+
+- Continuation result: `FAILED_AT_GLOBAL_MCP_STAGING_CONFIG_UNCHANGED`, not READY; ran from `2026-08-11T14:25:19.5918660Z` to `2026-08-11T14:28:46.8575854Z`, elapsed `207266 ms`.
+- It reused, and did not reprovision, live holder `127.0.0.1:55061`, run `04517df6a8ed496fa465046b5e4b20d1`, PID `30476`; listener ownership passed, TTL cleanup PID `14212` lived, and deadline remained `2026-08-11T16:01:50.0257480Z`.
+- Failure: `LATTICE_P0_CONFIG_KEY_REJECTED` at `global_mcp_staging_command_update`. The current command assignment is a TOML single-quoted string, while the one-time setter intentionally matched only double quotes, so it failed before staging/global writes.
+- Fail-closed evidence: no staging file or backup directory, no attempted/replaced global config, and no rollback command. Config before/after stayed exactly `dc83687cf3d0964682ce80616273c07dc0663e64b955350f2a3a3c3b837c4191`.
+- Discovery was `NOT_RUN_DUE_FIRST_CONFIG_FAILURE`; tool-call count `0`. This differs from the prior provision-receipt capture timeout because it reused the ready holder and reached config staging.
+- Protected boundaries held: no repository/saver-path mutation or push, no protected script content access, no old PID/root residual or `64272` mutation, and no submit/status/delivery call.
+- Next action is the already-dispatched bounded resume-from-live-holder worker: perform one single-quote-aware value-only command transform, validate/switch config atomically, discovery-only, and update the external secret-free handoff. Do not reprovision or cleanup.
+- Successor durable save: exact-path commit `dbcd684536d864c764b41c40dfd0e9cdd75e7d50` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T14:30:30.133Z`.
+- Archive boundary: original materialization worker was archived successfully; saver immediately captured actual `archived_at_utc=2026-08-11T14:39:36.9190562Z`. Archival affects only the Codex worker and does not mutate holder/config/handoff/backup/cleanup/rollback state.
+
+## Bounded resume concurrency failure — `019ff138-f37f-78c0-a0d5-4165efbbb8a8`
+
+- Result: `FAIL_STOPPED_BEFORE_FINALIZE_SWITCH_DISCOVERY` / `NOT_READY_FOR_FRESH_CODEX_WINDOW`; started `2026-08-11T14:28:02.000Z`, failure observed `2026-08-11T14:31:46.7116604Z`, receipt sent `2026-08-11T14:33:01.440Z`, elapsed `224 s`.
+- Failure: `P0_GLOBAL_MCP_CONFIG_CONCURRENT_MUTATION_AND_QUOTE_SEMANTICS_DRIFT` at `PREFLIGHT_CONFIG_COMPATIBILITY_AND_OWNERSHIP`.
+- This worker initially observed config `dc83687cf3d0964682ce80616273c07dc0663e64b955350f2a3a3c3b837c4191`, a single-quoted command targeting old binary `0ba38c05...`. Before it mutated anything, shared config changed externally to `e624fc0c3677abfbe89b3d838123902481dccad36772310009c5600a3338c3ae`, run-specific backups appeared, command changed to the `d600110d...` binary, and quote style changed to double.
+- The authoritative no-mutation precondition and exclusive config ownership were therefore lost. The worker did not finalize, switch, create a backup, discover, rollback, cleanup, provision, build, run tools, commit, or push.
+- Live holder remained READY at `127.0.0.1:55061`, run `04517df6a8ed496fa465046b5e4b20d1`, PID `30476`; marker hash `094260be4aa273930075484480d08e6395012aab7d160f8746321c7b7d6dd23f`, system identifier `7672773976043398424`, TTL cleanup PID `14212`, deadline `2026-08-11T16:01:50.0257480Z`.
+- Current observed config mapped the repaired binary and holder in FRESH mode with exactly 21 env key names; no secret values are recorded. Four run-specific backup files were observed with their exact hashes in the ledger.
+- Discovery was `NOT_RUN`; initialize/tools-list were not received; tool-call count `0`.
+- Next action requires one coordinating owner to stop concurrent config writers, determine provenance of `e624fc0c...`, and decide whether to restore `dc83687...` or retain a safely restaged config before completing finalize/discovery. Do not rerun provision or discovery from this worker.
+- Successor durable save: exact-path commit `2749390f77e0880aacdc2aa30a1a7da802778c07` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T14:34:33.480Z`.
+- Archive boundary: formal resume worker was archived successfully; saver immediately captured actual `archived_at_utc=2026-08-11T14:39:36.9240579Z`. Archival affects only the Codex worker; live holder and all cleanup scopes remain independently owned.
+
+## Urgent-stop mutation provenance — `019ff11b-5d3c-7633-a45f-8cfb3829978a`
+
+- Result: `STOPPED_WITH_PRE_REVOCATION_GLOBAL_CONFIG_MUTATION`; ownership `REVOKED_STOPPED`; observed `2026-08-11T14:34:01.4059317Z`. This is a fourth independent receipt and does not overwrite the two earlier materialization failures or the formal resume failure.
+- Provenance: this worker caused the global config switch before revocation, from `dc83687cf3d0964682ce80616273c07dc0663e64b955350f2a3a3c3b837c4191` to `e624fc0c3677abfbe89b3d838123902481dccad36772310009c5600a3338c3ae` during `2026-08-11T14:30:48.1714818Z..14:30:50.1864675Z` (`2009 ms`).
+- The atomic switch used an ACL-contained staging config, changed only the command value from single-quoted old binary to double-quoted new binary, validated with an in-memory single expected-hash substitution, and performed `File.Replace`. The wrapper source was not persistently edited.
+- Current mapping snapshot was complete: repaired `d600110de4249aeb0ef2e7d2996a81960a8c996d1d612ae0806fb85eac0a4c65` binary, FRESH, 21 env keys, holder `127.0.0.1:55061` / run `04517df6a8ed496fa465046b5e4b20d1` / PID `30476`; listener and TTL cleanup PID `14212` lived, deadline `2026-08-11T16:01:50.0257480Z`.
+- Four backup files were created before revocation: two staging backups at SHA-256 `3528dc6aeef0638b2e3ddceceab657794a39538caecd8767e9a3250bc926eb3a` and two exact pre-mutation global backups at `dc83687cf3d0964682ce80616273c07dc0663e64b955350f2a3a3c3b837c4191`; no staging path remained.
+- Discovery completed before revocation: `PASS` / `DISCOVERY_OK`, protocol `2025-11-25`, exact four tools, tool-call count `0`, process exit `0`; evidence SHA-256 `66ae5f87eb548b9a33bad91153b3e7be2d662865e8181877053bba690f0f57ca`.
+- External handoff was not updated and remained stale at old binary `0ba38c05...`, port `51666`, run `56b85b31...`; attempted update was blocked before PowerShell execution.
+- After revocation, the worker performed only a secret-safe read-only snapshot: no staging/config/finalize/discovery/cleanup/rollback/wrapper/backup/handoff mutation. It will not compete with formal resume.
+- Coordination boundary: do not ask this revoked worker to fix or restore anything. One coordinating owner must validate the current switched config and update the external secret-free handoff without reprovision, cleanup, or rollback.
+- Successor durable save: exact-path commit `086da8ea51f8f4b91ef21193ab22ea37774466fc` was pushed to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` proved exact local/remote SHA equality at `2026-08-11T14:36:51.075Z`.
+
+## Bounded reconciliation READY — `019ff143-b1d1-7251-b22e-6bdca4531493`
+
+- Result: `READY_FOR_FRESH_CODEX_WINDOW`; started `2026-08-11T14:39:52.0000000+00:00`, finished `2026-08-11T14:51:35.8931121+00:00`, elapsed `703893 ms`; no failure code/stage.
+- Preflight passed for config `e624fc0c3677abfbe89b3d838123902481dccad36772310009c5600a3338c3ae`, repaired binary `d600110de4249aeb0ef2e7d2996a81960a8c996d1d612ae0806fb85eac0a4c65`, and live holder `127.0.0.1:55061` / PID `30476` / run `04517df6a8ed496fa465046b5e4b20d1`. FRESH, implicit stdio, zero args, and 21 env keys matched; no raw env values recorded.
+- Remote-head correction passed: known saver archive-only advance from `fe78ee9a...` to `027052d...`, exact changed paths were only ledger/handoff, with no runtime or external-handoff mutation in that advance.
+- External secret-free handoff was atomically updated from SHA-256 `3e615a8edf51c82146a89c82dfab24febf3196700eec72b4d416600711e845fa` to `72ec5bfa343c668816a37d99ee474bc35be8201c16f646d16b876c7552d46d3a` at `2026-08-11T14:47:28.4295646+00:00`; current mapping and secret-free checks passed. Two exact pre-reconciliation backups retain the before hash.
+- Discovery passed: `DISCOVERY_OK`, protocol `2025-11-25`, exact four tools, tool-call count `0`, child exit `0`, no forced termination; evidence SHA-256 `5ecfb7794781a9fe16c21e3bea6164646f21191b9e0871e604135d3ba26e62c3`.
+- Postchecks passed for unchanged config hash, holder marker/listener/system identity/TTL, and current secret-free handoff. Holder had `4260` seconds remaining at `2026-08-11T14:50:49.7866444+00:00`.
+- Non-state incident: initial `File.Replace` null-backup call was rejected without destination mutation; validated staging was then atomically installed with an explicit backup path. The suite was not rerun.
+- Protected boundaries held: no global config rewrite by this worker, wrapper/build/test/provision/finalize/reprovision, submit/status/delivery, cleanup/rollback, holder/TTL stop, old residual, `64272`, protected script, saver paths, repo commit/push, verifier creation, or secret recording.
+- Next action: saver publishes this exact receipt and signals central after remote equality; central may then create exactly one truly fresh verifier. This reconciliation worker must not call submit/status or create it.
+- Successor durable save: exact-path commit `2528ed3f41c6772e0fba571b02d65877ffbbb5c1` (tree `cefe894f7f0108f859caab103e2905668d558e9c`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T14:54:30.3590040Z`.
+- Archive boundary: central confirmed this completed reconciliation task archived; actual saver-observed `archived_at_utc=2026-08-11T14:56:08.6313386Z`. This archive applies only to the completed task and does not authorize holder/config/verifier mutation.
+
+## Fresh verifier domain-status failure — `019ff152-28a4-70a3-99a3-005e456e1684`
+
+- Result: `CURRENT_LIVE_ACCEPTANCE_FAIL`; started `2026-08-11T14:55:31.000Z`, finished `2026-08-11T15:00:40.540Z`, elapsed `309540 ms`; first failure stage `UNIQUE_FRESH_SUBMIT`, classification `DOMAIN_STATUS_FAILED`.
+- Preflight passed against remote `5c34869b9c1857c7e4c86a033e8dfd1462ff721c`, config `e624fc0c...`, binary `d600110d...`, external handoff `72ec5bfa...`, and live holder `127.0.0.1:55061` / PID `30476` / TTL PID `14212`; only the protected script remained dirty and its content was not read or touched.
+- Fresh discovery exposed the exact four tools and typed submit/status schemas; pre-submit LATTICE tool-call count was `0`. Protocol `2025-11-25` came from authoritative READY evidence and was not surfaced by the fresh catalog.
+- The single submit used client request `fresh-codex-p0-msosd410-9vef04zky7f`; transport completed with `isError=false`, but the structured domain result was `status=FAILED`, `task_state=FAILED`, `result_digest=null`, ledger head `024eb29f9fbfe75d82a0bb7ff9600fc510696e5aa6b439407ce1f653769db96a`.
+- Returned task ref `f2bbbd846d91afc81c4ef4a347e01debe275733c95db02d91d22799bed32404e` was new and did not equal the old unacceptable ref `ab8724dd...`; acceptance still failed because status was not `COMPLETED`.
+- Strict first-failure stop held: no independent session was started, `lattice_task_status` call count was `0`, and protocol/equality checks are `NOT_RUN`; no live PASS is claimed.
+- Postcheck preserved config, holder/listener, TTL process/deadline, external handoff, and dirty state. No cleanup or rollback ran.
+- Protected boundaries held: no delivery calls, build/test/provision/finalize, config/handoff/PG mutation, cleanup/stop/kill/delete/rollback, `64272`, protected-script access, saver-path edit, unrelated P0 work, or verifier commit/push.
+- Next action: saver publishes this exact failure receipt; verifier must not retry submit/status or cleanup/rollback. Any domain-`FAILED` diagnosis belongs to a separately authorized worker after durable save.
+- Successor durable save: exact-path commit `3bc901f2110c06f04136b29653868ee7edb5c13d` (tree `f0a055da948d6a602e0569547f8185a9613fcffe`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:03:03.8321412Z`.
+- Archive boundary: central confirmed this completed verifier archived after remote confirmation `07ea67dd6d13ad7a5c56b90c05a207052bd8257d`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T15:04:21.5580453Z`. This archive does not authorize holder/config/cleanup/rollback or diagnostic-worker mutation.
+
+## Fresh submit domain failure diagnosis — `019ff159-f1e8-7511-a7ed-18cf39d4301f`
+
+- Result: `DIAGNOSIS_COMPLETE_WAITING_SAVER_REMOTE_EQUALITY`; started `2026-08-11T15:04:02.0000000Z`, finished `2026-08-11T15:13:46.2665207Z`, elapsed `584.2665207 s`; diagnosis-only, no remediation.
+- Fixed diagnosis: `ROOT_MUST_BE_ABSENT` at `WORKSPACE_PREPARE`. Static server-owned `LATTICE_DELIVERY_ROOT` existed before the fresh submit, and the fail-closed Git workspace adapter rejects every pre-existing filesystem entry before provisioning.
+- Durable stream proof: current command maps to one stream with sequence/event/command counts `8/8/8`, outbox `1`, attempt `0`, and ledger head `024eb29f...`. Sequence 5 is the current delivery intent; sequence 6 is the initiating `TASK032_DELIVERY_FAILED`; sequences 7-8 are downstream STOPPING/FAILED projections.
+- Root proof: config `e624fc0c...` binds the static root, whose `CreationTimeUtc=2026-08-11T13:28:38.9597131Z` predates the current fresh intent by about 90 minutes. This is pre-existing runtime state, not a submit-time race.
+- Source trace: composition loads and passes the static delivery root; `IsolatedGitDelivery` validates before create and maps any existing entry to `ROOT_MUST_BE_ABSENT`. Runtime then converts durable execution-failure evidence into a verified public status, explaining transport `isError=false` with domain `FAILED`.
+- Prior task-ref reuse remains fixed: new public ref `f2bbbd...` differs from `ab8724dd...`; current failure is a later workspace-preparation failure, not transport/auth/credential or old-ref replay.
+- Recommended later remediation: retain no-adopt fail-closed behavior, derive a deterministic per-admission root under a validated LATTICE-owned base, and bind it consistently to workspace, ledger repository locator, and execution. Prove distinct request IDs get distinct absent roots and same-ID replay is idempotent. Never delete/adopt/reuse the existing root.
+- Scope evidence: changed paths `[]`, tests `NOT_RUN_BY_SCOPE`, no source/config/script/PG/handoff/ledger edits, stage/commit/push, live tool call, build/test, holder/restart/cleanup/rollback, or protected-state action; checkout ended at `b79426e...` with only the protected script dirty.
+- Successor durable save: exact-path commit `e4346609c3b2b3437219a31e189eb713b62cdd18` (tree `8ae6813eb773a2c9ad0299f318b0b103bd0960bc`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:15:52.0715053Z`.
+- Archive boundary: central confirmed this diagnosis worker archived after remote confirmation `93e6c4034d2ec0601bd7b69bd5d7c8629be13703`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T15:16:56.9899804Z`. This archive does not authorize holder/config/root/cleanup/rollback or source-remediation mutation.
+
+## Fresh unique workspace source remediation — `019ff165-c671-7e71-b71c-c76ba69ee795`
+
+- Result: `SOURCE_REMEDIATION_COMMITTED_AWAITING_SAVER_PUSH`; started `2026-08-11T15:16:57.0000000Z`, finished `2026-08-11T15:26:07.1712058Z`, elapsed `550171 ms`; no failure code/stage.
+- Exact source scope: only `apps/lattice-runtime/src/composition.rs`; source commit `851ffd56e92e32abdf3a5ae9ab7374297ebe7f10`, tree `3c31ea3f88056a2b3751f032f07776a20b6da0cf`, parent `9a14a2f1a006b5f5dff3c45418d7cd47478f663e`.
+- Behavior: configured `LATTICE_DELIVERY_ROOT` remains untouched and becomes a parent/base. Actual Fresh execution derives a deterministic task-scoped child from the existing task-ref identity and verifies that child absent immediately before workspace adapter assembly. ResumeExisting does not execute or create a child.
+- Focused TDD: RED exited `1` only for missing helper; final GREEN passed `1/1` with `74` filtered; final `cargo fmt --check -p lattice-runtime` and owned-path `git diff --check` both exited `0`.
+- Previous failure comparison: this source change targets durable `ROOT_MUST_BE_ABSENT` / `WORKSPACE_PREPARE` while retaining no-adopt fail-closed behavior. It does not claim the prior live failure cleared; runtime materialization/live acceptance remains separate.
+- Preserved contracts: deterministic admission/task-ref inputs, configured root, public schema, Task Spec, PostgreSQL, credential, holder, lease/fence ownership, exact retry, and ResumeExisting replay. A pre-existing child still fails closed; no cleanup/reuse occurs.
+- Rejected alternatives: time/random roots weaken deterministic replay; rewriting global root per process expands ownership; reusing the static root repeats the proven failure.
+- Protected boundaries held: no protected-script/saver-path mutation by the worker, existing-root deletion/adoption/cleanup, global config/PG/credential/holder/protected-state work, unrelated programs, push/merge/deploy/release/default branch, full suite/build, or live tool call.
+- Source publication: commit `851ffd56e92e32abdf3a5ae9ab7374297ebe7f10` was pushed unchanged to `origin/feature/p0-clean-seed-rebuild`; `git ls-remote` equality was proven at `2026-08-11T15:27:20.2257975Z` before saver receipt commits.
+- Saver durable receipt: exact-path commit `a31f1c79f5134eb018fcf6288276e0a393ee0c4c` (tree `a9d3ee5c10450eed040f1836a9117e43bdd9e565`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:28:34.0000519Z`.
+- Archive boundary: central confirmed this source worker archived after remote confirmation `f61110587526f6f563056190e532e8760af5eda8`; saver immediately captured `archived_at_utc=2026-08-11T15:29:45.3139584Z`. This archive does not authorize runtime materialization/holder/config/root/cleanup/rollback mutation.
+
+## Runtime materialization first-build timeout — `019ff171-87e8-7560-ab8e-38025d759db3`
+
+- Result: bounded failure, never READY; started `2026-08-11T15:29:48.0000000Z`, finished `2026-08-11T15:31:27.1895931Z`, elapsed `99.19 s`; failure `P0_MATERIALIZATION_BUILD_EXECUTOR_TIMEOUT` at `A_BUILD_FIRST_ATTEMPT`.
+- Source binding passed: commit `851ffd56...`, tree `3c31ea3f...`; preflight HEAD/remote `f611105...`, receipt HEAD/remote `74041cc...`, with advances confined to saver ledger/handoff. Runtime build inputs exactly matched source.
+- The first isolated cargo build targeted `lattice-isolated-targets/latticed-851ffd56-20260811T1532Z`; executor reported a `5.024 s` timeout, wrapper exit `124`, cargo completion code unknown. Target activity spanned `7.685 s`, producing `542` files / `193126147` bytes, but no `latticed.exe`; no cargo/rustc residual process remained.
+- Holder stage was not entered. Minimal post-failure evidence only: PID `30476` existed and owned the sole `127.0.0.1:55061` listener; TTL/identity/marker/psql validation was `NOT_RUN`.
+- Config remained byte-identical at `e624fc0c...`; no backup, structural validation, staging, or atomic switch ran. Fresh/PG/credential/21-env mapping was not separately read because stage B was never entered.
+- External handoff remained byte-identical at `72ec5bfa...`; no backup or atomic replace ran. Discovery/schema/direct-stdio were `NOT_RUN_DUE_TO_BUILD_FAILURE`; LATTICE tool-call count `0`.
+- Test evidence: locked no-deps cargo metadata exited `0`; build is `FAIL_EXECUTOR_TIMEOUT_NO_CARGO_COMPLETION_CODE`; cargo test/full suite/npm/discovery are `NOT_RUN`.
+- This is distinct from `ROOT_MUST_BE_ABSENT/WORKSPACE_PREPARE`: it stopped before runtime/holder/config/discovery, with no root deletion/adoption/reuse.
+- Protected boundaries held: protected script/saver/source/config untouched by worker; no repo commit/push, live tool call, holder/PG/protected-state/root cleanup action, merge/deploy/release/default-branch change, or unrelated program.
+- Next action: save this failure only. Any retry requires a newly authorized worker/turn, a fresh isolated target, and a long enough execution window; never reuse this partial target. Do not ask this worker to rerun.
+- Successor durable save: exact-path commit `5cbbba803784f9b9f4bca1753bd12f496c08735f` (tree `aaa5e7b8474fbad8cf299186fe4551b79340df3d`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:34:12.6425004Z`.
+- Archive boundary: central confirmed this failed worker archived after remote confirmation `8b663ea233077fe55ab2c8185fa6b1dd29478e40`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T15:35:19.7569771Z`. This archive does not authorize partial-target/build-only/holder/config/handoff/root/cleanup/rollback mutation.
+
+## Build-only materialization recovery — `019ff176-69e0-7853-af27-cdd34d1e7d59`
+
+- Result: `BUILD_ONLY_SUCCESS_BINARY_MATERIALIZED`; started `2026-08-11T15:35:09.0000000Z`, finished `2026-08-11T15:37:26.9862026Z`, elapsed `137.9862026 s`; `runtime_ready_claimed=false` and no failure code/stage.
+- Authority was narrowed before any revoked action: runtime/holder/PG/config/backup/external-handoff/discovery work is `REVOKED_AND_NOT_RUN`.
+- Source binding: commit `851ffd56...`, tree `3c31ea3f...`; current saver-only advances did not affect build inputs. Only the protected script was dirty and its content was not read or touched.
+- Previous partial target was observed only: no matching cargo/rustc, no binary, `542` files / `193126147` bytes, not deleted/cleaned/reused/adopted.
+- Exactly one new build used a never-existing isolated target and a `180000 ms` bound; it completed exit `0` in `38347 ms` with Cargo reporting `38.29 s`.
+- Verified binary: `10279424` bytes, SHA-256 `5ec06821eb06d6b1da40c7bdf7bd094453a7081808720ef622ffb2afb127dc58`, last write `2026-08-11T15:37:11.1854282Z`, verified `2026-08-11T15:37:26.9862026Z`.
+- Previous timeout comparison: the prior worker stopped at executor timeout without a binary; this worker used a fresh target and the one authorized build completed. This proves only binary materialization, not runtime readiness.
+- Tests: cargo build `PASS`; cargo test/full suite/npm `NOT_RUN_BY_SCOPE`; direct-stdio discovery `NOT_RUN_AUTHORITY_REVOKED`.
+- Protected boundaries held: no repo/saver/protected-script mutation by worker, holder/PG query, global config or external handoff read/write, discovery/live tool call, cleanup/rollback/provision/process action, protected state, release/default branch, or unrelated program.
+- Next action: saver publishes this binary receipt. Any holder/config/handoff/discovery work requires a separate newly authorized worker; this worker must not perform runtime steps.
+- Successor durable save: exact-path commit `9a1c643d2c8880c613a3f1e2ea13fef4f718ff64` (tree `81b46fcdd8198274ae1183ca7c69bd56590362ed`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:39:32.5836229Z`.
+- Archive boundary: central confirmed this build-only worker archived after remote confirmation `f3fb17884d6b705a214aa1e54a4e92700223785f`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T15:40:50.1319644Z`. This archive does not authorize binary/runtime/switch/discovery/holder/config/external-handoff/root/cleanup/rollback mutation.
+
+## Runtime switch/discovery staging-validation failure — `019ff17b-79bc-72a2-9f64-276b0b589a6b`
+
+- Result: `FAILED_FIRST_FAILURE`; started `2026-08-11T15:40:39.0000000Z`, stopped `2026-08-11T15:45:55.9808097Z`; failure `P0_RUNTIME_SWITCH_STAGING_VALIDATION_SCRIPT_ERROR` at `B_GLOBAL_CONFIG_STAGING_VALIDATION`.
+- Root cause: a PowerShell re-decode expression passed inline `if(...)` inside a .NET call; PowerShell treated `if` as an unavailable command. The worker stopped before `File.Replace` and did not rerun.
+- Repo/source/binary checks passed: current head/remote `47302d0...`, source inputs unchanged since `851ffd56...`; verified binary remains `10279424` bytes / SHA-256 `5ec06821...`, untouched and not rebuilt.
+- Holder and PG identity passed: `127.0.0.1:55061`, PID `30476`, run `04517...`, system id `7672773976043398424`, TTL PID `14212`, and `953` seconds remained at postcheck. No holder mutation occurred.
+- Config before/after remained `e624fc0c...`; FRESH, holder mapping, 21 env keys, zero args, and implicit stdio matched. Exact backup and a staging file were created, but structural validation failed before completion; no atomic backup/switch, and the new command is inactive.
+- External handoff remained `72ec5bfa...`, still READY for the old binary; no backup or atomic replace ran. Discovery/schema/direct-stdio are `NOT_RUN_DUE_TO_CONFIG_STAGING_VALIDATION_FAILURE`; LATTICE tool-call count `0`.
+- This differs from the build timeout because the authoritative recovered binary exists; it differs from the Fresh domain failure because no discovery or tool call started. The first failure was worker-side staging orchestration before replacement.
+- Protected boundaries held: no build/test/binary mutation, provision/PG/process/cleanup/rollback, LATTICE tool call, root or protected-state action, saver/repo commit by worker, merge/deploy/release/default branch, unrelated program, or secret recording.
+- Artifact state: exact before-config backup and an unvalidated staging file exist at the recorded run-specific paths. Do not reuse the staging file.
+- Next action: saver publishes this exact failure. Any separate worker must re-check config/handoff expected hashes and holder TTL >= 8 minutes, create fresh staging, and must not ask this worker to retry.
+- Successor durable save: exact-path commit `ab2a0abd10bac3334e354f7f49963b6e4ba102c7` (tree `5a22b073fc6f111c8ca9070bdb93153edf324fcd`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:48:51.9270038Z`.
+- Archive boundary: central confirmed this failed switch worker archived after remote confirmation `0de86da75c5694115be41e9bed0e1179a07ef427`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T15:50:03.2340791Z`. This archive does not authorize diagnosis/config/staging/backup/binary/holder/external-handoff/root/cleanup/rollback mutation.
+
+## Switch staging script diagnosis-only — `019ff184-07b3-7352-b5fd-01702d38f33b`
+
+- Result: `DIAGNOSIS_ONLY_COMPLETE_REMEDIATION_NOT_IMPLEMENTED`; started `2026-08-11T15:49:49.0000000Z`, finished `2026-08-11T15:56:29.6881523Z`, elapsed `400688 ms`; changed paths `[]`, tests `NOT_RUN_BY_SCOPE`.
+- Fixed diagnosis remains `P0_RUNTIME_SWITCH_STAGING_VALIDATION_SCRIPT_ERROR` / `B_GLOBAL_CONFIG_STAGING_VALIDATION`; failed switch durable evidence and archive chain were remotely confirmed through `29727a3...`.
+- Operative source is the archived worker's 75-line inline PowerShell command; no matching repo wrapper/helper exists outside excluded protected/saver paths.
+- Exact blocker: static parse reports `0` errors, but both parenthesized `if($hasBom){3}else{0}` occurrences are `CommandAst("if")`. Runtime therefore throws `CommandNotFoundException` at the first inline `if` before `UTF8Encoding.GetString` runs.
+- Offending line: `$stageDecoded=$utf8.GetString($stageReload,(if($hasBom){3}else{0}),$stageReload.Length-(if($hasBom){3}else{0}))`. This is a runtime expression-assumption failure, not quoting/regex/.NET/JSON/TOML validation.
+- The staging file was written/reloaded and its length check passed, but all later command/env/FRESH/PG/args/hash structural checks were unreachable. `ErrorActionPreference=Stop` terminated before line-70 `File.Replace`; atomic backup/switch remained `NOT_CREATED/NOT_RUN`.
+- Minimal later correction: after fresh preflight/staging, retain `$offset=if($hasBom){3}else{0}` and replace only the re-decode line with `$stageDecoded=$utf8.GetString($stageReload,$offset,$stageReload.Length-$offset)`. Static parse yields zero errors and zero if-CommandAst; execution was `NOT_RUN_BY_DIAGNOSIS_SCOPE`.
+- Preserve every existing guard and ordering. Never read/delete/reuse/install the failed staging/backup; create fresh run-specific artifacts. Before any switch, re-check hashes and require holder TTL >= 8 minutes, otherwise stop without provision.
+- Protected boundaries held: no live/config/staging/backup/binary/holder/PG/runtime access or mutation, wrapper/source/repo change, build/test, tool call, cleanup/root/protected-state action, release/default branch, unrelated program, or secret recording.
+- Authoritative binary is reference-only: `10279424` bytes, SHA-256 `5ec06821...`; diagnosis did not access or modify it.
+- Successor durable save: exact-path commit `49165a80f3afd9c5496f804855eda0fe356dd9dd` (tree `d99bec970e66f7f6dfea63f442dccb12a9c1c4d4`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T15:58:35.7437632Z`.
+- Archive boundary: central confirmed this diagnosis thread archived after remote confirmation `86bb4d55a58315eb3d5fcf7edc77b7654df3ae1c`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:00:00.9486875Z`. This archive does not authorize script-remediation or live config/staging/backup/holder/external-handoff/root/cleanup/rollback mutation.
+
+## Reusable MCP command staging validator remediation — `019ff18c-f85c-7fe0-9ac7-a5bbc369b7fb`
+
+- Result: `SCRIPT_REMEDIATION_COMPLETE_AWAITING_SAVER_REMOTE_DURABILITY`; started `2026-08-11T15:59:50.0000000Z`, ended `2026-08-11T16:06:15.1994644Z`, elapsed `385.199 s`; no failure code, stage `REPOSITORY_SCRIPT_REMEDIATION`.
+- Exact source scope: new helper `tools/lattice-mcp-kit/New-LatticeMcpCommandStaging.ps1` only; commit `5106314db78c6faa7a6420a74e12738324dc670c`, tree `4f909ea7512eef7f8dc3642fbd4ff0573b49574e`, parent `4899815a1f4378c618f170404f944c03d2d3e271`.
+- Ownership: existing tunnel/delivery/direct-stdio scripts own other surfaces, so a narrow repository helper owns command staging only. It accepts explicit source/destination/command/hash/server/key-count inputs, requires a fresh destination, and never replaces source.
+- Fix: compute BOM `$offset` once and reuse it in `$stageDecoded=$script:Utf8Strict.GetString($stageReload,$offset,$stageReload.Length-$offset)`; no inline-if CommandAst remains.
+- Windows PowerShell 5.1 AST gate passed: parser errors `0`, if-CommandAst count `0`. Focused non-live fixture passed two cases: literal/no-BOM offset `0`, basic/BOM offset `3`; each had 21 env keys and unchanged non-command bytes.
+- Other test state: PSScriptAnalyzer `NOT_AVAILABLE`, git diff check `PASS`, full suite/build/cargo/npm/live `NOT_RUN_BY_SCOPE`.
+- Preserved guards: same quote form, exactly one command/env section, 21 unique env-like keys, no args/transport override, non-command byte equality, expected path/hash, and source never replaced.
+- This remediates the diagnosed script shape only. It does not perform atomic switch, backup, runtime/holder/PG/config/handoff/discovery, or live acceptance; current state is not READY.
+- Protected boundaries held: no subagent, live config/runtime/PG/TTL/tool/build/cleanup/protected-state action, failed-artifact reuse, protected script access, saver-path edit by worker, push/merge/deploy/release/default branch, or unrelated program.
+- Source publication and saver receipt are pending the exclusive saver; source commit must remain an ancestor of the final remote receipt head.
+- Successor durable save: exact-path commit `68f980d9b091dd9e853f8c034111e08fc80e52f6` (tree `830ce175deae79a89ffe9b8936bac75a283d71a2`) was pushed to `origin/feature/p0-clean-seed-rebuild`; live `git ls-remote` equality and source `5106314db78c6faa7a6420a74e12738324dc670c` ancestry were proven at `2026-08-11T16:08:18.4857839Z`.
+- Archive boundary: central confirmed this script-remediation worker archived after remote confirmation `f9aeea6e78f25f196cb0fc8ac742b17a25a77a41`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:09:21.6647159Z`. This archive does not authorize helper/live config/staging/backup/binary/holder/external-handoff/root/cleanup/rollback or successor-worker mutation.
+
+## Duplicate holder worker cancelled before action — `019ff197-7c87-7d01-93b4-6680a5b6032f`
+
+- Result: `CANCELLED_DUPLICATE_BEFORE_ACTION`; started `2026-08-11T16:11:07.0000000Z`, finished `2026-08-11T16:12:14.0000000Z`, elapsed `67000 ms`.
+- Fixed classification: `ORCHESTRATOR_DUPLICATE_DISPATCH_CANCELLED_BEFORE_ACTION` at `DISPATCH_OWNERSHIP`; central had already repurposed `019ff196-8fe4-7b91-ac93-ec50110bd2d2` as the single authoritative holder-preflight/provision-only worker.
+- The duplicate called `create_goal`, then made `0` command/tool calls; changed paths `[]`, provision count `0`, and all holder/PG/process/config/handoff/discovery/submit/status/build/cleanup/rollback work is `NOT_RUN`.
+- Protected `64272` was not touched. The duplicate was archived successfully at `2026-08-11T16:12:24.4842839Z`.
+- Next action: continue only authoritative holder worker `019ff196-8fe4-7b91-ac93-ec50110bd2d2`; this cancellation grants no live authority.
+- Successor durable save: exact-path commit `8894ba8dbfd695c59a9901ce7cf24e4bbd85696e` (tree `afe8f8f685fd90bddd1e1488ede549ee01b59a78`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:13:32.1837562Z`.
+
+## Holder-resume request cancelled before action — `019ff196-8fe4-7b91-ac93-ec50110bd2d2`
+
+- Receipt schema `lattice.safe-to-archive.v1`; classification `CANCELLED/BLOCKED_AFTER_SCOPE_REPLACEMENT_BEFORE_ACTION`; scope is only the latest holder-resume request. Start/end are `NOT_CAPTURED`, elapsed `0 ms`.
+- Original goal remained `BLOCKED`. A resumed `create_goal` was attempted once but rejected as `REJECTED_UNFINISHED_BLOCKED_GOAL`; no resumed goal was created and replacement scope never executed.
+- Fixed failure: `CENTRAL_FINAL_REVOCATION_BEFORE_HOLDER_ACTION` at `REPLACEMENT_GOAL_CREATE`; central revoked the resume before operational execution.
+- Changed paths `[]`; runtime, holder, PG, wrapper, provision, bind, old-holder read, connection, config, handoff, discovery, tool, cleanup, rollback, binary/helper/switch, and repository action counts are all `0`.
+- This receipt does not reclassify historical actions from earlier closed scope. It records one coordination-only create-goal attempt and no task runtime or mutation.
+- Next action: archive this old thread and use a clean new holder-provision-only worker. `safe_to_archive=true`, `self_archived=false`.
+- Successor durable save: exact-path commit `abe4ba4834e81e8760ab7451d637515874219468` (tree `797548da39ca4c9c2ef3d6a6531eeb280bbffc23`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:16:46.3566355Z`.
+- Archive boundary: central confirmed this old zero-action holder thread archived after remote confirmation `6c8bb5e60436c1d7ce44a8ebfea65090ed733451`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:17:39.1808821Z`. This does not authorize clean-holder-worker or live-state mutation.
+
+## Clean holder provision actual READY with incomplete parent receipt — `019ff19b-dbca-75b2-88e5-df5218e9f16a`
+
+- Result is exactly `FAILED_FIRST_FAILURE_WITH_ACTUAL_NEW_HOLDER_READY`, not a complete parent-receipt pass. Started `2026-08-11T16:16:04.000Z`, finished `2026-08-11T16:22:12.556Z`, elapsed `368556 ms`.
+- Fixed failure is `P0_HOLDER_PARENT_RECEIPT_NOT_DURABLY_CAPTURED` at `WRAPPER_PARENT_RECEIPT_CAPTURE_AFTER_HAS_EXITED`: the one wrapper parent was observed exited, but inherited log handles caused the outer monitor to exit before durably capturing parent PID/exit code and the in-memory pre-snapshot port list. The wrapper was not rerun.
+- Old `127.0.0.1:55061` / run `04517df6a8ed496fa465046b5e4b20d1` is classified `EXPIRED_AND_TTL_CLEANED_STATE_ABSENT`: marker, PID `30476`, listener, and corrected TTL cleanup PID `14212` are absent; no old-holder psql or mutation action occurred.
+- Actual new holder is READY at `127.0.0.1:49156`, run `5b9a861ddd104146afa06fd40c051e46`, database `lattice_task019_5b9a861d_base`, system identifier `7672809321324394560`, PostgreSQL `17.10`, postmaster PID `29688`, TTL cleanup PID `3892`, deadline `2026-08-11T17:04:01.3148589Z`; listener ownership and secret-free psql identity passed. This actual-state proof does not fill the parent-receipt evidence gap.
+- Explicit forbidden ports were `5432`, `64272`, `55432`, and `55061`; chosen `49156` is not in that list. Whether it was in the non-durable pre-snapshot remains `UNKNOWN_RECEIPT_GAP`.
+- Boundary: no second wrapper, config/binary/helper/external-handoff switch, discovery/submit/status/delivery, build/test, cleanup/rollback/root deletion, `64272` action, repository mutation, merge/deploy/release, or protected dirty-script content read/change. A mistaken pre-correction read-only `Get-Process` query for PID `32132` occurred once and caused no mutation.
+- Successor durable save: exact-path commit `b7b041a232ad85019f6fd9404b3694ab7e71af8d` (tree `918811b5c5e5b46cd928831b7bf14c3f2c72d153`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:23:47.0345706Z`.
+- Archive boundary: central confirmed this clean-holder worker archived after final remote confirmation `dc8cf9cf11cdf45dd63d3f91820bebc225a445e7`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:25:51.0800300Z`. The actual live holder `127.0.0.1:49156` / PID `29688` / TTL PID `3892` and all live state remain outside saver authority.
+
+## Redundant worker cancelled before action — `019ff1a5-794c-7c80-8e01-fbe42d9068ec`
+
+- Result is exactly `CANCELLED_REDUNDANT_BEFORE_ACTION`; revoked by central thread `019fef39-6c03-76f0-9115-0171c7d44f10`.
+- Before cancellation arrived, the worker had called `create_goal` and read reply-skill instructions read-only. No holder/runtime/PG/marker/process/config/handoff/discovery state was read and no live state was changed.
+- Changed paths `[]`; holder-runtime reads, PostgreSQL connections, runtime actions, file writes, child agents, and engineering changes are all `0`.
+- Current action was only delivery of the cancellation receipt. `safe_to_archive=true`, `self_archived=false`.
+- Successor durable save: exact-path commit `93a3e36b517cda83f18efe7aa748dc3aa71194ed` (tree `faf627c7084bc042eeb3e3542d5aeeff2878a422`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:28:28.3579882Z`.
+- Archive boundary: central confirmed this redundant worker archived after final remote confirmation `0d7670f61d1cb8bce6a82eb50eaf6cae307d8cf2`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:29:22.8887630Z`. This does not authorize active switch-worker or live-state mutation.
+
+## Switch preserved; direct-stdio initialize timed out — `019ff1a6-4309-7122-bbe9-116c34307c81`
+
+- Result is exactly `FAILED_FIRST_REAL_FAILURE_CONFIG_SWITCH_PRESERVED`; readiness is false. Started `2026-08-11T16:27:24.0000000Z`, finished `2026-08-11T16:44:05.1384676Z`, elapsed `1001138 ms`.
+- Fixed failure is `LATTICE_P0_DISCOVERY_TIMEOUT` at `D_DIRECT_STDIO_INITIALIZE`: the exact `5ec06821...` binary received one initialize request but returned no stdout JSON within `30000 ms`. No initialized notification, tools/list, or tools/call message followed; retry count is `0`, and no rollback occurred.
+- Holder validation passed for `127.0.0.1:49156`, run `5b9a861ddd104146afa06fd40c051e46`, PID `29688`, TTL PID `3892`. At failure truth, `1216` seconds remained before `2026-08-11T17:04:01.3148589Z`.
+- Durable helper verification, command staging, PG binding, atomic config switch, and external handoff update succeeded. Current config SHA is `63881ec515b9a8f8959e0084c2ff9e249b9636ff648f2f0fc477571c8365b467`; current handoff status is `DISCOVERY_FAILED_CURRENT_CONFIG_ACTIVE` with readiness false.
+- Discovery truth: a new ephemeral, not-durably-identified direct-stdio session was used; PID was `NOT_DURABLY_CAPTURED`; request/response counts were initialize `1/0`, initialized notification `0`, tools/list `0/0`, tools/call `0`; stderr capture started but content was `NOT_CAPTURED_OR_PERSISTED_BEFORE_FAILURE`; exit code is `UNKNOWN_NOT_CAPTURED`; final process state is `NO_EXACT_5EC_BINARY_PROCESS_REMAINING`.
+- Boundary: no build/test, PG provision/restart/stop/kill/cleanup, old-holder/root/PID32132/64272 action, submit/status/delivery call, repo push by worker, saver-path edit by worker, rollback, merge/deploy/release/default-branch, TASK-037/GH-9/Hermes/reflection.
+- Next action: do not open a fresh verifier, roll back, or clean up. Any bounded initialize-timeout remediation must be separately authorized and preserve current config/holder truth without reusing failed artifacts.
+- Successor durable save: corrected exact-path commit `79ace2a2837db173cb2c7efaab1853cdb0170197` (tree `978bd9b0f91c8665c9b9e756a48d5fa82288a97f`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved local/remote SHA equality at `2026-08-11T16:47:12.1419589Z`.
+- Archive boundary: central confirmed this switch/discovery failure worker archived after final remote confirmation `870c2fbaa76a0f443031178b51ade7d46b3abee5`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:48:20.7622182Z`. Current config, holder, external handoff, cleanup/rollback, and successor-worker state remain outside saver authority.
+
+## Initialize diagnosis: slow but responds — `019ff1ba-4479-7ba1-b4ce-df065658628e`
+
+- Diagnosis result is `PASS` with code `LATTICE_P0_INITIALIZE_SLOW_BUT_RESPONDS`; it is not post-initialize discovery or fresh-readiness evidence. Started `2026-08-11T16:53:42.133Z`, ended `2026-08-11T16:54:11.257Z`, elapsed `29122 ms`.
+- One exact `5ec06821...` binary process and one LF-framed initialize request produced a valid JSON-RPC result after `28793 ms`; negotiated protocol was `2025-11-25`, server `latticed` `1.0.0`, stderr was empty, and the process was terminated after first evidence.
+- The earlier 30-second zero-response did not reproduce. Current diagnosis excludes startup/early-exit, stdio framing/output, stderr, and DB-connect failure for this one run; extra intermittency remains `UNKNOWN` and must not be inferred away.
+- Preflight matched config `63881ec515b9a8f8959e0084c2ff9e249b9636ff648f2f0fc477571c8365b467`, exact binary, stdio/zero args, 21 key names only, and READY holder `127.0.0.1:49156` / PID `29688` / TTL PID `3892`. No raw MCP env or credential value is recorded in this receipt.
+- No initialized notification, tools/list, tools/call, submit/status/delivery, retry, verifier, build/test, PG/config/handoff/staging/backup/source/saver-file mutation, cleanup/rollback, or `64272` action occurred. One earlier read-only tool-output env exposure incident is disclosed; its raw values are excluded.
+- Next action: any discovery continuation or fresh verifier requires a separately bounded window. This diagnosis must not be promoted to discovery readiness.
+- Successor durable save: exact-path commit `21515c1b9af1c15e81df6683a017790024e478b2` (tree `b3108117c441fa47482241da4ce58bd5fe75043d`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved first durable local/remote SHA equality at `2026-08-11T16:56:45.1719225Z`.
+- Archive boundary: central confirmed this initialize-diagnosis worker archived after final remote confirmation `62aa9761026a02c69ba461ab0e13be2e8e6f3b92`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T16:57:44.2241234Z`. Current config, holder, external handoff, and successor-worker state remain outside saver authority.
+
+## New holder ready; switch/discovery not run — `019ff1c2-97fa-79f0-8ebb-7234b258ec4c`
+
+- Result is exactly `PASS_HOLDER_READY`; it is not MCP switch/discovery readiness. Started `2026-08-11T16:58:09.0000000Z`, ended `2026-08-11T17:04:01.4410095Z`, elapsed `352441 ms`.
+- The validated provision wrapper ran exactly once and durably exited `0`. Its inherited TTL-child streams left stdout/stderr content locked, so content was not captured and no wrapper rerun occurred; actual READY holder evidence is authoritative.
+- New holder: `127.0.0.1:52575`, run `f112f8fbc17344ed978ea8fe284e9705`, database `lattice_task019_f112f8fb_base`, system identifier `7672820385534622536`, postmaster PID `28476`, TTL PID `29244`, deadline `2026-08-11T17:47:00.2169479Z`; `2578` seconds remained at evidence.
+- Old `49156` holder was read-only classified `READY_BUT_BELOW_8_MINUTE_GATE` with `253` seconds at preflight and had crossed its deadline by final read. No connection, stop, delete, cleanup, or rollback action was taken.
+- Selected port `52575` was absent from the 34-port occupied snapshot and from effective exclusions `5432/64272/55432/49156/55061/51666/63238`; `64272` was only observed occupied and never connected.
+- Boundary: no MCP initialize/discovery/tool call, submit/status/delivery, config/binary/external-handoff switch write, credential-file read, raw credential/env value save, source/helper change, second provision, or protected dirty-script read/write.
+- Next action after durable save: central may archive this worker and separately authorize switch/discovery with a 60-second initialize timeout against `127.0.0.1:52575`.
+- Successor durable save: exact-path commit `bf5f02dd2d54b5e1d84155040dc3e7e998f08026` (tree `0b44bc4e40e033350a7f7d7c6dc0b9062560ab2f`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved first durable local/remote SHA equality at `2026-08-11T17:06:33.5880167Z`.
+- Archive boundary: central confirmed this holder-ready worker archived after final remote confirmation `3fa7c3c920c4fb96f30f04899f085792caaf7652`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T17:07:38.4507261Z`. Holder `127.0.0.1:52575`, config, external handoff, cleanup/rollback, and successor-worker state remain outside saver authority.
+
+## Switch active; initialize returned parse error — `019ff1cb-bb7c-7cd3-a1b1-8073fea91b33`
+
+- Authoritative secret-free receipt SHA `72327461504bfe4ccf117f5811b969a010f3df64b4743652a7af7e5e1395ee5a` and external live-handoff SHA `1ea8a3bf4b41d229c7b2b3eaa6beccd8a8ec3210ebbef7eb690e1bf6f26cfbce` were verified before persistence.
+- Status remains `DISCOVERY_FAILED_CURRENT_CONFIG_ACTIVE`, readiness false, with `LATTICE_P0_INITIALIZE_PARSE_ERROR` at `DIRECT_STDIO_INITIALIZE_RESPONSE`. This is not discovery success.
+- Current config SHA is `402505b168c59ab59ca3f62fc3a7fd5a431e1280423389f74aa7a660d7984881`; backup SHA is `63881ec515b9a8f8959e0084c2ff9e249b9636ff648f2f0fc477571c8365b467`; exact binary SHA is `5ec06821eb06d6b1da40c7bdf7bd094453a7081808720ef622ffb2afb127dc58`.
+- Holder binding is `127.0.0.1:52575`, run `f112f8fbc17344ed978ea8fe284e9705`. One discovery process was attempted with `60000 ms` initialize timeout; response was JSON-RPC `-32700 Parse error`.
+- No initialized notification, tools/list, or tools/call followed; tool-call count `0`, retry/rollback/holder cleanup false, and exact binary processes remaining `0`.
+- Stdout SHA is `a32de6af36090423b1bd656789374b5407d1009427353f1311a752515543cf85`; corrected authoritative empty-stderr SHA is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+- Wrapper post-processing hit a StrictMode serialization bug after stdout capture, so process PID/exit remain null with capture status `WRAPPER_SUMMARY_SERIALIZATION_FAILED_AFTER_STDOUT_CAPTURE`.
+- Saver did not retry discovery, call LATTICE tools, roll back config, clean the holder, or record any raw credential/env value.
+- Successor durable save: saver record commit `4592b2299c9951308c034f167e25efecd13c2946` (tree `1f0c230a0fafebeaf408f69ab2ed3c338772c224`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved first durable local/remote SHA equality at `2026-08-11T17:26:54.2013909Z`. At that immutable commit, `WINDOW_LEDGER.jsonl` SHA was `d9f459ccd42d2be4bc8f643dc732750bc479ce388e36b1c54e89c287a0c312ba` and the exact saver record-line SHA was `29dc62ec977dd98be46648e166e4240379f84a651c7cd5bf820f93d629fb07d9`.
+- Archive boundary: central confirmed this switch/discovery parse-error worker archived after final remote confirmation `e162502e1ffe175bf93640e90bd16d73d8b92801`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T17:28:14.6588791Z`. Current config `402505b1...`, holder `127.0.0.1:52575`, external handoff, failure artifacts, cleanup/rollback, and successor diagnosis remain outside saver authority.
+
+## Offline initialize parse root cause identified — `019ff1de-9363-77e0-9f86-2f9fc0375f88`
+
+- Result is `PASS_OFFLINE_ROOT_CAUSE_IDENTIFIED` with diagnosis `LATTICE_P0_INITIALIZE_STDIN_UTF8_BOM` at `CLIENT_STDIN_INITIALIZE_FRAME_ENCODING`. This is offline diagnosis only, not remediation or live verification.
+- Primary root cause: Windows PowerShell 5.1/.NET Framework creates redirected StandardInput from `Console.InputEncoding`; AutoFlush emits UTF-8 BOM `EFBBBF` before the first `WriteLine` JSON frame. The server reads through LF and correctly returns JSON-RPC `-32700 Parse error` because BOM is not JSON whitespace.
+- Reconstructed failure request is `181` bytes, SHA `764c4512a18137b938103110ea8bc1f6b8c7d81fbc4e984ada336a371ca4b6c8`, BOM=true, CRLF; the durable successful request was BOM=false/LF. CRLF, protocol version, framing, extra stdin/stdout, partial read, and server parser are excluded as primary causes.
+- Evidence gap remains explicit: live request bytes/hash/framing were not persisted independently; the failure frame is source-and-host exact reconstruction corroborated by the unique server parse-error path.
+- Secondary diagnosis: `LATTICE_MCP_WRAPPER_ERROR_SUMMARY_STRICTMODE` at `CLIENT_POSTPROCESSING_AFTER_STDOUT_CAPTURE`; `$safeInitialize.result.protocolVersion` fails on an error response with no result and prevents summary creation, but did not cause the server parse error.
+- Minimal reversible recommendation: ensure no-BOM UTF-8 before Process.Start, set stdin newline to LF, restore process-global encoding in finally when required, guard error-response result access, and persist future secret-free request byte metadata.
+- Protected boundaries: no binary/MCP process, discovery retry, config read/write, raw env/credential read, runtime/PG/listener/64272 action, source/wrapper/runner write, protected dirty-script read/write, saver-file write by worker, commit, or push.
+- Successor durable save: exact-path commit `3b1730c8890ea7a03478a27aecbf5dabcd891a2b` (tree `dc10770b074f7ad9952a3a597db8c91311394b9e`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved first durable local/remote SHA equality at `2026-08-11T17:37:50.2277961Z`. At that immutable commit, `WINDOW_LEDGER.jsonl` SHA was `22f8a63b002b14615489ce0ebb2f95ffe68ecd3dbafeddb6549cb5055499ea15` and the receipt-line SHA was `d17d0a9200277d26672805ed5cc1a282c82951616e4917d3bc17457dafe6ac18`.
+- Archive boundary: central confirmed this offline initialize-parse diagnosis archived after final remote confirmation `64988454bec4c180e0d34bf85ac6914d5d86f1e7`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T17:39:02.1519766Z`. Wrapper source, config, holder, external handoff, live state, and successor remediation remain outside saver authority.
+
+## Direct-stdio no-BOM/LF source remediation — `019ff1e8-a475-7183-93a3-5f9646263316`
+
+- Result: PASS source remediation only; source commit `41bca3c631f43a164791c8e70db5340212f49e5c` (tree `6f206ae676c8743d7ede4b6d8d121cf91eca554f`, parent `877d88450ed97f2261cde181c4ed318b624c134a`) was already pushed and remote-equal before saver work.
+- Exactly two source paths changed: `Invoke-LatticeMcp.ps1` and new `Test-StdinFrameEncoding.ps1`. Saver did not modify either path.
+- Implementation prefers no-BOM `StandardInputEncoding` when available; PS5.1 fallback temporarily sets/restores `Console.InputEncoding` around Process.Start; stdin newline is explicit LF; all four JSON-RPC writes use the same TextWriter path.
+- Offline fixture `DIRECT_STDIO_STDIN_ENCODING_OFFLINE=PASS`: initialize and tools/list begin `0x7B`, contain no BOM, end LF without CR, strict UTF-8 decode and JSON parse, and preserve method/id. Both scripts have zero AST parser errors; no live runtime/build/full suite was run.
+- Current wrapper SHA `5a2f0acf68cf15abbc86d785b25278cd022435a63fa4ed7a05766684f06cca30`; fixture SHA `f000b643428d7545ddd78ae40d7b90ee1e4ca63935820b3a08cfc1b1bae686c2`.
+- StrictMode error-summary remediation remains deliberately separate. No server tolerance, logging/metadata, config, runtime, PostgreSQL, listener, or global-state change was bundled.
+- Process deviation is preserved: one broad filename-only `rg -l` scan included the protected dirty script path; contents were not shown, edited, staged, reset, cleaned, committed, or otherwise acted on.
+- Successor durable save: exact-path commit `255245583dc60628f63c503cd965a55a18d46497` (tree `0ee0675e35b4cd2d337f0c34e4b7fbc54430a4a6`, parent/source `41bca3c631f43a164791c8e70db5340212f49e5c`) was pushed to `origin/feature/p0-clean-seed-rebuild`; independent `git ls-remote` proved first durable local/remote SHA equality at `2026-08-11T17:46:23.6646761Z`.
+- Archive boundary: central confirmed this no-BOM/LF source-remediation worker archived after final remote confirmation `c259521e844f5b2411cf81369bdaa86c853d7057`; platform acknowledgement was immediately captured at `archived_at_utc=2026-08-11T17:47:27.8225715Z`. Source paths, config, expired holder, external handoff, and successor holder-worker state remain outside saver authority.
+
+## Two-hour holder ready — `019ff1f0-09a4-7d41-b076-db41140b7f18`
+
+- Exact captured receipt is now durably queued as `PASS_HOLDER_READY`; checked at `2026-08-11T17:52:19.9259179Z`. The earlier response-only capture was not GitHub persistence.
+- Additive worker timing metadata: started `2026-08-11T17:48:02.000Z`, finished `2026-08-11T17:52:19.9259179Z`, elapsed `257925 ms`, status `completed_pending_saver_commit_and_remote_equality`; scope remained one read-only old-holder classification plus exactly one TTL-7200 provision and secret-safe HOLDER_READY verification.
+- Wrapper invocation count `1`, requested TTL `7200` seconds. Parent capture gap is `GAP_NON_BLOCKING_STDOUT_AND_MARKER_DURABLE`; stdout contained one JSON line equal to marker safe fields, stderr bytes `0`.
+- Old holder `127.0.0.1:52575` / run `f112f8fbc17344ed978ea8fe284e9705` is classified `DEADLINE_ELAPSED_MARKER_ROOT_ABSENT_PIDS_DEAD_NO_LISTENER`; it was not connected and no lifecycle action was taken.
+- New holder: `127.0.0.1:56503`, run `faa5b2b496524142b79bdc457b5863bf`, database `lattice_task019_faa5b2b4_base`, PostgreSQL `17.10`, system identifier `7672833000919291588`, postmaster PID `16248`, TTL PID `11336`, deadline `2026-08-11T19:50:54.8010275Z`; marker/status/listener/PIDs were READY/live in the receipt.
+- Selected port is outside required exclusions `5432/64272/55432/52575/49156/55061/51666/63238`; no forbidden action is recorded.
+- Saver did not rerun wrapper, connect holder, perform MCP/config/external-handoff/provision/cleanup actions, touch source paths, or read/modify/stage the protected dirty script.
+- First durable saver receipt commit is `c5a2dfb171bd6c028107d18ecaa897eb21caeb42` (tree `0aae2e41334f7ecec89046c2d31cbaacd188a6b1`); live `git ls-remote` equality was verified at `2026-08-11T17:55:22.0043186Z`. Central archived the worker at `2026-08-11T17:58:14.0304470Z`.
+## Switch and exact-four discovery READY — `019ff1f8-6d3e-7a32-b724-c6963ad89208`
+
+- Result is `READY_FOR_FRESH_CODEX_WINDOW / READY_EXACT_FOUR_DISCOVERY_ONLY`; holder `127.0.0.1:56503` / run `faa5b2b496524142b79bdc457b5863bf` remained live with `6005` seconds of TTL at READY handoff.
+- Atomic config switch succeeded from `402505b168c59ab59ca3f62fc3a7fd5a431e1280423389f74aa7a660d7984881` to `be9104230e74a321577147751c02cd40e06729776f53345a4cdbf4d5b7cff272`; backup hash equals the before hash. No rollback or cleanup was executed.
+- The single direct-stdio Discovery invocation exited `0`, negotiated `2025-11-25`, and returned exactly `lattice_delivery_run,lattice_delivery_status,lattice_task_status,lattice_task_submit` with typed schemas. `tool_call_count=0`; no submit/status/delivery call occurred.
+- External secret-free handoff is READY with SHA-256 `1aa6c277d1538ced6cc5976e173517df284135e062021246340edb0b698954f0`.
+- First durable saver receipt commit is `950c813e5167e3c4dfea4b8fe9b927e4a46337d5` (tree `042ffd8394e6ec4dd3d48a8f5e6e6fb4e9c05525`); live `git ls-remote` equality was verified at `2026-08-11T18:12:32.6398022Z`. Central archived the worker at `2026-08-11T18:13:37.3763203Z`.
+## Fresh verifier domain failure — `019ff207-8c88-7e00-b114-920c03687206`
+
+- Window ran from `2026-08-11T18:13:40.0000000Z` to `2026-08-11T18:19:49.8232998Z` (`369823 ms`). Outcome is `FAIL_FRESH_TASK_SUBMIT_DOMAIN_NOT_COMPLETED`, not a transport failure.
+- Preflight and exact-four discovery passed. The single `lattice_task_submit` transport returned `isError=false` but domain `status=FAILED`, `task_state=FAILED`, `result_digest=null`; new task ref `1f71f06485aa23f1390a5f4d433b7db36b29de2cf2c86ea25e1eef25e2fbd539`.
+- First failure is `LATTICE_P0_FRESH_TASK_SUBMIT_DOMAIN_NOT_COMPLETED` at `C_FRESH_TASK_SUBMIT_DOMAIN_VALIDATION`. Independent status was correctly `NOT_RUN` after the mandatory first-mismatch stop.
+- Postcheck preserved config `be9104230e74a321577147751c02cd40e06729776f53345a4cdbf4d5b7cff272`, READY external handoff `1aa6c277d1538ced6cc5976e173517df284135e062021246340edb0b698954f0`, and live holder run `faa5b2b496524142b79bdc457b5863bf`.
+- First durable receipt commit is `f601579dedb50bea141196536ef68ce8f3464ef3` (tree `5747f37e22d01f72d047850edd4e96ac9824f213`); live `git ls-remote` equality was verified at `2026-08-11T18:22:22.3148269Z`. Central archived the verifier at `2026-08-11T18:23:26.741Z`.
+## Fresh submit domain diagnosis — `019ff210-6eee-7a81-95a0-d6608544e4c7`
+
+- Diagnosis at `2026-08-11T18:29:30.3058443Z`: `DIAGNOSED_FIRST_SERVER_OWNED_DOMAIN_FAILURE`, certainty `KNOWN`.
+- First server-owned failure is `GIT_INIT_FAILED / WORKSPACE_PREPARE` for task `1f71f06485aa23f1390a5f4d433b7db36b29de2cf2c86ea25e1eef25e2fbd539`. Transport, MCP framing, credential/DB admission, prior root-absence failure, and Codex execution were excluded.
+- Root cause is the full task identity appended beneath an already deep Windows delivery base: task root `217` chars, separate git-dir `233` chars, template hook targets `261-265` chars, while the owned Git subprocess lacks process-scoped `core.longpaths=true`.
+- Minimal reversible remediation is a preferably Windows-gated process-scoped `-c core.longpaths=true` in `GitRunner::output`, plus one deep-base/full-task-ref regression; do not change task identity, database, global Git config, holder, or MCP contract.
+- First durable diagnosis receipt commit is `5bd527454fa164625f144c836d7f9ef668e76ac2` (tree `7aac5067fab2106daf8b2dae7531eac329675c2f`); live `git ls-remote` equality was verified at `2026-08-11T18:31:02.7909771Z`. Central archived the diagnosis at `2026-08-11T18:31:56.190Z`.
+## GitRunner remediation cancelled — `019ff218-3a7f-7812-8a26-e05a1c700643`
+
+- Status is `CANCELLED_AFTER_READ_ONLY_INSPECTION`; central replaced the GitRunner source-remediation scope with a short user-owned LocalAppData delivery base.
+- No source/test edit, stage, commit, push, test, or build occurred. No config, holder, runtime, PG, MCP, saver-file, or protected-script-content mutation/read occurred.
+- Read-only inspection located `GitRunner::output` at `git_delivery.rs:1392` and the git-init call at `192-199`; malformed-regex aggregate failures retained no remote/commit output and caused no write.
+- Original goal remains `ACTIVE_NOT_COMPLETED`; no rollback/reset/clean/revert is needed or authorized. Worker receipt reports `safe_to_archive=true`.
+- First durable cancellation receipt commit is `2925063bf0ee4c44b7cc85944c560e3af5c2f3fe` (tree `3224f264784bc7438192782e568efd2ab3690188`); live `git ls-remote` equality was verified at `2026-08-11T18:33:57.4306662Z`. Central archived the worker at `2026-08-11T18:34:38.235Z`.
+## Short-root discovery identity failure — `019ff219-8ac1-78e1-898b-00589092f113`
+
+- Window ran `2026-08-11T18:33:17.000Z`–`2026-08-11T18:48:21.122Z` (`904122 ms`). Outcome is `FAILED_FIRST_TRUE_CONNECTIVITY_FAILURE_PRESERVED`; READY is false.
+- Whole-file SHA drift was semantically cleared: command/stdio/args, 21 keys, binary, FRESH, holder/authority/ingress and all 20 non-root env values matched. Only `LATTICE_DELIVERY_ROOT` was atomically switched to short user-owned LocalAppData base `P0D-019ff2198ac178e2`; projected maximum Git-template path is `175 <= 220`.
+- Config switched to `65b659a416929de4d8cda0ffb815b99eaa021e9260e231911e998737288ffa89`; secret-free external handoff status is `DISCOVERY_FAILED_PRESERVED` with SHA-256 `9d90084799ff936752a6840d925e80522ac516c982ab80f5a8f9ffccf8c311b2`.
+- The one no-BOM Discovery attempt exited before initialize response with `LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED / DISCOVERY_PROCESS_STARTUP`; `tool_call_count=0`, no retry, submit/status/delivery NOT_RUN.
+- No rollback or cleanup occurred; short root and current config were preserved. First durable receipt commit is `6d0d4ef3ed3fdb9f71a3551e434ab6ddc6b4f04d` (tree `cc09ae1357cb2fbf804e6657218a25981bc8ab4d`); live `git ls-remote` equality was verified at `2026-08-11T18:49:52.0900403Z`. Central archived the worker at `2026-08-11T18:51:05.047Z`.
+## Offline official-identity diagnosis — `019ff229-d7bc-7790-80fa-a44eef95ca08`
+
+- Diagnosis at `2026-08-11T18:59:20.944Z`: `PASS_OFFLINE_EXACT_FIRST_PREDICATE_IDENTIFIED`, certainty `KNOWN`.
+- Exact first predicate is `delivery_root.file_name() != Some(OsStr::new("delivery"))` at `composition.rs:796-799`; current leaf `P0D-019ff2198ac178e2` causes `OfficialIdentityRejection::Layout` before filesystem metadata or MCP stdin.
+- Root cause is accidental coupling of workspace `LATTICE_DELIVERY_ROOT` with the official bundle trust-anchor layout. Transport/framing, binary, credential/PG/ingress/task domain, root metadata and port 64272 are excluded or not reached.
+- One-field root rollback is smallest for identity-only recovery but restores the long-path problem. For the short-root P0 goal, the smallest source change is deriving official target root from existing launcher ancestry while preserving all fixed bundle checks.
+- No process, DB, discovery/tool call, build/test, config/root/source/handoff write, rollback, cleanup, global Git config or protected-script read occurred. First durable receipt commit is `05f736a488fef2062610d89c23222238d5171952` (tree `874ba9b599fbb9c2e7e9db81479fcade2eaca465`); live `git ls-remote` equality was verified at `2026-08-11T19:00:47.4386722Z`. Central archived the diagnosis at `2026-08-11T19:01:50.776Z`.
+## Official-bundle source decoupling cancelled — `019ff233-bed6-7de3-9ece-d0a934cd03bb`
+
+- Status is `CANCELLED_AFTER_READ_ONLY_INVENTORY`; central replaced source decoupling with a ROOT-LAYOUT CONFIG-ONLY direction that this worker was not authorized to execute.
+- The required local goal remains active and incomplete. No source/test edit, stage, commit, push, test/build/live discovery/submit/status, config/root/holder/runtime action, reset/clean/revert, or protected dirty-script content access occurred.
+- Read-only checkout/remote/baseline/diagnosis evidence was verified; `composition.rs` was announced as the intended sole source/test path but was never edited.
+- No source-remediation receipt or commit exists because cancellation arrived before edit/test. First durable cancellation receipt commit is `5e6d18fec62e03879e2cb8e1db8e7280f7085e43` (tree `8b931b1e9917d9f386a3f3badbfbbacf7cc9f738`); live `git ls-remote` equality was verified at `2026-08-11T19:04:30.2160040Z`. Central archived the worker at `2026-08-11T19:05:19.473Z`.
+## Exact-leaf ROOT-LAYOUT discovery failure — `019ff234-e93e-7f52-bba3-6ca89bcd5d7b`
+
+- Window ran `2026-08-11T19:03:11.0000000Z`–`2026-08-11T19:11:32.0221621Z` (`501022 ms`). Outcome is `FAILED_FIRST_TRUE_CONNECTIVITY_FAILURE_PRESERVED`; READY is false.
+- Configured root `P0R-019ff234e93e7f52\delivery` has byte-exact `delivery` leaf and projected maximum path `184 <= 220`. Only `LATTICE_DELIVERY_ROOT` changed; config SHA is `593e0f5c60f2d7359ebe4d0a501d6eede9d5de673e16f8257b1d1f04b065a46a`.
+- The one no-BOM Discovery child exited `2` before initialize response with `LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED / DISCOVERY_PROCESS_STARTUP`. This proves the prior leaf predicate was corrected but does not isolate the later predicate; no retry or tool call occurred.
+- External secret-free handoff remains `DISCOVERY_FAILED_PRESERVED` with SHA-256 `4eb355e904a0a9fa1612a74e89307d98fe66de57b1a0c5f1200f4e22298495a0`; holder `127.0.0.1:56503` remained live.
+- No source/binary/PG mutation, submit/status/delivery, rollback, cleanup, root reuse/delete, 64272 or protected-script content access occurred. First durable receipt commit is `c040dda421e36ed110b5853502800ee38efb568d` (tree `1a3f40c2caa69e71a276f8a371fc3eb371a7e25f`); live `git ls-remote` equality was verified at `2026-08-11T19:13:43.2673017Z`. Central archived the worker at `2026-08-11T19:14:38.915Z`.
+
+## Official-bundle next-predicate diagnosis — `019ff23f-faae-71c2-9cef-0cb7eb8034d7`
+
+- Diagnosis outcome is `PASS_OFFLINE_EXACT_NEXT_PREDICATE_IDENTIFIED`, certainty `KNOWN`; the exact next mismatch is `!is_lower_hex(fixture_id, 32)` at `composition.rs:807-808`.
+- The exact `delivery` leaf now passes, but its parent `P0R-<16-lowerhex>` is not the required 32-character lowercase hexadecimal fixture ID. The public failure remains `LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED / DISCOVERY_PROCESS_STARTUP`.
+- LocalAppData candidates can meet the `<=220` path budget, but root-only config cannot also equal the unchanged launcher target and fixed seven-file bundle policy. The smallest short-root-preserving remediation is narrow source decoupling using existing launcher ancestry while retaining every fixed identity check.
+- This diagnosis was read-only: no binary/MCP, config/root/handoff/source, PG/64272, rollback/cleanup, protected-script content, merge/deploy/release/default-branch, or third-path action occurred.
+- First durable diagnosis receipt commit is `7fbfb3370baa03e8e56b6705ff0bdc120aaa18fb` (tree `5cfcad4c9f50d8487efce7e2a81f8b92ee394304`); live `git ls-remote` equality was verified at `2026-08-11T19:28:05.6403865Z`. Receipt now reports `safe_to_archive=true`. Central archived the diagnosis at `2026-08-11T19:29:04.187Z` (`set_thread_archived_result=success`).
+
+## Official-bundle source decoupling — `019ff24d-aec2-73d2-a56c-1cd60cb4a5c7`
+
+- Functional source commit `0e93c7b8685f7783db274ff36425b82ed3cee4c4` (tree `c32afa981c8221fb5db3f9c3f806579c76db2eef`, parent `7bc95d5ba8a9cf46a85997489e92ba603743aad4`) changes only `apps/lattice-runtime/src/composition.rs`.
+- Official bundle trust is now derived from validated launcher ancestry; `LATTICE_DELIVERY_ROOT` remains solely the workspace base. Seven-file and launcher identity checks remain intact; no env/schema/Fresh/ResumeExisting/task_ref/credential/Git/ingress contract changed.
+- Focused TDD evidence: expected RED exit `101`, final GREEN exit `0` (`1 passed, 0 failed, 75 filtered`); `cargo fmt --check -p lattice-runtime` and owned-path whitespace checks both exited `0`. Read-only diff-risk check found no issue.
+- Source commit was pushed directly to `feature/p0-clean-seed-rebuild`; first live `git ls-remote` equality and reachability were proven at `2026-08-11T19:37:22.1037268Z`.
+- This is source remediation only. Live acceptance is not claimed; BUILD-ONLY and SWITCH/DISCOVERY remain separate phases. First durable receipt commit is `03cb7e1b9396c66124898c0c0d185e8ba02141d9` (tree `9f41a387f15303d298123c554cec759386258ff9`, parent `0e93c7b8685f7783db274ff36425b82ed3cee4c4`); live `git ls-remote` equality was verified at `2026-08-11T19:38:32.1722859Z`. Receipt now reports `safe_to_archive=true`. Central archived the source worker at `2026-08-11T19:39:25.535Z` (`set_thread_archived_result=success`).
+
+## BUILD-ONLY false-drift failure — `019ff256-b68b-7b42-b4ce-ffad5dc39b48`
+
+- Authoritative receipt version `2` supersedes version `1` by `CENTRAL_FINAL_CLASSIFICATION`. Result is `STOPPED_PREBUILD_FIRST_FAILURE`; failure is `P0_BUILD_ONLY_FALSE_DRIFT_ON_SAVER_PATHS / SOURCE_DRIFT_GATE`.
+- The observed post-source paths are exactly the expected fully qualified saver-owned paths: `tools/lattice-mcp-kit/HANDOFF.md` and `tools/lattice-mcp-kit/WINDOW_LEDGER.jsonl`; they do not alter source/tree build input.
+- Source commit/tree/parent/ancestry gates all passed. Build invocation count is `0`, binary does not exist, target was not created, and worker source/dirty/remote mutation counts are all `0`.
+- No runtime readiness or live acceptance is claimed. A new clean BUILD-ONLY worker must explicitly allow both fully qualified saver paths; this worker must not resume.
+- Stage 1 durable receipt commit is `0c71da3e8a44b91add876d18c15853e49ca90470`; expected and live remote SHA matched at `2026-08-11T19:43:34.3863338Z`. Stage 2 confirmation commit `aa87dd57d0e939d0405fe77697b31d69856c369a` and fresh live remote SHA matched at `2026-08-11T19:44:21.2046332Z`, so the separate saver state is `safe_to_archive=true`; authoritative receipt fields remain unchanged. Central archived the worker at `2026-08-11T19:44:39.870Z` (`set_thread_archived_result=success`).
+
+## BUILD-ONLY binary materialized — `019ff25b-d55e-7880-9de0-dfd7842c94ae`
+
+- Result is `BUILD_ONLY_SUCCESS_BINARY_MATERIALIZED` from source commit `0e93c7b8685f7783db274ff36425b82ed3cee4c4` and tree `c32afa981c8221fb5db3f9c3f806579c76db2eef`; build inputs equal source and post-source commits touch only the two saver paths.
+- Exactly one locked isolated build completed exit `0` in `42752 ms`. Materialized binary is `10277376` bytes with SHA-256 `cf7b46cb4989253df8c36b5933e5ee5bf9a1b1e70ae01e89807045d8c0210f94`.
+- The binary was not launched. The worker made no repository commit/push and did not edit ledger/HANDOFF; the protected dirty path was observed only by Git status.
+- Runtime readiness and live acceptance are not claimed. The next phase remains a separate SWITCH/DISCOVERY worker.
+- Stage 1 durable receipt commit is `16672a223f00fb61a874de65f5c1a760e7ad707c`; expected and live remote SHA matched at `2026-08-11T19:49:34.6584901Z`. Stage 2 confirmation commit `76de45e17453a642b941943a00aa4087298c9d9c` and fresh live remote SHA matched at `2026-08-11T19:50:08.8667264Z`, so the separate saver state is `safe_to_archive=true`; authoritative BUILD_ONLY receipt remains unchanged. Central archived the worker at `2026-08-11T19:50:27.125Z` (`set_thread_archived_result=success`).
+
+## HOLDER_READY — `019ff260-ec6c-7b63-b146-80f7164af1c4`
+
+- Functional classification is `PASS_HOLDER_READY`. Old run `faa5b2b496524142b79bdc457b5863bf` was classified `EXPIRED_INSUFFICIENT` without PostgreSQL connection or lifecycle action.
+- The wrapper was invoked exactly once with TTL `7200`. A non-blocking parent exit-code capture gap remains, while durable READY stdout, empty stderr, inactive parent, and independent read-only post-state passed every functional READY gate.
+- Fresh holder is `127.0.0.1:50205`, run `9f27d3ac638343a6a64418a5c7987160`, PostgreSQL 17, postmaster PID `29372`, TTL PID `22652`, deadline `2026-08-11T21:54:43.9863591Z`; remaining time at verification was `7073.610` seconds.
+- Marker/listener/database/system identifier/authority/manifests/TTL/excluded-port/stderr checks all passed. No raw credential or env value was saved.
+- Stage 1 durable receipt commit is `1b56bb44dba85c3be17299f45c0e0590cb6c1fef`; expected and live remote SHA matched at `2026-08-11T19:59:07.4861900Z`. Stage 2 confirmation commit `40babf71d87743fb30bfb8e01265093bbc03198d` and fresh live remote SHA matched at `2026-08-11T19:59:44.9762254Z`, so the separate saver state is `safe_to_archive=true`; authoritative HOLDER_READY receipt remains unchanged. Central archived the worker at `2026-08-11T20:00:04.586Z` (`set_thread_archived_result=success`).
+
+## SWITCH/DISCOVERY READY — `019ff269-dd78-7ba0-bbd1-9ce3583c1b5c`
+
+- Result is `READY_FOR_FRESH_CODEX_WINDOW`; the source-decoupled binary SHA-256 is `cf7b46cb4989253df8c36b5933e5ee5bf9a1b1e70ae01e89807045d8c0210f94` and holder binding is `127.0.0.1:50205` / run `9f27d3ac638343a6a64418a5c7987160`.
+- Atomic config and secret-free handoff postchecks passed. Current config SHA-256 is `31a85201bd24b600e88dac786b7d93fe4af27acd20f744f140834b35aa12bf39`; handoff is `READY_FOR_FRESH_CODEX_WINDOW` with SHA-256 `dd8a903b7a528417b7d69c771b5bf6c55b77efa14222cd20466f5c43b96a4b9f`.
+- The single no-BOM discovery completed exit `0`, protocol `2025-11-25`, exact four typed tools, `tool_call_count=0`, and no retry. Corrected discovery/outer stderr SHA-256 is the standard empty-content digest.
+- No submit/status/delivery call, rollback, cleanup, PG provision/restart/stop, 64272 action, protected-script content read, repository commit, or worker push occurred.
+- Stage 1 durable READY receipt commit is `398f8a8409401849261d4cc74a3733e5f85ffa13`; expected and live remote SHA matched at `2026-08-11T20:16:59.4168533Z`. Stage 2 confirmation commit `413a86327d2845f56b88edb7406581d2356aed85` and fresh live remote SHA matched at `2026-08-11T20:17:36.6946216Z`, so the separate saver state is `safe_to_archive=true`; authoritative and correction receipts remain unchanged. Central archived the worker at `2026-08-11T20:18:02.508Z` (`set_thread_archived_result=success`).
+
+## Fresh verifier first failure — `019ff27b-ef58-78e2-b692-fe18f433541b`
+
+- Window ran from `2026-08-11T20:20:46.000Z` to `2026-08-11T20:29:17.335Z` (`511335 ms`). Overall result is `FIRST_FAILURE_STOPPED`; current live acceptance and P0 connectivity acceptance are both false.
+- Preflight passed for source `0e93c7b8685f7783db274ff36425b82ed3cee4c4`, binary `cf7b46cb4989253df8c36b5933e5ee5bf9a1b1e70ae01e89807045d8c0210f94`, config `31a85201bd24b600e88dac786b7d93fe4af27acd20f744f140834b35aa12bf39`, READY handoff `dd8a903b7a528417b7d69c771b5bf6c55b77efa14222cd20466f5c43b96a4b9f`, and live holder `127.0.0.1:50205` / run `9f27d3ac638343a6a64418a5c7987160`.
+- Session 1 completed exact-four discovery and made exactly one `lattice_task_submit`. Transport returned `isError=false`, but domain `status=FAILED`, `task_state=FAILED`, and `result_digest=null` for new task ref `470d3e1085acae6fa11ee9ff8b79cd5c22769e2f386fe9056bf090c87d054482`.
+- First failure is `LATTICE_FRESH_SUBMIT_DOMAIN_FAILED / C_TASK_SUBMIT_DOMAIN`. Session 2 and independent status equality were correctly `NOT_RUN`; no retry, delivery call, mutation, cleanup, rollback, or protected-script content access occurred.
+- Stage 1 durable receipt commit is `80bf6a2be85c2ce42b05ebfcc369932ea883ec43`; expected and live remote SHA matched at `2026-08-11T20:35:47.4122842Z`. Stage 2 confirmation commit `29f00da4ecaccca9e90c9965673416e3d4216f75` and fresh live remote SHA matched at `2026-08-11T20:36:48.3833270Z`, so `safe_to_archive=true`; authoritative receipt fields remain unchanged. Central archived the worker at `2026-08-11T20:37:52.9802448Z` (`set_thread_archived_result=success`).
+
+## Fresh submit domain diagnosis — `019ff28b-eeb1-7f62-be6d-2e9620aa5836`
+
+- Result is `DIAGNOSIS_KNOWN_WAITING_SAVER_TWO_STAGE_REMOTE_EQUALITY`, certainty `KNOWN`; this diagnosis is not a P0 PASS.
+- Exact failure is `CODEX_APP_SERVER_INVALID_CODEX_HOME / CODEX` for task `470d3e1085acae6fa11ee9ff8b79cd5c22769e2f386fe9056bf090c87d054482`. The isolated Codex-home `config.toml` is `365` bytes while the source-owned exact value is `174` bytes; the required bytes are an exact prefix and the first differing offset is `174`.
+- Transport, PostgreSQL durability, and workspace preparation are not the initiating failure. Codex identity/app-server/model execution was not entered; remediation is root-layer repair/reprovision only and must not relax the exact predicate.
+- Diagnosis made no test/build/MCP/submit/status/delivery, holder lifecycle, DB mutation, repository edit, push, cleanup, rollback, or 64272 action. The protected dirty script had one reported read-only scan incident but was not modified, staged, reset, or cleaned.
+- Stage 1 durable diagnosis receipt commit is `5639f0a5742e7b6dfc031e839340c983b3bc7d9e`; expected and live remote SHA matched at `2026-08-11T20:49:54.5787202Z`. Stage 2 confirmation commit `4f5c881f502adc44ba9a0475b0d357792689aae1` and fresh live remote SHA matched at `2026-08-11T20:50:52.9170181Z`, so `safe_to_archive=true`. The diagnosis remains not a P0 PASS; authoritative receipt and boundary incident remain unchanged. Central archived the worker at `2026-08-11T20:51:17.9069510Z` (`set_thread_archived_result=success`).
+
+## Codex-home remediation helper parse failure — `019ff298-d0bb-73f2-9f20-150cdae960bc`
+
+- Result is `FIRST_FAILURE_STOPPED`, not P0 PASS. First failure is `LATTICE_HOME_REMEDIATION_HELPER_PARSE_REJECTED / EXTERNAL_HELPER_PARSE`.
+- The single authorized helper invocation exited at PowerShell parse time before any helper statement ran; body execution, retry, new-home creation, config switch, handoff update, rollback, and cleanup all remained false or zero.
+- Holder preflight passed with `3523` seconds remaining. Existing Codex-home config remained `365` bytes / `7b6fe3b1...`; required canonical config remains `174` bytes / `1a9bc2b3...`.
+- Worker made no repository edit/commit/push, Codex or MCP launch, database action, holder lifecycle action, source edit, build, test, 64272 action, cleanup, or rollback. The protected dirty script was not read or modified.
+- Stage 1 durable failure receipt commit is `40110ec2da127f6494c5cdf4c22745b659c4f271`; expected and live remote SHA matched at `2026-08-11T21:10:14.8090160Z`. Stage 2 confirmation commit `ed80d3a1fc6d4292fbd2ab5e0f48e368b60f37ca` and fresh live remote SHA matched at `2026-08-11T21:10:54.4549355Z`, so outer saver state is `safe_to_archive=true`; authoritative `safe_to_archive=false` and all receipt fields remain unchanged. This remains a first-failure receipt, not P0 PASS. Central archived the worker at `2026-08-11T21:11:22.1463662Z` (`set_thread_archived_result=success`).
+
+## HOME-PREPARE pre-create alias failure — `019ff2ab-0cb3-71e1-be39-fd7eaf8e1fcc`
+
+- Result is `FIRST_FAILURE_STOPPED` and classification is `HOME_PREPARE_FAILED_BEFORE_PROVISION`; neither `HOME_PREPARED_ONLY` nor P0 PASS is claimed.
+- The first sequential pre-create command parsed and ran read-only checks, but short name `H` resolved to PowerShell alias `Get-History`; parameter `Id` rejected the holder marker path. Execution stopped before acceptance-id generation or any filesystem mutation.
+- Previous failed helper artifact was not read, reused, invoked, modified, or deleted. No new-home path or files were created; old home, global config, external handoff, holder, and canonical source evidence remained unchanged.
+- Worker made no repository edit/commit/push, Codex/MCP/DB/64272 action, holder lifecycle action, build, test, cleanup, rollback, or protected-script content access.
+- Stage 1 durable HOME-PREPARE failure receipt commit is `40e1de22ddc2552f58a5f77656955083af383ad1` and matched live remote at `2026-08-11T21:20:13.3474843Z`; stage 2 confirmation commit is `90001ce5c669fc0a33dcca4c15bafc714ed2bc7d` and matched live remote at `2026-08-11T21:20:48.4855505Z`. Central archived the worker at `2026-08-11T21:21:11.5992805Z`; outer saver state is `safe_to_archive=true`, while the authoritative receipt remains unchanged with `safe_to_archive=false`. `HOME_PREPARED_ONLY`, discovery, and P0 PASS remain unclaimed.
+
+## HOME-PREPARED-ONLY — `019ff2b4-0543-79b2-9117-b10b305bdbd7`
+
+- Result and classification are `HOME_PREPARED_ONLY`; this is not discovery, P0 PASS, or `CONFIG-HOME-SWITCH`.
+- New isolated home `6035356d59694957b16c45ed28f1ff77` was created at the exact absent path with four verified items; canonical config is 174 bytes with SHA-256 `1a9bc2b325476a4679e5ad9202329c97952ed8ea958162bd0ffadd2196833189`.
+- Credential source and old home remained unchanged; global config, external handoff, holder, source, binary, and protected dirty script were not mutated by the worker.
+- Four pre-target-selection incidents were recorded as zero-mutation local inspection/tooling incidents. The obsolete failure receipt was cancelled and was never written, committed, or pushed by saver.
+- Codex/MCP/DB/build/test, holder lifecycle, port 64272, cleanup, rollback, merge, deploy, release, and default-branch action counts are zero.
+- Stage 1 durable HOME_PREPARED_ONLY receipt commit is `1e065b44e729f8ca4a8e036b21f84ea08172c20d` and matched live remote at `2026-08-11T21:38:00.9339790Z`; stage 2 confirmation commit is `b3f19a5355a3598e28f2eff13164bd58d29a4e61` and matched live remote at `2026-08-11T21:38:53.7926640Z`. Central archived the worker at `2026-08-11T21:40:04.7769246Z`; outer saver state is `safe_to_archive=true`, while the authoritative receipt remains unchanged with `safe_to_archive=false`. Discovery, P0 PASS, and `CONFIG-HOME-SWITCH` remain unclaimed.
+
+## CONFIG-HOME-SWITCH-ONLY ready — `019ff2c4-6e14-7fe2-bb08-710ad9dbc74d`
+
+- Status is `HOME_REMEDIATED_READY_FOR_FRESH_VERIFIER`; this receipt does not claim discovery or P0 acceptance.
+- Global config atomically switched the single Codex-home assignment to prepared home `6035356d59694957b16c45ed28f1ff77`; all outside-home bytes, command/stdio/args, remaining 21-key environment semantics, binary, and Fresh PostgreSQL identity were preserved.
+- External secret-free handoff atomically advanced to `HOME_REMEDIATED_READY_FOR_FRESH_VERIFIER`; config and handoff each mutated once, with rollback backups retained and no rollback or cleanup executed.
+- Worker started no Codex/MCP process and made no initialize, discovery, tool, submit, status, PostgreSQL, build, test, holder lifecycle, or port 64272 call. Protected dirty script and saver files were untouched by worker.
+- Stage 1 durable CONFIG-HOME-SWITCH receipt commit is `b42a3407414fde08a40a24ee1d1784ef98fe5bd3` and matched live remote at `2026-08-11T21:49:36.5600163Z`; stage 2 confirmation commit is `6150bbe6d8158c85b9eb3b1d036a792e73117c6a` and matched live remote at `2026-08-11T21:50:28.9700233Z`. Central archived the worker at `2026-08-11T21:50:56.3808435Z`; outer saver state is `safe_to_archive=true`, while the authoritative key-value receipt remains unchanged with `worker_safe_to_archive=false`. `READY_FOR_FRESH_VERIFIER` remains the current handoff status, not P0 acceptance.
+
+## CONFIG-HOME-SWITCH pre-mutation drift failure — `019ff2c7-00d5-7962-9bf1-e39195f5c1c8`
+
+- Outcome is `FAILED_PREMUTATION` with `success_claim=NONE`; failure code is `CONFIG_SEMANTIC_DRIFT_BEFORE_TARGET_MUTATION` at stage C.
+- Initial current-read matched the expected config, but concurrent peer `019ff2c4-6e14-7fe2-bb08-710ad9dbc74d` changed config and handoff before this worker's first mutation. Those external mutations are not attributed to this worker.
+- This worker made no config, handoff, prepared-home, old-home, repository, database, holder, source, build, test, cleanup, rollback, reset, merge, deploy, or release mutation/action.
+- Prepared home remained valid and externally observed config/handoff already pointed to it, but strict step C required stop without retry, adoption, cleanup, or rollback.
+- Stage 1 durable pre-mutation drift failure receipt commit `5931a29309c22166ce32d155fa2f103841c4d0c8` matched live remote at `2026-08-11T21:52:47.9080683Z`; stage 2 confirmation commit `e8f24f5c1c58be8c1babb3dfb9a142b3004fe9c7` matched live remote at `2026-08-11T21:53:21.1464341Z`. Central archived the worker at `2026-08-11T21:55:52.3150711Z`; outer saver state is `safe_to_archive=true`. Authoritative outcome remains `FAILED_PREMUTATION`, `success_claim=NONE`, and no peer mutation is attributed to this worker.
+
+## Fresh-window live verifier first failure — `019ff2cd-e28b-7990-a966-7dd1ccc35650`
+
+- Verdict is `FAIL`; current fresh-window live acceptance PASS is not claimed.
+- The verifier stopped at `SUBMIT_RESPONSE_CAPTURE` with `STDIO_ORCHESTRATOR_NONZERO_NO_RESPONSE`; discovery exact-four was not proven and the submit path may have written zero or one request.
+- No retry or status call was permitted. Status equality, domain response, task reference, result digest, and ledger head remain unobserved.
+- No cleanup, rollback, holder stop, database connection, port 64272 action, protected-script access, TASK-037/GH-9/Hermes/reflection, merge, deploy, release, or default-branch action occurred.
+- Required baseline `b42a3407414fde08a40a24ee1d1784ef98fe5bd3` is an ancestor of the saver branch. Stage 1 fresh-verifier failure receipt commit `528634917c3fbe785790665bd86d6a539fd894c5` matched live remote at `2026-08-11T21:54:37.2211066Z`; stage 2 confirmation commit `ef84552e45173764e148fe044970c01326aa46ca` matched live remote at `2026-08-11T21:55:12.0070388Z`. Central archived the verifier at `2026-08-11T21:55:52.3100741Z`; outer saver state is `safe_to_archive=true`. Verdict remains `FAIL` and P0 PASS remains unclaimed.
+
+## Fresh verifier substituted-request failure — `019ff2ce-7961-7952-a4bb-af73082a92b0`
+
+- Verdict is `FRESH_SUBMIT_FAILED`; current live acceptance and P0 connectivity acceptance are false.
+- Preflight passed prepared-home, global-config, external-handoff, binary, and holder checks; the one session initialized, observed exact-four typed tools, then made exactly one `lattice_task_submit` call.
+- Submit returned transport `isError=true`, domain `ERROR`, classification `TOOL_ERROR`, and `LATTICE_TASK_REQUEST_SUBSTITUTED`; task state/reference/result/head were null.
+- No retry or second status session was run. Config, handoff, prepared-home config, holder candidate, and protected dirty script remained unchanged.
+- No build/test/new PG/manual DB/64272, cleanup, rollback, delete, merge, deploy, release, or default-branch action occurred.
+- Stage 1 durable substituted-request failure receipt commit `3e89585a710a0d338457cf9acf5ad9cb85e97436` matched live remote at `2026-08-11T21:58:03.3833022Z`; stage 2 confirmation commit `aa1256ace0f71752b413e09d1df74662a8284918` matched live remote at `2026-08-11T21:58:35.8819422Z`. Central archived the verifier at `2026-08-11T21:59:09.5937689Z`; outer saver state is `safe_to_archive=true`. Authoritative `safe_to_archive=false`, verdict `FRESH_SUBMIT_FAILED`, `LATTICE_TASK_REQUEST_SUBSTITUTED`, and P0 acceptance false remain unchanged.
+
+## Offline stdio verifier diagnosis — `019ff2d3-2008-7f73-9e27-945b25bc9eb8`
+
+- Verdict is `DIAGNOSIS_ONLY_NOT_P0_PASS`; current fresh-window live acceptance PASS is not claimed.
+- Medium-certainty client diagnosis: the read loop can reissue `ReadLineAsync` after a 500 ms wait while the prior read remains pending, allowing concurrent reads and an uncaught client runtime failure.
+- Exact exception text was not captured. Submit-frame write count remains `UNKNOWN_0_OR_1` and must not be inferred as zero or one.
+- Failure remains `STDIO_ORCHESTRATOR_NONZERO_NO_RESPONSE` at `SUBMIT_RESPONSE_CAPTURE`; initialize/list/submit flow evidence retains its probable, unobserved, and unknown classifications.
+- No MCP, Codex, PostgreSQL, network mutation, config/home mutation, holder inspection/action, cleanup/rollback, or protected-script access occurred. The holder deadline is treated as expired without inspection.
+- The proposed client correction was diagnosis-only and was not implemented. Stage 1 receipt commit `3ef2fd6f6a3776d5bfd35fba8a3e1d6af1357e3b` matched fresh live remote at `2026-08-11T22:03:22.8646740Z`; stage 2 confirmation commit `a88522f750eb239f63ecbe25f9e4a0d3d903e408` matched fresh live remote at `2026-08-11T22:04:41.6134748Z`. Central archived the diagnosis at `2026-08-11T22:05:31.7270448Z`; outer saver state is `safe_to_archive=true`. Verdict remains non-PASS, certainty remains `MEDIUM`, and submit write count remains `UNKNOWN_0_OR_1`.
+
+## Holder ready — `019ff2d3-6842-7ec3-9839-8d0dd54bca35`
+
+- Functional classification is `PASS_HOLDER_READY`; the exact canonical wrapper receipt reports `READY` for run `feb0534b39484da6997b7235f1d49d9d` at `127.0.0.1:58503`.
+- Canonical LF-terminated receipt SHA-256 is `0dbef44acd4ca0f75c022bdc8a815ff3c6ed75123351bd398f37beb30513cb98`; single wrapper invocation and no rerun are preserved.
+- Parent exit code remained unavailable after parent exit because the TTL child inherited the pipe; durable recovered receipt and read-only functional gates established semantic `READY`.
+- Verification time is `2026-08-11T22:05:57.3829998Z` with 6734 seconds remaining. PostgreSQL 17.10, exact listener/postmaster ownership, TTL cleanup identity, deadline, exclusions, and secret-safety checks passed.
+- Worker performed no MCP/discovery/submit/status, no manual database query beyond wrapper readiness, no port 64272 action, cleanup/rollback, global config, source, or handoff write. Stage 1 receipt commit `d6d974aeee0ed222ef343157b299f0adf72b9d34` matched fresh live remote at `2026-08-11T22:08:03.8277047Z`; stage 2 confirmation commit `ee5f080e6c49cc6e07d2e2a789e8860a8f4ff1e8` matched fresh live remote at `2026-08-11T22:08:43.6391566Z`. Central archived the worker at `2026-08-11T22:09:20.4579092Z`; outer saver state is `safe_to_archive=true`.
+
+## New-holder config switch only — `019ff2df-8c00-7310-92f9-7553cf5447ca`
+
+- Scope is `CONFIG-SWITCH-ONLY`; status is `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY`. Discovery for the new holder is explicitly `NOT_RUN_FOR_NEW_HOLDER`, so this is not P0 PASS.
+- The active config was atomically rebound to receipt holder run `feb0534b39484da6997b7235f1d49d9d` at `127.0.0.1:58503`; eight of nine PG-holder target values changed because loopback host was already equal.
+- Command, implicit stdio, zero args, prepared home, binary, twelve non-PG environment values, and all non-target raw bytes were preserved. No credential value was recorded.
+- External secret-free handoff advanced atomically to `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` with next action `RUN_FRESH_DISCOVERY_ONLY`; rollback and cleanup were not executed.
+- Worker launched no MCP/Codex process, ran no initialize/discovery/tool/submit/status, made no PostgreSQL connection or port 64272 action, and did not touch saver paths or the protected dirty script.
+- Stage 1 receipt commit `431cfd3ea25d78d5bb073a9c744dcc714856ae26` matched fresh live remote at `2026-08-11T22:21:52.7204515Z`; stage 2 confirmation commit `6dac983e0f75cefcb989201a32790c06ff714edb` matched fresh live remote at `2026-08-11T22:22:33.2748008Z`. Central archived the worker at `2026-08-11T22:23:17.7079693Z`; authoritative `worker_safe_to_archive=false` remains unchanged while outer saver state is `safe_to_archive=true`. Discovery remains not run and P0 PASS remains unclaimed.
+
+## Corrected discovery-only final — `019ff2ec-4a2e-7252-b572-eaccdab86db8`
+
+- Scope is `DISCOVERY-ONLY`; status is `DISCOVERY_ONLY_PASS_READY_FOR_FRESH_VERIFIER`. This is successful discovery evidence, not P0 PASS.
+- One actual latticed process initialized, negotiated protocol `2025-11-25`, sent initialized, and returned exact case-sensitive four tools: `lattice_delivery_run`, `lattice_delivery_status`, `lattice_task_submit`, and `lattice_task_status`.
+- Process exited 0 with empty stderr; exact-four is true. No tools/call, submit, status, or delivery call occurred, and there was no retry after the actual process launch.
+- The withdrawn prelaunch failure receipt was never saved, committed, pushed, or archived. Central classified its zero-process lock incident as `PRELAUNCH_LOCAL_ORCHESTRATION_INCIDENT`.
+- Config, handoff, holder listener, binary, client, prepared config, protected script, and non-saver paths remained preserved. Stage 1 receipt commit `090408477ec4fb07a8709820b9ab4a61bb9d3d04` matched fresh live remote at `2026-08-11T22:34:35.5531614Z`; stage 2 confirmation commit `7ff0fad5679bcffa92cda2094b94d71f156c1e05` matched fresh live remote at `2026-08-11T22:35:17.5323918Z`. Central archived the worker at `2026-08-11T22:35:58.1904430Z`; outer saver state is `safe_to_archive=true`. Discovery-only PASS remains ready for a fresh verifier, P0 PASS remains unclaimed, and withdrawn receipt count remains zero.
+
+## Fresh live submit domain failure — `019ff2f8-0bd0-7a60-aca5-5a834033c708`
+
+- Verdict is `FRESH_SUBMIT_DOMAIN_FAILED`; current fresh-window live acceptance PASS is not claimed.
+- Preflight passed. One session initialized, negotiated protocol `2025-11-25`, observed exact-four tools, and made exactly one `lattice_task_submit` call with no retry.
+- Transport succeeded with `isError=false` and exact-six structured content, but domain `status=FAILED`, `task_state=FAILED`, and `result_digest=null`; acceptance gate C failed.
+- Conditional status session was not run because submit did not complete. No delivery calls, cleanup, rollback, holder/candidate stop, config change, PostgreSQL connection, port 64272 action, source edit, or protected-script access occurred.
+- Stage 1 receipt commit `595695178c870262db4a0b28e865fff3ebf7868a` matched fresh live remote at `2026-08-11T22:44:01.2452789Z`; stage 2 confirmation commit `b2de62a11d076bfdf03749453544e1b5a8884c1f` matched fresh live remote at `2026-08-11T22:44:46.0167341Z`. Central archived the verifier at `2026-08-11T22:45:28.7676981Z`; outer saver state is `safe_to_archive=true`. Authoritative verdict remains `FRESH_SUBMIT_DOMAIN_FAILED`, status remains not run, and current Fresh live acceptance PASS remains unclaimed.
+
+## Server-owned fresh-submit failure diagnosis — `019ff300-9659-7330-ba4c-256641621d7f`
+
+- Diagnosis outcome is `EXACT_FIRST_FAILURE_DIAGNOSED` with known verdict `CODEX_SCHEMA_OUTPUT_EXISTS`; current Fresh live acceptance PASS remains unclaimed.
+- Durable stream sequence 6 is the first failure: stage `CODEX`, kind `Unavailable`, certainty `Known`. Transport, PostgreSQL credentials, workspace preparation, launcher, app-server turn, and model start are excluded as initiating causes.
+- Root cause is the static, pre-existing 275-file schema bundle being passed unchanged as `schema_output_dir`; the fail-closed identity preflight requires that output path to be absent.
+- Minimal remediation is proposed only: derive one task-scoped absent schema-output child from the deterministic delivery root while preserving the existing fail-closed check and the current bundle. No remediation was implemented and no tests were run.
+- Diagnosis used read-only PostgreSQL sessions with zero SQL mutations. No MCP/Codex/submit/status/delivery call, source/config/handoff/holder mutation, cleanup, rollback, or protected-script access occurred.
+- Stage 1 durable receipt commit `03cdcdd7e1e401e3e197bbe313cd8f17f70c4f0a` and stage 2 confirmation commit `3d0042ebfc053f9c435700057cbd30675ec906e3` each equal their fresh remote reads. Central archived the diagnosis at `2026-08-11T22:59:52.0096260Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## Schema-output path source remediation — `019ff30d-8a70-7de0-8105-db5083a16823`
+
+- Source commit `0b59b79a60208be364a6f5c43c442b900c245e7d` scopes the Codex schema-output path to deterministic `task-<task_ref>/codex-schema-output`; the configured 275-file schema bundle remains a read-only process input commitment.
+- The source commit changes only `apps/lattice-runtime/src/composition.rs`, with tree `d2a32044c3aaeb04552e2a0ac77d6033072b3f79` and parent `7ecab4d7089ce7cfb04ff777fce95da6b9c5df7f`. Fresh source remote equality passed at `2026-08-11T23:08:41.0685387Z`.
+- Focused red/green regression passed, final `cargo fmt --check` and diff checks passed; no full suite, review, security run, runtime build, launch, MCP, Codex, PostgreSQL, config, holder, cleanup, or rollback action occurred.
+- Receipt stage 1 commit `595e37f067940f4bbd09ab744ca1d2b96f41d11c` and confirmation stage 2 commit `f1cd8d890b279d01e862fb2f4459213e8140040e` each equal their fresh remote reads. Central archived the source-remediation worker at `2026-08-11T23:12:48.0596768Z`; current fresh-window live acceptance PASS remains unclaimed, authoritative `safe_to_archive=false`, and outer saver `safe_to_archive=true`.
+
+## Build-only binary materialization — `019ff317-5ad3-7581-8b53-e2eb4ce81150`
+
+- `cargo build -p lattice-runtime --bin latticed --locked` passed in one invocation against source commit `0b59b79a60208be364a6f5c43c442b900c245e7d`; build inputs were source-bound with no source drift.
+- The fresh isolated binary is 10,278,400 bytes with SHA-256 `c79e2ee9bfe1abec5cf38405c6cca721157feb6b69ce578eba0c1c336f32004f`; it was not launched. No target reuse, retry, or prior-target deletion occurred.
+- Build head `00dd4d0c7ff87c1606362a87f6a9bcb12a0df24d` differs from the source only through the two saver-owned receipt paths. Protected dirty script remained preserved.
+- Receipt stage 1 commit `13de8143e3354a03ff9090c6de50f17d05fca3bb` and confirmation stage 2 commit `3ae56f16151e172e5258208a3c7344b933055f81` each equal their fresh remote reads. Central archived BUILD_ONLY at `2026-08-11T23:18:43.8207141Z`; outer saver `safe_to_archive=true`, while BUILD_ONLY PASS still does not claim runtime or P0 live acceptance.
+
+## Binary-switch-only pre-mutation failure — `019ff31e-eef7-7dc1-81b0-16f3064c8fd4`
+
+- Worker stopped before mutation with `FAILED_PRE_MUTATION` / `PRECHECK_IMPLEMENTATION_ERROR`: Python was unavailable and the current PowerShell/.NET lacked `System.Security.Cryptography.SHA256.HashData`.
+- No retry, staging, backup, atomic replace, config change, external-handoff update, PostgreSQL connection, MCP launch/call, or port 64272 action occurred.
+- Binary, source, and holder verification remained incomplete or not reached; no success or P0 claim is made. Central may dispatch a fresh worker only if a new retry is authorized.
+- Receipt stage 1 commit `2bb405c3dc3ab17def4c1ee7a0f1c6a76f5e520e` and confirmation stage 2 commit `94d05224a75b3227f38bf61f931538de505781ff` each equal their fresh remote reads. Central archived the pre-mutation failure at `2026-08-11T23:23:16.1766298Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## Binary-switch-only success — `019ff322-f1cb-7100-86db-404dfdb1666b`
+
+- Worker atomically switched the configured command to the source-remediated binary SHA-256 `c79e2ee9bfe1abec5cf38405c6cca721157feb6b69ce578eba0c1c336f32004f`; the source tree is `d2a32044c3aaeb04552e2a0ac77d6033072b3f79`.
+- Config changed once from SHA-256 `f76de812e18dde1ab20ef9eda613146488b363423c40785bbfb23898c6c20c55` to `7859634f68744d3244768eb50af29434a8b40974ebf56af9540bf068f4baea40`; all environment assignments and non-command semantics remained byte-equivalent, with no rollback.
+- External handoff advanced atomically to `SCHEMA_OUTPUT_FIX_BINARY_SWITCHED_AWAITING_SAVER` with SHA-256 `98fb8291432958d6432a342dab9d875d9551d9833c5dc5bcf8bb5dc3032f6ce8`; holder `127.0.0.1:58503` was live at the worker's final preflight.
+- Worker made no MCP, PostgreSQL, port 64272, source/build/test, cleanup, rollback, merge, deploy, or release action. Receipt stage 1 commit `e408e25107cbf146e0e63de9278223c4cdd59055` and confirmation stage 2 commit `f3c5dc5c1f5116d77a6eba9d213531c21a5279b6` each equal their fresh remote reads. Central archived the worker at `2026-08-11T23:32:46.2330098Z`; outer saver `safe_to_archive=true`. This remains a binary-switch receipt, not a P0 live-acceptance claim.
+
+## Discovery-only pre-launch failure — `019ff32b-b25b-74c2-9220-43eebafb886e`
+
+- Worker stopped at `DISCOVERY_WRAPPER_INVOCATION_SUBMISSION` with `FAILED_PRE_LAUNCH` / `EXECUTION_POLICY_REJECTED`: the shell command was blocked by policy before wrapper invocation.
+- Preflight was incomplete; wrapper, latticed, initialize, tools/list, and tool-call counts are all zero. Protocol and exact-four discovery remain `NOT_RUN`; no retry occurred.
+- No config/handoff/source/binary mutation, PostgreSQL connection/provision, port 64272 touch, cleanup, rollback, ephemeral environment file, raw credential output, or protected-script access occurred.
+- Receipt stage 1 commit `a0bd7822db20e14f526fb1457f243844e55b07c5` equals the fresh remote read at `2026-08-11T23:41:48.6334279Z`; confirmation stage 2 commit `e5b63f66ae1810d7712aa650981569e16815e8f9` equals the fresh remote read at `2026-08-11T23:43:00.3231128Z`. Central archived the worker at `2026-08-11T23:44:16.8747734Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`, and no discovery/P0 success is claimed.
+
+## Corrected discovery-only PASS — 019ff336-3583-7d93-bd09-4c8957c048f2
+
+- Preflight passed against the source-remediated binary/config and holder 127.0.0.1:58503. One plain wrapper invocation launched one latticed process and closed normally with exit code 0; no retry or manual cleanup occurred.
+- Protocol 2025-11-25 negotiated successfully. Initialize and tools/list each completed once, and the exact case-sensitive four-tool set was observed.
+- This was discovery only: tool-call, submit, status, and delivery counts are all zero. No PostgreSQL connection, port 64272 action, config/handoff/source/binary mutation, cleanup, rollback, or protected-script access occurred.
+- Receipt stage 1 commit `a6607154036e15ee46c2d21bfdcceea5c45c66b9` equals the fresh remote read at `2026-08-11T23:51:43.9661536Z`; confirmation stage 2 commit `19bc567bb0261d974ea2232a83bf77f577f7c2c9` equals the fresh remote read at `2026-08-11T23:52:15.4273200Z`. Central archived the worker at `2026-08-11T23:53:11.7680167Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`, and `DISCOVERY_ONLY_PASS` still does not claim current full P0 live acceptance.
+
+## Holder-ready provisioning — 019ff33e-5fc3-7dc3-8bfc-80543c7d6b3a
+
+- One provision-wrapper invocation produced HOLDER_READY for run 5c95659541b5428b8249d3ed062dd1f1 at 127.0.0.1:51021, with PostgreSQL 17 ownership checks and a 7,200-second TTL.
+- Receipt verification recorded the postmaster/listener and TTL cleanup identities as matching, with 7,101 seconds remaining. Credentials were not output.
+- No retry, post-wrapper PostgreSQL connection, old-holder action, global-config action, or MCP action occurred.
+- Receipt stage 1 commit `0cafffdbdbfd0cb32ac5232720bfbe969acd2fdb` equals the fresh remote read at `2026-08-11T23:57:43.1021011Z`; confirmation stage 2 commit `713a67c53d27dac84a3590430f0e16e0c9cfa9c5` equals the fresh remote read at `2026-08-11T23:58:09.9592539Z`. Central archived the worker at `2026-08-11T23:59:07.6143157Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## PostgreSQL binding-only switch — 019ff343-cc8f-7eb2-8a31-e3bcf1060423
+
+- Worker completed PG-BINDING-ONLY with status DONE, atomically updating one config and one external-handoff file to holder run 5c95659541b5428b8249d3ed062dd1f1 at 127.0.0.1:51021.
+- Nine holder assignments were targeted and eight values changed; all 12 non-PG environment assignments and command/binary/stdio/args/FRESH/home/delivery/schema/Git/launcher semantics were preserved.
+- No MCP launch, initialize, discovery, tool call, PostgreSQL connection, port 64272 action, source/build/test, provisioning, cleanup, rollback, or protected-script access occurred.
+- Receipt stage 1 commit `1bd139e04d4a1272b89ee402c092b170bacb492b` equals the fresh remote read at `2026-08-12T00:12:36.7402921Z`; confirmation stage 2 commit `475b539a6ad59c322f2d4269fc84dc56ba6cb26d` equals the fresh remote read at `2026-08-12T00:13:02.4768537Z`. Central archived the worker at `2026-08-12T00:13:54.6914530Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## New-holder discovery preflight failure — 019ff351-6ea6-7241-84e0-5280fb086299
+
+- Worker stopped at PREFLIGHT_CONFIG_SAFE_PARSE with LOCAL_PYTHON_RUNTIME_NOT_FOUND_DURING_CONFIG_SAFE_PARSE; the configured SHA matched, but the local Python runtime was unavailable.
+- Binary, external handoff, holder, and wrapper checks were NOT_RUN. No environment artifact, wrapper process, initialize, tools/list, tool call, PostgreSQL connection, port 64272 action, mutation, cleanup, rollback, or retry occurred.
+- Live acceptance was not claimed. Receipt stage 1 commit `201606534a38af8bb8577213e25cbafaf9f52eb5` equals the fresh remote read at `2026-08-12T00:17:28.6429299Z`; confirmation stage 2 commit `457d52f69e118d26ea9a56480139e7ae08877410` equals the fresh remote read at `2026-08-12T00:17:57.8013524Z`. Central archived the worker at `2026-08-12T00:18:48.3097011Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## Discovery execution failure — 019ff355-e9fe-7b93-91a4-d8e4af7d030e
+
+- Preflight and environment artifact creation passed, but the one plain Discovery wrapper invocation launched a binary whose SHA-256 differed from the authoritative configured binary.
+- The child exited 2 before initialize response with PROCESS_EXITED_BEFORE_RESPONSE / MCP_STDOUT_EOF_BEFORE_RESPONSE. Exact-four discovery was not observed and tool-call count remained zero.
+- No retry, cleanup, further inspection, tool invocation, PostgreSQL connection, mutation, rollback, or archive action occurred; evidence and environment artifacts were retained.
+- Receipt stage 1 commit `e11ad0b577f4adfd913b94681d66a686e8c9828b` equals the fresh remote read at `2026-08-12T00:26:34.4128259Z`; confirmation stage 2 commit `7b24531f728bc70dde98597cd2df01f7ed7b709f` equals the fresh remote read at `2026-08-12T00:27:02.7927845Z`. Central archived the worker at `2026-08-12T00:28:20.0302572Z`; authoritative `safe_to_archive=false` and live-acceptance-not-claimed remain unchanged while outer saver `safe_to_archive=true`.
+
+## Discovery binary-path mismatch diagnosis — 019ff35e-2c01-70e1-b61d-ca87f92e6c9a
+
+- Diagnosis identified the exact first predicate as the mandatory caller-to-wrapper -BinaryPath binding: the caller supplied a stale materialization binary SHA d600… instead of the current configured isolated binary SHA c79e….
+- Config mismatch, omitted/default selection, stale environment binary selection, and wrapper rewrite/bug were excluded. The summary proves receipt-equivalent binary/action/argument/output shape but not a byte-for-byte literal outer invocation.
+- Minimal next-worker boundary changes only caller input: parse the current config command, bind that exact value to the one wrapper invocation, and require summary path/hash equality before interpreting discovery.
+- Diagnosis was read-only: no MCP/process, mutation, PG/holder, cleanup, rollback, port 64272, artifact deletion, or protected-script access. Receipt stage 1 commit `b26e8ebf223841e44652fea7e0f9bbf5959c69f6` equals the fresh remote read at `2026-08-12T00:34:00.0833458Z`; confirmation stage 2 commit `bf1b548ee706a35c0f9e6d6e4660a003b197f348` equals the fresh remote read at `2026-08-12T00:34:51.4029364Z`. Central archived the diagnosis at `2026-08-12T00:36:41.5730454Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## Corrected discovery-only wrapper-path preflight failure — 019ff366-40aa-7c63-a3d0-6e3f80ce7d00
+
+- The worker returned FAIL at `preflight.wrapper_presence`: the exact required wrapper path `tools/lattice-mcp-kit/Invoke-LatticeMcp.ps1` was absent.
+- Config, binary-path, holder, Command A, and Command B checks were NOT_RUN. No artifact, wrapper/latticed process, initialize, tools/list, tool call, source/build/test, config, holder/PG, cleanup, rollback, delete, or kill action occurred.
+- One read-only recursive-listing incident preceded the corrected direct-path check and caused no mutation. Discovery and full P0 acceptance were not claimed.
+- Receipt stage 1 commit `6390b94ac748addccced08e0cb7706fe7c238147` equals the fresh remote read at `2026-08-12T00:39:30.4237839Z`; confirmation stage 2 commit `5157f6e0bc8d3be27eb30ae20e2da959b8ae9374` equals the fresh remote read at `2026-08-12T00:39:59.4878946Z`. Central archived the worker at `2026-08-12T00:40:59.9345814Z`; authoritative `safe_to_archive=false`, discovery PASS not claimed, and full P0 acceptance not claimed remain unchanged while outer saver `safe_to_archive=true`.
+
+## Locator cancelled after authoritative path — 019ff36a-2f6a-7040-af83-ee2b2dfde50f
+
+- The bounded locator was cancelled before content inspection after the authoritative `direct-stdio/Invoke-LatticeMcp.ps1` path arrived; certainty is CONFIRMED.
+- Completed work was read-only repository and filename inventory. No post-revocation locator/content/receipt reads, wrapper or binary execution, MCP/runtime/PostgreSQL/config/source/build/test, cleanup, rollback, delete, kill, or port 64272 action occurred.
+- `changed_paths=[]`, `operational_actions=0`, and the authoritative result is `AUTHORITATIVE_PATH_SUPERSEDED_FURTHER_DISCOVERY`.
+- Receipt stage 1 commit `12ab49a5f3bab80649fbe7e34104de65f3d096db` equals the fresh remote read at `2026-08-12T00:43:46.6045338Z`; confirmation stage 2 commit `a3cd31484bee09c50e84010ff80335c45d24c42c` equals the fresh remote read at `2026-08-12T00:44:18.4587340Z`. Central archived the cancelled locator at `2026-08-12T00:44:57.0961220Z`; authoritative `safe_to_archive=false` remains unchanged while outer saver `safe_to_archive=true`.
+
+## Corrected discovery-only pass — 019ff36a-b241-76a3-b340-2598016b2304
+
+- The exact `direct-stdio/Invoke-LatticeMcp.ps1` wrapper completed one Discovery session with protocol `2025-11-25`, response IDs 1 and 2, the exact four case-sensitive tool names, zero tool calls, child exit 0, and a clean exit.
+- One authorized no-mutation `OutputRoot` to `OutputDirectory` parameter-name correction occurred strictly before Command A. One private no-BOM 21-key environment artifact and one retained result session were produced.
+- Config command path, mandatory `BinaryPath`, and summary binary path were exactly equal; every available binary SHA-256 equaled `c79e2ee9…`, and config remained unchanged.
+- This is `DISCOVERY_ONLY_PASS`, not full P0 acceptance. No submit/status/delivery call, source/build/test, global-config or holder mutation, port 64272 action, cleanup, rollback, delete, kill, or protected-script access occurred. Receipt stage 1 commit `c66d38ae82a133d7e322877bceadbe8ddc5fb511` equals the fresh remote read at `2026-08-12T00:49:55.1166389Z`; confirmation stage 2 commit `f6a1f005ba026d77f143c7f896d46a1a754ce102` equals the fresh remote read at `2026-08-12T00:50:28.0550807Z`. Central archived the worker at `2026-08-12T00:51:21.5535894Z`; authoritative `safe_to_archive=false` and full-P0-acceptance-not-claimed remain unchanged while outer saver `safe_to_archive=true`.
+
+## Fresh live verifier timeout — 019ff374-1e75-7f73-93e5-fa028f438a28
+
+- Session 1 completed initialize and tools/list with the exact four tool names, then made exactly one CONTROLLED_CODEX_CANARY submit call. No response with ID 3 arrived; the fixed client timed out with MCP_CLIENT_TIMEOUT, call=null, and process exit 1.
+- This is the first true failure. No retry, second submit, status session, delivery call, source/build/test, config/handoff/holder/PostgreSQL mutation, or action outside the wrapper occurred; the candidate and holder remain active.
+- Cross-session equality is NOT_RUN because Session 1 did not return domain COMPLETED. Current fresh-window live acceptance is not claimed.
+- Receipt stage 1 commit `d2347825074012b21a782090525e895e54ccc652` equals the fresh remote read at `2026-08-12T01:06:04.0091420Z`; confirmation stage 2 commit `f5cc686999d6e3d10c6a57814350a9511ddc2ce2` equals the fresh remote read at `2026-08-12T01:06:38.0602617Z`. Central archived the verifier at `2026-08-12T01:07:45.5481372Z`; authoritative safe_to_archive=false, MCP_CLIENT_TIMEOUT/call=null, and P0 PASS not claimed remain unchanged while outer saver safe_to_archive=true.
+
+## Offline submit-timeout diagnosis — 019ff382-9de1-75e2-a4df-b05b32191945
+
+- Fixed classification: id=3 was serialized, written, and flushed once; no complete response arrived before the shared session deadline. The first failure is MCP_CLIENT_TIMEOUT at TASK_SUBMIT_RESPONSE_WAIT_AFTER_STDIN_FLUSH.
+- Retry is unsafe because a new task may exist. The diagnosis did not query PostgreSQL; a future separately authorized reconciliation must use only the exact client_request_id before any submit retry.
+- The client boundary is a shared session stopwatch consumed by setup, discovery, and submit response wait; the next remediation would use explicit per-stage budgets and secret-safe outbound write/flush evidence.
+- Diagnosis is offline/read-only and not P0 PASS: no MCP launch/call, PostgreSQL query, repository mutation, cleanup/kill, or protected-script read. Receipt stage 1 commit `87716c86e4d796427e7ddbff78331f707013e0dd` equals the fresh remote read at `2026-08-12T01:15:23.1679019Z`; confirmation stage 2 commit `09d3cc464ebb7b16935f860e41e786065186342d` equals the fresh remote read at `2026-08-12T01:16:00.3201366Z`. Central archived the diagnosis at `2026-08-12T01:17:04.3765010Z`; id3 class C, submit_write_count=1, retry_safe=false, and authoritative safe_to_archive=false remain unchanged while outer saver safe_to_archive=true.
+
+## Read-only client-request-id reconciliation — 019ff38b-193b-7043-8c79-437a7b8e1f32
+
+- Exact command reconciliation found one durable admission for the timed-out request: task_ref `91e6a296…d796ddb6`, task state EXECUTING, durable sequence 5, and public status RECONCILIATION_REQUIRED.
+- Durable evidence ends at EFFECT_INTENT; it does not prove external completion, failure, or a transient state. No submit/status call or mutation was performed in this read-only task.
+- Exact replay is source-defined as zero-new-execution at this state, but the one smaller next boundary is a fresh status-only session for the known task_ref; do not submit/replay first.
+- This is not P0 PASS. Receipt stage 1 commit `7a9ac06d62b411d25330b60b5e9daf25c4ee6e30` equals the fresh remote read at `2026-08-12T01:27:26.9799148Z`; confirmation stage 2 commit `026a983f627ed8e34298ad5c56557aded51b2af0` equals the fresh remote read at `2026-08-12T01:28:09.4262898Z`. Central archived the reconciliation at `2026-08-12T01:29:11.4741571Z`; RECORDED_PENDING, task_ref `91e6a2963b02a6b73e259ec8474a07eb410fe4c1c5ccd17e4245c162d796ddb6`, next STATUS_ONLY boundary, and authoritative safe_to_archive=false remain unchanged while outer saver safe_to_archive=true.
+
+## Fresh status-only verifier first preflight failure — 019ff396-3fe5-7963-880b-a002914a7ff7
+
+- The authoritative receipt is `TRANSPORT_FAILURE` at `CONFIG_PREFLIGHT_BEFORE_CONFIG_PARSE_AND_BEFORE_PROCESS_LAUNCH`: `PREFLIGHT_PATH_LITERAL_INVALID` (`Test-Path : Illegal characters in path.`). The calling layer altered the Windows path literal before config parsing.
+- First failure stop: zero process/MCP sessions, initialize, tools/list, status, submit, delivery, replay, retry, artifact, config/source/PG mutation, holder cleanup, or port 64272 access. No current public task status was obtained.
+- Requested task ref `91e6a2963b02a6b73e259ec8474a07eb410fe4c1c5ccd17e4245c162d796ddb6` is not presented as a live response. Full fresh submit+status acceptance and P0 PASS are not claimed; baseline `026a983f627ed8e34298ad5c56557aded51b2af0` is an ancestor-only gate.
+- Stage 1 durable receipt commit `3aa8e57bc1fdc289f4a891e5ca20e3231ab61d04` equals the fresh remote read at `2026-08-12T01:37:56.0537210Z`. Confirmation-only stage 2 is pending.
+- Stage 2 confirmation commit 7a8bd1e8c288be4c7ce41fc0b3b6eaa7f0418e37 equals the fresh remote read at 2026-08-12T01:38:21.5926191Z. Central archived this zero-runtime prelaunch failure at 2026-08-12T01:39:20.7301711Z; authoritative TRANSPORT_FAILURE and initialize/status/submit counts 0 remain unchanged while outer saver safe_to_archive=true.
+
+## Corrected minimal status-only verifier — 019ff39f-9d67-7562-902f-83caca8ce391
+
+- One fresh TaskStatus session completed successfully: protocol 2025-11-25, response IDs 1/2/3, exact one status call, no submit/delivery/retry, and child exit 0.
+- Current response is `RECONCILIATION_REQUIRED` / `EXECUTING` for task ref `91e6a2963b02a6b73e259ec8474a07eb410fe4c1c5ccd17e4245c162d796ddb6`; result_digest is null. It cannot claim full P0 PASS.
+- No poll, submit, replay, config/source/PG mutation, holder mutation, cleanup, rollback, or protected-script access occurred. Saver durability pending.
+- Stage 1 durable commit b98a3a1048cd21c99c6055c2873b39ce9a4a4a2a equals the fresh remote at 2026-08-12T01:43:44.0915952Z; stage 2 confirmation is pending.
+- Stage 2 confirmation commit 703e43c84aba93dbf205495cddaad4b07e7891d0 equals the fresh remote at 2026-08-12T01:44:08.0695282Z. Central archived this status-only evidence at 2026-08-12T01:45:15.3482649Z; RECONCILIATION_REQUIRED, EXECUTING, and result_digest=null remain unchanged while outer saver safe_to_archive=true.
+
+## Read-only stuck execution diagnosis — 019ff3a5-be04-7873-997e-cbd54176c3d5
+
+- Diagnosis: `MCP_CLIENT_TIMEOUT_KILLED_SYNCHRONOUS_EXECUTOR_ORPHANED_DURABLE_TASK`, high causal certainty. Client wrapper termination killed the synchronous executor after durable `EFFECT_INTENT`, leaving the task orphaned at the last known `RECONCILIATION_REQUIRED` / `EXECUTING` state.
+- The only scoped DB select failed (`missing FROM-clause entry for table t`); no successful fresh row or claim about later terminal events exists. The holder became unavailable after TTL.
+- This is read-only and not P0 PASS. No recovery/replay is authorized; current source needs recovery design changes. Saver durability pending.
+- Stage 1 durable diagnosis commit ad5313f8281a80d822c2d7bb971432c2e7543772 equals fresh remote at 2026-08-12T01:57:46.5380971Z; stage 2 confirmation pending.
+- Stage 2 confirmation commit cb5990719b23a5ba79da22b6159a633a3e2e58f4 equals fresh remote at 2026-08-12T01:58:10.5208815Z. Central archived at 2026-08-12T01:59:06.6610914Z; the one SELECT parse-failure and zero successful fresh DB row evidence gap remains unchanged while outer saver safe_to_archive=true.
+
+## Direct-stdio tool-call timeout source remediation — 019ff3b2-9c6f-73c2-83e8-ff5d5ced3d1c
+
+- Source commit `3f1d2ae98615e0899196c1f81c4b430066b2508f` (tree `45627179c174595017e152f2d08b0936bcdda59f`, parent `716108e403d8e81496811cd2c8a73ebc182073ba`) is already remotely durable.
+- Scope is exactly the direct-stdio wrapper and focused timeout fixture. RED reproduced the shared-deadline timeout; GREEN passed offline/default-compatibility/900-binding/stop-path checks. No live MCP, holder, PG, config, handoff, or recovery action occurred.
+- Full P0 acceptance is not claimed. `archived_at_utc` remains null pending central archive; saver two-stage durability pending.
+- Stage 1 receipt commit a90696e31a63bd310b08875b325aca8315978008 equals fresh remote at 2026-08-12T02:12:49.9918457Z; stage 2 confirmation pending.
+- Stage 2 confirmation commit ecf802b21a9ab43c2e27c27b4107f41ee42651eb equals fresh remote at 2026-08-12T02:13:12.4628502Z. Central archived at 2026-08-12T02:14:03.9357065Z; source commit 3f1d2ae98615e0899196c1f81c4b430066b2508f and focused scope remain unchanged.
+
+## Holder provision-only readiness — 019ff3c0-0ee1-7b60-b219-bcf1184a3f79
+
+- One provisioning invocation produced READY holder run `902b79ad90f4446eabf0613e8b0122f8` at `127.0.0.1:61152`; marker, PostgreSQL 17.10, owned listener, and 7200-second TTL checks passed.
+- No repository path was modified by the worker; no MCP/discovery/submit/status call, global config, PG binding, binary, or credential mutation occurred. Protected dirty script remained untouched.
+- This is HOLDER_READY, not P0 PASS. `archived_at_utc` remains null pending central archive; saver durability pending.
+- Stage 1 receipt commit f35fa39f145d20abaab1a42153ead1d4821f4d6c equals fresh remote at 2026-08-12T02:28:51.6219885Z; stage 2 confirmation pending.
+- Central archive success at 2026-08-12T02:30:59.083Z; HOLDER_READY holder 127.0.0.1:61152/run 902b79ad90f4446eabf0613e8b0122f8 remains recorded. Stage 2 remote equality commit 4d3565ee7fe5f756b5e7ca3093037a40965e2478 is preserved.
+
+## PG binding pre-mutation failure — 019ff3cf-9dc3-7023-9d52-047e475b7105
+
+- First failure `POSTMASTER_DATA_ROOT_MISMATCH` at pre-mutation final holder validation. The extra non-authoritative containment check failed before artifacts or live-file mutation; zero writes and no retry.
+- Config and handoff remained byte-identical; no runtime/MCP/PG connection or action, cleanup, rollback, port 64272, or protected-script access. Not a P0 PASS; saver durability pending.
+- Stage 1 receipt commit 43bc832e71f83216f80b7b5fbbcd4edf0fdcae06 equals fresh remote at 2026-08-12T02:39:56.1326093Z; stage 2 pending.
+- Central archive success at 2026-08-12T02:41:53.250Z; PRE_MUTATION_ORCHESTRATION_FAILURE/POSTMASTER_DATA_ROOT_MISMATCH, zero mutation, no retry, and unchanged config/handoff hashes remain preserved.
+
+## Corrected PG binding validation assumption failure — 019ff3d9-ae82-7151-b05f-9b7d2573a64f
+
+- First failure is `HOLDER_CREDENTIAL_SEMANTICS_REJECTED`: the exact username assumption was non-authoritative. Classification remains PRE_MUTATION_VALIDATION_ASSUMPTION_FAILURE.
+- No live config/handoff mutation, atomic replace, cleanup, rollback, MCP/PG action, or protected-script access occurred. Earlier staging artifacts remain in place per no-cleanup; no continued binding after the stop directive.
+- Stage 1 receipt commit 5607b2a4421b756e67b27bb32e8a33cf4dd1e060 equals fresh remote at 2026-08-12T02:51:54.1669966Z; stage 2 pending.
+- Central archive success at 2026-08-12T02:53:47.810Z; rejected credential username assumption, unchanged live config/handoff, preserved staging, and no cleanup/rollback remain recorded.
+
+## PG binding coordination race — 019ff3e4-bf81-7e12-b2e6-ff6bf3a23a44
+
+- Authoritative classification: `CONFIG_SWITCH_SUCCEEDED_HANDOFF_NOT_UPDATED_DUE_COORDINATION_RACE` — this is not pre-mutation. Config was atomically replaced once and current hash equals candidate `3aa6b262...`; nine PG bindings match, eight values changed, and all non-PG/command/binary/stdio invariants were preserved.
+- Handoff remains exactly at the old hash `0c37f438...` with zero atomic updates. No MCP, discovery, submit, status, delivery, PostgreSQL action, cleanup, rollback, port 64272, or protected-script access occurred.
+- This receipt is not P0 PASS. archived_at remains null; saver durability pending.
+- Stage 1 receipt commit 2a7ac10fb8514e6094b04f981bc52f1c6bf4d358 equals fresh remote at 2026-08-12T03:07:21.6299547Z; stage 2 pending.
+- Central archive success at 2026-08-12T03:09:19.526Z; coordination-race evidence is preserved: config equals validated candidate, nine PG bindings/eight changed values, twelve non-PG bytes equal, and handoff remains old hash with no update.
+
+## Handoff-only verifier field-assumption failure — 019ff3f2-c29b-7b72-831a-050386464bb9
+
+- First failure: `marker.status must equal READY` was rejected because the marker status field is absent. Classification remains PRE_MUTATION_VERIFIER_FIELD_ASSUMPTION_FAILURE; no alternate-field rerun or continuation followed the stop directive.
+- Config/handoff were unchanged; zero live writes, cleanup/rollback, MCP/PG/runtime action, or protected-script access. This is not P0 PASS; saver durability pending.
+- Stage 1 receipt commit 1c340e75c742f60ee791ab0772819d3ca8e0de8a (tree f0cc2f4efaa6c5612eaa75400a3b56d70b896926) equals fresh remote at 2026-08-12T03:16:57.5630958Z; stage 2 pending.
+- Central archive success at 2026-08-12T03:18:15.566Z; rejected marker.status assumption and correct authoritative provision_status field remain recorded; live config/handoff/holder/repo writes were zero.
+
+## Handoff atomic API parameter failure — 019ff3fa-f046-7d00-9b21-5b478396182f
+
+- First failure `PRE_MUTATION_ATOMIC_API_PARAMETER_FAILURE`: one File.Replace call rejected a blank/null destination backup parameter. No live handoff mutation, second atomic API call, correction, or retry followed.
+- Config/handoff hashes remained exact; backup and staging are preserved with no cleanup/rollback. No MCP, PostgreSQL, or protected-script action occurred. Saver durability pending.
+- Stage 1 receipt commit 938dfa7f4bac12277cbc82a746f759884ecba32d equals fresh remote at 2026-08-12T03:30:53.3271177Z; stage 2 pending.
+- Central archive success at 2026-08-12T03:32:32.896Z; File.Replace null backup parameter, one atomic call, zero live mutation, unchanged config/handoff hashes, and preserved staging remain recorded.
+
+## Handoff reconcile directory-creation parameter failure — 019ff407-fba7-7411-89ad-faf27fb69f99
+
+- Exact stop is `PRE_MUTATION_DIRECTORY_CREATION_PARAMETER_FAILURE`: New-Item rejected unsupported `-LiteralPath`. Do not infer a successful handoff replacement; File.Replace was never invoked and live handoff/config remain unchanged.
+- The worker directory, original backup, and staging were created before the authoritative stop due to an incorrect incidental-failure continuation; no cleanup/rollback occurred. No MCP/PG/runtime or protected-script action occurred. Saver durability pending.
+- Stage 1 receipt commit 6607f9e24b9d6e7b01456b2eb3039d30b49ddb63 (tree 3f9c7b7d2096c8d7048a28519caa0913da215c1f) equals fresh remote at 2026-08-12T03:40:28.8965195Z; stage 2 pending.
+- Central archive success at 2026-08-12T03:42:44.008Z; New-Item LiteralPath failure, two creation attempts/one success, backup and staging copies, and zero File.Replace calls remain recorded.
+
+## PowerShell-compatible handoff-only receipt — 019ff411-5349-7e61-8177-f57898133dad
+
+- Preflight and staging validation passed; one File.Replace with three distinct nonempty paths installed handoff status `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` and next boundary `DISCOVERY_ONLY`. Config remained unchanged.
+- No discovery, submit, status, delivery, PostgreSQL, cleanup/rollback, or protected-script action occurred. This is handoff-only, not P0 PASS; saver durability pending.
+- Authoritative post-update incident: File.Replace succeeded; only subsequent DateTime/DateTimeOffset elapsed calculation failed locally, with no mutation/runtime effect. Current handoff hash remains the success-state hash; no retry, post-success handoff/config write, rollback, cleanup, or discovery occurred. Stage 1 receipt commit e3ea741963f90594d2efa8b1a2aa2c537b436b99 equals fresh remote at 2026-08-12T03:53:23.8951412Z; stage 2 pending.
+- Central archive success at 2026-08-12T03:55:18.409Z; handoff success-state hash 8c04a231..., unchanged config hash, one File.Replace, zero retry, and zero rollback/cleanup remain recorded.
+
+## Discovery-only precheck failure — 019ff41c-cf5e-7341-a4f7-a7d442cc385a
+
+- First failure is `POWERSHELL_AUTOMATIC_VARIABLE_NAME_COLLISION`: function parameter `Pid` collided with read-only `$PID` during the holder-listener query. Listener check and all execution work are NOT_RUN after first failure.
+- No wrapper invocation/MCP session/tool call, artifact, config/handoff/source/binary/holder/PG mutation, cleanup, rollback, or protected-script access occurred. This is not Discovery PASS or P0 PASS; saver durability pending.
+- Stage 1 receipt commit db90fd92df293371f3c5816ad0f56fe01a1ac09a equals fresh remote at 2026-08-12T04:06:21.9753215Z; stage 2 pending.
+- Central archive success at 2026-08-12T04:08:11.3991086Z; PRECHECK POWERSHELL_PID_READONLY_NAME_COLLISION and command/wrapper/MCP/initialize/tools-list/tool-call counts all 0 remain recorded.
+
+## Holder provision-only readiness — 019ff428-d5ee-71b2-b2b5-3f3a0d82fc41
+
+- One validated wrapper invocation created READY holder run `92a1dc57fc7845e9993eec271e7a2499` at `127.0.0.1:52874`, PostgreSQL 17.10, exclusive listener, and fresh 7200-second TTL. All ready gates passed.
+- Parent stdout JSON capture was imperfect but independently verified from marker/PID/listener/deadline evidence. No direct PG/MCP/discovery/submit/status/config/source/cleanup action occurred. Saver durability pending.
+- Stage 1 receipt commit `5f9d52700ab2215609f9e27ee400863ef24318a5` equalled fresh remote at `2026-08-12T04:14:53.5345059Z`; Stage 2 confirmation is pending.
+- Central archive succeeded at `2026-08-12T04:16:42.7011766Z`; both prior saver commits (`5f9d52700ab2215609f9e27ee400863ef24318a5`, `4b90b22f56e875849ba5df2bf98d9767ec360999`) had remote equality.
+
+## PG-binding-only protected-boundary stop — 019ff430-dfb9-75d1-ab8a-344ab7274720
+
+- Authoritative status: `FAIL_STOPPED_PRE_MUTATION` at `PRE_MUTATION_PROTECTED_BOUNDARY` / `PROTECTED_DIRTY_SCRIPT_READ_INCIDENT`; one prohibited script read was emitted, then the worker stopped.
+- No config or external-handoff replacement, PostgreSQL connection, MCP/runtime call, cleanup, rollback, or successor occurred. This is a failure receipt, not a PG-binding switch or P0 acceptance; saver durability pending.
+- Stage 1 receipt commit `415c27c515174b9f942cd6c9e202c14d268af7c7` equalled fresh remote at `2026-08-12T04:25:45.3028038Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T04:26:57.9311978Z`. The preserved incident truth is one unintended protected-script line read, with no modification or staging; candidate/backup/staging/atomic-replace counts remain zero.
+
+## PG-binding-only first rejected gate — 019ff43a-3e09-7493-aa1c-09b1f782d08f
+
+- Authoritative status: `STOPPED_FIRST_REJECTED_GATE` at `ENV_LITERAL_UNIQUE_LATTICE_DELIVERY_SCHEMA_DIR` during pre-mutation config extraction. No correction or retry followed.
+- No candidate, backup, staging, atomic replacement, PostgreSQL/MCP action, or protected-script access occurred. Failure receipt durability pending.
+- Stage 1 receipt commit `d06e5ba5a32595c0333bd0507c8059835b6d789b` equalled fresh remote at `2026-08-12T04:43:15.5017094Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T04:44:18.9623691Z`; the rejected schema-dir literal gate and all zero-action counts remain authoritative.
+
+## Config PG-binding-only completion — 019ff44a-1aee-7843-8f67-ae0772212bee
+
+- Authoritative status: `CONFIG_PG_BINDING_DONE`. One atomic config replacement installed the 9 PG-holder bindings for holder `127.0.0.1:52874`; the 12 non-PG lines and command/args/stdio/fresh bindings remained byte-equivalent.
+- External handoff was not read or changed. No PostgreSQL, MCP/runtime, source, build/test, cleanup, port 64272, or protected-script action occurred. Saver durability pending; this receipt is not P0 acceptance.
+- Stage 1 receipt commit `4acd6300a1aa88baffe05aaf77bd08d31398c853` equalled fresh remote at `2026-08-12T04:58:44.1436826Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T04:59:47.3799954Z`; config PG-binding completion remains recorded with 9 bindings, 12 byte-equivalent non-PG lines, and one File.Replace.
+
+## Handoff-only completion — 019ff458-4701-7df0-80d1-1426c546e50e
+
+- Authoritative result: `HANDOFF_ONLY_DONE`. One File.Replace updated the external handoff to `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` / next boundary `DISCOVERY_ONLY`; config remained unchanged.
+- No MCP/runtime/discovery, PostgreSQL, holder, source/build/test, cleanup/rollback, port 64272, or protected-script action occurred. Saver durability pending; this is not P0 acceptance.
+- Stage 1 receipt commit `f3eb259fa24f16ae18015642db1b1f778e091aa4` equalled fresh remote at `2026-08-12T05:17:45.6261405Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T05:18:47.1884369Z`; handoff-only completion remains recorded with one File.Replace and unchanged config.
+
+## Discovery-only preflight failure — 019ff469-a967-7c50-9a81-d9c768e6890d
+
+- Authoritative outcome: `DISCOVERY_ONLY_PREFLIGHT_FAIL` at `preflight.wrapper_metadata_consistency` / `WRAPPER_SHA256_HANDOFF_MISMATCH`. The wrapper current SHA and handoff SHA differ; first-failure stop applied with no retry.
+- No artifact, wrapper/latticed session, MCP request, PostgreSQL connection, operational mutation, cleanup, or protected-script access occurred. No discovery or P0 acceptance is claimed; saver durability pending.
+- Stage 1 receipt commit `45f20047dc91335f6446bc43746e421e25b6b1c7` equalled fresh remote at `2026-08-12T05:28:11.7324026Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T05:29:26.2054998Z`; central archive metadata preserves its authoritative wrapper SHA mismatch and zero command/session/tool/PG mutation counts.
+
+## Handoff wrapper-hash correction rejected — 019ff473-81ee-7702-8cb0-9794ecb02cd9
+
+- Authoritative result: `REJECTED_AT_FIRST_MISMATCH` / `WRAPPER_SHA256_PRECONDITION_MISMATCH`. The expected and observed wrapper SHA-256 values differ; no correction, retry, or write followed.
+- The worker correction has no source change to publish (`github_remote_equality_stage1/2=NOT_APPLICABLE_NO_CORRECTION`), but its saver receipt durability is recorded separately. No operational action occurred.
+- Saver Stage 1 receipt commit `a451d8fa50da9c96dab7a3a98c98c25e225b423a` equalled fresh remote at `2026-08-12T05:33:20.7941918Z`; saver Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T05:34:24.6621093Z`; the rejection is a delegated SHA typo, explicitly not source drift, with zero write/replace/retry/process/PG/MCP actions.
+
+## Corrected wrapper-identity rejection — 019ff477-e8cf-7710-b785-26b67faac12f
+
+- Authoritative result: `REJECTED_GATE` at `prepared_home_exact`. This is not a successful wrapper-identity correction; first-rejected-gate stop applied with no correction, retry, File.Replace, or other write.
+- The worker correction-stage remote equality remains `NOT_RUN_REJECTED_GATE`. No MCP/runtime, PostgreSQL, cleanup, source, or protected-script action occurred; saver durability pending.
+- Saver Stage 1 receipt commit `84ee611eb003a28f9357f68d9c42fe43f7b36d04` equalled fresh remote at `2026-08-12T05:41:31.2670132Z`; saver Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T05:42:24.4719689Z`; prepared-home exact mismatch and all zero operational-action counts remain authoritative.
+
+## Offline handoff projection diagnosis — 019ff47f-27e4-77f0-aaaf-fea0d47d0484
+
+- Diagnosis-only result: only `/direct_stdio_client/wrapper_sha256` and `/direct_stdio_client/current_blob` are stale handoff values. Current wrapper bytes/blob and source ancestry pass; there is no wrapper drift or config drift.
+- Prepared-home values themselves pass literal and normalized equality; the failure signal is `FIELD_NAME_MISMATCH_OR_DUPLICATE` with medium certainty for the uninspected consumer mechanism. No implementation or operational action occurred; saver durability pending.
+- Stage 1 receipt commit `69cdea7ed51842c8c2469498268ab83648997fb7` equalled fresh remote at `2026-08-12T05:50:03.7852302Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T05:51:00.9657984Z`; stale handoff wrapper identity only, with prepared-home equality and no config drift, remains authoritative.
+
+## Holder provision-only readiness — 019ff486-e8a3-7690-b3d7-89c396a074f2
+
+- New READY holder run `586b099ea65d44eda5ec795299a60bc2` is at `127.0.0.1:59431`, PostgreSQL 17.10, with exclusive listener and fresh 7200-second TTL. All holder-ready gates passed.
+- Old holder was classified read-only as insufficient runway and was not mutated. No global-config/external-handoff/runtime/PG outside wrapper/source/cleanup/protected-script action occurred; saver durability pending.
+- Stage 1 receipt commit `945fe46894007ac87849ef36671e294a8b291ae6` equalled fresh remote at `2026-08-12T05:59:21.6077711Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T06:00:29.5896831Z`; 59431 holder readiness metadata and prior durability equality remain recorded.
+
+## Config PG-binding pre-mutation gate rejection — 019ff48f-ceb8-7e30-bb5f-75a67341da43
+
+- Authoritative status: `GATE_REJECTED` at `lattice_env_assignment_token_valid`; this is `LOCAL_ORCHESTRATION_PREMUTATION_GATE_REJECTION`, not `CONFIG_PG_BINDING_DONE`.
+- File.Replace/config/handoff mutations are zero and no candidate/backup/staging/success receipt exists. Saver durability pending.
+- Stage 1 receipt commit `b1de7738affa5b5276b786bcb6ff6f92d1359b59` equalled fresh remote at `2026-08-12T06:13:23.3166147Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T06:14:04.6818828Z`; gate rejection, unchanged config, and zero operational-state actions remain authoritative.
+
+## Corrected config PG-binding gate rejection — 019ff49c-2dca-7031-a330-9d681f139760
+
+- Authoritative status: `GATE_REJECTED` at `lattice_main_assignment_keys_unique` / `LOCAL_ORCHESTRATION_PREMUTATION_GATE_REJECTION`; this is not `CONFIG_PG_BINDING_DONE`.
+- File.Replace/config/handoff mutations are zero; original backup, candidate, staging, replace backup, and success receipt are absent. Saver durability pending.
+- Stage 1 receipt commit `8d049bb3613115cecfa5aa0a6b97b3fa51895404` equalled fresh remote at `2026-08-12T06:27:20.1153121Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T06:28:38.4422171Z`; corrected gate rejection remains pre-mutation with File.Replace zero and no candidate/backup/staging/success receipt.
+
+## Corrected config PG-binding v2 gate rejection — 019ff4a9-7eda-74a2-862b-9fa1b7977ecb
+
+- Authoritative status: `GATE_REJECTED` at `lattice_env_quoted_key_value_tokens`; the required parser/duplicate/key-set/count checks passed, then an over-strict quoted-key in-body requirement rejected the run. This is not `CONFIG_PG_BINDING_DONE`.
+- No correction/retry followed. File.Replace/config/handoff mutations are zero and backup/candidate/staging/replace-backup/success receipt are absent; saver durability pending.
+- Stage 1 receipt commit `45f47d926d0f2dd4638d3f9a84f471a692be2e9b` equalled fresh remote at `2026-08-12T06:40:43.6581194Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T06:42:12.3627509Z`; over-strict local orchestration gate classification, passed required parser checks, and zero operational actions remain authoritative.
+
+## Final corrected config PG-binding completion — 019ff4b5-ed12-7913-b930-8b6ca66a667b
+
+- Authoritative status: `CONFIG_PG_BINDING_DONE`. One File.Replace installed the 59431 holder projection: 9 PG bindings, 12 byte-equivalent non-PG lines, and 21 env assignments; installed bytes equal the candidate.
+- The parser accepts quoted-or-bare keys with basic-or-literal string values; quote-style and formatting gates are explicitly omitted. Prior parser-shape incidents were local zero-mutation corrections. No handoff/runtime/PG/source/cleanup/protected-script action occurred; saver durability pending.
+- Stage 1 receipt commit `2e5d7a77810a507be6863ccc1eff056543b08f96` equalled fresh remote at `2026-08-12T06:54:34.1749176Z`; Stage 2 confirmation pending.
+- Central archive succeeded at `2026-08-12T06:55:48.4606437Z`; final config binding records one File.Replace, 9 PG binding changes, 12 byte-equivalent non-PG lines, and zero handoff/runtime/MCP/PG connection actions.
+## Handoff projection correction-only completion — 019ff4c2-8beb-7581-8eac-7747390311ce
+
+- Authoritative result: `HANDOFF_PROJECTION_CORRECTION_ONLY_DONE`; receipt SHA-256 `29ada395178d89f10e5246a0d99985b7b212d6b5550ea0e6317ce99eb118d404`.
+- One `File.Replace` corrected the two stale wrapper-identity projections (`wrapper_sha256`, `current_blob`) for holder `127.0.0.1:59431`; config remained `b63853523cabe27886d67d783228dc3653cbec551ab7a1d5033ac6f304baa47b`.
+- Transaction: 71 explicit target paths, zero unexpected paths and zero retries. Prepared-home literal and normalized equality remain true; no runtime, MCP, PostgreSQL, cleanup, or protected-script action occurred.
+- Final projection remains `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` with next boundary `DISCOVERY_ONLY`. This is not a P0 acceptance claim. Saver Stage 1/Stage 2 durability follows; `archived_at_utc=null`.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `7bfd9c4f1bdba0fd6a01005c77a76ee2484212a4` at `2026-08-12T07:14:01.0085413Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff4c2-8beb-7581-8eac-7747390311ce` was archived at `2026-08-12T07:15:09.5511443Z`. It preserves `HANDOFF_PROJECTION_CORRECTION_DONE`, handoff SHA-256 `f6f09205fb2953c70a88630ea128a62c03fb60196b8ea8908685a5196ce2d320`, one `File.Replace`, and zero non-target or operational actions.
+## Discovery preflight failure — 019ff4d3-fd35-7081-a19c-fd5bf51f9286
+
+- Authoritative classification: `PREFLIGHT_FAIL`; first failure was `PREFLIGHT_WRAPPER_SOURCE_COMMIT_MISMATCH actual=41bca3c631f43a164791c8e70db5340212f49e5c`.
+- Earlier config, handoff, environment-count, and wrapper-SHA gates passed. The required wrapper source commit was `3f1d2ae98615e0899196c1f81c4b430066b2508f`; all subsequent gates were not run under first-failure stop.
+- No retry, artifact, wrapper/MCP session/tool call, PostgreSQL connection, mutation, cleanup, or protected-script access occurred. This is not discovery success or P0 acceptance; `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `18627999a69b232306852b532bdce52b9c65dd51` at `2026-08-12T07:20:23.3911812Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff4d3-fd35-7081-a19c-fd5bf51f9286` was archived at `2026-08-12T07:21:21.3968786Z` as `PREFLIGHT_FAIL` from the wrapper-source-commit mismatch. It retains zero wrapper, runtime, MCP/tools, PostgreSQL, config, and handoff mutations.
+## Corrected discovery-only result — 019ff4d9-bcc2-7aa0-b729-e81f678ab152
+
+- Shared receipt SHA-256 was verified before persistence: `3bf1bb0983b434ef2a6933f70337c3cc6a948116468c5c5a7f08362e4d0d12d3`.
+- `DISCOVERY_OK`: one discovery wrapper/session, protocol `2025-11-25`, the exact four typed tools, zero tool calls, and clean child exit. All observed binary paths and SHA-256 values matched.
+- The historical wrapper commit is explicitly not required to equal the current reference; the exact current wrapper blob/hash and all immutable postchecks matched. Holder pre/postchecks passed.
+- No retry, submit/status/delivery, PostgreSQL connection, operational mutation, cleanup, or protected-script access occurred. This remains discovery-only and not a P0 acceptance claim; `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `346de44c6874d47acccd61c98441035a10f74e9c` at `2026-08-12T07:32:40.1855060Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff4d9-bcc2-7aa0-b729-e81f678ab152` was archived at `2026-08-12T07:34:22.3940541Z` as `DISCOVERY_ONLY_PASS` (protocol `2025-11-25`, exact four tools, zero tool calls). It does not claim P0 pass; the worker created no verifier and performed zero operational mutations.
+## Fresh verifier pre-request failure — 019ff4e5-fb8a-7e00-bb7b-57cc52009322
+
+- The authoritative final receipt SHA-256 was verified before persistence: `fb9084fdd36aa79b0dd6ed505043f9228744f4e840725ed99435c6b19cbf8b97`. The earlier preexecution receipt is withdrawn, superseded, and was not used.
+- Result: `FAIL` at `PREFLIGHT_FAILURE_PRE_REQUEST_RECORD_WRITE_ABORTED`. A private environment artifact was created, but PowerShell failed during pre-request record construction; no wrapper or MCP request started and unknown dynamic paths were not enumerated.
+- Submit/status remain unstarted: wrapper, process, session, initialize, tools/list, submit write, and status call counts are all zero. Task outcome is `UNKNOWN`; no P0 acceptance is claimed.
+- No retry, operational mutation, PostgreSQL action, cleanup/rollback, or protected-script access occurred; `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `af6e223261f9cd09f8218b975ad7a68423cd93b7` at `2026-08-12T07:44:46.0034721Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff4e5-fb8a-7e00-bb7b-57cc52009322` was archived at `2026-08-12T07:45:55.2436088Z` after `PREFLIGHT_FAILURE_PRE_REQUEST_RECORD_WRITE_ABORTED`; wrapper/submit/status counts and operational mutations remain zero, and P0 pass remains false.
+## Holder ready — 019ff4ef-f89b-7cc0-97ed-adb5175be203
+
+- Authoritative state: `HOLDER_READY`. The former holder was retained but excluded for insufficient runway; the new holder is `127.0.0.1:51199`, run `3456886feaa04e4c8b18051463a4566a`, database `lattice_task019_3456886f_base`, PostgreSQL 17.10, with an approximately 7200-second TTL.
+- All ready gates passed: marker/provision status, identity, exclusive postmaster listener, TTL cleanup, allowed port, PostgreSQL version, and secret-safe credential structure. Wrapper invocation count was one and exited zero.
+- No global config, external handoff, source, old-holder, direct PostgreSQL, MCP, discovery, submit/status/delivery, cleanup, or protected-script action occurred. `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `00ba3cbb3df9f004dcfafb25d9849e5a54c9c65b` at `2026-08-12T07:52:21.9172667Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff4ef-f89b-7cc0-97ed-adb5175be203` was archived at `2026-08-12T07:53:25.3244789Z` as `HOLDER_READY` for `127.0.0.1:51199` (run `3456886feaa04e4c8b18051463a4566a`).
+## Config PG binding complete — 019ff4f6-e7ea-7842-a94a-e4a1e0dbe969
+
+- Receipt SHA-256 was verified before persistence: `7b6712c679735f21877e698b351f1f2dbea87df0f84f0d4ec5334e5d064193af`. Result: `CONFIG_PG_BINDING_DONE` for holder `127.0.0.1:51199`.
+- One atomic `File.Replace` changed config from `b63853523cabe27886d67d783228dc3653cbec551ab7a1d5033ac6f304baa47b` to `b809db8c98b28d10101ab1b336fae7a53bd9aa753e9ed51a305e5f615875e253`; installed bytes equal the candidate.
+- The stanza-scoped parser passed with 21 environment entries, 9 holder PG bindings, 12 byte-identical non-PG entries, and zero duplicates. No external handoff, PostgreSQL, MCP/runtime, source, cleanup, or protected-script action occurred.
+- `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `190910b88aef0e9c4a370ebe645e0fbf3006a398` at `2026-08-12T08:05:54.3318612Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff4f6-e7ea-7842-a94a-e4a1e0dbe969` was archived at `2026-08-12T08:07:36.5091929Z` as `CONFIG_PG_BINDING_DONE` for `127.0.0.1:51199`; config SHA-256 changed from `b6385352…` to `b809db8c…`.
+## Handoff projection correction complete — 019ff504-2afd-7321-b944-8bb5d6eed136
+
+- Shared receipt SHA-256 was verified before persistence: `c01e549cd72ce7df975afc119c3a4e4d722d4bc372a8eb04614fa55a3bbd26f1`. Result: `HANDOFF_PROJECTION_CORRECTION_DONE` for holder `127.0.0.1:51199`.
+- One atomic `File.Replace`, with no retry, changed 72 explicit canonical projection paths and zero unexpected paths. Handoff SHA-256 changed from `f6f09205…` to `a3a75fbd…`; config remained `b809db8c…`.
+- `/direct_stdio_client/current_blob` is preserved as Git blob OID `bb569f731fb3fdb3eca61a9922bed55d37ab9a25`, not a commit. Wrapper identity and all stated preservation gates remain exact; raw secrets were not recorded.
+- `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `cb8b4a6f09abd61f3c50726a848ee4f22e2a531a` at `2026-08-12T08:20:47.1399962Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff504-2afd-7321-b944-8bb5d6eed136` was archived at `2026-08-12T08:21:52.6368284Z`; handoff remains `NEW_HOLDER_BOUND_READY_FOR_DISCOVERY` at SHA-256 `a3a75fbd…`.
+## PowerShell-only discovery — 019ff511-0ff8-7ac3-85a4-ee66bb04200b
+
+- Shared receipt SHA-256 was verified before persistence: `aef829e1f11ec9c8504ffb4dab61c67cbb397a15dd4534949788b9e1dbbe9781`. Authoritative wrapper result is `DISCOVERY_OK`, retained as `PASS_WITH_POSTPROCESSING_INCIDENTS`.
+- Exactly one process/session and one wrapper invocation completed: protocol `2025-11-25`, exact four typed tools, two requests plus one notification, two responses, zero tool calls, no retry, clean child exit, and empty stderr.
+- Postprocessing incidents were confined to optional-property access, compact boolean false negative, and a summary-label interpretation; the receipt was recovered from the existing single-session artifacts without a second session or wrapper retry.
+- No verifier/successor was created and no PostgreSQL, operational mutation, cleanup, protected-script, or port 64272 action occurred. This is not P0 pass; `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `e84b70bf352b56e82fa1b29a06817e15119f90fc` at `2026-08-12T08:42:21.9358494Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff511-0ff8-7ac3-85a4-ee66bb04200b` was archived at `2026-08-12T08:43:42.3134050Z` as `PASS_WITH_POSTPROCESSING_INCIDENTS`; authoritative discovery remains `DISCOVERY_OK`, with exact four tools and zero tool calls. P0 pass remains false.
+## No-operational-action orchestration failure — 019ff525-4506-70e3-9fd1-0da27c8721d4
+
+- Shared receipt integrity verified before persistence: SHA-256 `a7b88f8fed1ddce21d1ff48c68504469d820cea174179437fdcfa27e5ae29c71`, 8880 bytes, valid UTF-8-no-BOM JSON with the stated private ACL.
+- Authoritative result: `NO_OPERATIONAL_ACTION_ORCHESTRATION_FAILURE`, stopping at `WORKER_FRAGMENT_SYNTAX_CHECK` / `POWERSHELL_SYNTAX_ERROR_COUNT_11`. Operational launch and retry were both prohibited after the first true failure.
+- All operational counts are zero: request/environment artifact, wrapper, latticed, MCP, initialize/tools/list/tool calls, submit/status, retry, cleanup, PostgreSQL, port 64272, and protected-script access. No child/successor/diagnosis/reconciliation/holder/discovery worker was created.
+- Full current P0 live acceptance is not proven; `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `494fd49f3f3f42b26f19d959549a8eb5d7e686eb` at `2026-08-12T09:01:56.8913295Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff525-4506-70e3-9fd1-0da27c8721d4` was archived at `2026-08-12T09:03:23.2573486Z` as `NO_OPERATIONAL_ACTION_ORCHESTRATION_FAILURE`; parse-error count is 11 and all request/runtime/session/submit/status/retry counts remain zero. P0 pass remains false.
+## Fresh P0 live verification pass — 019ff537-4754-7e60-bc5c-9a3150deda93
+
+- Authoritative receipt integrity verified before persistence: SHA-256 `8375dd291feb4338b7b3a77aeab5e56db990a936cd0df053b05941e1b62d107f`, 22339 bytes. Result: `PASS`; `p0_pass=true`; first failure is null.
+- One `TaskSubmit` and one wholly independent `TaskStatus` session completed, with zero retries. Both returned `COMPLETED`; the five fields task ref, status, task state, result digest, and ledger-head digest are exactly equal.
+- Two wrapper processes/sessions and exactly two tool calls were used. Submit and status each received response id 3 after one serialized, written, flushed tool request; immutable postcheck passed.
+- No duplicate/successor/diagnosis/reconciliation/holder/discovery task, operational mutation, cleanup, rollback, delete, port 64272, protected-script access, build, test, merge, deployment, or release action occurred. `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `47841b66fe2c92ff2ba8c66a62368274d403ac5d` at `2026-08-12T09:18:30.0883694Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff537-4754-7e60-bc5c-9a3150deda93` was archived at `2026-08-12T09:20:00.9419318Z` with verdict `P0_PASS`: one completed submit, one completed independent status, zero retries, and five-field equality. Candidate config/handoff/holder preservation remains true.
+
+## Post-P0 MCP Kit Slice 1 source ??019ff547-ab21-7952-befd-27afb1fa79eb
+
+- Source commit `78740fa33c9978942156056715e5534040c6959f` (tree `647a68492c15aa3bd8911d8d33507e75a372e643`, parent `2632d219561439f46c9989d36be4880549d07ffe`) was pushed once; its fresh remote SHA matched and is reachable.
+- Changed only `Invoke-LatticeFreshAcceptance.ps1`, `Test-LatticeFreshAcceptance.ps1`, and the direct-stdio README. Coordinator/test AST parsing and the focused offline test passed: 3 cases, 5 fake-wrapper invocations, 3 submits, 2 statuses, and zero retry or cleanup.
+- README checks passed for absolute binary/environment examples, `90/900/180` defaults, no-retry semantics, and offline-test command. No live process/session/discovery/submit/status/retry/PostgreSQL/latticed/MCP action occurred.
+- Protected acceptance script remained unread, unmodified, and unstaged; no default-branch, merge, deployment, release, or child-agent action occurred. `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `1e116ba72f91c35f5ba1d0a0142308613bc9b096` at `2026-08-12T09:33:11.7464926Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff547-ab21-7952-befd-27afb1fa79eb` was archived at `2026-08-12T09:36:26.4860897Z` as `DONE`. It preserves the three listed Slice 1 source paths, AST 2/2 and offline 3/3 evidence (`submit/status/retry/cleanup=3/2/0/0`), zero live actions, and the protected dirty script’s unread/unmodified/unstaged state.
+
+## Post-P0 MCP Kit Slice 2 source ??019ff58b-0804-7903-970f-a09c792cb524
+
+- Source commit `26f6d7a351c12158fd0c4616f393db8730b16f6f` (tree `77cd9a91a5b47ec8079478f644ff0e2deb755546`, parent `cbefb8ed9a0336ca20c097e638fba56d24a46307`) is the remote head and reaches Slice 1 (`78740fa33c9978942156056715e5534040c6959f`). Registry claim: `ONLY_CONTROLLED_CODEX_CANARY`.
+- Five direct-stdio paths changed. Four AST parses, the 16-case resolver test (1 accepted/15 rejected), and the 10-case fresh-acceptance test passed. Seven dangerous contracts were rejected before wrapper launch; fake wrapper/submit/status/retry/cleanup counts were `5/3/2/0/0`.
+- README contract, mandatory TaskContractFile, closed-registry/timeout-no-retry, diff, and exact five-path staging checks passed. No live MCP/task/runtime/holder/PostgreSQL/Codex/binary inspection or mutation occurred; protected dirty script remains unread, unmodified, and unstaged. `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `04b4905548f050713195664f283ea308fd8d0b5e` at `2026-08-12T10:44:45.0911757Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff58b-0804-7903-970f-a09c792cb524` was archived at `2026-08-12T10:46:22.3343375Z` as `DONE`. Typed-contract evidence remains AST 4/4, resolver 16 cases, coordinator 10 cases, `submit/status/retry/cleanup=3/2/0/0`, controlled-canary-only registry, zero live actions, and protected-script preservation.
+
+## Post-P0 MCP Kit Slice 3 source ??019ff597-18a2-7873-9d2b-a5742e4de5a6
+
+- Source commit `adf84062844a7bd871ebe7c9955ca29876848f45` (tree `d5a30de5c82c5cb4d964d652e8f49ce038d385a6`, parent `69a37876bd82f3831b29bc58f2f8ac0a810312c2`) was pushed once and matches the fresh remote head.
+- Added conformance runner and v1 manifest; updated the task-contract test and README. AST (2 files), strict UTF-8/no-BOM manifest/schema/version/SHA, task-contract 16-case test (1 accepted/15 rejected), and unchanged fresh-acceptance regression (10 cases; wrapper/submit/status/retry/cleanup `5/3/2/0/0`) passed.
+- README checks passed (10 checks, 3 referenced files). Cached diff and exact four-path staging passed; unrelated resolver/fresh-acceptance blobs remain unchanged. No live MCP/discovery/submit/status/delivery/runtime/database/holder/config actions occurred. Protected dirty script remains unread, unmodified, and unstaged; `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `838136fd05f60736ead66a75464b6a2c75b7ebf4` at `2026-08-12T10:59:29.3314470Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff597-18a2-7873-9d2b-a5742e4de5a6` was archived at `2026-08-12T11:01:03.6739216Z` as `DONE`. Evidence remains AST/manifest pass, conformance 16/16 (1 accepted/15 rejected; 16 resolver invocations), existing regression 10/10, README/diff scope pass, zero live actions, and protected-script preservation.
+
+## Post-P0 MCP Kit Slice 4 source ??019ff5a5-275a-75c3-9dac-39a5daf4a13c
+
+- Source commit `d5b5a7cff1ec31eb0b676be08e4a63f23310fc0d` (tree `3a6af649019ede2bac93ae98054733b13933456b`, parent `3512f12f303a04fc8b8e15f288fcd1f4f67d0a64`) was pushed once and matches the remote head.
+- Five direct-stdio files implement a closed typed-task registry with the single `CONTROLLED_CODEX_CANARY` mapping. AST passed for four scripts; registry schema/UTF-8-no-BOM/type/mapping and SHA checks passed.
+- Conformance passed 16 cases (1 accepted/15 rejected), including duplicate/unknown/uncovered vectors; coordinator regression passed 10 cases with wrapper/submit/status/retry/cleanup `5/3/2/0/0`. Manifest remained byte-identical; README 5/5 and diff checks passed. No runtime/MCP/PostgreSQL/holder/cleanup/child-worker action occurred; protected dirty script remains unread, unmodified, and unstaged. `archived_at_utc=null` pending saver durability.
+- Saver Stage 1 remote equality: local and fresh `origin/feature/p0-clean-seed-rebuild` were both `bc67098fd019e1bff101e9a919358618c4b12486` at `2026-08-12T11:15:10.6816299Z`; Stage 2 is confirmation-only.
+- Archive backfill: task `019ff5a5-275a-75c3-9dac-39a5daf4a13c` was archived at `2026-08-12T11:16:41.0275479Z` as `DONE`. Closed-registry evidence remains 1 type and 1/1 coverage, conformance 16 cases, coordinator regression 10 cases, AST/diff-scope pass, zero live actions, and protected-script preservation.

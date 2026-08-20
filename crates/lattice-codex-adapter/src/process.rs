@@ -7,7 +7,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -16,10 +16,13 @@ use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
-#[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
-#[cfg(windows)]
-use win32job::{ExtendedLimitInfo, Job};
+
+#[cfg(not(windows))]
+use std::io;
+#[cfg(not(windows))]
+use std::process::ExitStatus;
+#[cfg(not(windows))]
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 
 use crate::{
     AppServerProtocol, AppServerSession, InitializeEvidence, ProtocolError, SessionError,
@@ -33,7 +36,6 @@ const FS_SANDBOX_PREFLIGHT_TIMEOUT: Duration = Duration::from_mins(1);
 #[cfg(windows)]
 const FS_SANDBOX_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 const FS_SANDBOX_TEMP_DIRECTORY_NAME: &str = ".lattice-fs-sandbox-temp-v1";
-const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 const WINDOWS_SANDBOX_READINESS_REQUEST_ID: i64 = 3;
 const INTERRUPT_REQUEST_ID: i64 = 4;
 const PROTOCOL_QUIET_WINDOW: Duration = Duration::from_millis(10);
@@ -47,7 +49,10 @@ model = \"gpt-5.6-sol\"\n\
 model_reasoning_effort = \"low\"\n\
 \n\
 [windows]\n\
-sandbox = \"unelevated\"\n";
+sandbox = \"unelevated\"\n\
+\n\
+[features]\n\
+plugins = false\n";
 
 /// Exact managed package and helper identities admitted for one official Codex child.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -479,20 +484,12 @@ fn run_app_server_with_sandbox_temp(
     if let Some(sandbox_temp) = sandbox_temp {
         sandbox_temp.configure(&mut command);
     }
-    let Ok(mut child) = command.spawn() else {
-        return Err(AppServerRunError::new(AppServerRunErrorKind::SpawnFailed));
-    };
-    let Ok(process_tree) = OwnedProcessTree::attach(&child) else {
-        let _ = terminate_uncontained_process_tree_bounded(&mut child);
-        return Err(AppServerRunError::new(
-            AppServerRunErrorKind::JobObjectFailed,
-        ));
-    };
+    let mut child = spawn_owned_child(&mut command, OwnedChildStdio::Duplex)?;
     let result = ensure_before_deadline(deadline)
         .and_then(|()| verify_app_server_identity(config, before_spawn))
         .and_then(|()| ensure_before_deadline(deadline))
         .and_then(|()| drive_child(&mut child, config, deadline));
-    let cleanup = stop_owned_child(&mut child, process_tree);
+    let cleanup = stop_owned_child(&mut child);
     cleanup?;
     result
 }
@@ -537,23 +534,19 @@ fn run_windows_sandbox_preflight(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     ensure_before_sandbox_deadline(caller_deadline, bootstrap_deadline)?;
-    let Ok(mut child) = command.spawn() else {
-        return Err(AppServerRunError::new(
-            AppServerRunErrorKind::FsSandboxBootstrapFailed,
-        ));
-    };
-    let Ok(process_tree) = OwnedProcessTree::attach(&child) else {
-        let _ = terminate_uncontained_process_tree_bounded(&mut child);
-        return Err(AppServerRunError::new(
-            AppServerRunErrorKind::JobObjectFailed,
-        ));
-    };
+    let mut child = spawn_owned_child(&mut command, OwnedChildStdio::Null).map_err(|error| {
+        if error.kind() == AppServerRunErrorKind::SpawnFailed {
+            AppServerRunError::new(AppServerRunErrorKind::FsSandboxBootstrapFailed)
+        } else {
+            error
+        }
+    })?;
     let post_attach = ensure_before_sandbox_deadline(caller_deadline, bootstrap_deadline)
         .and_then(|()| verify_preflight_identity(config, expected_launcher_digest))
         .and_then(|()| ensure_before_sandbox_deadline(caller_deadline, bootstrap_deadline));
     let result = post_attach
         .and_then(|()| wait_for_sandbox_preflight(&mut child, caller_deadline, bootstrap_deadline));
-    let cleanup = stop_owned_child(&mut child, process_tree);
+    let cleanup = stop_owned_child(&mut child);
     cleanup?;
     result
 }
@@ -575,7 +568,7 @@ fn verify_preflight_identity(
 
 #[cfg(windows)]
 fn wait_for_sandbox_preflight(
-    child: &mut Child,
+    child: &mut OwnedChild,
     caller_deadline: Instant,
     bootstrap_deadline: Instant,
 ) -> Result<(), AppServerRunError> {
@@ -616,49 +609,875 @@ pub(crate) fn cleanup_sandbox_temp(
     sandbox_temp.map_or(Ok(()), OwnedSandboxTemp::cleanup)
 }
 
-#[cfg(windows)]
-pub(crate) struct OwnedProcessTree {
-    _job: Job,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OwnedChildStdio {
+    Duplex,
+    Stdout,
+    Null,
 }
 
 #[cfg(windows)]
-impl OwnedProcessTree {
-    pub(crate) fn attach(child: &Child) -> Result<Self, ()> {
-        let mut limits = ExtendedLimitInfo::new();
-        limits.limit_kill_on_job_close();
-        let job = Job::create_with_limit_info(&limits).map_err(|_| ())?;
-        job.assign_process(child.as_raw_handle() as isize)
-            .map_err(|_| ())?;
-        Ok(Self { _job: job })
+pub(crate) use windows_job::OwnedChild;
+
+#[cfg(windows)]
+pub(crate) fn spawn_owned_child(
+    command: &mut Command,
+    stdio: OwnedChildStdio,
+) -> Result<OwnedChild, AppServerRunError> {
+    windows_job::spawn(command, stdio)
+}
+
+#[cfg(all(test, windows))]
+fn spawn_windows_owned_command_with_pre_resume(
+    command: &Command,
+    stdio: OwnedChildStdio,
+    pre_resume: impl FnOnce() -> Result<(), AppServerRunError>,
+) -> Result<OwnedChild, AppServerRunError> {
+    windows_job::spawn_with_pre_resume(command, stdio, pre_resume)
+}
+
+#[cfg(not(windows))]
+type OwnedChildStdin = ChildStdin;
+#[cfg(not(windows))]
+type OwnedChildStdout = ChildStdout;
+#[cfg(not(windows))]
+type OwnedChildStderr = ChildStderr;
+
+#[cfg(not(windows))]
+#[derive(Debug)]
+pub(crate) struct OwnedChild {
+    child: Child,
+    terminated: bool,
+}
+
+#[cfg(not(windows))]
+impl OwnedChild {
+    pub(crate) fn take_stdin(&mut self) -> Option<OwnedChildStdin> {
+        self.child.stdin.take()
+    }
+
+    pub(crate) fn take_stdout(&mut self) -> Option<OwnedChildStdout> {
+        self.child.stdout.take()
+    }
+
+    pub(crate) fn take_stderr(&mut self) -> Option<OwnedChildStderr> {
+        self.child.stderr.take()
+    }
+
+    pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    fn terminate_and_reap(&mut self) -> Result<(), AppServerRunError> {
+        if self.terminated {
+            return Ok(());
+        }
+        terminate_native_child_bounded(&mut self.child)?;
+        self.terminated = true;
+        Ok(())
     }
 }
 
 #[cfg(not(windows))]
-pub(crate) struct OwnedProcessTree;
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        if !self.terminated {
+            let _ = terminate_native_child_bounded(&mut self.child);
+            self.terminated = true;
+        }
+    }
+}
 
 #[cfg(not(windows))]
-impl OwnedProcessTree {
-    pub(crate) fn attach(_: &Child) -> Result<Self, ()> {
-        Ok(Self)
+pub(crate) fn spawn_owned_child(
+    command: &mut Command,
+    stdio: OwnedChildStdio,
+) -> Result<OwnedChild, AppServerRunError> {
+    let _ = stdio;
+    command
+        .spawn()
+        .map(|child| OwnedChild {
+            child,
+            terminated: false,
+        })
+        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::SpawnFailed))
+}
+
+pub(crate) fn stop_owned_child(child: &mut OwnedChild) -> Result<(), AppServerRunError> {
+    child.terminate_and_reap()
+}
+
+#[cfg(not(windows))]
+fn terminate_native_child_bounded(child: &mut Child) -> Result<(), AppServerRunError> {
+    match child.try_wait() {
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => {}
+        Err(_) => {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::ChildCleanupFailed,
+            ));
+        }
+    }
+    child
+        .kill()
+        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::ChildCleanupFailed))?;
+    let deadline = Instant::now()
+        .checked_add(CHILD_CLEANUP_TIMEOUT)
+        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::ChildCleanupFailed))?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {}
+            Err(_) => {
+                return Err(AppServerRunError::new(
+                    AppServerRunErrorKind::ChildCleanupFailed,
+                ));
+            }
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::ChildCleanupFailed,
+            ));
+        };
+        std::thread::sleep(Duration::from_millis(10).min(remaining));
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows_job {
+    use std::ffi::{OsStr, OsString};
+    use std::fs::File;
+    use std::io;
+    use std::mem::{size_of, zeroed};
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::os::windows::process::ExitStatusExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, ExitStatus};
+    use std::ptr::{null, null_mut};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use windows_sys::Win32::Foundation::{
+        GENERIC_READ, GENERIC_WRITE, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        SetHandleInformation, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+        QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+    };
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+    use windows_sys::Win32::System::Threading::{
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
+        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
+    };
+
+    use super::{AppServerRunError, AppServerRunErrorKind, CHILD_CLEANUP_TIMEOUT, OwnedChildStdio};
+
+    const PROCESS_TEARDOWN_EXIT_CODE: u32 = 0xC0DE_0380;
+
+    /// The child is created suspended, assigned to its private kill-on-close
+    /// Job, and resumed only after assignment. The Job handle stays live until
+    /// bounded accounting proves `ActiveProcesses == 0`.
+    pub(crate) struct OwnedChild {
+        job: OwnedHandle,
+        process: OwnedHandle,
+        stdin: Option<File>,
+        stdout: Option<File>,
+        stderr: Option<File>,
+        terminated: bool,
+    }
+
+    impl std::fmt::Debug for OwnedChild {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("OwnedChild")
+                .field("terminated", &self.terminated)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl OwnedChild {
+        pub(crate) fn take_stdin(&mut self) -> Option<File> {
+            self.stdin.take()
+        }
+
+        pub(crate) fn take_stdout(&mut self) -> Option<File> {
+            self.stdout.take()
+        }
+
+        pub(crate) fn take_stderr(&mut self) -> Option<File> {
+            self.stderr.take()
+        }
+
+        pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            // SAFETY: process is a live owned process handle; zero timeout is
+            // observation-only.
+            match unsafe { WaitForSingleObject(self.process.raw(), 0) } {
+                WAIT_TIMEOUT => Ok(None),
+                WAIT_OBJECT_0 => {
+                    let mut exit_code = 0_u32;
+                    // SAFETY: the signaled handle and output pointer are valid.
+                    if unsafe { GetExitCodeProcess(self.process.raw(), &raw mut exit_code) } == 0 {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        Ok(Some(ExitStatus::from_raw(exit_code)))
+                    }
+                }
+                WAIT_FAILED => Err(io::Error::last_os_error()),
+                _ => Err(io::Error::other("unexpected Windows process wait result")),
+            }
+        }
+
+        pub(crate) fn terminate_and_reap(&mut self) -> Result<(), AppServerRunError> {
+            if self.terminated {
+                return Ok(());
+            }
+            ensure_job_empty(&self.job, &self.process, CHILD_CLEANUP_TIMEOUT)?;
+            self.terminated = true;
+            Ok(())
+        }
+
+        #[cfg(test)]
+        pub(crate) fn active_processes(&self) -> Result<u32, AppServerRunError> {
+            job_active_processes(&self.job).map_err(|()| cleanup_error())
+        }
+    }
+
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            if !self.terminated {
+                let _ = terminate_job_and_reap(&self.job, &self.process, CHILD_CLEANUP_TIMEOUT);
+                self.terminated = true;
+            }
+        }
+    }
+
+    pub(crate) fn spawn(
+        command: &Command,
+        stdio: OwnedChildStdio,
+    ) -> Result<OwnedChild, AppServerRunError> {
+        spawn_with_pre_resume(command, stdio, || Ok(()))
+    }
+
+    pub(crate) fn spawn_with_pre_resume(
+        command: &Command,
+        stdio: OwnedChildStdio,
+        pre_resume: impl FnOnce() -> Result<(), AppServerRunError>,
+    ) -> Result<OwnedChild, AppServerRunError> {
+        let redirects = RedirectHandles::create(stdio)?;
+        let job = create_kill_on_close_job()?;
+        let attributes = ProcThreadAttributes::for_handles(redirects.child_handles())?;
+        let executable_path = PathBuf::from(command.get_program());
+        if !executable_path.is_absolute() {
+            return Err(spawn_error());
+        }
+        let mut command_line = command_line(
+            command.get_program(),
+            command.get_args().map(OsStr::to_os_string),
+        )?;
+        let environment = command_environment(command)?;
+        let executable = wide_null(command.get_program())?;
+        let current_directory = command
+            .get_current_dir()
+            .map(Path::to_path_buf)
+            .map_or_else(std::env::current_dir, Ok)
+            .map_err(|_| spawn_error())?;
+        let current_directory = wide_null(non_verbatim_path(&current_directory)?)?;
+
+        let mut startup = STARTUPINFOEXW::default();
+        startup.StartupInfo.cb =
+            u32::try_from(size_of::<STARTUPINFOEXW>()).map_err(|_| spawn_error())?;
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = redirects.child_stdin.raw();
+        startup.StartupInfo.hStdOutput = redirects.child_stdout.raw();
+        startup.StartupInfo.hStdError = redirects.child_stderr.raw();
+        startup.lpAttributeList = attributes.raw();
+
+        // SAFETY: every pointer references live storage through this call. The
+        // mutable command line and double-NUL environment meet CreateProcessW
+        // contracts, and only the three standard handles are inherited.
+        let mut process_info: PROCESS_INFORMATION = unsafe { zeroed() };
+        // SAFETY: see the pointer and handle invariants immediately above.
+        let created = unsafe {
+            CreateProcessW(
+                executable.as_ptr(),
+                command_line.as_mut_ptr(),
+                null(),
+                null(),
+                1,
+                CREATE_NO_WINDOW
+                    | CREATE_SUSPENDED
+                    | CREATE_UNICODE_ENVIRONMENT
+                    | EXTENDED_STARTUPINFO_PRESENT,
+                environment.as_ptr().cast(),
+                current_directory.as_ptr(),
+                &raw const startup.StartupInfo,
+                &raw mut process_info,
+            )
+        };
+        if created == 0 {
+            return Err(spawn_error());
+        }
+
+        let process = owned_handle(process_info.hProcess).ok_or_else(containment_error)?;
+        let Some(thread_handle) = owned_handle(process_info.hThread) else {
+            terminate_unassigned_process(&process, CHILD_CLEANUP_TIMEOUT)?;
+            return Err(containment_error());
+        };
+        drop(attributes);
+
+        // SAFETY: the primary process is still suspended, so assignment
+        // precedes its first instruction and any descendant creation.
+        if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {
+            terminate_unassigned_process(&process, CHILD_CLEANUP_TIMEOUT)?;
+            return Err(containment_error());
+        }
+        if let Err(error) = pre_resume() {
+            terminate_job_and_reap(&job, &process, CHILD_CLEANUP_TIMEOUT)?;
+            return Err(error);
+        }
+
+        // SAFETY: this is the retained suspended primary thread returned by
+        // CreateProcessW and it has not yet been resumed.
+        if unsafe { ResumeThread(thread_handle.raw()) } == u32::MAX {
+            terminate_job_and_reap(&job, &process, CHILD_CLEANUP_TIMEOUT)?;
+            return Err(containment_error());
+        }
+        drop(thread_handle);
+
+        let RedirectHandles {
+            child_stdin,
+            child_stdout,
+            child_stderr,
+            parent_stdin,
+            parent_stdout,
+            parent_stderr,
+        } = redirects;
+        drop(child_stdin);
+        drop(child_stdout);
+        drop(child_stderr);
+        Ok(OwnedChild {
+            job,
+            process,
+            stdin: parent_stdin.map(File::from),
+            stdout: parent_stdout.map(File::from),
+            stderr: parent_stderr.map(File::from),
+            terminated: false,
+        })
+    }
+
+    struct RedirectHandles {
+        child_stdin: OwnedHandle,
+        child_stdout: OwnedHandle,
+        child_stderr: OwnedHandle,
+        parent_stdin: Option<OwnedHandle>,
+        parent_stdout: Option<OwnedHandle>,
+        parent_stderr: Option<OwnedHandle>,
+    }
+
+    impl RedirectHandles {
+        fn create(stdio: OwnedChildStdio) -> Result<Self, AppServerRunError> {
+            let (child_stdin, parent_stdin) = if stdio == OwnedChildStdio::Duplex {
+                let (child_reader, parent_writer) = create_anonymous_pipe(true)?;
+                (child_reader, Some(parent_writer))
+            } else {
+                (open_null(GENERIC_READ)?, None)
+            };
+            let (child_stdout, parent_stdout) =
+                if matches!(stdio, OwnedChildStdio::Duplex | OwnedChildStdio::Stdout) {
+                    let (parent_reader, child_writer) = create_anonymous_pipe(false)?;
+                    (child_writer, Some(parent_reader))
+                } else {
+                    (open_null(GENERIC_WRITE)?, None)
+                };
+            let (child_stderr, parent_stderr) = if stdio == OwnedChildStdio::Duplex {
+                let (parent_reader, child_writer) = create_anonymous_pipe(false)?;
+                (child_writer, Some(parent_reader))
+            } else {
+                (open_null(GENERIC_WRITE)?, None)
+            };
+            Ok(Self {
+                child_stdin,
+                child_stdout,
+                child_stderr,
+                parent_stdin,
+                parent_stdout,
+                parent_stderr,
+            })
+        }
+
+        fn child_handles(&self) -> [HANDLE; 3] {
+            [
+                self.child_stdin.raw(),
+                self.child_stdout.raw(),
+                self.child_stderr.raw(),
+            ]
+        }
+    }
+
+    fn create_anonymous_pipe(
+        parent_is_writer: bool,
+    ) -> Result<(OwnedHandle, OwnedHandle), AppServerRunError> {
+        let attributes = inheritable_security_attributes()?;
+        let mut read_handle: HANDLE = null_mut();
+        let mut write_handle: HANDLE = null_mut();
+        // SAFETY: output pointers and security attributes are valid.
+        if unsafe {
+            CreatePipe(
+                &raw mut read_handle,
+                &raw mut write_handle,
+                &raw const attributes,
+                0,
+            )
+        } == 0
+        {
+            return Err(spawn_error());
+        }
+        let reader = owned_handle(read_handle).ok_or_else(spawn_error)?;
+        let writer = owned_handle(write_handle).ok_or_else(spawn_error)?;
+        let parent = if parent_is_writer {
+            writer.raw()
+        } else {
+            reader.raw()
+        };
+        // SAFETY: this is the live parent-owned end and must not be inherited.
+        if unsafe { SetHandleInformation(parent, HANDLE_FLAG_INHERIT, 0) } == 0 {
+            return Err(spawn_error());
+        }
+        Ok((reader, writer))
+    }
+
+    fn open_null(desired_access: u32) -> Result<OwnedHandle, AppServerRunError> {
+        let path = wide_null(OsStr::new("NUL"))?;
+        let attributes = inheritable_security_attributes()?;
+        // SAFETY: path and attributes remain live; the returned handle is
+        // transferred exactly once into OwnedHandle.
+        let handle = unsafe {
+            CreateFileW(
+                path.as_ptr(),
+                desired_access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                &raw const attributes,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                null_mut(),
+            )
+        };
+        owned_handle(handle).ok_or_else(spawn_error)
+    }
+
+    fn inheritable_security_attributes() -> Result<SECURITY_ATTRIBUTES, AppServerRunError> {
+        Ok(SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).map_err(|_| spawn_error())?,
+            lpSecurityDescriptor: null_mut(),
+            bInheritHandle: 1,
+        })
+    }
+
+    fn create_kill_on_close_job() -> Result<OwnedHandle, AppServerRunError> {
+        // SAFETY: unnamed Job creation uses no caller pointers.
+        let job = unsafe { CreateJobObjectW(null(), null()) };
+        let job = owned_handle(job).ok_or_else(containment_error)?;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let size = u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+            .map_err(|_| containment_error())?;
+        // SAFETY: job and immutable limit storage are valid.
+        if unsafe {
+            SetInformationJobObject(
+                job.raw(),
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                size,
+            )
+        } == 0
+        {
+            return Err(containment_error());
+        }
+        Ok(job)
+    }
+
+    struct ProcThreadAttributes {
+        storage: Vec<usize>,
+        handles: StableHandleList,
+    }
+
+    /// `UpdateProcThreadAttribute` retains this pointer until process creation;
+    /// heap ownership keeps it stable when the attribute owner itself moves.
+    struct StableHandleList(Box<[HANDLE; 3]>);
+
+    impl StableHandleList {
+        fn new(handles: [HANDLE; 3]) -> Self {
+            Self(Box::new(handles))
+        }
+
+        fn as_ptr(&self) -> *const HANDLE {
+            self.0.as_ptr()
+        }
+    }
+
+    impl ProcThreadAttributes {
+        fn for_handles(handles: [HANDLE; 3]) -> Result<Self, AppServerRunError> {
+            let mut bytes = 0_usize;
+            // SAFETY: null is the documented sizing probe for one attribute.
+            unsafe {
+                InitializeProcThreadAttributeList(null_mut(), 1, 0, &raw mut bytes);
+            }
+            if bytes == 0 {
+                return Err(spawn_error());
+            }
+            let words = bytes
+                .checked_add(size_of::<usize>() - 1)
+                .map(|value| value / size_of::<usize>())
+                .ok_or_else(spawn_error)?;
+            let mut storage = vec![0_usize; words];
+            let raw = storage.as_mut_ptr().cast();
+            // SAFETY: storage is aligned and at least the probed byte size.
+            if unsafe { InitializeProcThreadAttributeList(raw, 1, 0, &raw mut bytes) } == 0 {
+                return Err(spawn_error());
+            }
+            let result = Self {
+                storage,
+                handles: StableHandleList::new(handles),
+            };
+            let attribute =
+                usize::try_from(PROC_THREAD_ATTRIBUTE_HANDLE_LIST).map_err(|_| spawn_error())?;
+            // SAFETY: the initialized list and heap-owned handle payload stay
+            // live at stable addresses through CreateProcessW; Drop deletes
+            // the attribute list before either backing allocation is released.
+            if unsafe {
+                UpdateProcThreadAttribute(
+                    result.raw(),
+                    0,
+                    attribute,
+                    result.handles.as_ptr().cast(),
+                    size_of::<[HANDLE; 3]>(),
+                    null_mut(),
+                    null(),
+                )
+            } == 0
+            {
+                return Err(spawn_error());
+            }
+            Ok(result)
+        }
+
+        fn raw(&self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+            self.storage.as_ptr().cast_mut().cast()
+        }
+    }
+
+    impl Drop for ProcThreadAttributes {
+        fn drop(&mut self) {
+            if !self.storage.is_empty() {
+                // SAFETY: successful construction initialized this list once.
+                unsafe { DeleteProcThreadAttributeList(self.raw()) };
+            }
+        }
+    }
+
+    fn ensure_job_empty(
+        job: &OwnedHandle,
+        process: &OwnedHandle,
+        timeout: Duration,
+    ) -> Result<(), AppServerRunError> {
+        match job_active_processes(job) {
+            Ok(0) => {
+                // SAFETY: zero active Job members means the primary has
+                // exited; this bounded observation also proves its handle is
+                // signaled before cleanup returns.
+                if unsafe { WaitForSingleObject(process.raw(), millis(timeout)) } == WAIT_OBJECT_0 {
+                    Ok(())
+                } else {
+                    Err(cleanup_error())
+                }
+            }
+            Ok(_) | Err(()) => terminate_job_and_reap(job, process, timeout),
+        }
+    }
+
+    fn terminate_job_and_reap(
+        job: &OwnedHandle,
+        process: &OwnedHandle,
+        timeout: Duration,
+    ) -> Result<(), AppServerRunError> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(cleanup_error)?;
+        // SAFETY: the retained Job is live. No PID/name/tree scan authority is
+        // used; this exact owned handle terminates all members.
+        if unsafe { TerminateJobObject(job.raw(), PROCESS_TEARDOWN_EXIT_CODE) } == 0 {
+            return Err(cleanup_error());
+        }
+        // SAFETY: the primary process handle remains owned through this wait.
+        if unsafe { WaitForSingleObject(process.raw(), millis_until(deadline)) } != WAIT_OBJECT_0 {
+            return Err(cleanup_error());
+        }
+        loop {
+            match job_active_processes(job) {
+                Ok(0) => return Ok(()),
+                Ok(_) => {}
+                Err(()) => return Err(cleanup_error()),
+            }
+            if Instant::now() >= deadline {
+                return Err(cleanup_error());
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn terminate_unassigned_process(
+        process: &OwnedHandle,
+        timeout: Duration,
+    ) -> Result<(), AppServerRunError> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(cleanup_error)?;
+        // SAFETY: the exact process is live, owned, and still suspended.
+        if unsafe { TerminateProcess(process.raw(), PROCESS_TEARDOWN_EXIT_CODE) } == 0 {
+            return Err(cleanup_error());
+        }
+        // SAFETY: the same owned process handle remains valid for this reap.
+        if unsafe { WaitForSingleObject(process.raw(), millis_until(deadline)) } == WAIT_OBJECT_0 {
+            Ok(())
+        } else {
+            Err(cleanup_error())
+        }
+    }
+
+    fn job_active_processes(job: &OwnedHandle) -> Result<u32, ()> {
+        let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        let size =
+            u32::try_from(size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>()).map_err(|_| ())?;
+        // SAFETY: accounting is writable storage of the exact queried type.
+        if unsafe {
+            QueryInformationJobObject(
+                job.raw(),
+                JobObjectBasicAccountingInformation,
+                (&raw mut accounting).cast(),
+                size,
+                null_mut(),
+            )
+        } == 0
+        {
+            Err(())
+        } else {
+            Ok(accounting.ActiveProcesses)
+        }
+    }
+
+    fn command_line(
+        executable: &OsStr,
+        arguments: impl IntoIterator<Item = OsString>,
+    ) -> Result<Vec<u16>, AppServerRunError> {
+        let mut result = Vec::new();
+        append_quoted_argument(&mut result, executable)?;
+        for argument in arguments {
+            result.push(u16::from(b' '));
+            append_quoted_argument(&mut result, &argument)?;
+        }
+        result.push(0);
+        Ok(result)
+    }
+
+    fn append_quoted_argument(
+        output: &mut Vec<u16>,
+        argument: &OsStr,
+    ) -> Result<(), AppServerRunError> {
+        let encoded: Vec<u16> = argument.encode_wide().collect();
+        if encoded.contains(&0) {
+            return Err(spawn_error());
+        }
+        let needs_quotes = encoded.is_empty()
+            || encoded
+                .iter()
+                .any(|unit| matches!(*unit, 0x20 | 0x09 | 0x22));
+        if !needs_quotes {
+            output.extend(encoded);
+            return Ok(());
+        }
+        output.push(u16::from(b'"'));
+        let mut backslashes = 0_usize;
+        for unit in encoded {
+            match unit {
+                0x5c => backslashes += 1,
+                0x22 => {
+                    output.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes * 2 + 1));
+                    output.push(unit);
+                    backslashes = 0;
+                }
+                _ => {
+                    output.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes));
+                    output.push(unit);
+                    backslashes = 0;
+                }
+            }
+        }
+        output.extend(std::iter::repeat_n(u16::from(b'\\'), backslashes * 2));
+        output.push(u16::from(b'"'));
+        Ok(())
+    }
+
+    fn command_environment(command: &Command) -> Result<Vec<u16>, AppServerRunError> {
+        let mut environment = std::env::vars_os().collect::<Vec<_>>();
+        for (name, value) in command.get_envs() {
+            environment.retain(|(existing, _)| {
+                !existing
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&name.to_string_lossy())
+            });
+            if let Some(value) = value {
+                environment.push((name.to_os_string(), value.to_os_string()));
+            }
+        }
+        environment.sort_by(|(left, _), (right, _)| {
+            left.to_string_lossy()
+                .to_ascii_uppercase()
+                .cmp(&right.to_string_lossy().to_ascii_uppercase())
+        });
+        for pair in environment.windows(2) {
+            if pair[0]
+                .0
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&pair[1].0.to_string_lossy())
+            {
+                return Err(spawn_error());
+            }
+        }
+
+        let mut block = Vec::new();
+        for (name, value) in environment {
+            let name: Vec<u16> = name.encode_wide().collect();
+            let value: Vec<u16> = value.encode_wide().collect();
+            if name.is_empty()
+                || name.contains(&0)
+                || value.contains(&0)
+                || name.contains(&u16::from(b'='))
+            {
+                return Err(spawn_error());
+            }
+            block.extend(name);
+            block.push(u16::from(b'='));
+            block.extend(value);
+            block.push(0);
+        }
+        block.push(0);
+        if block.len() == 1 {
+            block.push(0);
+        }
+        Ok(block)
+    }
+
+    fn wide_null(value: impl AsRef<OsStr>) -> Result<Vec<u16>, AppServerRunError> {
+        let mut wide: Vec<u16> = value.as_ref().encode_wide().collect();
+        if wide.contains(&0) {
+            return Err(spawn_error());
+        }
+        wide.push(0);
+        Ok(wide)
+    }
+
+    fn non_verbatim_path(path: &Path) -> Result<PathBuf, AppServerRunError> {
+        let text = path.as_os_str().to_string_lossy();
+        if let Some(without_prefix) = text.strip_prefix(r"\\?\") {
+            if without_prefix.starts_with("UNC\\") {
+                return Err(spawn_error());
+            }
+            return Ok(PathBuf::from(without_prefix));
+        }
+        Ok(path.to_path_buf())
+    }
+
+    fn millis(duration: Duration) -> u32 {
+        u32::try_from(duration.as_millis()).unwrap_or(u32::MAX - 1)
+    }
+
+    fn millis_until(deadline: Instant) -> u32 {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return 0;
+        };
+        let millis = remaining.as_millis();
+        if millis == 0 && !remaining.is_zero() {
+            1
+        } else {
+            u32::try_from(millis).unwrap_or(u32::MAX - 1)
+        }
+    }
+
+    fn owned_handle(handle: HANDLE) -> Option<OwnedHandle> {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        // SAFETY: successful Win32 creation transfers one unique handle.
+        Some(unsafe { OwnedHandle::from_raw_handle(handle.cast()) })
+    }
+
+    trait OwnedHandleExt {
+        fn raw(&self) -> HANDLE;
+    }
+
+    impl OwnedHandleExt for OwnedHandle {
+        fn raw(&self) -> HANDLE {
+            self.as_raw_handle().cast()
+        }
+    }
+
+    const fn spawn_error() -> AppServerRunError {
+        AppServerRunError::new(AppServerRunErrorKind::SpawnFailed)
+    }
+
+    const fn containment_error() -> AppServerRunError {
+        AppServerRunError::new(AppServerRunErrorKind::JobObjectFailed)
+    }
+
+    const fn cleanup_error() -> AppServerRunError {
+        AppServerRunError::new(AppServerRunErrorKind::ChildCleanupFailed)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{HANDLE, StableHandleList};
+
+        #[test]
+        fn inherited_handle_payload_address_survives_owner_moves() {
+            let handles = StableHandleList::new([std::ptr::null_mut::<_>() as HANDLE; 3]);
+            let address = handles.as_ptr();
+            let moved = Some(handles);
+
+            assert_eq!(
+                moved.as_ref().expect("moved handle owner").as_ptr(),
+                address,
+                "UpdateProcThreadAttribute payload moved before CreateProcessW"
+            );
+        }
     }
 }
 
 fn drive_child(
-    child: &mut Child,
+    child: &mut OwnedChild,
     config: &AppServerRunConfig,
     deadline: Instant,
 ) -> Result<AppServerRunEvidence, AppServerRunError> {
     let mut stdin = child
-        .stdin
-        .take()
+        .take_stdin()
         .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::PipeUnavailable))?;
     let stdout = child
-        .stdout
-        .take()
+        .take_stdout()
         .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::PipeUnavailable))?;
     let stderr = child
-        .stderr
-        .take()
+        .take_stderr()
         .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::PipeUnavailable))?;
 
     let receiver = start_readers(stdout, stderr);
@@ -721,7 +1540,7 @@ fn drive_child(
         session.outcome().is_some()
     }) {
         if error.kind() == AppServerRunErrorKind::Timeout {
-            interrupt_timed_out_turn(&mut stdin, &receiver, &mut session, &thread_id)?;
+            interrupt_timed_out_turn(&mut stdin, &session, &thread_id);
             return Err(error);
         }
         return Err(error);
@@ -800,10 +1619,11 @@ fn readiness_timeout(caller_deadline: Instant, bootstrap_deadline: Instant) -> A
     AppServerRunError::new(kind)
 }
 
-fn start_readers(
-    stdout: std::process::ChildStdout,
-    stderr: std::process::ChildStderr,
-) -> Receiver<ReaderEvent> {
+fn start_readers<Stdout, Stderr>(stdout: Stdout, stderr: Stderr) -> Receiver<ReaderEvent>
+where
+    Stdout: Read + Send + 'static,
+    Stderr: Read + Send + 'static,
+{
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
@@ -949,70 +1769,29 @@ fn ingest_reader_event(
     }
 }
 
-fn interrupt_timed_out_turn(
-    stdin: &mut impl Write,
-    receiver: &Receiver<ReaderEvent>,
-    session: &mut AppServerSession,
-    thread_id: &str,
-) -> Result<(), AppServerRunError> {
+fn interrupt_timed_out_turn(stdin: &mut impl Write, session: &AppServerSession, thread_id: &str) {
     let Some(turn_id) = session.turn_id().map(ToOwned::to_owned) else {
-        return Ok(());
+        return;
     };
+    let _ = send_turn_interrupt(stdin, thread_id, &turn_id);
+}
+
+fn send_turn_interrupt(
+    stdin: &mut impl Write,
+    thread_id: &str,
+    turn_id: &str,
+) -> Result<(), AppServerRunError> {
     let request = json!({
         "method": "turn/interrupt",
         "id": INTERRUPT_REQUEST_ID,
         "params": {"threadId": thread_id, "turnId": turn_id}
     });
-    if send_json(stdin, &request).is_err() {
-        return Ok(());
-    }
-
-    let grace_deadline = Instant::now()
-        .checked_add(INTERRUPT_GRACE)
-        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::Timeout))?;
-    while session.outcome().is_none() {
-        let Some(remaining) = grace_deadline.checked_duration_since(Instant::now()) else {
-            break;
-        };
-        let event = match receiver.recv_timeout(remaining) {
-            Ok(event) => event,
-            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
-        };
-        match event {
-            ReaderEvent::Line(line) => {
-                match is_interrupt_ack(&line) {
-                    Ok(true) => continue,
-                    Ok(false) => {}
-                    Err(_) => break,
-                }
-                if session.ingest_json_line(&line).is_err() {
-                    break;
-                }
-            }
-            ReaderEvent::Eof | ReaderEvent::Failed | ReaderEvent::LineTooLarge => break,
-        }
-    }
-    Ok(())
-}
-
-fn is_interrupt_ack(line: &str) -> Result<bool, AppServerRunError> {
-    let message: Value = serde_json::from_str(line)
-        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::ProtocolFailed))?;
-    if message.get("id").and_then(Value::as_i64) != Some(INTERRUPT_REQUEST_ID) {
-        return Ok(false);
-    }
-    let object = message
-        .as_object()
-        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::ProtocolFailed))?;
-    if object.contains_key("method")
-        || object.contains_key("error")
-        || !object.get("result").is_some_and(Value::is_object)
-    {
-        return Err(AppServerRunError::new(
-            AppServerRunErrorKind::ProtocolFailed,
-        ));
-    }
-    Ok(true)
+    // Deadline expiry revokes the child's effect window. The interrupt is
+    // advisory only: never wait for Codex to acknowledge or emit a terminal,
+    // because it and its descendants would remain writable during that grace.
+    // The caller immediately closes the owned process tree and waits for the
+    // direct child to be reaped before returning.
+    send_json(stdin, &request)
 }
 
 fn send_json(writer: &mut impl Write, message: &Value) -> Result<(), AppServerRunError> {
@@ -1353,109 +2132,6 @@ fn map_session_error(error: &SessionError) -> AppServerRunError {
     AppServerRunError::new(kind)
 }
 
-pub(crate) fn stop_owned_child(
-    child: &mut Child,
-    process_tree: OwnedProcessTree,
-) -> Result<(), AppServerRunError> {
-    // Closing a Windows Job Object configured with KILL_ON_JOB_CLOSE is the
-    // primary, tree-wide termination mechanism. Do this before waiting on any
-    // external cleanup command so teardown cannot deadlock behind the child.
-    drop(process_tree);
-    terminate_child_bounded(child)
-}
-
-pub(crate) fn terminate_child_bounded(child: &mut Child) -> Result<(), AppServerRunError> {
-    match child.try_wait() {
-        Ok(Some(_)) => return Ok(()),
-        Ok(None) => {}
-        Err(_) => {
-            return Err(AppServerRunError::new(
-                AppServerRunErrorKind::ChildCleanupFailed,
-            ));
-        }
-    }
-
-    // The Job Object close above normally wins this race on Windows. The
-    // direct kill is a bounded fallback and is also the non-Windows path.
-    let _ = child.kill();
-    let deadline = Instant::now()
-        .checked_add(CHILD_CLEANUP_TIMEOUT)
-        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::ChildCleanupFailed))?;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return Ok(()),
-            Ok(None) => {}
-            Err(_) => {
-                return Err(AppServerRunError::new(
-                    AppServerRunErrorKind::ChildCleanupFailed,
-                ));
-            }
-        }
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return Err(AppServerRunError::new(
-                AppServerRunErrorKind::ChildCleanupFailed,
-            ));
-        };
-        std::thread::sleep(Duration::from_millis(10).min(remaining));
-    }
-}
-
-#[cfg(windows)]
-pub(crate) fn terminate_uncontained_process_tree_bounded(
-    child: &mut Child,
-) -> Result<(), AppServerRunError> {
-    let pid = child.id().to_string();
-    let mut tree_stopped = false;
-    if let Some(taskkill) = std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .map(|root| root.join("System32").join("taskkill.exe"))
-        .filter(|path| path.is_file())
-    {
-        let mut command = Command::new(taskkill);
-        crate::scrub_protected_environment(&mut command);
-        command
-            .args(["/PID", pid.as_str(), "/T", "/F"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if let Ok(mut taskkill_child) = command.spawn() {
-            let deadline = Instant::now()
-                .checked_add(CHILD_CLEANUP_TIMEOUT)
-                .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::ChildCleanupFailed))?;
-            loop {
-                match taskkill_child.try_wait() {
-                    Ok(Some(status)) => {
-                        tree_stopped = status.success();
-                        break;
-                    }
-                    Ok(None) => {}
-                    Err(_) => break,
-                }
-                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                    let _ = terminate_child_bounded(&mut taskkill_child);
-                    break;
-                };
-                std::thread::sleep(Duration::from_millis(10).min(remaining));
-            }
-        }
-    }
-    let direct_cleanup = terminate_child_bounded(child);
-    if tree_stopped {
-        direct_cleanup
-    } else {
-        Err(AppServerRunError::new(
-            AppServerRunErrorKind::ChildCleanupFailed,
-        ))
-    }
-}
-
-#[cfg(not(windows))]
-pub(crate) fn terminate_uncontained_process_tree_bounded(
-    child: &mut Child,
-) -> Result<(), AppServerRunError> {
-    terminate_child_bounded(child)
-}
-
 #[cfg(all(test, windows))]
 mod resource_environment_tests {
     use std::ffi::OsStr;
@@ -1511,5 +2187,186 @@ mod resource_environment_tests {
             .find(|(name, _)| *name == OsStr::new("CODEX_MANAGED_PACKAGE_ROOT"))
             .expect("managed package root is explicit");
         assert_eq!(managed.1, Some(managed_root.as_os_str()));
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use std::io::{self, Write};
+
+    use serde_json::json;
+
+    use super::send_turn_interrupt;
+
+    #[derive(Default)]
+    struct FlushSpy {
+        bytes: Vec<u8>,
+        flush_count: usize,
+    }
+
+    impl Write for FlushSpy {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flush_count += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn timed_out_turn_interrupt_is_one_exact_flushed_jsonl_request() {
+        let mut output = FlushSpy::default();
+
+        send_turn_interrupt(&mut output, "thread-deadline", "turn-deadline")
+            .expect("write interrupt request");
+
+        assert_eq!(output.flush_count, 1);
+        let payload = output
+            .bytes
+            .strip_suffix(b"\n")
+            .expect("interrupt request ends with one JSONL delimiter");
+        assert!(!payload.contains(&b'\n'));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(payload).expect("parse interrupt request"),
+            json!({
+                "id": 4,
+                "method": "turn/interrupt",
+                "params": {
+                    "threadId": "thread-deadline",
+                    "turnId": "turn-deadline"
+                }
+            })
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_containment_tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::{
+        AppServerRunError, AppServerRunErrorKind, OwnedChildStdio, spawn_owned_child,
+        spawn_windows_owned_command_with_pre_resume, stop_owned_child,
+    };
+
+    static NEXT_MARKER: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn pre_resume_failure_never_resumes_the_suspended_child() {
+        let sequence = NEXT_MARKER.fetch_add(1, Ordering::Relaxed);
+        let marker = std::env::temp_dir().join(format!(
+            "lattice-codex-suspended-pre-resume-{}-{sequence}.txt",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let system_root = std::env::var_os("SystemRoot").expect("Windows system root");
+        let powershell = PathBuf::from(system_root)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        let script = format!(
+            "[IO.File]::WriteAllText('{}', 'unexpected')",
+            marker.display().to_string().replace('\'', "''")
+        );
+        let mut command = Command::new(powershell);
+        command
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+            .arg(script)
+            .current_dir(std::env::temp_dir())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let error =
+            spawn_windows_owned_command_with_pre_resume(&command, OwnedChildStdio::Null, || {
+                assert!(
+                    !marker.exists(),
+                    "the suspended child executed before Job assignment completed"
+                );
+                Err(AppServerRunError::new(
+                    AppServerRunErrorKind::JobObjectFailed,
+                ))
+            })
+            .expect_err("injected pre-resume failure must fail closed");
+
+        assert_eq!(error.kind(), AppServerRunErrorKind::JobObjectFailed);
+        assert!(!marker.exists(), "a pre-resume failure resumed the child");
+    }
+
+    #[test]
+    fn parent_exit_with_live_descendant_is_terminated_to_zero_before_return() {
+        let sequence = NEXT_MARKER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "lattice-codex-job-accounting-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create exact Job accounting root");
+        let trigger = root.join("descendant.trigger");
+        let effect = root.join("descendant.effect");
+        let pid = root.join("descendant.pid");
+        let quote = |path: &std::path::Path| path.display().to_string().replace('\'', "''");
+        let descendant = format!(
+            "`$stop = [DateTime]::UtcNow.AddSeconds(20); while (!(Test-Path -LiteralPath '{}')) {{ if ([DateTime]::UtcNow -ge `$stop) {{ exit 91 }}; Start-Sleep -Milliseconds 10 }}; [IO.File]::WriteAllText('{}', 'survived')",
+            quote(&trigger),
+            quote(&effect)
+        );
+        let script = format!(
+            "$grandchild = '{}'; $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($grandchild)); $descendant = Start-Process -FilePath \"$PSHOME\\powershell.exe\" -WindowStyle Hidden -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -PassThru; [IO.File]::WriteAllText('{}', [string]$descendant.Id); exit 0",
+            descendant.replace('\'', "''"),
+            quote(&pid)
+        );
+        let system_root = std::env::var_os("SystemRoot").expect("Windows system root");
+        let powershell = PathBuf::from(system_root)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        let mut command = Command::new(powershell);
+        command
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+            .arg(script)
+            .current_dir(&root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        let mut child = spawn_owned_child(&mut command, OwnedChildStdio::Null)
+            .expect("spawn assigned suspended root");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait().expect("observe owned root").is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "root did not exit on time");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(pid.exists(), "root exited before recording its descendant");
+        assert!(
+            child.active_processes().expect("query retained Job") > 0,
+            "the exited root must leave its blocked descendant active"
+        );
+
+        stop_owned_child(&mut child).expect("terminate retained Job and prove zero members");
+        assert_eq!(
+            child.active_processes().expect("query reaped Job"),
+            0,
+            "cleanup returned before Job accounting reached zero"
+        );
+        fs::write(&trigger, b"release\n").expect("release any escaped descendant");
+        thread::sleep(Duration::from_millis(500));
+        assert!(
+            !effect.exists(),
+            "a descendant wrote after zero-member cleanup returned"
+        );
+        fs::remove_dir_all(&root).expect("remove exact Job accounting root");
     }
 }

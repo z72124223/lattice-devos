@@ -851,15 +851,11 @@ fn official_codex_0146_four_file_bundle_identity_is_live_verified() {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "requires the built broker helper and staged official Codex 0.146.0 bundle"]
+#[ignore = "requires a staged official Codex 0.146.0 bundle and isolated Codex home"]
 fn official_codex_0146_zero_model_preflight_is_live_verified() {
     let launcher = std::path::PathBuf::from(
         std::env::var_os("LATTICE_HERMES_CODEX_0146_LAUNCHER")
             .expect("set exact staged launcher path"),
-    );
-    let helper = std::path::PathBuf::from(
-        std::env::var_os("LATTICE_HERMES_CODEX_BROKER_HELPER")
-            .expect("set built broker helper path"),
     );
     let codex_home = std::path::PathBuf::from(
         std::env::var_os("LATTICE_HERMES_ISOLATED_CODEX_HOME")
@@ -875,10 +871,7 @@ fn official_codex_0146_zero_model_preflight_is_live_verified() {
         "lattice-hermes-codex-preflight-{}-{sequence}",
         std::process::id()
     ));
-    let helper_sha256 = crate::sha256_file(&helper).expect("broker helper digest");
     let config = CodexReflectionBrokerConfig::new(
-        helper,
-        helper_sha256.clone(),
         launcher,
         codex_home,
         isolation_root.clone(),
@@ -889,7 +882,6 @@ fn official_codex_0146_zero_model_preflight_is_live_verified() {
     let receipt = config
         .run_zero_model_preflight(Instant::now() + Duration::from_secs(30))
         .expect("zero-model broker preflight");
-    assert_eq!(receipt.helper_sha256(), helper_sha256);
     assert_eq!(
         receipt.launcher_sha256(),
         CodexBrokerPolicy::official().launcher_sha256()
@@ -1215,7 +1207,36 @@ fn production_official_no_model_preflight_owns_the_pinned_gateway() {
         64
     );
     runner.terminate().expect("exact Job tree is reaped");
-    remove_temp_root_with_retry(&isolation_root);
+    assert!(
+        !isolation_root.exists(),
+        "verified runner teardown removes its owned isolation root"
+    );
+}
+
+#[test]
+#[ignore = "requires WSL2, bubblewrap, and the exact frozen Hermes runtime"]
+fn production_runner_drop_reaps_and_cleans_the_owned_gateway_root() {
+    let isolation_root = unique_temp_root("lattice-hermes-production-drop-cleanup");
+    let config = crate::HermesProductionRunnerConfig::official_with_broker_digest(
+        production_containment(isolation_root.clone()),
+        &test_runtime_manifest(),
+        &digest("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+        "production-drop-cleanup-key",
+        "hermes-agent",
+        Duration::from_secs(20),
+        Duration::from_secs(5),
+        Duration::from_millis(1),
+    )
+    .expect("bounded official config");
+    let mut runner = config
+        .launch(Instant::now() + Duration::from_secs(30))
+        .expect("exact official gateway reaches no-model readiness");
+    runner.verify_live().expect("owned process remains live");
+    drop(runner);
+    assert!(
+        !isolation_root.exists(),
+        "runner Drop reaps the Job and removes only its owned root"
+    );
 }
 
 #[test]
@@ -1303,6 +1324,7 @@ fn event_transport_loss_recovers_through_bound_status_polling() {
 fn same_process_reconciliation_uses_receipt_without_resubmission() {
     let request = request();
     let job = job(request.clone());
+    let expected_input_digest = job.input_digest().clone();
     let output = bound_output(&job);
     let server = ScriptedServer::start(vec![
         capabilities(),
@@ -1334,11 +1356,18 @@ fn same_process_reconciliation_uses_receipt_without_resubmission() {
     assert_eq!(duplicate.code(), "HERMES_RUN_RECONCILIATION_REQUIRED");
 
     thread::sleep(Duration::from_millis(250));
-    let reflection = adapter
-        .reconcile_reflection(&request, &receipt)
+    let recovered = adapter
+        .reconcile_reflection_evidence(&request, &receipt)
         .expect("same-process status reconciliation");
 
-    assert_eq!(reflection.binding().input_digest().len(), 64);
+    let reflection = recovered.reflection();
+    assert_eq!(
+        reflection.binding().input_digest(),
+        expected_input_digest.as_str()
+    );
+    assert_eq!(recovered.evidence().invocation(), request.invocation());
+    assert_eq!(recovered.evidence().runtime(), RuntimeKind::Live);
+    assert_eq!(recovered.evidence().output_digest(), reflection.output_digest());
     let requests = server.finish();
     assert_eq!(requests.len(), 6);
     assert_eq!(
@@ -1350,6 +1379,200 @@ fn same_process_reconciliation_uses_receipt_without_resubmission() {
     );
     assert!(requests[0].starts_with("GET /v1/capabilities"));
     assert!(requests[5].starts_with("GET /v1/runs/run_reconcile HTTP/1.1"));
+}
+
+#[test]
+fn definitive_event_terminals_retire_the_active_recovery_receipt() {
+    for (cancelled, expected_kind, expected_code) in [
+        (
+            false,
+            HermesAdapterErrorKind::Failed,
+            "HERMES_RUN_FAILED_HINT_APP_SERVER_TURN_STATUS",
+        ),
+        (
+            true,
+            HermesAdapterErrorKind::Cancelled,
+            "HERMES_RUN_CANCELLED",
+        ),
+    ] {
+        let request = request();
+        let run_id = if cancelled {
+            "run_event_cancelled"
+        } else {
+            "run_event_failed"
+        };
+        let terminal = if cancelled {
+            cancelled_events(run_id)
+        } else {
+            failed_events(
+                run_id,
+                Some(serde_json::json!("turn ended status=failed")),
+            )
+        };
+        let server = ScriptedServer::start(vec![
+            capabilities(),
+            Response::json(
+                202,
+                serde_json::json!({"run_id": run_id, "status": "started"}).to_string(),
+            ),
+            terminal,
+        ]);
+        let mut adapter =
+            HermesReflectionAdapter::connect(config(&server), job(request.clone()))
+                .expect("adapter");
+
+        let failure = adapter
+            .run_reflection(&request)
+            .expect_err("authoritative event terminal fails the run");
+
+        assert_eq!(failure.kind(), expected_kind);
+        assert_eq!(failure.code(), expected_code);
+        assert!(failure.recovery_receipt().is_none());
+        assert!(adapter.active_recovery_receipt().is_none());
+        let requests = server.finish();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/runs HTTP/1.1"))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn definitive_reconciliation_terminals_retire_the_active_recovery_receipt() {
+    for (cancelled, expected_kind, expected_code) in [
+        (
+            false,
+            HermesAdapterErrorKind::Failed,
+            "HERMES_RUN_FAILED_HINT_APP_SERVER_TURN_STATUS",
+        ),
+        (
+            true,
+            HermesAdapterErrorKind::Cancelled,
+            "HERMES_RUN_CANCELLED",
+        ),
+    ] {
+        let request = request();
+        let run_id = if cancelled {
+            "run_reconcile_cancelled"
+        } else {
+            "run_reconcile_failed"
+        };
+        let reconciled_terminal = if cancelled {
+            cancelled_status(run_id)
+        } else {
+            failed_status(
+                run_id,
+                Some(serde_json::json!("turn ended status=failed")),
+            )
+        };
+        let server = ScriptedServer::start(vec![
+            capabilities(),
+            Response::json(
+                202,
+                serde_json::json!({"run_id": run_id, "status": "started"}).to_string(),
+            ),
+            Response::json(503, r#"{"error":{"message":"events unavailable"}}"#),
+            running_status(run_id).with_delay(Duration::from_millis(200)),
+            capabilities(),
+            reconciled_terminal,
+        ]);
+        let timeout_config = contained_config_with_timing(
+            &server,
+            Duration::from_millis(100),
+            Duration::from_millis(1),
+        );
+        let mut adapter =
+            HermesReflectionAdapter::connect(timeout_config, job(request.clone()))
+                .expect("adapter");
+
+        let first_failure = adapter
+            .run_reflection(&request)
+            .expect_err("first status observation times out after submission");
+        assert_eq!(first_failure.kind(), HermesAdapterErrorKind::Timeout);
+        assert_eq!(first_failure.code(), "HERMES_LOOPBACK_TIMEOUT");
+        let receipt = first_failure
+            .recovery_receipt()
+            .expect("known submitted run retains a recovery receipt")
+            .clone();
+        assert_eq!(receipt.run_id(), Some(run_id));
+        thread::sleep(Duration::from_millis(250));
+
+        let failure = adapter
+            .reconcile_reflection(&request, &receipt)
+            .expect_err("authoritative reconciled terminal fails the run");
+
+        assert_eq!(failure.kind(), expected_kind);
+        assert_eq!(failure.code(), expected_code);
+        assert!(failure.recovery_receipt().is_none());
+        assert!(adapter.active_recovery_receipt().is_none());
+        let replay = adapter
+            .reconcile_reflection(&request, &receipt)
+            .expect_err("retired receipt cannot be reconciled twice");
+        assert_eq!(replay.code(), "HERMES_RECOVERY_RECEIPT_BINDING_REJECTED");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 6);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /v1/runs HTTP/1.1"))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn uncertain_reconciliation_keeps_the_active_recovery_receipt() {
+    let request = request();
+    let run_id = "run_reconcile_unavailable";
+    let server = ScriptedServer::start(vec![
+        capabilities(),
+        Response::json(
+            202,
+            serde_json::json!({"run_id": run_id, "status": "started"}).to_string(),
+        ),
+        Response::json(503, r#"{"error":{"message":"events unavailable"}}"#),
+        running_status(run_id).with_delay(Duration::from_millis(200)),
+        capabilities(),
+        Response::json(404, r#"{"error":{"message":"not visible yet"}}"#),
+    ]);
+    let timeout_config = contained_config_with_timing(
+        &server,
+        Duration::from_millis(100),
+        Duration::from_millis(1),
+    );
+    let mut adapter = HermesReflectionAdapter::connect(timeout_config, job(request.clone()))
+        .expect("adapter");
+    let first_failure = adapter
+        .run_reflection(&request)
+        .expect_err("first observation times out after submission");
+    let receipt = first_failure
+        .recovery_receipt()
+        .expect("known run receipt")
+        .clone();
+    thread::sleep(Duration::from_millis(250));
+
+    let failure = adapter
+        .reconcile_reflection(&request, &receipt)
+        .expect_err("404 does not establish a definitive terminal");
+
+    assert_eq!(failure.kind(), HermesAdapterErrorKind::Ambiguous);
+    assert_eq!(failure.code(), "HERMES_RUN_NOT_RECOVERABLE");
+    assert_eq!(failure.recovery_receipt(), Some(&receipt));
+    assert_eq!(adapter.active_recovery_receipt(), Some(&receipt));
+    let requests = server.finish();
+    assert_eq!(requests.len(), 6);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("POST /v1/runs HTTP/1.1"))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -1381,6 +1604,11 @@ fn malformed_reflection_schema_fails_closed() {
 
     assert_eq!(failure.kind(), HermesAdapterErrorKind::Malformed);
     assert_eq!(failure.code(), "HERMES_REFLECTION_SCHEMA_REJECTED");
+    let retained = failure
+        .recovery_receipt()
+        .expect("malformed completed output remains recoverable");
+    assert_eq!(retained.run_id(), Some("run_malformed"));
+    assert_eq!(adapter.active_recovery_receipt(), Some(retained));
     assert_eq!(server.finish().len(), 4);
 }
 
@@ -1413,8 +1641,69 @@ fn false_completed_codex_app_server_runs_are_classified_as_failed() {
 
         assert_eq!(failure.kind(), HermesAdapterErrorKind::Failed);
         assert_eq!(failure.code(), "HERMES_CODEX_APP_SERVER_RUN_FAILED");
+        assert!(failure.recovery_receipt().is_none());
+        assert!(adapter.active_recovery_receipt().is_none());
         assert_eq!(server.finish().len(), 4);
     }
+}
+
+#[test]
+fn reconciled_false_completed_codex_failure_retires_the_active_recovery_receipt() {
+    let request = request();
+    let run_id = "run_reconcile_false_completed";
+    let output = "Codex app-server turn failed: thread/start rejected";
+    let server = ScriptedServer::start(vec![
+        capabilities(),
+        Response::json(
+            202,
+            serde_json::json!({"run_id": run_id, "status": "started"}).to_string(),
+        ),
+        Response::json(503, r#"{"error":{"message":"events unavailable"}}"#),
+        running_status(run_id).with_delay(Duration::from_millis(200)),
+        capabilities(),
+        completed_status(run_id, "lattice-task-034-session", output),
+    ]);
+    let timeout_config = contained_config_with_timing(
+        &server,
+        Duration::from_millis(100),
+        Duration::from_millis(1),
+    );
+    let mut adapter =
+        HermesReflectionAdapter::connect(timeout_config, job(request.clone())).expect("adapter");
+
+    let first_failure = adapter
+        .run_reflection(&request)
+        .expect_err("first completed-output observation times out after submission");
+    assert_eq!(first_failure.kind(), HermesAdapterErrorKind::Timeout);
+    assert_eq!(first_failure.code(), "HERMES_LOOPBACK_TIMEOUT");
+    let receipt = first_failure
+        .recovery_receipt()
+        .expect("known submitted run receipt")
+        .clone();
+    assert_eq!(receipt.run_id(), Some(run_id));
+    thread::sleep(Duration::from_millis(250));
+
+    let failure = adapter
+        .reconcile_reflection(&request, &receipt)
+        .expect_err("false completed Codex output is a definitive failure");
+    assert_eq!(failure.kind(), HermesAdapterErrorKind::Failed);
+    assert_eq!(failure.code(), "HERMES_CODEX_APP_SERVER_RUN_FAILED");
+    assert!(failure.recovery_receipt().is_none());
+    assert!(adapter.active_recovery_receipt().is_none());
+
+    let replay = adapter
+        .reconcile_reflection(&request, &receipt)
+        .expect_err("retired false-completed receipt cannot replay");
+    assert_eq!(replay.code(), "HERMES_RECOVERY_RECEIPT_BINDING_REJECTED");
+    let requests = server.finish();
+    assert_eq!(requests.len(), 6);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("POST /v1/runs HTTP/1.1"))
+            .count(),
+        1
+    );
 }
 
 const FAILED_RUN_HINT_CASES: &[(&str, &str)] = &[
@@ -1865,7 +2154,17 @@ fn production_port_exposes_reflection_and_normalized_evidence_seam() {
         &HermesResearchRequest,
     ) -> lattice_ports::PortResult<crate::HermesReflectionEvidence> =
         crate::ProductionHermesPort::run_reflection_evidence;
-    let _ = (launch, bind, seam);
+    let recovery: fn(
+        &crate::ProductionHermesPort,
+    ) -> Option<&crate::HermesRunRecoveryReceipt> =
+        crate::ProductionHermesPort::active_recovery_receipt;
+    let reconcile: fn(
+        &mut crate::ProductionHermesPort,
+        &HermesResearchRequest,
+        &crate::HermesRunRecoveryReceipt,
+    ) -> lattice_ports::PortResult<crate::HermesReflectionEvidence> =
+        crate::ProductionHermesPort::reconcile_reflection_evidence;
+    let _ = (launch, bind, seam, recovery, reconcile);
 }
 
 #[cfg(windows)]
@@ -2289,6 +2588,20 @@ fn completed_status(run_id: &str, session_id: &str, output: &str) -> Response {
     )
 }
 
+fn running_status(run_id: &str) -> Response {
+    Response::json(
+        200,
+        serde_json::json!({
+            "object": "hermes.run",
+            "run_id": run_id,
+            "status": "running",
+            "session_id": "lattice-task-034-session",
+            "model": "hermes-agent",
+        })
+        .to_string(),
+    )
+}
+
 fn failed_events(run_id: &str, detail: Option<serde_json::Value>) -> Response {
     let mut event = serde_json::json!({
         "event": "run.failed",
@@ -2301,6 +2614,15 @@ fn failed_events(run_id: &str, detail: Option<serde_json::Value>) -> Response {
             .expect("failed event object")
             .insert("error".to_owned(), detail);
     }
+    Response::sse(200, format!("data: {event}\n\n: stream closed\n\n"))
+}
+
+fn cancelled_events(run_id: &str) -> Response {
+    let event = serde_json::json!({
+        "event": "run.cancelled",
+        "run_id": run_id,
+        "timestamp": 1.0,
+    });
     Response::sse(200, format!("data: {event}\n\n: stream closed\n\n"))
 }
 
@@ -2319,6 +2641,20 @@ fn failed_status(run_id: &str, detail: Option<serde_json::Value>) -> Response {
             .insert("error".to_owned(), detail);
     }
     Response::json(200, status.to_string())
+}
+
+fn cancelled_status(run_id: &str) -> Response {
+    Response::json(
+        200,
+        serde_json::json!({
+            "object": "hermes.run",
+            "run_id": run_id,
+            "status": "cancelled",
+            "session_id": "lattice-task-034-session",
+            "model": "hermes-agent",
+        })
+        .to_string(),
+    )
 }
 
 fn observe_failed_run(

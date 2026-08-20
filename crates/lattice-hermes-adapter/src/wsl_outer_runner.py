@@ -663,6 +663,17 @@ def open_runner_source(path, expected_sha256):
         fail(67)
 
 
+def send_response_to_observer(connection, response):
+    try:
+        connection.sendall(response)
+    except (BrokenPipeError, ConnectionResetError):
+        # The authoritative inner response arrived after this bounded client
+        # stopped observing. Keep the owned relay alive so the same known run
+        # can be reconciled through a new loopback connection. No inner
+        # exchange or process error is admitted here.
+        return
+
+
 def production(runtime_root, nonce, secret_path, runner_path, runner_sha256):
     if sys.version_info[:3] != EXPECTED_PYTHON_VERSION:
         fail(65)
@@ -732,7 +743,7 @@ def production(runtime_root, nonce, secret_path, runner_path, runner_sha256):
                 peer.settimeout(max(0.001, deadline - time.monotonic()))
                 send_frame(peer, HTTP_REQUEST_MAGIC, request)
                 response = receive_frame(peer, HTTP_RESPONSE_MAGIC)
-                connection.sendall(response)
+                send_response_to_observer(connection, response)
             finally:
                 connection.close()
         fail(79)

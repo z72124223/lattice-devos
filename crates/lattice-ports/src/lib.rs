@@ -15,6 +15,7 @@ use lattice_contracts::{
     StorePhysicalHead, StoreScope, StoreTransactionReceipt, StoreTransactionRequest,
     WorkspaceChangeEvidence,
 };
+use lattice_task_domain::TaskState;
 
 /// Result type returned by every LATTICE port.
 pub type PortResult<T> = Result<T, PortError>;
@@ -34,6 +35,476 @@ pub type DeliveryPortResult<T> = Result<T, DeliveryPortError>;
 
 /// Result returned by each exact graph-memory effect port.
 pub type GraphMemoryPortResult<T> = Result<T, GraphMemoryPortError>;
+
+/// Result returned by the authoritative Task lifecycle repository boundary.
+pub type TaskLifecycleResult<T> = Result<T, TaskLifecycleError>;
+
+/// Result returned by the single bounded task execution port.
+pub type ControlledTaskExecutionResult<T> = Result<T, ControlledTaskExecutionError>;
+
+/// Whether a failed controlled execution is known not to have completed or
+/// requires reconciliation before any retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlledTaskExecutionErrorKind {
+    Known,
+    Ambiguous,
+}
+
+/// Secret-free controlled execution failure returned to the orchestrator.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlledTaskExecutionError {
+    kind: ControlledTaskExecutionErrorKind,
+    code: &'static str,
+}
+
+impl ControlledTaskExecutionError {
+    #[must_use]
+    pub const fn new(kind: ControlledTaskExecutionErrorKind, code: &'static str) -> Self {
+        Self { kind, code }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> ControlledTaskExecutionErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl fmt::Display for ControlledTaskExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.code)
+    }
+}
+
+impl Error for ControlledTaskExecutionError {}
+
+/// Existing-orchestrator effect boundary for one server-owned bounded task.
+/// The current Writer Lease head is supplied to the adapter but never exposed
+/// through MCP or accepted from the GPT caller.
+pub trait ControlledTaskExecutionPort {
+    /// Executes the one server-owned task under the exact current writer head.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded known or ambiguous execution failure.
+    fn execute(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        writer_authority: &lattice_contracts::WriterLeaseAuthorityHead,
+        writer_guard: &mut dyn WriterAuthorityGuardPort,
+    ) -> ControlledTaskExecutionResult<lattice_contracts::ContentDigest>;
+}
+
+/// Currentness assertion supplied by Orchestrator from the same injected
+/// Writer Lease repository that allocated the fence. Execution adapters may
+/// request checks but cannot acquire, release, or replace writer authority.
+pub trait WriterAuthorityGuardPort {
+    /// Proves the exact authority is still current at one mutation boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded known mismatch or ambiguous owner failure.
+    fn assert_current(
+        &mut self,
+        expected: &lattice_contracts::WriterLeaseAuthorityHead,
+    ) -> ControlledTaskExecutionResult<()>;
+}
+
+/// Closed durable Task lifecycle repository failure classes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskLifecycleErrorKind {
+    Rejected,
+    Unavailable,
+    Ambiguous,
+    Corrupt,
+}
+
+/// Bounded Task lifecycle failure without database or task-source contents.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskLifecycleError {
+    kind: TaskLifecycleErrorKind,
+    code: &'static str,
+}
+
+impl TaskLifecycleError {
+    #[must_use]
+    pub const fn new(kind: TaskLifecycleErrorKind, code: &'static str) -> Self {
+        Self { kind, code }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> TaskLifecycleErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl fmt::Display for TaskLifecycleError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.code)
+    }
+}
+
+impl Error for TaskLifecycleError {}
+
+/// Replay-derived authoritative Task lifecycle projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyDisposition {
+    Proceed,
+    AskUser,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyReason {
+    RoutineAuthorized,
+    NewUserDecision,
+    NewAuthority,
+    HighRiskOrIrreversible,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyModel {
+    GovernedCodexWriter,
+    NoModel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyVerification {
+    FocusedChecks,
+    BuildAndFocusedChecks,
+    ReadOnlyEvidence,
+}
+
+/// Internal-only replay projection of one verified autonomy receipt event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutonomyReceiptProjection {
+    receipt_digest: lattice_contracts::ContentDigest,
+    authority_digest: lattice_contracts::ContentDigest,
+    event_digest: lattice_contracts::ContentDigest,
+    observed_state: TaskState,
+    disposition: AutonomyDisposition,
+    reason: AutonomyReason,
+    model: Option<AutonomyModel>,
+    verification: Option<AutonomyVerification>,
+}
+
+impl AutonomyReceiptProjection {
+    /// Constructs one closed projection from Task-Ledger-verified values.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-Draft observations and impossible decision shapes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        receipt_digest: lattice_contracts::ContentDigest,
+        authority_digest: lattice_contracts::ContentDigest,
+        event_digest: lattice_contracts::ContentDigest,
+        observed_state: TaskState,
+        disposition: AutonomyDisposition,
+        reason: AutonomyReason,
+        model: Option<AutonomyModel>,
+        verification: Option<AutonomyVerification>,
+    ) -> TaskLifecycleResult<Self> {
+        let decision_shape_valid = matches!(
+            (disposition, reason, model, verification),
+            (
+                AutonomyDisposition::Proceed,
+                AutonomyReason::RoutineAuthorized,
+                Some(_),
+                Some(_)
+            ) | (
+                AutonomyDisposition::AskUser,
+                AutonomyReason::NewUserDecision
+                    | AutonomyReason::NewAuthority
+                    | AutonomyReason::HighRiskOrIrreversible,
+                None,
+                None
+            )
+        );
+        if observed_state != TaskState::Draft || !decision_shape_valid {
+            return Err(TaskLifecycleError::new(
+                TaskLifecycleErrorKind::Corrupt,
+                "TASK_LIFECYCLE_AUTONOMY_PROJECTION_INVALID",
+            ));
+        }
+        Ok(Self {
+            receipt_digest,
+            authority_digest,
+            event_digest,
+            observed_state,
+            disposition,
+            reason,
+            model,
+            verification,
+        })
+    }
+
+    #[must_use]
+    pub const fn receipt_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.receipt_digest
+    }
+    #[must_use]
+    pub const fn authority_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.authority_digest
+    }
+    #[must_use]
+    pub const fn event_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.event_digest
+    }
+    #[must_use]
+    pub const fn observed_state(&self) -> TaskState {
+        self.observed_state
+    }
+    #[must_use]
+    pub const fn disposition(&self) -> AutonomyDisposition {
+        self.disposition
+    }
+    #[must_use]
+    pub const fn reason(&self) -> AutonomyReason {
+        self.reason
+    }
+    #[must_use]
+    pub const fn model(&self) -> Option<AutonomyModel> {
+        self.model
+    }
+    #[must_use]
+    pub const fn verification(&self) -> Option<AutonomyVerification> {
+        self.verification
+    }
+}
+
+/// Closed lifecycle admission/receipt relationship exposed through Ports.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TaskLifecycleAutonomyEvidence {
+    Unadmitted,
+    HistoricalOptional(Option<AutonomyReceiptProjection>),
+    RequiredComplete(AutonomyReceiptProjection),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TaskLifecycleAdmissionState {
+    PendingRequiredReceipt {
+        binding: lattice_contracts::SubjectBinding,
+        ledger_head_digest: lattice_contracts::ContentDigest,
+    },
+    Existing(TaskLifecycleEvidence),
+}
+
+/// Closed result of idempotent task admission. A fresh required profile may
+/// exist only as reconciliation state until its sequence-2 receipt is durable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskLifecycleAdmission {
+    state: TaskLifecycleAdmissionState,
+}
+
+impl TaskLifecycleAdmission {
+    #[must_use]
+    pub const fn pending_required_receipt(
+        binding: lattice_contracts::SubjectBinding,
+        ledger_head_digest: lattice_contracts::ContentDigest,
+    ) -> Self {
+        Self {
+            state: TaskLifecycleAdmissionState::PendingRequiredReceipt {
+                binding,
+                ledger_head_digest,
+            },
+        }
+    }
+
+    /// Wraps replay-derived evidence only after it represents an admitted task.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unadmitted/not-applicable lifecycle evidence.
+    pub fn existing(evidence: TaskLifecycleEvidence) -> TaskLifecycleResult<Self> {
+        if !evidence.admitted() {
+            return Err(TaskLifecycleError::new(
+                TaskLifecycleErrorKind::Corrupt,
+                "LATTICE_TASK_ADMISSION_STATE_REJECTED",
+            ));
+        }
+        Ok(Self {
+            state: TaskLifecycleAdmissionState::Existing(evidence),
+        })
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> &lattice_contracts::SubjectBinding {
+        match &self.state {
+            TaskLifecycleAdmissionState::PendingRequiredReceipt { binding, .. } => binding,
+            TaskLifecycleAdmissionState::Existing(evidence) => evidence.binding(),
+        }
+    }
+
+    #[must_use]
+    pub const fn ledger_head_digest(&self) -> &lattice_contracts::ContentDigest {
+        match &self.state {
+            TaskLifecycleAdmissionState::PendingRequiredReceipt {
+                ledger_head_digest, ..
+            } => ledger_head_digest,
+            TaskLifecycleAdmissionState::Existing(evidence) => evidence.ledger_head_digest(),
+        }
+    }
+
+    #[must_use]
+    pub const fn existing_evidence(&self) -> Option<&TaskLifecycleEvidence> {
+        match &self.state {
+            TaskLifecycleAdmissionState::Existing(evidence) => Some(evidence),
+            TaskLifecycleAdmissionState::PendingRequiredReceipt { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn into_existing(self) -> Option<TaskLifecycleEvidence> {
+        match self.state {
+            TaskLifecycleAdmissionState::Existing(evidence) => Some(evidence),
+            TaskLifecycleAdmissionState::PendingRequiredReceipt { .. } => None,
+        }
+    }
+}
+
+/// Replay-derived authoritative Task lifecycle projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskLifecycleEvidence {
+    binding: lattice_contracts::SubjectBinding,
+    autonomy_evidence: TaskLifecycleAutonomyEvidence,
+    state: TaskState,
+    ledger_head_digest: lattice_contracts::ContentDigest,
+    result_digest: Option<lattice_contracts::ContentDigest>,
+}
+
+impl TaskLifecycleEvidence {
+    #[must_use]
+    pub const fn new(
+        binding: lattice_contracts::SubjectBinding,
+        autonomy_evidence: TaskLifecycleAutonomyEvidence,
+        state: TaskState,
+        ledger_head_digest: lattice_contracts::ContentDigest,
+        result_digest: Option<lattice_contracts::ContentDigest>,
+    ) -> Self {
+        Self {
+            binding,
+            autonomy_evidence,
+            state,
+            ledger_head_digest,
+            result_digest,
+        }
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> &lattice_contracts::SubjectBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub const fn admitted(&self) -> bool {
+        !matches!(
+            self.autonomy_evidence,
+            TaskLifecycleAutonomyEvidence::Unadmitted
+        )
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> TaskState {
+        self.state
+    }
+
+    #[must_use]
+    pub const fn ledger_head_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.ledger_head_digest
+    }
+
+    #[must_use]
+    pub const fn result_digest(&self) -> Option<&lattice_contracts::ContentDigest> {
+        self.result_digest.as_ref()
+    }
+
+    #[must_use]
+    pub const fn autonomy_receipt(&self) -> Option<&AutonomyReceiptProjection> {
+        match &self.autonomy_evidence {
+            TaskLifecycleAutonomyEvidence::HistoricalOptional(receipt) => receipt.as_ref(),
+            TaskLifecycleAutonomyEvidence::RequiredComplete(receipt) => Some(receipt),
+            TaskLifecycleAutonomyEvidence::Unadmitted => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn autonomy_evidence(&self) -> &TaskLifecycleAutonomyEvidence {
+        &self.autonomy_evidence
+    }
+}
+
+/// PostgreSQL-backed authoritative lifecycle boundary used by the sole
+/// orchestrator. Implementations may persist and replay but never decide
+/// Task Domain transition legality.
+pub trait TaskLifecyclePort {
+    /// Idempotently admits one exact caller retry key and Task binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn admit(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        client_request_id: &str,
+    ) -> TaskLifecycleResult<TaskLifecycleAdmission>;
+
+    /// Records the exactly-once autonomy receipt before the first writable task
+    /// effect. `PROCEED` requires the supplied current writer authority;
+    /// `ASK_USER` requires `None` and imports no ambient writer authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn record_autonomy_receipt(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        writer_authority: Option<&lattice_contracts::WriterLeaseAuthorityHead>,
+    ) -> TaskLifecycleResult<TaskLifecycleEvidence>;
+
+    /// Appends one Task Domain-approved state transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn transition(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        from: TaskState,
+        to: TaskState,
+        writer_authority: Option<&lattice_contracts::WriterLeaseAuthorityHead>,
+    ) -> TaskLifecycleResult<TaskLifecycleEvidence>;
+
+    /// Persists the exact governed execution result under the current writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn record_result(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+        result_digest: &lattice_contracts::ContentDigest,
+        writer_authority: &lattice_contracts::WriterLeaseAuthorityHead,
+    ) -> TaskLifecycleResult<TaskLifecycleEvidence>;
+
+    /// Replays the authoritative lifecycle projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn load(
+        &mut self,
+        binding: &lattice_contracts::SubjectBinding,
+    ) -> TaskLifecycleResult<TaskLifecycleEvidence>;
+}
 
 /// Stable fail-closed categories shared across port and inbound-service boundaries.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -842,4 +1313,84 @@ pub trait HermesPort {
     ///
     /// Returns a typed failure when interruption or final outcome is unknown.
     fn interrupt(&mut self, request_id: &RequestId) -> PortResult<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lattice_contracts::{ContentDigest, ProjectId, ProjectSnapshotId, SubjectBinding, TaskId};
+
+    fn digest(byte: char) -> ContentDigest {
+        ContentDigest::from_sha256(byte.to_string().repeat(64)).expect("valid digest")
+    }
+
+    #[test]
+    fn task_lifecycle_autonomy_evidence_is_closed() {
+        let binding = SubjectBinding::new(
+            ProjectId::new("project-1").expect("project"),
+            ProjectSnapshotId::new("snapshot-1").expect("snapshot"),
+            TaskId::new("TASK-050").expect("task"),
+            "1",
+            digest('a'),
+        )
+        .expect("binding");
+        let receipt = AutonomyReceiptProjection::new(
+            digest('b'),
+            digest('c'),
+            digest('d'),
+            TaskState::Draft,
+            AutonomyDisposition::Proceed,
+            AutonomyReason::RoutineAuthorized,
+            Some(AutonomyModel::GovernedCodexWriter),
+            Some(AutonomyVerification::FocusedChecks),
+        )
+        .expect("closed receipt projection");
+        let evidence = TaskLifecycleEvidence::new(
+            binding,
+            TaskLifecycleAutonomyEvidence::RequiredComplete(receipt.clone()),
+            TaskState::Draft,
+            digest('e'),
+            None,
+        );
+        assert!(evidence.admitted());
+        assert_eq!(evidence.autonomy_receipt(), Some(&receipt));
+        assert_eq!(
+            evidence.autonomy_evidence(),
+            &TaskLifecycleAutonomyEvidence::RequiredComplete(receipt)
+        );
+        assert!(TaskLifecycleAdmission::existing(evidence).is_ok());
+        let unadmitted = TaskLifecycleEvidence::new(
+            SubjectBinding::new(
+                ProjectId::new("project-1").expect("project"),
+                ProjectSnapshotId::new("snapshot-1").expect("snapshot"),
+                TaskId::new("TASK-050").expect("task"),
+                "1",
+                digest('a'),
+            )
+            .expect("binding"),
+            TaskLifecycleAutonomyEvidence::Unadmitted,
+            TaskState::Draft,
+            digest('e'),
+            None,
+        );
+        assert_eq!(
+            TaskLifecycleAdmission::existing(unadmitted)
+                .expect_err("unadmitted evidence cannot become existing admission")
+                .code(),
+            "LATTICE_TASK_ADMISSION_STATE_REJECTED"
+        );
+        assert!(
+            AutonomyReceiptProjection::new(
+                digest('b'),
+                digest('c'),
+                digest('d'),
+                TaskState::Draft,
+                AutonomyDisposition::AskUser,
+                AutonomyReason::NewUserDecision,
+                Some(AutonomyModel::GovernedCodexWriter),
+                None,
+            )
+            .is_err()
+        );
+    }
 }
