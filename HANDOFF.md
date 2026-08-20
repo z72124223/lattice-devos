@@ -1,4 +1,73 @@
-# LATTICE DevOS TASK-033 Graphify/PostgreSQL Memory Checkpoint Handoff
+# TASK-033 Terminal Delivery Repair Handoff — 2026-08-21
+
+## Status
+
+`NEEDS_REVIEW` / `BLOCKED` before live execution.
+
+## Objective And Scope
+
+- Repair TASK-033 itself on `feature/task-033-terminal-delivery`, preserving
+  implementation checkpoint `52389375cd7dde552ceec9319120d3659dd7bb2f`
+  and clean base `fd9561c2f488c30365135ab94b392f212fe68afc`.
+- Protect the dirty `feature/v2-rust-postgres-bootstrap` worktree. Its ten
+  uncommitted paths remain unchanged and excluded.
+- Do not create a TASK-090 ticket, touch TASK-051, use system PostgreSQL 5432,
+  terminate foreign processes, merge, deploy, release, or archive.
+
+## Completed Work
+
+- Confirmed `feature/task-033-terminal-delivery` was unoccupied locally and
+  remotely, then used `git branch -m` and `git worktree move` to register the
+  existing clean isolated candidate under the legal TASK-033 identity.
+- Updated the one existing TASK-033 ticket with branch, delivery policies,
+  Traditional-Chinese display metadata, and exact implementation/base
+  provenance. It remains `in_progress`.
+- Regenerated the four exact ticket-allowed review artifacts from current
+  evidence. They state that independent reviewer identity is not proven.
+- Passed both focused Rust groups, format, strict workspace Clippy, locked full
+  workspace tests, repository `npm.cmd run verify` (44/44 Node tests), and
+  current diff/allowlist/secret checks.
+
+## Exact Blocker
+
+The clean, remotely synchronized latest stable validator from
+`feature/task-085-parallel-task-governance`
+`e34bc9bfcf18c71e771f704d50128e1fbeba53ea` exits 1 against this branch:
+
+```text
+docs/contracts/ENGINEERING_PROTOCOL_V1.md: missing engineering protocol.
+AGENTS.md: must point to docs/contracts/ENGINEERING_PROTOCOL_V1.md.
+AGENTS.md: must require engineering protocol checks before editing and completion.
+AGENTS.md: must route completion through delivery:finish and archive the current Codex task only after its success marker.
+docs/tickets/TASK-033-graphify-postgres-codebase-memory.md: parallel ticket must be terminal.
+```
+
+The final ticket-status error is expected until acceptance completes. The
+protocol/AGENTS errors are not repairable inside the TASK-033 allowlist. The
+ticket does not authorize `AGENTS.md` or `docs/contracts/**`; expanding its own
+allowlist to import them would be circular self-authorization.
+
+## Verification And Runtime State
+
+- Non-live validation: PASS as recorded in the four review artifacts.
+- Current stable validator: FAIL with the exact contract errors above.
+- Graphify/PostgreSQL combined live: `NOT_RUN`.
+- TASK-033 live run root/port/marker: not allocated.
+- TASK-033 live processes: none launched.
+- System PostgreSQL 5432 and TASK-079 resources: untouched.
+- Commit/push/remote equality/finisher/dashboard: `NOT_RUN`.
+
+## Exact Next Action
+
+The foreman must authorize or provide a history-preserving governance contract
+bridge that makes the current engineering protocol and AGENTS routing part of
+the legal TASK-033 candidate without self-expanding this ticket. After that,
+rerun the current stable validator, then perform the separately coordinated
+TASK-079 resource check before any disposable live command.
+
+---
+
+# Archived TASK-033 Implementation Handoff
 
 ## Status And Alignment
 
