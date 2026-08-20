@@ -6,8 +6,7 @@ module_id: codebase-memory
 constitution_version: 1.0
 status: completed
 parallel_safe: true
-depends_on:
-  - TASK-033
+depends_on: [TASK-033]
 allowed_paths:
   - crates/lattice-codebase-memory/src/lib.rs
   - crates/lattice-codebase-memory/tests/**
