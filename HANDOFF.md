@@ -291,7 +291,6 @@ push. No PR, merge, deployment, release, or public hosting occurred.
 | engineering protocol/checker/governance test | mandatory post-handoff/push refresh rule | removal regression and project check |
 | TASK-051 ticket | record user priority pause without changing terminal result | live card remains explicit `FAIL` |
 | review/ledger/integration artifacts and this handoff | durable evidence and next decision | independent review and combined verification |
-
 ## Workflow ledger
 
 | Stage | Status | Evidence / artifact |

@@ -1,10 +1,10 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.10
+version: 1.11
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-21
 ---
 
 ## Mission
@@ -42,6 +42,11 @@ acquisitions required by the governed runners: transaction-scoped
 `pg_advisory_xact_lock(bigint)` and nonblocking session-scoped
 `pg_try_advisory_lock(bigint)`. The latter is only the bounded Writer apply
 gate; it does not become a Store migration primitive or Writer state ownership.
+Version 1.11 reserves one exact fail-closed schema-v6 catalog/ACL compatibility
+profile for the future Task-Ledger-owned `FOREMAN_COORDINATION` stream and
+`FOREMAN_SNAPSHOT_RECORDED` event. It recognizes Writer v3 bridge/current
+states but does not add migration `0007`, event semantics, rows, or a second
+transaction path.
 
 ## Non-Goals
 
@@ -778,6 +783,13 @@ canonicalization, and hashing with Task Ledger 2.3 typed construction and
 verification. This is a consumer/ownership correction only: no migration,
 row, ACL, MCP, or Store receipt byte changes.
 
+Version 1.11 leaves the active manifest at schema v5. It publishes only a
+closed successor contract: exact v5 predecessor; ordinal 7 migration ID/path;
+global generation 6; fixed foreman stream/event identities; exact catalog and
+runtime ACL expectations; and Writer v3 bridge/current compatibility states.
+Until future migration bytes and measured catalog signatures exist and every
+assertion passes, schema v6 is not current and no runtime authority is granted.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -855,3 +867,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.8 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-022/023, TASK-076 | Recognize exact Writer-v2 bridge/current companion profiles under global-to-Memory-to-Writer locking and keep schema-v5 pending states runtime closed without taking Writer ownership | User continuation authorization |
 | 1.9 | 2026-08-14 | SPEC-002 v34, ADR-023 TASK-076 amendment, TASK-076 | Freeze the exact second post-role migrator acquisition grant for the bounded Writer session gate while keeping all LOGIN roles and the other fourteen overloads denied | User TASK-076 continuation directive |
 | 1.10 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Delegate autonomy subject/profile semantics and hashes exclusively to Task Ledger 2.3 while preserving schema-v5 physical bytes and Store ownership | User-approved TASK-050 repair amendment |
+| 1.11 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Reserve exact schema-v6 foreman-coordination catalog/ACL and Writer-v3 bridge recognition without implementing migration 0007 or event semantics | Fixed-foreman delegation |

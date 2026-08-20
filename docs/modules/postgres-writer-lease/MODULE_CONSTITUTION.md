@@ -1,10 +1,10 @@
 ---
 module_id: postgres-writer-lease
 name: PostgreSQL Writer Lease Repository
-version: 1.1
+version: 1.2
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-14
+last_reviewed: 2026-08-21
 ---
 
 ## Mission
@@ -15,6 +15,9 @@ through one exact extension and repository implementation, without acquiring
 lease semantic ownership.
 Version 1.1 preserves the v1 extension and semantic history while adding the
 Writer-owned v2 schema-v5 bridge and exact current v2 runtime profile.
+Version 1.2 adds an append-only v3 compatibility bridge for the exact future
+global-schema-v6 foreman-coordination profile without widening v2 or changing
+Writer Lease 1.1 semantic/fencing bytes.
 
 ## Non-Goals
 
@@ -149,6 +152,15 @@ Every v2 bridge or pending profile, including `G3_M2_W2_BRIDGE`, never admits
 runtime use. Only the exact W1 current profile and the exact final W2 current
 profile are executable.
 
+Version 1.2 accepts only the exact v2-current schema-v5/Memory-v3 predecessor,
+the runtime-closed v3 bridge, the exact schema-v6 successor reserved by
+ADR-025, and the final v3-current rebind. V2 continues to accept only global
+schema 3/5. Unknown generation, skipped/duplicate ledger ordinal, missing
+`0007_foreman_coordination`, wrong `FOREMAN_COORDINATION` stream or
+`FOREMAN_SNAPSHOT_RECORDED` event identity, catalog/ACL drift, and cross-
+generation replay fail closed. TASK-087 does not implement the event or global
+migration.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -178,3 +190,4 @@ synthetic evidence as production authority.
 |---|---|---|---|---|
 | 1.0 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Independent exact PostgreSQL extension and repository for Writer Lease 1.1 with atomic replay/currentness and monotonic fencing | User TASK-038-first direction |
 | 1.1 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-023, TASK-076 | Preserve v1 history and add the Writer-owned v2 bridge/current profiles for global-v5/Memory-v3 without changing lease semantics or fencing bytes | User continuation authorization |
+| 1.2 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Add append-only v3 bridge/current compatibility for exact future global-v6 foreman coordination while freezing v2 schema-3/5 behavior | Fixed-foreman delegation |
