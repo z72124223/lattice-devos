@@ -1,6 +1,8 @@
 ---
 ticket_id: TASK-082
 title: TASK-050 retrospective terminal evidence chain
+display_name_zh_tw: TASK-050 追溯終態證據鏈
+display_purpose_zh_tw: 記錄 TASK-050 immutable candidate 與後續提交終態證據的繁中用途說明
 spec_id: SPEC-002
 spec_version: 35
 module_id: task-ledger
