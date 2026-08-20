@@ -1,4 +1,4 @@
-# LATTICE DevOS TASK-033 Pure Graphify Checkpoint Handoff
+# LATTICE DevOS TASK-039 Hermes Broker Protocol Handoff
 
 ## Status And Alignment
 

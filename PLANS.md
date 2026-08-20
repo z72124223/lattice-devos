@@ -744,7 +744,7 @@ remain future Orchestrator/PostgreSQL responsibilities.
   handoff are complete. The official-live acceptance substep remains blocked by
   the incident gate above and must not be retried in this window; TASK-032 stays
   `in-progress` with official acceptance `FAILED_DIAGNOSTIC`.
-- [ ] **CURRENT TASK-033 — real Graphify/PostgreSQL Codebase Memory node:** pin
+- [ ] **BLOCKED TASK-033 — real Graphify/PostgreSQL Codebase Memory node:** pin
   Graphify v0.9.33 at commit
   `4e7e6b1f7e0df10ed07d5f28f9189bbde42940f1`, analyze only an exact tracked
   Git snapshot and validate/canonicalize typed graph evidence. Pure contracts,
@@ -758,7 +758,13 @@ remain future Orchestrator/PostgreSQL responsibilities.
   the pinned Graphify adapter, private tmpfs copy/verification, strict framed
   capture, and Landlock ABI 3 enforcement have passed focused/full local gates
   and independent P0/P1 review. PostgreSQL composition, restart replay, and
-  status exposure remain the next blocked substep; TASK-033 stays current.
+  status exposure remain the next blocked substep; TASK-033 stays blocked.
+- [ ] **CURRENT TASK-039 — Hermes broker protocol evidence repair:** freeze the
+  Hermes adapter boundary, publish its constitution, and keep the current task
+  marker aligned with the already-implemented broker protocol so governance and
+  status projection resolve the live terminal state instead of UNKNOWN. The
+  Hermes adapter remains read-only, bounded, and fail-closed; no new product
+  writer lane is introduced.
 - [ ] Step 7: Complete TASK-026 and TASK-027 for Workspace Git 2.0 and exact
   Scope Check 1.1 behavior in disposable repositories; retain the local
   filesystem lock only as defense in depth.

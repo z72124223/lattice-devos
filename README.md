@@ -47,7 +47,7 @@ or completion claim exists yet.
 - Ready V2 specification:
   `docs/specs/SPEC-002-autonomous-development-platform.md`
 - Approved module direction: `docs/modules/V2_AMENDMENT_PROPOSAL.md`
-- Current governance ticket: `docs/tickets/TASK-022-postgres-project-registry.md`
+- Current governance ticket: `docs/tickets/TASK-039-hermes-broker-protocol.md`
 - Current workflow audit:
   `docs/reviews/WORKFLOW_AUDIT_TASK_022_2026-08-03.md`
 - First TASK-022 governance review:
