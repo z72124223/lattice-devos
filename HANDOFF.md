@@ -2,8 +2,9 @@
 
 ## Status
 
-`NEEDS_REVIEW`: implementation and direct verification pass; the clean-source
-aggregate has not yet been executed on a committed TASK-044 checkpoint.
+`DONE` for local TASK-044 implementation, review, and clean-source aggregate.
+Integration remains `NEEDS_REVIEW` because this branch has not been pushed or
+merged and no such authorization was provided.
 
 ## Objective And Scope
 
@@ -36,7 +37,7 @@ aggregate has not yet been executed on a committed TASK-044 checkpoint.
 | `apps/lattice-runtime/src/task_control.rs` | admit the exact unfenced pre-writer cancellation edge | RED/GREEN unit test; strict Clippy |
 | `apps/lattice-runtime/tests/task_control.rs` | PostgreSQL initial/restart terminal replay proof | Task019 live gate PASS |
 | `scripts/run-task019-postgres.ps1` | run TASK-044 beside Task068 on Task076 current profile | combined live PASS; Task050 wrapper PASS |
-| TASK-044 runner/self-test | bounded F01-F08 aggregation and fail-closed source/evidence checks | self-test PASS; clean-source aggregate pending |
+| TASK-044 runner/self-test | bounded F01-F08 aggregation and fail-closed source/evidence checks | self-test PASS; clean-source aggregate PASS |
 | ticket, latticed constitution, `PLANS.md`, `HANDOFF.md` | scope, invariant, acceptance, and restart context | repository check PASS before final edits |
 
 ## Workflow Ledger
@@ -48,7 +49,7 @@ aggregate has not yet been executed on a committed TASK-044 checkpoint.
 | PostgreSQL restart | PASS | `TASK044_POSTGRES_CANCEL_REPLAY=PASS`; Task068 combined replay PASS |
 | Fresh Status and regression | PASS | `TASK050_AUTONOMY_RECEIPT_ACCEPTANCE=PASS`; strict Clippy and affected suites PASS |
 | Code and architecture review | PASS | no unresolved P0-P3 finding; conditional admission preservation re-review PASS |
-| Clean-source aggregate | PENDING | requires committed clean TASK-044 source |
+| Clean-source aggregate | PASS | run `e5784371df1a46c78a64b8f1cf9c59cd`; exact source `f6e66da`; 13 commands, F01-F08 |
 
 ## Verification
 
@@ -59,6 +60,10 @@ aggregate has not yet been executed on a committed TASK-044 checkpoint.
 - `scripts/test-task050-autonomy-receipt-acceptance.ps1`: exit `0`, Task050
   wrapper and fresh-process PostgreSQL acceptance PASS.
 - `cargo fmt --all -- --check` and strict changed-slice Clippy: PASS.
+- `scripts/run-task044-component-fault-recovery-gate.ps1`: exit `0` on exact
+  source `f6e66da`; all four final PASS markers emitted. Bounded evidence is
+  16,236 bytes with 8 scenarios, 13 command hashes, zero six-component fresh
+  Status deltas, and `unexpected_footprint_count=0`.
 - CI: not run for this local branch; no push was authorized.
 
 ## Review And Integration
@@ -80,19 +85,20 @@ aggregate has not yet been executed on a committed TASK-044 checkpoint.
 
 ## Risks And Open Decisions
 
-- The aggregate must still pass from a clean committed source before `DONE`.
 - Remote CI and branch protection are not current evidence for TASK-044.
+- Push, review publication, merge, deployment, and release remain separately
+  unauthorized and unperformed.
 
 ## Next Action
 
-1. Commit a clean local checkpoint and run
-   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-task044-component-fault-recovery-gate.ps1`.
+1. If integration is desired, obtain explicit push/review/merge direction and
+   verify the intended remote target; do not infer it from the local PASS.
 
 ## Restart Context
 
 - Current branch/worktree: `feature/task-044-component-fault-recovery-gate` /
   `lattice-worktrees/task-044-component-fault-recovery-gate`.
-- Relevant plan: `PLANS.md`, section `Current task update — TASK-044`.
+- Relevant plan: `PLANS.md`, section `Completed task update — TASK-044`.
 - First command: `git status --short`.
 
 ---

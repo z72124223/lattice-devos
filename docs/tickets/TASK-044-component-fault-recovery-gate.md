@@ -4,7 +4,7 @@ spec_id: SPEC-002
 spec_version: 35
 module_id: latticed
 constitution_version: 1.9
-status: in-progress
+status: done
 parallel_safe: false
 depends_on:
   - TASK-038
@@ -39,7 +39,7 @@ base_commit: 65f2902504e5ef5acba6f258b736905fd4d12a4d
 
 ## Current Gate
 
-`VERIFIED_IMPLEMENTATION / CLEAN_SOURCE_AGGREGATE_PENDING`
+`PASS / EXACT_IMPLEMENTATION_SOURCE f6e66dad6e8982d7a0d41692b96469cfbab98a04`
 
 2026-08-20 修復重啟已把本 ticket 的單一設計提交搬到乾淨且與遠端一致的
 `feature/task-076-postgres-writer-lease-v2@65f2902`。該基底包含 TASK-038 的
@@ -58,6 +58,17 @@ adapter。除 aggregate runner 外，唯一 runtime 行為修復是讓既有 Pos
 彙整成 TASK-044 證據；缺少、skip、解析失敗、未清理或未證明的情境一律不得輸出
 總 PASS。這個 aggregate gate 不改寫 owner semantics，也不把歷史 PASS 當成 current
 evidence。
+
+2026-08-20 clean-source aggregate run
+`e5784371df1a46c78a64b8f1cf9c59cd` 在 exact source `f6e66da` 完成 13 個 current
+commands、8/8 scenarios、六個 fresh-status effect delta 全為零，並輸出：
+
+```text
+TASK044_COMPONENT_FAULT_RECOVERY_GATE=PASS
+SCENARIOS=F01,F02,F03,F04,F05,F06,F07,F08
+FRESH_STATUS_ZERO_RERUN=PASS
+CLEANUP_FOOTPRINT=PASS
+```
 
 ## Historical Blocker (superseded 2026-08-20)
 
@@ -270,10 +281,11 @@ TASK-044 durable cancellation 與 TASK-050 fresh-status acceptance 彙整成 bou
 
 ## Current Handoff
 
-`VERIFIED_IMPLEMENTATION / CLEAN_SOURCE_AGGREGATE_PENDING`
+`DONE_LOCAL / NOT_INTEGRATED`
 
-runtime、live PostgreSQL initial/restart、Task068 Hermes replay、Task050 fresh Status、
-strict Clippy、格式、repository check 與 read-only code/architecture review 已有 current
-PASS。剩餘步驟是建立乾淨 local checkpoint，然後在該 exact commit 執行
-`scripts/run-task044-component-fault-recovery-gate.ps1`。沒有 push、merge、deploy 或
-release 授權。
+exact implementation source `f6e66da` 已通過 runtime、live PostgreSQL
+initial/restart、Task068 Hermes replay、Task050 fresh Status、strict Clippy、格式、
+repository check、read-only code/architecture review 與完整 F01-F08 aggregate。
+bounded JSON evidence 位於 ignored `target/task044-component-fault-recovery/` 下，run id
+為 `e5784371df1a46c78a64b8f1cf9c59cd`。本 branch 尚未 push/merge；deploy 或 release
+亦未執行或授權。
