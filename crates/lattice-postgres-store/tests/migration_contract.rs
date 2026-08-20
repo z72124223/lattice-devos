@@ -11,9 +11,6 @@ const LIVE_CONTROL_STORE_SHA256: &str =
     "00ae3eedd76704f26b1df58955d9d594c98f0ba525be93b15d8c9ebb1f2115c1";
 const PROJECT_REGISTRY_REPOSITORY_SHA256: &str =
     "b7af1f8a8ac370bbfc8a5312497461587cb8a86eb32ff97e5b865c7ae9bf0dcf";
-const CURRENT_V5_MANIFEST_SHA256: &str =
-    "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
-
 #[test]
 fn task076_store_migration_locks_global_memory_writer_before_classification() {
     let setup = include_str!("../src/postgres_setup.rs");
@@ -254,16 +251,16 @@ fn task076_store_live_phases_are_closed_and_emit_fixed_pass_tokens() {
 }
 
 #[test]
-fn schema_v5_manifest_reconciles_registry_before_autonomy() {
+fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
     let manifest = migration_manifest();
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 5);
-    assert_eq!(manifest.len(), 6);
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 6);
+    assert_eq!(manifest.len(), 7);
     assert_eq!(
         verify_embedded_manifest()
-            .expect("exact schema-v5 manifest")
+            .expect("exact schema-v6 manifest")
             .manifest_sha256()
             .as_str(),
-        CURRENT_V5_MANIFEST_SHA256
+        "875b39f2f605b2dd30958a345d900f570274e1fd4d05065dda09edd694448b70"
     );
 
     let registry = &manifest[4];
@@ -286,7 +283,7 @@ fn schema_v5_manifest_reconciles_registry_before_autonomy() {
         autonomy.path(),
         "db/migrations/0006_task_autonomy_receipt.sql"
     );
-    assert_eq!(autonomy.schema_version(), POSTGRES_SCHEMA_VERSION);
+    assert_eq!(autonomy.schema_version(), 5);
     assert_eq!(autonomy.reader_compatibility(), 5..=5);
     assert_eq!(autonomy.writer_compatibility(), 5..=5);
 
@@ -843,7 +840,7 @@ fn schema_v5_catalog_measurement_has_closed_forbidden_object_diagnostics() {
 #[allow(clippy::too_many_lines)]
 fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     let manifest = migration_manifest();
-    assert_eq!(manifest.len(), 6);
+    assert_eq!(manifest.len(), 7);
 
     let draft = &manifest[0];
     assert_eq!(draft.ordinal(), 1);
@@ -941,22 +938,34 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
         autonomy.transaction_mode(),
         MigrationTransactionMode::RunnerOwned
     );
-    assert_eq!(autonomy.schema_version(), POSTGRES_SCHEMA_VERSION);
+    assert_eq!(autonomy.schema_version(), 5);
     assert_eq!(autonomy.reader_compatibility(), 5..=5);
     assert_eq!(autonomy.writer_compatibility(), 5..=5);
 
     let evidence = verify_embedded_manifest().expect("embedded manifest");
-    assert_eq!(evidence.entry_count(), 6);
-    assert_eq!(evidence.executable_count(), 5);
+    let foreman = &manifest[6];
+    assert_eq!(foreman.ordinal(), 7);
+    assert_eq!(foreman.id(), "0007_foreman_coordination");
+    assert_eq!(
+        foreman.path(),
+        "db/migrations/0007_foreman_coordination.sql"
+    );
+    assert_eq!(foreman.byte_length(), 222_010);
+    assert_eq!(
+        foreman.sha256(),
+        "f0934eb74827a5d7dc96148a94b2145f7c4e8e6d8b21d7408660d05d5451337f"
+    );
+    assert_eq!(foreman.schema_version(), POSTGRES_SCHEMA_VERSION);
+    assert_eq!(foreman.reader_compatibility(), 6..=6);
+    assert_eq!(foreman.writer_compatibility(), 6..=6);
+
+    assert_eq!(evidence.entry_count(), 7);
+    assert_eq!(evidence.executable_count(), 6);
     assert_eq!(evidence.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(evidence.manifest_sha256().as_str().len(), 64);
 
     let live = include_str!("postgres_live.rs");
-    assert!(!live.contains("executable_count: 6"));
-    assert!(
-        live.matches("executable_count: 5").count() >= 2,
-        "fresh and concurrent live apply must count only executable entries"
-    );
+    assert!(live.contains("executable_count: 6"));
     let task_ledger = include_str!("postgres_task_ledger.rs");
     assert_eq!(
         task_ledger.matches("executable_count: 6").count(),
@@ -966,8 +975,112 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     assert!(task_ledger.contains("executable_count: 6 - prefix_len"));
     assert!(
         task_ledger.contains("executable_count: 5"),
-        "fresh Ledger apply must count the five executable schema-v5 entries"
+        "historical schema-v5 fixture evidence remains explicit"
     );
+}
+
+#[test]
+fn foreman_migration_is_event_bound_fenced_and_table_acl_closed() {
+    let migration = &migration_manifest()[6];
+    let sql = std::str::from_utf8(migration.bytes()).expect("UTF-8 SQL");
+    let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    for required in [
+        "CREATE TABLE control.task_ledger_foreman_snapshots",
+        "FOREMAN_SNAPSHOT_RECORDED",
+        "FOREIGN KEY (stream_id, event_sequence) REFERENCES control.task_ledger_events",
+        "writer_lease.writer_lease_assert_current_v1(",
+        "xmin = pg_catalog.pg_current_xact_id()::xid",
+        "CREATE FUNCTION control.task_ledger_record_foreman_snapshot_v1(",
+        "CREATE FUNCTION control.task_ledger_read_foreman_snapshots_v1(",
+        "REVOKE ALL ON TABLE control.task_ledger_foreman_snapshots FROM lattice_runtime",
+        "worker_id !~* '^(sk-|bearer )|password|full chat|begin private'",
+        "heartbeat_digest_ref ~ '^heartbeat:sha256:[0-9a-f]{64}$'",
+        "authority_digest_ref ~ '^authority:sha256:[0-9a-f]{64}$'",
+        "decision_ref ~ '^decision:sha256:[0-9a-f]{64}$'",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "missing 0007 contract: {required}"
+        );
+    }
+    assert!(!normalized.contains("CREATE TABLE control.foreman_current_state"));
+    assert!(!normalized.contains("GRANT SELECT ON TABLE control.task_ledger_foreman_snapshots"));
+    assert_eq!(
+        normalized
+            .matches("CREATE OR REPLACE FUNCTION control.")
+            .count(),
+        19,
+        "schema-v6 must rebind the exact existing runtime surface"
+    );
+    assert_eq!(
+        normalized
+            .matches("v_manifest_entry_count IS DISTINCT FROM 7")
+            .count(),
+        20,
+        "every rebound function must verify all seven retained manifest entries"
+    );
+    assert!(!normalized.contains("v_manifest_entry_count IS DISTINCT FROM 6"));
+    assert!(normalized.contains("LATTICE_DEVOS_CONTROL_SCHEMA_V6"));
+}
+
+#[test]
+fn foreman_adapter_uses_the_ledger_transaction_and_verified_fresh_replay() {
+    let adapter = include_str!("../src/task_ledger.rs");
+    let attempt_start = adapter
+        .find("fn run_execute_attempt(")
+        .expect("Task Ledger transaction");
+    let attempt = &adapter[attempt_start..];
+    let writer = attempt
+        .find("assert_writer_authority(&mut transaction")
+        .expect("same-transaction writer assertion");
+    let ledger = attempt
+        .find("sql_profile.ledger_finalize_sql()")
+        .expect("Ledger finalize");
+    let child = attempt
+        .find("LEDGER_RECORD_FOREMAN_SNAPSHOT_SQL")
+        .expect("foreman child write");
+    let commit = child
+        + attempt[child..]
+            .find("transaction\n        .commit()")
+            .expect("transaction commit after child verification");
+    assert!(writer < ledger && ledger < child && child < commit);
+    assert!(adapter.contains("verify_untrusted_foreman_snapshot_rows(stream, &untrusted)"));
+    assert!(adapter.contains("IsolationLevel::RepeatableRead"));
+    assert!(adapter.contains("IsolationLevel::Serializable"));
+    assert!(adapter.contains("if plan.is_exact_retry()"));
+}
+
+#[test]
+fn schema_v6_runtime_admission_requires_writer_v3_current_and_closed_acl() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    let verifier = setup
+        .split_once("fn verify_runtime_foreman_schema_v6")
+        .expect("schema-v6 runtime verifier")
+        .1
+        .split_once("fn preflight_connection")
+        .expect("verifier boundary")
+        .0;
+    for required in [
+        "verify_history_rows(&rows, migration_manifest())",
+        "current_schema_version",
+        "task_ledger_foreman_snapshots",
+        "has_table_privilege",
+        "task_ledger_record_foreman_snapshot_v1",
+        "extension_schema_version=3",
+        "global_schema_version=6",
+        "WriterLeaseV3Profile::Current",
+        "verify_runtime_admission_present(client)",
+    ] {
+        assert!(
+            verifier.contains(required),
+            "missing v6 admission proof: {required}"
+        );
+    }
+    assert!(
+        verifier.contains("!= 7"),
+        "runtime Writer surface must be exact"
+    );
+    assert!(!verifier.contains("WriterLeaseV3Profile::Bridge"));
 }
 
 #[test]
@@ -1473,7 +1586,7 @@ fn live_store_migration_is_fixed_function_gated_and_transaction_control_free() {
 }
 
 #[test]
-fn runner_has_closed_fresh_and_exact_prefix_states_through_v5() {
+fn runner_has_closed_fresh_and_exact_prefix_states_through_v6() {
     let source = include_str!("../src/postgres_setup.rs");
     for required in [
         "enum InstalledManifestState",
@@ -1482,17 +1595,20 @@ fn runner_has_closed_fresh_and_exact_prefix_states_through_v5() {
         "ExactV2Prefix",
         "ExactV3Prefix",
         "ExactV4Prefix",
-        "ExactV5Full",
+        "ExactV5Prefix",
+        "ExactV6Full",
         "classify_installed_manifest_state",
         "verify_v1_upgrade_source",
         "verify_v2_upgrade_source",
         "verify_v3_upgrade_source",
         "verify_v4_upgrade_source",
+        "verify_v5_upgrade_source",
         "apply_missing_entries",
         "advance_compatibility_from_v1",
         "advance_compatibility_from_v2",
         "advance_compatibility_from_v3",
         "advance_compatibility_from_v4",
+        "advance_compatibility_from_v5",
         "LOCK TABLE control.physical_heads IN ACCESS EXCLUSIVE MODE",
         "LOCK TABLE control.terminal_transactions IN ACCESS EXCLUSIVE MODE",
         "LOCK TABLE control.runtime_admission IN ACCESS EXCLUSIVE MODE",
@@ -1662,7 +1778,7 @@ fn setup_errors_are_closed_static_bounded_and_redacted() {
 fn driver_and_schema_support_are_exact_for_this_foundation() {
     assert_eq!(POSTGRES_DRIVER_VERSION, "0.19.14");
     assert_eq!(SUPPORTED_POSTGRES_MAJOR, 17);
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 5);
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 6);
 }
 
 #[test]

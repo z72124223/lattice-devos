@@ -6,7 +6,7 @@ use lattice_postgres_store::{
     verify_foreman_schema_v6_profile,
 };
 
-const SQL: &[u8] = b"-- future TASK-079 migration identity fixture\n";
+const SQL: &[u8] = include_bytes!("../../../db/migrations/0007_foreman_coordination.sql");
 
 fn candidate() -> ForemanSchemaV6Candidate {
     ForemanSchemaV6Candidate::from_migration_bytes(
@@ -28,13 +28,17 @@ fn catalog() -> ForemanSchemaV6CatalogAcl {
 }
 
 #[test]
-fn task087_does_not_install_the_future_migration_or_change_schema_v5() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 5);
-    assert_eq!(migration_manifest().len(), 6);
-    assert!(
-        migration_manifest()
-            .iter()
-            .all(|entry| entry.id() != FOREMAN_COORDINATION_MIGRATION_ID)
+fn task079_appends_exact_0007_without_changing_the_v5_prefix() {
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 6);
+    assert_eq!(migration_manifest().len(), 7);
+    assert_eq!(
+        migration_manifest()[6].id(),
+        FOREMAN_COORDINATION_MIGRATION_ID
+    );
+    assert_eq!(migration_manifest()[6].bytes(), SQL);
+    assert_eq!(
+        candidate().manifest_sha256(),
+        "875b39f2f605b2dd30958a345d900f570274e1fd4d05065dda09edd694448b70"
     );
 }
 

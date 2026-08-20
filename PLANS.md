@@ -104,16 +104,16 @@ remains not authorized for merge or Draft promotion.
 
 CURRENT TASK-079 - establish the smallest versioned, secret-free foreman
 snapshot/replay/watchdog vertical slice through the existing Task Ledger,
-Postgres Store, and typed Ports boundaries. TASK-048/049 are integrated only as
-read-only input contracts, TASK-078 exporter working files remain untouched,
-and PostgreSQL/TASK-051 live acceptance stays deferred. The dashboard remains
-an index, never coordination truth.
-
-TASK-079 durable binding is blocked by the current schema-v5/Writer Lease v2
-profile boundary: an append-only global schema-v6 migration requires a new
-authorized Writer Lease successor bridge and Store catalog/ACL profile. TASK-050
-has uncommitted overlapping Ledger/Store governance work. Preserve both; do not
-substitute a diagnostic, dashboard, cache, or independent foreman table.
+Postgres Store, and typed Ports boundaries. TASK-087 exact implementation
+`e13e6d8` is integrated through history-preserving merge and clears the
+Writer-v3/schema-v6 offline contract blocker. The typed event/port/Store child
+binding and reviewed `0007` candidate now exist and focused checks pass. Live
+closure remains blocked because the Store runner still conflates the six-row
+v5 prefix with the seven-row v6 current manifest and the Writer-owned adapter
+has no v3 bridge/apply/rebind operation. TASK-048/049 remain read-only inputs,
+TASK-078 exporter working files and dirty TASK-050 remain untouched, and no
+PostgreSQL fixture is started until that production ordering path is closed.
+The dashboard remains an index, never coordination truth.
 
 ## Completed engineering delivery finisher - TASK-078
 

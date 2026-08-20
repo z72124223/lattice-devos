@@ -1,19 +1,19 @@
 ---
 spec_id: SPEC-006
 title: Durable foreman state and takeover acceptance
-version: 2
+version: 3
 status: approved
 approved_by: fixed_foreman_delegation
 approved_at_local: 2026-08-21
 modules:
   - module_id: foreman-state
-    constitution_version: 1.1
+    constitution_version: 1.2
   - module_id: task-ledger
-    constitution_version: 2.3
+    constitution_version: 2.4
   - module_id: postgres-store
-    constitution_version: 1.10
+    constitution_version: 1.12
   - module_id: lattice-ports
-    constitution_version: 1.9
+    constitution_version: 2.0
 ---
 
 # SPEC-006 — Durable foreman state and takeover acceptance
@@ -36,9 +36,11 @@ LATTICE authority.
    hypotheses, confidence/unknowns, evidence/counterevidence, checked/expiry
    time, refresh trigger, and decision/probe/falsifier pointers. These records
    cannot represent or mutate authoritative snapshot state.
-2. Task Ledger owns the append/replay event and Postgres Store owns its rows in
-   the existing transaction/fencing boundary. No cache, dashboard, chat, or
-   automation record can substitute for this authority.
+2. Task Ledger owns the fixed `FOREMAN_COORDINATION` stream, the versioned
+   `FOREMAN_SNAPSHOT_RECORDED` event, append order, generation/idempotency and
+   verified replay. Postgres Store persists only fixed typed scalars bound to
+   the matching Ledger event and command in the same serializable transaction,
+   after `writer_lease_assert_current_v1`; no child row is independently current.
 3. A fresh reader reconstructs active, blocked, archive-ineligible, and
    next-action projections from verified replay without launching a worker,
    running Git, or rereading a chat.
@@ -101,8 +103,10 @@ authority. The dashboard and delivery finisher remain read-only/non-owning.
 5. Focused characterization proves an expiring hypothesis pointer stays
    separate from lifecycle state and rejects non-pointer/free-form hypothesis
    content.
-6. No change touches `scripts/export-lattice-engineering-status.mjs` or starts
-   TASK-051/live PostgreSQL acceptance.
+6. Unknown event/payload schema, changed-command retry, stale writer/fence,
+   partial child/event state, and migration rollback fail closed.
+7. No change touches `scripts/export-lattice-engineering-status.mjs` or starts
+   TASK-051 acceptance; live proof uses only a marker-owned disposable cluster.
 
 ## Verification plan
 

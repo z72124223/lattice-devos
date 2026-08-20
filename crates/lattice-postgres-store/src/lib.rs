@@ -1,5 +1,6 @@
 //! Typed Store conformance fake plus exact live `PostgreSQL` adapter for LATTICE.
 
+mod foreman_coordination;
 mod live;
 mod migrations;
 mod postgres_setup;
@@ -7,6 +8,7 @@ mod project_registry;
 mod schema_v6_profile;
 mod task_ledger;
 
+pub use foreman_coordination::PostgresForemanCoordination;
 pub use live::PostgresControlStore;
 pub use migrations::{
     DatabaseRole, ManifestEvidence, MigrationDescriptor, MigrationStatus, MigrationTarget,

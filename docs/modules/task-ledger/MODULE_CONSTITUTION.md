@@ -1,7 +1,7 @@
 ---
 module_id: task-ledger
 name: Task Ledger
-version: 2.3
+version: 2.4
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-15
@@ -11,9 +11,10 @@ last_reviewed: 2026-08-15
 
 Own the versioned event, hash-chain, exact command-receipt, verified replay,
 resource-projection, effect-intent outbox-admission, pure append-plan, and
-complete checkpoint semantics, including the closed autonomy-receipt event,
-and the authoritative Task-created autonomy profile discriminator that
-PostgreSQL persists as the single durable control-plane truth.
+complete checkpoint semantics, including the closed autonomy-receipt and
+foreman-coordination events, and the authoritative Task-created autonomy
+profile discriminator that PostgreSQL persists as the single durable
+control-plane truth.
 
 ## Non-Goals
 
@@ -52,6 +53,9 @@ PostgreSQL persists as the single durable control-plane truth.
   the authoritative `TASK_CREATED.action` field for bounded task-control
   streams. The legacy `CONTROLLED_CODEX_CANARY` value is receipt-optional;
   `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` requires exactly one V1 receipt.
+- The fixed `FOREMAN_COORDINATION` stream identity and versioned
+  `FOREMAN_SNAPSHOT_RECORDED` event, including payload digest, strict generation
+  order, exact command retry, and typed child-row replay verification.
 
 The TASK-013 fake owns only disposable process-memory test state. Postgres
 Store 1.3 owns physical durable rows, locks, transactions, indexes, projection
@@ -101,6 +105,9 @@ until a separately approved module/ticket owns those mechanics.
   required-receipt pending, or required-receipt complete. The one-event
   required prefix may exist only as a non-runtime-admissible reconciliation
   state; transition, completed replay, and Status require the exact receipt.
+- Plan and verify foreman snapshot appends only through the reserved constructor;
+  generic callers cannot mint the event. Hypothesis pointers participate in the
+  payload commitment but never select event outcome or lifecycle state.
 
 ## Invariants
 
@@ -169,6 +176,9 @@ until a separately approved module/ticket owns those mechanics.
 25. Public MCP tools, input schemas, and six-field output remain unchanged by
     the internal event. Projection-only status may derive from verified state
     but cannot become a second durable record or wire authority.
+26. Every foreman child record binds one matching Ledger event, command,
+    request digest, payload digest and generation. Missing, duplicate, changed,
+    reordered, or cross-stream records fail replay; exact retry is byte-equal.
 
 ## Allowed Dependencies
 
@@ -176,6 +186,8 @@ until a separately approved module/ticket owns those mechanics.
 - `lattice-contracts` 1.9 immutable shared values and Task Ledger receipt/head
   representations, whose Ledger-specific semantics remain unchanged from 1.3.
 - `lattice-cjson` 1.0 canonical-byte/hash mechanics only.
+- `lattice-foreman-state` 1.2 typed, pure snapshot validation and fixed-scalar
+  accessors only; Task Ledger owns append/replay authority.
 - exact `time` 0.3.54 parsing/formatting only for caller-supplied canonical UTC
   RFC 3339 timestamps; no clock reads.
 
@@ -217,6 +229,11 @@ profile hash or database column. Historical optional streams remain valid,
 while the new required marker cannot progress or project Status without its
 exact second event.
 
+Version 2.4 adds the reserved foreman stream/event and typed payload commitment
+without changing historical event bytes. PostgreSQL may persist a fixed-scalar
+child only beside the matching Ledger append in one transaction; diagnostic
+JSON, hypotheses, and child rows cannot become lifecycle authority.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -250,3 +267,4 @@ compatibility plan, security and architecture review, and user authorization.
 | 2.1 | 2026-08-02 | SPEC-002 v23, ADR-019, TASK-021 | Shared pure vacant/plan/apply boundary, verified retained receipts, effect-intent outbox admission, and independent complete Ledger checkpoint without adding I/O | Approved V2 amendment and user MVP-3 execution directive |
 | 2.2 | 2026-08-14 | SPEC-002 v32, ADR-011/019, TASK-050, TASK-075 | Closed autonomy-receipt event/subject semantics, exactly-one ordering, and byte-identical mixed historical replay without public MCP or I/O expansion | User-approved TASK-075 reconciliation |
 | 2.3 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Own the exact Task-created autonomy profile discriminator and canonical receipt verifier; preserve unrelated/historical action bytes while required profiles fail closed before progress or Status | User-approved TASK-050 repair amendment |
+| 2.4 | 2026-08-21 | SPEC-006 v3, ADR-024/025, TASK-079/087 | Add fixed foreman stream/event generation, typed payload commitment and child-row replay verification without changing historical bytes | Fixed-foreman delegation |

@@ -14,6 +14,11 @@ use crate::migrations::{
     verify_embedded_manifest, verify_v1_manifest_prefix, verify_v2_manifest_prefix,
     verify_v3_manifest_prefix, verify_v4_manifest_prefix,
 };
+use crate::schema_v6_profile::{
+    FOREMAN_COORDINATION_EVENT_IDENTITY, FOREMAN_COORDINATION_STREAM_IDENTITY,
+    ForemanSchemaV6Candidate, ForemanSchemaV6CatalogAcl, WriterLeaseV3Profile,
+    verify_foreman_schema_v6_profile,
+};
 
 const MIGRATION_ADVISORY_LOCK: i64 = 0x4c41_5454_4943_4501;
 const CODEBASE_MEMORY_ADVISORY_LOCK: i64 = 0x4c41_5443_4d45_4d31;
@@ -1784,6 +1789,7 @@ pub fn verify_postgres_schema(
     Ok(evidence)
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn verify_runtime_store_schema(
     client: &mut Client,
     target: &MigrationTarget,
@@ -1834,6 +1840,25 @@ pub(crate) fn verify_runtime_store_schema(
             ));
         }
     };
+    if installed_schema_version == POSTGRES_SCHEMA_VERSION {
+        let database_uuid = verify_runtime_foreman_schema_v6(&mut transaction, target, &manifest)?;
+        preflight_connection(
+            &mut transaction,
+            target,
+            DatabaseRole::Runtime,
+            SetupOperation::Verification,
+        )?;
+        transaction.commit().map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+        })?;
+        return Ok(RuntimeStoreSchemaEvidence {
+            database_uuid,
+            global_manifest_sha256: manifest.manifest_sha256().clone(),
+            global_schema_version: installed_schema_version,
+            store_manifest_sha256: store_v2_manifest.manifest_sha256().clone(),
+            store_schema_version: STORE_V2_SCHEMA_VERSION,
+        });
+    }
     let current_profile =
         classify_current_catalog_profile(&mut transaction, installed_schema_version)?;
     if matches!(
@@ -1876,6 +1901,163 @@ pub(crate) fn verify_runtime_store_schema(
         store_manifest_sha256: store_v2_manifest.manifest_sha256().clone(),
         store_schema_version: STORE_V2_SCHEMA_VERSION,
     })
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_runtime_foreman_schema_v6<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+    manifest: &ManifestEvidence,
+) -> Result<String, PostgresStoreSetupError> {
+    let rows = read_history_rows(client)?;
+    verify_history_rows(&rows, migration_manifest())?;
+    let compatibility = client
+        .query(
+            "SELECT manifest_sha256,current_schema_version,min_reader,max_reader,min_writer,max_writer \
+               FROM ONLY control.schema_compatibility WHERE singleton = true",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    if compatibility.len() != 1
+        || row_value::<String>(
+            &compatibility[0],
+            0,
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        )? != manifest.manifest_sha256().as_str()
+        || row_value::<i16>(
+            &compatibility[0],
+            1,
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        )? != 6
+        || (2..=5).any(|index| {
+            row_value::<i16>(
+                &compatibility[0],
+                index,
+                PostgresStoreSetupErrorKind::CompatibilityMismatch,
+            )
+            .ok()
+                != Some(6)
+        })
+    {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+
+    let catalog = client
+        .query_one(
+            "SELECT \
+                (SELECT count(*)::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace \
+                  WHERE n.nspname='control' AND c.relkind='r'), \
+                (SELECT count(*)::bigint FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace \
+                  WHERE n.nspname='control'), \
+                (SELECT count(*) FILTER (WHERE pg_catalog.has_function_privilege(\
+                    'lattice_runtime',p.oid,'EXECUTE'))::bigint \
+                   FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace \
+                  WHERE n.nspname='control'), \
+                (SELECT count(*)::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace \
+                  WHERE n.nspname='control' AND c.relname='task_ledger_foreman_snapshots' \
+                    AND c.relkind='r' AND pg_get_userbyid(c.relowner)='lattice_migrator'), \
+                COALESCE(pg_catalog.has_table_privilege('lattice_runtime',\
+                    'control.task_ledger_foreman_snapshots','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'),false), \
+                (SELECT count(*)::bigint FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace \
+                  WHERE n.nspname='control' AND p.proname IN (\
+                    'task_ledger_record_foreman_snapshot_v1','task_ledger_read_foreman_snapshots_v1') \
+                    AND pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE'))",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    let table_count = row_value::<i64>(&catalog, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    let retained_functions =
+        row_value::<i64>(&catalog, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    let runtime_functions =
+        row_value::<i64>(&catalog, 2, PostgresStoreSetupErrorKind::PermissionDenied)?;
+    let foreman_table = row_value::<i64>(&catalog, 3, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    let direct_table =
+        row_value::<bool>(&catalog, 4, PostgresStoreSetupErrorKind::PermissionDenied)?;
+    let foreman_runtime_functions =
+        row_value::<i64>(&catalog, 5, PostgresStoreSetupErrorKind::PermissionDenied)?;
+    if (
+        table_count,
+        retained_functions,
+        runtime_functions,
+        foreman_table,
+        direct_table,
+        foreman_runtime_functions,
+    ) != (17, 49, 21, 1, false, 2)
+    {
+        return Err(catalog_error());
+    }
+
+    let writer = client
+        .query_one(
+            "SELECT \
+                (SELECT count(*)::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace \
+                  WHERE n.nspname='writer_lease' AND c.relkind='r'), \
+                (SELECT count(*)::bigint FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace \
+                  WHERE n.nspname='writer_lease'), \
+                (SELECT count(*) FILTER (WHERE pg_catalog.has_function_privilege(\
+                    'lattice_runtime',p.oid,'EXECUTE'))::bigint \
+                   FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace \
+                  WHERE n.nspname='writer_lease'), \
+                COALESCE(pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE'),false), \
+                (SELECT count(*)::bigint FROM ONLY writer_lease.writer_lease_extension_identity w \
+                  WHERE w.singleton AND w.extension_id='lattice-writer-lease' \
+                    AND w.extension_schema_version=3 \
+                    AND w.extension_path='db/extensions/writer-lease/v3.sql' \
+                    AND w.extension_sql_sha256='677c010a61e5945bcc6b96ca9f3d9e57830dc42f4cfbd46ea76d5e9d8b9262a0' \
+                    AND w.extension_manifest_sha256='eab2812fa3d94cd3466d7c003386f805a973fd7def1f16aeb15b52f47dad78e4' \
+                    AND w.global_schema_version=6 AND w.global_manifest_sha256=$1 \
+                    AND w.required_memory_schema_version=3 \
+                    AND w.required_memory_manifest_sha256=$2), \
+                (SELECT pg_catalog.string_agg(l.ledger_ordinal::text||':'||l.event_kind::text||':'||\
+                    l.extension_schema_version::text||':'||l.global_schema_version::text,',' \
+                    ORDER BY l.ledger_ordinal) \
+                   FROM ONLY writer_lease.writer_lease_extension_ledger l)",
+            &[&manifest.manifest_sha256().as_str(), &CODEBASE_MEMORY_V3_MANIFEST_SHA256],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    let ledger_shape =
+        row_value::<Option<String>>(&writer, 5, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    let current_shape = matches!(
+        ledger_shape.as_deref(),
+        Some(
+            "1:INSTALLED:3:6"
+                | "1:INSTALLED:2:5,2:UPGRADED:3:5,3:REBOUND:3:6"
+                | "1:INSTALLED:1:3,2:UPGRADED:2:3,3:REBOUND:2:5,4:UPGRADED:3:5,5:REBOUND:3:6"
+        )
+    );
+    if row_value::<i64>(&writer, 0, PostgresStoreSetupErrorKind::CorruptCatalog)? != 5
+        || row_value::<i64>(&writer, 1, PostgresStoreSetupErrorKind::CorruptCatalog)? != 11
+        || row_value::<i64>(&writer, 2, PostgresStoreSetupErrorKind::PermissionDenied)? != 7
+        || !row_value::<bool>(&writer, 3, PostgresStoreSetupErrorKind::PermissionDenied)?
+        || row_value::<i64>(&writer, 4, PostgresStoreSetupErrorKind::CorruptCatalog)? != 1
+        || !current_shape
+    {
+        return Err(catalog_error());
+    }
+
+    let migration = &migration_manifest()[6];
+    let candidate = ForemanSchemaV6Candidate::from_migration_bytes(
+        migration.ordinal(),
+        migration.id(),
+        migration.path(),
+        migration.schema_version(),
+        migration.reader_compatibility(),
+        migration.writer_compatibility(),
+        FOREMAN_COORDINATION_STREAM_IDENTITY,
+        FOREMAN_COORDINATION_EVENT_IDENTITY,
+        migration.bytes(),
+    )
+    .map_err(|_| catalog_error())?;
+    let _verified_profile = verify_foreman_schema_v6_profile(
+        &candidate,
+        &ForemanSchemaV6CatalogAcl::exact_foreman_coordination(),
+        WriterLeaseV3Profile::Current,
+    )
+    .map_err(|_| catalog_error())?;
+    verify_runtime_admission_present(client)?;
+    read_database_identity(client, target)
 }
 
 fn preflight_connection<C: GenericClient>(

@@ -1,7 +1,7 @@
 ---
 module_id: foreman-state
 name: Foreman State
-version: 1.1
+version: 1.2
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-21
@@ -102,4 +102,5 @@ and responsible-user authorization.
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
 | 1.1 | 2026-08-21 | ADR-024, SPEC-006, TASK-079 | Add separately typed, expiring epistemic references without lifecycle authority | Foreman-delegated user authority |
+| 1.2 | 2026-08-21 | ADR-024, SPEC-006 v3, TASK-079 | Export fixed-scalar snapshot reconstruction values for the Ledger-owned typed persistence boundary; no I/O or authority added | Fixed-foreman delegation |
 | 1.0 | 2026-08-21 | ADR-024, SPEC-006, TASK-079 | Initial secret-free snapshot and read-only watchdog boundary | Foreman-delegated user authority |

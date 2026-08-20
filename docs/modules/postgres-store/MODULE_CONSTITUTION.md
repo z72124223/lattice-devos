@@ -1,7 +1,7 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.11
+version: 1.12
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-21
@@ -790,6 +790,13 @@ runtime ACL expectations; and Writer v3 bridge/current compatibility states.
 Until future migration bytes and measured catalog signatures exist and every
 assertion passes, schema v6 is not current and no runtime authority is granted.
 
+Version 1.12 appends reviewed migration `0007`, advances the exact manifest to
+schema v6, and persists fixed foreman snapshot scalars only as a child of the
+matching Ledger event/command. Record and read functions remain fixed,
+schema-qualified and table-ACL closed. Record reasserts the exact Writer current
+tuple in the same serializable transaction; rollback removes both Ledger and
+child effects. No diagnostic or independent current-state store is added.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -838,6 +845,7 @@ assertion passes, schema v6 is not current and no runtime authority is granted.
 | Autonomy Ledger atomicity | command, optional closed autonomy event/subject, projection/checkpoint, terminal receipt, and physical receipt all-or-none with restart/retry/corruption matrices | Engineering | yes |
 | Memory-v3 extension recognition | exact separate global-v5 catalog/owner/ACL profile, immutable v1/v2 bytes, v2-upgrade-only classification, and no base-manifest/count change | Compatibility review | yes |
 | Writer Lease profile closure | exact V3+Memory-v2+Writer-Lease-v1 catalog/owner/ACL/function/checksum acceptance plus partial/extra/drift/wrong-owner/direct-grant denial | Security review | yes |
+| Foreman schema-v6 binding | exact 0007 ordering/hash, fixed child/event linkage, same-transaction fencing, rollback/restart/fresh-process replay and unknown-version/privacy denial | Integration review | yes |
 | Extension ownership | static/dependency tests prove Store cannot install, mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate is executable | Architecture review | yes |
 
 ## Change Policy
@@ -868,3 +876,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.9 | 2026-08-14 | SPEC-002 v34, ADR-023 TASK-076 amendment, TASK-076 | Freeze the exact second post-role migrator acquisition grant for the bounded Writer session gate while keeping all LOGIN roles and the other fourteen overloads denied | User TASK-076 continuation directive |
 | 1.10 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Delegate autonomy subject/profile semantics and hashes exclusively to Task Ledger 2.3 while preserving schema-v5 physical bytes and Store ownership | User-approved TASK-050 repair amendment |
 | 1.11 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Reserve exact schema-v6 foreman-coordination catalog/ACL and Writer-v3 bridge recognition without implementing migration 0007 or event semantics | Fixed-foreman delegation |
+| 1.12 | 2026-08-21 | SPEC-006 v3, ADR-024/025, TASK-079 | Append 0007 and bind fixed foreman scalars to the Ledger event under same-transaction Writer fencing and verified replay | Fixed-foreman delegation |

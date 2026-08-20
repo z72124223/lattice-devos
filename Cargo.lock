@@ -362,6 +362,7 @@ name = "lattice-ports"
 version = "0.1.0"
 dependencies = [
  "lattice-contracts",
+ "lattice-foreman-state",
  "lattice-task-domain",
 ]
 
@@ -384,6 +385,7 @@ version = "0.1.0"
 dependencies = [
  "lattice-cjson",
  "lattice-contracts",
+ "lattice-foreman-state",
  "lattice-ports",
  "lattice-project-registry",
  "lattice-task-ledger",
@@ -453,6 +455,7 @@ version = "0.1.0"
 dependencies = [
  "lattice-cjson",
  "lattice-contracts",
+ "lattice-foreman-state",
  "time",
 ]
 

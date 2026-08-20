@@ -170,6 +170,60 @@ impl EpistemicReferences {
     }
 }
 
+impl Confidence {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "UNKNOWN",
+            Self::Low => "LOW",
+            Self::Medium => "MEDIUM",
+            Self::High => "HIGH",
+        }
+    }
+
+    /// Parses the closed persistence spelling.
+    ///
+    /// # Errors
+    ///
+    /// Rejects every unknown or case-substituted value.
+    pub fn from_persisted(value: &str) -> Result<Self, SnapshotError> {
+        match value {
+            "UNKNOWN" => Ok(Self::Unknown),
+            "LOW" => Ok(Self::Low),
+            "MEDIUM" => Ok(Self::Medium),
+            "HIGH" => Ok(Self::High),
+            _ => Err(SnapshotError::MalformedReference),
+        }
+    }
+}
+
+impl RefreshTrigger {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Expiry => "EXPIRY",
+            Self::NewEvidence => "NEW_EVIDENCE",
+            Self::Counterevidence => "COUNTEREVIDENCE",
+            Self::DependencyChange => "DEPENDENCY_CHANGE",
+        }
+    }
+
+    /// Parses the closed persistence spelling.
+    ///
+    /// # Errors
+    ///
+    /// Rejects every unknown or case-substituted value.
+    pub fn from_persisted(value: &str) -> Result<Self, SnapshotError> {
+        match value {
+            "EXPIRY" => Ok(Self::Expiry),
+            "NEW_EVIDENCE" => Ok(Self::NewEvidence),
+            "COUNTEREVIDENCE" => Ok(Self::Counterevidence),
+            "DEPENDENCY_CHANGE" => Ok(Self::DependencyChange),
+            _ => Err(SnapshotError::MalformedReference),
+        }
+    }
+}
+
 /// Stable rejection and replay failures.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SnapshotError {
@@ -194,6 +248,7 @@ pub struct ForemanSnapshot {
     state: ForemanState,
     blocker: Option<String>,
     heartbeat: String,
+    authority: String,
     evidence: String,
     generation: u64,
     epistemic: Option<EpistemicReferences>,
@@ -215,6 +270,7 @@ impl ForemanSnapshot {
         state: ForemanState,
         blocker: Option<String>,
         heartbeat: impl Into<String>,
+        authority: impl Into<String>,
         evidence: impl Into<String>,
         generation: u64,
     ) -> Result<Self, SnapshotError> {
@@ -228,6 +284,7 @@ impl ForemanSnapshot {
             return Err(SnapshotError::MalformedReference);
         }
         let heartbeat = digest_pointer(heartbeat.into(), "heartbeat")?;
+        let authority = digest_pointer(authority.into(), "authority")?;
         let evidence = digest_pointer(evidence.into(), "evidence")?;
         if generation == 0 {
             return Err(SnapshotError::GenerationRollback);
@@ -250,6 +307,7 @@ impl ForemanSnapshot {
             state,
             blocker,
             heartbeat,
+            authority,
             evidence,
             generation,
             epistemic: None,
@@ -285,8 +343,18 @@ impl ForemanSnapshot {
     }
 
     #[must_use]
+    pub fn task(&self) -> &str {
+        &self.task
+    }
+
+    #[must_use]
     pub fn branch(&self) -> &str {
         &self.branch
+    }
+
+    #[must_use]
+    pub fn worktree(&self) -> &str {
+        &self.worktree
     }
 
     #[must_use]
@@ -302,6 +370,22 @@ impl ForemanSnapshot {
     #[must_use]
     pub fn blocker(&self) -> Option<&str> {
         self.blocker.as_deref()
+    }
+
+    #[must_use]
+    pub fn heartbeat(&self) -> &str {
+        &self.heartbeat
+    }
+
+    /// Digest pointer to the authority receipt/head used for this report.
+    #[must_use]
+    pub fn authority(&self) -> &str {
+        &self.authority
+    }
+
+    #[must_use]
+    pub fn evidence(&self) -> &str {
+        &self.evidence
     }
 
     #[must_use]
@@ -516,11 +600,26 @@ pub fn watchdog(
 }
 
 impl ForemanState {
-    const fn as_str(self) -> &'static str {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Active => "ACTIVE",
             Self::Blocked => "BLOCKED",
             Self::Completed => "COMPLETED",
+        }
+    }
+
+    /// Parses the closed persistence spelling.
+    ///
+    /// # Errors
+    ///
+    /// Rejects every unknown or case-substituted value.
+    pub fn from_persisted(value: &str) -> Result<Self, SnapshotError> {
+        match value {
+            "ACTIVE" => Ok(Self::Active),
+            "BLOCKED" => Ok(Self::Blocked),
+            "COMPLETED" => Ok(Self::Completed),
+            _ => Err(SnapshotError::MalformedReference),
         }
     }
 }

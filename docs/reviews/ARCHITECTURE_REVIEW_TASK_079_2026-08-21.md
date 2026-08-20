@@ -36,3 +36,27 @@ active owner. No code, migration, or live PostgreSQL test was run. The safe
 next slice must own the Writer Lease successor and combined schema profile;
 until then TASK-079 remains blocked rather than substituting a diagnostic,
 dashboard, cache, or independent table.
+
+## Post-TASK-087 durable implementation review
+
+The earlier dependency blocker is partially resolved by history-preserving
+integration of TASK-087 `e13e6d8`. TASK-079 now keeps the fixed foreman event,
+canonical payload, child row, and verified replay under Task Ledger ownership;
+the production Port delegates to the existing PostgreSQL Task Ledger
+transaction and creates no dashboard/cache truth. The child function rechecks
+the unchanged 15-scalar Writer authority before Ledger finalize and is verified
+again before commit. Epistemic fields remain expiring digest pointers and are
+not read as lifecycle state.
+
+**P1 — production schema-v6 transition is not representable yet.** The Store
+runner classifies a seven-row current manifest as `ExactV5Full` but has no
+six-row v5-prefix state, `verify_v5_upgrade_source`, or v5-to-v6 compatibility
+advance. Separately, the Writer owner exposes verified v3 bytes and an offline
+transition classifier but no administrative v3 apply/rebind API. Store may not
+install or mutate Writer extension state under its constitution. Consequently
+there is no truthful production sequence from `G5_M3_W2_CURRENT` through
+`G5_M3_W3_BRIDGE` and `0007` to `G6_M3_W3_CURRENT`.
+
+Architecture status remains **BLOCKED**. Starting PostgreSQL would only test a
+hand-written fixture transition that production cannot invoke, so the live gate
+correctly remains `NOT_RUN`; no TASK-033/TASK-051 resource was touched.

@@ -1,11 +1,13 @@
-//! Offline, fail-closed compatibility contract for the future schema-v6
-//! foreman-coordination migration. This module does not install or execute it.
+//! Offline, fail-closed compatibility contract for the schema-v6
+//! foreman-coordination migration. Installation remains an explicit coordinated gate.
 
 use std::ops::RangeInclusive;
 
 use sha2::{Digest, Sha256};
 
-use crate::migrations::{CURRENT_V5_MANIFEST_SHA256, MigrationDescriptor, migration_manifest};
+use crate::migrations::{
+    CURRENT_V5_MANIFEST_SHA256, MigrationDescriptor, migration_manifest, verify_v5_manifest_prefix,
+};
 
 const MANIFEST_HASH_DOMAIN: &[u8] = b"LATTICE_POSTGRES_MIGRATION_MANIFEST_V1\0";
 
@@ -63,8 +65,8 @@ impl ForemanSchemaV6Candidate {
         if bytes.is_empty() {
             return Err(SchemaV6ProfileError::MigrationMissing);
         }
-        let predecessor = crate::verify_embedded_manifest()
-            .map_err(|_| SchemaV6ProfileError::MigrationIdentity)?;
+        let predecessor =
+            verify_v5_manifest_prefix().map_err(|_| SchemaV6ProfileError::MigrationIdentity)?;
         if ordinal != FOREMAN_COORDINATION_MIGRATION_ORDINAL
             || id != FOREMAN_COORDINATION_MIGRATION_ID
             || path != FOREMAN_COORDINATION_MIGRATION_PATH
@@ -73,11 +75,16 @@ impl ForemanSchemaV6Candidate {
             || writer_compatibility != (6..=6)
             || stream_identity != FOREMAN_COORDINATION_STREAM_IDENTITY
             || event_identity != FOREMAN_COORDINATION_EVENT_IDENTITY
-            || migration_manifest().len() != 6
+            || migration_manifest().len() != 7
             || migration_manifest()
-                .last()
+                .get(5)
                 .map(MigrationDescriptor::schema_version)
                 != Some(5)
+            || migration_manifest().get(6).is_none_or(|entry| {
+                entry.id() != FOREMAN_COORDINATION_MIGRATION_ID
+                    || entry.path() != FOREMAN_COORDINATION_MIGRATION_PATH
+                    || entry.bytes() != bytes
+            })
             || predecessor.manifest_sha256().as_str() != CURRENT_V5_MANIFEST_SHA256
         {
             return Err(SchemaV6ProfileError::MigrationIdentity);
@@ -248,7 +255,7 @@ impl VerifiedForemanSchemaV6Profile {
     }
 }
 
-/// Verifies the exact future schema-v6 migration, catalog/ACL, and Writer v3 phase.
+/// Verifies the exact schema-v6 migration, catalog/ACL, and Writer v3 phase.
 ///
 /// # Errors
 ///
@@ -282,7 +289,7 @@ pub fn verify_foreman_schema_v6_profile(
 fn successor_manifest_sha256(bytes: &[u8], sql_sha256: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(MANIFEST_HASH_DOMAIN);
-    for entry in migration_manifest() {
+    for entry in &migration_manifest()[..6] {
         update_field(&mut hasher, &entry.ordinal().to_be_bytes());
         update_field(&mut hasher, entry.id().as_bytes());
         update_field(&mut hasher, entry.path().as_bytes());

@@ -20,6 +20,7 @@ fn snapshot(
         state,
         dependency.map(str::to_owned),
         "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "authority:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         generation,
     )
@@ -84,6 +85,7 @@ fn replay_rejects_duplicate_identity_and_generation_rollback() {
         ForemanState::Active,
         None,
         "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "authority:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         2,
     )
@@ -115,6 +117,7 @@ fn transcript_and_secret_like_fields_are_rejected_without_rejecting_task_identif
         ForemanState::Active,
         None,
         "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "authority:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         1,
     );
@@ -130,6 +133,7 @@ fn transcript_and_secret_like_fields_are_rejected_without_rejecting_task_identif
             ForemanState::Active,
             None,
             "full chat: sk-live-secret",
+            "authority:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             1,
         ),
@@ -147,6 +151,7 @@ fn transcript_and_secret_like_fields_are_rejected_without_rejecting_task_identif
                 ForemanState::Active,
                 None,
                 token,
+                "authority:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                 "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 1,
             ),
@@ -164,6 +169,7 @@ fn transcript_and_secret_like_fields_are_rejected_without_rejecting_task_identif
             ForemanState::Active,
             None,
             "s𝕜-live-secret",
+            "authority:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             1,
         ),

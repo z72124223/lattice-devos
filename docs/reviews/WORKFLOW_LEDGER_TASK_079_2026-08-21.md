@@ -14,3 +14,15 @@
 | Architecture review | blocked | A fixed control stream/global schema-v6 needs a Writer Lease v3 successor plus Store catalog/ACL profile. TASK-076 v2 explicitly admits only schema 3/5; diagnostic/dashboard substitutions are rejected. | self-review only |
 | Integration verification | blocked | Local-only partial foundation has no completed durable feature to integrate. | authority/scope gate |
 | CI/merge authorization | blocked | No push, merge, deployment, release, or archive authority. | authority gate |
+
+## Durable binding continuation
+
+| Stage | Status | Evidence | Gate strength |
+|---|---|---|---|
+| Dependency integration | valid | TASK-087 exact commit `e13e6d8` merged at `fb1b499`; TASK-048/049 ancestry retained. | Git evidence |
+| Owned implementation | partial-green | Pure schema/watchdog, Ledger event/replay, typed Port, Store child binding, 0007 and runtime verifier implemented. | focused tests |
+| Privacy/epistemic boundary | pass | Explicit authority/evidence digests, secret/transcript rejection, expiring hypothesis pointers only. | unit/static tests |
+| Offline verification | pass-except-characterized-blocker | Formatting, strict scoped Clippy, governance and focused suites pass; migration contract RED is exact production orchestration gap. | current machine evidence |
+| PostgreSQL live | not-run | Resource lock was released, but production v5-prefix and Writer-v3 apply/rebind path is absent; no TASK-079 fixture started. | fail-closed gate |
+| Review/integration | blocked | Store cannot replace missing Writer-owner mutation with fixture SQL or a second truth. | architecture boundary |
+| Delivery | keep-open | No push/finisher/dashboard terminal refresh/archive while required gates are incomplete. | ticket policy |

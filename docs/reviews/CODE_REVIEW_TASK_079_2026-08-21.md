@@ -41,3 +41,22 @@ and worktree references while rejecting exact secret-token prefixes and a
 non-ASCII confusable input fail-closed. The added `lattice.foreman-epistemic/1.0`
 references are bounded digest pointers, expose no hypothesis text, and cannot
 modify lifecycle state; learning/promotion remains TASK-084 scope.
+
+## Durable binding continuation review
+
+The prior “not implemented” finding is resolved for the owned core: fixed
+`FOREMAN_COORDINATION`/`FOREMAN_SNAPSHOT_RECORDED` semantics, canonical
+authority/evidence commitments, typed Port, Store adapter, fixed 48-scalar
+record function, child/event replay verification, exact retry, stale-writer
+mapping, and privacy/schema rejection are present. Focused tests, schema-v6
+profile tests, formatting, scoped strict Clippy, and governance pass.
+
+**P1 — migration/rebind orchestration remains missing.** The new RED
+`runner_has_closed_fresh_and_exact_prefix_states_through_v6` fails first on
+missing `ExactV5Prefix`; the full migration contract also retains the deliberate
+missing-real-live-harness RED. `lattice-postgres-writer-lease::apply_extension`
+still accepts only v1/v2 manifests and has no v3 owner mutation path. Adding a
+test-only rebind or Store-owned Writer DML would hide, not resolve, the defect.
+
+No additional P0-P2 finding was found in the implemented owned slice. Review
+status is **BLOCKED**, not approved for push/finisher or live PASS claims.
