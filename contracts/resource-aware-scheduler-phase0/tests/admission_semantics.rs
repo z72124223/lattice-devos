@@ -1,9 +1,9 @@
 use resource_aware_scheduler_phase0::{
-    evaluate_admission, ActiveTask, AdmissionDecision, AdmissionReason, AdmissionThresholds,
-    DependencyCheckpoint, EvidenceWindow, HostSnapshot, IdentityFault, Observation,
-    ObservationSource, ObservationState, Permille, Prerequisites, RequiredSignal, ResourceClass,
-    ResourceRequirements, SampleFailure, SharedResource, SignalKind, TaskCandidate, ThresholdKind,
-    WorktreeId,
+    evaluate_admission, schedule_next_session, ActiveTask, AdmissionDecision, AdmissionReason,
+    AdmissionThresholds, DependencyCheckpoint, EvidenceWindow, HostSnapshot, IdentityFault,
+    Observation, ObservationSource, ObservationState, Permille, Prerequisites, RequiredSignal,
+    ResourceClass, ResourceRequirements, SampleFailure, SchedulerDecision, SchedulerLimits,
+    SharedResource, SignalKind, TaskCandidate, ThresholdKind, WorktreeId,
 };
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -58,6 +58,13 @@ fn ready_candidate() -> TaskCandidate {
         prerequisites: Prerequisites::ready(),
         shared_resources: vec![],
     }
+}
+
+fn candidate_with_key(key: &str) -> TaskCandidate {
+    let mut candidate = ready_candidate();
+    candidate.task_key = key.to_owned();
+    candidate.worktree = WorktreeId::new(key).expect("valid symbolic worktree id");
+    candidate
 }
 
 #[test]
@@ -274,5 +281,116 @@ fn healthy_independent_fixture_admits_exactly_one_candidate() {
             100
         ),
         AdmissionDecision::AdmitOne
+    );
+}
+
+#[test]
+fn scheduler_selects_the_first_admissible_candidate_after_reporting_prior_holds() {
+    let mut blocked = candidate_with_key("blocked-on-dependency");
+    blocked.prerequisites.dependencies_complete = false;
+    let ready = candidate_with_key("ready-cloud-light");
+
+    assert_eq!(
+        schedule_next_session(
+            &[blocked, ready],
+            &[],
+            &healthy_host(),
+            &thresholds(500),
+            SchedulerLimits { max_sessions: 4 },
+            100,
+        ),
+        SchedulerDecision::StartOne {
+            queue_index: 1,
+            task_key: "ready-cloud-light".to_owned(),
+            prior_holds: vec![(
+                0,
+                "blocked-on-dependency".to_owned(),
+                AdmissionReason::DependencyCheckpointMissing(
+                    DependencyCheckpoint::DependenciesComplete,
+                )
+            )],
+        }
+    );
+}
+
+#[test]
+fn scheduler_never_starts_more_than_one_session_per_evaluation() {
+    assert_eq!(
+        schedule_next_session(
+            &[candidate_with_key("first"), candidate_with_key("second")],
+            &[],
+            &healthy_host(),
+            &thresholds(500),
+            SchedulerLimits { max_sessions: 4 },
+            100,
+        ),
+        SchedulerDecision::StartOne {
+            queue_index: 0,
+            task_key: "first".to_owned(),
+            prior_holds: vec![],
+        }
+    );
+}
+
+#[test]
+fn scheduler_holds_when_session_cap_is_reached_before_resource_evaluation() {
+    let active = ActiveTask {
+        task_key: "active".to_owned(),
+        worktree: WorktreeId::new("active-worktree").expect("valid symbolic worktree id"),
+        shared_resources: vec![],
+    };
+
+    assert_eq!(
+        schedule_next_session(
+            &[candidate_with_key("ready")],
+            &[active],
+            &healthy_host(),
+            &thresholds(500),
+            SchedulerLimits { max_sessions: 1 },
+            100,
+        ),
+        SchedulerDecision::HoldAll {
+            reason: AdmissionReason::SessionLimitReached,
+            held: vec![],
+        }
+    );
+}
+
+#[test]
+fn scheduler_reports_all_candidate_hold_reasons_when_none_can_start() {
+    let mut dependency_blocked = candidate_with_key("dependency-blocked");
+    dependency_blocked.prerequisites.worker_observation_stable = false;
+    let mut resource_blocked = candidate_with_key("resource-blocked");
+    resource_blocked.class = ResourceClass::CpuHeavy;
+    resource_blocked.requirements.requires_cloud_quota = false;
+    let mut host = healthy_host();
+    host.cpu_used = fresh(Permille::new(900).expect("valid sample"));
+
+    assert_eq!(
+        schedule_next_session(
+            &[dependency_blocked, resource_blocked],
+            &[],
+            &host,
+            &thresholds(500),
+            SchedulerLimits { max_sessions: 4 },
+            100,
+        ),
+        SchedulerDecision::HoldAll {
+            reason: AdmissionReason::NoCandidateAdmissible,
+            held: vec![
+                (
+                    0,
+                    "dependency-blocked".to_owned(),
+                    AdmissionReason::DependencyCheckpointMissing(
+                        DependencyCheckpoint::WorkerObservationStable,
+                    )
+                ),
+                (
+                    1,
+                    "resource-blocked".to_owned(),
+                    AdmissionReason::ThresholdExceeded(ThresholdKind::CpuUsed,)
+                )
+            ],
+        }
     );
 }

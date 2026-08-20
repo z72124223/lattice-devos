@@ -390,6 +390,8 @@ pub enum AdmissionReason {
         fault: ObservationFault,
     },
     ThresholdExceeded(ThresholdKind),
+    SessionLimitReached,
+    NoCandidateAdmissible,
 }
 
 /// The Phase 0 evaluator never grants a batch. A caller may admit one task and
@@ -398,6 +400,26 @@ pub enum AdmissionReason {
 pub enum AdmissionDecision {
     AdmitOne,
     Hold(AdmissionReason),
+}
+
+/// Hard limits owned by the caller's current mode configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SchedulerLimits {
+    pub max_sessions: usize,
+}
+
+/// Queue-level decision for one Phase 0 scheduler evaluation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SchedulerDecision {
+    StartOne {
+        queue_index: usize,
+        task_key: String,
+        prior_holds: Vec<(usize, String, AdmissionReason)>,
+    },
+    HoldAll {
+        reason: AdmissionReason,
+        held: Vec<(usize, String, AdmissionReason)>,
+    },
 }
 
 fn missing_prerequisite(value: Prerequisites) -> Option<DependencyCheckpoint> {
@@ -616,4 +638,46 @@ pub fn evaluate_admission(
     }
 
     AdmissionDecision::AdmitOne
+}
+
+/// Selects at most one additional work session from the caller-provided queue.
+///
+/// This function performs no dispatch, process control, persistence, or queue
+/// mutation. The caller must collect a new host snapshot before calling again.
+#[must_use]
+pub fn schedule_next_session(
+    queue: &[TaskCandidate],
+    active_tasks: &[ActiveTask],
+    host: &HostSnapshot,
+    thresholds: &AdmissionThresholds,
+    limits: SchedulerLimits,
+    now: u64,
+) -> SchedulerDecision {
+    if active_tasks.len() >= limits.max_sessions {
+        return SchedulerDecision::HoldAll {
+            reason: AdmissionReason::SessionLimitReached,
+            held: vec![],
+        };
+    }
+
+    let mut held = Vec::new();
+    for (queue_index, candidate) in queue.iter().enumerate() {
+        match evaluate_admission(candidate, active_tasks, host, thresholds, now) {
+            AdmissionDecision::AdmitOne => {
+                return SchedulerDecision::StartOne {
+                    queue_index,
+                    task_key: candidate.task_key.clone(),
+                    prior_holds: held,
+                };
+            }
+            AdmissionDecision::Hold(reason) => {
+                held.push((queue_index, candidate.task_key.clone(), reason));
+            }
+        }
+    }
+
+    SchedulerDecision::HoldAll {
+        reason: AdmissionReason::NoCandidateAdmissible,
+        held,
+    }
 }
