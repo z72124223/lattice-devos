@@ -29,6 +29,16 @@
 - Preserve unrelated and pre-existing changes. Do not reset or clean another task's
   worktree.
 
+## Engineering Protocol
+
+- Before editing, read `docs/contracts/ENGINEERING_PROTOCOL_V1.md` and the
+  active task and module contracts.
+- Before claiming completion, reread the protocol, inspect the final diff, run
+  `npm.cmd run check` and focused verification, and report only current evidence.
+- After the clean logical commit, run `npm.cmd run delivery:finish` rather than
+  an ordinary manual push; archive the current Codex task only after
+  `LATTICE_DELIVERY_READY_TO_ARCHIVE=1`; every failure keeps the task open.
+
 ## Project authorization
 
 - The user has authorized routine local LATTICE implementation, exact dependency
