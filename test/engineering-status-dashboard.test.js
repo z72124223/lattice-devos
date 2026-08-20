@@ -14,6 +14,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   classifyTicketStatus,
+  isSnapshotFresh,
   openLocalFile,
   writeDashboard,
 } from "../scripts/export-lattice-engineering-status.mjs";
@@ -35,6 +36,7 @@ function git(cwd, ...args) {
 
 function createFixture({
   terminalState = "FAIL",
+  ticketStatus = "in_progress",
   malicious = false,
   sourceName = "source",
 } = {}) {
@@ -42,6 +44,7 @@ function createFixture({
   const repository = path.join(root, sourceName);
   const remote = path.join(root, "remote.git");
   const output = path.join(root, "output");
+  const guide = path.join(root, "branch-guide.zh-TW.json");
   mkdirSync(repository, { recursive: true });
   run("git", ["init", "--bare", remote], root);
   run("git", ["init", "-b", "main", repository], root);
@@ -54,21 +57,43 @@ function createFixture({
     : "";
   writeFileSync(
     path.join(repository, "docs", "tickets", "TASK-101-demo.md"),
-    `---\nticket_id: TASK-101\ntitle: Visible demo ${unsafe}\nstatus: in_progress\nbranch: feature/task-101-demo\n---\n\n# Demo\n\n## Objective\n\nMake branch state understandable. ${unsafe}${privatePaths}\n\n## Result\n\nCurrent terminal state is \`${terminalState}\`, not \`VERIFIED\`.\n\n## Next action\n\nReview the bounded correction.\n\n## Human gate\n\nNo user action is required.\n`,
+    `---\nticket_id: TASK-101\ntitle: Visible demo ${unsafe}\nstatus: ${ticketStatus}\nbranch: feature/task-101-demo\n---\n\n# Demo\n\n## Objective\n\nMake branch state understandable. ${unsafe}${privatePaths}\n\n## Result\n\nCurrent terminal state is \`${terminalState}\`, not \`VERIFIED\`.\n\n## Next action\n\nReview the bounded correction.\n\n## Human gate\n\nNo user action is required.\n`,
     "utf8",
   );
   git(repository, "add", ".");
   git(repository, "commit", "-m", "seed fixture");
-  git(repository, "switch", "-c", "feature/task-101-demo");
   git(repository, "remote", "add", "origin", remote);
+  git(repository, "push", "-u", "origin", "main");
+  run("git", ["--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main"], root);
+  git(repository, "switch", "-c", "feature/task-101-demo");
+  writeFileSync(path.join(repository, "feature.txt"), "feature child\n", "utf8");
+  git(repository, "add", "feature.txt");
+  git(repository, "commit", "-m", "add feature child commit");
   git(repository, "push", "-u", "origin", "feature/task-101-demo");
-  return { root, repository, remote, output };
+  writeFileSync(
+    guide,
+    `${JSON.stringify({
+      schema: "lattice.branch-guide.zh-TW/1.0",
+      branches: {
+        main: {
+          name: "穩定專案根節點",
+          purpose: "這是遠端預設分支，可作為不依賴新功能的工作起點。",
+        },
+        "feature/task-101-demo": {
+          name: "任務 101：示範分支",
+          purpose: "用來示範如何看懂分支狀態與派工資格。",
+        },
+      },
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  return { root, repository, remote, output, guide };
 }
 
-function exportFixture(repository, output) {
+function exportFixture(repository, output, guide) {
   const result = spawnSync(
     process.execPath,
-    [exporter, "--repository", repository, "--output", output],
+    [exporter, "--repository", repository, "--output", output, "--guide", guide],
     { cwd: projectRoot, encoding: "utf8" },
   );
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
@@ -82,22 +107,33 @@ test("exports explicit task failure safely without mutating the source tree", ()
   const fixture = createFixture({ malicious: true });
   try {
     const before = git(fixture.repository, "status", "--porcelain=v1");
-    const { snapshot, html } = exportFixture(fixture.repository, fixture.output);
+    const { snapshot, html } = exportFixture(fixture.repository, fixture.output, fixture.guide);
     const after = git(fixture.repository, "status", "--porcelain=v1");
     const item = snapshot.items.find((candidate) => candidate.id === "TASK-101");
 
-    assert.equal(snapshot.schema, "lattice.engineering-status/1.0");
+    assert.equal(snapshot.schema, "lattice.engineering-status/2.0");
     assert.equal(snapshot.repository.currentBranch, "feature/task-101-demo");
     assert.equal(snapshot.completeness, "complete");
     assert.equal(item.outcome, "FAIL");
     assert.equal(item.git.clean, true);
     assert.equal(item.git.sync.state, "synced");
+    assert.equal(item.displayNameZh, "任務 101：示範分支");
+    assert.equal(item.purposeZh, "用來示範如何看懂分支狀態與派工資格。");
+    assert.equal(item.dispatch.eligible, false);
+    assert.match(item.dispatch.reasonZh, /失敗/u);
     assert.equal(item.nextStep, "Review the bounded correction.");
     assert.equal(before, "");
     assert.equal(after, "");
     assert.equal(html.includes("</script><script>globalThis.pwned=true</script>"), false);
     assert.equal(html.includes(".innerHTML"), false);
-    assert.match(html, /LATTICE 工程雷達/u);
+    assert.match(html, /LATTICE 分支工作地圖/u);
+    assert.match(html, /你現在可以從哪裡開始新工作/u);
+    assert.match(html, /全部展開/u);
+    assert.match(html, /選這裡安排新工作/u);
+    assert.match(html, /snapshotFresh/u);
+    assert.match(html, /所有派工選擇均已停用/u);
+    assert.match(html, /copied=document\.execCommand\("copy"\)/u);
+    assert.match(html, /瀏覽器沒有允許自動複製/u);
     assert.equal(html.includes(fixture.repository), false);
     assert.equal(html.includes("C:\\Users\\alice\\private\\repo"), false);
     assert.equal(html.includes("C:/Users/alice/private/repo"), false);
@@ -115,7 +151,7 @@ test("keeps a TASK with a missing ticket visible as partial and unknown", () => 
   try {
     git(fixture.repository, "rm", "docs/tickets/TASK-101-demo.md");
     git(fixture.repository, "commit", "-m", "remove ticket to simulate partial evidence");
-    const { snapshot } = exportFixture(fixture.repository, fixture.output);
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
     const item = snapshot.items.find((candidate) => candidate.id === "TASK-101");
 
     assert.equal(snapshot.completeness, "partial");
@@ -137,7 +173,7 @@ test("rejects duplicate TASK tickets instead of selecting one arbitrarily", () =
     );
     git(fixture.repository, "add", ".");
     git(fixture.repository, "commit", "-m", "add conflicting duplicate ticket");
-    const { snapshot } = exportFixture(fixture.repository, fixture.output);
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
     const item = snapshot.items.find((candidate) => candidate.id === "TASK-101");
 
     assert.equal(item.outcome, "UNKNOWN");
@@ -165,6 +201,15 @@ test("normalizes the repository ticket status vocabulary", () => {
   assert.equal(classifyTicketStatus("invented-success"), null);
 });
 
+test("treats old or implausibly future snapshots as stale", () => {
+  const now = Date.parse("2026-08-20T12:00:00.000Z");
+  assert.equal(isSnapshotFresh("2026-08-19T13:00:00.000Z", now), true);
+  assert.equal(isSnapshotFresh("2026-08-19T11:59:59.000Z", now), false);
+  assert.equal(isSnapshotFresh("2026-08-20T12:04:59.000Z", now), true);
+  assert.equal(isSnapshotFresh("2026-08-20T12:05:01.000Z", now), false);
+  assert.equal(isSnapshotFresh("not-a-date", now), false);
+});
+
 test("marks an unrecognized TASK status as partial unknown evidence", () => {
   const fixture = createFixture();
   try {
@@ -176,7 +221,7 @@ test("marks an unrecognized TASK status as partial unknown evidence", () => {
     writeFileSync(ticketPath, ticket, "utf8");
     git(fixture.repository, "add", "docs/tickets/TASK-101-demo.md");
     git(fixture.repository, "commit", "-m", "add malformed ticket status");
-    const { snapshot } = exportFixture(fixture.repository, fixture.output);
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
     const item = snapshot.items.find((candidate) => candidate.id === "TASK-101");
 
     assert.equal(item.outcome, "UNKNOWN");
@@ -198,7 +243,7 @@ test("rejects duplicate authoritative frontmatter fields instead of taking the l
     writeFileSync(ticketPath, ticket, "utf8");
     git(fixture.repository, "add", "docs/tickets/TASK-101-demo.md");
     git(fixture.repository, "commit", "-m", "add conflicting ticket status fields");
-    const { snapshot } = exportFixture(fixture.repository, fixture.output);
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
     const item = snapshot.items.find((candidate) => candidate.id === "TASK-101");
 
     assert.equal(item.outcome, "UNKNOWN");
@@ -218,10 +263,59 @@ test("rejects an invalid snapshot before replacing an existing output", async ()
       writeDashboard({ schema: "wrong", items: [] }, root),
       /invalid engineering-status snapshot/u,
     );
+    await assert.rejects(
+      writeDashboard({ schema: "lattice.engineering-status/2.0", items: [] }, root),
+      /invalid engineering-status snapshot/u,
+    );
     assert.equal(readFileSync(path.join(root, "status.json"), "utf8"), "old-json\n");
     assert.equal(readFileSync(path.join(root, "index.html"), "utf8"), "old-html\n");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects orphaned, duplicate, and cyclic V2 tree relationships", async () => {
+  const fixture = createFixture({ terminalState: "COMPLETE", ticketStatus: "complete" });
+  try {
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+    const originalJson = readFileSync(path.join(fixture.output, "status.json"), "utf8");
+    const child = snapshot.items.find((item) => item.tree.parentKey !== null);
+    const parent = snapshot.items.find((item) => item.treeKey === child.tree.parentKey);
+
+    const orphaned = structuredClone(snapshot);
+    const orphanParent = orphaned.items.find((item) => item.treeKey === parent.treeKey);
+    orphanParent.tree.childrenKeys = orphanParent.tree.childrenKeys.filter(
+      (key) => key !== child.treeKey,
+    );
+    await assert.rejects(
+      writeDashboard(orphaned, fixture.output),
+      /invalid engineering-status snapshot/u,
+    );
+
+    const duplicated = structuredClone(snapshot);
+    duplicated.items
+      .find((item) => item.treeKey === parent.treeKey)
+      .tree.childrenKeys.push(child.treeKey);
+    await assert.rejects(
+      writeDashboard(duplicated, fixture.output),
+      /invalid engineering-status snapshot/u,
+    );
+
+    const cyclic = structuredClone(snapshot);
+    const cyclicRoot = cyclic.items.find((item) => item.tree.parentKey === null);
+    const cyclicChild = cyclic.items.find((item) => item.tree.parentKey !== null);
+    cyclicRoot.tree.parentKey = cyclicChild.treeKey;
+    cyclicRoot.tree.parentBranch = cyclicChild.branch;
+    cyclicChild.tree.childrenKeys.push(cyclicRoot.treeKey);
+    cyclic.tree.roots = [];
+    await assert.rejects(
+      writeDashboard(cyclic, fixture.output),
+      /invalid engineering-status snapshot/u,
+    );
+
+    assert.equal(readFileSync(path.join(fixture.output, "status.json"), "utf8"), originalJson);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
   }
 });
 
@@ -261,6 +355,12 @@ test(
         "engineering-status-dashboard",
         "index.template.html",
       );
+      const fixtureGuide = path.join(
+        fixture.repository,
+        "tools",
+        "engineering-status-dashboard",
+        "branch-guide.zh-TW.json",
+      );
       mkdirSync(path.dirname(fixtureExporter), { recursive: true });
       mkdirSync(path.dirname(fixtureTemplate), { recursive: true });
       copyFileSync(path.join(projectRoot, "Open-LATTICE-Engineering-Status.cmd"), launcher);
@@ -269,6 +369,7 @@ test(
         path.join(projectRoot, "tools", "engineering-status-dashboard", "index.template.html"),
         fixtureTemplate,
       );
+      copyFileSync(fixture.guide, fixtureGuide);
       const result = spawnSync(
         "cmd.exe",
         ["/d", "/c", launcher],
@@ -307,7 +408,7 @@ test("keeps remote divergence and issue worktrees visible as separate evidence",
     git(fixture.repository, "commit", "-m", "local ahead commit");
     git(fixture.repository, "worktree", "add", "-b", "issue/42-readable-cards", issueWorktree, "main");
 
-    const { snapshot } = exportFixture(fixture.repository, fixture.output);
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
     const task = snapshot.items.find((candidate) => candidate.id === "TASK-101");
     const issue = snapshot.items.find((candidate) => candidate.id === "ISSUE-42");
 
@@ -340,11 +441,140 @@ test("does not call a stale tracking ref synced after the live remote advances",
     git(peer, "commit", "-m", "advance remote outside source tracking ref");
     git(peer, "push", "origin", "feature/task-101-demo");
 
-    const { snapshot } = exportFixture(fixture.repository, fixture.output);
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
     const item = snapshot.items.find((candidate) => candidate.id === "TASK-101");
     assert.equal(snapshot.sources.gitRemote.state, "available");
     assert.equal(item.git.sync.state, "remote-changed");
     assert.equal(item.git.sync.remoteVerified, true);
+    assert.equal(item.dispatch.eligible, false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when a completed branch has no Chinese purpose", () => {
+  const fixture = createFixture({ terminalState: "COMPLETE", ticketStatus: "complete" });
+  try {
+    const guide = JSON.parse(readFileSync(fixture.guide, "utf8"));
+    delete guide.branches["feature/task-101-demo"];
+    writeFileSync(fixture.guide, `${JSON.stringify(guide, null, 2)}\n`, "utf8");
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+    const item = snapshot.items.find((candidate) => candidate.id === "TASK-101");
+
+    assert.equal(item.outcome, "COMPLETE");
+    assert.equal(item.guideMatched, false);
+    assert.equal(item.dispatch.eligible, false);
+    assert.match(item.dispatch.reasonZh, /白話中文用途/u);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when a completed branch has uncommitted changes", () => {
+  const fixture = createFixture({ terminalState: "COMPLETE", ticketStatus: "complete" });
+  try {
+    writeFileSync(path.join(fixture.repository, "unfinished.txt"), "not committed\n", "utf8");
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+    const item = snapshot.items.find((candidate) => candidate.id === "TASK-101");
+
+    assert.equal(item.git.clean, false);
+    assert.equal(item.dispatch.eligible, false);
+    assert.match(item.dispatch.reasonZh, /未提交變更/u);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("keeps multiple detached worktrees as distinct reachable tree nodes", () => {
+  const fixture = createFixture();
+  try {
+    git(fixture.repository, "worktree", "add", "--detach", path.join(fixture.root, "detached-one"), "main");
+    git(fixture.repository, "worktree", "add", "--detach", path.join(fixture.root, "detached-two"), "main");
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+    const detached = snapshot.items.filter((item) => item.worktree.detached);
+    const byKey = new Map(snapshot.items.map((item) => [item.treeKey, item]));
+    const visited = new Set();
+    const visit = (key) => {
+      if (visited.has(key)) return;
+      visited.add(key);
+      for (const child of byKey.get(key).tree.childrenKeys) visit(child);
+    };
+    for (const rootKey of snapshot.tree.roots) visit(rootKey);
+
+    assert.equal(detached.length, 2);
+    assert.equal(new Set(detached.map((item) => item.treeKey)).size, 2);
+    assert.ok(detached.every((item) => item.dispatch.eligible === false));
+    assert.equal(visited.size, snapshot.items.length);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("prefers a named stable branch over a detached worktree at the same commit", () => {
+  const fixture = createFixture();
+  const detachedPath = path.join(fixture.root, "detached-at-feature");
+  const childPath = path.join(fixture.root, "named-child");
+  try {
+    git(fixture.repository, "worktree", "add", "--detach", detachedPath, "feature/task-101-demo");
+    git(
+      fixture.repository,
+      "worktree",
+      "add",
+      "-b",
+      "feature/task-102-child",
+      childPath,
+      "feature/task-101-demo",
+    );
+    writeFileSync(path.join(childPath, "child.txt"), "child branch\n", "utf8");
+    git(childPath, "add", "child.txt");
+    git(childPath, "commit", "-m", "add named child");
+
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+    const child = snapshot.items.find((item) => item.branch === "feature/task-102-child");
+    assert.equal(child.tree.parentBranch, "feature/task-101-demo");
+    assert.equal(child.tree.relation, "descendant");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("marks the snapshot partial and disables dispatch when Git ancestry fails", () => {
+  const fixture = createFixture({ terminalState: "COMPLETE", ticketStatus: "complete" });
+  try {
+    writeFileSync(
+      path.join(fixture.repository, ".git", "refs", "heads", "broken-ancestry-ref"),
+      `${"1".repeat(40)}\n`,
+      "utf8",
+    );
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+    assert.equal(snapshot.sources.gitAncestry.state, "partial");
+    assert.equal(snapshot.completeness, "partial");
+    assert.equal(snapshot.recommendedBranch, null);
+    assert.ok(snapshot.items.every((item) => item.dispatch.eligible === false));
+    assert.ok(snapshot.items.every((item) => /版本關係無法讀取/u.test(item.dispatch.reasonZh)));
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("builds a real top-down ancestry tree and enables only a proven branch", () => {
+  const fixture = createFixture({ terminalState: "COMPLETE", ticketStatus: "complete" });
+  try {
+    const { snapshot } = exportFixture(fixture.repository, fixture.output, fixture.guide);
+    const root = snapshot.items.find((item) => item.branch === "main");
+    const task = snapshot.items.find((item) => item.branch === "feature/task-101-demo");
+
+    assert.equal(snapshot.repository.defaultBranch, "main");
+    assert.equal(snapshot.sources.gitAncestry.state, "available");
+    assert.equal(root.kind, "BASE");
+    assert.equal(root.isDefaultBranch, true);
+    assert.equal(root.dispatch.eligible, true);
+    assert.equal(task.tree.parentBranch, "main");
+    assert.equal(task.tree.relation, "descendant");
+    assert.equal(task.tree.depth, 1);
+    assert.equal(task.dispatch.eligible, true);
+    assert.equal(snapshot.recommendedBranch, "feature/task-101-demo");
+    assert.deepEqual(snapshot.tree.roots, [root.treeKey]);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

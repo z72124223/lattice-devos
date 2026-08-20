@@ -1,7 +1,7 @@
 ---
 module_id: engineering-status-dashboard
 name: Engineering Status Dashboard
-constitution_version: 1.0
+constitution_version: 1.1
 status: active
 ---
 
@@ -24,6 +24,8 @@ engineering status page that a non-engineer can refresh and understand quickly.
 - A generated local `status.json` snapshot and self-contained `index.html`.
 - Presentation-only classifications derived from evidence, including explicit
   `UNKNOWN` and `STALE` states.
+- The Git-ancestry presentation tree, Chinese purpose guide, and fail-closed
+  new-work eligibility projection.
 
 The default output directory is outside Git worktrees. Generated data is a
 disposable projection, not authoritative repository state.
@@ -34,7 +36,7 @@ disposable projection, not authoritative repository state.
 - `npm.cmd run status:refresh`
 - `npm.cmd run status:open`
 - `Open-LATTICE-Engineering-Status.cmd`
-- Snapshot schema `lattice.engineering-status/1.0`.
+- Snapshot schema `lattice.engineering-status/2.0`.
 
 The exporter must return a nonzero exit code when it cannot identify the source
 repository or cannot write a valid complete snapshot. Per-worktree and optional
@@ -51,6 +53,17 @@ GitHub failures are represented in the snapshot instead of silently omitted.
    version, completeness, and source-level errors.
 7. A failed refresh leaves any previous snapshot untouched by writing temporary
    files first and replacing only complete artifacts.
+8. New-work eligibility requires explicit purpose, complete terminal evidence,
+   a clean tree, and a verified synchronized remote, except that the verified
+   GitHub default branch may act as the stable root.
+9. Selecting or copying a new-work request never creates a task, branch, commit,
+   push, or authorization.
+10. Tree parents come from Git commit ancestry; branch names and TASK numbers do
+    not invent parentage.
+11. A snapshot older than 24 hours, implausibly future-dated, or missing its Git
+    ancestry graph disables every new-work selection and recommendation.
+12. The V2 writer validates the complete tree, Chinese display, eligibility,
+    freshness, and recommendation structure before replacing prior output.
 
 ## Allowed Dependencies
 
@@ -80,10 +93,10 @@ processes, or third-party JavaScript packages is allowed.
 - The launcher keeps the terminal visible on fatal refresh failure and does not
   open a knowingly incomplete new page.
 
-The initial snapshot schema is `lattice.engineering-status/1.0`. Additive fields
-may be introduced compatibly; removing or reinterpreting an existing field
-requires a versioned schema and specification amendment. Generated snapshots
-are disposable and require no data migration.
+Snapshot version 2 is `lattice.engineering-status/2.0`; it adds the verified
+default root, Git-ancestry tree, Chinese purpose fields, eligibility fields,
+and the explicit snapshot freshness policy.
+Generated snapshots are disposable and require no data migration.
 
 ## Acceptance Gates
 
@@ -104,3 +117,5 @@ requires separate user authorization.
 ## Amendment History
 
 - 1.0 (2026-08-20): initial local read-only dashboard boundary for SPEC-004.
+- 1.1 (2026-08-20): replace the card-first view with a Chinese Git-ancestry
+  branch tree and fail-closed, copy-only new-work selection for SPEC-004 v2.

@@ -1,6 +1,6 @@
 ---
 protocol_id: LATTICE_ENGINEERING_PROTOCOL
-version: 1.0.2
+version: 1.0.3
 status: active
 canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md
 ---
@@ -26,6 +26,12 @@ After the durable handoff is current, and again after any authorized push, run
 projection for the user. A refresh failure or stale/unknown source must remain
 visible and be reported; the projection never replaces ticket, Git, test, CI,
 review, or LATTICE acceptance evidence.
+
+Every new branch must add a plain Traditional-Chinese name and purpose to
+`tools/engineering-status-dashboard/branch-guide.zh-TW.json` and include that
+path in the active ticket `allowed_paths`. Complete this human-readable entry
+before the delivery refresh; an unmapped branch intentionally remains visible
+but cannot be selected as a new-work starting point.
 
 ## Knowledge Routing
 

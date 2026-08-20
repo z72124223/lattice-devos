@@ -1,0 +1,165 @@
+{
+  "schema": "lattice.branch-guide.zh-TW/1.0",
+  "branches": {
+    "feature/task-037-full-chain-integration": {
+      "name": "專案預設根節點",
+      "purpose": "GitHub 目前的預設分支；適合建立不需要尚未整合新功能的獨立工作。"
+    },
+    "feature/task-077-engineering-status-dashboard": {
+      "name": "任務 077：工程分支地圖",
+      "purpose": "把分支關係、用途和可派工狀態整理成全中文、可展開的樹狀畫面。"
+    },
+    "feature/task-076-postgres-writer-lease-v2": {
+      "name": "任務 076：寫入租約升級",
+      "purpose": "讓新版資料庫仍能安全辨識唯一寫入者，並防止過期工作繼續寫入。"
+    },
+    "feature/task-075-schema-v5-migration-reconciliation": {
+      "name": "任務 075：資料庫版本整合",
+      "purpose": "整理專案登記與自主收據的資料庫升級順序，避免版本互相衝突。"
+    },
+    "feature/task-051-p0-platform-live-acceptance": {
+      "name": "任務 051：本機平台驗收",
+      "purpose": "驗證這台電腦上的 LATTICE 工具能被找到、呼叫，並在資料庫重啟後安全恢復。"
+    },
+    "feature/task-050-autonomy-receipt-ledger-replay": {
+      "name": "任務 050：自主執行收據",
+      "purpose": "把自主決定與執行證據保存到正式工作帳本，並驗證重啟後仍可重播。"
+    },
+    "feature/task-049-window-closure": {
+      "name": "任務 049：工作視窗收尾",
+      "purpose": "確保 Codex 工作視窗結束時能保存結果並安全收尾。"
+    },
+    "feature/task-048-worker-observation-contract": {
+      "name": "任務 048：背景工作觀察",
+      "purpose": "記錄背景工作者的狀態，但不讓觀察者取得工程寫入權。"
+    },
+    "feature/task-045-047-guardian-contracts-20260810": {
+      "name": "任務 045–047：守門規則",
+      "purpose": "建立授權、資源與安全條件的統一守門契約。"
+    },
+    "feature/task-044-component-fault-recovery-gate": {
+      "name": "任務 044：元件故障恢復",
+      "purpose": "驗證元件失敗時能停止、回復並保留可檢查的證據。"
+    },
+    "feature/task-043-codebase-memory-benchmark": {
+      "name": "任務 043：程式碼記憶效能測試",
+      "purpose": "量測程式碼記憶的準確度、速度與資源使用。"
+    },
+    "feature/task-042-hermes-strict-clippy": {
+      "name": "任務 042：Hermes 嚴格程式檢查",
+      "purpose": "讓 Hermes 相關的 Rust 程式通過更嚴格的品質檢查。"
+    },
+    "feature/task-041-rust-ci": {
+      "name": "任務 041：Rust 自動測試",
+      "purpose": "讓 Rust 程式在 GitHub 自動執行編譯與品質檢查。"
+    },
+    "integration/task-041-task-042": {
+      "name": "整合節點：任務 041 與 042",
+      "purpose": "把 Rust 自動測試與 Hermes 嚴格檢查放在一起驗證。"
+    },
+    "feature/task-040-code-mode-toolchain-repair": {
+      "name": "任務 040：程式工具鏈修復",
+      "purpose": "修正 Code Mode 執行與工具呼叫的基礎問題。"
+    },
+    "feature/task-039-hermes-broker-protocol": {
+      "name": "任務 039：Hermes 訊息協議",
+      "purpose": "定義 LATTICE 與 Hermes 交換工作、進度與結果的格式。"
+    },
+    "feature/task-038-hermes-production-runner": {
+      "name": "任務 038：Hermes 正式執行器",
+      "purpose": "把 Hermes 研究工作放進受控的正式執行路徑。"
+    },
+    "feature/task-038-four-tool-acceptance-publication": {
+      "name": "任務 038：四工具驗收整理",
+      "purpose": "保存四個公開工具的驗收證據與候選發布狀態；不代表已正式發布。"
+    },
+    "feature/task-038-chatgpt-mcp": {
+      "name": "任務 038：ChatGPT 工具連接",
+      "purpose": "讓 ChatGPT 經由 MCP 看見並呼叫 LATTICE 工具。"
+    },
+    "feature/task-038-acceptance-prep": {
+      "name": "任務 038：正式驗收準備",
+      "purpose": "準備四個工具與完整流程所需的正式驗收環境。"
+    },
+    "feature/task-037-operator-entrypoint": {
+      "name": "任務 037：操作員啟動入口",
+      "purpose": "提供一個受控方式啟動並檢查整套 LATTICE。"
+    },
+    "feature/task-037-full-chain-publication": {
+      "name": "任務 037：完整流程發布準備",
+      "purpose": "整理全鏈路完成證據與發布候選；不代表已正式發布。"
+    },
+    "feature/task-036-codex-app-server-repair": {
+      "name": "任務 036：Codex 服務修復",
+      "purpose": "修正 Codex app-server 的啟動、連線與版本辨識。"
+    },
+    "feature/task-035-openclaw-gateway": {
+      "name": "任務 035：OpenClaw 人類入口",
+      "purpose": "建立使用者透過 OpenClaw 進入 LATTICE 的受控入口。"
+    },
+    "feature/task-034-hermes-reflection": {
+      "name": "任務 034：Hermes 反思",
+      "purpose": "讓 Hermes 對工作結果提出反思候選，但不取得寫入權。"
+    },
+    "feature/task-028-031-hardening-audit": {
+      "name": "任務 028–031：安全加固與稽核",
+      "purpose": "補強鎖定、證據、失敗保護與稽核流程。"
+    },
+    "feature/task-026-027-workspace-scope": {
+      "name": "任務 026–027：工作區安全範圍",
+      "purpose": "限制每個工作只能修改被授權的資料夾與檔案。"
+    },
+    "feature/task-023-025-durable-repositories": {
+      "name": "任務 023–025：永久保存基礎",
+      "purpose": "建立重啟後仍存在的任務、事件與專案資料。"
+    },
+    "feature/task-022-postgres-project-registry": {
+      "name": "任務 022：專案登記資料庫",
+      "purpose": "使用 PostgreSQL 保存專案身分與登記資料。"
+    },
+    "feature/issue-008-model-routing": {
+      "name": "問題 8：模型選擇路由",
+      "purpose": "處理不同工作應交給哪一種 AI 模型的選擇規則。"
+    },
+    "feature/issue-007-resource-aware-scheduler": {
+      "name": "問題 7：資源感知排程",
+      "purpose": "依電腦資源與工作限制安排執行順序。"
+    },
+    "feature/issue-2-passive-supervisor-20260810": {
+      "name": "問題 2：被動監督器",
+      "purpose": "觀察背景執行狀態並回報異常，不主動取得控制權。"
+    },
+    "feature/gh-9-reflection-evolution": {
+      "name": "GitHub 問題 9：反思機制演進",
+      "purpose": "整理反思候選如何產生、審查與演進。"
+    },
+    "fix/governance-gh9-ticket-id-ci": {
+      "name": "修正：問題 9 治理與自動檢查",
+      "purpose": "修正票券編號治理與 GitHub 自動檢查問題。"
+    },
+    "feature/phase1-controlled-swarm": {
+      "name": "第一階段：受控多工作者",
+      "purpose": "建立多個 AI 工作者在明確授權與邊界內協作的基礎。"
+    },
+    "feature/p0-clean-seed-rebuild": {
+      "name": "P0：乾淨基底重建",
+      "purpose": "從可驗證的乾淨基底重建最重要的工程狀態。"
+    },
+    "feature/v2-rust-postgres-bootstrap": {
+      "name": "第二版：Rust 與 PostgreSQL 基礎",
+      "purpose": "建立 Rust 服務連接 PostgreSQL 的第二版基礎。"
+    },
+    "feature/applypatch-runtime-fix": {
+      "name": "修正：Apply Patch 執行環境",
+      "purpose": "修正程式修改工具在本機執行時的問題。"
+    },
+    "chore/gh-1-codex-bridge-smoke-20260810": {
+      "name": "維護：Codex 連接冒煙測試",
+      "purpose": "快速確認 Codex 與 LATTICE 的基本連接是否可用。"
+    },
+    "(detached)": {
+      "name": "已脫離的工程版本",
+      "purpose": "這是未掛在具名分支上的暫時版本，只供檢查，不能派工。"
+    }
+  }
+}

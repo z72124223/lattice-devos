@@ -90,13 +90,13 @@ remains not authorized for merge or Draft promotion.
 
 ## Current local engineering status dashboard - TASK-077
 
-CURRENT TASK-077 - implementation is complete and blocker-free on
-`feature/task-077-engineering-status-dashboard`, with a clean default-branch
-merge simulation and combined `npm.cmd run verify` pass. The local page remains
-an observational projection only. The next decision is whether to authorize a
-separate integration into GitHub's actual default branch,
-`feature/task-037-full-chain-integration`; no merge, deployment, release, or
-public hosting is authorized by this completion.
+CURRENT TASK-077 - V2 implementation and independent review are complete and
+blocker-free. The local page is now a Traditional-Chinese expandable
+Git-ancestry tree with plain branch purposes, conservative new-work selection,
+and a copyable Codex request. It remains read-only and does not create a task or
+branch. Exact default-target integration verification, final handoff, non-force
+feature push, remote equality, and post-push refresh are the remaining delivery
+steps; no default-branch merge or release is authorized.
 
 ## Paused P0 platform live acceptance - TASK-051
 

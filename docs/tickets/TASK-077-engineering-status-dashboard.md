@@ -2,9 +2,9 @@
 ticket_id: TASK-077
 title: Local static engineering status dashboard
 spec_id: SPEC-004
-spec_version: 1
+spec_version: 2
 module_id: engineering-status-dashboard
-constitution_version: 1.0
+constitution_version: 1.1
 status: complete
 parallel_safe: false
 depends_on: []
@@ -25,6 +25,7 @@ allowed_paths:
   - scripts/check-project.mjs
   - scripts/export-lattice-engineering-status.mjs
   - tools/engineering-status-dashboard/index.template.html
+  - tools/engineering-status-dashboard/branch-guide.zh-TW.json
   - test/engineering-status-dashboard.test.js
   - test/project-governance-check.test.js
 branch: feature/task-077-engineering-status-dashboard
@@ -34,13 +35,15 @@ branch: feature/task-077-engineering-status-dashboard
 
 ## Objective
 
-Deliver the approved SPEC-004 vertical slice: live read-only collection, safe
-static rendering, a double-click launcher, plain-language branch cards, and the
-delivery-protocol refresh hook.
+Rework the approved SPEC-004 vertical slice from cards into an expandable,
+Traditional-Chinese branch tree. The tree must explain branch purpose, derive
+parentage from Git ancestry, fail closed when deciding whether a branch may
+start new work, and generate a copyable Codex request without mutating Git.
 
 The repository validator's exact required engineering-protocol version is also
-advanced from 1.0.1 to 1.0.2 so the new mandatory refresh rule is enforced by
-the existing `npm.cmd run check` gate.
+advanced to 1.0.3 so the mandatory refresh rule and the Chinese purpose-guide
+update for every new branch are enforced by the existing `npm.cmd run check`
+gate.
 
 ## Acceptance conditions
 
@@ -50,6 +53,11 @@ the existing `npm.cmd run check` gate.
 - Generated artifacts remain outside the repository by default and the source
   worktree is unchanged by refresh.
 - No unresolved P0/P1 code, security, architecture, or integration finding.
+- Every selectable non-default node has a mapped Chinese purpose, complete
+  terminal evidence, a clean worktree, and a verified synchronized remote.
+- The user can expand the top-down tree, select an eligible node, enter a work
+  description, and copy a Chinese request for Codex to create a separate task
+  and branch.
 - The completed feature checkpoint is committed and non-force pushed to this
   ticket's feature branch. PR, merge, deployment, release, and public hosting
   remain unauthorized.
@@ -83,11 +91,14 @@ credential mutation, or destructive cleanup.
 
 ## Next action
 
-The completed feature branch may be inspected through the local launcher. After
-its non-force push, the user may separately choose whether to authorize
-integration into the actual GitHub default branch; no merge is implied.
+Create the V2 implementation checkpoint, verify it against the actual GitHub
+default target, update the durable handoff, non-force push the completed feature
+branch, prove remote equality, and refresh the local page after the push.
 
 ## Completion evidence
+
+The evidence below is retained from V1 and is stale for the reopened V2 work.
+New V2 evidence replaces it only after the revised acceptance conditions pass.
 
 - Implementation checkpoint: `89de978404acfefcdb0eec23742657636d4cf16d`.
 - Focused dashboard and governance checks: 22/22 passed.
@@ -98,3 +109,22 @@ integration into the actual GitHub default branch; no merge is implied.
   no conflict; combined `npm.cmd run verify` passed 60/60.
 - TASK-051 was not rerun and remains explicitly `FAIL` in the live local
   dashboard despite clean Git and passing PR CI evidence.
+
+## V2 completion evidence
+
+- Focused dashboard tests: 19/19 passed, including ancestry failure, snapshot
+  freshness, same-commit detached priority, tree reachability, safe output
+  replacement, unmapped/dirty/remote-changed denial, and the Windows launcher.
+- Focused governance tests: 17/17 passed, including live current-branch,
+  `allowed_paths`, Chinese guide entry, decoy-list, mismatch, and English-only
+  rejection.
+- Full repository verification: 74/74 passed before the final narrow P3
+  message/cleanup repair; affected tests, template JavaScript syntax, and
+  `git diff --check` passed afterward. A final full rerun is required after
+  completion artifacts are current.
+- Independent final code/security review: `No findings`, P0=P1=P2=P3=0.
+- Architecture review: blocker-free, schema 2.0 is disposable, and no ADR,
+  migration, dependency, truth, writer, or authority expansion is required.
+- Live V2 refresh: 40 nodes, one root, Git ancestry available, zero unmapped
+  nodes, three currently eligible starting points; TASK-051 remains `FAIL` and
+  TASK-077 remained non-eligible until this clean completion is pushed.

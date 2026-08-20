@@ -1,86 +1,80 @@
-# TASK-077 architecture review — 2026-08-20
+# TASK-077 V2 architecture review — 2026-08-20
 
 ## Triggers
 
-- Creates the `engineering-status-dashboard` module.
-- Introduces local snapshot schema `lattice.engineering-status/1.0`.
-- Adds read-only Git/GitHub/OS process dependencies and a cross-cutting
-  post-handoff refresh contract.
-- Materially handles privacy, partial failure, and status reliability.
+- Changes the disposable public snapshot from
+  `lattice.engineering-status/1.0` to `2.0`.
+- Adds Git-ancestry hierarchy, a repository-owned Chinese purpose guide,
+  fail-closed new-work eligibility, and a copy-only interaction.
+- Amends the module constitution from 1.0 to 1.1 and the delivery protocol to
+  1.0.3.
+- Materially changes reliability, privacy presentation, and authorization
+  wording while retaining the same read-only process/network boundary.
 
 ## Before and after
 
-Before TASK-077, task state remained authoritative in existing tickets,
-receipts, Git/test/CI evidence, and LATTICE ledgers, but no single
-plain-language local projection existed. The Rust control plane and the
-`lattice-cli` module intentionally exclude Git/network/process ownership.
+V1 rendered independent technical cards. V2 reads the same registered
+worktrees, tickets, live remote heads, and optional GitHub metadata, then adds a
+versioned, disposable projection of commit ancestry and Chinese branch purpose.
+The page may classify a branch as a candidate starting point and prepare text
+for Codex, but it cannot create a TASK, branch, worktree, commit, push, approval,
+or other side effect.
 
-After TASK-077, a separate Node standard-library adapter reads registered Git
-worktrees, exact ticket frontmatter, live remote heads, and optional GitHub PR/CI
-metadata. It owns only disposable `status.json` and self-contained `index.html`
-files under local application data. It does not write control-plane state,
-repository state, GitHub state, task tickets, or credentials.
-
-## Ownership and contracts
-
-- ADR-001 remains intact: the task ledger/control-plane evidence stays truth;
-  the dashboard is explicitly non-authoritative derived evidence.
-- ADR-002 remains intact: no approval subject, writer lease, merge authority,
-  scope decision, or execution capability is added.
-- ADR-006 remains intact: the dashboard is a read-only observer and never owns
-  a writable Codex process or worktree lease.
-- Snapshot status precedence is fail closed. Explicit task outcomes outrank
-  clean Git/passing CI, while missing, conflicting, malformed, stale, or
-  unavailable sources remain `UNKNOWN`, partial, or an exact non-success state.
-- The v1.0 schema is initial and disposable. Additive changes are compatible;
-  removals or reinterpretations require a schema/specification amendment.
-
-## Dependency direction
+## Ownership, contracts, and dependency direction
 
 ```text
-launcher / npm script
+launcher / npm delivery hook
   -> engineering-status-dashboard
        -> Node.js standard library
-       -> Git read-only commands
+       -> Git read-only worktree, remote, and ancestry commands
        -> optional gh read-only query
-       -> local OS file opener
-       -> repository tickets as read-only input
-       -> local disposable HTML/JSON output
+       -> repository tickets and Chinese guide as read-only input
+       -> disposable local HTML/JSON output
 ```
 
-There is no dependency on `lattice-cli`, Rust control-plane crates, PostgreSQL,
-MCP, Hermes, LATTICE writers, or third-party JavaScript packages. No reverse
-dependency or cycle is introduced. ADR-004's safety-critical Rust boundaries
-are therefore not diluted; this module is a presentation adapter outside the
-trusted control plane.
+- ADR-001 remains intact: the Task Ledger and existing evidence remain truth;
+  eligibility is labeled a presentation decision and grants no authority.
+- ADR-002 and ADR-009 remain intact: selection never supplies an approval,
+  lease, merge fact, or write permission; missing, stale, dirty, partial,
+  unsynchronized, unmapped, or malformed evidence denies.
+- ADR-004 remains intact: no safety-critical control-plane behavior moves out
+  of Rust. This bounded Node module remains a local presentation adapter.
+- ADR-006 remains intact: the page does not own a writable Codex process. Its
+  copied request explicitly asks Codex to create a separate TASK and branch.
+- No third-party package, database, service, public host, mutable shared state,
+  or reverse dependency was added.
 
 ## Failure, compatibility, and rollback
 
-- Repository identification or complete-output write failure returns nonzero.
-- Per-worktree, live-remote, and optional GitHub failures stay visible and do
-  not become success.
-- Bounded external processes use argv arrays and timeouts. Live remote heads
-  prevent stale tracking refs from being labeled synchronized.
-- Output files are staged and installed as a pair; rejected snapshots leave the
-  previous output intact. Generated data requires no migration.
-- Rollback is removal/revert of this feature and deletion of the disposable
-  local output directory. No database, event, credential, deployment, or public
-  state must be rolled back.
+- Schema 2.0 is an intentional versioned replacement for disposable snapshots;
+  no persistent migration or dual read is required.
+- Complete V2 structure is validated before atomic output replacement. A failed
+  generation leaves the previous pair untouched.
+- Git ancestry failure, an expired/untrusted timestamp, or incomplete evidence
+  remains visible and disables all new-work choices.
+- Commit ancestry proves version containment, not the historical moment a Git
+  branch name was created. The UI states this limitation in plain Chinese.
+- Rollback is a feature revert plus optional deletion of disposable local
+  output; no LATTICE, database, credential, GitHub, deployment, or release state
+  needs migration.
 
-## Risks and decisions
+## Governance and risks
 
-- Absolute-path redaction is deliberately heuristic. Verified Windows drive,
-  forward-slash drive, UNC, `/home`, `/root`, and `/data` forms are covered;
-  uncommon mount roots remain a disclosed local-only residual risk.
-- Remote and GitHub checks depend on installed tools/network; `UNKNOWN` and
-  partial/offline states are the designed degradation path.
-- No ADR is required: SPEC-004 and the new module constitution define a bounded
-  presentation adapter without revising a control-plane architecture decision.
+- SPEC-004 v2 and constitution 1.1 were approved by the user's direct acceptance
+  correction before implementation; no silent constitution change occurred.
+- Protocol 1.0.3 makes every future current branch provide a scoped Chinese
+  name/purpose before refresh. The validator checks the live branch and guide.
+- The guide is intentionally human-readable repository data and may require a
+  normal task edit when purpose changes. Unmapped branches remain visible and
+  unselectable.
+- Path redaction remains heuristic for uncommon mount roots, but the generated
+  artifact is local-only and common current-machine Windows/UNC/Unix forms are
+  covered by preserved regressions.
 
 ## Decision
 
 - Confirmed architecture violations: none.
-- Constitution conflict or amendment required: none.
-- Migration required: none.
-- Unapproved architecture decision: none.
+- Constitution conflict: none; the approved 1.1 amendment matches V2.
+- Migration or ADR required: none.
+- Hidden/cyclic dependency or second truth/writer: none.
 - Integration blocker: `PASS`, blocker-free.

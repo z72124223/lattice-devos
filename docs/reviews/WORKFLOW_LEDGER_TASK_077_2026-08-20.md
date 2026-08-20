@@ -17,3 +17,16 @@
 - TASK-051 runtime rerun is paused; its last explicit terminal state is `FAIL`.
 - Dashboard output is a local read-only projection outside Git, never task truth.
 - No PR, merge, deployment, release, public hosting, or credential change is authorized.
+
+## V2 acceptance correction
+
+| Stage | State | Evidence |
+| --- | --- | --- |
+| User acceptance | FAIL_V1 | The user found the card-first page too technical, English-heavy, and unusable for choosing where new work may begin. |
+| Scope | PASS | Direct feedback approves SPEC-004 v2 and constitution 1.1: Chinese expandable Git-ancestry tree, purpose guide, fail-closed eligibility, and copy-only Codex request. |
+| TDD | GREEN | Observable V2 tests moved from unknown `--guide`/schema/tree behavior to 19/19 focused dashboard and 17/17 governance passes. |
+| Focused/full verification | PASS | Dashboard 19/19, governance 17/17, full repository 74/74; final narrow P3 repair passed affected tests, template JavaScript syntax, and diff check. |
+| Code review | PASS | Independent review found P1=2/P2=4, then P2=2/P3=2, then P3=2; all were repaired and final exact-hunk confirmation reports `No findings`, P0=P1=P2=P3=0. |
+| Architecture review | PASS | Schema 2.0, hierarchy, guide, and copy-only selection preserve the disposable read-only adapter boundary; no ADR/migration/truth/writer expansion. |
+| Integration verification | PENDING | Must run against the current actual GitHub default target after the V2 implementation checkpoint. |
+| Handoff | NOT_READY | V2 still requires exact integration evidence, final handoff, non-force feature push, remote equality, and post-push refresh. |

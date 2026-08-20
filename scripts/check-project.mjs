@@ -32,6 +32,19 @@ function relative(file) {
   return path.relative(root, file).replaceAll("\\", "/");
 }
 
+function frontmatterListIncludes(frontmatter, key, expectedValue) {
+  const lines = frontmatter.split(/\r?\n/gu);
+  const start = lines.findIndex((line) => line === `${key}:`);
+  if (start < 0) return false;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^[a-zA-Z0-9_]+:/u.test(line)) break;
+    const item = line.match(/^\s+-\s*(.*?)\s*$/u);
+    if (item?.[1] === expectedValue) return true;
+  }
+  return false;
+}
+
 const files = await walk(root);
 const errors = [];
 
@@ -45,7 +58,7 @@ if (!engineeringProtocolFile) {
   const protocol = await readFile(engineeringProtocolFile, "utf8");
   const requiredProtocolContent = [
     "protocol_id: LATTICE_ENGINEERING_PROTOCOL",
-    "version: 1.0.2",
+    "version: 1.0.3",
     "canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md",
     "## Mandatory Entry",
     "## Mandatory Delivery",
@@ -53,6 +66,9 @@ if (!engineeringProtocolFile) {
     "npm.cmd run status:refresh",
     "the projection never replaces ticket, Git, test, CI",
     "LATTICE acceptance evidence",
+    "plain Traditional-Chinese name and purpose",
+    "tools/engineering-status-dashboard/branch-guide.zh-TW.json",
+    "active ticket `allowed_paths`",
     "## Knowledge Routing",
     "Personal preferences, historical cases, and detailed decision logic belong in LATTICE, Hermes, and the knowledge graph",
     "## Authority Boundary",
@@ -184,17 +200,36 @@ for (const file of ticketFiles) {
     continue;
   }
   const moduleId = moduleMatches[0][1];
+  const branchMatches = [...frontmatter.matchAll(/^branch:\s*(\S+)\s*$/gmu)];
+  const branch = branchMatches.length === 1 ? branchMatches[0][1] : null;
+  const includesBranchGuide = frontmatterListIncludes(
+    frontmatter,
+    "allowed_paths",
+    "tools/engineering-status-dashboard/branch-guide.zh-TW.json",
+  );
   const prior = ticketOwners.get(ticketId);
   if (prior) {
     errors.push(
       `${relative(file)}: duplicate ticket_id '${ticketId}' also owned by ${prior.file}.`,
     );
   } else {
-    ticketOwners.set(ticketId, { file: relative(file), moduleId });
+    ticketOwners.set(ticketId, {
+      file: relative(file),
+      moduleId,
+      branch,
+      includesBranchGuide,
+    });
   }
 }
 
 const plansFile = files.find((candidate) => relative(candidate) === "PLANS.md");
+const currentGitBranchResult = spawnSync("git", ["branch", "--show-current"], {
+  cwd: root,
+  encoding: "utf8",
+  windowsHide: true,
+});
+const currentGitBranch =
+  currentGitBranchResult.status === 0 ? currentGitBranchResult.stdout.trim() : "";
 if (!plansFile) {
   errors.push("PLANS.md: missing project plan.");
 } else {
@@ -217,6 +252,46 @@ if (!plansFile) {
       errors.push(
         `${currentTicket.file}: current module '${currentTicket.moduleId}' has no MODULE_CONSTITUTION.md.`,
       );
+    } else {
+      const branchGuidePath = "tools/engineering-status-dashboard/branch-guide.zh-TW.json";
+      if (!currentTicket.branch) {
+        errors.push(`${currentTicket.file}: current ticket requires exactly one branch.`);
+      } else if (!currentGitBranch) {
+        errors.push(`${currentTicket.file}: current Git branch cannot be identified.`);
+      } else if (currentTicket.branch !== currentGitBranch) {
+        errors.push(
+          `${currentTicket.file}: ticket branch '${currentTicket.branch}' does not match current Git branch '${currentGitBranch}'.`,
+        );
+      }
+      if (!currentTicket.includesBranchGuide) {
+        errors.push(
+          `${currentTicket.file}: current ticket allowed_paths must include '${branchGuidePath}'.`,
+        );
+      }
+      const branchGuideFile = files.find((candidate) => relative(candidate) === branchGuidePath);
+      if (!branchGuideFile) {
+        errors.push(`${branchGuidePath}: missing Traditional-Chinese branch guide.`);
+      } else if (currentTicket.branch) {
+        try {
+          const guide = JSON.parse(await readFile(branchGuideFile, "utf8"));
+          const entry = guide?.branches?.[currentTicket.branch];
+          if (
+            guide?.schema !== "lattice.branch-guide.zh-TW/1.0" ||
+            typeof entry?.name !== "string" ||
+            !entry.name.trim() ||
+            !/\p{Script=Han}/u.test(entry.name) ||
+            typeof entry?.purpose !== "string" ||
+            !entry.purpose.trim() ||
+            !/\p{Script=Han}/u.test(entry.purpose)
+          ) {
+            errors.push(
+              `${branchGuidePath}: missing plain Traditional-Chinese name and purpose for '${currentTicket.branch}'.`,
+            );
+          }
+        } catch {
+          // The generic JSON validator already reports the parse failure.
+        }
+      }
     }
   }
 }

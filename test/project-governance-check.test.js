@@ -8,7 +8,7 @@ import test from "node:test";
 const checkScript = path.resolve("scripts/check-project.mjs");
 const engineeringProtocol = `---
 protocol_id: LATTICE_ENGINEERING_PROTOCOL
-version: 1.0.2
+version: 1.0.3
 status: active
 canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md
 ---
@@ -21,6 +21,7 @@ Read before work.
 ## Mandatory Delivery
 If an ordinary reproducible check fails, repair it within the authorized scope and rerun the same failed check.
 After the durable handoff is current, run npm.cmd run status:refresh; the projection never replaces ticket, Git, test, CI, review, or LATTICE acceptance evidence.
+Every new branch must add a plain Traditional-Chinese name and purpose to tools/engineering-status-dashboard/branch-guide.zh-TW.json and include that path in the active ticket \`allowed_paths\`.
 
 ## Knowledge Routing
 Personal preferences, historical cases, and detailed decision logic belong in LATTICE, Hermes, and the knowledge graph.
@@ -88,13 +89,29 @@ async function runFixture({
     "fixture",
     "MODULE_CONSTITUTION.md",
   ),
+  includeGuideAllowedPath = true,
+  includeGuideEntry = true,
+  guideEntryUsesChinese = true,
+  decoyGuidePath = false,
+  gitBranch,
 }) {
   const root = await mkdtemp(path.join(tmpdir(), "lattice-project-check-"));
   try {
+    const currentTask = plans.match(/CURRENT (TASK-[0-9]{3})\b/u)?.[1] || tickets[0]?.[1];
+    const fixtureGitBranch = gitBranch || `feature/${String(currentTask).toLowerCase()}-fixture`;
+    const gitInit = spawnSync("git", ["init", "-b", fixtureGitBranch], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    assert.equal(gitInit.status, 0, gitInit.stderr);
     const constitutionFile = path.join(root, constitutionPath);
     await mkdir(path.dirname(constitutionFile), { recursive: true });
     await mkdir(path.join(root, "docs", "contracts"), { recursive: true });
     await mkdir(path.join(root, "docs", "tickets"), { recursive: true });
+    await mkdir(
+      path.join(root, "tools", "engineering-status-dashboard"),
+      { recursive: true },
+    );
     await writeFile(constitutionFile, constitution, "utf8");
     if (protocol !== null) {
       await writeFile(
@@ -107,13 +124,31 @@ async function runFixture({
       await writeFile(path.join(root, "AGENTS.md"), agentsContent, "utf8");
     }
     await writeFile(path.join(root, "PLANS.md"), plans, "utf8");
+    const guideBranches = {};
     for (const [name, ticketId, moduleId = "fixture"] of tickets) {
+      const branch = `feature/${ticketId.toLowerCase()}-fixture`;
       await writeFile(
         path.join(root, "docs", "tickets", name),
-        `---\nticket_id: ${ticketId}\nmodule_id: ${moduleId}\n---\n`,
+        `---\nticket_id: ${ticketId}\nmodule_id: ${moduleId}\nallowed_paths:\n${includeGuideAllowedPath ? "  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}${decoyGuidePath ? "other_paths:\n  - tools/engineering-status-dashboard/branch-guide.zh-TW.json\n" : ""}branch: ${branch}\n---\n`,
         "utf8",
       );
+      if (includeGuideEntry) {
+        guideBranches[branch] = {
+          name: guideEntryUsesChinese ? `${ticketId} 中文名稱` : `${ticketId} English Name`,
+          purpose: guideEntryUsesChinese
+            ? "用繁體中文說明這條測試分支的用途。"
+            : "English purpose only.",
+        };
+      }
     }
+    await writeFile(
+      path.join(root, "tools", "engineering-status-dashboard", "branch-guide.zh-TW.json"),
+      `${JSON.stringify({
+        schema: "lattice.branch-guide.zh-TW/1.0",
+        branches: guideBranches,
+      }, null, 2)}\n`,
+      "utf8",
+    );
     const initial = spawnSync(process.execPath, [checkScript], {
       cwd: root,
       encoding: "utf8",
@@ -197,6 +232,76 @@ test("project check enforces the post-handoff dashboard refresh rule", async () 
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /npm\.cmd run status:refresh/u);
+});
+
+test("project check requires the protocol to describe the Chinese purpose guide", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    protocol: engineeringProtocol.replace(
+      "Every new branch must add a plain Traditional-Chinese name and purpose to tools/engineering-status-dashboard/branch-guide.zh-TW.json and include that path in the active ticket `allowed_paths`.",
+      "Branch explanations are optional.",
+    ),
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /branch-guide\.zh-TW\.json/u);
+});
+
+test("project check requires the current branch in the Chinese purpose guide", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    includeGuideEntry: false,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /missing plain Traditional-Chinese name and purpose/u);
+});
+
+test("project check requires the guide in current ticket allowed_paths", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    includeGuideAllowedPath: false,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /allowed_paths must include/u);
+});
+
+test("project check does not accept the guide path under another frontmatter list", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    includeGuideAllowedPath: false,
+    decoyGuidePath: true,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /allowed_paths must include/u);
+});
+
+test("project check requires current ticket branch to match Git", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    gitBranch: "feature/different-fixture",
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /does not match current Git branch/u);
+});
+
+test("project check rejects English-only guide text", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017"]],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    guideEntryUsesChinese: false,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /missing plain Traditional-Chinese name and purpose/u);
 });
 
 test("an ordinary protocol error can be repaired and the same check rerun", async () => {

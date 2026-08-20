@@ -23,7 +23,16 @@ const templatePath = path.resolve(
   "engineering-status-dashboard",
   "index.template.html",
 );
-const schema = "lattice.engineering-status/1.0";
+const defaultGuidePath = path.resolve(
+  scriptDirectory,
+  "..",
+  "tools",
+  "engineering-status-dashboard",
+  "branch-guide.zh-TW.json",
+);
+const schema = "lattice.engineering-status/2.0";
+const snapshotMaximumAgeMs = 24 * 60 * 60 * 1000;
+const snapshotMaximumFutureSkewMs = 5 * 60 * 1000;
 const terminalStates = new Set([
   "VERIFIED",
   "COMPLETE",
@@ -55,6 +64,15 @@ const ticketStatusOutcomes = new Map([
   ["user_action", "USER_ACTION"],
   ["stale", "STALE"],
 ]);
+
+export function isSnapshotFresh(generatedAt, now = Date.now()) {
+  const generated = new Date(generatedAt).valueOf();
+  return (
+    Number.isFinite(generated) &&
+    generated <= now + snapshotMaximumFutureSkewMs &&
+    now - generated <= snapshotMaximumAgeMs
+  );
+}
 
 function cleanError(error) {
   const detail = String(error?.stderr || error?.message || error || "unknown error")
@@ -88,6 +106,7 @@ function parseArguments(argv) {
     output: undefined,
     offline: false,
     open: false,
+    guidePath: defaultGuidePath,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -99,6 +118,8 @@ function parseArguments(argv) {
       options.offline = true;
     } else if (argument === "--open") {
       options.open = true;
+    } else if (argument === "--guide") {
+      options.guidePath = argv[++index];
     } else if (argument === "--help" || argument === "-h") {
       options.help = true;
     } else {
@@ -107,6 +128,9 @@ function parseArguments(argv) {
   }
   if (!options.repository) {
     throw new Error("--repository requires a path");
+  }
+  if (!options.guidePath) {
+    throw new Error("--guide requires a path");
   }
   return options;
 }
@@ -377,16 +401,25 @@ async function collectRemoteHeads(repository, offline) {
     return { state: "no-remotes", checkedAt, remotes: new Map(), error: null };
   }
   const results = await mapLimit(names, 3, async (name) => {
-    const headsResult = await optionalGit(repository, ["ls-remote", "--heads", name]);
+    const headsResult = await optionalGit(repository, [
+      "ls-remote",
+      "--symref",
+      name,
+      "HEAD",
+      "refs/heads/*",
+    ]);
     if (!headsResult.ok) {
-      return [name, { state: "unavailable", heads: new Map() }];
+      return [name, { state: "unavailable", heads: new Map(), defaultBranch: null }];
     }
     const heads = new Map();
+    let defaultBranch = null;
     for (const line of headsResult.value.split(/\r?\n/gu).filter(Boolean)) {
+      const symbolic = line.match(/^ref:\s+refs\/heads\/(.+)\s+HEAD$/u);
+      if (symbolic) defaultBranch = symbolic[1];
       const match = line.match(/^([0-9a-f]{40})\s+refs\/heads\/(.+)$/iu);
       if (match) heads.set(match[2], match[1]);
     }
-    return [name, { state: "available", heads }];
+    return [name, { state: "available", heads, defaultBranch }];
   });
   const remotes = new Map(results);
   const unavailable = results.filter(([, result]) => result.state !== "available").length;
@@ -394,6 +427,10 @@ async function collectRemoteHeads(repository, offline) {
     state: unavailable === 0 ? "available" : unavailable === results.length ? "unavailable" : "partial",
     checkedAt,
     remotes,
+    defaultRemote:
+      (remotes.get("origin")?.defaultBranch ? "origin" : null) ||
+      results.find(([, result]) => result.defaultBranch)?.[0] ||
+      null,
     error: unavailable ? "至少一個 Git 遠端無法即時核對" : null,
   };
 }
@@ -683,7 +720,307 @@ async function repositoryDisplayName(repository) {
   return path.basename(repository);
 }
 
-export async function buildSnapshot({ repository, offline = false } = {}) {
+async function readBranchGuide(guidePath) {
+  let parsed;
+  try {
+    parsed = JSON.parse(await readFile(path.resolve(guidePath), "utf8"));
+  } catch {
+    throw new Error("繁體中文分支用途表無法讀取");
+  }
+  if (
+    parsed?.schema !== "lattice.branch-guide.zh-TW/1.0" ||
+    !parsed.branches ||
+    typeof parsed.branches !== "object" ||
+    Array.isArray(parsed.branches)
+  ) {
+    throw new Error("繁體中文分支用途表格式不正確");
+  }
+  const branches = new Map();
+  for (const [branch, entry] of Object.entries(parsed.branches)) {
+    const name = stripMarkdown(entry?.name, 100);
+    const purpose = stripMarkdown(entry?.purpose, 240);
+    if (!name || !purpose) {
+      throw new Error(`繁體中文分支用途表缺少名稱或用途：${branch}`);
+    }
+    branches.set(branch, { name, purpose });
+  }
+  return branches;
+}
+
+function defaultChineseGuide(item) {
+  if (item.kind === "TASK") {
+    return {
+      name: `${item.id.replace("TASK-", "任務 ")}（中文用途尚未補齊）`,
+      purpose: "這條分支尚未補上白話中文用途，因此不能用它作為派工依據。",
+    };
+  }
+  if (item.kind === "ISSUE") {
+    return {
+      name: `${item.id.replace("ISSUE-", "問題 ")}（中文用途尚未補齊）`,
+      purpose: "這條問題修正分支尚未補上白話中文用途，因此不能用它作為派工依據。",
+    };
+  }
+  return {
+    name: item.worktree.detached
+      ? "已脫離的工程版本（不可派工）"
+      : "其他工程分支（中文用途尚未補齊）",
+    purpose: "這條分支尚未補上白話中文用途，因此不能用它作為派工依據。",
+  };
+}
+
+function addDefaultBranchItem(items, remoteEvidence) {
+  const remoteName = remoteEvidence.defaultRemote;
+  const remote = remoteName ? remoteEvidence.remotes.get(remoteName) : null;
+  const defaultBranch = remote?.defaultBranch || null;
+  const defaultHead = defaultBranch ? remote.heads.get(defaultBranch) : null;
+  if (!defaultBranch || !defaultHead) {
+    return null;
+  }
+  const existing = items.find((item) => item.branch === defaultBranch);
+  if (existing) {
+    existing.isDefaultBranch = true;
+    return defaultBranch;
+  }
+  items.push({
+    id: "DEFAULT-ROOT",
+    kind: "BASE",
+    branch: defaultBranch,
+    title: "GitHub 預設分支",
+    summary: "GitHub 目前指定的穩定起點。",
+    outcome: "DEFAULT_ROOT",
+    ticket: null,
+    nextStep: "可從這裡建立不依賴尚未整合功能的新工作。",
+    userAction: "需要時選擇這個節點並填寫新工作。",
+    evidenceState: "complete",
+    errors: [],
+    isDefaultBranch: true,
+    worktree: {
+      name: "未開啟獨立工作目錄",
+      detached: false,
+      prunable: false,
+      synthetic: true,
+    },
+    git: {
+      clean: null,
+      changeCount: null,
+      head: defaultHead,
+      shortHead: defaultHead.slice(0, 7),
+      lastCommit: "遠端預設分支",
+      lastCommitAt: null,
+      sync: {
+        state: "synced",
+        ahead: 0,
+        behind: 0,
+        upstream: `${remoteName}/${defaultBranch}`,
+        remoteVerified: true,
+        remoteCheckedAt: remoteEvidence.checkedAt,
+      },
+    },
+    github: { state: "unknown", pr: null, ci: "unknown" },
+  });
+  return defaultBranch;
+}
+
+function anchorPriority(item, defaultBranch) {
+  const rank = item.branch === defaultBranch
+    ? "0"
+    : item.worktree.detached || item.worktree.prunable
+      ? "2"
+      : "1";
+  return `${rank}:${item.branch}`;
+}
+
+async function buildAncestryTree(repository, items, defaultBranch) {
+  const graphResult = await optionalGit(repository, ["rev-list", "--parents", "--all"]);
+  const parents = new Map();
+  if (graphResult.ok) {
+    for (const line of graphResult.value.split(/\r?\n/gu).filter(Boolean)) {
+      const [commit, ...commitParents] = line.split(" ");
+      parents.set(commit, commitParents);
+    }
+  }
+
+  const itemsByHead = new Map();
+  for (const [index, item] of items.entries()) {
+    item.treeKey = `branch-node-${index + 1}`;
+    const list = itemsByHead.get(item.git.head) || [];
+    list.push(item);
+    itemsByHead.set(item.git.head, list);
+  }
+  const anchorsByHead = new Map();
+  for (const [head, sameHeadItems] of itemsByHead) {
+    sameHeadItems.sort((left, right) =>
+      anchorPriority(left, defaultBranch).localeCompare(anchorPriority(right, defaultBranch)),
+    );
+    anchorsByHead.set(head, sameHeadItems[0]);
+  }
+  const stableAnchorsByHead = new Map(
+    [...anchorsByHead].filter(([, item]) => !item.worktree.detached && !item.worktree.prunable),
+  );
+
+  for (const item of items) {
+    item.tree = {
+      parentKey: null,
+      parentBranch: null,
+      relation: "root",
+      depth: 0,
+      childrenKeys: [],
+      childrenBranches: [],
+    };
+    const anchor = anchorsByHead.get(item.git.head);
+    if (anchor !== item) {
+      item.tree.parentKey = anchor.treeKey;
+      item.tree.parentBranch = anchor.branch;
+      item.tree.relation = "same_commit";
+    }
+  }
+
+  for (const [head, anchor] of anchorsByHead) {
+    const visited = new Set([head]);
+    let frontier = parents.get(head) || [];
+    let chosen = null;
+    while (frontier.length > 0 && !chosen) {
+      const candidates = frontier
+        .map((commit) => stableAnchorsByHead.get(commit))
+        .filter(Boolean)
+        .sort((left, right) =>
+          anchorPriority(left, defaultBranch).localeCompare(anchorPriority(right, defaultBranch)),
+        );
+      if (candidates.length > 0) {
+        chosen = candidates[0];
+        break;
+      }
+      const next = [];
+      for (const commit of frontier) {
+        if (visited.has(commit)) continue;
+        visited.add(commit);
+        next.push(...(parents.get(commit) || []));
+      }
+      frontier = [...new Set(next)];
+    }
+    if (chosen) {
+      anchor.tree.parentKey = chosen.treeKey;
+      anchor.tree.parentBranch = chosen.branch;
+      anchor.tree.relation = "descendant";
+    }
+  }
+
+  const byKey = new Map(items.map((item) => [item.treeKey, item]));
+  const depthOf = (item, visiting = new Set()) => {
+    if (!item.tree.parentKey) return 0;
+    if (visiting.has(item.treeKey)) return 0;
+    const parent = byKey.get(item.tree.parentKey);
+    if (!parent) return 0;
+    const next = new Set(visiting).add(item.treeKey);
+    return depthOf(parent, next) + 1;
+  };
+  for (const item of items) item.tree.depth = depthOf(item);
+  for (const item of items) {
+    const parent = byKey.get(item.tree.parentKey);
+    if (parent) {
+      parent.tree.childrenKeys.push(item.treeKey);
+      parent.tree.childrenBranches.push(item.branch);
+    }
+  }
+  for (const item of items) {
+    item.tree.childrenKeys.sort((leftKey, rightKey) =>
+      byKey.get(leftKey).branch.localeCompare(byKey.get(rightKey).branch),
+    );
+    item.tree.childrenBranches = item.tree.childrenKeys.map((key) => byKey.get(key).branch);
+  }
+  const roots = items
+    .filter((item) => !item.tree.parentKey)
+    .sort((left, right) =>
+      anchorPriority(left, defaultBranch).localeCompare(anchorPriority(right, defaultBranch)),
+    )
+    .map((item) => item.treeKey);
+  return {
+    roots,
+    graphState: graphResult.ok ? "available" : "partial",
+    error: graphResult.ok ? null : "Git 提交祖先關係無法讀取",
+  };
+}
+
+function ineligibleOutcomeReason(outcome) {
+  const reasons = {
+    FAIL: "上次驗證失敗，先修好後才能從這裡派工。",
+    BLOCKED: "這條工作仍被阻擋，現在不適合承接新工作。",
+    WAITING_DEPENDENCY: "這條工作仍在等待依賴，現在不適合承接新工作。",
+    USER_ACTION: "這條工作仍在等待使用者決定。",
+    IN_PROGRESS: "這條工作尚未完成，不能把未完成狀態當成新起點。",
+    PARTIAL: "這條工作只完成一部分，不能從這裡開始新工作。",
+    PAUSED: "這條工作目前暫停，不能從這裡開始新工作。",
+    SUPERSEDED: "這條工作已被其他分支取代。",
+    STALE: "這條分支的證據已過期，需要先重新核對。",
+    UNKNOWN: "沒有足夠證據確認這條工作已完成。",
+  };
+  return reasons[outcome] || "只有已完成或已驗收的工作可以作為新起點。";
+}
+
+function applyGuideAndEligibility(items, guide, graphState) {
+  for (const item of items) {
+    const entry = guide.get(item.branch);
+    const fallback = defaultChineseGuide(item);
+    item.displayNameZh = entry?.name || fallback.name;
+    item.purposeZh = entry?.purpose || fallback.purpose;
+    item.guideMatched = Boolean(entry);
+
+    if (graphState !== "available") {
+      item.dispatch = {
+        eligible: false,
+        reasonZh: "分支樹的版本關係無法讀取，重新整理成功前不能派工。",
+      };
+      continue;
+    }
+
+    if (item.isDefaultBranch) {
+      const eligible = item.git.sync.remoteVerified && item.git.sync.state === "synced";
+      item.dispatch = {
+        eligible,
+        reasonZh: eligible
+          ? "這是已即時核對的 GitHub 預設分支，可作為穩定的新工作起點。"
+          : "GitHub 預設分支目前無法即時核對，暫時不能從這裡派工。",
+      };
+      continue;
+    }
+    let reasonZh = "已完成、工作目錄乾淨，並且與 GitHub 相同，可以從這裡安排獨立的新工作。";
+    let eligible = true;
+    if (item.worktree.detached || item.worktree.prunable) {
+      eligible = false;
+      reasonZh = "這不是穩定的具名工作分支，不能從這裡派工。";
+    } else if (!item.guideMatched) {
+      eligible = false;
+      reasonZh = "這條分支還沒有白話中文用途，先補清楚再派工。";
+    } else if (!["COMPLETE", "VERIFIED"].includes(item.outcome)) {
+      eligible = false;
+      reasonZh = ineligibleOutcomeReason(item.outcome);
+    } else if (item.evidenceState !== "complete") {
+      eligible = false;
+      reasonZh = "完成證據不完整，需要先補齊或重新核對。";
+    } else if (item.git.clean !== true) {
+      eligible = false;
+      reasonZh = "工作目錄還有未提交變更，先收好目前工作。";
+    } else if (!item.git.sync.remoteVerified || item.git.sync.state !== "synced") {
+      eligible = false;
+      reasonZh = "這條分支尚未確認與 GitHub 完全相同。";
+    }
+    item.dispatch = { eligible, reasonZh };
+  }
+}
+
+function chooseRecommendedBranch(items) {
+  const eligible = items.filter((item) => item.dispatch.eligible && !item.isDefaultBranch);
+  eligible.sort((left, right) => {
+    if (right.tree.depth !== left.tree.depth) return right.tree.depth - left.tree.depth;
+    const timeDifference = String(right.git.lastCommitAt || "").localeCompare(
+      String(left.git.lastCommitAt || ""),
+    );
+    return timeDifference || left.branch.localeCompare(right.branch);
+  });
+  return eligible[0]?.branch || items.find((item) => item.isDefaultBranch && item.dispatch.eligible)?.branch || null;
+}
+
+export async function buildSnapshot({ repository, offline = false, guidePath = defaultGuidePath } = {}) {
   const requestedRepository = path.resolve(repository || process.cwd());
   const repositoryRoot = await gitAt(requestedRepository, ["rev-parse", "--show-toplevel"]);
   const branch = await gitAt(repositoryRoot, ["branch", "--show-current"]);
@@ -695,13 +1032,24 @@ export async function buildSnapshot({ repository, offline = false } = {}) {
   }
   const remoteEvidence = await collectRemoteHeads(repositoryRoot, offline);
   const items = await mapLimit(records, 4, (record) => collectWorktree(record, remoteEvidence));
+  const defaultBranch = addDefaultBranchItem(items, remoteEvidence);
+  const guide = await readBranchGuide(guidePath);
+  const tree = await buildAncestryTree(repositoryRoot, items, defaultBranch);
+  applyGuideAndEligibility(items, guide, tree.graphState);
+  const recommendedBranch = chooseRecommendedBranch(items);
   const github = await enrichFromGitHub(repositoryRoot, items, offline);
   const incompleteCount = items.filter((item) => item.evidenceState !== "complete").length;
   const currentItem = items.find((item) => item.branch === branch) || null;
+  const generatedAt = new Date().toISOString();
   return {
     schema,
-    generatedAt: new Date().toISOString(),
-    completeness: incompleteCount === 0 ? "complete" : "partial",
+    generatedAt,
+    freshness: {
+      maximumAgeMs: snapshotMaximumAgeMs,
+      maximumFutureSkewMs: snapshotMaximumFutureSkewMs,
+    },
+    completeness:
+      incompleteCount === 0 && tree.graphState === "available" ? "complete" : "partial",
     repository: {
       displayName: await repositoryDisplayName(repositoryRoot),
       currentBranch: branch || "(detached)",
@@ -709,14 +1057,21 @@ export async function buildSnapshot({ repository, offline = false } = {}) {
       shortHead: head.slice(0, 7),
       sourceWorktree: path.basename(repositoryRoot),
       github: github.repository,
+      defaultBranch,
     },
     currentItemId: currentItem?.id || null,
+    recommendedBranch,
+    tree,
     sources: {
       git: "available",
       gitRemote: {
         state: remoteEvidence.state,
         checkedAt: remoteEvidence.checkedAt,
         error: remoteEvidence.error,
+      },
+      gitAncestry: {
+        state: tree.graphState,
+        error: tree.error,
       },
       tickets: incompleteCount === 0 ? "available" : "partial",
       github,
@@ -792,8 +1147,94 @@ async function replaceOutputPair(output, json, html) {
   }
 }
 
+function validSnapshot(snapshot) {
+  if (
+    snapshot?.schema !== schema ||
+    !Array.isArray(snapshot.items) ||
+    snapshot.items.length === 0 ||
+    !Array.isArray(snapshot.tree?.roots) ||
+    snapshot.tree.roots.length === 0
+  ) {
+    return false;
+  }
+  const byKey = new Map();
+  for (const item of snapshot.items) {
+    if (
+      !item ||
+      typeof item.treeKey !== "string" ||
+      byKey.has(item.treeKey) ||
+      typeof item.displayNameZh !== "string" ||
+      !item.displayNameZh ||
+      typeof item.purposeZh !== "string" ||
+      !item.purposeZh ||
+      typeof item.dispatch?.eligible !== "boolean" ||
+      typeof item.dispatch?.reasonZh !== "string" ||
+      !Array.isArray(item.tree?.childrenKeys) ||
+      !(item.tree?.parentKey === null || typeof item.tree?.parentKey === "string")
+    ) {
+      return false;
+    }
+    byKey.set(item.treeKey, item);
+  }
+  const expectedRoots = new Set(
+    snapshot.items.filter((item) => item.tree.parentKey === null).map((item) => item.treeKey),
+  );
+  if (
+    snapshot.tree.roots.length !== expectedRoots.size ||
+    new Set(snapshot.tree.roots).size !== snapshot.tree.roots.length ||
+    snapshot.tree.roots.some((key) => !expectedRoots.has(key))
+  ) {
+    return false;
+  }
+  if (
+    !Number.isFinite(new Date(snapshot.generatedAt).valueOf()) ||
+    snapshot.freshness?.maximumAgeMs !== snapshotMaximumAgeMs ||
+    snapshot.freshness?.maximumFutureSkewMs !== snapshotMaximumFutureSkewMs
+  ) {
+    return false;
+  }
+  const inbound = new Map(snapshot.items.map((item) => [item.treeKey, 0]));
+  for (const item of snapshot.items) {
+    if (item.tree.parentKey && !byKey.has(item.tree.parentKey)) return false;
+    if (new Set(item.tree.childrenKeys).size !== item.tree.childrenKeys.length) return false;
+    for (const childKey of item.tree.childrenKeys) {
+      if (byKey.get(childKey)?.tree.parentKey !== item.treeKey) return false;
+      inbound.set(childKey, inbound.get(childKey) + 1);
+    }
+  }
+  for (const item of snapshot.items) {
+    const expectedInbound = item.tree.parentKey === null ? 0 : 1;
+    if (inbound.get(item.treeKey) !== expectedInbound) return false;
+  }
+  const visited = new Set();
+  const visiting = new Set();
+  const visit = (key) => {
+    if (visiting.has(key)) return false;
+    if (visited.has(key)) return true;
+    visiting.add(key);
+    for (const childKey of byKey.get(key).tree.childrenKeys) {
+      if (!visit(childKey)) return false;
+    }
+    visiting.delete(key);
+    visited.add(key);
+    return true;
+  };
+  if (snapshot.tree.roots.some((key) => !visit(key)) || visited.size !== snapshot.items.length) {
+    return false;
+  }
+  if (
+    snapshot.recommendedBranch !== null &&
+    !snapshot.items.some(
+      (item) => item.branch === snapshot.recommendedBranch && item.dispatch.eligible,
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export async function writeDashboard(snapshot, outputDirectory) {
-  if (snapshot?.schema !== schema || !Array.isArray(snapshot.items)) {
+  if (!validSnapshot(snapshot)) {
     throw new Error("Refusing to write an invalid engineering-status snapshot");
   }
   const template = await readFile(templatePath, "utf8");
@@ -834,7 +1275,7 @@ export async function openLocalFile(
 }
 
 function printHelp() {
-  process.stdout.write(`LATTICE engineering status dashboard\n\nUsage:\n  node scripts/export-lattice-engineering-status.mjs [options]\n\nOptions:\n  --repository PATH  Git worktree used to discover the repository\n  --output PATH      Output directory (defaults to local application data)\n  --offline          Skip optional GitHub PR/CI enrichment\n  --open             Open index.html after a successful refresh\n  --help             Show this help\n`);
+  process.stdout.write(`LATTICE engineering status dashboard\n\nUsage:\n  node scripts/export-lattice-engineering-status.mjs [options]\n\nOptions:\n  --repository PATH  Git worktree used to discover the repository\n  --output PATH      Output directory (defaults to local application data)\n  --guide PATH       Traditional-Chinese branch purpose guide\n  --offline          Skip optional GitHub PR/CI enrichment\n  --open             Open index.html after a successful refresh\n  --help             Show this help\n`);
 }
 
 export async function main(argv = process.argv.slice(2)) {
