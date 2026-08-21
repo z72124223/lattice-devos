@@ -491,9 +491,13 @@ fn validate_optional_scalar_fields(
         "signature",
         "category",
         "subtype",
-        "_callable_class",
     ] {
         let _ = optional_text(node, key, max_text_bytes)?;
+    }
+    if let Some(value) = node.get("_callable_class")
+        && !value.is_boolean()
+    {
+        let _ = optional_text(node, "_callable_class", max_text_bytes)?;
     }
     if let Some(value) = node.get("_callable")
         && !value.is_boolean()
@@ -817,6 +821,30 @@ mod tests {
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.edges.len(), 0);
         assert_eq!(graph.dropped_non_code_nodes(), 1);
+    }
+
+    #[test]
+    fn parser_accepts_graphify_callable_class_boolean_but_rejects_other_shapes() {
+        let source = String::from_utf8(valid_graph()).expect("fixture utf8");
+        let boolean = source.replacen(
+            "\"_origin\":\"ast\"}",
+            "\"_origin\":\"ast\",\"_callable_class\":true}",
+            1,
+        );
+        parse_graph(boolean.as_bytes(), &snapshot(), limits())
+            .expect("boolean Graphify classifier is non-persisted metadata");
+
+        let malformed = source.replacen(
+            "\"_origin\":\"ast\"}",
+            "\"_origin\":\"ast\",\"_callable_class\":[]}",
+            1,
+        );
+        assert_eq!(
+            parse_graph(malformed.as_bytes(), &snapshot(), limits())
+                .expect_err("structured classifier metadata is not accepted")
+                .kind(),
+            GraphifyAdapterErrorKind::MalformedOutput
+        );
     }
 
     #[test]
