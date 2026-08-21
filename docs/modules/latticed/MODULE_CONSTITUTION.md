@@ -1,7 +1,7 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 2.3
+version: 2.4
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-22
@@ -73,6 +73,11 @@ Orchestrator composition.
   runtime. It never starts Graphify, PostgreSQL, Hermes, or a delivery run;
   it reports only fixed configuration/identity classifications and grants no
   MCP, task, or durable-write authority.
+- Through canonical `latticed --graphify-refresh`, expose one local,
+  zero-argument derived-memory refresh. It reads only the process-configured
+  clean Git root at its exact HEAD and persists or replays only the matching
+  PostgreSQL Graphify receipt. It creates no delivery receipt, does not
+  dispatch Codex or mutate Git, and grants no Hermes authority.
 - Through canonical no-argument `latticed`, accept only process-owned
   `LATTICE_HERMES_MODE=TASK_ONLY|PRODUCTION`. The default and `TASK_ONLY`
   preserve the task-only composition. `PRODUCTION` configures one lazy Hermes
@@ -279,6 +284,10 @@ verifiable internal departments: `CORE_ONLY`, `GRAPHIFY`, and
 Graphify and Hermes add derived evidence only and degrade visibly without
 invalidating core truth.
 
+Version 2.4 adds a local, process-configured Graphify refresh for a clean
+immutable Git source. It keeps the five-tool MCP surface unchanged and does
+not treat a derived-memory receipt as delivery evidence.
+
 Version 1.8 emits the Task Ledger 2.3 required-profile marker for new
 controlled-task admissions and fails closed when required receipt replay is
 incomplete. It keeps exactly four MCP tools and the existing six-field task
@@ -329,3 +338,4 @@ constitution cannot be weakened merely to excuse implementation drift.
 | 2.1 | 2026-08-22 | Runtime direction | Make core-only MCP operation the executable default and reserve Graphify/Hermes continuation for explicit full-chain integration | User-approved four-part Runtime direction |
 | 2.2 | 2026-08-22 | Runtime direction | Split optional Runtime composition into Graphify and Graphify-plus-Hermes modes; optional failure preserves PostgreSQL truth and reports degradation | User-approved four-part Runtime direction |
 | 2.3 | 2026-08-22 | Runtime direction | Add a read-only Runtime Status MCP tool so Codex can independently verify PostgreSQL, Graphify, and Hermes state without a full-chain run | User-approved four-part Runtime direction |
+| 2.4 | 2026-08-22 | Runtime direction | Add a process-configured exact-Git Graphify refresh without a new MCP tool or delivery dependency | User-approved independent-core direction |

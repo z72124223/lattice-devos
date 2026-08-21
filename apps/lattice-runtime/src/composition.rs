@@ -68,8 +68,8 @@ use lattice_openclaw_adapter::{
 };
 use lattice_orchestrator::{
     ControlledTaskOrchestratorError, ControlledTaskRequest, DeliveryOrchestratorError,
-    delivery_status, graph_memory_status, run_controlled_task, run_delivery, run_delivery_governed,
-    run_graph_memory,
+    GraphMemoryOrchestratorError, delivery_status, graph_memory_status, run_controlled_task,
+    run_delivery, run_delivery_governed, run_graph_memory,
 };
 #[cfg(test)]
 use lattice_ports::TaskLifecycleAutonomyEvidence;
@@ -5620,6 +5620,60 @@ fn graph_request_from_json(
     .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))
 }
 
+/// Constructs one derived-memory request from a process-owned Git commit.
+///
+/// Unlike the legacy delivery continuation, this binding does not imply a
+/// delivery receipt. It only identifies the immutable source selected at
+/// process start and keeps its result isolated from every other commit.
+fn runtime_graph_request(
+    run_id: &str,
+    commit: &str,
+    configuration_digest: ContentDigest,
+) -> Result<GraphMemoryRunRequest, LatticedError> {
+    let commit_id = GitObjectId::new(commit)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let subject_digest = digest(
+        "lattice.runtime.graphify-source-request",
+        &CanonicalValue::Object(vec![
+            (
+                "commit".to_owned(),
+                CanonicalValue::String(commit.to_owned()),
+            ),
+            (
+                "configuration_digest".to_owned(),
+                CanonicalValue::String(configuration_digest.as_str().to_owned()),
+            ),
+            (
+                "run_id".to_owned(),
+                CanonicalValue::String(run_id.to_owned()),
+            ),
+        ]),
+    )?;
+    let invocation = Invocation::new(
+        CONTRACT_VERSION,
+        RequestId::new(format!("runtime-graph-request-{run_id}"))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        TaskId::new(GRAPH_TASK_ID).map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        AttemptId::new(format!("runtime-graph-attempt-{run_id}"))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        ProjectSnapshotId::new(GRAPH_PROJECT_SNAPSHOT_ID)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        subject_digest,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
+    GraphMemoryRunRequest::new(
+        invocation,
+        ProjectId::new(GRAPH_PROJECT_ID)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        commit_id,
+        digest_query_text(GRAPH_QUERY)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?,
+        configuration_digest,
+        GRAPH_RETRIEVAL_LIMIT,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))
+}
+
 fn hermes_request_for_graph(
     run_id: &str,
     graph_request: &GraphMemoryRunRequest,
@@ -6341,6 +6395,108 @@ struct DeliveryGraphPaths {
     repository_root: PathBuf,
 }
 
+/// Process-owned source for ordinary Graphify refreshes.
+///
+/// This is deliberately separate from the historical delivery fixture: it
+/// reads one clean Git worktree at its exact `HEAD` and never accepts a path
+/// from an MCP request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RuntimeGraphSource {
+    repository_root: PathBuf,
+    work_root: PathBuf,
+    git_executable: PathBuf,
+    git_sha256: String,
+}
+
+fn runtime_graph_source_from_environment() -> Result<(RuntimeGraphSource, String), LatticedError> {
+    let repository_root = graph_canonical_directory(Path::new(&required_environment(
+        "LATTICE_GRAPHIFY_SOURCE_ROOT",
+    )?))?;
+    let work_root = PathBuf::from(required_environment("LATTICE_GRAPHIFY_WORK_ROOT")?);
+    fs::create_dir_all(&work_root)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let work_root = graph_canonical_directory(&work_root)?;
+    let git_executable = PathBuf::from(required_environment("LATTICE_DELIVERY_GIT_EXE")?);
+    let git_sha256 = graph_executable_sha256(&git_executable)?;
+
+    let top_level = graph_git_stdout(
+        &git_executable,
+        &repository_root,
+        ["rev-parse", "--show-toplevel"],
+    )?;
+    if graph_canonical_directory(Path::new(&top_level))? != repository_root {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    }
+    let clean = graph_git_output(
+        &git_executable,
+        &repository_root,
+        ["status", "--porcelain=v1", "-z"],
+    )?;
+    if !clean.stdout.is_empty() {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    }
+    let commit = graph_git_stdout(&git_executable, &repository_root, ["rev-parse", "HEAD"])?;
+    GitObjectId::new(&commit)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    Ok((
+        RuntimeGraphSource {
+            repository_root,
+            work_root,
+            git_executable,
+            git_sha256,
+        },
+        commit,
+    ))
+}
+
+fn graph_canonical_directory(path: &Path) -> Result<PathBuf, LatticedError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    }
+    fs::canonicalize(path).map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))
+}
+
+fn graph_git_output<I, S>(
+    executable: &Path,
+    repository_root: &Path,
+    arguments: I,
+) -> Result<process::Output, LatticedError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = process::Command::new(executable)
+        .current_dir(repository_root)
+        .args(arguments)
+        .output()
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    }
+    Ok(output)
+}
+
+fn graph_git_stdout<I, S>(
+    executable: &Path,
+    repository_root: &Path,
+    arguments: I,
+) -> Result<String, LatticedError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = graph_git_output(executable, repository_root, arguments)?;
+    let value = std::str::from_utf8(&output.stdout)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?
+        .trim();
+    if value.is_empty() || value.contains(char::is_whitespace) {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    }
+    Ok(value.to_owned())
+}
+
 fn validate_scripted_fixture(
     config: &LatticedDeliveryConfig,
 ) -> Result<DeliveryGraphPaths, LatticedError> {
@@ -6558,6 +6714,125 @@ fn run_graph_memory_request(
     let mut memory = PostgresCodebaseMemory::new(client, target)
         .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
 
+    run_graph_memory(request, &query, &mut snapshot, &mut graphify, &mut memory)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphExecution))
+}
+
+/// Refreshes derived Graphify memory from the fixed, clean Git source selected
+/// in process configuration. This is intentionally a local CLI path rather
+/// than an MCP tool: callers cannot supply a source path, commit, command, or
+/// database target.
+///
+/// # Errors
+///
+/// Returns a bounded configuration, database, Graphify, or persistence error;
+/// it never creates a delivery receipt or substitutes a different source.
+pub fn refresh_runtime_graphify_from_environment() -> Result<GraphMemoryReceipt, LatticedError> {
+    let (_unused_delivery, database, password) =
+        delivery_environment_for_mode(FullChainRunMode::ResumeExisting)?;
+    let timeout = match env::var("LATTICE_DELIVERY_TIMEOUT_SECONDS") {
+        Ok(value) => parse_timeout(&value)?,
+        Err(env::VarError::NotPresent) => Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(LatticedError::new(LatticedErrorKind::Configuration));
+        }
+    };
+    let (source, commit) = runtime_graph_source_from_environment()?;
+    let configuration_digest = digest(
+        "lattice.runtime.graphify-source-configuration",
+        &CanonicalValue::Object(vec![
+            (
+                "git_sha256".to_owned(),
+                CanonicalValue::String(source.git_sha256.clone()),
+            ),
+            (
+                "repository_root".to_owned(),
+                CanonicalValue::String(path_text(&source.repository_root)?),
+            ),
+            (
+                "runtime_root".to_owned(),
+                CanonicalValue::String(path_text(&graphify_runtime_root_from_environment(
+                    &source.repository_root,
+                ))?),
+            ),
+        ]),
+    )?;
+    let request = runtime_graph_request(database.run_id(), &commit, configuration_digest)?;
+    if let Some(receipt) =
+        load_runtime_graph_receipt(&database, &password, deadline(timeout)?, &request)?
+    {
+        return Ok(receipt);
+    }
+    run_runtime_graph_memory_request(&database, &password, &source, deadline(timeout)?, &request)
+}
+
+fn load_runtime_graph_receipt(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    deadline: Instant,
+    request: &GraphMemoryRunRequest,
+) -> Result<Option<GraphMemoryReceipt>, LatticedError> {
+    let client = connect_fixed_runtime_client(database, password, deadline)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+    let target = ExtensionTarget::new(database.database_name(), database.run_id())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let mut memory = PostgresCodebaseMemory::new(client, target)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    match graph_memory_status(request, &mut memory) {
+        Ok(receipt) => Ok(Some(receipt)),
+        Err(GraphMemoryOrchestratorError::Receipt(error))
+            if error.code() == "MEMORY_RECEIPT_UNAVAILABLE" =>
+        {
+            Ok(None)
+        }
+        Err(_) => Err(LatticedError::new(LatticedErrorKind::GraphReceiptRead)),
+    }
+}
+
+fn run_runtime_graph_memory_request(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    source: &RuntimeGraphSource,
+    deadline: Instant,
+    request: &GraphMemoryRunRequest,
+) -> Result<GraphMemoryReceipt, LatticedError> {
+    let query = MemoryQuery::new(request, GRAPH_QUERY, GRAPH_RETRIEVAL_LIMIT)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Contract))?;
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphExecution))?;
+    let graph_root = source.work_root.join(request.commit_id().as_str());
+    let bridge = SnapshotBridge::new();
+    let snapshot_config = GitSnapshotConfig::new(
+        source.git_executable.clone(),
+        source.git_sha256.clone(),
+        source.repository_root.clone(),
+        graph_root.join("snapshots"),
+        SnapshotLimits::default(),
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let mut snapshot = ExactGitSnapshotMaterializer::with_bridge(snapshot_config, bridge.clone());
+    let system_root = env::var_os("SystemRoot")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let graphify_config = GraphifyRuntimeConfig::new(
+        graphify_wsl_executable_from_environment(
+            PathBuf::from(system_root).join("System32/wsl.exe"),
+        ),
+        graphify_runtime_root_from_environment(&source.repository_root),
+        graph_root.join("staging"),
+        remaining,
+        GraphOutputLimits::default(),
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let mut graphify = PinnedGraphifyAdapter::new(graphify_config, bridge);
+    let client = connect_fixed_runtime_client(database, password, deadline)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+    let target = ExtensionTarget::new(database.database_name(), database.run_id())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let mut memory = PostgresCodebaseMemory::new(client, target)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     run_graph_memory(request, &query, &mut snapshot, &mut graphify, &mut memory)
         .map_err(|_| LatticedError::new(LatticedErrorKind::GraphExecution))
 }
@@ -7987,6 +8262,36 @@ mod tests {
         assert_eq!(
             graphify_wsl_executable_from_value(None, default_wsl.clone()),
             default_wsl
+        );
+    }
+
+    #[test]
+    fn runtime_graph_request_is_bound_to_the_configured_git_commit() {
+        let configuration = test_content_digest('a');
+        let first = runtime_graph_request(
+            "core-61152",
+            "1111111111111111111111111111111111111111",
+            configuration.clone(),
+        )
+        .expect("first configured source request");
+        let repeated = runtime_graph_request(
+            "core-61152",
+            "1111111111111111111111111111111111111111",
+            configuration,
+        )
+        .expect("same configured source request");
+        let changed = runtime_graph_request(
+            "core-61152",
+            "2222222222222222222222222222222222222222",
+            test_content_digest('a'),
+        )
+        .expect("changed configured source request");
+
+        assert_eq!(first, repeated);
+        assert_ne!(first.commit_id(), changed.commit_id());
+        assert_ne!(
+            first.invocation().subject_digest(),
+            changed.invocation().subject_digest()
         );
     }
 

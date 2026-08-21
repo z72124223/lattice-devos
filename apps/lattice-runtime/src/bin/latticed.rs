@@ -73,6 +73,18 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             };
         }
+        if argument == "--graphify-refresh" && arguments.next().is_none() {
+            return match lattice_runtime::composition::refresh_runtime_graphify_from_environment() {
+                Ok(_) => {
+                    eprintln!("LATTICE_GRAPHIFY_REFRESH_READY");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{}", error.code());
+                    ExitCode::from(2)
+                }
+            };
+        }
         if argument == "--postgres-bootstrap" && arguments.next().is_none() {
             return match lattice_runtime::composition::bootstrap_postgres_extensions_from_environment() {
                 Ok(()) => {
