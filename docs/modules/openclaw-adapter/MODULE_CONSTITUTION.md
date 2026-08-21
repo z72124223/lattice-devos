@@ -1,17 +1,17 @@
 ---
 module_id: openclaw-adapter
 name: OpenClaw Adapter
-version: 2.0
-status: active
+version: 2.1
+status: retired
 owner: LATTICE maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-21
 ---
 
 ## Mission
 
-Own the authenticated native OpenClaw `/lattice` package boundary and translate
-its six normal user actions to the versioned local LATTICE IPC client without
-duplicating Orchestrator, Codex ownership, policy, or task truth.
+Preserve the historical OpenClaw adapter contract and implementation for
+reference or an explicitly approved future extraction. It is not part of the
+active MVP, default startup, or release gate.
 
 ## Non-Goals
 
@@ -20,6 +20,7 @@ duplicating Orchestrator, Codex ownership, policy, or task truth.
   protected Guardian authority.
 - Accept arbitrary SQL, shell, path, provider, or process commands.
 - Claim live OpenClaw compatibility from TASK-017 pure Rust fake evidence.
+- Act as the normal user gateway or block Codex-first product delivery.
 
 ## Owned Data
 
@@ -66,9 +67,9 @@ duplicating Orchestrator, Codex ownership, policy, or task truth.
 ## Failure, Compatibility, And Migration
 
 Unknown IPC/plugin versions, unauthenticated commands, malformed replies,
-daemon unavailability, disconnect, or ambiguous outcome fail closed. Live
-compatibility requires exact plugin/host/schema/binary capability evidence in
-MVP-2. The preserved V1 inert package evidence is characterization only.
+daemon unavailability, disconnect, or ambiguous outcome fail closed. The
+adapter remains source-compatible historical code. No live compatibility claim
+or maintenance obligation exists while its status is `retired`.
 
 ## Acceptance Gates
 
@@ -92,4 +93,4 @@ security/architecture review, and responsible-user authorization.
 |---|---|---|---|---|
 | 1.0 | 2026-07-29 | ADR-003 | Initial inert native plugin boundary | Current user task |
 | 2.0 | 2026-08-01 | SPEC-002 v13, ADR-004/006/015, TASK-017 | Thin typed local IPC client; live package remains MVP-2 | User MVP-3 execution directive |
-
+| 2.1 | 2026-08-21 | Product simplification decision | Retire OpenClaw from the active MVP while preserving its code and history | User |

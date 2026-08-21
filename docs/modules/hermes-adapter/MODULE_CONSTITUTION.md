@@ -1,21 +1,24 @@
 ---
 module_id: hermes-adapter
 name: LATTICE Hermes Reflection Adapter
-version: 1.1
-status: active
+version: 1.2
+status: deferred
 owner: LATTICE maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-21
 ---
 
 ## Mission
 
 Obtain one bounded reflection candidate from the exact pinned Hermes source in
 a verified whole-process OS containment boundary after an exact graph receipt.
+The module is retained for later optional integration and is not an MVP startup
+or release dependency.
 
 ## Non-Goals
 
 - Write product code, authorize work, accept or promote memory, own durable
   state, or recover truth from Hermes process memory.
+- Block the core product, Graphify, or Codebase Memory while Hermes is absent.
 
 ## Owned Data
 
@@ -88,3 +91,4 @@ changes require a versioned amendment and responsible-user approval.
 |---|---|---|---|---|
 | 1.1 | 2026-08-13 | SPEC-002 v31, TASK-065 | Remove the non-executed broker helper from production admission and receipt identity; retain its legacy one-shot protocol separately | User goal-mode direction to complete Hermes |
 | 1.0 | 2026-08-05 | SPEC-002 v27, V2 amendment, PLANS Step 9, TASK-033 | Contained reflection with PostgreSQL-owned replay | User full-chain directive |
+| 1.2 | 2026-08-21 | Product simplification decision | Defer Hermes until the core and independently useful modules are stable | User |

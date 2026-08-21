@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use lattice_core::{ComponentId, ComponentMode, bootstrap_manifest, platform_name};
+use lattice_core::{ComponentId, ComponentMode, ComponentTier, bootstrap_manifest, platform_name};
 
 #[test]
 fn manifest_identifies_the_general_ai_platform() {
@@ -63,4 +63,28 @@ fn manifest_preserves_one_gateway_truth_writer_and_read_only_lanes() {
         mode(ComponentId::Guardian),
         Some(ComponentMode::ApprovalGated)
     );
+}
+
+#[test]
+fn manifest_separates_the_mvp_from_optional_deferred_and_retired_modules() {
+    let manifest = bootstrap_manifest();
+
+    let tier = |id| {
+        manifest
+            .iter()
+            .find(|component| component.id == id)
+            .map(|component| component.tier)
+    };
+
+    assert_eq!(tier(ComponentId::RustCore), Some(ComponentTier::Core));
+    assert_eq!(tier(ComponentId::PostgreSql), Some(ComponentTier::Core));
+    assert_eq!(tier(ComponentId::Codex), Some(ComponentTier::Core));
+    assert_eq!(
+        tier(ComponentId::CodebaseMemory),
+        Some(ComponentTier::Optional)
+    );
+    assert_eq!(tier(ComponentId::Graphify), Some(ComponentTier::Optional));
+    assert_eq!(tier(ComponentId::Hermes), Some(ComponentTier::Deferred));
+    assert_eq!(tier(ComponentId::Guardian), Some(ComponentTier::Deferred));
+    assert_eq!(tier(ComponentId::OpenClaw), Some(ComponentTier::Retired));
 }

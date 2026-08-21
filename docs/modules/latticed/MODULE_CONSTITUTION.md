@@ -1,19 +1,18 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 1.8
-status: active
+version: 2.0
+status: deferred
 owner: LATTICE maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-21
 ---
 
 ## Mission
 
-Provide the sole normal local composition root that constructs the pure Rust
-orchestrator with concrete delivery/task adapters and exposes the bounded Codex
-App MCP stdio surface. The existing `apps/lattice-runtime` package implements
-this module and maps every MCP operation into the same `FullChainService` /
-Orchestrator composition.
+Preserve the existing bounded LATTICE composition and MCP contracts as an
+optional integration module. It no longer defines the core MVP, default
+startup, or default verification path; Codex owns the agent loop and user
+interaction.
 
 ## Non-Goals
 
@@ -26,6 +25,8 @@ Orchestrator composition.
   through MCP.
 - Promote the legacy `lattice-runtime` scripted acceptance command into an
   official writer entry or let it claim MCP/tunnel provenance.
+- Require OpenClaw, Hermes, Graphify, Writer Lease, or a full-chain acceptance
+  merely to develop or release the small core.
 
 ## Owned Data
 
@@ -111,9 +112,8 @@ Orchestrator composition.
   repository-owned acceptance fixture. It rejects official Codex mode before
   identity, database, workspace, or process effects; canonical `latticed` is
   the only official writer entry.
-- Keep OpenClaw as the broader normal human gateway. MCP permits only the one
-  fixed typed Submit template and its Status projection; it provides no
-  general submit/plan/approve/reject/stop or protected-release operation.
+- Retain the OpenClaw path only as historical compatibility code. It is not the
+  normal human gateway and its absence cannot block Codex-first operation.
 - Return only the allowlisted typed status projection and reconstruct it from
   PostgreSQL in a fresh process/session without rerunning external effects.
   A Completed projection additionally requires an existing, independently
@@ -239,6 +239,11 @@ incomplete. It keeps exactly four MCP tools and the existing six-field task
 status output, and requires fresh canonical `latticed` restart evidence rather
 than a Store test binary as acceptance.
 
+Version 2.0 preserves those contracts for explicit integration work but removes
+the module from the core MVP and default verification gate. Reactivation
+requires a concrete product need and focused module or pairwise acceptance; the
+retired full-chain is not a release prerequisite.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -278,3 +283,4 @@ constitution cannot be weakened merely to excuse implementation drift.
 | 1.6 | 2026-08-13 | SPEC-002 v30, ADR-021 clarification, TASK-064 | Add opt-in lazy production Hermes composition to canonical four-tool `latticed`; preserve task/status zero-effect paths and require explicit teardown | User goal-mode direction to integrate Hermes into LATTICE |
 | 1.7 | 2026-08-13 | SPEC-002 v31, TASK-065 | Remove two non-executed broker-helper settings from production admission while preserving the direct verified Codex proxy, lazy activation, and MCP contracts | User goal-mode direction to complete Hermes |
 | 1.8 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Emit and enforce the required Task-created autonomy profile through Task Ledger 2.3 while preserving the four-tool/six-field MCP wire | User-approved TASK-050 repair amendment |
+| 2.0 | 2026-08-21 | Product simplification decision | Preserve the composition as deferred integration code and remove full-chain startup from the core MVP | User |

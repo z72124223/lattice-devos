@@ -58,45 +58,77 @@ impl ComponentMode {
     }
 }
 
+/// Product lifecycle tier. This is independent from a component's authority
+/// mode: retained code can leave the MVP without losing its stable identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ComponentTier {
+    Core,
+    Optional,
+    Deferred,
+    Retired,
+}
+
+impl ComponentTier {
+    /// Returns the stable text representation used by local inspection tools.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Optional => "optional",
+            Self::Deferred => "deferred",
+            Self::Retired => "retired",
+        }
+    }
+}
+
 /// One inert entry in the bootstrap composition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Component {
     pub id: ComponentId,
     pub mode: ComponentMode,
+    pub tier: ComponentTier,
 }
 
 const COMPONENTS: [Component; 8] = [
     Component {
         id: ComponentId::RustCore,
         mode: ComponentMode::ControlCore,
+        tier: ComponentTier::Core,
     },
     Component {
         id: ComponentId::OpenClaw,
         mode: ComponentMode::Gateway,
+        tier: ComponentTier::Retired,
     },
     Component {
         id: ComponentId::PostgreSql,
         mode: ComponentMode::DurableTruth,
+        tier: ComponentTier::Core,
     },
     Component {
         id: ComponentId::Codex,
         mode: ComponentMode::SoleWriter,
+        tier: ComponentTier::Core,
     },
     Component {
         id: ComponentId::Graphify,
         mode: ComponentMode::ReadOnlyEvidence,
+        tier: ComponentTier::Optional,
     },
     Component {
         id: ComponentId::Hermes,
         mode: ComponentMode::ReadOnlyEvidence,
+        tier: ComponentTier::Deferred,
     },
     Component {
         id: ComponentId::CodebaseMemory,
         mode: ComponentMode::DurableMemory,
+        tier: ComponentTier::Optional,
     },
     Component {
         id: ComponentId::Guardian,
         mode: ComponentMode::ApprovalGated,
+        tier: ComponentTier::Deferred,
     },
 ];
 

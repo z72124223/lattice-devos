@@ -24,6 +24,18 @@ members = [
     "crates/lattice-task-domain",
     "crates/lattice-writer-lease",
 ]
+default-members = [
+    "apps/lattice-cli",
+    "crates/lattice-core",
+    "crates/lattice-cjson",
+    "crates/lattice-contracts",
+    "crates/lattice-codebase-memory",
+    "crates/lattice-ports",
+    "crates/lattice-postgres-store",
+    "crates/lattice-project-registry",
+    "crates/lattice-task-ledger",
+    "crates/lattice-task-domain",
+]
 resolver = "3"
 
 [workspace.package]

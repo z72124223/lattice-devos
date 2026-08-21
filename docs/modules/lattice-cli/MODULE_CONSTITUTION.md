@@ -1,10 +1,10 @@
 ---
 module_id: lattice-cli
 name: LATTICE Recovery CLI
-version: 1.0
+version: 2.0
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-07-29
+last_reviewed: 2026-08-21
 ---
 
 ## Mission
@@ -14,7 +14,7 @@ manifest through the same public core contract.
 
 ## Non-Goals
 
-- Become a second normal human gateway; OpenClaw remains the planned gateway.
+- Become a second chat or control console; Codex remains the human interface.
 - Execute tasks, approve work, mutate PostgreSQL, or call external components.
 - Install, authenticate, publish, or deploy anything.
 
@@ -25,7 +25,8 @@ manifest through the same public core contract.
 
 ## Public Contracts
 
-- `lattice status` renders the platform name and component bootstrap modes.
+- `lattice status` renders the platform name, component authority modes, and
+  lifecycle tiers.
 - Unknown commands fail with a non-zero exit and a short usage message.
 
 ## Invariants
@@ -48,8 +49,8 @@ manifest through the same public core contract.
 
 ## Failure, Compatibility, And Migration
 
-Unsupported arguments return a stable failure code. Output changes must preserve
-machine-readable component identifiers or introduce a versioned format. Any
+Unsupported arguments return a stable failure code. Version 2 adds a `tier`
+field and preserves machine-readable component identifiers and authority modes. Any
 operational command requires a versioned constitution amendment and must use
 the approved local IPC instead of direct runtime authority.
 
@@ -72,3 +73,4 @@ approval.
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
 | 1.0 | 2026-07-29 | SPEC-002, PLANS Step 4 | Read-only bootstrap status CLI | User |
+| 2.0 | 2026-08-21 | Product simplification decision | Show core, optional, deferred, and retired tiers without adding execution authority | User |

@@ -8,34 +8,37 @@ import test from "node:test";
 const checkScript = path.resolve("scripts/check-project.mjs");
 const engineeringProtocol = `---
 protocol_id: LATTICE_ENGINEERING_PROTOCOL
-version: 1.2.0
+version: 2.0.0
 status: active
 canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md
 ---
 
 # Fixture Engineering Protocol
 
-## Mandatory Entry
-Read before work.
+## Safety Boundaries
+Never force-push, mutate the default branch, deploy, release, expose secrets, or
+perform destructive cleanup without explicit authority.
 
-## Mandatory Delivery
-If an ordinary reproducible check fails, repair it within the authorized scope and rerun the same failed check.
-After the durable handoff is current, run npm.cmd run status:refresh; the projection never replaces ticket, Git, test, CI, review, or LATTICE acceptance evidence.
-Every new branch must provide a plain Traditional-Chinese name and purpose through its own exactly-once non-empty \`display_name_zh_tw\` and \`display_purpose_zh_tw\` ticket fields. The shared tools/engineering-status-dashboard/branch-guide.zh-TW.json is a legacy branch-guide fallback only: a ticket without both local fields must include that path in its \`allowed_paths\`.
-When a TASK repairs, reconciles, or otherwise records evidence about another TASK, it declares the targets only in \`evidence_subjects: [TASK-NNN, ...]\`. This is provenance, not a delivery prerequisite: \`depends_on\` remains limited to work that must be uniquely and successfully terminal before delivery. Each subject must resolve uniquely to a legal committed TASK identity; duplicate, illegal, overlapping, self-referential, or cyclic declarations remain denied. Recording a subject never changes that subject's terminal state.
-After the clean logical commit, run npm.cmd run delivery:finish instead of an ordinary manual push. Only LATTICE_DELIVERY_READY_TO_ARCHIVE=1 permits Codex to call the native archive-task action; every failure keeps the task open.
+## Risk Tiers
+Use focused checks for ordinary work. Reserve full integration, live services,
+and independent review for changes whose actual risk requires them.
 
-## Knowledge Routing
-Personal preferences, historical cases, and detailed decision logic belong in LATTICE, Hermes, and the knowledge graph.
+## Complexity Circuit Breaker
+Dashboard, ticket, validator, finisher, and handoff defects do not by themselves
+make product behavior fail. Do not create another task only to repair governance
+for the current task. After one governance repair, record a known limitation or
+simplify the gate.
 
-## Authority Boundary
-Preserve authority and safety boundaries.
+## Delivery
+Use npm.cmd run delivery:finish only for an explicitly authorized remote feature
+delivery. LATTICE_DELIVERY_READY_TO_ARCHIVE=1 permits archival after that optional
+delivery path; ordinary local completion does not require the finisher.
 `;
 const agents = `# Fixture Instructions
 
-Before editing, read \`docs/contracts/ENGINEERING_PROTOCOL_V1.md\`.
-Before claiming completion, reread it and run the focused checks.
-After the clean logical commit, run \`npm.cmd run delivery:finish\`; archive the current Codex task only after \`LATTICE_DELIVERY_READY_TO_ARCHIVE=1\`.
+Before editing, read \`docs/contracts/ENGINEERING_PROTOCOL_V1.md\` and classify
+the actual risk. Prefer the smallest verification that proves the change. Do not
+create a new task for dashboard, ticket, validator, finisher, or handoff repair.
 `;
 const constitution = `---
 module_id: fixture
@@ -255,13 +258,13 @@ test("project check requires AGENTS to point to the engineering protocol", async
   assert.match(result.stderr, /AGENTS\.md: must point to docs\/contracts\/ENGINEERING_PROTOCOL_V1\.md/u);
 });
 
-test("project check requires detailed knowledge to route outside the protocol", async () => {
+test("project check requires the complexity circuit breaker", async () => {
   const result = await runFixture({
     tickets: [["one.md", "TASK-017"]],
     plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
     protocol: engineeringProtocol.replace(
-      "Personal preferences, historical cases, and detailed decision logic belong in LATTICE, Hermes, and the knowledge graph.",
-      "Keep every rule here.",
+      "Do not create another task only to repair governance",
+      "Create another task whenever governance fails",
     ),
   });
 
@@ -269,36 +272,27 @@ test("project check requires detailed knowledge to route outside the protocol", 
   assert.match(result.stderr, /missing required contract content/u);
 });
 
-test("project check enforces the post-handoff dashboard refresh rule", async () => {
+test("project check does not require a dashboard refresh for ordinary work", async () => {
   const result = await runFixture({
     tickets: [["one.md", "TASK-017"]],
     plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
-    protocol: engineeringProtocol.replace(
-      "After the durable handoff is current, run npm.cmd run status:refresh; the projection never replaces ticket, Git, test, CI, review, or LATTICE acceptance evidence.",
-      "No local projection is required.",
-    ),
+    protocol: engineeringProtocol,
   });
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /npm\.cmd run status:refresh/u);
+  assert.equal(result.status, 0, result.stderr);
 });
 
-test("project check requires the one-command delivery and archive-success rule", async () => {
+test("project check keeps the finisher optional for ordinary local completion", async () => {
   const result = await runFixture({
     tickets: [["one.md", "TASK-017"]],
     plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
-    protocol: engineeringProtocol.replace(
-      "After the clean logical commit, run npm.cmd run delivery:finish instead of an ordinary manual push. Only LATTICE_DELIVERY_READY_TO_ARCHIVE=1 permits Codex to call the native archive-task action; every failure keeps the task open.",
-      "Finish manually.",
-    ),
+    protocol: engineeringProtocol,
   });
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /npm\.cmd run delivery:finish/u);
-  assert.match(result.stderr, /LATTICE_DELIVERY_READY_TO_ARCHIVE=1/u);
+  assert.equal(result.status, 0, result.stderr);
 });
 
-test("project check requires current ticket push and archive policies", async () => {
+test("project check leaves delivery policy validation to the explicit finisher", async () => {
   for (const fixtureOptions of [
     { deliveryPush: null },
     { deliveryPush: "push_everything" },
@@ -314,77 +308,65 @@ test("project check requires current ticket push and archive policies", async ()
       plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
       ...fixtureOptions,
     });
-    assert.equal(result.status, 1, JSON.stringify(fixtureOptions));
-    assert.match(result.stderr, /delivery_(?:push|archive|remote|repository)/u);
+    assert.equal(result.status, 0, `${JSON.stringify(fixtureOptions)}: ${result.stderr}`);
   }
 });
 
-test("project check requires AGENTS to route successful delivery to native archival", async () => {
+test("project check requires AGENTS to prohibit governance-only tasks", async () => {
   const result = await runFixture({
     tickets: [["one.md", "TASK-017"]],
     plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
     agentsContent: agents.replace(
-      "After the clean logical commit, run `npm.cmd run delivery:finish`; archive the current Codex task only after `LATTICE_DELIVERY_READY_TO_ARCHIVE=1`.",
-      "Finish manually.",
+      "Do not\ncreate a new task for dashboard, ticket, validator, finisher, or handoff repair.",
+      "Create another task for every governance repair.",
     ),
   });
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /AGENTS\.md.*delivery:finish/u);
+  assert.match(result.stderr, /governance-only task creation/u);
 });
 
-test("project check requires the protocol to describe the Chinese purpose guide", async () => {
+test("project check does not require dashboard presentation policy in the engineering protocol", async () => {
   const result = await runFixture({
     tickets: [["one.md", "TASK-017"]],
     plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
-    protocol: engineeringProtocol.replace(
-      "Every new branch must provide a plain Traditional-Chinese name and purpose through its own exactly-once non-empty `display_name_zh_tw` and `display_purpose_zh_tw` ticket fields. The shared tools/engineering-status-dashboard/branch-guide.zh-TW.json is a legacy branch-guide fallback only: a ticket without both local fields must include that path in its `allowed_paths`.",
-      "Branch explanations are optional.",
-    ),
+    protocol: engineeringProtocol,
   });
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /branch-guide\.zh-TW\.json/u);
+  assert.equal(result.status, 0, result.stderr);
 });
 
-test("project check requires the protocol to preserve evidence-subject governance", async () => {
+test("project check does not require provenance policy for ordinary verification", async () => {
   const result = await runFixture({
     tickets: [["one.md", "TASK-017"]],
     plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
-    protocol: engineeringProtocol.replace(
-      "When a TASK repairs, reconciles, or otherwise records evidence about another TASK, it declares the targets only in `evidence_subjects: [TASK-NNN, ...]`. This is provenance, not a delivery prerequisite: `depends_on` remains limited to work that must be uniquely and successfully terminal before delivery. Each subject must resolve uniquely to a legal committed TASK identity; duplicate, illegal, overlapping, self-referential, or cyclic declarations remain denied. Recording a subject never changes that subject's terminal state.",
-      "Evidence is an unrestricted delivery dependency.",
-    ),
+    protocol: engineeringProtocol,
   });
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /evidence_subjects/u);
-  assert.match(result.stderr, /Recording a subject never changes/u);
+  assert.equal(result.status, 0, result.stderr);
 });
 
-test("project check requires the current branch in the Chinese purpose guide", async () => {
+test("project check treats a missing dashboard guide entry as non-blocking", async () => {
   const result = await runFixture({
     tickets: [["one.md", "TASK-017"]],
     plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
     includeGuideEntry: false,
   });
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /missing plain Traditional-Chinese name and purpose/u);
+  assert.equal(result.status, 0, result.stderr);
 });
 
-test("project check requires the guide in current ticket allowed_paths", async () => {
+test("project check does not expand allowed_paths only for dashboard presentation", async () => {
   const result = await runFixture({
     tickets: [["one.md", "TASK-017"]],
     plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
     includeGuideAllowedPath: false,
   });
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /allowed_paths must include/u);
+  assert.equal(result.status, 0, result.stderr);
 });
 
-test("project check does not accept the guide path under another frontmatter list", async () => {
+test("project check ignores dashboard guide placement during product verification", async () => {
   const result = await runFixture({
     tickets: [["one.md", "TASK-017"]],
     plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
@@ -392,19 +374,17 @@ test("project check does not accept the guide path under another frontmatter lis
     decoyGuidePath: true,
   });
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /allowed_paths must include/u);
+  assert.equal(result.status, 0, result.stderr);
 });
 
-test("project check requires current ticket branch to match Git", async () => {
+test("project check does not let a shared plan lock an unrelated maintenance branch", async () => {
   const result = await runFixture({
     tickets: [["one.md", "TASK-017"]],
     plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
     gitBranch: "feature/different-fixture",
   });
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /does not match current Git branch/u);
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("project check permits a detached read-only integration verification", async () => {
@@ -417,21 +397,20 @@ test("project check permits a detached read-only integration verification", asyn
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("project check rejects English-only guide text", async () => {
+test("project check does not block product verification on dashboard translation", async () => {
   const result = await runFixture({
     tickets: [["one.md", "TASK-017"]],
     plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
     guideEntryUsesChinese: false,
   });
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /missing plain Traditional-Chinese name and purpose/u);
+  assert.equal(result.status, 0, result.stderr);
 });
 
-test("an ordinary protocol error can be repaired and the same check rerun", async () => {
+test("a missing complexity circuit breaker can be repaired and the same check rerun", async () => {
   const broken = engineeringProtocol.replace(
-    "repair it within the authorized scope and rerun the same failed check.",
-    "close the task immediately.",
+    "Do not create another task only to repair governance",
+    "Create another task whenever governance fails",
   );
   const { initial, rerun } = await runFixture({
     tickets: [["one.md", "TASK-017"]],
@@ -445,7 +424,7 @@ test("an ordinary protocol error can be repaired and the same check rerun", asyn
   assert.match(rerun.stdout, /check=ok/u);
 });
 
-test("project check requires exactly one current-task marker", async () => {
+test("project check permits zero or one current-task marker but rejects two", async () => {
   const result = await runFixture({
     tickets: [["one.md", "TASK-017"]],
     plans:
@@ -453,7 +432,7 @@ test("project check requires exactly one current-task marker", async () => {
   });
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /PLANS\.md: expected exactly one CURRENT TASK marker/u);
+  assert.match(result.stderr, /PLANS\.md: expected at most one CURRENT TASK marker/u);
 });
 
 test("project check requires a ticket matching the current-task marker", async () => {
@@ -466,17 +445,25 @@ test("project check requires a ticket matching the current-task marker", async (
   assert.match(result.stderr, /current task 'TASK-018' has no matching unique ticket/u);
 });
 
-test("project check requires a constitution for the current ticket module", async () => {
+test("project check does not require a constitution only to run ordinary verification", async () => {
   const result = await runFixture({
     tickets: [["one.md", "TASK-018", "postgres-store"]],
     plans: "**CURRENT TASK-018 GOVERNANCE:** missing constitution\n",
+    gitBranch: "maintenance/ordinary-verification",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("project check requires a module contract for the task branch being changed", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-018", "missing-module"]],
+    plans: "# Shared plan without a global task lock\n",
+    gitBranch: "feature/task-018-fixture",
   });
 
   assert.equal(result.status, 1);
-  assert.match(
-    result.stderr,
-    /current module 'postgres-store' has no MODULE_CONSTITUTION\.md/u,
-  );
+  assert.match(result.stderr, /parallel module 'missing-module' has no MODULE_CONSTITUTION\.md/u);
 });
 
 test("project check rejects a current-module constitution outside its canonical path", async () => {
@@ -590,7 +577,7 @@ test("project check accepts TASK-081, TASK-082, and TASK-083 ticket-local metada
   }
 });
 
-test("project check does not accept display metadata in the engineering protocol as ticket identity", async () => {
+test("project check keeps dashboard display metadata outside product verification", async () => {
   const result = await runFixture({
     tickets: [
       ["current.md", "TASK-017", "fixture", {
@@ -605,11 +592,10 @@ test("project check does not accept display metadata in the engineering protocol
     includeGuideEntry: false,
   });
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /parallel ticket allowed_paths must include/u);
+  assert.equal(result.status, 0, result.stderr);
 });
 
-test("project check rejects incomplete, duplicate, blank, or non-Chinese ticket-local display metadata", async () => {
+test("project check leaves incomplete dashboard display metadata visible but non-blocking", async () => {
   const invalidMetadata = [
     { displayName: "只有名稱" },
     { displayName: "名稱", displayPurpose: "用途", extraFrontmatter: "display_name_zh_tw: 重複名稱\n" },
@@ -631,8 +617,7 @@ test("project check rejects incomplete, duplicate, blank, or non-Chinese ticket-
       includeGuideEntry: false,
     });
 
-    assert.equal(result.status, 1);
-    assert.match(result.stderr, /ticket-local display_name_zh_tw and display_purpose_zh_tw/u);
+    assert.equal(result.status, 0, result.stderr);
   }
 });
 
@@ -661,7 +646,7 @@ test("project check rejects a parallel TASK ticket with a branch mismatch", asyn
   assert.match(result.stderr, /parallel ticket branch 'feature\/task-018-other' does not match current Git branch 'feature\/task-018-fixture'/u);
 });
 
-test("project check rejects a non-terminal parallel TASK ticket", async () => {
+test("project check accepts a non-terminal parallel TASK ticket during development", async () => {
   const result = await runFixture({
     tickets: [
       ["current.md", "TASK-017"],
@@ -671,8 +656,7 @@ test("project check rejects a non-terminal parallel TASK ticket", async () => {
     gitBranch: "feature/task-018-fixture",
   });
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /parallel ticket must be terminal/u);
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("project check keeps a cancelled TASK-038 branch denied", async () => {
@@ -686,10 +670,10 @@ test("project check keeps a cancelled TASK-038 branch denied", async () => {
   });
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /parallel ticket must be terminal/u);
+  assert.match(result.stderr, /cancelled or malformed task branches cannot resume/u);
 });
 
-test("project check rejects an unauthorized parallel delivery policy and the default branch", async () => {
+test("project check leaves delivery policy and default-branch mutation protection to the finisher", async () => {
   const unauthorized = await runFixture({
     tickets: [
       ["current.md", "TASK-017"],
@@ -706,10 +690,8 @@ test("project check rejects an unauthorized parallel delivery policy and the def
     defaultGitBranch: "main",
   });
 
-  assert.equal(unauthorized.status, 1);
-  assert.match(unauthorized.stderr, /delivery_push must be 'authorized_non_force_feature_branch' or 'local_only'/u);
-  assert.equal(defaultBranch.status, 1);
-  assert.match(defaultBranch.stderr, /current Git branch 'main' must not be the default branch/u);
+  assert.equal(unauthorized.status, 0, unauthorized.stderr);
+  assert.equal(defaultBranch.status, 0, defaultBranch.stderr);
 });
 
 test("project check rejects a worktree nested inside another Git worktree", async () => {
@@ -721,4 +703,60 @@ test("project check rejects a worktree nested inside another Git worktree", asyn
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /worktree root must not be nested inside another Git worktree/u);
+});
+
+test("project check accepts a maintenance branch without a ticket or current-task marker", async () => {
+  const result = await runFixture({
+    tickets: [],
+    plans: "# Plan\n\nStabilize the product without opening another task.\n",
+    protocol: engineeringProtocol,
+    agentsContent: agents,
+    gitBranch: "maintenance/workflow-simplification",
+    includeGuideAllowedPath: false,
+    includeGuideEntry: false,
+    deliveryPush: null,
+    deliveryArchive: null,
+    deliveryRemote: null,
+    deliveryRepository: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /current_tasks=0/u);
+});
+
+test("project check accepts an in-progress task branch before delivery metadata exists", async () => {
+  const result = await runFixture({
+    tickets: [["one.md", "TASK-017", "fixture", { status: "in_progress" }]],
+    plans: "# Plan\n\nNo global current-task lock.\n",
+    protocol: engineeringProtocol,
+    agentsContent: agents,
+    gitBranch: "feature/task-017-fixture",
+    includeGuideAllowedPath: false,
+    includeGuideEntry: false,
+    deliveryPush: null,
+    deliveryArchive: null,
+    deliveryRemote: null,
+    deliveryRepository: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("project check permits the default branch and leaves protected delivery to the finisher", async () => {
+  const result = await runFixture({
+    tickets: [],
+    plans: "# Plan\n\nStable integration branch.\n",
+    protocol: engineeringProtocol,
+    agentsContent: agents,
+    gitBranch: "main",
+    defaultGitBranch: "main",
+    includeGuideAllowedPath: false,
+    includeGuideEntry: false,
+    deliveryPush: null,
+    deliveryArchive: null,
+    deliveryRemote: null,
+    deliveryRepository: null,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
 });

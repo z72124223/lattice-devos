@@ -14,9 +14,10 @@ pub fn render_status() -> String {
     for component in bootstrap_manifest() {
         writeln!(
             output,
-            "{}: {}",
+            "{}: {} [{}]",
             component.id.as_str(),
-            component.mode.as_str()
+            component.mode.as_str(),
+            component.tier.as_str()
         )
         .expect("writing to a String cannot fail");
     }
@@ -38,9 +39,10 @@ pub fn render_status_json() -> String {
         }
         write!(
             output,
-            "{{\"id\":\"{}\",\"mode\":\"{}\"}}",
+            "{{\"id\":\"{}\",\"mode\":\"{}\",\"tier\":\"{}\"}}",
             component.id.as_str(),
-            component.mode.as_str()
+            component.mode.as_str(),
+            component.tier.as_str()
         )
         .expect("writing to a String cannot fail");
     }

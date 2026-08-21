@@ -32,19 +32,6 @@ function relative(file) {
   return path.relative(root, file).replaceAll("\\", "/");
 }
 
-function frontmatterListIncludes(frontmatter, key, expectedValue) {
-  const lines = frontmatter.split(/\r?\n/gu);
-  const start = lines.findIndex((line) => line === `${key}:`);
-  if (start < 0) return false;
-  for (let index = start + 1; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (/^[a-zA-Z0-9_]+:/u.test(line)) break;
-    const item = line.match(/^\s+-\s*(.*?)\s*$/u);
-    if (item?.[1] === expectedValue) return true;
-  }
-  return false;
-}
-
 function frontmatterScalar(frontmatter, key) {
   const pattern = new RegExp(`^${key}:\\s*(\\S+)\\s*$`, "gmu");
   const matches = [...frontmatter.matchAll(pattern)];
@@ -52,19 +39,6 @@ function frontmatterScalar(frontmatter, key) {
     valid: matches.length === 1,
     value: matches.length === 1 ? matches[0][1] : null,
   };
-}
-
-function frontmatterTextScalar(frontmatter, key) {
-  const pattern = new RegExp(`^${key}:[ \\t]*(.*?)[ \\t]*$`, "gmu");
-  const matches = [...frontmatter.matchAll(pattern)];
-  return {
-    valid: matches.length === 1,
-    value: matches.length === 1 ? matches[0][1] : null,
-  };
-}
-
-function frontmatterHasKey(frontmatter, key) {
-  return new RegExp(`^${key}:`, "mu").test(frontmatter);
 }
 
 const files = await walk(root);
@@ -98,30 +72,20 @@ if (!engineeringProtocolFile) {
   errors.push(`${engineeringProtocolPath}: missing engineering protocol.`);
 } else {
   const protocol = await readFile(engineeringProtocolFile, "utf8");
+  const normalizedProtocol = protocol.replaceAll(/\s+/gu, " ").toLowerCase();
   const requiredProtocolContent = [
     "protocol_id: LATTICE_ENGINEERING_PROTOCOL",
-    "version: 1.2.0",
+    "version: 2.0.0",
     "canonical_path: docs/contracts/ENGINEERING_PROTOCOL_V1.md",
-    "## Mandatory Entry",
-    "## Mandatory Delivery",
-    "repair it within the authorized scope and rerun the same failed check",
-    "npm.cmd run status:refresh",
-    "the projection never replaces ticket, Git, test, CI",
-    "LATTICE acceptance evidence",
-    "tools/engineering-status-dashboard/branch-guide.zh-TW.json",
-    "evidence_subjects: [TASK-NNN, ...]",
-    "This is provenance, not a delivery prerequisite",
-    "Recording a subject never changes that subject's terminal state",
-    "npm.cmd run delivery:finish",
-    "LATTICE_DELIVERY_READY_TO_ARCHIVE=1",
-    "native archive-task action",
-    "every failure keeps the task open",
-    "## Knowledge Routing",
-    "Personal preferences, historical cases, and detailed decision logic belong in LATTICE, Hermes, and the knowledge graph",
-    "## Authority Boundary",
+    "## Safety Boundaries",
+    "## Risk Tiers",
+    "## Complexity Circuit Breaker",
+    "## Delivery",
+    "Do not create another task only to repair governance",
+    "ordinary local completion does not require the finisher",
   ];
   for (const required of requiredProtocolContent) {
-    if (!protocol.includes(required)) {
+    if (!normalizedProtocol.includes(required.toLowerCase())) {
       errors.push(
         `${engineeringProtocolPath}: missing required contract content '${required.replaceAll("\n", " ")}'.`,
       );
@@ -134,20 +98,17 @@ if (!agentsFile) {
   errors.push("AGENTS.md: missing repository instructions.");
 } else {
   const agents = await readFile(agentsFile, "utf8");
-  const normalizedAgents = agents.replaceAll(/\s+/gu, " ");
+  const normalizedAgents = agents.replaceAll(/\s+/gu, " ").toLowerCase();
   if (!agents.includes(`\`${engineeringProtocolPath}\``)) {
     errors.push(`AGENTS.md: must point to ${engineeringProtocolPath}.`);
   }
-  if (!agents.includes("Before editing") || !agents.includes("Before claiming completion")) {
-    errors.push("AGENTS.md: must require engineering protocol checks before editing and completion.");
-  }
   if (
-    !agents.includes("npm.cmd run delivery:finish") ||
-    !agents.includes("LATTICE_DELIVERY_READY_TO_ARCHIVE=1") ||
-    !normalizedAgents.includes("archive the current Codex task")
+    !normalizedAgents.includes("classify") ||
+    !normalizedAgents.includes("risk") ||
+    !normalizedAgents.includes("do not create a new task")
   ) {
     errors.push(
-      "AGENTS.md: must route completion through delivery:finish and archive the current Codex task only after its success marker.",
+      "AGENTS.md: must require risk classification and prohibit governance-only task creation.",
     );
   }
 }
@@ -259,18 +220,7 @@ for (const file of ticketFiles) {
   const moduleId = moduleMatches[0][1];
   const branchMatches = [...frontmatter.matchAll(/^branch:\s*(\S+)\s*$/gmu)];
   const branch = branchMatches.length === 1 ? branchMatches[0][1] : null;
-  const deliveryRemote = frontmatterScalar(frontmatter, "delivery_remote");
-  const deliveryRepository = frontmatterScalar(frontmatter, "delivery_repository");
-  const deliveryPush = frontmatterScalar(frontmatter, "delivery_push");
-  const deliveryArchive = frontmatterScalar(frontmatter, "delivery_archive");
   const status = frontmatterScalar(frontmatter, "status");
-  const displayName = frontmatterTextScalar(frontmatter, "display_name_zh_tw");
-  const displayPurpose = frontmatterTextScalar(frontmatter, "display_purpose_zh_tw");
-  const includesBranchGuide = frontmatterListIncludes(
-    frontmatter,
-    "allowed_paths",
-    "tools/engineering-status-dashboard/branch-guide.zh-TW.json",
-  );
   const prior = ticketOwners.get(ticketId);
   if (prior) {
     errors.push(
@@ -281,16 +231,7 @@ for (const file of ticketFiles) {
       file: relative(file),
       moduleId,
       branch,
-      includesBranchGuide,
-      deliveryRemote,
-      deliveryRepository,
-      deliveryPush,
-      deliveryArchive,
       status,
-      displayName,
-      displayPurpose,
-      hasTicketLocalDisplay: frontmatterHasKey(frontmatter, "display_name_zh_tw") ||
-        frontmatterHasKey(frontmatter, "display_purpose_zh_tw"),
     });
   }
 }
@@ -311,102 +252,10 @@ const defaultGitBranchResult = spawnSync(
 const defaultGitBranch = defaultGitBranchResult.status === 0
   ? defaultGitBranchResult.stdout.trim().replace(/^origin\//u, "")
   : "";
-const branchGuidePath = "tools/engineering-status-dashboard/branch-guide.zh-TW.json";
-
-async function validateBranchPresentation(ticket, label) {
-  if (ticket.hasTicketLocalDisplay) {
-    if (
-      !ticket.displayName.valid ||
-      !ticket.displayName.value?.trim() ||
-      !/\p{Script=Han}/u.test(ticket.displayName.value) ||
-      !ticket.displayPurpose.valid ||
-      !ticket.displayPurpose.value?.trim() ||
-      !/\p{Script=Han}/u.test(ticket.displayPurpose.value)
-    ) {
-      errors.push(
-        `${ticket.file}: ${label} ticket-local display_name_zh_tw and display_purpose_zh_tw must each be exactly one non-empty Traditional-Chinese value.`,
-      );
-    }
-    return;
-  }
-  if (!ticket.includesBranchGuide) {
-    errors.push(
-      `${ticket.file}: ${label} ticket allowed_paths must include '${branchGuidePath}'.`,
-    );
-    return;
-  }
-  const branchGuideFile = files.find((candidate) => relative(candidate) === branchGuidePath);
-  if (!branchGuideFile) {
-    errors.push(`${branchGuidePath}: missing Traditional-Chinese branch guide.`);
-    return;
-  }
-  if (!ticket.branch) return;
-  try {
-    const guide = JSON.parse(await readFile(branchGuideFile, "utf8"));
-    const entry = guide?.branches?.[ticket.branch];
-    if (
-      guide?.schema !== "lattice.branch-guide.zh-TW/1.0" ||
-      typeof entry?.name !== "string" ||
-      !entry.name.trim() ||
-      !/\p{Script=Han}/u.test(entry.name) ||
-      typeof entry?.purpose !== "string" ||
-      !entry.purpose.trim() ||
-      !/\p{Script=Han}/u.test(entry.purpose)
-    ) {
-      errors.push(
-        `${branchGuidePath}: missing plain Traditional-Chinese name and purpose for '${ticket.branch}'.`,
-      );
-    }
-  } catch {
-    // The generic JSON validator already reports the parse failure.
-  }
-}
-
-function validateDeliveryMetadata(ticket, label) {
-  if (
-    !ticket.deliveryRemote.valid ||
-    !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/u.test(ticket.deliveryRemote.value || "")
-  ) {
-    errors.push(
-      `${ticket.file}: ${label} ticket delivery_remote must be exactly one safe named Git remote.`,
-    );
-  }
-  if (
-    !ticket.deliveryRepository.valid ||
-    !/^(?:[a-z0-9.-]+(?::[0-9]+)?\/[a-zA-Z0-9._/-]+|file:[^\r\n]+)$/u.test(
-      ticket.deliveryRepository.value || "",
-    )
-  ) {
-    errors.push(
-      `${ticket.file}: ${label} ticket delivery_repository must name one credential-free canonical repository identity.`,
-    );
-  }
-  if (
-    !ticket.deliveryPush.valid ||
-    !new Set(["authorized_non_force_feature_branch", "local_only"]).has(
-      ticket.deliveryPush.value,
-    )
-  ) {
-    errors.push(
-      `${ticket.file}: ${label} ticket delivery_push must be 'authorized_non_force_feature_branch' or 'local_only'.`,
-    );
-  }
-  if (
-    !ticket.deliveryArchive.valid ||
-    !new Set(["after_success", "keep_open"]).has(ticket.deliveryArchive.value)
-  ) {
-    errors.push(
-      `${ticket.file}: ${label} ticket delivery_archive must be 'after_success' or 'keep_open'.`,
-    );
-  }
-}
-
 const parallelTaskMatch = currentGitBranch.match(
   /^feature\/(task-[0-9]{3})-[a-z0-9]+(?:-[a-z0-9]+)*$/u,
 );
-if (currentGitBranch && defaultGitBranch && currentGitBranch === defaultGitBranch) {
-  errors.push(`current Git branch '${currentGitBranch}' must not be the default branch.`);
-} else if (parallelTaskMatch) {
+if (parallelTaskMatch) {
   const parallelTaskId = parallelTaskMatch[1].toUpperCase();
   const parallelTicket = ticketOwners.get(parallelTaskId);
   if (!parallelTicket) {
@@ -424,58 +273,36 @@ if (currentGitBranch && defaultGitBranch && currentGitBranch === defaultGitBranc
         `${parallelTicket.file}: parallel module '${parallelTicket.moduleId}' has no MODULE_CONSTITUTION.md.`,
       );
     }
-    if (
-      !parallelTicket.status.valid ||
-      !new Set(["complete", "completed", "verified"]).has(
-        (parallelTicket.status.value || "").toLowerCase(),
-      )
-    ) {
-      errors.push(`${parallelTicket.file}: parallel ticket must be terminal.`);
+    const parallelStatus = (parallelTicket.status.value || "").toLowerCase();
+    if (!parallelTicket.status.valid || parallelStatus === "cancelled") {
+      errors.push(`${parallelTicket.file}: cancelled or malformed task branches cannot resume.`);
     }
-    validateDeliveryMetadata(parallelTicket, "parallel");
-    await validateBranchPresentation(parallelTicket, "parallel");
   }
 }
+let currentTaskMarkers = [];
 if (!plansFile) {
   errors.push("PLANS.md: missing project plan.");
 } else {
   const plans = await readFile(plansFile, "utf8");
-  const currentTaskMarkers = [
+  currentTaskMarkers = [
     ...plans.matchAll(/CURRENT (TASK-[0-9]{3})\b/gu),
   ];
-  if (currentTaskMarkers.length !== 1) {
+  if (currentTaskMarkers.length > 1) {
     errors.push(
-      `PLANS.md: expected exactly one CURRENT TASK marker; found ${currentTaskMarkers.length}.`,
+      `PLANS.md: expected at most one CURRENT TASK marker; found ${currentTaskMarkers.length}.`,
     );
-  } else {
+  } else if (currentTaskMarkers.length === 1) {
     const currentTaskId = currentTaskMarkers[0][1];
     const currentTicket = ticketOwners.get(currentTaskId);
     if (!currentTicket) {
       errors.push(
         `PLANS.md: current task '${currentTaskId}' has no matching unique ticket.`,
       );
-    } else if (!constitutionOwners.has(currentTicket.moduleId)) {
-      errors.push(
-        `${currentTicket.file}: current module '${currentTicket.moduleId}' has no MODULE_CONSTITUTION.md.`,
-      );
     } else {
       if (!currentTicket.branch) {
         errors.push(`${currentTicket.file}: current ticket requires exactly one branch.`);
       } else if (currentGitBranchResult.status !== 0) {
         errors.push(`${currentTicket.file}: current Git branch cannot be identified.`);
-      } else if (
-        currentGitBranch &&
-        currentGitBranch !== defaultGitBranch &&
-        (!parallelTaskMatch || currentTaskId === parallelTaskMatch[1].toUpperCase()) &&
-        currentTicket.branch !== currentGitBranch
-      ) {
-        errors.push(
-          `${currentTicket.file}: ticket branch '${currentTicket.branch}' does not match current Git branch '${currentGitBranch}'.`,
-        );
-      }
-      validateDeliveryMetadata(currentTicket, "current");
-      if (currentTicket.branch) {
-        await validateBranchPresentation(currentTicket, "current");
       }
     }
   }
@@ -488,6 +315,6 @@ if (errors.length > 0) {
   process.exitCode = 1;
 } else {
   process.stdout.write(
-    `check=ok files=${files.length} constitutions=${constitutionFiles.length} tickets=${ticketOwners.size} current_tasks=1\n`,
+    `check=ok files=${files.length} constitutions=${constitutionFiles.length} tickets=${ticketOwners.size} current_tasks=${currentTaskMarkers.length}\n`,
   );
 }

@@ -5,13 +5,13 @@ fn status_renders_the_inert_platform_manifest() {
     let output = render_status();
 
     assert!(output.starts_with("LATTICE DevOS\nstate: bootstrap-ready\n"));
-    assert!(output.contains("openclaw: gateway\n"));
-    assert!(output.contains("postgresql: durable-truth\n"));
-    assert!(output.contains("codex: sole-writer\n"));
-    assert!(output.contains("graphify: read-only-evidence\n"));
-    assert!(output.contains("hermes: read-only-evidence\n"));
-    assert!(output.contains("codebase-memory: durable-memory\n"));
-    assert!(output.contains("guardian: approval-gated\n"));
+    assert!(output.contains("openclaw: gateway [retired]\n"));
+    assert!(output.contains("postgresql: durable-truth [core]\n"));
+    assert!(output.contains("codex: sole-writer [core]\n"));
+    assert!(output.contains("graphify: read-only-evidence [optional]\n"));
+    assert!(output.contains("hermes: read-only-evidence [deferred]\n"));
+    assert!(output.contains("codebase-memory: durable-memory [optional]\n"));
+    assert!(output.contains("guardian: approval-gated [deferred]\n"));
 }
 
 #[test]
@@ -29,14 +29,14 @@ fn only_the_read_only_status_command_is_accepted() {
 fn status_json_is_a_stable_read_only_manifest_projection() {
     let expected = concat!(
         "{\"platform\":\"LATTICE DevOS\",\"state\":\"bootstrap-ready\",\"components\":[",
-        "{\"id\":\"rust-core\",\"mode\":\"control-core\"},",
-        "{\"id\":\"openclaw\",\"mode\":\"gateway\"},",
-        "{\"id\":\"postgresql\",\"mode\":\"durable-truth\"},",
-        "{\"id\":\"codex\",\"mode\":\"sole-writer\"},",
-        "{\"id\":\"graphify\",\"mode\":\"read-only-evidence\"},",
-        "{\"id\":\"hermes\",\"mode\":\"read-only-evidence\"},",
-        "{\"id\":\"codebase-memory\",\"mode\":\"durable-memory\"},",
-        "{\"id\":\"guardian\",\"mode\":\"approval-gated\"}]}",
+        "{\"id\":\"rust-core\",\"mode\":\"control-core\",\"tier\":\"core\"},",
+        "{\"id\":\"openclaw\",\"mode\":\"gateway\",\"tier\":\"retired\"},",
+        "{\"id\":\"postgresql\",\"mode\":\"durable-truth\",\"tier\":\"core\"},",
+        "{\"id\":\"codex\",\"mode\":\"sole-writer\",\"tier\":\"core\"},",
+        "{\"id\":\"graphify\",\"mode\":\"read-only-evidence\",\"tier\":\"optional\"},",
+        "{\"id\":\"hermes\",\"mode\":\"read-only-evidence\",\"tier\":\"deferred\"},",
+        "{\"id\":\"codebase-memory\",\"mode\":\"durable-memory\",\"tier\":\"optional\"},",
+        "{\"id\":\"guardian\",\"mode\":\"approval-gated\",\"tier\":\"deferred\"}]}",
         "\n"
     );
 
