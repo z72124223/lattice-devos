@@ -32,7 +32,7 @@ const PREPARED_ASSETS_NAME: &str = "prepared-assets.json";
 pub(crate) const OFFICIAL_HERMES_CONFIG: &[u8] = br"_config_version: 33
 model:
   provider: openai-api
-  default: gpt-5.3-codex-spark
+  default: gpt-5.6-terra
   openai_runtime: codex_app_server
   api_mode: codex_app_server
   base_url: http://127.0.0.1:9/v1

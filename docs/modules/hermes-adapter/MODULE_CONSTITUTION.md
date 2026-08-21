@@ -1,7 +1,7 @@
 ---
 module_id: hermes-adapter
 name: LATTICE Hermes Reflection Adapter
-version: 1.1
+version: 1.2
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-13
@@ -86,5 +86,6 @@ changes require a versioned amendment and responsible-user approval.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 1.2 | 2026-08-22 | Runtime model policy | Replace the retired Spark broker identity with the fixed `gpt-5.6-terra` identity; non-5.6 substitutions remain rejected before launch | User goal-mode approval |
 | 1.1 | 2026-08-13 | SPEC-002 v31, TASK-065 | Remove the non-executed broker helper from production admission and receipt identity; retain its legacy one-shot protocol separately | User goal-mode direction to complete Hermes |
 | 1.0 | 2026-08-05 | SPEC-002 v27, V2 amendment, PLANS Step 9, TASK-033 | Contained reflection with PostgreSQL-owned replay | User full-chain directive |

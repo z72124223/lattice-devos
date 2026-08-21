@@ -2147,7 +2147,7 @@ impl HermesProductionRunnerConfig {
         broker_receipt.validate_for_containment()?;
         let model = model.into();
         let codex_provider = broker
-            .into_production_proxy_provider_from_preflight(broker_receipt, "gpt-5.3-codex-spark")?;
+            .into_production_proxy_provider_from_preflight(broker_receipt, "gpt-5.6-terra")?;
         Self::validated(
             containment,
             runtime_manifest,
@@ -3748,10 +3748,10 @@ mod proxy_host_tests {
     #[test]
     fn official_hermes_config_bytes_are_exact_and_cross_bound() {
         let config_text = std::str::from_utf8(OFFICIAL_HERMES_CONFIG).expect("ASCII YAML");
-        assert_eq!(OFFICIAL_HERMES_CONFIG.len(), 254);
+        assert_eq!(OFFICIAL_HERMES_CONFIG.len(), 248);
         assert_eq!(
             encode_sha256(&Sha256::digest(OFFICIAL_HERMES_CONFIG)),
-            "1bc83178fc5fbbbb12fb7c9ff512b88c13bda8a55bfadcd572970f9bc06d1a45"
+            "899a208531bc431d9a4f491a588b499b9f1d742b8d6bc16b35fa3bb3d254dfaf"
         );
         assert!(PRIVATE_RUNNER_SOURCE.contains(config_text));
         assert!(OUTER_RUNNER_SOURCE.contains(config_text));

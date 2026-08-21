@@ -59,7 +59,7 @@ const CODEX_CONFIG_LOCK: &str = r#"version = 1
 codex_version = "0.146.0"
 
 [config]
-model = "gpt-5.3-codex-spark"
+model = "gpt-5.6-terra"
 model_provider = "openai"
 approval_policy = "never"
 include_permissions_instructions = false
@@ -918,7 +918,7 @@ impl CodexReflectionBrokerConfig {
             || !codex_home.is_absolute()
             || !isolation_root.is_absolute()
             || !product_root.is_absolute()
-            || model != "gpt-5.3-codex-spark"
+            || model != "gpt-5.6-terra"
         {
             return Err(configuration("HERMES_CODEX_BROKER_CONFIG_REJECTED"));
         }
@@ -995,7 +995,7 @@ impl CodexReflectionBrokerConfig {
                 "HERMES_CODEX_PROXY_FACTORY_BINDING_REJECTED",
             )
         };
-        if expected_model != self.model || expected_model != "gpt-5.3-codex-spark" {
+        if expected_model != self.model || expected_model != "gpt-5.6-terra" {
             return Err(binding_rejected());
         }
         receipt.validate_for_containment()?;
@@ -1188,7 +1188,7 @@ impl VerifiedCodexProxyConfig {
             || reviewed.launcher() != self.launcher
             || reviewed.launcher_sha256() != CODEX_LAUNCHER_SHA256
             || reviewed.package_manifest_sha256() != CODEX_PACKAGE_MANIFEST_SHA256
-            || self.model != "gpt-5.3-codex-spark"
+            || self.model != "gpt-5.6-terra"
         {
             return Err(identity("HERMES_CODEX_BUNDLE_IDENTITY_REJECTED"));
         }
@@ -1229,7 +1229,7 @@ impl VerifiedCodexProxyConfig {
             || reviewed.launcher() != self.launcher
             || reviewed.launcher_sha256() != CODEX_LAUNCHER_SHA256
             || reviewed.package_manifest_sha256() != CODEX_PACKAGE_MANIFEST_SHA256
-            || self.model != "gpt-5.3-codex-spark"
+            || self.model != "gpt-5.6-terra"
         {
             return Err(HermesAdapterError::new(
                 HermesAdapterErrorKind::Identity,
@@ -2117,7 +2117,7 @@ fn run_broker_helper_inner() -> Result<CodexBrokerCandidate, i32> {
         serde_json::from_slice(&request_bytes).map_err(|_| 64)?;
     if serde_json::to_vec(&request).map_err(|_| 64)? != request_bytes
         || request.schema != BROKER_HELPER_SCHEMA
-        || request.model != "gpt-5.3-codex-spark"
+        || request.model != "gpt-5.6-terra"
         || !is_lowercase_sha256(&request.nonce)
         || request.deadline_millis == 0
         || request.deadline_millis > 300_000
@@ -2831,7 +2831,7 @@ impl CodexBrokerProtocol {
         let model = model.into();
         if !codex_home.is_absolute()
             || !cwd.is_absolute()
-            || model != "gpt-5.3-codex-spark"
+            || model != "gpt-5.6-terra"
             || model.len() > 256
         {
             return Err(66);
@@ -3532,7 +3532,7 @@ impl CodexNoMarkerCanaryPlan {
     ) -> HermesAdapterResult<Self> {
         let nonce = nonce.into();
         let model = model.into();
-        if !cwd.is_absolute() || !is_lowercase_sha256(&nonce) || model != "gpt-5.3-codex-spark" {
+        if !cwd.is_absolute() || !is_lowercase_sha256(&nonce) || model != "gpt-5.6-terra" {
             return Err(HermesAdapterError::new(
                 HermesAdapterErrorKind::Configuration,
                 "HERMES_CODEX_CANARY_PLAN_REJECTED",
@@ -4309,7 +4309,7 @@ mod production_provider_tests {
                 codex_home,
                 isolation_root,
                 product_root,
-                "gpt-5.3-codex-spark",
+                "gpt-5.6-terra",
             )
             .expect("fixture broker config");
             let receipt = CodexBrokerPreflightReceipt::test_only(
@@ -4526,7 +4526,7 @@ mod production_provider_tests {
         fixture
             .config
             .clone()
-            .into_production_proxy_provider_from_preflight(&fixture.receipt, "gpt-5.3-codex-spark")
+            .into_production_proxy_provider_from_preflight(&fixture.receipt, "gpt-5.6-terra")
             .expect("one receipt-bound official provider");
 
         let failure = fixture
@@ -4546,7 +4546,7 @@ mod production_provider_tests {
         let failure = fixture
             .config
             .clone()
-            .into_production_proxy_provider_from_preflight(&wrong_receipt, "gpt-5.3-codex-spark")
+            .into_production_proxy_provider_from_preflight(&wrong_receipt, "gpt-5.6-terra")
             .err()
             .expect("receipt substitution fails before process launch");
         assert_eq!(failure.kind(), HermesAdapterErrorKind::CrossBinding);
@@ -4559,7 +4559,7 @@ mod production_provider_tests {
         let failure = fixture
             .config
             .clone()
-            .into_production_proxy_provider_from_preflight(&fixture.receipt, "gpt-5.3-codex-spark")
+            .into_production_proxy_provider_from_preflight(&fixture.receipt, "gpt-5.6-terra")
             .err()
             .expect("config-lock drift fails before process launch");
         assert_eq!(failure.kind(), HermesAdapterErrorKind::Identity);
@@ -4650,7 +4650,7 @@ mod production_provider_tests {
             cwd: PathBuf::from(r"C:\lattice\run\empty-work"),
             isolation_root: PathBuf::from(r"C:\lattice\run"),
             launcher: launcher.clone(),
-            model: "gpt-5.3-codex-spark".to_owned(),
+            model: "gpt-5.6-terra".to_owned(),
             product_root: PathBuf::from(r"C:\lattice\product"),
             temp: PathBuf::from(r"C:\lattice\run\temp"),
         };
@@ -4666,7 +4666,7 @@ mod production_provider_tests {
 
         assert_eq!(
             digest.as_str(),
-            "5e7ab4e5d7ccc7386eb2f2625af060ea935c73bd01e80a48558c3bb6dba6c3ab"
+            "b003896248a0927fc9ff0f8fd3152e113771a4e5830903a115cbc2b603564068"
         );
         // The former v1 fixture additionally sealed helper SHA `e` * 64 and
         // `C:\lattice\lattice-hermes-broker.exe`; it cannot substitute for v2.
@@ -4853,7 +4853,7 @@ mod production_provider_tests {
         let provider = fixture
             .config
             .clone()
-            .into_production_proxy_provider_from_preflight(&fixture.receipt, "gpt-5.3-codex-spark")
+            .into_production_proxy_provider_from_preflight(&fixture.receipt, "gpt-5.6-terra")
             .expect("factory consumes the root owner");
         let control = provider.control();
         drop(provider);
@@ -4868,7 +4868,7 @@ mod production_provider_tests {
         )
         .expect("replacement proves the same path remains usable");
         let Err(failure) = second_config
-            .into_production_proxy_provider_from_preflight(&fixture.receipt, "gpt-5.3-codex-spark")
+            .into_production_proxy_provider_from_preflight(&fixture.receipt, "gpt-5.6-terra")
         else {
             panic!("one receipt must not mint a second provider");
         };
