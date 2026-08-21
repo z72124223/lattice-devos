@@ -3518,6 +3518,51 @@ where
 }
 
 impl<H: FullChainHermesPort> FullChainCore<H> {
+    fn runtime_status_json(&mut self) -> Result<Value, LatticedError> {
+        let mut base = self.delivery.core_status_json()?;
+        let object = base
+            .as_object_mut()
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
+        object.insert(
+            "runtime_integration".to_owned(),
+            Value::String(
+                match self.integration_mode {
+                    RuntimeIntegrationMode::CoreOnly => "CORE_ONLY",
+                    RuntimeIntegrationMode::Graphify => "GRAPHIFY",
+                    RuntimeIntegrationMode::GraphifyHermes => "GRAPHIFY_HERMES",
+                }
+                .to_owned(),
+            ),
+        );
+        let graphify_status = if self.integration_mode.uses_graphify() {
+            match graphify_runtime_preflight_from_environment() {
+                GraphifyRuntimePreflight::IdentityVerified => "READY",
+                GraphifyRuntimePreflight::MissingConfiguration(_)
+                | GraphifyRuntimePreflight::ConfigurationRejected => "DEGRADED",
+            }
+        } else {
+            "DEFERRED"
+        };
+        let hermes_status = if self.integration_mode.uses_hermes() {
+            match hermes_runtime_preflight_from_environment() {
+                HermesRuntimePreflight::ConfigurationPresentUnverified => "PREPARED",
+                HermesRuntimePreflight::MissingConfiguration(_)
+                | HermesRuntimePreflight::ConfigurationRejected => "DEGRADED",
+            }
+        } else {
+            "DEFERRED"
+        };
+        object.insert(
+            "graphify_runtime_status".to_owned(),
+            Value::String(graphify_status.to_owned()),
+        );
+        object.insert(
+            "hermes_runtime_status".to_owned(),
+            Value::String(hermes_status.to_owned()),
+        );
+        Ok(base)
+    }
+
     fn status_json(&mut self, entry: FullChainEntry) -> Result<Value, LatticedError> {
         if !self.integration_mode.uses_graphify() {
             return self.delivery.core_status_json();
@@ -4427,6 +4472,23 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             core.status_json(FullChainEntry::CodexAppMcp)
                 .map_err(|error| ToolExecutionError::new(error.code()))
         }
+    }
+
+    fn runtime_status(
+        &mut self,
+        arguments: &DeliveryToolArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        let mut core = self
+            .inner
+            .lock()
+            .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Transport.code()))?;
+        if arguments.binding() != core.submission.binding() {
+            return Err(ToolExecutionError::new(
+                "LATTICE_FULL_CHAIN_BINDING_REJECTED",
+            ));
+        }
+        core.runtime_status_json()
+            .map_err(|error| ToolExecutionError::new(error.code()))
     }
 
     fn task_submit(

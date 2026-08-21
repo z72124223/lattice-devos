@@ -24,6 +24,8 @@ pub const MCP_STATELESS_PROTOCOL_VERSION: &str = "2026-07-28";
 pub const DELIVERY_RUN_TOOL: &str = "lattice_delivery_run";
 /// Sole delivery status tool.
 pub const DELIVERY_STATUS_TOOL: &str = "lattice_delivery_status";
+/// Read-only Runtime component status tool.
+pub const RUNTIME_STATUS_TOOL: &str = "lattice_runtime_status";
 /// Bounded high-level task submission tool.
 pub const TASK_SUBMIT_TOOL: &str = "lattice_task_submit";
 /// Bounded durable task status tool.
@@ -1122,6 +1124,7 @@ pub(crate) fn task_ingress_schema_digest() -> Option<ContentDigest> {
             CanonicalValue::Array(vec![
                 CanonicalValue::String(DELIVERY_RUN_TOOL.to_owned()),
                 CanonicalValue::String(DELIVERY_STATUS_TOOL.to_owned()),
+                CanonicalValue::String(RUNTIME_STATUS_TOOL.to_owned()),
             ]),
         ),
         (
@@ -1358,6 +1361,20 @@ pub trait DeliveryToolService {
     /// Returns only a stable, secret-free failure code.
     fn status(&mut self, arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError>;
 
+    /// Reads secret-free state for the Runtime's independently degradable components.
+    ///
+    /// # Errors
+    ///
+    /// Returns only a stable, secret-free failure code.
+    fn runtime_status(
+        &mut self,
+        _arguments: &DeliveryToolArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Err(ToolExecutionError::new(
+            "LATTICE_RUNTIME_STATUS_UNAVAILABLE",
+        ))
+    }
+
     /// Submits one validated high-level task intent to the existing service.
     ///
     /// # Errors
@@ -1406,7 +1423,7 @@ impl ToolSurface {
     const fn instructions(self) -> &'static str {
         match self {
             Self::CanonicalTaskControl => {
-                "Four bounded LATTICE tools. Authority, task binding, orchestration, and execution configuration remain server-owned."
+                "Five bounded LATTICE tools. Authority, task binding, orchestration, and execution configuration remain server-owned."
             }
             Self::LegacyDeliveryObserver => {
                 "Legacy LATTICE delivery observer. Delivery mutation and task control are available only through the canonical latticed entrypoint."
@@ -1637,7 +1654,11 @@ impl<S: DeliveryToolService> McpServer<S> {
             .filter(|name| {
                 matches!(
                     *name,
-                    DELIVERY_RUN_TOOL | DELIVERY_STATUS_TOOL | TASK_SUBMIT_TOOL | TASK_STATUS_TOOL
+                    DELIVERY_RUN_TOOL
+                        | DELIVERY_STATUS_TOOL
+                        | RUNTIME_STATUS_TOOL
+                        | TASK_SUBMIT_TOOL
+                        | TASK_STATUS_TOOL
                 )
             })
             .unwrap_or("unknown");
@@ -1695,7 +1716,10 @@ impl<S: DeliveryToolService> McpServer<S> {
             DELIVERY_STATUS_TOOL if empty_object_or_absent(params.get("arguments")) => {
                 ToolOperation::DeliveryStatus
             }
-            DELIVERY_RUN_TOOL | DELIVERY_STATUS_TOOL => {
+            RUNTIME_STATUS_TOOL if empty_object_or_absent(params.get("arguments")) => {
+                ToolOperation::RuntimeStatus
+            }
+            DELIVERY_RUN_TOOL | DELIVERY_STATUS_TOOL | RUNTIME_STATUS_TOOL => {
                 return self.reject_observed_probe(
                     id,
                     "MCP_INVALID_PARAMS",
@@ -1756,6 +1780,7 @@ impl<S: DeliveryToolService> McpServer<S> {
             }
             ToolOperation::DeliveryRun => self.service.run(&self.arguments),
             ToolOperation::DeliveryStatus => self.service.status(&self.arguments),
+            ToolOperation::RuntimeStatus => self.service.runtime_status(&self.arguments),
             ToolOperation::TaskSubmit(arguments) => {
                 closed_task_public_status(self.service.task_submit(&arguments))
             }
@@ -1791,6 +1816,7 @@ impl<S: DeliveryToolService> McpServer<S> {
 enum ToolOperation {
     DeliveryRun,
     DeliveryStatus,
+    RuntimeStatus,
     TaskSubmit(TaskSubmitArguments),
     TaskStatus(TaskStatusArguments),
 }
@@ -2093,6 +2119,12 @@ fn tool_catalog(protocol: RequestProtocol, surface: ToolSurface) -> Value {
             "description": "Reads the durable status for the one LATTICE-owned delivery profile.",
             "inputSchema": delivery_arguments_schema()
         }),
+        json!({
+            "name": RUNTIME_STATUS_TOOL,
+            "title": "Read LATTICE Runtime component status",
+            "description": "Reads PostgreSQL, Graphify, and Hermes activation or degradation state without starting optional components.",
+            "inputSchema": delivery_arguments_schema()
+        }),
     ];
     if surface.allows_task_control() {
         tools.extend([
@@ -2125,14 +2157,20 @@ fn tool_catalog(protocol: RequestProtocol, surface: ToolSurface) -> Value {
             "idempotentHint": true,
             "openWorldHint": false
         });
+        tools[2]["annotations"] = json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+        });
         if surface.allows_task_control() {
-            tools[2]["annotations"] = json!({
+            tools[3]["annotations"] = json!({
                 "readOnlyHint": false,
                 "destructiveHint": true,
                 "idempotentHint": true,
                 "openWorldHint": false
             });
-            tools[3]["annotations"] = json!({
+            tools[4]["annotations"] = json!({
                 "readOnlyHint": true,
                 "destructiveHint": false,
                 "idempotentHint": true,
@@ -2440,7 +2478,8 @@ fn unsupported_protocol_error(id: Value, requested: &str) -> Value {
 mod acceptance_evidence_tests {
     use super::{
         ACCEPTANCE_EVIDENCE_SCHEMA, AcceptanceEvidence, OBSERVED_EFFECT_EVIDENCE_SCHEMA,
-        ObservedEffectEvidence, ObservedEffectKind, verify_observed_effect_evidence,
+        ObservedEffectEvidence, ObservedEffectKind, RUNTIME_STATUS_TOOL, RequestProtocol,
+        ToolSurface, tool_catalog, verify_observed_effect_evidence,
     };
     use serde_json::{Value, json};
     use std::fs::File;
@@ -2457,6 +2496,23 @@ mod acceptance_evidence_tests {
         ));
         File::create(&path).expect("create fresh acceptance sink");
         path
+    }
+
+    #[test]
+    fn canonical_catalog_exposes_read_only_runtime_status() {
+        let tools = tool_catalog(
+            RequestProtocol::Stateless,
+            ToolSurface::CanonicalTaskControl,
+        );
+        let runtime = tools
+            .as_array()
+            .expect("tool array")
+            .iter()
+            .find(|tool| tool["name"] == RUNTIME_STATUS_TOOL)
+            .expect("runtime status tool");
+        assert_eq!(runtime["inputSchema"]["additionalProperties"], false);
+        assert_eq!(runtime["annotations"]["readOnlyHint"], true);
+        assert_eq!(runtime["annotations"]["destructiveHint"], false);
     }
 
     #[test]

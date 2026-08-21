@@ -1,7 +1,7 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 2.2
+version: 2.3
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-22
@@ -41,9 +41,10 @@ Orchestrator composition.
 - Construct one Orchestrator 2.6 instance with typed Contracts 1.13 / Ports 1.9
   implementations for the bounded delivery, graph-memory, and task-control
   paths.
-- Through canonical `latticed`, expose exactly four MCP tools: `lattice_delivery_run`,
-  `lattice_delivery_status`, `lattice_task_submit`, and
-  `lattice_task_status`.
+- Through canonical `latticed`, expose exactly five MCP tools:
+  `lattice_delivery_run`, `lattice_delivery_status`, `lattice_runtime_status`,
+  `lattice_task_submit`, and `lattice_task_status`. Runtime Status is read-only,
+  starts no optional component, and reports their independent readiness/degradation.
 - Through the compatibility `lattice-runtime` executable, expose one non-MCP,
   read-only `runtime-health` and `receipt-state` commands. They accept the same
   fixed marker-owned PostgreSQL binding as Delivery Status. `runtime-health`
@@ -51,7 +52,7 @@ Orchestrator composition.
   configured independent Graphify/Hermes mode; it always keeps
   `delivery_receipt=NOT_INSPECTED`. `receipt-state` reports only the verified
   durable receipt projection. Neither command creates or reinterprets a
-  receipt, and neither alters the four-tool MCP surface.
+  receipt, and neither alters the five-tool MCP surface.
 - Restrict the alternate `lattice-full-chain` executable to a legacy observer
   surface. It advertises only the two delivery names, rejects Delivery Run
   with a fixed code before service dispatch, permits only durable Delivery
@@ -148,8 +149,8 @@ Orchestrator composition.
    skip, or synthesize delivery stages.
 3. Concrete adapters are constructed at the edge, implement typed ports, and
    never call one another.
-4. Canonical `latticed` MCP enumeration contains exactly the four approved
-   names. Delivery schemas remain zero-parameter; task schemas remain closed
+4. Canonical `latticed` MCP enumeration contains exactly the five approved
+   names. Delivery and Runtime Status schemas remain zero-parameter; task schemas remain closed
    to the one approved intent/`client_request_id` and returned `task_ref`.
    Alternate `lattice-full-chain` is an observer only: it exposes the two
    delivery names, cannot dispatch Delivery Run, and never exposes or
@@ -289,7 +290,7 @@ than a Store test binary as acceptance.
 | Gate | Evidence | Owner | Required for merge |
 |---|---|---|---|
 | Composition direction | Cargo metadata proves orchestrator has no concrete dependency and only `latticed` selects adapters | Architecture review | yes |
-| MCP tool closure | exact four-tool list; unchanged empty delivery schemas; closed task schemas and unknown/additional-property rejection | Engineering | yes |
+| MCP tool closure | exact five-tool list; unchanged empty delivery/Runtime Status schemas; closed task schemas and unknown/additional-property rejection | Engineering | yes |
 | Restricted input | shell/SQL/path/credential/provider/task-text/actor/session/lease/fence/writable-thread matrix is rejected before dispatch | Security review | yes |
 | One Gateway | both task tools invoke the same `FullChainService` / Orchestrator composition; MCP has no direct database/Codex/Git call path | Architecture review | yes |
 | Fixed identity | process profile supplies the actor/audit binding; tunnel/local commitments cannot substitute; hostile `clientInfo`/arguments grant no authority | Security review | yes |
@@ -326,3 +327,5 @@ constitution cannot be weakened merely to excuse implementation drift.
 | 1.9 | 2026-08-22 | Runtime direction | Add read-only `runtime-health` and `receipt-state` so PostgreSQL connectivity cannot be confused with delivery receipt state | User-approved four-part Runtime direction |
 | 2.0 | 2026-08-22 | Runtime direction | Operate LATTICE, PostgreSQL, Graphify, and Hermes as one Runtime with independent verification and defined degraded modes; reserve full-chain execution for explicit integration | User-approved four-part Runtime direction |
 | 2.1 | 2026-08-22 | Runtime direction | Make core-only MCP operation the executable default and reserve Graphify/Hermes continuation for explicit full-chain integration | User-approved four-part Runtime direction |
+| 2.2 | 2026-08-22 | Runtime direction | Split optional Runtime composition into Graphify and Graphify-plus-Hermes modes; optional failure preserves PostgreSQL truth and reports degradation | User-approved four-part Runtime direction |
+| 2.3 | 2026-08-22 | Runtime direction | Add a read-only Runtime Status MCP tool so Codex can independently verify PostgreSQL, Graphify, and Hermes state without a full-chain run | User-approved four-part Runtime direction |
