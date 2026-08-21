@@ -5376,9 +5376,14 @@ fn mcp_gateway_submission(client_request_id: &str) -> Result<TaskSpecSubmission,
         "TASK-MCP-{}",
         request_digest.as_str()[..24].to_ascii_uppercase()
     );
+    // MCP submissions share the Runtime ledger, but not a Writer Lease. A
+    // terminally uncertain task must remain readable without preventing an
+    // unrelated idempotency key from doing bounded work.
+    let project = format!("lattice-mcp-{}", &request_digest.as_str()[..24]);
+    let snapshot = format!("{project}:snapshot:1");
     gateway_submission(GatewaySubmissionIdentity {
-        project: CONTROLLED_PROJECT_ID,
-        snapshot: CONTROLLED_PROJECT_SNAPSHOT_ID,
+        project: &project,
+        snapshot: &snapshot,
         task: &task,
     })
 }
@@ -8062,6 +8067,11 @@ mod tests {
 
         assert_eq!(first.binding(), retry.binding());
         assert_ne!(first.binding(), second.binding());
+        assert_ne!(first.binding().project_id(), second.binding().project_id());
+        assert_ne!(
+            first.binding().project_snapshot_id(),
+            second.binding().project_snapshot_id()
+        );
         assert_ne!(
             first.binding(),
             fixed_gateway_submission()
