@@ -126,6 +126,7 @@ pub struct NormalizedGraph {
     record_set_sha256: String,
     raw_node_count: usize,
     raw_edge_count: usize,
+    dropped_non_code_nodes: usize,
     dropped_source_less_nodes: usize,
     dropped_unbound_edges: usize,
 }
@@ -164,6 +165,12 @@ impl NormalizedGraph {
     #[must_use]
     pub const fn dropped_source_less_nodes(&self) -> usize {
         self.dropped_source_less_nodes
+    }
+
+    /// Number of explicit non-code nodes excluded from a code-only snapshot.
+    #[must_use]
+    pub const fn dropped_non_code_nodes(&self) -> usize {
+        self.dropped_non_code_nodes
     }
 
     #[must_use]
@@ -255,6 +262,7 @@ pub(crate) fn parse_graph(
     let mut all_ids = HashSet::with_capacity(raw_nodes.len());
     let mut kept_ids = HashSet::with_capacity(raw_nodes.len());
     let mut nodes = Vec::with_capacity(raw_nodes.len());
+    let mut dropped_non_code_nodes = 0_usize;
     let mut dropped_source_less_nodes = 0_usize;
     for raw_node in raw_nodes {
         let node = raw_node.as_object().ok_or_else(|| {
@@ -292,10 +300,17 @@ pub(crate) fn parse_graph(
                 "GRAPHIFY_GRAPH_DUPLICATE_NODE_ID",
             ));
         }
+        if required_text(node, "file_type", 32)? != "code" {
+            dropped_non_code_nodes = dropped_non_code_nodes.checked_add(1).ok_or_else(|| {
+                error(
+                    GraphifyAdapterErrorKind::OutputLimit,
+                    "GRAPHIFY_GRAPH_DROP_COUNT_OVERFLOW",
+                )
+            })?;
+            continue;
+        }
         let label = required_text(node, "label", limits.max_text_bytes)?;
-        if required_text(node, "file_type", 32)? != "code"
-            || required_text(node, "_origin", 32)? != "ast"
-        {
+        if required_text(node, "_origin", 32)? != "ast" {
             return Err(error(
                 GraphifyAdapterErrorKind::PartialOutput,
                 "GRAPHIFY_GRAPH_NODE_PROVENANCE_REJECTED",
@@ -457,6 +472,7 @@ pub(crate) fn parse_graph(
         record_set_sha256,
         raw_node_count: raw_nodes.len(),
         raw_edge_count: raw_edges.len(),
+        dropped_non_code_nodes,
         dropped_source_less_nodes,
         dropped_unbound_edges,
     })
@@ -786,6 +802,21 @@ mod tests {
         assert_eq!(graph.edges.len(), 1);
         assert_eq!(graph.dropped_source_less_nodes, 1);
         assert_eq!(graph.dropped_unbound_edges, 2);
+    }
+
+    #[test]
+    fn parser_drops_explicit_non_code_nodes_without_weakening_ast_checks() {
+        let source = String::from_utf8(valid_graph()).expect("fixture utf8");
+        let graph = source.replacen(
+            "\"file_type\":\"code\",\"source_file\":\"src/lib.rs\",\"source_location\":\"L1\",\"_origin\":\"ast\"",
+            "\"file_type\":\"resource\",\"source_file\":\"src/lib.rs\",\"source_location\":\"L1\",\"_origin\":\"ast\"",
+            1,
+        );
+        let graph = parse_graph(graph.as_bytes(), &snapshot(), limits()).expect("code-only graph");
+
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.edges.len(), 0);
+        assert_eq!(graph.dropped_non_code_nodes(), 1);
     }
 
     #[test]
