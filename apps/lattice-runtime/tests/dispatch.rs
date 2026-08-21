@@ -130,6 +130,54 @@ fn parses_only_the_marker_owned_delivery_status_binding() {
 }
 
 #[test]
+fn parses_the_read_only_runtime_health_binding() {
+    let arguments = vec![
+        "runtime-health".to_owned(),
+        "--postgres-host".to_owned(),
+        "127.0.0.1".to_owned(),
+        "--postgres-port".to_owned(),
+        "55432".to_owned(),
+        "--postgres-run-id".to_owned(),
+        "c".repeat(32),
+    ];
+    let expected = lattice_runtime::delivery_ledger::DeliveryDatabaseBinding::new(
+        "127.0.0.1",
+        55432,
+        "c".repeat(32),
+    )
+    .expect("binding");
+
+    assert_eq!(
+        parse_command(&arguments),
+        Ok(RuntimeCommand::RuntimeHealth { database: expected })
+    );
+}
+
+#[test]
+fn parses_the_read_only_delivery_receipt_state_binding() {
+    let arguments = vec![
+        "receipt-state".to_owned(),
+        "--postgres-host".to_owned(),
+        "127.0.0.1".to_owned(),
+        "--postgres-port".to_owned(),
+        "55432".to_owned(),
+        "--postgres-run-id".to_owned(),
+        "d".repeat(32),
+    ];
+    let expected = lattice_runtime::delivery_ledger::DeliveryDatabaseBinding::new(
+        "127.0.0.1",
+        55432,
+        "d".repeat(32),
+    )
+    .expect("binding");
+
+    assert_eq!(
+        parse_command(&arguments),
+        Ok(RuntimeCommand::ReceiptState { database: expected })
+    );
+}
+
+#[test]
 fn parses_the_bounded_delivery_run_without_a_password_argument() {
     let arguments = vec![
         "delivery-run".to_owned(),

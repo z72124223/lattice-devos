@@ -1,4 +1,4 @@
-//! Read-only recovery CLI helpers for `LATTICE DevOS`.
+//! Read-only runtime-contract CLI helpers for LATTICE.
 
 use std::fmt::Write;
 
@@ -6,17 +6,19 @@ use lattice_core::{bootstrap_manifest, platform_name};
 
 const USAGE: &str = "usage: lattice status";
 
-/// Renders the inert bootstrap manifest without performing external I/O.
+/// Renders the runtime contract without performing external I/O.
 #[must_use]
 pub fn render_status() -> String {
-    let mut output = format!("{}\nstate: bootstrap-ready\n", platform_name());
+    let mut output = format!("{}\nstate: contract-ready\n", platform_name());
 
     for component in bootstrap_manifest() {
         writeln!(
             output,
-            "{}: {}",
+            "{}: {}; failure={}; recovery={}",
             component.id.as_str(),
-            component.mode.as_str()
+            component.mode.as_str(),
+            component.failure_policy.as_str(),
+            component.recovery_action.as_str(),
         )
         .expect("writing to a String cannot fail");
     }
@@ -24,11 +26,11 @@ pub fn render_status() -> String {
     output
 }
 
-/// Renders the inert bootstrap manifest as stable JSON without external I/O.
+/// Renders the runtime contract as stable JSON without external I/O.
 #[must_use]
 pub fn render_status_json() -> String {
     let mut output = format!(
-        "{{\"platform\":\"{}\",\"state\":\"bootstrap-ready\",\"components\":[",
+        "{{\"platform\":\"{}\",\"state\":\"contract-ready\",\"components\":[",
         platform_name()
     );
 
@@ -38,9 +40,11 @@ pub fn render_status_json() -> String {
         }
         write!(
             output,
-            "{{\"id\":\"{}\",\"mode\":\"{}\"}}",
+            "{{\"id\":\"{}\",\"mode\":\"{}\",\"failure_policy\":\"{}\",\"recovery_action\":\"{}\"}}",
             component.id.as_str(),
-            component.mode.as_str()
+            component.mode.as_str(),
+            component.failure_policy.as_str(),
+            component.recovery_action.as_str(),
         )
         .expect("writing to a String cannot fail");
     }

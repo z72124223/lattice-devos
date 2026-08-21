@@ -69,6 +69,7 @@ function frontmatterHasKey(frontmatter, key) {
 
 const files = await walk(root);
 const errors = [];
+let runtimeContractChecked = false;
 
 async function isGitWorktreeRoot(candidate) {
   try {
@@ -143,6 +144,26 @@ if (!agentsFile) {
       "AGENTS.md: must prohibit governance-only task creation and all-module acceptance.",
     );
   }
+}
+
+const runtimeContract = spawnSync(
+  "cargo",
+  ["test", "-p", "lattice-core", "--test", "platform_manifest"],
+  {
+    cwd: root,
+    encoding: "utf8",
+  },
+);
+if (runtimeContract.status !== 0) {
+  const detail = [runtimeContract.stdout, runtimeContract.stderr]
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  errors.push(
+    `Runtime contract test failed${detail ? `: ${detail}` : "."}`,
+  );
+} else {
+  runtimeContractChecked = true;
 }
 
 for (const file of files.filter((candidate) => candidate.endsWith(".js") || candidate.endsWith(".mjs"))) {
@@ -320,6 +341,6 @@ if (errors.length > 0) {
   process.exitCode = 1;
 } else {
   process.stdout.write(
-    `check=ok files=${files.length} constitutions=${constitutionFiles.length} tickets=${ticketOwners.size} current_tasks=${currentTaskCount}\n`,
+    `check=ok files=${files.length} constitutions=${constitutionFiles.length} tickets=${ticketOwners.size} current_tasks=${currentTaskCount} runtime_contract=${runtimeContractChecked ? "ok" : "not-run"}\n`,
   );
 }

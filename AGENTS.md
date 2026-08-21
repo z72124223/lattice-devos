@@ -5,17 +5,28 @@ smallest workflow and verification that can prove the requested result.
 
 ## Current product direction
 
-- LATTICE is a small local control plane built on the official Codex Harness.
-- Codex App Server or the Codex SDK owns threads, turns, context, compaction,
-  sandboxing, tool execution, approvals, progress events, and thread archival.
-- LATTICE owns projects, work items, priority, business status, the Codex
-  thread link, user-visible verification, and compact cost/failure summaries.
+- LATTICE is one local Runtime with four core functions: LATTICE control,
+  PostgreSQL durable facts, Graphify derived relationship memory, and Hermes
+  reflection. They share one fact/event contract, not one fragile all-or-nothing
+  acceptance run.
+- PostgreSQL is the only authoritative durable truth. Graphify is rebuilt from
+  that truth when necessary. Hermes may create observations or suggestions, but
+  never overwrites authoritative facts by itself.
+- PostgreSQL failure makes durable Runtime work unavailable. Graphify or Hermes
+  failure is a visible degraded mode: preserve facts and receipts, keep the
+  control core usable where possible, and repair or rebuild only that module.
+- Keep runtime health separate from delivery receipts. A successful PostgreSQL
+  health probe proves only that the fixed durable-facts connection is available;
+  it never implies that a delivery was started, completed, failed, or corrupt.
+- Read receipt state through its own read-only path: `NOT_STARTED`, terminal,
+  or reconciliation is delivery evidence, never a substitute for health.
+- Codex App Server or the Codex SDK remains the external reasoning and execution
+  harness: it owns threads, turns, context, compaction, sandboxing, tool
+  execution, approvals, progress events, and thread archival. Do not recreate
+  those generic agent-loop capabilities in LATTICE.
 - Do not rebuild a generic agent loop, process supervisor, sandbox, context
   store, MCP host, or multi-provider abstraction while Codex already provides
   the required behavior.
-- Graphify, Codebase Memory, Hermes, PostgreSQL, Writer Lease, Artifact Store,
-  and the engineering dashboard are independent optional modules. A failure in
-  one optional module must not make unrelated LATTICE work unusable.
 - Historical V2 plans, tickets, branches, and full-chain acceptance documents
   remain evidence, not current implementation requirements.
 
@@ -55,14 +66,14 @@ tests prove only the tested behavior.
 
 ## Verification and delivery
 
-- Keep new product work independent from the legacy all-in-one runtime.
+- Keep each Runtime module independently testable and repairable. Reserve a
+  complete four-part run for an explicit release-level integration check, never
+  as the mandatory proof for routine module work.
 - Add or update the smallest behavioral test when behavior changes.
 - Run focused checks and inspect the final diff before reporting completion.
 - `npm.cmd run check` is a repository-structure check, not a global task lock.
-- `npm.cmd run status:refresh` is optional diagnostics; the engineering map is
-  not completion authority.
-- `npm.cmd run delivery:finish` is optional and only for an explicitly
-  authorized remote feature delivery. Local work does not require it.
+- GitHub Issues, Projects, and pull requests are the engineering-progress
+  record. Do not generate or use a local engineering-status map.
 - Do not append routine work to the root `PLANS.md` or `HANDOFF.md`.
 
 ## MVP stop condition

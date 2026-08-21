@@ -1,6 +1,6 @@
 # LATTICE
 
-LATTICE 是建立在官方 Codex Harness 上的本機工作控制台。
+LATTICE 是建立在官方 Codex Harness 上的本機 Runtime 與工作控制台。
 
 Codex 負責 agent loop、thread、context、sandbox、工具、MCP、核准事件、
 進度與封存；LATTICE 只保存專案、工作、優先度、Codex thread 對應、
@@ -44,19 +44,51 @@ npm.cmd test
 `control:test` 不呼叫模型；它以假的 App Server 驗證保存、重開、續接、
 進度、核准、完成、驗證與封存流程。
 
-## 模組策略
+## Runtime 狀態工具
 
-下列既有模組保留，但不是啟動 LATTICE 的必要條件：
+```powershell
+cargo run -p lattice-cli -- status
+cargo run -p lattice-cli -- status --json
+```
 
-- Graphify；
-- Codebase Memory；
-- Project Registry 與 Task Domain；
-- 工程狀態頁；
-- Hermes、PostgreSQL、Writer Lease、Artifact Store 與舊 Task Ledger。
+這個唯讀工具固定 LATTICE 的核心方向：
 
-模組應各自維護、各自測試、各自失敗。新 LATTICE 不再要求 Codex、
-PostgreSQL、Graphify、Hermes 與其他模組必須在同一次全鏈路驗收中全部
-通過。
+| 功能 | 責任 | 故障時的規則 |
+|---|---|---|
+| LATTICE | 控制與工作流程 | 控制核心失效，Runtime 不可用。 |
+| PostgreSQL | 唯一的持久事實與收據 | 不可用時停止持久工作；不能猜測或偽造狀態。 |
+| Graphify | 從事實導出的關係記憶 | 進入降級；保留事實，之後可由 PostgreSQL 重建。 |
+| Hermes | 反思、疑點與建議 | 進入降級；不得自行覆寫事實或收據。 |
+
+四者是同一個產品，但日常開發採模組驗收與相鄰整合驗收；只有明確的
+release-level 檢查才跑完整四段流程。Codex 仍是外部的推理與執行 Harness，
+不被重寫進 LATTICE。
+
+### PostgreSQL 健康與交付收據
+
+`lattice-runtime runtime-health` 是非 MCP 的唯讀連線檢查。它使用既有
+process-owned PostgreSQL binding，成功只代表資料庫可連線，固定回傳
+`receipt_state: NOT_INSPECTED`。它不會建立、讀取或修改交付收據；
+`lattice_delivery_status` 仍是嚴格的收據驗證工具。這能避免「資料庫健康、
+但尚未有交付收據」被錯誤稱為資料損壞。
+
+`lattice-runtime receipt-state` 則只讀取同一綁定的交付收據投影，會明確
+回傳 `NOT_STARTED`、`COMPLETED`、`FAILED` 或 `RECONCILIATION_REQUIRED`。
+它不會啟動 Codex、Graphify、Hermes 或任何交付效果。
+
+### 分段整合模式
+
+正常的 MCP Runtime 預設為 `CORE_ONLY`：只驗證並回傳 LATTICE 與
+PostgreSQL 的核心收據，不啟動 Graphify 或 Hermes。若要進行明確的整合
+驗收，才在啟動程序時設定：
+
+```powershell
+$env:LATTICE_RUNTIME_INTEGRATION = 'FULL_CHAIN'
+```
+
+`FULL_CHAIN` 保留舊有 Graphify + Hermes 附加分析收據，供專門的整合或
+發布檢查使用。它不是日常任務完成的前提；未設定或設定 `CORE_ONLY` 時，
+Graphify/Hermes 設定都不會被啟動。
 
 ## 歷史程式
 

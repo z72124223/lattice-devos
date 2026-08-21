@@ -1,17 +1,20 @@
 use lattice_cli::{dispatch, render_status, render_status_json};
 
 #[test]
-fn status_renders_the_inert_platform_manifest() {
+fn status_renders_the_runtime_contract() {
     let output = render_status();
 
-    assert!(output.starts_with("LATTICE DevOS\nstate: bootstrap-ready\n"));
-    assert!(output.contains("openclaw: gateway\n"));
-    assert!(output.contains("postgresql: durable-truth\n"));
-    assert!(output.contains("codex: sole-writer\n"));
-    assert!(output.contains("graphify: read-only-evidence\n"));
-    assert!(output.contains("hermes: read-only-evidence\n"));
-    assert!(output.contains("codebase-memory: durable-memory\n"));
-    assert!(output.contains("guardian: approval-gated\n"));
+    assert!(output.starts_with("LATTICE Runtime\nstate: contract-ready\n"));
+    assert!(output.contains(
+        "lattice: control-core; failure=runtime-unavailable; recovery=repair-control-core\n"
+    ));
+    assert!(output.contains(
+        "postgresql: durable-truth; failure=runtime-unavailable; recovery=restore-durable-facts\n"
+    ));
+    assert!(output.contains("graphify: derived-relationship-memory; failure=degraded; recovery=rebuild-from-postgresql\n"));
+    assert!(output.contains(
+        "hermes: reflective-advisor; failure=degraded; recovery=recompute-from-facts-and-graph\n"
+    ));
 }
 
 #[test]
@@ -28,15 +31,11 @@ fn only_the_read_only_status_command_is_accepted() {
 #[test]
 fn status_json_is_a_stable_read_only_manifest_projection() {
     let expected = concat!(
-        "{\"platform\":\"LATTICE DevOS\",\"state\":\"bootstrap-ready\",\"components\":[",
-        "{\"id\":\"rust-core\",\"mode\":\"control-core\"},",
-        "{\"id\":\"openclaw\",\"mode\":\"gateway\"},",
-        "{\"id\":\"postgresql\",\"mode\":\"durable-truth\"},",
-        "{\"id\":\"codex\",\"mode\":\"sole-writer\"},",
-        "{\"id\":\"graphify\",\"mode\":\"read-only-evidence\"},",
-        "{\"id\":\"hermes\",\"mode\":\"read-only-evidence\"},",
-        "{\"id\":\"codebase-memory\",\"mode\":\"durable-memory\"},",
-        "{\"id\":\"guardian\",\"mode\":\"approval-gated\"}]}",
+        "{\"platform\":\"LATTICE Runtime\",\"state\":\"contract-ready\",\"components\":[",
+        "{\"id\":\"lattice\",\"mode\":\"control-core\",\"failure_policy\":\"runtime-unavailable\",\"recovery_action\":\"repair-control-core\"},",
+        "{\"id\":\"postgresql\",\"mode\":\"durable-truth\",\"failure_policy\":\"runtime-unavailable\",\"recovery_action\":\"restore-durable-facts\"},",
+        "{\"id\":\"graphify\",\"mode\":\"derived-relationship-memory\",\"failure_policy\":\"degraded\",\"recovery_action\":\"rebuild-from-postgresql\"},",
+        "{\"id\":\"hermes\",\"mode\":\"reflective-advisor\",\"failure_policy\":\"degraded\",\"recovery_action\":\"recompute-from-facts-and-graph\"}]}",
         "\n"
     );
 

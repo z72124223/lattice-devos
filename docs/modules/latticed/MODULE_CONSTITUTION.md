@@ -1,10 +1,10 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 1.8
+version: 2.1
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-22
 ---
 
 ## Mission
@@ -44,6 +44,13 @@ Orchestrator composition.
 - Through canonical `latticed`, expose exactly four MCP tools: `lattice_delivery_run`,
   `lattice_delivery_status`, `lattice_task_submit`, and
   `lattice_task_status`.
+- Through the compatibility `lattice-runtime` executable, expose one non-MCP,
+  read-only `runtime-health` and `receipt-state` commands. They accept the same
+  fixed marker-owned PostgreSQL binding as Delivery Status. `runtime-health`
+  reports only connection availability plus `receipt_state=NOT_INSPECTED`;
+  `receipt-state` reports only the verified durable receipt projection. Neither
+  command creates or reinterprets a receipt, and neither alters the four-tool
+  MCP surface.
 - Restrict the alternate `lattice-full-chain` executable to a legacy observer
   surface. It advertises only the two delivery names, rejects Delivery Run
   with a fixed code before service dispatch, permits only durable Delivery
@@ -65,6 +72,12 @@ Orchestrator composition.
   owner: only `lattice_delivery_run` may activate it, before writer effects;
   Delivery Status and both Task tools perform zero Hermes activation. MCP EOF
   explicitly reaps an activated runner, and teardown ambiguity cannot exit 0.
+- Through canonical `latticed`, default the process-owned
+  `LATTICE_RUNTIME_INTEGRATION` setting to `CORE_ONLY`. In this mode MCP
+  delivery/status returns only the verified PostgreSQL receipt and does not
+  activate Graphify or Hermes. `FULL_CHAIN` is the sole explicit opt-in for
+  the historical Graphify/Hermes analysis continuation; its analysis receipt
+  supplements, rather than replaces, the durable delivery receipt.
 - Production Hermes configuration requires exactly the twelve executed-input
   settings for preparation, runtime, containment, API bearer, Codex launcher
   and home, broker run root, and deadline. Legacy
@@ -173,6 +186,10 @@ Orchestrator composition.
     transition, replay as completed, or produce normal Task Status. The
     one-event prefix maps only to reconciliation; historical optional streams
     remain byte-compatible.
+18. Runtime health is a connection-only fact. It cannot be used as evidence
+    that a delivery was started, completed, failed, reconciled, or corrupted.
+    Receipt state is separately verified durable evidence and cannot imply that
+    the database is currently reachable outside that read.
 
 ## Allowed Dependencies
 
@@ -233,6 +250,27 @@ Version 1.5 adds an exact standalone Hermes process-lifecycle flag to canonical
 `latticed`. It changes neither the four-tool MCP contract nor durable task
 truth, provider credentials, dependency direction, or orchestration order.
 
+Version 1.9 adds non-MCP, read-only PostgreSQL health and receipt-state probes
+to the compatibility CLI. They deliberately separate durable-facts availability
+from delivery-receipt interpretation; the canonical four MCP tools and their
+schemas are unchanged.
+
+Version 2.0 establishes the four-core Runtime operating boundary. PostgreSQL
+is the only durable source of facts and receipts. Graphify is derived
+relationship memory that may be rebuilt from PostgreSQL, and Hermes is a
+read-only reflective advisor whose findings remain inferences rather than
+facts. A Graphify or Hermes failure therefore degrades only that capability;
+it must not block control or durable-fact reads. PostgreSQL unavailability
+does make the Runtime unavailable for fact-dependent work. Existing historical
+full-chain entry points remain compatibility/explicit-integration paths, not
+the normal acceptance requirement for each component.
+
+Version 2.1 makes that boundary executable at the canonical MCP entry: normal
+operation is `CORE_ONLY`, while the historical Graphify/Hermes continuation is
+available only through the explicit `FULL_CHAIN` integration mode. Core
+projections use the durable delivery receipt digest; full-chain projections
+retain their separate analysis receipt digest.
+
 Version 1.8 emits the Task Ledger 2.3 required-profile marker for new
 controlled-task admissions and fails closed when required receipt replay is
 incomplete. It keeps exactly four MCP tools and the existing six-field task
@@ -278,3 +316,6 @@ constitution cannot be weakened merely to excuse implementation drift.
 | 1.6 | 2026-08-13 | SPEC-002 v30, ADR-021 clarification, TASK-064 | Add opt-in lazy production Hermes composition to canonical four-tool `latticed`; preserve task/status zero-effect paths and require explicit teardown | User goal-mode direction to integrate Hermes into LATTICE |
 | 1.7 | 2026-08-13 | SPEC-002 v31, TASK-065 | Remove two non-executed broker-helper settings from production admission while preserving the direct verified Codex proxy, lazy activation, and MCP contracts | User goal-mode direction to complete Hermes |
 | 1.8 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Emit and enforce the required Task-created autonomy profile through Task Ledger 2.3 while preserving the four-tool/six-field MCP wire | User-approved TASK-050 repair amendment |
+| 1.9 | 2026-08-22 | Runtime direction | Add read-only `runtime-health` and `receipt-state` so PostgreSQL connectivity cannot be confused with delivery receipt state | User-approved four-part Runtime direction |
+| 2.0 | 2026-08-22 | Runtime direction | Operate LATTICE, PostgreSQL, Graphify, and Hermes as one Runtime with independent verification and defined degraded modes; reserve full-chain execution for explicit integration | User-approved four-part Runtime direction |
+| 2.1 | 2026-08-22 | Runtime direction | Make core-only MCP operation the executable default and reserve Graphify/Hermes continuation for explicit full-chain integration | User-approved four-part Runtime direction |

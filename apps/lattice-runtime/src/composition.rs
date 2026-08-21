@@ -100,8 +100,8 @@ use sha2::{Digest, Sha256};
 use crate::DELIVERY_PROMPT;
 use crate::delivery_ledger::{
     DeliveryDatabaseBinding, DeliveryLedger, DeliveryReceipt as LegacyDeliveryReceipt,
-    LEGACY_RECEIPT_FORMAT, PostgresDeliveryLedgerAdapter, PostgresDeliveryStatusReplay,
-    connect_fixed_runtime_client,
+    DeliveryStatus, LEGACY_RECEIPT_FORMAT, PostgresDeliveryLedgerAdapter,
+    PostgresDeliveryStatusReplay, connect_fixed_runtime_client,
 };
 use crate::git_delivery::{
     BASELINE_COMMIT_SHA, DeliveryWorkspaceGitAdapter, DeliveryWorkspaceGitAdapterConfig,
@@ -1704,6 +1704,23 @@ impl LatticedDeliveryService {
         )
     }
 
+    /// Reads only the durable delivery receipt, without requiring Graphify or
+    /// Hermes analysis evidence.
+    fn core_status_json(&mut self) -> Result<Value, LatticedError> {
+        let mut ledger =
+            DeliveryLedger::connect(&self.database, &self.password, deadline(self.timeout)?)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+        if ledger
+            .status()
+            .map_err(|_| LatticedError::new(LatticedErrorKind::ReconciliationRequired))?
+            == DeliveryStatus::NotStarted
+        {
+            return Ok(core_not_started_status_json());
+        }
+        let expected_invocation = invocation_for_run(self.database.run_id())?;
+        self.status_request_json(&expected_invocation, None, DeliveryContinuation::WriterOnly)
+    }
+
     /// Replays one controlled task result from `PostgreSQL` under its Task Spec.
     ///
     /// # Errors
@@ -1814,6 +1831,14 @@ impl LatticedDeliveryService {
     }
 }
 
+fn core_not_started_status_json() -> Value {
+    json!({
+        "component": "delivery-receipt",
+        "status": "NOT_STARTED",
+        "scope": "receipt-only"
+    })
+}
+
 fn delivery_environment()
 -> Result<(LatticedDeliveryConfig, DeliveryDatabaseBinding, String), LatticedError> {
     let timeout = match env::var("LATTICE_DELIVERY_TIMEOUT_SECONDS") {
@@ -1915,6 +1940,18 @@ where
             return Err(error);
         }
     };
+    let integration_mode = match runtime_integration_mode_from_environment() {
+        Ok(mode) => mode,
+        Err(error) => {
+            diagnostic(StartupDiagnostic::failure(
+                "NONE",
+                "REJECTED",
+                "NOT_CHECKED",
+                error.kind(),
+            ));
+            return Err(error);
+        }
+    };
     let hermes_mode = match canonical_hermes_mode_from_environment() {
         Ok(mode) => mode,
         Err(error) => {
@@ -1928,7 +1965,9 @@ where
         }
     };
     #[cfg(not(windows))]
-    if hermes_mode == CanonicalHermesMode::Production {
+    if integration_mode == RuntimeIntegrationMode::FullChain
+        && hermes_mode == CanonicalHermesMode::Production
+    {
         let error = LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired);
         diagnostic(StartupDiagnostic::failure(
             "NONE",
@@ -1964,15 +2003,19 @@ where
     };
     diagnostic(StartupDiagnostic::configuration_validated());
     diagnostic(StartupDiagnostic::service_assembly_started());
-    let hermes = match hermes_mode {
-        CanonicalHermesMode::TaskOnly => CanonicalHermes::TaskOnly(DeferredTaskHermes),
+    let hermes = match (integration_mode, hermes_mode) {
+        (RuntimeIntegrationMode::CoreOnly, _) | (_, CanonicalHermesMode::TaskOnly) => {
+            CanonicalHermes::TaskOnly(DeferredTaskHermes)
+        }
         #[cfg(windows)]
-        CanonicalHermesMode::Production => CanonicalHermes::Production {
-            active: None,
-            activation_attempted: false,
-        },
+        (RuntimeIntegrationMode::FullChain, CanonicalHermesMode::Production) => {
+            CanonicalHermes::Production {
+                active: None,
+                activation_attempted: false,
+            }
+        }
         #[cfg(not(windows))]
-        CanonicalHermesMode::Production => {
+        (RuntimeIntegrationMode::FullChain, CanonicalHermesMode::Production) => {
             unreachable!("non-Windows production mode returns before composition")
         }
     };
@@ -1983,7 +2026,9 @@ where
         hermes,
         submission,
         run_mode,
-        hermes_mode == CanonicalHermesMode::Production,
+        integration_mode,
+        integration_mode == RuntimeIntegrationMode::FullChain
+            && hermes_mode == CanonicalHermesMode::Production,
     )
     .inspect_err(|error| {
         diagnostic(StartupDiagnostic::failure(
@@ -3070,6 +3115,14 @@ enum FullChainRunMode {
     ResumeExisting,
 }
 
+/// Process-owned choice between ordinary Runtime work and an explicit
+/// cross-module integration run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeIntegrationMode {
+    CoreOnly,
+    FullChain,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Task050AcceptanceProfile {
     AskUser,
@@ -3241,6 +3294,26 @@ fn full_chain_run_mode_from_environment() -> Result<FullChainRunMode, LatticedEr
     }
 }
 
+fn parse_runtime_integration_mode(
+    value: Option<&str>,
+) -> Result<RuntimeIntegrationMode, LatticedError> {
+    match value {
+        None | Some("CORE_ONLY") => Ok(RuntimeIntegrationMode::CoreOnly),
+        Some("FULL_CHAIN") => Ok(RuntimeIntegrationMode::FullChain),
+        Some(_) => Err(LatticedError::new(LatticedErrorKind::Configuration)),
+    }
+}
+
+fn runtime_integration_mode_from_environment() -> Result<RuntimeIntegrationMode, LatticedError> {
+    match env::var("LATTICE_RUNTIME_INTEGRATION") {
+        Ok(value) => parse_runtime_integration_mode(Some(&value)),
+        Err(env::VarError::NotPresent) => parse_runtime_integration_mode(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(LatticedError::new(LatticedErrorKind::Configuration))
+        }
+    }
+}
+
 fn canonical_hermes_mode_from_environment() -> Result<CanonicalHermesMode, LatticedError> {
     match env::var("LATTICE_HERMES_MODE") {
         Ok(value) => canonical_hermes_mode_from_value(Some(&value)),
@@ -3289,6 +3362,7 @@ struct FullChainCore<H> {
     hermes: H,
     submission: TaskSpecSubmission,
     run_mode: FullChainRunMode,
+    integration_mode: RuntimeIntegrationMode,
     process_start_identity: ContentDigest,
     task_ingress_peer: TaskIngressPeerEvidence,
     store_authority: StoreAuthorityHead,
@@ -3352,6 +3426,9 @@ where
 
 impl<H: FullChainHermesPort> FullChainCore<H> {
     fn status_json(&mut self, entry: FullChainEntry) -> Result<Value, LatticedError> {
+        if self.integration_mode == RuntimeIntegrationMode::CoreOnly {
+            return self.delivery.core_status_json();
+        }
         let base = self.delivery.status_json()?;
         let request = graph_request_from_json(self.delivery.database.run_id(), &base)?;
         let reflection = load_canonical_reflection(&request, |request| {
@@ -3393,6 +3470,9 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         entry: FullChainEntry,
         binding: &SubjectBinding,
     ) -> Result<Value, LatticedError> {
+        if self.integration_mode == RuntimeIntegrationMode::CoreOnly {
+            return self.delivery.status_task_json(binding);
+        }
         let base = self.delivery.run_task_downstream_json(binding)?;
         let reflection = self.load_or_run_reflection(&base)?;
         append_full_chain_json(base, &reflection, entry)
@@ -3403,6 +3483,9 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         entry: FullChainEntry,
         binding: &SubjectBinding,
     ) -> Result<Value, LatticedError> {
+        if self.integration_mode == RuntimeIntegrationMode::CoreOnly {
+            return self.delivery.status_task_json(binding);
+        }
         let base = self.delivery.status_task_downstream_json(binding)?;
         let request = graph_request_from_json(self.delivery.database.run_id(), &base)?;
         let reflection = load_canonical_reflection(&request, |request| {
@@ -4147,8 +4230,7 @@ impl<H: FullChainHermesPort> FullChainService<H> {
             core.status_json(FullChainEntry::OpenClawTyped)
         }
         .map_err(map_gateway_service_error)?;
-        let receipt_digest =
-            full_chain_receipt_digest(&result).map_err(map_gateway_service_error)?;
+        let receipt_digest = runtime_receipt_digest(&result).map_err(map_gateway_service_error)?;
         if matches!(
             &target,
             GatewayStatusTarget::Task(task)
@@ -4741,7 +4823,14 @@ where
         .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
     let timeout = config.timeout;
     let (mcp_service, mcp_binding) = assemble_full_chain_service_with_mode(
-        config, database, password, hermes, submission, run_mode, true,
+        config,
+        database,
+        password,
+        hermes,
+        submission,
+        run_mode,
+        RuntimeIntegrationMode::FullChain,
+        true,
     )?;
     let client = connect_fixed_runtime_client(database, password, deadline(timeout)?)
         .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
@@ -4771,6 +4860,7 @@ fn assemble_full_chain_service_with_mode<H>(
     hermes: H,
     submission: TaskSpecSubmission,
     run_mode: FullChainRunMode,
+    integration_mode: RuntimeIntegrationMode,
     require_production_hermes: bool,
 ) -> Result<(FullChainService<H>, SubjectBinding), LatticedError>
 where
@@ -4797,6 +4887,7 @@ where
         hermes,
         submission,
         run_mode,
+        integration_mode,
         process_start_identity,
         task_ingress_peer,
         store_authority,
@@ -5409,6 +5500,16 @@ fn full_chain_receipt_digest(value: &Value) -> Result<ContentDigest, LatticedErr
         .as_object()
         .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
     json_digest(object, "full_chain_receipt_digest")
+}
+
+fn runtime_receipt_digest(value: &Value) -> Result<ContentDigest, LatticedError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
+    match object.get("full_chain_receipt_digest") {
+        Some(_) => full_chain_receipt_digest(value),
+        None => delivery_receipt_digest(value),
+    }
 }
 
 fn delivery_receipt_digest(value: &Value) -> Result<ContentDigest, LatticedError> {
@@ -7660,6 +7761,46 @@ mod tests {
     }
 
     #[test]
+    fn runtime_integration_is_core_only_unless_full_chain_is_explicit() {
+        assert_eq!(
+            parse_runtime_integration_mode(None).expect("default integration mode"),
+            RuntimeIntegrationMode::CoreOnly
+        );
+        assert_eq!(
+            parse_runtime_integration_mode(Some("CORE_ONLY")).expect("core-only mode"),
+            RuntimeIntegrationMode::CoreOnly
+        );
+        assert_eq!(
+            parse_runtime_integration_mode(Some("FULL_CHAIN")).expect("explicit full chain"),
+            RuntimeIntegrationMode::FullChain
+        );
+        assert!(parse_runtime_integration_mode(Some("full_chain")).is_err());
+        assert!(parse_runtime_integration_mode(Some("")).is_err());
+    }
+
+    #[test]
+    fn runtime_receipt_digest_uses_durable_receipt_when_analysis_is_absent() {
+        let core_only = json!({"receipt_digest": "a".repeat(64)});
+        assert_eq!(
+            runtime_receipt_digest(&core_only)
+                .expect("core receipt digest")
+                .as_str(),
+            "a".repeat(64)
+        );
+
+        let full_chain = json!({
+            "receipt_digest": "a".repeat(64),
+            "full_chain_receipt_digest": "b".repeat(64),
+        });
+        assert_eq!(
+            runtime_receipt_digest(&full_chain)
+                .expect("full-chain receipt digest")
+                .as_str(),
+            "b".repeat(64)
+        );
+    }
+
+    #[test]
     fn canonical_hermes_mode_is_explicit_and_fail_closed() {
         assert_eq!(
             canonical_hermes_mode_from_value(None).expect("default task-only mode"),
@@ -9282,5 +9423,14 @@ mod tests {
                 "terminate",
             ]
         );
+    }
+
+    #[test]
+    fn core_status_exposes_a_not_started_receipt_without_reconciliation() {
+        let status = core_not_started_status_json();
+
+        assert_eq!(status["component"], "delivery-receipt");
+        assert_eq!(status["status"], "NOT_STARTED");
+        assert_eq!(status["scope"], "receipt-only");
     }
 }

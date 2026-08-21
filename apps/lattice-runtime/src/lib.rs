@@ -10,7 +10,7 @@ pub mod task_control;
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lattice_codex_adapter::{
     CodexIdentityErrorKind, CodexIdentityExpectation, preflight_codex_identity,
@@ -19,10 +19,12 @@ use lattice_contracts::DeliveryRuntime;
 use serde_json::{Value, json};
 
 use crate::composition::{LatticedDeliveryConfig, LatticedDeliveryService, LatticedErrorKind};
-use crate::delivery_ledger::{DeliveryDatabaseBinding, DeliveryLedgerErrorKind};
+use crate::delivery_ledger::{
+    DeliveryDatabaseBinding, DeliveryLedger, DeliveryLedgerErrorKind, connect_fixed_runtime_client,
+};
 use crate::git_delivery::GitDeliveryErrorKind;
 
-const USAGE: &str = "usage:\n  lattice-runtime codex-preflight --launcher <absolute-path> --version <exact-version> --sha256 <lowercase-sha256> --schema-dir <absent-path>\n  lattice-runtime delivery-run --launcher <absolute-path> --version <exact-version> --sha256 <lowercase-sha256> --schema-dir <absent-path> --codex-home <absolute-path> --delivery-root <absent-absolute-path> --git-exe <absolute-path> --timeout-seconds <1..3600> --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>\n  lattice-runtime delivery-status --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>";
+const USAGE: &str = "usage:\n  lattice-runtime codex-preflight --launcher <absolute-path> --version <exact-version> --sha256 <lowercase-sha256> --schema-dir <absent-path>\n  lattice-runtime delivery-run --launcher <absolute-path> --version <exact-version> --sha256 <lowercase-sha256> --schema-dir <absent-path> --codex-home <absolute-path> --delivery-root <absent-absolute-path> --git-exe <absolute-path> --timeout-seconds <1..3600> --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>\n  lattice-runtime delivery-status --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>\n  lattice-runtime runtime-health --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>\n  lattice-runtime receipt-state --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>";
 
 const DELIVERY_PROMPT: &str = concat!(
     "Create answer.txt in the current repository with exactly the bytes LATTICE_DELIVERY_OK followed by one newline. ",
@@ -47,6 +49,12 @@ pub enum RuntimeCommand {
         schema_dir: PathBuf,
     },
     DeliveryStatus {
+        database: DeliveryDatabaseBinding,
+    },
+    RuntimeHealth {
+        database: DeliveryDatabaseBinding,
+    },
+    ReceiptState {
         database: DeliveryDatabaseBinding,
     },
     DeliveryRun {
@@ -213,6 +221,22 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
             let database = parse_database_binding(&values[0], &values[1], &values[2])?;
             Ok(RuntimeCommand::DeliveryStatus { database })
         }
+        "runtime-health" => {
+            let values = parse_options(
+                options,
+                &["--postgres-host", "--postgres-port", "--postgres-run-id"],
+            )?;
+            let database = parse_database_binding(&values[0], &values[1], &values[2])?;
+            Ok(RuntimeCommand::RuntimeHealth { database })
+        }
+        "receipt-state" => {
+            let values = parse_options(
+                options,
+                &["--postgres-host", "--postgres-port", "--postgres-run-id"],
+            )?;
+            let database = parse_database_binding(&values[0], &values[1], &values[2])?;
+            Ok(RuntimeCommand::ReceiptState { database })
+        }
         _ => Err(RuntimeError::Usage),
     }
 }
@@ -267,6 +291,8 @@ pub fn execute(command: RuntimeCommand) -> Result<Value, RuntimeError> {
             database,
         }),
         RuntimeCommand::DeliveryStatus { database } => execute_delivery_status(database),
+        RuntimeCommand::RuntimeHealth { database } => execute_runtime_health(&database),
+        RuntimeCommand::ReceiptState { database } => execute_receipt_state(&database),
     }
 }
 
@@ -315,6 +341,36 @@ fn execute_delivery_status(database: DeliveryDatabaseBinding) -> Result<Value, R
     service
         .status_json()
         .map_err(|error| RuntimeError::Latticed(error.kind()))
+}
+
+fn execute_runtime_health(database: &DeliveryDatabaseBinding) -> Result<Value, RuntimeError> {
+    let password = delivery_database_password()?;
+    let _client =
+        connect_fixed_runtime_client(database, &password, Instant::now() + Duration::from_secs(5))
+            .map_err(|_| RuntimeError::Latticed(LatticedErrorKind::DatabaseConnect))?;
+
+    Ok(json!({
+        "component": "postgresql",
+        "status": "CONNECTABLE",
+        "receipt_state": "NOT_INSPECTED",
+        "scope": "connection-only"
+    }))
+}
+
+fn execute_receipt_state(database: &DeliveryDatabaseBinding) -> Result<Value, RuntimeError> {
+    let password = delivery_database_password()?;
+    let mut ledger =
+        DeliveryLedger::connect(database, &password, Instant::now() + Duration::from_secs(5))
+            .map_err(|error| RuntimeError::DeliveryLedger(error.kind()))?;
+    let status = ledger
+        .status()
+        .map_err(|error| RuntimeError::DeliveryLedger(error.kind()))?;
+
+    Ok(json!({
+        "component": "delivery-receipt",
+        "status": status.as_str(),
+        "scope": "receipt-only"
+    }))
 }
 
 fn delivery_database_password() -> Result<String, RuntimeError> {
