@@ -1,4 +1,4 @@
-use lattice_cli::{dispatch, render_status, render_status_json};
+use lattice_cli::{dispatch, render_status, render_status_json, render_version};
 
 #[test]
 fn status_renders_the_inert_platform_manifest() {
@@ -15,13 +15,25 @@ fn status_renders_the_inert_platform_manifest() {
 }
 
 #[test]
-fn only_the_read_only_status_command_is_accepted() {
+fn only_the_read_only_inspection_commands_are_accepted() {
     assert_eq!(dispatch(&["status".to_owned()]), Ok(render_status()));
-    assert_eq!(dispatch(&[]), Err("usage: lattice status"));
-    assert_eq!(dispatch(&["run".to_owned()]), Err("usage: lattice status"));
+    assert_eq!(dispatch(&["version".to_owned()]), Ok(render_version()));
+    assert_eq!(dispatch(&[]), Err("usage: lattice <status|version>"));
+    assert_eq!(
+        dispatch(&["run".to_owned()]),
+        Err("usage: lattice <status|version>")
+    );
     assert_eq!(
         dispatch(&["status".to_owned(), "extra".to_owned()]),
-        Err("usage: lattice status")
+        Err("usage: lattice <status|version>")
+    );
+}
+
+#[test]
+fn version_reports_the_alpha_release_identity() {
+    assert_eq!(
+        dispatch(&["version".to_owned()]),
+        Ok("LATTICE DevOS 0.1.0-alpha.1\n".to_owned())
     );
 }
 

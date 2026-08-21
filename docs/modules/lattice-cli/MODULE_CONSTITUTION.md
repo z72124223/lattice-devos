@@ -1,7 +1,7 @@
 ---
 module_id: lattice-cli
 name: LATTICE Recovery CLI
-version: 2.0
+version: 2.1
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-21
@@ -27,6 +27,7 @@ manifest through the same public core contract.
 
 - `lattice status` renders the platform name, component authority modes, and
   lifecycle tiers.
+- `lattice version` renders the exact packaged pre-release version.
 - Unknown commands fail with a non-zero exit and a short usage message.
 
 ## Invariants
@@ -50,9 +51,10 @@ manifest through the same public core contract.
 ## Failure, Compatibility, And Migration
 
 Unsupported arguments return a stable failure code. Version 2 adds a `tier`
-field and preserves machine-readable component identifiers and authority modes. Any
-operational command requires a versioned constitution amendment and must use
-the approved local IPC instead of direct runtime authority.
+field and preserves machine-readable component identifiers and authority modes.
+Version 2.1 adds a read-only version command for packaged developer previews.
+Any operational command requires a versioned constitution amendment and must
+use the approved local IPC instead of direct runtime authority.
 
 ## Acceptance Gates
 
@@ -74,3 +76,4 @@ approval.
 |---|---|---|---|---|
 | 1.0 | 2026-07-29 | SPEC-002, PLANS Step 4 | Read-only bootstrap status CLI | User |
 | 2.0 | 2026-08-21 | Product simplification decision | Show core, optional, deferred, and retired tiers without adding execution authority | User |
+| 2.1 | 2026-08-21 | Alpha release preparation | Add exact read-only package version output | User |

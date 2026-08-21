@@ -4,6 +4,23 @@ LATTICE is a local-first development tool that keeps project/work-item truth
 around Codex without rebuilding the Codex agent loop, chat interface, sandbox,
 approval flow, or thread lifecycle.
 
+## Current release
+
+`v0.1.0-alpha.1` is a Windows x86_64 developer preview of the simplified
+module boundary. It provides only deterministic `version` and read-only
+`status` commands. It does **not** yet create, dispatch, persist, or resume work
+items, so it must not be presented as the completed product.
+
+```powershell
+npm.cmd run verify
+npm.cmd run test:core
+npm.cmd run alpha:package
+```
+
+The package is written under `dist`. See
+[`docs/releases/v0.1.0-alpha.1.md`](docs/releases/v0.1.0-alpha.1.md) for the
+exact included capabilities and limitations.
+
 ## Small MVP
 
 ```text
@@ -42,6 +59,9 @@ component must start and pass in one run is retired.
 ```powershell
 # Inspect the retained components and lifecycle tiers.
 cargo run -p lattice-cli -- status
+
+# Inspect the exact preview version.
+cargo run -p lattice-cli -- version
 
 # Test the default core set only.
 npm.cmd run test:core

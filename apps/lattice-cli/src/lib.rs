@@ -4,7 +4,13 @@ use std::fmt::Write;
 
 use lattice_core::{bootstrap_manifest, platform_name};
 
-const USAGE: &str = "usage: lattice status";
+const USAGE: &str = "usage: lattice <status|version>";
+
+/// Renders the exact packaged command-line version.
+#[must_use]
+pub fn render_version() -> String {
+    format!("{} {}\n", platform_name(), env!("CARGO_PKG_VERSION"))
+}
 
 /// Renders the inert bootstrap manifest without performing external I/O.
 #[must_use]
@@ -60,6 +66,7 @@ pub fn dispatch(arguments: &[String]) -> Result<String, &'static str> {
     match arguments {
         [command] if command == "status" => Ok(render_status()),
         [command, format] if command == "status" && format == "--json" => Ok(render_status_json()),
+        [command] if command == "version" => Ok(render_version()),
         _ => Err(USAGE),
     }
 }

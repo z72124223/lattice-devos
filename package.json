@@ -1,8 +1,8 @@
 {
   "name": "lattice-devos",
-  "version": "1.0.0",
+  "version": "0.1.0-alpha.1",
   "private": true,
-  "description": "Local-first autonomous AI development platform.",
+  "description": "Codex-first modular local development tool.",
   "type": "module",
   "engines": {
     "node": ">=24.15.0"
@@ -11,6 +11,7 @@
     "check": "node scripts/check-project.mjs",
     "test:core": "cargo test --locked",
     "test:all-modules": "cargo test --workspace --locked",
+    "alpha:package": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/build-alpha-package.ps1",
     "test": "node --test \"test/*.test.js\"",
     "test:domain": "node --test test/task-domain.test.js",
     "legacy:full-chain:start": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/start-lattice-full-chain.ps1",
