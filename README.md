@@ -66,11 +66,12 @@ release-level 檢查才跑完整四段流程。Codex 仍是外部的推理與執
 
 ### PostgreSQL 健康與交付收據
 
-`lattice-runtime runtime-health` 是非 MCP 的唯讀連線檢查。它使用既有
-process-owned PostgreSQL binding，成功只代表資料庫可連線，固定回傳
-`receipt_state: NOT_INSPECTED`。它不會建立、讀取或修改交付收據；
-`lattice_delivery_status` 仍是嚴格的收據驗證工具。這能避免「資料庫健康、
-但尚未有交付收據」被錯誤稱為資料損壞。
+`lattice-runtime runtime-health` 是非 MCP 的唯讀 Runtime 健康檢查。它使用既有
+process-owned PostgreSQL binding，將控制核心、PostgreSQL、交付收據、Graphify
+與 Hermes 分開呈現。成功只代表 PostgreSQL 可連線；交付收據固定標示為
+`NOT_INSPECTED`，而 `CORE_ONLY` 下 Graphify/Hermes 為 `DEFERRED`，不會被啟動。
+它不會建立、讀取或修改交付收據；`lattice_delivery_status` 仍是嚴格的收據
+驗證工具。這能避免「資料庫健康、但尚未有交付收據」被錯誤稱為資料損壞。
 
 `lattice-runtime receipt-state` 則只讀取同一綁定的交付收據投影，會明確
 回傳 `NOT_STARTED`、`COMPLETED`、`FAILED` 或 `RECONCILIATION_REQUIRED`。

@@ -47,10 +47,11 @@ Orchestrator composition.
 - Through the compatibility `lattice-runtime` executable, expose one non-MCP,
   read-only `runtime-health` and `receipt-state` commands. They accept the same
   fixed marker-owned PostgreSQL binding as Delivery Status. `runtime-health`
-  reports only connection availability plus `receipt_state=NOT_INSPECTED`;
-  `receipt-state` reports only the verified durable receipt projection. Neither
-  command creates or reinterprets a receipt, and neither alters the four-tool
-  MCP surface.
+  reports control-core readiness, PostgreSQL connection availability, and the
+  configured independent Graphify/Hermes mode; it always keeps
+  `delivery_receipt=NOT_INSPECTED`. `receipt-state` reports only the verified
+  durable receipt projection. Neither command creates or reinterprets a
+  receipt, and neither alters the four-tool MCP surface.
 - Restrict the alternate `lattice-full-chain` executable to a legacy observer
   surface. It advertises only the two delivery names, rejects Delivery Run
   with a fixed code before service dispatch, permits only durable Delivery

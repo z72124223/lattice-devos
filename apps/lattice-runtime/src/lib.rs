@@ -349,11 +349,28 @@ fn execute_runtime_health(database: &DeliveryDatabaseBinding) -> Result<Value, R
         connect_fixed_runtime_client(database, &password, Instant::now() + Duration::from_secs(5))
             .map_err(|_| RuntimeError::Latticed(LatticedErrorKind::DatabaseConnect))?;
 
+    Ok(runtime_health_projection(
+        std::env::var("LATTICE_RUNTIME_INTEGRATION").ok().as_deref(),
+    )?)
+}
+
+fn runtime_health_projection(integration_mode: Option<&str>) -> Result<Value, RuntimeError> {
+    let (mode, optional_component_status) = match integration_mode {
+        None | Some("CORE_ONLY") => ("CORE_ONLY", "DEFERRED"),
+        Some("FULL_CHAIN") => ("FULL_CHAIN", "NOT_INSPECTED"),
+        Some(_) => return Err(RuntimeError::Latticed(LatticedErrorKind::Configuration)),
+    };
+
     Ok(json!({
-        "component": "postgresql",
-        "status": "CONNECTABLE",
-        "receipt_state": "NOT_INSPECTED",
-        "scope": "connection-only"
+        "runtime": "LATTICE",
+        "mode": mode,
+        "components": {
+            "control": {"status": "READY", "role": "coordination"},
+            "postgresql": {"status": "CONNECTABLE", "role": "durable-truth"},
+            "delivery_receipt": {"status": "NOT_INSPECTED", "role": "read-separately"},
+            "graphify": {"status": optional_component_status, "role": "derived-memory"},
+            "hermes": {"status": optional_component_status, "role": "reflection"}
+        }
     }))
 }
 
@@ -436,7 +453,9 @@ fn is_lowercase_sha256(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DELIVERY_PROMPT, RuntimeError, validate_delivery_command_runtime};
+    use super::{
+        DELIVERY_PROMPT, RuntimeError, runtime_health_projection, validate_delivery_command_runtime,
+    };
     use lattice_codex_adapter::{AppServerSession, SessionRequest, TurnStatus};
     use lattice_contracts::DeliveryRuntime;
     use sha2::{Digest, Sha256};
@@ -458,6 +477,32 @@ mod tests {
             validate_delivery_command_runtime(DeliveryRuntime::OfficialCodexAppServer),
             Err(RuntimeError::Latticed(
                 crate::composition::LatticedErrorKind::OfficialLiveBlocked
+            ))
+        );
+    }
+
+    #[test]
+    fn core_only_health_reports_optional_modules_as_deferred_without_activating_them() {
+        let health = runtime_health_projection(Some("CORE_ONLY")).expect("core-only health");
+
+        assert_eq!(health["runtime"], "LATTICE");
+        assert_eq!(health["mode"], "CORE_ONLY");
+        assert_eq!(health["components"]["control"]["status"], "READY");
+        assert_eq!(health["components"]["postgresql"]["status"], "CONNECTABLE");
+        assert_eq!(
+            health["components"]["delivery_receipt"]["status"],
+            "NOT_INSPECTED"
+        );
+        assert_eq!(health["components"]["graphify"]["status"], "DEFERRED");
+        assert_eq!(health["components"]["hermes"]["status"], "DEFERRED");
+    }
+
+    #[test]
+    fn runtime_health_rejects_an_unknown_integration_mode() {
+        assert_eq!(
+            runtime_health_projection(Some("ALL_AT_ONCE")),
+            Err(RuntimeError::Latticed(
+                crate::composition::LatticedErrorKind::Configuration
             ))
         );
     }
