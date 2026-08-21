@@ -18,11 +18,12 @@ use crate::graph::{GraphParseLimits, NormalizedGraph, parse_graph};
 use crate::identity::{
     GRAPHIFY_PRIVATE_RUNNER_SHA256, GRAPHIFY_WSL_BWRAP_HELP_SHA256, GRAPHIFY_WSL_BWRAP_PATH,
     GRAPHIFY_WSL_BWRAP_SHA256, GRAPHIFY_WSL_BWRAP_VERSION_SHA256, GRAPHIFY_WSL_DISTRO,
-    GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256, GRAPHIFY_WSL_GRAPHIFY_HELP_SHA256,
-    GRAPHIFY_WSL_GRAPHIFY_VERSION_SHA256, GRAPHIFY_WSL_INSTALL_REPORT_SHA256,
-    GRAPHIFY_WSL_OS_RELEASE_SHA256, GRAPHIFY_WSL_PYTHON_PATH, GRAPHIFY_WSL_PYTHON_SHA256,
-    GRAPHIFY_WSL_PYTHON_VERSION_SHA256, GRAPHIFY_WSL_RUNTIME_BYTE_COUNT,
-    GRAPHIFY_WSL_RUNTIME_FILE_COUNT, GRAPHIFY_WSL_RUNTIME_MANIFEST_SHA256, verify_reviewed_runtime,
+    GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256, GRAPHIFY_WSL_GRAPHIFY_EXTRACT_WARNING_SHA256,
+    GRAPHIFY_WSL_GRAPHIFY_HELP_SHA256, GRAPHIFY_WSL_GRAPHIFY_VERSION_SHA256,
+    GRAPHIFY_WSL_INSTALL_REPORT_SHA256, GRAPHIFY_WSL_OS_RELEASE_SHA256, GRAPHIFY_WSL_PYTHON_PATH,
+    GRAPHIFY_WSL_PYTHON_SHA256, GRAPHIFY_WSL_PYTHON_VERSION_SHA256,
+    GRAPHIFY_WSL_RUNTIME_BYTE_COUNT, GRAPHIFY_WSL_RUNTIME_FILE_COUNT,
+    GRAPHIFY_WSL_RUNTIME_MANIFEST_SHA256, verify_reviewed_runtime,
 };
 use crate::snapshot::{
     MaterializedSnapshot, SnapshotBridge, file_sha256, framed_digest, verify_snapshot_binding,
@@ -513,12 +514,7 @@ impl PinnedGraphifyAdapter {
                 validate_graphify_version(frame.version_stdout, frame.version_stderr)?;
                 let help_sha256 =
                     validate_graphify_help(&self.config, frame.help_stdout, frame.help_stderr)?;
-                if !frame.extract_stderr.is_empty() {
-                    return Err(error(
-                        GraphifyAdapterErrorKind::PartialOutput,
-                        "GRAPHIFY_PRIVATE_EXTRACT_STDERR_REJECTED",
-                    ));
-                }
+                validate_graphify_extract_stderr(frame.extract_stderr)?;
                 (
                     help_sha256,
                     frame.extract_stdout.to_vec(),
@@ -1536,6 +1532,18 @@ fn validate_graphify_help(
     Ok(digest)
 }
 
+fn validate_graphify_extract_stderr(stderr: &[u8]) -> GraphifyAdapterResult<()> {
+    if stderr.is_empty()
+        || crate::snapshot::sha256_bytes(stderr) == GRAPHIFY_WSL_GRAPHIFY_EXTRACT_WARNING_SHA256
+    {
+        return Ok(());
+    }
+    Err(error(
+        GraphifyAdapterErrorKind::PartialOutput,
+        "GRAPHIFY_PRIVATE_EXTRACT_STDERR_REJECTED",
+    ))
+}
+
 #[derive(Debug)]
 struct PrivateGraphifyFrame<'a> {
     version_stdout: &'a [u8],
@@ -1975,5 +1983,14 @@ mod tests {
                 .kind(),
             GraphifyAdapterErrorKind::MalformedOutput
         );
+    }
+
+    #[test]
+    fn private_extract_stderr_rejects_every_unreviewed_value() {
+        validate_graphify_extract_stderr(b"").expect("empty stderr remains accepted");
+        let error = validate_graphify_extract_stderr(b"unreviewed diagnostic")
+            .expect_err("unreviewed stderr must not become a warning allowance");
+        assert_eq!(error.kind(), GraphifyAdapterErrorKind::PartialOutput);
+        assert_eq!(error.code(), "GRAPHIFY_PRIVATE_EXTRACT_STDERR_REJECTED");
     }
 }

@@ -83,6 +83,10 @@ pub const GRAPHIFY_WSL_GRAPHIFY_HELP_SHA256: &str =
 /// SHA-256 of pinned Graphify's version output under the same environment.
 pub const GRAPHIFY_WSL_GRAPHIFY_VERSION_SHA256: &str =
     "0f15606f847c0ccf0790ea95c6a6dc2a3f3e654adacb9de1b790313112d988ac";
+/// SHA-256 of the reviewed, non-fatal Graphify extraction warning emitted by
+/// the pinned runtime. Any other extraction stderr remains rejected.
+pub const GRAPHIFY_WSL_GRAPHIFY_EXTRACT_WARNING_SHA256: &str =
+    "356001f6906c6f7e2698cf5c5837ae02759d4c0db2b1ec90dd5db9ef24bf03e0";
 /// SHA-256 of the compile-time embedded private-copy verifier/runner.
 pub const GRAPHIFY_PRIVATE_RUNNER_SHA256: &str =
     "98d0411709927a5687315f64efc6673a77f2241e2db6df8bd17c34886e3c2ad9";
