@@ -40,6 +40,10 @@ fn mcp_stdio_discovers_and_calls_the_read_only_status_tool() {
     .expect("write tools/list");
     let tools = read_response(&mut output);
     assert_eq!(tools["result"]["tools"][0]["name"], "lattice_status");
+    assert_eq!(
+        tools["result"]["tools"][1]["name"],
+        "lattice_engineering_status"
+    );
 
     writeln!(
         input,
