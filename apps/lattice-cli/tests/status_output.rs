@@ -18,14 +18,14 @@ fn status_renders_the_inert_platform_manifest() {
 fn only_the_read_only_inspection_commands_are_accepted() {
     assert_eq!(dispatch(&["status".to_owned()]), Ok(render_status()));
     assert_eq!(dispatch(&["version".to_owned()]), Ok(render_version()));
-    assert_eq!(dispatch(&[]), Err("usage: lattice <status|version>"));
+    assert_eq!(dispatch(&[]), Err("usage: lattice <status|version|mcp>"));
     assert_eq!(
         dispatch(&["run".to_owned()]),
-        Err("usage: lattice <status|version>")
+        Err("usage: lattice <status|version|mcp>")
     );
     assert_eq!(
         dispatch(&["status".to_owned(), "extra".to_owned()]),
-        Err("usage: lattice <status|version>")
+        Err("usage: lattice <status|version|mcp>")
     );
 }
 
