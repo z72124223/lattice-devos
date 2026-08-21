@@ -83,10 +83,13 @@ use lattice_ports::{
     TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
 };
 use lattice_postgres_codebase_memory::{
-    ExtensionTarget, PostgresCodebaseMemory, verify_embedded_extension_manifest,
+    ExtensionTarget, PostgresCodebaseMemory, apply_extension as apply_postgres_memory_extension,
+    verify_embedded_extension_manifest, verify_extension as verify_memory_extension,
 };
 use lattice_postgres_writer_lease::{
     ExtensionTarget as WriterLeaseExtensionTarget, PostgresWriterLease,
+    apply_extension as apply_postgres_writer_extension,
+    verify_extension as verify_writer_extension,
 };
 use lattice_task_domain::{
     AcceptanceCriterion, ApprovalRequirement, ApprovalRequirements, Capability, CapabilityRequest,
@@ -94,6 +97,8 @@ use lattice_task_domain::{
     ScopeOperation, TASK_SPEC_SCHEMA_VERSION, TaskBudget, TaskScope, TaskSpec, TaskSpecInput,
     TaskState,
 };
+use postgres::config::SslMode;
+use postgres::{Client, Config, NoTls};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -1916,6 +1921,198 @@ fn delivery_environment_for_mode(
         database,
         required_environment("LATTICE_TASK019_PASSWORD")?,
     ))
+}
+
+/// Installs and verifies the same-database Graphify and Writer Lease extensions
+/// required by the local Runtime. The durable Store remains the only authority.
+///
+/// The command temporarily closes Runtime admission while it holds the extension
+/// migration locks, then restores the configured Runtime authority. A failed setup
+/// never reports readiness and restores the exact prior admission row.
+pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedError> {
+    let (_config, database, password) =
+        delivery_environment_for_mode(FullChainRunMode::ResumeExisting)?;
+    let submission = fixed_gateway_submission()?;
+    let authority = configured_store_authority()?;
+    let configured_admission = RuntimeAdmissionSnapshot::from_authority(&authority)?;
+    let mut foundation_probe = PostgresTaskLifecycle::connect(
+        &database,
+        &password,
+        deadline(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))?,
+        task_ledger_identity(submission.binding())?,
+        authority.clone(),
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+    let foundation = foundation_probe
+        .persistence_foundation(submission.binding())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+    drop(foundation_probe);
+
+    let memory_target = ExtensionTarget::new(database.database_name(), database.run_id())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let memory_manifest = verify_embedded_extension_manifest()
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let writer_target = WriterLeaseExtensionTarget::new(
+        database.database_name(),
+        foundation.database_identity_digest().clone(),
+        foundation.global_manifest_digest().clone(),
+        memory_manifest.manifest_sha256().clone(),
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+    let mut migrator = connect_migrator(&database, &password)?;
+    let admission = RuntimeAdmissionSnapshot::load(&mut migrator)?;
+    admission.stop(&mut migrator)?;
+
+    let setup = (|| {
+        apply_postgres_memory_extension(&mut migrator, &memory_target)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+        verify_memory_extension(
+            &mut migrator,
+            &memory_target,
+            lattice_postgres_codebase_memory::ExtensionDatabaseRole::Migrator,
+        )
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+        apply_postgres_writer_extension(&mut migrator, &writer_target)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+        verify_writer_extension(&mut migrator, &writer_target)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+        Ok(())
+    })();
+    match setup {
+        Ok(()) => configured_admission.restore(&mut migrator)?,
+        Err(error) => {
+            admission.restore(&mut migrator)?;
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn connect_migrator(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+) -> Result<Client, LatticedError> {
+    let host = required_environment("LATTICE_TASK019_HOST")?;
+    let port = required_environment("LATTICE_TASK019_PORT")?
+        .parse::<u16>()
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))?;
+    let database_name = database.database_name();
+    let mut config = Config::new();
+    config
+        .host(&host)
+        .port(port)
+        .user("lattice_migrator_login")
+        .password(password)
+        .dbname(&database_name)
+        .application_name("lattice-devos-task019")
+        .ssl_mode(SslMode::Disable);
+    let mut client = config
+        .connect(NoTls)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+    client
+        .batch_execute("SET ROLE lattice_migrator")
+        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+    Ok(client)
+}
+
+struct RuntimeAdmissionSnapshot {
+    mode: String,
+    daemon_instance_id: Option<String>,
+    daemon_epoch: Option<i64>,
+    authority_revision: i64,
+    observation_digest: Option<Vec<u8>>,
+    authority_head_digest: Option<Vec<u8>>,
+}
+
+impl RuntimeAdmissionSnapshot {
+    fn from_authority(authority: &StoreAuthorityHead) -> Result<Self, LatticedError> {
+        if authority.admission() != RuntimeAdmissionMode::Active {
+            return Err(LatticedError::new(LatticedErrorKind::LedgerConfiguration));
+        }
+        let digest = |value: &ContentDigest| {
+            (0..value.as_str().len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&value.as_str()[index..index + 2], 16))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))
+        };
+        Ok(Self {
+            mode: "ACTIVE".to_owned(),
+            daemon_instance_id: Some(authority.daemon_instance_id().as_str().to_owned()),
+            daemon_epoch: Some(
+                i64::try_from(authority.daemon_epoch().get())
+                    .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?,
+            ),
+            authority_revision: i64::try_from(authority.revision().get())
+                .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?,
+            observation_digest: Some(digest(authority.observation_digest())?),
+            authority_head_digest: Some(digest(authority.head_digest())?),
+        })
+    }
+
+    fn load(client: &mut Client) -> Result<Self, LatticedError> {
+        let row = client
+            .query_one(
+                "SELECT admission_mode::text, daemon_instance_id, daemon_epoch, authority_revision, \
+                 observation_digest, authority_head_digest \
+                 FROM ONLY control.runtime_admission WHERE singleton FOR UPDATE",
+                &[],
+            )
+            .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+        Ok(Self {
+            mode: row
+                .try_get(0)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?,
+            daemon_instance_id: row
+                .try_get(1)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?,
+            daemon_epoch: row
+                .try_get(2)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?,
+            authority_revision: row
+                .try_get(3)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?,
+            observation_digest: row
+                .try_get(4)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?,
+            authority_head_digest: row
+                .try_get(5)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?,
+        })
+    }
+
+    fn stop(&self, client: &mut Client) -> Result<(), LatticedError> {
+        client
+            .execute(
+                "UPDATE ONLY control.runtime_admission SET admission_mode = 'STOPPED', \
+                 daemon_instance_id = NULL, daemon_epoch = NULL, authority_revision = 0, \
+                 observation_digest = NULL, authority_head_digest = NULL, \
+                 updated_at = pg_catalog.clock_timestamp() WHERE singleton",
+                &[],
+            )
+            .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+        Ok(())
+    }
+
+    fn restore(&self, client: &mut Client) -> Result<(), LatticedError> {
+        client
+            .execute(
+                "UPDATE ONLY control.runtime_admission SET admission_mode = $1, \
+                 daemon_instance_id = $2, daemon_epoch = $3, authority_revision = $4, \
+                 observation_digest = $5, authority_head_digest = $6, \
+                 updated_at = pg_catalog.clock_timestamp() WHERE singleton",
+                &[
+                    &self.mode,
+                    &self.daemon_instance_id,
+                    &self.daemon_epoch,
+                    &self.authority_revision,
+                    &self.observation_digest,
+                    &self.authority_head_digest,
+                ],
+            )
+            .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+        Ok(())
+    }
 }
 
 /// Starts the canonical newline-delimited MCP stdio server. The default
@@ -6800,6 +6997,28 @@ mod tests {
             task050_test_digest('b'),
         )
         .expect("TASK050 Store authority")
+    }
+
+    #[test]
+    fn postgres_bootstrap_restores_the_configured_active_authority() {
+        let authority = task050_store_authority();
+        let snapshot = RuntimeAdmissionSnapshot::from_authority(&authority)
+            .expect("configured active authority is representable");
+        assert_eq!(snapshot.mode, "ACTIVE");
+        assert_eq!(
+            snapshot.daemon_instance_id.as_deref(),
+            Some("task050-fresh-process")
+        );
+        assert_eq!(snapshot.daemon_epoch, Some(50));
+        assert_eq!(snapshot.authority_revision, 50);
+        assert_eq!(
+            snapshot.observation_digest.as_deref(),
+            Some(&[0xaa; 32][..])
+        );
+        assert_eq!(
+            snapshot.authority_head_digest.as_deref(),
+            Some(&[0xbb; 32][..])
+        );
     }
 
     fn task050_connect_as(database: &str, role: &str) -> Result<Client, Box<dyn Error>> {

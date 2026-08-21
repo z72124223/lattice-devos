@@ -60,6 +60,18 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             };
         }
+        if argument == "--postgres-bootstrap" && arguments.next().is_none() {
+            return match lattice_runtime::composition::bootstrap_postgres_extensions_from_environment() {
+                Ok(()) => {
+                    eprintln!("LATTICE_POSTGRES_BOOTSTRAP_READY");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{}", error.code());
+                    ExitCode::from(2)
+                }
+            };
+        }
         if argument == "--hermes-launch" && arguments.next().is_none() {
             return match lattice_runtime::composition::launch_hermes_from_environment() {
                 Ok(()) => ExitCode::SUCCESS,
