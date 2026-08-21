@@ -6,6 +6,7 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+getrandom = "=0.4.3"
 lattice-codebase-memory = { path = "../../crates/lattice-codebase-memory" }
 lattice-codex-adapter = { path = "../../crates/lattice-codex-adapter" }
 lattice-cjson = { path = "../../crates/lattice-cjson" }

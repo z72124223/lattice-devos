@@ -578,7 +578,7 @@ fn assert_safe_startup_diagnostics(stderr: &[u8], expected_stages: &[&str]) {
 }
 
 #[test]
-fn real_latticed_binary_serves_only_the_four_bounded_tools() {
+fn real_latticed_binary_serves_the_five_bounded_tools() {
     let mut child = spawn_bounded_latticed();
     let task_ref = fixed_gateway_submission()
         .expect("fixed submission")
@@ -593,7 +593,7 @@ fn real_latticed_binary_serves_only_the_four_bounded_tools() {
         json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lattice_delivery_run","arguments":{}}}),
         json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lattice_delivery_status"}}),
         json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"lattice_task_submit","arguments":{"client_request_id":"composition-test","intent":"CONTROLLED_CODEX_CANARY"}}}),
-        json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"lattice_task_status","arguments":{"task_ref":task_ref}}}),
+        json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"lattice_task_status","arguments":{"client_request_id":"composition-test","task_ref":task_ref}}}),
     ];
     let input = requests
         .iter()
@@ -642,6 +642,7 @@ fn real_latticed_binary_serves_only_the_four_bounded_tools() {
         [
             "lattice_delivery_run",
             "lattice_delivery_status",
+            "lattice_runtime_status",
             "lattice_task_submit",
             "lattice_task_status",
         ]
@@ -649,7 +650,10 @@ fn real_latticed_binary_serves_only_the_four_bounded_tools() {
     for tool in tools {
         assert_eq!(tool["inputSchema"]["type"], "object");
         assert_eq!(tool["inputSchema"]["additionalProperties"], false);
-        if tool["name"] == "lattice_delivery_run" || tool["name"] == "lattice_delivery_status" {
+        if matches!(
+            tool["name"].as_str(),
+            Some("lattice_delivery_run" | "lattice_delivery_status" | "lattice_runtime_status")
+        ) {
             assert_eq!(tool["inputSchema"].as_object().expect("schema").len(), 2);
         } else {
             assert!(tool["inputSchema"]["properties"].is_object());
@@ -657,7 +661,12 @@ fn real_latticed_binary_serves_only_the_four_bounded_tools() {
         }
         assert!(tool.get("annotations").is_none());
     }
-    for response in &responses[2..] {
+    let calls = responses
+        .iter()
+        .filter(|response| response["id"].as_i64().is_some_and(|id| id >= 3))
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 4);
+    for response in calls {
         assert_eq!(response["result"]["isError"], true);
         assert_ne!(
             response["result"]["structuredContent"]["code"],
@@ -693,7 +702,7 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
         json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lattice_delivery_run","arguments":{},"_meta":metadata.clone()}}),
         json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lattice_delivery_status","_meta":metadata.clone()}}),
         json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"lattice_task_submit","arguments":{"client_request_id":"modern-composition-test","intent":"CONTROLLED_CODEX_CANARY"},"_meta":metadata.clone()}}),
-        json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"lattice_task_status","arguments":{"task_ref":task_ref},"_meta":metadata}}),
+        json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"lattice_task_status","arguments":{"client_request_id":"modern-composition-test","task_ref":task_ref},"_meta":metadata}}),
     ];
     let input = requests
         .iter()
@@ -744,6 +753,7 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
         [
             "lattice_delivery_run",
             "lattice_delivery_status",
+            "lattice_runtime_status",
             "lattice_task_submit",
             "lattice_task_status",
         ]
@@ -753,10 +763,15 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
         assert_eq!(tool["inputSchema"]["additionalProperties"], false);
         assert!(tool["annotations"].is_object());
     }
-    for response in &responses {
+    let calls = responses
+        .iter()
+        .filter(|response| response["id"].as_i64().is_some_and(|id| id >= 3))
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 4);
+    for response in &calls {
         assert_eq!(response["result"]["resultType"], "complete");
     }
-    for response in &responses[2..] {
+    for response in calls {
         assert_eq!(response["result"]["isError"], true);
         assert_ne!(
             response["result"]["structuredContent"]["code"],
@@ -908,7 +923,6 @@ fn latticed_hermes_preflight_reports_exact_missing_settings() {
             "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256,",
             "LATTICE_HERMES_RUNTIME_MANIFEST,",
             "LATTICE_HERMES_RUNTIME_GUEST_ROOT,",
-            "LATTICE_HERMES_API_KEY,",
             "LATTICE_HERMES_PRODUCT_ROOT,",
             "LATTICE_HERMES_WSL_EXE,",
             "LATTICE_HERMES_ISOLATION_ROOT,",
@@ -1104,7 +1118,7 @@ fn latticed_hermes_preflight_rejects_unavailable_manifest_without_echoing_values
 
 #[cfg(windows)]
 #[test]
-fn latticed_hermes_preflight_rejects_invalid_secret_after_exact_manifest_identity() {
+fn latticed_hermes_preflight_ignores_legacy_api_key_after_exact_manifest_identity() {
     const MANIFEST_BYTES: &[u8] = br#"{"cpython_archive_bytes":111375313,"cpython_archive_sha256":"a140c0868258075d160fa0da51ddffd423efbc9dd350695abd33e7ce3ce94352","cpython_build_release":"20260804","cpython_provenance":"astral-sh/python-build-standalone","cpython_sha256sums_sha256":"eccfdcc61c9fe48b7fe61db8812925ce30f23943d16c60861001004a4ae8f55c","cpython_version":"3.12.13","hermes_archive_sha256":"a9a84a25999a23a859a9d17ef3134ea1c3371d8bf1984313eab839e939528152","hermes_commit":"3c27eb6234bf91b8ceee9e9071591b31e9b148cb","hermes_release":"v2026.8.3","payload_byte_count":722643145,"payload_file_count":14077,"payload_manifest_sha256":"cb0e331bcb2b4fe2fd0977401d246819aadb800b645ca31ec233ad4e25b96929","platform":"x86_64-unknown-linux-gnu","pyproject_sha256":"64d1085ee1c23caf0ae0d9e65c73e280f466362ed43fdda1531f18f3af1d9869","schema":"lattice.hermes.offline-runtime.v1","uv_lock_sha256":"aab3c83f71b683507a590b6315b23bdc0abd6b63b76b2349eae15bf00dfbaf2b"}"#;
     const MANIFEST_SHA256: &str =
         "e3a3272b6cead30cd2df1af755df031766475595fdacfb080d0886671b6d1fbb";
@@ -1163,12 +1177,15 @@ fn latticed_hermes_preflight_rejects_invalid_secret_after_exact_manifest_identit
         )
         .env("LATTICE_HERMES_DEADLINE_SECONDS", "30")
         .output()
-        .expect("start canonical latticed invalid-secret preflight");
+        .expect("start canonical latticed legacy-key preflight");
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
-    assert_eq!(stderr, "LATTICE_HERMES_PREFLIGHT_CONFIGURATION_REJECTED\n");
+    assert_eq!(
+        stderr,
+        "LATTICE_HERMES_PREFLIGHT_CONFIGURATION_PRESENT_UNVERIFIED\n"
+    );
     assert!(!stderr.contains(SECRET_SENTINEL));
     assert!(!stderr.contains(manifest_path_text));
 }

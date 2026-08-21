@@ -2842,8 +2842,10 @@ impl HermesEnvironmentConfig {
             &runtime_manifest_bytes,
             &runtime_manifest,
         )?;
-        let api_key = hermes_environment("LATTICE_HERMES_API_KEY")?;
-        validate_hermes_api_key(&api_key)?;
+        // This is only a fresh loopback credential between LATTICE and the
+        // contained Hermes process. It is not an OpenAI or user-provided API
+        // key: model access is owned by the verified Codex app-server broker.
+        let api_key = new_hermes_session_token()?;
         let containment = HermesWslContainmentConfig::new(
             PathBuf::from(hermes_environment("LATTICE_HERMES_WSL_EXE")?),
             runtime_guest_root,
@@ -2925,18 +2927,17 @@ fn validate_official_hermes_runtime_identity(
 }
 
 #[cfg(windows)]
-fn validate_hermes_api_key(api_key: &str) -> Result<(), LatticedError> {
-    if api_key.trim().is_empty()
-        || api_key.len() < 16
-        || api_key.len() > 4_096
-        || !api_key.is_ascii()
-        || api_key.bytes().any(|byte| byte.is_ascii_control())
-    {
-        return Err(LatticedError::new(
-            LatticedErrorKind::HermesProductionRunnerRequired,
-        ));
+fn new_hermes_session_token() -> Result<String, LatticedError> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+    let mut token = String::with_capacity(64);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut token, "{byte:02x}")
+            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
     }
-    Ok(())
+    Ok(token)
 }
 
 #[cfg(windows)]
@@ -2989,11 +2990,6 @@ impl HermesRuntimePreflight {
 
 fn hermes_activation_status(preflight: HermesProductionPreflight) -> &'static str {
     match preflight {
-        HermesProductionPreflight::MissingConfiguration(names)
-            if names.contains(&"LATTICE_HERMES_API_KEY") =>
-        {
-            "CREDENTIAL_REQUIRED"
-        }
         HermesProductionPreflight::MissingConfiguration(_) => "CONFIGURATION_REQUIRED",
         HermesProductionPreflight::ConfigurationRejected => "CONFIGURATION_REJECTED",
         HermesProductionPreflight::ConfigurationPresentUnverified => "PREPARED",
@@ -3191,12 +3187,11 @@ pub fn hermes_production_preflight_from_environment() -> HermesProductionPreflig
     }
     #[cfg(windows)]
     {
-        const REQUIRED: [&str; 12] = [
+        const REQUIRED: [&str; 11] = [
             "LATTICE_HERMES_PREPARATION_ROOT",
             "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
             "LATTICE_HERMES_RUNTIME_MANIFEST",
             "LATTICE_HERMES_RUNTIME_GUEST_ROOT",
-            "LATTICE_HERMES_API_KEY",
             "LATTICE_HERMES_PRODUCT_ROOT",
             "LATTICE_HERMES_WSL_EXE",
             "LATTICE_HERMES_ISOLATION_ROOT",
@@ -8413,13 +8408,12 @@ mod tests {
     }
 
     #[test]
-    fn hermes_activation_status_distinguishes_credentials_from_other_setup() {
+    fn hermes_activation_status_requires_only_real_configuration() {
         assert_eq!(
             hermes_activation_status(HermesProductionPreflight::MissingConfiguration(vec![
-                "LATTICE_HERMES_API_KEY",
                 "LATTICE_HERMES_CODEX_HOME",
             ])),
-            "CREDENTIAL_REQUIRED"
+            "CONFIGURATION_REQUIRED"
         );
         assert_eq!(
             hermes_activation_status(HermesProductionPreflight::MissingConfiguration(vec![
@@ -8431,6 +8425,19 @@ mod tests {
             hermes_activation_status(HermesProductionPreflight::ConfigurationPresentUnverified),
             "PREPARED"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hermes_loopback_session_tokens_are_fresh() {
+        let first = new_hermes_session_token().expect("generate first loopback token");
+        let second = new_hermes_session_token().expect("generate second loopback token");
+
+        assert_eq!(first.len(), 64);
+        assert_eq!(second.len(), 64);
+        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(second.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -9662,16 +9669,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn production_hermes_secret_is_rejected_before_any_canary() {
-        validate_hermes_api_key("process-local-key").expect("bounded process-local secret");
-        for rejected in ["", "                ", "short", "control-byte-123\n"] {
-            assert!(validate_hermes_api_key(rejected).is_err());
-        }
-        assert!(validate_hermes_api_key(&"x".repeat(4_097)).is_err());
     }
 
     #[test]
