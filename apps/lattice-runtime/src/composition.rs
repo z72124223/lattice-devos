@@ -1733,10 +1733,6 @@ impl LatticedDeliveryService {
     /// Fails closed for a substituted Task Spec or any invalid, missing, or
     /// cross-bound durable delivery evidence.
     pub fn status_task_json(&mut self, binding: &SubjectBinding) -> Result<Value, LatticedError> {
-        let expected = fixed_gateway_submission()?;
-        if expected.binding() != binding {
-            return Err(LatticedError::new(LatticedErrorKind::Contract));
-        }
         let invocation = invocation_for_task(self.database.run_id(), binding)?;
         self.status_request_json(
             &invocation,
@@ -4150,7 +4146,12 @@ fn verified_controlled_task_reference<H: FullChainHermesPort>(
     )
 }
 
-fn task_public_status(evidence: &TaskLifecycleEvidence, task_ref: &ContentDigest) -> Value {
+fn task_public_status(
+    evidence: &TaskLifecycleEvidence,
+    task_ref: &ContentDigest,
+    failure_stage: Option<&str>,
+    failure_code: Option<&str>,
+) -> Value {
     let task_state = if evidence.admitted() {
         evidence.state().as_str()
     } else {
@@ -4180,8 +4181,10 @@ fn task_public_status(evidence: &TaskLifecycleEvidence, task_ref: &ContentDigest
     };
     json!({
         "ledger_head_digest": evidence.ledger_head_digest().as_str(),
+        "failure_code": failure_code,
+        "failure_stage": failure_stage,
         "result_digest": evidence.result_digest().map(ContentDigest::as_str),
-        "schema_version": "lattice.task.status.v1",
+        "schema_version": "lattice.task.status.v2",
         "status": status,
         "task_ref": task_ref.as_str(),
         "task_state": task_state,
@@ -4277,6 +4280,8 @@ fn verified_task_status<H: FullChainHermesPort>(
     evidence: &TaskLifecycleEvidence,
     task_ref: &ContentDigest,
 ) -> Result<Value, LatticedError> {
+    let mut failure_stage = None;
+    let mut failure_code = None;
     if evidence.state() == TaskState::Completed {
         let mut lifecycle = task_lifecycle(core, evidence.binding())
             .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
@@ -4292,8 +4297,41 @@ fn verified_task_status<H: FullChainHermesPort>(
         if &delivery_receipt_digest(&receipt)? != expected {
             return Err(LatticedError::new(LatticedErrorKind::ReceiptMismatch));
         }
+    } else if evidence.state() == TaskState::Failed {
+        // Failures before Delivery have no durable delivery receipt. When a
+        // receipt exists, expose only its closed, payload-free stage and code.
+        if let Ok(receipt) = core.status_task_json(evidence.binding()) {
+            if let Some((stage, code)) = delivery_failure_projection(&receipt) {
+                failure_stage = Some(stage);
+                failure_code = Some(code);
+            }
+        }
     }
-    Ok(task_public_status(evidence, task_ref))
+    Ok(task_public_status(
+        evidence,
+        task_ref,
+        failure_stage.as_deref(),
+        failure_code.as_deref(),
+    ))
+}
+
+fn delivery_failure_projection(receipt: &Value) -> Option<(String, String)> {
+    let object = receipt.as_object()?;
+    let stage = object.get("failure_stage")?.as_str()?;
+    let code = object.get("failure_code")?.as_str()?;
+    if valid_public_failure_atom(stage) && valid_public_failure_atom(code) {
+        Some((stage.to_owned(), code.to_owned()))
+    } else {
+        None
+    }
+}
+
+fn valid_public_failure_atom(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 const fn controlled_task_error_code(error: &ControlledTaskOrchestratorError) -> &'static str {
@@ -7148,7 +7186,7 @@ mod tests {
             "daemon_epoch": authority.daemon_epoch().get(),
             "daemon_instance_id": authority.daemon_instance_id().as_str(),
             "database_run_id": run_id,
-            "expected_status": task_public_status(evidence, task_ref),
+            "expected_status": task_public_status(evidence, task_ref, None, None),
             "ingress_profile_sha256": ingress_peer.profile_digest().as_str(),
             "observation_digest": authority.observation_digest().as_str(),
             "phase": phase,
@@ -8004,6 +8042,8 @@ mod tests {
                 None,
             ),
             &first,
+            None,
+            None,
         );
         assert_eq!(
             public_status.get("task_ref").and_then(Value::as_str),
@@ -8071,6 +8111,23 @@ mod tests {
     }
 
     #[test]
+    fn public_failure_projection_rejects_payload_like_receipt_fields() {
+        let valid = json!({
+            "failure_stage": "CODEX",
+            "failure_code": "LATTICE_DELIVERY_FAILED"
+        });
+        assert_eq!(
+            delivery_failure_projection(&valid),
+            Some(("CODEX".to_owned(), "LATTICE_DELIVERY_FAILED".to_owned()))
+        );
+        let invalid = json!({
+            "failure_stage": "CODEX",
+            "failure_code": "C:\\\\runtime\\\\stderr"
+        });
+        assert_eq!(delivery_failure_projection(&invalid), None);
+    }
+
+    #[test]
     fn controlled_canary_has_an_independent_task_subject() {
         let submission = fixed_gateway_submission().expect("fixed controlled canary");
         let binding = submission.binding();
@@ -8118,7 +8175,7 @@ mod tests {
             test_content_digest('7'),
             None,
         );
-        let status = task_public_status(&evidence, &test_content_digest('9'));
+        let status = task_public_status(&evidence, &test_content_digest('9'), None, None);
 
         assert_eq!(
             status.get("status").and_then(Value::as_str),

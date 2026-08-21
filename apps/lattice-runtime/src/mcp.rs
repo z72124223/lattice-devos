@@ -36,7 +36,7 @@ pub const CONTROLLED_CODEX_CANARY_INTENT: &str = "CONTROLLED_CODEX_CANARY";
 const LEGACY_DELIVERY_RUN_DISABLED: &str = "LATTICE_DELIVERY_RUN_REQUIRES_CANONICAL_LATTICED";
 
 const MAX_CLIENT_REQUEST_ID_BYTES: usize = 64;
-const TASK_PUBLIC_STATUS_SCHEMA_VERSION: &str = "lattice.task.status.v1";
+const TASK_PUBLIC_STATUS_SCHEMA_VERSION: &str = "lattice.task.status.v2";
 const TASK_PUBLIC_STATUS_VALUES: [&str; 4] = [
     "NOT_SUBMITTED",
     "RECONCILIATION_REQUIRED",
@@ -1154,7 +1154,7 @@ pub(crate) fn task_ingress_schema_digest() -> Option<ContentDigest> {
         (
             "task_output_schema".to_owned(),
             CanonicalValue::String(
-                "closed:schema_version:lattice.task.status.v1;status:NOT_SUBMITTED|RECONCILIATION_REQUIRED|FAILED|COMPLETED;task_state:NOT_SUBMITTED|DRAFT|AWAITING_EXECUTION_APPROVAL|PREPARING|EXECUTING|VERIFYING|REVIEWING|AWAITING_MERGE_APPROVAL|MERGING|COMPLETED|REJECTED|BLOCKED|FAILED|STOPPING|CANCELLED;task_ref:lower-sha256;ledger_head_digest:lower-sha256;result_digest:lower-sha256|null"
+                "closed:schema_version:lattice.task.status.v2;status:NOT_SUBMITTED|RECONCILIATION_REQUIRED|FAILED|COMPLETED;task_state:NOT_SUBMITTED|DRAFT|AWAITING_EXECUTION_APPROVAL|PREPARING|EXECUTING|VERIFYING|REVIEWING|AWAITING_MERGE_APPROVAL|MERGING|COMPLETED|REJECTED|BLOCKED|FAILED|STOPPING|CANCELLED;task_ref:lower-sha256;ledger_head_digest:lower-sha256;result_digest:lower-sha256|null;failure_stage:upper-underscore|null;failure_code:upper-underscore|null"
                     .to_owned(),
             ),
         ),
@@ -1296,12 +1296,14 @@ struct TaskPublicStatus {
     task_ref: String,
     ledger_head_digest: String,
     result_digest: Option<String>,
+    failure_stage: Option<String>,
+    failure_code: Option<String>,
 }
 
 impl TaskPublicStatus {
     fn from_value(value: &Value) -> Option<Self> {
         let object = value.as_object()?;
-        if object.len() != 6
+        if object.len() != 8
             || ![
                 "schema_version",
                 "status",
@@ -1309,6 +1311,8 @@ impl TaskPublicStatus {
                 "task_ref",
                 "ledger_head_digest",
                 "result_digest",
+                "failure_stage",
+                "failure_code",
             ]
             .iter()
             .all(|field| object.contains_key(*field))
@@ -1337,6 +1341,11 @@ impl TaskPublicStatus {
             Value::String(value) if valid_task_ref(value) => Some(value.clone()),
             _ => return None,
         };
+        let failure_stage = optional_public_failure_atom(object.get("failure_stage")?)?;
+        let failure_code = optional_public_failure_atom(object.get("failure_code")?)?;
+        if failure_stage.is_some() != failure_code.is_some() {
+            return None;
+        }
 
         Some(Self {
             status: status.to_owned(),
@@ -1344,6 +1353,8 @@ impl TaskPublicStatus {
             task_ref: task_ref.to_owned(),
             ledger_head_digest: ledger_head_digest.to_owned(),
             result_digest,
+            failure_stage,
+            failure_code,
         })
     }
 
@@ -1355,7 +1366,25 @@ impl TaskPublicStatus {
             "task_ref": self.task_ref,
             "ledger_head_digest": self.ledger_head_digest,
             "result_digest": self.result_digest,
+            "failure_stage": self.failure_stage,
+            "failure_code": self.failure_code,
         })
+    }
+}
+
+fn optional_public_failure_atom(value: &Value) -> Option<Option<String>> {
+    match value {
+        Value::Null => Some(None),
+        Value::String(value)
+            if !value.is_empty()
+                && value.len() <= 128
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+                }) =>
+        {
+            Some(Some(value.clone()))
+        }
+        _ => None,
     }
 }
 
@@ -2106,6 +2135,18 @@ fn task_public_status_schema() -> Value {
                     },
                     {"type": "null"}
                 ]
+            },
+            "failure_stage": {
+                "anyOf": [
+                    {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z0-9_]+$"},
+                    {"type": "null"}
+                ]
+            },
+            "failure_code": {
+                "anyOf": [
+                    {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z0-9_]+$"},
+                    {"type": "null"}
+                ]
             }
         },
         "required": [
@@ -2114,7 +2155,9 @@ fn task_public_status_schema() -> Value {
             "task_state",
             "task_ref",
             "ledger_head_digest",
-            "result_digest"
+            "result_digest",
+            "failure_stage",
+            "failure_code"
         ],
         "additionalProperties": false
     })
@@ -2499,7 +2542,8 @@ mod acceptance_evidence_tests {
     use super::{
         ACCEPTANCE_EVIDENCE_SCHEMA, AcceptanceEvidence, OBSERVED_EFFECT_EVIDENCE_SCHEMA,
         ObservedEffectEvidence, ObservedEffectKind, RUNTIME_STATUS_TOOL, RequestProtocol,
-        ToolSurface, tool_catalog, verify_observed_effect_evidence,
+        TaskPublicStatus, ToolSurface, closed_task_public_status, tool_catalog,
+        verify_observed_effect_evidence,
     };
     use serde_json::{Value, json};
     use std::fs::File;
@@ -2533,6 +2577,38 @@ mod acceptance_evidence_tests {
         assert_eq!(runtime["inputSchema"]["additionalProperties"], false);
         assert_eq!(runtime["annotations"]["readOnlyHint"], true);
         assert_eq!(runtime["annotations"]["destructiveHint"], false);
+    }
+
+    #[test]
+    fn task_public_status_exposes_only_closed_failure_atoms() {
+        let digest = "ab".repeat(32);
+        let valid = json!({
+            "schema_version": "lattice.task.status.v2",
+            "status": "FAILED",
+            "task_state": "FAILED",
+            "task_ref": digest,
+            "ledger_head_digest": "cd".repeat(32),
+            "result_digest": null,
+            "failure_stage": "CODEX",
+            "failure_code": "LATTICE_DELIVERY_FAILED"
+        });
+        assert!(TaskPublicStatus::from_value(&valid).is_some());
+        assert_eq!(
+            closed_task_public_status(Ok(valid)).expect("closed public status")["failure_code"],
+            "LATTICE_DELIVERY_FAILED"
+        );
+
+        let invalid = json!({
+            "schema_version": "lattice.task.status.v2",
+            "status": "FAILED",
+            "task_state": "FAILED",
+            "task_ref": "ab".repeat(32),
+            "ledger_head_digest": "cd".repeat(32),
+            "result_digest": null,
+            "failure_stage": "CODEX",
+            "failure_code": "path=C:\\\\secret"
+        });
+        assert!(TaskPublicStatus::from_value(&invalid).is_none());
     }
 
     #[test]
