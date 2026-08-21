@@ -3417,7 +3417,7 @@ enum Task050AcceptanceProfile {
 }
 
 impl Task050AcceptanceProfile {
-    const fn identity(self) -> GatewaySubmissionIdentity {
+    const fn identity(self) -> GatewaySubmissionIdentity<'static> {
         match self {
             Self::AskUser => GatewaySubmissionIdentity {
                 project: TASK050_ASK_USER_PROJECT_ID,
@@ -3937,6 +3937,7 @@ const fn controlled_execution_error_kind(
 
 fn task_lifecycle<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
+    binding: &SubjectBinding,
 ) -> TaskLifecycleResult<PostgresTaskLifecycle> {
     record_observed_effect(ObservedEffectKind::Database)
         .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
@@ -3955,7 +3956,7 @@ fn task_lifecycle<H: FullChainHermesPort>(
                 "LATTICE_TASK_LEDGER_DEADLINE_REJECTED",
             )
         })?,
-        task_ledger_identity(core.submission.binding()).map_err(|_| {
+        task_ledger_identity(binding).map_err(|_| {
             TaskLifecycleError::new(
                 TaskLifecycleErrorKind::Corrupt,
                 "LATTICE_TASK_LEDGER_IDENTITY_REJECTED",
@@ -4077,17 +4078,18 @@ fn task_writer_lease<H: FullChainHermesPort>(
 
 fn controlled_task_request<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
+    binding: SubjectBinding,
     client_request_id: &str,
 ) -> Result<ControlledTaskRequest, LatticedError> {
-    let binding = core.submission.binding().clone();
     let invocation = invocation_for_task(core.delivery.database.run_id(), &binding)?;
+    let task_suffix = binding.task_spec_digest().as_str()[..24].to_owned();
     ControlledTaskRequest::new(
         binding,
         client_request_id,
         invocation.attempt_id().clone(),
-        "task038-controlled-canary-lease",
+        format!("lattice-mcp-lease-{task_suffix}"),
         "codex-writer",
-        "task038-controlled-canary-worktree",
+        format!("lattice-mcp-worktree-{task_suffix}"),
         HolderProcessId::new(u64::from(process::id()))
             .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?,
         core.process_start_identity.clone(),
@@ -4126,8 +4128,8 @@ fn verified_controlled_task_reference<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
     binding: &SubjectBinding,
 ) -> Result<ContentDigest, LatticedError> {
-    let mut lifecycle =
-        task_lifecycle(core).map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
+    let mut lifecycle = task_lifecycle(core, binding)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
     let admission_command_id = lifecycle
         .verified_admission_command_id(binding)
         .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
@@ -4267,8 +4269,8 @@ fn verified_task_status<H: FullChainHermesPort>(
     task_ref: &ContentDigest,
 ) -> Result<Value, LatticedError> {
     if evidence.state() == TaskState::Completed {
-        let mut lifecycle =
-            task_lifecycle(core).map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
+        let mut lifecycle = task_lifecycle(core, evidence.binding())
+            .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
         let foundation = lifecycle
             .persistence_foundation(evidence.binding())
             .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
@@ -4428,8 +4430,10 @@ impl<H: FullChainHermesPort> FullChainService<H> {
             CanonicalHermesTool::DeliveryRun,
         )?;
         let binding = core.submission.binding().clone();
+        let submission = core.submission.clone();
         let evidence = Self::run_controlled_writer(
             core,
+            &submission,
             "delivery-run-controlled-compatibility",
             ExistingCompletionPolicy::AcceptOrExecute,
         )?;
@@ -4443,12 +4447,13 @@ impl<H: FullChainHermesPort> FullChainService<H> {
 
     fn run_controlled_writer(
         core: &mut FullChainCore<H>,
+        submission: &TaskSpecSubmission,
         client_request_id: &str,
         existing_completion_policy: ExistingCompletionPolicy,
     ) -> Result<TaskLifecycleEvidence, ToolExecutionError> {
-        let binding = core.submission.binding().clone();
-        let mut lifecycle =
-            task_lifecycle(core).map_err(|error| ToolExecutionError::new(error.code()))?;
+        let binding = submission.binding().clone();
+        let mut lifecycle = task_lifecycle(core, &binding)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
         let foundation = lifecycle
             .persistence_foundation(&binding)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
@@ -4479,7 +4484,7 @@ impl<H: FullChainHermesPort> FullChainService<H> {
             .map_err(|error| ToolExecutionError::new(error.code()))?;
         verify_merging_writer_history(&mut writer_lease, &preexisting)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
-        let request = controlled_task_request(core, client_request_id)
+        let request = controlled_task_request(core, binding.clone(), client_request_id)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
         let task_identity = controlled_task_reference(
             &binding,
@@ -4568,8 +4573,8 @@ impl<H: FullChainHermesPort> FullChainService<H> {
             }
             GatewayStatusTarget::Project(_) | GatewayStatusTarget::Task(_) => {}
         }
-        let mut lifecycle =
-            task_lifecycle(core).map_err(|error| map_task_lifecycle_gateway_error(&error))?;
+        let mut lifecycle = task_lifecycle(core, &fixed_binding)
+            .map_err(|error| map_task_lifecycle_gateway_error(&error))?;
         let task_evidence = lifecycle
             .load(&fixed_binding)
             .map_err(|error| GatewayServiceError::new(PortErrorKind::Denied, error.code()))?;
@@ -4657,8 +4662,8 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             CanonicalHermesTool::DeliveryStatus,
         )?;
         let binding = core.submission.binding().clone();
-        let mut lifecycle =
-            task_lifecycle(&core).map_err(|error| ToolExecutionError::new(error.code()))?;
+        let mut lifecycle = task_lifecycle(&core, &binding)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
         let evidence = lifecycle
             .load(&binding)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
@@ -4709,8 +4714,11 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             FullChainRunMode::Fresh => ExistingCompletionPolicy::Ignore,
             FullChainRunMode::ResumeExisting => ExistingCompletionPolicy::Require,
         };
+        let submission = mcp_gateway_submission(arguments.client_request_id())
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
         let evidence = Self::run_controlled_writer(
             &mut core,
+            &submission,
             arguments.client_request_id(),
             existing_completion_policy,
         )?;
@@ -4734,9 +4742,11 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             &run_id,
             CanonicalHermesTool::TaskStatus,
         )?;
-        let binding = core.submission.binding().clone();
-        let mut lifecycle =
-            task_lifecycle(&core).map_err(|error| ToolExecutionError::new(error.code()))?;
+        let submission = mcp_gateway_submission(arguments.client_request_id())
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let binding = submission.binding().clone();
+        let mut lifecycle = task_lifecycle(&core, &binding)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
         let evidence = lifecycle
             .load(&binding)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
@@ -5291,11 +5301,31 @@ pub fn fixed_gateway_submission() -> Result<TaskSpecSubmission, LatticedError> {
     })
 }
 
+/// Creates one durable MCP task binding from a client idempotency key.
+///
+/// A terminal result for one request is never reused as the evidence for a
+/// different request; retries with the same key remain idempotent.
+fn mcp_gateway_submission(client_request_id: &str) -> Result<TaskSpecSubmission, LatticedError> {
+    let request_digest = digest(
+        "lattice.mcp.task-submission.v1",
+        &CanonicalValue::String(client_request_id.to_owned()),
+    )?;
+    let task = format!(
+        "TASK-MCP-{}",
+        request_digest.as_str()[..24].to_ascii_uppercase()
+    );
+    gateway_submission(GatewaySubmissionIdentity {
+        project: CONTROLLED_PROJECT_ID,
+        snapshot: CONTROLLED_PROJECT_SNAPSHOT_ID,
+        task: &task,
+    })
+}
+
 #[derive(Clone, Copy)]
-struct GatewaySubmissionIdentity {
-    project: &'static str,
-    snapshot: &'static str,
-    task: &'static str,
+struct GatewaySubmissionIdentity<'a> {
+    project: &'a str,
+    snapshot: &'a str,
+    task: &'a str,
 }
 
 fn task050_acceptance_gateway_submission(
@@ -5305,7 +5335,7 @@ fn task050_acceptance_gateway_submission(
 }
 
 fn gateway_submission(
-    identity: GatewaySubmissionIdentity,
+    identity: GatewaySubmissionIdentity<'_>,
 ) -> Result<TaskSpecSubmission, LatticedError> {
     let task_spec = TaskSpec::new(TaskSpecInput {
         schema_version: TASK_SPEC_SCHEMA_VERSION.to_owned(),
@@ -7955,6 +7985,26 @@ mod tests {
             public_status.get("task_ref").and_then(Value::as_str),
             Some(first.as_str())
         );
+    }
+
+    #[test]
+    fn mcp_submissions_are_distinct_per_request_and_idempotent_per_key() {
+        let first =
+            mcp_gateway_submission("runtime-core-graphify-1").expect("first MCP submission");
+        let retry =
+            mcp_gateway_submission("runtime-core-graphify-1").expect("idempotent MCP submission");
+        let second =
+            mcp_gateway_submission("runtime-core-graphify-2").expect("second MCP submission");
+
+        assert_eq!(first.binding(), retry.binding());
+        assert_ne!(first.binding(), second.binding());
+        assert_ne!(
+            first.binding(),
+            fixed_gateway_submission()
+                .expect("legacy submission")
+                .binding()
+        );
+        assert!(first.binding().task_id().as_str().starts_with("TASK-MCP-"));
     }
 
     #[test]

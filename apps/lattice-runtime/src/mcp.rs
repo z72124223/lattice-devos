@@ -1147,7 +1147,9 @@ pub(crate) fn task_ingress_schema_digest() -> Option<ContentDigest> {
         ),
         (
             "task_status_schema".to_owned(),
-            CanonicalValue::String("closed:task_ref:lower-sha256".to_owned()),
+            CanonicalValue::String(format!(
+                "closed:client_request_id:ascii-control-id:1..={MAX_CLIENT_REQUEST_ID_BYTES};task_ref:lower-sha256"
+            )),
         ),
         (
             "task_output_schema".to_owned(),
@@ -1250,22 +1252,34 @@ impl TaskSubmitArguments {
 /// Validated durable task reference accepted by the MCP transport boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskStatusArguments {
+    client_request_id: String,
     task_ref: String,
 }
 
 impl TaskStatusArguments {
     fn from_value(value: Option<&Value>) -> Option<Self> {
         let arguments = value?.as_object()?;
-        if arguments.len() != 1 || !arguments.contains_key("task_ref") {
+        if arguments.len() != 2
+            || !arguments.contains_key("client_request_id")
+            || !arguments.contains_key("task_ref")
+        {
             return None;
         }
+        let client_request_id = arguments.get("client_request_id")?.as_str()?;
         let task_ref = arguments.get("task_ref")?.as_str()?;
-        if !valid_task_ref(task_ref) {
+        if !valid_client_request_id(client_request_id) || !valid_task_ref(task_ref) {
             return None;
         }
         Some(Self {
+            client_request_id: client_request_id.to_owned(),
             task_ref: task_ref.to_owned(),
         })
+    }
+
+    /// Returns the idempotency key that owns this task reference.
+    #[must_use]
+    pub fn client_request_id(&self) -> &str {
+        &self.client_request_id
     }
 
     /// Returns the exact lowercase SHA-256 task reference.
@@ -2036,6 +2050,12 @@ fn task_status_arguments_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
+            "client_request_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_CLIENT_REQUEST_ID_BYTES,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            },
             "task_ref": {
                 "type": "string",
                 "minLength": 64,
@@ -2043,7 +2063,7 @@ fn task_status_arguments_schema() -> Value {
                 "pattern": "^[0-9a-f]{64}$"
             }
         },
-        "required": ["task_ref"],
+        "required": ["client_request_id", "task_ref"],
         "additionalProperties": false
     })
 }

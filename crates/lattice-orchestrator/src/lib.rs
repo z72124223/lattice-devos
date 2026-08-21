@@ -324,7 +324,7 @@ where
     let acquired = writer_lease
         .execute(WriterLeaseRepositoryCommand::Acquire(
             WriterLeaseAcquireRequest {
-                command_id: "task038-writer-acquire".to_owned(),
+                command_id: writer_command_id(&request.binding, "acquire"),
                 expected_head: None,
                 project_id: request.binding.project_id().clone(),
                 project_snapshot_id: request.binding.project_snapshot_id().clone(),
@@ -512,7 +512,7 @@ fn release_writer<W: WriterLeaseRepository>(
     let release = writer_lease
         .execute(WriterLeaseRepositoryCommand::Release(
             WriterLeaseReleaseRequest {
-                command_id: "task038-writer-release".to_owned(),
+                command_id: writer_command_id(&request.binding, "release"),
                 project_id: request.binding.project_id().clone(),
                 expected_head: authority.clone(),
             },
@@ -529,6 +529,14 @@ fn release_writer<W: WriterLeaseRepository>(
         return Err(ControlledTaskOrchestratorError::LeaseMismatch);
     }
     Ok(())
+}
+
+/// Produces distinct, bounded Writer Lease command ids per immutable task
+/// binding. This preserves exact retry semantics for one task without letting
+/// an old terminal task collide with a newly admitted task in the same project.
+fn writer_command_id(binding: &SubjectBinding, operation: &str) -> String {
+    let suffix = &binding.task_spec_digest().as_str()[..24];
+    format!("lattice-task-{operation}-{suffix}")
 }
 
 fn advance<T: TaskLifecyclePort>(
