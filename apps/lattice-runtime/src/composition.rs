@@ -6755,6 +6755,76 @@ pub fn refresh_runtime_graphify_from_environment() -> Result<GraphMemoryReceipt,
             return Err(LatticedError::new(LatticedErrorKind::Configuration));
         }
     };
+    let (source, request) = runtime_graph_source_request(&database)?;
+    if let Some(receipt) =
+        load_runtime_graph_receipt(&database, &password, deadline(timeout)?, &request)?
+    {
+        return Ok(receipt);
+    }
+    run_runtime_graph_memory_request(&database, &password, &source, deadline(timeout)?, &request)
+}
+
+/// Runs the optional Hermes reflection over the current derived Graphify
+/// receipt. This is deliberately independent of the historical delivery lane:
+/// it neither creates nor changes a delivery receipt, and always tears down
+/// the contained Hermes runner before returning.
+///
+/// # Errors
+///
+/// Returns a bounded Graphify-receipt, Hermes, persistence, or teardown error.
+/// A failed optional reflection never changes PostgreSQL task or delivery truth.
+#[cfg(windows)]
+pub fn reflect_runtime_hermes_from_environment() -> Result<HermesReflectionReceipt, LatticedError> {
+    let (_unused_delivery, database, password) =
+        delivery_environment_for_mode(FullChainRunMode::ResumeExisting)?;
+    let timeout = match env::var("LATTICE_DELIVERY_TIMEOUT_SECONDS") {
+        Ok(value) => parse_timeout(&value)?,
+        Err(env::VarError::NotPresent) => Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(LatticedError::new(LatticedErrorKind::Configuration));
+        }
+    };
+    let (_source, request) = runtime_graph_source_request(&database)?;
+    match load_reflection_from_postgres(&database, &password, timeout, &request) {
+        Ok(receipt) => return Ok(receipt),
+        Err(error)
+            if error.kind() == PortErrorKind::Unavailable
+                && error.code() == "MEMORY_RECEIPT_UNAVAILABLE" => {}
+        Err(error) => return Err(map_reflection_read_error(&error)),
+    }
+    let mut hermes = HermesEnvironmentConfig::from_environment()?.launch(database.run_id())?;
+    let result = load_or_run_canonical_reflection(
+        &mut hermes,
+        database.run_id(),
+        &request,
+        |request| load_reflection_from_postgres(&database, &password, timeout, request),
+        |request| {
+            load_runtime_graph_receipt(&database, &password, deadline(timeout)?, request).and_then(
+                |receipt| {
+                    receipt.ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphReceiptRead))
+                },
+            )
+        },
+        |candidate| persist_reflection_to_postgres(&database, &password, timeout, candidate),
+    );
+    let teardown = production_hermes_sealed::Sealed::terminate(&mut hermes);
+    match (result, teardown) {
+        (Ok(receipt), Ok(())) => Ok(receipt),
+        (_, Err(error)) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+    }
+}
+
+#[cfg(not(windows))]
+pub fn reflect_runtime_hermes_from_environment() -> Result<HermesReflectionReceipt, LatticedError> {
+    Err(LatticedError::new(
+        LatticedErrorKind::HermesProductionRunnerRequired,
+    ))
+}
+
+fn runtime_graph_source_request(
+    database: &DeliveryDatabaseBinding,
+) -> Result<(RuntimeGraphSource, GraphMemoryRunRequest), LatticedError> {
     let (source, commit) = runtime_graph_source_from_environment()?;
     let configuration_digest = digest(
         "lattice.runtime.graphify-source-configuration",
@@ -6776,12 +6846,7 @@ pub fn refresh_runtime_graphify_from_environment() -> Result<GraphMemoryReceipt,
         ]),
     )?;
     let request = runtime_graph_request(database.run_id(), &commit, configuration_digest)?;
-    if let Some(receipt) =
-        load_runtime_graph_receipt(&database, &password, deadline(timeout)?, &request)?
-    {
-        return Ok(receipt);
-    }
-    run_runtime_graph_memory_request(&database, &password, &source, deadline(timeout)?, &request)
+    Ok((source, request))
 }
 
 fn load_runtime_graph_receipt(

@@ -85,6 +85,18 @@ fn main() -> ExitCode {
                 }
             };
         }
+        if argument == "--hermes-reflect" && arguments.next().is_none() {
+            return match lattice_runtime::composition::reflect_runtime_hermes_from_environment() {
+                Ok(_) => {
+                    eprintln!("LATTICE_HERMES_REFLECTION_READY");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{}", error.code());
+                    ExitCode::from(2)
+                }
+            };
+        }
         if argument == "--postgres-bootstrap" && arguments.next().is_none() {
             return match lattice_runtime::composition::bootstrap_postgres_extensions_from_environment() {
                 Ok(()) => {

@@ -940,6 +940,23 @@ fn latticed_hermes_preflight_reports_exact_missing_settings() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn latticed_hermes_reflect_rejects_missing_runtime_configuration_before_any_effect() {
+    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
+        .arg("--hermes-reflect")
+        .env_clear()
+        .output()
+        .expect("start standalone Hermes reflection entrypoint");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr utf8"),
+        "LATTICED_CONFIGURATION_REJECTED\n"
+    );
+}
+
 #[test]
 fn latticed_hermes_runtime_preflight_explicitly_rejects_missing_isolation_configuration() {
     let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
