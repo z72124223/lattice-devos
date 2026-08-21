@@ -4720,12 +4720,26 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             &run_id,
             CanonicalHermesTool::TaskSubmit,
         )?;
+        let submission = mcp_gateway_submission(arguments.client_request_id())
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        if core.run_mode == FullChainRunMode::ResumeExisting {
+            let binding = submission.binding().clone();
+            let mut lifecycle = task_lifecycle(&core, &binding)
+                .map_err(|error| ToolExecutionError::new(error.code()))?;
+            let evidence = lifecycle
+                .load(&binding)
+                .map_err(|error| ToolExecutionError::new(error.code()))?;
+            if evidence.admitted() && evidence.state() == TaskState::Failed {
+                let task_ref = verified_controlled_task_reference(&core, &binding)
+                    .map_err(|error| ToolExecutionError::new(error.code()))?;
+                return verified_task_status(&mut core, &evidence, &task_ref)
+                    .map_err(|error| ToolExecutionError::new(error.code()));
+            }
+        }
         let existing_completion_policy = match core.run_mode {
             FullChainRunMode::Fresh => ExistingCompletionPolicy::Ignore,
             FullChainRunMode::ResumeExisting => ExistingCompletionPolicy::Require,
         };
-        let submission = mcp_gateway_submission(arguments.client_request_id())
-            .map_err(|error| ToolExecutionError::new(error.code()))?;
         let evidence = Self::run_controlled_writer(
             &mut core,
             &submission,
