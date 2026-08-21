@@ -305,6 +305,12 @@ pub enum LatticedErrorKind {
     ScriptedFixtureRejected,
     GraphConfiguration,
     GraphExecution,
+    GraphSnapshotExecution,
+    GraphifyExecution,
+    GraphNormalization,
+    GraphPersistence,
+    GraphRetrieval,
+    GraphReceipt,
     GraphReceiptRead,
     HermesPreparationMissing,
     HermesPreparationRequired,
@@ -340,6 +346,12 @@ impl LatticedErrorKind {
             Self::ScriptedFixtureRejected => "LATTICE_SCRIPTED_FIXTURE_REJECTED",
             Self::GraphConfiguration => "LATTICE_GRAPH_MEMORY_CONFIGURATION_REJECTED",
             Self::GraphExecution => "LATTICE_GRAPH_MEMORY_RUN_REJECTED",
+            Self::GraphSnapshotExecution => "LATTICE_GRAPH_MEMORY_SNAPSHOT_REJECTED",
+            Self::GraphifyExecution => "LATTICE_GRAPH_MEMORY_GRAPHIFY_REJECTED",
+            Self::GraphNormalization => "LATTICE_GRAPH_MEMORY_NORMALIZATION_REJECTED",
+            Self::GraphPersistence => "LATTICE_GRAPH_MEMORY_PERSISTENCE_REJECTED",
+            Self::GraphRetrieval => "LATTICE_GRAPH_MEMORY_RETRIEVAL_REJECTED",
+            Self::GraphReceipt => "LATTICE_GRAPH_MEMORY_RECEIPT_STAGE_REJECTED",
             Self::GraphReceiptRead => "LATTICE_GRAPH_MEMORY_RECEIPT_REJECTED",
             Self::HermesPreparationMissing => "LATTICE_HERMES_PREPARATION_REQUIRED",
             Self::HermesPreparationRequired => "LATTICE_HERMES_PREPARATION_REJECTED",
@@ -6179,6 +6191,12 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         | LatticedErrorKind::OfficialLiveBlocked
         | LatticedErrorKind::ScriptedFixtureRejected
         | LatticedErrorKind::GraphExecution
+        | LatticedErrorKind::GraphSnapshotExecution
+        | LatticedErrorKind::GraphifyExecution
+        | LatticedErrorKind::GraphNormalization
+        | LatticedErrorKind::GraphPersistence
+        | LatticedErrorKind::GraphRetrieval
+        | LatticedErrorKind::GraphReceipt
         | LatticedErrorKind::HermesPreparationMissing
         | LatticedErrorKind::HermesPreparationRequired
         | LatticedErrorKind::HermesProductionRunnerRequired
@@ -6715,7 +6733,7 @@ fn run_graph_memory_request(
         .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
 
     run_graph_memory(request, &query, &mut snapshot, &mut graphify, &mut memory)
-        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphExecution))
+        .map_err(graph_memory_execution_error)
 }
 
 /// Refreshes derived Graphify memory from the fixed, clean Git source selected
@@ -6834,7 +6852,23 @@ fn run_runtime_graph_memory_request(
     let mut memory = PostgresCodebaseMemory::new(client, target)
         .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     run_graph_memory(request, &query, &mut snapshot, &mut graphify, &mut memory)
-        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphExecution))
+        .map_err(graph_memory_execution_error)
+}
+
+/// Converts the orchestrator's typed stage into a fixed, payload-free runtime
+/// error code.  The underlying adapter diagnostic stays out of the CLI/MCP
+/// boundary, while recovery logic can still tell where to look.
+fn graph_memory_execution_error(error: GraphMemoryOrchestratorError) -> LatticedError {
+    let kind = match error {
+        GraphMemoryOrchestratorError::Snapshot(_) => LatticedErrorKind::GraphSnapshotExecution,
+        GraphMemoryOrchestratorError::Graphify(_) => LatticedErrorKind::GraphifyExecution,
+        GraphMemoryOrchestratorError::Normalize(_) => LatticedErrorKind::GraphNormalization,
+        GraphMemoryOrchestratorError::Persistence(_) => LatticedErrorKind::GraphPersistence,
+        GraphMemoryOrchestratorError::Retrieval(_) => LatticedErrorKind::GraphRetrieval,
+        GraphMemoryOrchestratorError::Receipt(_) => LatticedErrorKind::GraphReceipt,
+        GraphMemoryOrchestratorError::EvidenceMismatch(_) => LatticedErrorKind::GraphExecution,
+    };
+    LatticedError::new(kind)
 }
 
 fn graphify_runtime_root_from_environment(repository_root: &Path) -> PathBuf {
@@ -8837,6 +8871,21 @@ mod tests {
         assert_eq!(
             value["graphify_error_code"],
             "LATTICE_GRAPH_MEMORY_RUN_REJECTED"
+        );
+    }
+
+    #[test]
+    fn graph_memory_failure_keeps_its_stage_without_exposing_adapter_output() {
+        let error = GraphMemoryOrchestratorError::Graphify(GraphMemoryPortError::new(
+            GraphMemoryStage::Graphify,
+            PortErrorKind::Unavailable,
+            GraphMemoryFailureCertainty::Known,
+            "GRAPHIFY_PRIVATE_EXTRACT_STDERR_REJECTED",
+        ));
+
+        assert_eq!(
+            graph_memory_execution_error(error).code(),
+            "LATTICE_GRAPH_MEMORY_GRAPHIFY_REJECTED"
         );
     }
 
