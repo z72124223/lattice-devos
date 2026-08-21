@@ -2969,6 +2969,35 @@ pub enum HermesRuntimePreflight {
     ConfigurationPresentUnverified,
 }
 
+/// Fixed, redacted result of verifying Hermes' local Codex broker boundary.
+///
+/// This check never starts Hermes or asks a model to produce a response. It
+/// validates only the dedicated Codex sign-in, pinned launcher, and an owned
+/// temporary broker configuration.
+#[derive(Debug, Eq, PartialEq)]
+pub enum HermesCodexBrokerPreflight {
+    MissingConfiguration(Vec<&'static str>),
+    ConfigurationRejected,
+    Ready,
+}
+
+impl HermesCodexBrokerPreflight {
+    /// Renders one stable, stderr-safe record.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            Self::MissingConfiguration(names) => format!(
+                "LATTICE_HERMES_CODEX_BROKER_PREFLIGHT_MISSING_CONFIGURATION:{}",
+                names.join(",")
+            ),
+            Self::ConfigurationRejected => {
+                "LATTICE_HERMES_CODEX_BROKER_PREFLIGHT_CONFIGURATION_REJECTED".to_owned()
+            }
+            Self::Ready => "LATTICE_HERMES_CODEX_BROKER_PREFLIGHT_READY".to_owned(),
+        }
+    }
+}
+
 impl HermesRuntimePreflight {
     /// Renders one stable, stderr-safe record.
     #[must_use]
@@ -3141,6 +3170,55 @@ pub fn hermes_runtime_preflight_from_environment() -> HermesRuntimePreflight {
             HermesRuntimePreflight::ConfigurationPresentUnverified
         } else {
             HermesRuntimePreflight::ConfigurationRejected
+        }
+    }
+}
+
+/// Verifies the Hermes-to-Codex local broker boundary without starting Hermes
+/// or issuing a model request. Any temporary broker root is owned and cleaned
+/// by the adapter when this check returns.
+#[must_use]
+pub fn hermes_codex_broker_preflight_from_environment() -> HermesCodexBrokerPreflight {
+    #[cfg(not(windows))]
+    {
+        HermesCodexBrokerPreflight::ConfigurationRejected
+    }
+    #[cfg(windows)]
+    {
+        const REQUIRED: [&str; 4] = [
+            "LATTICE_HERMES_CODEX_LAUNCHER",
+            "LATTICE_HERMES_CODEX_HOME",
+            "LATTICE_HERMES_BROKER_ISOLATION_ROOT",
+            "LATTICE_HERMES_DEADLINE_SECONDS",
+        ];
+        let missing = REQUIRED
+            .into_iter()
+            .filter(|name| std::env::var_os(name).is_none())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return HermesCodexBrokerPreflight::MissingConfiguration(missing);
+        }
+
+        let result = (|| {
+            let configuration = HermesEnvironmentConfig::from_environment()?;
+            let deadline = Instant::now()
+                .checked_add(configuration.timeout)
+                .ok_or_else(|| {
+                    LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired)
+                })?;
+            let _receipt = configuration
+                .broker
+                .run_zero_model_preflight(deadline)
+                .map_err(|_| {
+                    LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired)
+                })?;
+            Ok::<(), LatticedError>(())
+        })();
+
+        if result.is_ok() {
+            HermesCodexBrokerPreflight::Ready
+        } else {
+            HermesCodexBrokerPreflight::ConfigurationRejected
         }
     }
 }

@@ -50,6 +50,19 @@ fn main() -> ExitCode {
             eprintln!("{}", preflight.render());
             return ExitCode::from(2);
         }
+        if argument == "--hermes-codex-broker-preflight" && arguments.next().is_none() {
+            let preflight =
+                lattice_runtime::composition::hermes_codex_broker_preflight_from_environment();
+            eprintln!("{}", preflight.render());
+            return if matches!(
+                preflight,
+                lattice_runtime::composition::HermesCodexBrokerPreflight::Ready
+            ) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            };
+        }
         if argument == "--graphify-runtime-preflight" && arguments.next().is_none() {
             let preflight =
                 lattice_runtime::composition::graphify_runtime_preflight_from_environment();
