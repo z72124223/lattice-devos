@@ -2987,6 +2987,19 @@ impl HermesRuntimePreflight {
     }
 }
 
+fn hermes_activation_status(preflight: HermesProductionPreflight) -> &'static str {
+    match preflight {
+        HermesProductionPreflight::MissingConfiguration(names)
+            if names.contains(&"LATTICE_HERMES_API_KEY") =>
+        {
+            "CREDENTIAL_REQUIRED"
+        }
+        HermesProductionPreflight::MissingConfiguration(_) => "CONFIGURATION_REQUIRED",
+        HermesProductionPreflight::ConfigurationRejected => "CONFIGURATION_REJECTED",
+        HermesProductionPreflight::ConfigurationPresentUnverified => "PREPARED",
+    }
+}
+
 /// Fixed, redacted result of the standalone Graphify runtime identity check.
 /// This check never starts Graphify, PostgreSQL, Hermes, or a delivery run.
 #[derive(Debug, Eq, PartialEq)]
@@ -3752,6 +3765,12 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         object.insert(
             "hermes_runtime_status".to_owned(),
             Value::String(hermes_status.to_owned()),
+        );
+        object.insert(
+            "hermes_activation_status".to_owned(),
+            Value::String(
+                hermes_activation_status(hermes_production_preflight_from_environment()).to_owned(),
+            ),
         );
         Ok(base)
     }
@@ -8391,6 +8410,27 @@ mod tests {
         );
         assert!(parse_runtime_integration_mode(Some("full_chain")).is_err());
         assert!(parse_runtime_integration_mode(Some("")).is_err());
+    }
+
+    #[test]
+    fn hermes_activation_status_distinguishes_credentials_from_other_setup() {
+        assert_eq!(
+            hermes_activation_status(HermesProductionPreflight::MissingConfiguration(vec![
+                "LATTICE_HERMES_API_KEY",
+                "LATTICE_HERMES_CODEX_HOME",
+            ])),
+            "CREDENTIAL_REQUIRED"
+        );
+        assert_eq!(
+            hermes_activation_status(HermesProductionPreflight::MissingConfiguration(vec![
+                "LATTICE_HERMES_CODEX_HOME",
+            ])),
+            "CONFIGURATION_REQUIRED"
+        );
+        assert_eq!(
+            hermes_activation_status(HermesProductionPreflight::ConfigurationPresentUnverified),
+            "PREPARED"
+        );
     }
 
     #[test]
