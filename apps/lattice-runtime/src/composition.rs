@@ -1530,14 +1530,14 @@ impl LatticedDeliveryService {
     /// configuration, invalid ledger identity, or any governed delivery error.
     pub fn run_task_json(
         &mut self,
+        submission: &TaskSpecSubmission,
         binding: &SubjectBinding,
         store_authority: &StoreAuthorityHead,
         writer_authority: &WriterLeaseAuthorityHead,
         writer_guard: &mut dyn WriterAuthorityGuardPort,
         delivery_root: &Path,
     ) -> Result<Value, LatticedError> {
-        let expected = fixed_gateway_submission()?;
-        if expected.binding() != binding {
+        if submission.binding() != binding {
             return Err(LatticedError::new(LatticedErrorKind::Contract));
         }
         let config = controlled_task_delivery_config(
@@ -3782,6 +3782,7 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
 
     fn run_task_json(
         &mut self,
+        submission: &TaskSpecSubmission,
         binding: &SubjectBinding,
         writer_authority: &WriterLeaseAuthorityHead,
         writer_guard: &mut dyn WriterAuthorityGuardPort,
@@ -3789,6 +3790,7 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
     ) -> Result<Value, LatticedError> {
         match self.run_mode {
             FullChainRunMode::Fresh => self.delivery.run_task_json(
+                submission,
                 binding,
                 &self.store_authority,
                 writer_authority,
@@ -3870,6 +3872,7 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
 
 struct FullChainTaskExecution<'a, H> {
     core: &'a mut FullChainCore<H>,
+    submission: &'a TaskSpecSubmission,
     task_identity: ContentDigest,
 }
 
@@ -3904,7 +3907,13 @@ impl<H: FullChainHermesPort> ControlledTaskExecutionPort for FullChainTaskExecut
         })?;
         let value = self
             .core
-            .run_task_json(binding, writer_authority, writer_guard, &delivery_root)
+            .run_task_json(
+                self.submission,
+                binding,
+                writer_authority,
+                writer_guard,
+                &delivery_root,
+            )
             .map_err(|error| {
                 let kind = controlled_execution_error_kind(error.kind());
                 ControlledTaskExecutionError::new(kind, error.code())
@@ -4496,6 +4505,7 @@ impl<H: FullChainHermesPort> FullChainService<H> {
         let outcome = {
             let mut execution = FullChainTaskExecution {
                 core,
+                submission,
                 task_identity,
             };
             run_controlled_task(&request, &mut lifecycle, &mut writer_lease, &mut execution)
