@@ -1,7 +1,7 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 2.1
+version: 2.2
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-22
@@ -79,11 +79,12 @@ Orchestrator composition.
   Delivery Status and both Task tools perform zero Hermes activation. MCP EOF
   explicitly reaps an activated runner, and teardown ambiguity cannot exit 0.
 - Through canonical `latticed`, default the process-owned
-  `LATTICE_RUNTIME_INTEGRATION` setting to `CORE_ONLY`. In this mode MCP
-  delivery/status returns only the verified PostgreSQL receipt and does not
-  activate Graphify or Hermes. `FULL_CHAIN` is the sole explicit opt-in for
-  the historical Graphify/Hermes analysis continuation; its analysis receipt
-  supplements, rather than replaces, the durable delivery receipt.
+  `LATTICE_RUNTIME_INTEGRATION` setting to `CORE_ONLY`. `GRAPHIFY` adds only
+  the independently verifiable Graphify projection. `GRAPHIFY_HERMES` adds
+  Hermes reflection after Graphify; legacy `FULL_CHAIN` remains its alias for
+  compatibility. A Graphify or Hermes failure is reported as that component's
+  bounded `DEGRADED` status and error code; it never erases or replaces a
+  verified PostgreSQL delivery receipt.
 - Production Hermes configuration requires exactly the twelve executed-input
   settings for preparation, runtime, containment, API bearer, Codex launcher
   and home, broker run root, and deadline. Legacy
@@ -271,11 +272,11 @@ does make the Runtime unavailable for fact-dependent work. Existing historical
 full-chain entry points remain compatibility/explicit-integration paths, not
 the normal acceptance requirement for each component.
 
-Version 2.1 makes that boundary executable at the canonical MCP entry: normal
-operation is `CORE_ONLY`, while the historical Graphify/Hermes continuation is
-available only through the explicit `FULL_CHAIN` integration mode. Core
-projections use the durable delivery receipt digest; full-chain projections
-retain their separate analysis receipt digest.
+Version 2.2 makes the Runtime a single local composition with independently
+verifiable internal departments: `CORE_ONLY`, `GRAPHIFY`, and
+`GRAPHIFY_HERMES`. Core projections use the durable delivery receipt digest;
+Graphify and Hermes add derived evidence only and degrade visibly without
+invalidating core truth.
 
 Version 1.8 emits the Task Ledger 2.3 required-profile marker for new
 controlled-task admissions and fails closed when required receipt replay is

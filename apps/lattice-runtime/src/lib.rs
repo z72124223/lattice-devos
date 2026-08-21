@@ -355,9 +355,12 @@ fn execute_runtime_health(database: &DeliveryDatabaseBinding) -> Result<Value, R
 }
 
 fn runtime_health_projection(integration_mode: Option<&str>) -> Result<Value, RuntimeError> {
-    let (mode, optional_component_status) = match integration_mode {
-        None | Some("CORE_ONLY") => ("CORE_ONLY", "DEFERRED"),
-        Some("FULL_CHAIN") => ("FULL_CHAIN", "NOT_INSPECTED"),
+    let (mode, graphify_status, hermes_status) = match integration_mode {
+        None | Some("CORE_ONLY") => ("CORE_ONLY", "DEFERRED", "DEFERRED"),
+        Some("GRAPHIFY") => ("GRAPHIFY", "NOT_INSPECTED", "DEFERRED"),
+        Some("GRAPHIFY_HERMES") | Some("FULL_CHAIN") => {
+            ("GRAPHIFY_HERMES", "NOT_INSPECTED", "NOT_INSPECTED")
+        }
         Some(_) => return Err(RuntimeError::Latticed(LatticedErrorKind::Configuration)),
     };
 
@@ -368,8 +371,8 @@ fn runtime_health_projection(integration_mode: Option<&str>) -> Result<Value, Ru
             "control": {"status": "READY", "role": "coordination"},
             "postgresql": {"status": "CONNECTABLE", "role": "durable-truth"},
             "delivery_receipt": {"status": "NOT_INSPECTED", "role": "read-separately"},
-            "graphify": {"status": optional_component_status, "role": "derived-memory"},
-            "hermes": {"status": optional_component_status, "role": "reflection"}
+            "graphify": {"status": graphify_status, "role": "derived-memory"},
+            "hermes": {"status": hermes_status, "role": "reflection"}
         }
     }))
 }
@@ -505,6 +508,14 @@ mod tests {
                 crate::composition::LatticedErrorKind::Configuration
             ))
         );
+    }
+
+    #[test]
+    fn graphify_health_does_not_claim_hermes_is_active() {
+        let health = runtime_health_projection(Some("GRAPHIFY")).expect("graphify health");
+        assert_eq!(health["mode"], "GRAPHIFY");
+        assert_eq!(health["components"]["graphify"]["status"], "NOT_INSPECTED");
+        assert_eq!(health["components"]["hermes"]["status"], "DEFERRED");
     }
 
     #[test]

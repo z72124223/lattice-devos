@@ -1758,8 +1758,11 @@ impl LatticedDeliveryService {
             &graph_paths,
             deadline(self.timeout)?,
             &request,
-        )?;
-        append_graph_receipt_to_json(base, &graph_receipt)
+        );
+        match graph_receipt {
+            Ok(receipt) => append_graph_receipt_to_json(base, &receipt),
+            Err(error) => append_optional_component_degraded_json(base, "graphify", error),
+        }
     }
 
     fn status_task_downstream_json(
@@ -1773,8 +1776,11 @@ impl LatticedDeliveryService {
             &self.password,
             deadline(self.timeout)?,
             &request,
-        )?;
-        append_graph_receipt_to_json(base, &graph_receipt)
+        );
+        match graph_receipt {
+            Ok(receipt) => append_graph_receipt_to_json(base, &receipt),
+            Err(error) => append_optional_component_degraded_json(base, "graphify", error),
+        }
     }
 
     fn status_request_json(
@@ -1965,9 +1971,7 @@ where
         }
     };
     #[cfg(not(windows))]
-    if integration_mode == RuntimeIntegrationMode::FullChain
-        && hermes_mode == CanonicalHermesMode::Production
-    {
+    if integration_mode.uses_hermes() && hermes_mode == CanonicalHermesMode::Production {
         let error = LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired);
         diagnostic(StartupDiagnostic::failure(
             "NONE",
@@ -2004,18 +2008,19 @@ where
     diagnostic(StartupDiagnostic::configuration_validated());
     diagnostic(StartupDiagnostic::service_assembly_started());
     let hermes = match (integration_mode, hermes_mode) {
-        (RuntimeIntegrationMode::CoreOnly, _) | (_, CanonicalHermesMode::TaskOnly) => {
+        (_, CanonicalHermesMode::TaskOnly)
+        | (RuntimeIntegrationMode::CoreOnly | RuntimeIntegrationMode::Graphify, _) => {
             CanonicalHermes::TaskOnly(DeferredTaskHermes)
         }
         #[cfg(windows)]
-        (RuntimeIntegrationMode::FullChain, CanonicalHermesMode::Production) => {
+        (RuntimeIntegrationMode::GraphifyHermes, CanonicalHermesMode::Production) => {
             CanonicalHermes::Production {
                 active: None,
                 activation_attempted: false,
             }
         }
         #[cfg(not(windows))]
-        (RuntimeIntegrationMode::FullChain, CanonicalHermesMode::Production) => {
+        (RuntimeIntegrationMode::GraphifyHermes, CanonicalHermesMode::Production) => {
             unreachable!("non-Windows production mode returns before composition")
         }
     };
@@ -2027,8 +2032,7 @@ where
         submission,
         run_mode,
         integration_mode,
-        integration_mode == RuntimeIntegrationMode::FullChain
-            && hermes_mode == CanonicalHermesMode::Production,
+        integration_mode.uses_hermes() && hermes_mode == CanonicalHermesMode::Production,
     )
     .inspect_err(|error| {
         diagnostic(StartupDiagnostic::failure(
@@ -3195,7 +3199,18 @@ enum FullChainRunMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeIntegrationMode {
     CoreOnly,
-    FullChain,
+    Graphify,
+    GraphifyHermes,
+}
+
+impl RuntimeIntegrationMode {
+    const fn uses_graphify(self) -> bool {
+        !matches!(self, Self::CoreOnly)
+    }
+
+    const fn uses_hermes(self) -> bool {
+        matches!(self, Self::GraphifyHermes)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3374,7 +3389,10 @@ fn parse_runtime_integration_mode(
 ) -> Result<RuntimeIntegrationMode, LatticedError> {
     match value {
         None | Some("CORE_ONLY") => Ok(RuntimeIntegrationMode::CoreOnly),
-        Some("FULL_CHAIN") => Ok(RuntimeIntegrationMode::FullChain),
+        Some("GRAPHIFY") => Ok(RuntimeIntegrationMode::Graphify),
+        // Keep the legacy spelling readable, but express the new composition
+        // in terms of the independently degradable components.
+        Some("GRAPHIFY_HERMES") | Some("FULL_CHAIN") => Ok(RuntimeIntegrationMode::GraphifyHermes),
         Some(_) => Err(LatticedError::new(LatticedErrorKind::Configuration)),
     }
 }
@@ -3501,10 +3519,13 @@ where
 
 impl<H: FullChainHermesPort> FullChainCore<H> {
     fn status_json(&mut self, entry: FullChainEntry) -> Result<Value, LatticedError> {
-        if self.integration_mode == RuntimeIntegrationMode::CoreOnly {
+        if !self.integration_mode.uses_graphify() {
             return self.delivery.core_status_json();
         }
         let base = self.delivery.status_json()?;
+        if !self.integration_mode.uses_hermes() {
+            return Ok(base);
+        }
         let request = graph_request_from_json(self.delivery.database.run_id(), &base)?;
         let reflection = load_canonical_reflection(&request, |request| {
             load_reflection_from_postgres(
@@ -3545,12 +3566,17 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         entry: FullChainEntry,
         binding: &SubjectBinding,
     ) -> Result<Value, LatticedError> {
-        if self.integration_mode == RuntimeIntegrationMode::CoreOnly {
+        if !self.integration_mode.uses_graphify() {
             return self.delivery.status_task_json(binding);
         }
         let base = self.delivery.run_task_downstream_json(binding)?;
-        let reflection = self.load_or_run_reflection(&base)?;
-        append_full_chain_json(base, &reflection, entry)
+        if !self.integration_mode.uses_hermes() {
+            return Ok(base);
+        }
+        match self.load_or_run_reflection(&base) {
+            Ok(reflection) => append_full_chain_json(base, &reflection, entry),
+            Err(error) => append_optional_component_degraded_json(base, "hermes", error),
+        }
     }
 
     fn status_task_downstream_json(
@@ -3558,10 +3584,13 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         entry: FullChainEntry,
         binding: &SubjectBinding,
     ) -> Result<Value, LatticedError> {
-        if self.integration_mode == RuntimeIntegrationMode::CoreOnly {
+        if !self.integration_mode.uses_graphify() {
             return self.delivery.status_task_json(binding);
         }
         let base = self.delivery.status_task_downstream_json(binding)?;
+        if !self.integration_mode.uses_hermes() {
+            return Ok(base);
+        }
         let request = graph_request_from_json(self.delivery.database.run_id(), &base)?;
         let reflection = load_canonical_reflection(&request, |request| {
             load_reflection_from_postgres(
@@ -3570,8 +3599,11 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
                 self.delivery.timeout,
                 request,
             )
-        })?;
-        append_full_chain_json(base, &reflection, entry)
+        });
+        match reflection {
+            Ok(receipt) => append_full_chain_json(base, &receipt, entry),
+            Err(error) => append_optional_component_degraded_json(base, "hermes", error),
+        }
     }
 
     fn load_or_run_reflection(
@@ -4904,7 +4936,7 @@ where
         hermes,
         submission,
         run_mode,
-        RuntimeIntegrationMode::FullChain,
+        RuntimeIntegrationMode::GraphifyHermes,
         true,
     )?;
     let client = connect_fixed_runtime_client(database, password, deadline(timeout)?)
@@ -5481,6 +5513,27 @@ fn map_reflection_read_error(error: &GraphMemoryPortError) -> LatticedError {
     } else {
         LatticedError::new(LatticedErrorKind::HermesReceiptRead)
     }
+}
+
+/// Optional analysis must never erase a verified PostgreSQL receipt.  The
+/// caller receives a bounded, machine-readable degradation signal instead.
+fn append_optional_component_degraded_json(
+    mut base: Value,
+    component: &'static str,
+    error: LatticedError,
+) -> Result<Value, LatticedError> {
+    let object = base
+        .as_object_mut()
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
+    object.insert(
+        format!("{component}_status"),
+        Value::String("DEGRADED".to_owned()),
+    );
+    object.insert(
+        format!("{component}_error_code"),
+        Value::String(error.code().to_owned()),
+    );
+    Ok(base)
 }
 
 fn append_full_chain_json(
@@ -7892,7 +7945,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_integration_is_core_only_unless_full_chain_is_explicit() {
+    fn runtime_integration_selects_independently_degradable_components() {
         assert_eq!(
             parse_runtime_integration_mode(None).expect("default integration mode"),
             RuntimeIntegrationMode::CoreOnly
@@ -7902,11 +7955,37 @@ mod tests {
             RuntimeIntegrationMode::CoreOnly
         );
         assert_eq!(
-            parse_runtime_integration_mode(Some("FULL_CHAIN")).expect("explicit full chain"),
-            RuntimeIntegrationMode::FullChain
+            parse_runtime_integration_mode(Some("GRAPHIFY")).expect("graphify mode"),
+            RuntimeIntegrationMode::Graphify
+        );
+        assert_eq!(
+            parse_runtime_integration_mode(Some("GRAPHIFY_HERMES"))
+                .expect("graphify and hermes mode"),
+            RuntimeIntegrationMode::GraphifyHermes
+        );
+        assert_eq!(
+            parse_runtime_integration_mode(Some("FULL_CHAIN")).expect("legacy alias"),
+            RuntimeIntegrationMode::GraphifyHermes
         );
         assert!(parse_runtime_integration_mode(Some("full_chain")).is_err());
         assert!(parse_runtime_integration_mode(Some("")).is_err());
+    }
+
+    #[test]
+    fn optional_component_failure_preserves_the_verified_core_value() {
+        let value = append_optional_component_degraded_json(
+            json!({"receipt_digest": "a".repeat(64), "status": "COMPLETED"}),
+            "graphify",
+            LatticedError::new(LatticedErrorKind::GraphExecution),
+        )
+        .expect("degraded projection");
+        assert_eq!(value["status"], "COMPLETED");
+        assert_eq!(value["receipt_digest"], "a".repeat(64));
+        assert_eq!(value["graphify_status"], "DEGRADED");
+        assert_eq!(
+            value["graphify_error_code"],
+            "LATTICE_GRAPH_MEMORY_RUN_REJECTED"
+        );
     }
 
     #[test]
