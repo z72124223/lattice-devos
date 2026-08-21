@@ -50,6 +50,16 @@ fn main() -> ExitCode {
             eprintln!("{}", preflight.render());
             return ExitCode::from(2);
         }
+        if argument == "--graphify-runtime-preflight" && arguments.next().is_none() {
+            let preflight =
+                lattice_runtime::composition::graphify_runtime_preflight_from_environment();
+            eprintln!("{}", preflight.render());
+            return if preflight.is_identity_verified() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            };
+        }
         if argument == "--hermes-launch" && arguments.next().is_none() {
             return match lattice_runtime::composition::launch_hermes_from_environment() {
                 Ok(()) => ExitCode::SUCCESS,

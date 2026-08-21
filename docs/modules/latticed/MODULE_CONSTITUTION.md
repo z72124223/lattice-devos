@@ -67,6 +67,11 @@ Orchestrator composition.
   arguments, reuses the production Hermes configuration and runner from the
   full-chain composition, reports only fixed redacted failures, grants no MCP
   or task authority, and owns the runner until bounded shutdown.
+- Through canonical `latticed --graphify-runtime-preflight`, expose one
+  read-only identity check for a separately configured, pinned Graphify
+  runtime. It never starts Graphify, PostgreSQL, Hermes, or a delivery run;
+  it reports only fixed configuration/identity classifications and grants no
+  MCP, task, or durable-write authority.
 - Through canonical no-argument `latticed`, accept only process-owned
   `LATTICE_HERMES_MODE=TASK_ONLY|PRODUCTION`. The default and `TASK_ONLY`
   preserve the task-only composition. `PRODUCTION` configures one lazy Hermes

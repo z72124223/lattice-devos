@@ -2790,6 +2790,81 @@ impl HermesRuntimePreflight {
     }
 }
 
+/// Fixed, redacted result of the standalone Graphify runtime identity check.
+/// This check never starts Graphify, PostgreSQL, Hermes, or a delivery run.
+#[derive(Debug, Eq, PartialEq)]
+pub enum GraphifyRuntimePreflight {
+    MissingConfiguration(Vec<&'static str>),
+    ConfigurationRejected,
+    IdentityVerified,
+}
+
+impl GraphifyRuntimePreflight {
+    /// Renders one stable, stderr-safe record.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            Self::MissingConfiguration(names) => format!(
+                "LATTICE_GRAPHIFY_RUNTIME_PREFLIGHT_MISSING_CONFIGURATION:{}",
+                names.join(",")
+            ),
+            Self::ConfigurationRejected => {
+                "LATTICE_GRAPHIFY_RUNTIME_PREFLIGHT_CONFIGURATION_REJECTED".to_owned()
+            }
+            Self::IdentityVerified => {
+                "LATTICE_GRAPHIFY_RUNTIME_PREFLIGHT_IDENTITY_VERIFIED".to_owned()
+            }
+        }
+    }
+
+    /// Returns true only when the pinned runtime identity was verified.
+    #[must_use]
+    pub const fn is_identity_verified(&self) -> bool {
+        matches!(self, Self::IdentityVerified)
+    }
+}
+
+/// Verifies an independently configured, pinned Graphify runtime without starting it.
+/// The runtime root is deliberately supplied outside any historical delivery fixture.
+#[must_use]
+pub fn graphify_runtime_preflight_from_environment() -> GraphifyRuntimePreflight {
+    const REQUIRED: [&str; 2] = ["LATTICE_GRAPHIFY_RUNTIME_ROOT", "LATTICE_GRAPHIFY_WSL_EXE"];
+    let missing = REQUIRED
+        .into_iter()
+        .filter(|name| std::env::var_os(name).is_none())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return GraphifyRuntimePreflight::MissingConfiguration(missing);
+    }
+
+    let result = (|| {
+        let runtime_root = PathBuf::from(
+            std::env::var_os("LATTICE_GRAPHIFY_RUNTIME_ROOT")
+                .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?,
+        );
+        let wsl_executable = PathBuf::from(
+            std::env::var_os("LATTICE_GRAPHIFY_WSL_EXE")
+                .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?,
+        );
+        let staging_root = runtime_root.join(".lattice-preflight-staging");
+        GraphifyRuntimeConfig::new(
+            wsl_executable,
+            runtime_root,
+            staging_root,
+            Duration::from_secs(30),
+            GraphOutputLimits::default(),
+        )
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+        Ok::<(), LatticedError>(())
+    })();
+
+    if result.is_ok() {
+        GraphifyRuntimePreflight::IdentityVerified
+    } else {
+        GraphifyRuntimePreflight::ConfigurationRejected
+    }
+}
+
 /// Validates only the secret-free runtime and isolation configuration without
 /// launching WSL, Hermes, a broker, a provider, or any child process.
 #[must_use]
@@ -5965,8 +6040,10 @@ fn run_graph_memory_request(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let graphify_config = GraphifyRuntimeConfig::new(
-        PathBuf::from(system_root).join("System32/wsl.exe"),
-        fixture.repository_root.join(GRAPHIFY_RUNTIME_RELATIVE_PATH),
+        graphify_wsl_executable_from_environment(
+            PathBuf::from(system_root).join("System32/wsl.exe"),
+        ),
+        graphify_runtime_root_from_environment(&fixture.repository_root),
         graph_root.join("staging"),
         remaining,
         GraphOutputLimits::default(),
@@ -5982,6 +6059,35 @@ fn run_graph_memory_request(
 
     run_graph_memory(request, &query, &mut snapshot, &mut graphify, &mut memory)
         .map_err(|_| LatticedError::new(LatticedErrorKind::GraphExecution))
+}
+
+fn graphify_runtime_root_from_environment(repository_root: &Path) -> PathBuf {
+    graphify_runtime_root_from_value(
+        std::env::var_os("LATTICE_GRAPHIFY_RUNTIME_ROOT")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        repository_root,
+    )
+}
+
+fn graphify_runtime_root_from_value(
+    configured: Option<PathBuf>,
+    repository_root: &Path,
+) -> PathBuf {
+    configured.unwrap_or_else(|| repository_root.join(GRAPHIFY_RUNTIME_RELATIVE_PATH))
+}
+
+fn graphify_wsl_executable_from_environment(default: PathBuf) -> PathBuf {
+    graphify_wsl_executable_from_value(
+        std::env::var_os("LATTICE_GRAPHIFY_WSL_EXE")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        default,
+    )
+}
+
+fn graphify_wsl_executable_from_value(configured: Option<PathBuf>, default: PathBuf) -> PathBuf {
+    configured.unwrap_or(default)
 }
 
 fn load_delivery_graph_receipt(
@@ -7333,6 +7439,31 @@ mod tests {
         assert_eq!(
             controlled_writer_decision(ExistingCompletionPolicy::Ignore, &binding, None),
             Ok(ControlledWriterDecision::Execute)
+        );
+    }
+
+    #[test]
+    fn graphify_runtime_root_can_be_configured_outside_a_delivery_fixture() {
+        let repository_root = Path::new(r"C:\legacy-delivery-fixture");
+        let configured = PathBuf::from(r"C:\ProgramData\LATTICE\graphify-runtime");
+        let default_wsl = PathBuf::from(r"C:\Windows\System32\wsl.exe");
+        let configured_wsl = PathBuf::from(r"C:\LATTICE\pinned\wsl.exe");
+
+        assert_eq!(
+            graphify_runtime_root_from_value(Some(configured.clone()), repository_root),
+            configured
+        );
+        assert_eq!(
+            graphify_runtime_root_from_value(None, repository_root),
+            repository_root.join(GRAPHIFY_RUNTIME_RELATIVE_PATH)
+        );
+        assert_eq!(
+            graphify_wsl_executable_from_value(Some(configured_wsl.clone()), default_wsl.clone()),
+            configured_wsl
+        );
+        assert_eq!(
+            graphify_wsl_executable_from_value(None, default_wsl.clone()),
+            default_wsl
         );
     }
 

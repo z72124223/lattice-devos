@@ -958,6 +958,25 @@ fn latticed_hermes_runtime_preflight_explicitly_rejects_missing_isolation_config
 }
 
 #[test]
+fn latticed_graphify_runtime_preflight_reports_missing_independent_runtime_configuration() {
+    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
+        .arg("--graphify-runtime-preflight")
+        .env_clear()
+        .output()
+        .expect("start canonical latticed Graphify runtime preflight");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr utf8"),
+        concat!(
+            "LATTICE_GRAPHIFY_RUNTIME_PREFLIGHT_MISSING_CONFIGURATION:",
+            "LATTICE_GRAPHIFY_RUNTIME_ROOT,LATTICE_GRAPHIFY_WSL_EXE\n"
+        )
+    );
+}
+
+#[test]
 fn latticed_hermes_launch_routes_to_production_configuration() {
     let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
         .arg("--hermes-launch")
