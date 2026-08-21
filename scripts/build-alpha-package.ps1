@@ -7,6 +7,20 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $stream = [IO.File]::OpenRead($Path)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $repository 'dist'
@@ -89,7 +103,7 @@ try {
     if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
         throw 'ALPHA_SOURCE_COMMIT_REJECTED'
     }
-    $binaryHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'lattice.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $binaryHash = Get-Sha256Hex -Path (Join-Path $packageRoot 'lattice.exe')
     $manifest = [ordered]@{
         product = 'LATTICE DevOS'
         version = $version
@@ -101,10 +115,15 @@ try {
         binary_sha256 = $binaryHash
         capabilities = @('version', 'status', 'status-json')
     }
-    $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $packageRoot 'manifest.json') -Encoding utf8NoBOM
+    $manifestJson = $manifest | ConvertTo-Json -Depth 4
+    [IO.File]::WriteAllText(
+        (Join-Path $packageRoot 'manifest.json'),
+        $manifestJson,
+        [Text.UTF8Encoding]::new($false)
+    )
 
     Compress-Archive -LiteralPath $packageRoot -DestinationPath $archive -CompressionLevel Optimal
-    $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    $archiveHash = Get-Sha256Hex -Path $archive
     "$archiveHash  $([IO.Path]::GetFileName($archive))" | Set-Content -LiteralPath $checksumPath -Encoding ascii
 }
 finally {
