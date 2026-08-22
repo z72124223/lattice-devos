@@ -2978,6 +2978,12 @@ pub enum HermesProductionPreflight {
 pub enum HermesRuntimePreflight {
     MissingConfiguration(Vec<&'static str>),
     ConfigurationRejected,
+    /// A previous Hermes attempt left its exact owned isolation root behind.
+    ///
+    /// This is intentionally a degraded operational state: the root is
+    /// retained as fail-closed evidence and must never be overwritten by a
+    /// later launch.
+    IsolationRootOccupied,
     ConfigurationPresentUnverified,
 }
 
@@ -3021,6 +3027,9 @@ impl HermesRuntimePreflight {
             ),
             Self::ConfigurationRejected => {
                 "LATTICE_HERMES_RUNTIME_PREFLIGHT_CONFIGURATION_REJECTED".to_owned()
+            }
+            Self::IsolationRootOccupied => {
+                "LATTICE_HERMES_RUNTIME_PREFLIGHT_ISOLATION_ROOT_OCCUPIED".to_owned()
             }
             Self::ConfigurationPresentUnverified => {
                 "LATTICE_HERMES_RUNTIME_PREFLIGHT_CONFIGURATION_PRESENT_UNVERIFIED".to_owned()
@@ -3139,6 +3148,18 @@ pub fn hermes_runtime_preflight_from_environment() -> HermesRuntimePreflight {
             return HermesRuntimePreflight::MissingConfiguration(missing);
         }
 
+        // The production runner exclusively owns this exact path and creates
+        // it afresh.  A retained path is therefore already sufficient to
+        // report a safe degraded state; validating launch configuration first
+        // would collapse it into a generic configuration rejection.
+        let isolation_root = PathBuf::from(
+            std::env::var_os("LATTICE_HERMES_ISOLATION_ROOT")
+                .expect("required isolation root was checked above"),
+        );
+        if isolation_root.exists() {
+            return HermesRuntimePreflight::IsolationRootOccupied;
+        }
+
         let result = (|| {
             let product_root = PathBuf::from(hermes_environment("LATTICE_HERMES_PRODUCT_ROOT")?);
             let preparation_root =
@@ -3178,10 +3199,10 @@ pub fn hermes_runtime_preflight_from_environment() -> HermesRuntimePreflight {
             .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
             Ok::<(), LatticedError>(())
         })();
-        if result.is_ok() {
-            HermesRuntimePreflight::ConfigurationPresentUnverified
-        } else {
+        if result.is_err() {
             HermesRuntimePreflight::ConfigurationRejected
+        } else {
+            HermesRuntimePreflight::ConfigurationPresentUnverified
         }
     }
 }
@@ -3838,7 +3859,8 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
             match hermes_runtime_preflight_from_environment() {
                 HermesRuntimePreflight::ConfigurationPresentUnverified => "PREPARED",
                 HermesRuntimePreflight::MissingConfiguration(_)
-                | HermesRuntimePreflight::ConfigurationRejected => "DEGRADED",
+                | HermesRuntimePreflight::ConfigurationRejected
+                | HermesRuntimePreflight::IsolationRootOccupied => "DEGRADED",
             }
         } else {
             "DEFERRED"
