@@ -1367,7 +1367,7 @@ export function deriveContinuation(item, duplicateCount = 1) {
     item.evidenceState !== "complete" ||
     continuationOutcomesReconcile.has(item.outcome) ||
     (item.git?.clean === null && item.isDefaultBranch !== true) ||
-    item.git?.sync?.state === "unknown" ||
+    item.git?.sync?.state !== "synced" ||
     item.git?.sync?.remoteVerified !== true
   ) {
     return {

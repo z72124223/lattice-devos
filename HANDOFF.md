@@ -2403,3 +2403,47 @@ merge, deployment, or external LATTICE task binding occurred.
 Inspect final diff and create a clean local commit. Do not run the delivery
 finisher unless current user scope explicitly authorizes external feature-branch
 push; do not merge, deploy, or archive.
+
+---
+
+# TASK-099 Bounded Autonomy-Improvement Cycle — 2026-08-23
+
+## Status
+
+`NEEDS_REVIEW`: local hardening is complete and ready to commit. The commit is
+blocked because this worktree's shared Git metadata is outside the writable
+sandbox and Git cannot create its `index.lock`. LATTICE runtime status was
+unavailable because the MCP call was cancelled. Remote synchronization is
+unverified: `git fetch --all --prune` failed because the current Windows
+credential context has no usable credentials, and this branch has no configured
+upstream.
+
+## Change
+
+- Continuation now returns `RECONCILIATION_REQUIRED` for every Git sync state
+  except exact `synced`. Previously, `remote-changed` could be treated as
+  `CONTINUE` merely because the remote lookup itself succeeded.
+- Added a focused regression case for that remote-changed condition.
+
+## Verification
+
+- RED: `node --test --test-name-pattern='derives one fail-closed continuation decision' test/engineering-status-dashboard.test.js` exited 1 before the change, returning `CONTINUE` instead of `RECONCILIATION_REQUIRED`.
+- GREEN focused test, dashboard suite (27/27), `npm.cmd run check`,
+  `npm.cmd run verify` (127/127), and `git diff --check` all exited 0.
+
+## Review
+
+- Independent read-only code review of the final three-file diff found and
+  closed one P3 handoff wording mismatch; no P0–P2 finding remains.
+- No architecture review trigger: the patch tightens an existing fail-closed
+  condition and adds no contract, dependency, authority, persistence, or
+  schema change.
+
+## Next Action
+
+Keep the task open. First commit the existing three-file diff from an execution
+context permitted to write the shared Git worktree metadata. Before any delivery
+attempt, restore usable remote credentials, configure/verify the named upstream,
+obtain a successful LATTICE runtime/task binding, and then use the approved
+delivery finisher rather than a manual push. Do not merge, deploy, release, or
+archive.

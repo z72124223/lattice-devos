@@ -502,6 +502,13 @@ test("derives one fail-closed continuation decision from bounded evidence", () =
     deriveContinuation({ ...base, outcome: "UNKNOWN", evidenceState: "partial" }).state,
     "RECONCILIATION_REQUIRED",
   );
+  assert.equal(
+    deriveContinuation({
+      ...base,
+      git: { clean: true, sync: { state: "remote-changed", remoteVerified: true } },
+    }).state,
+    "RECONCILIATION_REQUIRED",
+  );
   assert.equal(deriveContinuation(base, 2).state, "STOP_DUPLICATE");
   assert.match(deriveContinuation({ ...base, outcome: "FAIL" }).nextAction, /只讀/u);
 });
