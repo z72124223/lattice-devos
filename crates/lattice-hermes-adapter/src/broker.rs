@@ -2535,12 +2535,50 @@ fn ingest_direct_codex_frame(
 
 #[cfg(windows)]
 fn direct_protocol_error(code: i32) -> HermesAdapterError {
-    let kind = if code == 69 {
-        HermesAdapterErrorKind::Timeout
-    } else {
-        HermesAdapterErrorKind::Malformed
+    let (kind, error_code) = match code {
+        69 => (
+            HermesAdapterErrorKind::Timeout,
+            "HERMES_CODEX_DIRECT_DEADLINE_EXCEEDED",
+        ),
+        71 => (
+            HermesAdapterErrorKind::Malformed,
+            "HERMES_CODEX_DIRECT_INITIALIZE_REJECTED",
+        ),
+        72 => (
+            HermesAdapterErrorKind::Malformed,
+            "HERMES_CODEX_DIRECT_THREAD_REJECTED",
+        ),
+        73 => (
+            HermesAdapterErrorKind::Malformed,
+            "HERMES_CODEX_DIRECT_TURN_REJECTED",
+        ),
+        75 => (
+            HermesAdapterErrorKind::Malformed,
+            "HERMES_CODEX_DIRECT_ENVELOPE_REJECTED",
+        ),
+        76 => (
+            HermesAdapterErrorKind::Malformed,
+            "HERMES_CODEX_DIRECT_LIFECYCLE_REJECTED",
+        ),
+        77 => (
+            HermesAdapterErrorKind::Malformed,
+            "HERMES_CODEX_DIRECT_TERMINAL_REJECTED",
+        ),
+        79 => (HermesAdapterErrorKind::Transport, "HERMES_CODEX_DIRECT_EOF"),
+        80 => (
+            HermesAdapterErrorKind::Transport,
+            "HERMES_CODEX_DIRECT_TRANSPORT_REJECTED",
+        ),
+        81 | 82 => (
+            HermesAdapterErrorKind::Malformed,
+            "HERMES_CODEX_DIRECT_FRAME_REJECTED",
+        ),
+        _ => (
+            HermesAdapterErrorKind::Malformed,
+            "HERMES_CODEX_DIRECT_PROTOCOL_REJECTED",
+        ),
     };
-    HermesAdapterError::new(kind, "HERMES_CODEX_DIRECT_PROTOCOL_REJECTED")
+    HermesAdapterError::new(kind, error_code)
 }
 
 #[cfg(windows)]
@@ -3739,6 +3777,7 @@ impl CodexDirectReflectionPlan {
             "method": "thread/start",
             "params": {
                 "model": self.model,
+                "reasoningEffort": "low",
                 "cwd": self.cwd,
                 "approvalPolicy": "never",
                 "sandbox": "read-only",
