@@ -2523,14 +2523,7 @@ fn ingest_direct_codex_frame(
             "HERMES_CODEX_DIRECT_TOOL_REQUEST_DENIED",
         ));
     }
-    protocol.ingest_frame(frame).map_err(|code| {
-        let kind = if code == 74 {
-            HermesAdapterErrorKind::Cancelled
-        } else {
-            HermesAdapterErrorKind::Malformed
-        };
-        HermesAdapterError::new(kind, "HERMES_CODEX_DIRECT_PROTOCOL_REJECTED")
-    })
+    protocol.ingest_frame(frame).map_err(direct_protocol_error)
 }
 
 #[cfg(windows)]
@@ -2552,6 +2545,10 @@ fn direct_protocol_error(code: i32) -> HermesAdapterError {
             HermesAdapterErrorKind::Malformed,
             "HERMES_CODEX_DIRECT_TURN_REJECTED",
         ),
+        74 => (
+            HermesAdapterErrorKind::Cancelled,
+            "HERMES_CODEX_DIRECT_TOOL_REQUEST_DENIED",
+        ),
         75 => (
             HermesAdapterErrorKind::Malformed,
             "HERMES_CODEX_DIRECT_ENVELOPE_REJECTED",
@@ -2563,6 +2560,10 @@ fn direct_protocol_error(code: i32) -> HermesAdapterError {
         77 => (
             HermesAdapterErrorKind::Malformed,
             "HERMES_CODEX_DIRECT_TERMINAL_REJECTED",
+        ),
+        88 => (
+            HermesAdapterErrorKind::Malformed,
+            "HERMES_CODEX_DIRECT_DUPLICATE_TERMINAL_REJECTED",
         ),
         79 => (HermesAdapterErrorKind::Transport, "HERMES_CODEX_DIRECT_EOF"),
         80 => (
