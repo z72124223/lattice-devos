@@ -2811,7 +2811,10 @@ impl FullChainHermesPort for FullChainHermes {
 
 #[cfg(windows)]
 struct HermesEnvironmentConfig {
-    containment: HermesWslContainmentConfig,
+    wsl_executable: PathBuf,
+    runtime_guest_root: String,
+    isolation_parent: PathBuf,
+    product_root: PathBuf,
     runtime_manifest: HermesOfflineRuntimeManifest,
     broker: CodexReflectionBrokerConfig,
     api_key: String,
@@ -2858,10 +2861,14 @@ impl HermesEnvironmentConfig {
         // contained Hermes process. It is not an OpenAI or user-provided API
         // key: model access is owned by the verified Codex app-server broker.
         let api_key = new_hermes_session_token()?;
-        let containment = HermesWslContainmentConfig::new(
-            PathBuf::from(hermes_environment("LATTICE_HERMES_WSL_EXE")?),
-            runtime_guest_root,
-            PathBuf::from(hermes_environment("LATTICE_HERMES_ISOLATION_ROOT")?),
+        let wsl_executable = PathBuf::from(hermes_environment("LATTICE_HERMES_WSL_EXE")?);
+        let isolation_parent =
+            PathBuf::from(hermes_environment("LATTICE_HERMES_ISOLATION_PARENT")?);
+        let preflight_token = new_hermes_session_token()?;
+        HermesWslContainmentConfig::new(
+            wsl_executable.clone(),
+            runtime_guest_root.clone(),
+            isolation_parent.join(format!("preflight-{}", &preflight_token[..32])),
             product_root.clone(),
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
@@ -2869,7 +2876,7 @@ impl HermesEnvironmentConfig {
             PathBuf::from(hermes_environment("LATTICE_HERMES_CODEX_LAUNCHER")?),
             PathBuf::from(hermes_environment("LATTICE_HERMES_CODEX_HOME")?),
             PathBuf::from(hermes_environment("LATTICE_HERMES_BROKER_ISOLATION_ROOT")?),
-            product_root,
+            product_root.clone(),
             FULL_CHAIN_CODEX_BROKER_MODEL,
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
@@ -2879,7 +2886,10 @@ impl HermesEnvironmentConfig {
             .filter(|seconds| (1..=300).contains(seconds))
             .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
         Ok(Self {
-            containment,
+            wsl_executable,
+            runtime_guest_root,
+            isolation_parent,
+            product_root,
             runtime_manifest,
             broker,
             api_key,
@@ -2895,8 +2905,17 @@ impl HermesEnvironmentConfig {
             .broker
             .run_zero_model_preflight(absolute_deadline)
             .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        let attempt_token = new_hermes_session_token()?;
+        let containment = HermesWslContainmentConfig::new(
+            self.wsl_executable,
+            self.runtime_guest_root,
+            self.isolation_parent
+                .join(format!("run-{}", &attempt_token[..32])),
+            self.product_root,
+        )
+        .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
         let runner = HermesProductionRunnerConfig::new(
-            self.containment,
+            containment,
             &self.runtime_manifest,
             self.broker,
             &broker_receipt,
@@ -2978,12 +2997,6 @@ pub enum HermesProductionPreflight {
 pub enum HermesRuntimePreflight {
     MissingConfiguration(Vec<&'static str>),
     ConfigurationRejected,
-    /// A previous Hermes attempt left its exact owned isolation root behind.
-    ///
-    /// This is intentionally a degraded operational state: the root is
-    /// retained as fail-closed evidence and must never be overwritten by a
-    /// later launch.
-    IsolationRootOccupied,
     ConfigurationPresentUnverified,
 }
 
@@ -3027,9 +3040,6 @@ impl HermesRuntimePreflight {
             ),
             Self::ConfigurationRejected => {
                 "LATTICE_HERMES_RUNTIME_PREFLIGHT_CONFIGURATION_REJECTED".to_owned()
-            }
-            Self::IsolationRootOccupied => {
-                "LATTICE_HERMES_RUNTIME_PREFLIGHT_ISOLATION_ROOT_OCCUPIED".to_owned()
             }
             Self::ConfigurationPresentUnverified => {
                 "LATTICE_HERMES_RUNTIME_PREFLIGHT_CONFIGURATION_PRESENT_UNVERIFIED".to_owned()
@@ -3138,7 +3148,7 @@ pub fn hermes_runtime_preflight_from_environment() -> HermesRuntimePreflight {
             "LATTICE_HERMES_RUNTIME_GUEST_ROOT",
             "LATTICE_HERMES_PRODUCT_ROOT",
             "LATTICE_HERMES_WSL_EXE",
-            "LATTICE_HERMES_ISOLATION_ROOT",
+            "LATTICE_HERMES_ISOLATION_PARENT",
         ];
         let missing = REQUIRED
             .into_iter()
@@ -3146,18 +3156,6 @@ pub fn hermes_runtime_preflight_from_environment() -> HermesRuntimePreflight {
             .collect::<Vec<_>>();
         if !missing.is_empty() {
             return HermesRuntimePreflight::MissingConfiguration(missing);
-        }
-
-        // The production runner exclusively owns this exact path and creates
-        // it afresh.  A retained path is therefore already sufficient to
-        // report a safe degraded state; validating launch configuration first
-        // would collapse it into a generic configuration rejection.
-        let isolation_root = PathBuf::from(
-            std::env::var_os("LATTICE_HERMES_ISOLATION_ROOT")
-                .expect("required isolation root was checked above"),
-        );
-        if isolation_root.exists() {
-            return HermesRuntimePreflight::IsolationRootOccupied;
         }
 
         let result = (|| {
@@ -3193,7 +3191,8 @@ pub fn hermes_runtime_preflight_from_environment() -> HermesRuntimePreflight {
             HermesWslContainmentConfig::new(
                 PathBuf::from(hermes_environment("LATTICE_HERMES_WSL_EXE")?),
                 runtime_guest_root,
-                PathBuf::from(hermes_environment("LATTICE_HERMES_ISOLATION_ROOT")?),
+                PathBuf::from(hermes_environment("LATTICE_HERMES_ISOLATION_PARENT")?)
+                    .join("runtime-preflight"),
                 product_root,
             )
             .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
@@ -3305,7 +3304,7 @@ pub fn hermes_production_preflight_from_environment() -> HermesProductionPreflig
             "LATTICE_HERMES_RUNTIME_GUEST_ROOT",
             "LATTICE_HERMES_PRODUCT_ROOT",
             "LATTICE_HERMES_WSL_EXE",
-            "LATTICE_HERMES_ISOLATION_ROOT",
+            "LATTICE_HERMES_ISOLATION_PARENT",
             "LATTICE_HERMES_CODEX_LAUNCHER",
             "LATTICE_HERMES_CODEX_HOME",
             "LATTICE_HERMES_BROKER_ISOLATION_ROOT",
@@ -3859,8 +3858,7 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
             match hermes_runtime_preflight_from_environment() {
                 HermesRuntimePreflight::ConfigurationPresentUnverified => "PREPARED",
                 HermesRuntimePreflight::MissingConfiguration(_)
-                | HermesRuntimePreflight::ConfigurationRejected
-                | HermesRuntimePreflight::IsolationRootOccupied => "DEGRADED",
+                | HermesRuntimePreflight::ConfigurationRejected => "DEGRADED",
             }
         } else {
             "DEFERRED"

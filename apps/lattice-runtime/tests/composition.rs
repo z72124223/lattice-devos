@@ -925,7 +925,7 @@ fn latticed_hermes_preflight_reports_exact_missing_settings() {
             "LATTICE_HERMES_RUNTIME_GUEST_ROOT,",
             "LATTICE_HERMES_PRODUCT_ROOT,",
             "LATTICE_HERMES_WSL_EXE,",
-            "LATTICE_HERMES_ISOLATION_ROOT,",
+            "LATTICE_HERMES_ISOLATION_PARENT,",
             "LATTICE_HERMES_CODEX_LAUNCHER,",
             "LATTICE_HERMES_CODEX_HOME,",
             "LATTICE_HERMES_BROKER_ISOLATION_ROOT,",
@@ -983,7 +983,7 @@ fn latticed_hermes_runtime_preflight_explicitly_rejects_missing_isolation_config
         String::from_utf8(output.stderr).expect("stderr utf8"),
         concat!(
             "LATTICE_HERMES_RUNTIME_PREFLIGHT_MISSING_CONFIGURATION:",
-            "LATTICE_HERMES_ISOLATION_ROOT\n"
+            "LATTICE_HERMES_ISOLATION_PARENT\n"
         )
     );
 }
@@ -1078,7 +1078,7 @@ fn latticed_hermes_runtime_preflight_rejects_invalid_isolation_configuration() {
         )
         .env("LATTICE_HERMES_PRODUCT_ROOT", &product_root)
         .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
-        .env("LATTICE_HERMES_ISOLATION_ROOT", &invalid_isolation_root)
+        .env("LATTICE_HERMES_ISOLATION_PARENT", &invalid_isolation_root)
         .output()
         .expect("start canonical latticed Hermes runtime preflight");
 
@@ -1105,7 +1105,7 @@ fn latticed_hermes_preflight_rejects_unavailable_manifest_without_echoing_values
         .env("LATTICE_HERMES_RUNTIME_GUEST_ROOT", "/runtime")
         .env("LATTICE_HERMES_API_KEY", SECRET_SENTINEL)
         .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
-        .env("LATTICE_HERMES_ISOLATION_ROOT", r"C:\isolation")
+        .env("LATTICE_HERMES_ISOLATION_PARENT", r"C:\")
         .env("LATTICE_HERMES_CODEX_LAUNCHER", r"C:\codex\codex.exe")
         .env("LATTICE_HERMES_CODEX_HOME", r"C:\codex\home")
         .env(
@@ -1185,7 +1185,7 @@ fn latticed_hermes_preflight_ignores_legacy_api_key_after_exact_manifest_identit
         .env("LATTICE_HERMES_API_KEY", SECRET_SENTINEL)
         .env("LATTICE_HERMES_PRODUCT_ROOT", &product_root)
         .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
-        .env("LATTICE_HERMES_ISOLATION_ROOT", r"C:\isolation")
+        .env("LATTICE_HERMES_ISOLATION_PARENT", r"C:\")
         .env("LATTICE_HERMES_CODEX_LAUNCHER", r"C:\codex\codex.exe")
         .env("LATTICE_HERMES_CODEX_HOME", r"C:\codex\home")
         .env(
