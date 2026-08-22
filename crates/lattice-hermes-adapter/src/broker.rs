@@ -4045,10 +4045,7 @@ fn classify_notification_envelope(
     let timestamped_keys = HashSet::from(["emittedAtMs", "method", "params"]);
     if (keys != expected_keys && keys != timestamped_keys)
         || !object.get("params").is_some_and(Value::is_object)
-        || (keys == timestamped_keys
-            && !object.get("emittedAtMs").is_some_and(|value| {
-                value.as_u64().is_some() || value.as_i64().is_some_and(|timestamp| timestamp >= 0)
-            }))
+        || (keys == timestamped_keys && !is_safe_emitted_at(object.get("emittedAtMs")))
     {
         return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
     }
@@ -4106,10 +4103,7 @@ fn classify_notification(
     let expected_keys = HashSet::from(["method", "params"]);
     let timestamped_keys = HashSet::from(["emittedAtMs", "method", "params"]);
     if (keys != expected_keys && keys != timestamped_keys)
-        || (keys == timestamped_keys
-            && !object.get("emittedAtMs").is_some_and(|value| {
-                value.as_u64().is_some() || value.as_i64().is_some_and(|timestamp| timestamp >= 0)
-            }))
+        || (keys == timestamped_keys && !is_safe_emitted_at(object.get("emittedAtMs")))
     {
         return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
     }
@@ -4193,6 +4187,18 @@ fn classify_notification(
     }
     Ok(CodexAppServerFrameKind::Lifecycle {
         method: method.to_owned(),
+    })
+}
+
+fn is_safe_emitted_at(value: Option<&Value>) -> bool {
+    value.is_some_and(|value| {
+        value.as_u64().is_some()
+            || value.as_i64().is_some_and(|timestamp| timestamp >= 0)
+            || value.as_str().is_some_and(|timestamp| {
+                !timestamp.is_empty()
+                    && timestamp.len() <= 64
+                    && !timestamp.chars().any(char::is_control)
+            })
     })
 }
 
