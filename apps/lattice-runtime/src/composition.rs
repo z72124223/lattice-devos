@@ -2033,7 +2033,7 @@ pub fn initialize_runtime_postgres_from_environment() -> Result<(), LatticedErro
     bootstrap
         .host(&host)
         .port(port)
-        .user("lattice_bootstrap")
+        .user("runtime_bootstrap")
         .password(&password)
         .dbname("postgres")
         .application_name("lattice-runtime-bootstrap")
@@ -2109,7 +2109,7 @@ pub fn initialize_runtime_postgres_from_environment() -> Result<(), LatticedErro
     target_bootstrap
         .host(&host)
         .port(port)
-        .user("lattice_bootstrap")
+        .user("runtime_bootstrap")
         .password(&password)
         .dbname(&database_name)
         .application_name("lattice-runtime-bootstrap")
