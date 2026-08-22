@@ -2660,6 +2660,10 @@ fn receive_codex_frame(
                 "has_jsonrpc": object.is_some_and(|fields| fields.contains_key("jsonrpc")),
                 "has_method": object.is_some_and(|fields| fields.contains_key("method")),
                 "has_meta": object.is_some_and(|fields| fields.contains_key("meta")),
+                "method": object
+                    .and_then(|fields| fields.get("method"))
+                    .and_then(Value::as_str)
+                    .filter(|method| method.len() <= 128 && !method.chars().any(char::is_control)),
                 "has_params": object.is_some_and(|fields| fields.contains_key("params")),
                 "has_result": object.is_some_and(|fields| fields.contains_key("result")),
                 "key_count": object.map_or(0, Map::len),
