@@ -77,7 +77,8 @@ function Set-LatticeConfigEnvironment {
         if ($lines[$index] -match '^\[') { $end = $index; break }
     }
     foreach ($name in $Values.Keys) {
-        $replacement = "$name = `"$($Values[$name])`""
+        $tomlValue = ([string]$Values[$name]).Replace('\', '\\').Replace('"', '\"')
+        $replacement = "$name = `"$tomlValue`""
         $found = $false
         for ($index = $start; $index -lt $end; $index++) {
             if ($lines[$index] -match ('^' + [regex]::Escape($name) + '\s*=')) {
