@@ -272,10 +272,8 @@ impl CodexProxyInvocation {
         let arguments = arguments.into_iter().collect::<Vec<_>>();
         match arguments.as_slice() {
             [argument] if argument.as_ref() == "--version" => Ok(Self::Version),
-            [command, listen, endpoint, strict]
+            [command, strict]
                 if command.as_ref() == "app-server"
-                    && listen.as_ref() == "--listen"
-                    && endpoint.as_ref() == "stdio://"
                     && strict.as_ref() == "--strict-config" =>
             {
                 Ok(Self::AppServer)
@@ -1236,7 +1234,7 @@ impl VerifiedCodexProxyConfig {
                 "HERMES_CODEX_PROXY_CONFIG_IDENTITY_REJECTED",
             ));
         }
-        CodexProxyInvocation::parse(["app-server", "--listen", "stdio://", "--strict-config"])?;
+        CodexProxyInvocation::parse(["app-server", "--strict-config"])?;
         let environment = codex_child_environment(&self.launcher, &self.codex_home, &self.temp)?;
         if digest_environment(&environment)? != self.child_environment_sha256 {
             return Err(HermesAdapterError::new(
@@ -1249,8 +1247,6 @@ impl VerifiedCodexProxyConfig {
             executable: self.launcher.clone(),
             arguments: [
                 OsString::from("app-server"),
-                OsString::from("--listen"),
-                OsString::from("stdio://"),
                 OsString::from("--strict-config"),
                 OsString::from("-c"),
                 OsString::from(config_override),
@@ -2161,14 +2157,12 @@ fn run_broker_helper_inner() -> Result<CodexBrokerCandidate, i32> {
         codex_child_environment(reviewed.launcher(), &codex_home, &temp).map_err(|_| 66)?;
     let child_environment_sha256 = digest_environment(&child_environment).map_err(|_| 66)?;
     let config_override = config_lock_override(&config_lock).map_err(|_| 66)?;
-    CodexProxyInvocation::parse(["app-server", "--listen", "stdio://", "--strict-config"])
+    CodexProxyInvocation::parse(["app-server", "--strict-config"])
         .map_err(|_| 66)?;
     let mut command = Command::new(reviewed.launcher());
     command
         .args([
             "app-server",
-            "--listen",
-            "stdio://",
             "--strict-config",
             "-c",
             &config_override,
@@ -4589,8 +4583,6 @@ mod production_provider_tests {
             plan.arguments,
             [
                 OsString::from("app-server"),
-                OsString::from("--listen"),
-                OsString::from("stdio://"),
                 OsString::from("--strict-config"),
                 OsString::from("-c"),
                 OsString::from(expected_override),

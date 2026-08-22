@@ -82,7 +82,7 @@ fn pinned_runtime_sandbox_and_proxy_contract_are_closed_by_construction() {
         CodexProxyInvocation::Version
     );
     assert_eq!(
-        CodexProxyInvocation::parse(["app-server", "--listen", "stdio://", "--strict-config"])
+        CodexProxyInvocation::parse(["app-server", "--strict-config"])
             .expect("fixed app-server relay"),
         CodexProxyInvocation::AppServer
     );
