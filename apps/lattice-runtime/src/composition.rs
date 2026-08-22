@@ -2156,10 +2156,18 @@ pub fn initialize_runtime_postgres_from_environment() -> Result<(), LatticedErro
     drop(target_bootstrap);
 
     let mut migrator = connect_migrator(&database, &password)?;
-    apply_store_migrations(&mut migrator, &target)
-        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
-    verify_store_schema(&mut migrator, &target, StoreDatabaseRole::Migrator)
-        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
+    if let Err(error) = apply_store_migrations(&mut migrator, &target) {
+        eprintln!("{}", error.code());
+        return Err(LatticedError::new(
+            LatticedErrorKind::RuntimePostgresMigration,
+        ));
+    }
+    if let Err(error) = verify_store_schema(&mut migrator, &target, StoreDatabaseRole::Migrator) {
+        eprintln!("{}", error.code());
+        return Err(LatticedError::new(
+            LatticedErrorKind::RuntimePostgresVerification,
+        ));
+    }
     drop(migrator);
     bootstrap_postgres_extensions_from_environment()
 }
