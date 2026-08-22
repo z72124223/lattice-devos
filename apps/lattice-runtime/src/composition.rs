@@ -2177,7 +2177,7 @@ pub fn initialize_runtime_postgres_from_environment() -> Result<(), LatticedErro
         };
         return Err(LatticedError::new(kind));
     }
-    if let Err(error) = verify_store_schema(&mut migrator, &target, StoreDatabaseRole::Migrator) {
+    if let Err(_error) = verify_store_schema(&mut migrator, &target, StoreDatabaseRole::Migrator) {
         return Err(LatticedError::new(
             LatticedErrorKind::RuntimePostgresVerification,
         ));
