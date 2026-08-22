@@ -1371,10 +1371,13 @@ export function deriveContinuation(item, duplicateCount = 1) {
     };
   }
   if (item.git?.sync?.state !== "synced" || item.git?.sync?.remoteVerified !== true) {
+    const remoteLooksSynced = item.git?.sync?.state === "synced";
     return {
       state: "RECONCILIATION_REQUIRED",
       nextAction: "只讀核對目前票券、upstream、HEAD 與遠端證據。",
-      reasonZh: "遠端狀態尚未同步，先只讀核對 upstream、HEAD 與遠端證據。",
+      reasonZh: remoteLooksSynced
+        ? "遠端看似同步，但尚未完成可信核對，先只讀核對 upstream、HEAD 與遠端證據。"
+        : "遠端狀態尚未同步，先只讀核對 upstream、HEAD 與遠端證據。",
     };
   }
   if (

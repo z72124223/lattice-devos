@@ -528,6 +528,13 @@ test("derives one fail-closed continuation decision from bounded evidence", () =
   assert.equal(
     deriveContinuation({
       ...base,
+      git: { clean: true, sync: { state: "synced", remoteVerified: false } },
+    }).reasonZh,
+    "遠端看似同步，但尚未完成可信核對，先只讀核對 upstream、HEAD 與遠端證據。",
+  );
+  assert.equal(
+    deriveContinuation({
+      ...base,
       git: { clean: true, sync: { state: "remote-changed", remoteVerified: true } },
     }).state,
     "RECONCILIATION_REQUIRED",

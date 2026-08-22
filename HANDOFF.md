@@ -2472,3 +2472,15 @@ archive.
 
 This remains a read-only dashboard projection. It changes no snapshot schema,
 Git state, remote, MCP action, dispatch, authority, or delivery state.
+
+---
+
+# TASK-099 remote-evidence wording — 2026-08-23
+
+`RECONCILIATION_REQUIRED` now distinguishes a changed remote from one that
+looks synchronised but has not completed trusted verification. The state and
+the read-only next action are unchanged. Focused RED/GREEN, dashboard 27/27,
+and `npm.cmd run check` passed. Independent review escalated Luna → Terra →
+Sol after the first two reviewers did not return in their bounded windows; Sol
+reported no findings. No schema, Git, remote, MCP, dispatch, or authority
+change occurred.
