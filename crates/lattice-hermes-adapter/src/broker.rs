@@ -3544,7 +3544,6 @@ impl CodexNoMarkerCanaryPlan {
     #[allow(clippy::unused_self)]
     pub(crate) fn initialize_request(&self) -> Value {
         serde_json::json!({
-            "jsonrpc": "2.0",
             "id": 0,
             "method": "initialize",
             "params": {
@@ -3564,12 +3563,11 @@ impl CodexNoMarkerCanaryPlan {
 
     #[allow(clippy::unused_self)]
     pub(crate) fn initialized_notification(&self) -> Value {
-        serde_json::json!({"jsonrpc": "2.0", "method": "initialized"})
+        serde_json::json!({"method": "initialized"})
     }
 
     pub(crate) fn thread_start_request(&self) -> Value {
         serde_json::json!({
-            "jsonrpc": "2.0",
             "id": 1,
             "method": "thread/start",
             "params": {
@@ -3589,7 +3587,6 @@ impl CodexNoMarkerCanaryPlan {
             "Canary only. Do not create, modify, or inspect files. The marker {marker} must remain absent. Return exactly the schema-bound constant JSON. Do not add prose."
         );
         serde_json::json!({
-            "jsonrpc": "2.0",
             "id": 2,
             "method": "turn/start",
             "params": {
