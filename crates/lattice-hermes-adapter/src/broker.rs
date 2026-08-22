@@ -3939,7 +3939,9 @@ fn classify_notification(
                 params,
                 &["environmentId", "installationId", "serverName", "status"],
             )?;
-            if !object.get("emittedAtMs").is_some_and(Value::is_u64) {
+            if !object.get("emittedAtMs").is_some_and(|value| {
+                value.as_u64().is_some() || value.as_i64().is_some_and(|timestamp| timestamp >= 0)
+            }) {
                 return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
             }
         }
