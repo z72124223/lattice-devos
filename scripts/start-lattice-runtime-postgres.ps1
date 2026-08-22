@@ -144,11 +144,11 @@ function Initialize-LatticeRuntimeCodexHome {
         -not (Test-Path -LiteralPath $markerPath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $configPath -PathType Leaf) -or
         -not (Test-Path -LiteralPath $authPath -PathType Leaf) -or
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes($markerPath)) -ne [Convert]::ToBase64String($markerBytes) -or
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -ne [Convert]::ToBase64String($configBytes)
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($markerPath)) -ne [Convert]::ToBase64String($markerBytes)
     ) {
         throw 'LATTICE_RUNTIME_CODEX_HOME_REJECTED'
     }
+    [IO.File]::WriteAllBytes($configPath, $configBytes)
     [IO.File]::Copy($authSource, $authPath, $true)
 }
 
