@@ -36,6 +36,7 @@ $ProgressPreference = 'SilentlyContinue'
 $script:ExpectedTools = @(
     'lattice_delivery_run',
     'lattice_delivery_status',
+    'lattice_runtime_status',
     'lattice_task_status',
     'lattice_task_submit'
 )
