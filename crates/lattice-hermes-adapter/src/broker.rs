@@ -242,8 +242,6 @@ enabled = false
 pub(crate) const fn official_codex_config_lock_bytes() -> &'static [u8] {
     CODEX_CONFIG_LOCK.as_bytes()
 }
-const CODEX_CONFIG_LOCK_RESOLUTION_OVERRIDE: &str =
-    "debug.config_lockfile.save_fields_resolved_from_model_catalog=false";
 const MAX_CODEX_LAUNCHER_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_CODEX_RESOURCE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_CODEX_MANIFEST_BYTES: u64 = 64 * 1024;
@@ -1242,16 +1240,11 @@ impl VerifiedCodexProxyConfig {
                 "HERMES_CODEX_PROXY_FACTORY_BINDING_REJECTED",
             ));
         }
-        let config_override = config_lock_override(&self.config_lock)?;
         Ok(crate::windows_job::WindowsJobCommandPlan {
             executable: self.launcher.clone(),
             arguments: [
                 OsString::from("app-server"),
                 OsString::from("--strict-config"),
-                OsString::from("-c"),
-                OsString::from(config_override),
-                OsString::from("-c"),
-                OsString::from(CODEX_CONFIG_LOCK_RESOLUTION_OVERRIDE),
             ]
             .into_iter()
             .collect(),
@@ -2156,7 +2149,6 @@ fn run_broker_helper_inner() -> Result<CodexBrokerCandidate, i32> {
     let child_environment =
         codex_child_environment(reviewed.launcher(), &codex_home, &temp).map_err(|_| 66)?;
     let child_environment_sha256 = digest_environment(&child_environment).map_err(|_| 66)?;
-    let config_override = config_lock_override(&config_lock).map_err(|_| 66)?;
     CodexProxyInvocation::parse(["app-server", "--strict-config"])
         .map_err(|_| 66)?;
     let mut command = Command::new(reviewed.launcher());
@@ -2164,10 +2156,6 @@ fn run_broker_helper_inner() -> Result<CodexBrokerCandidate, i32> {
         .args([
             "app-server",
             "--strict-config",
-            "-c",
-            &config_override,
-            "-c",
-            CODEX_CONFIG_LOCK_RESOLUTION_OVERRIDE,
         ])
         .current_dir(&cwd)
         .env_clear()
@@ -3315,14 +3303,6 @@ fn read_bounded_helper_file(path: &Path, limit: usize) -> Result<Vec<u8>, ()> {
         return Err(());
     }
     Ok(bytes)
-}
-
-#[cfg(windows)]
-fn config_lock_override(path: &Path) -> HermesAdapterResult<String> {
-    let text = path_text(path)?.replace('\\', "/");
-    let encoded = serde_json::to_string(&text)
-        .map_err(|_| configuration("HERMES_CODEX_CONFIG_LOCK_PATH_REJECTED"))?;
-    Ok(format!("debug.config_lockfile.load_path={encoded}"))
 }
 
 #[cfg(windows)]
@@ -4564,7 +4544,7 @@ mod production_provider_tests {
     }
 
     #[test]
-    fn production_provider_launch_plan_is_exact_and_config_lock_bound() {
+    fn production_provider_launch_plan_is_exact_and_read_only_bound() {
         let fixture = ProviderFixture::new();
         let verified =
             VerifiedCodexProxyConfig::from_config(fixture.config.clone()).expect("verified config");
@@ -4577,19 +4557,11 @@ mod production_provider_tests {
         let plan = verified
             .command_plan(&reviewed, deadline)
             .expect("one exact official launch plan");
-        let expected_override =
-            config_lock_override(&verified.config_lock).expect("canonical sealed config override");
         assert_eq!(
             plan.arguments,
             [
                 OsString::from("app-server"),
                 OsString::from("--strict-config"),
-                OsString::from("-c"),
-                OsString::from(expected_override),
-                OsString::from("-c"),
-                OsString::from(
-                    "debug.config_lockfile.save_fields_resolved_from_model_catalog=false"
-                ),
             ]
         );
         assert_eq!(plan.executable, verified.launcher);
