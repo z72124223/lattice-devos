@@ -297,6 +297,10 @@ pub enum LatticedErrorKind {
     DatabaseSecret,
     DatabaseConnect,
     LedgerConfiguration,
+    RuntimePostgresProvision,
+    RuntimePostgresBoundary,
+    RuntimePostgresMigration,
+    RuntimePostgresVerification,
     WorkspaceConfiguration,
     CodexConfiguration,
     Contract,
@@ -338,6 +342,10 @@ impl LatticedErrorKind {
             Self::DatabaseSecret => "LATTICED_DATABASE_SECRET_MISSING",
             Self::DatabaseConnect => "LATTICED_DATABASE_CONNECT_REJECTED",
             Self::LedgerConfiguration => "LATTICED_LEDGER_CONFIGURATION_REJECTED",
+            Self::RuntimePostgresProvision => "LATTICED_RUNTIME_POSTGRES_PROVISION_REJECTED",
+            Self::RuntimePostgresBoundary => "LATTICED_RUNTIME_POSTGRES_BOUNDARY_REJECTED",
+            Self::RuntimePostgresMigration => "LATTICED_RUNTIME_POSTGRES_MIGRATION_REJECTED",
+            Self::RuntimePostgresVerification => "LATTICED_RUNTIME_POSTGRES_VERIFICATION_REJECTED",
             Self::WorkspaceConfiguration => "LATTICED_WORKSPACE_CONFIGURATION_REJECTED",
             Self::CodexConfiguration => "LATTICED_CODEX_CONFIGURATION_REJECTED",
             Self::Contract => "LATTICE_DELIVERY_CONTRACT_REJECTED",
@@ -2015,7 +2023,7 @@ pub fn initialize_runtime_postgres_from_environment() -> Result<(), LatticedErro
         delivery_environment_for_mode(FullChainRunMode::ResumeExisting)?;
     let database_name = database.database_name();
     let target = StoreMigrationTarget::new(database_name.clone(), database.run_id())
-        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresProvision))?;
 
     let host = required_environment("LATTICE_TASK019_HOST")?;
     let port = required_environment("LATTICE_TASK019_PORT")?
@@ -2035,7 +2043,7 @@ pub fn initialize_runtime_postgres_from_environment() -> Result<(), LatticedErro
         .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
     let quoted_password = bootstrap
         .query_one("SELECT quote_literal($1::text)", &[&password])
-        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?
+        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresProvision))?
         .get::<_, String>(0);
     bootstrap
         .batch_execute(&format!(
@@ -2070,20 +2078,20 @@ pub fn initialize_runtime_postgres_from_environment() -> Result<(), LatticedErro
              GRANT lattice_guardian TO lattice_guardian_login WITH ADMIN FALSE, INHERIT FALSE, SET TRUE; \
              GRANT lattice_readonly TO lattice_readonly_login WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;"
         ))
-        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresProvision))?;
     let database_exists = bootstrap
         .query_opt(
             "SELECT 1 FROM pg_database WHERE datname = $1",
             &[&database_name],
         )
-        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?
+        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresProvision))?
         .is_some();
     if !database_exists {
         bootstrap
             .batch_execute(&format!(
                 "CREATE DATABASE {database_name} OWNER lattice_migrator"
             ))
-            .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+            .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresProvision))?;
     }
     bootstrap
         .batch_execute(&format!(
@@ -2095,7 +2103,7 @@ pub fn initialize_runtime_postgres_from_environment() -> Result<(), LatticedErro
              REVOKE ALL ON DATABASE template1 FROM PUBLIC;",
             target.database_comment()
         ))
-        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresBoundary))?;
     drop(bootstrap);
     let mut target_bootstrap = Config::new();
     target_bootstrap
@@ -2144,14 +2152,14 @@ pub fn initialize_runtime_postgres_from_environment() -> Result<(), LatticedErro
                  pg_catalog.pg_advisory_xact_lock(bigint), \
                  pg_catalog.pg_current_xact_id() TO lattice_migrator",
         )
-        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresBoundary))?;
     drop(target_bootstrap);
 
     let mut migrator = connect_migrator(&database, &password)?;
     apply_store_migrations(&mut migrator, &target)
-        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
     verify_store_schema(&mut migrator, &target, StoreDatabaseRole::Migrator)
-        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
     drop(migrator);
     bootstrap_postgres_extensions_from_environment()
 }
