@@ -52,8 +52,10 @@ function Get-FreeLoopbackPort {
 function Get-RandomHex {
     param([Parameter(Mandatory = $true)][ValidateRange(1, 64)][int]$ByteCount)
     $bytes = [byte[]]::new($ByteCount)
-    [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-    return ([Convert]::ToHexString($bytes)).ToLowerInvariant()
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $generator.GetBytes($bytes) }
+    finally { $generator.Dispose() }
+    return (([BitConverter]::ToString($bytes) -replace '-', '')).ToLowerInvariant()
 }
 
 function Set-LatticeConfigEnvironment {
