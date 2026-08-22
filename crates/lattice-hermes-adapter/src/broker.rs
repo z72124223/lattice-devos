@@ -1089,6 +1089,16 @@ impl CodexReflectionBrokerConfig {
             }
             crate::parse_reflection(&terminal.output, job)
         })();
+        if let Err(error) = &result {
+            eprintln!(
+                "{}",
+                json!({
+                    "component": "Hermes",
+                    "event": "direct_codex_reflection_rejected",
+                    "error_code": error.code(),
+                })
+            );
+        }
         let teardown = control.terminate();
         match (result, teardown) {
             (Ok(reflection), Ok(())) => Ok(DirectCodexReflection {
