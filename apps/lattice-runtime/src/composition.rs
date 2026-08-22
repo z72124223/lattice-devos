@@ -89,7 +89,8 @@ use lattice_postgres_codebase_memory::{
 };
 use lattice_postgres_store::{
     DatabaseRole as StoreDatabaseRole, MigrationTarget as StoreMigrationTarget,
-    apply_migrations as apply_store_migrations, verify_postgres_schema as verify_store_schema,
+    PostgresStoreSetupErrorKind, apply_migrations as apply_store_migrations,
+    verify_postgres_schema as verify_store_schema,
 };
 use lattice_postgres_writer_lease::{
     ExtensionTarget as WriterLeaseExtensionTarget, PostgresWriterLease,
@@ -300,6 +301,8 @@ pub enum LatticedErrorKind {
     RuntimePostgresProvision,
     RuntimePostgresBoundary,
     RuntimePostgresMigration,
+    RuntimePostgresMigrationPermission,
+    RuntimePostgresMigrationUnsafeSetting,
     RuntimePostgresVerification,
     WorkspaceConfiguration,
     CodexConfiguration,
@@ -345,6 +348,12 @@ impl LatticedErrorKind {
             Self::RuntimePostgresProvision => "LATTICED_RUNTIME_POSTGRES_PROVISION_REJECTED",
             Self::RuntimePostgresBoundary => "LATTICED_RUNTIME_POSTGRES_BOUNDARY_REJECTED",
             Self::RuntimePostgresMigration => "LATTICED_RUNTIME_POSTGRES_MIGRATION_REJECTED",
+            Self::RuntimePostgresMigrationPermission => {
+                "LATTICED_RUNTIME_POSTGRES_MIGRATION_PERMISSION_REJECTED"
+            }
+            Self::RuntimePostgresMigrationUnsafeSetting => {
+                "LATTICED_RUNTIME_POSTGRES_MIGRATION_SETTING_REJECTED"
+            }
             Self::RuntimePostgresVerification => "LATTICED_RUNTIME_POSTGRES_VERIFICATION_REJECTED",
             Self::WorkspaceConfiguration => "LATTICED_WORKSPACE_CONFIGURATION_REJECTED",
             Self::CodexConfiguration => "LATTICED_CODEX_CONFIGURATION_REJECTED",
@@ -2157,13 +2166,18 @@ pub fn initialize_runtime_postgres_from_environment() -> Result<(), LatticedErro
 
     let mut migrator = connect_migrator(&database, &password)?;
     if let Err(error) = apply_store_migrations(&mut migrator, &target) {
-        eprintln!("{}", error.code());
-        return Err(LatticedError::new(
-            LatticedErrorKind::RuntimePostgresMigration,
-        ));
+        let kind = match error.kind() {
+            PostgresStoreSetupErrorKind::PermissionDenied => {
+                LatticedErrorKind::RuntimePostgresMigrationPermission
+            }
+            PostgresStoreSetupErrorKind::UnsafeSetting => {
+                LatticedErrorKind::RuntimePostgresMigrationUnsafeSetting
+            }
+            _ => LatticedErrorKind::RuntimePostgresMigration,
+        };
+        return Err(LatticedError::new(kind));
     }
     if let Err(error) = verify_store_schema(&mut migrator, &target, StoreDatabaseRole::Migrator) {
-        eprintln!("{}", error.code());
         return Err(LatticedError::new(
             LatticedErrorKind::RuntimePostgresVerification,
         ));
@@ -6361,6 +6375,8 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         | LatticedErrorKind::RuntimePostgresProvision
         | LatticedErrorKind::RuntimePostgresBoundary
         | LatticedErrorKind::RuntimePostgresMigration
+        | LatticedErrorKind::RuntimePostgresMigrationPermission
+        | LatticedErrorKind::RuntimePostgresMigrationUnsafeSetting
         | LatticedErrorKind::RuntimePostgresVerification
         | LatticedErrorKind::WorkspaceConfiguration
         | LatticedErrorKind::CodexConfiguration
