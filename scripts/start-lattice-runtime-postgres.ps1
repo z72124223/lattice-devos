@@ -150,21 +150,30 @@ $gitExecutable = (Get-Command git.exe -ErrorAction Stop).Source
 if (-not [IO.Path]::IsPathRooted($gitExecutable) -or -not (Test-Path -LiteralPath $gitExecutable -PathType Leaf)) {
     throw 'LATTICE_RUNTIME_GIT_MISSING'
 }
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+$dirty = & $gitExecutable -C $repositoryRoot status --porcelain
+if ($LASTEXITCODE -ne 0 -or -not [string]::IsNullOrEmpty($dirty)) {
+    throw 'LATTICE_RUNTIME_GRAPH_SOURCE_REJECTED'
+}
+$graphWorkRoot = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-graphify'
+$runtimeGraphConfig = @{
+    LATTICE_DELIVERY_GIT_EXE = $gitExecutable
+    LATTICE_GRAPHIFY_SOURCE_ROOT = $repositoryRoot
+    LATTICE_GRAPHIFY_WORK_ROOT = $graphWorkRoot
+}
 if (Test-Path -LiteralPath $metadataPath) {
-    Set-LatticeConfigEnvironment -Path $ConfigPath -Values @{ LATTICE_DELIVERY_GIT_EXE = $gitExecutable }
+    Set-LatticeConfigEnvironment -Path $ConfigPath -Values $runtimeGraphConfig
     Import-LatticeConfigEnvironment -Path $ConfigPath
     & $pgCtl status -D $clusterRoot *> $null
     if ($LASTEXITCODE -ne 0) {
         Start-LatticePostgres -PgCtl $pgCtl -Cluster $clusterRoot -LogPath $postgresLog
     }
-    & $LatticedPath --postgres-initialize
-    if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_INITIALIZE_REJECTED' }
     Write-Output 'LATTICE_RUNTIME_POSTGRES_READY'
     exit 0
 }
 
 if (Test-Path -LiteralPath $clusterRoot) {
-    Set-LatticeConfigEnvironment -Path $ConfigPath -Values @{ LATTICE_DELIVERY_GIT_EXE = $gitExecutable }
+    Set-LatticeConfigEnvironment -Path $ConfigPath -Values $runtimeGraphConfig
     Import-LatticeConfigEnvironment -Path $ConfigPath
     Start-LatticePostgres -PgCtl $pgCtl -Cluster $clusterRoot -LogPath $postgresLog
     & $LatticedPath --postgres-initialize
@@ -201,6 +210,8 @@ try {
         LATTICE_TASK019_RUN_ID = $runId
         LATTICE_TASK019_PASSWORD = $password
         LATTICE_DELIVERY_GIT_EXE = $gitExecutable
+        LATTICE_GRAPHIFY_SOURCE_ROOT = $repositoryRoot
+        LATTICE_GRAPHIFY_WORK_ROOT = $graphWorkRoot
     }
     Import-LatticeConfigEnvironment -Path $ConfigPath
     & $LatticedPath --postgres-initialize
