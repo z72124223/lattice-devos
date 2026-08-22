@@ -339,6 +339,7 @@ fn codex_no_marker_plan_and_receipt_require_joint_empty_tool_evidence() {
     let plan = CodexNoMarkerCanaryPlan::new(cwd.clone(), nonce, "gpt-5.6-terra")
         .expect("fixed canary plan");
     let initialize = plan.initialize_request();
+    assert_eq!(initialize["jsonrpc"], "2.0");
     for capability in [
         "experimentalApi",
         "requestAttestation",
@@ -347,6 +348,7 @@ fn codex_no_marker_plan_and_receipt_require_joint_empty_tool_evidence() {
         assert_eq!(initialize["params"]["capabilities"][capability], false);
     }
     let thread = plan.thread_start_request();
+    assert_eq!(thread["jsonrpc"], "2.0");
     assert_eq!(thread["params"]["approvalPolicy"], "never");
     assert_eq!(thread["params"]["sandbox"], "read-only");
     assert_eq!(thread["params"]["ephemeral"], true);
@@ -355,6 +357,7 @@ fn codex_no_marker_plan_and_receipt_require_joint_empty_tool_evidence() {
     assert!(thread["params"].get("dynamicTools").is_none());
     assert!(thread["params"].get("selectedCapabilityRoots").is_none());
     let turn = plan.turn_start_request("thread-canary");
+    assert_eq!(turn["jsonrpc"], "2.0");
     assert_eq!(turn["id"], 2);
     assert_eq!(turn["params"]["sandboxPolicy"]["type"], "readOnly");
     assert_eq!(turn["params"]["sandboxPolicy"]["networkAccess"], false);
