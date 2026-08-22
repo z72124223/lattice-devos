@@ -44,16 +44,26 @@ export class LatticeControlService {
     this.codex = codex;
     this.model = model;
     this.requestOwners = new Map();
-    codex.on("notification", (message) => this.#onNotification(message));
-    codex.on("serverRequest", (message) => this.#onServerRequest(message));
-    codex.on("disconnect", ({ code, signal }) => {
+    this.onNotification = (message) => this.#onNotification(message);
+    this.onServerRequest = (message) => this.#onServerRequest(message);
+    this.onDisconnect = ({ code, signal }) => {
       for (const item of this.store.listWorkItems().filter((entry) => entry.status === "running")) {
         this.store.updateWorkItem(item.id, {
           status: "failed",
           failure_summary: `Codex App Server disconnected (${code ?? signal ?? "unknown"})`,
         });
       }
-    });
+    };
+    codex.on("notification", this.onNotification);
+    codex.on("serverRequest", this.onServerRequest);
+    codex.on("disconnect", this.onDisconnect);
+  }
+
+  close() {
+    this.codex.off("notification", this.onNotification);
+    this.codex.off("serverRequest", this.onServerRequest);
+    this.codex.off("disconnect", this.onDisconnect);
+    this.requestOwners.clear();
   }
 
   createProject(input) {

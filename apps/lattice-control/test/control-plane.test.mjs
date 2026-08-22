@@ -172,6 +172,17 @@ test("an interrupted turn never becomes completed work", async () => {
   }
 });
 
+test("closing control detaches Codex notifications before its store is closed", () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  service.close();
+  store.close();
+
+  assert.doesNotThrow(() => codex.emit("disconnect", { code: 0, signal: null }));
+  assert.doesNotThrow(() => codex.emit("notification", { method: "turn/completed", params: {} }));
+});
+
 test("a new Codex thread receives a bounded continuation packet derived from its LATTICE work item", async () => {
   const store = new LatticeStore();
   const codex = new FakeCodex();

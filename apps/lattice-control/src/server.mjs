@@ -106,6 +106,7 @@ export function createLatticeServer({ databasePath, codex = new CodexAppServer()
   });
 
   server.on("close", () => {
+    service.close();
     void codex.close();
     store.close();
   });
