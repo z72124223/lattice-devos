@@ -1,13 +1,13 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateScript({ [IO.Path]::IsPathFullyQualified($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) })]
+    [ValidateScript({ [IO.Path]::IsPathRooted($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) })]
     [string]$LatticedPath,
 
-    [ValidateScript({ [IO.Path]::IsPathFullyQualified($_) })]
+    [ValidateScript({ [IO.Path]::IsPathRooted($_) })]
     [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-postgres'),
 
-    [ValidateScript({ [IO.Path]::IsPathFullyQualified($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) })]
+    [ValidateScript({ [IO.Path]::IsPathRooted($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) })]
     [string]$ConfigPath = (Join-Path $env:USERPROFILE '.codex\config.toml'),
 
     [switch]$Background
