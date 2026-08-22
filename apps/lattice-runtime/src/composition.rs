@@ -6350,6 +6350,10 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         | LatticedErrorKind::HermesExecution
         | LatticedErrorKind::DatabaseSecret
         | LatticedErrorKind::LedgerConfiguration
+        | LatticedErrorKind::RuntimePostgresProvision
+        | LatticedErrorKind::RuntimePostgresBoundary
+        | LatticedErrorKind::RuntimePostgresMigration
+        | LatticedErrorKind::RuntimePostgresVerification
         | LatticedErrorKind::WorkspaceConfiguration
         | LatticedErrorKind::CodexConfiguration
         | LatticedErrorKind::ReceiptRead
