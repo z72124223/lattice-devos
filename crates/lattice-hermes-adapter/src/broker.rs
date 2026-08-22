@@ -2997,7 +2997,7 @@ impl CodexBrokerProtocol {
             CodexAppServerFrameKind::Lifecycle { method } => {
                 if matches!(
                     method.as_str(),
-                    "remoteControl/status/changed" | "mcpServer/startupStatus/updated"
+                    "remoteControl/status/changed" | "mcpServer/startupStatus/updated" | "warning"
                 ) {
                     return self.reconcile();
                 }
@@ -4060,6 +4060,7 @@ fn classify_notification_envelope(
             matches!(
                 *method,
                 "thread/started"
+                    | "warning"
                     | "remoteControl/status/changed"
                     | "mcpServer/startupStatus/updated"
                     | "turn/started"
@@ -4139,6 +4140,20 @@ fn classify_notification(
                 || !params.get("name").is_some_and(Value::is_string)
                 || !params.get("status").is_some_and(Value::is_string)
                 || !params.get("threadId").is_some_and(Value::is_string)
+            {
+                return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
+            }
+        }
+        "warning" => {
+            require_control_keys(params, &["message"])?;
+            if !params
+                .get("message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| {
+                    !message.is_empty()
+                        && message.len() <= 4_096
+                        && !message.chars().any(char::is_control)
+                })
             {
                 return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
             }
