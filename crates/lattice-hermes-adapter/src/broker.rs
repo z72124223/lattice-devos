@@ -2645,7 +2645,25 @@ fn receive_codex_frame(
     transcript.update((line.len() as u64).to_be_bytes());
     transcript.update(&line);
     let value = parse_bounded_codex_json(&line).map_err(|_| 82)?;
-    let kind = classify_codex_app_server_envelope(&value).map_err(|_| 75)?;
+    let kind = classify_codex_app_server_envelope(&value).map_err(|_| {
+        // Safe shape evidence for protocol evolution.  Values and field names
+        // are deliberately never retained or emitted.
+        let object = value.as_object();
+        eprintln!(
+            "{}",
+            json!({
+                "component": "Hermes",
+                "event": "codex_envelope_shape_rejected",
+                "has_error": object.is_some_and(|fields| fields.contains_key("error")),
+                "has_id": object.is_some_and(|fields| fields.contains_key("id")),
+                "has_method": object.is_some_and(|fields| fields.contains_key("method")),
+                "has_params": object.is_some_and(|fields| fields.contains_key("params")),
+                "has_result": object.is_some_and(|fields| fields.contains_key("result")),
+                "key_count": object.map_or(0, Map::len),
+            })
+        );
+        75
+    })?;
     Ok(ReceivedCodexFrame { kind, value })
 }
 
