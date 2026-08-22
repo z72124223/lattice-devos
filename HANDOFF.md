@@ -2447,3 +2447,28 @@ attempt, restore usable remote credentials, configure/verify the named upstream,
 obtain a successful LATTICE runtime/task binding, and then use the approved
 delivery finisher rather than a manual push. Do not merge, deploy, release, or
 archive.
+
+---
+
+# TASK-099 continuation precision — 2026-08-23
+
+## Change
+
+- An unsynchronised or unverified remote remains `RECONCILIATION_REQUIRED`, but
+  now names the exact safe read: upstream, HEAD, and remote evidence.
+- Explicit `BLOCKED`, `WAITING_DEPENDENCY`, `USER_ACTION`, and `PAUSED`
+  outcomes retain their required precedence over inferred Git synchronisation.
+
+## Evidence
+
+- RED: the focused continuation test returned `RECONCILIATION_REQUIRED` for a
+  `WAITING_DEPENDENCY` item with a changed remote before the precedence repair.
+- GREEN: focused continuation test passed; dashboard suite passed 27/27;
+  `npm.cmd run check` passed; `npm.cmd run verify` passed 127/127; and
+  `git diff --check` passed.
+- Independent Terra low-reasoning review after repair: no P0-P3 findings.
+
+## Boundary
+
+This remains a read-only dashboard projection. It changes no snapshot schema,
+Git state, remote, MCP action, dispatch, authority, or delivery state.

@@ -499,8 +499,31 @@ test("derives one fail-closed continuation decision from bounded evidence", () =
     "WAITING_DEPENDENCY",
   );
   assert.equal(
+    deriveContinuation({
+      ...base,
+      outcome: "WAITING_DEPENDENCY",
+      git: { clean: true, sync: { state: "remote-changed", remoteVerified: true } },
+    }).state,
+    "WAITING_DEPENDENCY",
+  );
+  assert.equal(
+    deriveContinuation({
+      ...base,
+      outcome: "USER_ACTION",
+      git: { clean: true, sync: { state: "synced", remoteVerified: false } },
+    }).state,
+    "WAITING_DEPENDENCY",
+  );
+  assert.equal(
     deriveContinuation({ ...base, outcome: "UNKNOWN", evidenceState: "partial" }).state,
     "RECONCILIATION_REQUIRED",
+  );
+  assert.equal(
+    deriveContinuation({
+      ...base,
+      git: { clean: true, sync: { state: "remote-changed", remoteVerified: true } },
+    }).reasonZh,
+    "遠端狀態尚未同步，先只讀核對 upstream、HEAD 與遠端證據。",
   );
   assert.equal(
     deriveContinuation({

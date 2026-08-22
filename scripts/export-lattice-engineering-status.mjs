@@ -1363,24 +1363,29 @@ export function deriveContinuation(item, duplicateCount = 1) {
       reasonZh: "同一個 TASK/ISSUE 同時出現在多個工作樹，不能繼續避免重工。",
     };
   }
-  if (
-    item.evidenceState !== "complete" ||
-    continuationOutcomesReconcile.has(item.outcome) ||
-    (item.git?.clean === null && item.isDefaultBranch !== true) ||
-    item.git?.sync?.state !== "synced" ||
-    item.git?.sync?.remoteVerified !== true
-  ) {
-    return {
-      state: "RECONCILIATION_REQUIRED",
-      nextAction: "只讀核對目前票券、HEAD、工作樹與遠端證據。",
-      reasonZh: "目前證據不完整、過期或未完成遠端核對，不能猜測續作方向。",
-    };
-  }
   if (continuationOutcomesWaiting.has(item.outcome)) {
     return {
       state: "WAITING_DEPENDENCY",
       nextAction: "等待票券記錄的依賴或人類關卡解除。",
       reasonZh: "目前工作被明確依賴或授權關卡阻擋。",
+    };
+  }
+  if (item.git?.sync?.state !== "synced" || item.git?.sync?.remoteVerified !== true) {
+    return {
+      state: "RECONCILIATION_REQUIRED",
+      nextAction: "只讀核對目前票券、upstream、HEAD 與遠端證據。",
+      reasonZh: "遠端狀態尚未同步，先只讀核對 upstream、HEAD 與遠端證據。",
+    };
+  }
+  if (
+    item.evidenceState !== "complete" ||
+    continuationOutcomesReconcile.has(item.outcome) ||
+    (item.git?.clean === null && item.isDefaultBranch !== true)
+  ) {
+    return {
+      state: "RECONCILIATION_REQUIRED",
+      nextAction: "只讀核對目前票券、HEAD、工作樹與遠端證據。",
+      reasonZh: "目前證據不完整、過期或未完成遠端核對，不能猜測續作方向。",
     };
   }
   if (item.outcome === "COMPLETE" || item.outcome === "VERIFIED") {
