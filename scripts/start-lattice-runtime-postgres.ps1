@@ -88,6 +88,7 @@ function Import-LatticeConfigEnvironment {
 
 $clusterRoot = Join-Path $StateRoot 'cluster'
 $metadataPath = Join-Path $StateRoot 'runtime-postgres.json'
+$postgresLog = Join-Path $StateRoot 'postgres.log'
 $postgresBin = 'C:\Program Files\PostgreSQL\17\bin'
 $initdb = Join-Path $postgresBin 'initdb.exe'
 $pgCtl = Join-Path $postgresBin 'pg_ctl.exe'
@@ -98,7 +99,7 @@ if (Test-Path -LiteralPath $metadataPath) {
     Import-LatticeConfigEnvironment -Path $ConfigPath
     & $pgCtl status -D $clusterRoot *> $null
     if ($LASTEXITCODE -ne 0) {
-        & $pgCtl start -D $clusterRoot -w -t 30 *> $null
+        & $pgCtl start -D $clusterRoot -l $postgresLog -w -t 30 *> $null
         if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_START_REJECTED' }
     }
     & $LatticedPath --postgres-initialize
@@ -121,7 +122,7 @@ try {
 finally {
     Remove-Item -LiteralPath $passwordFile -Force -ErrorAction SilentlyContinue
 }
-& $pgCtl start -D $clusterRoot -o "-p $port -h 127.0.0.1" -w -t 30 *> $null
+& $pgCtl start -D $clusterRoot -o "-p $port -h 127.0.0.1" -l $postgresLog -w -t 30 *> $null
 if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_START_REJECTED' }
 
 try {
