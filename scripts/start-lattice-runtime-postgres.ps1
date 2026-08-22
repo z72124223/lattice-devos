@@ -115,10 +115,15 @@ function Start-LatticePostgres {
         [Parameter(Mandatory = $true)][string]$Cluster,
         [Parameter(Mandatory = $true)][string]$LogPath
     )
-    $process = Start-Process -FilePath $PgCtl -ArgumentList @(
+    Start-Process -FilePath $PgCtl -ArgumentList @(
         'start', '-D', $Cluster, '-l', $LogPath, '-w', '-t', '30'
-    ) -Wait -PassThru -WindowStyle Hidden
-    if ($process.ExitCode -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_START_REJECTED' }
+    ) -WindowStyle Hidden | Out-Null
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        Start-Sleep -Seconds 1
+        & $PgCtl status -D $Cluster *> $null
+        if ($LASTEXITCODE -eq 0) { return }
+    }
+    throw 'LATTICE_RUNTIME_POSTGRES_START_REJECTED'
 }
 
 $clusterRoot = Join-Path $StateRoot 'cluster'
