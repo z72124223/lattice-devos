@@ -1,16 +1,18 @@
 ---
 module_id: hermes-adapter
 name: LATTICE Hermes Reflection Adapter
-version: 1.2
+version: 1.3
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-22
 ---
 
 ## Mission
 
-Obtain one bounded reflection candidate from the exact pinned Hermes source in
-a verified whole-process OS containment boundary after an exact graph receipt.
+Obtain one bounded, read-only reflection candidate through the verified Codex
+App Server in a whole-process OS containment boundary after an exact Graphify
+receipt. The historical pinned Hermes Gateway is retained only as diagnostic
+evidence; it is not a required production dependency.
 
 ## Non-Goals
 
@@ -35,24 +37,26 @@ a verified whole-process OS containment boundary after an exact graph receipt.
 - Production admission and its ephemeral receipt bind only inputs that the
   production process path actually executes or consumes. A non-executed
   helper path or caller-supplied matching digest cannot become a trust gate.
-- Retain `lattice-hermes-broker` only as an independent legacy one-shot entry;
-  it cannot mint or substitute for the production Codex-proxy receipt.
+- The direct bridge starts exactly one Codex App Server turn with
+  `approvalPolicy=never`, a read-only sandbox, no network access, an empty
+  owned cwd, and a closed reflection output schema. Any server request is a
+  terminal denial, not an approval or fallback path.
 
 ## Invariants
 
 1. Isolated homes are state separation, not OS isolation.
-2. Server-side tools require verified containment with no product mount,
-   Git/database credential, or normal home.
+2. The direct Codex bridge has no tool, approval, or write fallback; a server
+   request terminates its owned Job Object.
 3. Version probes receive no API key or provider credential.
 4. Hermes output cannot authorize, mutate, persist itself, or become truth.
 5. Fresh LATTICE status reads PostgreSQL only and performs zero Hermes calls.
 6. The contained production proxy executes the exact verified Codex launcher;
-   legacy helper identity has no production admission authority.
+   the retired Gateway and legacy helper have no production admission authority.
 
 ## Allowed Dependencies
 
-- `lattice-contracts`, `lattice-ports`, canonical hashing, bounded local API
-  transport, and a verified containment/process launcher.
+- `lattice-contracts`, `lattice-ports`, canonical hashing, the Codex App
+  Server protocol, and a verified containment/process launcher.
 
 ## Forbidden Dependencies
 
@@ -62,20 +66,20 @@ a verified whole-process OS containment boundary after an exact graph receipt.
 ## Failure, Compatibility, And Migration
 
 Unknown identity/capability/schema, containment drift, deadline expiry,
-malformed/cross-bound output, mutation evidence, or ambiguous teardown fails
-closed. Hermes v2026.8.3 source package 0.20.0 is source-pinned; a PyPI install
-must not be claimed because that release is not published there.
+malformed/cross-bound output, a server request, mutation evidence, or ambiguous
+teardown fails closed. The historical Hermes v2026.8.3 source package is kept
+as diagnostic evidence only and must not be presented as a runtime requirement.
 
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
 |---|---|---|---|
-| Identity and probe secrecy | source/executable/schema digests; no probe API key | Engineering | yes |
-| OS containment | empty cwd/no product mount and credential/home/memory denial | Security review | yes |
+| Identity and probe secrecy | exact Codex bundle/configuration digest; no probe API key | Engineering | yes |
+| OS containment | empty cwd/no product mount, read-only policy, and Job teardown | Security review | yes |
 | Closed context/output | substitution, secret, schema and provenance matrix | Engineering | yes |
 | Deadline/recovery | one deadline and no post-submit resubmission | Engineering | yes |
 | Durable replay | PostgreSQL survives restart; fresh status makes zero Hermes calls | Integration | yes |
-| Executed-input identity | v2 receipt golden, stale helper-variable no-effect test, exact launcher plan, legacy helper isolation | Engineering and security review | yes |
+| Direct Codex policy | closed thread/turn plan, tool-request denial, exact launcher plan | Engineering and security review | yes |
 
 ## Change Policy
 
@@ -86,6 +90,7 @@ changes require a versioned amendment and responsible-user approval.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 1.3 | 2026-08-22 | Four-core Runtime goal | Replace the retired Hermes Gateway production dependency with one LATTICE-owned, contained, read-only Codex App Server reflection bridge; retain the Gateway only for diagnostics | User goal-mode approval |
 | 1.2 | 2026-08-22 | Runtime model policy | Replace the retired Spark broker identity with the fixed `gpt-5.6-terra` identity; non-5.6 substitutions remain rejected before launch | User goal-mode approval |
 | 1.1 | 2026-08-13 | SPEC-002 v31, TASK-065 | Remove the non-executed broker helper from production admission and receipt identity; retain its legacy one-shot protocol separately | User goal-mode direction to complete Hermes |
 | 1.0 | 2026-08-05 | SPEC-002 v27, V2 amendment, PLANS Step 9, TASK-033 | Contained reflection with PostgreSQL-owned replay | User full-chain directive |

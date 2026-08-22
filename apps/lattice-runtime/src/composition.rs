@@ -57,9 +57,10 @@ use lattice_hermes_adapter::{
 };
 #[cfg(windows)]
 use lattice_hermes_adapter::{
-    CodexReflectionBrokerConfig, HermesOfflineRuntimeManifest, HermesProductionRunnerConfig,
-    HermesWslContainmentConfig, ProductionHermesPort as HermesAdapterProductionPort,
-    ProductionHermesRunner, preparation::verify_official_preparation_for_launch,
+    CodexReflectionBrokerConfig, DirectCodexReflection, HermesOfflineRuntimeManifest,
+    HermesProductionRunnerConfig, HermesWslContainmentConfig,
+    ProductionHermesPort as HermesAdapterProductionPort, ProductionHermesRunner,
+    preparation::verify_official_preparation_for_launch,
 };
 use lattice_openclaw_adapter::{
     AuthenticationKey, GatewayTransportErrorKind, OpenClawGatewayConfig, OpenClawGatewayServer,
@@ -3131,8 +3132,8 @@ pub fn graphify_runtime_preflight_from_environment() -> GraphifyRuntimePreflight
     }
 }
 
-/// Validates only the secret-free runtime and isolation configuration without
-/// launching WSL, Hermes, a broker, a provider, or any child process.
+/// Validates the direct Codex reflection configuration without launching a
+/// model turn, PostgreSQL, or the retired Hermes Gateway.
 #[must_use]
 pub fn hermes_runtime_preflight_from_environment() -> HermesRuntimePreflight {
     #[cfg(not(windows))]
@@ -3141,14 +3142,12 @@ pub fn hermes_runtime_preflight_from_environment() -> HermesRuntimePreflight {
     }
     #[cfg(windows)]
     {
-        const REQUIRED: [&str; 7] = [
-            "LATTICE_HERMES_PREPARATION_ROOT",
-            "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
-            "LATTICE_HERMES_RUNTIME_MANIFEST",
-            "LATTICE_HERMES_RUNTIME_GUEST_ROOT",
+        const REQUIRED: [&str; 5] = [
             "LATTICE_HERMES_PRODUCT_ROOT",
-            "LATTICE_HERMES_WSL_EXE",
-            "LATTICE_HERMES_ISOLATION_PARENT",
+            "LATTICE_HERMES_CODEX_LAUNCHER",
+            "LATTICE_HERMES_CODEX_HOME",
+            "LATTICE_HERMES_BROKER_ISOLATION_ROOT",
+            "LATTICE_HERMES_DEADLINE_SECONDS",
         ];
         let missing = REQUIRED
             .into_iter()
@@ -3158,46 +3157,7 @@ pub fn hermes_runtime_preflight_from_environment() -> HermesRuntimePreflight {
             return HermesRuntimePreflight::MissingConfiguration(missing);
         }
 
-        let result = (|| {
-            let product_root = PathBuf::from(hermes_environment("LATTICE_HERMES_PRODUCT_ROOT")?);
-            let preparation_root =
-                PathBuf::from(hermes_environment("LATTICE_HERMES_PREPARATION_ROOT")?);
-            let preparation_receipt =
-                hermes_environment("LATTICE_HERMES_PREPARATION_RECEIPT_SHA256")?;
-            verify_official_preparation_for_launch(
-                &preparation_root,
-                &product_root,
-                &preparation_receipt,
-            )
-            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesPreparationRequired))?;
-            let runtime_manifest_path =
-                PathBuf::from(hermes_environment("LATTICE_HERMES_RUNTIME_MANIFEST")?);
-            let runtime_manifest_bytes =
-                read_regular_file(&runtime_manifest_path, MAX_HERMES_RUNTIME_MANIFEST_BYTES)
-                    .map_err(|_| {
-                        LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired)
-                    })?;
-            let runtime_manifest =
-                HermesOfflineRuntimeManifest::from_canonical_json(&runtime_manifest_bytes)
-                    .map_err(|_| {
-                        LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired)
-                    })?;
-            let runtime_guest_root = hermes_environment("LATTICE_HERMES_RUNTIME_GUEST_ROOT")?;
-            validate_official_hermes_runtime_identity(
-                &runtime_guest_root,
-                &runtime_manifest_bytes,
-                &runtime_manifest,
-            )?;
-            HermesWslContainmentConfig::new(
-                PathBuf::from(hermes_environment("LATTICE_HERMES_WSL_EXE")?),
-                runtime_guest_root,
-                PathBuf::from(hermes_environment("LATTICE_HERMES_ISOLATION_PARENT")?)
-                    .join("runtime-preflight"),
-                product_root,
-            )
-            .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
-            Ok::<(), LatticedError>(())
-        })();
+        let result = DirectCodexHermesEnvironmentConfig::from_environment();
         if result.is_err() {
             HermesRuntimePreflight::ConfigurationRejected
         } else {
@@ -3232,7 +3192,7 @@ pub fn hermes_codex_broker_preflight_from_environment() -> HermesCodexBrokerPref
         }
 
         let result = (|| {
-            let configuration = HermesEnvironmentConfig::from_environment()?;
+            let configuration = DirectCodexHermesEnvironmentConfig::from_environment()?;
             let deadline = Instant::now()
                 .checked_add(configuration.timeout)
                 .ok_or_else(|| {
@@ -6812,27 +6772,104 @@ pub fn reflect_runtime_hermes_from_environment() -> Result<HermesReflectionRecei
                 && error.code() == "MEMORY_RECEIPT_UNAVAILABLE" => {}
         Err(error) => return Err(map_reflection_read_error(&error)),
     }
-    let mut hermes = HermesEnvironmentConfig::from_environment()?.launch(database.run_id())?;
-    let result = load_or_run_canonical_reflection(
-        &mut hermes,
-        database.run_id(),
+    let graph_receipt =
+        load_runtime_graph_receipt(&database, &password, deadline(timeout)?, &request)?
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphReceiptRead))?;
+    let hermes_request = hermes_request_for_graph(database.run_id(), &request, &graph_receipt)?;
+    let configuration = DirectCodexHermesEnvironmentConfig::from_environment()?;
+    let session_id = new_hermes_session_token()?;
+    let job = HermesReflectionJob::new(
+        hermes_request.clone(),
+        session_id.clone(),
+        FULL_CHAIN_CODEX_BROKER_MODEL,
+        hermes_job_evidence(&request, &graph_receipt)
+            .map_err(|error| map_hermes_research_error(&error))?,
+    )
+    .map_err(|error| map_hermes_research_error(&map_hermes_adapter_error(&error)))?;
+    let direct = configuration
+        .broker
+        .run_direct_reflection(&job, deadline(configuration.timeout)?)
+        .map_err(|error| map_hermes_research_error(&map_hermes_adapter_error(&error)))?;
+    persist_direct_codex_reflection(
+        &database,
+        &password,
+        timeout,
         &request,
-        |request| load_reflection_from_postgres(&database, &password, timeout, request),
-        |request| {
-            load_runtime_graph_receipt(&database, &password, deadline(timeout)?, request).and_then(
-                |receipt| {
-                    receipt.ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphReceiptRead))
-                },
-            )
-        },
-        |candidate| persist_reflection_to_postgres(&database, &password, timeout, candidate),
-    );
-    let teardown = production_hermes_sealed::Sealed::terminate(&mut hermes);
-    match (result, teardown) {
-        (Ok(receipt), Ok(())) => Ok(receipt),
-        (_, Err(error)) => Err(error),
-        (Err(error), Ok(())) => Err(error),
+        &graph_receipt,
+        &hermes_request,
+        &session_id,
+        &job,
+        direct,
+    )
+}
+
+#[cfg(windows)]
+struct DirectCodexHermesEnvironmentConfig {
+    broker: CodexReflectionBrokerConfig,
+    timeout: Duration,
+}
+
+#[cfg(windows)]
+impl DirectCodexHermesEnvironmentConfig {
+    fn from_environment() -> Result<Self, LatticedError> {
+        let product_root = PathBuf::from(hermes_environment("LATTICE_HERMES_PRODUCT_ROOT")?);
+        let timeout_seconds = hermes_environment("LATTICE_HERMES_DEADLINE_SECONDS")?
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| (1..=300).contains(seconds))
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        let broker = CodexReflectionBrokerConfig::new(
+            PathBuf::from(hermes_environment("LATTICE_HERMES_CODEX_LAUNCHER")?),
+            PathBuf::from(hermes_environment("LATTICE_HERMES_CODEX_HOME")?),
+            PathBuf::from(hermes_environment("LATTICE_HERMES_BROKER_ISOLATION_ROOT")?),
+            product_root,
+            FULL_CHAIN_CODEX_BROKER_MODEL,
+        )
+        .map_err(|_| LatticedError::new(LatticedErrorKind::HermesProductionRunnerRequired))?;
+        Ok(Self {
+            broker,
+            timeout: Duration::from_secs(timeout_seconds),
+        })
     }
+}
+
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+fn persist_direct_codex_reflection(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    timeout: Duration,
+    graph_request: &GraphMemoryRunRequest,
+    graph_receipt: &GraphMemoryReceipt,
+    request: &HermesResearchRequest,
+    session_id: &str,
+    job: &HermesReflectionJob,
+    direct: DirectCodexReflection,
+) -> Result<HermesReflectionReceipt, LatticedError> {
+    let evidence = HermesEvidence::new(
+        request.invocation().clone(),
+        RuntimeKind::Live,
+        direct.reflection().output_digest().clone(),
+    );
+    let candidate = reflection_candidate(
+        request,
+        graph_request,
+        graph_receipt,
+        session_id,
+        job.model(),
+        job.input_digest(),
+        direct.identity_digest(),
+        direct.reflection(),
+        &evidence,
+    )
+    .map_err(|error| map_hermes_research_error(&error))?;
+    let persisted = persist_reflection_to_postgres(database, password, timeout, &candidate)?;
+    let replayed = load_reflection_from_postgres(database, password, timeout, graph_request)
+        .map_err(|error| map_reflection_read_error(&error))?;
+    if replayed != persisted {
+        return Err(LatticedError::new(LatticedErrorKind::HermesReceiptRead));
+    }
+    Ok(replayed)
 }
 
 #[cfg(not(windows))]

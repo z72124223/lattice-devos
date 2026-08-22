@@ -35,7 +35,10 @@ use lattice_contracts::ContentDigest;
 use crate::codex_proxy::{
     ProductionCodexProxyControl, ProductionCodexProxyDuplex, ProductionCodexProxyProvider,
 };
-use crate::{HermesAdapterError, HermesAdapterErrorKind, HermesAdapterResult};
+use crate::{
+    CanonicalReflection, HERMES_SCHEMA_VERSION, HermesAdapterError, HermesAdapterErrorKind,
+    HermesAdapterResult, HermesReflectionJob,
+};
 
 const CODEX_VERSION: &str = "codex-cli 0.146.0";
 const CODEX_LAUNCHER_SHA256: &str =
@@ -894,6 +897,28 @@ pub struct CodexReflectionBrokerConfig {
     product_root: PathBuf,
 }
 
+/// Result of one contained direct Codex reflection.  The identity digest is
+/// derived from the exact preflight that created the owned process root.
+#[cfg(windows)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectCodexReflection {
+    reflection: CanonicalReflection,
+    identity_digest: ContentDigest,
+}
+
+#[cfg(windows)]
+impl DirectCodexReflection {
+    #[must_use]
+    pub const fn reflection(&self) -> &CanonicalReflection {
+        &self.reflection
+    }
+
+    #[must_use]
+    pub const fn identity_digest(&self) -> &ContentDigest {
+        &self.identity_digest
+    }
+}
+
 #[cfg(windows)]
 impl CodexReflectionBrokerConfig {
     /// Creates a deployment-owned proxy configuration.
@@ -977,6 +1002,102 @@ impl CodexReflectionBrokerConfig {
             #[cfg(test)]
             test_only: false,
         })
+    }
+
+    /// Runs one LATTICE-owned, read-only Codex reflection without starting the
+    /// retired Hermes HTTP gateway.  The process is contained in the existing
+    /// Windows Job boundary; any server request (including a tool request) is
+    /// rejected by terminating that exact job and no output is persisted here.
+    pub fn run_direct_reflection(
+        &self,
+        job: &HermesReflectionJob,
+        deadline: Instant,
+    ) -> HermesAdapterResult<DirectCodexReflection> {
+        if deadline <= Instant::now() || job.model() != self.model {
+            return Err(configuration("HERMES_CODEX_DIRECT_REFLECTION_REJECTED"));
+        }
+        let receipt = self.run_zero_model_preflight(deadline)?;
+        let provider = self
+            .clone()
+            .into_production_proxy_provider_from_preflight(&receipt, job.model())?;
+        let control = provider.control();
+        let result = (|| {
+            let mut duplex = provider.open(deadline)?;
+            let reader = duplex.take_reader()?;
+            let receiver = start_codex_stdout_reader(reader);
+            let cwd = fs::canonicalize(self.isolation_root.join(BROKER_ROOT_CWD_NAME))
+                .map_err(|_| configuration("HERMES_CODEX_DIRECT_REFLECTION_REJECTED"))?;
+            let codex_home = fs::canonicalize(&self.codex_home)
+                .map_err(|_| configuration("HERMES_CODEX_DIRECT_REFLECTION_REJECTED"))?;
+            let plan = CodexDirectReflectionPlan::new(cwd.clone(), job)?;
+            let mut protocol = CodexBrokerProtocol::new(codex_home, cwd, job.model())
+                .map_err(direct_protocol_error)?;
+            let mut transcript = Sha256::new();
+            transcript.update(b"lattice.hermes.direct-codex-reflection.v1\0");
+
+            protocol
+                .mark_request_sent(CodexBrokerRequest::Initialize)
+                .map_err(direct_protocol_error)?;
+            send_codex_proxy_json(&mut duplex, &plan.initialize_request(), &mut transcript)?;
+            while !protocol.responses_seen[CodexBrokerRequest::Initialize.index()] {
+                let frame = receive_codex_frame(&receiver, &mut transcript, deadline)
+                    .map_err(direct_protocol_error)?;
+                ingest_direct_codex_frame(&mut protocol, &frame, &control)?;
+            }
+            send_codex_proxy_json(
+                &mut duplex,
+                &plan.initialized_notification(),
+                &mut transcript,
+            )?;
+            protocol
+                .mark_request_sent(CodexBrokerRequest::ThreadStart)
+                .map_err(direct_protocol_error)?;
+            send_codex_proxy_json(&mut duplex, &plan.thread_start_request(), &mut transcript)?;
+            while protocol.thread_id.is_none() {
+                let frame = receive_codex_frame(&receiver, &mut transcript, deadline)
+                    .map_err(direct_protocol_error)?;
+                ingest_direct_codex_frame(&mut protocol, &frame, &control)?;
+            }
+            let thread_id = protocol.thread_id.clone().ok_or_else(|| {
+                HermesAdapterError::new(
+                    HermesAdapterErrorKind::Malformed,
+                    "HERMES_CODEX_DIRECT_THREAD_REJECTED",
+                )
+            })?;
+            protocol
+                .mark_request_sent(CodexBrokerRequest::TurnStart)
+                .map_err(direct_protocol_error)?;
+            send_codex_proxy_json(
+                &mut duplex,
+                &plan.turn_start_request(&thread_id),
+                &mut transcript,
+            )?;
+            let terminal = loop {
+                control.ensure_running()?;
+                let frame = receive_codex_frame(&receiver, &mut transcript, deadline)
+                    .map_err(direct_protocol_error)?;
+                if let Some(terminal) = ingest_direct_codex_frame(&mut protocol, &frame, &control)?
+                {
+                    break terminal;
+                }
+            };
+            if terminal.status != "completed" || terminal.agent_message_count != 1 {
+                return Err(HermesAdapterError::new(
+                    HermesAdapterErrorKind::Failed,
+                    "HERMES_CODEX_DIRECT_TERMINAL_REJECTED",
+                ));
+            }
+            crate::parse_reflection(&terminal.output, job)
+        })();
+        let teardown = control.terminate();
+        match (result, teardown) {
+            (Ok(reflection), Ok(())) => Ok(DirectCodexReflection {
+                reflection,
+                identity_digest: receipt.receipt_digest().clone(),
+            }),
+            (_, Err(error)) => Err(error),
+            (Err(error), Ok(())) => Err(error),
+        }
     }
 
     pub(crate) fn into_production_proxy_provider_from_preflight(
@@ -2315,7 +2436,10 @@ struct ReceivedCodexFrame {
 }
 
 #[cfg(windows)]
-fn start_codex_stdout_reader(stdout: std::process::ChildStdout) -> Receiver<CodexReaderEvent> {
+fn start_codex_stdout_reader<R>(stdout: R) -> Receiver<CodexReaderEvent>
+where
+    R: Read + Send + 'static,
+{
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
@@ -2355,6 +2479,58 @@ fn start_codex_stdout_reader(stdout: std::process::ChildStdout) -> Receiver<Code
         }
     });
     receiver
+}
+
+#[cfg(windows)]
+fn send_codex_proxy_json(
+    duplex: &mut ProductionCodexProxyDuplex,
+    value: &Value,
+    transcript: &mut Sha256,
+) -> HermesAdapterResult<()> {
+    let encoded = serde_json::to_vec(value)
+        .map_err(|_| malformed_error("HERMES_CODEX_DIRECT_FRAME_REJECTED"))?;
+    if encoded.len() > MAX_CODEX_FRAME_BYTES {
+        return Err(malformed_error("HERMES_CODEX_DIRECT_FRAME_REJECTED"));
+    }
+    transcript.update(b"C\0");
+    transcript.update((encoded.len() as u64).to_be_bytes());
+    transcript.update(&encoded);
+    let mut framed = encoded;
+    framed.push(b'\n');
+    duplex.write_all(&framed)
+}
+
+#[cfg(windows)]
+fn ingest_direct_codex_frame(
+    protocol: &mut CodexBrokerProtocol,
+    frame: &ReceivedCodexFrame,
+    control: &Arc<dyn ProductionCodexProxyControl>,
+) -> HermesAdapterResult<Option<CodexBrokerTerminal>> {
+    if matches!(frame.kind, CodexAppServerFrameKind::ServerRequest { .. }) {
+        let _ = control.terminate();
+        return Err(HermesAdapterError::new(
+            HermesAdapterErrorKind::Cancelled,
+            "HERMES_CODEX_DIRECT_TOOL_REQUEST_DENIED",
+        ));
+    }
+    protocol.ingest_frame(frame).map_err(|code| {
+        let kind = if code == 74 {
+            HermesAdapterErrorKind::Cancelled
+        } else {
+            HermesAdapterErrorKind::Malformed
+        };
+        HermesAdapterError::new(kind, "HERMES_CODEX_DIRECT_PROTOCOL_REJECTED")
+    })
+}
+
+#[cfg(windows)]
+fn direct_protocol_error(code: i32) -> HermesAdapterError {
+    let kind = if code == 69 {
+        HermesAdapterErrorKind::Timeout
+    } else {
+        HermesAdapterErrorKind::Malformed
+    };
+    HermesAdapterError::new(kind, "HERMES_CODEX_DIRECT_PROTOCOL_REJECTED")
 }
 
 #[cfg(windows)]
@@ -2941,7 +3117,10 @@ impl CodexBrokerProtocol {
                 self.pending_terminal = Some((id, terminal));
             }
             CodexAppServerFrameKind::Lifecycle { method } => {
-                if method == "remoteControl/status/changed" {
+                if matches!(
+                    method.as_str(),
+                    "remoteControl/status/changed" | "mcpServer/startupStatus/updated"
+                ) {
                     return self.reconcile();
                 }
                 let params = frame
@@ -3496,6 +3675,134 @@ pub(crate) struct CodexNoMarkerCanaryPlan {
     model: String,
 }
 
+/// Fixed request sequence for one direct, read-only Codex reflection.  This
+/// lives beside the canary plan because both use the same closed app-server
+/// protocol; it intentionally adds no generic agent loop or tool surface.
+#[cfg(windows)]
+struct CodexDirectReflectionPlan {
+    cwd: PathBuf,
+    model: String,
+    prompt: String,
+    output_schema: Value,
+}
+
+#[cfg(windows)]
+impl CodexDirectReflectionPlan {
+    fn new(cwd: PathBuf, job: &HermesReflectionJob) -> HermesAdapterResult<Self> {
+        if !cwd.is_absolute() || job.model() != "gpt-5.6-terra" {
+            return Err(configuration("HERMES_CODEX_DIRECT_REFLECTION_REJECTED"));
+        }
+        Ok(Self {
+            cwd,
+            model: job.model().to_owned(),
+            prompt: job.prompt().to_owned(),
+            output_schema: direct_reflection_output_schema(job),
+        })
+    }
+
+    fn initialize_request(&self) -> Value {
+        serde_json::json!({
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "lattice-hermes-reflection",
+                    "title": "LATTICE Hermes Reflection",
+                    "version": "1.0.0"
+                },
+                "capabilities": {
+                    "experimentalApi": false,
+                    "requestAttestation": false,
+                    "mcpServerOpenaiFormElicitation": false
+                }
+            }
+        })
+    }
+
+    fn initialized_notification(&self) -> Value {
+        serde_json::json!({"method": "initialized"})
+    }
+
+    fn thread_start_request(&self) -> Value {
+        serde_json::json!({
+            "id": 1,
+            "method": "thread/start",
+            "params": {
+                "model": self.model,
+                "cwd": self.cwd,
+                "approvalPolicy": "never",
+                "sandbox": "read-only",
+                "serviceName": "lattice-hermes-reflection",
+                "ephemeral": true
+            }
+        })
+    }
+
+    fn turn_start_request(&self, thread_id: &str) -> Value {
+        serde_json::json!({
+            "id": 2,
+            "method": "turn/start",
+            "params": {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": self.prompt}],
+                "model": self.model,
+                "cwd": self.cwd,
+                "approvalPolicy": "never",
+                "sandboxPolicy": {"type": "readOnly", "networkAccess": false},
+                "outputSchema": self.output_schema
+            }
+        })
+    }
+}
+
+#[cfg(windows)]
+fn direct_reflection_output_schema(job: &HermesReflectionJob) -> Value {
+    let invocation = job.request().invocation();
+    let evidence_digests = job
+        .evidence()
+        .iter()
+        .map(|evidence| evidence.digest().as_str())
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "binding", "summary", "findings", "next_actions"],
+        "properties": {
+            "schema_version": {"type": "string", "enum": [HERMES_SCHEMA_VERSION]},
+            "binding": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["request_id", "task_id", "attempt_id", "project_snapshot_id", "subject_digest", "session_id", "input_digest", "model"],
+                "properties": {
+                    "request_id": {"type": "string", "enum": [invocation.request_id().as_str()]},
+                    "task_id": {"type": "string", "enum": [invocation.task_id().as_str()]},
+                    "attempt_id": {"type": "string", "enum": [invocation.attempt_id().as_str()]},
+                    "project_snapshot_id": {"type": "string", "enum": [invocation.project_snapshot_id().as_str()]},
+                    "subject_digest": {"type": "string", "enum": [invocation.subject_digest().as_str()]},
+                    "session_id": {"type": "string", "enum": [job.session_id()]},
+                    "input_digest": {"type": "string", "enum": [job.input_digest().as_str()]},
+                    "model": {"type": "string", "enum": [job.model()]}
+                }
+            },
+            "summary": {"type": "string"},
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["classification", "statement", "evidence_digests"],
+                    "properties": {
+                        "classification": {"type": "string", "enum": ["inference"]},
+                        "statement": {"type": "string"},
+                        "evidence_digests": {"type": "array", "items": {"type": "string", "enum": evidence_digests}}
+                    }
+                }
+            },
+            "next_actions": {"type": "array", "items": {"type": "string"}}
+        }
+    })
+}
+
 impl CodexNoMarkerCanaryPlan {
     pub(crate) fn new(
         cwd: PathBuf,
@@ -3879,6 +4186,7 @@ fn classify_notification_envelope(
                 *method,
                 "thread/started"
                     | "remoteControl/status/changed"
+                    | "mcpServer/startupStatus/updated"
                     | "turn/started"
                     | "account/rateLimits/updated"
                     | "thread/status/changed"
@@ -3942,6 +4250,24 @@ fn classify_notification(
             if !object.get("emittedAtMs").is_some_and(|value| {
                 value.as_u64().is_some() || value.as_i64().is_some_and(|timestamp| timestamp >= 0)
             }) {
+                return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
+            }
+        }
+        "mcpServer/startupStatus/updated" => {
+            require_control_keys(
+                params,
+                &["error", "failureReason", "name", "status", "threadId"],
+            )?;
+            if !params
+                .get("error")
+                .is_some_and(|value| value.is_null() || value.is_string())
+                || !params
+                    .get("failureReason")
+                    .is_some_and(|value| value.is_null() || value.is_string())
+                || !params.get("name").is_some_and(Value::is_string)
+                || !params.get("status").is_some_and(Value::is_string)
+                || !params.get("threadId").is_some_and(Value::is_string)
+            {
                 return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
             }
         }

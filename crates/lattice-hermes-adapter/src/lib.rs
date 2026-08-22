@@ -17,7 +17,7 @@ mod windows_job;
 
 pub use broker::CodexProxyInvocation;
 #[cfg(windows)]
-pub use broker::{CodexBrokerPreflightReceipt, CodexReflectionBrokerConfig};
+pub use broker::{CodexBrokerPreflightReceipt, CodexReflectionBrokerConfig, DirectCodexReflection};
 pub use containment::{
     HermesContainmentFrame, HermesContainmentFrameLimits, HermesSandboxProfile,
     build_hermes_bwrap_arguments, parse_containment_frame,
@@ -1838,7 +1838,13 @@ fn redacted_run_failure_missing_detail_diagnostic(component: &str, source: &str)
     })
 }
 
-fn parse_reflection(
+/// Validates one closed-schema reflection returned by the direct Codex bridge.
+///
+/// The bridge owns process containment; this parser retains Hermes' existing
+/// evidence binding and canonicalization rules so a model response can never
+/// become durable truth without the normal LATTICE memory-port path.
+#[cfg(windows)]
+pub(crate) fn parse_reflection(
     output: &str,
     job: &HermesReflectionJob,
 ) -> HermesAdapterResult<CanonicalReflection> {
