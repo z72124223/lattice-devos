@@ -175,7 +175,7 @@ $password = Get-RandomHex -ByteCount 32
 $passwordFile = Join-Path $StateRoot '.initdb-password'
 try {
     [IO.File]::WriteAllText($passwordFile, $password, [Text.UTF8Encoding]::new($false))
-    & $initdb -D $clusterRoot -U lattice_bootstrap --auth-host=scram-sha-256 --auth-local=trust --pwfile=$passwordFile -E UTF8 --no-locale *> $null
+    & $initdb -D $clusterRoot -U lattice_bootstrap --auth-host=scram-sha-256 --auth-local=trust --pwfile=$passwordFile -E UTF8 --no-locale --data-checksums *> $null
     if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_INITDB_REJECTED' }
 }
 finally {
