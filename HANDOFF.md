@@ -1298,3 +1298,49 @@ installing or invoking OpenClaw:
   - `npm.cmd run verify`
 - Continue bounded, reversible local work automatically.
 - Do not introduce the unrelated playmate website.
+
+---
+
+# TASK-098 Reconciliation Diagnostic Envelope — 2026-08-23
+
+## Status
+
+`NEEDS_REVIEW`: local implementation and machine verification are complete;
+no independent reviewer, integration, push, merge, deployment, or live
+delivery run has occurred.
+
+## Completed
+
+- Added a versioned closed contract for two static reconciliation fields:
+  `reconciliation_action: INSPECT_ONLY` and `retry: FORBIDDEN`.
+- Preserved the existing two zero-argument MCP tools and all recovery
+  authority boundaries. The fields expose no evidence identifiers, paths,
+  process details, output, SQL, credentials, or arbitrary error text.
+- Added MCP and compatibility-CLI exact-envelope tests. RED evidence was the
+  original MCP envelope containing only `status` and `code`; the focused test
+  then passed after the implementation.
+
+## Verification
+
+- `cargo test -p lattice-runtime --locked`: pass (57 tests).
+- `cargo fmt --check`: pass.
+- `npm.cmd run check`: pass (355 files, 23 constitutions, 29 tickets, one
+  current task).
+- `npm.cmd run verify`: pass (48 tests).
+- `cargo clippy --workspace --all-targets -- -D warnings`: pass.
+- `git diff --check`: pass.
+
+## Review
+
+- Code review: separate read-only pass by the implementer; independence is not
+  proven. No P0/P1/P2 findings. Residual gap: no external integration review.
+- Architecture review: public error envelope is additive and versioned; no new
+  tool, input, dependency, durable data owner, or mutation authority. The
+  LATTICED constitution amendment records the user authorization.
+
+## Next Action
+
+Inspect the final diff, create a clean local commit, and run the repository
+delivery finisher only if its current-ticket and remote conditions accept this
+new branch. Do not merge, deploy, or run live delivery without separate
+authorization.

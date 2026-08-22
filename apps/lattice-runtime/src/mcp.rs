@@ -74,6 +74,13 @@ impl ToolExecutionError {
                 Value::String(cause.code.to_owned()),
             );
         }
+        if self.code == "LATTICE_DELIVERY_RECONCILIATION_REQUIRED" {
+            value.insert(
+                "reconciliation_action".to_owned(),
+                Value::String("INSPECT_ONLY".to_owned()),
+            );
+            value.insert("retry".to_owned(), Value::String("FORBIDDEN".to_owned()));
+        }
         Value::Object(value)
     }
 }

@@ -1,7 +1,7 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 1.1
+version: 1.2
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-05
@@ -56,6 +56,8 @@ module.
   select a different adapter, order, workspace, test, or truth source.
 - Keep OpenClaw as the normal human gateway. This MCP surface provides no
   general submit/plan/approve/reject/stop or protected-release operation.
+- A reconciliation-required error may carry only the closed `INSPECT_ONLY` and
+  `FORBIDDEN` recovery guidance defined by the versioned diagnostic contract.
 
 ## Invariants
 
@@ -142,4 +144,5 @@ constitution cannot be weakened merely to excuse implementation drift.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 1.2 | 2026-08-23 | RUNTIME_RECONCILIATION_DIAGNOSTIC_ENVELOPE V1, TASK-098 | Add static inspection-only guidance to the existing reconciliation error without changing tool schemas or recovery authority | User, conversation authorization |
 | 1.0 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Sole normal composition root in `apps/lattice-runtime`, two fixed zero-parameter MCP tools, and one shared `lattice-runtime` compatibility wrapper | User approval in preceding implementation window |

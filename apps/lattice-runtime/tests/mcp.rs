@@ -36,7 +36,7 @@ fn server() -> (McpServer<FakeService>, Rc<Cell<u32>>, Rc<Cell<u32>>) {
     (McpServer::new(service), run_calls, status_calls)
 }
 
-fn initialize(server: &mut McpServer<FakeService>) {
+fn initialize<S: DeliveryToolService>(server: &mut McpServer<S>) {
     let response = server
         .handle(json!({
             "jsonrpc": "2.0",
@@ -107,6 +107,48 @@ fn empty_arguments_dispatch_each_fixed_tool() {
 
     assert_eq!(run_calls.get(), 1);
     assert_eq!(status_calls.get(), 1);
+}
+
+#[test]
+fn reconciliation_error_offers_only_inspection_and_forbids_retry() {
+    #[derive(Clone)]
+    struct ReconciliationService;
+
+    impl DeliveryToolService for ReconciliationService {
+        fn run(&mut self) -> Result<Value, ToolExecutionError> {
+            Err(ToolExecutionError::new(
+                "LATTICE_DELIVERY_RECONCILIATION_REQUIRED",
+            ))
+        }
+
+        fn status(&mut self) -> Result<Value, ToolExecutionError> {
+            Err(ToolExecutionError::new(
+                "LATTICE_DELIVERY_RECONCILIATION_REQUIRED",
+            ))
+        }
+    }
+
+    let mut server = McpServer::new(ReconciliationService);
+    initialize(&mut server);
+    let response = server
+        .handle(json!({
+            "jsonrpc":"2.0",
+            "id":2,
+            "method":"tools/call",
+            "params":{"name":"lattice_delivery_status","arguments":{}}
+        }))
+        .expect("tool error response");
+
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(
+        response["result"]["structuredContent"],
+        json!({
+            "status":"ERROR",
+            "code":"LATTICE_DELIVERY_RECONCILIATION_REQUIRED",
+            "reconciliation_action":"INSPECT_ONLY",
+            "retry":"FORBIDDEN"
+        })
+    );
 }
 
 #[test]

@@ -113,6 +113,13 @@ impl RuntimeError {
                 Value::String(cause.code().to_owned()),
             );
         }
+        if self.code() == "LATTICE_DELIVERY_RECONCILIATION_REQUIRED" {
+            value.insert(
+                "reconciliation_action".to_owned(),
+                Value::String("INSPECT_ONLY".to_owned()),
+            );
+            value.insert("retry".to_owned(), Value::String("FORBIDDEN".to_owned()));
+        }
         Value::Object(value)
     }
 }
@@ -389,6 +396,25 @@ mod tests {
                 "status": "ERROR",
                 "code": "LATTICED_CONFIGURATION_REJECTED",
                 "message": "LATTICED_CONFIGURATION_REJECTED"
+            })
+        );
+    }
+
+    #[test]
+    fn cli_reconciliation_error_offers_only_inspection_and_forbids_retry() {
+        let envelope = RuntimeError::Latticed(LatticedError::new(
+            LatticedErrorKind::ReconciliationRequired,
+        ))
+        .error_envelope();
+
+        assert_eq!(
+            envelope,
+            json!({
+                "status":"ERROR",
+                "code":"LATTICE_DELIVERY_RECONCILIATION_REQUIRED",
+                "message":"LATTICE_DELIVERY_RECONCILIATION_REQUIRED",
+                "reconciliation_action":"INSPECT_ONLY",
+                "retry":"FORBIDDEN"
             })
         );
     }

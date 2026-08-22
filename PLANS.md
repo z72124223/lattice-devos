@@ -763,7 +763,12 @@ remain future Orchestrator/PostgreSQL responsibilities.
   handoff are complete. The official-live acceptance substep remains blocked by
   the incident gate above and must not be retried in this window; TASK-032 stays
   `in-progress` with official acceptance `FAILED_DIAGNOSTIC`.
-- [ ] **CURRENT TASK-033 — real Graphify/PostgreSQL Codebase Memory node:** pin
+- [ ] **CURRENT TASK-098 — reconciliation diagnostic envelope:** retain the two
+  zero-parameter MCP tools and add only static `INSPECT_ONLY` / `FORBIDDEN`
+  guidance to `LATTICE_DELIVERY_RECONCILIATION_REQUIRED`; no retry, recovery,
+  evidence identifier, path, secret, deployment, or live delivery action is
+  authorized.
+- [ ] **TASK-033 — real Graphify/PostgreSQL Codebase Memory node:** pin
   Graphify v0.9.33 at commit
   `4e7e6b1f7e0df10ed07d5f28f9189bbde42940f1`, analyze only an exact tracked
   Git snapshot and validate/canonicalize typed graph evidence. Pure contracts,
