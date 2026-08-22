@@ -88,9 +88,15 @@ boundaries, complete cleanup, and no unresolved P0-P3 finding. GitHub Actions
 run `31835654240` passed on the exact implementation commit. Draft PR #12
 remains not authorized for merge or Draft promotion.
 
+## Current bounded continuation decision receipt - TASK-099
+
+CURRENT TASK-099 - add an evidence-bound, read-only continuation projection
+to the engineering-status snapshot. It may classify work but cannot create,
+dispatch, mutate, push, merge, deploy, or release anything.
+
 ## Current engineering delivery finisher - TASK-078
 
-CURRENT TASK-078 - implement one fail-closed command that reads explicit push
+TASK-078 - implement one fail-closed command that reads explicit push
 repository-identity, and archive policies from the matching terminal TASK
 ticket or unique committed terminal ISSUE evidence. It permits only an
 exact-SHA non-force `feature/task-nnn-*` or evidence-bound

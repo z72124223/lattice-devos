@@ -2360,3 +2360,46 @@ installing or invoking OpenClaw:
   - `npm.cmd run verify`
 - Continue bounded, reversible local work automatically.
 - Do not introduce the unrelated playmate website.
+
+---
+
+# TASK-099 Bounded Continuation Decision Receipt — 2026-08-23
+
+## Status
+
+`NEEDS_REVIEW`: local implementation and verification complete; no push,
+merge, deployment, or external LATTICE task binding occurred.
+
+## Result
+
+- Added `item.continuation` to the existing
+  `lattice.engineering-status/2.0` snapshot.
+- The projection is closed to `CONTINUE`, `WAITING_DEPENDENCY`,
+  `RECONCILIATION_REQUIRED`, and `STOP_DUPLICATE`.
+- It uses only current ticket outcome, evidence completeness, Git sync, default
+  branch identity, and duplicate canonical TASK/ISSUE counts.
+- It performs no Git/GitHub mutation, task creation, dispatch, model call,
+  release, or protected action.
+- The GitHub default branch is explicitly treated as a valid `CONTINUE` root
+  when its remote identity is verified.
+
+## Verification
+
+- Focused dashboard suite: 27/27 passed.
+- `npm.cmd run check`: passed; 527 files, 51 tickets, one current task.
+- `npm.cmd run verify`: 127/127 passed.
+- `git diff --check`: passed.
+
+## Review
+
+- Code review: separate read-only pass by implementer; independence not proven;
+  no P0/P1/P2 findings after fixing the default-root edge case.
+- Architecture review: additive presentation-only field, no new dependency,
+  authority, persistence, or mutation path; existing constitution 1.3 remains
+  compatible.
+
+## Next Action
+
+Inspect final diff and create a clean local commit. Do not run the delivery
+finisher unless current user scope explicitly authorizes external feature-branch
+push; do not merge, deploy, or archive.

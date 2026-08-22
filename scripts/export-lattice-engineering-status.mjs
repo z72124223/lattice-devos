@@ -1341,6 +1341,76 @@ function ineligibleOutcomeReason(outcome) {
   return reasons[outcome] || "只有已完成或已驗收的工作可以作為新起點。";
 }
 
+const continuationOutcomesWaiting = new Set([
+  "BLOCKED",
+  "WAITING_DEPENDENCY",
+  "USER_ACTION",
+  "PAUSED",
+]);
+const continuationOutcomesReconcile = new Set([
+  "FAIL",
+  "PARTIAL",
+  "STALE",
+  "UNKNOWN",
+]);
+
+export function deriveContinuation(item, duplicateCount = 1) {
+  const identityIsCanonical = item.kind === "TASK" || item.kind === "ISSUE";
+  if (identityIsCanonical && duplicateCount > 1) {
+    return {
+      state: "STOP_DUPLICATE",
+      nextAction: "停止這條分支，先由工頭合併重複工作證據。",
+      reasonZh: "同一個 TASK/ISSUE 同時出現在多個工作樹，不能繼續避免重工。",
+    };
+  }
+  if (
+    item.evidenceState !== "complete" ||
+    continuationOutcomesReconcile.has(item.outcome) ||
+    (item.git?.clean === null && item.isDefaultBranch !== true) ||
+    item.git?.sync?.state === "unknown" ||
+    item.git?.sync?.remoteVerified !== true
+  ) {
+    return {
+      state: "RECONCILIATION_REQUIRED",
+      nextAction: "只讀核對目前票券、HEAD、工作樹與遠端證據。",
+      reasonZh: "目前證據不完整、過期或未完成遠端核對，不能猜測續作方向。",
+    };
+  }
+  if (continuationOutcomesWaiting.has(item.outcome)) {
+    return {
+      state: "WAITING_DEPENDENCY",
+      nextAction: "等待票券記錄的依賴或人類關卡解除。",
+      reasonZh: "目前工作被明確依賴或授權關卡阻擋。",
+    };
+  }
+  if (item.outcome === "COMPLETE" || item.outcome === "VERIFIED") {
+    return {
+      state: "STOP_DUPLICATE",
+      nextAction: "不要在已完成分支重開工作，另選已核對的新起點。",
+      reasonZh: "這條分支已完成，不應在同一身份上重複開工。",
+    };
+  }
+  return {
+    state: "CONTINUE",
+    nextAction: "依目前票券繼續本機實作與驗證，不擴張工作範圍。",
+    reasonZh: "目前身份唯一，證據完整，工作樹與遠端狀態可核對。",
+  };
+}
+
+function applyContinuation(items) {
+  const identityCounts = new Map();
+  for (const item of items) {
+    if (item.kind === "TASK" || item.kind === "ISSUE") {
+      const key = `${item.kind}:${item.id}`;
+      identityCounts.set(key, (identityCounts.get(key) || 0) + 1);
+    }
+  }
+  for (const item of items) {
+    const key = `${item.kind}:${item.id}`;
+    item.continuation = deriveContinuation(item, identityCounts.get(key) || 1);
+  }
+}
+
 function applyGuideAndEligibility(items, guide, graphState) {
   for (const item of items) {
     const entry = guide.get(item.branch);
@@ -1423,6 +1493,7 @@ export async function buildSnapshot({ repository, offline = false, guidePath = d
   const guide = await readBranchGuide(guidePath);
   const tree = await buildAncestryTree(repositoryRoot, items, defaultBranch);
   applyGuideAndEligibility(items, guide, tree.graphState);
+  applyContinuation(items);
   const recommendedBranch = chooseRecommendedBranch(items);
   const github = await enrichFromGitHub(repositoryRoot, items, offline);
   const incompleteCount = items.filter((item) => item.evidenceState !== "complete").length;
@@ -1559,6 +1630,11 @@ function validSnapshot(snapshot) {
       typeof item.delivery?.reasonZh !== "string" ||
       typeof item.dispatch?.eligible !== "boolean" ||
       typeof item.dispatch?.reasonZh !== "string" ||
+      !["CONTINUE", "WAITING_DEPENDENCY", "RECONCILIATION_REQUIRED", "STOP_DUPLICATE"].includes(
+        item.continuation?.state,
+      ) ||
+      typeof item.continuation?.nextAction !== "string" ||
+      typeof item.continuation?.reasonZh !== "string" ||
       !Array.isArray(item.tree?.childrenKeys) ||
       !(item.tree?.parentKey === null || typeof item.tree?.parentKey === "string")
     ) {

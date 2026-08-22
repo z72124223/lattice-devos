@@ -1,6 +1,10 @@
 {
   "schema": "lattice.branch-guide.zh-TW/1.0",
   "branches": {
+    "feature/task-099-continuation-receipt": {
+      "name": "TASK-099 續作判斷收據",
+      "purpose": "根據即時證據決定可續作、等待依賴、需要對帳或停止重工。"
+    },
     "feature/task-078-engineering-delivery-finisher": {
       "name": "任務 078：一鍵工程收尾",
       "purpose": "工作完成後依票券決定是否安全推送、核對 GitHub、更新工程地圖，成功才封存 Codex 任務。"

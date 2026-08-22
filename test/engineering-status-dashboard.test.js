@@ -14,6 +14,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   classifyTicketStatus,
+  deriveContinuation,
   isSnapshotFresh,
   openLocalFile,
   recommendCodexSetup,
@@ -471,6 +472,38 @@ test("normalizes the repository ticket status vocabulary", () => {
     assert.equal(classifyTicketStatus(status), expected, status);
   }
   assert.equal(classifyTicketStatus("invented-success"), null);
+});
+
+test("derives one fail-closed continuation decision from bounded evidence", () => {
+  const base = {
+    kind: "TASK",
+    id: "TASK-101",
+    outcome: "IN_PROGRESS",
+    evidenceState: "complete",
+    git: { clean: true, sync: { state: "synced", remoteVerified: true } },
+  };
+  assert.equal(deriveContinuation(base).state, "CONTINUE");
+  assert.equal(
+    deriveContinuation({
+      ...base,
+      kind: "BASE",
+      id: "DEFAULT-ROOT",
+      isDefaultBranch: true,
+      outcome: "DEFAULT_ROOT",
+      git: { clean: null, sync: { state: "synced", remoteVerified: true } },
+    }).state,
+    "CONTINUE",
+  );
+  assert.equal(
+    deriveContinuation({ ...base, outcome: "WAITING_DEPENDENCY" }).state,
+    "WAITING_DEPENDENCY",
+  );
+  assert.equal(
+    deriveContinuation({ ...base, outcome: "UNKNOWN", evidenceState: "partial" }).state,
+    "RECONCILIATION_REQUIRED",
+  );
+  assert.equal(deriveContinuation(base, 2).state, "STOP_DUPLICATE");
+  assert.match(deriveContinuation({ ...base, outcome: "FAIL" }).nextAction, /只讀/u);
 });
 
 test("treats old or implausibly future snapshots as stale", () => {
