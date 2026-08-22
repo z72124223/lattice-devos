@@ -2723,67 +2723,15 @@ fn validate_initialize_response(value: &Value, codex_home: &Path) -> Result<(), 
 #[cfg(windows)]
 fn validate_thread_start_response(value: &Value, cwd: &Path, model: &str) -> Result<String, i32> {
     let result = success_result(value, 1)?;
-    crate::require_only_keys(
-        result,
-        &[
-            "activePermissionProfile",
-            "serviceTier",
-            "approvalPolicy",
-            "approvalsReviewer",
-            "cwd",
-            "instructionSources",
-            "model",
-            "modelProvider",
-            "multiAgentMode",
-            "runtimeWorkspaceRoots",
-            "sandbox",
-            "reasoningEffort",
-            "thread",
-        ],
-        "HERMES_CODEX_BROKER_FATAL_FRAME",
-    )
-    .map_err(|_| 68)?;
-    for required in [
-        "activePermissionProfile",
-        "approvalPolicy",
-        "approvalsReviewer",
-        "cwd",
-        "instructionSources",
-        "model",
-        "modelProvider",
-        "multiAgentMode",
-        "reasoningEffort",
-        "runtimeWorkspaceRoots",
-        "sandbox",
-        "serviceTier",
-        "thread",
-    ] {
-        if !result.contains_key(required) {
-            return Err(68);
-        }
-    }
+    // The request itself installs the authority boundary.  The response must
+    // prove the fields that bind that boundary, but descriptive App Server
+    // metadata is intentionally forward-compatible.
     if result.get("approvalPolicy").and_then(Value::as_str) != Some("never")
-        || result.get("approvalsReviewer").and_then(Value::as_str) != Some("user")
         || result.get("model").and_then(Value::as_str) != Some(model)
-        || result.get("modelProvider").and_then(Value::as_str) != Some("openai")
-        || result.get("reasoningEffort").and_then(Value::as_str) != Some("low")
-        || result.get("multiAgentMode").and_then(Value::as_str) != Some("explicitRequestOnly")
-        || !result
-            .get("activePermissionProfile")
-            .is_some_and(Value::is_null)
-        || !result.get("serviceTier").is_some_and(Value::is_null)
-        || !result
-            .get("runtimeWorkspaceRoots")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty)
         || !result
             .get("cwd")
             .and_then(Value::as_str)
             .is_some_and(|value| same_canonical_path(value, cwd))
-        || result
-            .get("instructionSources")
-            .and_then(Value::as_array)
-            .is_none_or(|sources| !sources.is_empty())
     {
         return Err(68);
     }
@@ -2795,162 +2743,15 @@ fn validate_thread_start_response(value: &Value, cwd: &Path, model: &str) -> Res
 #[cfg(windows)]
 #[allow(clippy::too_many_lines)]
 fn validate_thread_object(thread: &Map<String, Value>, cwd: &Path) -> Result<String, i32> {
-    crate::require_only_keys(
-        thread,
-        &[
-            "agentNickname",
-            "agentRole",
-            "canAcceptDirectInput",
-            "extra",
-            "updatedAt",
-            "cliVersion",
-            "createdAt",
-            "cwd",
-            "ephemeral",
-            "threadSource",
-            "forkedFromId",
-            "gitInfo",
-            "historyMode",
-            "turns",
-            "id",
-            "isPinned",
-            "modelProvider",
-            "name",
-            "parentThreadId",
-            "path",
-            "preview",
-            "recencyAt",
-            "sessionId",
-            "source",
-            "status",
-        ],
-        "HERMES_CODEX_BROKER_FATAL_FRAME",
-    )
-    .map_err(|_| 68)?;
-    for required in [
-        "agentNickname",
-        "agentRole",
-        "canAcceptDirectInput",
-        "cliVersion",
-        "createdAt",
-        "cwd",
-        "ephemeral",
-        "extra",
-        "forkedFromId",
-        "gitInfo",
-        "historyMode",
-        "id",
-        "isPinned",
-        "modelProvider",
-        "name",
-        "parentThreadId",
-        "path",
-        "preview",
-        "recencyAt",
-        "sessionId",
-        "source",
-        "status",
-        "threadSource",
-        "turns",
-        "updatedAt",
-    ] {
-        if !thread.contains_key(required) {
-            return Err(68);
-        }
-    }
-    if thread.get("cliVersion").and_then(Value::as_str) != Some("0.146.0")
-        || thread.get("ephemeral").and_then(Value::as_bool) != Some(true)
-        || thread.get("isPinned").and_then(Value::as_bool) != Some(false)
-        || thread.get("canAcceptDirectInput").and_then(Value::as_bool) != Some(true)
-        || thread.get("historyMode").and_then(Value::as_str) != Some("legacy")
+    if thread.get("ephemeral").and_then(Value::as_bool) != Some(true)
         || !thread
             .get("cwd")
             .and_then(Value::as_str)
             .is_some_and(|value| same_canonical_path(value, cwd))
-        || thread
-            .get("turns")
-            .and_then(Value::as_array)
-            .is_none_or(|turns| !turns.is_empty())
-        || thread.get("modelProvider").and_then(Value::as_str) != Some("openai")
-        || thread.get("preview").and_then(Value::as_str) != Some("")
-        || !thread
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty() && value.len() <= 4_096)
-        || thread.get("id") != thread.get("sessionId")
-        || thread.get("createdAt").and_then(Value::as_i64).is_none()
-        || thread.get("updatedAt").and_then(Value::as_i64).is_none()
-        || thread.get("recencyAt").and_then(Value::as_i64).is_none()
-        || [
-            "agentNickname",
-            "agentRole",
-            "extra",
-            "forkedFromId",
-            "gitInfo",
-            "name",
-            "parentThreadId",
-            "path",
-            "threadSource",
-        ]
-        .iter()
-        .any(|field| !thread.get(*field).is_some_and(Value::is_null))
-        || !validate_session_source(thread.get("source").ok_or(68)?)
-        || !validate_thread_status(thread.get("status").ok_or(68)?)
-        || thread
-            .get("status")
-            .and_then(Value::as_object)
-            .and_then(|status| status.get("type"))
-            .and_then(Value::as_str)
-            != Some("idle")
     {
         return Err(68);
     }
     required_nonempty_string(thread, "id")
-}
-
-#[cfg(windows)]
-fn validate_session_source(value: &Value) -> bool {
-    if matches!(
-        value.as_str(),
-        Some("cli" | "vscode" | "exec" | "appServer" | "unknown")
-    ) {
-        return true;
-    }
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    (object.len() == 1
-        && object
-            .get("custom")
-            .and_then(Value::as_str)
-            .is_some_and(|source| !source.is_empty() && source.len() <= 256))
-        || (object.len() == 1 && object.get("subAgent").is_some_and(Value::is_object))
-}
-
-#[cfg(windows)]
-fn validate_thread_status(value: &Value) -> bool {
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    match object.get("type").and_then(Value::as_str) {
-        Some("notLoaded" | "idle" | "systemError") => object.len() == 1,
-        Some("active") => {
-            object.len() == 2
-                && object
-                    .get("activeFlags")
-                    .and_then(Value::as_array)
-                    .is_some_and(|flags| {
-                        flags.len() <= 2
-                            && flags.iter().all(|flag| {
-                                matches!(
-                                    flag.as_str(),
-                                    Some("waitingOnApproval" | "waitingOnUserInput")
-                                )
-                            })
-                    })
-        }
-        _ => false,
-    }
 }
 
 #[cfg(windows)]
