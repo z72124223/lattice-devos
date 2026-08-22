@@ -109,6 +109,48 @@ function Import-LatticeConfigEnvironment {
     }
 }
 
+function Initialize-LatticeRuntimeCodexHome {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $authSource = Join-Path $env:USERPROFILE '.codex\auth.json'
+    if (-not (Test-Path -LiteralPath $authSource -PathType Leaf)) {
+        throw 'LATTICE_RUNTIME_CODEX_AUTH_MISSING'
+    }
+    $markerPath = Join-Path $Path '.lattice-codex-home-v1'
+    $configPath = Join-Path $Path 'config.toml'
+    $authPath = Join-Path $Path 'auth.json'
+    $markerBytes = [Text.Encoding]::UTF8.GetBytes("lattice.codex-home.v1`n")
+    $configBytes = [Text.UTF8Encoding]::new($false).GetBytes((@(
+        'approval_policy = "never"',
+        'sandbox_mode = "workspace-write"',
+        'model = "gpt-5.6-sol"',
+        'model_reasoning_effort = "low"',
+        '',
+        '[windows]',
+        'sandbox = "unelevated"',
+        '',
+        '[features]',
+        'plugins = false'
+    ) -join "`n") + "`n")
+
+    $items = @(Get-ChildItem -LiteralPath $Path -Force)
+    if ($items.Count -eq 0) {
+        [IO.File]::WriteAllBytes($markerPath, $markerBytes)
+        [IO.File]::WriteAllBytes($configPath, $configBytes)
+        [IO.File]::Copy($authSource, $authPath, $false)
+    }
+    if (
+        -not (Test-Path -LiteralPath $markerPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $configPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $authPath -PathType Leaf) -or
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($markerPath)) -ne [Convert]::ToBase64String($markerBytes) -or
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -ne [Convert]::ToBase64String($configBytes)
+    ) {
+        throw 'LATTICE_RUNTIME_CODEX_HOME_REJECTED'
+    }
+    [IO.File]::Copy($authSource, $authPath, $true)
+}
+
 function Start-LatticePostgres {
     param(
         [Parameter(Mandatory = $true)][string]$PgCtl,
@@ -159,6 +201,7 @@ $graphWorkRoot = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-graphify'
 $runtimeTaskRoot = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-delivery'
 $runtimeTaskCodexHome = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-codex-home'
 New-Item -ItemType Directory -Path $graphWorkRoot, $runtimeTaskRoot, $runtimeTaskCodexHome -Force | Out-Null
+Initialize-LatticeRuntimeCodexHome -Path $runtimeTaskCodexHome
 $runtimeConfig = @{
     LATTICE_DELIVERY_GIT_EXE = $gitExecutable
     LATTICE_GRAPHIFY_SOURCE_ROOT = $repositoryRoot
