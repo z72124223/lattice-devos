@@ -146,7 +146,12 @@ $pgCtl = Join-Path $postgresBin 'pg_ctl.exe'
 if (-not (Test-Path -LiteralPath $initdb -PathType Leaf) -or -not (Test-Path -LiteralPath $pgCtl -PathType Leaf)) {
     throw 'LATTICE_RUNTIME_POSTGRES_BINARIES_MISSING'
 }
+$gitExecutable = (Get-Command git.exe -ErrorAction Stop).Source
+if (-not [IO.Path]::IsPathRooted($gitExecutable) -or -not (Test-Path -LiteralPath $gitExecutable -PathType Leaf)) {
+    throw 'LATTICE_RUNTIME_GIT_MISSING'
+}
 if (Test-Path -LiteralPath $metadataPath) {
+    Set-LatticeConfigEnvironment -Path $ConfigPath -Values @{ LATTICE_DELIVERY_GIT_EXE = $gitExecutable }
     Import-LatticeConfigEnvironment -Path $ConfigPath
     & $pgCtl status -D $clusterRoot *> $null
     if ($LASTEXITCODE -ne 0) {
@@ -159,6 +164,7 @@ if (Test-Path -LiteralPath $metadataPath) {
 }
 
 if (Test-Path -LiteralPath $clusterRoot) {
+    Set-LatticeConfigEnvironment -Path $ConfigPath -Values @{ LATTICE_DELIVERY_GIT_EXE = $gitExecutable }
     Import-LatticeConfigEnvironment -Path $ConfigPath
     Start-LatticePostgres -PgCtl $pgCtl -Cluster $clusterRoot -LogPath $postgresLog
     & $LatticedPath --postgres-initialize
@@ -194,6 +200,7 @@ try {
         LATTICE_TASK019_PORT = [string]$port
         LATTICE_TASK019_RUN_ID = $runId
         LATTICE_TASK019_PASSWORD = $password
+        LATTICE_DELIVERY_GIT_EXE = $gitExecutable
     }
     Import-LatticeConfigEnvironment -Path $ConfigPath
     & $LatticedPath --postgres-initialize
