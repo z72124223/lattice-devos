@@ -2700,13 +2700,16 @@ fn deny_and_interrupt(
 #[cfg(windows)]
 fn validate_initialize_response(value: &Value, codex_home: &Path) -> Result<(), i32> {
     let result = success_result(value, 0)?;
-    require_exact_keys(
-        result,
-        &["codexHome", "platformFamily", "platformOs", "userAgent"],
-    )?;
+    // The executable and its four-file bundle are byte-pinned before launch.
+    // `initialize` is therefore only a compatibility and binding check: newer
+    // App Server builds may append descriptive fields without gaining any
+    // authority over this read-only, no-tool turn.
     if result.get("platformFamily").and_then(Value::as_str) != Some("windows")
         || result.get("platformOs").and_then(Value::as_str) != Some("windows")
-        || result.get("userAgent").and_then(Value::as_str) != Some("codex_cli_rs/0.146.0")
+        || result
+            .get("userAgent")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
     {
         return Err(68);
     }
