@@ -271,8 +271,7 @@ impl CodexProxyInvocation {
         match arguments.as_slice() {
             [argument] if argument.as_ref() == "--version" => Ok(Self::Version),
             [command, strict]
-                if command.as_ref() == "app-server"
-                    && strict.as_ref() == "--strict-config" =>
+                if command.as_ref() == "app-server" && strict.as_ref() == "--strict-config" =>
             {
                 Ok(Self::AppServer)
             }
@@ -2149,14 +2148,10 @@ fn run_broker_helper_inner() -> Result<CodexBrokerCandidate, i32> {
     let child_environment =
         codex_child_environment(reviewed.launcher(), &codex_home, &temp).map_err(|_| 66)?;
     let child_environment_sha256 = digest_environment(&child_environment).map_err(|_| 66)?;
-    CodexProxyInvocation::parse(["app-server", "--strict-config"])
-        .map_err(|_| 66)?;
+    CodexProxyInvocation::parse(["app-server", "--strict-config"]).map_err(|_| 66)?;
     let mut command = Command::new(reviewed.launcher());
     command
-        .args([
-            "app-server",
-            "--strict-config",
-        ])
+        .args(["app-server", "--strict-config"])
         .current_dir(&cwd)
         .env_clear()
         .envs(&child_environment)
@@ -2946,6 +2941,9 @@ impl CodexBrokerProtocol {
                 self.pending_terminal = Some((id, terminal));
             }
             CodexAppServerFrameKind::Lifecycle { method } => {
+                if method == "remoteControl/status/changed" {
+                    return self.reconcile();
+                }
                 let params = frame
                     .value
                     .get("params")
@@ -3861,9 +3859,16 @@ fn classify_notification_envelope(
     object: &Map<String, Value>,
 ) -> HermesAdapterResult<CodexAppServerFrameKind> {
     let keys = object.keys().map(String::as_str).collect::<HashSet<_>>();
-    if keys != HashSet::from(["method", "params"])
-        || !object.get("params").is_some_and(Value::is_object)
-    {
+    let remote_control_status = object
+        .get("method")
+        .and_then(Value::as_str)
+        .is_some_and(|method| method == "remoteControl/status/changed");
+    let expected_keys = if remote_control_status {
+        HashSet::from(["emittedAtMs", "method", "params"])
+    } else {
+        HashSet::from(["method", "params"])
+    };
+    if keys != expected_keys || !object.get("params").is_some_and(Value::is_object) {
         return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
     }
     let method = object
@@ -3873,6 +3878,7 @@ fn classify_notification_envelope(
             matches!(
                 *method,
                 "thread/started"
+                    | "remoteControl/status/changed"
                     | "turn/started"
                     | "account/rateLimits/updated"
                     | "thread/status/changed"
@@ -3911,18 +3917,32 @@ fn classify_notification(
     object: &Map<String, Value>,
 ) -> HermesAdapterResult<CodexAppServerFrameKind> {
     let keys = object.keys().map(String::as_str).collect::<HashSet<_>>();
-    if keys != HashSet::from(["method", "params"]) {
-        return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
-    }
     let method = object
         .get("method")
         .and_then(Value::as_str)
         .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
+    let expected_keys = if method == "remoteControl/status/changed" {
+        HashSet::from(["emittedAtMs", "method", "params"])
+    } else {
+        HashSet::from(["method", "params"])
+    };
+    if keys != expected_keys {
+        return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
+    }
     let params = object
         .get("params")
         .and_then(Value::as_object)
         .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
     match method {
+        "remoteControl/status/changed" => {
+            require_control_keys(
+                params,
+                &["environmentId", "installationId", "serverName", "status"],
+            )?;
+            if !object.get("emittedAtMs").is_some_and(Value::is_u64) {
+                return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
+            }
+        }
         "thread/started" => require_control_keys(params, &["thread"])?,
         "account/rateLimits/updated" => {
             require_control_keys(params, &["rateLimits"])?;

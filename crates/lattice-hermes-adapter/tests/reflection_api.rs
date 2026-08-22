@@ -270,6 +270,14 @@ fn codex_broker_pins_four_files_and_locks_the_proven_empty_tool_policy() {
         classify_codex_app_server_frame(response).expect("pending response shape"),
         CodexAppServerFrameKind::Response { id: 1 }
     );
+    let remote_control_status = br#"{"emittedAtMs":1,"method":"remoteControl/status/changed","params":{"environmentId":"env","installationId":"install","serverName":"codex","status":"disabled"}}"#;
+    assert_eq!(
+        classify_codex_app_server_frame(remote_control_status)
+            .expect("read-only remote-control status notification"),
+        CodexAppServerFrameKind::Lifecycle {
+            method: "remoteControl/status/changed".to_owned(),
+        }
+    );
     for (id, method) in [
         (9, "account/chatgptAuthTokens/refresh"),
         (10, "attestation/generate"),
