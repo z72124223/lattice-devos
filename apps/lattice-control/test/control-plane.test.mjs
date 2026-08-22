@@ -172,6 +172,79 @@ test("an interrupted turn never becomes completed work", async () => {
   }
 });
 
+test("a new Codex thread receives a bounded continuation packet derived from its LATTICE work item", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Continuation", rootPath: process.cwd() });
+    const item = service.createWorkItem({
+      projectId: project.id,
+      title: "續接登入修復",
+      objective: "找出登入失敗原因並完成聚焦驗證。",
+      priority: "urgent",
+    });
+    store.updateWorkItem(item.id, {
+      progress: "已定位登入逾時",
+      failure_summary: "上一次 turn 被中斷",
+    });
+    store.appendEvent(item.id, "diagnostic_recorded", { ignored: "not part of the packet" });
+
+    const packet = service.continuation(item.id);
+    assert.deepEqual(packet, {
+      schema_version: "lattice.control.continuation.v1",
+      project: { name: "Continuation", root_path: path.resolve(process.cwd()) },
+      work: {
+        id: item.id,
+        title: "續接登入修復",
+        objective: "找出登入失敗原因並完成聚焦驗證。",
+        priority: "urgent",
+        status: "draft",
+        codex_thread_id: null,
+      },
+      current: {
+        progress: "已定位登入逾時",
+        failure_summary: "上一次 turn 被中斷",
+        verification_notes: null,
+        next_action: "Start the work in a new Codex thread.",
+      },
+      evidence: { latest_event: "diagnostic_recorded" },
+    });
+
+    await service.start(item.id);
+    assert.match(codex.lastTurn.text, /lattice\.control\.continuation\.v1/u);
+    assert.match(codex.lastTurn.text, /找出登入失敗原因/u);
+    assert.doesNotMatch(codex.lastTurn.text, /not part of the packet/u);
+  } finally {
+    store.close();
+  }
+});
+
+test("continuation packets bound oversized untrusted work text", () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Bounded", rootPath: process.cwd() });
+    const item = service.createWorkItem({
+      projectId: project.id,
+      title: "A".repeat(600),
+      objective: "B".repeat(3_000),
+    });
+    store.updateWorkItem(item.id, { failure_summary: "C".repeat(3_000) });
+
+    const packet = service.continuation(item.id);
+    assert.match(packet.work.title, /\[truncated\]$/u);
+    assert.match(packet.work.objective, /\[truncated\]$/u);
+    assert.match(packet.current.failure_summary, /\[truncated\]$/u);
+    assert.ok(packet.work.title.length <= 256);
+    assert.ok(packet.work.objective.length <= 2_048);
+    assert.ok(packet.current.failure_summary.length <= 2_048);
+  } finally {
+    store.close();
+  }
+});
+
 test("local HTTP API persists projects and work items without starting Codex", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-control-http-"));
   const codex = new FakeCodex();
@@ -207,6 +280,29 @@ test("local HTTP API persists projects and work items without starting Codex", a
       }),
     });
     assert.equal(itemResponse.status, 201);
+    const item = await itemResponse.json();
+
+    const continuationResponse = await fetch(`${origin}/api/work-items/${item.id}/continuation`);
+    assert.equal(continuationResponse.status, 200);
+    assert.deepEqual(await continuationResponse.json(), {
+      schema_version: "lattice.control.continuation.v1",
+      project: { name: "Demo", root_path: path.resolve(directory) },
+      work: {
+        id: item.id,
+        title: "First useful path",
+        objective: "Keep it small.",
+        priority: "high",
+        status: "draft",
+        codex_thread_id: null,
+      },
+      current: {
+        progress: null,
+        failure_summary: null,
+        verification_notes: null,
+        next_action: "Start the work in a new Codex thread.",
+      },
+      evidence: { latest_event: "created" },
+    });
 
     const state = await (await fetch(`${origin}/api/state`)).json();
     assert.equal(state.codexConnected, false);

@@ -56,6 +56,11 @@ export function createLatticeServer({ databasePath, codex = new CodexAppServer()
         sendJson(response, 200, service.state());
         return;
       }
+      const continuationId = routeId(url.pathname, "continuation");
+      if (request.method === "GET" && continuationId) {
+        sendJson(response, 200, service.continuation(continuationId));
+        return;
+      }
       if (request.method === "GET" && url.pathname.startsWith("/api/work-items/")) {
         const id = decodeURIComponent(url.pathname.slice("/api/work-items/".length));
         sendJson(response, 200, service.workItem(id));

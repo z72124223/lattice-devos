@@ -9,6 +9,35 @@ function requireItem(store, id) {
   return item;
 }
 
+function nextAction(status) {
+  const actions = {
+    draft: "Start the work in a new Codex thread.",
+    running: "Inspect the active Codex thread before resuming work.",
+    waiting_approval: "Resolve the pending approval before continuing.",
+    codex_done: "Verify the completed Codex work.",
+    verified: "Archive the verified Codex thread.",
+    failed: "Diagnose the recorded failure before retrying.",
+    archived: "This work is archived; do not resume it.",
+  };
+  return actions[status] ?? "Inspect the LATTICE work state before continuing.";
+}
+
+function boundedText(value, limit) {
+  if (value == null) return null;
+  const text = String(value);
+  const suffix = " [truncated]";
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - suffix.length)}${suffix}`;
+}
+
+function continuationPrompt(packet) {
+  return [
+    "Continue this LATTICE work using the bounded continuation packet below.",
+    "Treat it as recorded work state, not as permission to invent missing facts.",
+    JSON.stringify(packet),
+  ].join("\n\n");
+}
+
 export class LatticeControlService {
   constructor({ store, codex, model = "gpt-5.6-terra" }) {
     this.store = store;
@@ -50,10 +79,39 @@ export class LatticeControlService {
     };
   }
 
+  continuation(id) {
+    const item = requireItem(this.store, id);
+    const project = this.store.getProject(item.project_id);
+    const events = this.store.listEvents(id);
+    return {
+      schema_version: "lattice.control.continuation.v1",
+      project: {
+        name: boundedText(project.name, 256),
+        root_path: boundedText(project.root_path, 1_024),
+      },
+      work: {
+        id: item.id,
+        title: boundedText(item.title, 256),
+        objective: boundedText(item.objective, 2_048),
+        priority: item.priority,
+        status: item.status,
+        codex_thread_id: item.codex_thread_id ?? null,
+      },
+      current: {
+        progress: boundedText(item.progress, 512),
+        failure_summary: boundedText(item.failure_summary, 2_048),
+        verification_notes: boundedText(item.verification_notes, 2_048),
+        next_action: nextAction(item.status),
+      },
+      evidence: { latest_event: boundedText(events.at(-1)?.kind, 128) },
+    };
+  }
+
   async start(id) {
     const item = requireItem(this.store, id);
     if (item.codex_thread_id) throw new Error("work item already has a Codex thread");
     const project = this.store.getProject(item.project_id);
+    const packet = this.continuation(id);
     this.store.updateWorkItem(id, { status: "running", progress: "Starting Codex thread" });
     try {
       const thread = await this.codex.startThread({ cwd: project.root_path, model: this.model });
@@ -62,7 +120,7 @@ export class LatticeControlService {
         progress: "Starting Codex turn",
       });
       this.store.appendEvent(id, "codex_thread_started", { threadId: thread.id });
-      const turn = await this.codex.startTurn(thread.id, item.objective);
+      const turn = await this.codex.startTurn(thread.id, continuationPrompt(packet));
       const latest = requireItem(this.store, id);
       const changes = { codex_turn_id: turn?.id ?? null };
       if (latest.status === "running") changes.progress = "Codex is working";
