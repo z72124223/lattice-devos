@@ -8,11 +8,32 @@ param(
     [string]$StateRoot = (Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-postgres'),
 
     [ValidateScript({ [IO.Path]::IsPathFullyQualified($_) -and (Test-Path -LiteralPath $_ -PathType Leaf) })]
-    [string]$ConfigPath = (Join-Path $env:USERPROFILE '.codex\config.toml')
+    [string]$ConfigPath = (Join-Path $env:USERPROFILE '.codex\config.toml'),
+
+    [switch]$Background
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($Background) {
+    $logRoot = Join-Path $StateRoot 'bootstrap'
+    New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+    $stdout = Join-Path $logRoot 'stdout.log'
+    $stderr = Join-Path $logRoot 'stderr.log'
+    Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+    $arguments = @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', $PSCommandPath,
+        '-LatticedPath', $LatticedPath,
+        '-StateRoot', $StateRoot,
+        '-ConfigPath', $ConfigPath
+    )
+    $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments `
+        -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+    Write-Output "LATTICE_RUNTIME_POSTGRES_BACKGROUND_STARTED:$($process.Id)"
+    exit 0
+}
 
 function Get-FreeLoopbackPort {
     do {
