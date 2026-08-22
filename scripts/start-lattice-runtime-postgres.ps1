@@ -86,6 +86,18 @@ function Import-LatticeConfigEnvironment {
     }
 }
 
+function Start-LatticePostgres {
+    param(
+        [Parameter(Mandatory = $true)][string]$PgCtl,
+        [Parameter(Mandatory = $true)][string]$Cluster,
+        [Parameter(Mandatory = $true)][string]$LogPath
+    )
+    $process = Start-Process -FilePath $PgCtl -ArgumentList @(
+        'start', '-D', $Cluster, '-l', $LogPath, '-w', '-t', '30'
+    ) -Wait -PassThru -WindowStyle Hidden
+    if ($process.ExitCode -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_START_REJECTED' }
+}
+
 $clusterRoot = Join-Path $StateRoot 'cluster'
 $metadataPath = Join-Path $StateRoot 'runtime-postgres.json'
 $postgresLog = Join-Path $StateRoot 'postgres.log'
@@ -99,8 +111,7 @@ if (Test-Path -LiteralPath $metadataPath) {
     Import-LatticeConfigEnvironment -Path $ConfigPath
     & $pgCtl status -D $clusterRoot *> $null
     if ($LASTEXITCODE -ne 0) {
-        & $pgCtl start -D $clusterRoot -l $postgresLog -w -t 30 *> $null
-        if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_START_REJECTED' }
+        Start-LatticePostgres -PgCtl $pgCtl -Cluster $clusterRoot -LogPath $postgresLog
     }
     & $LatticedPath --postgres-initialize
     if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_INITIALIZE_REJECTED' }
@@ -122,8 +133,12 @@ try {
 finally {
     Remove-Item -LiteralPath $passwordFile -Force -ErrorAction SilentlyContinue
 }
-& $pgCtl start -D $clusterRoot -o "-p $port -h 127.0.0.1" -l $postgresLog -w -t 30 *> $null
-if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_START_REJECTED' }
+[IO.File]::AppendAllText(
+    (Join-Path $clusterRoot 'postgresql.conf'),
+    ("`n# LATTICE-owned local Runtime only`nlisten_addresses = '127.0.0.1'`nport = $port`n"),
+    [Text.UTF8Encoding]::new($false)
+)
+Start-LatticePostgres -PgCtl $pgCtl -Cluster $clusterRoot -LogPath $postgresLog
 
 try {
     Set-LatticeConfigEnvironment -Path $ConfigPath -Values @{
