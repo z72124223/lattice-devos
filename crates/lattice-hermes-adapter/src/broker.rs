@@ -4020,16 +4020,15 @@ fn classify_notification_envelope(
     object: &Map<String, Value>,
 ) -> HermesAdapterResult<CodexAppServerFrameKind> {
     let keys = object.keys().map(String::as_str).collect::<HashSet<_>>();
-    let remote_control_status = object
-        .get("method")
-        .and_then(Value::as_str)
-        .is_some_and(|method| method == "remoteControl/status/changed");
-    let expected_keys = if remote_control_status {
-        HashSet::from(["emittedAtMs", "method", "params"])
-    } else {
-        HashSet::from(["method", "params"])
-    };
-    if keys != expected_keys || !object.get("params").is_some_and(Value::is_object) {
+    let expected_keys = HashSet::from(["method", "params"]);
+    let timestamped_keys = HashSet::from(["emittedAtMs", "method", "params"]);
+    if (keys != expected_keys && keys != timestamped_keys)
+        || !object.get("params").is_some_and(Value::is_object)
+        || (keys == timestamped_keys
+            && !object.get("emittedAtMs").is_some_and(|value| {
+                value.as_u64().is_some() || value.as_i64().is_some_and(|timestamp| timestamp >= 0)
+            }))
+    {
         return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
     }
     let method = object
@@ -4083,12 +4082,14 @@ fn classify_notification(
         .get("method")
         .and_then(Value::as_str)
         .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
-    let expected_keys = if method == "remoteControl/status/changed" {
-        HashSet::from(["emittedAtMs", "method", "params"])
-    } else {
-        HashSet::from(["method", "params"])
-    };
-    if keys != expected_keys {
+    let expected_keys = HashSet::from(["method", "params"]);
+    let timestamped_keys = HashSet::from(["emittedAtMs", "method", "params"]);
+    if (keys != expected_keys && keys != timestamped_keys)
+        || (keys == timestamped_keys
+            && !object.get("emittedAtMs").is_some_and(|value| {
+                value.as_u64().is_some() || value.as_i64().is_some_and(|timestamp| timestamp >= 0)
+            }))
+    {
         return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
     }
     let params = object
@@ -4101,9 +4102,7 @@ fn classify_notification(
                 params,
                 &["environmentId", "installationId", "serverName", "status"],
             )?;
-            if !object.get("emittedAtMs").is_some_and(|value| {
-                value.as_u64().is_some() || value.as_i64().is_some_and(|timestamp| timestamp >= 0)
-            }) {
+            if !object.contains_key("emittedAtMs") {
                 return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
             }
         }
