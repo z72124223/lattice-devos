@@ -156,13 +156,19 @@ if ($LASTEXITCODE -ne 0 -or -not [string]::IsNullOrEmpty($dirty)) {
     throw 'LATTICE_RUNTIME_GRAPH_SOURCE_REJECTED'
 }
 $graphWorkRoot = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-graphify'
-$runtimeGraphConfig = @{
+$runtimeTaskRoot = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-delivery'
+$runtimeTaskCodexHome = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-codex-home'
+New-Item -ItemType Directory -Path $graphWorkRoot, $runtimeTaskRoot, $runtimeTaskCodexHome -Force | Out-Null
+$runtimeConfig = @{
     LATTICE_DELIVERY_GIT_EXE = $gitExecutable
     LATTICE_GRAPHIFY_SOURCE_ROOT = $repositoryRoot
     LATTICE_GRAPHIFY_WORK_ROOT = $graphWorkRoot
+    LATTICE_FULL_CHAIN_RUN_MODE = 'FRESH'
+    LATTICE_DELIVERY_ROOT = $runtimeTaskRoot
+    LATTICE_DELIVERY_CODEX_HOME = $runtimeTaskCodexHome
 }
 if (Test-Path -LiteralPath $metadataPath) {
-    Set-LatticeConfigEnvironment -Path $ConfigPath -Values $runtimeGraphConfig
+    Set-LatticeConfigEnvironment -Path $ConfigPath -Values $runtimeConfig
     Import-LatticeConfigEnvironment -Path $ConfigPath
     & $pgCtl status -D $clusterRoot *> $null
     if ($LASTEXITCODE -ne 0) {
@@ -173,7 +179,7 @@ if (Test-Path -LiteralPath $metadataPath) {
 }
 
 if (Test-Path -LiteralPath $clusterRoot) {
-    Set-LatticeConfigEnvironment -Path $ConfigPath -Values $runtimeGraphConfig
+    Set-LatticeConfigEnvironment -Path $ConfigPath -Values $runtimeConfig
     Import-LatticeConfigEnvironment -Path $ConfigPath
     Start-LatticePostgres -PgCtl $pgCtl -Cluster $clusterRoot -LogPath $postgresLog
     & $LatticedPath --postgres-initialize
