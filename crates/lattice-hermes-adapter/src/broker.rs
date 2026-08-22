@@ -4144,20 +4144,10 @@ fn classify_notification(
                 return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
             }
         }
-        "warning" => {
-            require_control_keys(params, &["message"])?;
-            if !params
-                .get("message")
-                .and_then(Value::as_str)
-                .is_some_and(|message| {
-                    !message.is_empty()
-                        && message.len() <= 4_096
-                        && !message.chars().any(char::is_control)
-                })
-            {
-                return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
-            }
-        }
+        // App Server warnings are observational only: no response is sent,
+        // nothing is persisted, and their presentation payload is not parsed
+        // or forwarded to the reflection model.
+        "warning" => {}
         "thread/started" => require_control_keys(params, &["thread"])?,
         "account/rateLimits/updated" => {
             require_control_keys(params, &["rateLimits"])?;
