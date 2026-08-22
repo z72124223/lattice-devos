@@ -319,7 +319,10 @@ try {
         'TaskStatus' {
             if ([string]::IsNullOrWhiteSpace($TaskRef)) { throw 'TASK_REF_REQUIRED' }
             $ToolName = 'lattice_task_status'
-            $callArguments = [ordered]@{ task_ref = $TaskRef }
+            $callArguments = [ordered]@{
+                client_request_id = $ClientRequestId
+                task_ref = $TaskRef
+            }
         }
         default { $callArguments = $null }
     }
