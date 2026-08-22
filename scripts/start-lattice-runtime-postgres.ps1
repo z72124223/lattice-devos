@@ -126,6 +126,17 @@ function Start-LatticePostgres {
     throw 'LATTICE_RUNTIME_POSTGRES_START_REJECTED'
 }
 
+function Write-RuntimeMetadata {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $port = [int]$env:LATTICE_TASK019_PORT
+    $runId = [string]$env:LATTICE_TASK019_RUN_ID
+    [IO.File]::WriteAllText(
+        $Path,
+        ('{"schema":"lattice.runtime-postgres.v1","host":"127.0.0.1","port":' + $port + ',"run_id":"' + $runId + '"}'),
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
 $clusterRoot = Join-Path $StateRoot 'cluster'
 $metadataPath = Join-Path $StateRoot 'runtime-postgres.json'
 $postgresLog = Join-Path $StateRoot 'postgres.log'
@@ -147,8 +158,17 @@ if (Test-Path -LiteralPath $metadataPath) {
     exit 0
 }
 
+if (Test-Path -LiteralPath $clusterRoot) {
+    Import-LatticeConfigEnvironment -Path $ConfigPath
+    Start-LatticePostgres -PgCtl $pgCtl -Cluster $clusterRoot -LogPath $postgresLog
+    & $LatticedPath --postgres-initialize
+    if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_INITIALIZE_REJECTED' }
+    Write-RuntimeMetadata -Path $metadataPath
+    Write-Output 'LATTICE_RUNTIME_POSTGRES_READY'
+    exit 0
+}
+
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
-if (Test-Path -LiteralPath $clusterRoot) { throw 'LATTICE_RUNTIME_POSTGRES_STATE_CONFLICT' }
 $port = Get-FreeLoopbackPort
 $runId = Get-RandomHex -ByteCount 16
 $password = Get-RandomHex -ByteCount 32
@@ -184,9 +204,5 @@ catch {
     throw
 }
 
-[IO.File]::WriteAllText(
-    $metadataPath,
-    ('{"schema":"lattice.runtime-postgres.v1","host":"127.0.0.1","port":' + $port + ',"run_id":"' + $runId + '"}'),
-    [Text.UTF8Encoding]::new($false)
-)
+Write-RuntimeMetadata -Path $metadataPath
 Write-Output 'LATTICE_RUNTIME_POSTGRES_READY'

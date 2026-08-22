@@ -2097,6 +2097,55 @@ pub fn initialize_runtime_postgres_from_environment() -> Result<(), LatticedErro
         ))
         .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
     drop(bootstrap);
+    let mut target_bootstrap = Config::new();
+    target_bootstrap
+        .host(&host)
+        .port(port)
+        .user("lattice_bootstrap")
+        .password(&password)
+        .dbname(&database_name)
+        .application_name("lattice-runtime-bootstrap")
+        .ssl_mode(SslMode::Disable);
+    let mut target_bootstrap = target_bootstrap
+        .connect(NoTls)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+    target_bootstrap
+        .batch_execute(
+            "REVOKE ALL PRIVILEGES ON FUNCTION \
+                 pg_catalog.lo_creat(integer), pg_catalog.lo_create(oid), \
+                 pg_catalog.lo_from_bytea(oid, bytea), pg_catalog.lo_import(text), \
+                 pg_catalog.lo_import(text, oid), \
+                 pg_catalog.pg_logical_emit_message(boolean, text, text, boolean), \
+                 pg_catalog.pg_logical_emit_message(boolean, text, bytea, boolean), \
+                 pg_catalog.pg_advisory_lock(bigint), \
+                 pg_catalog.pg_advisory_lock(integer, integer), \
+                 pg_catalog.pg_advisory_lock_shared(bigint), \
+                 pg_catalog.pg_advisory_lock_shared(integer, integer), \
+                 pg_catalog.pg_try_advisory_lock(bigint), \
+                 pg_catalog.pg_try_advisory_lock(integer, integer), \
+                 pg_catalog.pg_try_advisory_lock_shared(bigint), \
+                 pg_catalog.pg_try_advisory_lock_shared(integer, integer), \
+                 pg_catalog.pg_advisory_xact_lock(bigint), \
+                 pg_catalog.pg_advisory_xact_lock(integer, integer), \
+                 pg_catalog.pg_advisory_xact_lock_shared(bigint), \
+                 pg_catalog.pg_advisory_xact_lock_shared(integer, integer), \
+                 pg_catalog.pg_try_advisory_xact_lock(bigint), \
+                 pg_catalog.pg_try_advisory_xact_lock(integer, integer), \
+                 pg_catalog.pg_try_advisory_xact_lock_shared(bigint), \
+                 pg_catalog.pg_try_advisory_xact_lock_shared(integer, integer), \
+                 pg_catalog.pg_cancel_backend(integer), \
+                 pg_catalog.pg_terminate_backend(integer, bigint), \
+                 pg_catalog.pg_export_snapshot(), pg_catalog.pg_current_xact_id(), \
+                 pg_catalog.txid_current() \
+             FROM PUBLIC, lattice_migrator, lattice_runtime, lattice_guardian, \
+                 lattice_readonly, lattice_migrator_login, lattice_runtime_login, \
+                 lattice_guardian_login, lattice_readonly_login; \
+             GRANT EXECUTE ON FUNCTION pg_catalog.pg_try_advisory_lock(bigint), \
+                 pg_catalog.pg_advisory_xact_lock(bigint), \
+                 pg_catalog.pg_current_xact_id() TO lattice_migrator",
+        )
+        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+    drop(target_bootstrap);
 
     let mut migrator = connect_migrator(&database, &password)?;
     apply_store_migrations(&mut migrator, &target)
