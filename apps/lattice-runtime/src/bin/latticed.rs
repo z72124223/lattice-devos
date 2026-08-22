@@ -109,6 +109,19 @@ fn main() -> ExitCode {
                 }
             };
         }
+        if argument == "--postgres-initialize" && arguments.next().is_none() {
+            return match lattice_runtime::composition::initialize_runtime_postgres_from_environment(
+            ) {
+                Ok(()) => {
+                    eprintln!("LATTICE_POSTGRES_INITIALIZE_READY");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{}", error.code());
+                    ExitCode::from(2)
+                }
+            };
+        }
         if argument == "--hermes-launch" && arguments.next().is_none() {
             return match lattice_runtime::composition::launch_hermes_from_environment() {
                 Ok(()) => ExitCode::SUCCESS,

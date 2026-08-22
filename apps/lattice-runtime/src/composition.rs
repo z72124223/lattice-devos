@@ -87,6 +87,10 @@ use lattice_postgres_codebase_memory::{
     ExtensionTarget, PostgresCodebaseMemory, apply_extension as apply_postgres_memory_extension,
     verify_embedded_extension_manifest, verify_extension as verify_memory_extension,
 };
+use lattice_postgres_store::{
+    DatabaseRole as StoreDatabaseRole, MigrationTarget as StoreMigrationTarget,
+    apply_migrations as apply_store_migrations, verify_postgres_schema as verify_store_schema,
+};
 use lattice_postgres_writer_lease::{
     ExtensionTarget as WriterLeaseExtensionTarget, PostgresWriterLease,
     apply_extension as apply_postgres_writer_extension,
@@ -1995,6 +1999,112 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
         }
     }
     Ok(())
+}
+
+/// Initializes the LATTICE-owned local PostgreSQL database before normal Runtime
+/// startup. This is deliberately separate from the historical disposable
+/// acceptance harness: callers must already have started an isolated loopback
+/// cluster with the fixed `lattice_bootstrap` superuser.
+///
+/// # Errors
+///
+/// Returns a stable configuration, connection, or ledger error. The database is
+/// left untouched when its existing role or schema boundary cannot be verified.
+pub fn initialize_runtime_postgres_from_environment() -> Result<(), LatticedError> {
+    let (_config, database, password) =
+        delivery_environment_for_mode(FullChainRunMode::ResumeExisting)?;
+    let database_name = database.database_name();
+    let target = StoreMigrationTarget::new(database_name.clone(), database.run_id())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+
+    let host = required_environment("LATTICE_TASK019_HOST")?;
+    let port = required_environment("LATTICE_TASK019_PORT")?
+        .parse::<u16>()
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))?;
+    let mut bootstrap = Config::new();
+    bootstrap
+        .host(&host)
+        .port(port)
+        .user("lattice_bootstrap")
+        .password(&password)
+        .dbname("postgres")
+        .application_name("lattice-runtime-bootstrap")
+        .ssl_mode(SslMode::Disable);
+    let mut bootstrap = bootstrap
+        .connect(NoTls)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+    let quoted_password = bootstrap
+        .query_one("SELECT quote_literal($1::text)", &[&password])
+        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?
+        .get::<_, String>(0);
+    bootstrap
+        .batch_execute(&format!(
+            "DO $$ BEGIN \
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lattice_migrator') THEN \
+                   CREATE ROLE lattice_migrator NOLOGIN NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; \
+                 END IF; \
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lattice_runtime') THEN \
+                   CREATE ROLE lattice_runtime NOLOGIN NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; \
+                 END IF; \
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lattice_guardian') THEN \
+                   CREATE ROLE lattice_guardian NOLOGIN NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; \
+                 END IF; \
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lattice_readonly') THEN \
+                   CREATE ROLE lattice_readonly NOLOGIN NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; \
+                 END IF; \
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lattice_migrator_login') THEN \
+                   CREATE ROLE lattice_migrator_login LOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD {quoted_password}; \
+                 END IF; \
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lattice_runtime_login') THEN \
+                   CREATE ROLE lattice_runtime_login LOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD {quoted_password}; \
+                 END IF; \
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lattice_guardian_login') THEN \
+                   CREATE ROLE lattice_guardian_login LOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD {quoted_password}; \
+                 END IF; \
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lattice_readonly_login') THEN \
+                   CREATE ROLE lattice_readonly_login LOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD {quoted_password}; \
+                 END IF; \
+               END $$; \
+             GRANT lattice_migrator TO lattice_migrator_login WITH ADMIN FALSE, INHERIT FALSE, SET TRUE; \
+             GRANT lattice_runtime TO lattice_runtime_login WITH ADMIN FALSE, INHERIT FALSE, SET TRUE; \
+             GRANT lattice_guardian TO lattice_guardian_login WITH ADMIN FALSE, INHERIT FALSE, SET TRUE; \
+             GRANT lattice_readonly TO lattice_readonly_login WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;"
+        ))
+        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+    let database_exists = bootstrap
+        .query_opt(
+            "SELECT 1 FROM pg_database WHERE datname = $1",
+            &[&database_name],
+        )
+        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?
+        .is_some();
+    if !database_exists {
+        bootstrap
+            .batch_execute(&format!(
+                "CREATE DATABASE {database_name} OWNER lattice_migrator"
+            ))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+    }
+    bootstrap
+        .batch_execute(&format!(
+            "REVOKE ALL ON DATABASE {database_name} FROM PUBLIC; \
+             GRANT CONNECT ON DATABASE {database_name} TO lattice_migrator, lattice_runtime, lattice_guardian, lattice_readonly, lattice_migrator_login, lattice_runtime_login, lattice_guardian_login, lattice_readonly_login; \
+             SET ROLE lattice_migrator; COMMENT ON DATABASE {database_name} IS '{}'; RESET ROLE; \
+             REVOKE ALL ON DATABASE postgres FROM PUBLIC; \
+             REVOKE ALL ON DATABASE template0 FROM PUBLIC; \
+             REVOKE ALL ON DATABASE template1 FROM PUBLIC;",
+            target.database_comment()
+        ))
+        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+    drop(bootstrap);
+
+    let mut migrator = connect_migrator(&database, &password)?;
+    apply_store_migrations(&mut migrator, &target)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+    verify_store_schema(&mut migrator, &target, StoreDatabaseRole::Migrator)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+    drop(migrator);
+    bootstrap_postgres_extensions_from_environment()
 }
 
 fn connect_migrator(
