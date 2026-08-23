@@ -200,7 +200,7 @@ fn marker_owned_postgres_17_foundation() {
 
 fn run_disconnect_phase(config: &LiveConfig) {
     let mut admin = config.connect("postgres", "lattice-devos-task092-disconnect-admin");
-    prove_live_task_ledger_commit_response_loss(config, &mut admin);
+    prove_live_task_ledger_commit_response_loss(config, &mut admin, "tl_lost_disc");
     println!("TASK092_COMMIT_RESPONSE_LOSS_RECONCILED_ONCE");
 }
 
@@ -565,7 +565,7 @@ fn run_initial_phase(config: &LiveConfig) {
     println!("STORE_TASK021_STAGE_03_SERIALIZATION_BOUND");
     prove_live_task_ledger_serialization_retry_bound(config, &mut admin);
     println!("STORE_TASK021_STAGE_04_COMMIT_RESPONSE_LOSS");
-    prove_live_task_ledger_commit_response_loss(config, &mut admin);
+    prove_live_task_ledger_commit_response_loss(config, &mut admin, "tl_lost_ack");
     println!("STORE_TASK021_STAGE_05_MANIFEST_DRIFT");
     prove_live_task_ledger_manifest_drift(config, &mut admin);
     println!("STORE_TASK021_STAGE_06_LOCK_TIMEOUT");
@@ -4338,8 +4338,12 @@ fn prove_live_task_ledger_serialization_retry_bound(config: &LiveConfig, admin: 
 }
 
 #[allow(clippy::too_many_lines)]
-fn prove_live_task_ledger_commit_response_loss(config: &LiveConfig, admin: &mut Client) {
-    let target = migrated_database(config, admin, "tl_lost_ack");
+fn prove_live_task_ledger_commit_response_loss(
+    config: &LiveConfig,
+    admin: &mut Client,
+    database_tag: &str,
+) {
+    let target = migrated_database(config, admin, database_tag);
     set_live_admission(config, &target, true);
     let identity = live_task_identity("ledger-lost-ack", "TASK-021");
     let vacant = VerifiedStream::vacant(identity.clone(), RuntimeKind::Live)
