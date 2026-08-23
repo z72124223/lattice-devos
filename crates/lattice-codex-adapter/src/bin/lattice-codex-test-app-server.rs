@@ -45,14 +45,45 @@ fn run_app_server() -> Result<(), ()> {
     let mut input = io::BufReader::new(io::stdin().lock());
     let mut output = io::stdout().lock();
     read_line(&mut input)?;
+    let reported_home = if mode == "wrong-home" {
+        root.join("wrong-home").display().to_string()
+    } else {
+        codex_home.clone()
+    };
     writeln!(
         output,
         "{{\"id\":0,\"result\":{{\"userAgent\":\"codex_cli_rs/0.144.6\",\"platformFamily\":\"windows\",\"platformOs\":\"windows\",\"codexHome\":{}}}}}",
-        json_string(&codex_home)
+        json_string(&reported_home)
     )
     .map_err(|_| ())?;
     output.flush().map_err(|_| ())?;
+    if mode == "malformed" {
+        writeln!(output, "{{not-json").map_err(|_| ())?;
+        output.flush().map_err(|_| ())?;
+        thread::sleep(Duration::from_secs(60));
+        return Ok(());
+    }
+    if mode == "eof" || mode == "wrong-home" {
+        return Ok(());
+    }
+    if mode == "premature" {
+        writeln!(
+            output,
+            "{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"thread-scripted\"}}}}}}"
+        )
+        .map_err(|_| ())?;
+        writeln!(
+            output,
+            "{{\"id\":2,\"result\":{{\"turn\":{{\"id\":\"turn-scripted\"}}}}}}"
+        )
+        .map_err(|_| ())?;
+        writeln!(output, "{{\"method\":\"turn/completed\",\"params\":{{\"threadId\":\"thread-scripted\",\"turn\":{{\"id\":\"turn-scripted\",\"items\":[],\"status\":\"completed\",\"error\":null}}}}}}").map_err(|_| ())?;
+        output.flush().map_err(|_| ())?;
+        thread::sleep(Duration::from_secs(60));
+        return Ok(());
+    }
     read_line(&mut input)?;
+    fs::write(root.join("thread-started.txt"), b"thread/start received").map_err(|_| ())?;
     read_line(&mut input)?;
     writeln!(
         output,
@@ -69,6 +100,17 @@ fn run_app_server() -> Result<(), ()> {
     output.flush().map_err(|_| ())?;
 
     match mode.as_str() {
+        "success" => {
+            write_completed(&mut output)?;
+            thread::sleep(Duration::from_secs(60));
+            Ok(())
+        }
+        "yielded" => {
+            writeln!(output, r#"{{"method":"item/completed","params":{{"threadId":"thread-scripted","turnId":"turn-scripted","item":{{"arguments":{{}},"contentItems":[{{"text":"Script running with cell ID cell-7","type":"inputText"}}],"id":"tool-exec","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"}},"completedAtMs":1}}}}"#).map_err(|_| ())?;
+            write_turn_completed(&mut output)?;
+            thread::sleep(Duration::from_secs(60));
+            Ok(())
+        }
         "timeout" => {
             spawn_descendant(&mode, &root)?;
             read_line(&mut input)?;
@@ -80,13 +122,21 @@ fn run_app_server() -> Result<(), ()> {
         }
         "orphan" => {
             spawn_descendant(&mode, &root)?;
-            writeln!(output, "{{\"method\":\"item/completed\",\"params\":{{\"threadId\":\"thread-scripted\",\"turnId\":\"turn-scripted\",\"item\":{{\"arguments\":{{\"command\":\"apply fixture\"}},\"contentItems\":[{{\"text\":\"Script completed\\nExit code: 0\",\"type\":\"inputText\"}}],\"id\":\"tool-apply\",\"status\":\"completed\",\"success\":true,\"tool\":\"exec\",\"type\":\"dynamicToolCall\"}},\"completedAtMs\":1}}}}") .map_err(|_| ())?;
-            writeln!(output, "{{\"method\":\"item/completed\",\"params\":{{\"threadId\":\"thread-scripted\",\"turnId\":\"turn-scripted\",\"item\":{{\"arguments\":{{\"command\":\"verify fixture\"}},\"contentItems\":[{{\"text\":\"Script completed\\nExit code: 0\",\"type\":\"inputText\"}}],\"id\":\"tool-verify\",\"status\":\"completed\",\"success\":true,\"tool\":\"exec\",\"type\":\"dynamicToolCall\"}},\"completedAtMs\":2}}}}") .map_err(|_| ())?;
-            writeln!(output, "{{\"method\":\"turn/completed\",\"params\":{{\"threadId\":\"thread-scripted\",\"turn\":{{\"id\":\"turn-scripted\",\"items\":[{{\"id\":\"agent-final\",\"text\":\"Delivery complete.\",\"type\":\"agentMessage\"}}],\"itemsView\":\"summary\",\"status\":\"completed\",\"error\":null}}}}}}") .map_err(|_| ())?;
-            output.flush().map_err(|_| ())
+            write_completed(&mut output)
         }
         _ => Err(()),
     }
+}
+
+fn write_completed(output: &mut impl Write) -> Result<(), ()> {
+    writeln!(output, "{}", r#"{"method":"item/completed","params":{"threadId":"thread-scripted","turnId":"turn-scripted","item":{"arguments":{"command":"apply fixture"},"contentItems":[{"text":"Script completed\nExit code: 0","type":"inputText"}],"id":"tool-apply","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"},"completedAtMs":1}}"#).map_err(|_| ())?;
+    writeln!(output, "{}", r#"{"method":"item/completed","params":{"threadId":"thread-scripted","turnId":"turn-scripted","item":{"arguments":{"command":"verify fixture"},"contentItems":[{"text":"Script completed\nExit code: 0","type":"inputText"}],"id":"tool-verify","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"},"completedAtMs":2}}"#).map_err(|_| ())?;
+    write_turn_completed(output)
+}
+
+fn write_turn_completed(output: &mut impl Write) -> Result<(), ()> {
+    writeln!(output, "{}", r#"{"method":"turn/completed","params":{"threadId":"thread-scripted","turn":{"id":"turn-scripted","items":[{"id":"agent-final","text":"Delivery complete.","type":"agentMessage"}],"itemsView":"summary","status":"completed","error":null}}}"#).map_err(|_| ())?;
+    output.flush().map_err(|_| ())
 }
 
 fn spawn_descendant(mode: &str, root: &std::path::Path) -> Result<(), ()> {

@@ -197,10 +197,8 @@ impl ProcessFixture {
         ));
         let codex_home = root.join("codex-home");
         let working_directory = root.join("worktree");
-        let wrong_home = root.join("wrong-home");
         fs::create_dir_all(&codex_home).expect("create dedicated Codex home");
         fs::create_dir_all(&working_directory).expect("create isolated worktree fixture");
-        fs::create_dir_all(&wrong_home).expect("create wrong Codex home fixture");
         fs::write(
             codex_home.join(CODEX_HOME_OWNERSHIP_MARKER_NAME),
             CODEX_HOME_OWNERSHIP_MARKER_BYTES,
@@ -228,40 +226,10 @@ impl ProcessFixture {
         let descendant_pid_log = root.join("descendant.pid");
         let descendant_trigger = root.join(DESCENDANT_TRIGGER_NAME);
         let descendant_effect_log = root.join("descendant-effect.txt");
-        let launcher;
-        if matches!(mode, FakeMode::Timeout | FakeMode::Orphan) {
-            fs::write(
-                root.join("native-process-mode.txt"),
-                match mode {
-                    FakeMode::Timeout => b"timeout\n".as_slice(),
-                    FakeMode::Orphan => b"orphan\n".as_slice(),
-                    _ => unreachable!("native fixture only covers process-fault modes"),
-                },
-            )
+        fs::write(root.join("native-process-mode.txt"), native_mode(mode))
             .expect("write native process-fault mode");
-            launcher = native_fixture_helper();
-            wait_for_native_fixture_helper(&launcher);
-        } else {
-            launcher = root.join("fake-codex.cmd");
-            let server = root.join("fake-app-server.ps1");
-            fs::write(
-                &server,
-                fake_launcher_script(
-                    mode,
-                    &codex_home,
-                    &wrong_home,
-                    &effect_log,
-                    &descendant_pid_log,
-                    &descendant_effect_log,
-                ),
-            )
-            .expect("write remaining scripted app-server modes");
-            fs::write(
-                &launcher,
-                "@echo off\r\n\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0fake-app-server.ps1\" %*\r\n",
-            )
-            .expect("write remaining scripted app-server launcher");
-        }
+        let launcher = native_fixture_helper();
+        wait_for_native_fixture_helper(&launcher);
         let launcher_sha256 = sha256(&fs::read(&launcher).expect("read scripted app-server"));
         Self {
             root,
@@ -287,6 +255,20 @@ impl ProcessFixture {
             None,
         )
         .expect("valid scripted app-server config")
+    }
+}
+
+#[cfg(windows)]
+fn native_mode(mode: FakeMode) -> &'static [u8] {
+    match mode {
+        FakeMode::Success => b"success\n",
+        FakeMode::Yielded => b"yielded\n",
+        FakeMode::Malformed => b"malformed\n",
+        FakeMode::Eof => b"eof\n",
+        FakeMode::Timeout => b"timeout\n",
+        FakeMode::WrongHome => b"wrong-home\n",
+        FakeMode::Premature => b"premature\n",
+        FakeMode::Orphan => b"orphan\n",
     }
 }
 
