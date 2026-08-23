@@ -50,6 +50,18 @@ class SafeMcpUpdateTests(unittest.TestCase):
             self.assertIn(str(candidate).replace("\\", "\\\\"), text)
             self.assertIn("[mcp_servers.lattice.env]", text)
 
+    def test_saved_config_can_be_atomically_restored_after_activation_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self.write_config(root, r"C:\\old\\latticed.exe")
+            original = config.read_text(encoding="utf-8")
+            candidate = root / "candidate.exe"
+            candidate.write_bytes(b"candidate")
+            saved = MODULE.replace_command(config, candidate)
+            self.assertNotEqual(config.read_text(encoding="utf-8"), original)
+            MODULE.atomic_write(config, saved)
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+
     def test_verifier_requires_the_fail_closed_marker(self):
         candidate = Path("candidate.exe")
         with patch.object(MODULE.subprocess, "run") as run:

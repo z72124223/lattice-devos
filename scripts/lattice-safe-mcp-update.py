@@ -91,7 +91,14 @@ def verify_candidate(executable: Path) -> None:
         raise RuntimeError("LATTICE_SAFE_UPDATE_CANDIDATE_VERIFICATION_FAILED")
 
 
-def replace_command(config: Path, executable: Path) -> None:
+def atomic_write(config: Path, text: str) -> None:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False, dir=config.parent) as target:
+        target.write(text)
+        temporary = Path(target.name)
+    os.replace(temporary, config)
+
+
+def replace_command(config: Path, executable: Path) -> str:
     original = config.read_text(encoding="utf-8")
     toml_path = str(executable).replace("\\", "\\\\")
     replacement, changed = COMMAND.subn(
@@ -101,10 +108,8 @@ def replace_command(config: Path, executable: Path) -> None:
     )
     if changed != 1:
         raise RuntimeError("LATTICE_SAFE_UPDATE_CONFIG_REJECTED")
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False, dir=config.parent) as target:
-        target.write(replacement)
-        temporary = Path(target.name)
-    os.replace(temporary, config)
+    atomic_write(config, replacement)
+    return original
 
 
 def main() -> int:
@@ -118,14 +123,21 @@ def main() -> int:
     if locks:
         write_receipt(lattice_root, "DEFERRED_ACTIVE_CODEX_TASKS", active_lock_count=len(locks))
         return 0
+    original_config = None
     try:
         revision = git_head(source_root)
         executable = build_candidate(source_root, lattice_root / "build-cache", revision)
         verify_candidate(executable)
-        replace_command(config, executable)
+        original_config = replace_command(config, executable)
         write_receipt(lattice_root, "ACTIVATED", revision=revision, executable_sha256=sha256(executable))
         return 0
     except Exception as error:  # hook errors must preserve the previous command
+        if original_config is not None:
+            try:
+                atomic_write(config, original_config)
+            except Exception:
+                write_receipt(lattice_root, "ROLLBACK_FAILED", code="LATTICE_SAFE_UPDATE_ROLLBACK_FAILED")
+                return 0
         write_receipt(lattice_root, "FAILED_PRESERVED_PREVIOUS", code=str(error))
         return 0
 
