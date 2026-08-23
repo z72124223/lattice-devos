@@ -55,3 +55,7 @@ path = "src/bin/latticed.rs"
 [[bin]]
 name = "lattice-full-chain"
 path = "src/bin/lattice-full-chain.rs"
+
+[[bin]]
+name = "lattice-live-fault-acceptance"
+path = "src/bin/lattice-live-fault-acceptance.rs"
