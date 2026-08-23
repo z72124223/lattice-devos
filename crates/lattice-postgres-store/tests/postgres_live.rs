@@ -100,6 +100,7 @@ impl LiveConfig {
         assert!(matches!(
             phase.as_str(),
             "initial"
+                | "disconnect"
                 | "restart"
                 | "memory_setup"
                 | "task075_memory_setup"
