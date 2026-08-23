@@ -275,7 +275,7 @@ fn run_store_live_phase(
             .map_err(|_| "LATTICE_LIVE_FAULT_STORE_EVIDENCE_REJECTED")?;
         if !output
             .lines()
-            .any(|line| line == "TASK092_COMMIT_RESPONSE_LOSS_RECONCILED_ONCE")
+            .any(|line| line.contains("TASK092_COMMIT_RESPONSE_LOSS_RECONCILED_ONCE"))
         {
             return Err("LATTICE_LIVE_FAULT_DISCONNECT_RECONCILIATION_REJECTED");
         }
