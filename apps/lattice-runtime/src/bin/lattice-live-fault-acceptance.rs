@@ -148,7 +148,20 @@ fn run_restart_infrastructure_slice(
     start_cluster(&tools.pg_ctl, &data, port, &root)?;
     let store_evidence = if run_store_replay {
         match run_store_live_phase(&root, port, &password, &run_id, "initial", None) {
-            Ok(evidence) => Some(evidence),
+            Ok(evidence) => {
+                if let Err(error) = run_store_live_phase(
+                    &root,
+                    port,
+                    &password,
+                    &run_id,
+                    "disconnect",
+                    Some(&evidence),
+                ) {
+                    let _ = stop_cluster(&tools.pg_ctl, &data);
+                    return Err(error);
+                }
+                Some(evidence)
+            }
             Err(error) => {
                 let _ = stop_cluster(&tools.pg_ctl, &data);
                 return Err(error);
@@ -256,6 +269,22 @@ fn run_store_live_phase(
         .map_err(|_| "LATTICE_LIVE_FAULT_STORE_COMMAND_UNAVAILABLE")?;
     if !status.success() {
         return Err("LATTICE_LIVE_FAULT_STORE_PHASE_REJECTED");
+    }
+    if phase == "disconnect" {
+        let output = fs::read_to_string(&stdout_path)
+            .map_err(|_| "LATTICE_LIVE_FAULT_STORE_EVIDENCE_REJECTED")?;
+        if !output
+            .lines()
+            .any(|line| line == "TASK092_COMMIT_RESPONSE_LOSS_RECONCILED_ONCE")
+        {
+            return Err("LATTICE_LIVE_FAULT_DISCONNECT_RECONCILIATION_REJECTED");
+        }
+        return expected
+            .map(|value| StoreEvidence {
+                database_uuid: value.database_uuid.clone(),
+                manifest_sha256: value.manifest_sha256.clone(),
+            })
+            .ok_or("LATTICE_LIVE_FAULT_DISCONNECT_RECONCILIATION_REJECTED");
     }
     if phase == "restart" {
         return expected

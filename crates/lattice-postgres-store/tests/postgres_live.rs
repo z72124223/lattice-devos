@@ -172,6 +172,8 @@ fn marker_owned_postgres_17_foundation() {
     };
     if config.phase == "initial" {
         run_initial_phase(&config);
+    } else if config.phase == "disconnect" {
+        run_disconnect_phase(&config);
     } else if config.phase == "restart" {
         run_restart_phase(&config);
     } else if config.phase == "memory_setup" {
@@ -193,6 +195,13 @@ fn marker_owned_postgres_17_foundation() {
     } else {
         run_task076_writer_restart_phase(&config);
     }
+}
+
+fn run_disconnect_phase(config: &LiveConfig) {
+    let mut admin = config.connect("postgres", "lattice-devos-task092-disconnect-admin");
+    create_fixed_roles(&mut admin, &config.password);
+    prove_live_task_ledger_commit_response_loss(config, &mut admin);
+    println!("TASK092_COMMIT_RESPONSE_LOSS_RECONCILED_ONCE");
 }
 
 #[test]
