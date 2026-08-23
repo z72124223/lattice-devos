@@ -16,6 +16,8 @@ use lattice_contracts::{ContentDigest, SubjectBinding};
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
+use crate::mcp_budget::{McpAdmission, McpBudget, McpToolClass};
+
 /// Legacy stateful MCP protocol version implemented by this server.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 /// Stateless MCP protocol version implemented by this server.
@@ -67,6 +69,7 @@ const TASK_PUBLIC_STATE_VALUES: [&str; 15] = [
 pub const MAX_STDIO_MESSAGE_BYTES: usize = 65_536;
 /// Maximum valid tool invocations accepted during one MCP server session.
 pub const MAX_TOOL_INVOCATIONS_PER_SESSION: usize = 64;
+const MCP_HANDOFF_RESERVE: usize = 8;
 
 const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 const META_CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
@@ -1503,7 +1506,7 @@ pub struct McpServer<S> {
     arguments: DeliveryToolArguments,
     lifecycle: Lifecycle,
     tool_surface: ToolSurface,
-    tool_invocations: usize,
+    tool_budget: McpBudget,
     acceptance_evidence: Option<AcceptanceEvidence>,
     acceptance_evidence_error: Option<io::Error>,
     observed_effect_enabled: bool,
@@ -1518,7 +1521,11 @@ impl<S: DeliveryToolService> McpServer<S> {
             arguments: DeliveryToolArguments::new(binding),
             lifecycle: Lifecycle::AwaitingInitialize,
             tool_surface: ToolSurface::CanonicalTaskControl,
-            tool_invocations: 0,
+            tool_budget: McpBudget::new(
+                MAX_TOOL_INVOCATIONS_PER_SESSION as u16,
+                MCP_HANDOFF_RESERVE as u16,
+            )
+            .expect("constant budget is valid"),
             acceptance_evidence: None,
             acceptance_evidence_error: None,
             observed_effect_enabled: false,
@@ -1533,7 +1540,11 @@ impl<S: DeliveryToolService> McpServer<S> {
             arguments: DeliveryToolArguments::new(binding),
             lifecycle: Lifecycle::AwaitingInitialize,
             tool_surface: ToolSurface::LegacyDeliveryObserver,
-            tool_invocations: 0,
+            tool_budget: McpBudget::new(
+                MAX_TOOL_INVOCATIONS_PER_SESSION as u16,
+                MCP_HANDOFF_RESERVE as u16,
+            )
+            .expect("constant budget is valid"),
             acceptance_evidence: None,
             acceptance_evidence_error: None,
             observed_effect_enabled: false,
@@ -1573,6 +1584,27 @@ impl<S: DeliveryToolService> McpServer<S> {
             return protocol_error(id, -32603, "Acceptance evidence rejected");
         }
         protocol_error(id, code, message)
+    }
+
+    fn reject_budget_probe(
+        &mut self,
+        id: Value,
+        receipt: crate::mcp_budget::McpRejectionReceipt,
+    ) -> Value {
+        if let Err(error) =
+            with_observed_effect_evidence(|evidence| evidence.reject_probe("MCP_INVOCATION_LIMIT"))
+        {
+            self.acceptance_evidence_error = Some(error);
+            return protocol_error(id, -32603, "Acceptance evidence rejected");
+        }
+        success(
+            id,
+            budget_rejection_result(
+                receipt,
+                self.tool_budget.remaining(),
+                self.tool_budget.read_only_reserve(),
+            ),
+        )
     }
 
     /// Handles one decoded JSON-RPC message. Notifications return no value.
@@ -1824,15 +1856,17 @@ impl<S: DeliveryToolService> McpServer<S> {
                 return self.reject_observed_probe(id, "MCP_UNKNOWN_TOOL", -32602, "Unknown tool");
             }
         };
-        if self.tool_invocations >= MAX_TOOL_INVOCATIONS_PER_SESSION {
-            return self.reject_observed_probe(
-                id,
-                "MCP_INVOCATION_LIMIT",
-                -32029,
-                "Tool invocation limit exceeded",
-            );
+        let class = if matches!(
+            &operation,
+            ToolOperation::DeliveryRun | ToolOperation::TaskSubmit(_)
+        ) {
+            McpToolClass::Execution
+        } else {
+            McpToolClass::Observation
+        };
+        if let McpAdmission::Rejected(receipt) = self.tool_budget.admit(class) {
+            return self.reject_budget_probe(id, receipt);
         }
-        self.tool_invocations += 1;
         if let Some(evidence) = self.acceptance_evidence.as_mut()
             && let Err(error) = evidence.record_dispatch(name, &id)
         {
@@ -2537,6 +2571,41 @@ fn tool_result(result: Result<Value, ToolExecutionError>) -> Value {
             })
         }
     }
+}
+
+fn budget_rejection_result(
+    receipt: crate::mcp_budget::McpRejectionReceipt,
+    remaining_calls: u16,
+    read_only_reserve: u16,
+) -> Value {
+    let can_continue_read_only = remaining_calls > 0;
+    let value = json!({
+        "schema_version": "lattice.mcp.handoff.v1",
+        "status": "REJECTED",
+        "code": receipt.code,
+        "reason": receipt.reason,
+        "effect_started": receipt.effect_was_started,
+        "retry_allowed": receipt.retry_allowed,
+        "handoff_required": receipt.handoff_required,
+        "remaining_read_only_calls": remaining_calls,
+        "reserved_read_only_calls": read_only_reserve,
+        "can_do": if can_continue_read_only {
+            json!([RUNTIME_STATUS_TOOL, DELIVERY_RECONCILE_TOOL, DELIVERY_STATUS_TOOL, TASK_STATUS_TOOL])
+        } else {
+            json!(["start a fresh MCP session, then use read-only status or reconciliation tools"])
+        },
+        "cannot_do": [DELIVERY_RUN_TOOL, TASK_SUBMIT_TOOL],
+        "resume_instruction": if can_continue_read_only {
+            "Use a read-only status or reconciliation tool now; do not retry execution in this session."
+        } else {
+            "Start a fresh MCP session, inspect durable status, then decide whether execution may be resumed."
+        }
+    });
+    json!({
+        "content": [{"type": "text", "text": value.to_string()}],
+        "structuredContent": value,
+        "isError": true
+    })
 }
 
 fn success(id: Value, result: Value) -> Value {

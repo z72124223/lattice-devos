@@ -763,7 +763,15 @@ fn modern_stateless_calls_share_the_bounded_process_rate_counter() {
             }
         }))
         .expect("modern rate-limit response");
-    assert_eq!(rejected["error"]["code"], -32029);
+    assert_eq!(rejected["result"]["isError"], true);
+    assert_eq!(
+        rejected["result"]["structuredContent"]["code"],
+        "LATTICE_MCP_SESSION_EXHAUSTED"
+    );
+    assert_eq!(
+        rejected["result"]["structuredContent"]["effect_started"],
+        false
+    );
     assert_eq!(run_calls.get(), 0);
     assert_eq!(
         status_calls.get() as usize,
@@ -1574,12 +1582,72 @@ fn tool_invocations_are_bounded_per_session() {
             "params":{"name":"lattice_delivery_run","arguments":{}}
         }))
         .expect("rate limit response");
-    assert_eq!(rejected["error"]["code"], -32029);
+    assert_eq!(rejected["result"]["isError"], true);
+    assert_eq!(
+        rejected["result"]["structuredContent"]["code"],
+        "LATTICE_MCP_SESSION_EXHAUSTED"
+    );
     assert_eq!(run_calls.get(), 0);
     assert_eq!(
         status_calls.get() as usize,
         MAX_TOOL_INVOCATIONS_PER_SESSION
     );
+}
+
+#[test]
+fn execution_budget_preserves_a_structured_read_only_handoff_reserve() {
+    let (mut server, run_calls, status_calls) = server();
+    initialize(&mut server);
+
+    for id in 0..(MAX_TOOL_INVOCATIONS_PER_SESSION - 8) {
+        let response = server
+            .handle(json!({
+                "jsonrpc":"2.0",
+                "id":id + 1000,
+                "method":"tools/call",
+                "params":{"name":"lattice_delivery_run","arguments":{}}
+            }))
+            .expect("execution response within budget");
+        assert_eq!(response["result"]["isError"], false, "{id}");
+    }
+
+    let denied_execution = server
+        .handle(json!({
+            "jsonrpc":"2.0",
+            "id":"budget-handoff",
+            "method":"tools/call",
+            "params":{"name":"lattice_delivery_run","arguments":{}}
+        }))
+        .expect("budget handoff response");
+    let receipt = &denied_execution["result"]["structuredContent"];
+    assert_eq!(denied_execution["result"]["isError"], true);
+    assert_eq!(receipt["schema_version"], "lattice.mcp.handoff.v1");
+    assert_eq!(receipt["code"], "LATTICE_MCP_BUDGET_HANDOFF_REQUIRED");
+    assert_eq!(receipt["effect_started"], false);
+    assert_eq!(receipt["retry_allowed"], false);
+    assert_eq!(receipt["remaining_read_only_calls"], 8);
+    assert_eq!(receipt["can_do"][0], "lattice_runtime_status");
+    assert_eq!(
+        receipt["cannot_do"],
+        json!(["lattice_delivery_run", "lattice_task_submit"])
+    );
+    assert_eq!(
+        run_calls.get() as usize,
+        MAX_TOOL_INVOCATIONS_PER_SESSION - 8
+    );
+
+    for id in 0..8 {
+        let response = server
+            .handle(json!({
+                "jsonrpc":"2.0",
+                "id":id + 2000,
+                "method":"tools/call",
+                "params":{"name":"lattice_delivery_status","arguments":{}}
+            }))
+            .expect("read-only handoff response");
+        assert_eq!(response["result"]["isError"], false, "{id}");
+    }
+    assert_eq!(status_calls.get(), 8);
 }
 
 #[test]
