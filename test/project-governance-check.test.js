@@ -82,12 +82,27 @@ async function runFixture({
     const moduleDirectory = path.join(root, "docs", "modules", "fixture");
     const contractDirectory = path.join(root, "docs", "contracts");
     const ticketDirectory = path.join(root, "docs", "tickets");
+    const runtimeContractDirectory = path.join(root, "tests");
+    const runtimeSourceDirectory = path.join(root, "src");
     await mkdir(moduleDirectory, { recursive: true });
     await mkdir(contractDirectory, { recursive: true });
     await mkdir(ticketDirectory, { recursive: true });
+    await mkdir(runtimeContractDirectory, { recursive: true });
+    await mkdir(runtimeSourceDirectory, { recursive: true });
 
     await writeFile(path.join(root, "AGENTS.md"), agents, "utf8");
     await writeFile(path.join(root, "PLANS.md"), plans, "utf8");
+    await writeFile(
+      path.join(root, "Cargo.toml"),
+      `[package]\nname = "lattice-core"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n`,
+      "utf8",
+    );
+    await writeFile(path.join(runtimeSourceDirectory, "lib.rs"), "", "utf8");
+    await writeFile(
+      path.join(runtimeContractDirectory, "platform_manifest.rs"),
+      `#[test]\nfn fixture_runtime_contract_is_satisfied() {}\n`,
+      "utf8",
+    );
     await writeFile(
       path.join(moduleDirectory, "MODULE_CONSTITUTION.md"),
       constitution,
