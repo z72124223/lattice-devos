@@ -1144,6 +1144,80 @@ fn rejects_unsafe_isolated_home_config_before_spawn() {
 
 #[cfg(windows)]
 #[test]
+fn accepts_and_clears_a_prior_lattice_delivery_worktree_trust_entry() {
+    let fixture = ProcessFixture::new(FakeMode::Success);
+    let trust_path = fixture
+        .codex_home
+        .parent()
+        .expect("Codex home has a fixture root")
+        .join("runtime-delivery")
+        .join(format!("task-{}", "a".repeat(64)))
+        .join("repo")
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    fs::write(
+        fixture.codex_home.join("config.toml"),
+        format!(
+            "{}[projects.'{}']\ntrust_level = \"trusted\"\n",
+            concat!(
+                "approval_policy = \"never\"\n",
+                "sandbox_mode = \"workspace-write\"\n",
+                "model = \"gpt-5.6-sol\"\n",
+                "model_reasoning_effort = \"low\"\n",
+                "\n",
+                "[windows]\n",
+                "sandbox = \"unelevated\"\n",
+                "\n",
+                "[features]\n",
+                "plugins = false\n\n",
+            ),
+            trust_path,
+        ),
+    )
+    .expect("write Codex-generated current-worktree trust entry");
+
+    run_codex_app_server(&fixture.config(Duration::from_secs(5)))
+        .expect("a prior LATTICE delivery worktree trust entry is safe");
+    assert!(fixture.effect_log.exists());
+    let reset_config = String::from_utf8(
+        fs::read(fixture.codex_home.join("config.toml")).expect("read reset config"),
+    )
+    .expect("reset config is UTF-8");
+    assert!(!reset_config.contains("[projects."));
+}
+
+#[cfg(windows)]
+#[test]
+fn rejects_a_codex_trust_entry_for_another_worktree() {
+    let fixture = ProcessFixture::new(FakeMode::Success);
+    fs::write(
+        fixture.codex_home.join("config.toml"),
+        concat!(
+            "approval_policy = \"never\"\n",
+            "sandbox_mode = \"workspace-write\"\n",
+            "model = \"gpt-5.6-sol\"\n",
+            "model_reasoning_effort = \"low\"\n",
+            "\n",
+            "[windows]\n",
+            "sandbox = \"unelevated\"\n",
+            "\n",
+            "[features]\n",
+            "plugins = false\n",
+            "\n",
+            "[projects.'c:\\untrusted-worktree']\n",
+            "trust_level = \"trusted\"\n",
+        ),
+    )
+    .expect("write foreign Codex trust entry");
+
+    let error = run_codex_app_server(&fixture.config(Duration::from_secs(5)))
+        .expect_err("a foreign worktree trust entry must be rejected");
+    assert_eq!(error.kind(), AppServerRunErrorKind::InvalidCodexHome);
+    assert!(!fixture.effect_log.exists());
+}
+
+#[cfg(windows)]
+#[test]
 fn scripted_malformed_eof_and_wrong_home_fail_closed() {
     for (mode, expected) in [
         (

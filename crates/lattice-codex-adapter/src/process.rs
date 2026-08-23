@@ -2019,11 +2019,11 @@ pub(crate) fn validate_owned_codex_home(
     validate_isolated_home_file(&auth_state, AppServerRunErrorKind::InvalidCodexHome)?;
     let config_path = config.codex_home().join("config.toml");
     validate_isolated_home_file(&config_path, AppServerRunErrorKind::InvalidCodexHome)?;
-    let config_metadata = std::fs::metadata(&config_path)
-        .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::InvalidCodexHome))?;
-    if config_metadata.len() != u64::try_from(CODEX_HOME_CONFIG_BYTES.len()).unwrap_or(u64::MAX)
-        || std::fs::read(&config_path).ok().as_deref() != Some(CODEX_HOME_CONFIG_BYTES)
-    {
+    if !restore_owned_codex_home_config(
+        &config_path,
+        config.codex_home(),
+        config.working_directory(),
+    ) {
         return Err(AppServerRunError::new(
             AppServerRunErrorKind::InvalidCodexHome,
         ));
@@ -2048,6 +2048,57 @@ pub(crate) fn validate_owned_codex_home(
     }
 
     Ok(())
+}
+
+fn restore_owned_codex_home_config(
+    config_path: &Path,
+    codex_home: &Path,
+    working_directory: &Path,
+) -> bool {
+    let Ok(bytes) = std::fs::read(config_path) else {
+        return false;
+    };
+    if bytes.as_slice() == CODEX_HOME_CONFIG_BYTES {
+        return true;
+    }
+
+    let prefix = format!(
+        "{}\n[projects.'",
+        String::from_utf8_lossy(CODEX_HOME_CONFIG_BYTES)
+    );
+    let suffix = "']\ntrust_level = \"trusted\"\n";
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return false;
+    };
+    let Some(trusted_worktree) = text
+        .strip_prefix(&prefix)
+        .and_then(|text| text.strip_suffix(suffix))
+    else {
+        return false;
+    };
+    let trusted_worktree = trusted_worktree.to_ascii_lowercase();
+    let current_worktree = working_directory.to_string_lossy().to_ascii_lowercase();
+    let prior_delivery_worktree = codex_home
+        .parent()
+        .map(|root| root.join("runtime-delivery"))
+        .map(|root| root.to_string_lossy().to_ascii_lowercase())
+        .is_some_and(|root| is_lattice_delivery_worktree(&trusted_worktree, &root));
+    if trusted_worktree != current_worktree && !prior_delivery_worktree {
+        return false;
+    }
+    std::fs::write(config_path, CODEX_HOME_CONFIG_BYTES).is_ok()
+}
+
+fn is_lattice_delivery_worktree(path: &str, runtime_delivery_root: &str) -> bool {
+    let Some(relative) = path.strip_prefix(&format!("{runtime_delivery_root}\\")) else {
+        return false;
+    };
+    let Some(task) = relative.strip_suffix("\\repo") else {
+        return false;
+    };
+    task.len() == 69
+        && task.starts_with("task-")
+        && task[5..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn validate_isolated_home_file(
