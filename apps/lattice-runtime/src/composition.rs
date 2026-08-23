@@ -1743,6 +1743,19 @@ impl LatticedDeliveryService {
         )
     }
 
+    /// Replays the durable delivery receipt without running a delivery effect.
+    ///
+    /// A replay failure remains a reconciliation blocker. This method never
+    /// appends a receipt or converts uncertain evidence into a terminal result.
+    pub fn reconcile_json(&mut self) -> Result<Value, LatticedError> {
+        let receipt = self.core_status_json()?;
+        Ok(json!({
+            "component": "delivery-reconciliation",
+            "status": "RECONCILIATION_NOT_REQUIRED",
+            "delivery_receipt": receipt,
+        }))
+    }
+
     /// Reads only the durable delivery receipt, without requiring Graphify or
     /// Hermes analysis evidence.
     fn core_status_json(&mut self) -> Result<Value, LatticedError> {
@@ -5011,6 +5024,24 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             ));
         }
         core.runtime_status_json()
+            .map_err(|error| ToolExecutionError::new(error.code()))
+    }
+
+    fn reconcile(
+        &mut self,
+        arguments: &DeliveryToolArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        let mut core = self
+            .inner
+            .lock()
+            .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Transport.code()))?;
+        if arguments.binding() != core.submission.binding() {
+            return Err(ToolExecutionError::new(
+                "LATTICE_FULL_CHAIN_BINDING_REJECTED",
+            ));
+        }
+        core.delivery
+            .reconcile_json()
             .map_err(|error| ToolExecutionError::new(error.code()))
     }
 

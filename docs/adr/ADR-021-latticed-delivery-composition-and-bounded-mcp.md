@@ -148,3 +148,18 @@ writer effect. Delivery Status and both Task tools remain zero-Hermes paths.
 The same composition root explicitly terminates an activated runner when MCP
 stdio ends; an ambiguous teardown is the terminal result even when stdio
 otherwise succeeded or already failed.
+
+## 2026-08-23 Read-Only Delivery Reconciliation Amendment
+
+The responsible user approved one additional canonical MCP operation:
+`lattice_delivery_reconcile`. It accepts the same zero-parameter closed object
+as delivery status and uses the same process-owned delivery binding. Its sole
+effect is a fresh durable receipt replay. A verified terminal receipt reports
+`RECONCILIATION_NOT_REQUIRED`; any missing, pending, malformed, contradictory,
+or otherwise uncertain evidence remains a bounded reconciliation blocker.
+
+This operation is not an administrative repair path: it cannot start Codex,
+write an intent/outcome/receipt, mutate Git, start Graphify or Hermes, accept a
+caller-selected binding, or convert uncertainty into success. The legacy
+observer retains its two-tool catalog, so existing compatibility clients are
+unchanged.

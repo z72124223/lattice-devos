@@ -263,7 +263,7 @@ creating duplicate authorities or an unconstrained self-modifying agent.
   `apps/lattice-runtime` package implements it, selects concrete adapters, and
   retains `lattice-runtime` only as a compatibility wrapper over the same
   composition and state.
-- The Codex App MCP stdio surface exposes exactly four bounded tools:
+- The Codex App MCP stdio surface exposes exactly six bounded tools:
   `lattice_delivery_run`, `lattice_delivery_status`, `lattice_task_submit`, and
   `lattice_task_status`. Delivery schemas remain zero-parameter; task schemas
   remain closed to the fixed canary intent/request ID and returned task ref.

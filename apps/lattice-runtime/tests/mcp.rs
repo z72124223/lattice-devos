@@ -53,12 +53,14 @@ const RESULT_DIGEST: &str = "23456789abcdef0123456789abcdef0123456789abcdef01234
 
 fn completed_task_status() -> Value {
     json!({
-        "schema_version": "lattice.task.status.v1",
+        "schema_version": "lattice.task.status.v2",
         "status": "COMPLETED",
         "task_state": "COMPLETED",
         "task_ref": TASK_REF,
         "ledger_head_digest": LEDGER_HEAD_DIGEST,
-        "result_digest": RESULT_DIGEST
+        "result_digest": RESULT_DIGEST,
+        "failure_stage": null,
+        "failure_code": null
     })
 }
 
@@ -105,7 +107,7 @@ fn lifecycle_diagnostics_observe_fixed_mcp_milestones_without_changing_stdout() 
     assert_eq!(responses[0]["result"]["protocolVersion"], "2025-11-25");
     assert_eq!(
         responses[1]["result"]["tools"].as_array().map(Vec::len),
-        Some(4)
+        Some(6)
     );
 }
 
@@ -115,7 +117,7 @@ fn task_public_output_schema() -> Value {
         "properties": {
             "schema_version": {
                 "type": "string",
-                "enum": ["lattice.task.status.v1"]
+                "enum": ["lattice.task.status.v2"]
             },
             "status": {
                 "type": "string",
@@ -168,6 +170,18 @@ fn task_public_output_schema() -> Value {
                     },
                     {"type": "null"}
                 ]
+            },
+            "failure_stage": {
+                "anyOf": [
+                    {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z0-9_]+$"},
+                    {"type": "null"}
+                ]
+            },
+            "failure_code": {
+                "anyOf": [
+                    {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z0-9_]+$"},
+                    {"type": "null"}
+                ]
             }
         },
         "required": [
@@ -176,7 +190,9 @@ fn task_public_output_schema() -> Value {
             "task_state",
             "task_ref",
             "ledger_head_digest",
-            "result_digest"
+            "result_digest",
+            "failure_stage",
+            "failure_code"
         ],
         "additionalProperties": false
     })
@@ -284,7 +300,10 @@ fn call_task_tool_with_output(tool_name: &str, output: Value) -> Value {
             "client_request_id": CLIENT_REQUEST_ID,
             "intent": CONTROLLED_CODEX_CANARY
         }),
-        "lattice_task_status" => json!({"task_ref": TASK_REF}),
+        "lattice_task_status" => json!({
+            "client_request_id": CLIENT_REQUEST_ID,
+            "task_ref": TASK_REF
+        }),
         _ => panic!("unexpected task tool"),
     };
     server
@@ -421,7 +440,9 @@ fn modern_tool_requests_are_stateless_and_preserve_the_server_binding() {
             "lattice_delivery_run",
             "lattice_delivery_status",
             "lattice_task_submit",
-            "lattice_task_status"
+            "lattice_task_status",
+            "lattice_runtime_status",
+            "lattice_delivery_reconcile"
         ]
     );
     assert_eq!(
@@ -460,7 +481,7 @@ fn modern_tool_requests_are_stateless_and_preserve_the_server_binding() {
             "openWorldHint": false
         })
     );
-    for tool in &list["result"]["tools"].as_array().expect("tools")[2..] {
+    for tool in &list["result"]["tools"].as_array().expect("tools")[2..4] {
         assert_eq!(tool["outputSchema"], task_public_output_schema());
     }
 
@@ -791,7 +812,7 @@ fn modern_discovery_does_not_replace_the_legacy_lifecycle() {
         .expect("legacy tool list");
     assert_eq!(
         legacy_list["result"]["tools"].as_array().map(Vec::len),
-        Some(4)
+        Some(6)
     );
 
     for method in ["initialize", "ping"] {
@@ -809,7 +830,7 @@ fn modern_discovery_does_not_replace_the_legacy_lifecycle() {
 }
 
 #[test]
-fn tool_list_is_exactly_four_bounded_tools_with_closed_schemas() {
+fn tool_list_is_exactly_six_bounded_tools_with_closed_schemas() {
     let (mut server, _, _) = server();
     initialize(&mut server);
 
@@ -818,7 +839,7 @@ fn tool_list_is_exactly_four_bounded_tools_with_closed_schemas() {
         .expect("tool list");
     let tools = response["result"]["tools"].as_array().expect("tools");
 
-    assert_eq!(tools.len(), 4);
+    assert_eq!(tools.len(), 6);
     assert_eq!(
         tools
             .iter()
@@ -828,7 +849,9 @@ fn tool_list_is_exactly_four_bounded_tools_with_closed_schemas() {
             "lattice_delivery_run",
             "lattice_delivery_status",
             "lattice_task_submit",
-            "lattice_task_status"
+            "lattice_task_status",
+            "lattice_runtime_status",
+            "lattice_delivery_reconcile"
         ]
     );
     for tool in &tools[..2] {
@@ -839,6 +862,14 @@ fn tool_list_is_exactly_four_bounded_tools_with_closed_schemas() {
         assert!(tool.get("outputSchema").is_none());
         assert!(tool.get("annotations").is_none());
     }
+    assert_eq!(
+        tools[4]["inputSchema"],
+        json!({"type":"object","additionalProperties":false})
+    );
+    assert_eq!(
+        tools[5]["inputSchema"],
+        json!({"type":"object","additionalProperties":false})
+    );
     let task_output_schema = task_public_output_schema();
     assert_eq!(
         tools[2]["inputSchema"],
@@ -865,6 +896,12 @@ fn tool_list_is_exactly_four_bounded_tools_with_closed_schemas() {
         json!({
             "type": "object",
             "properties": {
+                "client_request_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                },
                 "task_ref": {
                     "type": "string",
                     "minLength": 64,
@@ -872,7 +909,7 @@ fn tool_list_is_exactly_four_bounded_tools_with_closed_schemas() {
                     "pattern": "^[0-9a-f]{64}$"
                 }
             },
-            "required": ["task_ref"],
+            "required": ["client_request_id", "task_ref"],
             "additionalProperties": false
         })
     );
@@ -1085,7 +1122,7 @@ fn bounded_task_tools_dispatch_only_typed_arguments() {
             "method": "tools/call",
             "params": {
                 "name": "lattice_task_status",
-                "arguments": {"task_ref": TASK_REF}
+                "arguments": {"client_request_id": CLIENT_REQUEST_ID, "task_ref": TASK_REF}
             }
         }))
         .expect("task status response");
@@ -1105,20 +1142,24 @@ fn task_tools_emit_only_closed_public_status_shapes() {
     let accepted = [
         completed_task_status(),
         json!({
-            "schema_version": "lattice.task.status.v1",
+            "schema_version": "lattice.task.status.v2",
             "status": "FAILED",
             "task_state": "FAILED",
             "task_ref": TASK_REF,
             "ledger_head_digest": LEDGER_HEAD_DIGEST,
-            "result_digest": null
+            "result_digest": null,
+            "failure_stage": "CODEX",
+            "failure_code": "LATTICE_DELIVERY_FAILED"
         }),
         json!({
-            "schema_version": "lattice.task.status.v1",
+            "schema_version": "lattice.task.status.v2",
             "status": "RECONCILIATION_REQUIRED",
             "task_state": "EXECUTING",
             "task_ref": TASK_REF,
             "ledger_head_digest": LEDGER_HEAD_DIGEST,
-            "result_digest": null
+            "result_digest": null,
+            "failure_stage": "OUTCOME",
+            "failure_code": "LATTICE_DELIVERY_RECONCILIATION_REQUIRED"
         }),
     ];
 
@@ -1145,6 +1186,8 @@ fn task_tools_fail_closed_before_serializing_invalid_public_status() {
         "task_ref",
         "ledger_head_digest",
         "result_digest",
+        "failure_stage",
+        "failure_code",
     ] {
         let mut value = completed_task_status();
         value.as_object_mut().expect("status object").remove(field);
@@ -1165,7 +1208,7 @@ fn task_tools_fail_closed_before_serializing_invalid_public_status() {
     }
 
     for (field, replacement) in [
-        ("schema_version", "lattice.task.status.v2"),
+        ("schema_version", "lattice.task.status.v1"),
         ("status", "ACCEPTED"),
         ("task_state", "UNKNOWN"),
         ("task_ref", "a"),
@@ -1275,7 +1318,7 @@ fn stateless_client_info_cannot_change_typed_task_arguments() {
             "method": "tools/call",
             "params": {
                 "name": "lattice_task_status",
-                "arguments": {"task_ref": TASK_REF},
+                "arguments": {"client_request_id": CLIENT_REQUEST_ID, "task_ref": TASK_REF},
                 "_meta": modern_request_meta()
             }
         }))
@@ -1445,7 +1488,7 @@ fn request_metadata_is_allowed_without_widening_tool_arguments() {
             "params":{"_meta":{"progressToken":"list-progress"}}
         }))
         .expect("tool list");
-    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(4));
+    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(6));
 
     let call = server
         .handle(json!({

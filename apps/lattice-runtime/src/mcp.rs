@@ -26,6 +26,8 @@ pub const DELIVERY_RUN_TOOL: &str = "lattice_delivery_run";
 pub const DELIVERY_STATUS_TOOL: &str = "lattice_delivery_status";
 /// Read-only Runtime component status tool.
 pub const RUNTIME_STATUS_TOOL: &str = "lattice_runtime_status";
+/// Read-only durable delivery-reconciliation probe.
+pub const DELIVERY_RECONCILE_TOOL: &str = "lattice_delivery_reconcile";
 /// Bounded high-level task submission tool.
 pub const TASK_SUBMIT_TOOL: &str = "lattice_task_submit";
 /// Bounded durable task status tool.
@@ -1125,6 +1127,7 @@ pub(crate) fn task_ingress_schema_digest() -> Option<ContentDigest> {
                 CanonicalValue::String(DELIVERY_RUN_TOOL.to_owned()),
                 CanonicalValue::String(DELIVERY_STATUS_TOOL.to_owned()),
                 CanonicalValue::String(RUNTIME_STATUS_TOOL.to_owned()),
+                CanonicalValue::String(DELIVERY_RECONCILE_TOOL.to_owned()),
             ]),
         ),
         (
@@ -1418,6 +1421,19 @@ pub trait DeliveryToolService {
         ))
     }
 
+    /// Replays the fixed delivery receipt to determine whether reconciliation is needed.
+    ///
+    /// This probe is read-only. It must never dispatch Codex, append a receipt,
+    /// or reinterpret uncertain evidence as success.
+    fn reconcile(
+        &mut self,
+        _arguments: &DeliveryToolArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Err(ToolExecutionError::new(
+            "LATTICE_DELIVERY_RECONCILIATION_UNAVAILABLE",
+        ))
+    }
+
     /// Submits one validated high-level task intent to the existing service.
     ///
     /// # Errors
@@ -1700,6 +1716,7 @@ impl<S: DeliveryToolService> McpServer<S> {
                     DELIVERY_RUN_TOOL
                         | DELIVERY_STATUS_TOOL
                         | RUNTIME_STATUS_TOOL
+                        | DELIVERY_RECONCILE_TOOL
                         | TASK_SUBMIT_TOOL
                         | TASK_STATUS_TOOL
                 )
@@ -1748,7 +1765,10 @@ impl<S: DeliveryToolService> McpServer<S> {
             );
         };
         if !self.tool_surface.allows_task_control()
-            && matches!(name, TASK_SUBMIT_TOOL | TASK_STATUS_TOOL)
+            && matches!(
+                name,
+                RUNTIME_STATUS_TOOL | DELIVERY_RECONCILE_TOOL | TASK_SUBMIT_TOOL | TASK_STATUS_TOOL
+            )
         {
             return self.reject_observed_probe(id, "MCP_UNKNOWN_TOOL", -32602, "Unknown tool");
         }
@@ -1762,7 +1782,13 @@ impl<S: DeliveryToolService> McpServer<S> {
             RUNTIME_STATUS_TOOL if empty_object_or_absent(params.get("arguments")) => {
                 ToolOperation::RuntimeStatus
             }
-            DELIVERY_RUN_TOOL | DELIVERY_STATUS_TOOL | RUNTIME_STATUS_TOOL => {
+            DELIVERY_RECONCILE_TOOL if empty_object_or_absent(params.get("arguments")) => {
+                ToolOperation::DeliveryReconcile
+            }
+            DELIVERY_RUN_TOOL
+            | DELIVERY_STATUS_TOOL
+            | RUNTIME_STATUS_TOOL
+            | DELIVERY_RECONCILE_TOOL => {
                 return self.reject_observed_probe(
                     id,
                     "MCP_INVALID_PARAMS",
@@ -1824,6 +1850,7 @@ impl<S: DeliveryToolService> McpServer<S> {
             ToolOperation::DeliveryRun => self.service.run(&self.arguments),
             ToolOperation::DeliveryStatus => self.service.status(&self.arguments),
             ToolOperation::RuntimeStatus => self.service.runtime_status(&self.arguments),
+            ToolOperation::DeliveryReconcile => self.service.reconcile(&self.arguments),
             ToolOperation::TaskSubmit(arguments) => {
                 closed_task_public_status(self.service.task_submit(&arguments))
             }
@@ -1860,6 +1887,7 @@ enum ToolOperation {
     DeliveryRun,
     DeliveryStatus,
     RuntimeStatus,
+    DeliveryReconcile,
     TaskSubmit(TaskSubmitArguments),
     TaskStatus(TaskStatusArguments),
 }
@@ -2182,12 +2210,6 @@ fn tool_catalog(protocol: RequestProtocol, surface: ToolSurface) -> Value {
             "description": "Reads the durable status for the one LATTICE-owned delivery profile.",
             "inputSchema": delivery_arguments_schema()
         }),
-        json!({
-            "name": RUNTIME_STATUS_TOOL,
-            "title": "Read LATTICE Runtime component status",
-            "description": "Reads PostgreSQL, Graphify, and Hermes activation or degradation state without starting optional components.",
-            "inputSchema": delivery_arguments_schema()
-        }),
     ];
     if surface.allows_task_control() {
         tools.extend([
@@ -2206,6 +2228,20 @@ fn tool_catalog(protocol: RequestProtocol, surface: ToolSurface) -> Value {
                 "outputSchema": task_public_status_schema()
             }),
         ]);
+        tools.extend([
+            json!({
+                "name": RUNTIME_STATUS_TOOL,
+                "title": "Read LATTICE Runtime component status",
+                "description": "Reads PostgreSQL, Graphify, and Hermes activation or degradation state without starting optional components.",
+                "inputSchema": delivery_arguments_schema()
+            }),
+            json!({
+                "name": DELIVERY_RECONCILE_TOOL,
+                "title": "Reconcile LATTICE delivery evidence",
+                "description": "Replays the durable delivery receipt to determine whether reconciliation is required. It never starts work or changes durable evidence.",
+                "inputSchema": delivery_arguments_schema()
+            }),
+        ]);
     }
     if protocol == RequestProtocol::Stateless {
         tools[0]["annotations"] = json!({
@@ -2220,20 +2256,26 @@ fn tool_catalog(protocol: RequestProtocol, surface: ToolSurface) -> Value {
             "idempotentHint": true,
             "openWorldHint": false
         });
-        tools[2]["annotations"] = json!({
-            "readOnlyHint": true,
-            "destructiveHint": false,
-            "idempotentHint": true,
-            "openWorldHint": false
-        });
         if surface.allows_task_control() {
-            tools[3]["annotations"] = json!({
+            tools[2]["annotations"] = json!({
                 "readOnlyHint": false,
                 "destructiveHint": true,
                 "idempotentHint": true,
                 "openWorldHint": false
             });
+            tools[3]["annotations"] = json!({
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            });
             tools[4]["annotations"] = json!({
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            });
+            tools[5]["annotations"] = json!({
                 "readOnlyHint": true,
                 "destructiveHint": false,
                 "idempotentHint": true,
@@ -2540,10 +2582,10 @@ fn unsupported_protocol_error(id: Value, requested: &str) -> Value {
 #[cfg(test)]
 mod acceptance_evidence_tests {
     use super::{
-        ACCEPTANCE_EVIDENCE_SCHEMA, AcceptanceEvidence, OBSERVED_EFFECT_EVIDENCE_SCHEMA,
-        ObservedEffectEvidence, ObservedEffectKind, RUNTIME_STATUS_TOOL, RequestProtocol,
-        TaskPublicStatus, ToolSurface, closed_task_public_status, tool_catalog,
-        verify_observed_effect_evidence,
+        ACCEPTANCE_EVIDENCE_SCHEMA, AcceptanceEvidence, DELIVERY_RECONCILE_TOOL,
+        OBSERVED_EFFECT_EVIDENCE_SCHEMA, ObservedEffectEvidence, ObservedEffectKind,
+        RUNTIME_STATUS_TOOL, RequestProtocol, TaskPublicStatus, ToolSurface,
+        closed_task_public_status, tool_catalog, verify_observed_effect_evidence,
     };
     use serde_json::{Value, json};
     use std::fs::File;
@@ -2577,6 +2619,24 @@ mod acceptance_evidence_tests {
         assert_eq!(runtime["inputSchema"]["additionalProperties"], false);
         assert_eq!(runtime["annotations"]["readOnlyHint"], true);
         assert_eq!(runtime["annotations"]["destructiveHint"], false);
+    }
+
+    #[test]
+    fn canonical_catalog_exposes_a_zero_argument_read_only_reconciliation_probe() {
+        let tools = tool_catalog(
+            RequestProtocol::Stateless,
+            ToolSurface::CanonicalTaskControl,
+        );
+        let reconciliation = tools
+            .as_array()
+            .expect("tool array")
+            .iter()
+            .find(|tool| tool["name"] == DELIVERY_RECONCILE_TOOL)
+            .expect("delivery reconciliation tool");
+        assert_eq!(reconciliation["inputSchema"]["additionalProperties"], false);
+        assert_eq!(reconciliation["annotations"]["readOnlyHint"], true);
+        assert_eq!(reconciliation["annotations"]["destructiveHint"], false);
+        assert_eq!(reconciliation["annotations"]["idempotentHint"], true);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 2.4
+version: 2.5
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-22
@@ -41,9 +41,13 @@ Orchestrator composition.
 - Construct one Orchestrator 2.6 instance with typed Contracts 1.13 / Ports 1.9
   implementations for the bounded delivery, graph-memory, and task-control
   paths.
-- Through canonical `latticed`, expose exactly five MCP tools:
+- Through canonical `latticed`, expose exactly six MCP tools:
   `lattice_delivery_run`, `lattice_delivery_status`, `lattice_runtime_status`,
-  `lattice_task_submit`, and `lattice_task_status`. Runtime Status is read-only,
+  `lattice_delivery_reconcile`, `lattice_task_submit`, and `lattice_task_status`.
+  Delivery Reconcile is zero-parameter and read-only: it replays the existing
+  PostgreSQL receipt to distinguish a durable terminal fact from a reconciliation
+  blocker, and cannot dispatch Codex, write a receipt, or reinterpret uncertainty.
+  Runtime Status is read-only,
   starts no optional component, and reports their independent readiness/degradation.
 - Through the compatibility `lattice-runtime` executable, expose one non-MCP,
   read-only `runtime-health` and `receipt-state` commands. They accept the same
@@ -154,7 +158,7 @@ Orchestrator composition.
    skip, or synthesize delivery stages.
 3. Concrete adapters are constructed at the edge, implement typed ports, and
    never call one another.
-4. Canonical `latticed` MCP enumeration contains exactly the five approved
+4. Canonical `latticed` MCP enumeration contains exactly the six approved
    names. Delivery and Runtime Status schemas remain zero-parameter; task schemas remain closed
    to the one approved intent/`client_request_id` and returned `task_ref`.
    Alternate `lattice-full-chain` is an observer only: it exposes the two
@@ -339,3 +343,4 @@ constitution cannot be weakened merely to excuse implementation drift.
 | 2.2 | 2026-08-22 | Runtime direction | Split optional Runtime composition into Graphify and Graphify-plus-Hermes modes; optional failure preserves PostgreSQL truth and reports degradation | User-approved four-part Runtime direction |
 | 2.3 | 2026-08-22 | Runtime direction | Add a read-only Runtime Status MCP tool so Codex can independently verify PostgreSQL, Graphify, and Hermes state without a full-chain run | User-approved four-part Runtime direction |
 | 2.4 | 2026-08-22 | Runtime direction | Add a process-configured exact-Git Graphify refresh without a new MCP tool or delivery dependency | User-approved independent-core direction |
+| 2.5 | 2026-08-23 | Evidence-driven autonomy direction | Add one zero-parameter, read-only delivery-reconciliation probe. It can report a replayed durable fact or a blocker, but cannot run Codex, mutate evidence, or turn uncertainty into success. | Current user task |

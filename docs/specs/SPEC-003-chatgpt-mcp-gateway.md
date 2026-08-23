@@ -60,6 +60,16 @@ Discovery adds:
 - `lattice_task_submit`;
 - `lattice_task_status`.
 
+### Phase 3 Read-Only Delivery Reconciliation
+
+Discovery also exposes `lattice_delivery_reconcile`, with the same closed empty
+object schema as delivery status. It replays the process-owned PostgreSQL
+delivery receipt through a fresh connection. A verified terminal receipt returns
+`RECONCILIATION_NOT_REQUIRED`; a missing, corrupt, pending, or contradictory
+receipt returns a bounded reconciliation blocker. The operation does not run
+Codex, append or alter durable evidence, change Git, start optional Runtime
+components, or turn uncertain evidence into success.
+
 `lattice_task_submit` has this closed semantic input:
 
 ```json
@@ -265,11 +275,11 @@ conversation content is retained as authority.
 
 ## Compatibility And Migration
 
-The two delivery tools retain their exact names, empty schemas, result/error
+The two existing delivery tools retain their exact names, empty schemas, result/error
 shape, and Phase 1 legacy/stateless compatibility on canonical `latticed`.
-Discovery clients that refresh canonical `latticed` see the two additive task
-tools. An old client that does not know them continues to use delivery tools
-unchanged.
+Discovery clients that refresh canonical `latticed` see the additive task tools
+and the read-only reconciliation probe. An old client that does not know them
+continues to use delivery tools unchanged.
 
 The alternate `lattice-full-chain` executable is not another writer entry. Its
 legacy observer catalog contains only `lattice_delivery_run` and
