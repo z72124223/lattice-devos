@@ -263,6 +263,8 @@ pub enum LedgerEventKind {
     TaskCreated,
     /// One canonical autonomy decision receipt was recorded.
     AutonomyReceiptRecorded,
+    /// One verified autonomy lifecycle transition receipt was recorded.
+    AutonomyLifecycleReceiptRecorded,
     /// A separately validated Task Domain transition was recorded.
     StateTransition,
     /// A pure Policy decision was recorded.
@@ -284,6 +286,7 @@ impl LedgerEventKind {
         match self {
             Self::TaskCreated => "TASK_CREATED",
             Self::AutonomyReceiptRecorded => "AUTONOMY_RECEIPT_RECORDED",
+            Self::AutonomyLifecycleReceiptRecorded => "AUTONOMY_LIFECYCLE_RECEIPT_RECORDED",
             Self::StateTransition => "STATE_TRANSITION",
             Self::PolicyDecision => "POLICY_DECISION",
             Self::ResourceSnapshot => "RESOURCE_SNAPSHOT",
@@ -302,6 +305,7 @@ impl LedgerEventKind {
         match value {
             "TASK_CREATED" => Ok(Self::TaskCreated),
             "AUTONOMY_RECEIPT_RECORDED" => Ok(Self::AutonomyReceiptRecorded),
+            "AUTONOMY_LIFECYCLE_RECEIPT_RECORDED" => Ok(Self::AutonomyLifecycleReceiptRecorded),
             "STATE_TRANSITION" => Ok(Self::StateTransition),
             "POLICY_DECISION" => Ok(Self::PolicyDecision),
             "RESOURCE_SNAPSHOT" => Ok(Self::ResourceSnapshot),
@@ -338,6 +342,8 @@ const AUTONOMY_RECEIPT_DOMAIN: &str = "lattice.autonomy-receipt";
 const AUTONOMY_AUTHORITY_DOMAIN: &str = "lattice.autonomy-authority";
 const AUTONOMY_HASH_VERSION: &str = "1.0";
 const AUTONOMY_AUTHORITY_MODE: &str = "P0_PROCESS_START_PROFILE_V1";
+const AUTONOMY_LIFECYCLE_RECEIPT_SCHEMA: &str = "lattice.autonomy-lifecycle-receipt/1.0";
+const AUTONOMY_LIFECYCLE_RECEIPT_DOMAIN: &str = "lattice.autonomy-lifecycle-receipt";
 
 /// Closed task kind stored in the canonical autonomy receipt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -600,6 +606,225 @@ impl AutonomyAppendMetadata {
             actor_id,
         })
     }
+}
+
+/// Closed autonomy-runner lifecycle state recorded only after verification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyLifecycleState {
+    Idle,
+    Claimed,
+    HeartbeatDue,
+    YieldToForeground,
+    Interrupting,
+    OrphanSuspected,
+    ReconcileRequired,
+}
+
+impl AutonomyLifecycleState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "IDLE",
+            Self::Claimed => "CLAIMED",
+            Self::HeartbeatDue => "HEARTBEAT_DUE",
+            Self::YieldToForeground => "YIELD_TO_FOREGROUND",
+            Self::Interrupting => "INTERRUPTING",
+            Self::OrphanSuspected => "ORPHAN_SUSPECTED",
+            Self::ReconcileRequired => "RECONCILE_REQUIRED",
+        }
+    }
+}
+
+/// Closed evidence-qualified event that may change an autonomy lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyLifecycleEvent {
+    ClaimVerified,
+    HeartbeatDue,
+    HeartbeatVerified,
+    ForegroundTaskObserved,
+    InterruptRequested,
+    InterruptOutcomeUnknown,
+    HolderDeathVerified,
+    NewEvidenceSnapshot,
+    ReconciliationVerified,
+}
+
+impl AutonomyLifecycleEvent {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaimVerified => "CLAIM_VERIFIED",
+            Self::HeartbeatDue => "HEARTBEAT_DUE",
+            Self::HeartbeatVerified => "HEARTBEAT_VERIFIED",
+            Self::ForegroundTaskObserved => "FOREGROUND_TASK_OBSERVED",
+            Self::InterruptRequested => "INTERRUPT_REQUESTED",
+            Self::InterruptOutcomeUnknown => "INTERRUPT_OUTCOME_UNKNOWN",
+            Self::HolderDeathVerified => "HOLDER_DEATH_VERIFIED",
+            Self::NewEvidenceSnapshot => "NEW_EVIDENCE_SNAPSHOT",
+            Self::ReconciliationVerified => "RECONCILIATION_VERIFIED",
+        }
+    }
+}
+
+/// Typed reason for a lifecycle receipt; no free-form reason becomes authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AutonomyLifecycleReason {
+    VerifiedEvidence,
+}
+
+impl AutonomyLifecycleReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::VerifiedEvidence => "VERIFIED_EVIDENCE",
+        }
+    }
+}
+
+/// One closed transition plus the current evidence snapshot that proves it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutonomyLifecycleTransition {
+    from: AutonomyLifecycleState,
+    event: AutonomyLifecycleEvent,
+    to: AutonomyLifecycleState,
+    evidence_snapshot_digest: ContentDigest,
+    reason: AutonomyLifecycleReason,
+}
+
+impl AutonomyLifecycleTransition {
+    /// Constructs only a legal lifecycle transition with non-zero evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an illegal state/event pair or missing evidence commitment.
+    pub fn new(
+        from: AutonomyLifecycleState,
+        event: AutonomyLifecycleEvent,
+        to: AutonomyLifecycleState,
+        evidence_snapshot_digest: ContentDigest,
+        reason: AutonomyLifecycleReason,
+    ) -> Result<Self, LedgerError> {
+        if !autonomy_lifecycle_transition_is_legal(from, event, to)
+            || is_zero_digest(&evidence_snapshot_digest)
+        {
+            return Err(LedgerError::InvalidAutonomyReceipt);
+        }
+        Ok(Self {
+            from,
+            event,
+            to,
+            evidence_snapshot_digest,
+            reason,
+        })
+    }
+
+    #[must_use]
+    pub const fn from(&self) -> AutonomyLifecycleState {
+        self.from
+    }
+
+    #[must_use]
+    pub const fn event(&self) -> AutonomyLifecycleEvent {
+        self.event
+    }
+
+    #[must_use]
+    pub const fn to(&self) -> AutonomyLifecycleState {
+        self.to
+    }
+
+    #[must_use]
+    pub const fn evidence_snapshot_digest(&self) -> &ContentDigest {
+        &self.evidence_snapshot_digest
+    }
+
+    #[must_use]
+    pub const fn reason(&self) -> AutonomyLifecycleReason {
+        self.reason
+    }
+}
+
+/// Exact append metadata for one lifecycle receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutonomyLifecycleAppendMetadata {
+    command_id: CommandId,
+    correlation_id: CorrelationId,
+    occurred_at: String,
+    actor_id: ActorId,
+}
+
+impl AutonomyLifecycleAppendMetadata {
+    /// Constructs bounded metadata without reading a clock.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical UTC timestamp.
+    pub fn new(
+        command_id: CommandId,
+        correlation_id: CorrelationId,
+        occurred_at: impl Into<String>,
+        actor_id: ActorId,
+    ) -> Result<Self, LedgerError> {
+        let occurred_at = occurred_at.into();
+        validate_utc_timestamp(&occurred_at)?;
+        Ok(Self {
+            command_id,
+            correlation_id,
+            occurred_at,
+            actor_id,
+        })
+    }
+}
+
+fn autonomy_lifecycle_transition_is_legal(
+    from: AutonomyLifecycleState,
+    event: AutonomyLifecycleEvent,
+    to: AutonomyLifecycleState,
+) -> bool {
+    matches!(
+        (from, event, to),
+        (
+            AutonomyLifecycleState::Idle,
+            AutonomyLifecycleEvent::ClaimVerified,
+            AutonomyLifecycleState::Claimed
+        ) | (
+            AutonomyLifecycleState::Claimed,
+            AutonomyLifecycleEvent::HeartbeatDue,
+            AutonomyLifecycleState::HeartbeatDue
+        ) | (
+            AutonomyLifecycleState::HeartbeatDue,
+            AutonomyLifecycleEvent::HeartbeatVerified,
+            AutonomyLifecycleState::Claimed
+        ) | (
+            AutonomyLifecycleState::Claimed | AutonomyLifecycleState::HeartbeatDue,
+            AutonomyLifecycleEvent::ForegroundTaskObserved,
+            AutonomyLifecycleState::YieldToForeground
+        ) | (
+            AutonomyLifecycleState::Claimed,
+            AutonomyLifecycleEvent::InterruptRequested,
+            AutonomyLifecycleState::Interrupting
+        ) | (
+            AutonomyLifecycleState::Interrupting,
+            AutonomyLifecycleEvent::InterruptOutcomeUnknown,
+            AutonomyLifecycleState::ReconcileRequired
+        ) | (
+            AutonomyLifecycleState::HeartbeatDue,
+            AutonomyLifecycleEvent::HolderDeathVerified,
+            AutonomyLifecycleState::OrphanSuspected
+        ) | (
+            AutonomyLifecycleState::OrphanSuspected,
+            AutonomyLifecycleEvent::NewEvidenceSnapshot,
+            AutonomyLifecycleState::ReconcileRequired
+        ) | (
+            AutonomyLifecycleState::YieldToForeground,
+            AutonomyLifecycleEvent::NewEvidenceSnapshot,
+            AutonomyLifecycleState::Idle
+        ) | (
+            AutonomyLifecycleState::ReconcileRequired,
+            AutonomyLifecycleEvent::ReconciliationVerified,
+            AutonomyLifecycleState::Idle
+        )
+    )
 }
 
 /// Complete P0 authority evidence consumed by one Task-Ledger-owned receipt.
@@ -1037,6 +1262,214 @@ impl AutonomyReceiptAppendPlan {
     }
 }
 
+/// Canonical lifecycle receipt verified and constructed only by Task Ledger.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedAutonomyLifecycleReceipt {
+    stream_id: ContentDigest,
+    event_sequence: u64,
+    event_digest: ContentDigest,
+    predecessor_event_digest: ContentDigest,
+    transition: AutonomyLifecycleTransition,
+    command_id: CommandId,
+    receipt_digest: ContentDigest,
+}
+
+impl VerifiedAutonomyLifecycleReceipt {
+    #[must_use]
+    pub const fn stream_id(&self) -> &ContentDigest {
+        &self.stream_id
+    }
+
+    #[must_use]
+    pub const fn event_sequence(&self) -> u64 {
+        self.event_sequence
+    }
+
+    #[must_use]
+    pub const fn event_digest(&self) -> &ContentDigest {
+        &self.event_digest
+    }
+
+    #[must_use]
+    pub const fn predecessor_event_digest(&self) -> &ContentDigest {
+        &self.predecessor_event_digest
+    }
+
+    #[must_use]
+    pub const fn transition(&self) -> &AutonomyLifecycleTransition {
+        &self.transition
+    }
+
+    #[must_use]
+    pub const fn command_id(&self) -> &CommandId {
+        &self.command_id
+    }
+
+    #[must_use]
+    pub const fn receipt_digest(&self) -> &ContentDigest {
+        &self.receipt_digest
+    }
+
+    #[must_use]
+    pub const fn receipt_schema_version(&self) -> &'static str {
+        AUTONOMY_LIFECYCLE_RECEIPT_SCHEMA
+    }
+}
+
+/// Typed append plan for one lifecycle receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutonomyLifecycleReceiptAppendPlan {
+    append_plan: LedgerAppendPlan,
+    receipt: VerifiedAutonomyLifecycleReceipt,
+}
+
+impl AutonomyLifecycleReceiptAppendPlan {
+    #[must_use]
+    pub const fn append_plan(&self) -> &LedgerAppendPlan {
+        &self.append_plan
+    }
+
+    #[must_use]
+    pub const fn receipt(&self) -> &VerifiedAutonomyLifecycleReceipt {
+        &self.receipt
+    }
+}
+
+/// Untrusted persistence scalars for one lifecycle receipt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UntrustedAutonomyLifecycleReceiptRow {
+    stream_id: ContentDigest,
+    event_sequence: u64,
+    event_digest: ContentDigest,
+    predecessor_event_digest: ContentDigest,
+    receipt_schema_version: String,
+    from_state: String,
+    transition_event: String,
+    to_state: String,
+    evidence_snapshot_digest: ContentDigest,
+    reason: String,
+    command_id: String,
+    receipt_digest: ContentDigest,
+}
+
+impl UntrustedAutonomyLifecycleReceiptRow {
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        stream_id: ContentDigest,
+        event_sequence: u64,
+        event_digest: ContentDigest,
+        predecessor_event_digest: ContentDigest,
+        receipt_schema_version: impl Into<String>,
+        from_state: impl Into<String>,
+        transition_event: impl Into<String>,
+        to_state: impl Into<String>,
+        evidence_snapshot_digest: ContentDigest,
+        reason: impl Into<String>,
+        command_id: impl Into<String>,
+        receipt_digest: ContentDigest,
+    ) -> Self {
+        Self {
+            stream_id,
+            event_sequence,
+            event_digest,
+            predecessor_event_digest,
+            receipt_schema_version: receipt_schema_version.into(),
+            from_state: from_state.into(),
+            transition_event: transition_event.into(),
+            to_state: to_state.into(),
+            evidence_snapshot_digest,
+            reason: reason.into(),
+            command_id: command_id.into(),
+            receipt_digest,
+        }
+    }
+
+    #[must_use]
+    pub const fn stream_id(&self) -> &ContentDigest {
+        &self.stream_id
+    }
+    #[must_use]
+    pub const fn event_sequence(&self) -> u64 {
+        self.event_sequence
+    }
+    #[must_use]
+    pub const fn event_digest(&self) -> &ContentDigest {
+        &self.event_digest
+    }
+    #[must_use]
+    pub const fn predecessor_event_digest(&self) -> &ContentDigest {
+        &self.predecessor_event_digest
+    }
+    #[must_use]
+    pub fn receipt_schema_version(&self) -> &str {
+        &self.receipt_schema_version
+    }
+    #[must_use]
+    pub fn from_state(&self) -> &str {
+        &self.from_state
+    }
+    #[must_use]
+    pub fn transition_event(&self) -> &str {
+        &self.transition_event
+    }
+    #[must_use]
+    pub fn to_state(&self) -> &str {
+        &self.to_state
+    }
+    #[must_use]
+    pub const fn evidence_snapshot_digest(&self) -> &ContentDigest {
+        &self.evidence_snapshot_digest
+    }
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+    #[must_use]
+    pub fn command_id(&self) -> &str {
+        &self.command_id
+    }
+    #[must_use]
+    pub const fn receipt_digest(&self) -> &ContentDigest {
+        &self.receipt_digest
+    }
+}
+
+impl VerifiedAutonomyLifecycleReceipt {
+    /// Exports verified receipt scalars; re-import requires Ledger replay.
+    #[must_use]
+    pub fn to_untrusted(&self) -> UntrustedAutonomyLifecycleReceiptRow {
+        UntrustedAutonomyLifecycleReceiptRow::new(
+            self.stream_id.clone(),
+            self.event_sequence,
+            self.event_digest.clone(),
+            self.predecessor_event_digest.clone(),
+            AUTONOMY_LIFECYCLE_RECEIPT_SCHEMA,
+            self.transition.from.as_str(),
+            self.transition.event.as_str(),
+            self.transition.to.as_str(),
+            self.transition.evidence_snapshot_digest.clone(),
+            self.transition.reason.as_str(),
+            self.command_id.as_str(),
+            self.receipt_digest.clone(),
+        )
+    }
+}
+
+/// Reconstructed lifecycle state with no process-memory authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedAutonomyLifecycleReceiptState {
+    current_state: AutonomyLifecycleState,
+    receipts: Vec<VerifiedAutonomyLifecycleReceipt>,
+}
+
+impl VerifiedAutonomyLifecycleReceiptState {
+    #[must_use]
+    pub const fn current_state(&self) -> AutonomyLifecycleState {
+        self.current_state
+    }
+}
+
 /// Closed audit outcomes supported by Task Ledger schema 2.0.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LedgerOutcome {
@@ -1160,6 +1593,7 @@ enum AppendConstruction {
     Generic,
     RequiredTaskCreated,
     VerifiedAutonomy,
+    VerifiedAutonomyLifecycle,
     VerifiedReplay,
 }
 
@@ -1272,6 +1706,18 @@ impl AppendCommand {
         {
             return Err(LedgerError::InvalidAutonomyReceipt);
         }
+        if matches!(kind, LedgerEventKind::AutonomyLifecycleReceiptRecorded)
+            && (!matches!(
+                construction,
+                AppendConstruction::VerifiedAutonomyLifecycle | AppendConstruction::VerifiedReplay
+            ) || action.as_str() != "RECORD_AUTONOMY_LIFECYCLE_RECEIPT_V1"
+                || outcome != LedgerOutcome::Recorded
+                || reason_code.as_str() != "AUTONOMY_LIFECYCLE_VERIFIED"
+                || diagnostic.is_some()
+                || resource_snapshot.is_some())
+        {
+            return Err(LedgerError::InvalidAutonomyReceipt);
+        }
         if matches!(kind, LedgerEventKind::TaskCreated) {
             let profile = classify_task_created_action(action.as_str())?;
             match construction {
@@ -1286,6 +1732,7 @@ impl AppendCommand {
                 AppendConstruction::Generic
                 | AppendConstruction::RequiredTaskCreated
                 | AppendConstruction::VerifiedAutonomy
+                | AppendConstruction::VerifiedAutonomyLifecycle
                 | AppendConstruction::VerifiedReplay => {}
             }
         }
@@ -2573,6 +3020,138 @@ pub fn plan_autonomy_receipt_append(
     })
 }
 
+/// Plans one verified autonomy lifecycle receipt without performing I/O.
+///
+/// # Errors
+///
+/// Rejects an invalid verified stream, illegal transition, stale head, command
+/// reuse, or canonical receipt binding failure.
+pub fn plan_autonomy_lifecycle_receipt_append(
+    current: &VerifiedStream,
+    lifecycle_state: &VerifiedAutonomyLifecycleReceiptState,
+    metadata: AutonomyLifecycleAppendMetadata,
+    transition: AutonomyLifecycleTransition,
+) -> Result<AutonomyLifecycleReceiptAppendPlan, LedgerError> {
+    validate_verified_checkpoint(current)?;
+    validate_autonomy_lifecycle_state(current, lifecycle_state)?;
+    if transition.from != lifecycle_state.current_state {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    let predecessor_event_digest = current.head().last_event_digest().clone();
+    let receipt_digest = hash_value_at_version(
+        AUTONOMY_LIFECYCLE_RECEIPT_DOMAIN,
+        AUTONOMY_HASH_VERSION,
+        &autonomy_lifecycle_receipt_value(
+            current.identity(),
+            &predecessor_event_digest,
+            &metadata,
+            &transition,
+        ),
+    )?;
+    let command_id = metadata.command_id.clone();
+    let command = AppendCommand::from_fields(
+        current.head().clone(),
+        metadata.command_id,
+        metadata.correlation_id,
+        metadata.occurred_at,
+        LedgerEventKind::AutonomyLifecycleReceiptRecorded,
+        metadata.actor_id,
+        ActionId::new("RECORD_AUTONOMY_LIFECYCLE_RECEIPT_V1")?,
+        LedgerOutcome::Recorded,
+        ReasonCode::new("AUTONOMY_LIFECYCLE_VERIFIED")?,
+        receipt_digest.clone(),
+        None,
+        None,
+        AppendConstruction::VerifiedAutonomyLifecycle,
+    )?;
+    let append_plan = plan_append(current, command)?;
+    let event = append_plan
+        .new_event()
+        .ok_or(LedgerError::InvalidAutonomyReceipt)?;
+    if event.previous_event_digest() != &predecessor_event_digest
+        || event.subject_digest() != &receipt_digest
+    {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    let event_sequence = event.sequence();
+    let event_digest = event.event_digest().clone();
+    Ok(AutonomyLifecycleReceiptAppendPlan {
+        append_plan,
+        receipt: VerifiedAutonomyLifecycleReceipt {
+            stream_id: current.head().stream_id().clone(),
+            event_sequence,
+            event_digest,
+            predecessor_event_digest,
+            transition,
+            command_id,
+            receipt_digest,
+        },
+    })
+}
+
+fn validate_autonomy_lifecycle_state(
+    stream: &VerifiedStream,
+    state: &VerifiedAutonomyLifecycleReceiptState,
+) -> Result<(), LedgerError> {
+    let lifecycle_events = stream
+        .events()
+        .iter()
+        .filter(|event| event.kind() == LedgerEventKind::AutonomyLifecycleReceiptRecorded)
+        .collect::<Vec<_>>();
+    if lifecycle_events.len() != state.receipts.len() {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    let mut expected_state = AutonomyLifecycleState::Idle;
+    for (event, receipt) in lifecycle_events.into_iter().zip(&state.receipts) {
+        if receipt.stream_id != *stream.head().stream_id()
+            || receipt.event_sequence != event.sequence()
+            || receipt.event_digest != *event.event_digest()
+            || receipt.predecessor_event_digest != *event.previous_event_digest()
+            || receipt.transition.from != expected_state
+        {
+            return Err(LedgerError::InvalidAutonomyReceipt);
+        }
+        expected_state = receipt.transition.to;
+    }
+    if expected_state != state.current_state {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    Ok(())
+}
+
+/// Verifies that a retry has exactly the same lifecycle receipt commitment.
+///
+/// # Errors
+///
+/// Rejects a changed identity, transition, evidence, or append metadata.
+pub fn verify_exact_autonomy_lifecycle_receipt_retry(
+    identity: &TaskLedgerStreamIdentity,
+    existing: &VerifiedAutonomyLifecycleReceipt,
+    metadata: &AutonomyLifecycleAppendMetadata,
+    transition: &AutonomyLifecycleTransition,
+) -> Result<(), LedgerError> {
+    validate_stream_identity(identity)?;
+    let stream_id = hash_value("lattice.task-ledger.stream-id", &identity_value(identity))?;
+    let receipt_digest = hash_value_at_version(
+        AUTONOMY_LIFECYCLE_RECEIPT_DOMAIN,
+        AUTONOMY_HASH_VERSION,
+        &autonomy_lifecycle_receipt_value(
+            identity,
+            &existing.predecessor_event_digest,
+            metadata,
+            transition,
+        ),
+    )?;
+    if existing.stream_id != stream_id
+        || existing.transition != *transition
+        || existing.command_id != metadata.command_id
+        || existing.receipt_digest != receipt_digest
+    {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    Ok(())
+}
+
 /// Verifies that a candidate is the exact canonical retry of one retained
 /// autonomy receipt.
 ///
@@ -2800,6 +3379,149 @@ fn verify_one_untrusted_autonomy_receipt(
         authority_digest,
         receipt_digest,
     })
+}
+
+/// Replays lifecycle receipt rows from untrusted persistence data.
+///
+/// # Errors
+///
+/// Rejects missing, duplicate, substituted, reordered, or illegal lifecycle
+/// receipts. The returned state is a projection, never an execution claim.
+pub fn verify_untrusted_autonomy_lifecycle_receipt_rows(
+    stream: &VerifiedStream,
+    rows: &[UntrustedAutonomyLifecycleReceiptRow],
+) -> Result<VerifiedAutonomyLifecycleReceiptState, LedgerError> {
+    validate_verified_checkpoint(stream)?;
+    let lifecycle_events = stream
+        .events()
+        .iter()
+        .filter(|event| event.kind() == LedgerEventKind::AutonomyLifecycleReceiptRecorded)
+        .collect::<Vec<_>>();
+    if lifecycle_events.len() != rows.len() {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    if rows.is_empty() {
+        return Ok(VerifiedAutonomyLifecycleReceiptState {
+            current_state: AutonomyLifecycleState::Idle,
+            receipts: Vec::new(),
+        });
+    }
+    let mut rows_by_sequence = BTreeMap::new();
+    for row in rows {
+        if rows_by_sequence.insert(row.event_sequence, row).is_some() {
+            return Err(LedgerError::InvalidAutonomyReceipt);
+        }
+    }
+    let mut state = AutonomyLifecycleState::Idle;
+    let mut receipts = Vec::with_capacity(lifecycle_events.len());
+    for event in lifecycle_events {
+        let row = rows_by_sequence
+            .get(&event.sequence())
+            .ok_or(LedgerError::InvalidAutonomyReceipt)?;
+        let receipt = verify_one_untrusted_autonomy_lifecycle_receipt(stream, event, row)?;
+        if receipt.transition.from != state {
+            return Err(LedgerError::InvalidAutonomyReceipt);
+        }
+        state = receipt.transition.to;
+        receipts.push(receipt);
+    }
+    Ok(VerifiedAutonomyLifecycleReceiptState {
+        current_state: state,
+        receipts,
+    })
+}
+
+fn verify_one_untrusted_autonomy_lifecycle_receipt(
+    stream: &VerifiedStream,
+    event: &LedgerEvent,
+    row: &UntrustedAutonomyLifecycleReceiptRow,
+) -> Result<VerifiedAutonomyLifecycleReceipt, LedgerError> {
+    if row.stream_id != *stream.head().stream_id()
+        || row.event_sequence != event.sequence()
+        || row.event_digest != *event.event_digest()
+        || row.predecessor_event_digest != *event.previous_event_digest()
+        || row.receipt_schema_version != AUTONOMY_LIFECYCLE_RECEIPT_SCHEMA
+        || row.command_id != event.command_id().as_str()
+        || event.kind() != LedgerEventKind::AutonomyLifecycleReceiptRecorded
+        || event.action().as_str() != "RECORD_AUTONOMY_LIFECYCLE_RECEIPT_V1"
+        || event.outcome() != LedgerOutcome::Recorded
+        || event.reason_code().as_str() != "AUTONOMY_LIFECYCLE_VERIFIED"
+        || event.diagnostic().is_some()
+        || event.resource_snapshot().is_some()
+        || is_zero_digest(&row.evidence_snapshot_digest)
+    {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    let transition = AutonomyLifecycleTransition::new(
+        parse_autonomy_lifecycle_state(&row.from_state)?,
+        parse_autonomy_lifecycle_event(&row.transition_event)?,
+        parse_autonomy_lifecycle_state(&row.to_state)?,
+        row.evidence_snapshot_digest.clone(),
+        parse_autonomy_lifecycle_reason(&row.reason)?,
+    )?;
+    let metadata = AutonomyLifecycleAppendMetadata::new(
+        event.command_id().clone(),
+        event.correlation_id().clone(),
+        event.occurred_at().to_owned(),
+        event.actor_id().clone(),
+    )?;
+    let receipt_digest = hash_value_at_version(
+        AUTONOMY_LIFECYCLE_RECEIPT_DOMAIN,
+        AUTONOMY_HASH_VERSION,
+        &autonomy_lifecycle_receipt_value(
+            stream.identity(),
+            event.previous_event_digest(),
+            &metadata,
+            &transition,
+        ),
+    )?;
+    if receipt_digest != row.receipt_digest || receipt_digest != *event.subject_digest() {
+        return Err(LedgerError::InvalidAutonomyReceipt);
+    }
+    Ok(VerifiedAutonomyLifecycleReceipt {
+        stream_id: row.stream_id.clone(),
+        event_sequence: row.event_sequence,
+        event_digest: row.event_digest.clone(),
+        predecessor_event_digest: row.predecessor_event_digest.clone(),
+        transition,
+        command_id: event.command_id().clone(),
+        receipt_digest,
+    })
+}
+
+fn parse_autonomy_lifecycle_state(value: &str) -> Result<AutonomyLifecycleState, LedgerError> {
+    match value {
+        "IDLE" => Ok(AutonomyLifecycleState::Idle),
+        "CLAIMED" => Ok(AutonomyLifecycleState::Claimed),
+        "HEARTBEAT_DUE" => Ok(AutonomyLifecycleState::HeartbeatDue),
+        "YIELD_TO_FOREGROUND" => Ok(AutonomyLifecycleState::YieldToForeground),
+        "INTERRUPTING" => Ok(AutonomyLifecycleState::Interrupting),
+        "ORPHAN_SUSPECTED" => Ok(AutonomyLifecycleState::OrphanSuspected),
+        "RECONCILE_REQUIRED" => Ok(AutonomyLifecycleState::ReconcileRequired),
+        _ => Err(LedgerError::InvalidAutonomyReceipt),
+    }
+}
+
+fn parse_autonomy_lifecycle_event(value: &str) -> Result<AutonomyLifecycleEvent, LedgerError> {
+    match value {
+        "CLAIM_VERIFIED" => Ok(AutonomyLifecycleEvent::ClaimVerified),
+        "HEARTBEAT_DUE" => Ok(AutonomyLifecycleEvent::HeartbeatDue),
+        "HEARTBEAT_VERIFIED" => Ok(AutonomyLifecycleEvent::HeartbeatVerified),
+        "FOREGROUND_TASK_OBSERVED" => Ok(AutonomyLifecycleEvent::ForegroundTaskObserved),
+        "INTERRUPT_REQUESTED" => Ok(AutonomyLifecycleEvent::InterruptRequested),
+        "INTERRUPT_OUTCOME_UNKNOWN" => Ok(AutonomyLifecycleEvent::InterruptOutcomeUnknown),
+        "HOLDER_DEATH_VERIFIED" => Ok(AutonomyLifecycleEvent::HolderDeathVerified),
+        "NEW_EVIDENCE_SNAPSHOT" => Ok(AutonomyLifecycleEvent::NewEvidenceSnapshot),
+        "RECONCILIATION_VERIFIED" => Ok(AutonomyLifecycleEvent::ReconciliationVerified),
+        _ => Err(LedgerError::InvalidAutonomyReceipt),
+    }
+}
+
+fn parse_autonomy_lifecycle_reason(value: &str) -> Result<AutonomyLifecycleReason, LedgerError> {
+    match value {
+        "VERIFIED_EVIDENCE" => Ok(AutonomyLifecycleReason::VerifiedEvidence),
+        _ => Err(LedgerError::InvalidAutonomyReceipt),
+    }
 }
 
 fn valid_autonomy_writer_scalar_tuple(
@@ -3125,6 +3847,40 @@ fn autonomy_receipt_value(
             ]),
         ),
         ("authority_digest", text(authority_digest.as_str())),
+    ])
+}
+
+fn autonomy_lifecycle_receipt_value(
+    identity: &TaskLedgerStreamIdentity,
+    predecessor_event_digest: &ContentDigest,
+    metadata: &AutonomyLifecycleAppendMetadata,
+    transition: &AutonomyLifecycleTransition,
+) -> CanonicalValue {
+    object(vec![
+        ("schema_version", text(AUTONOMY_LIFECYCLE_RECEIPT_SCHEMA)),
+        ("hash_version", text(AUTONOMY_HASH_VERSION)),
+        ("binding", autonomy_binding_value(identity)),
+        (
+            "predecessor_event_digest",
+            text(predecessor_event_digest.as_str()),
+        ),
+        (
+            "transition",
+            object(vec![
+                ("from", text(transition.from.as_str())),
+                ("event", text(transition.event.as_str())),
+                ("to", text(transition.to.as_str())),
+                (
+                    "evidence_snapshot_digest",
+                    text(transition.evidence_snapshot_digest.as_str()),
+                ),
+                ("reason", text(transition.reason.as_str())),
+            ]),
+        ),
+        ("command_id", text(metadata.command_id.as_str())),
+        ("correlation_id", text(metadata.correlation_id.as_str())),
+        ("occurred_at", text(&metadata.occurred_at)),
+        ("actor_id", text(metadata.actor_id.as_str())),
     ])
 }
 

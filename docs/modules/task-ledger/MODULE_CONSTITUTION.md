@@ -1,7 +1,7 @@
 ---
 module_id: task-ledger
 name: Task Ledger
-version: 2.3
+version: 2.4
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-15
@@ -52,6 +52,8 @@ PostgreSQL persists as the single durable control-plane truth.
   the authoritative `TASK_CREATED.action` field for bounded task-control
   streams. The legacy `CONTROLLED_CODEX_CANARY` value is receipt-optional;
   `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` requires exactly one V1 receipt.
+- The closed autonomy-lifecycle receipt event, its typed state/event/reason
+  values, canonical subject/hash, ordering, idempotency, and replay semantics.
 
 The TASK-013 fake owns only disposable process-memory test state. Postgres
 Store 1.3 owns physical durable rows, locks, transactions, indexes, projection
@@ -169,6 +171,10 @@ until a separately approved module/ticket owns those mechanics.
 25. Public MCP tools, input schemas, and six-field output remain unchanged by
     the internal event. Projection-only status may derive from verified state
     but cannot become a second durable record or wire authority.
+26. An autonomy-lifecycle receipt records an already verified lifecycle
+    transition and its evidence binding; it cannot claim work, refresh a lease,
+    resume a process, authorize a model, or turn a technical assertion into
+    verified evidence.
 
 ## Allowed Dependencies
 
@@ -217,6 +223,11 @@ profile hash or database column. Historical optional streams remain valid,
 while the new required marker cannot progress or project Status without its
 exact second event.
 
+Version 2.4 adds the separate closed autonomy-lifecycle receipt contract. It
+preserves TASK-050 autonomy receipt bytes and all historical replay. A future
+store migration and runtime adapter are separately governed; this version adds
+no I/O, scheduler, or public MCP surface.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -250,3 +261,4 @@ compatibility plan, security and architecture review, and user authorization.
 | 2.1 | 2026-08-02 | SPEC-002 v23, ADR-019, TASK-021 | Shared pure vacant/plan/apply boundary, verified retained receipts, effect-intent outbox admission, and independent complete Ledger checkpoint without adding I/O | Approved V2 amendment and user MVP-3 execution directive |
 | 2.2 | 2026-08-14 | SPEC-002 v32, ADR-011/019, TASK-050, TASK-075 | Closed autonomy-receipt event/subject semantics, exactly-one ordering, and byte-identical mixed historical replay without public MCP or I/O expansion | User-approved TASK-075 reconciliation |
 | 2.3 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Own the exact Task-created autonomy profile discriminator and canonical receipt verifier; preserve unrelated/historical action bytes while required profiles fail closed before progress or Status | User-approved TASK-050 repair amendment |
+| 2.4 | 2026-08-23 | SPEC-009, ADR-027, TASK-103 | Add a distinct closed lifecycle-transition receipt and replay contract without persistence, scheduling, or public-interface expansion | Current user direction |

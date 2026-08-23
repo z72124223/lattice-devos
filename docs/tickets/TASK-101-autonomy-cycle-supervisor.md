@@ -5,7 +5,7 @@ spec_id: SPEC-007
 spec_version: 1
 module_id: orchestrator-runtime
 constitution_version: 2.7
-status: ready
+status: completed
 parallel_safe: true
 depends_on: []
 branch: feature/task-101-autonomy-cycle
@@ -33,6 +33,10 @@ allowed_paths:
 Implement the pure decision core defined by SPEC-007. The next slice may wire
 this core to a LATTICE-owned durable scheduler only after this ticket's tests,
 review, and architecture gates pass.
+
+Local completion evidence: commit `27efa5a`; focused autonomy-cycle tests,
+crate Clippy, and project check passed. Delivery remains local-only and this
+does not authorize a scheduler or public execution surface.
 
 ## Verification
 

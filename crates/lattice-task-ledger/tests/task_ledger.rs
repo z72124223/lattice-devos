@@ -8,14 +8,18 @@ use lattice_contracts::{
 };
 use lattice_task_ledger::{
     ActionId, ActorId, AppendCommand, AutonomyAppendMetadata, AutonomyAuthorityEvidence,
-    AutonomyDecisionReason, AutonomyIntent, AutonomyModel, AutonomyObservedTaskState,
-    AutonomyRecommendation, AutonomyRiskClass, AutonomyTaskKind, AutonomyVerification, CommandId,
-    CommandOutcome, CorrelationId, Diagnostic, EffectClaimId, FakeTaskLedger, LedgerCheckpoint,
-    LedgerDenial, LedgerError, LedgerEventKind, LedgerOutcome, OutboxAdmissionState, ReasonCode,
-    ResourceSnapshot, TaskCreatedProfile, UntrustedAutonomyReceiptRow,
-    VerifiedAutonomyReceiptState, VerifiedStream, apply_append_plan, classify_task_created_profile,
-    export_untrusted_snapshot, plan_append, plan_autonomy_receipt_append,
-    verify_exact_autonomy_receipt_retry, verify_untrusted_autonomy_receipt_rows,
+    AutonomyDecisionReason, AutonomyIntent, AutonomyLifecycleAppendMetadata,
+    AutonomyLifecycleEvent, AutonomyLifecycleReason, AutonomyLifecycleState,
+    AutonomyLifecycleTransition, AutonomyModel, AutonomyObservedTaskState, AutonomyRecommendation,
+    AutonomyRiskClass, AutonomyTaskKind, AutonomyVerification, CommandId, CommandOutcome,
+    CorrelationId, Diagnostic, EffectClaimId, FakeTaskLedger, LedgerCheckpoint, LedgerDenial,
+    LedgerError, LedgerEventKind, LedgerOutcome, OutboxAdmissionState, ReasonCode,
+    ResourceSnapshot, TaskCreatedProfile, UntrustedAutonomyLifecycleReceiptRow,
+    UntrustedAutonomyReceiptRow, VerifiedAutonomyReceiptState, VerifiedStream, apply_append_plan,
+    classify_task_created_profile, export_untrusted_snapshot, plan_append,
+    plan_autonomy_lifecycle_receipt_append, plan_autonomy_receipt_append,
+    verify_exact_autonomy_lifecycle_receipt_retry, verify_exact_autonomy_receipt_retry,
+    verify_untrusted_autonomy_lifecycle_receipt_rows, verify_untrusted_autonomy_receipt_rows,
     verify_untrusted_snapshot, verify_untrusted_snapshot_against_checkpoint,
 };
 
@@ -402,6 +406,203 @@ fn generic_append_cannot_forge_autonomy_receipt_subject() {
         ),
         Err(LedgerError::InvalidAutonomyReceipt)
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn lifecycle_receipt_is_closed_hash_bound_and_foreground_preempts() {
+    let vacant = VerifiedStream::vacant(identity("project-1", "TASK-103"), RuntimeKind::Fake)
+        .expect("vacant stream");
+    let created = apply_append_plan(
+        &vacant,
+        &plan_append(&vacant, append(vacant.head().clone(), "create", 'b')).expect("create plan"),
+    )
+    .expect("created stream");
+    assert_eq!(
+        AppendCommand::new(
+            created.head().clone(),
+            CommandId::new("forged-lifecycle").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-23T00:00:01Z",
+            LedgerEventKind::AutonomyLifecycleReceiptRecorded,
+            ActorId::new("caller-controlled").expect("actor"),
+            ActionId::new("RECORD_AUTONOMY_LIFECYCLE_RECEIPT_V1").expect("action"),
+            LedgerOutcome::Recorded,
+            ReasonCode::new("AUTONOMY_LIFECYCLE_VERIFIED").expect("reason"),
+            digest('c'),
+            None,
+            None,
+        ),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
+
+    let claim = plan_autonomy_lifecycle_receipt_append(
+        &created,
+        &verify_untrusted_autonomy_lifecycle_receipt_rows(&created, &[])
+            .expect("initial lifecycle state"),
+        AutonomyLifecycleAppendMetadata::new(
+            CommandId::new("claim").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-23T00:00:01Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+        )
+        .expect("metadata"),
+        AutonomyLifecycleTransition::new(
+            AutonomyLifecycleState::Idle,
+            AutonomyLifecycleEvent::ClaimVerified,
+            AutonomyLifecycleState::Claimed,
+            digest('c'),
+            AutonomyLifecycleReason::VerifiedEvidence,
+        )
+        .expect("claim transition"),
+    )
+    .expect("claim plan");
+    assert_eq!(claim.receipt().event_sequence(), 2);
+    assert_eq!(
+        claim
+            .append_plan()
+            .new_event()
+            .expect("claim event")
+            .subject_digest(),
+        claim.receipt().receipt_digest()
+    );
+    let claimed = apply_append_plan(&created, claim.append_plan()).expect("apply claim");
+    verify_exact_autonomy_lifecycle_receipt_retry(
+        created.identity(),
+        claim.receipt(),
+        &AutonomyLifecycleAppendMetadata::new(
+            CommandId::new("claim").expect("command"),
+            CorrelationId::new("correlation-1").expect("correlation"),
+            "2026-08-23T00:00:01Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+        )
+        .expect("same metadata"),
+        claim.receipt().transition(),
+    )
+    .expect("exact lifecycle retry");
+    assert_eq!(
+        verify_exact_autonomy_lifecycle_receipt_retry(
+            created.identity(),
+            claim.receipt(),
+            &AutonomyLifecycleAppendMetadata::new(
+                CommandId::new("claim").expect("command"),
+                CorrelationId::new("correlation-1").expect("correlation"),
+                "2026-08-23T00:00:01Z",
+                ActorId::new("lattice-runtime").expect("actor"),
+            )
+            .expect("same metadata"),
+            &AutonomyLifecycleTransition::new(
+                AutonomyLifecycleState::Idle,
+                AutonomyLifecycleEvent::ClaimVerified,
+                AutonomyLifecycleState::Claimed,
+                digest('e'),
+                AutonomyLifecycleReason::VerifiedEvidence,
+            )
+            .expect("substituted evidence"),
+        ),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
+    let claimed_state = verify_untrusted_autonomy_lifecycle_receipt_rows(
+        &claimed,
+        &[claim.receipt().to_untrusted()],
+    )
+    .expect("claimed lifecycle state");
+    assert_eq!(
+        plan_autonomy_lifecycle_receipt_append(
+            &claimed,
+            &claimed_state,
+            AutonomyLifecycleAppendMetadata::new(
+                CommandId::new("second-claim").expect("command"),
+                CorrelationId::new("correlation-2").expect("correlation"),
+                "2026-08-23T00:00:02Z",
+                ActorId::new("lattice-runtime").expect("actor"),
+            )
+            .expect("metadata"),
+            AutonomyLifecycleTransition::new(
+                AutonomyLifecycleState::Idle,
+                AutonomyLifecycleEvent::ClaimVerified,
+                AutonomyLifecycleState::Claimed,
+                digest('d'),
+                AutonomyLifecycleReason::VerifiedEvidence,
+            )
+            .expect("syntactically valid but stale transition"),
+        ),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
+    let foreground = plan_autonomy_lifecycle_receipt_append(
+        &claimed,
+        &claimed_state,
+        AutonomyLifecycleAppendMetadata::new(
+            CommandId::new("foreground").expect("command"),
+            CorrelationId::new("correlation-2").expect("correlation"),
+            "2026-08-23T00:00:02Z",
+            ActorId::new("lattice-runtime").expect("actor"),
+        )
+        .expect("metadata"),
+        AutonomyLifecycleTransition::new(
+            AutonomyLifecycleState::Claimed,
+            AutonomyLifecycleEvent::ForegroundTaskObserved,
+            AutonomyLifecycleState::YieldToForeground,
+            digest('d'),
+            AutonomyLifecycleReason::VerifiedEvidence,
+        )
+        .expect("foreground transition"),
+    )
+    .expect("foreground plan");
+    assert_eq!(
+        foreground.receipt().transition().to(),
+        AutonomyLifecycleState::YieldToForeground
+    );
+    let yielded = apply_append_plan(&claimed, foreground.append_plan()).expect("apply foreground");
+    let rows = vec![
+        foreground.receipt().to_untrusted(),
+        claim.receipt().to_untrusted(),
+    ];
+    let replayed = verify_untrusted_autonomy_lifecycle_receipt_rows(&yielded, &rows)
+        .expect("replayed lifecycle state");
+    assert_eq!(
+        replayed.current_state(),
+        AutonomyLifecycleState::YieldToForeground
+    );
+    let substituted = UntrustedAutonomyLifecycleReceiptRow::new(
+        rows[0].stream_id().clone(),
+        rows[0].event_sequence(),
+        rows[0].event_digest().clone(),
+        rows[0].predecessor_event_digest().clone(),
+        rows[0].receipt_schema_version(),
+        rows[0].from_state(),
+        rows[0].transition_event(),
+        rows[0].to_state(),
+        digest('e'),
+        rows[0].reason(),
+        rows[0].command_id(),
+        rows[0].receipt_digest().clone(),
+    );
+    assert_eq!(
+        verify_untrusted_autonomy_lifecycle_receipt_rows(&yielded, &[substituted, rows[1].clone()]),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
+    assert_eq!(
+        verify_untrusted_autonomy_lifecycle_receipt_rows(&yielded, &rows[..1]),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
+    assert_eq!(
+        verify_untrusted_autonomy_lifecycle_receipt_rows(
+            &yielded,
+            &[rows[0].clone(), rows[0].clone()]
+        ),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
+    assert!(matches!(
+        AutonomyLifecycleTransition::new(
+            AutonomyLifecycleState::YieldToForeground,
+            AutonomyLifecycleEvent::ClaimVerified,
+            AutonomyLifecycleState::Claimed,
+            digest('e'),
+            AutonomyLifecycleReason::VerifiedEvidence,
+        ),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    ));
 }
 
 #[test]

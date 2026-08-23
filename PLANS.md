@@ -94,14 +94,23 @@ BLOCKED TASK-099 - implementation is locally verified, but server-owned
 delivery reconciliation remains required. It may not push, archive, or claim
 completion until fresh LATTICE delivery evidence clears the blocker.
 
-## Current bounded autonomy-cycle core - TASK-101
+## Completed bounded autonomy-cycle core - TASK-101
 
-CURRENT TASK-101 - add a pure, evidence-bound autonomy-cycle supervisor decision core.
+COMPLETED TASK-101 (local-only) - add a pure, evidence-bound autonomy-cycle supervisor decision core.
 It requires five explicit candidate challenges, trusted user goals but
 independently verified technical evidence, Luna/low-first escalation evidence,
 and foreground-Codex-task yield. It has no scheduler, daemon, MCP, model,
 filesystem, network, database, or execution authority; a later separately
 governed slice may compose a durable background runner.
+
+## Current autonomy lifecycle receipt - TASK-103
+
+CURRENT TASK-103 - define and implement a Task-Ledger-owned, closed,
+evidence-bound lifecycle-transition receipt. It is the next prerequisite for a
+durable background runner: every foreground yield, heartbeat, interruption,
+orphan, and reconciliation transition must be replayable before a runner may
+resume work. This task does not add PostgreSQL writes, a scheduler, daemon,
+model call, public MCP input, or any protected external action.
 
 ## Current engineering delivery finisher - TASK-078
 

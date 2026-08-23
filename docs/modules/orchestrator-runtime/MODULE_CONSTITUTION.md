@@ -1,7 +1,7 @@
 ---
 module_id: orchestrator-runtime
 name: Orchestrator and Runtime Port
-version: 2.7
+version: 2.8
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-15
@@ -205,6 +205,10 @@ recommendations, while yielding to foreground Codex work. It adds no scheduler,
 daemon, durable record, adapter, MCP surface, model invocation, or task
 authority.
 
+Version 2.8 adds the pure SPEC-008 lifecycle gate used by a later receipt
+adapter. The gate remains non-durable and cannot schedule, claim, resume, or
+execute background work.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -240,3 +244,4 @@ SPEC/ADR update, architecture review, and responsible-user authorization.
 | 2.5 | 2026-08-13 | TASK-055 | Pure fail-closed work/evidence projection, next-round dispatch, and archive recommendation without I/O or execution authority | Current user task |
 | 2.6 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Gate controlled progression on the Task-Ledger-owned required receipt and retain only the pure autonomy recommendation in Orchestrator | User-approved TASK-050 repair amendment |
 | 2.7 | 2026-08-23 | SPEC-007, TASK-101 | Add pure evidence-bound five-challenge autonomy-cycle selection, model escalation recommendation, and foreground yield without scheduler or execution authority | Current user direction |
+| 2.8 | 2026-08-23 | SPEC-008, TASK-102 | Add a closed pure lifecycle gate for foreground yield, heartbeat, interrupt, orphan, and reconciliation states without durable or execution authority | Current user direction |

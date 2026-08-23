@@ -1,6 +1,14 @@
 {
   "schema": "lattice.branch-guide.zh-TW/1.0",
   "branches": {
+    "feature/task-103-autonomy-lifecycle-receipt": {
+      "name": "任務 103：自治生命週期收據",
+      "purpose": "把背景工作讓路、心跳、中斷、孤兒與恢復的已驗證轉換記入可重播帳本；本任務不啟動排程。"
+    },
+    "feature/task-102-autonomy-lifecycle": {
+      "name": "任務 102：自治生命週期閘門",
+      "purpose": "定義背景工作讓位、心跳、孤兒與對帳的純狀態機，不直接控制程序。"
+    },
     "feature/task-101-autonomy-cycle": {
       "name": "任務 101：自治迴圈核心",
       "purpose": "用即時證據挑選可逆小工程，先讓位給新的 Codex 任務，並保留五次安全檢查與模型升級理由。"
