@@ -5,7 +5,7 @@ spec_id: SPEC-007
 spec_version: 1
 module_id: lattice-codex-adapter
 constitution_version: 1.2
-status: in_progress
+status: completed
 parallel_safe: false
 depends_on:
   - TASK-090
