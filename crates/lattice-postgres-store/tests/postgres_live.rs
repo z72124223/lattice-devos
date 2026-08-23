@@ -201,6 +201,9 @@ fn marker_owned_postgres_17_foundation() {
 fn run_disconnect_phase(config: &LiveConfig) {
     let mut admin = config.connect("postgres", "lattice-devos-task092-disconnect-admin");
     prove_live_task_ledger_commit_response_loss(config, &mut admin, "tl_lost_disc");
+    // The isolated loss-ack fixture narrows CONNECT grants to its own database.
+    // Re-establish the persisted base boundary before the physical restart phase.
+    set_exact_database_access(&mut admin, config.target("base").database_name());
     println!("TASK092_COMMIT_RESPONSE_LOSS_RECONCILED_ONCE");
 }
 
