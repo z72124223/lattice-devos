@@ -1,10 +1,10 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 2.5
+version: 2.6
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-22
+last_reviewed: 2026-08-24
 ---
 
 ## Mission
@@ -56,7 +56,7 @@ Orchestrator composition.
   configured independent Graphify/Hermes mode; it always keeps
   `delivery_receipt=NOT_INSPECTED`. `receipt-state` reports only the verified
   durable receipt projection. Neither command creates or reinterprets a
-  receipt, and neither alters the five-tool MCP surface.
+  receipt, and neither alters the six-tool MCP surface.
 - Restrict the alternate `lattice-full-chain` executable to a legacy observer
   surface. It advertises only the two delivery names, rejects Delivery Run
   with a fixed code before service dispatch, permits only durable Delivery
@@ -122,7 +122,7 @@ Orchestrator composition.
   port. Production task dispatch cannot use `FakeWriterLease`, synthetic
   authority, or a process-memory task/status store.
 - The local Task lifecycle edge wrapper implements `TaskLifecyclePort` only by
-  translating typed admit/transition/result/load calls into Task Ledger 2.3 and
+  translating typed admit/transition/result/load calls into Task Ledger 2.5 and
   `PostgresTaskLedger` public append/replay APIs. New admissions carry the
   exact required-profile marker, and canonical autonomy receipt construction/
   verification remains Task-Ledger-owned. The wrapper owns no transition
@@ -150,6 +150,11 @@ Orchestrator composition.
   replayed Writer Lease project with no current authority and the fixed canary
   `1/2/2` fence/transition/command history. `Merging + result` recovery verifies
   active `1/1/1` or released `1/2/2` before any further Task Ledger mutation.
+- A dedicated status-only fallback may project a fully verified historical
+  `Failed`, `Rejected`, `Blocked`, or `Cancelled` stream after binary commitment
+  drift. It must revalidate the closed historical ingress audit and complete
+  Ledger history, write nothing, preserve exact task-reference comparison, and
+  remain unreachable from Submit, resume, transition, result, and effect paths.
 
 ## Invariants
 
@@ -207,11 +212,13 @@ Orchestrator composition.
     that a delivery was started, completed, failed, reconciled, or corrupted.
     Receipt state is separately verified durable evidence and cannot imply that
     the database is currently reachable outside that read.
+19. Historical status observation grants no successor ingress authority.
+    Historical non-terminal and Completed streams remain current-profile-bound.
 
 ## Allowed Dependencies
 
 - `lattice-contracts` 1.13, `lattice-ports` 1.9,
-  `orchestrator-runtime` 2.6, Task Ledger 2.3, and Writer Lease 1.1 public APIs.
+  `orchestrator-runtime` 2.6, Task Ledger 2.5, and Writer Lease 1.1 public APIs.
 - Concrete Codex, PostgreSQL Task Ledger, bounded workspace/Git, and fixed-test
   adapters required by TASK-032, only for construction and port
   implementation.
@@ -292,6 +299,12 @@ Version 2.4 adds a local, process-configured Graphify refresh for a clean
 immutable Git source. It keeps the five-tool MCP surface unchanged and does
 not treat a derived-memory receipt as delivery evidence.
 
+Version 2.6 separates historical non-success terminal observation from current
+ingress mutation authority. It adds no event, migration, tool, field, or
+external mutation or execution and preserves schema v5, Memory v3, and Writer
+Lease v2. Its status proof still performs the bounded database and loopback
+reads required to verify durable truth.
+
 Version 1.8 emits the Task Ledger 2.3 required-profile marker for new
 controlled-task admissions and fails closed when required receipt replay is
 incomplete. It keeps exactly four MCP tools and the existing six-field task
@@ -303,7 +316,7 @@ than a Store test binary as acceptance.
 | Gate | Evidence | Owner | Required for merge |
 |---|---|---|---|
 | Composition direction | Cargo metadata proves orchestrator has no concrete dependency and only `latticed` selects adapters | Architecture review | yes |
-| MCP tool closure | exact five-tool list; unchanged empty delivery/Runtime Status schemas; closed task schemas and unknown/additional-property rejection | Engineering | yes |
+| MCP tool closure | exact six-tool list; unchanged empty delivery/Runtime Status schemas; closed task schemas and unknown/additional-property rejection | Engineering | yes |
 | Restricted input | shell/SQL/path/credential/provider/task-text/actor/session/lease/fence/writable-thread matrix is rejected before dispatch | Security review | yes |
 | One Gateway | both task tools invoke the same `FullChainService` / Orchestrator composition; MCP has no direct database/Codex/Git call path | Architecture review | yes |
 | Fixed identity | process profile supplies the actor/audit binding; tunnel/local commitments cannot substitute; hostile `clientInfo`/arguments grant no authority | Security review | yes |
@@ -313,6 +326,7 @@ than a Store test binary as acceptance.
 | Legacy command isolation | `lattice-runtime delivery-run` accepts only the exact scripted fixture; official Codex and MCP/tunnel provenance fail before effects | Compatibility review | yes |
 | Delivery acceptance | official Codex turn, isolated scope/test/commit, durable outcome and separate restart/status replay | Engineering | yes |
 | Failure closure | startup/framing/adapter/timeout/unknown-effect cases never report success | Engineering | yes |
+| Historical terminal status | cross-binary Failed replay, tamper rejection, exact task-ref check, and zero durable mutation | Engineering and security review | yes |
 | Standalone Hermes lifecycle | exact CLI routing, runner liveness, explicit bounded teardown, redacted errors, and local live-start evidence | Engineering and security review | yes |
 | Hermes executed-input closure | exact twelve-setting preflight, ignored legacy-helper sentinels, v2 adapter receipt and direct launcher plan | Engineering and security review | yes |
 
@@ -344,3 +358,4 @@ constitution cannot be weakened merely to excuse implementation drift.
 | 2.3 | 2026-08-22 | Runtime direction | Add a read-only Runtime Status MCP tool so Codex can independently verify PostgreSQL, Graphify, and Hermes state without a full-chain run | User-approved four-part Runtime direction |
 | 2.4 | 2026-08-22 | Runtime direction | Add a process-configured exact-Git Graphify refresh without a new MCP tool or delivery dependency | User-approved independent-core direction |
 | 2.5 | 2026-08-23 | Evidence-driven autonomy direction | Add one zero-parameter, read-only delivery-reconciliation probe. It can report a replayed durable fact or a blocker, but cannot run Codex, mutate evidence, or turn uncertainty into success. | Current user task |
+| 2.6 | 2026-08-24 | ADR-025, SPEC-008 v2 | Permit verified historical non-success terminal status after binary drift without granting mutation authority | User-authorized bounded repair |

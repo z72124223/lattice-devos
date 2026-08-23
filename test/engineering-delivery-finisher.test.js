@@ -38,6 +38,11 @@ function git(cwd, ...args) {
   return run("git", args, cwd);
 }
 
+function localRemoteIdentity(remote) {
+  const normalizedPath = path.resolve(remote).replaceAll("\\", "/");
+  return `file:${process.platform === "win32" ? normalizedPath.toLowerCase() : normalizedPath}`;
+}
+
 function writeTicket(repository, {
   task = "TASK-901",
   branch = "feature/task-901-demo",
@@ -104,7 +109,7 @@ function createRepository(options = {}) {
   git(root, "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main");
   git(repository, "remote", "set-head", "origin", "main");
   git(repository, "switch", "-c", options.branch || "feature/task-901-demo");
-  const testRemoteIdentity = `file:${path.resolve(remote).replaceAll("\\", "/").toLowerCase()}`;
+  const testRemoteIdentity = localRemoteIdentity(remote);
   writeTicket(repository, { ...options.ticket, remoteIdentity: testRemoteIdentity });
   if (options.issueEvidence) {
     writeIssueEvidence(repository, {
@@ -579,7 +584,7 @@ test("issue delivery rejects unanchored, nonterminal, and duplicate ISSUE eviden
     const fixture = createRepository(fixtureCase.options);
     try {
       if (fixtureCase.duplicate) {
-        const endpoint = `file:${path.resolve(fixture.remote).replaceAll("\\", "/").toLowerCase()}`;
+        const endpoint = localRemoteIdentity(fixture.remote);
         writeFileSync(
           path.join(fixture.repository, "docs", "issues", "ISSUE-007-duplicate.md"),
           `---\nissue_id: ISSUE-007\nstatus: complete\nbranch: ${branch}\ndelivery_remote: origin\ndelivery_repository: ${endpoint}\ndelivery_push: authorized_non_force_feature_branch\ndelivery_archive: keep_open\n---\n`,
@@ -589,7 +594,7 @@ test("issue delivery rejects unanchored, nonterminal, and duplicate ISSUE eviden
         git(fixture.repository, "commit", "-m", "duplicate issue identity");
       }
       if (fixtureCase.filenameMismatch) {
-        const endpoint = `file:${path.resolve(fixture.remote).replaceAll("\\", "/").toLowerCase()}`;
+        const endpoint = localRemoteIdentity(fixture.remote);
         writeFileSync(
           path.join(fixture.repository, "docs", "issues", "ISSUE-008-mislabeled.md"),
           `---\nissue_id: ISSUE-007\nstatus: complete\nbranch: ${branch}\ndelivery_remote: origin\ndelivery_repository: ${endpoint}\ndelivery_push: authorized_non_force_feature_branch\ndelivery_archive: keep_open\n---\n`,

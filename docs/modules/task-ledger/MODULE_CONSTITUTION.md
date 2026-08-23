@@ -1,10 +1,10 @@
 ---
 module_id: task-ledger
 name: Task Ledger
-version: 2.4
+version: 2.5
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-24
 ---
 
 ## Mission
@@ -52,9 +52,6 @@ PostgreSQL persists as the single durable control-plane truth.
   the authoritative `TASK_CREATED.action` field for bounded task-control
   streams. The legacy `CONTROLLED_CODEX_CANARY` value is receipt-optional;
   `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` requires exactly one V1 receipt.
-- The closed append-only ingress receipt handoff record, which proves a
-  successor verified ingress profile without modifying historical evidence.
-
 The TASK-013 fake owns only disposable process-memory test state. Postgres
 Store 1.3 owns physical durable rows, locks, transactions, indexes, projection
 persistence, and outbox-admission persistence without acquiring event meaning.
@@ -171,8 +168,9 @@ until a separately approved module/ticket owns those mechanics.
 25. Public MCP tools, input schemas, and six-field output remain unchanged by
     the internal event. Projection-only status may derive from verified state
     but cannot become a second durable record or wire authority.
-26. Ingress handoff is an explicit idempotent append; status replay cannot
-    synthesize, repair, or persist handoff evidence.
+26. The event-kind contract cannot expose a value that the active PostgreSQL
+    schema cannot persist. Schema-v5 readers continue to reject the withdrawn
+    `INGRESS_RECEIPT_HANDOFF` spelling as unknown.
 
 ## Allowed Dependencies
 
@@ -221,11 +219,14 @@ profile hash or database column. Historical optional streams remain valid,
 while the new required marker cannot progress or project Status without its
 exact second event.
 
-Version 2.4 preserves every pre-handoff event, command, receipt, head,
-checkpoint, and migration byte. It adds the closed
-`INGRESS_RECEIPT_HANDOFF` event only for a completed historical stream. The
-event binds the historical ingress commitment, terminal result digest, and
-one successor commitment; it adds no column, public MCP field, or authority.
+Version 2.4 proposed the closed `INGRESS_RECEIPT_HANDOFF` event for a completed
+historical stream. It was accepted in ADR-024 but superseded before deployment
+because schema v5 could not persist it and it did not cover the production
+non-success terminal.
+
+Version 2.5 withdraws that source-only event under ADR-025. No migration or
+persisted event is rewritten: schema v5, existing event bytes, receipts, heads,
+checkpoints, hash domains, Memory v3, and Writer Lease v2 remain unchanged.
 
 ## Acceptance Gates
 
@@ -241,6 +242,7 @@ one successor commitment; it adds no column, public MCP field, or authority.
 | Autonomy event contract | fixed subject/authority fields, exactly-one ordering, full substitution/duplicate/missing/late matrices, and zero arbitrary payload surface | Security review | yes |
 | Mixed historical replay | pre-autonomy streams replay byte-identically without a synthesized event; autonomy-enabled streams require the closed event and unchanged public MCP bytes | Compatibility review | yes |
 | Autonomy atomicity | schema-v5 command, optional event, projection/checkpoint, terminal receipt, and physical receipt persist all-or-none | Engineering | yes |
+| Schema/event parity | schema-v5 rejects the withdrawn handoff spelling and no unpersistable event remains in the public enum | Compatibility review | yes |
 | Dependency/no-I/O boundary | Cargo tree and forbidden-reference scan | Architecture review | yes |
 | Full verification | workspace format, lint, Rust, and preserved Node tests | Engineering | yes |
 
@@ -259,5 +261,6 @@ compatibility plan, security and architecture review, and user authorization.
 | 2.0 | 2026-07-29 | SPEC-002 v9, ADR-005/008/011, TASK-013 | Pure Rust event/receipt/replay/resource semantics plus visibly non-durable fake; PostgreSQL persistence deferred | User MVP-3 execution directive |
 | 2.1 | 2026-08-02 | SPEC-002 v23, ADR-019, TASK-021 | Shared pure vacant/plan/apply boundary, verified retained receipts, effect-intent outbox admission, and independent complete Ledger checkpoint without adding I/O | Approved V2 amendment and user MVP-3 execution directive |
 | 2.2 | 2026-08-14 | SPEC-002 v32, ADR-011/019, TASK-050, TASK-075 | Closed autonomy-receipt event/subject semantics, exactly-one ordering, and byte-identical mixed historical replay without public MCP or I/O expansion | User-approved TASK-075 reconciliation |
-| 2.4 | 2026-08-24 | ADR-024, SPEC-008 | Closed append-only successor ingress receipt handoff for verified replay after a canonical runtime upgrade | User-selected versioned handoff |
 | 2.3 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Own the exact Task-created autonomy profile discriminator and canonical receipt verifier; preserve unrelated/historical action bytes while required profiles fail closed before progress or Status | User-approved TASK-050 repair amendment |
+| 2.4 | 2026-08-24 | ADR-024, SPEC-008 v1 | Proposed a closed append-only successor ingress receipt handoff; superseded before deployment because schema v5 could not persist it | User-selected versioned handoff |
+| 2.5 | 2026-08-24 | ADR-025, SPEC-008 v2 | Withdraw the unpersistable source-only handoff event while preserving all deployed schema-v5 and historical bytes | User-authorized bounded repair |
