@@ -200,7 +200,6 @@ fn marker_owned_postgres_17_foundation() {
 
 fn run_disconnect_phase(config: &LiveConfig) {
     let mut admin = config.connect("postgres", "lattice-devos-task092-disconnect-admin");
-    create_fixed_roles(&mut admin, &config.password);
     prove_live_task_ledger_commit_response_loss(config, &mut admin);
     println!("TASK092_COMMIT_RESPONSE_LOSS_RECONCILED_ONCE");
 }
