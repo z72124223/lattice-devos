@@ -1331,7 +1331,12 @@ mod windows_job {
     }
 
     fn command_environment(command: &Command) -> Result<Vec<u16>, AppServerRunError> {
-        let mut environment = std::env::vars_os().collect::<Vec<_>>();
+        // Windows may expose `=C:`-style current-directory records. They are
+        // shell bookkeeping, not application configuration, and are omitted
+        // from this explicit child environment block.
+        let mut environment = std::env::vars_os()
+            .filter(|(name, _)| !name.to_string_lossy().starts_with('='))
+            .collect::<Vec<_>>();
         for (name, value) in command.get_envs() {
             environment.retain(|(existing, _)| {
                 !existing

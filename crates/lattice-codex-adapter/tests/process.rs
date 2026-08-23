@@ -11,6 +11,8 @@ use std::fs;
 #[cfg(windows)]
 use std::path::Path;
 #[cfg(windows)]
+use std::process::Command;
+#[cfg(windows)]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(windows)]
 use std::time::Instant;
@@ -226,25 +228,40 @@ impl ProcessFixture {
         let descendant_pid_log = root.join("descendant.pid");
         let descendant_trigger = root.join(DESCENDANT_TRIGGER_NAME);
         let descendant_effect_log = root.join("descendant-effect.txt");
-        let server = root.join("fake-app-server.ps1");
-        fs::write(
-            &server,
-            fake_launcher_script(
-                mode,
-                &codex_home,
-                &wrong_home,
-                &effect_log,
-                &descendant_pid_log,
-                &descendant_effect_log,
-            ),
-        )
-        .expect("write scripted PowerShell app-server");
-        let launcher = root.join("fake-codex.cmd");
-        fs::write(
-            &launcher,
-            "@echo off\r\n\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0fake-app-server.ps1\" %*\r\n",
-        )
-        .expect("write scripted app-server");
+        let launcher;
+        if matches!(mode, FakeMode::Timeout | FakeMode::Orphan) {
+            fs::write(
+                root.join("native-process-mode.txt"),
+                match mode {
+                    FakeMode::Timeout => b"timeout\n".as_slice(),
+                    FakeMode::Orphan => b"orphan\n".as_slice(),
+                    _ => unreachable!("native fixture only covers process-fault modes"),
+                },
+            )
+            .expect("write native process-fault mode");
+            launcher = native_fixture_helper();
+            wait_for_native_fixture_helper(&launcher);
+        } else {
+            launcher = root.join("fake-codex.cmd");
+            let server = root.join("fake-app-server.ps1");
+            fs::write(
+                &server,
+                fake_launcher_script(
+                    mode,
+                    &codex_home,
+                    &wrong_home,
+                    &effect_log,
+                    &descendant_pid_log,
+                    &descendant_effect_log,
+                ),
+            )
+            .expect("write remaining scripted app-server modes");
+            fs::write(
+                &launcher,
+                "@echo off\r\n\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0fake-app-server.ps1\" %*\r\n",
+            )
+            .expect("write remaining scripted app-server launcher");
+        }
         let launcher_sha256 = sha256(&fs::read(&launcher).expect("read scripted app-server"));
         Self {
             root,
@@ -270,6 +287,33 @@ impl ProcessFixture {
             None,
         )
         .expect("valid scripted app-server config")
+    }
+}
+
+#[cfg(windows)]
+fn native_fixture_helper() -> PathBuf {
+    PathBuf::from(
+        std::env::var("CARGO_BIN_EXE_lattice-codex-test-app-server")
+            .expect("Cargo must provide the native test app-server binary path"),
+    )
+}
+
+#[cfg(windows)]
+fn wait_for_native_fixture_helper(helper: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if Command::new(helper)
+            .args(["app-server", "--listen", "stdio://"])
+            .status()
+            .is_ok()
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native test app-server did not become executable: {helper:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -1153,7 +1197,13 @@ fn timeout_immediately_terminates_and_reaps_the_owned_tree() {
     let error = run_codex_app_server(&fixture.config(Duration::from_secs(10)))
         .expect_err("timed out turn must not succeed");
 
-    assert_eq!(error.kind(), AppServerRunErrorKind::Timeout);
+    assert_eq!(
+        error.kind(),
+        AppServerRunErrorKind::Timeout,
+        "native timeout fixture error: {error:?}; launcher={:?}; exists={}",
+        fixture.launcher,
+        fixture.launcher.exists(),
+    );
     assert!(started.elapsed() < Duration::from_secs(20));
     let descendant_pid = fs::read_to_string(&fixture.descendant_pid_log)
         .expect("the timed-out turn proved that it spawned a writable descendant");
