@@ -251,6 +251,40 @@ impl PostgresTaskLifecycle {
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
         replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)
     }
+
+    /// Records the one server-owned successor ingress receipt for a completed
+    /// historical task. The prior stream is fully replayed before mutation and
+    /// the append is deterministic, so retries cannot create a second handoff.
+    pub fn handoff_completed_ingress_receipt(
+        &mut self,
+        binding: &SubjectBinding,
+    ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
+        let ingress_peer = self.required_ingress_peer()?;
+        let (stream, _autonomy) = self.load_verified_with_autonomy(binding)?;
+        let replayed =
+            replay_lifecycle_state_allowing_pending_handoff(&stream, binding, &ingress_peer)?;
+        let result = replayed
+            .result_digest
+            .as_ref()
+            .ok_or_else(|| rejected("LATTICE_TASK_HANDOFF_RESULT_REQUIRED"))?;
+        if replayed.state != TaskState::Completed {
+            return Err(rejected("LATTICE_TASK_HANDOFF_COMPLETION_REQUIRED"));
+        }
+        let historical = historical_ingress_commitment(&stream)?;
+        if historical == task_ingress_profile_adapter_commitment(&ingress_peer)? {
+            return Err(rejected("LATTICE_TASK_HANDOFF_NOT_REQUIRED"));
+        }
+        let command = ingress_receipt_handoff_command(
+            stream.head().clone(),
+            binding,
+            &ingress_peer,
+            &historical,
+            result,
+        )?;
+        self.execute_command(command, None)?;
+        let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
+        replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)
+    }
 }
 
 impl TaskLifecyclePort for PostgresTaskLifecycle {
@@ -666,13 +700,32 @@ fn replay_lifecycle_state(
     binding: &SubjectBinding,
     ingress_peer: &TaskIngressPeerEvidence,
 ) -> TaskLifecycleResult<ReplayedLifecycleState> {
+    replay_lifecycle_state_inner(stream, binding, ingress_peer, false)
+}
+
+fn replay_lifecycle_state_allowing_pending_handoff(
+    stream: &VerifiedStream,
+    binding: &SubjectBinding,
+    ingress_peer: &TaskIngressPeerEvidence,
+) -> TaskLifecycleResult<ReplayedLifecycleState> {
+    replay_lifecycle_state_inner(stream, binding, ingress_peer, true)
+}
+
+fn replay_lifecycle_state_inner(
+    stream: &VerifiedStream,
+    binding: &SubjectBinding,
+    ingress_peer: &TaskIngressPeerEvidence,
+    allow_pending_handoff: bool,
+) -> TaskLifecycleResult<ReplayedLifecycleState> {
     ensure_binding(binding, stream.identity())?;
     let expected_actor = ingress_peer.actor_id().as_str();
-    let expected_created_subject = task_created_subject_digest(binding, ingress_peer)?;
+    let current_commitment = task_ingress_profile_adapter_commitment(ingress_peer)?;
     let mut state = TaskState::Draft;
     let mut created = false;
     let mut profile = None;
     let mut result_digest = None;
+    let mut historical_commitment = None;
+    let mut handoff_recorded = false;
     for event in stream.events() {
         match event.kind() {
             LedgerEventKind::TaskCreated => {
@@ -686,14 +739,25 @@ fn replay_lifecycle_state(
                 {
                     return Err(corrupt("LATTICE_TASK_CREATED_EVIDENCE_REJECTED"));
                 }
-                if event.subject_digest() != &expected_created_subject {
-                    return Err(corrupt("LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH"));
-                }
                 let audit = event
                     .diagnostic()
                     .map(Diagnostic::value)
                     .ok_or_else(|| corrupt("LATTICE_TASK_INGRESS_AUDIT_REJECTED"))?;
-                validate_task_created_audit(audit, ingress_peer)?;
+                let CanonicalValue::Object(audit_fields) = audit else {
+                    return Err(corrupt("LATTICE_TASK_INGRESS_AUDIT_REJECTED"));
+                };
+                let historical = audit_string_field(audit_fields, "profile_adapter_commitment")
+                    .and_then(|value| ContentDigest::from_sha256(value.to_owned()).ok())
+                    .ok_or_else(|| corrupt("LATTICE_TASK_INGRESS_AUDIT_REJECTED"))?;
+                if event.subject_digest()
+                    != &task_created_subject_digest_for_commitment(binding, &historical)?
+                {
+                    return Err(corrupt("LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH"));
+                }
+                if historical == current_commitment {
+                    validate_task_created_audit(audit, ingress_peer)?;
+                }
+                historical_commitment = Some(historical);
                 created = true;
                 profile = event_profile;
             }
@@ -727,6 +791,30 @@ fn replay_lifecycle_state(
                 }
                 result_digest = Some(event.subject_digest().clone());
             }
+            LedgerEventKind::IngressReceiptHandoff => {
+                let historical = historical_commitment
+                    .as_ref()
+                    .ok_or_else(|| corrupt("LATTICE_TASK_HANDOFF_EVIDENCE_REJECTED"))?;
+                let result = result_digest
+                    .as_ref()
+                    .ok_or_else(|| corrupt("LATTICE_TASK_HANDOFF_EVIDENCE_REJECTED"))?;
+                if handoff_recorded
+                    || event.actor_id().as_str() != expected_actor
+                    || event.action().as_str() != "HANDOFF_INGRESS_RECEIPT_V1"
+                    || event.reason_code().as_str() != "INGRESS_RECEIPT_HANDOFF_RECORDED"
+                    || event.outcome() != LedgerOutcome::Recorded
+                    || event.subject_digest()
+                        != &ingress_receipt_handoff_digest(
+                            binding,
+                            historical,
+                            &current_commitment,
+                            result,
+                        )?
+                {
+                    return Err(corrupt("LATTICE_TASK_HANDOFF_EVIDENCE_REJECTED"));
+                }
+                handoff_recorded = true;
+            }
             _ => {}
         }
     }
@@ -735,12 +823,38 @@ fn replay_lifecycle_state(
         // any other event without TASK_CREATED is not a valid task authority.
         return Err(corrupt("LATTICE_TASK_ADMISSION_MISSING"));
     }
+    if historical_commitment
+        .as_ref()
+        .is_some_and(|value| value != &current_commitment)
+        && !handoff_recorded
+        && !allow_pending_handoff
+    {
+        return Err(corrupt("LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH"));
+    }
     Ok(ReplayedLifecycleState {
         created,
         profile,
         state,
         result_digest,
     })
+}
+
+fn historical_ingress_commitment(stream: &VerifiedStream) -> TaskLifecycleResult<ContentDigest> {
+    let created = stream
+        .events()
+        .iter()
+        .find(|event| event.kind() == LedgerEventKind::TaskCreated)
+        .ok_or_else(|| corrupt("LATTICE_TASK_ADMISSION_MISSING"))?;
+    let CanonicalValue::Object(fields) = created
+        .diagnostic()
+        .map(Diagnostic::value)
+        .ok_or_else(|| corrupt("LATTICE_TASK_INGRESS_AUDIT_REJECTED"))?
+    else {
+        return Err(corrupt("LATTICE_TASK_INGRESS_AUDIT_REJECTED"));
+    };
+    audit_string_field(fields, "profile_adapter_commitment")
+        .and_then(|value| ContentDigest::from_sha256(value.to_owned()).ok())
+        .ok_or_else(|| corrupt("LATTICE_TASK_INGRESS_AUDIT_REJECTED"))
 }
 
 fn pending_required_admission(
@@ -787,11 +901,45 @@ fn task_created_command(
     .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))
 }
 
+fn ingress_receipt_handoff_command(
+    head: lattice_contracts::TaskLedgerStreamHead,
+    binding: &SubjectBinding,
+    ingress_peer: &TaskIngressPeerEvidence,
+    historical_commitment: &ContentDigest,
+    result_digest: &ContentDigest,
+) -> TaskLifecycleResult<AppendCommand> {
+    let successor_commitment = task_ingress_profile_adapter_commitment(ingress_peer)?;
+    AppendCommand::new_ingress_receipt_handoff(
+        head,
+        CommandId::new("ingress-receipt-handoff-v1")
+            .map_err(|_| corrupt("LATTICE_TASK_HANDOFF_EVIDENCE_REJECTED"))?,
+        CorrelationId::new(CORRELATION_ID)
+            .map_err(|_| corrupt("LATTICE_TASK_HANDOFF_EVIDENCE_REJECTED"))?,
+        "2000-01-01T00:00:21Z",
+        ActorId::new(ingress_peer.actor_id().as_str())
+            .map_err(|_| corrupt("LATTICE_TASK_HANDOFF_EVIDENCE_REJECTED"))?,
+        ingress_receipt_handoff_digest(
+            binding,
+            historical_commitment,
+            &successor_commitment,
+            result_digest,
+        )?,
+    )
+    .map_err(|_| corrupt("LATTICE_TASK_HANDOFF_EVIDENCE_REJECTED"))
+}
+
 fn task_created_subject_digest(
     binding: &SubjectBinding,
     ingress_peer: &TaskIngressPeerEvidence,
 ) -> TaskLifecycleResult<ContentDigest> {
     let profile_adapter_commitment = task_ingress_profile_adapter_commitment(ingress_peer)?;
+    task_created_subject_digest_for_commitment(binding, &profile_adapter_commitment)
+}
+
+fn task_created_subject_digest_for_commitment(
+    binding: &SubjectBinding,
+    profile_adapter_commitment: &ContentDigest,
+) -> TaskLifecycleResult<ContentDigest> {
     let value = CanonicalValue::Object(vec![
         (
             "project_id".to_owned(),
@@ -1103,6 +1251,38 @@ fn transition_digest(
         .map_err(|_| corrupt("LATTICE_TASK_STATE_DIGEST_REJECTED"))?;
     ContentDigest::from_sha256(digest.to_hex())
         .map_err(|_| corrupt("LATTICE_TASK_STATE_DIGEST_REJECTED"))
+}
+
+fn ingress_receipt_handoff_digest(
+    binding: &SubjectBinding,
+    historical_commitment: &ContentDigest,
+    successor_commitment: &ContentDigest,
+    result_digest: &ContentDigest,
+) -> TaskLifecycleResult<ContentDigest> {
+    let value = CanonicalValue::Object(vec![
+        (
+            "historical_profile_adapter_commitment".to_owned(),
+            CanonicalValue::String(historical_commitment.as_str().to_owned()),
+        ),
+        (
+            "result_digest".to_owned(),
+            CanonicalValue::String(result_digest.as_str().to_owned()),
+        ),
+        (
+            "successor_profile_adapter_commitment".to_owned(),
+            CanonicalValue::String(successor_commitment.as_str().to_owned()),
+        ),
+        (
+            "task_spec_digest".to_owned(),
+            CanonicalValue::String(binding.task_spec_digest().as_str().to_owned()),
+        ),
+    ]);
+    canonical_content_digest(
+        "lattice.task.ingress-receipt-handoff",
+        "1.0",
+        &value,
+        "LATTICE_TASK_HANDOFF_EVIDENCE_REJECTED",
+    )
 }
 
 fn ensure_binding(
@@ -1891,6 +2071,27 @@ mod tests {
             replay_lifecycle_state(&verified(&fake, &identity), &binding, &ingress_peer).unwrap();
         assert_eq!(evidence.state, TaskState::Merging);
         assert_eq!(evidence.result_digest.as_ref(), Some(&result));
+
+        let successor = ingress_peer_with_authority('a', 'e', 'd');
+        assert_eq!(
+            replay_lifecycle_state(&verified(&fake, &identity), &binding, &successor)
+                .unwrap_err()
+                .code(),
+            "LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH"
+        );
+        let historical = task_ingress_profile_adapter_commitment(&ingress_peer).unwrap();
+        let handoff = ingress_receipt_handoff_command(
+            verified(&fake, &identity).head().clone(),
+            &binding,
+            &successor,
+            &historical,
+            &result,
+        )
+        .unwrap();
+        fake.execute(handoff).unwrap();
+        let replayed = replay_lifecycle_state(&verified(&fake, &identity), &binding, &successor)
+            .expect("verified handoff permits successor replay");
+        assert_eq!(replayed.result_digest.as_ref(), Some(&result));
     }
 
     #[test]

@@ -5068,9 +5068,17 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             let binding = submission.binding().clone();
             let mut lifecycle = task_lifecycle(&core, &binding)
                 .map_err(|error| ToolExecutionError::new(error.code()))?;
-            let evidence = lifecycle
-                .load(&binding)
-                .map_err(|error| ToolExecutionError::new(error.code()))?;
+            let evidence = match lifecycle.load(&binding) {
+                Ok(evidence) => evidence,
+                Err(error)
+                    if error.code() == "LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH" =>
+                {
+                    lifecycle
+                        .handoff_completed_ingress_receipt(&binding)
+                        .map_err(|error| ToolExecutionError::new(error.code()))?
+                }
+                Err(error) => return Err(ToolExecutionError::new(error.code())),
+            };
             if evidence.admitted() && evidence.state() == TaskState::Failed {
                 let task_ref = verified_controlled_task_reference(&core, &binding)
                     .map_err(|error| ToolExecutionError::new(error.code()))?;
