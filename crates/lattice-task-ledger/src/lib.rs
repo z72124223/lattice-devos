@@ -263,8 +263,6 @@ pub enum LedgerEventKind {
     TaskCreated,
     /// One canonical autonomy decision receipt was recorded.
     AutonomyReceiptRecorded,
-    /// One immutable successor ingress profile handoff was recorded.
-    IngressReceiptHandoff,
     /// A separately validated Task Domain transition was recorded.
     StateTransition,
     /// A pure Policy decision was recorded.
@@ -286,7 +284,6 @@ impl LedgerEventKind {
         match self {
             Self::TaskCreated => "TASK_CREATED",
             Self::AutonomyReceiptRecorded => "AUTONOMY_RECEIPT_RECORDED",
-            Self::IngressReceiptHandoff => "INGRESS_RECEIPT_HANDOFF",
             Self::StateTransition => "STATE_TRANSITION",
             Self::PolicyDecision => "POLICY_DECISION",
             Self::ResourceSnapshot => "RESOURCE_SNAPSHOT",
@@ -305,7 +302,6 @@ impl LedgerEventKind {
         match value {
             "TASK_CREATED" => Ok(Self::TaskCreated),
             "AUTONOMY_RECEIPT_RECORDED" => Ok(Self::AutonomyReceiptRecorded),
-            "INGRESS_RECEIPT_HANDOFF" => Ok(Self::IngressReceiptHandoff),
             "STATE_TRANSITION" => Ok(Self::StateTransition),
             "POLICY_DECISION" => Ok(Self::PolicyDecision),
             "RESOURCE_SNAPSHOT" => Ok(Self::ResourceSnapshot),
@@ -1164,7 +1160,6 @@ enum AppendConstruction {
     Generic,
     RequiredTaskCreated,
     VerifiedAutonomy,
-    VerifiedIngressHandoff,
     VerifiedReplay,
 }
 
@@ -1243,36 +1238,6 @@ impl AppendCommand {
         )
     }
 
-    /// Constructs the sole closed ingress receipt handoff append command.
-    ///
-    /// The caller supplies only a Ledger-owned canonical handoff commitment;
-    /// profile and terminal-receipt validation remains with task-control.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_ingress_receipt_handoff(
-        expected_head: TaskLedgerStreamHead,
-        command_id: CommandId,
-        correlation_id: CorrelationId,
-        occurred_at: impl Into<String>,
-        actor_id: ActorId,
-        subject_digest: ContentDigest,
-    ) -> Result<Self, LedgerError> {
-        Self::from_fields(
-            expected_head,
-            command_id,
-            correlation_id,
-            occurred_at,
-            LedgerEventKind::IngressReceiptHandoff,
-            actor_id,
-            ActionId::new("HANDOFF_INGRESS_RECEIPT_V1")?,
-            LedgerOutcome::Recorded,
-            ReasonCode::new("INGRESS_RECEIPT_HANDOFF_RECORDED")?,
-            subject_digest,
-            None,
-            None,
-            AppendConstruction::VerifiedIngressHandoff,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn from_fields(
         expected_head: TaskLedgerStreamHead,
@@ -1307,18 +1272,6 @@ impl AppendCommand {
         {
             return Err(LedgerError::InvalidAutonomyReceipt);
         }
-        if matches!(kind, LedgerEventKind::IngressReceiptHandoff)
-            && (!matches!(
-                construction,
-                AppendConstruction::VerifiedIngressHandoff | AppendConstruction::VerifiedReplay
-            ) || action.as_str() != "HANDOFF_INGRESS_RECEIPT_V1"
-                || outcome != LedgerOutcome::Recorded
-                || reason_code.as_str() != "INGRESS_RECEIPT_HANDOFF_RECORDED"
-                || diagnostic.is_some()
-                || resource_snapshot.is_some())
-        {
-            return Err(LedgerError::InvalidAutonomyReceipt);
-        }
         if matches!(kind, LedgerEventKind::TaskCreated) {
             let profile = classify_task_created_action(action.as_str())?;
             match construction {
@@ -1333,7 +1286,6 @@ impl AppendCommand {
                 AppendConstruction::Generic
                 | AppendConstruction::RequiredTaskCreated
                 | AppendConstruction::VerifiedAutonomy
-                | AppendConstruction::VerifiedIngressHandoff
                 | AppendConstruction::VerifiedReplay => {}
             }
         }
@@ -2400,10 +2352,7 @@ pub fn plan_append(
     if current.events.len() == 1
         && classify_task_created_profile(&current.events[0])?
             == Some(TaskCreatedProfile::AutonomyReceiptRequiredV1)
-        && !matches!(
-            command.kind,
-            LedgerEventKind::AutonomyReceiptRecorded | LedgerEventKind::IngressReceiptHandoff
-        )
+        && command.kind != LedgerEventKind::AutonomyReceiptRecorded
     {
         return Err(LedgerError::InvalidAutonomyReceipt);
     }
@@ -5209,34 +5158,11 @@ mod tests {
     }
 
     #[test]
-    fn ingress_handoff_requires_its_closed_constructor() {
-        let head = FakeTaskLedger::zero_head(identity()).expect("zero");
-        let generic = AppendCommand::new(
-            head.clone(),
-            CommandId::new("generic-handoff").expect("command"),
-            CorrelationId::new("correlation-1").expect("correlation"),
-            "2026-07-29T00:00:00Z",
-            LedgerEventKind::IngressReceiptHandoff,
-            ActorId::new("lattice-runtime").expect("actor"),
-            ActionId::new("HANDOFF_INGRESS_RECEIPT_V1").expect("action"),
-            LedgerOutcome::Recorded,
-            ReasonCode::new("INGRESS_RECEIPT_HANDOFF_RECORDED").expect("reason"),
-            digest('b'),
-            None,
-            None,
+    fn unpersistable_ingress_handoff_kind_is_not_part_of_schema_v5() {
+        assert_eq!(
+            LedgerEventKind::parse("INGRESS_RECEIPT_HANDOFF"),
+            Err(LedgerError::UnknownEventKind)
         );
-        assert_eq!(generic, Err(LedgerError::InvalidAutonomyReceipt));
-
-        let handoff = AppendCommand::new_ingress_receipt_handoff(
-            head,
-            CommandId::new("ingress-receipt-handoff-v1").expect("command"),
-            CorrelationId::new("correlation-1").expect("correlation"),
-            "2026-07-29T00:00:00Z",
-            ActorId::new("lattice-runtime").expect("actor"),
-            digest('b'),
-        )
-        .expect("closed handoff");
-        assert_eq!(handoff.kind(), LedgerEventKind::IngressReceiptHandoff);
     }
 
     #[test]

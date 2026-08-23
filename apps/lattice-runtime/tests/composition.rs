@@ -578,7 +578,7 @@ fn assert_safe_startup_diagnostics(stderr: &[u8], expected_stages: &[&str]) {
 }
 
 #[test]
-fn real_latticed_binary_serves_the_five_bounded_tools() {
+fn real_latticed_binary_serves_the_six_bounded_tools() {
     let mut child = spawn_bounded_latticed();
     let task_ref = fixed_gateway_submission()
         .expect("fixed submission")
@@ -642,9 +642,10 @@ fn real_latticed_binary_serves_the_five_bounded_tools() {
         [
             "lattice_delivery_run",
             "lattice_delivery_status",
-            "lattice_runtime_status",
             "lattice_task_submit",
             "lattice_task_status",
+            "lattice_runtime_status",
+            "lattice_delivery_reconcile",
         ]
     );
     for tool in tools {
@@ -652,7 +653,12 @@ fn real_latticed_binary_serves_the_five_bounded_tools() {
         assert_eq!(tool["inputSchema"]["additionalProperties"], false);
         if matches!(
             tool["name"].as_str(),
-            Some("lattice_delivery_run" | "lattice_delivery_status" | "lattice_runtime_status")
+            Some(
+                "lattice_delivery_run"
+                    | "lattice_delivery_status"
+                    | "lattice_runtime_status"
+                    | "lattice_delivery_reconcile"
+            )
         ) {
             assert_eq!(tool["inputSchema"].as_object().expect("schema").len(), 2);
         } else {
@@ -753,9 +759,10 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
         [
             "lattice_delivery_run",
             "lattice_delivery_status",
-            "lattice_runtime_status",
             "lattice_task_submit",
             "lattice_task_status",
+            "lattice_runtime_status",
+            "lattice_delivery_reconcile",
         ]
     );
     for tool in tools {
@@ -958,7 +965,7 @@ fn latticed_hermes_reflect_rejects_missing_runtime_configuration_before_any_effe
 }
 
 #[test]
-fn latticed_hermes_runtime_preflight_explicitly_rejects_missing_isolation_configuration() {
+fn latticed_hermes_runtime_preflight_reports_missing_direct_codex_configuration() {
     let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
         .arg("--hermes-runtime-preflight")
         .env_clear()
@@ -983,7 +990,10 @@ fn latticed_hermes_runtime_preflight_explicitly_rejects_missing_isolation_config
         String::from_utf8(output.stderr).expect("stderr utf8"),
         concat!(
             "LATTICE_HERMES_RUNTIME_PREFLIGHT_MISSING_CONFIGURATION:",
-            "LATTICE_HERMES_ISOLATION_PARENT\n"
+            "LATTICE_HERMES_CODEX_LAUNCHER,",
+            "LATTICE_HERMES_CODEX_HOME,",
+            "LATTICE_HERMES_BROKER_ISOLATION_ROOT,",
+            "LATTICE_HERMES_DEADLINE_SECONDS\n"
         )
     );
 }
@@ -1057,7 +1067,7 @@ fn canonical_latticed_rejects_unknown_hermes_mode_without_echoing_it() {
 
 #[cfg(windows)]
 #[test]
-fn latticed_hermes_runtime_preflight_rejects_invalid_isolation_configuration() {
+fn latticed_hermes_runtime_preflight_accepts_valid_direct_codex_configuration_without_starting() {
     let (preparation_root, product_root, preparation_receipt, _cleanup) =
         hermes_preparation_fixture("invalid-runtime-isolation");
     let manifest = preparation_root.join("offline-runtime-manifest.json");
@@ -1079,6 +1089,10 @@ fn latticed_hermes_runtime_preflight_rejects_invalid_isolation_configuration() {
         .env("LATTICE_HERMES_PRODUCT_ROOT", &product_root)
         .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
         .env("LATTICE_HERMES_ISOLATION_PARENT", &invalid_isolation_root)
+        .env("LATTICE_HERMES_CODEX_LAUNCHER", r"C:\codex\codex.exe")
+        .env("LATTICE_HERMES_CODEX_HOME", r"C:\codex\home")
+        .env("LATTICE_HERMES_BROKER_ISOLATION_ROOT", r"C:\broker")
+        .env("LATTICE_HERMES_DEADLINE_SECONDS", "30")
         .output()
         .expect("start canonical latticed Hermes runtime preflight");
 
@@ -1086,7 +1100,7 @@ fn latticed_hermes_runtime_preflight_rejects_invalid_isolation_configuration() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr utf8"),
-        "LATTICE_HERMES_RUNTIME_PREFLIGHT_CONFIGURATION_REJECTED\n"
+        "LATTICE_HERMES_RUNTIME_PREFLIGHT_CONFIGURATION_PRESENT_UNVERIFIED\n"
     );
 }
 

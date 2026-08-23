@@ -1788,6 +1788,61 @@ impl LatticedDeliveryService {
         )
     }
 
+    fn task_delivery_status(
+        &mut self,
+        binding: &SubjectBinding,
+    ) -> Result<DeliveryStatus, LatticedError> {
+        record_observed_effect(ObservedEffectKind::Database)
+            .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+        let mut ledger = DeliveryLedger::connect_for_identity(
+            &self.database,
+            &self.password,
+            deadline(self.timeout)?,
+            task_ledger_identity(binding)?,
+        )
+        .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+        ledger
+            .status()
+            .map_err(|_| LatticedError::new(LatticedErrorKind::ReconciliationRequired))
+    }
+
+    fn historical_terminal_status_json(
+        &mut self,
+        binding: &SubjectBinding,
+    ) -> Result<Value, LatticedError> {
+        match historical_delivery_status_action(self.task_delivery_status(binding)?) {
+            HistoricalDeliveryStatusAction::NotStarted => Ok(core_not_started_status_json()),
+            HistoricalDeliveryStatusAction::Failed => {
+                self.historical_typed_terminal_status_json(binding, "FAILED")
+            }
+            HistoricalDeliveryStatusAction::ReconciliationRequired => {
+                self.historical_typed_terminal_status_json(binding, "RECONCILIATION_REQUIRED")
+            }
+            HistoricalDeliveryStatusAction::ReceiptMismatch => {
+                Err(LatticedError::new(LatticedErrorKind::ReceiptMismatch))
+            }
+        }
+    }
+
+    fn historical_typed_terminal_status_json(
+        &mut self,
+        binding: &SubjectBinding,
+        expected_status: &'static str,
+    ) -> Result<Value, LatticedError> {
+        let receipt = self.status_task_json(binding)?;
+        if receipt.get("status").and_then(Value::as_str) != Some(expected_status) {
+            return Err(LatticedError::new(LatticedErrorKind::ReceiptMismatch));
+        }
+        let (stage, code) = delivery_failure_projection(&receipt)
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
+        Ok(historical_terminal_status_json(
+            expected_status,
+            &stage,
+            &code,
+        ))
+    }
+
     fn run_task_downstream_json(
         &mut self,
         binding: &SubjectBinding,
@@ -1891,6 +1946,37 @@ fn core_not_started_status_json() -> Value {
         "status": "NOT_STARTED",
         "scope": "receipt-only"
     })
+}
+
+fn historical_terminal_status_json(status: &str, stage: &str, code: &str) -> Value {
+    json!({
+        "component": "delivery-receipt",
+        "failure_code": code,
+        "failure_stage": stage,
+        "scope": "receipt-only",
+        "status": status,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HistoricalDeliveryStatusAction {
+    NotStarted,
+    Failed,
+    ReconciliationRequired,
+    ReceiptMismatch,
+}
+
+const fn historical_delivery_status_action(
+    delivery_status: DeliveryStatus,
+) -> HistoricalDeliveryStatusAction {
+    match delivery_status {
+        DeliveryStatus::NotStarted => HistoricalDeliveryStatusAction::NotStarted,
+        DeliveryStatus::Failed => HistoricalDeliveryStatusAction::Failed,
+        DeliveryStatus::ReconciliationRequired => {
+            HistoricalDeliveryStatusAction::ReconciliationRequired
+        }
+        DeliveryStatus::Completed => HistoricalDeliveryStatusAction::ReceiptMismatch,
+    }
 }
 
 fn delivery_environment()
@@ -4998,10 +5084,24 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
         let binding = core.submission.binding().clone();
         let mut lifecycle = task_lifecycle(&core, &binding)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
-        let evidence = lifecycle
-            .load(&binding)
-            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let (evidence, historical_terminal) = match lifecycle.load(&binding) {
+            Ok(evidence) => (evidence, false),
+            Err(error) if error.code() == "LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH" => {
+                lifecycle
+                    .load_historical_terminal_status(&binding)
+                    .map(|(evidence, _)| evidence)
+                    .map(|evidence| (evidence, true))
+                    .map_err(|error| ToolExecutionError::new(error.code()))?
+            }
+            Err(error) => return Err(ToolExecutionError::new(error.code())),
+        };
         if evidence.admitted() {
+            if historical_terminal {
+                return core
+                    .delivery
+                    .historical_terminal_status_json(&binding)
+                    .map_err(|error| ToolExecutionError::new(error.code()));
+            }
             core.status_task_downstream_json(FullChainEntry::CodexAppMcp, &binding)
                 .map_err(|error| ToolExecutionError::new(error.code()))
         } else {
@@ -5068,17 +5168,9 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             let binding = submission.binding().clone();
             let mut lifecycle = task_lifecycle(&core, &binding)
                 .map_err(|error| ToolExecutionError::new(error.code()))?;
-            let evidence = match lifecycle.load(&binding) {
-                Ok(evidence) => evidence,
-                Err(error)
-                    if error.code() == "LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH" =>
-                {
-                    lifecycle
-                        .handoff_completed_ingress_receipt(&binding)
-                        .map_err(|error| ToolExecutionError::new(error.code()))?
-                }
-                Err(error) => return Err(ToolExecutionError::new(error.code())),
-            };
+            let evidence = lifecycle
+                .load(&binding)
+                .map_err(|error| ToolExecutionError::new(error.code()))?;
             if evidence.admitted() && evidence.state() == TaskState::Failed {
                 let task_ref = verified_controlled_task_reference(&core, &binding)
                     .map_err(|error| ToolExecutionError::new(error.code()))?;
@@ -5121,12 +5213,22 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
         let binding = submission.binding().clone();
         let mut lifecycle = task_lifecycle(&core, &binding)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
-        let evidence = lifecycle
-            .load(&binding)
-            .map_err(|error| ToolExecutionError::new(error.code()))?;
-        let admission_command_id = lifecycle
-            .verified_admission_command_id(&binding)
-            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let (evidence, historical_admission_command_id) = match lifecycle.load(&binding) {
+            Ok(evidence) => (evidence, None),
+            Err(error) if error.code() == "LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH" => {
+                let (evidence, admission_command_id) = lifecycle
+                    .load_historical_terminal_status(&binding)
+                    .map_err(|error| ToolExecutionError::new(error.code()))?;
+                (evidence, Some(admission_command_id))
+            }
+            Err(error) => return Err(ToolExecutionError::new(error.code())),
+        };
+        let admission_command_id = match historical_admission_command_id {
+            Some(command_id) => command_id,
+            None => lifecycle
+                .verified_admission_command_id(&binding)
+                .map_err(|error| ToolExecutionError::new(error.code()))?,
+        };
         let task_ref = controlled_task_reference(
             &binding,
             &admission_command_id,
@@ -10889,5 +10991,55 @@ mod tests {
         assert_eq!(status["component"], "delivery-receipt");
         assert_eq!(status["status"], "NOT_STARTED");
         assert_eq!(status["scope"], "receipt-only");
+    }
+
+    #[test]
+    fn historical_terminal_routes_only_exact_delivery_states() {
+        assert_eq!(
+            historical_delivery_status_action(DeliveryStatus::NotStarted),
+            HistoricalDeliveryStatusAction::NotStarted,
+        );
+        assert_eq!(
+            historical_delivery_status_action(DeliveryStatus::Failed),
+            HistoricalDeliveryStatusAction::Failed,
+        );
+        assert_eq!(
+            historical_delivery_status_action(DeliveryStatus::ReconciliationRequired),
+            HistoricalDeliveryStatusAction::ReconciliationRequired,
+        );
+        assert_eq!(
+            historical_delivery_status_action(DeliveryStatus::Completed),
+            HistoricalDeliveryStatusAction::ReceiptMismatch,
+        );
+    }
+
+    #[test]
+    fn historical_delivery_terminal_exposes_only_a_closed_failure_projection() {
+        let status = historical_terminal_status_json(
+            "FAILED",
+            "CODEX",
+            "CODEX_APP_SERVER_INVALID_CODEX_HOME",
+        );
+
+        assert_eq!(
+            status,
+            json!({
+                "component": "delivery-receipt",
+                "failure_code": "CODEX_APP_SERVER_INVALID_CODEX_HOME",
+                "failure_stage": "CODEX",
+                "scope": "receipt-only",
+                "status": "FAILED",
+            })
+        );
+        for forbidden in [
+            "profile",
+            "request_id",
+            "configuration_digest",
+            "intent_digest",
+            "outcome_digest",
+            "receipt_digest",
+        ] {
+            assert!(status.get(forbidden).is_none(), "{forbidden}");
+        }
     }
 }

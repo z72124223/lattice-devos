@@ -1,6 +1,6 @@
 # ADR-024: Versioned ingress receipt handoff
 
-- Status: accepted
+- Status: superseded by ADR-025 before deployment
 - Date: 2026-08-24
 - Decision owner: user
 - Related: ADR-023, Task Ledger 2.3
@@ -24,3 +24,7 @@ out-of-order, substituted, or malformed handoffs fail closed.
 Historical events, receipts, heads, and hash domains remain byte-identical.
 New binaries cannot impersonate old binaries.  A future replay verifies the
 historical chain followed by one explicitly recorded compatible successor.
+
+This decision was not deployable against schema v5 and did not address the
+live non-success terminal. ADR-025 records the replacement decision without
+erasing this decision history.
