@@ -1,26 +1,28 @@
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fmt::Write;
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write as IoWrite};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 
 const LIVE_GATE: &str = "LATTICE_LIVE_FAULT_ACCEPTANCE";
+const STORE_REPLAY_GATE: &str = "LATTICE_LIVE_FAULT_STORE_REPLAY";
 const POSTGRES_VERSION: &str = "postgres (PostgreSQL) 17.10";
 const POSTGRES_SHA256: &str = "882a5a073a88817f6c6d4c8827df1e4269ff226d52cf6f47c9883e91088c6345";
 const INITDB_SHA256: &str = "2556d079888bf9ebba6b8ba7d3e8c08c947e6e564ceb73054fe1929611c87d48";
 const PG_CTL_SHA256: &str = "abe89b0767a8cd0f956059aa5a5a93cd1042efc6194d000c2501da3e23babbd2";
 const PG_CONTROLDATA_SHA256: &str =
     "eb48b96114795530ba9aec9920e86c41fced3bb19e4aa59781dcc4f45a31f9c3";
-const POSTGRES_USER: &str = "lattice_live_owner";
+const POSTGRES_USER: &str = "task019_harness";
 const ROOT_MARKER: &str = "lattice.live-fault-root.v1";
 
 fn main() -> ExitCode {
     match run(
         std::env::args_os().skip(1).collect(),
         std::env::var(LIVE_GATE).ok(),
+        std::env::var(STORE_REPLAY_GATE).ok(),
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(code) => {
@@ -30,7 +32,11 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(arguments: Vec<OsString>, live_gate: Option<String>) -> Result<(), &'static str> {
+fn run(
+    arguments: Vec<OsString>,
+    live_gate: Option<String>,
+    store_replay_gate: Option<String>,
+) -> Result<(), &'static str> {
     if !arguments.is_empty() {
         return Err("LATTICE_LIVE_FAULT_ARGUMENTS_REJECTED");
     }
@@ -39,7 +45,7 @@ fn run(arguments: Vec<OsString>, live_gate: Option<String>) -> Result<(), &'stat
     }
 
     let tools = verified_postgres_tools()?;
-    run_restart_infrastructure_slice(&tools)?;
+    run_restart_infrastructure_slice(&tools, store_replay_gate.as_deref() == Some("1"))?;
     Ok(())
 }
 
@@ -100,7 +106,10 @@ fn verified_program(file_name: &str, expected_digest: &str) -> Result<PathBuf, &
     }
 }
 
-fn run_restart_infrastructure_slice(tools: &PostgresTools) -> Result<(), &'static str> {
+fn run_restart_infrastructure_slice(
+    tools: &PostgresTools,
+    run_store_replay: bool,
+) -> Result<(), &'static str> {
     let run_id = random_hex(16)?;
     let root = std::env::temp_dir().join(format!("lattice-live-fault-{run_id}"));
     fs::create_dir(&root).map_err(|_| "LATTICE_LIVE_FAULT_ROOT_CREATE_REJECTED")?;
@@ -115,9 +124,16 @@ fn run_restart_infrastructure_slice(tools: &PostgresTools) -> Result<(), &'stati
     let initdb = Command::new(&tools.initdb)
         .arg("--pgdata")
         .arg(&data)
+        .arg("--encoding")
+        .arg("UTF8")
+        .arg("--locale")
+        .arg("C")
+        .arg("--data-checksums")
         .arg("--username")
         .arg(POSTGRES_USER)
-        .arg("--auth")
+        .arg("--auth-host")
+        .arg("scram-sha-256")
+        .arg("--auth-local")
         .arg("scram-sha-256")
         .arg("--pwfile")
         .arg(&password_path)
@@ -127,11 +143,31 @@ fn run_restart_infrastructure_slice(tools: &PostgresTools) -> Result<(), &'stati
         preserve_diagnostic(&root, "initdb", &initdb);
         return Err("LATTICE_LIVE_FAULT_INITDB_REJECTED");
     }
+    configure_disposable_cluster(&data, port)?;
 
     start_cluster(&tools.pg_ctl, &data, port, &root)?;
+    let store_evidence = if run_store_replay {
+        match run_store_live_phase(&root, port, &password, &run_id, "initial", None) {
+            Ok(evidence) => Some(evidence),
+            Err(error) => {
+                let _ = stop_cluster(&tools.pg_ctl, &data);
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     stop_cluster(&tools.pg_ctl, &data)?;
     let first_system_id = system_identifier(&tools.pg_controldata, &data, &root)?;
     start_cluster(&tools.pg_ctl, &data, port, &root)?;
+    if let Some(evidence) = store_evidence.as_ref() {
+        if let Err(error) =
+            run_store_live_phase(&root, port, &password, &run_id, "restart", Some(evidence))
+        {
+            let _ = stop_cluster(&tools.pg_ctl, &data);
+            return Err(error);
+        }
+    }
     stop_cluster(&tools.pg_ctl, &data)?;
     let restarted_system_id = system_identifier(&tools.pg_controldata, &data, &root)?;
     if first_system_id != restarted_system_id {
@@ -140,8 +176,135 @@ fn run_restart_infrastructure_slice(tools: &PostgresTools) -> Result<(), &'stati
     // The root is intentionally preserved at this stage.  TASK-090 must add a
     // separately tested marker-and-stop-proof cleanup before deletion becomes
     // permissible; retained local evidence is safer than an unproved cleanup.
-    eprintln!("LATTICE_LIVE_FAULT_INFRASTRUCTURE_RESTART_PROVED");
+    if run_store_replay {
+        eprintln!("LATTICE_LIVE_FAULT_STORE_REPLAY_PROVED");
+    } else {
+        eprintln!("LATTICE_LIVE_FAULT_INFRASTRUCTURE_RESTART_PROVED");
+    }
     Ok(())
+}
+
+fn configure_disposable_cluster(data: &Path, port: u16) -> Result<(), &'static str> {
+    let configuration = format!(
+        "\nlisten_addresses = '127.0.0.1'\nport = {port}\nssl = off\nfsync = on\nsynchronous_commit = on\nfull_page_writes = on\nmax_prepared_transactions = 0\npassword_encryption = scram-sha-256\nlogging_collector = off\nlog_min_messages = 'panic'\nlog_min_error_statement = 'panic'\nlog_parameter_max_length_on_error = 0\nlog_error_verbosity = 'terse'\nlog_connections = off\nlog_disconnections = off\nlog_statement = 'none'\n"
+    );
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(data.join("postgresql.conf"))
+        .map_err(|_| "LATTICE_LIVE_FAULT_CLUSTER_CONFIGURATION_REJECTED")?;
+    file.write_all(configuration.as_bytes())
+        .map_err(|_| "LATTICE_LIVE_FAULT_CLUSTER_CONFIGURATION_REJECTED")
+}
+
+struct StoreEvidence {
+    database_uuid: String,
+    manifest_sha256: String,
+}
+
+fn run_store_live_phase(
+    root: &Path,
+    port: u16,
+    password: &str,
+    run_id: &str,
+    phase: &str,
+    expected: Option<&StoreEvidence>,
+) -> Result<StoreEvidence, &'static str> {
+    let stdout_path = root.join(format!("store-{phase}-stdout.log"));
+    let stderr_path = root.join(format!("store-{phase}-stderr.log"));
+    let stdout = File::create(&stdout_path).map_err(|_| "LATTICE_LIVE_FAULT_STORE_LOG_REJECTED")?;
+    let stderr = File::create(&stderr_path).map_err(|_| "LATTICE_LIVE_FAULT_STORE_LOG_REJECTED")?;
+    let repository =
+        std::env::current_dir().map_err(|_| "LATTICE_LIVE_FAULT_REPOSITORY_REJECTED")?;
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(repository)
+        .arg("test")
+        .arg("-p")
+        .arg("lattice-postgres-store")
+        .arg("--test")
+        .arg("postgres_live")
+        .arg("marker_owned_postgres_17_foundation")
+        .arg("--locked")
+        .arg("--")
+        .arg("--exact")
+        .arg("--nocapture")
+        .arg("--test-threads=1")
+        .env("LATTICE_TASK019_LIVE", "1")
+        .env("LATTICE_TASK019_PHASE", phase)
+        .env("LATTICE_TASK019_HOST", "127.0.0.1")
+        .env("LATTICE_TASK019_PORT", port.to_string())
+        .env("LATTICE_TASK019_PASSWORD", password)
+        .env("LATTICE_TASK019_RUN_ID", run_id)
+        .env("PGCONNECT_TIMEOUT", "5")
+        .env("PGSSLMODE", "disable")
+        .env_remove("PGSERVICE")
+        .env_remove("PGSERVICEFILE")
+        .env_remove("PGPASSFILE")
+        .env_remove("PGOPTIONS")
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    if let Some(expected) = expected {
+        command
+            .env("LATTICE_TASK019_EXPECTED_UUID", &expected.database_uuid)
+            .env(
+                "LATTICE_TASK019_EXPECTED_MANIFEST",
+                &expected.manifest_sha256,
+            );
+    }
+    let status = command
+        .status()
+        .map_err(|_| "LATTICE_LIVE_FAULT_STORE_COMMAND_UNAVAILABLE")?;
+    if !status.success() {
+        return Err("LATTICE_LIVE_FAULT_STORE_PHASE_REJECTED");
+    }
+    if phase == "restart" {
+        return expected
+            .map(|evidence| StoreEvidence {
+                database_uuid: evidence.database_uuid.clone(),
+                manifest_sha256: evidence.manifest_sha256.clone(),
+            })
+            .ok_or("LATTICE_LIVE_FAULT_STORE_EVIDENCE_REJECTED");
+    }
+    parse_store_evidence(&stdout_path)
+}
+
+fn parse_store_evidence(path: &Path) -> Result<StoreEvidence, &'static str> {
+    let output =
+        fs::read_to_string(path).map_err(|_| "LATTICE_LIVE_FAULT_STORE_EVIDENCE_REJECTED")?;
+    let prefix = "TASK019_EVIDENCE database_uuid=";
+    let evidence_line = output
+        .lines()
+        .find(|line| line.starts_with(prefix))
+        .ok_or("LATTICE_LIVE_FAULT_STORE_EVIDENCE_REJECTED")?;
+    let (database_uuid, manifest_sha256) = evidence_line
+        .strip_prefix(prefix)
+        .and_then(|value| value.split_once(" manifest_sha256="))
+        .ok_or("LATTICE_LIVE_FAULT_STORE_EVIDENCE_REJECTED")?;
+    if !is_canonical_uuid(database_uuid) || !is_lower_hex(manifest_sha256, 64) {
+        return Err("LATTICE_LIVE_FAULT_STORE_EVIDENCE_REJECTED");
+    }
+    Ok(StoreEvidence {
+        database_uuid: database_uuid.to_owned(),
+        manifest_sha256: manifest_sha256.to_owned(),
+    })
+}
+
+fn is_canonical_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (byte.is_ascii_lowercase() && byte.is_ascii_hexdigit())
+            }
+        })
+}
+
+fn is_lower_hex(value: &str, expected_length: usize) -> bool {
+    value.len() == expected_length
+        && value.bytes().all(|byte| {
+            byte.is_ascii_digit() || (byte.is_ascii_lowercase() && byte.is_ascii_hexdigit())
+        })
 }
 
 fn preserve_diagnostic(root: &Path, phase: &str, output: &std::process::Output) {
@@ -281,7 +444,11 @@ mod tests {
     #[test]
     fn rejects_arguments_before_any_live_preflight() {
         assert_eq!(
-            run(vec![OsString::from("unexpected")], Some("1".to_owned())),
+            run(
+                vec![OsString::from("unexpected")],
+                Some("1".to_owned()),
+                None,
+            ),
             Err("LATTICE_LIVE_FAULT_ARGUMENTS_REJECTED")
         );
     }
@@ -289,11 +456,11 @@ mod tests {
     #[test]
     fn requires_an_explicit_live_opt_in() {
         assert_eq!(
-            run(Vec::new(), None),
+            run(Vec::new(), None, None),
             Err("LATTICE_LIVE_FAULT_OPT_IN_REQUIRED")
         );
         assert_eq!(
-            run(Vec::new(), Some("yes".to_owned())),
+            run(Vec::new(), Some("yes".to_owned()), None),
             Err("LATTICE_LIVE_FAULT_OPT_IN_REQUIRED")
         );
     }
