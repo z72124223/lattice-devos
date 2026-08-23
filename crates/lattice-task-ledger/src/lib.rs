@@ -242,6 +242,8 @@ ledger_identifier!(EffectClaimId, "effect_claim_id");
 pub enum LedgerEventKind {
     /// The immutable task subject was accepted.
     TaskCreated,
+    /// One immutable, verified successor ingress-profile handoff was recorded.
+    IngressReceiptHandoff,
     /// A separately validated Task Domain transition was recorded.
     StateTransition,
     /// A pure Policy decision was recorded.
@@ -262,6 +264,7 @@ impl LedgerEventKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::TaskCreated => "TASK_CREATED",
+            Self::IngressReceiptHandoff => "INGRESS_RECEIPT_HANDOFF",
             Self::StateTransition => "STATE_TRANSITION",
             Self::PolicyDecision => "POLICY_DECISION",
             Self::ResourceSnapshot => "RESOURCE_SNAPSHOT",
@@ -279,6 +282,7 @@ impl LedgerEventKind {
     pub fn parse(value: &str) -> Result<Self, LedgerError> {
         match value {
             "TASK_CREATED" => Ok(Self::TaskCreated),
+            "INGRESS_RECEIPT_HANDOFF" => Ok(Self::IngressReceiptHandoff),
             "STATE_TRANSITION" => Ok(Self::StateTransition),
             "POLICY_DECISION" => Ok(Self::PolicyDecision),
             "RESOURCE_SNAPSHOT" => Ok(Self::ResourceSnapshot),
@@ -432,6 +436,9 @@ impl AppendCommand {
     ) -> Result<Self, LedgerError> {
         let occurred_at = occurred_at.into();
         validate_utc_timestamp(&occurred_at)?;
+        if kind == LedgerEventKind::IngressReceiptHandoff {
+            return Err(LedgerError::InvalidDiagnostic);
+        }
         let resource_shape = matches!(kind, LedgerEventKind::ResourceSnapshot);
         if resource_shape != resource_snapshot.is_some() {
             return Err(LedgerError::InvalidResourceSnapshot);
@@ -449,6 +456,33 @@ impl AppendCommand {
             subject_digest,
             diagnostic,
             resource_snapshot,
+        })
+    }
+
+    /// Constructs the only closed successor-ingress handoff event.
+    pub fn new_ingress_receipt_handoff(
+        expected_head: TaskLedgerStreamHead,
+        command_id: CommandId,
+        correlation_id: CorrelationId,
+        occurred_at: impl Into<String>,
+        actor_id: ActorId,
+        subject_digest: ContentDigest,
+    ) -> Result<Self, LedgerError> {
+        let occurred_at = occurred_at.into();
+        validate_utc_timestamp(&occurred_at)?;
+        Ok(Self {
+            expected_head,
+            command_id,
+            correlation_id,
+            occurred_at,
+            kind: LedgerEventKind::IngressReceiptHandoff,
+            actor_id,
+            action: ActionId::new("HANDOFF_INGRESS_RECEIPT_V1")?,
+            outcome: LedgerOutcome::Recorded,
+            reason_code: ReasonCode::new("INGRESS_RECEIPT_HANDOFF_RECORDED")?,
+            subject_digest,
+            diagnostic: None,
+            resource_snapshot: None,
         })
     }
 
@@ -2094,12 +2128,31 @@ fn command_from_untrusted_request(
     if raw.schema_version != LEDGER_SCHEMA_VERSION {
         return Err(LedgerError::UnknownRequestVersion);
     }
+    let kind = LedgerEventKind::parse(&raw.kind)?;
+    if kind == LedgerEventKind::IngressReceiptHandoff {
+        if raw.action != "HANDOFF_INGRESS_RECEIPT_V1"
+            || raw.outcome != "RECORDED"
+            || raw.reason_code != "INGRESS_RECEIPT_HANDOFF_RECORDED"
+            || raw.diagnostic.is_some()
+            || raw.resource_snapshot.is_some()
+        {
+            return Err(LedgerError::InvalidDiagnostic);
+        }
+        return AppendCommand::new_ingress_receipt_handoff(
+            raw.expected_head.clone(),
+            CommandId::new(raw.command_id.clone())?,
+            CorrelationId::new(raw.correlation_id.clone())?,
+            raw.occurred_at.clone(),
+            ActorId::new(raw.actor_id.clone())?,
+            raw.subject_digest.clone(),
+        );
+    }
     AppendCommand::new(
         raw.expected_head.clone(),
         CommandId::new(raw.command_id.clone())?,
         CorrelationId::new(raw.correlation_id.clone())?,
         raw.occurred_at.clone(),
-        LedgerEventKind::parse(&raw.kind)?,
+        kind,
         ActorId::new(raw.actor_id.clone())?,
         ActionId::new(raw.action.clone())?,
         LedgerOutcome::parse(&raw.outcome)?,
