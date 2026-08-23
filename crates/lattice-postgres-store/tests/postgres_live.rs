@@ -588,6 +588,10 @@ fn run_initial_phase(config: &LiveConfig) {
     prove_task038_task_created_jsonb_round_trip(config, &base);
     println!("STORE_TASK021_STAGE_09_XMIN_PROVENANCE");
     prove_task021_transaction_provenance_primitive(config, &base);
+    // Later isolated fixtures intentionally narrow database CONNECT grants to
+    // their own target. Restore the base target's exact grants before its
+    // durable evidence is handed to the fresh-process restart verifier.
+    set_exact_database_access(&mut admin, base.database_name());
     println!(
         "TASK019_EVIDENCE database_uuid={} manifest_sha256={}",
         evidence.database_uuid(),
