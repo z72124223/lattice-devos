@@ -1,10 +1,10 @@
 ---
 module_id: task-domain
 name: Task Domain
-version: 2.2
+version: 2.3
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-21
 ---
 
 ## Mission
@@ -30,6 +30,9 @@ transitions so every LATTICE component uses the same workflow language.
 - V2 Task Spec field validation and normalized immutable field ownership.
 - V2 task state/transition rules plus explicit read-only V1 transition
   compatibility.
+- Closed Task Reflection vocabulary for an independent append-only projection:
+  `REFLECTION_PENDING`, `REFLECTION_FAILED`, `RETRY_PENDING`, `DEGRADED`,
+  failure kinds, and candidate kinds.
 - Task dependency DAG semantics and stable cycle evidence.
 - Selection of fields and schema domain used for Task Spec `spec_hash`.
 - The complete normalized canonical subject and canonical Task Spec 2.1
@@ -54,6 +57,10 @@ data.
   incomplete hash carrier.
 - Validate V2 transitions and expose the frozen V1 transition matrix only as
   compatibility evidence.
+- Export closed Reflection state/failure/candidate enums and deterministic
+  event-to-state projection helpers. These values describe a replayed
+  Reflection projection only; they do not authorize queueing, claiming,
+  candidate persistence, retry, degradation, or any core Task transition.
 - Detect unknown dependencies and cyclic task graphs with stable cycle paths.
 
 ## Invariants
@@ -79,6 +86,11 @@ data.
     recomputing the frozen hash domain yields the owned `spec_hash`.
 11. A Gateway, template, adapter, or persistence layer cannot supply a reduced
     canonical document and call it Task Spec 2.1 domain evidence.
+12. Reflection vocabulary is independent from core Task lifecycle states.
+    Reflection appends cannot rewrite `TaskState::Completed`, result digest, or
+    the verified core-head commitment.
+13. Reflection queue/admission/claim/candidate/failure events are not Task
+    `STATE_TRANSITION` events and cannot revive a failed core Task.
 
 ## Allowed Dependencies
 
@@ -105,6 +117,11 @@ Version 2.2 adds only the public complete canonical subject/document carrier
 for an already validated Task Spec 2.1. It changes no schema field,
 normalization, hash domain, transition, dependency, or I/O boundary.
 
+Version 2.3 adds only closed Reflection vocabulary and pure projection helpers
+for GH-9's known-Task Reflection lane. It adds no persistence, ports, scheduler,
+Hermes execution, database access, transition rule, Task Spec field, hash
+subject change, or workflow authority.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -113,6 +130,7 @@ normalization, hash domain, transition, dependency, or I/O boundary.
 | V1/V2 transitions | complete frozen matrices and stable error tests | Engineering | yes |
 | Hash stability | canonical-byte fixtures and immutable-field mutation matrix | Engineering | yes |
 | Canonical document | byte-stable document equals the complete subject and recomputes the owned spec hash; reduced/alternate carriers fail comparison | Security review | yes |
+| Reflection vocabulary | focused tests prove closed states, event projection, terminal failed-core read-only history, and no core-state rewrite | Engineering | yes |
 | Dependency graph | acyclic/unknown/cycle fixtures with stable evidence | Engineering | yes |
 | No-I/O/dependencies | Cargo metadata and forbidden-reference scan | Architecture review | yes |
 | Full verification | Rust workspace plus preserved Node suite | Engineering | yes |
@@ -131,3 +149,4 @@ update, architecture review, and explicit responsible-user authorization.
 | 2.0 | 2026-07-29 | SPEC-002 v4, ADR-004/005, approved V2 amendment, TASK-010 | Rust Task Spec V2, V1 transition compatibility, and separated canonical mechanism | User execution directive |
 | 2.1 | 2026-07-29 | SPEC-002 v6, ADR-008/009, TASK-011 review RED | Immutable external-cost accounting currency added to Task Spec hash | User MVP-3 execution directive |
 | 2.2 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Export the complete normalized canonical subject/document from the validated Task Spec so every boundary uses one hash carrier | User TASK-038-first direction |
+| 2.3 | 2026-08-21 | SPEC-003 v5, ADR-024, GH-9 | Add closed Reflection projection vocabulary for the known-Task append-only Reflection lane without changing core Task transitions | User GH-9 delegation |

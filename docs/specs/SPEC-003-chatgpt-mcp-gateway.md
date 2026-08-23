@@ -1,14 +1,14 @@
 ---
 spec_id: SPEC-003
 status: ready
-version: 4
+version: 5
 modules:
   - module_id: latticed
-    constitution_version: 1.4
+    constitution_version: 1.5
   - module_id: lattice-contracts
     constitution_version: 1.12
   - module_id: lattice-ports
-    constitution_version: 1.8
+    constitution_version: 1.9
   - module_id: orchestrator-runtime
     constitution_version: 2.3
   - module_id: writer-lease
@@ -20,7 +20,7 @@ modules:
   - module_id: codex-adapter
     constitution_version: 1.2
   - module_id: task-domain
-    constitution_version: 2.2
+    constitution_version: 2.3
 ---
 
 # ChatGPT MCP Gateway
@@ -41,6 +41,28 @@ ordering. It must not forge a live Project Registry authority merely to claim
 that the broader Policy composition already exists.
 
 ## Intended Behavior
+
+### GH-9 Reflection Projection
+
+After a durable core Task reaches `COMPLETED`, LATTICE may record Reflection as
+an independent append-only projection over the same verified Task Ledger
+stream. Reflection appends never use `STATE_TRANSITION` and cannot rewrite the
+core Task state, result digest, or core-head digest. The full journal head may
+advance as Reflection events are appended.
+
+The first GH-9 slice is a known-Task lane only. A bounded caller must already
+hold the exact Task binding and call typed ports explicitly. There is no MCP
+Reflection tool, global pending scanner, `claim_next`, unattended worker,
+automatic Hermes caller, or new physical PostgreSQL migration.
+
+Hermes-facing history is bounded, typed, digest-only, and keyset-paged. The
+page digest binds cursor, limit, returned events, next cursor, exact core
+anchor, and current journal head. Candidate append must replay and match that
+page before accepting the candidate digest.
+
+Direct `TASK_FAILURE` and fixed-verifier `OUTPUT_REJECTED` records on a failed
+core are terminal read-only Reflection history; this slice cannot claim, retry,
+degrade, append a candidate, or revive that core Task.
 
 ### Phase 1 Compatibility
 
@@ -209,19 +231,21 @@ projection without rerunning external effects.
 
 ## Module Impact
 
-- `latticed` 1.4: the canonical public tool list expands from two to four; both task tools
-  map into the existing `FullChainService` / Orchestrator composition under
-  one fixed server actor.
+- `latticed` 1.5: the canonical public tool list remains the existing four tools;
+  the known-Task Reflection lane does not add or expand an MCP tool. Existing task tools
+  remain mapped into the `FullChainService` / Orchestrator composition under one fixed server actor.
   Its Task lifecycle edge wrapper implements `TaskLifecyclePort` over the
   existing `PostgresTaskLedger` public append/replay API without owning Task
   Domain legality or Ledger semantics.
 - `lattice-contracts` 1.12: adds closed controlled-task/fixed-profile values and
   unified Task-Spec/lease/fence writer/status binding.
-- `lattice-ports` 1.8: adds a neutral `TaskLifecyclePort`, the explicit one-way
-  Task Domain 2.2 `TaskState` dependency, and lease-bound sole-writer request
-  without concrete I/O types.
-- Task Domain 2.2: exports the complete normalized Task Spec 2.1 canonical
-  subject/document so every boundary uses the domain-owned hash carrier.
+- `lattice-ports` 1.9: adds a neutral `TaskLifecyclePort`, the explicit one-way
+  Task Domain 2.3 `TaskState` dependency, lease-bound sole-writer request, and
+  bounded known-Task Reflection queue/history/candidate traits without concrete
+  I/O types.
+- Task Domain 2.3: exports the complete normalized Task Spec 2.1 canonical
+  subject/document and closed Reflection vocabulary so every boundary uses the
+  domain-owned hash carrier and state language.
 - `orchestrator-runtime` 2.3: owns bounded Submit/Status and exact admission/lease/
   writer/verification/Git/durable-status order.
 - `writer-lease` 1.1: owns canonical snapshot/checkpoint bytes and the sole

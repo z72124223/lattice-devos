@@ -1,10 +1,10 @@
 ---
 module_id: lattice-ports
 name: LATTICE I/O Ports
-version: 1.8
+version: 1.9
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-21
 ---
 
 ## Mission
@@ -31,6 +31,11 @@ lane, fixed-test lane, and authoritative Task lifecycle repository lane.
 - Bounded `TaskLifecycleError` and replay-derived `TaskLifecycleEvidence`
   transport values. Task Domain remains the semantic owner of `TaskState` and
   transition legality.
+- Bounded `TaskReflectionError`, `TaskReflectionEvidence`, authorized
+  digest-only Reflection history pages, known-Task queue/claim/failure/retry/
+  degraded operations, and Hermes-facing history/candidate traits. Task Domain
+  remains the semantic owner of `ReflectionState` and closed Reflection
+  vocabulary.
 - No runtime, durable, product, credential, or provider-session data.
 
 ## Public Contracts
@@ -62,6 +67,17 @@ lane, fixed-test lane, and authoritative Task lifecycle repository lane.
   replay-derived authoritative lifecycle projection. It exposes no SQL,
   database client, event fragment, arbitrary payload, cache, or alternate state
   mutation, and it does not decide transition legality.
+- `TaskReflectionQueuePort` exposes only explicit known-Task Reflection
+  admission, claim, failure, retry, degraded, and load operations. It does not
+  discover tasks, select the next task, invoke Codex, verification, Git,
+  Graphify, Hermes, Memory, a scheduler, or a process.
+- `HermesTaskReflectionHistoryPort` exposes only bounded typed history pages
+  whose digest commits the query, returned events, next cursor, exact core
+  anchor, and journal head.
+- `HermesTaskReflectionCandidatePort` accepts only a digest-bound candidate
+  append for the exact history page it replays. It exposes no SQL, database
+  client, path, prompt, stderr, credential, update, delete, or core-transition
+  operation.
 - `WorkspaceGitPort` prepares/inspects the preconfigured bounded workspace and
   creates a local commit only from typed passing scope/test evidence. It
   exposes no arbitrary command or caller-selected path.
@@ -79,9 +95,10 @@ lane, fixed-test lane, and authoritative Task lifecycle repository lane.
 
 ## Invariants
 
-1. This crate depends only on `lattice-contracts` and Task Domain 2.2. The Task
+1. This crate depends only on `lattice-contracts` and Task Domain 2.3. The Task
    Domain dependency is limited to the closed `TaskState` value used by
-   `TaskLifecyclePort`; no validation/planning implementation enters Ports.
+   `TaskLifecyclePort` and closed Reflection vocabulary used by Reflection
+   ports; no validation/planning implementation enters Ports.
 2. OpenClaw is an inbound gateway client, never a second control core or an
    outbound provider selected by orchestration.
 3. Traits expose no concrete database, filesystem, or process type.
@@ -126,12 +143,18 @@ lane, fixed-test lane, and authoritative Task lifecycle repository lane.
     verification command, writer lease, fencing token, or Codex thread.
 19. Writer Lease repository semantics/traits remain owned by Writer Lease 1.1;
     this crate neither duplicates nor wraps them into a second authority.
+20. Reflection ports are independent projections over the same verified
+    append-only stream. They cannot advance the core Task state, overwrite the
+    core result, mutate original events, or become a second durable truth.
+21. Authorized history is keyset-bounded and digest-only. A stale page digest,
+    invalid cursor, zero/oversized limit, or mismatched core/journal anchor is
+    rejected before candidate append.
 
 ## Allowed Dependencies
 
 - `lattice-contracts`.
-- `lattice-task-domain` 2.2 only for the closed `TaskState` representation in
-  Task lifecycle request/evidence signatures.
+- `lattice-task-domain` 2.3 only for the closed `TaskState` representation in
+  Task lifecycle request/evidence signatures and closed Reflection vocabulary.
 - Rust standard library.
 
 ## Forbidden Dependencies
@@ -169,6 +192,11 @@ closed `TaskState` value. It adds no database, domain transition implementation,
 lease, process, filesystem, Git, MCP, actor-authentication, or workflow
 implementation.
 
+Version 1.9 adds GH-9 Reflection repository and Hermes-facing traits for one
+known Task. It adds no concrete adapter, no scheduler, no `claim_next`, no MCP
+tool, no Hermes execution, no SQL/database type, no raw payload surface, and no
+core-transition authority.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -177,6 +205,7 @@ implementation.
 | Store error/trait shape | complete transaction/current-head compile and failure matrix | Security review | yes |
 | Delivery effect traits | compile-time lane separation plus intent/outcome, fixed-test, scope-before-commit, and unknown-outcome matrices | Engineering | yes |
 | Task lifecycle trait | compile-time exact admit/transition/result/load separation, typed failure/replay evidence, and no raw event/SQL/cache surface | Engineering | yes |
+| Reflection traits | compile-time queue/history/candidate separation, bounded page digest tests, stale-page rejection, terminal failed-core denial, and no raw event/SQL/Hermes surface | Engineering | yes |
 | Lease-bound writer | complete spec/intent/workspace/lease/fence mutation matrix and generic-writer non-wiring proof | Security review | yes |
 | Dependency direction | Cargo metadata proves only Contracts plus Task Domain's closed `TaskState`, with no adapter/orchestrator/I/O dependency | Architecture review | yes |
 | Full Rust verification | workspace format, lint, and tests | Engineering | yes |
@@ -200,3 +229,4 @@ approval.
 | 1.6 | 2026-08-05 | SPEC-002 v26, ADR-021 clarification, TASK-032 | Record the approved typed `DeliveryCodexPort` specialization; freeze generic `CodexPort` outside the production delivery composition | User approval of typed delivery contracts/ports in preceding implementation window |
 | 1.7 | 2026-08-05 | SPEC-002 v26, ADR-022, TASK-033 | Add exact snapshot, Graphify analysis, PostgreSQL Memory, and retrieval ports while retaining contracts-only dependencies | User TASK-033 direction |
 | 1.8 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Add neutral Task lifecycle operations, an explicit Task Domain `TaskState` dependency, and lease-bound sole-writer requests for bounded MCP Submit/Status | User TASK-038-first direction |
+| 1.9 | 2026-08-21 | SPEC-003 v5, ADR-024, GH-9 | Add bounded known-Task Reflection queue/history/candidate traits without concrete I/O or core-transition authority | User GH-9 delegation |

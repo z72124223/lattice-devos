@@ -65,6 +65,40 @@ fn connect_as(database: &str, role: &str) -> Client {
     client
 }
 
+fn activate_gh9_live_admission(database: &str) {
+    let port = required_environment("LATTICE_TASK019_PORT")
+        .parse::<u16>()
+        .expect("port");
+    let host = required_environment("LATTICE_TASK019_HOST");
+    let password = required_environment("LATTICE_TASK019_PASSWORD");
+    let mut config = Config::new();
+    config
+        .host(&host)
+        .port(port)
+        .user("task019_harness")
+        .password(password)
+        .dbname(database)
+        .application_name(APPLICATION_NAME)
+        .ssl_mode(SslMode::Disable);
+    let mut client = config.connect(NoTls).expect("GH9 live fixture connection");
+    let updated = client
+        .execute(
+            "UPDATE ONLY control.runtime_admission \
+             SET admission_mode = 'ACTIVE', daemon_instance_id = 'daemon-live-1', \
+                 daemon_epoch = 7, authority_revision = 3, \
+                 observation_digest = decode(repeat('aa', 32), 'hex'), \
+                 authority_head_digest = decode(repeat('bb', 32), 'hex'), \
+                 updated_at = clock_timestamp() \
+             WHERE singleton = true AND admission_mode = 'STOPPED' \
+               AND daemon_instance_id IS NULL AND daemon_epoch IS NULL \
+               AND authority_revision = 0 AND observation_digest IS NULL \
+               AND authority_head_digest IS NULL",
+            &[],
+        )
+        .expect("GH9 live admission fixture");
+    assert_eq!(updated, 1, "GH9 live admission fixture missing");
+}
+
 fn store_authority() -> StoreAuthorityHead {
     StoreAuthorityHead::new(
         RuntimeKind::Live,
@@ -174,7 +208,7 @@ fn gh9_binding() -> SubjectBinding {
     SubjectBinding::new(
         ProjectId::new("gh9-reflection-evolution").expect("project"),
         ProjectSnapshotId::new("gh9-reflection-snapshot").expect("snapshot"),
-        TaskId::new("GH-9-REFLECTION-EVOLUTION").expect("task"),
+        TaskId::new("TASK-GH9-REFLECTION-EVOLUTION").expect("task"),
         "1",
         digest('d'),
     )
@@ -250,6 +284,7 @@ fn reflection_core_and_journal_replay_across_postgres_restart_when_provisioned()
     let failure_digest = digest('f');
 
     if phase == "initial" {
+        activate_gh9_live_admission(&database);
         let runtime = connect_as(&database, "lattice_runtime");
         let mut ledger = PostgresTaskLedger::new(runtime, &migration_target).expect("ledger");
         let vacant = ledger.load_stream(identity.clone()).expect("vacant stream");

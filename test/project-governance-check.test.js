@@ -155,3 +155,28 @@ test("project check accepts unique tickets and one current-task marker", async (
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /check=ok/u);
 });
+
+test("project check accepts github issue tickets outside the current-task marker", async () => {
+  const result = await runFixture({
+    tickets: [
+      ["one.md", "TASK-017"],
+      ["gh-nine.md", "GH-9"],
+    ],
+    plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /check=ok/u);
+});
+
+test("project check rejects non-canonical github issue ticket IDs", async () => {
+  for (const ticketId of ["GH-0", "GH-09"]) {
+    const result = await runFixture({
+      tickets: [["one.md", ticketId]],
+      plans: "**CURRENT TASK-017 IMPLEMENTATION:** fixture\n",
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /expected exactly one TASK-nnn or GH-n ticket_id/u);
+  }
+});

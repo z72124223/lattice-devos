@@ -3,6 +3,7 @@ param(
     [switch]$RunLatticeDeliveryHook,
     [switch]$RunFullChainAcceptanceHook,
     [switch]$RunTask038AcceptanceHook,
+    [switch]$RunGh9ReflectionHook,
     [string]$Task038OfficialCodexExecutable,
     [string]$Task038CodexAuthHome,
     [switch]$MemoryOnly
@@ -39,7 +40,8 @@ $environmentNames = @(
     'LATTICE_STORE_PROFILE_LIVE',
     'LATTICE_STORE_PROFILE_EXPECTED',
     'LATTICE_STORE_PROFILE_RUNTIME_URL',
-    'LATTICE_STORE_PROFILE_MIGRATOR_URL'
+    'LATTICE_STORE_PROFILE_MIGRATOR_URL',
+    'LATTICE_GH9_REFLECTION_LIVE'
 )
 
 function Get-CanonicalPath {
@@ -208,6 +210,19 @@ function Test-StoreProfileLiveGateOutput {
     )
 }
 
+function Test-Gh9ReflectionLiveGateOutput {
+    param(
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [Parameter(Mandatory = $true)][object[]]$Output,
+        [Parameter(Mandatory = $true)][string]$ExpectedMarker
+    )
+
+    $text = @($Output | ForEach-Object { [string]$_ }) -join "`n"
+    $markerPresent = $text -match "(?m)^(?:test [^\r\n]+? \.\.\. )?$([regex]::Escape($ExpectedMarker))[ \t]*$"
+    $skipPresent = $text -match '(?m)(?:^|[^\S\r\n])SKIP:'
+    return ($ExitCode -eq 0 -and $markerPresent -and -not $skipPresent)
+}
+
 function Get-StoreProfileForLiveSuitePhase {
     param(
         [Parameter(Mandatory = $true)][string]$Phase,
@@ -258,6 +273,25 @@ function Invoke-HarnessSelfTest {
         $null -ne (Get-StoreProfileForLiveSuitePhase -Phase 'initial' -SuiteName 'unknown')
     ) {
         throw 'TASK019_STORE_PROFILE_PHASE_MAPPING_SELF_TEST_REJECTED'
+    }
+    $gh9Marker = 'GH9_REFLECTION_INITIAL_OK core=COMPLETED reflection=REFLECTION_FAILED events=4'
+    foreach ($accepted in @(
+        @($gh9Marker),
+        @("test reflection_core_and_journal_replay_across_postgres_restart_when_provisioned ... $gh9Marker")
+    )) {
+        if (-not (Test-Gh9ReflectionLiveGateOutput -ExitCode 0 -Output $accepted -ExpectedMarker $gh9Marker)) {
+            throw 'GH9_REFLECTION_OUTPUT_SELF_TEST_REJECTED_PASS'
+        }
+    }
+    foreach ($rejected in @(
+        [pscustomobject]@{ ExitCode = 1; Output = @($gh9Marker) },
+        [pscustomobject]@{ ExitCode = 0; Output = @("prefix $gh9Marker") },
+        [pscustomobject]@{ ExitCode = 0; Output = @("$gh9Marker suffix") },
+        [pscustomobject]@{ ExitCode = 0; Output = @('SKIP: GH9 disabled', $gh9Marker) }
+    )) {
+        if (Test-Gh9ReflectionLiveGateOutput -ExitCode $rejected.ExitCode -Output $rejected.Output -ExpectedMarker $gh9Marker) {
+            throw 'GH9_REFLECTION_OUTPUT_SELF_TEST_ACCEPTED_REJECTION'
+        }
     }
     Write-Output 'TASK019_HARNESS_SELF_TEST=PASS'
 }
@@ -477,7 +511,11 @@ function Invoke-LiveTest {
     )
 
     $testOutput = @()
-    $liveSuites = if ($MemoryOnly -and $Phase -eq 'restart') {
+    # GH-9 owns the Reflection stream in the disposable base database.  Its
+    # restart proof therefore starts from the harness's minimal, marker-owned
+    # foundation instead of the unrelated Store mutation suite.
+    $runMemoryOnly = $MemoryOnly -or $RunGh9ReflectionHook
+    $liveSuites = if ($runMemoryOnly -and $Phase -eq 'restart') {
         @([pscustomobject]@{ Name = 'memory'; Package = 'lattice-postgres-codebase-memory' })
     }
     else {
@@ -487,7 +525,7 @@ function Invoke-LiveTest {
         )
     }
     foreach ($suite in $liveSuites) {
-        $suitePhase = if ($MemoryOnly -and $suite.Name -eq 'store') {
+        $suitePhase = if ($runMemoryOnly -and $suite.Name -eq 'store') {
             'memory_setup'
         }
         else {
@@ -567,6 +605,81 @@ function Invoke-LiveTest {
     }
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_PHASE', $Phase, 'Process')
     return ,$testOutput
+}
+
+function Invoke-Gh9ReflectionLiveGate {
+    param(
+        [Parameter(Mandatory = $true)][string]$Cargo,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$Phase
+    )
+
+    $expectedMarker = if ($Phase -eq 'initial') {
+        'GH9_REFLECTION_INITIAL_OK core=COMPLETED reflection=REFLECTION_FAILED events=4'
+    }
+    elseif ($Phase -eq 'restart') {
+        'GH9_REFLECTION_RESTART_OK core=COMPLETED reflection=REFLECTION_FAILED events=4'
+    }
+    else {
+        throw 'GH9_REFLECTION_PHASE_REJECTED'
+    }
+
+    $originalGh9 = [Environment]::GetEnvironmentVariable('LATTICE_GH9_REFLECTION_LIVE', 'Process')
+    $stdoutPath = Join-Path $clusterRoot ".cargo-gh9-$Phase-stdout.log"
+    $stderrPath = Join-Path $clusterRoot ".cargo-gh9-$Phase-stderr.log"
+    $process = $null
+    $testExitCode = $null
+    $testOutput = @()
+    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+    try {
+        [Environment]::SetEnvironmentVariable('LATTICE_GH9_REFLECTION_LIVE', '1', 'Process')
+        $process = Start-Process -FilePath $Cargo -ArgumentList @(
+            'test',
+            '-p', 'lattice-runtime',
+            '--test', 'task_control',
+            '--locked',
+            'reflection_core_and_journal_replay_across_postgres_restart_when_provisioned',
+            '--',
+            '--nocapture',
+            '--test-threads=1'
+        ) -WorkingDirectory $RepositoryRoot -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru
+        $null = $process.Handle
+        $process.WaitForExit()
+        $testExitCode = $process.ExitCode
+        if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+            $testOutput += @(Get-Content -LiteralPath $stdoutPath -Encoding utf8)
+        }
+        if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+            $testOutput += @(Get-Content -LiteralPath $stderrPath -Encoding utf8)
+        }
+    }
+    finally {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+        [Environment]::SetEnvironmentVariable('LATTICE_GH9_REFLECTION_LIVE', $originalGh9, 'Process')
+        foreach ($path in @($stdoutPath, $stderrPath)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $path) {
+                throw 'GH9_REFLECTION_CARGO_OUTPUT_DELETE_FAILED'
+            }
+        }
+    }
+
+    if (-not (Test-Gh9ReflectionLiveGateOutput -ExitCode $testExitCode -Output $testOutput -ExpectedMarker $expectedMarker)) {
+        $safeTokens = @($testOutput | ForEach-Object {
+            foreach ($match in [regex]::Matches(
+                [string]$_,
+                '(?<![A-Z0-9_])(?:GH9|LATTICE|TASK019|TASK_LEDGER|POSTGRES|REFLECTION)_[A-Z0-9_]{1,63}(?![A-Z0-9_])'
+            )) {
+                $match.Value
+            }
+        })
+        $safeSummary = if ($safeTokens.Count -eq 0) { 'none' } else { (@($safeTokens | Sort-Object -Unique) -join '|') }
+        throw "GH9_REFLECTION_LIVE_GATE_REJECTED_$($Phase.ToUpperInvariant()): exit=$testExitCode marker=$markerPresent skip=$skipPresent diagnostics=$safeSummary"
+    }
 }
 
 function Get-RestartEvidence {
@@ -799,7 +912,7 @@ $deliveryHookPath = $null
 $fullChainHookPath = $null
 $task038HookPath = $null
 
-$selectedHookCount = @($RunLatticeDeliveryHook, $RunFullChainAcceptanceHook, $RunTask038AcceptanceHook) |
+$selectedHookCount = @($RunLatticeDeliveryHook, $RunFullChainAcceptanceHook, $RunTask038AcceptanceHook, $RunGh9ReflectionHook) |
     Where-Object { [bool]$_ }
 if (@($selectedHookCount).Count -gt 1) {
     throw 'TASK019_HOOK_MODE_REJECTED'
@@ -914,6 +1027,9 @@ try {
     ) -Operation 'PostgreSQL test-cluster start'
     Set-HarnessEnvironment -Phase 'initial' -HostName '127.0.0.1' -Port $port -Password $oneTimePassword -RunId $runId
     $initialOutput = Invoke-LiveTest -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'initial'
+    if ($RunGh9ReflectionHook) {
+        Invoke-Gh9ReflectionLiveGate -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'initial'
+    }
     $restartEvidence = Get-RestartEvidence -TestOutput $initialOutput
 
     if (-not (Stop-TestCluster -PgCtl $pgCtl -DataDirectory $dataDirectory)) {
@@ -935,6 +1051,9 @@ try {
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_UUID', $restartEvidence.DatabaseId, 'Process')
     [Environment]::SetEnvironmentVariable('LATTICE_TASK019_EXPECTED_MANIFEST', $restartEvidence.ManifestHash, 'Process')
     $null = Invoke-LiveTest -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'restart'
+    if ($RunGh9ReflectionHook) {
+        Invoke-Gh9ReflectionLiveGate -Cargo $cargoCommand.Source -RepositoryRoot $repositoryRoot -Phase 'restart'
+    }
 
     if ($RunLatticeDeliveryHook) {
         $deliveryHookPath = Get-LatticeDeliveryHookPath -ScriptDirectory $PSScriptRoot -RepositoryRoot $repositoryRoot

@@ -126,9 +126,9 @@ for (const file of ticketFiles) {
     content.startsWith("---\n") && frontmatterEnd >= 0
       ? content.slice(4, frontmatterEnd)
       : "";
-  const matches = [...frontmatter.matchAll(/^ticket_id:\s*(TASK-[0-9]{3})\s*$/gmu)];
+  const matches = [...frontmatter.matchAll(/^ticket_id:\s*((?:TASK-[0-9]{3})|(?:GH-[1-9][0-9]*))\s*$/gmu)];
   if (matches.length !== 1) {
-    errors.push(`${relative(file)}: expected exactly one TASK-nnn ticket_id.`);
+    errors.push(`${relative(file)}: expected exactly one TASK-nnn or GH-n ticket_id.`);
     continue;
   }
   const ticketId = matches[0][1];

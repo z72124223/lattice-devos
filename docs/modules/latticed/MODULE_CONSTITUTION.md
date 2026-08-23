@@ -1,10 +1,10 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 1.4
+version: 1.5
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-08-21
 ---
 
 ## Mission
@@ -38,7 +38,7 @@ Orchestrator composition.
 
 ## Public Contracts
 
-- Construct one Orchestrator 2.3 instance with typed Contracts 1.12 / Ports 1.8
+- Construct one Orchestrator 2.3 instance with typed Contracts 1.12 / Ports 1.9
   implementations for the bounded delivery, graph-memory, and task-control
   paths.
 - Through canonical `latticed`, expose exactly four MCP tools: `lattice_delivery_run`,
@@ -102,6 +102,12 @@ Orchestrator composition.
   replayed Writer Lease project with no current authority and the fixed canary
   `1/2/2` fence/transition/command history. `Merging + result` recovery verifies
   active `1/1/1` or released `1/2/2` before any further Task Ledger mutation.
+- Compose GH-9 Reflection operations only as an explicit known-Task lane behind
+  the same PostgreSQL Task Ledger stream. Queue admission, claims, candidates,
+  failures, retries, and degraded receipts append immutable non-transition
+  events and are replayed as a separate projection. `latticed` adds no MCP
+  Reflection tool, no global pending scanner, no `claim_next`, and no automatic
+  Hermes caller in this slice.
 
 ## Invariants
 
@@ -151,10 +157,13 @@ Orchestrator composition.
     Registry currentness and normal Policy composition exist.
 16. Missing, active-at-completion, or physically corrupt Writer Lease history
     cannot be downgraded to a valid terminal Task status or recovery path.
+17. Reflection tails cannot rewrite a completed core projection. Status and
+    live replay must keep the core-head digest separate from the full journal
+    head after Reflection appends.
 
 ## Allowed Dependencies
 
-- `lattice-contracts` 1.12, `lattice-ports` 1.8,
+- `lattice-contracts` 1.12, `lattice-ports` 1.9,
   `orchestrator-runtime` 2.3, and Writer Lease 1.1 public APIs.
 - Concrete Codex, PostgreSQL Task Ledger, bounded workspace/Git, and fixed-test
   adapters required by TASK-032, only for construction and port
@@ -204,6 +213,11 @@ CLI paths from becoming a second official workspace/adapter entry or being
 misrecorded as an MCP tunnel actor. The four canonical `latticed` tools and
 their schemas are unchanged.
 
+Version 1.5 records the GH-9 known-Task Reflection lane implemented in
+`apps/lattice-runtime` task-control code. It does not change MCP tool names or
+schemas, does not start Hermes, does not add a scheduler, and does not make
+Reflection a second workflow truth.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -214,6 +228,7 @@ their schemas are unchanged.
 | One Gateway | both task tools invoke the same `FullChainService` / Orchestrator composition; MCP has no direct database/Codex/Git call path | Architecture review | yes |
 | Fixed identity | process profile supplies the actor/audit binding; tunnel/local commitments cannot substitute; hostile `clientInfo`/arguments grant no authority | Security review | yes |
 | Durable task control | Task creation/idempotency/audit/status replay from PostgreSQL with fresh-process equality | Engineering | yes |
+| Reflection replay | completed core projection plus independent Reflection projection replay from PostgreSQL after physical restart; no repeated external effects | Engineering | yes |
 | Writer authority | real PostgreSQL lease/fencing/current-head evidence; no fake/synthetic production path | Security review | yes |
 | Legacy command isolation | `lattice-runtime delivery-run` accepts only the exact scripted fixture; official Codex and MCP/tunnel provenance fail before effects | Compatibility review | yes |
 | Delivery acceptance | official Codex turn, isolated scope/test/commit, durable outcome and separate restart/status replay | Engineering | yes |
@@ -236,3 +251,4 @@ constitution cannot be weakened merely to excuse implementation drift.
 | 1.2 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Add bounded Task Submit/Status through the same Gateway with a fixed server-owned actor, Task Spec digest unity, PostgreSQL task truth, and real writer lease/fencing | User TASK-038-first direction |
 | 1.3 | 2026-08-10 | SPEC-003 v3, ADR-023 security correction, TASK-038 | Make canonical `latticed` the sole official writer entry and restrict the legacy CLI delivery command to the exact visibly scripted fixture | User TASK-038-first security boundary |
 | 1.4 | 2026-08-10 | SPEC-003 v4, ADR-023 alternate-entry correction, TASK-038 | Restrict alternate `lattice-full-chain` to a read-only delivery observer and reserve all official mutation plus task control for canonical `latticed` | User TASK-038-first One Writer boundary |
+| 1.5 | 2026-08-21 | SPEC-003 v5, ADR-024, GH-9 | Record the explicit known-Task Reflection lane as an independent append-only projection over the same Task Ledger stream | User GH-9 delegation |
