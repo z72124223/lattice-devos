@@ -137,7 +137,7 @@ impl LiveConfig {
             .ssl_mode(SslMode::Disable);
         config
             .connect(NoTls)
-            .unwrap_or_else(|_| panic!("TASK019_LIVE_CONNECT_FAILED"))
+            .unwrap_or_else(|error| panic!("TASK019_LIVE_CONNECT_FAILED:{error}"))
     }
 
     fn role_client(&self, database: &str, role: DatabaseRole, application_name: &str) -> Client {
