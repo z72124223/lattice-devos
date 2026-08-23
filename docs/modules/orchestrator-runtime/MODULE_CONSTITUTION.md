@@ -1,7 +1,7 @@
 ---
 module_id: orchestrator-runtime
 name: Orchestrator and Runtime Port
-version: 2.6
+version: 2.7
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-15
@@ -40,6 +40,9 @@ composition root.
   and Orchestrator does not own the canonical receipt subject or its hashes.
 - Pure coordination projections plus data-only dispatch and archive decisions;
   neither the snapshot nor decision is durable truth or execution authority.
+- Pure evidence-bound autonomy-cycle selection, five challenge records,
+  foreground-yield, and model-escalation recommendations; none are scheduler,
+  provider, or execution authority.
 
 Task Domain owns Task Spec/state legality; Task Ledger/PostgreSQL owns durable
 truth; Policy owns decisions; Gateway IPC owns protocol; Approval Verifier owns
@@ -86,6 +89,10 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
   `READY`, dependency-complete, resource-valid, conflict-free work. Recompute
   after completion registration and recommend `ARCHIVE`/`RETAIN` without
   performing either action.
+- Recommend one bounded autonomy-cycle outcome only from a complete verified
+  snapshot: exactly five safety/value challenges, Luna/low-first routing,
+  evidence-bound escalation, or foreground-task yield. The recommendation
+  cannot invoke a model, schedule work, or mutate durable state.
 
 ## Invariants
 
@@ -139,6 +146,15 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
 22. Dispatch/archive values are data only. They cannot create/control a window
     or process, reserve resources, invoke Codex, mutate files/PostgreSQL, access
     network/credentials, or bypass the governed execution path.
+23. Autonomy-cycle values treat user goals/authorization as authoritative but
+    treat every technical claim as untrusted until a typed current evidence
+    record verifies it. Missing, stale, conflicting, or malformed evidence
+    yields a blocker; it never becomes an assumed fact.
+24. The autonomy-cycle model ladder starts at Luna/low. Higher reasoning or a
+    higher model needs the immediately preceding recorded insufficiency;
+    values never invoke the recommended model or retain an execution claim.
+25. A foreground Codex-task observation yields the autonomy cycle before
+    candidate selection. Resumption requires a new snapshot.
 
 ## Allowed Dependencies
 
@@ -183,6 +199,12 @@ admission and before any task transition or external effect. It removes
 canonical receipt/hash ownership from Orchestrator while preserving the pure
 classifier, dependency direction, and public MCP surface.
 
+Version 2.7 adds the pure SPEC-007 autonomy-cycle decision core. It records
+five bounded safety/value challenges and evidence-bound Luna-to-Terra-to-Sol
+recommendations, while yielding to foreground Codex work. It adds no scheduler,
+daemon, durable record, adapter, MCP surface, model invocation, or task
+authority.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -217,3 +239,4 @@ SPEC/ADR update, architecture review, and responsible-user authorization.
 | 2.4 | 2026-08-12 | Autonomous execution-control user direction | Pure versioned intent classification, safe writer/verification recommendation, and non-durable state receipt | Current user task |
 | 2.5 | 2026-08-13 | TASK-055 | Pure fail-closed work/evidence projection, next-round dispatch, and archive recommendation without I/O or execution authority | Current user task |
 | 2.6 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Gate controlled progression on the Task-Ledger-owned required receipt and retain only the pure autonomy recommendation in Orchestrator | User-approved TASK-050 repair amendment |
+| 2.7 | 2026-08-23 | SPEC-007, TASK-101 | Add pure evidence-bound five-challenge autonomy-cycle selection, model escalation recommendation, and foreground yield without scheduler or execution authority | Current user direction |

@@ -88,11 +88,20 @@ boundaries, complete cleanup, and no unresolved P0-P3 finding. GitHub Actions
 run `31835654240` passed on the exact implementation commit. Draft PR #12
 remains not authorized for merge or Draft promotion.
 
-## Current bounded continuation decision receipt - TASK-099
+## Blocked bounded continuation decision receipt - TASK-099
 
-CURRENT TASK-099 - add an evidence-bound, read-only continuation projection
-to the engineering-status snapshot. It may classify work but cannot create,
-dispatch, mutate, push, merge, deploy, or release anything.
+BLOCKED TASK-099 - implementation is locally verified, but server-owned
+delivery reconciliation remains required. It may not push, archive, or claim
+completion until fresh LATTICE delivery evidence clears the blocker.
+
+## Current bounded autonomy-cycle core - TASK-101
+
+CURRENT TASK-101 - add a pure, evidence-bound autonomy-cycle supervisor decision core.
+It requires five explicit candidate challenges, trusted user goals but
+independently verified technical evidence, Luna/low-first escalation evidence,
+and foreground-Codex-task yield. It has no scheduler, daemon, MCP, model,
+filesystem, network, database, or execution authority; a later separately
+governed slice may compose a durable background runner.
 
 ## Current engineering delivery finisher - TASK-078
 

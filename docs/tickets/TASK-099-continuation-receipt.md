@@ -5,7 +5,7 @@ spec_id: SPEC-006
 spec_version: 1
 module_id: engineering-status-dashboard
 constitution_version: 1.3
-status: in_progress
+status: blocked
 parallel_safe: false
 depends_on: []
 evidence_subjects: [TASK-081]
@@ -33,6 +33,13 @@ allowed_paths:
 Add a closed, read-only continuation projection to each engineering-status
 snapshot so a new AI window can choose one safe next state without treating
 free-text ticket instructions as authority.
+
+## Current blocker
+
+Implementation and local verification are complete on the ticket branch, but
+the LATTICE delivery profile reports `LATTICE_DELIVERY_RECONCILIATION_REQUIRED`.
+No push, archive, or completion claim may proceed until the server-owned
+delivery reconciliation is independently cleared.
 
 ## Verification
 

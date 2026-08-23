@@ -1,6 +1,10 @@
 {
   "schema": "lattice.branch-guide.zh-TW/1.0",
   "branches": {
+    "feature/task-101-autonomy-cycle": {
+      "name": "任務 101：自治迴圈核心",
+      "purpose": "用即時證據挑選可逆小工程，先讓位給新的 Codex 任務，並保留五次安全檢查與模型升級理由。"
+    },
     "feature/task-099-continuation-receipt": {
       "name": "TASK-099 續作判斷收據",
       "purpose": "根據即時證據決定可續作、等待依賴、需要對帳或停止重工。"

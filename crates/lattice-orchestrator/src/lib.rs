@@ -999,11 +999,17 @@ fn outcome_persistence_after_durable_intent(
     ))
 }
 mod autonomy;
+mod autonomy_cycle;
 mod coordination;
 
 pub use autonomy::{
     AutonomyDecision, AutonomyDecisionReason, AutonomyIntent, AutonomyIntentVersion,
     AutonomyReceipt, ModelRecommendation, TaskKind, VerificationRecommendation, classify_autonomy,
+};
+pub use autonomy_cycle::{
+    AutonomyCandidate, AutonomyCycleBlocker, AutonomyCycleDecision, AutonomyCycleInput,
+    CandidateAuthorization, CandidateEvidence, CandidateSafety, CandidateVerification, ModelRoute,
+    ModelShortfall, select_autonomy_cycle,
 };
 pub use coordination::{
     ArchiveDecision, ArchiveDisposition, BlockedWorkItem, CompletionReport, CompletionState,
