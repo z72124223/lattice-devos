@@ -265,7 +265,23 @@ fn run_store_live_phase(
             })
             .ok_or("LATTICE_LIVE_FAULT_STORE_EVIDENCE_REJECTED");
     }
+    verify_store_fault_coverage(&stdout_path)?;
     parse_store_evidence(&stdout_path)
+}
+
+fn verify_store_fault_coverage(path: &Path) -> Result<(), &'static str> {
+    let output =
+        fs::read_to_string(path).map_err(|_| "LATTICE_LIVE_FAULT_STORE_EVIDENCE_REJECTED")?;
+    for marker in [
+        "STORE_TASK021_STAGE_04_COMMIT_RESPONSE_LOSS",
+        "STORE_TASK022_STAGE_03_COMMIT_RESPONSE_LOSS",
+        "STORE_TASK021_STAGE_06_LOCK_TIMEOUT",
+    ] {
+        if !output.lines().any(|line| line == marker) {
+            return Err("LATTICE_LIVE_FAULT_STORE_FAULT_COVERAGE_REJECTED");
+        }
+    }
+    Ok(())
 }
 
 fn parse_store_evidence(path: &Path) -> Result<StoreEvidence, &'static str> {
