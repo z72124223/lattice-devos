@@ -91,13 +91,13 @@ use lattice_postgres_codebase_memory::{
 };
 use lattice_postgres_store::{
     DatabaseRole as StoreDatabaseRole, MigrationTarget as StoreMigrationTarget,
-    PostgresForemanCoordination, PostgresStoreSetupErrorKind, PostgresTaskLedger,
-    PostgresTaskLedgerErrorKind, apply_migrations as apply_store_migrations,
-    verify_postgres_schema as verify_store_schema,
+    PostgresForemanCoordination, PostgresTaskLedger, PostgresTaskLedgerErrorKind,
+    apply_migrations as apply_store_migrations, verify_postgres_schema as verify_store_schema,
 };
 use lattice_postgres_writer_lease::{
-    ExtensionTarget as WriterLeaseExtensionTarget, PostgresWriterLease,
-    apply_extension as apply_postgres_writer_extension,
+    ExtensionSetupErrorKind as WriterExtensionSetupErrorKind,
+    ExtensionTarget as WriterLeaseExtensionTarget, PostgresWriterLease, V3ExtensionTarget,
+    apply_extension as apply_postgres_writer_extension, apply_v3_extension,
     verify_extension as verify_writer_extension,
 };
 use lattice_task_domain::{
@@ -107,7 +107,7 @@ use lattice_task_domain::{
     TaskState,
 };
 use lattice_task_ledger::foreman_coordination_identity;
-use lattice_writer_lease::WriterLeaseAcquireRequest;
+use lattice_writer_lease::{WriterLeaseAcquireRequest, WriterLeaseRepository};
 use postgres::config::SslMode;
 use postgres::{Client, Config, NoTls};
 use serde_json::{Map, Value, json};
@@ -342,6 +342,7 @@ pub enum LatticedErrorKind {
     ForemanReplayCorrupt,
     ForemanReplayUnsupported,
     ForemanReplayUnavailable,
+    ForemanWriterContention,
     WriterLease,
     Transport,
 }
@@ -396,6 +397,7 @@ impl LatticedErrorKind {
             Self::ForemanReplayCorrupt => "FOREMAN_REPLAY_CORRUPT",
             Self::ForemanReplayUnsupported => "FOREMAN_REPLAY_UNSUPPORTED",
             Self::ForemanReplayUnavailable => "FOREMAN_REPLAY_UNAVAILABLE",
+            Self::ForemanWriterContention => "FOREMAN_WRITER_CONTENTION",
             Self::WriterLease => "LATTICE_WRITER_LEASE_REJECTED",
             Self::Transport => "LATTICED_STDIO_REJECTED",
         }
@@ -2064,8 +2066,8 @@ fn delivery_environment_for_mode(
     ))
 }
 
-/// Installs and verifies the same-database Graphify and Writer Lease extensions
-/// required by the local Runtime. The durable Store remains the only authority.
+/// Performs the only product migration path: Store v5 foundation, Memory v3,
+/// Writer v2/v3 bridge, then Store v6/rebind and fresh-runtime replay proof.
 ///
 /// The command temporarily closes Runtime admission while it holds the extension
 /// migration locks, then restores the configured Runtime authority. A failed setup
@@ -2073,50 +2075,84 @@ fn delivery_environment_for_mode(
 pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedError> {
     let (_config, database, password) =
         delivery_environment_for_mode(FullChainRunMode::ResumeExisting)?;
-    let submission = fixed_gateway_submission()?;
     let authority = configured_store_authority()?;
     let configured_admission = RuntimeAdmissionSnapshot::from_authority(&authority)?;
-    let mut foundation_probe = PostgresTaskLifecycle::connect(
-        &database,
-        &password,
-        deadline(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))?,
-        task_ledger_identity(submission.binding())?,
-        authority.clone(),
-    )
-    .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
-    let foundation = foundation_probe
-        .persistence_foundation(submission.binding())
-        .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
-    drop(foundation_probe);
-
-    let memory_target = ExtensionTarget::new(database.database_name(), database.run_id())
-        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-    let memory_manifest = verify_embedded_extension_manifest()
-        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-    let writer_target = WriterLeaseExtensionTarget::new(
-        database.database_name(),
-        foundation.database_identity_digest().clone(),
-        foundation.global_manifest_digest().clone(),
-        memory_manifest.manifest_sha256().clone(),
-    )
-    .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+    let store_target = StoreMigrationTarget::new(database.database_name(), database.run_id())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
     let mut migrator = connect_migrator(&database, &password)?;
+
+    // Fresh/v1-v4 databases advance only to the v5 foundation on this first
+    // call. Existing v5/v6 profiles are verified without speculative repair.
+    let mut store = verify_store_schema(&mut migrator, &store_target, StoreDatabaseRole::Migrator);
+    if store.is_err() {
+        apply_store_migrations(&mut migrator, &store_target)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
+        store = verify_store_schema(&mut migrator, &store_target, StoreDatabaseRole::Migrator);
+    }
+    let store =
+        store.map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
     let admission = RuntimeAdmissionSnapshot::load(&mut migrator)?;
     admission.stop(&mut migrator)?;
 
     let setup = (|| {
-        apply_postgres_memory_extension(&mut migrator, &memory_target)
+        if store.schema_version() == 5 {
+            let memory_target =
+                ExtensionTarget::new(database.database_name(), database.run_id())
+                    .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+            let memory_manifest = verify_embedded_extension_manifest()
+                .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+            let database_identity = ContentDigest::from_sha256(
+                store_target.expected_database_identity_sha256().as_str(),
+            )
+            .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
+            let global_manifest = ContentDigest::from_sha256(store.manifest_sha256().as_str())
+                .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
+            let writer_target = WriterLeaseExtensionTarget::new(
+                database.database_name(),
+                database_identity.clone(),
+                global_manifest,
+                memory_manifest.manifest_sha256().clone(),
+            )
+            .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+            apply_postgres_memory_extension(&mut migrator, &memory_target)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+            verify_memory_extension(
+                &mut migrator,
+                &memory_target,
+                lattice_postgres_codebase_memory::ExtensionDatabaseRole::Migrator,
+            )
             .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-        verify_memory_extension(
-            &mut migrator,
-            &memory_target,
-            lattice_postgres_codebase_memory::ExtensionDatabaseRole::Migrator,
-        )
-        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-        apply_postgres_writer_extension(&mut migrator, &writer_target)
-            .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
-        verify_writer_extension(&mut migrator, &writer_target)
-            .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+            let writer_v3 = V3ExtensionTarget::new(database.database_name(), database_identity)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+            match apply_v3_extension(&mut migrator, &writer_v3) {
+                Ok(_) => {}
+                Err(error)
+                    if error.kind() == WriterExtensionSetupErrorKind::UnsupportedFoundation =>
+                {
+                    apply_postgres_writer_extension(&mut migrator, &writer_target)
+                        .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+                    verify_writer_extension(&mut migrator, &writer_target)
+                        .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+                    apply_v3_extension(&mut migrator, &writer_v3)
+                        .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+                }
+                Err(_) => return Err(LatticedError::new(LatticedErrorKind::WriterLease)),
+            }
+            apply_store_migrations(&mut migrator, &store_target)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
+        } else if store.schema_version() != 6 {
+            return Err(LatticedError::new(
+                LatticedErrorKind::RuntimePostgresVerification,
+            ));
+        }
+        let final_store =
+            verify_store_schema(&mut migrator, &store_target, StoreDatabaseRole::Migrator)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
+        if final_store.schema_version() != 6 {
+            return Err(LatticedError::new(
+                LatticedErrorKind::RuntimePostgresVerification,
+            ));
+        }
         Ok(())
     })();
     match setup {
@@ -2126,6 +2162,21 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
             return Err(error);
         }
     }
+    drop(migrator);
+
+    // Migrator credentials are gone before any Runtime-role verification.
+    let runtime = connect_fixed_runtime_client(
+        &database,
+        &password,
+        deadline(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))?,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+    let ledger = PostgresTaskLedger::new(runtime, &store_target)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::ForemanReplayCorrupt))?;
+    let mut coordination = PostgresForemanCoordination::new(ledger, authority);
+    coordination
+        .load_runtime_status()
+        .map_err(|error| foreman_replay_latticed(ToolExecutionError::new(error.code())))?;
     Ok(())
 }
 
@@ -2275,26 +2326,9 @@ pub fn initialize_runtime_postgres_from_environment() -> Result<(), LatticedErro
         .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresBoundary))?;
     drop(target_bootstrap);
 
-    let mut migrator = connect_migrator(&database, &password)?;
-    if let Err(error) = apply_store_migrations(&mut migrator, &target) {
-        let kind = match error.kind() {
-            PostgresStoreSetupErrorKind::PermissionDenied => {
-                LatticedErrorKind::RuntimePostgresMigrationPermission
-            }
-            PostgresStoreSetupErrorKind::UnsafeSetting => {
-                LatticedErrorKind::RuntimePostgresMigrationUnsafeSetting
-            }
-            _ => LatticedErrorKind::RuntimePostgresMigration,
-        };
-        return Err(LatticedError::new(kind));
-    }
-    if let Err(_error) = verify_store_schema(&mut migrator, &target, StoreDatabaseRole::Migrator) {
-        return Err(LatticedError::new(
-            LatticedErrorKind::RuntimePostgresVerification,
-        ));
-    }
-    drop(migrator);
-    bootstrap_postgres_extensions_from_environment()
+    // Provisioning ends here. The explicit --postgres-bootstrap command is
+    // the only path allowed to install or migrate Store/Memory/Writer schemas.
+    Ok(())
 }
 
 fn connect_migrator(
@@ -4141,6 +4175,24 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         let foreman = coordination
             .load_runtime_status()
             .map_err(|error| foreman_replay_latticed(ToolExecutionError::new(error.code())))?;
+        // Writer readiness is observed only after the Task Ledger replay has
+        // been verified. It can degrade write readiness, never replay truth.
+        let identity = foreman_coordination_identity()
+            .map_err(|_| LatticedError::new(LatticedErrorKind::ForemanReplayCorrupt))?;
+        let mut writer = foreman_writer_lease(self).map_err(|error| {
+            if error.code() == "FOREMAN_WRITER_CONTENTION" {
+                LatticedError::new(LatticedErrorKind::ForemanWriterContention)
+            } else {
+                foreman_replay_latticed(error)
+            }
+        })?;
+        let writer_active = writer
+            .current_authority(identity.project_id())
+            .map_err(|_| LatticedError::new(LatticedErrorKind::ForemanWriterContention))?
+            .is_some();
+        let degraded_code = foreman_writer_degraded_code(writer_active)
+            .map(|code| Value::String(code.to_owned()))
+            .unwrap_or(Value::Null);
         object.insert(
             "foreman".to_owned(),
             json!({
@@ -4158,7 +4210,7 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
                 "blocked_count": foreman.blocked_count(),
                 "completed_count": foreman.completed_count(),
                 "next_action": foreman.next_action(),
-                "degraded_code": Value::Null,
+                "degraded_code": degraded_code,
             }),
         );
         Ok(base)
@@ -4520,6 +4572,77 @@ fn foreman_coordination<H: FullChainHermesPort>(
         ledger,
         core.store_authority.clone(),
     ))
+}
+
+fn foreman_writer_lease<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+) -> Result<PostgresWriterLease, ToolExecutionError> {
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
+    let store_target = StoreMigrationTarget::new(
+        core.delivery.database.database_name(),
+        core.delivery.database.run_id(),
+    )
+    .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
+    let foundation_client = connect_fixed_runtime_client(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout)
+            .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?,
+    )
+    .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
+    let mut foundation_ledger =
+        PostgresTaskLedger::new(foundation_client, &store_target).map_err(|error| {
+            ToolExecutionError::new(match error.kind() {
+                PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema => {
+                    "FOREMAN_REPLAY_UNSUPPORTED"
+                }
+                PostgresTaskLedgerErrorKind::Unavailable
+                | PostgresTaskLedgerErrorKind::TransactionFailed
+                | PostgresTaskLedgerErrorKind::CommitOutcomeUnknown => "FOREMAN_REPLAY_UNAVAILABLE",
+                _ => "FOREMAN_REPLAY_CORRUPT",
+            })
+        })?;
+    let foundation = foundation_ledger.load_foreman_replay().map_err(|error| {
+        ToolExecutionError::new(match error.kind() {
+            PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema => "FOREMAN_REPLAY_UNSUPPORTED",
+            PostgresTaskLedgerErrorKind::Unavailable
+            | PostgresTaskLedgerErrorKind::TransactionFailed
+            | PostgresTaskLedgerErrorKind::CommitOutcomeUnknown => "FOREMAN_REPLAY_UNAVAILABLE",
+            _ => "FOREMAN_REPLAY_CORRUPT",
+        })
+    })?;
+    let database_identity =
+        ContentDigest::from_sha256(store_target.expected_database_identity_sha256().as_str())
+            .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
+    let memory_manifest = verify_embedded_extension_manifest()
+        .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
+    let target = WriterLeaseExtensionTarget::new(
+        core.delivery.database.database_name(),
+        database_identity,
+        foundation.ledger().persistence().manifest_digest().clone(),
+        memory_manifest.manifest_sha256().clone(),
+    )
+    .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
+    drop(foundation_ledger);
+    let client = connect_fixed_runtime_client(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout)
+            .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?,
+    )
+    .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
+    PostgresWriterLease::new(client, target, &core.store_authority, 600)
+        .map_err(|_| ToolExecutionError::new("FOREMAN_WRITER_CONTENTION"))
+}
+
+const fn foreman_writer_degraded_code(writer_active: bool) -> Option<&'static str> {
+    if writer_active {
+        Some("FOREMAN_WRITER_CONTENTION")
+    } else {
+        None
+    }
 }
 
 fn foreman_observation_from_environment() -> Result<ForemanServerObservation, &'static str> {
@@ -5295,14 +5418,7 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             .replay_checkpoint(arguments.intent())
             .map_err(|error| ToolExecutionError::new(error.code()))?;
 
-        let binding = core.submission.binding().clone();
-        let mut lifecycle = task_lifecycle(&core, &binding)
-            .map_err(|error| ToolExecutionError::new(error.code()))?;
-        let foundation = lifecycle
-            .persistence_foundation(&binding)
-            .map_err(|error| ToolExecutionError::new(error.code()))?;
-        let mut writer = task_writer_lease(&core, &foundation)
-            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let mut writer = foreman_writer_lease(&core)?;
         let acquire = foreman_writer_acquire(&core, arguments.intent().checkpoint_id())?;
         let receipt = checkpoint_foreman(
             &mut coordination,
@@ -5318,7 +5434,7 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             "generation": receipt.generation(),
             "status": if receipt.is_exact_retry() { "REPLAYED" } else { "RECORDED" },
             "exact_retry": receipt.is_exact_retry(),
-            "ledger_digest": receipt.event_digest().as_str(),
+            "ledger_digest": receipt.ledger_digest().as_str(),
             "checkpoint_digest": receipt.checkpoint_digest().as_str(),
         }))
     }
@@ -5940,6 +6056,12 @@ where
         task_ingress_peer,
         store_authority,
     };
+    // Ordinary serving never migrates. It must verify the fixed durable
+    // foreman replay before either MCP or OpenClaw can accept a request.
+    let mut coordination = foreman_coordination(&core).map_err(foreman_replay_latticed)?;
+    coordination
+        .load_runtime_status()
+        .map_err(|error| foreman_replay_latticed(ToolExecutionError::new(error.code())))?;
     Ok((
         FullChainService {
             inner: Arc::new(Mutex::new(core)),
@@ -6724,6 +6846,7 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         | LatticedErrorKind::WriterLease
         | LatticedErrorKind::ForemanReplayCorrupt
         | LatticedErrorKind::ForemanReplayUnsupported
+        | LatticedErrorKind::ForemanWriterContention
         | LatticedErrorKind::Transport => PortErrorKind::Denied,
     }
 }
@@ -8174,6 +8297,107 @@ mod tests {
             snapshot.authority_head_digest.as_deref(),
             Some(&[0xbb; 32][..])
         );
+    }
+
+    #[test]
+    fn official_launcher_runs_provision_then_explicit_bootstrap_and_avoids_live_ports() {
+        let launcher = include_str!("../../../scripts/start-lattice-runtime-postgres.ps1")
+            .replace("\r\n", "\n");
+        assert!(launcher.contains("$candidate -eq 5432 -or $candidate -eq 58743"));
+        assert_eq!(launcher.matches("--postgres-initialize").count(), 2);
+        assert_eq!(launcher.matches("--postgres-bootstrap").count(), 3);
+        assert_eq!(
+            launcher
+                .matches(
+                    "--postgres-initialize\n    if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_INITIALIZE_REJECTED' }\n    & $LatticedPath --postgres-bootstrap"
+                )
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn verified_replay_precedes_writer_read_and_writer_state_only_degrades_readiness() {
+        assert_eq!(foreman_writer_degraded_code(false), None);
+        assert_eq!(
+            foreman_writer_degraded_code(true),
+            Some("FOREMAN_WRITER_CONTENTION")
+        );
+
+        let source = include_str!("composition.rs");
+        let runtime_status = source
+            .split("fn runtime_status_json")
+            .nth(1)
+            .expect("runtime status")
+            .split("fn status_json")
+            .next()
+            .expect("runtime status body");
+        let replay = runtime_status
+            .find("load_runtime_status")
+            .expect("verified foreman replay");
+        let writer = runtime_status
+            .find("foreman_writer_lease")
+            .expect("writer adapter construction");
+        let current = runtime_status
+            .find("current_authority")
+            .expect("writer current-authority read");
+        assert!(replay < writer && writer < current);
+    }
+
+    #[test]
+    fn initialize_is_provisioning_only_and_bootstrap_orders_writer_v3_before_store_v6() {
+        let source = include_str!("composition.rs");
+        let initialize = source
+            .split("pub fn initialize_runtime_postgres_from_environment")
+            .nth(1)
+            .expect("initialize")
+            .split("fn connect_migrator")
+            .next()
+            .expect("initialize body");
+        assert!(!initialize.contains("apply_store_migrations"));
+        assert!(!initialize.contains("bootstrap_postgres_extensions_from_environment()"));
+
+        let bootstrap = source
+            .split("pub fn bootstrap_postgres_extensions_from_environment")
+            .nth(1)
+            .expect("bootstrap")
+            .split("pub fn initialize_runtime_postgres_from_environment")
+            .next()
+            .expect("bootstrap body");
+        let first_store = bootstrap
+            .find("apply_store_migrations")
+            .expect("v5 foundation");
+        let writer_v3 = bootstrap
+            .find("apply_v3_extension")
+            .expect("Writer v3 bridge");
+        let writer_v2_fallback = bootstrap
+            .find("apply_postgres_writer_extension")
+            .expect("Writer v2 fresh-install fallback");
+        let final_store = bootstrap.rfind("apply_store_migrations").expect("Store v6");
+        assert!(first_store < writer_v3 && writer_v3 < final_store);
+        assert!(writer_v3 < writer_v2_fallback);
+        assert!(bootstrap.contains("WriterExtensionSetupErrorKind::UnsupportedFoundation"));
+        assert_eq!(bootstrap.matches("apply_v3_extension").count(), 2);
+        assert!(bootstrap.contains("drop(migrator);"));
+        assert!(bootstrap.contains("connect_fixed_runtime_client"));
+        assert!(bootstrap.contains("load_runtime_status"));
+
+        let ordinary_start = source
+            .split("fn assemble_full_chain_service_with_mode")
+            .nth(1)
+            .expect("ordinary service assembly")
+            .split("fn validate_controlled_task_timeout")
+            .next()
+            .expect("ordinary service assembly body");
+        assert!(!ordinary_start.contains("apply_store_migrations"));
+        assert!(!ordinary_start.contains("apply_v3_extension"));
+        let replay = ordinary_start
+            .find("load_runtime_status")
+            .expect("foreman replay verification");
+        let serve = ordinary_start
+            .find("Ok((")
+            .expect("service construction result");
+        assert!(replay < serve);
     }
 
     fn task050_connect_as(database: &str, role: &str) -> Result<Client, Box<dyn Error>> {

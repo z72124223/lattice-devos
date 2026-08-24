@@ -45,7 +45,7 @@ function Get-FreeLoopbackPort {
         finally {
             $listener.Stop()
         }
-    } while ($candidate -eq 5432)
+    } while ($candidate -eq 5432 -or $candidate -eq 58743)
     return $candidate
 }
 
@@ -218,6 +218,8 @@ if (Test-Path -LiteralPath $metadataPath) {
     if ($LASTEXITCODE -ne 0) {
         Start-LatticePostgres -PgCtl $pgCtl -Cluster $clusterRoot -LogPath $postgresLog
     }
+    & $LatticedPath --postgres-bootstrap
+    if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_BOOTSTRAP_REJECTED' }
     Write-Output 'LATTICE_RUNTIME_POSTGRES_READY'
     exit 0
 }
@@ -228,6 +230,8 @@ if (Test-Path -LiteralPath $clusterRoot) {
     Start-LatticePostgres -PgCtl $pgCtl -Cluster $clusterRoot -LogPath $postgresLog
     & $LatticedPath --postgres-initialize
     if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_INITIALIZE_REJECTED' }
+    & $LatticedPath --postgres-bootstrap
+    if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_BOOTSTRAP_REJECTED' }
     Write-RuntimeMetadata -Path $metadataPath
     Write-Output 'LATTICE_RUNTIME_POSTGRES_READY'
     exit 0
@@ -266,6 +270,8 @@ try {
     Import-LatticeConfigEnvironment -Path $ConfigPath
     & $LatticedPath --postgres-initialize
     if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_INITIALIZE_REJECTED' }
+    & $LatticedPath --postgres-bootstrap
+    if ($LASTEXITCODE -ne 0) { throw 'LATTICE_RUNTIME_POSTGRES_BOOTSTRAP_REJECTED' }
 }
 catch {
     & $pgCtl stop -D $clusterRoot -m fast *> $null
