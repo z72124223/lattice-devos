@@ -15,7 +15,7 @@ additional_modules:
   - module_id: task-ledger
     constitution_version: 2.7
   - module_id: postgres-store
-    constitution_version: 1.15
+    constitution_version: 1.16
   - module_id: postgres-writer-lease
     constitution_version: 1.4
 status: in_progress
@@ -40,6 +40,8 @@ allowed_paths:
   - crates/lattice-task-ledger/**
   - crates/lattice-postgres-store/**
   - crates/lattice-postgres-writer-lease/**
+  - db/migrations/0007_foreman_coordination.sql
+  - db/extensions/writer-lease/v3-rebind.sql
   - docs/adr/ADR-027-durable-foreman-runtime-boundary.md
   - docs/specs/SPEC-009-durable-foreman-runtime.md
   - docs/tickets/TASK-105-durable-foreman-runtime.md

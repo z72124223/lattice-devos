@@ -1097,7 +1097,7 @@ BEGIN
        AND c.max_writer = 6
        AND pg_catalog.btrim(c.manifest_sha256::text) ~ '^[0-9a-f]{64}$'
        AND pg_catalog.btrim(c.manifest_sha256::text) <> pg_catalog.repeat('0', 64)
-       AND v_manifest_entry_count = 6
+       AND v_manifest_entry_count = 7
        AND pg_catalog.btrim(c.manifest_sha256::text) = v_history_manifest_sha256;
 END;
 $lattice_store_current_head_v5$;

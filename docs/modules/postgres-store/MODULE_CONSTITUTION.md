@@ -1,7 +1,7 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.15
+version: 1.16
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -66,6 +66,10 @@ Version 1.15 exposes one read-only exact migration-prefix classification for
 the product bootstrap coordinator. It returns only `Fresh`, `LegacyPrefix`,
 `V5`, or `V6` after verifying the target and retained embedded history; it
 does not inspect Writer rows, mutate admission, or authorize a migration.
+Version 1.16 corrects the undeployed ordinal-7 Store current-head verifier to
+require all seven exact history entries. The one-character correction is
+re-pinned in the schema-v6 SQL checksum and manifest; it adds no migration,
+table, function, semantic event, or compatibility generation.
 
 ## Non-Goals
 
@@ -841,6 +845,12 @@ rebind rolls back every staged global and Writer-visible effect, leaving the
 exact v5 bridge identity, ledger, runtime ACL, migration history, and
 compatibility row intact.
 
+Version 1.16 supersedes the pre-product ordinal-7 byte pin because its
+`store_current_head_v5` read path incorrectly required a six-entry history
+after schema v6 had committed seven. The corrected function requires seven,
+so a vacant foreman stream returns its verified genesis physical head instead
+of an unavailable row-count error. Schema-v5 prefix bytes remain unchanged.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -890,6 +900,7 @@ compatibility row intact.
 | Memory-v3 extension recognition | exact separate global-v5 catalog/owner/ACL profile, immutable v1/v2 bytes, v2-upgrade-only classification, and no base-manifest/count change | Compatibility review | yes |
 | Writer Lease profile closure | exact V3+Memory-v2+Writer-Lease-v1 catalog/owner/ACL/function/checksum acceptance plus partial/extra/drift/wrong-owner/direct-grant denial | Security review | yes |
 | Foreman schema-v6 binding | exact 0007 ordering/hash, fixed child/event linkage, same-transaction fencing, rollback/restart/fresh-process replay and unknown-version/privacy denial | Integration review | yes |
+| Vacant v6 Store head | exact seven-entry history returns the genesis physical head; a six-entry guard is prohibited | Integration review | yes |
 | Extension ownership | static/dependency tests prove Store cannot install, directly mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate and the exact-v5 transition/exact-v6 retry calls to Writer-owned `writer_lease_rebind_v3()` are executable | Architecture review | yes |
 
 ## Change Policy
@@ -924,3 +935,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.13 | 2026-08-25 | SPEC-002 v38, ADR-026, TASK-094 boundary repair | Keep the existing 15-scalar assertion while forbidding Store Writer semantic-row parsing and adapter dependency; exact-v5 transition and exact-v6 idempotent retry call only the Writer-owned rebind procedure, with Task Ledger 2.4 and Foreman State 1.2 semantic ownership retained | TASK-094 repair authority |
 | 1.14 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Return one repeatable-read typed foreman replay evidence value, enforce the fixed sole-foreman identity on retained/write paths, and normalize execute-time changed-ID races without adding persistence or Writer semantics | Sole-foreman delegation |
 | 1.15 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Add a read-only exact Store migration-prefix classifier so product bootstrap can stop existing admission before Writer-v3 rebind or Store-v6 mutation without parsing Store or Writer rows in composition | Sole-foreman delegation |
+| 1.16 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Re-pin the undeployed 0007 byte and v6 manifest after correcting Store current-head history closure from six entries to seven; no new migration or semantic owner | Sole-foreman delegation |

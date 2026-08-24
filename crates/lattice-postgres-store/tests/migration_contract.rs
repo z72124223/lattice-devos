@@ -39,7 +39,11 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
         );
     }
 
-    let v5_to_v6 = setup
+    let apply = setup
+        .split_once("pub fn apply_migrations(")
+        .expect("migration entrypoint")
+        .1;
+    let v5_to_v6 = apply
         .split_once("InstalledManifestState::ExactV5Prefix")
         .expect("exact v5 transition arm")
         .1
@@ -69,7 +73,7 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
         v5_order.windows(2).all(|pair| pair[0] < pair[1]),
         "exact-v5 transition must retain v5 verification, 0007, v6 compatibility, fixed CALL, then catalog/ACL verification"
     );
-    let v6_retry = setup
+    let v6_retry = apply
         .split_once("InstalledManifestState::ExactV6Full")
         .expect("exact v6 retry arm")
         .1
@@ -406,7 +410,7 @@ fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
             .expect("exact schema-v6 manifest")
             .manifest_sha256()
             .as_str(),
-        "4a004488543ce39266ec046607a938958da51567fe747cb22f2e731f30b36ed7"
+        "cc5d86746ed84ce0e8977923f60015b4308509ed4ef028940f776941976fadb9"
     );
 
     let registry = &manifest[4];
@@ -1099,7 +1103,7 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     assert_eq!(foreman.byte_length(), 217_177);
     assert_eq!(
         foreman.sha256(),
-        "21de6f201996a71ec048f0c7976b0802180182e8be5e613147daefd735baf52e"
+        "3610b033fa621a2f4199c5477e0ab761bd9f1ba49177cd8bcf19920ce0f95aff"
     );
     assert_eq!(foreman.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(foreman.reader_compatibility(), 6..=6);
@@ -1776,7 +1780,11 @@ fn runner_has_closed_fresh_and_exact_prefix_states_through_v6() {
 #[test]
 fn task094_store_calls_only_the_fixed_writer_owned_rebind_boundary() {
     let source = include_str!("../src/postgres_setup.rs");
-    let transition = source
+    let apply = source
+        .split_once("pub fn apply_migrations(")
+        .expect("migration entrypoint")
+        .1;
+    let transition = apply
         .split_once("InstalledManifestState::ExactV5Prefix")
         .expect("exact v5 transition arm")
         .1

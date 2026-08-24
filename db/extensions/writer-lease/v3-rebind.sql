@@ -34,7 +34,7 @@ BEGIN
         AND (SELECT pg_catalog.count(*)
                FROM ONLY control.schema_compatibility AS c
               WHERE c.singleton
-                AND c.manifest_sha256 = '4a004488543ce39266ec046607a938958da51567fe747cb22f2e731f30b36ed7'
+                AND c.manifest_sha256 = 'cc5d86746ed84ce0e8977923f60015b4308509ed4ef028940f776941976fadb9'
                 AND c.current_schema_version = 6
                 AND c.min_reader = 6 AND c.max_reader = 6
                 AND c.min_writer = 6 AND c.max_writer = 6) = 1
@@ -64,7 +64,7 @@ BEGIN
                 AND ((w.global_schema_version = 5 AND w.global_manifest_sha256 =
                     'f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d')
                   OR (w.global_schema_version = 6 AND w.global_manifest_sha256 =
-                    '4a004488543ce39266ec046607a938958da51567fe747cb22f2e731f30b36ed7'))) = 1
+                    'cc5d86746ed84ce0e8977923f60015b4308509ed4ef028940f776941976fadb9'))) = 1
         AND (SELECT pg_catalog.string_agg(
                     l.ledger_ordinal::text || ':' || l.event_kind::text || ':' ||
                     l.extension_schema_version::text || ':' || l.global_schema_version::text,
@@ -83,7 +83,7 @@ BEGIN
     UPDATE ONLY writer_lease.writer_lease_extension_identity
        SET global_schema_version = 6,
            global_manifest_sha256 =
-               '4a004488543ce39266ec046607a938958da51567fe747cb22f2e731f30b36ed7'
+               'cc5d86746ed84ce0e8977923f60015b4308509ed4ef028940f776941976fadb9'
      WHERE singleton AND extension_id = 'lattice-writer-lease'
        AND extension_schema_version = 3
        AND extension_path = 'db/extensions/writer-lease/v3.sql'
@@ -151,7 +151,7 @@ BEGIN
           WHERE w.singleton AND w.extension_schema_version = 3
             AND w.global_schema_version = 6
             AND w.global_manifest_sha256 =
-                '4a004488543ce39266ec046607a938958da51567fe747cb22f2e731f30b36ed7') = 1
+                'cc5d86746ed84ce0e8977923f60015b4308509ed4ef028940f776941976fadb9') = 1
         AND (SELECT pg_catalog.string_agg(
                     l.ledger_ordinal::text || ':' || l.event_kind::text || ':' ||
                     l.extension_schema_version::text || ':' || l.global_schema_version::text,

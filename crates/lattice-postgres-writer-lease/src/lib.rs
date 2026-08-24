@@ -53,9 +53,9 @@ const EXPECTED_V3_EXTENSION_MANIFEST_SHA256: &str =
     "eab2812fa3d94cd3466d7c003386f805a973fd7def1f16aeb15b52f47dad78e4";
 const EXPECTED_V3_REBIND_SQL_BYTES: usize = 10_286;
 const EXPECTED_V3_REBIND_SQL_SHA256: &str =
-    "27c2c1f4b9ee6ccf3723bc950bf997b08a72476a5405135c2776b32e93ecda00";
+    "6166a40c5b63df1bc1305a183cdf73635eaff97e4b944fb4bd9dbb4adc143f95";
 const EXPECTED_V3_REBIND_MANIFEST_SHA256: &str =
-    "456f501cdb74f517efb6cbd674ad7ce09d8146148f2ae307960e909223249d75";
+    "648c8e03886c8d8ca4aa3f2629e495909f2d9e6762d799850b2795c8ed901de6";
 const EXTENSION_MANIFEST_DOMAIN: &str = "lattice.postgres-writer-lease.extension-manifest.v1";
 
 /// Exact embedded-extension identity failure.

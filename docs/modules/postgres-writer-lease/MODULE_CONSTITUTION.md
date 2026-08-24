@@ -27,6 +27,8 @@ reinterpret Writer state.
 Version 1.4 adds the narrower product-bootstrap operation for an already-
 present schema-v6 Writer v3 profile. It rejects an absent profile before
 durable mutation, rebinds only bridge-pending, and verifies current as a no-op.
+The same amendment re-pins the undeployed fixed rebind bytes to the corrected
+TASK-105 schema-v6 manifest and changes no Writer semantic row shape.
 
 ## Non-Goals
 
@@ -195,6 +197,8 @@ and adds one stricter TASK-105 product-bootstrap entrypoint. On global schema
 v6, Writer absence is not a fresh-install opportunity: the strict entrypoint
 rolls back without catalog, ledger, ACL, or identity mutation. Bridge-pending
 may rebind and current may verify idempotently.
+Its fixed rebind SQL accepts only the corrected seven-entry v6 manifest; the
+prior pre-product digest is rejected rather than treated as current.
 
 ## Acceptance Gates
 
@@ -228,4 +232,4 @@ synthetic evidence as production authority.
 | 1.1 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-023, TASK-076 | Preserve v1 history and add the Writer-owned v2 bridge/current profiles for global-v5/Memory-v3 without changing lease semantics or fencing bytes | User continuation authorization |
 | 1.2 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Add append-only v3 bridge/current compatibility for exact future global-v6 foreman coordination while freezing v2 schema-3/5 behavior | Fixed-foreman delegation |
 | 1.3 | 2026-08-24 | SPEC-002 v37, ADR-026, TASK-094 | Writer-owned typed v3 apply/rebind administration for exact-v5 transition and exact-v6 idempotent retry through one fixed Store transaction boundary | TASK-094 bounded repair authority |
-| 1.4 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 | Add strict existing-v3 product-bootstrap rebind/verify; schema-v6 Writer absence fails closed without durable mutation | TASK-105 bounded implementation authority |
+| 1.4 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 | Add strict existing-v3 product-bootstrap rebind/verify, fail closed on schema-v6 Writer absence, and re-pin the fixed rebind boundary to the corrected seven-entry v6 manifest | TASK-105 bounded implementation authority |

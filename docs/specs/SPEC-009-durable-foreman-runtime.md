@@ -54,6 +54,10 @@ action projection even though PostgreSQL has the intended durable boundary.
   v5/Writer-v2 through Writer-v3 bridge then Store-v6/rebind, handles v5+bridge,
   exact-v6 retry and v6-current verification, closes migrator credentials,
   creates fresh runtime clients, verifies foreman replay, then may serve MCP.
+- Ordinal `0007_foreman_coordination` is the same schema-v6 migration identity,
+  with its pre-product Store current-head history guard corrected from six to
+  seven exact entries and its SQL/manifest/rebind digests re-pinned. No new
+  migration or durable schema is introduced.
 
 ## Goals
 
@@ -117,8 +121,10 @@ a successful structured result.
 The explicit bootstrap command has these observable rows: `v5 + Writer v2`
 applies the fixed Writer-v3 bridge then Store-v6/rebind; `v5 + Writer v3`
 applies Store-v6/rebind; `v6 + bridge-pending` retries exact-v6 rebind; and
-`v6 + current Writer v3` verifies without mutation. Partial/corrupt/unsupported
-profiles fail closed. No-argument startup and every MCP call perform zero
+`v6 + current Writer v3` verifies without mutation. Partial, corrupt,
+unsupported and `v6 + Writer absent` profiles fail closed without installing
+Writer or changing the Store/Writer fingerprint. No-argument startup and every
+MCP call perform zero
 migrations and refuse serving until bootstrap completes. Success closes the
 migrator connection, constructs fresh runtime-role clients, verifies foreman
 replay through them, and only then reports ready/serves.
