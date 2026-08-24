@@ -247,11 +247,13 @@ pub fn plan_foreman_snapshot_append(
         });
     }
 
-    let generation_is_new = existing_records
+    let latest_generation = existing_records
         .iter()
         .filter(|record| record.snapshot.worker() == snapshot.worker())
-        .all(|record| record.snapshot.generation() < snapshot.generation());
-    if !generation_is_new {
+        .map(|record| record.snapshot.generation())
+        .max()
+        .unwrap_or(0);
+    if latest_generation.checked_add(1) != Some(snapshot.generation()) {
         return Err(LedgerError::ForemanGenerationRollback);
     }
     let event = ledger_plan
@@ -328,7 +330,7 @@ pub fn verify_untrusted_foreman_snapshot_rows(
         let prior = generations
             .entry(row.snapshot.worker().to_owned())
             .or_default();
-        if row.snapshot.generation() <= *prior {
+        if prior.checked_add(1) != Some(row.snapshot.generation()) {
             return Err(LedgerError::ForemanGenerationRollback);
         }
         *prior = row.snapshot.generation();

@@ -131,6 +131,47 @@ fn exact_retry_is_idempotent_but_changed_command_and_generation_rollback_fail_cl
 }
 
 #[test]
+fn foreman_append_rejects_generation_gap() {
+    let identity = foreman_coordination_identity().expect("fixed identity");
+    let mut stream = VerifiedStream::vacant(identity, RuntimeKind::Live).expect("vacant");
+    let first = plan_foreman_snapshot_append(
+        &stream,
+        &[],
+        metadata("foreman-gap-1", 1),
+        snapshot("worker-1", 1, ForemanState::Active),
+    )
+    .expect("first");
+    stream = apply_append_plan(&stream, first.ledger_plan()).expect("apply first");
+    let retained = first.new_record().expect("record").clone();
+
+    assert_eq!(
+        plan_foreman_snapshot_append(
+            &stream,
+            &[retained],
+            metadata("foreman-gap-3", 3),
+            snapshot("worker-1", 3, ForemanState::Completed),
+        ),
+        Err(LedgerError::ForemanGenerationRollback)
+    );
+}
+
+#[test]
+fn foreman_append_rejects_generation_other_than_one_on_empty_stream() {
+    let identity = foreman_coordination_identity().expect("fixed identity");
+    let stream = VerifiedStream::vacant(identity, RuntimeKind::Live).expect("vacant");
+
+    assert_eq!(
+        plan_foreman_snapshot_append(
+            &stream,
+            &[],
+            metadata("foreman-first-2", 2),
+            snapshot("worker-1", 2, ForemanState::Active),
+        ),
+        Err(LedgerError::ForemanGenerationRollback)
+    );
+}
+
+#[test]
 fn unknown_child_schema_and_missing_child_fail_replay() {
     let identity = foreman_coordination_identity().expect("fixed identity");
     let vacant = VerifiedStream::vacant(identity, RuntimeKind::Fake).expect("vacant");

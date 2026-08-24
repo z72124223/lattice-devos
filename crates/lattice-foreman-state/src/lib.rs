@@ -452,9 +452,11 @@ pub fn reconstruct(
             if previous.thread() != snapshot.thread() {
                 return Err(SnapshotError::DuplicateWorkerIdentity);
             }
-            if snapshot.generation() <= previous.generation() {
+            if previous.generation().checked_add(1) != Some(snapshot.generation()) {
                 return Err(SnapshotError::GenerationRollback);
             }
+        } else if snapshot.generation() != 1 {
+            return Err(SnapshotError::GenerationRollback);
         }
         by_worker.insert(snapshot.worker().to_owned(), snapshot);
     }

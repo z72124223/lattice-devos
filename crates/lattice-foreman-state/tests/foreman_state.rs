@@ -31,14 +31,14 @@ fn snapshot(
 fn fresh_reader_reconstructs_active_blocked_and_next_action() {
     let active = snapshot(
         "worker-a",
-        2,
+        1,
         ForemanState::Active,
         "a".repeat(40).as_str(),
         None,
     );
     let blocked = snapshot(
         "worker-b",
-        3,
+        1,
         ForemanState::Blocked,
         "b".repeat(40).as_str(),
         Some("TASK-078-delivery-evidence"),
@@ -94,7 +94,7 @@ fn replay_rejects_duplicate_identity_and_generation_rollback() {
         reconstruct([
             snapshot(
                 "worker-a",
-                2,
+                1,
                 ForemanState::Active,
                 "a".repeat(40).as_str(),
                 None
@@ -102,6 +102,43 @@ fn replay_rejects_duplicate_identity_and_generation_rollback() {
             other_thread
         ]),
         Err(SnapshotError::DuplicateWorkerIdentity)
+    );
+}
+
+#[test]
+fn replay_rejects_generation_gap() {
+    let first = snapshot(
+        "worker-1",
+        1,
+        ForemanState::Active,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        None,
+    );
+    let skipped = snapshot(
+        "worker-1",
+        3,
+        ForemanState::Completed,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        None,
+    );
+
+    assert_eq!(
+        reconstruct([first, skipped]),
+        Err(SnapshotError::GenerationRollback)
+    );
+}
+
+#[test]
+fn replay_rejects_generation_other_than_one_for_new_identity() {
+    assert_eq!(
+        reconstruct([snapshot(
+            "worker-1",
+            2,
+            ForemanState::Active,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            None,
+        )]),
+        Err(SnapshotError::GenerationRollback)
     );
 }
 
