@@ -1,10 +1,10 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.10
+version: 1.13
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-25
 ---
 
 ## Mission
@@ -42,6 +42,22 @@ acquisitions required by the governed runners: transaction-scoped
 `pg_advisory_xact_lock(bigint)` and nonblocking session-scoped
 `pg_try_advisory_lock(bigint)`. The latter is only the bounded Writer apply
 gate; it does not become a Store migration primitive or Writer state ownership.
+Version 1.11 reserves one exact fail-closed schema-v6 catalog/ACL compatibility
+profile for the future Task-Ledger-owned `FOREMAN_COORDINATION` stream and
+`FOREMAN_SNAPSHOT_RECORDED` event. It recognizes Writer v3 bridge/current
+states but does not add migration `0007`, event semantics, rows, or a second
+transaction path.
+Version 1.13 permits one narrow migration-only exception: after the exact
+schema-v5 prefix has been verified and ordinal `0007` plus the schema-v6
+compatibility row are staged in the existing runner transaction, Store may call
+only the Writer-owned zero-argument `writer_lease.writer_lease_rebind_v3()`
+procedure for the exact-v5 transition or exact-v6 idempotent retry. Store
+neither constructs nor interprets Writer state, and any procedure failure rolls
+back migration history, compatibility, Writer identity, Writer ledger, and
+runtime ACL changes together.
+The actual dependent semantic owners are Task Ledger 2.4 and Foreman State 1.2:
+Store persists only their already-governed scalar event boundary and does not
+create a second foreman or Ledger meaning.
 
 ## Non-Goals
 
@@ -76,10 +92,21 @@ gate; it does not become a Store migration primitive or Writer state ownership.
   Guardian activation, domain repository completeness, effect delivery, or
   release safety.
 - Install, migrate, write, replay, repair, or expose Writer Lease extension
-  state. The sole exception is executing the fixed
-  `writer_lease_assert_current_v1` predicate at a Task Ledger mutation
-  boundary; PostgreSQL Writer Lease remains the persistence adapter and Writer
-  Lease remains the semantic owner.
+  state. The only exceptions are the fixed 15-scalar
+  `writer_lease_assert_current_v1` predicate at a Task Ledger mutation boundary
+  and, solely for the exact-v5 transition or exact-v6 idempotent retry in the
+  existing migration transaction, the fixed Writer-owned zero-argument
+  `writer_lease.writer_lease_rebind_v3()` procedure. Neither exception grants a
+  Writer repository API, generic SQL, state parsing, state construction, or
+  semantic ownership; PostgreSQL Writer Lease remains the persistence adapter
+  and Writer Lease remains the semantic owner.
+- Parse, classify, fingerprint, or otherwise interpret Writer identity, ledger,
+  head, command, or transition rows. Store may retain only its existing fixed
+  15-scalar Writer current-authority assertion and pg_catalog procedure/
+  owner/body/ACL/grant closure recognition. Its only Writer mutation seam is
+  the exact-v5 transition and exact-v6 idempotent retry call to the fixed
+  zero-argument rebind
+  procedure in the governed migration transaction.
 
 ## Owned Data
 
@@ -778,6 +805,30 @@ canonicalization, and hashing with Task Ledger 2.3 typed construction and
 verification. This is a consumer/ownership correction only: no migration,
 row, ACL, MCP, or Store receipt byte changes.
 
+Version 1.11 leaves the active manifest at schema v5. It publishes only a
+closed successor contract: exact v5 predecessor; ordinal 7 migration ID/path;
+global generation 6; fixed foreman stream/event identities; exact catalog and
+runtime ACL expectations; and Writer v3 bridge/current compatibility states.
+Until future migration bytes and measured catalog signatures exist and every
+assertion passes, schema v6 is not current and no runtime authority is granted.
+
+Version 1.12 appends reviewed migration `0007`, advances the exact manifest to
+schema v6, and persists fixed foreman snapshot scalars only as a child of the
+matching Ledger event/command. Record and read functions remain fixed,
+schema-qualified and table-ACL closed. Record reasserts the exact Writer current
+tuple in the same serializable transaction; rollback removes both Ledger and
+child effects. No diagnostic or independent current-state store is added.
+
+Version 1.13 corrects the Store boundary for that exact migration: Store may
+call `writer_lease.writer_lease_rebind_v3()` for the exact-v5 transition after
+v5-prefix verification and staging ordinal `0007`/schema-v6 compatibility in
+the same runner-owned transaction, or for exact-v6 idempotent retry before
+catalog/ACL verification. The procedure stays Writer-owned; Store does not
+install, mutate directly, parse, replay, or derive Writer state. A failed
+rebind rolls back every staged global and Writer-visible effect, leaving the
+exact v5 bridge identity, ledger, runtime ACL, migration history, and
+compatibility row intact.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -826,7 +877,8 @@ row, ACL, MCP, or Store receipt byte changes.
 | Autonomy Ledger atomicity | command, optional closed autonomy event/subject, projection/checkpoint, terminal receipt, and physical receipt all-or-none with restart/retry/corruption matrices | Engineering | yes |
 | Memory-v3 extension recognition | exact separate global-v5 catalog/owner/ACL profile, immutable v1/v2 bytes, v2-upgrade-only classification, and no base-manifest/count change | Compatibility review | yes |
 | Writer Lease profile closure | exact V3+Memory-v2+Writer-Lease-v1 catalog/owner/ACL/function/checksum acceptance plus partial/extra/drift/wrong-owner/direct-grant denial | Security review | yes |
-| Extension ownership | static/dependency tests prove Store cannot install, mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate is executable | Architecture review | yes |
+| Foreman schema-v6 binding | exact 0007 ordering/hash, fixed child/event linkage, same-transaction fencing, rollback/restart/fresh-process replay and unknown-version/privacy denial | Integration review | yes |
+| Extension ownership | static/dependency tests prove Store cannot install, directly mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate and the exact-v5 transition/exact-v6 retry calls to Writer-owned `writer_lease_rebind_v3()` are executable | Architecture review | yes |
 
 ## Change Policy
 
@@ -855,3 +907,6 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.8 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-022/023, TASK-076 | Recognize exact Writer-v2 bridge/current companion profiles under global-to-Memory-to-Writer locking and keep schema-v5 pending states runtime closed without taking Writer ownership | User continuation authorization |
 | 1.9 | 2026-08-14 | SPEC-002 v34, ADR-023 TASK-076 amendment, TASK-076 | Freeze the exact second post-role migrator acquisition grant for the bounded Writer session gate while keeping all LOGIN roles and the other fourteen overloads denied | User TASK-076 continuation directive |
 | 1.10 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Delegate autonomy subject/profile semantics and hashes exclusively to Task Ledger 2.3 while preserving schema-v5 physical bytes and Store ownership | User-approved TASK-050 repair amendment |
+| 1.11 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Reserve exact schema-v6 foreman-coordination catalog/ACL and Writer-v3 bridge recognition without implementing migration 0007 or event semantics | Fixed-foreman delegation |
+| 1.12 | 2026-08-21 | SPEC-006 v3, ADR-024/025, TASK-079 | Append 0007 and bind fixed foreman scalars to the Ledger event under same-transaction Writer fencing and verified replay | Fixed-foreman delegation |
+| 1.13 | 2026-08-25 | SPEC-002 v38, ADR-026, TASK-094 boundary repair | Keep the existing 15-scalar assertion while forbidding Store Writer semantic-row parsing and adapter dependency; exact-v5 transition and exact-v6 idempotent retry call only the Writer-owned rebind procedure, with Task Ledger 2.4 and Foreman State 1.2 semantic ownership retained | TASK-094 repair authority |

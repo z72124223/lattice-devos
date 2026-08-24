@@ -15,15 +15,20 @@ use lattice_contracts::{
     TASK_LEDGER_PRODUCER_VERSION, TaskId, TaskLedgerStreamHead, TaskLedgerStreamIdentity,
     WriterLeaseAuthorityHead, WriterLeaseStatus,
 };
+use lattice_foreman_state::{
+    Confidence, EpistemicReferences, ForemanSnapshot, ForemanState, RefreshTrigger,
+};
 use lattice_task_ledger::{
-    AppendCommand, AutonomyReceiptAppendPlan, CommandReceipt, Diagnostic,
-    LEDGER_CHECKPOINT_SCHEMA_VERSION, LEDGER_SCHEMA_VERSION, LedgerAppendPlan, LedgerCheckpoint,
-    LedgerError, LedgerEventKind, OutboxAdmission, TaskCreatedProfile, UntrustedAppendRequest,
-    UntrustedAutonomyReceiptRow, UntrustedCommandReceipt, UntrustedCommandRecord,
+    AppendCommand, AutonomyReceiptAppendPlan, CommandId, CommandReceipt, Diagnostic,
+    FOREMAN_RECORD_SCHEMA, ForemanSnapshotAppendPlan, LEDGER_CHECKPOINT_SCHEMA_VERSION,
+    LEDGER_SCHEMA_VERSION, LedgerAppendPlan, LedgerCheckpoint, LedgerError, LedgerEventKind,
+    OutboxAdmission, TaskCreatedProfile, UntrustedAppendRequest, UntrustedAutonomyReceiptRow,
+    UntrustedCommandReceipt, UntrustedCommandRecord, UntrustedForemanSnapshotRow,
     UntrustedLedgerEvent, UntrustedLedgerSnapshot, UntrustedOutboxAdmission,
-    VerifiedAutonomyReceipt, VerifiedAutonomyReceiptState, VerifiedStream, apply_append_plan,
-    classify_task_created_profile, plan_append, verify_untrusted_autonomy_receipt_rows,
-    verify_untrusted_snapshot_against_checkpoint,
+    VerifiedAutonomyReceipt, VerifiedAutonomyReceiptState, VerifiedForemanSnapshotRecord,
+    VerifiedStream, apply_append_plan, classify_task_created_profile,
+    foreman_coordination_identity, plan_append, verify_untrusted_autonomy_receipt_rows,
+    verify_untrusted_foreman_snapshot_rows, verify_untrusted_snapshot_against_checkpoint,
 };
 use postgres::error::SqlState;
 use postgres::types::{FromSqlOwned, ToSql};
@@ -46,6 +51,7 @@ const LEGACY_GLOBAL_LEDGER_SCHEMA_VERSION: u16 = 3;
 const LEGACY_GLOBAL_LEDGER_MANIFEST_SHA256: &str =
     "09c431df18ad71a4f44239a5d2ddf6b1774b8ffec06c7f9223f0e41757f3d407";
 const CURRENT_GLOBAL_LEDGER_SCHEMA_VERSION: u16 = 5;
+const FOREMAN_GLOBAL_LEDGER_SCHEMA_VERSION: u16 = 6;
 const MAX_LIVE_SERIALIZATION_RETRIES: u8 = 3;
 const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
 const ZERO_DIGEST_TEXT: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -238,6 +244,25 @@ const LEDGER_RECORD_AUTONOMY_RECEIPT_SQL: &str = "\
         $8::boolean,$9::boolean,$10::boolean,$11::text,$12::text,$13::text,\
         $14::text,$15::text,$16::text,$17::bytea,$18::bytea,$19::bytea,\
         $20::bytea,$21::bytea,$22::text,$23::bytea,$24::bytea)";
+
+const LEDGER_FOREMAN_SNAPSHOTS_SQL: &str = "\
+    SELECT stream_id,event_sequence,event_digest,command_id,request_digest,record_schema,\
+           payload_schema,payload_digest,worker_id,thread_id,task_id,branch_ref,worktree_ref,\
+           head_sha1,foreman_state,blocker_ref,heartbeat_digest_ref,authority_digest_ref,\
+           evidence_digest_ref,generation,epistemic_schema,observed_fact_refs,hypothesis_refs,confidence,\
+           unknown_refs,evidence_refs,counterevidence_refs,checked_at,expires_at,\
+           refresh_trigger,decision_ref,probe_ref,falsifier_ref\
+      FROM control.task_ledger_read_foreman_snapshots_v1($1::bytea)";
+
+const LEDGER_RECORD_FOREMAN_SNAPSHOT_SQL: &str = "\
+    SELECT control.task_ledger_record_foreman_snapshot_v1(\
+        $1::text,$2::text,$3::text,$4::text,$5::bytea,$6::text,$7::text,$8::text,\
+        $9::text,$10::bigint,$11::bytea,$12::text,$13::bigint,$14::bigint,$15::bytea,\
+        $16::bytea,$17::text,$18::bytea,$19::text,$20::bytea,$21::text,$22::text,\
+        $23::bytea,$24::text,$25::text,$26::text,$27::text,$28::text,$29::text,\
+        $30::text,$31::text,$32::text,$33::text,$34::text,$35::text,$36::text,\
+        $37::text[],$38::text[],$39::text,$40::text[],$41::text[],$42::text[],\
+        $43::text,$44::text,$45::text,$46::text,$47::text,$48::text)";
 
 const STORE_PREPARE_V3_SQL: &str = "\
     SELECT prepare_status, database_uuid::text, database_identity_digest, schema_version, \
@@ -517,7 +542,7 @@ pub struct PostgresTaskLedger {
 }
 
 impl PostgresTaskLedger {
-    /// Verifies an exact frozen schema-v3 or current schema-v5 runtime surface
+    /// Verifies an exact frozen schema-v3, schema-v5, or foreman schema-v6 runtime surface
     /// before accepting the client.
     ///
     /// # Errors
@@ -624,7 +649,7 @@ impl PostgresTaskLedger {
         command: AppendCommand,
         expected_authority: StoreAuthorityHead,
     ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
-        self.execute_with_writer_authority(&command, &expected_authority, None, None)
+        self.execute_with_writer_authority(&command, &expected_authority, None, None, None)
     }
 
     /// Executes one append while asserting an exact current live Writer Lease
@@ -647,6 +672,7 @@ impl PostgresTaskLedger {
             &command,
             &expected_authority,
             Some(&writer_authority),
+            None,
             None,
         )
     }
@@ -676,6 +702,91 @@ impl PostgresTaskLedger {
             &expected_authority,
             autonomy_plan.writer_authority(),
             Some(&autonomy_plan),
+            None,
+        )
+    }
+
+    /// Loads the fixed foreman stream and verifies every child row against the
+    /// authoritative Ledger replay in one repeatable-read transaction.
+    ///
+    /// # Errors
+    ///
+    /// Missing, extra, malformed, unknown-version, or cross-linked rows fail closed.
+    pub fn load_foreman_records(
+        &mut self,
+    ) -> PostgresTaskLedgerResult<Vec<VerifiedForemanSnapshotRecord>> {
+        self.ensure_reconcilable()?;
+        if !self.sql_profile.supports_foreman() {
+            return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+        }
+        let identity =
+            foreman_coordination_identity().map_err(|ledger| map_ledger_error(&ledger))?;
+        let stream_id = VerifiedStream::vacant(identity.clone(), RuntimeKind::Live)
+            .map_err(|ledger| map_ledger_error(&ledger))?
+            .head()
+            .stream_id()
+            .clone();
+        let stream_id_bytes = digest_bytes(&stream_id)?;
+        let mut transaction = self
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .map_err(|database| map_database_error(&database))?;
+        if let Err(database) = transaction.batch_execute(READ_TRANSACTION_SETTINGS) {
+            return rollback_load(transaction, map_database_error(&database));
+        }
+        let loaded = match load_verified_stream(
+            &mut transaction,
+            &identity,
+            &stream_id_bytes,
+            &self.database_uuid,
+            &self.store_receipt_persistence,
+            &self.global_persistence,
+            self.sql_profile,
+        ) {
+            Ok(loaded) => loaded,
+            Err(load_error) => return rollback_load(transaction, load_error),
+        };
+        let records = match load_foreman_records(&mut transaction, &stream_id_bytes, &loaded.stream)
+        {
+            Ok(records) => records,
+            Err(load_error) => return rollback_load(transaction, load_error),
+        };
+        transaction
+            .commit()
+            .map_err(|database| map_database_error(&database))?;
+        Ok(records)
+    }
+
+    /// Executes one Task-Ledger-planned foreman snapshot under the exact
+    /// current Writer Lease and persists its child row in the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on stale authority, substituted plan, corrupt replay, or
+    /// any transaction whose commit result is not known.
+    pub fn execute_foreman(
+        &mut self,
+        foreman_plan: &ForemanSnapshotAppendPlan,
+        expected_authority: &StoreAuthorityHead,
+        writer_authority: &WriterLeaseAuthorityHead,
+    ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
+        if !self.sql_profile.supports_foreman() {
+            return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+        }
+        let command = foreman_plan
+            .ledger_plan()
+            .command_record()
+            .request()
+            .clone();
+        self.execute_with_writer_authority(
+            &command,
+            expected_authority,
+            Some(writer_authority),
+            None,
+            Some(foreman_plan),
         )
     }
 
@@ -685,11 +796,15 @@ impl PostgresTaskLedger {
         expected_authority: &StoreAuthorityHead,
         writer_authority: Option<&WriterLeaseAuthorityHead>,
         autonomy_plan: Option<&AutonomyReceiptAppendPlan>,
+        foreman_plan: Option<&ForemanSnapshotAppendPlan>,
     ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
         self.ensure_reconcilable()?;
         if command.expected_head().runtime() != RuntimeKind::Live
             || (autonomy_plan.is_none()
                 && command.kind() == lattice_task_ledger::LedgerEventKind::AutonomyReceiptRecorded)
+            || (foreman_plan.is_none()
+                && command.kind() == lattice_task_ledger::LedgerEventKind::ForemanSnapshotRecorded)
+            || (autonomy_plan.is_some() && foreman_plan.is_some())
         {
             return Err(error(PostgresTaskLedgerErrorKind::Malformed));
         }
@@ -721,6 +836,7 @@ impl PostgresTaskLedger {
                 expected_authority.clone(),
                 writer_authority,
                 autonomy_plan,
+                foreman_plan,
             ) {
                 Ok(execution) => return Ok(execution),
                 Err(AttemptFailure::Retryable) if retry_count < MAX_LIVE_SERIALIZATION_RETRIES => {}
@@ -750,85 +866,90 @@ impl PostgresTaskLedger {
 enum TaskLedgerSqlProfile {
     V3,
     V5,
+    V6,
 }
 
 impl TaskLedgerSqlProfile {
     const fn ledger_prepare_sql(self) -> &'static str {
         match self {
             Self::V3 => LEDGER_PREPARE_V3_SQL,
-            Self::V5 => LEDGER_PREPARE_V5_SQL,
+            Self::V5 | Self::V6 => LEDGER_PREPARE_V5_SQL,
         }
     }
 
     const fn ledger_head_sql(self) -> &'static str {
         match self {
             Self::V3 => LEDGER_HEAD_V3_SQL,
-            Self::V5 => LEDGER_HEAD_V5_SQL,
+            Self::V5 | Self::V6 => LEDGER_HEAD_V5_SQL,
         }
     }
 
     const fn ledger_events_sql(self) -> &'static str {
         match self {
             Self::V3 => LEDGER_EVENTS_V3_SQL,
-            Self::V5 => LEDGER_EVENTS_V5_SQL,
+            Self::V5 | Self::V6 => LEDGER_EVENTS_V5_SQL,
         }
     }
 
     const fn ledger_commands_sql(self) -> &'static str {
         match self {
             Self::V3 => LEDGER_COMMANDS_V3_SQL,
-            Self::V5 => LEDGER_COMMANDS_V5_SQL,
+            Self::V5 | Self::V6 => LEDGER_COMMANDS_V5_SQL,
         }
     }
 
     const fn ledger_finalize_sql(self) -> &'static str {
         match self {
             Self::V3 => LEDGER_FINALIZE_V3_SQL,
-            Self::V5 => LEDGER_FINALIZE_V5_SQL,
+            Self::V5 | Self::V6 => LEDGER_FINALIZE_V5_SQL,
         }
     }
 
     const fn store_prepare_sql(self) -> &'static str {
         match self {
             Self::V3 => STORE_PREPARE_V3_SQL,
-            Self::V5 => STORE_PREPARE_V5_SQL,
+            Self::V5 | Self::V6 => STORE_PREPARE_V5_SQL,
         }
     }
 
     const fn store_finalize_sql(self) -> &'static str {
         match self {
             Self::V3 => STORE_FINALIZE_V3_SQL,
-            Self::V5 => STORE_FINALIZE_V5_SQL,
+            Self::V5 | Self::V6 => STORE_FINALIZE_V5_SQL,
         }
     }
 
     const fn store_current_sql(self) -> &'static str {
         match self {
             Self::V3 => STORE_CURRENT_V3_SQL,
-            Self::V5 => STORE_CURRENT_V5_SQL,
+            Self::V5 | Self::V6 => STORE_CURRENT_V5_SQL,
         }
     }
 
     const fn supports_autonomy(self) -> bool {
-        matches!(self, Self::V5)
+        matches!(self, Self::V5 | Self::V6)
     }
 
     const fn autonomy_receipts_sql(self) -> Option<&'static str> {
         match self {
             Self::V3 => None,
-            Self::V5 => Some(LEDGER_AUTONOMY_RECEIPTS_SQL),
+            Self::V5 | Self::V6 => Some(LEDGER_AUTONOMY_RECEIPTS_SQL),
         }
     }
 
     const fn autonomy_record_sql(self) -> Option<&'static str> {
         match self {
             Self::V3 => None,
-            Self::V5 => Some(LEDGER_RECORD_AUTONOMY_RECEIPT_SQL),
+            Self::V5 | Self::V6 => Some(LEDGER_RECORD_AUTONOMY_RECEIPT_SQL),
         }
     }
 
+    const fn supports_foreman(self) -> bool {
+        matches!(self, Self::V6)
+    }
+
     const fn has_global_profile_parameters(self) -> bool {
-        matches!(self, Self::V5)
+        matches!(self, Self::V5 | Self::V6)
     }
 }
 
@@ -837,6 +958,8 @@ fn global_ledger_sql_profile(schema_version: u16) -> Option<TaskLedgerSqlProfile
         Some(TaskLedgerSqlProfile::V3)
     } else if schema_version == CURRENT_GLOBAL_LEDGER_SCHEMA_VERSION {
         Some(TaskLedgerSqlProfile::V5)
+    } else if schema_version == FOREMAN_GLOBAL_LEDGER_SCHEMA_VERSION {
+        Some(TaskLedgerSqlProfile::V6)
     } else {
         None
     }
@@ -1209,6 +1332,7 @@ fn database_error_kind(code: &str) -> PostgresTaskLedgerErrorKind {
         "LTX01" => PostgresTaskLedgerErrorKind::CommandSubstitution,
         "LAD01" => PostgresTaskLedgerErrorKind::AdmissionDenied,
         "LAU01" => PostgresTaskLedgerErrorKind::AuthorityMismatch,
+        "LFW01" => PostgresTaskLedgerErrorKind::Malformed,
         "LRV01" => PostgresTaskLedgerErrorKind::RevisionOverflow,
         "LCP01" => PostgresTaskLedgerErrorKind::CheckpointCorrupt,
         "LCR01" | "LST01" | "LST02" => PostgresTaskLedgerErrorKind::RetainedRowCorrupt,
@@ -1516,6 +1640,121 @@ fn load_autonomy_receipt_for_profile<C: GenericClient>(
             .map_err(|ledger| map_ledger_error(&ledger));
     };
     load_autonomy_receipt(client, stream_id_bytes, stream, sql)
+}
+
+fn load_foreman_records<C: GenericClient>(
+    client: &mut C,
+    stream_id_bytes: &[u8],
+    stream: &VerifiedStream,
+) -> PostgresTaskLedgerResult<Vec<VerifiedForemanSnapshotRecord>> {
+    let rows = client
+        .query(LEDGER_FOREMAN_SNAPSHOTS_SQL, &[&stream_id_bytes])
+        .map_err(|database| map_database_error(&database))?;
+    let mut untrusted = Vec::with_capacity(rows.len());
+    for row in &rows {
+        if row.len() != 33 {
+            return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+        }
+        let command_id_text = row_value::<String>(row, 3)?;
+        let command = stream
+            .commands()
+            .iter()
+            .find(|record| record.request().command_id().as_str() == command_id_text)
+            .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+        let epistemic = epistemic_from_foreman_row(row)?;
+        let mut snapshot = ForemanSnapshot::new(
+            row_value::<String>(row, 8)?,
+            row_value::<String>(row, 9)?,
+            row_value::<String>(row, 10)?,
+            row_value::<String>(row, 11)?,
+            row_value::<String>(row, 12)?,
+            row_value::<String>(row, 13)?,
+            ForemanState::from_persisted(&row_value::<String>(row, 14)?)
+                .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
+            row_value::<Option<String>>(row, 15)?,
+            row_value::<String>(row, 16)?,
+            row_value::<String>(row, 17)?,
+            row_value::<String>(row, 18)?,
+            parse_u64_text(&row_value::<String>(row, 19)?)?,
+        )
+        .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+        if let Some(epistemic) = epistemic {
+            snapshot = snapshot
+                .with_epistemic(epistemic)
+                .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+        }
+        if row_value::<String>(row, 6)? != snapshot.schema() {
+            return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+        }
+        untrusted.push(UntrustedForemanSnapshotRow::new(
+            row_value::<String>(row, 5)?,
+            row_digest(row, 0)?,
+            row_digest(row, 2)?,
+            CommandId::new(command_id_text)
+                .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
+            row_digest(row, 4)?,
+            row_digest(row, 7)?,
+            snapshot,
+            command.request().expected_head().clone(),
+        ));
+    }
+    verify_untrusted_foreman_snapshot_rows(stream, &untrusted)
+        .map_err(|ledger| map_ledger_error(&ledger))
+}
+
+#[allow(clippy::type_complexity)]
+fn epistemic_from_foreman_row(row: &Row) -> PostgresTaskLedgerResult<Option<EpistemicReferences>> {
+    let values = (
+        row_value::<Option<String>>(row, 20)?,
+        row_value::<Option<Vec<String>>>(row, 21)?,
+        row_value::<Option<Vec<String>>>(row, 22)?,
+        row_value::<Option<String>>(row, 23)?,
+        row_value::<Option<Vec<String>>>(row, 24)?,
+        row_value::<Option<Vec<String>>>(row, 25)?,
+        row_value::<Option<Vec<String>>>(row, 26)?,
+        row_value::<Option<String>>(row, 27)?,
+        row_value::<Option<String>>(row, 28)?,
+        row_value::<Option<String>>(row, 29)?,
+        row_value::<Option<String>>(row, 30)?,
+        row_value::<Option<String>>(row, 31)?,
+        row_value::<Option<String>>(row, 32)?,
+    );
+    match values {
+        (None, None, None, None, None, None, None, None, None, None, None, None, None) => Ok(None),
+        (
+            Some(schema),
+            Some(observed),
+            Some(hypotheses),
+            Some(confidence),
+            Some(unknowns),
+            Some(evidence),
+            Some(counterevidence),
+            Some(checked_at),
+            Some(expires_at),
+            Some(refresh_trigger),
+            Some(decision),
+            Some(probe),
+            Some(falsifier),
+        ) if schema == "lattice.foreman-epistemic/1.0" => EpistemicReferences::new(
+            observed,
+            hypotheses,
+            Confidence::from_persisted(&confidence)
+                .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
+            unknowns,
+            evidence,
+            counterevidence,
+            checked_at,
+            expires_at,
+            RefreshTrigger::from_persisted(&refresh_trigger)
+                .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
+            decision,
+            probe,
+            falsifier,
+        )
+        .map(Some)
+        .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
+        _ => Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
+    }
 }
 
 fn validate_autonomy_surface_for_profile(
@@ -1896,6 +2135,7 @@ fn run_execute_attempt(
     expected_authority: StoreAuthorityHead,
     writer_authority: Option<&WriterLeaseAuthorityHead>,
     autonomy_plan: Option<&AutonomyReceiptAppendPlan>,
+    foreman_plan: Option<&ForemanSnapshotAppendPlan>,
 ) -> Result<PostgresTaskLedgerExecution, AttemptFailure> {
     let Ok(global_schema_version) = i16::try_from(global_persistence.schema_version()) else {
         return Err(AttemptFailure::Terminal(error(
@@ -1945,6 +2185,16 @@ fn run_execute_attempt(
     if let Err(prepare_error) = validate_ledger_prepare(&prepare, &loaded, command_id) {
         return rollback_attempt(transaction, AttemptFailure::Terminal(prepare_error));
     }
+    let foreman_records = if foreman_plan.is_some() {
+        match load_foreman_records(&mut transaction, stream_id_bytes, &loaded.stream) {
+            Ok(records) => Some(records),
+            Err(load_error) => {
+                return rollback_attempt(transaction, AttemptFailure::Terminal(load_error));
+            }
+        }
+    } else {
+        None
+    };
     let plan = match plan_append(&loaded.stream, command) {
         Ok(plan) => plan,
         Err(ledger) => {
@@ -1963,10 +2213,23 @@ fn run_execute_attempt(
             AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Malformed)),
         );
     }
+    if foreman_plan.is_some_and(|submitted| submitted.ledger_plan() != &plan) {
+        return rollback_attempt(
+            transaction,
+            AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Malformed)),
+        );
+    }
 
     if !sql_profile.supports_autonomy()
         && (autonomy_plan.is_some() || plan_uses_autonomy_surface(&plan))
     {
+        return rollback_attempt(
+            transaction,
+            AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Malformed)),
+        );
+    }
+
+    if !sql_profile.supports_foreman() && foreman_plan.is_some() {
         return rollback_attempt(
             transaction,
             AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Malformed)),
@@ -1983,6 +2246,18 @@ fn run_execute_attempt(
             );
         }
         if loaded.record_set_digests.get(command_id) != Some(plan.record_set_digest()) {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
+            );
+        }
+        if foreman_plan.is_some()
+            && !foreman_records.as_ref().is_some_and(|records| {
+                records
+                    .iter()
+                    .any(|record| record.command_id().as_str() == command_id)
+            })
+        {
             return rollback_attempt(
                 transaction,
                 AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
@@ -2206,6 +2481,50 @@ fn run_execute_attempt(
             AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Malformed)),
         );
     }
+    if let Some(submitted) = foreman_plan {
+        let Some(record) = submitted.new_record() else {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Malformed)),
+            );
+        };
+        let Some(writer_authority) = writer_authority else {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::AuthorityMismatch)),
+            );
+        };
+        let values = match ForemanSqlValues::new(writer_authority, record) {
+            Ok(values) => values,
+            Err(values_error) => {
+                return rollback_attempt(transaction, AttemptFailure::Terminal(values_error));
+            }
+        };
+        let status = match transaction
+            .query_one(LEDGER_RECORD_FOREMAN_SNAPSHOT_SQL, &values.params())
+        {
+            Ok(row) => match row_value::<String>(&row, 0) {
+                Ok(status) => status,
+                Err(row_error) => {
+                    return rollback_attempt(transaction, AttemptFailure::Terminal(row_error));
+                }
+            },
+            Err(database) => return rollback_attempt(transaction, classify_query_error(&database)),
+        };
+        if status != "RECORDED" {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
+            );
+        }
+    } else if plan.new_event().is_some_and(|event| {
+        event.kind() == lattice_task_ledger::LedgerEventKind::ForemanSnapshotRecorded
+    }) {
+        return rollback_attempt(
+            transaction,
+            AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Malformed)),
+        );
+    }
     let reloaded = match load_verified_stream(
         &mut transaction,
         loaded.stream.identity(),
@@ -2229,6 +2548,16 @@ fn run_execute_attempt(
             );
         }
     };
+    let reloaded_foreman_records = if foreman_plan.is_some() {
+        match load_foreman_records(&mut transaction, stream_id_bytes, &reloaded.stream) {
+            Ok(records) => Some(records),
+            Err(load_error) => {
+                return rollback_attempt(transaction, AttemptFailure::Terminal(load_error));
+            }
+        }
+    } else {
+        None
+    };
     if reloaded.stream != planned_state
         || reloaded.retained_checkpoint != *plan.next_checkpoint()
         || reloaded.physical_head != *store_receipt.after_head()
@@ -2237,6 +2566,13 @@ fn run_execute_attempt(
         || autonomy_receipt.is_some_and(|receipt| {
             reloaded.autonomy_state
                 != VerifiedAutonomyReceiptState::RequiredComplete(receipt.clone())
+        })
+        || foreman_plan.is_some_and(|submitted| {
+            submitted.new_record().is_none_or(|record| {
+                !reloaded_foreman_records
+                    .as_ref()
+                    .is_some_and(|records| records.iter().any(|retained| retained == record))
+            })
         })
     {
         return rollback_attempt(
@@ -2560,6 +2896,173 @@ impl AutonomySqlValues {
             &self.writer_fencing_token,
             &self.authority_digest,
             &self.receipt_digest,
+        ]
+    }
+}
+
+struct ForemanSqlValues {
+    writer_project_id: String,
+    writer_project_snapshot_id: String,
+    writer_task_id: String,
+    writer_task_revision: String,
+    writer_task_spec_digest: Vec<u8>,
+    writer_attempt_id: String,
+    writer_lease_id: String,
+    writer_lease_holder_id: String,
+    writer_worktree_id: String,
+    writer_holder_process_id: i64,
+    writer_holder_process_start_identity: Vec<u8>,
+    writer_daemon_instance_id: String,
+    writer_daemon_epoch: i64,
+    writer_fencing_token: i64,
+    writer_receipt_digest: Vec<u8>,
+    stream_id: Vec<u8>,
+    event_sequence: String,
+    event_digest: Vec<u8>,
+    command_id: String,
+    request_digest: Vec<u8>,
+    record_schema: String,
+    payload_schema: String,
+    payload_digest: Vec<u8>,
+    worker_id: String,
+    thread_id: String,
+    task_id: String,
+    branch_ref: String,
+    worktree_ref: String,
+    head_sha1: String,
+    foreman_state: String,
+    blocker_ref: Option<String>,
+    heartbeat_digest_ref: String,
+    authority_digest_ref: String,
+    evidence_digest_ref: String,
+    generation: String,
+    epistemic_schema: Option<String>,
+    observed_fact_refs: Option<Vec<String>>,
+    hypothesis_refs: Option<Vec<String>>,
+    confidence: Option<String>,
+    unknown_refs: Option<Vec<String>>,
+    evidence_refs: Option<Vec<String>>,
+    counterevidence_refs: Option<Vec<String>>,
+    checked_at: Option<String>,
+    expires_at: Option<String>,
+    refresh_trigger: Option<String>,
+    decision_ref: Option<String>,
+    probe_ref: Option<String>,
+    falsifier_ref: Option<String>,
+}
+
+impl ForemanSqlValues {
+    fn new(
+        authority: &WriterLeaseAuthorityHead,
+        record: &VerifiedForemanSnapshotRecord,
+    ) -> PostgresTaskLedgerResult<Self> {
+        let identity = authority.identity();
+        let snapshot = record.snapshot();
+        let epistemic = snapshot.epistemic();
+        Ok(Self {
+            writer_project_id: identity.project_id().as_str().to_owned(),
+            writer_project_snapshot_id: identity.project_snapshot_id().as_str().to_owned(),
+            writer_task_id: identity.task_id().as_str().to_owned(),
+            writer_task_revision: identity.task_revision().to_owned(),
+            writer_task_spec_digest: digest_bytes(identity.task_spec_digest())?,
+            writer_attempt_id: identity.attempt_id().as_str().to_owned(),
+            writer_lease_id: identity.lease_id().to_owned(),
+            writer_lease_holder_id: identity.lease_holder_id().to_owned(),
+            writer_worktree_id: identity.worktree_id().to_owned(),
+            writer_holder_process_id: signed_i64(identity.holder_process_id().get())?,
+            writer_holder_process_start_identity: digest_bytes(
+                identity.holder_process_start_identity(),
+            )?,
+            writer_daemon_instance_id: identity.daemon_instance_id().to_owned(),
+            writer_daemon_epoch: signed_i64(identity.daemon_epoch().get())?,
+            writer_fencing_token: signed_i64(identity.fencing_token().get())?,
+            writer_receipt_digest: digest_bytes(authority.receipt_digest())?,
+            stream_id: digest_bytes(record.stream_id())?,
+            event_sequence: record.event_sequence().to_string(),
+            event_digest: digest_bytes(record.event_digest())?,
+            command_id: record.command_id().as_str().to_owned(),
+            request_digest: digest_bytes(record.request_digest())?,
+            record_schema: FOREMAN_RECORD_SCHEMA.to_owned(),
+            payload_schema: snapshot.schema().to_owned(),
+            payload_digest: digest_bytes(record.payload_digest())?,
+            worker_id: snapshot.worker().to_owned(),
+            thread_id: snapshot.thread().to_owned(),
+            task_id: snapshot.task().to_owned(),
+            branch_ref: snapshot.branch().to_owned(),
+            worktree_ref: snapshot.worktree().to_owned(),
+            head_sha1: snapshot.head().to_owned(),
+            foreman_state: snapshot.state().as_str().to_owned(),
+            blocker_ref: snapshot.blocker().map(str::to_owned),
+            heartbeat_digest_ref: snapshot.heartbeat().to_owned(),
+            authority_digest_ref: snapshot.authority().to_owned(),
+            evidence_digest_ref: snapshot.evidence().to_owned(),
+            generation: snapshot.generation().to_string(),
+            epistemic_schema: epistemic.map(|value| value.schema().to_owned()),
+            observed_fact_refs: epistemic.map(|value| value.observed_facts().to_vec()),
+            hypothesis_refs: epistemic.map(|value| value.hypotheses().to_vec()),
+            confidence: epistemic.map(|value| value.confidence().as_str().to_owned()),
+            unknown_refs: epistemic.map(|value| value.unknowns().to_vec()),
+            evidence_refs: epistemic.map(|value| value.evidence().to_vec()),
+            counterevidence_refs: epistemic.map(|value| value.counterevidence().to_vec()),
+            checked_at: epistemic.map(|value| value.checked_at().to_owned()),
+            expires_at: epistemic.map(|value| value.expires_at().to_owned()),
+            refresh_trigger: epistemic.map(|value| value.refresh_trigger().as_str().to_owned()),
+            decision_ref: epistemic.map(|value| value.decision().to_owned()),
+            probe_ref: epistemic.map(|value| value.probe().to_owned()),
+            falsifier_ref: epistemic.map(|value| value.falsifier().to_owned()),
+        })
+    }
+
+    fn params(&self) -> [&(dyn ToSql + Sync); 48] {
+        [
+            &self.writer_project_id,
+            &self.writer_project_snapshot_id,
+            &self.writer_task_id,
+            &self.writer_task_revision,
+            &self.writer_task_spec_digest,
+            &self.writer_attempt_id,
+            &self.writer_lease_id,
+            &self.writer_lease_holder_id,
+            &self.writer_worktree_id,
+            &self.writer_holder_process_id,
+            &self.writer_holder_process_start_identity,
+            &self.writer_daemon_instance_id,
+            &self.writer_daemon_epoch,
+            &self.writer_fencing_token,
+            &self.writer_receipt_digest,
+            &self.stream_id,
+            &self.event_sequence,
+            &self.event_digest,
+            &self.command_id,
+            &self.request_digest,
+            &self.record_schema,
+            &self.payload_schema,
+            &self.payload_digest,
+            &self.worker_id,
+            &self.thread_id,
+            &self.task_id,
+            &self.branch_ref,
+            &self.worktree_ref,
+            &self.head_sha1,
+            &self.foreman_state,
+            &self.blocker_ref,
+            &self.heartbeat_digest_ref,
+            &self.authority_digest_ref,
+            &self.evidence_digest_ref,
+            &self.generation,
+            &self.epistemic_schema,
+            &self.observed_fact_refs,
+            &self.hypothesis_refs,
+            &self.confidence,
+            &self.unknown_refs,
+            &self.evidence_refs,
+            &self.counterevidence_refs,
+            &self.checked_at,
+            &self.expires_at,
+            &self.refresh_trigger,
+            &self.decision_ref,
+            &self.probe_ref,
+            &self.falsifier_ref,
         ]
     }
 }
@@ -3721,7 +4224,7 @@ mod tests {
     }
 
     #[test]
-    fn task_ledger_routes_only_verified_historical_v3_and_current_v5_profiles() {
+    fn task_ledger_routes_only_verified_historical_v3_v5_and_foreman_v6_profiles() {
         assert_eq!(
             global_ledger_sql_profile(LEGACY_GLOBAL_LEDGER_SCHEMA_VERSION),
             Some(TaskLedgerSqlProfile::V3)
@@ -3730,6 +4233,12 @@ mod tests {
             global_ledger_sql_profile(CURRENT_GLOBAL_LEDGER_SCHEMA_VERSION),
             Some(TaskLedgerSqlProfile::V5)
         );
+        assert_eq!(
+            global_ledger_sql_profile(FOREMAN_GLOBAL_LEDGER_SCHEMA_VERSION),
+            Some(TaskLedgerSqlProfile::V6)
+        );
+        assert!(TaskLedgerSqlProfile::V6.supports_foreman());
+        assert!(!TaskLedgerSqlProfile::V5.supports_foreman());
         for version in [0, 1, 2, 4, u16::MAX] {
             assert_eq!(global_ledger_sql_profile(version), None);
         }
@@ -3829,6 +4338,14 @@ mod tests {
                 PostgresTaskLedgerErrorKind::Unavailable
             );
         }
+    }
+
+    #[test]
+    fn foreman_payload_rejection_is_malformed_not_a_retryable_transaction_failure() {
+        assert_eq!(
+            database_error_kind("LFW01"),
+            PostgresTaskLedgerErrorKind::Malformed
+        );
     }
 
     #[test]

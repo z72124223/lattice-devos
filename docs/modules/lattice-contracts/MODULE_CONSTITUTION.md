@@ -1,10 +1,10 @@
 ---
 module_id: lattice-contracts
 name: LATTICE Shared Contracts
-version: 1.13
+version: 1.14
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-14
+last_reviewed: 2026-08-21
 ---
 
 ## Mission
@@ -48,6 +48,11 @@ their mutable domain state.
   they grant no source, database, task, policy, or release authority.
 - Versioned Codebase Memory persistence-profile identity: v1/v2 remain bound
   to global schema 3; v3 is separately bound to global schema 5.
+- Immutable provider-neutral Worker Provider, Worker Instance, Work Session,
+  Activity Event, Task Binding, Process Binding, observation-source,
+  confidence, freshness, and read-only query representations. These values
+  carry bounded identities and evidence only; they own no process, session,
+  task, lease, or persistence transition.
 - Neutral bounded gateway peer, request/action payload, reply/disposition,
   stable denial, and redacted Task Spec document representations.
 - Neutral fixed-profile MCP client/actor classification, server-derived live
@@ -59,9 +64,11 @@ their mutable domain state.
   compare-and-swap head, request commitments, terminal disposition/receipt,
   explicit fake/PostgreSQL durability classification, and immutable database-
   identity/schema-manifest persistence evidence.
-- No durable or mutable project truth, credential, or provider-session data.
-  Shared receipts carry immutable identifiers and digests only; Project
-  Registry retains lifecycle and issuance ownership.
+- No durable or mutable project truth, credential, raw provider-session
+  content, or process-control authority. Shared receipts and observations
+  carry immutable bounded identifiers and digests only; Project Registry,
+  Task Domain, Task Ledger, Writer Lease, and future PostgreSQL observation
+  persistence retain their respective semantic and durable ownership.
 
 ## Public Contracts
 
@@ -102,6 +109,30 @@ their mutable domain state.
   sorted tracked-source manifest digest, pinned Graphify identity, fixed
   configuration/capability/exclusion digests, complete graph/record-set
   digests, and terminal disposition.
+- Represent providers, instances, sessions, and activity without naming Codex
+  as the platform identity. Codex, PowerShell/WSL terminals, verification
+  runners, and future tools use the same closed provider-neutral shapes.
+- Keep process lifecycle, worker-session lifecycle, LATTICE task projection,
+  and Writer Lease/runtime-admission observation in separate typed fields.
+  No constructor derives, coerces, or promotes one dimension from another.
+- Keep observation source, confidence, freshness, and observation time as
+  separate fields. Confidence must match the declared evidence class and
+  cannot upgrade process discovery into provider or LATTICE evidence.
+- Managed-process supervision may prove process lifecycle only. It cannot by
+  itself claim a running session or link a last session-activity event.
+- Permit a task binding or task projection only from a managed or formal
+  provider observation. Process-presence-only discovery cannot claim a task,
+  session progress, session/task activity meaning beyond process lifecycle,
+  or writer authority.
+- Represent process ID only as a current locator paired with optional
+  process-start evidence. Worker/session identity remains independently
+  durable; PID reuse cannot become permanent worker identity.
+- Expose only closed read-only worker/session list and status query variants.
+  The contract cannot represent pause, resume, kill, cancel, command history,
+  shell input, SQL, path selection, writable thread control, or lease claim.
+- Carry no screenshot/OCR/keylogging data, command line, shell history,
+  environment variables, prompt/conversation, raw stderr, credential, or
+  secret field in worker/session observations or activity events.
 - Represent memory records and ranked retrieval results with bounded closed
   enums, strict ordinals/ranks, exact digests, and no raw source, SQL, path
   selection, credential, provider configuration, or caller-selected MCP query.
@@ -297,6 +328,25 @@ their mutable domain state.
 44. A Codebase Memory identity constructor fixes both extension and global
     schema generations. V1/v2 never consult a mutable current-version constant;
     v3 cannot represent or substitute a v1/v2 receipt identity.
+45. Worker observation representation performs no I/O and grants no process,
+     task, provider, orchestration, persistence, lease, fencing, MCP, or
+     cancellation authority.
+46. A process-presence-only or unobservable record cannot contain a task
+     binding, task state projection, Writer Lease observation, or claimed
+     session progress.
+47. Process state, work-session state, task state, and authority state remain
+     independently observable. A running process does not prove a running task
+     or session, and an exited process does not prove task completion.
+48. A task projection and Writer Lease observation must match the exact task
+     binding; carrying either value is structural read-only evidence and never
+     proves owner currentness or grants authority.
+49. Worker/session identifiers, timestamps, cursors, and event sequences are
+     bounded for PostgreSQL-safe persistence; source, confidence, freshness,
+     unknown, stale, and unobservable remain explicit rather than inferred as
+     success or failure.
+50. Worker observation types contain no raw command, terminal content,
+     environment, prompt, conversation, stderr, credential, secret, screen,
+     input-monitoring, or arbitrary path field.
 
 ## Allowed Dependencies
 
@@ -309,7 +359,10 @@ their mutable domain state.
 
 ## Failure, Compatibility, And Migration
 
-Invalid values return typed construction errors. Version 1.10 preserves every
+Invalid values return typed construction errors. Version 1.14 preserves every
+prior contract and adds provider-neutral, read-only worker/session observation
+representations without I/O, persistence, task transitions, process control,
+or lease authority. Version 1.10 preserves every
 1.9 contract and adds typed delivery request/stage/outcome/status/receipt
 representation without I/O or authority. Version 1.9 preserves v1
 fake-only request/receipt compatibility and adds v2 live/durable PostgreSQL
@@ -362,6 +415,7 @@ global-v5 persistence identity while freezing v1/v2 constructors to global v3.
 | Controlled task values | exact intent, idempotency/handle bounds, public-status allowlist, and prohibited-field construction matrix | Security review | yes |
 | Spec/lease writer binding | Task Spec, lease identity/fence/current-head, workspace, Codex, verification, Git, and status substitution matrix | Security review | yes |
 | Memory persistence profiles | frozen v1/v2 global-v3 constructors, distinct v3/global-v5 constructor, and complete cross-profile substitution matrix | Compatibility review | yes |
+| Worker/session observation matrix | provider neutrality, ownership/visibility, source/confidence/freshness, process/session/task/authority separation, process-only downgrade, prohibited-data shape, and closed read-only query tests | Security review | yes |
 | Dependency inspection | Cargo metadata shows no dependencies | Architecture review | yes |
 | Full Rust verification | workspace format, lint, and tests | Engineering | yes |
 
@@ -388,3 +442,4 @@ a versioned amendment, SPEC-002 trace, architecture review, and user approval.
 | 1.11 | 2026-08-05 | SPEC-002 v26, ADR-022, TASK-033 | Immutable exact-snapshot, Graphify, normalized graph, PostgreSQL Memory, retrieval, and graph-status evidence | User TASK-033 direction |
 | 1.12 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Fixed-profile MCP peer, closed controlled-task values, one Task Spec digest, and lease/fence-bound writer/status evidence | User TASK-038-first direction |
 | 1.13 | 2026-08-14 | SPEC-002 v32, ADR-022, TASK-075 | Freeze Memory v1/v2 persistence identities to global schema 3 and add a distinct extension-v3/global-v5 identity without I/O or authority | User-approved TASK-075 reconciliation |
+| 1.14 | 2026-08-21 | GitHub Issue #6, TASK-048, TASK-079 feature integration | Provider-neutral Worker Provider/Instance, Work Session, Activity Event, Task/Process Binding, separated state/evidence dimensions, and closed read-only query representations reconciled after TASK-075 | User-authoritative Issue #6 directive plus foreman-approved feature integration |

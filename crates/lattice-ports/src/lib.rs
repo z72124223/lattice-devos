@@ -5,16 +5,17 @@ use std::fmt;
 
 use lattice_contracts::{
     CodeSnapshotEvidence, CodexDeliveryEvidence, CodexDeliveryRequest, CodexEvidence,
-    CodexRunRequest, Component, DeliveryOutcomeEvidence, DeliveryOutcomeRequest, DeliveryReceipt,
-    DeliveryRunRequest, DeliveryStage, DeliveryStatusRequest, DurableIntentEvidence,
-    FixedTestEvidence, GatewayActorId, GatewayCommandId, GatewayPeerContext, GatewayReply,
-    GatewayRequest, GitCommitEvidence, GraphMemoryPersistenceEvidence, GraphMemoryReceipt,
-    GraphMemoryRunRequest, GraphifyBuildRequest, GraphifyEvidence, GraphifyRawEvidence,
-    HermesEvidence, HermesReflectionCandidate, HermesReflectionReceipt, HermesResearchRequest,
-    MemoryRetrievalPlan, NormalizedGraphAnalysis, PreparedWorkspaceEvidence, ProjectId, RequestId,
-    StorePhysicalHead, StoreScope, StoreTransactionReceipt, StoreTransactionRequest,
-    WorkspaceChangeEvidence,
+    CodexRunRequest, Component, ContentDigest, DeliveryOutcomeEvidence, DeliveryOutcomeRequest,
+    DeliveryReceipt, DeliveryRunRequest, DeliveryStage, DeliveryStatusRequest,
+    DurableIntentEvidence, FixedTestEvidence, GatewayActorId, GatewayCommandId, GatewayPeerContext,
+    GatewayReply, GatewayRequest, GitCommitEvidence, GraphMemoryPersistenceEvidence,
+    GraphMemoryReceipt, GraphMemoryRunRequest, GraphifyBuildRequest, GraphifyEvidence,
+    GraphifyRawEvidence, HermesEvidence, HermesReflectionCandidate, HermesReflectionReceipt,
+    HermesResearchRequest, MemoryRetrievalPlan, NormalizedGraphAnalysis, PreparedWorkspaceEvidence,
+    ProjectId, RequestId, StorePhysicalHead, StoreScope, StoreTransactionReceipt,
+    StoreTransactionRequest, WorkspaceChangeEvidence, WriterLeaseAuthorityHead,
 };
+use lattice_foreman_state::ForemanSnapshot;
 use lattice_task_domain::TaskState;
 
 /// Result type returned by every LATTICE port.
@@ -35,6 +36,136 @@ pub type DeliveryPortResult<T> = Result<T, DeliveryPortError>;
 
 /// Result returned by each exact graph-memory effect port.
 pub type GraphMemoryPortResult<T> = Result<T, GraphMemoryPortError>;
+
+/// Result returned by the typed foreman coordination persistence boundary.
+pub type ForemanCoordinationResult<T> = Result<T, ForemanCoordinationError>;
+
+/// Closed failure classes for foreman append/replay persistence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ForemanCoordinationErrorKind {
+    Malformed,
+    Unauthorized,
+    StaleWriter,
+    Conflict,
+    Corrupt,
+    Unavailable,
+    OutcomeUnknown,
+}
+
+/// Bounded component-free foreman persistence error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForemanCoordinationError {
+    kind: ForemanCoordinationErrorKind,
+    code: &'static str,
+}
+
+impl ForemanCoordinationError {
+    #[must_use]
+    pub const fn new(kind: ForemanCoordinationErrorKind, code: &'static str) -> Self {
+        Self { kind, code }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> ForemanCoordinationErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
+}
+
+impl fmt::Display for ForemanCoordinationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Foreman coordination {:?}: {}",
+            self.kind, self.code
+        )
+    }
+}
+
+impl Error for ForemanCoordinationError {}
+
+/// Durable evidence for one new append or exact retry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForemanAppendReceipt {
+    event_digest: ContentDigest,
+    checkpoint_digest: ContentDigest,
+    generation: u64,
+    exact_retry: bool,
+}
+
+impl ForemanAppendReceipt {
+    /// # Errors
+    ///
+    /// Rejects zero generation.
+    pub fn new(
+        event_digest: ContentDigest,
+        checkpoint_digest: ContentDigest,
+        generation: u64,
+        exact_retry: bool,
+    ) -> ForemanCoordinationResult<Self> {
+        if generation == 0 {
+            return Err(ForemanCoordinationError::new(
+                ForemanCoordinationErrorKind::Malformed,
+                "FOREMAN_RECEIPT_GENERATION_INVALID",
+            ));
+        }
+        Ok(Self {
+            event_digest,
+            checkpoint_digest,
+            generation,
+            exact_retry,
+        })
+    }
+
+    #[must_use]
+    pub const fn event_digest(&self) -> &ContentDigest {
+        &self.event_digest
+    }
+
+    #[must_use]
+    pub const fn checkpoint_digest(&self) -> &ContentDigest {
+        &self.checkpoint_digest
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[must_use]
+    pub const fn is_exact_retry(&self) -> bool {
+        self.exact_retry
+    }
+}
+
+/// Narrow append/replay boundary for the sole durable Task Ledger truth.
+pub trait ForemanCoordinationPort {
+    /// Appends one already validated snapshot under exact Writer authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed failure for malformed metadata, stale/fake authority,
+    /// conflict, corruption, unavailability, or unknown commit outcome.
+    fn append_snapshot(
+        &mut self,
+        command_id: &str,
+        correlation_id: &str,
+        occurred_at: &str,
+        snapshot: ForemanSnapshot,
+        writer: &WriterLeaseAuthorityHead,
+    ) -> ForemanCoordinationResult<ForemanAppendReceipt>;
+
+    /// Loads only snapshots verified against the authoritative Ledger replay.
+    ///
+    /// # Errors
+    ///
+    /// Missing, partial, unknown-version, or corrupt persistence fails closed.
+    fn load_snapshots(&mut self) -> ForemanCoordinationResult<Vec<ForemanSnapshot>>;
+}
 
 /// Result returned by the authoritative Task lifecycle repository boundary.
 pub type TaskLifecycleResult<T> = Result<T, TaskLifecycleError>;

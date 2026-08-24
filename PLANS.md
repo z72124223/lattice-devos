@@ -1,5 +1,22 @@
 # LATTICE DevOS V2 Plan
 
+## Current product integration — TASK-105
+
+Goal: integrate exact TASK-094 commit `1e4ac5d` into product base `387f556`,
+then expose one bounded durable foreman checkpoint and verified restart replay
+without creating another truth store or widening the legacy MCP surface.
+
+Current step: freeze SPEC/ADR/TASK-105 and module amendments, then drive the
+seven-tool/runtime-bootstrap behavior through one RED-GREEN slice at a time.
+Product Control scripts and the existing six modern tools remain compatibility
+requirements. Ordinary MCP serving never migrates; only explicit
+`latticed --postgres-bootstrap` may apply Writer-v3 then Store-v6 changes.
+
+Verification: focused contract/runtime tests, startup state matrix, marker-owned
+PostgreSQL on a dynamic port other than 5432/58743, fresh-process replay, scoped
+strict lint/format/check, and independent parent review. Push, product merge,
+installation, deployment and archival remain parent-owned gates.
+
 ## Completed task update — TASK-066
 
 COMPLETED TASK-066 — the deterministic canonical reflection chain now proves
