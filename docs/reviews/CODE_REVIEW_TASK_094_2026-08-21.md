@@ -10,8 +10,8 @@ regressions and the owned live harness.
 
 - P1 (review repair): Store constitution 1.12 prohibited every mutating Writer
   call, contradicting the fixed rebind implementation. Constitution 1.13 now
-  permits only the exact v5-to-v6 transaction call and preserves Writer
-  ownership/rollback boundaries.
+  permits only the fixed Writer-owned call for exact-v5 transition or exact-v6
+  idempotent retry, while preserving Writer ownership/rollback boundaries.
 - P2 (review repair): the prior live happy-path did not force rebind failure.
   The marker-owned live phase now injects an active Writer head and fingerprints
   exact v5 bridge history, compatibility, Writer identity, ledger and runtime
