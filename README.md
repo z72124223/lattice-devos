@@ -3,8 +3,8 @@
 LATTICE 是建立在官方 Codex Harness 上的本機 Runtime 與工作控制台。
 
 Codex 負責 agent loop、thread、context、sandbox、工具、MCP、核准事件、
-進度與封存；LATTICE 只保存專案、工作、優先度、Codex thread 對應、
-使用者驗證與簡短失敗資訊。
+進度與封存；LATTICE Control 保存專案、工作、優先度、Codex thread 對應、
+使用者驗證、簡短失敗資訊，以及本機非權威的安裝後觀察收據。
 
 ## 目前可用的 MVP
 
@@ -28,10 +28,34 @@ npm.cmd run control:start
 - 顯示進度與命令／檔案核准；
 - 分開記錄 Codex 已結束與使用者已驗證；
 - 驗證後封存 Codex thread；
-- 關閉並重開 LATTICE 後，從 SQLite 恢復工作與 thread 對應。
+- 由 AI 依專案追加保存元件的來源 commit、安裝位置與產物 SHA-256；
+- 關閉並重開 LATTICE 後，從 SQLite 恢復工作、thread 對應與安裝收據。
 
 Codex 只在按下「開始」或「續接」時連線，不會因開著頁面而呼叫模型。
 目前固定使用 `gpt-5.6-terra`。
+
+### AI 管理的安裝收據
+
+Control 的安裝收據固定標示為 `OBSERVED_AFTER_INSTALL`（安裝後觀察）與
+`NON_AUTHORITATIVE`（非部署權威）。收據只能新增，不能修改或刪除；完全相同
+的內容再次送出會回傳原收據，不會製造重複紀錄。
+
+使用者頁面不提供手動表單或技術明細。AI 在完成安裝與檔案驗證後使用
+`npm.cmd run control:receipt`；這個本機工具會自行計算產物 SHA-256、呼叫
+Control API，並依收據 ID 重新讀取剛寫入的觀察紀錄。這只證明紀錄可重讀，
+不會把它稱為部署驗證。範例：
+
+```powershell
+npm.cmd run control:receipt -- --project-name "LATTICE DevOS" --component lattice-cli --source-commit <40位commit> --artifact <絕對路徑>
+```
+
+AI 可透過有界查詢
+`GET /api/installation-receipts?limit=50&offset=0` 讀取技術證據；這個資料不會
+載入使用者頁面的定期輪詢。
+
+它代表「當時觀察到這個來源版本、檔案位置與產物指紋」，不代表檔案目前仍
+存在、服務健康、正式部署成功、GitHub 已驗證或目前仍是最新版。正式 Runtime
+與交付真相仍由 PostgreSQL 收據層負責。
 
 ## 驗證
 
@@ -39,10 +63,13 @@ Codex 只在按下「開始」或「續接」時連線，不會因開著頁面�
 npm.cmd run control:test
 npm.cmd run check
 npm.cmd test
+npm.cmd run verify
 ```
 
 `control:test` 不呼叫模型；它以假的 App Server 驗證保存、重開、續接、
-進度、核准、完成、驗證與封存流程。
+進度、核准、完成、驗證、封存，以及 AI 自動記錄／重讀安裝收據的流程。
+`verify` 會依序執行專案檢查、Control 測試及其餘 Node 測試，避免 CI 漏掉
+Control。
 
 ## Runtime 狀態工具
 

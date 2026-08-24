@@ -74,11 +74,24 @@ export class LatticeControlService {
     return this.store.createWorkItem(input);
   }
 
+  recordInstallationReceipt(input) {
+    return this.store.createInstallationReceipt(input);
+  }
+
+  installationReceipts(options) {
+    return this.store.listInstallationReceipts(options);
+  }
+
+  installationReceipt(id) {
+    return this.store.getInstallationReceipt(id);
+  }
+
   state() {
     return {
       codexConnected: this.codex.connected,
       projects: this.store.listProjects(),
       workItems: this.store.listWorkItems(),
+      installationReceiptCount: this.store.countInstallationReceipts(),
     };
   }
 

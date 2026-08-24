@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -13,6 +13,9 @@ const statuses = new Set([
   "failed",
   "archived",
 ]);
+const installationReceiptSchemaVersion = "lattice.control.installation-receipt.v1";
+const installationObservationKind = "OBSERVED_AFTER_INSTALL";
+const installationReceiptAuthority = "NON_AUTHORITATIVE";
 
 function now() {
   return new Date().toISOString();
@@ -23,6 +26,44 @@ function requireText(value, label) {
     throw new TypeError(`${label} is required`);
   }
   return value.trim();
+}
+
+function normalizeComponent(value) {
+  const component = requireText(value, "component").toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(component)) {
+    throw new TypeError("component must be a lowercase identifier");
+  }
+  return component;
+}
+
+function normalizeHex(value, length, label) {
+  const hex = requireText(value, label).toLowerCase();
+  if (hex.length !== length || !/^[a-f0-9]+$/u.test(hex)) {
+    throw new TypeError(`${label} must be ${length} hexadecimal characters`);
+  }
+  return hex;
+}
+
+function normalizeArtifactPath(value) {
+  const artifactPath = requireText(value, "artifact path");
+  if (artifactPath.length > 2_048 || !path.isAbsolute(artifactPath)) {
+    throw new TypeError("artifact path must be an absolute path of at most 2048 characters");
+  }
+  return path.normalize(artifactPath);
+}
+
+function installationReceiptDigest(receipt) {
+  const canonical = JSON.stringify([
+    receipt.schema_version,
+    receipt.observation_kind,
+    receipt.authority,
+    receipt.project_id,
+    receipt.component,
+    receipt.source_commit_sha,
+    receipt.artifact_path,
+    receipt.artifact_sha256,
+  ]);
+  return createHash("sha256").update(canonical).digest("hex");
 }
 
 function decodeItem(row) {
@@ -77,7 +118,121 @@ export class LatticeStore {
         payload_json TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS installation_receipts (
+        id TEXT PRIMARY KEY,
+        schema_version TEXT NOT NULL
+          CHECK (schema_version = 'lattice.control.installation-receipt.v1'),
+        observation_kind TEXT NOT NULL
+          CHECK (observation_kind = 'OBSERVED_AFTER_INSTALL'),
+        authority TEXT NOT NULL
+          CHECK (authority = 'NON_AUTHORITATIVE'),
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        component TEXT NOT NULL
+          CHECK (length(component) BETWEEN 1 AND 64),
+        source_commit_sha TEXT NOT NULL
+          CHECK (length(source_commit_sha) = 40 AND source_commit_sha NOT GLOB '*[^0-9a-f]*'),
+        artifact_path TEXT NOT NULL
+          CHECK (length(artifact_path) BETWEEN 1 AND 2048),
+        artifact_sha256 TEXT NOT NULL
+          CHECK (length(artifact_sha256) = 64 AND artifact_sha256 NOT GLOB '*[^0-9a-f]*'),
+        receipt_digest TEXT NOT NULL UNIQUE
+          CHECK (length(receipt_digest) = 64 AND receipt_digest NOT GLOB '*[^0-9a-f]*'),
+        recorded_at TEXT NOT NULL
+      );
+
+      CREATE TRIGGER IF NOT EXISTS installation_receipts_no_update
+      BEFORE UPDATE ON installation_receipts
+      BEGIN
+        SELECT RAISE(ABORT, 'installation receipts are append-only');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS installation_receipts_no_delete
+      BEFORE DELETE ON installation_receipts
+      BEGIN
+        SELECT RAISE(ABORT, 'installation receipts are append-only');
+      END;
     `);
+  }
+
+  createInstallationReceipt({
+    projectId,
+    component,
+    sourceCommitSha,
+    artifactPath,
+    artifactSha256,
+  }) {
+    const normalizedProjectId = requireText(projectId, "project ID");
+    if (!this.getProject(normalizedProjectId)) throw new Error("project not found");
+    const receipt = {
+      id: randomUUID(),
+      schema_version: installationReceiptSchemaVersion,
+      observation_kind: installationObservationKind,
+      authority: installationReceiptAuthority,
+      project_id: normalizedProjectId,
+      component: normalizeComponent(component),
+      source_commit_sha: normalizeHex(sourceCommitSha, 40, "source commit SHA"),
+      artifact_path: normalizeArtifactPath(artifactPath),
+      artifact_sha256: normalizeHex(artifactSha256, 64, "artifact SHA-256"),
+      recorded_at: now(),
+    };
+    receipt.receipt_digest = installationReceiptDigest(receipt);
+    const result = this.database.prepare(`
+      INSERT OR IGNORE INTO installation_receipts (
+        id, schema_version, observation_kind, authority, project_id, component,
+        source_commit_sha, artifact_path, artifact_sha256, receipt_digest, recorded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      receipt.id,
+      receipt.schema_version,
+      receipt.observation_kind,
+      receipt.authority,
+      receipt.project_id,
+      receipt.component,
+      receipt.source_commit_sha,
+      receipt.artifact_path,
+      receipt.artifact_sha256,
+      receipt.receipt_digest,
+      receipt.recorded_at,
+    );
+    return {
+      created: result.changes === 1,
+      receipt: this.database.prepare(
+        `SELECT installation_receipts.*, projects.name AS project_name
+         FROM installation_receipts
+         JOIN projects ON projects.id = installation_receipts.project_id
+         WHERE receipt_digest = ?`,
+      ).get(receipt.receipt_digest),
+    };
+  }
+
+  listInstallationReceipts({ limit = 50, offset = 0 } = {}) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new TypeError("receipt limit must be an integer from 1 to 100");
+    }
+    if (!Number.isInteger(offset) || offset < 0 || offset > 1_000_000) {
+      throw new TypeError("receipt offset must be an integer from 0 to 1000000");
+    }
+    return this.database.prepare(`
+      SELECT installation_receipts.*, projects.name AS project_name
+      FROM installation_receipts
+      JOIN projects ON projects.id = installation_receipts.project_id
+      ORDER BY installation_receipts.rowid DESC
+      LIMIT ? OFFSET ?
+    `).all(limit, offset);
+  }
+
+  getInstallationReceipt(id) {
+    return this.database.prepare(`
+      SELECT installation_receipts.*, projects.name AS project_name
+      FROM installation_receipts
+      JOIN projects ON projects.id = installation_receipts.project_id
+      WHERE installation_receipts.id = ?
+    `).get(requireText(id, "installation receipt ID")) ?? null;
+  }
+
+  countInstallationReceipts() {
+    return this.database.prepare("SELECT COUNT(*) AS count FROM installation_receipts").get().count;
   }
 
   close() {

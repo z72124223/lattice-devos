@@ -36,6 +36,11 @@ function routeId(pathname, action) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+function installationReceiptRouteId(pathname) {
+  const match = pathname.match(/^\/api\/installation-receipts\/([^/]+)$/u);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
 export function createLatticeServer({ databasePath, codex = new CodexAppServer() }) {
   const store = new LatticeStore(databasePath);
   const service = new LatticeControlService({ store, codex });
@@ -54,6 +59,22 @@ export function createLatticeServer({ databasePath, codex = new CodexAppServer()
       }
       if (request.method === "GET" && url.pathname === "/api/state") {
         sendJson(response, 200, service.state());
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/installation-receipts") {
+        const limit = url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 50;
+        const offset = url.searchParams.has("offset") ? Number(url.searchParams.get("offset")) : 0;
+        sendJson(response, 200, service.installationReceipts({ limit, offset }));
+        return;
+      }
+      const installationReceiptId = installationReceiptRouteId(url.pathname);
+      if (request.method === "GET" && installationReceiptId) {
+        const receipt = service.installationReceipt(installationReceiptId);
+        if (!receipt) {
+          sendJson(response, 404, { error: "installation receipt not found" });
+          return;
+        }
+        sendJson(response, 200, receipt);
         return;
       }
       const continuationId = routeId(url.pathname, "continuation");
@@ -79,6 +100,18 @@ export function createLatticeServer({ databasePath, codex = new CodexAppServer()
           objective: body.objective,
           priority: body.priority,
         }));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/installation-receipts") {
+        const body = await readJson(request);
+        const result = service.recordInstallationReceipt({
+          projectId: body.projectId,
+          component: body.component,
+          sourceCommitSha: body.sourceCommitSha,
+          artifactPath: body.artifactPath,
+          artifactSha256: body.artifactSha256,
+        });
+        sendJson(response, result.created ? 201 : 200, result.receipt);
         return;
       }
 

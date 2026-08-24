@@ -33,6 +33,7 @@
 <main>
   <h1>LATTICE Control</h1>
   <p class="muted">專案與工作由 LATTICE 保存；執行、續接、核准與封存交給 Codex。</p>
+  <p class="muted">安裝證據由 AI 自動管理，不需要手動輸入。</p>
   <p id="connection" class="muted"></p>
   <div class="grid">
     <section>
@@ -60,11 +61,17 @@
     </section>
   </div>
   <p id="error" class="error"></p>
+  <h2>工作項目</h2>
   <div id="items"></div>
 </main>
 <script type="module">
   const state = { projects: [], workItems: [] };
   const errorNode = document.querySelector("#error");
+
+  function showError(error, source = "action") {
+    errorNode.textContent = error.message;
+    errorNode.dataset.source = source;
+  }
 
   async function api(path, options = {}) {
     const response = await fetch(path, {
@@ -89,9 +96,9 @@
       try {
         button.disabled = true;
         await api(path, { method: "POST", body: JSON.stringify(body) });
-        await refresh();
+        await poll();
       } catch (error) {
-        errorNode.textContent = error.message;
+        showError(error);
       } finally {
         button.disabled = false;
       }
@@ -157,14 +164,26 @@
     render();
   }
 
+  async function poll() {
+    try {
+      await refresh();
+      if (errorNode.dataset.source === "poll") {
+        errorNode.textContent = "";
+        delete errorNode.dataset.source;
+      }
+    } catch (error) {
+      showError(error, "poll");
+    }
+  }
+
   document.querySelector("#project-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const values = Object.fromEntries(new FormData(event.currentTarget));
     try {
       await api("/api/projects", { method: "POST", body: JSON.stringify(values) });
       event.currentTarget.reset();
-      await refresh();
-    } catch (error) { errorNode.textContent = error.message; }
+      await poll();
+    } catch (error) { showError(error); }
   });
 
   document.querySelector("#work-form").addEventListener("submit", async (event) => {
@@ -173,12 +192,12 @@
     try {
       await api("/api/work-items", { method: "POST", body: JSON.stringify(values) });
       event.currentTarget.reset();
-      await refresh();
-    } catch (error) { errorNode.textContent = error.message; }
+      await poll();
+    } catch (error) { showError(error); }
   });
 
-  await refresh();
-  setInterval(refresh, 2000);
+  await poll();
+  setInterval(() => void poll(), 2000);
 </script>
 </body>
 </html>
