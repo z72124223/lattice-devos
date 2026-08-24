@@ -2112,30 +2112,11 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
         let writer_v3 = V3ExtensionTarget::new(database.database_name(), database_identity.clone())
             .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
         if profile == MigrationBootstrapProfile::V5 {
-            let store =
-                verify_store_schema(&mut migrator, &store_target, StoreDatabaseRole::Migrator)
-                    .map_err(|_| {
-                        LatticedError::new(LatticedErrorKind::RuntimePostgresVerification)
-                    })?;
-            if store.schema_version() != 5 {
-                return Err(LatticedError::new(
-                    LatticedErrorKind::RuntimePostgresVerification,
-                ));
-            }
             let memory_target =
                 ExtensionTarget::new(database.database_name(), database.run_id())
                     .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
             let memory_manifest = verify_embedded_extension_manifest()
                 .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-            let global_manifest = ContentDigest::from_sha256(store.manifest_sha256().as_str())
-                .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
-            let writer_target = WriterLeaseExtensionTarget::new(
-                database.database_name(),
-                database_identity.clone(),
-                global_manifest,
-                memory_manifest.manifest_sha256().clone(),
-            )
-            .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
             apply_postgres_memory_extension(&mut migrator, &memory_target)
                 .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
             verify_memory_extension(
@@ -2149,6 +2130,30 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                 Err(error)
                     if error.kind() == WriterExtensionSetupErrorKind::UnsupportedFoundation =>
                 {
+                    let store = verify_store_schema(
+                        &mut migrator,
+                        &store_target,
+                        StoreDatabaseRole::Migrator,
+                    )
+                    .map_err(|_| {
+                        LatticedError::new(LatticedErrorKind::RuntimePostgresVerification)
+                    })?;
+                    if store.schema_version() != 5 {
+                        return Err(LatticedError::new(
+                            LatticedErrorKind::RuntimePostgresVerification,
+                        ));
+                    }
+                    let global_manifest =
+                        ContentDigest::from_sha256(store.manifest_sha256().as_str()).map_err(
+                            |_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification),
+                        )?;
+                    let writer_target = WriterLeaseExtensionTarget::new(
+                        database.database_name(),
+                        database_identity.clone(),
+                        global_manifest,
+                        memory_manifest.manifest_sha256().clone(),
+                    )
+                    .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
                     apply_postgres_writer_extension(&mut migrator, &writer_target)
                         .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
                     verify_writer_extension(&mut migrator, &writer_target)
@@ -8414,13 +8419,23 @@ mod tests {
         let writer_v3 = bootstrap
             .find("apply_v3_extension")
             .expect("Writer v3 bridge");
+        let generic_v5_verifier = bootstrap
+            .find("verify_store_schema")
+            .expect("generic Store v5 fallback verifier");
         let writer_v2_fallback = bootstrap
             .find("apply_postgres_writer_extension")
             .expect("Writer v2 fresh-install fallback");
         let final_store = bootstrap.rfind("apply_store_migrations").expect("Store v6");
         assert!(first_store < writer_v3 && writer_v3 < final_store);
-        assert!(writer_v3 < writer_v2_fallback);
-        assert!(bootstrap.contains("WriterExtensionSetupErrorKind::UnsupportedFoundation"));
+        assert!(writer_v3 < generic_v5_verifier && generic_v5_verifier < writer_v2_fallback);
+        let unsupported_fallback = bootstrap
+            .find("error.kind() == WriterExtensionSetupErrorKind::UnsupportedFoundation")
+            .expect("closed absent/v2 fallback");
+        let other_writer_error = bootstrap
+            .find("Err(_) => return Err(LatticedError::new(LatticedErrorKind::WriterLease))")
+            .expect("partial or corrupt Writer rejection");
+        assert!(writer_v3 < unsupported_fallback && unsupported_fallback < other_writer_error);
+        assert!(other_writer_error < final_store);
         assert_eq!(bootstrap.matches("apply_v3_extension").count(), 2);
         let admission_stop = bootstrap.find("admission.stop").expect("admission stop");
         let v6_rebind = bootstrap
