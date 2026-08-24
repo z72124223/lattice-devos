@@ -1,3 +1,19 @@
+# TASK-094 local verification checkpoint (not delivered)
+
+- Candidate: `feature/task-094-writer-v3-apply-rebind` from exact base
+  `aeff4131d0a78e740980b47ab10f56c5aa96cb18`; the changed paths are restricted
+  to TASK-094's allowlist.
+- Scope: Writer-owned v3 apply/rebind plus Store `ExactV5Prefix` to
+  `ExactV6Full` transition. TASK-079 remains the parent task; no TASK-079
+  source-only behavior is claimed complete here.
+- Evidence: this checkpoint records current local command output and a fresh
+  TASK-094 marker-owned disposable PostgreSQL run in the ticket/review files.
+  Historical RED evidence was not available when pre-existing dirty work was
+  resumed and is not recreated or claimed.
+- Not performed: independent merge review, remote CI, delivery finisher, push,
+  merge, deployment, release, or archival. Parent re-verification remains
+  required before any such action.
+
 # TASK-079 durable foreman state handoff — 2026-08-21
 
 ## Status

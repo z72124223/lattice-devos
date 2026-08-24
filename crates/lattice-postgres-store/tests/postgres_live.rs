@@ -23,6 +23,10 @@ use lattice_postgres_store::{
     PostgresStoreSetupErrorKind, PostgresTaskLedger, PostgresTaskLedgerErrorKind, apply_migrations,
     migration_manifest, verify_embedded_manifest, verify_postgres_schema,
 };
+use lattice_postgres_writer_lease::{
+    ExtensionApplyOutcome, ExtensionTarget, V3ExtensionTarget, apply_extension, apply_v3_extension,
+    rebind_v3_extension,
+};
 use lattice_project_registry::{
     CommandId as RegistryCommandId, IdentityDrift, ReconciliationDecision, RegistryCheckpoint,
     RegistryCommand as ProjectRegistryCommand, RegistryCommandOutcome, RegistryCommandPlan,
@@ -110,6 +114,7 @@ impl LiveConfig {
                 | "task076_writer_fresh_access"
                 | "task076_writer_base_access"
                 | "task076_writer_restart"
+                | "task094_transition"
         ));
         Some(Self {
             host,
@@ -190,9 +195,107 @@ fn marker_owned_postgres_17_foundation() {
         run_task076_writer_access_phase(&config, "writer_fresh");
     } else if config.phase == "task076_writer_base_access" {
         run_task076_writer_access_phase(&config, "base");
+    } else if config.phase == "task094_transition" {
+        run_task094_transition_phase(&config);
     } else {
         run_task076_writer_restart_phase(&config);
     }
+}
+
+fn run_task094_transition_phase(config: &LiveConfig) {
+    let mut admin = config.connect("postgres", "lattice-devos-task094-admin");
+    create_fixed_roles(&mut admin, &config.password);
+    let target = provision_database(config, &mut admin, "transition", true);
+    drop(admin);
+
+    let mut migrator = config.role_client(
+        target.database_name(),
+        DatabaseRole::Migrator,
+        REQUIRED_APPLICATION_NAME,
+    );
+    println!("TASK094_STAGE_FRESH_V5_ENTER");
+    assert_eq!(
+        apply_migrations(&mut migrator, &target)
+            .unwrap_or_else(|error| panic!("TASK094_FRESH_V5_FAILED:{}", error.kind().code())),
+        MigrationApplyOutcome::Applied {
+            executable_count: 5,
+        },
+        "TASK094_FRESH_MUST_STOP_AT_EXACT_V5"
+    );
+    println!("TASK094_STAGE_FRESH_V5_PASS");
+    drop(migrator);
+
+    println!("TASK094_STAGE_MEMORY_V3_ENTER");
+    install_codebase_memory_v2(config, &target);
+    upgrade_codebase_memory_v3(config, &target);
+    println!("TASK094_STAGE_MEMORY_V3_PASS");
+
+    let database_identity = ContentDigest::from_sha256(
+        target
+            .expected_database_identity_sha256()
+            .as_str()
+            .to_owned(),
+    )
+    .expect("TASK094_DATABASE_IDENTITY_DIGEST");
+    let writer_v2_target = ExtensionTarget::new(
+        target.database_name().to_owned(),
+        database_identity.clone(),
+        ContentDigest::from_sha256(CURRENT_V5_MANIFEST_SHA256.to_owned())
+            .expect("TASK094_V5_MANIFEST_DIGEST"),
+        ContentDigest::from_sha256(CODEBASE_MEMORY_V3_MANIFEST_SHA256.to_owned())
+            .expect("TASK094_MEMORY_V3_MANIFEST_DIGEST"),
+    )
+    .expect("TASK094_WRITER_V2_TARGET");
+    let writer_v3_target =
+        V3ExtensionTarget::new(target.database_name().to_owned(), database_identity)
+            .expect("TASK094_WRITER_V3_TARGET");
+    let mut migrator = config.role_client(
+        target.database_name(),
+        DatabaseRole::Migrator,
+        REQUIRED_APPLICATION_NAME,
+    );
+    println!("TASK094_STAGE_WRITER_V2_ENTER");
+    assert_eq!(
+        apply_extension(&mut migrator, &writer_v2_target).expect("TASK094_WRITER_V2_CURRENT"),
+        ExtensionApplyOutcome::Installed
+    );
+    println!("TASK094_STAGE_WRITER_V2_PASS");
+    println!("TASK094_STAGE_WRITER_V3_BRIDGE_ENTER");
+    assert_eq!(
+        apply_v3_extension(&mut migrator, &writer_v3_target).expect("TASK094_WRITER_V3_BRIDGE"),
+        ExtensionApplyOutcome::Bridged
+    );
+    println!("TASK094_STAGE_WRITER_V3_BRIDGE_PASS");
+    println!("TASK094_STAGE_STORE_V6_ENTER");
+    assert_eq!(
+        apply_migrations(&mut migrator, &target)
+            .unwrap_or_else(|error| panic!("TASK094_STORE_V6_FAILED:{}", error.kind().code())),
+        MigrationApplyOutcome::Applied {
+            executable_count: 1,
+        },
+        "TASK094_EXACT_V5_TO_V6_OUTCOME"
+    );
+    println!("TASK094_STAGE_STORE_V6_PASS");
+    let evidence = must_setup(verify_postgres_schema(
+        &mut migrator,
+        &target,
+        DatabaseRole::Migrator,
+    ));
+    assert_eq!(evidence.schema_version(), 6);
+    assert_eq!(
+        must_setup(apply_migrations(&mut migrator, &target)),
+        MigrationApplyOutcome::AlreadyCurrent
+    );
+    assert_eq!(
+        rebind_v3_extension(&mut migrator, &writer_v3_target)
+            .expect("TASK094_WRITER_V3_REBIND_RETRY"),
+        ExtensionApplyOutcome::AlreadyCurrent
+    );
+    println!(
+        "TASK094_TRANSITION_OK database_uuid={} manifest_sha256={}",
+        evidence.database_uuid(),
+        evidence.manifest_sha256().as_str()
+    );
 }
 
 #[test]

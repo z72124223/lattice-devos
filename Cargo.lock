@@ -387,6 +387,7 @@ dependencies = [
  "lattice-contracts",
  "lattice-foreman-state",
  "lattice-ports",
+ "lattice-postgres-writer-lease",
  "lattice-project-registry",
  "lattice-task-ledger",
  "postgres",

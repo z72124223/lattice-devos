@@ -44,9 +44,9 @@ const PROJECT_REGISTRY_REPOSITORY_SHA256: &str =
 const TASK_AUTONOMY_RECEIPT_SHA256: &str =
     "c50f2a51380950b5f6c757b736b35b550d903319a46d2bcd9319938e02106a61";
 const FOREMAN_COORDINATION_SHA256: &str =
-    "f0934eb74827a5d7dc96148a94b2145f7c4e8e6d8b21d7408660d05d5451337f";
+    "21de6f201996a71ec048f0c7976b0802180182e8be5e613147daefd735baf52e";
 const CURRENT_V6_MANIFEST_SHA256: &str =
-    "875b39f2f605b2dd30958a345d900f570274e1fd4d05065dda09edd694448b70";
+    "4a004488543ce39266ec046607a938958da51567fe747cb22f2e731f30b36ed7";
 pub(crate) const CURRENT_V5_MANIFEST_SHA256: &str =
     "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
 pub(crate) const REGISTRY_V4_MANIFEST_SHA256: &str =
@@ -265,7 +265,7 @@ static MIGRATION_MANIFEST: [MigrationDescriptor; 7] = [
         id: "0007_foreman_coordination",
         path: "db/migrations/0007_foreman_coordination.sql",
         bytes: FOREMAN_COORDINATION_BYTES,
-        byte_length: 222_010,
+        byte_length: 217_177,
         sha256: FOREMAN_COORDINATION_SHA256,
         status: MigrationStatus::Executable,
         transaction_mode: MigrationTransactionMode::RunnerOwned,

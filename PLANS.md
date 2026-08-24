@@ -1,5 +1,17 @@
 # LATTICE DevOS V2 Plan
 
+## Current Writer Lease v3 apply/rebind repair - TASK-094
+
+CURRENT TASK-094 starts from exact clean TASK-079 commit `aeff4131` and owns
+only the missing Writer v3 administrative bridge/rebind plus the Store
+`ExactV5Prefix` to `ExactV6Full` transition. Store may invoke only a fixed
+Writer-owned SQL function inside the same migration transaction; it may not
+write or reinterpret Writer extension state. Writer v1/v2 SQL, migrations
+`0001`-`0006`, TASK-079 event/epistemic semantics, TASK-050/051/033, and the
+TASK-078 exporter remain unchanged. Live evidence is valid only from an owned
+disposable PostgreSQL cluster on a dynamic non-5432 port; otherwise it remains
+`NOT_RUN`.
+
 ## Completed Writer Lease schema-v6 bridge - TASK-087
 
 COMPLETED TASK-087 - Writer Lease v3 is an append-only successor that keeps
@@ -100,9 +112,9 @@ boundaries, complete cleanup, and no unresolved P0-P3 finding. GitHub Actions
 run `31835654240` passed on the exact implementation commit. Draft PR #12
 remains not authorized for merge or Draft promotion.
 
-## Current durable foreman state - TASK-079
+## Parent durable foreman state - TASK-079 (blocked by TASK-094 before this repair)
 
-CURRENT TASK-079 - establish the smallest versioned, secret-free foreman
+TASK-079 establishes the smallest versioned, secret-free foreman
 snapshot/replay/watchdog vertical slice through the existing Task Ledger,
 Postgres Store, and typed Ports boundaries. TASK-087 exact implementation
 `e13e6d8` is integrated through history-preserving merge and clears the

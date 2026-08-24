@@ -1,7 +1,7 @@
 ---
 module_id: postgres-writer-lease
 name: PostgreSQL Writer Lease Repository
-version: 1.2
+version: 1.3
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-21
@@ -18,6 +18,11 @@ Writer-owned v2 schema-v5 bridge and exact current v2 runtime profile.
 Version 1.2 adds an append-only v3 compatibility bridge for the exact future
 global-schema-v6 foreman-coordination profile without widening v2 or changing
 Writer Lease 1.1 semantic/fencing bytes.
+Version 1.3 makes that bridge administrative and explicit: the Writer-owned
+setup API may install/replay exact v3 bridge state and may rebind only through
+the fixed zero-argument `writer_lease_rebind_v3` procedure. Postgres Store may
+call that procedure only inside the same transaction as its exact v5-to-v6
+migration; it cannot construct, parse, persist, or reinterpret Writer state.
 
 ## Non-Goals
 
@@ -72,6 +77,9 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
   receipt.
 - Install or verify only the exact extension manifest through explicit
   administrative entrypoints. Normal runtime never auto-installs or repairs it.
+- Expose the typed v3 bridge/apply and rebind administrative operations only to
+  the Writer-owned adapter. The Store's one fixed SQL invocation is not a
+  Writer repository API and grants no generic Writer mutation authority.
 - Use fixed function calls only; expose no generic CRUD, arbitrary row, SQL,
   schema/table name, raw client, migration, or credential API.
 
@@ -110,6 +118,10 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
 13. Released history and absent history are not interchangeable. Terminal task
     acceptance may require an existing replayed project with no current
     authority and exact bounded high-water values.
+14. A v3 bridge or pending state has zero runtime execute authority. Only the
+    verified exact schema-v6/current profile restores the seven runtime Writer
+    functions; rebind is idempotent for that exact identity and fails closed on
+    substituted profile, lease, fence, manifest, or catalog state.
 
 ## Allowed Dependencies
 
@@ -161,6 +173,12 @@ schema 3/5. Unknown generation, skipped/duplicate ledger ordinal, missing
 generation replay fail closed. TASK-087 does not implement the event or global
 migration.
 
+Version 1.3 closes only the Writer-owned administrative seam: typed v3 apply
+and rebind call the exact extension and fixed rebind procedure. Store may
+sequence that procedure only in its schema-v6 transaction after exact v5
+prefix verification. Store remains unable to install, parse, persist, replay,
+or reinterpret Writer Lease state.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -191,3 +209,4 @@ synthetic evidence as production authority.
 | 1.0 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Independent exact PostgreSQL extension and repository for Writer Lease 1.1 with atomic replay/currentness and monotonic fencing | User TASK-038-first direction |
 | 1.1 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-023, TASK-076 | Preserve v1 history and add the Writer-owned v2 bridge/current profiles for global-v5/Memory-v3 without changing lease semantics or fencing bytes | User continuation authorization |
 | 1.2 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Add append-only v3 bridge/current compatibility for exact future global-v6 foreman coordination while freezing v2 schema-3/5 behavior | Fixed-foreman delegation |
+| 1.3 | 2026-08-24 | SPEC-002 v37, ADR-026, TASK-094 | Writer-owned typed v3 apply/rebind administration and one fixed Store transaction boundary from exact v5 prefix to exact v6 current | TASK-094 bounded repair authority |

@@ -12,7 +12,7 @@ mod setup;
 pub use adapter::PostgresWriterLease;
 pub use setup::{
     ExtensionApplyOutcome, ExtensionSetupError, ExtensionSetupErrorKind, ExtensionTarget,
-    apply_extension, verify_extension,
+    V3ExtensionTarget, apply_extension, apply_v3_extension, rebind_v3_extension, verify_extension,
 };
 
 /// Fixed extension identity.
@@ -25,6 +25,8 @@ pub const WRITER_LEASE_EXTENSION_PATH: &str = "db/extensions/writer-lease/v2.sql
 pub const WRITER_LEASE_V2_EXTENSION_PATH: &str = WRITER_LEASE_EXTENSION_PATH;
 /// Repository-relative location of the append-only v3 schema-v6 bridge.
 pub const WRITER_LEASE_V3_EXTENSION_PATH: &str = "db/extensions/writer-lease/v3.sql";
+/// Repository-relative location of the fixed Writer-owned v3 rebind boundary.
+pub const WRITER_LEASE_V3_REBIND_PATH: &str = "db/extensions/writer-lease/v3-rebind.sql";
 /// Physical extension schema version.
 pub const WRITER_LEASE_EXTENSION_SCHEMA_VERSION: u16 = 2;
 /// Physical v3 bridge schema version.
@@ -32,6 +34,7 @@ pub const WRITER_LEASE_V3_EXTENSION_SCHEMA_VERSION: u16 = 3;
 const V1_EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v1.sql");
 const EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v2.sql");
 const V3_EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v3.sql");
+const V3_REBIND_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v3-rebind.sql");
 const EXPECTED_V1_EXTENSION_SQL_BYTES: usize = 44_366;
 const EXPECTED_V1_EXTENSION_SQL_SHA256: &str =
     "63ffbf8f8b6c22bf35c3d393bd84e9462ca37e4ace94ceaedd6c27b729daa562";
@@ -47,6 +50,11 @@ const EXPECTED_V3_EXTENSION_SQL_SHA256: &str =
     "677c010a61e5945bcc6b96ca9f3d9e57830dc42f4cfbd46ea76d5e9d8b9262a0";
 const EXPECTED_V3_EXTENSION_MANIFEST_SHA256: &str =
     "eab2812fa3d94cd3466d7c003386f805a973fd7def1f16aeb15b52f47dad78e4";
+const EXPECTED_V3_REBIND_SQL_BYTES: usize = 9_984;
+const EXPECTED_V3_REBIND_SQL_SHA256: &str =
+    "04a7955b8e1becbdb3147e9a68d46b5978a07fd391fb09931bdf46ce1935a4aa";
+const EXPECTED_V3_REBIND_MANIFEST_SHA256: &str =
+    "5f806573969aa4765c614d511554b06edebc88fbe5b8c719aa9efb51fc92a42f";
 const EXTENSION_MANIFEST_DOMAIN: &str = "lattice.postgres-writer-lease.extension-manifest.v1";
 
 /// Exact embedded-extension identity failure.
@@ -157,6 +165,23 @@ pub fn verify_embedded_v3_extension_manifest()
         EXPECTED_V3_EXTENSION_SQL_BYTES,
         EXPECTED_V3_EXTENSION_SQL_SHA256,
         EXPECTED_V3_EXTENSION_MANIFEST_SHA256,
+    )
+}
+
+/// Verifies the append-only Writer-owned v3 administrative rebind boundary.
+///
+/// # Errors
+///
+/// Returns a typed failure for any byte, hash, path, or identity drift.
+pub fn verify_embedded_v3_rebind_manifest()
+-> Result<ExtensionManifestEvidence, ExtensionManifestError> {
+    verify_manifest(
+        WRITER_LEASE_V3_REBIND_PATH,
+        WRITER_LEASE_V3_EXTENSION_SCHEMA_VERSION,
+        V3_REBIND_SQL,
+        EXPECTED_V3_REBIND_SQL_BYTES,
+        EXPECTED_V3_REBIND_SQL_SHA256,
+        EXPECTED_V3_REBIND_MANIFEST_SHA256,
     )
 }
 

@@ -1,6 +1,10 @@
 {
   "schema": "lattice.branch-guide.zh-TW/1.0",
   "branches": {
+    "feature/task-094-writer-v3-apply-rebind": {
+      "name": "任務 094：寫入租約第 3 版安全換綁",
+      "purpose": "讓資料庫從第 5 版升到第 6 版時，由寫入租約擁有者安全關閉、換綁再恢復權限，失敗會整筆回滾。"
+    },
     "feature/task-079-durable-foreman-state": {
       "name": "任務 079：工頭狀態接管",
       "purpose": "把背景工作協調摘要安全保存到 LATTICE 帳本，讓新程序能重建卡住與下一步；工程地圖仍只是索引。"

@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 36
+version: 37
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -35,7 +35,7 @@ modules:
   - module_id: postgres-codebase-memory
     constitution_version: 1.2
   - module_id: postgres-writer-lease
-    constitution_version: 1.2
+    constitution_version: 1.3
   - module_id: artifact-store
     constitution_version: 1.0
   - module_id: codex-adapter
@@ -874,7 +874,7 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | approval-verifier | 1.0 | Pure typed-subject/challenge/proof/nonce/time/current-head owner and deterministic fake; live trust/claim remains deferred |
 | postgres-store | 1.10 | Preserve the exact schema-v5 Registry/autonomy profile and catalog while consuming Task Ledger 2.3 verified scalar plans without duplicating profile classification or canonical hashing; retain the governed Memory/Writer companion profiles and closed advisory-function ACL |
 | postgres-codebase-memory | 1.2 | Preserve extension v1/v2 bytes and historical v2/global-v3 receipt identity; add exact extension v3/global-v5 install/upgrade plus the bounded Writer-v2 bridge recognizer, per-analysis profile provenance, and byte-identical v2/v3 graph/reflection replay outside the global manifest |
-| postgres-writer-lease | 1.1 | Preserve Writer v1 bytes and add the append-only v2 bridge/current adapter under exact Store/Memory profiles, ordered transaction locks, and the bounded post-role session apply gate |
+| postgres-writer-lease | 1.3 | Preserve Writer v1/v2 bytes; Writer-owned v3 apply/rebind advances only the exact schema-v5 bridge to schema-v6 current through one fixed Store transaction call |
 | artifact-store | 1.0 | Pure project-scoped object/reference/provenance/quota/delete-claim semantic owner and deterministic fake; PostgreSQL/filesystem I/O remains deferred |
 | codex-adapter | 1.1 | One writable app-server process/thread implementing the typed `DeliveryCodexPort`; generic `CodexPort` is not a second production path |
 | review-runtime | 1.0 | New independent read-only review boundary |
@@ -1536,6 +1536,18 @@ ACL, direct protected-table access, stale lease, wrong fence, and cross-
 generation replay all fail closed. TASK-087 does not implement the foreman
 event, Port, row, function, or `0007` SQL; those remain TASK-079-owned and must
 land against this closed contract.
+
+### Writer Lease v3 apply/rebind closure
+
+SPEC-002 v37 closes only the previously reserved administrative seam. The
+Writer-owned PostgreSQL adapter exposes typed apply and rebind operations and
+the fixed zero-argument `writer_lease_rebind_v3` procedure. The Store migration
+runner distinguishes the exact six-entry `ExactV5Prefix` from the seven-entry
+`ExactV6Full`: it may apply ordinal 7 and call that one procedure in the same
+transaction, then verifies the exact schema-v6/current catalog. The Store does
+not install, parse, manufacture, or replay Writer extension state. Any changed
+history, profile, identity, lease, fence, ACL, catalog, retry, or transaction
+outcome fails closed; bridge and pending states expose zero runtime authority.
 
 ## Verification Plan
 

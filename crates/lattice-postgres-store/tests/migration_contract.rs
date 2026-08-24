@@ -260,7 +260,7 @@ fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
             .expect("exact schema-v6 manifest")
             .manifest_sha256()
             .as_str(),
-        "875b39f2f605b2dd30958a345d900f570274e1fd4d05065dda09edd694448b70"
+        "4a004488543ce39266ec046607a938958da51567fe747cb22f2e731f30b36ed7"
     );
 
     let registry = &manifest[4];
@@ -950,10 +950,10 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
         foreman.path(),
         "db/migrations/0007_foreman_coordination.sql"
     );
-    assert_eq!(foreman.byte_length(), 222_010);
+    assert_eq!(foreman.byte_length(), 217_177);
     assert_eq!(
         foreman.sha256(),
-        "f0934eb74827a5d7dc96148a94b2145f7c4e8e6d8b21d7408660d05d5451337f"
+        "21de6f201996a71ec048f0c7976b0802180182e8be5e613147daefd735baf52e"
     );
     assert_eq!(foreman.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(foreman.reader_compatibility(), 6..=6);
@@ -965,7 +965,10 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     assert_eq!(evidence.manifest_sha256().as_str().len(), 64);
 
     let live = include_str!("postgres_live.rs");
-    assert!(live.contains("executable_count: 6"));
+    assert!(
+        live.contains("executable_count: 5"),
+        "fresh setup must stop at the exact v5 bridge predecessor before the one-entry v6 transition"
+    );
     let task_ledger = include_str!("postgres_task_ledger.rs");
     assert_eq!(
         task_ledger.matches("executable_count: 6").count(),
@@ -1004,6 +1007,7 @@ fn foreman_migration_is_event_bound_fenced_and_table_acl_closed() {
         );
     }
     assert!(!normalized.contains("CREATE TABLE control.foreman_current_state"));
+    assert!(!normalized.contains("CREATE TABLE control.task_ledger_autonomy_receipts"));
     assert!(!normalized.contains("GRANT SELECT ON TABLE control.task_ledger_foreman_snapshots"));
     assert_eq!(
         normalized
@@ -1621,6 +1625,34 @@ fn runner_has_closed_fresh_and_exact_prefix_states_through_v6() {
         );
     }
     assert!(!source.contains("apply_manifest_in_transaction"));
+}
+
+#[test]
+fn task094_store_calls_only_the_fixed_writer_owned_rebind_boundary() {
+    let source = include_str!("../src/postgres_setup.rs");
+    let transition = source
+        .split_once("InstalledManifestState::ExactV5Prefix")
+        .expect("exact v5 transition arm")
+        .1
+        .split_once("InstalledManifestState::ExactV6Full")
+        .expect("exact v6 no-op arm")
+        .0;
+    for required in [
+        "verify_v5_upgrade_source",
+        "apply_missing_entries(&mut transaction, 6)",
+        "advance_compatibility_from_v5",
+        "CALL writer_lease.writer_lease_rebind_v3()",
+        "verify_runtime_foreman_schema_v6",
+    ] {
+        assert!(
+            transition.contains(required),
+            "missing atomic v5-to-v6 transition boundary: {required}"
+        );
+    }
+    assert!(!transition.contains("UPDATE ONLY writer_lease."));
+    assert!(!transition.contains("INSERT INTO writer_lease."));
+    assert!(!transition.contains("GRANT USAGE ON SCHEMA writer_lease"));
+    assert!(!transition.contains("GRANT EXECUTE ON FUNCTION writer_lease."));
 }
 
 #[test]

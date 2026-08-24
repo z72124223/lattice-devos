@@ -38,7 +38,7 @@ fn task079_appends_exact_0007_without_changing_the_v5_prefix() {
     assert_eq!(migration_manifest()[6].bytes(), SQL);
     assert_eq!(
         candidate().manifest_sha256(),
-        "875b39f2f605b2dd30958a345d900f570274e1fd4d05065dda09edd694448b70"
+        "4a004488543ce39266ec046607a938958da51567fe747cb22f2e731f30b36ed7"
     );
 }
 

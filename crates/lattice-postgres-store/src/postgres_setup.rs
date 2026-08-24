@@ -12,7 +12,7 @@ use crate::migrations::{
     POSTGRES_SCHEMA_VERSION, PostgresStoreSetupError, PostgresStoreSetupErrorKind,
     STORE_V2_SCHEMA_VERSION, SUPPORTED_POSTGRES_MAJOR, Sha256Hex, migration_manifest,
     verify_embedded_manifest, verify_v1_manifest_prefix, verify_v2_manifest_prefix,
-    verify_v3_manifest_prefix, verify_v4_manifest_prefix,
+    verify_v3_manifest_prefix, verify_v4_manifest_prefix, verify_v5_manifest_prefix,
 };
 use crate::schema_v6_profile::{
     FOREMAN_COORDINATION_EVENT_IDENTITY, FOREMAN_COORDINATION_STREAM_IDENTITY,
@@ -52,10 +52,19 @@ const WRITER_LEASE_V2_SQL_SHA256: &str =
     "8243fd39a3565c641423fde3f15cf801a4a48a12c8d238ae8e1657acdcdc56e3";
 const WRITER_LEASE_V2_MANIFEST_SHA256: &str =
     "5f54c182465c8e2dc8a6e6cc2ebd9a375f776adf500656586e59bfbc7dfd31a4";
+const WRITER_LEASE_V3_SCHEMA_VERSION: i16 = 3;
+const WRITER_LEASE_V3_PATH: &str = "db/extensions/writer-lease/v3.sql";
+const WRITER_LEASE_V3_SQL_SHA256: &str =
+    "677c010a61e5945bcc6b96ca9f3d9e57830dc42f4cfbd46ea76d5e9d8b9262a0";
+const WRITER_LEASE_V3_MANIFEST_SHA256: &str =
+    "eab2812fa3d94cd3466d7c003386f805a973fd7def1f16aeb15b52f47dad78e4";
 const WRITER_LEASE_V2_BRIDGE_LEDGER_PROFILE: &str = "1:INSTALLED,2:UPGRADED";
 const WRITER_LEASE_V2_UPGRADED_LEDGER_PROFILE: &str = "1:INSTALLED,2:UPGRADED,3:REBOUND";
 const WRITER_LEASE_V1_SQL: &str = include_str!("../../../db/extensions/writer-lease/v1.sql");
 const WRITER_LEASE_V2_SQL: &str = include_str!("../../../db/extensions/writer-lease/v2.sql");
+const WRITER_LEASE_V3_SQL: &str = include_str!("../../../db/extensions/writer-lease/v3.sql");
+const WRITER_LEASE_V3_REBIND_SQL: &str =
+    include_str!("../../../db/extensions/writer-lease/v3-rebind.sql");
 const CODEBASE_MEMORY_V3_GLOBAL_SCHEMA_VERSION: i16 = 5;
 const CATALOG_SIGNATURE_DOMAIN: &[u8] = b"LATTICE_POSTGRES_CATALOG_SIGNATURE_V1\0";
 const V1_EXPECTED_RELATION_SIGNATURE: &str =
@@ -1381,7 +1390,8 @@ enum InstalledManifestState {
     ExactV2Prefix,
     ExactV3Prefix,
     ExactV4Prefix,
-    ExactV5Full,
+    ExactV5Prefix,
+    ExactV6Full,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1648,6 +1658,7 @@ type WriterLeaseCatalogCounts = (i64, i64, i64, i64, i64, i64, bool);
 /// failures roll back; a commit error is reported as an unknown outcome. Once
 /// commit succeeds, a verifier failure is reported separately as committed but
 /// unverified and exact manifest retry is required for reconciliation.
+#[allow(clippy::too_many_lines)]
 pub fn apply_migrations(
     client: &mut Client,
     target: &MigrationTarget,
@@ -1657,6 +1668,7 @@ pub fn apply_migrations(
     let store_v2_manifest = verify_v2_manifest_prefix()?;
     let v3_manifest = verify_v3_manifest_prefix()?;
     let v4_manifest = verify_v4_manifest_prefix()?;
+    let v5_manifest = verify_v5_manifest_prefix()?;
     let mut transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::ReadCommitted)
@@ -1676,7 +1688,7 @@ pub fn apply_migrations(
                 map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
             })?;
     }
-    let connection = preflight_connection(
+    preflight_connection(
         &mut transaction,
         target,
         DatabaseRole::Migrator,
@@ -1687,43 +1699,49 @@ pub fn apply_migrations(
     let outcome = match installed {
         InstalledManifestState::Fresh => {
             verify_role_and_database_boundary(&mut transaction, CatalogProfile::PreSchema, false)?;
-            let executable_count = apply_missing_entries(&mut transaction, 0)?;
+            let executable_count = apply_entries_until(&mut transaction, 0, 6)?;
             seed_database_identity(&mut transaction, target)?;
-            insert_current_compatibility(&mut transaction, &manifest)?;
+            insert_current_compatibility(&mut transaction, &v5_manifest, 6)?;
             MigrationApplyOutcome::Applied { executable_count }
         }
         InstalledManifestState::ExactV1Prefix => {
             verify_v1_upgrade_source(&mut transaction, &legacy_manifest, target)?;
-            let executable_count = apply_missing_entries(&mut transaction, 2)?;
-            advance_compatibility_from_v1(&mut transaction, &legacy_manifest, &manifest)?;
+            let executable_count = apply_entries_until(&mut transaction, 2, 6)?;
+            advance_compatibility_from_v1(&mut transaction, &legacy_manifest, &v5_manifest)?;
             MigrationApplyOutcome::Applied { executable_count }
         }
         InstalledManifestState::ExactV2Prefix => {
             verify_v2_upgrade_source(&mut transaction, &store_v2_manifest, target)?;
-            let executable_count = apply_missing_entries(&mut transaction, 3)?;
-            advance_compatibility_from_v2(&mut transaction, &store_v2_manifest, &manifest)?;
+            let executable_count = apply_entries_until(&mut transaction, 3, 6)?;
+            advance_compatibility_from_v2(&mut transaction, &store_v2_manifest, &v5_manifest)?;
             MigrationApplyOutcome::Applied { executable_count }
         }
         InstalledManifestState::ExactV3Prefix => {
             verify_v3_upgrade_source(&mut transaction, &v3_manifest, target)?;
-            let executable_count = apply_missing_entries(&mut transaction, 4)?;
-            advance_compatibility_from_v3(&mut transaction, &v3_manifest, &manifest)?;
+            let executable_count = apply_entries_until(&mut transaction, 4, 6)?;
+            advance_compatibility_from_v3(&mut transaction, &v3_manifest, &v5_manifest)?;
             MigrationApplyOutcome::Applied { executable_count }
         }
         InstalledManifestState::ExactV4Prefix => {
             verify_v4_upgrade_source(&mut transaction, &v4_manifest, target)?;
-            let executable_count = apply_missing_entries(&mut transaction, 5)?;
-            advance_compatibility_from_v4(&mut transaction, &v4_manifest, &manifest)?;
+            let executable_count = apply_entries_until(&mut transaction, 5, 6)?;
+            advance_compatibility_from_v4(&mut transaction, &v4_manifest, &v5_manifest)?;
             MigrationApplyOutcome::Applied { executable_count }
         }
-        InstalledManifestState::ExactV5Full => {
-            verify_catalog(
-                &mut transaction,
-                &manifest,
-                target,
-                DatabaseRole::Migrator,
-                connection.server_version_num,
-            )?;
+        InstalledManifestState::ExactV5Prefix => {
+            verify_v5_upgrade_source(&mut transaction, &v5_manifest, target)?;
+            let executable_count = apply_missing_entries(&mut transaction, 6)?;
+            advance_compatibility_from_v5(&mut transaction, &v5_manifest, &manifest)?;
+            transaction
+                .batch_execute("CALL writer_lease.writer_lease_rebind_v3()")
+                .map_err(|error| {
+                    map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+                })?;
+            verify_runtime_foreman_schema_v6(&mut transaction, target, &manifest, false)?;
+            MigrationApplyOutcome::Applied { executable_count }
+        }
+        InstalledManifestState::ExactV6Full => {
+            verify_runtime_foreman_schema_v6(&mut transaction, target, &manifest, false)?;
             MigrationApplyOutcome::AlreadyCurrent
         }
     };
@@ -1734,9 +1752,15 @@ pub fn apply_migrations(
         DatabaseRole::Migrator,
         SetupOperation::Migration,
     )?;
-    let current_profile =
-        classify_current_catalog_profile(&mut transaction, POSTGRES_SCHEMA_VERSION)?;
-    verify_role_and_database_boundary(&mut transaction, current_profile, false)?;
+    if matches!(
+        installed,
+        InstalledManifestState::ExactV5Prefix | InstalledManifestState::ExactV6Full
+    ) {
+        verify_runtime_foreman_schema_v6(&mut transaction, target, &manifest, false)?;
+    } else {
+        let current_profile = classify_current_catalog_profile(&mut transaction, 5)?;
+        verify_role_and_database_boundary(&mut transaction, current_profile, false)?;
+    }
 
     transaction.commit().map_err(|_| {
         PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::CommitOutcomeUnknown)
@@ -1758,7 +1782,6 @@ pub fn verify_postgres_schema(
     target: &MigrationTarget,
     role: DatabaseRole,
 ) -> Result<PostgresSchemaEvidence, PostgresStoreSetupError> {
-    let manifest = verify_embedded_manifest()?;
     let mut transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::RepeatableRead)
@@ -1775,13 +1798,50 @@ pub fn verify_postgres_schema(
             PostgresStoreSetupErrorKind::HistoryMismatch,
         ));
     }
-    let evidence = verify_catalog(
-        &mut transaction,
-        &manifest,
-        target,
-        role,
-        connection.server_version_num,
-    )?;
+    let compatibility = transaction
+        .query(
+            "SELECT current_schema_version FROM ONLY control.schema_compatibility \
+             WHERE singleton = true",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    if compatibility.len() != 1 {
+        return Err(catalog_error());
+    }
+    let schema_version = u16::try_from(row_value::<i16>(
+        &compatibility[0],
+        0,
+        PostgresStoreSetupErrorKind::CompatibilityMismatch,
+    )?)
+    .map_err(|_| {
+        PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::CompatibilityMismatch)
+    })?;
+    let evidence = if schema_version == POSTGRES_SCHEMA_VERSION {
+        let manifest = verify_embedded_manifest()?;
+        let database_uuid =
+            verify_runtime_foreman_schema_v6(&mut transaction, target, &manifest, false)?;
+        PostgresSchemaEvidence {
+            database_uuid,
+            manifest_sha256: manifest.manifest_sha256().clone(),
+            schema_version,
+            server_version_num: connection.server_version_num,
+            role,
+            bootstrap_admission: BootstrapAdmission::StoppedNoLeader,
+        }
+    } else if schema_version == 5 {
+        let manifest = verify_v5_manifest_prefix()?;
+        verify_catalog(
+            &mut transaction,
+            &manifest,
+            target,
+            role,
+            connection.server_version_num,
+        )?
+    } else {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    };
     preflight_connection(&mut transaction, target, role, SetupOperation::Verification)?;
     transaction.commit().map_err(|error| {
         map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
@@ -1841,7 +1901,8 @@ pub(crate) fn verify_runtime_store_schema(
         }
     };
     if installed_schema_version == POSTGRES_SCHEMA_VERSION {
-        let database_uuid = verify_runtime_foreman_schema_v6(&mut transaction, target, &manifest)?;
+        let database_uuid =
+            verify_runtime_foreman_schema_v6(&mut transaction, target, &manifest, true)?;
         preflight_connection(
             &mut transaction,
             target,
@@ -1908,6 +1969,7 @@ fn verify_runtime_foreman_schema_v6<C: GenericClient>(
     client: &mut C,
     target: &MigrationTarget,
     manifest: &ManifestEvidence,
+    runtime_active: bool,
 ) -> Result<String, PostgresStoreSetupError> {
     let rows = read_history_rows(client)?;
     verify_history_rows(&rows, migration_manifest())?;
@@ -2028,7 +2090,7 @@ fn verify_runtime_foreman_schema_v6<C: GenericClient>(
         )
     );
     if row_value::<i64>(&writer, 0, PostgresStoreSetupErrorKind::CorruptCatalog)? != 5
-        || row_value::<i64>(&writer, 1, PostgresStoreSetupErrorKind::CorruptCatalog)? != 11
+        || row_value::<i64>(&writer, 1, PostgresStoreSetupErrorKind::CorruptCatalog)? != 12
         || row_value::<i64>(&writer, 2, PostgresStoreSetupErrorKind::PermissionDenied)? != 7
         || !row_value::<bool>(&writer, 3, PostgresStoreSetupErrorKind::PermissionDenied)?
         || row_value::<i64>(&writer, 4, PostgresStoreSetupErrorKind::CorruptCatalog)? != 1
@@ -2036,6 +2098,8 @@ fn verify_runtime_foreman_schema_v6<C: GenericClient>(
     {
         return Err(catalog_error());
     }
+    verify_writer_lease_v3_functions(client, true)?;
+    verify_writer_lease_v3_identity(client, target, manifest, true)?;
 
     let migration = &migration_manifest()[6];
     let candidate = ForemanSchemaV6Candidate::from_migration_bytes(
@@ -2056,7 +2120,11 @@ fn verify_runtime_foreman_schema_v6<C: GenericClient>(
         WriterLeaseV3Profile::Current,
     )
     .map_err(|_| catalog_error())?;
-    verify_runtime_admission_present(client)?;
+    if runtime_active {
+        verify_runtime_admission_present(client)?;
+    } else {
+        verify_stopped_admission(client)?;
+    }
     read_database_identity(client, target)
 }
 
@@ -2230,9 +2298,13 @@ fn classify_installed_manifest_state<C: GenericClient>(
                     verify_history_rows(&rows, &migration_manifest()[..5])?;
                     Ok(InstalledManifestState::ExactV4Prefix)
                 }
+                6 => {
+                    verify_history_rows(&rows, &migration_manifest()[..6])?;
+                    Ok(InstalledManifestState::ExactV5Prefix)
+                }
                 length if length == migration_manifest().len() => {
                     verify_history_rows(&rows, migration_manifest())?;
-                    Ok(InstalledManifestState::ExactV5Full)
+                    Ok(InstalledManifestState::ExactV6Full)
                 }
                 _ => Err(history_error()),
             }
@@ -2247,11 +2319,19 @@ fn apply_missing_entries<C: GenericClient>(
     client: &mut C,
     applied_prefix_len: usize,
 ) -> Result<usize, PostgresStoreSetupError> {
-    if applied_prefix_len > migration_manifest().len() {
+    apply_entries_until(client, applied_prefix_len, migration_manifest().len())
+}
+
+fn apply_entries_until<C: GenericClient>(
+    client: &mut C,
+    applied_prefix_len: usize,
+    target_prefix_len: usize,
+) -> Result<usize, PostgresStoreSetupError> {
+    if applied_prefix_len > target_prefix_len || target_prefix_len > migration_manifest().len() {
         return Err(history_error());
     }
     let mut executable_count = 0usize;
-    for entry in &migration_manifest()[applied_prefix_len..] {
+    for entry in &migration_manifest()[applied_prefix_len..target_prefix_len] {
         if entry.status() == MigrationStatus::Executable {
             let sql = std::str::from_utf8(entry.bytes()).map_err(|_| {
                 PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::ManifestInvalid)
@@ -2263,7 +2343,7 @@ fn apply_missing_entries<C: GenericClient>(
         }
     }
 
-    for entry in &migration_manifest()[applied_prefix_len..] {
+    for entry in &migration_manifest()[applied_prefix_len..target_prefix_len] {
         insert_history(client, entry)?;
     }
     Ok(executable_count)
@@ -2272,10 +2352,13 @@ fn apply_missing_entries<C: GenericClient>(
 fn insert_current_compatibility<C: GenericClient>(
     client: &mut C,
     manifest: &ManifestEvidence,
+    applied_prefix_len: usize,
 ) -> Result<(), PostgresStoreSetupError> {
-    let current = migration_manifest().last().ok_or_else(|| {
-        PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::ManifestInvalid)
-    })?;
+    let current = migration_manifest()
+        .get(applied_prefix_len.saturating_sub(1))
+        .ok_or_else(|| {
+            PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::ManifestInvalid)
+        })?;
     client
         .execute(
             "INSERT INTO control.schema_compatibility (\
@@ -2430,6 +2513,38 @@ fn advance_compatibility_from_v4<C: GenericClient>(
     Ok(())
 }
 
+fn advance_compatibility_from_v5<C: GenericClient>(
+    client: &mut C,
+    v5_manifest: &ManifestEvidence,
+    v6_manifest: &ManifestEvidence,
+) -> Result<(), PostgresStoreSetupError> {
+    let updated = client
+        .execute(
+            "UPDATE ONLY control.schema_compatibility \
+             SET manifest_sha256 = $1, current_schema_version = 6, \
+                 min_reader = 6, max_reader = 6, min_writer = 6, max_writer = 6, \
+                 updated_at = clock_timestamp() \
+             WHERE singleton = true \
+               AND manifest_sha256 = $2 \
+               AND current_schema_version = 5 \
+               AND min_reader = 5 AND max_reader = 5 \
+               AND min_writer = 5 AND max_writer = 5",
+            &[
+                &v6_manifest.manifest_sha256().as_str(),
+                &v5_manifest.manifest_sha256().as_str(),
+            ],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?;
+    if updated != 1 {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    Ok(())
+}
+
 fn insert_history<C: GenericClient>(
     client: &mut C,
     entry: &MigrationDescriptor,
@@ -2498,7 +2613,7 @@ fn verify_catalog<C: GenericClient>(
     role: DatabaseRole,
     server_version_num: u32,
 ) -> Result<PostgresSchemaEvidence, PostgresStoreSetupError> {
-    let current_profile = classify_current_catalog_profile(client, POSTGRES_SCHEMA_VERSION)?;
+    let current_profile = classify_current_catalog_profile(client, manifest.schema_version())?;
     if matches!(
         current_profile,
         CatalogProfile::V5CodebaseMemoryV2UpgradePending
@@ -2512,7 +2627,8 @@ fn verify_catalog<C: GenericClient>(
     }
     verify_schema_objects(client, current_profile)?;
     verify_autonomy_receipt_profile(client)?;
-    verify_history(client)?;
+    let rows = read_history_rows(client)?;
+    verify_history_rows(&rows, &migration_manifest()[..manifest.entry_count()])?;
     verify_compatibility(client, manifest, current_profile)?;
     let database_uuid = read_database_identity(client, target)?;
     match current_profile {
@@ -2568,7 +2684,7 @@ fn verify_catalog<C: GenericClient>(
     Ok(PostgresSchemaEvidence {
         database_uuid,
         manifest_sha256: manifest.manifest_sha256().clone(),
-        schema_version: POSTGRES_SCHEMA_VERSION,
+        schema_version: manifest.schema_version(),
         server_version_num,
         role,
         bootstrap_admission: BootstrapAdmission::StoppedNoLeader,
@@ -3419,6 +3535,130 @@ fn verify_v4_upgrade_source<C: GenericClient>(
     verify_roles_and_grants(client, profile)
 }
 
+fn verify_v5_upgrade_source<C: GenericClient>(
+    client: &mut C,
+    v5_manifest: &ManifestEvidence,
+    target: &MigrationTarget,
+) -> Result<(), PostgresStoreSetupError> {
+    client
+        .batch_execute(
+            "LOCK TABLE control.runtime_admission IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.physical_heads IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.terminal_transactions IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_streams IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_commands IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_events IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE control.task_ledger_outbox IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE writer_lease.writer_lease_extension_identity IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE writer_lease.writer_lease_extension_ledger IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE writer_lease.writer_lease_heads IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE writer_lease.writer_lease_commands IN ACCESS EXCLUSIVE MODE; \
+             LOCK TABLE writer_lease.writer_lease_transitions IN ACCESS EXCLUSIVE MODE",
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+        })?;
+    verify_schema_objects(client, CatalogProfile::V5CodebaseMemoryV3Current)?;
+    let rows = read_history_rows(client)?;
+    verify_history_rows(&rows, &migration_manifest()[..6])?;
+    verify_compatibility(
+        client,
+        v5_manifest,
+        CatalogProfile::V5CodebaseMemoryV3Current,
+    )?;
+    read_database_identity(client, target)?;
+    verify_codebase_memory_v3_identity(client, target, v5_manifest)?;
+    verify_stopped_admission(client)?;
+    verify_writer_lease_v3_bridge(client, target, v5_manifest)?;
+    verify_roles_and_grants(
+        client,
+        CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_writer_lease_v3_bridge<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+    v5_manifest: &ManifestEvidence,
+) -> Result<(), PostgresStoreSetupError> {
+    if WRITER_LEASE_V3_SQL.len() != 17_568
+        || hex_digest(Sha256::digest(WRITER_LEASE_V3_SQL.as_bytes()).as_ref())
+            != WRITER_LEASE_V3_SQL_SHA256
+        || WRITER_LEASE_V3_REBIND_SQL.is_empty()
+    {
+        return Err(catalog_error());
+    }
+    let header = client
+        .query_one(
+            "SELECT \
+             (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+               WHERE n.nspname='writer_lease' AND c.relkind='r'), \
+             (SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               WHERE n.nspname='writer_lease'), \
+             (SELECT count(*) FROM pg_catalog.pg_constraint con JOIN pg_catalog.pg_namespace n ON n.oid=con.connamespace \
+               WHERE n.nspname='writer_lease'), \
+             (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+               WHERE n.nspname='writer_lease' AND c.relkind='i'), \
+             (SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               WHERE n.nspname='writer_lease' AND pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE')), \
+             pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE'), \
+             (SELECT count(*) FROM ONLY writer_lease.writer_lease_heads \
+               WHERE current_status IN ('ACTIVE','SUSPECT')), \
+             (SELECT pg_catalog.obj_description(n.oid,'pg_namespace') FROM pg_catalog.pg_namespace n \
+               WHERE n.nspname='writer_lease')",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    for (index, expected) in [5_i64, 12, 27, 8, 0].into_iter().enumerate() {
+        if row_value::<i64>(&header, index, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            != expected
+        {
+            return Err(catalog_error());
+        }
+    }
+    if row_value::<bool>(&header, 5, PostgresStoreSetupErrorKind::PermissionDenied)?
+        || row_value::<i64>(
+            &header,
+            6,
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        )? != 0
+        || row_value::<Option<String>>(&header, 7, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            .as_deref()
+            != Some("LATTICE_WRITER_LEASE_SCHEMA_V3")
+    {
+        return Err(catalog_error());
+    }
+    for (query, expected, error_kind) in [
+        (
+            WRITER_LEASE_V1_COLUMN_PROFILE_SQL,
+            "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            WRITER_LEASE_V1_TABLE_ACL_PROFILE_SQL,
+            "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        ),
+        (
+            WRITER_LEASE_V1_COLUMN_ACL_PROFILE_SQL,
+            "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        ),
+        (
+            WRITER_LEASE_V1_TYPE_PROFILE_SQL,
+            "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+    ] {
+        if catalog_signature(client, query, error_kind)? != expected {
+            return Err(PostgresStoreSetupError::new(error_kind));
+        }
+    }
+    verify_writer_lease_v3_functions(client, false)?;
+    verify_writer_lease_v3_identity(client, target, v5_manifest, false)
+}
+
 fn verify_v1_store_empty<C: GenericClient>(client: &mut C) -> Result<(), PostgresStoreSetupError> {
     let row = client
         .query_one(
@@ -3621,6 +3861,7 @@ fn verify_runtime_admission_present<C: GenericClient>(
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn verify_history<C: GenericClient>(client: &mut C) -> Result<(), PostgresStoreSetupError> {
     let rows = read_history_rows(client)?;
     verify_history_rows(&rows, migration_manifest())
@@ -4238,6 +4479,285 @@ fn embedded_writer_function_source<'a>(
     let remainder = &sql[start..];
     let end = remainder.find(&close).ok_or_else(catalog_error)?;
     Ok(&remainder[..end])
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_writer_lease_v3_functions<C: GenericClient>(
+    client: &mut C,
+    current: bool,
+) -> Result<(), PostgresStoreSetupError> {
+    let rows = client
+        .query(
+            "SELECT p.proname::text,p.prokind::text,l.lanname,r.rolname,p.prosecdef, \
+                    p.provolatile::text,p.proparallel::text, \
+                    pg_catalog.oidvectortypes(p.proargtypes), \
+                    COALESCE(pg_catalog.array_to_string(p.proconfig,','),'<NULL>'), \
+                    pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE'), \
+                    p.prosrc::text,COALESCE(pg_catalog.obj_description(p.oid,'pg_proc'),'<NULL>') \
+               FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               JOIN pg_catalog.pg_language l ON l.oid=p.prolang \
+               JOIN pg_catalog.pg_roles r ON r.oid=p.proowner \
+              WHERE n.nspname='writer_lease' \
+              ORDER BY p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid)",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    let allowed = |name: &str| {
+        current
+            && matches!(
+                name,
+                "writer_lease_assert_current_v1"
+                    | "writer_lease_bind_runtime_v3"
+                    | "writer_lease_commit_plan_v1"
+                    | "writer_lease_load_commands_v1"
+                    | "writer_lease_load_current_v1"
+                    | "writer_lease_load_for_update_v3"
+                    | "writer_lease_load_transitions_v1"
+            )
+    };
+    let expected = [
+        (
+            "writer_lease_assert_current_v1",
+            "f",
+            "s",
+            "s",
+            "text, text, text, text, bytea, text, text, text, text, bigint, bytea, text, bigint, bigint, bytea",
+            true,
+        ),
+        (
+            "writer_lease_bind_runtime_v1",
+            "f",
+            "s",
+            "s",
+            "text, bigint, bytea, text, text, text, text, text",
+            true,
+        ),
+        (
+            "writer_lease_bind_runtime_v2",
+            "f",
+            "s",
+            "s",
+            "text, bigint, bytea, text, text, text, text, text",
+            true,
+        ),
+        (
+            "writer_lease_bind_runtime_v3",
+            "f",
+            "s",
+            "s",
+            "text, bigint, bytea, text, text, text, text, text",
+            true,
+        ),
+        (
+            "writer_lease_commit_plan_v1",
+            "f",
+            "v",
+            "u",
+            "text, bigint, bytea, bigint, bytea, text, bytea, text, text, bigint, bytea, bytea, bytea, bytea, bigint, bigint, bigint, bytea, text, bytea, text, text, text, bytea, text, text, text, text, bigint, bytea, text, bigint, bigint, text, bigint, text, bytea, bytea, bytea, bytea, bytea, text, text, bytea, bytea, bytea, text, bytea",
+            true,
+        ),
+        ("writer_lease_load_commands_v1", "f", "s", "s", "text", true),
+        ("writer_lease_load_current_v1", "f", "s", "s", "text", true),
+        (
+            "writer_lease_load_for_update_v1",
+            "f",
+            "v",
+            "u",
+            "text, bytea, bytea, bytea, text",
+            true,
+        ),
+        (
+            "writer_lease_load_for_update_v2",
+            "f",
+            "v",
+            "u",
+            "text, bytea, bytea, bytea, text",
+            true,
+        ),
+        (
+            "writer_lease_load_for_update_v3",
+            "f",
+            "v",
+            "u",
+            "text, bytea, bytea, bytea, text",
+            true,
+        ),
+        (
+            "writer_lease_load_transitions_v1",
+            "f",
+            "s",
+            "s",
+            "text",
+            true,
+        ),
+        ("writer_lease_rebind_v3", "p", "v", "u", "", false),
+    ];
+    if rows.len() != expected.len() {
+        return Err(catalog_error());
+    }
+    for (row, (name, kind, volatility, parallel, args, security_definer)) in
+        rows.iter().zip(expected)
+    {
+        if row_value::<String>(row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)? != name
+            || row_value::<String>(row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)? != kind
+            || row_value::<String>(row, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != "plpgsql"
+            || row_value::<String>(row, 3, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != "lattice_migrator"
+            || row_value::<bool>(row, 4, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != security_definer
+            || row_value::<String>(row, 5, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != volatility
+            || row_value::<String>(row, 6, PostgresStoreSetupErrorKind::CorruptCatalog)? != parallel
+            || row_value::<String>(row, 7, PostgresStoreSetupErrorKind::CorruptCatalog)? != args
+            || row_value::<String>(row, 8, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != "search_path=pg_catalog,row_security=on,lock_timeout=5s,statement_timeout=30s"
+            || row_value::<bool>(row, 9, PostgresStoreSetupErrorKind::PermissionDenied)?
+                != allowed(name)
+        {
+            return Err(catalog_error());
+        }
+        let (sql, delimiter, comment) = match name {
+            "writer_lease_bind_runtime_v2" | "writer_lease_load_for_update_v2" => (
+                WRITER_LEASE_V2_SQL,
+                if name == "writer_lease_bind_runtime_v2" {
+                    "lattice_writer_lease_bind_runtime_v2"
+                } else {
+                    "lattice_writer_lease_load_for_update_v2"
+                },
+                None,
+            ),
+            "writer_lease_bind_runtime_v3" | "writer_lease_load_for_update_v3" => (
+                WRITER_LEASE_V3_SQL,
+                if name == "writer_lease_bind_runtime_v3" {
+                    "lattice_writer_lease_bind_runtime_v3"
+                } else {
+                    "lattice_writer_lease_load_for_update_v3"
+                },
+                if name == "writer_lease_bind_runtime_v3" {
+                    Some("TASK087_GLOBAL_SCHEMA_V6_FOREMAN_COORDINATION_FOREMAN_SNAPSHOT_RECORDED")
+                } else {
+                    None
+                },
+            ),
+            "writer_lease_rebind_v3" => (
+                WRITER_LEASE_V3_REBIND_SQL,
+                "lattice_writer_lease_rebind_v3",
+                Some("LATTICE_WRITER_LEASE_REBIND_V3"),
+            ),
+            _ => (
+                WRITER_LEASE_V1_SQL,
+                match name {
+                    "writer_lease_assert_current_v1" => "lattice_writer_lease_assert_current_v1",
+                    "writer_lease_bind_runtime_v1" => "lattice_writer_lease_bind_runtime_v1",
+                    "writer_lease_commit_plan_v1" => "lattice_writer_lease_commit_plan_v1",
+                    "writer_lease_load_commands_v1" => "lattice_writer_lease_load_commands_v1",
+                    "writer_lease_load_current_v1" => "lattice_writer_lease_load_current_v1",
+                    "writer_lease_load_for_update_v1" => "lattice_writer_lease_load_for_update_v1",
+                    "writer_lease_load_transitions_v1" => {
+                        "lattice_writer_lease_load_transitions_v1"
+                    }
+                    _ => return Err(catalog_error()),
+                },
+                None,
+            ),
+        };
+        if row_value::<String>(row, 10, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            != embedded_writer_function_source(sql, delimiter)?
+            || row_value::<String>(row, 11, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != comment.unwrap_or("<NULL>")
+        {
+            return Err(catalog_error());
+        }
+    }
+    let closure = client
+        .query_one(
+            "SELECT \
+             (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+               WHERE n.nspname='writer_lease' AND pg_catalog.has_table_privilege(
+                 'lattice_runtime',c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')), \
+             (SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               CROSS JOIN pg_catalog.pg_roles r WHERE n.nspname='writer_lease' AND NOT r.rolsuper \
+                 AND r.rolname !~ '^pg_' AND r.rolname NOT IN ('lattice_migrator','lattice_runtime') \
+                 AND pg_catalog.has_function_privilege(r.rolname,p.oid,'EXECUTE')), \
+             pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','CREATE')",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied))?;
+    if row_value::<i64>(&closure, 0, PostgresStoreSetupErrorKind::PermissionDenied)? != 0
+        || row_value::<i64>(&closure, 1, PostgresStoreSetupErrorKind::PermissionDenied)? != 0
+        || row_value::<bool>(&closure, 2, PostgresStoreSetupErrorKind::PermissionDenied)?
+    {
+        return Err(permission_error());
+    }
+    Ok(())
+}
+
+fn verify_writer_lease_v3_identity<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+    global_manifest: &ManifestEvidence,
+    current: bool,
+) -> Result<(), PostgresStoreSetupError> {
+    let row = client
+        .query_one(
+            "SELECT pg_catalog.concat_ws('|',i.extension_id,i.extension_schema_version,i.extension_path, \
+                    pg_catalog.btrim(i.extension_sql_sha256),pg_catalog.btrim(i.extension_manifest_sha256), \
+                    i.database_uuid,pg_catalog.btrim(i.database_identity_sha256),i.global_schema_version, \
+                    pg_catalog.btrim(i.global_manifest_sha256),i.required_memory_schema_version, \
+                    pg_catalog.btrim(i.required_memory_manifest_sha256)), \
+                    (SELECT pg_catalog.string_agg(l.ledger_ordinal::text||':'||l.event_kind::text||':'|| \
+                        l.extension_schema_version::text||':'||l.global_schema_version::text,',' \
+                        ORDER BY l.ledger_ordinal) FROM ONLY writer_lease.writer_lease_extension_ledger l) \
+               FROM ONLY writer_lease.writer_lease_extension_identity i WHERE i.singleton",
+            &[],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?;
+    let expected = format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        WRITER_LEASE_EXTENSION_ID,
+        WRITER_LEASE_V3_SCHEMA_VERSION,
+        WRITER_LEASE_V3_PATH,
+        WRITER_LEASE_V3_SQL_SHA256,
+        WRITER_LEASE_V3_MANIFEST_SHA256,
+        target.expected_database_uuid(),
+        target.expected_database_identity_sha256().as_str(),
+        if current { 6 } else { 5 },
+        global_manifest.manifest_sha256().as_str(),
+        CODEBASE_MEMORY_V3_SCHEMA_VERSION,
+        CODEBASE_MEMORY_V3_MANIFEST_SHA256,
+    );
+    let ledger =
+        row_value::<Option<String>>(&row, 1, PostgresStoreSetupErrorKind::CompatibilityMismatch)?;
+    let valid_ledger = if current {
+        matches!(
+            ledger.as_deref(),
+            Some(
+                "1:INSTALLED:3:6"
+                    | "1:INSTALLED:2:5,2:UPGRADED:3:5,3:REBOUND:3:6"
+                    | "1:INSTALLED:1:3,2:UPGRADED:2:3,3:REBOUND:2:5,4:UPGRADED:3:5,5:REBOUND:3:6"
+            )
+        )
+    } else {
+        matches!(
+            ledger.as_deref(),
+            Some(
+                "1:INSTALLED:2:5,2:UPGRADED:3:5"
+                    | "1:INSTALLED:1:3,2:UPGRADED:2:3,3:REBOUND:2:5,4:UPGRADED:3:5"
+            )
+        )
+    };
+    if row_value::<String>(&row, 0, PostgresStoreSetupErrorKind::CompatibilityMismatch)? != expected
+        || !valid_ledger
+    {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    Ok(())
 }
 
 fn verify_writer_lease_v2_acl_closure<C: GenericClient>(

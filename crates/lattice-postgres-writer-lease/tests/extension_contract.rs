@@ -1,10 +1,58 @@
 use lattice_postgres_writer_lease::{
-    WRITER_LEASE_EXTENSION_ID, WRITER_LEASE_EXTENSION_PATH, WRITER_LEASE_EXTENSION_SCHEMA_VERSION,
+    ExtensionApplyOutcome, ExtensionSetupError, V3ExtensionTarget, WRITER_LEASE_EXTENSION_ID,
+    WRITER_LEASE_EXTENSION_PATH, WRITER_LEASE_EXTENSION_SCHEMA_VERSION,
     WRITER_LEASE_V1_EXTENSION_PATH, WRITER_LEASE_V2_EXTENSION_PATH, WRITER_LEASE_V3_EXTENSION_PATH,
-    WriterLeaseV3BridgeState, verify_embedded_extension_manifest,
-    verify_embedded_v1_extension_manifest, verify_embedded_v2_extension_manifest,
-    verify_embedded_v3_extension_manifest, verify_writer_lease_v3_transition,
+    WRITER_LEASE_V3_REBIND_PATH, WriterLeaseV3BridgeState, apply_v3_extension, rebind_v3_extension,
+    verify_embedded_extension_manifest, verify_embedded_v1_extension_manifest,
+    verify_embedded_v2_extension_manifest, verify_embedded_v3_extension_manifest,
+    verify_embedded_v3_rebind_manifest, verify_writer_lease_v3_transition,
 };
+
+#[test]
+fn task094_exposes_typed_v3_bridge_and_rebind_owner_apis() {
+    let _: fn(
+        &mut postgres::Client,
+        &V3ExtensionTarget,
+    ) -> Result<ExtensionApplyOutcome, ExtensionSetupError> = apply_v3_extension;
+    let _: fn(
+        &mut postgres::Client,
+        &V3ExtensionTarget,
+    ) -> Result<ExtensionApplyOutcome, ExtensionSetupError> = rebind_v3_extension;
+
+    let setup = include_str!("../src/setup.rs");
+    for required in [
+        "G5MemoryV3WriterV3Bridge",
+        "G6MemoryV3WriterV3BridgePending",
+        "G6MemoryV3WriterV3Current",
+        "apply_v2_to_v3_bridge",
+        "writer_lease_rebind_v3()",
+        "verify_v3_bridge_profile",
+        "verify_v3_current_profile",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing v3 owner boundary: {required}"
+        );
+    }
+
+    let rebind = verify_embedded_v3_rebind_manifest().expect("fixed rebind bytes");
+    assert_eq!(rebind.path(), WRITER_LEASE_V3_REBIND_PATH);
+    let sql = include_str!("../../../db/extensions/writer-lease/v3-rebind.sql");
+    for required in [
+        "CREATE PROCEDURE writer_lease.writer_lease_rebind_v3()",
+        "LANGUAGE plpgsql",
+        "$lattice_writer_lease_rebind_v3$",
+        "GRANT USAGE ON SCHEMA writer_lease TO lattice_runtime",
+        "WHEN 4 THEN 5",
+        "event_kind = 'REBOUND'",
+    ] {
+        assert!(
+            sql.contains(required),
+            "missing fixed v3 SQL boundary: {required}"
+        );
+    }
+    assert!(!sql.contains("CREATE OR REPLACE"));
+}
 
 #[test]
 fn v1_history_is_immutable_and_v2_is_the_current_append_only_successor() {
