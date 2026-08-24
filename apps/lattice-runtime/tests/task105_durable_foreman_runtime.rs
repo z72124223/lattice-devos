@@ -4,9 +4,11 @@ use std::env;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use lattice_contracts::RuntimeKind;
 use lattice_runtime::composition::{
     bootstrap_postgres_extensions_from_environment, initialize_runtime_postgres_from_environment,
 };
+use lattice_task_ledger::{VerifiedStream, foreman_coordination_identity};
 use postgres::config::SslMode;
 use postgres::{Client, Config, NoTls};
 use serde_json::{Value, json};
@@ -61,6 +63,105 @@ impl LiveConfig {
             .application_name("lattice-task105-migration-observer")
             .ssl_mode(SslMode::Disable);
         config.connect(NoTls).expect("TASK105_BOOTSTRAP_CONNECT")
+    }
+
+    fn runtime_client(&self) -> Client {
+        let mut config = Config::new();
+        config
+            .host(&self.host)
+            .port(self.port)
+            .user("lattice_runtime_login")
+            .password(&self.password)
+            .dbname(&self.database_name())
+            .application_name("lattice-devos-task019")
+            .ssl_mode(SslMode::Disable);
+        let mut client = config.connect(NoTls).expect("TASK105_RUNTIME_CONNECT");
+        client
+            .batch_execute("SET ROLE lattice_runtime")
+            .expect("TASK105_RUNTIME_ROLE");
+        client
+    }
+
+    fn assert_empty_foreman_runtime_surface(&self) {
+        let migration = self.migration_fingerprint();
+        let identity = foreman_coordination_identity().expect("TASK105_FOREMAN_IDENTITY");
+        let vacant = VerifiedStream::vacant(identity.clone(), RuntimeKind::Live)
+            .expect("TASK105_FOREMAN_VACANT");
+        let stream_id = vacant.head().stream_id().as_str();
+        let stream_bytes = (0..stream_id.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&stream_id[index..index + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        let mut client = self.runtime_client();
+        let head = client
+            .query(
+                "SELECT * FROM control.task_ledger_read_head_v3(\
+                    $1::smallint,$2::text,$3::bytea,$4::text,$5::text)",
+                &[
+                    &migration.1,
+                    &migration.2,
+                    &stream_bytes,
+                    &identity.project_id().as_str(),
+                    &identity.project_snapshot_id().as_str(),
+                ],
+            )
+            .expect("TASK105_DIAGNOSTIC_LEDGER_HEAD");
+        assert!(head.is_empty());
+        for (label, sql) in [
+            (
+                "EVENTS",
+                "SELECT * FROM control.task_ledger_read_events_v3(\
+                    $1::smallint,$2::text,$3::bytea)",
+            ),
+            (
+                "COMMANDS",
+                "SELECT * FROM control.task_ledger_read_commands_v3(\
+                    $1::smallint,$2::text,$3::bytea)",
+            ),
+        ] {
+            assert!(
+                client
+                    .query(sql, &[&migration.1, &migration.2, &stream_bytes])
+                    .unwrap_or_else(|error| panic!("TASK105_DIAGNOSTIC_{label}:{error}"))
+                    .is_empty()
+            );
+        }
+        assert!(
+            client
+                .query(
+                    "SELECT * FROM control.task_ledger_read_autonomy_receipts_v1($1::bytea)",
+                    &[&stream_bytes],
+                )
+                .expect("TASK105_DIAGNOSTIC_AUTONOMY")
+                .is_empty()
+        );
+        assert!(
+            client
+                .query(
+                    "SELECT * FROM control.task_ledger_read_foreman_snapshots_v1($1::bytea)",
+                    &[&stream_bytes],
+                )
+                .expect("TASK105_DIAGNOSTIC_FOREMAN_CHILD")
+                .is_empty()
+        );
+        assert_eq!(
+            client
+                .query_one(
+                    "SELECT head_found FROM control.store_current_head_v5(\
+                        $1::smallint,$2::text,$3::text,$4::text,$5::text,$6::bytea)",
+                    &[
+                        &migration.1,
+                        &migration.2,
+                        &identity.project_id().as_str(),
+                        &identity.project_snapshot_id().as_str(),
+                        &"TASK_LEDGER",
+                        &stream_bytes,
+                    ],
+                )
+                .expect("TASK105_DIAGNOSTIC_STORE_HEAD")
+                .get::<_, bool>(0),
+            false
+        );
     }
 
     fn migration_fingerprint(&self) -> (i64, i16, String) {
@@ -190,7 +291,10 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     };
     println!("TASK105_STAGE_INITIALIZE_ENTER");
     initialize_runtime_postgres_from_environment().expect("TASK105_INITIALIZE");
-    bootstrap_postgres_extensions_from_environment().expect("TASK105_BOOTSTRAP");
+    if let Err(error) = bootstrap_postgres_extensions_from_environment() {
+        config.assert_empty_foreman_runtime_surface();
+        panic!("TASK105_BOOTSTRAP:{}", error.code());
+    }
     let migration_before = config.migration_fingerprint();
     assert_eq!(migration_before.1, 6);
     bootstrap_postgres_extensions_from_environment().expect("TASK105_V6_CURRENT_RETRY");
