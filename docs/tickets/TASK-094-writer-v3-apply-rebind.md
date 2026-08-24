@@ -10,9 +10,7 @@ additional_modules:
     constitution_version: 1.13
 status: completed
 parallel_safe: false
-depends_on:
-  - commit:aeff4131d0a78e740980b47ab10f56c5aa96cb18
-  - commit:e13e6d8ffb0ffeb4ae1eea7e33f535d1848f7d0f
+depends_on: []
 branch: feature/task-094-writer-v3-apply-rebind
 implementation_worktree: lattice-worktrees/task-094-writer-v3-apply-rebind
 implementation_base: aeff4131d0a78e740980b47ab10f56c5aa96cb18
@@ -72,6 +70,13 @@ exact-v6 idempotent retry invoke that same function before catalog/ACL verify.
   event `FOREMAN_SNAPSHOT_RECORDED`.
 - TASK-079 event/epistemic semantics, TASK-050 dirty worktree, TASK-051,
   TASK-033, and TASK-078 exporter are out of scope.
+
+## Commit provenance (not TASK dependencies)
+
+- Resumption base: `aeff4131d0a78e740980b47ab10f56c5aa96cb18`.
+- Related inspected predecessor: `e13e6d8ffb0ffeb4ae1eea7e33f535d1848f7d0f`.
+- `depends_on: []` is deliberate: these are commit-provenance references, not
+  unresolved LATTICE TASK dependencies accepted by the delivery finisher.
 
 ## Acceptance criteria
 

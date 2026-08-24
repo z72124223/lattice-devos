@@ -14,6 +14,10 @@ an archive, merge, deployment, or release claim.
 - In scope: the allowlisted TASK-094 branch
   `feature/task-094-writer-v3-apply-rebind`, based on
   `aeff4131d0a78e740980b47ab10f56c5aa96cb18`.
+- Commit provenance only (not TASK dependencies): the resumption base is
+  `aeff4131d0a78e740980b47ab10f56c5aa96cb18`; the related inspected predecessor
+  is `e13e6d8ffb0ffeb4ae1eea7e33f535d1848f7d0f`. The ticket deliberately uses
+  canonical `depends_on: []`.
 - Out of scope: push, merge, remote CI, deployment/release, archival, and
   production bootstrap sequencing. Product Writer-v3-before-Store composition
   is the separate TASK-105 integration prerequisite.
