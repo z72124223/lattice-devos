@@ -30,7 +30,7 @@ use lattice_postgres_writer_lease::{
     verify_embedded_v2_extension_manifest as verify_writer_v2_manifest,
     verify_embedded_v3_rebind_manifest,
 };
-use lattice_task_ledger::foreman_coordination_identity;
+use lattice_task_ledger::{VerifiedStream, foreman_coordination_identity};
 use lattice_writer_lease::{
     CommandOutcome as LeaseCommandOutcome, WriterLeaseAcquireRequest, WriterLeaseReleaseRequest,
     WriterLeaseRepository, WriterLeaseRepositoryCommand,
@@ -120,6 +120,7 @@ const FRESH_CATALOG_FINGERPRINT_QUERIES: [&str; 3] = [
       WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
 ];
 
+#[derive(Clone)]
 struct LiveConfig {
     host: String,
     port: u16,
@@ -229,6 +230,11 @@ impl LiveConfig {
     }
 
     fn revoke_login_database_privileges(&self) {
+        self.try_revoke_login_database_privileges()
+            .expect("TASK105_CAPABILITY_HANDOFF_REVOKE");
+    }
+
+    fn try_revoke_login_database_privileges(&self) -> Result<(), &'static str> {
         let mut config = Config::new();
         config
             .host(&self.host)
@@ -240,14 +246,44 @@ impl LiveConfig {
             .ssl_mode(SslMode::Disable);
         config
             .connect(NoTls)
-            .expect("TASK105_CAPABILITY_HANDOFF_CONNECT")
+            .map_err(|_| "TASK105_CAPABILITY_HANDOFF_CONNECT")?
             .batch_execute(&format!(
                 "REVOKE ALL ON DATABASE {} FROM \
                  lattice_migrator_login,lattice_runtime_login,\
                  lattice_guardian_login,lattice_readonly_login",
                 self.database_name()
             ))
-            .expect("TASK105_CAPABILITY_HANDOFF_REVOKE");
+            .map_err(|_| "TASK105_CAPABILITY_HANDOFF_REVOKE")
+    }
+
+    fn try_drop_database(&self) -> Result<(), &'static str> {
+        let database = self.database_name();
+        let mut config = Config::new();
+        config
+            .host(&self.host)
+            .port(self.port)
+            .user("runtime_bootstrap")
+            .password(&self.password)
+            .dbname("postgres")
+            .application_name("lattice-task105-child-cleanup")
+            .ssl_mode(SslMode::Disable);
+        let mut client = config
+            .connect(NoTls)
+            .map_err(|_| "TASK105_CHILD_CLEANUP_CONNECT")?;
+        let active: i64 = client
+            .query_one(
+                "SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity \
+                  WHERE datname=$1 AND pid<>pg_catalog.pg_backend_pid()",
+                &[&database],
+            )
+            .map_err(|_| "TASK105_CHILD_CLEANUP_ACTIVITY")?
+            .get(0);
+        if active != 0 {
+            return Err("TASK105_CHILD_CLEANUP_ACTIVE");
+        }
+        client
+            .batch_execute(&format!("DROP DATABASE {database}"))
+            .map_err(|_| "TASK105_CHILD_CLEANUP_DROP")
     }
 
     fn assert_login_capability(&self, expected_connect: bool) {
@@ -1189,6 +1225,297 @@ impl LiveConfig {
             )
             .expect("TASK105_REMOVE_DISPOSABLE_WRITER_PROFILE");
     }
+
+    fn foreman_counts(&self) -> ([i64; 3], [String; 3], Option<String>) {
+        let stream_hex = foreman_stream_hex();
+        let row = self
+            .bootstrap_client()
+            .query_one(
+                "SELECT \
+                   (SELECT pg_catalog.count(*) FROM ONLY control.task_ledger_commands c \
+                     WHERE c.stream_id=pg_catalog.decode($1,'hex')), \
+                   (SELECT pg_catalog.count(*) FROM ONLY control.task_ledger_events e \
+                     WHERE e.stream_id=pg_catalog.decode($1,'hex')), \
+                   (SELECT pg_catalog.count(*) FROM ONLY control.task_ledger_foreman_snapshots f \
+                     WHERE f.stream_id=pg_catalog.decode($1,'hex')), \
+                   COALESCE((SELECT s.sequence::text FROM ONLY control.task_ledger_streams s \
+                     WHERE s.stream_id=pg_catalog.decode($1,'hex')),'0'), \
+                   COALESCE((SELECT s.event_count::text FROM ONLY control.task_ledger_streams s \
+                     WHERE s.stream_id=pg_catalog.decode($1,'hex')),'0'), \
+                   COALESCE((SELECT s.command_count::text FROM ONLY control.task_ledger_streams s \
+                     WHERE s.stream_id=pg_catalog.decode($1,'hex')),'0'), \
+                   (SELECT pg_catalog.encode(s.head_digest,'hex') \
+                      FROM ONLY control.task_ledger_streams s \
+                     WHERE s.stream_id=pg_catalog.decode($1,'hex'))",
+                &[&stream_hex],
+            )
+            .expect("TASK105_FOREMAN_COUNTS");
+        (
+            [row.get(0), row.get(1), row.get(2)],
+            [row.get(3), row.get(4), row.get(5)],
+            row.get(6),
+        )
+    }
+
+    fn assert_writer_denial(&self, checkpoint_id: &str, expected_reason: &str) {
+        let command_id = foreman_acquire_command_id(checkpoint_id);
+        let rows = self
+            .bootstrap_client()
+            .query(
+                "SELECT c.outcome::text, c.denial_reason::text \
+                   FROM ONLY writer_lease.writer_lease_commands c \
+                  WHERE c.project_id=$1 AND c.command_id=$2",
+                &[&"lattice-control", &command_id],
+            )
+            .expect("TASK105_RACE_WRITER_DENIAL_QUERY");
+        assert_eq!(rows.len(), 1, "TASK105_RACE_WRITER_DENIAL_COUNT");
+        assert_eq!(
+            rows[0].get::<_, String>(0),
+            "DENIED",
+            "TASK105_RACE_WRITER_DENIAL_OUTCOME"
+        );
+        assert_eq!(
+            rows[0].get::<_, String>(1),
+            expected_reason,
+            "TASK105_RACE_WRITER_DENIAL_REASON"
+        );
+    }
+}
+
+fn foreman_stream_hex() -> String {
+    VerifiedStream::vacant(
+        foreman_coordination_identity().expect("TASK105_FOREMAN_IDENTITY"),
+        RuntimeKind::Live,
+    )
+    .expect("TASK105_FOREMAN_VACANT_STREAM")
+    .head()
+    .stream_id()
+    .as_str()
+    .to_owned()
+}
+
+fn foreman_acquire_command_id(checkpoint_id: &str) -> String {
+    let digest = Sha256::digest(checkpoint_id.as_bytes());
+    let mut suffix = String::with_capacity(24);
+    for byte in &digest[..12] {
+        use std::fmt::Write as _;
+        write!(&mut suffix, "{byte:02x}").expect("TASK105_FOREMAN_COMMAND_HEX");
+    }
+    format!("foreman-acquire-{suffix}")
+}
+
+fn foreman_writer_repository(config: &LiveConfig) -> PostgresWriterLease {
+    let database_identity = ContentDigest::from_sha256(
+        config
+            .migration_target()
+            .expected_database_identity_sha256()
+            .as_str(),
+    )
+    .expect("TASK105_RACE_DATABASE_IDENTITY");
+    let target = V3ExtensionTarget::new(config.database_name(), database_identity)
+        .expect("TASK105_RACE_WRITER_TARGET");
+    PostgresWriterLease::new_v3(
+        config.runtime_client(),
+        &target,
+        &store_authority_from_environment(),
+        600,
+    )
+    .expect("TASK105_RACE_WRITER_REPOSITORY")
+}
+
+struct RaceAuthorityCleanup {
+    repository: PostgresWriterLease,
+    project_id: ProjectId,
+    expected: WriterLeaseAuthorityHead,
+    armed: bool,
+}
+
+impl RaceAuthorityCleanup {
+    fn new(
+        repository: PostgresWriterLease,
+        project_id: ProjectId,
+        expected: WriterLeaseAuthorityHead,
+    ) -> Self {
+        Self {
+            repository,
+            project_id,
+            expected,
+            armed: true,
+        }
+    }
+
+    fn disarm_after_release(&mut self) -> Result<(), &'static str> {
+        if self
+            .repository
+            .current_authority(&self.project_id)
+            .map_err(|_| "TASK105_RACE_AUTHORITY_CURRENT")?
+            .is_some()
+        {
+            return Err("TASK105_RACE_AUTHORITY_STILL_CURRENT");
+        }
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for RaceAuthorityCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(Some(current)) = self.repository.current_authority(&self.project_id) else {
+            return;
+        };
+        if current.independent_head() != &self.expected {
+            return;
+        }
+        let _ = self
+            .repository
+            .execute(WriterLeaseRepositoryCommand::Release(
+                WriterLeaseReleaseRequest {
+                    command_id: "task105-race-cleanup-release".to_owned(),
+                    project_id: self.project_id.clone(),
+                    expected_head: current.independent_head().clone(),
+                },
+            ));
+    }
+}
+
+struct ForemanStreamLock {
+    client: Client,
+    key: i64,
+    held: bool,
+}
+
+impl ForemanStreamLock {
+    fn acquire(config: &LiveConfig) -> Self {
+        let mut client = config.bootstrap_client();
+        let stream_hex = foreman_stream_hex();
+        let key: i64 = client
+            .query_one(
+                "SELECT pg_catalog.hashtextextended( \
+                   'lattice.task-ledger.stream.v1:' || $1,0)",
+                &[&stream_hex],
+            )
+            .expect("TASK105_FOREMAN_STREAM_LOCK_KEY")
+            .get(0);
+        client
+            .query("SELECT pg_catalog.pg_advisory_lock($1)", &[&key])
+            .expect("TASK105_FOREMAN_STREAM_LOCK_ACQUIRE");
+        Self {
+            client,
+            key,
+            held: true,
+        }
+    }
+
+    fn wait_for_one_ungranted_waiter(&mut self) -> Result<(), &'static str> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let waiting: i64 = self
+                .client
+                .query_one(
+                    "SELECT pg_catalog.count(*) \
+                       FROM pg_catalog.pg_locks held \
+                       JOIN pg_catalog.pg_locks waiting \
+                         ON waiting.locktype=held.locktype \
+                        AND waiting.database IS NOT DISTINCT FROM held.database \
+                        AND waiting.classid IS NOT DISTINCT FROM held.classid \
+                        AND waiting.objid IS NOT DISTINCT FROM held.objid \
+                        AND waiting.objsubid IS NOT DISTINCT FROM held.objsubid \
+                        AND waiting.mode=held.mode \
+                      WHERE held.pid=pg_catalog.pg_backend_pid() \
+                        AND held.locktype='advisory' AND held.granted \
+                        AND waiting.pid<>held.pid AND NOT waiting.granted",
+                    &[],
+                )
+                .map_err(|_| "TASK105_FOREMAN_STREAM_WAITER_QUERY")?
+                .get(0);
+            if waiting == 1 {
+                return Ok(());
+            }
+            if waiting > 1 {
+                return Err("TASK105_FOREMAN_STREAM_WAITER_DUPLICATE");
+            }
+            if Instant::now() >= deadline {
+                return Err("TASK105_FOREMAN_STREAM_WAITER_TIMEOUT");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn release(&mut self) -> Result<(), &'static str> {
+        if !self.held {
+            return Ok(());
+        }
+        let unlocked: bool = self
+            .client
+            .query_one("SELECT pg_catalog.pg_advisory_unlock($1)", &[&self.key])
+            .map_err(|_| "TASK105_FOREMAN_STREAM_LOCK_RELEASE")?
+            .get(0);
+        if !unlocked {
+            return Err("TASK105_FOREMAN_STREAM_LOCK_NOT_HELD");
+        }
+        self.held = false;
+        Ok(())
+    }
+}
+
+impl Drop for ForemanStreamLock {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
+}
+
+struct DisposableRaceDatabase<'a> {
+    parent: &'a LiveConfig,
+    child: LiveConfig,
+    cleanup_pending: bool,
+}
+
+impl<'a> DisposableRaceDatabase<'a> {
+    fn new(parent: &'a LiveConfig) -> Self {
+        let child = parent.child_database(0x6000_0000);
+        assert_ne!(child.run_id, parent.run_id);
+        Self {
+            parent,
+            child,
+            cleanup_pending: false,
+        }
+    }
+
+    fn initialize(&mut self) {
+        self.cleanup_pending = true;
+        self.parent.revoke_login_database_privileges();
+        self.parent.assert_login_capability(false);
+        run_latticed_admin(&self.child, "--postgres-initialize", true);
+        self.child.assert_login_capability(true);
+        self.parent.assert_login_capability(false);
+    }
+
+    fn config(&self) -> LiveConfig {
+        self.child.clone()
+    }
+
+    fn cleanup(&mut self) -> Result<(), &'static str> {
+        if !self.cleanup_pending {
+            return Ok(());
+        }
+        self.child.try_revoke_login_database_privileges()?;
+        self.child.try_drop_database()?;
+        run_latticed_admin(self.parent, "--postgres-initialize", true);
+        self.cleanup_pending = false;
+        Ok(())
+    }
+}
+
+impl Drop for DisposableRaceDatabase<'_> {
+    fn drop(&mut self) {
+        if self.cleanup_pending {
+            let _ = self.child.try_revoke_login_database_privileges();
+            let _ = self.child.try_drop_database();
+        }
+    }
 }
 
 struct ForemanWorkerCorruption<'a> {
@@ -1598,13 +1925,16 @@ struct InteractiveLatticed {
 }
 
 impl InteractiveLatticed {
-    fn start() -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_latticed"))
+    fn start_with_run_id(run_id: Option<&str>) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_latticed"));
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("TASK105_INTERACTIVE_LATTICED_START");
+            .stderr(Stdio::piped());
+        if let Some(run_id) = run_id {
+            command.env("LATTICE_TASK019_RUN_ID", run_id);
+        }
+        let mut child = command.spawn().expect("TASK105_INTERACTIVE_LATTICED_START");
         let stdin = child.stdin.take().expect("TASK105_INTERACTIVE_STDIN");
         let child_stdout = child.stdout.take().expect("TASK105_INTERACTIVE_STDOUT");
         let child_stderr = child.stderr.take().expect("TASK105_INTERACTIVE_STDERR");
@@ -1635,12 +1965,24 @@ impl InteractiveLatticed {
     }
 
     fn start_initialized() -> Self {
-        let mut session = Self::start();
-        let initialized = session.request(&initialize_request());
+        let mut session = Self::start_with_run_id(None);
+        session.initialize();
+        session
+    }
+
+    fn start_for(config: &LiveConfig) -> Self {
+        Self::start_with_run_id(Some(&config.run_id))
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn initialize(&mut self) {
+        let initialized = self.request(&initialize_request());
         assert_eq!(initialized["id"], 1);
         assert!(initialized.get("error").is_none());
-        session.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
-        session
+        self.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
     }
 
     fn send(&mut self, request: &Value) {
@@ -1655,15 +1997,23 @@ impl InteractiveLatticed {
             .cloned()
             .expect("TASK105_INTERACTIVE_REQUEST_ID");
         self.send(request);
+        self.receive_with_timeout(&expected_id, Duration::from_secs(35))
+    }
+
+    fn receive_with_timeout(&mut self, expected_id: &Value, timeout: Duration) -> Value {
         let line = self
             .stdout
-            .recv_timeout(Duration::from_secs(35))
+            .recv_timeout(timeout)
             .expect("TASK105_INTERACTIVE_RESPONSE_TIMEOUT")
             .expect("TASK105_INTERACTIVE_STDOUT_READ");
         let response: Value = serde_json::from_str(&line).expect("TASK105_INTERACTIVE_JSON");
         assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(response["id"], expected_id);
+        assert_eq!(&response["id"], expected_id);
         response
+    }
+
+    fn recv_expected(&mut self, id: i64, timeout: Duration) -> Value {
+        self.receive_with_timeout(&json!(id), timeout)
     }
 
     fn request_status(&mut self, id: i64) -> Value {
@@ -1812,11 +2162,42 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         "TASK105_STAGE_FOREMAN_WRITER_CONTENTION_PASS",
         "TASK105_STAGE_FOREMAN_REPLAY_EXTRA_HISTORY_CORRUPT_PASS",
         "TASK105_STAGE_FOREMAN_REPLAY_UNSUPPORTED_PASS",
+        "TASK105_STAGE_FOREMAN_DUAL_PROCESS_RACE_PASS",
     ] {
         assert_eq!(
             source.match_indices(marker).count(),
             2,
             "TASK105_FAULT_STAGE_MISSING:{marker}"
+        );
+    }
+    for race_contract in [
+        "child_database(0x6000_0000)",
+        "start_for(&race)",
+        "process_a.send(&generation_one)",
+        "process_a.recv_expected(2, Duration::from_secs(35))",
+        "assert_eq!(same_generation_one[\"params\"], generation_one[\"params\"])",
+        "process_b.send(&same_generation_one)",
+        "process_b.recv_expected(3, Duration::from_secs(2))",
+        "process_b.recv_expected(4, Duration::from_secs(2))",
+        "lattice.task-ledger.stream.v1:",
+        "wait_for_one_ungranted_waiter",
+        "NOT waiting.granted",
+        "let deadline = Instant::now() + Duration::from_secs(3);",
+        "Duration::from_secs(2)",
+        "Duration::from_millis(20)",
+        "task105-race-contender",
+        "holder_process_id().get()",
+        "race.assert_writer_denial(contender_checkpoint_id, \"WRITER_ALREADY_HELD\")",
+        "pg_catalog.encode(s.head_digest,'hex')",
+        "TASK105_RACE_GENERATION_ONE_LEDGER_DIGEST",
+        "TASK105_RACE_GENERATION_TWO_LEDGER_DIGEST",
+        "WRITER_ALREADY_HELD",
+        "race.foreman_counts()",
+        "race.try_bootstrap_client().is_err()",
+    ] {
+        assert!(
+            source.contains(race_contract),
+            "TASK105_RACE_CONTRACT_MISSING:{race_contract}"
         );
     }
     for query in FRESH_CATALOG_FINGERPRINT_QUERIES {
@@ -2247,4 +2628,245 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     assert_eq!(config.v6_absent_writer_fingerprint(), main_during_children);
     assert_eq!(required("LATTICE_TASK019_RUN_ID"), parent_run_id);
     println!("TASK105_STAGE_V5_WRITER_ABSENT_EXECUTABLE_PASS");
+
+    let main_before_race = config.v6_absent_writer_fingerprint();
+    let mut race_database = DisposableRaceDatabase::new(&config);
+    race_database.initialize();
+    let race = race_database.config();
+    run_latticed_admin(&race, "--postgres-bootstrap", true);
+    race.assert_v6_writer_v3_current();
+    let race_migration = race.migration_fingerprint();
+    let race_durable = race.durable_profile_fingerprint();
+
+    let mut process_a = InteractiveLatticed::start_for(&race);
+    process_a.initialize();
+    let mut process_b = InteractiveLatticed::start_for(&race);
+    process_b.initialize();
+    let mut stream_lock = ForemanStreamLock::acquire(&race);
+    let generation_one = checkpoint(
+        2,
+        "task105-race-checkpoint-1",
+        1,
+        "ACTIVE",
+        Value::Null,
+        'b',
+    );
+    process_a.send(&generation_one);
+    stream_lock
+        .wait_for_one_ungranted_waiter()
+        .expect("TASK105_FOREMAN_STREAM_WAITER");
+    assert_eq!(
+        race.foreman_counts(),
+        ([0, 0, 0], ["0".into(), "0".into(), "0".into()], None)
+    );
+    let coordination_identity = foreman_coordination_identity().expect("TASK105_FOREMAN_IDENTITY");
+    let mut writer_observer = foreman_writer_repository(&race);
+    let current = writer_observer
+        .current_authority(coordination_identity.project_id())
+        .expect("TASK105_RACE_WRITER_CURRENT")
+        .expect("TASK105_RACE_WRITER_AUTHORITY_MISSING");
+    let current_head = current.independent_head();
+    let acquire_command_id = foreman_acquire_command_id("task105-race-checkpoint-1");
+    let suffix = acquire_command_id
+        .strip_prefix("foreman-acquire-")
+        .expect("TASK105_RACE_WRITER_SUFFIX");
+    assert_eq!(
+        current_head.identity().project_id(),
+        coordination_identity.project_id()
+    );
+    assert_eq!(
+        current_head.identity().task_id(),
+        coordination_identity.task_id()
+    );
+    assert_eq!(
+        current_head.identity().attempt_id().as_str(),
+        format!("foreman-attempt-{suffix}")
+    );
+    assert_eq!(
+        current_head.identity().lease_id(),
+        format!("foreman-lease-{suffix}")
+    );
+    assert_eq!(
+        current_head.identity().lease_holder_id(),
+        "latticed-foreman-v1"
+    );
+    assert_eq!(
+        current_head.identity().worktree_id(),
+        format!("foreman-worktree-{suffix}")
+    );
+    assert_eq!(
+        current_head.identity().holder_process_id().get(),
+        u64::from(process_a.pid())
+    );
+    let mut authority_cleanup = RaceAuthorityCleanup::new(
+        writer_observer,
+        coordination_identity.project_id().clone(),
+        current_head.clone(),
+    );
+    let same_generation_one = checkpoint(
+        3,
+        "task105-race-checkpoint-1",
+        1,
+        "ACTIVE",
+        Value::Null,
+        'b',
+    );
+    assert_eq!(same_generation_one["params"], generation_one["params"]);
+    process_b.send(&same_generation_one);
+    assert_foreman_replay_error(
+        &process_b.recv_expected(3, Duration::from_secs(2)),
+        "FOREMAN_WRITER_CONTENTION",
+    );
+    let contender_checkpoint_id = "task105-race-contender";
+    let contender = checkpoint(4, contender_checkpoint_id, 1, "ACTIVE", Value::Null, 'c');
+    process_b.send(&contender);
+    assert_foreman_replay_error(
+        &process_b.recv_expected(4, Duration::from_secs(2)),
+        "FOREMAN_WRITER_CONTENTION",
+    );
+    race.assert_writer_denial(contender_checkpoint_id, "WRITER_ALREADY_HELD");
+    assert_eq!(
+        race.foreman_counts(),
+        ([0, 0, 0], ["0".into(), "0".into(), "0".into()], None)
+    );
+    stream_lock
+        .release()
+        .expect("TASK105_FOREMAN_STREAM_UNLOCK");
+    drop(stream_lock);
+    let recorded = process_a.recv_expected(2, Duration::from_secs(35));
+    assert_eq!(recorded["result"]["isError"], false);
+    let first = recorded["result"]["structuredContent"].clone();
+    assert_eq!(first["status"], "RECORDED");
+    assert_eq!(first["exact_retry"], false);
+    authority_cleanup
+        .disarm_after_release()
+        .expect("TASK105_RACE_AUTHORITY_RELEASED");
+    drop(authority_cleanup);
+
+    let replayed = process_b.request(&checkpoint(
+        5,
+        "task105-race-checkpoint-1",
+        1,
+        "ACTIVE",
+        Value::Null,
+        'b',
+    ));
+    assert_eq!(replayed["result"]["isError"], false);
+    let replayed = &replayed["result"]["structuredContent"];
+    assert_eq!(replayed["status"], "REPLAYED");
+    assert_eq!(replayed["exact_retry"], true);
+    assert_eq!(replayed["ledger_digest"], first["ledger_digest"]);
+    assert_eq!(replayed["checkpoint_digest"], first["checkpoint_digest"]);
+    let generation_one_head = Some(
+        first["ledger_digest"]
+            .as_str()
+            .expect("TASK105_RACE_GENERATION_ONE_LEDGER_DIGEST")
+            .to_owned(),
+    );
+    assert_eq!(
+        race.foreman_counts(),
+        (
+            [1, 1, 1],
+            ["1".into(), "1".into(), "1".into()],
+            generation_one_head.clone()
+        )
+    );
+    process_a.finish();
+    process_b.finish();
+
+    let mut process_c = InteractiveLatticed::start_for(&race);
+    process_c.initialize();
+    let fresh_status = process_c.request_status(2);
+    let fresh_foreman = &fresh_status["result"]["structuredContent"]["foreman"];
+    assert_eq!(fresh_status["result"]["isError"], false);
+    assert_eq!(fresh_foreman["latest_generation"], 1);
+    assert_eq!(fresh_foreman["ledger_digest"], first["ledger_digest"]);
+    assert_eq!(
+        fresh_foreman["checkpoint_digest"],
+        first["checkpoint_digest"]
+    );
+    assert_eq!(fresh_foreman["active_count"], 1);
+    assert_eq!(fresh_foreman["blocked_count"], 0);
+    assert_eq!(fresh_foreman["next_action"], "CONTINUE");
+
+    let fresh_retry = process_c.request(&checkpoint(
+        3,
+        "task105-race-checkpoint-1",
+        1,
+        "ACTIVE",
+        Value::Null,
+        'b',
+    ));
+    assert_eq!(fresh_retry["result"]["isError"], false);
+    assert_eq!(
+        fresh_retry["result"]["structuredContent"]["status"],
+        "REPLAYED"
+    );
+    assert_eq!(
+        fresh_retry["result"]["structuredContent"]["ledger_digest"],
+        first["ledger_digest"]
+    );
+    assert_eq!(
+        fresh_retry["result"]["structuredContent"]["checkpoint_digest"],
+        first["checkpoint_digest"]
+    );
+    let generation_two = process_c.request(&checkpoint(
+        4,
+        "task105-race-checkpoint-2",
+        2,
+        "BLOCKED",
+        json!("TASK-094"),
+        'c',
+    ));
+    assert_eq!(generation_two["result"]["isError"], false);
+    assert_eq!(
+        generation_two["result"]["structuredContent"]["status"],
+        "RECORDED"
+    );
+    let generation_two_head = Some(
+        generation_two["result"]["structuredContent"]["ledger_digest"]
+            .as_str()
+            .expect("TASK105_RACE_GENERATION_TWO_LEDGER_DIGEST")
+            .to_owned(),
+    );
+    assert_eq!(
+        race.foreman_counts(),
+        (
+            [2, 2, 2],
+            ["2".into(), "2".into(), "2".into()],
+            generation_two_head.clone()
+        )
+    );
+
+    assert_foreman_replay_error(
+        &process_c.request(&checkpoint(
+            5,
+            "task105-race-checkpoint-1",
+            1,
+            "ACTIVE",
+            Value::Null,
+            'd',
+        )),
+        "FOREMAN_CHECKPOINT_ID_REUSE",
+    );
+    assert_eq!(
+        race.foreman_counts(),
+        (
+            [2, 2, 2],
+            ["2".into(), "2".into(), "2".into()],
+            generation_two_head
+        )
+    );
+    process_c.finish();
+    assert_eq!(race.migration_fingerprint(), race_migration);
+    assert_eq!(race.durable_profile_fingerprint(), race_durable);
+
+    race_database
+        .cleanup()
+        .expect("TASK105_RACE_DATABASE_CLEANUP");
+    assert!(race.try_bootstrap_client().is_err());
+    config.assert_login_capability(true);
+    assert_eq!(config.v6_absent_writer_fingerprint(), main_before_race);
+    assert_eq!(required("LATTICE_TASK019_RUN_ID"), parent_run_id);
+    println!("TASK105_STAGE_FOREMAN_DUAL_PROCESS_RACE_PASS");
 }
