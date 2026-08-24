@@ -2117,14 +2117,6 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                     .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
             let memory_manifest = verify_embedded_extension_manifest()
                 .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-            apply_postgres_memory_extension(&mut migrator, &memory_target)
-                .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-            verify_memory_extension(
-                &mut migrator,
-                &memory_target,
-                lattice_postgres_codebase_memory::ExtensionDatabaseRole::Migrator,
-            )
-            .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
             match apply_v3_extension(&mut migrator, &writer_v3) {
                 Ok(_) => {}
                 Err(error)
@@ -2143,6 +2135,14 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                             LatticedErrorKind::RuntimePostgresVerification,
                         ));
                     }
+                    apply_postgres_memory_extension(&mut migrator, &memory_target)
+                        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+                    verify_memory_extension(
+                        &mut migrator,
+                        &memory_target,
+                        lattice_postgres_codebase_memory::ExtensionDatabaseRole::Migrator,
+                    )
+                    .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
                     let global_manifest =
                         ContentDigest::from_sha256(store.manifest_sha256().as_str()).map_err(
                             |_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification),
@@ -8422,12 +8422,16 @@ mod tests {
         let generic_v5_verifier = bootstrap
             .find("verify_store_schema")
             .expect("generic Store v5 fallback verifier");
+        let memory_fallback = bootstrap
+            .find("apply_postgres_memory_extension")
+            .expect("Memory fresh-install fallback");
         let writer_v2_fallback = bootstrap
             .find("apply_postgres_writer_extension")
             .expect("Writer v2 fresh-install fallback");
         let final_store = bootstrap.rfind("apply_store_migrations").expect("Store v6");
         assert!(first_store < writer_v3 && writer_v3 < final_store);
-        assert!(writer_v3 < generic_v5_verifier && generic_v5_verifier < writer_v2_fallback);
+        assert!(writer_v3 < generic_v5_verifier && generic_v5_verifier < memory_fallback);
+        assert!(memory_fallback < writer_v2_fallback);
         let unsupported_fallback = bootstrap
             .find("error.kind() == WriterExtensionSetupErrorKind::UnsupportedFoundation")
             .expect("closed absent/v2 fallback");

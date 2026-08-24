@@ -1,7 +1,7 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 2.8
+version: 2.9
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -230,9 +230,11 @@ Orchestrator composition.
 21. On an exact schema-v5 prefix, bootstrap first delegates Writer-v3
     recognition to the Writer-owned apply/retry boundary. Only its exact
     `UnsupportedFoundation` result may enter the generic Store-v5 verification
-    and Writer-v2 installation fallback. A partial, corrupt, unavailable, or
-    otherwise rejected Writer profile fails closed before Store-v6 migration;
-    composition never parses Writer rows or substitutes its own classifier.
+    followed by Memory apply/verify and Writer-v2 installation fallback. An
+    exact existing Writer-v3 bridge therefore never re-enters the generic
+    Memory verifier. A partial, corrupt, unavailable, or otherwise rejected
+    Writer profile fails closed before Store-v6 migration; composition never
+    parses Writer rows or substitutes its own classifier.
 
 ## Allowed Dependencies
 
@@ -362,6 +364,7 @@ constitution cannot be weakened merely to excuse implementation drift.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 2.9 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Make schema-v5 bootstrap strictly Writer-first; an existing exact v3 bridge skips generic Memory verification, while only unsupported foundation enters the complete Store, Memory, Writer-v2, then Writer-v3 fallback | Sole-foreman delegation |
 | 2.8 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Let the Writer-owned v3 boundary recognize an exact existing schema-v5 bridge before the generic Store-v5/Writer-v2 fallback; only exact unsupported foundation may fall back and every other Writer error remains fail-closed | Sole-foreman delegation |
 | 2.7 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Add the seventh canonical foreman checkpoint, verified zero-argument status replay and explicit Writer-v3-before-Store-v6 bootstrap; legacy surface unchanged | Sole-foreman delegation |
 | 1.0 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Sole normal composition root in `apps/lattice-runtime`, two fixed zero-parameter MCP tools, and one shared `lattice-runtime` compatibility wrapper | User approval in preceding implementation window |

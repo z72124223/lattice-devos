@@ -4,7 +4,7 @@ title: Durable foreman runtime checkpoint and restart replay
 spec_id: SPEC-009
 spec_version: 1
 module_id: latticed
-constitution_version: 2.7
+constitution_version: 2.9
 additional_modules:
   - module_id: orchestrator-runtime
     constitution_version: 2.7
