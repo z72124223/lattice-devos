@@ -10,7 +10,7 @@ modules:
     constitution_version: 2.2
   - module_id: task-ledger
     constitution_version: 2.4
-  - module_id: lattice-foreman-state
+  - module_id: foreman-state
     constitution_version: 1.2
   - module_id: policy-engine
     constitution_version: 2.6
@@ -863,7 +863,8 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 |---|---:|---|
 | lattice-cjson | 1.0 | Pure shared `lattice-cjson-1` byte/framing mechanism; caller modules retain hash-subject semantics |
 | task-domain | 2.2 | Preserve the task contract, V2 schema, V1 read compatibility, and hash-bound accounting currency |
-| task-ledger | 2.3 | Sole owner of the versioned task-created profile classifier, canonical autonomy authority/receipt subjects, typed append plan, exact required-profile ordering, mixed historical replay, and atomic event-owned persistence contract; generic append cannot forge the receipt and public MCP bytes remain unchanged |
+| task-ledger | 2.4 | Sole owner of the versioned task-created profile classifier, canonical autonomy authority/receipt subjects, typed append plan, exact required-profile ordering, mixed historical replay, and atomic event-owned persistence contract; generic append cannot forge the receipt and public MCP bytes remain unchanged |
+| foreman-state | 1.2 | Sole owner of foreman state interpretation and replay; Store persists only the already-governed event-owned scalars and creates no second foreman truth |
 | policy-engine | 2.6 | Generic project/capability/upgrade policy; independent current Registry, Task Ledger, Writer Lease, and Approval Verifier full-head comparison; R3 denies pending Review Runtime authority |
 | project-registry | 1.2 | Canonical repository identity and lifecycle plus one pure runtime-aware global vacant/plan/apply/export/verify boundary, separately reconstructed retained checkpoint, acyclic command-core/logical-bytes/checkpoint/record-set commitments, complete bounded history, and byte-identical Registry-1.1 Fake vectors |
 | writer-lease | 1.1 | Preserve the closed lease/fencing/daemon-epoch semantic owner and exact historical replay; no TASK-076 pure transition or receipt bytes change |

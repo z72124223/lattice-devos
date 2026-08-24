@@ -169,3 +169,13 @@ task archival are not authorized.
   governed integration task must explicitly compose Writer-v3 bridge before
   Store v6/rebind. TASK-094 neither changes that production composition nor
   claims deployment readiness.
+
+## 2026-08-25 architecture-review follow-up
+
+- Local architecture review found and this follow-up corrects a documentation
+  consistency gap: both Store and Writer constitutions now expressly authorize
+  the same fixed Writer-owned procedure for exact-v5 transition and exact-v6
+  idempotent retry only. SPEC-002 frontmatter now uses canonical
+  `foreman-state` 1.2 and its Module Impact table names Task Ledger 2.4 and
+  Foreman State 1.2. The migration contract also pins all five Writer-owned
+  procedure locks. This is an author repair record, not independent approval.

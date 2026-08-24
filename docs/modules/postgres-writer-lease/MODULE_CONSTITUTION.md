@@ -4,7 +4,7 @@ name: PostgreSQL Writer Lease Repository
 version: 1.3
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-25
 ---
 
 ## Mission
@@ -21,8 +21,9 @@ Writer Lease 1.1 semantic/fencing bytes.
 Version 1.3 makes that bridge administrative and explicit: the Writer-owned
 setup API may install/replay exact v3 bridge state and may rebind only through
 the fixed zero-argument `writer_lease_rebind_v3` procedure. Postgres Store may
-call that procedure only inside the same transaction as its exact v5-to-v6
-migration; it cannot construct, parse, persist, or reinterpret Writer state.
+call that procedure only inside the same transaction as its exact-v5 transition
+or exact-v6 idempotent retry; it cannot construct, parse, persist, or
+reinterpret Writer state.
 
 ## Non-Goals
 
@@ -175,9 +176,9 @@ migration.
 
 Version 1.3 closes only the Writer-owned administrative seam: typed v3 apply
 and rebind call the exact extension and fixed rebind procedure. Store may
-sequence that procedure only in its schema-v6 transaction after exact v5
-prefix verification. Store remains unable to install, parse, persist, replay,
-or reinterpret Writer Lease state.
+sequence that procedure only in its schema-v6 transaction after exact-v5 prefix
+verification or during exact-v6 idempotent retry. Store remains unable to
+install, parse, persist, replay, or reinterpret Writer Lease state.
 
 ## Acceptance Gates
 

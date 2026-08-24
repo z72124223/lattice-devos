@@ -820,11 +820,12 @@ child effects. No diagnostic or independent current-state store is added.
 Version 1.13 corrects the Store boundary for that exact migration: Store may
 call `writer_lease.writer_lease_rebind_v3()` only after exact v5-prefix
 verification and staging ordinal `0007`/schema-v6 compatibility in the same
-runner-owned transaction. The procedure stays Writer-owned and fixed; Store
-does not install, mutate directly, parse, replay, or derive Writer state. A
-failed rebind rolls back every staged global and Writer-visible effect, leaving
-the exact v5 bridge identity, ledger, runtime ACL, migration history, and
-compatibility row intact.
+runner-owned transaction, and may call that same fixed zero-argument procedure
+on exact-v6 idempotent retry before catalog/ACL verification. The procedure
+stays Writer-owned; Store does not install, mutate directly, parse, replay, or
+derive Writer state. A failed rebind rolls back every staged global and
+Writer-visible effect, leaving the exact v5 bridge identity, ledger, runtime
+ACL, migration history, and compatibility row intact.
 
 ## Acceptance Gates
 
@@ -875,7 +876,7 @@ compatibility row intact.
 | Memory-v3 extension recognition | exact separate global-v5 catalog/owner/ACL profile, immutable v1/v2 bytes, v2-upgrade-only classification, and no base-manifest/count change | Compatibility review | yes |
 | Writer Lease profile closure | exact V3+Memory-v2+Writer-Lease-v1 catalog/owner/ACL/function/checksum acceptance plus partial/extra/drift/wrong-owner/direct-grant denial | Security review | yes |
 | Foreman schema-v6 binding | exact 0007 ordering/hash, fixed child/event linkage, same-transaction fencing, rollback/restart/fresh-process replay and unknown-version/privacy denial | Integration review | yes |
-| Extension ownership | static/dependency tests prove Store cannot install, directly mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate and the exact v5-to-v6 migration call to Writer-owned `writer_lease_rebind_v3()` are executable | Architecture review | yes |
+| Extension ownership | static/dependency tests prove Store cannot install, directly mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate and the exact-v5 transition/exact-v6 retry calls to Writer-owned `writer_lease_rebind_v3()` are executable | Architecture review | yes |
 
 ## Change Policy
 

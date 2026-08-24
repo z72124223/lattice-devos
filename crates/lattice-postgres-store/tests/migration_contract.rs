@@ -94,6 +94,8 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
         "LOCK TABLE writer_lease.writer_lease_extension_identity",
         "writer_lease.writer_lease_extension_ledger",
         "writer_lease.writer_lease_heads",
+        "writer_lease.writer_lease_commands",
+        "writer_lease.writer_lease_transitions",
     ] {
         assert!(
             rebind_sql.contains(required),
