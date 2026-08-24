@@ -410,7 +410,7 @@ fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
             .expect("exact schema-v6 manifest")
             .manifest_sha256()
             .as_str(),
-        "e2f1849bf17f78d60e921cbdcff01aced0516214c2216cb0e7c2f541b68ae439"
+        "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae"
     );
 
     let registry = &manifest[4];
@@ -1100,10 +1100,10 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
         foreman.path(),
         "db/migrations/0007_foreman_coordination.sql"
     );
-    assert_eq!(foreman.byte_length(), 217_206);
+    assert_eq!(foreman.byte_length(), 217_170);
     assert_eq!(
         foreman.sha256(),
-        "36ae91884e849c63ffe2a4b7013b4dea7a8f1a4bc63305d4a91a04808d316f9c"
+        "33a4e1c3ab8f29f763123ffe46c2929025a7a7256614f5c92011a1140c8300ad"
     );
     assert_eq!(foreman.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(foreman.reader_compatibility(), 6..=6);
@@ -1158,6 +1158,24 @@ fn foreman_migration_is_event_bound_fenced_and_table_acl_closed() {
         );
     }
     assert!(!normalized.contains("CREATE TABLE control.foreman_current_state"));
+    assert!(!normalized.contains("{1,256}"));
+    for field in [
+        "worker_id",
+        "thread_id",
+        "task_id",
+        "branch_ref",
+        "worktree_ref",
+        "blocker_ref",
+    ] {
+        assert!(
+            normalized.contains(&format!("{field} varchar(256)")),
+            "printable foreman field lost its physical 256-character cap: {field}"
+        );
+        assert!(
+            normalized.contains(&format!("{field} ~ '^[!-~]+$'")),
+            "printable foreman field lost its non-empty ASCII constraint: {field}"
+        );
+    }
     assert!(!normalized.contains("CREATE TABLE control.task_ledger_autonomy_receipts"));
     assert!(!normalized.contains("GRANT SELECT ON TABLE control.task_ledger_foreman_snapshots"));
     assert_eq!(

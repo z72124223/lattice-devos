@@ -1,7 +1,7 @@
 ---
 module_id: postgres-writer-lease
 name: PostgreSQL Writer Lease Repository
-version: 1.6
+version: 1.7
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -34,6 +34,8 @@ only the Writer-v3 procedures after verified schema-v6 bootstrap. The
 historical Writer-v2 constructor and procedure profile remain unchanged.
 Version 1.6 re-pins the still-undeployed v3 rebind boundary to Store 1.17's
 corrected schema-v6 manifest. It changes no Writer procedure or semantic row.
+Version 1.7 re-pins that boundary to Store 1.18's PostgreSQL-valid, equivalently
+bounded foreman child constraint. Writer behavior remains unchanged.
 
 ## Non-Goals
 
@@ -219,6 +221,9 @@ domain semantics or physical rows.
 Version 1.6 accepts only Store 1.17's corrected seven-entry schema-v6 manifest
 at the existing fixed rebind procedure. Prior pre-product digests fail closed.
 
+Version 1.7 accepts only Store 1.18's successor manifest at the same fixed
+procedure and changes no Writer runtime, ACL, lease, or fencing behavior.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -254,3 +259,4 @@ synthetic evidence as production authority.
 | 1.4 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 | Add strict existing-v3 product-bootstrap rebind/verify, fail closed on schema-v6 Writer absence, and re-pin the fixed rebind boundary to the corrected seven-entry v6 manifest | TASK-105 bounded implementation authority |
 | 1.5 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 | Add explicit version-closed Writer-v3 runtime construction for schema-v6 composition while preserving the historical v2 adapter path | TASK-105 bounded implementation authority |
 | 1.6 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 live correction | Re-pin the still-undeployed Writer rebind boundary to Store 1.17 after closing the foreman event finalizer allowlist | TASK-105 bounded implementation authority |
+| 1.7 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 live correction | Re-pin the still-undeployed rebind boundary to Store 1.18's PostgreSQL-valid equivalent foreman scalar bounds | TASK-105 bounded implementation authority |

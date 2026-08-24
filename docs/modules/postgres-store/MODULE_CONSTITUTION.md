@@ -1,7 +1,7 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.17
+version: 1.18
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -74,6 +74,10 @@ Version 1.17 closes the same undeployed migration's Ledger finalizer allowlist:
 the existing `FOREMAN_SNAPSHOT_RECORDED` event may now pass the shared atomic
 finalizer before its fixed foreman child row is recorded. No other event,
 function, row shape, or semantic owner is added.
+Version 1.18 replaces six PostgreSQL-invalid `{1,256}` ASCII quantifiers in
+the still-undeployed foreman child constraint with non-empty printable-ASCII
+checks. Each affected column remains `varchar(256)`, so the composed bound is
+still exactly 1..256 characters and no `text` field is widened.
 
 ## Non-Goals
 
@@ -861,6 +865,11 @@ allowlist. The allowlist gains exactly `FOREMAN_SNAPSHOT_RECORDED`; validation,
 atomic ordering, same-transaction Writer assertion, and child-row closure stay
 unchanged.
 
+Version 1.18 supersedes the pin once more because PostgreSQL rejects repetition
+counts above 255 when the foreman child constraint is first evaluated. The six
+affected fields keep their exact `varchar(256)` physical cap and use `+` only
+for the non-empty printable-ASCII predicate; all other constraints are frozen.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -947,3 +956,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.15 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Add a read-only exact Store migration-prefix classifier so product bootstrap can stop existing admission before Writer-v3 rebind or Store-v6 mutation without parsing Store or Writer rows in composition | Sole-foreman delegation |
 | 1.16 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Re-pin the undeployed 0007 byte and v6 manifest after correcting Store current-head history closure from six entries to seven; no new migration or semantic owner | Sole-foreman delegation |
 | 1.17 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Admit the existing foreman event through the shared atomic Ledger finalizer and re-pin the still-undeployed 0007 profile without widening event semantics | Sole-foreman delegation |
+| 1.18 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Preserve exact 1..256 foreman scalar bounds through varchar caps plus PostgreSQL-valid non-empty printable-ASCII checks | Sole-foreman delegation |

@@ -85,11 +85,11 @@ CREATE TABLE control.task_ledger_foreman_snapshots (
         AND generation >= 1 AND generation <= 18446744073709551615),
     CHECK (record_schema = 'lattice.task-ledger.foreman-record/1.0'
         AND payload_schema = 'lattice.foreman-snapshot/1.0'
-        AND worker_id ~ '^[!-~]{1,256}$'
-        AND thread_id ~ '^[!-~]{1,256}$'
-        AND task_id ~ '^[!-~]{1,256}$'
-        AND branch_ref ~ '^[!-~]{1,256}$'
-        AND worktree_ref ~ '^[!-~]{1,256}$'
+        AND worker_id ~ '^[!-~]+$'
+        AND thread_id ~ '^[!-~]+$'
+        AND task_id ~ '^[!-~]+$'
+        AND branch_ref ~ '^[!-~]+$'
+        AND worktree_ref ~ '^[!-~]+$'
         AND head_sha1 ~ '^[0-9a-f]{40}$'
         AND foreman_state IN ('ACTIVE', 'BLOCKED', 'COMPLETED')
         AND heartbeat_digest_ref ~ '^heartbeat:sha256:[0-9a-f]{64}$'
@@ -100,7 +100,7 @@ CREATE TABLE control.task_ledger_foreman_snapshots (
         AND task_id !~* '^(sk-|bearer )|password|full chat|begin private'
         AND branch_ref !~* '^(sk-|bearer )|password|full chat|begin private'
         AND worktree_ref !~* '^(sk-|bearer )|password|full chat|begin private'
-        AND (blocker_ref IS NULL OR (blocker_ref ~ '^[!-~]{1,256}$'
+        AND (blocker_ref IS NULL OR (blocker_ref ~ '^[!-~]+$'
              AND blocker_ref !~* '^(sk-|bearer )|password|full chat|begin private'))
         AND ((foreman_state = 'BLOCKED' AND blocker_ref IS NOT NULL)
              OR (foreman_state <> 'BLOCKED' AND blocker_ref IS NULL))),
