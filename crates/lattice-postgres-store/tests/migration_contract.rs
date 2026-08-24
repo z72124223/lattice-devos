@@ -639,23 +639,55 @@ fn migration_runner_classifies_future_history_atomically_after_serial_lock_befor
     let parser = &classifier[parser_start..];
     assert_eq!(query.matches(".query_one(").count(), 1);
     let history_columns = [
-        ("ordinal", "ordinals", "i16"),
-        ("migration_id", "migration_ids", "String"),
-        ("migration_path", "migration_paths", "String"),
-        ("byte_length", "byte_lengths", "i64"),
-        ("checksum_sha256", "checksums", "String"),
-        ("migration_status", "statuses", "String"),
-        ("transaction_mode", "modes", "String"),
-        ("schema_version", "schema_versions", "i16"),
-        ("min_reader", "min_readers", "i16"),
-        ("max_reader", "max_readers", "i16"),
-        ("min_writer", "min_writers", "i16"),
-        ("max_writer", "max_writers", "i16"),
+        ("ordinal", "h.ordinal", "ordinals", "i16"),
+        (
+            "migration_id",
+            "h.migration_id::text",
+            "migration_ids",
+            "String",
+        ),
+        (
+            "migration_path",
+            "h.migration_path::text",
+            "migration_paths",
+            "String",
+        ),
+        ("byte_length", "h.byte_length", "byte_lengths", "i64"),
+        (
+            "checksum_sha256",
+            "h.checksum_sha256::text",
+            "checksums",
+            "String",
+        ),
+        (
+            "migration_status",
+            "h.migration_status::text",
+            "statuses",
+            "String",
+        ),
+        (
+            "transaction_mode",
+            "h.transaction_mode::text",
+            "modes",
+            "String",
+        ),
+        (
+            "schema_version",
+            "h.schema_version",
+            "schema_versions",
+            "i16",
+        ),
+        ("min_reader", "h.min_reader", "min_readers", "i16"),
+        ("max_reader", "h.max_reader", "max_readers", "i16"),
+        ("min_writer", "h.min_writer", "min_writers", "i16"),
+        ("max_writer", "h.max_writer", "max_writers", "i16"),
     ];
     let parser_compact = parser.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut previous_query_position = None;
-    for (index, (field, variable, element_type)) in history_columns.into_iter().enumerate() {
-        let evidence = format!("array_agg(h.{field} ORDER BY h.ordinal)");
+    for (index, (field, expression, variable, element_type)) in
+        history_columns.into_iter().enumerate()
+    {
+        let evidence = format!("array_agg({expression} ORDER BY h.ordinal)");
         assert_eq!(
             query.match_indices(&evidence).count(),
             1,

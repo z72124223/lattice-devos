@@ -47,8 +47,12 @@ const LEGACY_V1_MANIFEST_SHA256: &str =
     "9b126a41e542b71d434b5786e35acb66575967d055a6733b9d6bf0b8c9f0eada";
 const WRITER_V3_MANIFEST_SHA256: &str =
     "eab2812fa3d94cd3466d7c003386f805a973fd7def1f16aeb15b52f47dad78e4";
+const CURRENT_V6_MANIFEST_SHA256: &str =
+    "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae";
+const FUTURE_V7_MANIFEST_SHA256: &str =
+    "a760f04995fc60ceef89866a483a6dd91cf3d8c8ab5204d47ccdbeb65601ddef";
 
-fn future_v7_manifest_sha256() -> String {
+fn independent_manifest_sha256(include_future_v7: bool) -> String {
     fn field(hasher: &mut Sha256, value: &[u8]) {
         hasher.update(
             u64::try_from(value.len())
@@ -83,15 +87,17 @@ fn future_v7_manifest_sha256() -> String {
             field(&mut hasher, &version.to_be_bytes());
         }
     }
-    field(&mut hasher, &8_u16.to_be_bytes());
-    field(&mut hasher, b"0008_unsupported_fixture");
-    field(&mut hasher, b"db/migrations/0008_unsupported_fixture.sql");
-    field(&mut hasher, &1_u64.to_be_bytes());
-    field(&mut hasher, "d".repeat(64).as_bytes());
-    field(&mut hasher, b"EXECUTABLE");
-    field(&mut hasher, b"RUNNER_OWNED");
-    for _ in 0..5 {
-        field(&mut hasher, &7_u16.to_be_bytes());
+    if include_future_v7 {
+        field(&mut hasher, &8_u16.to_be_bytes());
+        field(&mut hasher, b"0008_unsupported_fixture");
+        field(&mut hasher, b"db/migrations/0008_unsupported_fixture.sql");
+        field(&mut hasher, &1_u64.to_be_bytes());
+        field(&mut hasher, "d".repeat(64).as_bytes());
+        field(&mut hasher, b"EXECUTABLE");
+        field(&mut hasher, b"RUNNER_OWNED");
+        for _ in 0..5 {
+            field(&mut hasher, &7_u16.to_be_bytes());
+        }
     }
     let digest = hasher.finalize();
     let mut encoded = String::with_capacity(64);
@@ -100,6 +106,10 @@ fn future_v7_manifest_sha256() -> String {
         write!(&mut encoded, "{byte:02x}").expect("hex encoding");
     }
     encoded
+}
+
+fn future_v7_manifest_sha256() -> String {
+    independent_manifest_sha256(true)
 }
 const FRESH_CATALOG_FINGERPRINT_QUERIES: [&str; 3] = [
     "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
@@ -2155,6 +2165,11 @@ fn response<'a>(responses: &'a [Value], id: i64) -> &'a Value {
 #[test]
 fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     assert_no_merged_sql_continuation_tokens();
+    assert_eq!(
+        independent_manifest_sha256(false),
+        CURRENT_V6_MANIFEST_SHA256
+    );
+    assert_eq!(future_v7_manifest_sha256(), FUTURE_V7_MANIFEST_SHA256);
     let source = include_str!("task105_durable_foreman_runtime.rs");
     for marker in [
         "TASK105_STAGE_FOREMAN_REPLAY_CORRUPT_PASS",

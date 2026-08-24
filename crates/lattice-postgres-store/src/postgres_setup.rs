@@ -3700,12 +3700,12 @@ fn classify_retained_history<C: GenericClient>(
         .query_one(
             "SELECT \
                COALESCE(array_agg(h.ordinal ORDER BY h.ordinal),ARRAY[]::smallint[]), \
-               COALESCE(array_agg(h.migration_id ORDER BY h.ordinal),ARRAY[]::text[]), \
-               COALESCE(array_agg(h.migration_path ORDER BY h.ordinal),ARRAY[]::text[]), \
+               COALESCE(array_agg(h.migration_id::text ORDER BY h.ordinal),ARRAY[]::text[]), \
+               COALESCE(array_agg(h.migration_path::text ORDER BY h.ordinal),ARRAY[]::text[]), \
                COALESCE(array_agg(h.byte_length ORDER BY h.ordinal),ARRAY[]::bigint[]), \
-               COALESCE(array_agg(h.checksum_sha256 ORDER BY h.ordinal),ARRAY[]::text[]), \
-               COALESCE(array_agg(h.migration_status ORDER BY h.ordinal),ARRAY[]::text[]), \
-               COALESCE(array_agg(h.transaction_mode ORDER BY h.ordinal),ARRAY[]::text[]), \
+               COALESCE(array_agg(h.checksum_sha256::text ORDER BY h.ordinal),ARRAY[]::text[]), \
+               COALESCE(array_agg(h.migration_status::text ORDER BY h.ordinal),ARRAY[]::text[]), \
+               COALESCE(array_agg(h.transaction_mode::text ORDER BY h.ordinal),ARRAY[]::text[]), \
                COALESCE(array_agg(h.schema_version ORDER BY h.ordinal),ARRAY[]::smallint[]), \
                COALESCE(array_agg(h.min_reader ORDER BY h.ordinal),ARRAY[]::smallint[]), \
                COALESCE(array_agg(h.max_reader ORDER BY h.ordinal),ARRAY[]::smallint[]), \
@@ -6786,8 +6786,16 @@ mod tests {
 
     #[test]
     fn retained_history_classification_separates_exact_future_and_corrupt_profiles() {
+        const FROZEN_CURRENT_V6_MANIFEST_SHA256: &str =
+            "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae";
+        const INDEPENDENT_FUTURE_V7_MANIFEST_SHA256: &str =
+            "a760f04995fc60ceef89866a483a6dd91cf3d8c8ab5204d47ccdbeb65601ddef";
         let current = retained_current_history();
         let current_compatibility = compatibility_for(&current, 6);
+        assert_eq!(
+            current_compatibility.manifest_sha256,
+            FROZEN_CURRENT_V6_MANIFEST_SHA256
+        );
         assert_eq!(
             classify_retained_history_rows(&current, &current_compatibility),
             RetainedHistoryClassification::ExactSupported
@@ -6808,7 +6816,10 @@ mod tests {
             min_writer: 7,
             max_writer: 7,
         });
-        let future_compatibility = compatibility_for(&future, 7);
+        let future_compatibility = RetainedSchemaCompatibility {
+            manifest_sha256: INDEPENDENT_FUTURE_V7_MANIFEST_SHA256.to_owned(),
+            versions: [7; 5],
+        };
         assert_eq!(
             classify_retained_history_rows(&future, &future_compatibility),
             RetainedHistoryClassification::StrictFutureSuffix
