@@ -46,6 +46,7 @@ use lattice_contracts::{
     TaskId, TaskIngressPeerEvidence, TaskSpecSubmission, WorkspaceChangeEvidence,
     WriterLeaseAuthorityHead,
 };
+use lattice_foreman_state::{ForemanServerObservation, SoleForemanBinding};
 use lattice_gateway_ipc::{build_reply, task_spec_document_digest};
 use lattice_graphify_adapter::{
     ExactGitSnapshotMaterializer, GitSnapshotConfig, GraphOutputLimits, GraphifyRuntimeConfig,
@@ -69,19 +70,20 @@ use lattice_openclaw_adapter::{
 };
 use lattice_orchestrator::{
     ControlledTaskOrchestratorError, ControlledTaskRequest, DeliveryOrchestratorError,
-    GraphMemoryOrchestratorError, delivery_status, graph_memory_status, run_controlled_task,
-    run_delivery, run_delivery_governed, run_graph_memory,
+    ForemanCheckpointOrchestratorError, GraphMemoryOrchestratorError, checkpoint_foreman,
+    delivery_status, graph_memory_status, run_controlled_task, run_delivery, run_delivery_governed,
+    run_graph_memory,
 };
 #[cfg(test)]
 use lattice_ports::TaskLifecycleAutonomyEvidence;
 use lattice_ports::{
     ControlledTaskExecutionError, ControlledTaskExecutionErrorKind, ControlledTaskExecutionPort,
     DeliveryCodexPort, DeliveryFailureCertainty, DeliveryLedgerPort, DeliveryPortError,
-    DeliveryPortResult, GatewayService, GatewayServiceError, GatewayServiceResult,
-    GraphMemoryFailureCertainty, GraphMemoryPortError, GraphMemoryStage, HermesPort,
-    HermesReflectionMemoryPort, PortError, PortErrorKind, PortResult, TaskLifecycleError,
-    TaskLifecycleErrorKind, TaskLifecycleEvidence, TaskLifecyclePort, TaskLifecycleResult,
-    TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
+    DeliveryPortResult, ForemanCoordinationPort, GatewayService, GatewayServiceError,
+    GatewayServiceResult, GraphMemoryFailureCertainty, GraphMemoryPortError, GraphMemoryStage,
+    HermesPort, HermesReflectionMemoryPort, PortError, PortErrorKind, PortResult,
+    TaskLifecycleError, TaskLifecycleErrorKind, TaskLifecycleEvidence, TaskLifecyclePort,
+    TaskLifecycleResult, TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
 };
 use lattice_postgres_codebase_memory::{
     ExtensionTarget, PostgresCodebaseMemory, apply_extension as apply_postgres_memory_extension,
@@ -89,7 +91,8 @@ use lattice_postgres_codebase_memory::{
 };
 use lattice_postgres_store::{
     DatabaseRole as StoreDatabaseRole, MigrationTarget as StoreMigrationTarget,
-    PostgresStoreSetupErrorKind, apply_migrations as apply_store_migrations,
+    PostgresForemanCoordination, PostgresStoreSetupErrorKind, PostgresTaskLedger,
+    PostgresTaskLedgerErrorKind, apply_migrations as apply_store_migrations,
     verify_postgres_schema as verify_store_schema,
 };
 use lattice_postgres_writer_lease::{
@@ -103,6 +106,8 @@ use lattice_task_domain::{
     ScopeOperation, TASK_SPEC_SCHEMA_VERSION, TaskBudget, TaskScope, TaskSpec, TaskSpecInput,
     TaskState,
 };
+use lattice_task_ledger::foreman_coordination_identity;
+use lattice_writer_lease::WriterLeaseAcquireRequest;
 use postgres::config::SslMode;
 use postgres::{Client, Config, NoTls};
 use serde_json::{Map, Value, json};
@@ -118,8 +123,9 @@ use crate::git_delivery::{
     BASELINE_COMMIT_SHA, DeliveryWorkspaceGitAdapter, DeliveryWorkspaceGitAdapterConfig,
 };
 use crate::mcp::{
-    self, DeliveryToolArguments, DeliveryToolService, ObservedEffectKind, TaskStatusArguments,
-    TaskSubmitArguments, ToolExecutionError, record_observed_effect,
+    self, DeliveryToolArguments, DeliveryToolService, ForemanCheckpointArguments,
+    ObservedEffectKind, TaskStatusArguments, TaskSubmitArguments, ToolExecutionError,
+    record_observed_effect,
 };
 use crate::task_control::{
     PostgresTaskLifecycle, TaskPersistenceFoundation, task_admission_command_id,
@@ -333,6 +339,9 @@ pub enum LatticedErrorKind {
     HermesReceiptRead,
     TaskControl,
     TaskReconciliationRequired,
+    ForemanReplayCorrupt,
+    ForemanReplayUnsupported,
+    ForemanReplayUnavailable,
     WriterLease,
     Transport,
 }
@@ -384,6 +393,9 @@ impl LatticedErrorKind {
             Self::HermesReceiptRead => "LATTICE_HERMES_MEMORY_RECEIPT_REJECTED",
             Self::TaskControl => "LATTICE_TASK_CONTROL_REJECTED",
             Self::TaskReconciliationRequired => "LATTICE_TASK_RECONCILIATION_REQUIRED",
+            Self::ForemanReplayCorrupt => "FOREMAN_REPLAY_CORRUPT",
+            Self::ForemanReplayUnsupported => "FOREMAN_REPLAY_UNSUPPORTED",
+            Self::ForemanReplayUnavailable => "FOREMAN_REPLAY_UNAVAILABLE",
             Self::WriterLease => "LATTICE_WRITER_LEASE_REJECTED",
             Self::Transport => "LATTICED_STDIO_REJECTED",
         }
@@ -4125,6 +4137,30 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
                 hermes_activation_status(hermes_production_preflight_from_environment()).to_owned(),
             ),
         );
+        let mut coordination = foreman_coordination(self).map_err(foreman_replay_latticed)?;
+        let foreman = coordination
+            .load_runtime_status()
+            .map_err(|error| foreman_replay_latticed(ToolExecutionError::new(error.code())))?;
+        object.insert(
+            "foreman".to_owned(),
+            json!({
+                "schema": "lattice.foreman-runtime-projection/1.0",
+                "replay_status": "VERIFIED",
+                "checkpoint_status": if foreman.latest_generation() == 0 { "NONE" } else { "AVAILABLE" },
+                "ledger_digest": foreman.ledger_digest().as_str(),
+                "checkpoint_digest": if foreman.latest_generation() == 0 {
+                    Value::Null
+                } else {
+                    Value::String(foreman.checkpoint_digest().as_str().to_owned())
+                },
+                "latest_generation": foreman.latest_generation(),
+                "active_count": foreman.active_count(),
+                "blocked_count": foreman.blocked_count(),
+                "completed_count": foreman.completed_count(),
+                "next_action": foreman.next_action(),
+                "degraded_code": Value::Null,
+            }),
+        );
         Ok(base)
     }
 
@@ -4451,6 +4487,123 @@ fn task_writer_lease<H: FullChainHermesPort>(
     .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
     PostgresWriterLease::new(client, target, &core.store_authority, 600)
         .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))
+}
+
+fn foreman_coordination<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+) -> Result<PostgresForemanCoordination, ToolExecutionError> {
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
+    let target = StoreMigrationTarget::new(
+        core.delivery.database.database_name(),
+        core.delivery.database.run_id(),
+    )
+    .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
+    let client = connect_fixed_runtime_client(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout)
+            .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?,
+    )
+    .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
+    let ledger = PostgresTaskLedger::new(client, &target).map_err(|error| {
+        ToolExecutionError::new(match error.kind() {
+            PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema => "FOREMAN_REPLAY_UNSUPPORTED",
+            PostgresTaskLedgerErrorKind::Unavailable
+            | PostgresTaskLedgerErrorKind::TransactionFailed
+            | PostgresTaskLedgerErrorKind::CommitOutcomeUnknown => "FOREMAN_REPLAY_UNAVAILABLE",
+            _ => "FOREMAN_REPLAY_CORRUPT",
+        })
+    })?;
+    Ok(PostgresForemanCoordination::new(
+        ledger,
+        core.store_authority.clone(),
+    ))
+}
+
+fn foreman_observation_from_environment() -> Result<ForemanServerObservation, &'static str> {
+    let root = required_environment("LATTICE_GRAPHIFY_SOURCE_ROOT")
+        .map(PathBuf::from)
+        .and_then(|path| graph_canonical_directory(&path))
+        .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")?;
+    let git = required_environment("LATTICE_DELIVERY_GIT_EXE")
+        .map(PathBuf::from)
+        .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")?;
+    graph_executable_sha256(&git).map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")?;
+    let top_level = graph_git_stdout(&git, &root, ["rev-parse", "--show-toplevel"])
+        .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")?;
+    let top_level = graph_canonical_directory(Path::new(&top_level))
+        .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")?;
+    if top_level != root {
+        return Err("FOREMAN_CHECKPOINT_OBSERVATION_FAILED");
+    }
+    let branch = graph_git_stdout(&git, &root, ["symbolic-ref", "--short", "HEAD"])
+        .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")?;
+    let head = graph_git_stdout(&git, &root, ["rev-parse", "HEAD"])
+        .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")?;
+    SoleForemanBinding::observe_git(branch, root.to_string_lossy(), head)
+        .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")
+}
+
+fn foreman_writer_acquire<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    checkpoint_id: &str,
+) -> Result<WriterLeaseAcquireRequest, ToolExecutionError> {
+    let suffix = Sha256::digest(checkpoint_id.as_bytes())[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let suffix = suffix.as_str();
+    let identity = foreman_coordination_identity()
+        .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
+    Ok(WriterLeaseAcquireRequest {
+        command_id: format!("foreman-acquire-{suffix}"),
+        expected_head: None,
+        project_id: identity.project_id().clone(),
+        project_snapshot_id: identity.project_snapshot_id().clone(),
+        task_id: identity.task_id().clone(),
+        task_revision: identity.task_revision().to_owned(),
+        task_spec_digest: identity.task_spec_digest().clone(),
+        attempt_id: AttemptId::new(format!("foreman-attempt-{suffix}"))
+            .map_err(|_| ToolExecutionError::new("FOREMAN_CHECKPOINT_INVALID"))?,
+        lease_id: format!("foreman-lease-{suffix}"),
+        lease_holder_id: "latticed-foreman-v1".to_owned(),
+        worktree_id: format!("foreman-worktree-{suffix}"),
+        holder_process_id: HolderProcessId::new(u64::from(process::id()))
+            .map_err(|_| ToolExecutionError::new("FOREMAN_WRITER_CONTENTION"))?,
+        holder_process_start_identity: core.process_start_identity.clone(),
+    })
+}
+
+fn foreman_error_code(error: &ForemanCheckpointOrchestratorError) -> &'static str {
+    match error {
+        ForemanCheckpointOrchestratorError::Replay(error)
+        | ForemanCheckpointOrchestratorError::Append(error) => error.code(),
+        ForemanCheckpointOrchestratorError::Observation(code) => code,
+        ForemanCheckpointOrchestratorError::WriterAcquire(_)
+        | ForemanCheckpointOrchestratorError::WriterContention => "FOREMAN_WRITER_CONTENTION",
+        ForemanCheckpointOrchestratorError::Snapshot(_) => "FOREMAN_CHECKPOINT_INVALID",
+        ForemanCheckpointOrchestratorError::WriterRelease(error) => {
+            if error.kind()
+                == lattice_writer_lease::WriterLeaseRepositoryErrorKind::CommitOutcomeUnknown
+            {
+                "FOREMAN_RELEASE_OUTCOME_UNKNOWN"
+            } else {
+                "FOREMAN_WRITER_CONTENTION"
+            }
+        }
+        ForemanCheckpointOrchestratorError::ReleaseRejected => "FOREMAN_RELEASE_OUTCOME_UNKNOWN",
+    }
+}
+
+fn foreman_replay_latticed(error: ToolExecutionError) -> LatticedError {
+    let kind = match error.code() {
+        "FOREMAN_REPLAY_UNSUPPORTED" => LatticedErrorKind::ForemanReplayUnsupported,
+        "FOREMAN_REPLAY_UNAVAILABLE" => LatticedErrorKind::ForemanReplayUnavailable,
+        _ => LatticedErrorKind::ForemanReplayCorrupt,
+    };
+    LatticedError::new(kind)
 }
 
 fn controlled_task_request<H: FullChainHermesPort>(
@@ -5125,6 +5278,49 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
         }
         core.runtime_status_json()
             .map_err(|error| ToolExecutionError::new(error.code()))
+    }
+
+    fn foreman_checkpoint(
+        &mut self,
+        arguments: &ForemanCheckpointArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        let core = self
+            .inner
+            .lock()
+            .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Transport.code()))?;
+        let mut coordination = foreman_coordination(&core)?;
+        // Task-Ledger-owned preflight must complete before constructing or
+        // observing the Writer repository and before the Git probe.
+        coordination
+            .replay_checkpoint(arguments.intent())
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+
+        let binding = core.submission.binding().clone();
+        let mut lifecycle = task_lifecycle(&core, &binding)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let foundation = lifecycle
+            .persistence_foundation(&binding)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let mut writer = task_writer_lease(&core, &foundation)
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let acquire = foreman_writer_acquire(&core, arguments.intent().checkpoint_id())?;
+        let receipt = checkpoint_foreman(
+            &mut coordination,
+            &mut writer,
+            arguments.intent(),
+            acquire,
+            foreman_observation_from_environment,
+        )
+        .map_err(|error| ToolExecutionError::new(foreman_error_code(&error)))?;
+        Ok(json!({
+            "schema": "lattice.foreman-checkpoint-result/1.0",
+            "checkpoint_id": arguments.intent().checkpoint_id(),
+            "generation": receipt.generation(),
+            "status": if receipt.is_exact_retry() { "REPLAYED" } else { "RECORDED" },
+            "exact_retry": receipt.is_exact_retry(),
+            "ledger_digest": receipt.event_digest().as_str(),
+            "checkpoint_digest": receipt.checkpoint_digest().as_str(),
+        }))
     }
 
     fn reconcile(
@@ -6491,7 +6687,8 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         LatticedErrorKind::DatabaseConnect
         | LatticedErrorKind::GraphReceiptRead
         | LatticedErrorKind::HermesReceiptRead
-        | LatticedErrorKind::HermesProductionLivenessRejected => PortErrorKind::Unavailable,
+        | LatticedErrorKind::HermesProductionLivenessRejected
+        | LatticedErrorKind::ForemanReplayUnavailable => PortErrorKind::Unavailable,
         LatticedErrorKind::Configuration
         | LatticedErrorKind::Contract
         | LatticedErrorKind::ReceiptMismatch => PortErrorKind::Malformed,
@@ -6525,6 +6722,8 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         | LatticedErrorKind::GraphConfiguration
         | LatticedErrorKind::TaskControl
         | LatticedErrorKind::WriterLease
+        | LatticedErrorKind::ForemanReplayCorrupt
+        | LatticedErrorKind::ForemanReplayUnsupported
         | LatticedErrorKind::Transport => PortErrorKind::Denied,
     }
 }

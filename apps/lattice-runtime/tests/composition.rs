@@ -578,7 +578,7 @@ fn assert_safe_startup_diagnostics(stderr: &[u8], expected_stages: &[&str]) {
 }
 
 #[test]
-fn real_latticed_binary_serves_the_six_bounded_tools() {
+fn real_latticed_binary_serves_the_seven_bounded_tools() {
     let mut child = spawn_bounded_latticed();
     let task_ref = fixed_gateway_submission()
         .expect("fixed submission")
@@ -646,6 +646,7 @@ fn real_latticed_binary_serves_the_six_bounded_tools() {
             "lattice_task_status",
             "lattice_runtime_status",
             "lattice_delivery_reconcile",
+            "lattice_foreman_checkpoint",
         ]
     );
     for tool in tools {
@@ -763,6 +764,7 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
             "lattice_task_status",
             "lattice_runtime_status",
             "lattice_delivery_reconcile",
+            "lattice_foreman_checkpoint",
         ]
     );
     for tool in tools {

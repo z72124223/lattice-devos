@@ -205,7 +205,10 @@ fn map_error(error: crate::PostgresTaskLedgerError) -> ForemanCoordinationError 
             );
         }
         PostgresTaskLedgerErrorKind::CommitOutcomeUnknown => {
-            ForemanCoordinationErrorKind::OutcomeUnknown
+            return ForemanCoordinationError::new(
+                ForemanCoordinationErrorKind::OutcomeUnknown,
+                "FOREMAN_APPEND_OUTCOME_UNKNOWN",
+            );
         }
         PostgresTaskLedgerErrorKind::TransactionFailed
         | PostgresTaskLedgerErrorKind::Unavailable => {
@@ -260,8 +263,8 @@ mod tests {
             map_error(PostgresTaskLedgerError::new(
                 PostgresTaskLedgerErrorKind::CommitOutcomeUnknown
             ))
-            .kind(),
-            ForemanCoordinationErrorKind::OutcomeUnknown
+            .code(),
+            "FOREMAN_APPEND_OUTCOME_UNKNOWN"
         );
         assert_eq!(
             map_error(PostgresTaskLedgerError::new(

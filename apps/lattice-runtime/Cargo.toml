@@ -11,6 +11,7 @@ lattice-codebase-memory = { path = "../../crates/lattice-codebase-memory" }
 lattice-codex-adapter = { path = "../../crates/lattice-codex-adapter" }
 lattice-cjson = { path = "../../crates/lattice-cjson" }
 lattice-contracts = { path = "../../crates/lattice-contracts" }
+lattice-foreman-state = { path = "../../crates/lattice-foreman-state" }
 lattice-graphify-adapter = { path = "../../crates/lattice-graphify-adapter" }
 lattice-gateway-ipc = { path = "../../crates/lattice-gateway-ipc" }
 lattice-hermes-adapter = { path = "../../crates/lattice-hermes-adapter" }

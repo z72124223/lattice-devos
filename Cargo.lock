@@ -426,6 +426,7 @@ dependencies = [
  "lattice-codebase-memory",
  "lattice-codex-adapter",
  "lattice-contracts",
+ "lattice-foreman-state",
  "lattice-gateway-ipc",
  "lattice-graphify-adapter",
  "lattice-hermes-adapter",
