@@ -71,6 +71,10 @@ tests prove only the tested behavior.
   as the mandatory proof for routine module work.
 - Add or update the smallest behavioral test when behavior changes.
 - Run focused checks and inspect the final diff before reporting completion.
+- Installation observations are AI-managed evidence. After installing and verifying a
+  component, the AI records and re-reads it with `npm.cmd run control:receipt`; never
+  ask the user to enter or interpret receipt paths, commits, hashes, or digests unless
+  the user explicitly requests technical details.
 - `npm.cmd run check` is a repository-structure check, not a global task lock.
 - GitHub Issues, Projects, and pull requests are the engineering-progress
   record. Do not generate or use a local engineering-status map.

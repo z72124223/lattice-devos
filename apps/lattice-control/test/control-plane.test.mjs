@@ -418,12 +418,10 @@ test("local HTTP API persists projects and work items without starting Codex", a
     assert.equal(page.status, 200);
     const pageHtml = await page.text();
     assert.match(pageHtml, /LATTICE Control/u);
-    assert.match(pageHtml, /安裝收據（事後觀察）/u);
-    assert.match(pageHtml, /id="receipt-form"/u);
-    assert.match(pageHtml, /\/api\/installation-receipts/u);
-    assert.match(pageHtml, /state\.installationReceipts/u);
-    assert.match(pageHtml, /installationReceiptCount/u);
-    assert.match(pageHtml, /loadedReceiptCount/u);
+    assert.match(pageHtml, /安裝證據由 AI 自動管理，不需要手動輸入/u);
+    assert.doesNotMatch(pageHtml, /id="receipt-form"/u);
+    assert.doesNotMatch(pageHtml, /\/api\/installation-receipts/u);
+    assert.doesNotMatch(pageHtml, /來源 commit|安裝位置|產物 SHA-256|收據指紋/u);
     assert.match(pageHtml, /async function poll/u);
     assert.match(pageHtml, /async function poll\(\) \{\s*try \{\s*await refresh\(\);/u);
     assert.equal(pageHtml.match(/await refresh\(\);/gu)?.length, 1);
@@ -466,6 +464,12 @@ test("local HTTP API persists projects and work items without starting Codex", a
     );
     assert.equal(receiptListResponse.status, 200);
     assert.deepEqual(await receiptListResponse.json(), [receipt]);
+
+    const receiptReplayResponse = await fetch(
+      `${origin}/api/installation-receipts/${encodeURIComponent(receipt.id)}`,
+    );
+    assert.equal(receiptReplayResponse.status, 200);
+    assert.deepEqual(await receiptReplayResponse.json(), receipt);
 
     const invalidListResponse = await fetch(`${origin}/api/installation-receipts?limit=0`);
     assert.equal(invalidListResponse.status, 400);

@@ -222,6 +222,15 @@ export class LatticeStore {
     `).all(limit, offset);
   }
 
+  getInstallationReceipt(id) {
+    return this.database.prepare(`
+      SELECT installation_receipts.*, projects.name AS project_name
+      FROM installation_receipts
+      JOIN projects ON projects.id = installation_receipts.project_id
+      WHERE installation_receipts.id = ?
+    `).get(requireText(id, "installation receipt ID")) ?? null;
+  }
+
   countInstallationReceipts() {
     return this.database.prepare("SELECT COUNT(*) AS count FROM installation_receipts").get().count;
   }

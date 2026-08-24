@@ -82,6 +82,10 @@ export class LatticeControlService {
     return this.store.listInstallationReceipts(options);
   }
 
+  installationReceipt(id) {
+    return this.store.getInstallationReceipt(id);
+  }
+
   state() {
     return {
       codexConnected: this.codex.connected,

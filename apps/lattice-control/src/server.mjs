@@ -36,6 +36,11 @@ function routeId(pathname, action) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+function installationReceiptRouteId(pathname) {
+  const match = pathname.match(/^\/api\/installation-receipts\/([^/]+)$/u);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
 export function createLatticeServer({ databasePath, codex = new CodexAppServer() }) {
   const store = new LatticeStore(databasePath);
   const service = new LatticeControlService({ store, codex });
@@ -60,6 +65,16 @@ export function createLatticeServer({ databasePath, codex = new CodexAppServer()
         const limit = url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 50;
         const offset = url.searchParams.has("offset") ? Number(url.searchParams.get("offset")) : 0;
         sendJson(response, 200, service.installationReceipts({ limit, offset }));
+        return;
+      }
+      const installationReceiptId = installationReceiptRouteId(url.pathname);
+      if (request.method === "GET" && installationReceiptId) {
+        const receipt = service.installationReceipt(installationReceiptId);
+        if (!receipt) {
+          sendJson(response, 404, { error: "installation receipt not found" });
+          return;
+        }
+        sendJson(response, 200, receipt);
         return;
       }
       const continuationId = routeId(url.pathname, "continuation");
