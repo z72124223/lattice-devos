@@ -2161,19 +2161,17 @@ fn verify_global_default_acl_closure(
 ) -> Result<(), ExtensionSetupError> {
     let defaults = client
         .query_one(
-            "SELECT pg_catalog.count(DISTINCT d.oid), pg_catalog.count(*), \
+            "SELECT (SELECT pg_catalog.count(*) \
+                       FROM pg_catalog.pg_default_acl x \
+                      WHERE x.defaclnamespace=0), \
+                    pg_catalog.count(*), \
                     pg_catalog.count(*) FILTER (WHERE \
                       owner.rolname='lattice_migrator' \
                       AND grantee.rolname='lattice_migrator' \
                       AND grantor.rolname='lattice_migrator' \
                       AND NOT a.is_grantable \
-                      AND ((d.defaclobjtype='r' AND a.privilege_type IN ( \
-                              'SELECT','INSERT','UPDATE','DELETE','TRUNCATE', \
-                              'REFERENCES','TRIGGER','MAINTAIN')) \
-                        OR (d.defaclobjtype='S' AND a.privilege_type IN ( \
-                              'USAGE','SELECT','UPDATE')) \
-                        OR (d.defaclobjtype='f' AND a.privilege_type='EXECUTE') \
-                        OR (d.defaclobjtype='T' AND a.privilege_type IN ('USAGE')))) \
+                      AND ((d.defaclobjtype='f' AND a.privilege_type='EXECUTE') \
+                        OR (d.defaclobjtype='T' AND a.privilege_type='USAGE'))) \
                FROM pg_catalog.pg_default_acl d \
                JOIN pg_catalog.pg_roles owner ON owner.oid=d.defaclrole \
                CROSS JOIN LATERAL pg_catalog.aclexplode(d.defaclacl) a \
@@ -2186,8 +2184,8 @@ fn verify_global_default_acl_closure(
     let default_rows: i64 = defaults.get(0);
     let default_acl_count: i64 = defaults.get(1);
     let admitted_default_acl_count: i64 = defaults.get(2);
-    if default_rows != 4
-        || default_acl_count != 13
+    if default_rows != 2
+        || default_acl_count != 2
         || admitted_default_acl_count != default_acl_count
     {
         return Err(catalog_stage("MEMORY_EXTENSION_EMPTY_DEFAULT_ACL_MISMATCH"));

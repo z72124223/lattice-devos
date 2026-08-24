@@ -85,6 +85,34 @@ fn empty_bootstrap_profile_closes_auxiliary_catalog_and_default_acl() {
     ] {
         assert!(empty.contains(required), "missing empty closure {required}");
     }
+    let global_default_acl = empty
+        .split_once("fn verify_global_default_acl_closure")
+        .expect("global default ACL verifier")
+        .1
+        .split_once("fn verify_namespace_auxiliary_closure")
+        .expect("global default ACL verifier boundary")
+        .0;
+    for required in [
+        "SELECT (SELECT pg_catalog.count(*)",
+        "FROM pg_catalog.pg_default_acl x",
+        "WHERE x.defaclnamespace=0",
+        "default_rows != 2",
+        "default_acl_count != 2",
+        "d.defaclobjtype='f' AND a.privilege_type='EXECUTE'",
+        "d.defaclobjtype='T' AND a.privilege_type='USAGE'",
+        "owner.rolname='lattice_migrator'",
+        "grantee.rolname='lattice_migrator'",
+        "grantor.rolname='lattice_migrator'",
+        "NOT a.is_grantable",
+    ] {
+        assert!(
+            global_default_acl.contains(required),
+            "missing frozen global default ACL evidence {required}"
+        );
+    }
+    assert!(!global_default_acl.contains("d.defaclobjtype='r'"));
+    assert!(!global_default_acl.contains("d.defaclobjtype='S'"));
+    assert!(!global_default_acl.contains("count(DISTINCT d.oid)"));
 }
 
 #[test]

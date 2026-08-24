@@ -764,6 +764,26 @@ impl LiveConfig {
             .expect("TASK105_MEMORY_DEFAULT_ACL_REPAIR");
     }
 
+    fn introduce_global_default_acl_drift(&self) {
+        self.bootstrap_client()
+            .batch_execute(
+                "SET ROLE lattice_migrator; \
+                 ALTER DEFAULT PRIVILEGES \
+                 GRANT SELECT ON TABLES TO lattice_runtime; RESET ROLE;",
+            )
+            .expect("TASK105_GLOBAL_DEFAULT_ACL_DRIFT");
+    }
+
+    fn repair_global_default_acl_drift(&self) {
+        self.bootstrap_client()
+            .batch_execute(
+                "SET ROLE lattice_migrator; \
+                 ALTER DEFAULT PRIVILEGES \
+                 REVOKE SELECT ON TABLES FROM lattice_runtime; RESET ROLE;",
+            )
+            .expect("TASK105_GLOBAL_DEFAULT_ACL_REPAIR");
+    }
+
     fn introduce_partial_memory_catalog(&self) {
         self.bootstrap_client()
             .batch_execute(
@@ -1357,6 +1377,20 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     config.assert_login_capability(false);
     writer_absent.prepare_v5_store_only();
     writer_absent.assert_v5_writer_absent();
+
+    writer_absent.introduce_global_default_acl_drift();
+    let global_default_acl_drift = writer_absent.v5_fallback_fingerprint();
+    assert_eq!(
+        run_latticed_admin(&writer_absent, "--postgres-bootstrap", false).trim(),
+        "LATTICE_GRAPH_MEMORY_CONFIGURATION_REJECTED"
+    );
+    assert_eq!(
+        writer_absent.v5_fallback_fingerprint(),
+        global_default_acl_drift
+    );
+    writer_absent.repair_global_default_acl_drift();
+    writer_absent.assert_v5_writer_absent();
+    println!("TASK105_STAGE_V5_GLOBAL_DEFAULT_ACL_FAIL_CLOSED_PASS");
 
     writer_absent.introduce_memory_default_acl_drift();
     let default_acl_drift = writer_absent.v5_fallback_fingerprint();
