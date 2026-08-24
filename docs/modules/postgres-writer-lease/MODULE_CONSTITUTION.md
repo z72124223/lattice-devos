@@ -1,7 +1,7 @@
 ---
 module_id: postgres-writer-lease
 name: PostgreSQL Writer Lease Repository
-version: 1.5
+version: 1.6
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -32,6 +32,8 @@ TASK-105 schema-v6 manifest and changes no Writer semantic row shape.
 Version 1.5 exposes an explicit current-profile runtime constructor that binds
 only the Writer-v3 procedures after verified schema-v6 bootstrap. The
 historical Writer-v2 constructor and procedure profile remain unchanged.
+Version 1.6 re-pins the still-undeployed v3 rebind boundary to Store 1.17's
+corrected schema-v6 manifest. It changes no Writer procedure or semantic row.
 
 ## Non-Goals
 
@@ -214,6 +216,9 @@ TASK-105 composition. It verifies the embedded v3 manifest and exact v6 target
 before invoking the v3 procedure pair; it neither widens v2 nor changes Writer
 domain semantics or physical rows.
 
+Version 1.6 accepts only Store 1.17's corrected seven-entry schema-v6 manifest
+at the existing fixed rebind procedure. Prior pre-product digests fail closed.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -248,3 +253,4 @@ synthetic evidence as production authority.
 | 1.3 | 2026-08-24 | SPEC-002 v37, ADR-026, TASK-094 | Writer-owned typed v3 apply/rebind administration for exact-v5 transition and exact-v6 idempotent retry through one fixed Store transaction boundary | TASK-094 bounded repair authority |
 | 1.4 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 | Add strict existing-v3 product-bootstrap rebind/verify, fail closed on schema-v6 Writer absence, and re-pin the fixed rebind boundary to the corrected seven-entry v6 manifest | TASK-105 bounded implementation authority |
 | 1.5 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 | Add explicit version-closed Writer-v3 runtime construction for schema-v6 composition while preserving the historical v2 adapter path | TASK-105 bounded implementation authority |
+| 1.6 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 live correction | Re-pin the still-undeployed Writer rebind boundary to Store 1.17 after closing the foreman event finalizer allowlist | TASK-105 bounded implementation authority |

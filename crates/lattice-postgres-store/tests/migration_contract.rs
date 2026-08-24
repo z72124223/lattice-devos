@@ -410,7 +410,7 @@ fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
             .expect("exact schema-v6 manifest")
             .manifest_sha256()
             .as_str(),
-        "cc5d86746ed84ce0e8977923f60015b4308509ed4ef028940f776941976fadb9"
+        "e2f1849bf17f78d60e921cbdcff01aced0516214c2216cb0e7c2f541b68ae439"
     );
 
     let registry = &manifest[4];
@@ -1100,10 +1100,10 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
         foreman.path(),
         "db/migrations/0007_foreman_coordination.sql"
     );
-    assert_eq!(foreman.byte_length(), 217_177);
+    assert_eq!(foreman.byte_length(), 217_206);
     assert_eq!(
         foreman.sha256(),
-        "3610b033fa621a2f4199c5477e0ab761bd9f1ba49177cd8bcf19920ce0f95aff"
+        "36ae91884e849c63ffe2a4b7013b4dea7a8f1a4bc63305d4a91a04808d316f9c"
     );
     assert_eq!(foreman.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(foreman.reader_compatibility(), 6..=6);
@@ -1145,6 +1145,7 @@ fn foreman_migration_is_event_bound_fenced_and_table_acl_closed() {
         "xmin = pg_catalog.pg_current_xact_id()::xid",
         "CREATE FUNCTION control.task_ledger_record_foreman_snapshot_v1(",
         "CREATE FUNCTION control.task_ledger_read_foreman_snapshots_v1(",
+        "'EVIDENCE_RECORDED', 'FOREMAN_SNAPSHOT_RECORDED'",
         "REVOKE ALL ON TABLE control.task_ledger_foreman_snapshots FROM lattice_runtime",
         "worker_id !~* '^(sk-|bearer )|password|full chat|begin private'",
         "heartbeat_digest_ref ~ '^heartbeat:sha256:[0-9a-f]{64}$'",

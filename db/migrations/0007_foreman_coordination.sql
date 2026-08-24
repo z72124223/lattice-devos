@@ -2204,7 +2204,7 @@ BEGIN
        OR p_event_kind NOT IN (
             'TASK_CREATED', 'AUTONOMY_RECEIPT_RECORDED', 'STATE_TRANSITION', 'POLICY_DECISION',
             'RESOURCE_SNAPSHOT', 'EFFECT_INTENT', 'EFFECT_OUTCOME',
-            'EVIDENCE_RECORDED'
+            'EVIDENCE_RECORDED', 'FOREMAN_SNAPSHOT_RECORDED'
        )
        OR p_audit_outcome IS NULL
        OR p_audit_outcome NOT IN (

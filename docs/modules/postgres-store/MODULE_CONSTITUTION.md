@@ -1,7 +1,7 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.16
+version: 1.17
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -70,6 +70,10 @@ Version 1.16 corrects the undeployed ordinal-7 Store current-head verifier to
 require all seven exact history entries. The one-character correction is
 re-pinned in the schema-v6 SQL checksum and manifest; it adds no migration,
 table, function, semantic event, or compatibility generation.
+Version 1.17 closes the same undeployed migration's Ledger finalizer allowlist:
+the existing `FOREMAN_SNAPSHOT_RECORDED` event may now pass the shared atomic
+finalizer before its fixed foreman child row is recorded. No other event,
+function, row shape, or semantic owner is added.
 
 ## Non-Goals
 
@@ -851,6 +855,12 @@ after schema v6 had committed seven. The corrected function requires seven,
 so a vacant foreman stream returns its verified genesis physical head instead
 of an unavailable row-count error. Schema-v5 prefix bytes remain unchanged.
 
+Version 1.17 supersedes that still-undeployed pin because the copied v3 Ledger
+finalizer omitted the already-governed foreman event from its closed event-kind
+allowlist. The allowlist gains exactly `FOREMAN_SNAPSHOT_RECORDED`; validation,
+atomic ordering, same-transaction Writer assertion, and child-row closure stay
+unchanged.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -936,3 +946,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.14 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Return one repeatable-read typed foreman replay evidence value, enforce the fixed sole-foreman identity on retained/write paths, and normalize execute-time changed-ID races without adding persistence or Writer semantics | Sole-foreman delegation |
 | 1.15 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Add a read-only exact Store migration-prefix classifier so product bootstrap can stop existing admission before Writer-v3 rebind or Store-v6 mutation without parsing Store or Writer rows in composition | Sole-foreman delegation |
 | 1.16 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Re-pin the undeployed 0007 byte and v6 manifest after correcting Store current-head history closure from six entries to seven; no new migration or semantic owner | Sole-foreman delegation |
+| 1.17 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Admit the existing foreman event through the shared atomic Ledger finalizer and re-pin the still-undeployed 0007 profile without widening event semantics | Sole-foreman delegation |

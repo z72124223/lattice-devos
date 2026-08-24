@@ -15,9 +15,9 @@ additional_modules:
   - module_id: task-ledger
     constitution_version: 2.7
   - module_id: postgres-store
-    constitution_version: 1.16
+    constitution_version: 1.17
   - module_id: postgres-writer-lease
-    constitution_version: 1.5
+    constitution_version: 1.6
 status: in_progress
 parallel_safe: false
 depends_on: [TASK-094]

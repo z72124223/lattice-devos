@@ -38,7 +38,7 @@ fn task079_appends_exact_0007_without_changing_the_v5_prefix() {
     assert_eq!(migration_manifest()[6].bytes(), SQL);
     assert_eq!(
         candidate().manifest_sha256(),
-        "cc5d86746ed84ce0e8977923f60015b4308509ed4ef028940f776941976fadb9"
+        "e2f1849bf17f78d60e921cbdcff01aced0516214c2216cb0e7c2f541b68ae439"
     );
     let sql = std::str::from_utf8(SQL).expect("canonical UTF-8 migration");
     assert!(sql.contains("AND v_manifest_entry_count = 7"));
