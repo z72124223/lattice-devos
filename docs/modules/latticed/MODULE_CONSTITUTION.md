@@ -1,10 +1,10 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 2.6
+version: 3.1
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-24
+last_reviewed: 2026-08-25
 ---
 
 ## Mission
@@ -38,17 +38,21 @@ Orchestrator composition.
 
 ## Public Contracts
 
-- Construct one Orchestrator 2.6 instance with typed Contracts 1.13 / Ports 1.9
+- Construct one Orchestrator 2.7 instance with typed Contracts 1.13 / Ports 2.1
   implementations for the bounded delivery, graph-memory, and task-control
   paths.
-- Through canonical `latticed`, expose exactly six MCP tools:
+- Through canonical `latticed`, expose exactly seven MCP tools:
   `lattice_delivery_run`, `lattice_delivery_status`, `lattice_runtime_status`,
-  `lattice_delivery_reconcile`, `lattice_task_submit`, and `lattice_task_status`.
+  `lattice_delivery_reconcile`, `lattice_task_submit`, `lattice_task_status`, and
+  `lattice_foreman_checkpoint`.
   Delivery Reconcile is zero-parameter and read-only: it replays the existing
   PostgreSQL receipt to distinguish a durable terminal fact from a reconciliation
   blocker, and cannot dispatch Codex, write a receipt, or reinterpret uncertainty.
   Runtime Status is read-only,
   starts no optional component, and reports their independent readiness/degradation.
+  It adds only a verified durable foreman replay projection. The checkpoint
+  schema contains no caller identity, Git/worktree/path, authority/fence,
+  database, SQL or command field.
 - Through the compatibility `lattice-runtime` executable, expose one non-MCP,
   read-only `runtime-health` and `receipt-state` commands. They accept the same
   fixed marker-owned PostgreSQL binding as Delivery Status. `runtime-health`
@@ -56,12 +60,12 @@ Orchestrator composition.
   configured independent Graphify/Hermes mode; it always keeps
   `delivery_receipt=NOT_INSPECTED`. `receipt-state` reports only the verified
   durable receipt projection. Neither command creates or reinterprets a
-  receipt, and neither alters the six-tool MCP surface.
+  receipt, and neither alters the seven-tool MCP surface.
 - Restrict the alternate `lattice-full-chain` executable to a legacy observer
   surface. It advertises only the two delivery names, rejects Delivery Run
   with a fixed code before service dispatch, permits only durable Delivery
-  Status reads, and treats both task names as unknown under legacy and
-  stateless MCP.
+  Status reads, and treats both task names and `lattice_foreman_checkpoint` as
+  unknown under legacy and stateless MCP.
 - Preserve zero-parameter closed schemas for both delivery tools. Give Task
   Submit only the closed `CONTROLLED_CODEX_CANARY` intent plus one bounded
   `client_request_id`, and give Task Status only the lowercase SHA-256
@@ -114,11 +118,16 @@ Orchestrator composition.
   production Secure MCP Tunnel and local canonical acceptance use distinct
   non-substitutable actor/adapter commitments. `clientInfo` and caller identity
   fields grant no authority.
+- Map Foreman Checkpoint into that same `FullChainService` and injected
+  Orchestrator. The composition root may observe its fixed server binding and
+  Git evidence, but it must pass them through typed ports; it cannot call
+  PostgreSQL, mutate Ledger state, acquire Writer authority, or reorder effects
+  directly. This preserves One Gateway for all seven canonical tools.
 - Construct the complete Task Spec 2.1 from the server-owned canary template,
   revalidate it through Task Domain, and preserve its one digest across
   Gateway, Task Ledger, Writer Lease, Codex, verification/Git, and status
   evidence.
-- Compose the injected Writer Lease 1.1 repository and Task lifecycle
+- Compose the injected Writer Lease domain 1.1 repository and Task lifecycle
   port. Production task dispatch cannot use `FakeWriterLease`, synthetic
   authority, or a process-memory task/status store.
 - The local Task lifecycle edge wrapper implements `TaskLifecyclePort` only by
@@ -163,7 +172,7 @@ Orchestrator composition.
    skip, or synthesize delivery stages.
 3. Concrete adapters are constructed at the edge, implement typed ports, and
    never call one another.
-4. Canonical `latticed` MCP enumeration contains exactly the six approved
+4. Canonical `latticed` MCP enumeration contains exactly the seven approved
    names. Delivery and Runtime Status schemas remain zero-parameter; task schemas remain closed
    to the one approved intent/`client_request_id` and returned `task_ref`.
    Alternate `lattice-full-chain` is an observer only: it exposes the two
@@ -214,21 +223,45 @@ Orchestrator composition.
     the database is currently reachable outside that read.
 19. Historical status observation grants no successor ingress authority.
     Historical non-terminal and Completed streams remain current-profile-bound.
+20. Normal no-argument MCP startup and every tool call are migration-free.
+    Only explicit `--postgres-bootstrap` may sequence Writer v3 before Store v6,
+    close migrator credentials, construct fresh runtime clients, verify foreman
+    replay and then report readiness.
+21. Before changing admission, bootstrap consumes only PostgreSQL Memory 1.3
+    and PostgreSQL Writer Lease 1.8 closed read-only profiles. It accepts only Store-v5 +
+    Memory `Empty|V2|V3` + Writer `V5FallbackRequired`, Store-v5 + Memory `V3`
+    + Writer `V5Bridge`, or Store-v6 + Memory `V3` + Writer
+    `V6BridgePending|V6Current`. Every other triple fails closed. Only the v5
+    fallback runs Store verification, Memory apply/verify, Writer-v2
+    apply/verify, then exact Writer-v3 bridge. Composition never parses Memory
+    or Writer rows or substitutes its own classifier.
+    A physically fresh Store first requires the Writer-owned inspector to prove
+    an exactly absent Writer namespace before Store v5 is created, after which
+    the same closed triple is re-inspected. A partial Writer namespace fails
+    before Store schema creation. Product bootstrap rejects every Store legacy
+    prefix before admission observation or mutation; only the Store-owned
+    administrative API may advance historical prefixes.
+22. Exact v6 current requires persisted Runtime admission to equal the
+    configured authority and performs zero stop, restore, rebind, Store
+    migration, row, or ACL write. Migrator credentials are then closed and a
+    fresh Runtime-role Task Ledger construction plus foreman replay performs
+    the full Store/runtime verification. V6 bridge-pending alone may stop,
+    rebind under Writer-owned reclassification, verify Store v6, and restore.
 
 ## Allowed Dependencies
 
-- `lattice-contracts` 1.13, `lattice-ports` 1.9,
-  `orchestrator-runtime` 2.6, Task Ledger 2.5, and Writer Lease 1.1 public APIs.
+- `lattice-contracts` 1.13, `lattice-ports` 2.1,
+  `orchestrator-runtime` 2.7, Foreman State 1.3, Task Ledger 2.7, PostgreSQL
+  Memory 1.3, Writer Lease domain 1.1, and PostgreSQL Writer Lease 1.8 public APIs.
 - Concrete Codex, PostgreSQL Task Ledger, bounded workspace/Git, and fixed-test
   adapters required by TASK-032, only for construction and port
   implementation.
-- Concrete exact-snapshot, Graphify 1.0, and pure Codebase Memory 1.0 adapters
-  required by TASK-033, only for construction and port implementation. The
-  proposed independent PostgreSQL Memory extension adapter cannot be composed
-  until its owning module receives an explicitly approved versioned amendment.
+- Concrete exact-snapshot, Graphify 1.0, pure Codebase Memory 1.0, and
+  PostgreSQL Memory 1.3 adapters required by TASK-033/TASK-105, only for
+  construction and typed bootstrap inspection/port implementation.
 - Bounded stdio/JSON/MCP framing, process configuration, hashing, timeout, and
   diagnostics libraries required at the application edge.
-- Concrete PostgreSQL Task Ledger and PostgreSQL Writer Lease 1.0 adapters only
+- Concrete PostgreSQL Task Ledger and PostgreSQL Writer Lease 1.8 adapters only
   for construction behind their typed boundaries.
 - `lattice-hermes-adapter` 1.1 only for production runner construction,
   ephemeral liveness, and lifecycle teardown; it grants no durable truth,
@@ -316,9 +349,9 @@ than a Store test binary as acceptance.
 | Gate | Evidence | Owner | Required for merge |
 |---|---|---|---|
 | Composition direction | Cargo metadata proves orchestrator has no concrete dependency and only `latticed` selects adapters | Architecture review | yes |
-| MCP tool closure | exact six-tool list; unchanged empty delivery/Runtime Status schemas; closed task schemas and unknown/additional-property rejection | Engineering | yes |
+| MCP tool closure | exact seven-tool list; unchanged empty delivery/Runtime Status schemas; closed task/checkpoint schemas; legacy exact two with checkpoint unknown; unknown/additional-property rejection | Engineering | yes |
 | Restricted input | shell/SQL/path/credential/provider/task-text/actor/session/lease/fence/writable-thread matrix is rejected before dispatch | Security review | yes |
-| One Gateway | both task tools invoke the same `FullChainService` / Orchestrator composition; MCP has no direct database/Codex/Git call path | Architecture review | yes |
+| One Gateway | both task tools plus Foreman Checkpoint invoke the same `FullChainService` / Orchestrator composition; MCP has no direct database/Codex/Git/Writer call path | Architecture review | yes |
 | Fixed identity | process profile supplies the actor/audit binding; tunnel/local commitments cannot substitute; hostile `clientInfo`/arguments grant no authority | Security review | yes |
 | Durable task control | Task creation/idempotency/audit/status replay from PostgreSQL with fresh-process equality | Engineering | yes |
 | Required autonomy profile | new marker, exact second receipt, historical optional replay, pending reconciliation, and fresh-`latticed` Status with no extra wire field | Engineering and security review | yes |
@@ -342,6 +375,11 @@ constitution cannot be weakened merely to excuse implementation drift.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 3.1 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Add the Memory 1.3 and PostgreSQL Writer Lease 1.8 typed read-only bootstrap profiles as the sole pre-admission cross-module contract, including exact empty, predecessor, bridge-pending, current, fresh-absence, and legacy-product-rejection handling | Sole-foreman delegation |
+| 3.0 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Consume Writer 1.8's closed preflight before admission effects; enforce the exact Store/Writer cross-product and make v6-current a full fresh-runtime verify-only path with zero durable mutation | Sole-foreman delegation |
+| 2.9 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Make schema-v5 bootstrap strictly Writer-first; an existing exact v3 bridge skips generic Memory verification, while only unsupported foundation enters the complete Store, Memory, Writer-v2, then Writer-v3 fallback | Sole-foreman delegation |
+| 2.8 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Let the Writer-owned v3 boundary recognize an exact existing schema-v5 bridge before the generic Store-v5/Writer-v2 fallback; only exact unsupported foundation may fall back and every other Writer error remains fail-closed | Sole-foreman delegation |
+| 2.7 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Add the seventh canonical foreman checkpoint, verified zero-argument status replay and explicit Writer-v3-before-Store-v6 bootstrap; legacy surface unchanged | Sole-foreman delegation |
 | 1.0 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Sole normal composition root in `apps/lattice-runtime`, two fixed zero-parameter MCP tools, and one shared `lattice-runtime` compatibility wrapper | User approval in preceding implementation window |
 | 1.1 | 2026-08-05 | SPEC-002 v26, ADR-022, TASK-033 | Compose the exact Graphify/PostgreSQL Codebase Memory continuation while preserving the same two-tool MCP boundary | User TASK-033 direction |
 | 1.2 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Add bounded Task Submit/Status through the same Gateway with a fixed server-owned actor, Task Spec digest unity, PostgreSQL task truth, and real writer lease/fencing | User TASK-038-first direction |

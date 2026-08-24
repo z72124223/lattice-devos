@@ -1,8 +1,117 @@
 use lattice_postgres_writer_lease::{
+    ExtensionApplyOutcome, ExtensionSetupError, V3BootstrapProfile, V3ExtensionTarget,
     WRITER_LEASE_EXTENSION_ID, WRITER_LEASE_EXTENSION_PATH, WRITER_LEASE_EXTENSION_SCHEMA_VERSION,
-    WRITER_LEASE_V1_EXTENSION_PATH, verify_embedded_extension_manifest,
-    verify_embedded_v1_extension_manifest,
+    WRITER_LEASE_V1_EXTENSION_PATH, WRITER_LEASE_V2_EXTENSION_PATH, WRITER_LEASE_V3_EXTENSION_PATH,
+    WRITER_LEASE_V3_REBIND_PATH, WriterLeaseV3BridgeState, apply_v3_extension,
+    inspect_v3_bootstrap_profile, rebind_existing_v3_extension, rebind_v3_extension,
+    verify_embedded_extension_manifest, verify_embedded_v1_extension_manifest,
+    verify_embedded_v2_extension_manifest, verify_embedded_v3_extension_manifest,
+    verify_embedded_v3_rebind_manifest, verify_writer_lease_v3_transition,
 };
+
+#[test]
+fn task105_bootstrap_profile_is_read_only_closed_and_fully_verified() {
+    let _: fn(
+        &mut postgres::Client,
+        &V3ExtensionTarget,
+    ) -> Result<V3BootstrapProfile, ExtensionSetupError> = inspect_v3_bootstrap_profile;
+
+    let setup = include_str!("../src/setup.rs");
+    let inspector = setup
+        .split("pub fn inspect_v3_bootstrap_profile")
+        .nth(1)
+        .expect("TASK105 Writer-owned inspector")
+        .split("fn apply_v3_extension_under_gate")
+        .next()
+        .expect("bounded inspector body");
+    for required in [
+        ".read_only(true)",
+        "V3InstalledState::Absent",
+        "verify_v2_bootstrap_predecessor",
+        "verify_v3_bridge_profile",
+        "verify_v3_bridge_pending_profile",
+        "verify_v3_current_profile",
+        "verify_v3_rebind_boundary",
+        "verify_replay_safe_history",
+    ] {
+        assert!(
+            inspector.contains(required),
+            "missing preflight gate: {required}"
+        );
+    }
+    for prohibited in [
+        "batch_execute(\"CALL",
+        "apply_v2_to_v3_bridge",
+        "activate_v3_runtime_acl",
+    ] {
+        assert!(
+            !inspector.contains(prohibited),
+            "read-only preflight contains mutation: {prohibited}"
+        );
+    }
+}
+
+#[test]
+fn task094_exposes_typed_v3_bridge_and_rebind_owner_apis() {
+    let _: fn(
+        &mut postgres::Client,
+        &V3ExtensionTarget,
+    ) -> Result<ExtensionApplyOutcome, ExtensionSetupError> = apply_v3_extension;
+    let _: fn(
+        &mut postgres::Client,
+        &V3ExtensionTarget,
+    ) -> Result<ExtensionApplyOutcome, ExtensionSetupError> = rebind_v3_extension;
+    let _: fn(
+        &mut postgres::Client,
+        &V3ExtensionTarget,
+    ) -> Result<ExtensionApplyOutcome, ExtensionSetupError> = rebind_existing_v3_extension;
+
+    let setup = include_str!("../src/setup.rs");
+    for required in [
+        "G5MemoryV3WriterV3Bridge",
+        "G6MemoryV3WriterV3BridgePending",
+        "G6MemoryV3WriterV3Current",
+        "apply_v2_to_v3_bridge",
+        "writer_lease_rebind_v3()",
+        "verify_v3_bridge_profile",
+        "verify_v3_current_profile",
+        "if !allow_fresh_install",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing v3 owner boundary: {required}"
+        );
+    }
+
+    let rebind = verify_embedded_v3_rebind_manifest().expect("fixed rebind bytes");
+    assert_eq!(rebind.path(), WRITER_LEASE_V3_REBIND_PATH);
+    let sql = include_str!("../../../db/extensions/writer-lease/v3-rebind.sql");
+    for required in [
+        "CREATE PROCEDURE writer_lease.writer_lease_rebind_v3()",
+        "LANGUAGE plpgsql",
+        "SECURITY INVOKER",
+        "SET search_path = pg_catalog",
+        "SET row_security = on",
+        "SET lock_timeout = '5s'",
+        "SET statement_timeout = '30s'",
+        "LOCK TABLE writer_lease.writer_lease_extension_identity",
+        "writer_lease.writer_lease_extension_ledger",
+        "writer_lease.writer_lease_heads",
+        "$lattice_writer_lease_rebind_v3$",
+        "GRANT USAGE ON SCHEMA writer_lease TO lattice_runtime",
+        "WHEN 4 THEN 5",
+        "event_kind = 'REBOUND'",
+    ] {
+        assert!(
+            sql.contains(required),
+            "missing fixed v3 SQL boundary: {required}"
+        );
+    }
+    assert!(!sql.contains("CREATE OR REPLACE"));
+    assert!(!sql.contains(
+        "GRANT EXECUTE ON PROCEDURE writer_lease.writer_lease_rebind_v3() TO lattice_runtime"
+    ));
+}
 
 #[test]
 fn v1_history_is_immutable_and_v2_is_the_current_append_only_successor() {
@@ -62,6 +171,86 @@ fn v1_history_is_immutable_and_v2_is_the_current_append_only_successor() {
     assert!(!sql.contains("writer_lease_assert_memory_upgrade"));
     assert!(!sql.contains("GRANT USAGE ON SCHEMA writer_lease"));
     assert!(!sql.contains("GRANT EXECUTE ON FUNCTION writer_lease"));
+}
+
+#[test]
+fn task087_v2_stays_frozen_and_v3_is_append_only_schema_v6_successor() {
+    let v2 = verify_embedded_v2_extension_manifest().expect("frozen v2 manifest");
+    assert_eq!(v2.path(), WRITER_LEASE_V2_EXTENSION_PATH);
+    assert_eq!(v2.schema_version(), 2);
+    assert_eq!(v2.byte_length(), 22_985);
+    assert_eq!(
+        v2.sql_sha256().as_str(),
+        "8243fd39a3565c641423fde3f15cf801a4a48a12c8d238ae8e1657acdcdc56e3"
+    );
+
+    let v3 = verify_embedded_v3_extension_manifest().expect("Writer v3 manifest");
+    assert_eq!(v3.path(), WRITER_LEASE_V3_EXTENSION_PATH);
+    assert_eq!(v3.schema_version(), 3);
+    let sql = std::str::from_utf8(v3.bytes()).expect("UTF-8 v3 SQL");
+    for required in [
+        "extension_schema_version = 2",
+        "global_schema_version = 5",
+        "extension_schema_version = 3",
+        "global_schema_version = 6",
+        "ledger_ordinal = 4",
+        "ledger_ordinal = 5",
+        "FOREMAN_COORDINATION",
+        "FOREMAN_SNAPSHOT_RECORDED",
+        "writer_lease_bind_runtime_v3",
+        "writer_lease_load_for_update_v3",
+        "LATTICE_WRITER_LEASE_SCHEMA_V3",
+    ] {
+        assert!(sql.contains(required), "missing v3 boundary: {required}");
+    }
+    assert!(!sql.contains("CREATE OR REPLACE"));
+    assert!(!sql.contains("DROP TABLE"));
+    assert!(!sql.contains("CREATE TABLE"));
+    assert_eq!(sql.matches("CREATE FUNCTION writer_lease.").count(), 2);
+    assert!(!sql.contains("GRANT USAGE ON SCHEMA writer_lease"));
+    assert!(!sql.contains("GRANT EXECUTE ON FUNCTION writer_lease"));
+}
+
+#[test]
+fn task087_v3_transition_is_closed_ordered_idempotent_and_runtime_quarantined() {
+    let bridge =
+        verify_writer_lease_v3_transition(WriterLeaseV3BridgeState::V2Current, 5, "1:INSTALLED")
+            .expect("v2 current to v3 bridge");
+    assert_eq!(bridge, WriterLeaseV3BridgeState::Bridge);
+    assert_eq!(bridge.runtime_function_count(), 0);
+    assert_eq!(
+        verify_writer_lease_v3_transition(bridge, 5, "1:INSTALLED,2:UPGRADED")
+            .expect("exact retry"),
+        bridge
+    );
+    let pending = verify_writer_lease_v3_transition(bridge, 6, "1:INSTALLED,2:UPGRADED")
+        .expect("exact schema-v6 migration");
+    assert_eq!(pending, WriterLeaseV3BridgeState::BridgePending);
+    assert_eq!(pending.runtime_function_count(), 0);
+    let current = verify_writer_lease_v3_transition(pending, 6, "1:INSTALLED,2:UPGRADED,3:REBOUND")
+        .expect("exact v3 rebind");
+    assert_eq!(current, WriterLeaseV3BridgeState::Current);
+    assert_eq!(current.runtime_function_count(), 7);
+
+    for (state, generation, ledger) in [
+        (WriterLeaseV3BridgeState::V2Current, 6, "1:INSTALLED"),
+        (
+            WriterLeaseV3BridgeState::Bridge,
+            7,
+            "1:INSTALLED,2:UPGRADED",
+        ),
+        (WriterLeaseV3BridgeState::Bridge, 6, "1:INSTALLED,3:REBOUND"),
+        (
+            WriterLeaseV3BridgeState::Current,
+            5,
+            "1:INSTALLED,2:UPGRADED,3:REBOUND",
+        ),
+    ] {
+        assert!(
+            verify_writer_lease_v3_transition(state, generation, ledger).is_err(),
+            "cross-generation or reordered replay must fail"
+        );
+    }
 }
 
 #[test]

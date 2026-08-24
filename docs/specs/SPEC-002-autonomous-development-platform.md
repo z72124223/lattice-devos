@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 35
+version: 38
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -9,7 +9,9 @@ modules:
   - module_id: task-domain
     constitution_version: 2.2
   - module_id: task-ledger
-    constitution_version: 2.3
+    constitution_version: 2.4
+  - module_id: foreman-state
+    constitution_version: 1.2
   - module_id: policy-engine
     constitution_version: 2.6
   - module_id: project-registry
@@ -31,11 +33,11 @@ modules:
   - module_id: approval-verifier
     constitution_version: 1.0
   - module_id: postgres-store
-    constitution_version: 1.10
+    constitution_version: 1.13
   - module_id: postgres-codebase-memory
     constitution_version: 1.2
   - module_id: postgres-writer-lease
-    constitution_version: 1.1
+    constitution_version: 1.3
   - module_id: artifact-store
     constitution_version: 1.0
   - module_id: codex-adapter
@@ -861,7 +863,8 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 |---|---:|---|
 | lattice-cjson | 1.0 | Pure shared `lattice-cjson-1` byte/framing mechanism; caller modules retain hash-subject semantics |
 | task-domain | 2.2 | Preserve the task contract, V2 schema, V1 read compatibility, and hash-bound accounting currency |
-| task-ledger | 2.3 | Sole owner of the versioned task-created profile classifier, canonical autonomy authority/receipt subjects, typed append plan, exact required-profile ordering, mixed historical replay, and atomic event-owned persistence contract; generic append cannot forge the receipt and public MCP bytes remain unchanged |
+| task-ledger | 2.4 | Sole owner of the versioned task-created profile classifier, canonical autonomy authority/receipt subjects, typed append plan, exact required-profile ordering, mixed historical replay, and atomic event-owned persistence contract; generic append cannot forge the receipt and public MCP bytes remain unchanged |
+| foreman-state | 1.2 | Sole owner of foreman state interpretation and replay; Store persists only the already-governed event-owned scalars and creates no second foreman truth |
 | policy-engine | 2.6 | Generic project/capability/upgrade policy; independent current Registry, Task Ledger, Writer Lease, and Approval Verifier full-head comparison; R3 denies pending Review Runtime authority |
 | project-registry | 1.2 | Canonical repository identity and lifecycle plus one pure runtime-aware global vacant/plan/apply/export/verify boundary, separately reconstructed retained checkpoint, acyclic command-core/logical-bytes/checkpoint/record-set commitments, complete bounded history, and byte-identical Registry-1.1 Fake vectors |
 | writer-lease | 1.1 | Preserve the closed lease/fencing/daemon-epoch semantic owner and exact historical replay; no TASK-076 pure transition or receipt bytes change |
@@ -872,9 +875,9 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | openclaw-adapter | 2.0 | Inert scaffold becomes a thin local IPC gateway |
 | gateway-ipc | 1.1 | Bounded canonical six-action protocol, NFC-preserving encoder, truthful core-service errors, and deterministic fake loopback; live transport and OS authentication remain deferred |
 | approval-verifier | 1.0 | Pure typed-subject/challenge/proof/nonce/time/current-head owner and deterministic fake; live trust/claim remains deferred |
-| postgres-store | 1.10 | Preserve the exact schema-v5 Registry/autonomy profile and catalog while consuming Task Ledger 2.3 verified scalar plans without duplicating profile classification or canonical hashing; retain the governed Memory/Writer companion profiles and closed advisory-function ACL |
+| postgres-store | 1.13 | Preserve exact Store/Registry/Ledger ownership; only the exact-v5 transition or exact-v6 idempotent retry may call the fixed Writer-owned rebind procedure in its transaction, with failure rolling all staged effects back |
 | postgres-codebase-memory | 1.2 | Preserve extension v1/v2 bytes and historical v2/global-v3 receipt identity; add exact extension v3/global-v5 install/upgrade plus the bounded Writer-v2 bridge recognizer, per-analysis profile provenance, and byte-identical v2/v3 graph/reflection replay outside the global manifest |
-| postgres-writer-lease | 1.1 | Preserve Writer v1 bytes and add the append-only v2 bridge/current adapter under exact Store/Memory profiles, ordered transaction locks, and the bounded post-role session apply gate |
+| postgres-writer-lease | 1.3 | Preserve Writer v1/v2 bytes; Writer-owned v3 apply/rebind advances the exact schema-v5 bridge to schema-v6 current and supports exact-v6 idempotent retry through one fixed Store transaction boundary |
 | artifact-store | 1.0 | Pure project-scoped object/reference/provenance/quota/delete-claim semantic owner and deterministic fake; PostgreSQL/filesystem I/O remains deferred |
 | codex-adapter | 1.1 | One writable app-server process/thread implementing the typed `DeliveryCodexPort`; generic `CodexPort` is not a second production path |
 | review-runtime | 1.0 | New independent read-only review boundary |
@@ -1514,6 +1517,56 @@ bounded session gate that spans a Writer apply attempt and its serialization
 retries. This does not grant a login role directly, add a generic lock API, or
 change Store/Memory/Writer state ownership.
 
+### Writer Lease v3 future schema-v6 compatibility bridge
+
+SPEC-002 v36 adds no global migration or Task Ledger event. It freezes the
+compatibility prerequisite that TASK-079 must satisfy before adding durable
+foreman coordination. Writer v2 remains exact and accepts only its existing
+global-schema 3/5 profiles. Writer v3 may move from exact
+`G5_M3_W2_CURRENT` to runtime-closed `G5_M3_W3_BRIDGE`; Store may later advance
+that exact bridge only through the v5 prefix plus ordinal 7 migration ID
+`0007_foreman_coordination` at
+`db/migrations/0007_foreman_coordination.sql`; Writer may reopen runtime only
+after exact global schema 6, stream identity `FOREMAN_COORDINATION`, event
+identity `FOREMAN_SNAPSHOT_RECORDED`, Store catalog/ACL closure, and v3 ledger
+rebind all verify together.
+
+Bridge and pending profiles expose zero Writer runtime authority. V3 current
+retains the same seven governed Writer functions and unchanged 15-scalar
+`writer_lease_assert_current_v1` same-transaction predicate. Unknown or skipped
+generation, absent/edited/reordered migration, missing stream/event or runtime
+ACL, direct protected-table access, stale lease, wrong fence, and cross-
+generation replay all fail closed. TASK-087 does not implement the foreman
+event, Port, row, function, or `0007` SQL; those remain TASK-079-owned and must
+land against this closed contract.
+
+### Writer Lease v3 apply/rebind closure
+
+SPEC-002 v37 closes only the previously reserved administrative seam. The
+Writer-owned PostgreSQL adapter exposes typed apply and rebind operations and
+the fixed zero-argument `writer_lease_rebind_v3` procedure. The Store migration
+runner distinguishes the exact six-entry `ExactV5Prefix` from the seven-entry
+`ExactV6Full`: it may apply ordinal 7 and call that one procedure in the
+exact-v5 transition transaction, or call the same procedure for exact-v6
+idempotent retry before verifying the exact schema-v6/current catalog. The
+Store does not install, parse, manufacture, or replay Writer extension state.
+Any changed history, profile, identity, lease, fence, ACL, catalog, retry, or
+transaction outcome fails closed; bridge and pending states expose zero runtime
+authority.
+
+SPEC-002 v38 records the Store constitutional exception precisely: only the
+exact-v5 transition may call the Writer-owned fixed zero-argument rebind
+procedure after staging ordinal 7 and schema-v6 compatibility in the same
+transaction, and exact-v6 idempotent retry may call that same procedure before
+catalog/ACL verification. Store cannot otherwise mutate or interpret Writer
+state. A precondition failure rolls back all staged migration, compatibility,
+Writer identity, Writer ledger, and runtime ACL effects to the exact v5 bridge.
+Task Ledger 2.4 and Foreman State 1.2 remain the semantic owners of the
+foreman event and state: Store owns only global migration persistence. Store
+may recognize Writer procedure/catalog/ACL closure but never parse Writer
+identity, ledger, active-head, command, or transition rows; both exact-v5
+transition and exact-v6 retry use the same Writer-owned idempotent procedure.
+
 ## Verification Plan
 
 | Criterion | Verification method | Expected evidence |
@@ -1554,6 +1607,7 @@ change Store/Memory/Writer state ownership.
 | AC-43 | exact source/blob checksum checks, fresh and exact-prefix disposable PostgreSQL schema-v5 migration matrices, misplaced-autonomy-0005 no-DDL rejection, base and Memory-extension catalog/ACL/profile assertions, Registry v4/v5 and Memory v2/v3 mixed-replay fixtures | exact Registry `0005` and autonomy `0006` history; stable fail-closed mismatch classification before DDL; base 16-table/47-function catalog with only 19 runtime functions; immutable Memory v1/v2 bytes and byte-identical historical Registry/Memory persistence receipts |
 | AC-44 | exact Writer v1/v2 manifests, five-state Store/Memory/Writer transition matrices, common lock-order concurrency, pending-runtime denial, non-empty replay, and marker-owned PostgreSQL restart acceptance | immutable v1 and semantic/fencing bytes; exact v2 bridge/current identities; no deadlock or partial state; final TASK-050 fenced assertion and fresh-process replay |
 | AC-45 | Task Ledger profile-classifier and typed-autonomy-plan tests, generic-forgery denial, historical/required/unknown replay matrices, lifecycle ordering tests, fresh canonical `latticed` restart/Status acceptance, and four-tool/six-field MCP regression | one canonical receipt/profile owner; required sequence-2 receipt before effects; missing/late/duplicate/unknown fail closed; exact `0006`, catalog, existing hashes, and MCP wire unchanged |
+| AC-46 | frozen v1/v2 byte checks, offline Writer-v3 bridge state matrix, exact schema-v6 successor identity/catalog/ACL assertions, migration ordering/idempotency/rollback characterization, and combined Store/Writer profile tests | v2 remains schema-3/5-only; v3 stays runtime-closed until exact v5+`0007_foreman_coordination`/`FOREMAN_COORDINATION`/`FOREMAN_SNAPSHOT_RECORDED` closure; unknown, missing, skipped, ACL-drifted, stale-fence and cross-generation inputs deny without a second truth |
 
 ## Human Decisions
 

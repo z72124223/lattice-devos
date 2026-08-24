@@ -4,10 +4,10 @@ use std::rc::Rc;
 
 use lattice_runtime::composition::fixed_gateway_submission;
 use lattice_runtime::mcp::{
-    DeliveryToolArguments, DeliveryToolService, MAX_STDIO_MESSAGE_BYTES,
-    MAX_TOOL_INVOCATIONS_PER_SESSION, McpServer, StdioLifecycleEvent, TaskStatusArguments,
-    TaskSubmitArguments, ToolExecutionError, serve, serve_legacy_delivery_observer,
-    serve_with_lifecycle_observer,
+    DeliveryToolArguments, DeliveryToolService, ForemanCheckpointArguments,
+    MAX_STDIO_MESSAGE_BYTES, MAX_TOOL_INVOCATIONS_PER_SESSION, McpServer, StdioLifecycleEvent,
+    TaskStatusArguments, TaskSubmitArguments, ToolExecutionError, serve,
+    serve_legacy_delivery_observer, serve_with_lifecycle_observer,
 };
 use serde_json::{Value, json};
 
@@ -15,6 +15,52 @@ use serde_json::{Value, json};
 struct FakeService {
     run_calls: Rc<Cell<u32>>,
     status_calls: Rc<Cell<u32>>,
+}
+
+#[derive(Clone)]
+struct CheckpointService {
+    calls: Rc<Cell<u32>>,
+}
+
+impl DeliveryToolService for CheckpointService {
+    fn run(&mut self, _arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        Ok(json!({}))
+    }
+
+    fn status(&mut self, _arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        Ok(json!({}))
+    }
+
+    fn task_submit(
+        &mut self,
+        _arguments: &TaskSubmitArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Ok(completed_task_status())
+    }
+
+    fn task_status(
+        &mut self,
+        _arguments: &TaskStatusArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Ok(completed_task_status())
+    }
+
+    fn foreman_checkpoint(
+        &mut self,
+        arguments: &ForemanCheckpointArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        self.calls.set(self.calls.get() + 1);
+        let intent = arguments.intent();
+        Ok(json!({
+            "schema": "lattice.foreman-checkpoint-result/1.0",
+            "checkpoint_id": intent.checkpoint_id(),
+            "generation": intent.generation(),
+            "status": "RECORDED",
+            "exact_retry": false,
+            "ledger_digest": "1".repeat(64),
+            "checkpoint_digest": "2".repeat(64)
+        }))
+    }
 }
 
 impl DeliveryToolService for FakeService {
@@ -64,6 +110,18 @@ fn completed_task_status() -> Value {
     })
 }
 
+fn valid_foreman_checkpoint_arguments() -> Value {
+    json!({
+        "checkpoint_id": "checkpoint-1",
+        "generation": 1,
+        "occurred_at": "2026-08-25T00:00:01Z",
+        "state": "ACTIVE",
+        "blocker_ref": null,
+        "heartbeat_ref": "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "evidence_ref": "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    })
+}
+
 #[test]
 fn lifecycle_diagnostics_observe_fixed_mcp_milestones_without_changing_stdout() {
     let service = FakeService {
@@ -107,7 +165,7 @@ fn lifecycle_diagnostics_observe_fixed_mcp_milestones_without_changing_stdout() 
     assert_eq!(responses[0]["result"]["protocolVersion"], "2025-11-25");
     assert_eq!(
         responses[1]["result"]["tools"].as_array().map(Vec::len),
-        Some(6)
+        Some(7)
     );
 }
 
@@ -442,7 +500,8 @@ fn modern_tool_requests_are_stateless_and_preserve_the_server_binding() {
             "lattice_task_submit",
             "lattice_task_status",
             "lattice_runtime_status",
-            "lattice_delivery_reconcile"
+            "lattice_delivery_reconcile",
+            "lattice_foreman_checkpoint"
         ]
     );
     assert_eq!(
@@ -820,7 +879,7 @@ fn modern_discovery_does_not_replace_the_legacy_lifecycle() {
         .expect("legacy tool list");
     assert_eq!(
         legacy_list["result"]["tools"].as_array().map(Vec::len),
-        Some(6)
+        Some(7)
     );
 
     for method in ["initialize", "ping"] {
@@ -838,7 +897,7 @@ fn modern_discovery_does_not_replace_the_legacy_lifecycle() {
 }
 
 #[test]
-fn tool_list_is_exactly_six_bounded_tools_with_closed_schemas() {
+fn tool_list_is_exactly_seven_bounded_tools_with_closed_schemas() {
     let (mut server, _, _) = server();
     initialize(&mut server);
 
@@ -847,7 +906,7 @@ fn tool_list_is_exactly_six_bounded_tools_with_closed_schemas() {
         .expect("tool list");
     let tools = response["result"]["tools"].as_array().expect("tools");
 
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 7);
     assert_eq!(
         tools
             .iter()
@@ -859,7 +918,8 @@ fn tool_list_is_exactly_six_bounded_tools_with_closed_schemas() {
             "lattice_task_submit",
             "lattice_task_status",
             "lattice_runtime_status",
-            "lattice_delivery_reconcile"
+            "lattice_delivery_reconcile",
+            "lattice_foreman_checkpoint"
         ]
     );
     for tool in &tools[..2] {
@@ -923,8 +983,183 @@ fn tool_list_is_exactly_six_bounded_tools_with_closed_schemas() {
     );
     assert_eq!(tools[2]["outputSchema"], task_output_schema);
     assert_eq!(tools[3]["outputSchema"], task_output_schema);
+    assert_eq!(tools[6]["inputSchema"]["additionalProperties"], false);
+    assert_eq!(
+        tools[6]["inputSchema"]["required"].as_array().map(Vec::len),
+        Some(7)
+    );
+    assert_eq!(tools[6]["outputSchema"]["additionalProperties"], false);
     assert!(tools[2].get("annotations").is_none());
     assert!(tools[3].get("annotations").is_none());
+}
+
+#[test]
+fn foreman_checkpoint_rejects_prohibited_fields_before_dispatch() {
+    for property in [
+        "worker",
+        "thread",
+        "task",
+        "branch",
+        "worktree",
+        "head",
+        "authority",
+        "lease",
+        "fence",
+        "db",
+        "sql",
+        "path",
+        "command",
+    ] {
+        let calls = Rc::new(Cell::new(0));
+        let mut server = McpServer::new(
+            CheckpointService {
+                calls: calls.clone(),
+            },
+            fixed_binding().clone(),
+        );
+        initialize(&mut server);
+        let mut arguments = valid_foreman_checkpoint_arguments()
+            .as_object()
+            .expect("arguments")
+            .clone();
+        arguments.insert(property.to_owned(), json!("forbidden"));
+        let response = server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": property,
+                "method": "tools/call",
+                "params": {
+                    "name": "lattice_foreman_checkpoint",
+                    "arguments": arguments
+                }
+            }))
+            .expect("rejection");
+        assert_eq!(response["error"]["code"], -32602, "{property}");
+        assert_eq!(
+            response["error"]["data"]["code"], "FOREMAN_CHECKPOINT_INVALID",
+            "{property}"
+        );
+        assert_eq!(calls.get(), 0, "{property}");
+    }
+}
+
+#[test]
+fn foreman_checkpoint_invalid_format_time_and_blocker_matrix_has_stable_protocol_code() {
+    let cases = [
+        ("unsafe-id", "checkpoint_id", json!("-bad")),
+        ("zero-generation", "generation", json!(0)),
+        (
+            "offset-time",
+            "occurred_at",
+            json!("2026-08-25T00:00:01+00:00"),
+        ),
+        (
+            "fraction-time",
+            "occurred_at",
+            json!("2026-08-25T00:00:01.000Z"),
+        ),
+        ("invalid-date", "occurred_at", json!("2026-99-99T00:00:01Z")),
+        ("unknown-state", "state", json!("active")),
+        (
+            "uppercase-heartbeat",
+            "heartbeat_ref",
+            json!(format!("heartbeat:sha256:{}", "A".repeat(64))),
+        ),
+        (
+            "bad-evidence-prefix",
+            "evidence_ref",
+            json!(format!("heartbeat:sha256:{}", "b".repeat(64))),
+        ),
+    ];
+    for (id, field, value) in cases {
+        let calls = Rc::new(Cell::new(0));
+        let mut server = McpServer::new(
+            CheckpointService {
+                calls: calls.clone(),
+            },
+            fixed_binding().clone(),
+        );
+        initialize(&mut server);
+        let mut arguments = valid_foreman_checkpoint_arguments()
+            .as_object()
+            .expect("arguments")
+            .clone();
+        arguments.insert(field.to_owned(), value);
+        let response = server
+            .handle(json!({
+                "jsonrpc":"2.0", "id":id, "method":"tools/call",
+                "params":{"name":"lattice_foreman_checkpoint","arguments":arguments}
+            }))
+            .expect("rejection");
+        assert_eq!(response["error"]["code"], -32602, "{id}");
+        assert_eq!(
+            response["error"]["data"]["code"], "FOREMAN_CHECKPOINT_INVALID",
+            "{id}"
+        );
+        assert_eq!(calls.get(), 0, "{id}");
+    }
+
+    for (id, state, blocker) in [
+        ("active-blocker", "ACTIVE", json!("TASK-094")),
+        ("completed-blocker", "COMPLETED", json!("TASK-094")),
+        ("blocked-without-blocker", "BLOCKED", Value::Null),
+    ] {
+        let calls = Rc::new(Cell::new(0));
+        let mut server = McpServer::new(
+            CheckpointService {
+                calls: calls.clone(),
+            },
+            fixed_binding().clone(),
+        );
+        initialize(&mut server);
+        let mut arguments = valid_foreman_checkpoint_arguments()
+            .as_object()
+            .expect("arguments")
+            .clone();
+        arguments.insert("state".to_owned(), json!(state));
+        arguments.insert("blocker_ref".to_owned(), blocker);
+        let response = server
+            .handle(json!({
+                "jsonrpc":"2.0", "id":id, "method":"tools/call",
+                "params":{"name":"lattice_foreman_checkpoint","arguments":arguments}
+            }))
+            .expect("rejection");
+        assert_eq!(response["error"]["code"], -32602, "{id}");
+        assert_eq!(
+            response["error"]["data"]["code"], "FOREMAN_CHECKPOINT_INVALID",
+            "{id}"
+        );
+        assert_eq!(calls.get(), 0, "{id}");
+    }
+}
+
+#[test]
+fn foreman_checkpoint_dispatches_only_valid_closed_intent() {
+    let calls = Rc::new(Cell::new(0));
+    let mut server = McpServer::new(
+        CheckpointService {
+            calls: calls.clone(),
+        },
+        fixed_binding().clone(),
+    );
+    initialize(&mut server);
+    let response = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "checkpoint",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_foreman_checkpoint",
+                "arguments": valid_foreman_checkpoint_arguments()
+            }
+        }))
+        .expect("checkpoint response");
+    assert_eq!(response["result"]["isError"], false);
+    assert_eq!(
+        response["result"]["structuredContent"]["status"],
+        "RECORDED"
+    );
+    assert_eq!(calls.get(), 1);
 }
 
 #[test]
@@ -975,6 +1210,11 @@ fn legacy_observer_neither_mutates_nor_advertises_or_dispatches_task_tools() {
             "legacy-status",
             "lattice_task_status",
             json!({"task_ref": TASK_REF}),
+        ),
+        (
+            "legacy-checkpoint",
+            "lattice_foreman_checkpoint",
+            valid_foreman_checkpoint_arguments(),
         ),
     ] {
         let response = legacy_server
@@ -1033,6 +1273,11 @@ fn stateless_legacy_observer_neither_advertises_nor_dispatches_task_tools() {
             "stateless-status",
             "lattice_task_status",
             json!({"task_ref": TASK_REF}),
+        ),
+        (
+            "stateless-checkpoint",
+            "lattice_foreman_checkpoint",
+            valid_foreman_checkpoint_arguments(),
         ),
     ] {
         let response = stateless_server
@@ -1496,7 +1741,7 @@ fn request_metadata_is_allowed_without_widening_tool_arguments() {
             "params":{"_meta":{"progressToken":"list-progress"}}
         }))
         .expect("tool list");
-    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(6));
+    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(7));
 
     let call = server
         .handle(json!({

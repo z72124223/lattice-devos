@@ -282,6 +282,13 @@ name = "lattice-core"
 version = "0.1.0"
 
 [[package]]
+name = "lattice-foreman-state"
+version = "0.1.0"
+dependencies = [
+ "time",
+]
+
+[[package]]
 name = "lattice-gateway-ipc"
 version = "0.1.0"
 dependencies = [
@@ -337,6 +344,7 @@ version = "0.1.0"
 dependencies = [
  "lattice-codebase-memory",
  "lattice-contracts",
+ "lattice-foreman-state",
  "lattice-ports",
  "lattice-task-domain",
  "lattice-writer-lease",
@@ -358,6 +366,7 @@ name = "lattice-ports"
 version = "0.1.0"
 dependencies = [
  "lattice-contracts",
+ "lattice-foreman-state",
  "lattice-task-domain",
 ]
 
@@ -380,6 +389,7 @@ version = "0.1.0"
 dependencies = [
  "lattice-cjson",
  "lattice-contracts",
+ "lattice-foreman-state",
  "lattice-ports",
  "lattice-project-registry",
  "lattice-task-ledger",
@@ -416,6 +426,7 @@ dependencies = [
  "lattice-codebase-memory",
  "lattice-codex-adapter",
  "lattice-contracts",
+ "lattice-foreman-state",
  "lattice-gateway-ipc",
  "lattice-graphify-adapter",
  "lattice-hermes-adapter",
@@ -450,6 +461,7 @@ version = "0.1.0"
 dependencies = [
  "lattice-cjson",
  "lattice-contracts",
+ "lattice-foreman-state",
  "time",
 ]
 

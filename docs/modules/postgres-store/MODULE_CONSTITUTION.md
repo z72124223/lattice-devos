@@ -1,10 +1,10 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.10
+version: 1.19
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-25
 ---
 
 ## Mission
@@ -42,6 +42,53 @@ acquisitions required by the governed runners: transaction-scoped
 `pg_advisory_xact_lock(bigint)` and nonblocking session-scoped
 `pg_try_advisory_lock(bigint)`. The latter is only the bounded Writer apply
 gate; it does not become a Store migration primitive or Writer state ownership.
+Version 1.11 reserves one exact fail-closed schema-v6 catalog/ACL compatibility
+profile for the future Task-Ledger-owned `FOREMAN_COORDINATION` stream and
+`FOREMAN_SNAPSHOT_RECORDED` event. It recognizes Writer v3 bridge/current
+states but does not add migration `0007`, event semantics, rows, or a second
+transaction path.
+Version 1.13 permits one narrow migration-only exception: after the exact
+schema-v5 prefix has been verified and ordinal `0007` plus the schema-v6
+compatibility row are staged in the existing runner transaction, Store may call
+only the Writer-owned zero-argument `writer_lease.writer_lease_rebind_v3()`
+procedure for the exact-v5 transition or exact-v6 idempotent retry. Store
+neither constructs nor interprets Writer state, and any procedure failure rolls
+back migration history, compatibility, Writer identity, Writer ledger, and
+runtime ACL changes together.
+Version 1.14 exposes one same-transaction, read-only foreman replay evidence
+value containing the verified Ledger stream/checkpoints and fixed-scalar child
+records. It also normalizes the existing execute-time command-substitution race
+to the public foreman conflict without changing tables, functions, or ownership.
+The actual dependent semantic owners are Task Ledger 2.7 and Foreman State 1.3:
+Store persists only their already-governed scalar event boundary and does not
+create a second foreman or Ledger meaning.
+Version 1.15 exposes one read-only exact migration-prefix classification for
+the product bootstrap coordinator. It returns only `Fresh`, `LegacyPrefix`,
+`V5`, or `V6` after verifying the target and retained embedded history; it
+does not inspect Writer rows, mutate admission, or authorize a migration.
+Version 1.16 corrects the undeployed ordinal-7 Store current-head verifier to
+require all seven exact history entries. The one-character correction is
+re-pinned in the schema-v6 SQL checksum and manifest; it adds no migration,
+table, function, semantic event, or compatibility generation.
+Version 1.17 closes the same undeployed migration's Ledger finalizer allowlist:
+the existing `FOREMAN_SNAPSHOT_RECORDED` event may now pass the shared atomic
+finalizer before its fixed foreman child row is recorded. No other event,
+function, row shape, or semantic owner is added.
+Version 1.18 replaces six PostgreSQL-invalid `{1,256}` ASCII quantifiers in
+the still-undeployed foreman child constraint with non-empty printable-ASCII
+checks. Each affected column remains `varchar(256)`, so the composed bound is
+still exactly 1..256 characters and no `text` field is widened.
+Version 1.19 classifies retained migration metadata inside one
+target/role-hardened Store transaction. Inspection and verification use
+repeatable-read read-only transactions. Migration apply retains Read Committed
+write authority plus all three advisory transaction locks so a lock waiter can
+observe the preceding commit, then atomically rereads ordered history and
+compatibility in one SQL statement before mutation. Only an
+exact supported manifest prefix followed by contiguous exact-next future
+schema entries whose canonical full-history metadata digest and compatibility
+row agree is `UnsupportedFutureSchema`. Missing, reordered, substituted,
+gapped, or compatibility-divergent history remains corruption. The classifier
+adds no migration, mutation, repair, or successful future bootstrap profile.
 
 ## Non-Goals
 
@@ -76,10 +123,21 @@ gate; it does not become a Store migration primitive or Writer state ownership.
   Guardian activation, domain repository completeness, effect delivery, or
   release safety.
 - Install, migrate, write, replay, repair, or expose Writer Lease extension
-  state. The sole exception is executing the fixed
-  `writer_lease_assert_current_v1` predicate at a Task Ledger mutation
-  boundary; PostgreSQL Writer Lease remains the persistence adapter and Writer
-  Lease remains the semantic owner.
+  state. The only exceptions are the fixed 15-scalar
+  `writer_lease_assert_current_v1` predicate at a Task Ledger mutation boundary
+  and, solely for the exact-v5 transition or exact-v6 idempotent retry in the
+  existing migration transaction, the fixed Writer-owned zero-argument
+  `writer_lease.writer_lease_rebind_v3()` procedure. Neither exception grants a
+  Writer repository API, generic SQL, state parsing, state construction, or
+  semantic ownership; PostgreSQL Writer Lease remains the persistence adapter
+  and Writer Lease remains the semantic owner.
+- Parse, classify, fingerprint, or otherwise interpret Writer identity, ledger,
+  head, command, or transition rows. Store may retain only its existing fixed
+  15-scalar Writer current-authority assertion and pg_catalog procedure/
+  owner/body/ACL/grant closure recognition. Its only Writer mutation seam is
+  the exact-v5 transition and exact-v6 idempotent retry call to the fixed
+  zero-argument rebind
+  procedure in the governed migration transaction.
 
 ## Owned Data
 
@@ -181,6 +239,10 @@ gate; it does not become a Store migration primitive or Writer state ownership.
 - `SchemaVerifier` performs read-only exact manifest, server, settings,
   database identity, bootstrap admission, effective-role, ACL/ownership, and
   protected-function checks.
+- `inspect_migration_profile` is a read-only migrator-bound classification of
+  exact embedded history into `Fresh`, `LegacyPrefix`, `V5`, or `V6`. Partial,
+  colliding, changed, unavailable, or wrong-target evidence is an error; the
+  caller receives no catalog rows or Writer semantics.
 - The deterministic fake remains visibly non-durable and preserves Store v1
   behavior. Contracts 1.9 / Ports 1.4 add v2 live durability and explicit
   mutable current-head observation without exposing a driver.
@@ -677,10 +739,11 @@ gate; it does not become a Store migration primitive or Writer state ownership.
 
 ## Allowed Dependencies
 
-- `lattice-contracts` 1.13.
-- `lattice-ports` 1.4.
+- `lattice-contracts` 1.14.
+- `lattice-ports` 2.1.
 - `lattice-cjson` 1.0.
-- `lattice-task-ledger` 2.3 pure planner/checkpoint/replay/profile/autonomy-subject API.
+- `lattice-task-ledger` 2.7 pure planner/checkpoint/replay/profile/autonomy-subject API.
+- `lattice-foreman-state` 1.3 pure retained foreman verification types.
 - `lattice-project-registry` 1.2 pure planner/checkpoint/replay API, one-way
   from this adapter only.
 - Exact `postgres` 0.19.14 with default features disabled.
@@ -696,8 +759,9 @@ gate; it does not become a Store migration primitive or Writer state ownership.
   Git, product repositories, and companion/playmate website code.
 - Task Domain, Writer Lease, PostgreSQL Writer Lease, Approval, Artifact, Policy,
   Orchestrator, Gateway, another concrete adapter, Review Runtime, Codebase
-  Memory, or Guardian crates. Task Ledger 2.3 and Project Registry 1.2 are the
-  only approved domain-owner dependencies in version 1.10.
+  Memory, or Guardian crates. Historically, Task Ledger 2.3 and Project
+  Registry 1.2 were the only approved domain-owner dependencies in version
+  1.10; the current closed dependency set is the Allowed Dependencies above.
 - Any adapter-to-adapter dependency or reverse dependency from a domain owner.
 
 ## Failure, Compatibility, And Migration
@@ -778,6 +842,56 @@ canonicalization, and hashing with Task Ledger 2.3 typed construction and
 verification. This is a consumer/ownership correction only: no migration,
 row, ACL, MCP, or Store receipt byte changes.
 
+Version 1.11 leaves the active manifest at schema v5. It publishes only a
+closed successor contract: exact v5 predecessor; ordinal 7 migration ID/path;
+global generation 6; fixed foreman stream/event identities; exact catalog and
+runtime ACL expectations; and Writer v3 bridge/current compatibility states.
+Until future migration bytes and measured catalog signatures exist and every
+assertion passes, schema v6 is not current and no runtime authority is granted.
+
+Version 1.12 appends reviewed migration `0007`, advances the exact manifest to
+schema v6, and persists fixed foreman snapshot scalars only as a child of the
+matching Ledger event/command. Record and read functions remain fixed,
+schema-qualified and table-ACL closed. Record reasserts the exact Writer current
+tuple in the same serializable transaction; rollback removes both Ledger and
+child effects. No diagnostic or independent current-state store is added.
+
+Version 1.13 corrects the Store boundary for that exact migration: Store may
+call `writer_lease.writer_lease_rebind_v3()` for the exact-v5 transition after
+v5-prefix verification and staging ordinal `0007`/schema-v6 compatibility in
+the same runner-owned transaction, or for exact-v6 idempotent retry before
+catalog/ACL verification. The procedure stays Writer-owned; Store does not
+install, mutate directly, parse, replay, or derive Writer state. A failed
+rebind rolls back every staged global and Writer-visible effect, leaving the
+exact v5 bridge identity, ledger, runtime ACL, migration history, and
+compatibility row intact.
+
+Version 1.16 supersedes the pre-product ordinal-7 byte pin because its
+`store_current_head_v5` read path incorrectly required a six-entry history
+after schema v6 had committed seven. The corrected function requires seven,
+so a vacant foreman stream returns its verified genesis physical head instead
+of an unavailable row-count error. Schema-v5 prefix bytes remain unchanged.
+
+Version 1.17 supersedes that still-undeployed pin because the copied v3 Ledger
+finalizer omitted the already-governed foreman event from its closed event-kind
+allowlist. The allowlist gains exactly `FOREMAN_SNAPSHOT_RECORDED`; validation,
+atomic ordering, same-transaction Writer assertion, and child-row closure stay
+unchanged.
+
+Version 1.18 supersedes the pin once more because PostgreSQL rejects repetition
+counts above 255 when the foreman child constraint is first evaluated. The six
+affected fields keep their exact `varchar(256)` physical cap and use `+` only
+for the non-empty printable-ASCII predicate; all other constraints are frozen.
+
+Version 1.19 adds one closed public setup failure for a coherent future Store
+schema. Inspection and verification decide from one hardened repeatable-read,
+read-only snapshot. Migration apply keeps Read Committed and all three advisory
+transaction locks, and its future classifier atomically reads ordered history
+arrays plus compatibility scalars in one statement before mutation; this avoids
+both torn evidence and a stale snapshot fixed before a contended lock returns.
+`inspect_migration_profile` still returns no future success profile, and Task
+Ledger alone translates this exact setup kind into unsupported replay.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -826,7 +940,10 @@ row, ACL, MCP, or Store receipt byte changes.
 | Autonomy Ledger atomicity | command, optional closed autonomy event/subject, projection/checkpoint, terminal receipt, and physical receipt all-or-none with restart/retry/corruption matrices | Engineering | yes |
 | Memory-v3 extension recognition | exact separate global-v5 catalog/owner/ACL profile, immutable v1/v2 bytes, v2-upgrade-only classification, and no base-manifest/count change | Compatibility review | yes |
 | Writer Lease profile closure | exact V3+Memory-v2+Writer-Lease-v1 catalog/owner/ACL/function/checksum acceptance plus partial/extra/drift/wrong-owner/direct-grant denial | Security review | yes |
-| Extension ownership | static/dependency tests prove Store cannot install, mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate is executable | Architecture review | yes |
+| Foreman schema-v6 binding | exact 0007 ordering/hash, fixed child/event linkage, same-transaction fencing, rollback/restart/fresh-process replay and unknown-version/privacy denial | Integration review | yes |
+| Vacant v6 Store head | exact seven-entry history returns the genesis physical head; a six-entry guard is prohibited | Integration review | yes |
+| Future schema taxonomy | exact current prefix plus contiguous exact-next suffix, canonical full-history metadata digest and matching future compatibility return only `STORE_SCHEMA_UNSUPPORTED_FUTURE`; extra/missing/reordered/substituted/gapped/divergent history remains corrupt | Compatibility review | yes |
+| Extension ownership | static/dependency tests prove Store cannot install, directly mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate and the exact-v5 transition/exact-v6 retry calls to Writer-owned `writer_lease_rebind_v3()` are executable | Architecture review | yes |
 
 ## Change Policy
 
@@ -855,3 +972,12 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.8 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-022/023, TASK-076 | Recognize exact Writer-v2 bridge/current companion profiles under global-to-Memory-to-Writer locking and keep schema-v5 pending states runtime closed without taking Writer ownership | User continuation authorization |
 | 1.9 | 2026-08-14 | SPEC-002 v34, ADR-023 TASK-076 amendment, TASK-076 | Freeze the exact second post-role migrator acquisition grant for the bounded Writer session gate while keeping all LOGIN roles and the other fourteen overloads denied | User TASK-076 continuation directive |
 | 1.10 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Delegate autonomy subject/profile semantics and hashes exclusively to Task Ledger 2.3 while preserving schema-v5 physical bytes and Store ownership | User-approved TASK-050 repair amendment |
+| 1.11 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Reserve exact schema-v6 foreman-coordination catalog/ACL and Writer-v3 bridge recognition without implementing migration 0007 or event semantics | Fixed-foreman delegation |
+| 1.12 | 2026-08-21 | SPEC-006 v3, ADR-024/025, TASK-079 | Append 0007 and bind fixed foreman scalars to the Ledger event under same-transaction Writer fencing and verified replay | Fixed-foreman delegation |
+| 1.13 | 2026-08-25 | SPEC-002 v38, ADR-026, TASK-094 boundary repair | Keep the existing 15-scalar assertion while forbidding Store Writer semantic-row parsing and adapter dependency; exact-v5 transition and exact-v6 idempotent retry call only the Writer-owned rebind procedure, with Task Ledger 2.4 and Foreman State 1.2 semantic ownership retained | TASK-094 repair authority |
+| 1.14 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Return one repeatable-read typed foreman replay evidence value, enforce the fixed sole-foreman identity on retained/write paths, and normalize execute-time changed-ID races without adding persistence or Writer semantics | Sole-foreman delegation |
+| 1.15 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Add a read-only exact Store migration-prefix classifier so product bootstrap can stop existing admission before Writer-v3 rebind or Store-v6 mutation without parsing Store or Writer rows in composition | Sole-foreman delegation |
+| 1.16 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Re-pin the undeployed 0007 byte and v6 manifest after correcting Store current-head history closure from six entries to seven; no new migration or semantic owner | Sole-foreman delegation |
+| 1.17 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Admit the existing foreman event through the shared atomic Ledger finalizer and re-pin the still-undeployed 0007 profile without widening event semantics | Sole-foreman delegation |
+| 1.18 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Preserve exact 1..256 foreman scalar bounds through varchar caps plus PostgreSQL-valid non-empty printable-ASCII checks | Sole-foreman delegation |
+| 1.19 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Classify only a coherent canonical future migration suffix as unsupported from atomic history-plus-compatibility evidence before mutation while preserving Read Committed advisory-lock retry freshness; retain all divergent history as corruption | Sole-foreman delegation |

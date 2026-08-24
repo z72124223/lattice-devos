@@ -1,3 +1,50 @@
+# TASK-105 耐久唯一工頭 runtime 交接 — 2026-08-25
+
+## 狀態
+
+`COMPLETE / DELIVERY_PENDING`：本機實作、完整回歸、獨立審查與
+marker-owned PostgreSQL full live gate 均已通過。未推送、未開 PR、未合併產品
+分支、未安裝或部署，也未碰現行產品服務／資料庫；這些仍由唯一工頭逐關驗證。
+
+## 已完成
+
+- 精確整合 TASK-094，保留產品 Control scripts 與既有六工具行為；modern MCP
+  現為精確七工具，legacy 仍精確兩工具且不認得 checkpoint。
+- `lattice_foreman_checkpoint` 只收封閉安全欄位；伺服器固定唯一工頭身分、觀察
+  Git HEAD、取得 Writer authority，再由 Task Ledger/PostgreSQL 原子寫入。
+- runtime status 從同一耐久 replay 回報 generation、計數、next action、Ledger／
+  checkpoint digest；正常服務不 migration，只有明確 bootstrap 會依固定矩陣升級。
+- 修正實機才會觸發的四個整合缺口：Store v6 七筆 history closure、foreman read
+  SQL token 邊界、Writer v3 runtime procedure 路由、Ledger finalizer foreman event
+  allowlist，以及 PostgreSQL 不接受 `{1,256}` 量詞；六欄仍由 `varchar(256)` 加
+  非空 printable-ASCII 約束維持精確 1..256。
+
+## 已驗證
+
+- 最新接受 SHA：`f932432a5471d03eba869cec61c1b5f376ffc740`。
+- Live PASS：run `0e5c2971d099499183ee1643fe291e3d`、動態埠 `59685`；
+  initialize/bootstrap、checkpoint/retry/reject、blocked projection、
+  fresh-process replay、coherent future/corrupt taxonomy、舊版升級矩陣與
+  雙程序 Writer race 全通過；清理為 `root_absent=True`、
+  `listener_absent=True`。
+- 最終 Store full tests 全數通過（另 2 個需另行協調的 fixture ignored）；
+  runtime lib 131 通過（另 2 coordinated-live ignored）；TASK-105 official
+  live 1/1、Control 17/17、repository/npm check、format、diff check 全通過。
+- TASK-105 repository check、format、diff check通過；Foreman／Ledger／Ports／
+  Orchestrator／Store／Writer strict lint通過。完整 runtime/workspace strict lint
+  仍失敗，Rust 1.97 報告 29 個 runtime 與 21 個 Hermes 既有整體/style 診斷，
+  明確不算 PASS，也未為了本票擴張修理。
+
+## 尚待工頭
+
+1. 提交這份終態收據，重驗乾淨 tree，再做同名 feature 非強制推送與 remote
+   SHA 核對。
+2. 建立 PR、驗證 CI 後合併產品分支；不得 force push。
+3. 依既有授權完成安全安裝／部署、Control receipt 與重開後即時 MCP replay；
+   完成前不把本機 PASS 冒充產品交付或 archive-ready。
+
+---
+
 # TASK-089 追溯對象治理修復交接 — 2026-08-21
 
 ## 狀態

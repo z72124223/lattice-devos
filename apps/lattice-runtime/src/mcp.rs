@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
 use lattice_contracts::{ContentDigest, SubjectBinding};
+use lattice_foreman_state::{ForemanCheckpointIntent, ForemanState};
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
@@ -34,12 +35,15 @@ pub const DELIVERY_RECONCILE_TOOL: &str = "lattice_delivery_reconcile";
 pub const TASK_SUBMIT_TOOL: &str = "lattice_task_submit";
 /// Bounded durable task status tool.
 pub const TASK_STATUS_TOOL: &str = "lattice_task_status";
+/// Sole durable foreman checkpoint tool.
+pub const FOREMAN_CHECKPOINT_TOOL: &str = "lattice_foreman_checkpoint";
 /// Sole task intent accepted by the transport boundary.
 pub const CONTROLLED_CODEX_CANARY_INTENT: &str = "CONTROLLED_CODEX_CANARY";
 
 const LEGACY_DELIVERY_RUN_DISABLED: &str = "LATTICE_DELIVERY_RUN_REQUIRES_CANONICAL_LATTICED";
 
 const MAX_CLIENT_REQUEST_ID_BYTES: usize = 64;
+const FOREMAN_CHECKPOINT_RESULT_SCHEMA: &str = "lattice.foreman-checkpoint-result/1.0";
 const TASK_PUBLIC_STATUS_SCHEMA_VERSION: &str = "lattice.task.status.v2";
 const TASK_PUBLIC_STATUS_VALUES: [&str; 4] = [
     "NOT_SUBMITTED",
@@ -1262,6 +1266,54 @@ pub struct TaskStatusArguments {
     task_ref: String,
 }
 
+/// Validated closed checkpoint request accepted by the MCP boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForemanCheckpointArguments {
+    intent: ForemanCheckpointIntent,
+}
+
+impl ForemanCheckpointArguments {
+    fn from_value(value: Option<&Value>) -> Option<Self> {
+        let arguments = value?.as_object()?;
+        if arguments.len() != 7
+            || ![
+                "checkpoint_id",
+                "generation",
+                "occurred_at",
+                "state",
+                "blocker_ref",
+                "heartbeat_ref",
+                "evidence_ref",
+            ]
+            .iter()
+            .all(|field| arguments.contains_key(*field))
+        {
+            return None;
+        }
+        let blocker_ref = match arguments.get("blocker_ref")? {
+            Value::Null => None,
+            Value::String(value) => Some(value.clone()),
+            _ => return None,
+        };
+        let intent = ForemanCheckpointIntent::new(
+            arguments.get("checkpoint_id")?.as_str()?,
+            arguments.get("generation")?.as_u64()?,
+            arguments.get("occurred_at")?.as_str()?,
+            ForemanState::from_persisted(arguments.get("state")?.as_str()?).ok()?,
+            blocker_ref,
+            arguments.get("heartbeat_ref")?.as_str()?,
+            arguments.get("evidence_ref")?.as_str()?,
+        )
+        .ok()?;
+        Some(Self { intent })
+    }
+
+    #[must_use]
+    pub const fn intent(&self) -> &ForemanCheckpointIntent {
+        &self.intent
+    }
+}
+
 impl TaskStatusArguments {
     fn from_value(value: Option<&Value>) -> Option<Self> {
         let arguments = value?.as_object()?;
@@ -1452,6 +1504,18 @@ pub trait DeliveryToolService {
     /// Returns only a stable, secret-free failure code.
     fn task_status(&mut self, arguments: &TaskStatusArguments)
     -> Result<Value, ToolExecutionError>;
+
+    /// Records or exactly replays the sole foreman's durable checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns only a stable, secret-free failure code.
+    fn foreman_checkpoint(
+        &mut self,
+        _arguments: &ForemanCheckpointArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Err(ToolExecutionError::new("FOREMAN_CHECKPOINT_UNAVAILABLE"))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1584,6 +1648,21 @@ impl<S: DeliveryToolService> McpServer<S> {
             return protocol_error(id, -32603, "Acceptance evidence rejected");
         }
         protocol_error(id, code, message)
+    }
+
+    fn reject_foreman_checkpoint_params(&mut self, id: Value) -> Value {
+        if let Err(error) =
+            with_observed_effect_evidence(|evidence| evidence.reject_probe("MCP_INVALID_PARAMS"))
+        {
+            self.acceptance_evidence_error = Some(error);
+            return protocol_error(id, -32603, "Acceptance evidence rejected");
+        }
+        protocol_error_with_machine_code(
+            id,
+            -32602,
+            "Invalid foreman checkpoint arguments",
+            "FOREMAN_CHECKPOINT_INVALID",
+        )
     }
 
     fn reject_budget_probe(
@@ -1751,6 +1830,7 @@ impl<S: DeliveryToolService> McpServer<S> {
                         | DELIVERY_RECONCILE_TOOL
                         | TASK_SUBMIT_TOOL
                         | TASK_STATUS_TOOL
+                        | FOREMAN_CHECKPOINT_TOOL
                 )
             })
             .unwrap_or("unknown");
@@ -1799,7 +1879,11 @@ impl<S: DeliveryToolService> McpServer<S> {
         if !self.tool_surface.allows_task_control()
             && matches!(
                 name,
-                RUNTIME_STATUS_TOOL | DELIVERY_RECONCILE_TOOL | TASK_SUBMIT_TOOL | TASK_STATUS_TOOL
+                RUNTIME_STATUS_TOOL
+                    | DELIVERY_RECONCILE_TOOL
+                    | TASK_SUBMIT_TOOL
+                    | TASK_STATUS_TOOL
+                    | FOREMAN_CHECKPOINT_TOOL
             )
         {
             return self.reject_observed_probe(id, "MCP_UNKNOWN_TOOL", -32602, "Unknown tool");
@@ -1852,13 +1936,23 @@ impl<S: DeliveryToolService> McpServer<S> {
                 };
                 ToolOperation::TaskStatus(arguments)
             }
+            FOREMAN_CHECKPOINT_TOOL => {
+                let Some(arguments) =
+                    ForemanCheckpointArguments::from_value(params.get("arguments"))
+                else {
+                    return self.reject_foreman_checkpoint_params(id);
+                };
+                ToolOperation::ForemanCheckpoint(arguments)
+            }
             _ => {
                 return self.reject_observed_probe(id, "MCP_UNKNOWN_TOOL", -32602, "Unknown tool");
             }
         };
         let class = if matches!(
             &operation,
-            ToolOperation::DeliveryRun | ToolOperation::TaskSubmit(_)
+            ToolOperation::DeliveryRun
+                | ToolOperation::TaskSubmit(_)
+                | ToolOperation::ForemanCheckpoint(_)
         ) {
             McpToolClass::Execution
         } else {
@@ -1890,6 +1984,9 @@ impl<S: DeliveryToolService> McpServer<S> {
             }
             ToolOperation::TaskStatus(arguments) => {
                 closed_task_public_status(self.service.task_status(&arguments))
+            }
+            ToolOperation::ForemanCheckpoint(arguments) => {
+                closed_foreman_checkpoint_result(self.service.foreman_checkpoint(&arguments))
             }
         };
         let observed_classification = if result.is_ok() {
@@ -1924,6 +2021,7 @@ enum ToolOperation {
     DeliveryReconcile,
     TaskSubmit(TaskSubmitArguments),
     TaskStatus(TaskStatusArguments),
+    ForemanCheckpoint(ForemanCheckpointArguments),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -2159,6 +2257,65 @@ fn task_status_arguments_schema() -> Value {
     })
 }
 
+fn foreman_checkpoint_arguments_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "checkpoint_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+            },
+            "generation": {"type": "integer", "minimum": 1},
+            "occurred_at": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+            },
+            "state": {"type": "string", "enum": ["ACTIVE", "BLOCKED", "COMPLETED"]},
+            "blocker_ref": {
+                "anyOf": [
+                    {"type": "string", "minLength": 1, "maxLength": 256},
+                    {"type": "null"}
+                ]
+            },
+            "heartbeat_ref": {
+                "type": "string",
+                "pattern": "^heartbeat:sha256:[0-9a-f]{64}$"
+            },
+            "evidence_ref": {
+                "type": "string",
+                "pattern": "^evidence:sha256:[0-9a-f]{64}$"
+            }
+        },
+        "required": [
+            "checkpoint_id", "generation", "occurred_at", "state",
+            "blocker_ref", "heartbeat_ref", "evidence_ref"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn foreman_checkpoint_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "schema": {"type": "string", "enum": [FOREMAN_CHECKPOINT_RESULT_SCHEMA]},
+            "checkpoint_id": {"type": "string"},
+            "generation": {"type": "integer", "minimum": 1},
+            "status": {"type": "string", "enum": ["RECORDED", "REPLAYED"]},
+            "exact_retry": {"type": "boolean"},
+            "ledger_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "checkpoint_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "required": [
+            "schema", "checkpoint_id", "generation", "status", "exact_retry",
+            "ledger_digest", "checkpoint_digest"
+        ],
+        "additionalProperties": false
+    })
+}
+
 fn task_public_status_schema() -> Value {
     json!({
         "type": "object",
@@ -2275,6 +2432,13 @@ fn tool_catalog(protocol: RequestProtocol, surface: ToolSurface) -> Value {
                 "description": "Replays the durable delivery receipt to determine whether reconciliation is required. It never starts work or changes durable evidence.",
                 "inputSchema": delivery_arguments_schema()
             }),
+            json!({
+                "name": FOREMAN_CHECKPOINT_TOOL,
+                "title": "Checkpoint the sole LATTICE foreman",
+                "description": "Records or exactly replays one closed durable foreman checkpoint through the existing orchestrator.",
+                "inputSchema": foreman_checkpoint_arguments_schema(),
+                "outputSchema": foreman_checkpoint_output_schema()
+            }),
         ]);
     }
     if protocol == RequestProtocol::Stateless {
@@ -2311,6 +2475,12 @@ fn tool_catalog(protocol: RequestProtocol, surface: ToolSurface) -> Value {
             });
             tools[5]["annotations"] = json!({
                 "readOnlyHint": true,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            });
+            tools[6]["annotations"] = json!({
+                "readOnlyHint": false,
                 "destructiveHint": false,
                 "idempotentHint": true,
                 "openWorldHint": false
@@ -2530,6 +2700,48 @@ fn closed_task_public_status(
     })
 }
 
+fn closed_foreman_checkpoint_result(
+    result: Result<Value, ToolExecutionError>,
+) -> Result<Value, ToolExecutionError> {
+    result.and_then(|value| {
+        let valid = value.as_object().is_some_and(|object| {
+            object.len() == 7
+                && object.get("schema").and_then(Value::as_str)
+                    == Some(FOREMAN_CHECKPOINT_RESULT_SCHEMA)
+                && object
+                    .get("checkpoint_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(valid_client_request_id)
+                && object
+                    .get("generation")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|generation| generation > 0)
+                && matches!(
+                    (
+                        object.get("status").and_then(Value::as_str),
+                        object.get("exact_retry").and_then(Value::as_bool)
+                    ),
+                    (Some("RECORDED"), Some(false)) | (Some("REPLAYED"), Some(true))
+                )
+                && object
+                    .get("ledger_digest")
+                    .and_then(Value::as_str)
+                    .is_some_and(valid_task_ref)
+                && object
+                    .get("checkpoint_digest")
+                    .and_then(Value::as_str)
+                    .is_some_and(valid_task_ref)
+        });
+        if valid {
+            Ok(value)
+        } else {
+            Err(ToolExecutionError::new(
+                "FOREMAN_CHECKPOINT_RESULT_REJECTED",
+            ))
+        }
+    })
+}
+
 fn empty_object_or_absent(value: Option<&Value>) -> bool {
     value.is_none_or(|value| value.as_object().is_some_and(Map::is_empty))
 }
@@ -2625,6 +2837,17 @@ fn protocol_error(id: Value, code: i32, message: &'static str) -> Value {
     response.insert("id".to_owned(), id);
     response.insert("error".to_owned(), Value::Object(error));
     Value::Object(response)
+}
+
+fn protocol_error_with_machine_code(
+    id: Value,
+    code: i32,
+    message: &'static str,
+    machine_code: &'static str,
+) -> Value {
+    let mut response = protocol_error(id, code, message);
+    response["error"]["data"] = json!({"code": machine_code});
+    response
 }
 
 fn unsupported_protocol_error(id: Value, requested: &str) -> Value {

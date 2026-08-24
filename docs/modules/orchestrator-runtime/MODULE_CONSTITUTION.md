@@ -1,10 +1,10 @@
 ---
 module_id: orchestrator-runtime
 name: Orchestrator and Runtime Port
-version: 2.6
+version: 2.7
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-25
 ---
 
 ## Mission
@@ -14,6 +14,8 @@ orders policy, durable intent, runtime, workspace, verification, Git, terminal
 evidence, review, stop, reconciliation, and improvement workflows only through
 injected ports. `latticed`, not this module, is the application entry and
 composition root.
+It also owns the pure replay-first foreman checkpoint effect order; it does not
+own the snapshot, Ledger, Git observation, or Writer authority.
 
 ## Non-Goals
 
@@ -86,6 +88,10 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
   `READY`, dependency-complete, resource-valid, conflict-free work. Recompute
   after completion registration and recommend `ARCHIVE`/`RETAIN` without
   performing either action.
+- For a foreman checkpoint, replay the exact intent first. Only a new intent may
+  observe server binding/Git and acquire Writer authority, then append under the
+  fence and release after known append success. Unknown append stops before
+  release; unknown release stops without repeating append.
 
 ## Invariants
 
@@ -139,12 +145,18 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
 22. Dispatch/archive values are data only. They cannot create/control a window
     or process, reserve resources, invoke Codex, mutate files/PostgreSQL, access
     network/credentials, or bypass the governed execution path.
+23. Foreman exact retry performs no new Git observation, Writer acquire, or
+    Ledger append. It may read only the current Writer authority and issue the
+    deterministic release when the replayed checkpoint's retained authority
+    receipt digest matches exactly; this is the sole reconciliation exception.
+    No unknown append/release outcome is converted to success or duplicate append.
 
 ## Allowed Dependencies
 
 - `lattice-contracts`, `lattice-task-domain`,
   `lattice-codebase-memory`, `lattice-ports`, and `lattice-writer-lease` 1.1
   public APIs.
+- `lattice-foreman-state` 1.3 closed checkpoint/snapshot/projection values only.
 - Injected Registry, Ledger, approval, workspace, runtime, verification,
   review, integration, clock, and ID ports.
 
@@ -209,6 +221,7 @@ SPEC/ADR update, architecture review, and responsible-user authorization.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 2.7 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Order replay-first foreman checkpoint, Writer acquire, fenced append and known-success release with explicit unknown-outcome stops | Sole-foreman delegation |
 | 1.0 | 2026-07-29 | SPEC-001, ADR-001/002 | Initial Node deterministic control loop | Current user task |
 | 2.0 | 2026-08-01 | SPEC-002 v13, ADR-004/005/006/007/015 | Rust routing, transaction/effect/stop/reconciliation boundary | User MVP-3 execution directive |
 | 2.1 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Pure injected delivery ordering and explicit separation from `latticed` composition/MCP/concrete adapters | User approval in preceding implementation window |

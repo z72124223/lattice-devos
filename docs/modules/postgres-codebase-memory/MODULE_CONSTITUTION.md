@@ -1,10 +1,10 @@
 ---
 module_id: postgres-codebase-memory
 name: LATTICE PostgreSQL Codebase Memory Adapter
-version: 1.2
+version: 1.3
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-14
+last_reviewed: 2026-08-25
 ---
 
 ## Mission
@@ -17,6 +17,9 @@ Version 1.1 adds only the extension-v3/global-v5 compatibility profile and
 historical per-analysis persistence provenance.
 Version 1.2 adds only the migration-time exact Writer-v2 bridge companion
 verification required to upgrade a previously accepted combined profile.
+Version 1.3 adds a read-only, Memory-owned bootstrap inspector that classifies
+only exact empty, v2, or v3 Memory state under an explicit exact Store-v5/v6
+context. It does not inspect Writer state or add durable data.
 
 ## Non-Goals
 
@@ -75,6 +78,15 @@ verification required to upgrade a previously accepted combined profile.
    graph-memory, or reflection receipt.
 8. Missing, malformed, unsupported, substituted, or digest-disagreeing profile
    provenance fails closed; the current adapter identity is not a fallback.
+9. Product bootstrap may consume only the typed Memory 1.3 inspector before
+   admission changes. Empty means the exact Store-created `memory` namespace,
+   owner, schema ACL, comment/security-label closure, and zero objects
+   across every namespaced catalog; v2/v3 reuse their full identity, ledger,
+   catalog and ACL verifiers. Every profile also verifies the exact global and
+   namespace-scoped default-ACL closure. Writer state is not interpreted by
+   this API.
+10. The bootstrap inspector accepts only exact Store-v5 or Store-v6 context;
+    Memory-v3 identity retains its Store-v5 provenance in either context.
 
 ## Allowed Dependencies
 
@@ -118,6 +130,13 @@ its own DDL. Unknown, v1, partial, drifted, active, or substituted companion
 state rolls back Memory. Both schema-v5 bridge states remain runtime closed
 until the Writer owner activates v2 on exact global-v5/Memory-v3.
 
+Version 1.3 adds no migration and changes no v1/v2/v3 bytes. Its read-only
+bootstrap inspector takes the existing global/Memory/Writer advisory lock order
+but does not read Writer rows. It accepts only exact empty/v2/v3 Memory-owned
+evidence in an exact Store-v5/v6 context; partial, extra, ACL-drifted,
+identity-disagreeing, or unsupported Memory state fails before Runtime
+admission mutation.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -145,3 +164,4 @@ user approval.
 | 1.0 | 2026-08-05 | SPEC-002 v28, ADR-022, TASK-033 | Independent same-database Codebase Memory extension and adapter without global Store migration changes | User continuation authorization |
 | 1.1 | 2026-08-14 | SPEC-002 v32, ADR-022, TASK-075 | Add extension-v3/global-v5 compatibility and retained per-analysis profile replay while preserving v1/v2 bytes and receipts | User-approved TASK-075 reconciliation |
 | 1.2 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-022/023, TASK-076 | Verify the exact Writer-v2 bridge companion under the common lock order during Memory-v3 migration without owning or mutating Writer state | User continuation authorization |
+| 1.3 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Add the read-only closed Memory bootstrap inspector for exact Store-v5/v6 composition without interpreting Writer state | Sole-foreman delegation |

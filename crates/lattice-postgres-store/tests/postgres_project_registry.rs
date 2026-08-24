@@ -1,8 +1,12 @@
 use lattice_postgres_store::{POSTGRES_SCHEMA_VERSION, PostgresProjectRegistryErrorKind};
 
 #[test]
-fn typed_project_registry_adapter_surface_is_schema_v5_and_closed() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 5);
+fn typed_project_registry_adapter_retains_schema_v5_on_global_v6() {
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 6);
+    assert!(
+        include_str!("../src/project_registry.rs")
+            .contains("const GLOBAL_REGISTRY_SCHEMA_VERSION: u16 = 5;")
+    );
     let mut codes =
         PostgresProjectRegistryErrorKind::ALL.map(PostgresProjectRegistryErrorKind::code);
     codes.sort_unstable();

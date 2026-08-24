@@ -1,5 +1,9 @@
 //! Pure Task Ledger V2 semantic owner, append planner, and non-durable fake.
 
+mod foreman;
+
+pub use foreman::*;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -57,6 +61,12 @@ pub enum LedgerError {
     InvalidAutonomyReceipt,
     /// The supplied autonomy recommendation differs from Task Ledger policy.
     AutonomyRecommendationMismatch,
+    /// A foreman event, child record, payload, linkage, or fixed stream is invalid.
+    InvalidForemanSnapshot,
+    /// A persisted foreman child-record or payload schema is unknown.
+    UnknownForemanSnapshotVersion,
+    /// A new foreman generation was not exactly the prior generation plus one.
+    ForemanGenerationRollback,
     /// A generic caller selected a reserved or unknown Task-created profile.
     UnknownTaskCreatedProfile,
     /// Cumulative resource counters moved backwards.
@@ -119,6 +129,9 @@ impl LedgerError {
             Self::InvalidResourceSnapshot => "LEDGER_INVALID_RESOURCE_SNAPSHOT",
             Self::InvalidAutonomyReceipt => "LEDGER_INVALID_AUTONOMY_RECEIPT",
             Self::AutonomyRecommendationMismatch => "LEDGER_AUTONOMY_RECOMMENDATION_MISMATCH",
+            Self::InvalidForemanSnapshot => "LEDGER_INVALID_FOREMAN_SNAPSHOT",
+            Self::UnknownForemanSnapshotVersion => "LEDGER_UNKNOWN_FOREMAN_SNAPSHOT_VERSION",
+            Self::ForemanGenerationRollback => "LEDGER_FOREMAN_GENERATION_ROLLBACK",
             Self::UnknownTaskCreatedProfile => "LEDGER_UNKNOWN_TASK_CREATED_PROFILE",
             Self::ResourceCounterRegression => "LEDGER_RESOURCE_COUNTER_REGRESSION",
             Self::CommandIdReuse => "LEDGER_COMMAND_ID_REUSE",
@@ -167,6 +180,15 @@ impl fmt::Display for LedgerError {
             }
             Self::AutonomyRecommendationMismatch => {
                 formatter.write_str("autonomy recommendation does not match Task Ledger policy")
+            }
+            Self::InvalidForemanSnapshot => {
+                formatter.write_str("invalid foreman snapshot event or child record")
+            }
+            Self::UnknownForemanSnapshotVersion => {
+                formatter.write_str("unknown foreman snapshot record or payload schema")
+            }
+            Self::ForemanGenerationRollback => {
+                formatter.write_str("foreman generation was not exact-next")
             }
             Self::UnknownTaskCreatedProfile => {
                 formatter.write_str("unknown or caller-selected Task-created profile")
@@ -263,6 +285,8 @@ pub enum LedgerEventKind {
     TaskCreated,
     /// One canonical autonomy decision receipt was recorded.
     AutonomyReceiptRecorded,
+    /// One typed foreman coordination snapshot was recorded.
+    ForemanSnapshotRecorded,
     /// A separately validated Task Domain transition was recorded.
     StateTransition,
     /// A pure Policy decision was recorded.
@@ -284,6 +308,7 @@ impl LedgerEventKind {
         match self {
             Self::TaskCreated => "TASK_CREATED",
             Self::AutonomyReceiptRecorded => "AUTONOMY_RECEIPT_RECORDED",
+            Self::ForemanSnapshotRecorded => "FOREMAN_SNAPSHOT_RECORDED",
             Self::StateTransition => "STATE_TRANSITION",
             Self::PolicyDecision => "POLICY_DECISION",
             Self::ResourceSnapshot => "RESOURCE_SNAPSHOT",
@@ -302,6 +327,7 @@ impl LedgerEventKind {
         match value {
             "TASK_CREATED" => Ok(Self::TaskCreated),
             "AUTONOMY_RECEIPT_RECORDED" => Ok(Self::AutonomyReceiptRecorded),
+            "FOREMAN_SNAPSHOT_RECORDED" => Ok(Self::ForemanSnapshotRecorded),
             "STATE_TRANSITION" => Ok(Self::StateTransition),
             "POLICY_DECISION" => Ok(Self::PolicyDecision),
             "RESOURCE_SNAPSHOT" => Ok(Self::ResourceSnapshot),
@@ -1160,6 +1186,7 @@ enum AppendConstruction {
     Generic,
     RequiredTaskCreated,
     VerifiedAutonomy,
+    VerifiedForeman,
     VerifiedReplay,
 }
 
@@ -1272,6 +1299,18 @@ impl AppendCommand {
         {
             return Err(LedgerError::InvalidAutonomyReceipt);
         }
+        if matches!(kind, LedgerEventKind::ForemanSnapshotRecorded)
+            && (!matches!(
+                construction,
+                AppendConstruction::VerifiedForeman | AppendConstruction::VerifiedReplay
+            ) || action.as_str() != "RECORD_FOREMAN_SNAPSHOT_V1"
+                || outcome != LedgerOutcome::Recorded
+                || reason_code.as_str() != "FOREMAN_SNAPSHOT_RECORDED"
+                || diagnostic.is_some()
+                || resource_snapshot.is_some())
+        {
+            return Err(LedgerError::InvalidForemanSnapshot);
+        }
         if matches!(kind, LedgerEventKind::TaskCreated) {
             let profile = classify_task_created_action(action.as_str())?;
             match construction {
@@ -1286,6 +1325,7 @@ impl AppendCommand {
                 AppendConstruction::Generic
                 | AppendConstruction::RequiredTaskCreated
                 | AppendConstruction::VerifiedAutonomy
+                | AppendConstruction::VerifiedForeman
                 | AppendConstruction::VerifiedReplay => {}
             }
         }
@@ -1303,6 +1343,31 @@ impl AppendCommand {
             diagnostic,
             resource_snapshot,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_verified_foreman(
+        expected_head: TaskLedgerStreamHead,
+        command_id: CommandId,
+        correlation_id: CorrelationId,
+        occurred_at: impl Into<String>,
+        subject_digest: ContentDigest,
+    ) -> Result<Self, LedgerError> {
+        Self::from_fields(
+            expected_head,
+            command_id,
+            correlation_id,
+            occurred_at,
+            LedgerEventKind::ForemanSnapshotRecorded,
+            ActorId::new("lattice-foreman")?,
+            ActionId::new("RECORD_FOREMAN_SNAPSHOT_V1")?,
+            LedgerOutcome::Recorded,
+            ReasonCode::new("FOREMAN_SNAPSHOT_RECORDED")?,
+            subject_digest,
+            None,
+            None,
+            AppendConstruction::VerifiedForeman,
+        )
     }
 
     /// Returns the caller-supplied full expected head.

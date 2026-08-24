@@ -11,11 +11,165 @@ const LIVE_CONTROL_STORE_SHA256: &str =
     "00ae3eedd76704f26b1df58955d9d594c98f0ba525be93b15d8c9ebb1f2115c1";
 const PROJECT_REGISTRY_REPOSITORY_SHA256: &str =
     "b7af1f8a8ac370bbfc8a5312497461587cb8a86eb32ff97e5b865c7ae9bf0dcf";
-const CURRENT_V5_MANIFEST_SHA256: &str =
-    "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
 
 #[test]
-fn task076_store_migration_locks_global_memory_writer_before_classification() {
+#[allow(clippy::too_many_lines)]
+fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_store() {
+    let manifest = include_str!("../Cargo.toml");
+    assert!(
+        !manifest.contains("lattice-postgres-writer-lease"),
+        "Store must not carry a Writer adapter dependency, even for tests"
+    );
+
+    let setup = include_str!("../src/postgres_setup.rs");
+    for forbidden in [
+        "verify_writer_lease_v2_identity_and_ledger",
+        "verify_writer_lease_v3_identity",
+        "writer_lease_identity_shape",
+        "writer_lease_ledger_shape",
+        "FROM ONLY writer_lease.writer_lease_extension_",
+        "UPDATE ONLY writer_lease.",
+        "INSERT INTO writer_lease.",
+        "DELETE FROM ONLY writer_lease.",
+        "LOCK TABLE writer_lease.",
+    ] {
+        assert!(
+            !setup.contains(forbidden),
+            "Store must not retain Writer semantic ownership: {forbidden}"
+        );
+    }
+
+    let apply = setup
+        .split_once("pub fn apply_migrations(")
+        .expect("migration entrypoint")
+        .1;
+    let v5_to_v6 = apply
+        .split_once("InstalledManifestState::ExactV5Prefix")
+        .expect("exact v5 transition arm")
+        .1
+        .split_once("InstalledManifestState::ExactV6Full")
+        .expect("exact v6 retry arm")
+        .0;
+    assert_eq!(
+        v5_to_v6
+            .matches("CALL writer_lease.writer_lease_rebind_v3()")
+            .count(),
+        1,
+        "exact-v5 transition has one fixed Writer executable boundary"
+    );
+    let v5_order = [
+        "verify_v5_upgrade_source",
+        "apply_missing_entries(&mut transaction, 6)",
+        "advance_compatibility_from_v5",
+        "CALL writer_lease.writer_lease_rebind_v3()",
+        "verify_runtime_foreman_schema_v6",
+    ]
+    .map(|needle| {
+        v5_to_v6
+            .find(needle)
+            .unwrap_or_else(|| panic!("exact-v5 transition missing {needle}"))
+    });
+    assert!(
+        v5_order.windows(2).all(|pair| pair[0] < pair[1]),
+        "exact-v5 transition must retain v5 verification, 0007, v6 compatibility, fixed CALL, then catalog/ACL verification"
+    );
+    let v6_retry = apply
+        .split_once("InstalledManifestState::ExactV6Full")
+        .expect("exact v6 retry arm")
+        .1
+        .split_once("};\n\n    preflight_connection")
+        .expect("migration match boundary")
+        .0;
+    assert_eq!(
+        v6_retry
+            .matches("CALL writer_lease.writer_lease_rebind_v3()")
+            .count(),
+        1,
+        "exact-v6 retry must call the same idempotent Writer procedure"
+    );
+    let rebind_sql = include_str!("../../../db/extensions/writer-lease/v3-rebind.sql");
+    for required in [
+        "CREATE PROCEDURE writer_lease.writer_lease_rebind_v3()",
+        "SECURITY INVOKER",
+        "SET search_path = pg_catalog",
+        "SET row_security = on",
+        "SET lock_timeout = '5s'",
+        "SET statement_timeout = '30s'",
+    ] {
+        assert!(
+            rebind_sql.contains(required),
+            "missing Writer-owned rebind boundary: {required}"
+        );
+    }
+    assert_eq!(
+        rebind_sql.matches("LOCK TABLE ").count(),
+        1,
+        "Writer-owned rebind SQL must contain exactly one LOCK TABLE statement"
+    );
+    let lock_block = rebind_sql
+        .split_once("LOCK TABLE ")
+        .expect("Writer-owned rebind lock statement")
+        .1
+        .split_once(" IN SHARE ROW EXCLUSIVE MODE;")
+        .expect("Writer-owned rebind lock mode terminator")
+        .0;
+    let lock_order = [
+        "writer_lease.writer_lease_extension_identity",
+        "writer_lease.writer_lease_extension_ledger",
+        "writer_lease.writer_lease_heads",
+        "writer_lease.writer_lease_commands",
+        "writer_lease.writer_lease_transitions",
+    ]
+    .map(|table| {
+        assert_eq!(
+            lock_block.matches(table).count(),
+            1,
+            "Writer-owned lock block must name {table} exactly once"
+        );
+        lock_block
+            .find(table)
+            .unwrap_or_else(|| panic!("Writer-owned lock block missing {table}"))
+    });
+    assert!(
+        lock_order.windows(2).all(|pair| pair[0] < pair[1]),
+        "Writer-owned lock block must order identity, ledger, heads, commands, transitions"
+    );
+    assert!(!rebind_sql.contains(
+        "GRANT EXECUTE ON PROCEDURE writer_lease.writer_lease_rebind_v3() TO lattice_runtime"
+    ));
+
+    let store_live = include_str!("postgres_live.rs");
+    assert!(
+        !store_live.contains("TASK094_STAGE_"),
+        "TASK-094 live composition belongs to lattice-runtime, not Store"
+    );
+    assert!(
+        !store_live.contains("lattice_postgres_writer_lease"),
+        "Store live tests must not import the Writer adapter"
+    );
+    let runtime_live =
+        include_str!("../../../apps/lattice-runtime/tests/task094_writer_v3_transition.rs");
+    for required in [
+        "TASK094_STAGE_FRESH_V5_PASS",
+        "TASK094_STAGE_MEMORY_V3_PASS",
+        "TASK094_STAGE_WRITER_V2_PASS",
+        "TASK094_STAGE_WRITER_V3_BRIDGE_PASS",
+        "TASK094_STAGE_REBIND_FAILURE_ATOMICITY_PASS",
+        "TASK094_STAGE_STORE_V6_PASS",
+        "SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE",
+        "assert_drift_failure_preserves_state",
+        "assert_ledger_drift_preserves_state",
+        "assert_acl_drift_preserves_state",
+        "MigrationApplyOutcome::AlreadyCurrent",
+    ] {
+        assert!(
+            runtime_live.contains(required),
+            "runtime live proof missing {required}"
+        );
+    }
+}
+#[test]
+fn task076_store_migration_locks_global_and_memory_before_catalog_classification() {
     let setup = include_str!("../src/postgres_setup.rs");
     let apply = setup
         .split_once("pub fn apply_migrations")
@@ -48,35 +202,29 @@ fn task076_store_migration_locks_global_memory_writer_before_classification() {
     let memory_tables = source
         .find("LOCK TABLE memory.codebase_memory_analyses")
         .expect("Memory source locks");
-    let writer_tables = source
-        .find("LOCK TABLE writer_lease.writer_lease_commands")
-        .expect("Writer Lease source locks");
     let reclassify = source[memory_tables..]
         .find("classify_current_catalog_profile")
         .map(|offset| memory_tables + offset)
         .expect("locked profile reclassification");
-    assert!(memory_tables < writer_tables && writer_tables < reclassify);
+    assert!(memory_tables < reclassify);
+    assert!(!source.contains("LOCK TABLE writer_lease."));
     assert!(source.contains("CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge"));
 }
 
 #[test]
-fn task076_store_freezes_writer_v2_catalog_acl_identity_and_ledger_profiles() {
+fn task076_store_freezes_writer_v2_catalog_and_acl_profiles_without_semantic_rows() {
     let setup = include_str!("../src/postgres_setup.rs");
     for required in [
         "WRITER_LEASE_V2_SQL_SHA256",
-        "WRITER_LEASE_V2_MANIFEST_SHA256",
         "WRITER_LEASE_V2_BRIDGE_CATALOG_PROFILES",
         "WRITER_LEASE_V2_CURRENT_CATALOG_PROFILES",
         "verify_writer_lease_v2_catalog",
         "verify_writer_lease_v2_function_sources",
-        "verify_writer_lease_v2_identity_and_ledger",
         "LATTICE_WRITER_LEASE_SCHEMA_V2",
         "LATTICE_WRITER_LEASE_EXTENSION_IDENTITY_V2",
         "LATTICE_WRITER_LEASE_EXTENSION_LEDGER_V2",
         "writer_lease_bind_runtime_v2",
         "writer_lease_load_for_update_v2",
-        "1:INSTALLED,2:UPGRADED",
-        "1:INSTALLED,2:UPGRADED,3:REBOUND",
         "WriterLeaseV2RuntimeProfile::Bridge",
         "WriterLeaseV2RuntimeProfile::Current",
     ] {
@@ -102,7 +250,6 @@ fn task076_store_freezes_writer_v2_catalog_acl_identity_and_ledger_profiles() {
             "missing measured Writer v2 bridge profile: {measured_bridge_signature}"
         );
     }
-    assert!(setup.contains("runtime == WriterLeaseV2RuntimeProfile::Bridge"));
     assert!(setup.contains(
         "WriterLeaseV2RuntimeProfile::Bridge => &WRITER_LEASE_V2_BRIDGE_CATALOG_PROFILES"
     ));
@@ -110,8 +257,8 @@ fn task076_store_freezes_writer_v2_catalog_acl_identity_and_ledger_profiles() {
         "WriterLeaseV2RuntimeProfile::Current => &WRITER_LEASE_V2_CURRENT_CATALOG_PROFILES"
     ));
     assert!(setup.contains("bd5b05d60340a1b9f9fbf1de2b4bed8586b7eede4fd8d7c4825841c221e89b7a"));
-    assert!(setup.contains("\"{}|t|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\""));
-    assert!(!setup.contains("\"{}|true|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\""));
+    assert!(!setup.contains("writer_lease_extension_identity i"));
+    assert!(!setup.contains("writer_lease_extension_ledger l"));
     let writer_v2_catalog = setup
         .split_once("fn verify_writer_lease_v2_catalog")
         .expect("Writer v2 companion catalog verifier")
@@ -254,16 +401,16 @@ fn task076_store_live_phases_are_closed_and_emit_fixed_pass_tokens() {
 }
 
 #[test]
-fn schema_v5_manifest_reconciles_registry_before_autonomy() {
+fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
     let manifest = migration_manifest();
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 5);
-    assert_eq!(manifest.len(), 6);
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 6);
+    assert_eq!(manifest.len(), 7);
     assert_eq!(
         verify_embedded_manifest()
-            .expect("exact schema-v5 manifest")
+            .expect("exact schema-v6 manifest")
             .manifest_sha256()
             .as_str(),
-        CURRENT_V5_MANIFEST_SHA256
+        "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae"
     );
 
     let registry = &manifest[4];
@@ -286,7 +433,7 @@ fn schema_v5_manifest_reconciles_registry_before_autonomy() {
         autonomy.path(),
         "db/migrations/0006_task_autonomy_receipt.sql"
     );
-    assert_eq!(autonomy.schema_version(), POSTGRES_SCHEMA_VERSION);
+    assert_eq!(autonomy.schema_version(), 5);
     assert_eq!(autonomy.reader_compatibility(), 5..=5);
     assert_eq!(autonomy.writer_compatibility(), 5..=5);
 
@@ -438,6 +585,194 @@ fn misplaced_autonomy_0005_fixture_proves_pre_ddl_non_mutation() {
         .expect("registry stage");
     let between = &initial[misplaced..registry];
     assert!(between.contains("set_exact_database_access(&mut admin, base.database_name())"));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn migration_runner_classifies_future_history_atomically_after_serial_lock_before_mutation() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    let apply_start = setup
+        .find("pub fn apply_migrations")
+        .expect("migration runner");
+    let apply_end = setup[apply_start..]
+        .find("pub fn verify_postgres_schema")
+        .map(|offset| apply_start + offset)
+        .expect("migration runner boundary");
+    let apply = &setup[apply_start..apply_end];
+
+    assert!(apply.contains(".isolation_level(IsolationLevel::ReadCommitted)"));
+    assert!(!apply.contains(".isolation_level(IsolationLevel::RepeatableRead)"));
+    assert!(!apply.contains(".read_only(true)"));
+    let lock = apply
+        .find("SELECT pg_advisory_xact_lock($1)")
+        .expect("serial migration locks");
+
+    let classify = apply
+        .find("let installed = classify_installed_manifest_state")
+        .expect("installed history classification");
+    assert!(lock < classify);
+    for mutation in [
+        "apply_entries_until",
+        "apply_missing_entries",
+        "seed_database_identity",
+        "advance_compatibility_from_v1",
+        "CALL writer_lease.writer_lease_rebind_v3()",
+    ] {
+        assert!(
+            classify < apply.find(mutation).expect("migration mutation boundary"),
+            "retained history classification must precede {mutation}"
+        );
+    }
+
+    let classifier_start = setup
+        .find("fn classify_retained_history<C: GenericClient>")
+        .expect("atomic retained history classifier");
+    let classifier_end = setup[classifier_start..]
+        .find("\nfn classify_retained_history_rows")
+        .map(|offset| classifier_start + offset)
+        .expect("atomic classifier boundary");
+    let classifier = &setup[classifier_start..classifier_end];
+    let parser_start = classifier
+        .find("fn classify_retained_history_snapshot")
+        .expect("retained history snapshot parser");
+    let query = &classifier[..parser_start];
+    let parser = &classifier[parser_start..];
+    assert_eq!(query.matches(".query_one(").count(), 1);
+    let history_columns = [
+        ("ordinal", "h.ordinal", "ordinals", "i16"),
+        (
+            "migration_id",
+            "h.migration_id::text",
+            "migration_ids",
+            "String",
+        ),
+        (
+            "migration_path",
+            "h.migration_path::text",
+            "migration_paths",
+            "String",
+        ),
+        ("byte_length", "h.byte_length", "byte_lengths", "i64"),
+        (
+            "checksum_sha256",
+            "h.checksum_sha256::text",
+            "checksums",
+            "String",
+        ),
+        (
+            "migration_status",
+            "h.migration_status::text",
+            "statuses",
+            "String",
+        ),
+        (
+            "transaction_mode",
+            "h.transaction_mode::text",
+            "modes",
+            "String",
+        ),
+        (
+            "schema_version",
+            "h.schema_version",
+            "schema_versions",
+            "i16",
+        ),
+        ("min_reader", "h.min_reader", "min_readers", "i16"),
+        ("max_reader", "h.max_reader", "max_readers", "i16"),
+        ("min_writer", "h.min_writer", "min_writers", "i16"),
+        ("max_writer", "h.max_writer", "max_writers", "i16"),
+    ];
+    let parser_compact = parser.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut previous_query_position = None;
+    for (index, (field, expression, variable, element_type)) in
+        history_columns.into_iter().enumerate()
+    {
+        let evidence = format!("array_agg({expression} ORDER BY h.ordinal)");
+        assert_eq!(
+            query.match_indices(&evidence).count(),
+            1,
+            "atomic history field {field} must appear exactly once"
+        );
+        let position = query.find(&evidence).expect("atomic history field");
+        assert!(
+            previous_query_position.is_none_or(|previous| previous < position),
+            "atomic history field {field} is out of result-column order"
+        );
+        previous_query_position = Some(position);
+
+        assert!(parser_compact.contains(&format!(
+            "let {variable}: Vec<{element_type}> = row_value(row, {index}, PostgresStoreSetupErrorKind::HistoryMismatch)?;"
+        )), "history parser index {index} does not bind {field} to {variable}: Vec<{element_type}>");
+    }
+    for field in [
+        "manifest_sha256",
+        "current_schema_version",
+        "min_reader",
+        "max_reader",
+        "min_writer",
+        "max_writer",
+    ] {
+        assert!(
+            query.contains(&format!(
+                "SELECT c.{field} FROM ONLY control.schema_compatibility c"
+            )),
+            "missing atomic compatibility field {field}"
+        );
+    }
+    assert_eq!(query.matches("WHERE c.singleton=true").count(), 6);
+    assert!(!query.contains("read_history_rows"));
+    assert!(!query.contains("read_retained_schema_compatibility"));
+
+    assert!(parser.contains("let length = ordinals.len();"));
+    for vector in [
+        "migration_ids",
+        "migration_paths",
+        "byte_lengths",
+        "checksums",
+        "statuses",
+        "modes",
+        "schema_versions",
+        "min_readers",
+        "max_readers",
+        "min_writers",
+        "max_writers",
+    ] {
+        assert!(
+            parser.contains(&format!("{vector}.len()")),
+            "missing equal-length check for {vector}"
+        );
+    }
+    assert!(parser.contains(".any(|candidate| candidate != length)"));
+
+    for index in 13..=17 {
+        assert!(parser_compact.contains(&format!(
+            "row_value::<Option<i16>>(row, {index}, PostgresStoreSetupErrorKind::CompatibilityMismatch)?"
+        )));
+    }
+    assert!(parser_compact.contains("collect::<Option<Vec<_>>>()"));
+    assert!(parser_compact.contains(
+        "let Some(manifest_sha256) = row_value::<Option<String>>(row, 12, PostgresStoreSetupErrorKind::CompatibilityMismatch)?"
+    ));
+    let nullable_parser = parser
+        .split("let compatibility_values")
+        .nth(1)
+        .expect("nullable compatibility parser");
+    assert_eq!(
+        nullable_parser
+            .matches("return Ok(RetainedHistoryClassification::Corrupt);")
+            .count(),
+        2
+    );
+
+    let installed_start = setup
+        .find("fn classify_installed_manifest_state<C: GenericClient>")
+        .expect("installed manifest classifier");
+    let installed_end = setup[installed_start..]
+        .find("\nfn apply_missing_entries")
+        .map(|offset| installed_start + offset)
+        .expect("installed classifier boundary");
+    let installed = &setup[installed_start..installed_end];
+    assert!(installed.contains("match classify_retained_history(client)?"));
 }
 
 #[test]
@@ -843,7 +1178,7 @@ fn schema_v5_catalog_measurement_has_closed_forbidden_object_diagnostics() {
 #[allow(clippy::too_many_lines)]
 fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     let manifest = migration_manifest();
-    assert_eq!(manifest.len(), 6);
+    assert_eq!(manifest.len(), 7);
 
     let draft = &manifest[0];
     assert_eq!(draft.ordinal(), 1);
@@ -941,21 +1276,36 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
         autonomy.transaction_mode(),
         MigrationTransactionMode::RunnerOwned
     );
-    assert_eq!(autonomy.schema_version(), POSTGRES_SCHEMA_VERSION);
+    assert_eq!(autonomy.schema_version(), 5);
     assert_eq!(autonomy.reader_compatibility(), 5..=5);
     assert_eq!(autonomy.writer_compatibility(), 5..=5);
 
     let evidence = verify_embedded_manifest().expect("embedded manifest");
-    assert_eq!(evidence.entry_count(), 6);
-    assert_eq!(evidence.executable_count(), 5);
+    let foreman = &manifest[6];
+    assert_eq!(foreman.ordinal(), 7);
+    assert_eq!(foreman.id(), "0007_foreman_coordination");
+    assert_eq!(
+        foreman.path(),
+        "db/migrations/0007_foreman_coordination.sql"
+    );
+    assert_eq!(foreman.byte_length(), 217_170);
+    assert_eq!(
+        foreman.sha256(),
+        "33a4e1c3ab8f29f763123ffe46c2929025a7a7256614f5c92011a1140c8300ad"
+    );
+    assert_eq!(foreman.schema_version(), POSTGRES_SCHEMA_VERSION);
+    assert_eq!(foreman.reader_compatibility(), 6..=6);
+    assert_eq!(foreman.writer_compatibility(), 6..=6);
+
+    assert_eq!(evidence.entry_count(), 7);
+    assert_eq!(evidence.executable_count(), 6);
     assert_eq!(evidence.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(evidence.manifest_sha256().as_str().len(), 64);
 
     let live = include_str!("postgres_live.rs");
-    assert!(!live.contains("executable_count: 6"));
     assert!(
-        live.matches("executable_count: 5").count() >= 2,
-        "fresh and concurrent live apply must count only executable entries"
+        live.contains("executable_count: 5"),
+        "fresh setup must stop at the exact v5 bridge predecessor before the one-entry v6 transition"
     );
     let task_ledger = include_str!("postgres_task_ledger.rs");
     assert_eq!(
@@ -966,8 +1316,133 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     assert!(task_ledger.contains("executable_count: 6 - prefix_len"));
     assert!(
         task_ledger.contains("executable_count: 5"),
-        "fresh Ledger apply must count the five executable schema-v5 entries"
+        "historical schema-v5 fixture evidence remains explicit"
     );
+}
+
+#[test]
+fn foreman_migration_is_event_bound_fenced_and_table_acl_closed() {
+    let migration = &migration_manifest()[6];
+    let sql = std::str::from_utf8(migration.bytes()).expect("UTF-8 SQL");
+    let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    for required in [
+        "CREATE TABLE control.task_ledger_foreman_snapshots",
+        "FOREMAN_SNAPSHOT_RECORDED",
+        "FOREIGN KEY (stream_id, event_sequence) REFERENCES control.task_ledger_events",
+        "writer_lease.writer_lease_assert_current_v1(",
+        "xmin = pg_catalog.pg_current_xact_id()::xid",
+        "CREATE FUNCTION control.task_ledger_record_foreman_snapshot_v1(",
+        "CREATE FUNCTION control.task_ledger_read_foreman_snapshots_v1(",
+        "'EVIDENCE_RECORDED', 'FOREMAN_SNAPSHOT_RECORDED'",
+        "REVOKE ALL ON TABLE control.task_ledger_foreman_snapshots FROM lattice_runtime",
+        "worker_id !~* '^(sk-|bearer )|password|full chat|begin private'",
+        "heartbeat_digest_ref ~ '^heartbeat:sha256:[0-9a-f]{64}$'",
+        "authority_digest_ref ~ '^authority:sha256:[0-9a-f]{64}$'",
+        "decision_ref ~ '^decision:sha256:[0-9a-f]{64}$'",
+    ] {
+        assert!(
+            normalized.contains(required),
+            "missing 0007 contract: {required}"
+        );
+    }
+    assert!(!normalized.contains("CREATE TABLE control.foreman_current_state"));
+    assert!(!normalized.contains("{1,256}"));
+    for field in [
+        "worker_id",
+        "thread_id",
+        "task_id",
+        "branch_ref",
+        "worktree_ref",
+        "blocker_ref",
+    ] {
+        assert!(
+            normalized.contains(&format!("{field} varchar(256)")),
+            "printable foreman field lost its physical 256-character cap: {field}"
+        );
+        assert!(
+            normalized.contains(&format!("{field} ~ '^[!-~]+$'")),
+            "printable foreman field lost its non-empty ASCII constraint: {field}"
+        );
+    }
+    assert!(!normalized.contains("CREATE TABLE control.task_ledger_autonomy_receipts"));
+    assert!(!normalized.contains("GRANT SELECT ON TABLE control.task_ledger_foreman_snapshots"));
+    assert_eq!(
+        normalized
+            .matches("CREATE OR REPLACE FUNCTION control.")
+            .count(),
+        19,
+        "schema-v6 must rebind the exact existing runtime surface"
+    );
+    assert_eq!(
+        normalized
+            .matches("v_manifest_entry_count IS DISTINCT FROM 7")
+            .count(),
+        20,
+        "every rebound function must verify all seven retained manifest entries"
+    );
+    assert!(!normalized.contains("v_manifest_entry_count IS DISTINCT FROM 6"));
+    assert!(normalized.contains("LATTICE_DEVOS_CONTROL_SCHEMA_V6"));
+}
+
+#[test]
+fn foreman_adapter_uses_the_ledger_transaction_and_verified_fresh_replay() {
+    let adapter = include_str!("../src/task_ledger.rs");
+    let attempt_start = adapter
+        .find("fn run_execute_attempt(")
+        .expect("Task Ledger transaction");
+    let attempt = &adapter[attempt_start..];
+    let writer = attempt
+        .find("assert_writer_authority(&mut transaction")
+        .expect("same-transaction writer assertion");
+    let ledger = attempt
+        .find("sql_profile.ledger_finalize_sql()")
+        .expect("Ledger finalize");
+    let child = attempt
+        .find("LEDGER_RECORD_FOREMAN_SNAPSHOT_SQL")
+        .expect("foreman child write");
+    let commit = child
+        + attempt[child..]
+            .find("transaction\n        .commit()")
+            .expect("transaction commit after child verification");
+    assert!(writer < ledger && ledger < child && child < commit);
+    assert!(adapter.contains("verify_untrusted_foreman_snapshot_rows(stream, &untrusted)"));
+    assert!(adapter.contains("IsolationLevel::RepeatableRead"));
+    assert!(adapter.contains("IsolationLevel::Serializable"));
+    assert!(adapter.contains("if plan.is_exact_retry()"));
+}
+
+#[test]
+fn schema_v6_runtime_admission_requires_writer_v3_current_and_closed_acl() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    let verifier = setup
+        .split_once("fn verify_runtime_foreman_schema_v6")
+        .expect("schema-v6 runtime verifier")
+        .1
+        .split_once("fn preflight_connection")
+        .expect("verifier boundary")
+        .0;
+    for required in [
+        "classify_retained_history_rows(&retained, &compatibility)",
+        "RetainedHistoryClassification::StrictFutureSuffix",
+        "read_retained_schema_compatibility(client)",
+        "task_ledger_foreman_snapshots",
+        "has_table_privilege",
+        "task_ledger_record_foreman_snapshot_v1",
+        "verify_writer_lease_v3_functions(client, true)",
+        "n.nspname='writer_lease'",
+        "WriterLeaseV3Profile::Current",
+        "verify_runtime_admission_present(client)",
+    ] {
+        assert!(
+            verifier.contains(required),
+            "missing v6 admission proof: {required}"
+        );
+    }
+    assert!(
+        verifier.contains("!= 7"),
+        "runtime Writer surface must be exact"
+    );
+    assert!(!verifier.contains("WriterLeaseV3Profile::Bridge"));
 }
 
 #[test]
@@ -1473,7 +1948,7 @@ fn live_store_migration_is_fixed_function_gated_and_transaction_control_free() {
 }
 
 #[test]
-fn runner_has_closed_fresh_and_exact_prefix_states_through_v5() {
+fn runner_has_closed_fresh_and_exact_prefix_states_through_v6() {
     let source = include_str!("../src/postgres_setup.rs");
     for required in [
         "enum InstalledManifestState",
@@ -1482,17 +1957,20 @@ fn runner_has_closed_fresh_and_exact_prefix_states_through_v5() {
         "ExactV2Prefix",
         "ExactV3Prefix",
         "ExactV4Prefix",
-        "ExactV5Full",
+        "ExactV5Prefix",
+        "ExactV6Full",
         "classify_installed_manifest_state",
         "verify_v1_upgrade_source",
         "verify_v2_upgrade_source",
         "verify_v3_upgrade_source",
         "verify_v4_upgrade_source",
+        "verify_v5_upgrade_source",
         "apply_missing_entries",
         "advance_compatibility_from_v1",
         "advance_compatibility_from_v2",
         "advance_compatibility_from_v3",
         "advance_compatibility_from_v4",
+        "advance_compatibility_from_v5",
         "LOCK TABLE control.physical_heads IN ACCESS EXCLUSIVE MODE",
         "LOCK TABLE control.terminal_transactions IN ACCESS EXCLUSIVE MODE",
         "LOCK TABLE control.runtime_admission IN ACCESS EXCLUSIVE MODE",
@@ -1505,6 +1983,38 @@ fn runner_has_closed_fresh_and_exact_prefix_states_through_v5() {
         );
     }
     assert!(!source.contains("apply_manifest_in_transaction"));
+}
+
+#[test]
+fn task094_store_calls_only_the_fixed_writer_owned_rebind_boundary() {
+    let source = include_str!("../src/postgres_setup.rs");
+    let apply = source
+        .split_once("pub fn apply_migrations(")
+        .expect("migration entrypoint")
+        .1;
+    let transition = apply
+        .split_once("InstalledManifestState::ExactV5Prefix")
+        .expect("exact v5 transition arm")
+        .1
+        .split_once("InstalledManifestState::ExactV6Full")
+        .expect("exact v6 no-op arm")
+        .0;
+    for required in [
+        "verify_v5_upgrade_source",
+        "apply_missing_entries(&mut transaction, 6)",
+        "advance_compatibility_from_v5",
+        "CALL writer_lease.writer_lease_rebind_v3()",
+        "verify_runtime_foreman_schema_v6",
+    ] {
+        assert!(
+            transition.contains(required),
+            "missing atomic v5-to-v6 transition boundary: {required}"
+        );
+    }
+    assert!(!transition.contains("UPDATE ONLY writer_lease."));
+    assert!(!transition.contains("INSERT INTO writer_lease."));
+    assert!(!transition.contains("GRANT USAGE ON SCHEMA writer_lease"));
+    assert!(!transition.contains("GRANT EXECUTE ON FUNCTION writer_lease."));
 }
 
 #[test]
@@ -1623,7 +2133,7 @@ fn database_roles_are_closed_and_never_a_login_or_caller_value() {
 
 #[test]
 fn setup_errors_are_closed_static_bounded_and_redacted() {
-    assert_eq!(PostgresStoreSetupErrorKind::ALL.len(), 15);
+    assert_eq!(PostgresStoreSetupErrorKind::ALL.len(), 16);
     assert!(
         PostgresStoreSetupErrorKind::ALL
             .contains(&PostgresStoreSetupErrorKind::PostApplyVerificationFailed)
@@ -1631,6 +2141,10 @@ fn setup_errors_are_closed_static_bounded_and_redacted() {
     assert_eq!(
         PostgresStoreSetupErrorKind::PostApplyVerificationFailed.code(),
         "STORE_MIGRATION_COMMITTED_UNVERIFIED"
+    );
+    assert_eq!(
+        PostgresStoreSetupErrorKind::UnsupportedFutureSchema.code(),
+        "STORE_SCHEMA_UNSUPPORTED_FUTURE"
     );
     for kind in PostgresStoreSetupErrorKind::ALL {
         let error = PostgresStoreSetupError::new(kind);
@@ -1662,7 +2176,7 @@ fn setup_errors_are_closed_static_bounded_and_redacted() {
 fn driver_and_schema_support_are_exact_for_this_foundation() {
     assert_eq!(POSTGRES_DRIVER_VERSION, "0.19.14");
     assert_eq!(SUPPORTED_POSTGRES_MAJOR, 17);
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 5);
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 6);
 }
 
 #[test]

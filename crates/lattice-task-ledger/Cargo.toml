@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 lattice-cjson = { path = "../lattice-cjson" }
 lattice-contracts = { path = "../lattice-contracts" }
+lattice-foreman-state = { path = "../lattice-foreman-state" }
 time = { version = "=0.3.54", default-features = false, features = ["formatting", "parsing"] }
 
 [lints]

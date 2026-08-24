@@ -1,6 +1,7 @@
 use lattice_postgres_codebase_memory::{
-    ExtensionApplyOutcome, ExtensionCatalogEvidence, ExtensionDatabaseRole, ExtensionSetupError,
-    ExtensionTarget, apply_extension, verify_extension,
+    ExtensionApplyOutcome, ExtensionBootstrapGlobalProfile, ExtensionBootstrapProfile,
+    ExtensionCatalogEvidence, ExtensionDatabaseRole, ExtensionSetupError, ExtensionTarget,
+    apply_extension, inspect_bootstrap_profile, verify_extension,
 };
 use postgres::Client;
 
@@ -13,6 +14,11 @@ fn explicit_admin_and_closed_verifier_api_are_the_only_setup_surface() {
         &ExtensionTarget,
         ExtensionDatabaseRole,
     ) -> Result<ExtensionCatalogEvidence, ExtensionSetupError> = verify_extension;
+    let _: fn(
+        &mut Client,
+        &ExtensionTarget,
+        ExtensionBootstrapGlobalProfile,
+    ) -> Result<ExtensionBootstrapProfile, ExtensionSetupError> = inspect_bootstrap_profile;
 
     let run_id = "1".repeat(32);
     let target =
@@ -25,6 +31,88 @@ fn explicit_admin_and_closed_verifier_api_are_the_only_setup_surface() {
     );
     assert!(ExtensionTarget::new("postgres", "1".repeat(32)).is_err());
     assert!(ExtensionTarget::new("lattice_task019_12345678_base", "not-a-run-id").is_err());
+}
+
+#[test]
+fn bootstrap_inspector_is_read_only_memory_owned_and_writer_agnostic() {
+    let source = include_str!("../src/setup.rs");
+    let inspector = source
+        .split_once("pub fn inspect_bootstrap_profile")
+        .expect("bootstrap inspector")
+        .1
+        .split_once("pub fn verify_extension")
+        .expect("bootstrap inspector boundary")
+        .0;
+    for required in [
+        "IsolationLevel::RepeatableRead",
+        ".read_only(true)",
+        "preflight_bootstrap",
+        "verify_global_default_acl_closure",
+        "verify_empty_catalog_closure",
+        "verify_v2_source",
+        "verify_exact_catalog_profile",
+        "verify_catalog_closure",
+        "read_identity",
+    ] {
+        assert!(inspector.contains(required), "missing {required}");
+    }
+    assert!(!inspector.contains("classify_writer_lease_companion"));
+    assert!(!inspector.contains("verify_writer_lease_companion"));
+}
+
+#[test]
+fn empty_bootstrap_profile_closes_auxiliary_catalog_and_default_acl() {
+    let source = include_str!("../src/setup.rs");
+    let empty = source
+        .split_once("fn verify_empty_catalog_closure")
+        .expect("empty catalog verifier")
+        .1
+        .split_once("fn verify_exact_catalog_profile")
+        .expect("empty catalog verifier boundary")
+        .0;
+    for required in [
+        "pg_catalog.pg_opclass",
+        "pg_catalog.pg_opfamily",
+        "pg_catalog.pg_statistic_ext",
+        "pg_catalog.pg_ts_config",
+        "pg_catalog.pg_ts_dict",
+        "pg_catalog.pg_ts_parser",
+        "pg_catalog.pg_ts_template",
+        "pg_catalog.pg_seclabel",
+        "pg_catalog.obj_description",
+        "pg_catalog.pg_default_acl",
+        "pg_catalog.aclexplode",
+    ] {
+        assert!(empty.contains(required), "missing empty closure {required}");
+    }
+    let global_default_acl = empty
+        .split_once("fn verify_global_default_acl_closure")
+        .expect("global default ACL verifier")
+        .1
+        .split_once("fn verify_namespace_auxiliary_closure")
+        .expect("global default ACL verifier boundary")
+        .0;
+    for required in [
+        "SELECT (SELECT pg_catalog.count(*)",
+        "FROM pg_catalog.pg_default_acl x",
+        "WHERE x.defaclnamespace=0",
+        "default_rows != 2",
+        "default_acl_count != 2",
+        "d.defaclobjtype='f' AND a.privilege_type='EXECUTE'",
+        "d.defaclobjtype='T' AND a.privilege_type='USAGE'",
+        "owner.rolname='lattice_migrator'",
+        "grantee.rolname='lattice_migrator'",
+        "grantor.rolname='lattice_migrator'",
+        "NOT a.is_grantable",
+    ] {
+        assert!(
+            global_default_acl.contains(required),
+            "missing frozen global default ACL evidence {required}"
+        );
+    }
+    assert!(!global_default_acl.contains("d.defaclobjtype='r'"));
+    assert!(!global_default_acl.contains("d.defaclobjtype='S'"));
+    assert!(!global_default_acl.contains("count(DISTINCT d.oid)"));
 }
 
 #[test]

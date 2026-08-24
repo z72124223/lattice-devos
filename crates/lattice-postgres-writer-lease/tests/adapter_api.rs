@@ -1,5 +1,5 @@
 use lattice_contracts::{ContentDigest, ProjectId, StoreAuthorityHead};
-use lattice_postgres_writer_lease::{ExtensionTarget, PostgresWriterLease};
+use lattice_postgres_writer_lease::{ExtensionTarget, PostgresWriterLease, V3ExtensionTarget};
 use lattice_writer_lease::{
     WriterLeaseProjectEvidence, WriterLeaseRepository, WriterLeaseRepositoryError,
 };
@@ -19,6 +19,15 @@ fn concrete_adapter_implements_the_domain_owned_repository_port() {
         PostgresWriterLease,
         lattice_writer_lease::WriterLeaseRepositoryError,
     > = PostgresWriterLease::new;
+    let _: for<'a> fn(
+        Client,
+        &'a V3ExtensionTarget,
+        &'a StoreAuthorityHead,
+        u32,
+    ) -> Result<
+        PostgresWriterLease,
+        lattice_writer_lease::WriterLeaseRepositoryError,
+    > = PostgresWriterLease::new_v3;
     let _: fn(
         &mut PostgresWriterLease,
         &ProjectId,
@@ -35,10 +44,12 @@ fn concrete_adapter_implements_the_domain_owned_repository_port() {
 }
 
 #[test]
-fn adapter_switches_only_the_two_ordinal_bound_calls_to_v2() {
+fn adapter_routes_only_the_two_ordinal_bound_calls_by_version() {
     let adapter = include_str!("../src/adapter.rs");
     assert!(adapter.contains("writer_lease_bind_runtime_v2"));
     assert!(adapter.contains("writer_lease_load_for_update_v2"));
+    assert!(adapter.contains("writer_lease_bind_runtime_v3"));
+    assert!(adapter.contains("writer_lease_load_for_update_v3"));
     assert!(!adapter.contains("writer_lease_bind_runtime_v1"));
     assert!(!adapter.contains("writer_lease_load_for_update_v1"));
     for retained in [

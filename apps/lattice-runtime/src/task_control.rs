@@ -1268,7 +1268,8 @@ fn map_store_error(error: lattice_postgres_store::PostgresTaskLedgerError) -> Ta
         Kind::Malformed
         | Kind::PhysicalStateMismatch
         | Kind::CheckpointCorrupt
-        | Kind::RetainedRowCorrupt => corrupt("LATTICE_TASK_LEDGER_CORRUPT"),
+        | Kind::RetainedRowCorrupt
+        | Kind::UnsupportedRetainedSchema => corrupt("LATTICE_TASK_LEDGER_CORRUPT"),
         Kind::RevisionOverflow
         | Kind::SerializationExhausted
         | Kind::TransactionFailed

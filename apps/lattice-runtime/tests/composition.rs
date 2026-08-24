@@ -514,7 +514,8 @@ fn test_scripted_launcher_bytes(server_sha256: &str) -> Vec<u8> {
 }
 
 fn spawn_bounded_latticed() -> std::process::Child {
-    Command::new(env!("CARGO_BIN_EXE_latticed"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_latticed"));
+    command
         .env("LATTICE_DELIVERY_CODEX_MODE", "OFFICIAL_CODEX_APP_SERVER")
         .env("LATTICE_FULL_CHAIN_RUN_MODE", "RESUME_EXISTING")
         .env("LATTICE_DELIVERY_LAUNCHER", r"C:\tools\codex.exe")
@@ -524,10 +525,6 @@ fn spawn_bounded_latticed() -> std::process::Child {
         .env("LATTICE_DELIVERY_CODEX_HOME", r"C:\delivery\codex-home")
         .env("LATTICE_DELIVERY_ROOT", r"C:\delivery\root")
         .env("LATTICE_DELIVERY_GIT_EXE", r"C:\tools\git.exe")
-        .env("LATTICE_TASK019_HOST", "127.0.0.1")
-        .env("LATTICE_TASK019_PORT", "1")
-        .env("LATTICE_TASK019_RUN_ID", "0123456789abcdef0123456789abcdef")
-        .env("LATTICE_TASK019_PASSWORD", "test-password")
         .env("LATTICE_DELIVERY_TIMEOUT_SECONDS", "1")
         .env("LATTICE_STORE_DAEMON_INSTANCE_ID", "test-daemon")
         .env("LATTICE_STORE_DAEMON_EPOCH", "1")
@@ -541,9 +538,15 @@ fn spawn_bounded_latticed() -> std::process::Child {
         .env("LATTICE_TASK_INGRESS_PROFILE_SHA256", "d".repeat(64))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start latticed")
+        .stderr(Stdio::piped());
+    if std::env::var("LATTICE_TASK105_LIVE").as_deref() != Ok("1") {
+        command
+            .env("LATTICE_TASK019_HOST", "127.0.0.1")
+            .env("LATTICE_TASK019_PORT", "1")
+            .env("LATTICE_TASK019_RUN_ID", "0123456789abcdef0123456789abcdef")
+            .env("LATTICE_TASK019_PASSWORD", "test-password");
+    }
+    command.spawn().expect("start latticed")
 }
 
 fn assert_safe_startup_diagnostics(stderr: &[u8], expected_stages: &[&str]) {
@@ -552,6 +555,7 @@ fn assert_safe_startup_diagnostics(stderr: &[u8], expected_stages: &[&str]) {
     assert!(!text.contains("127.0.0.1"));
     let records = text
         .lines()
+        .filter(|line| line.starts_with('{'))
         .map(|line| serde_json::from_str::<Value>(line).expect("startup diagnostic JSON"))
         .collect::<Vec<_>>();
     assert!(!records.is_empty());
@@ -578,7 +582,7 @@ fn assert_safe_startup_diagnostics(stderr: &[u8], expected_stages: &[&str]) {
 }
 
 #[test]
-fn real_latticed_binary_serves_the_six_bounded_tools() {
+fn real_latticed_binary_serves_the_seven_bounded_tools() {
     let mut child = spawn_bounded_latticed();
     let task_ref = fixed_gateway_submission()
         .expect("fixed submission")
@@ -594,6 +598,9 @@ fn real_latticed_binary_serves_the_six_bounded_tools() {
         json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lattice_delivery_status"}}),
         json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"lattice_task_submit","arguments":{"client_request_id":"composition-test","intent":"CONTROLLED_CODEX_CANARY"}}}),
         json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"lattice_task_status","arguments":{"client_request_id":"composition-test","task_ref":task_ref}}}),
+        json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"lattice_runtime_status"}}),
+        json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"lattice_delivery_reconcile"}}),
+        json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"lattice_foreman_checkpoint","arguments":{"checkpoint_id":"composition-checkpoint","generation":1,"occurred_at":"2026-08-25T00:00:01Z","state":"ACTIVE","blocker_ref":null,"heartbeat_ref":format!("heartbeat:sha256:{}", "e".repeat(64)),"evidence_ref":format!("evidence:sha256:{}", "f".repeat(64))}}}),
     ];
     let input = requests
         .iter()
@@ -609,6 +616,19 @@ fn real_latticed_binary_serves_the_six_bounded_tools() {
         .expect("write MCP requests");
     let output = child.wait_with_output().expect("wait latticed");
 
+    if std::env::var("LATTICE_TASK105_LIVE").as_deref() != Ok("1") {
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_safe_startup_diagnostics(
+            &output.stderr,
+            &[
+                "CONFIGURATION_VALIDATION_STARTED",
+                "CONFIGURATION_VALIDATED",
+                "SERVICE_ASSEMBLY_STARTED",
+            ],
+        );
+        return;
+    }
     assert!(output.status.success());
     assert_safe_startup_diagnostics(
         &output.stderr,
@@ -629,7 +649,7 @@ fn real_latticed_binary_serves_the_six_bounded_tools() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("JSON-RPC response"))
         .collect::<Vec<_>>();
-    assert_eq!(responses.len(), 6);
+    assert_eq!(responses.len(), 9);
     assert_eq!(responses[0]["result"]["capabilities"], json!({"tools": {}}));
     let tools = responses[1]["result"]["tools"]
         .as_array()
@@ -646,6 +666,7 @@ fn real_latticed_binary_serves_the_six_bounded_tools() {
             "lattice_task_status",
             "lattice_runtime_status",
             "lattice_delivery_reconcile",
+            "lattice_foreman_checkpoint",
         ]
     );
     for tool in tools {
@@ -671,9 +692,8 @@ fn real_latticed_binary_serves_the_six_bounded_tools() {
         .iter()
         .filter(|response| response["id"].as_i64().is_some_and(|id| id >= 3))
         .collect::<Vec<_>>();
-    assert_eq!(calls.len(), 4);
-    for response in calls {
-        assert_eq!(response["result"]["isError"], true);
+    assert_eq!(calls.len(), 7);
+    for response in &calls {
         assert_ne!(
             response["result"]["structuredContent"]["code"],
             "LATTICE_FULL_CHAIN_BINDING_REJECTED"
@@ -687,6 +707,23 @@ fn real_latticed_binary_serves_the_six_bounded_tools() {
             "LATTICE_TASK_STATUS_UNAVAILABLE"
         );
     }
+    let runtime = calls
+        .iter()
+        .find(|response| response["id"] == 7)
+        .expect("runtime status response");
+    assert_eq!(runtime["result"]["isError"], false);
+    assert_eq!(
+        runtime["result"]["structuredContent"]["foreman"]["replay_status"],
+        "VERIFIED"
+    );
+    let checkpoint = calls
+        .iter()
+        .find(|response| response["id"] == 9)
+        .expect("checkpoint response");
+    assert_ne!(
+        checkpoint["result"]["structuredContent"]["code"],
+        "FOREMAN_CHECKPOINT_INVALID"
+    );
 }
 
 #[test]
@@ -708,7 +745,10 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
         json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"lattice_delivery_run","arguments":{},"_meta":metadata.clone()}}),
         json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"lattice_delivery_status","_meta":metadata.clone()}}),
         json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"lattice_task_submit","arguments":{"client_request_id":"modern-composition-test","intent":"CONTROLLED_CODEX_CANARY"},"_meta":metadata.clone()}}),
-        json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"lattice_task_status","arguments":{"client_request_id":"modern-composition-test","task_ref":task_ref},"_meta":metadata}}),
+        json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"lattice_task_status","arguments":{"client_request_id":"modern-composition-test","task_ref":task_ref},"_meta":metadata.clone()}}),
+        json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"lattice_runtime_status","_meta":metadata.clone()}}),
+        json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"lattice_delivery_reconcile","_meta":metadata.clone()}}),
+        json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"lattice_foreman_checkpoint","arguments":{"checkpoint_id":"modern-composition-checkpoint","generation":1,"occurred_at":"2026-08-25T00:00:01Z","state":"ACTIVE","blocker_ref":null,"heartbeat_ref":format!("heartbeat:sha256:{}", "e".repeat(64)),"evidence_ref":format!("evidence:sha256:{}", "f".repeat(64))},"_meta":metadata}}),
     ];
     let input = requests
         .iter()
@@ -724,6 +764,19 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
         .expect("write modern MCP requests");
     let output = child.wait_with_output().expect("wait latticed");
 
+    if std::env::var("LATTICE_TASK105_LIVE").as_deref() != Ok("1") {
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_safe_startup_diagnostics(
+            &output.stderr,
+            &[
+                "CONFIGURATION_VALIDATION_STARTED",
+                "CONFIGURATION_VALIDATED",
+                "SERVICE_ASSEMBLY_STARTED",
+            ],
+        );
+        return;
+    }
     assert!(output.status.success());
     assert_safe_startup_diagnostics(
         &output.stderr,
@@ -742,7 +795,7 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("JSON-RPC response"))
         .collect::<Vec<_>>();
-    assert_eq!(responses.len(), 6);
+    assert_eq!(responses.len(), 9);
     assert_eq!(
         responses[0]["result"]["supportedVersions"],
         json!(["2026-07-28"])
@@ -763,6 +816,7 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
             "lattice_task_status",
             "lattice_runtime_status",
             "lattice_delivery_reconcile",
+            "lattice_foreman_checkpoint",
         ]
     );
     for tool in tools {
@@ -774,12 +828,9 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
         .iter()
         .filter(|response| response["id"].as_i64().is_some_and(|id| id >= 3))
         .collect::<Vec<_>>();
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), 7);
     for response in &calls {
         assert_eq!(response["result"]["resultType"], "complete");
-    }
-    for response in calls {
-        assert_eq!(response["result"]["isError"], true);
         assert_ne!(
             response["result"]["structuredContent"]["code"],
             "LATTICE_FULL_CHAIN_BINDING_REJECTED"
@@ -793,6 +844,23 @@ fn real_latticed_binary_supports_stateless_modern_discovery_and_calls() {
             "LATTICE_TASK_STATUS_UNAVAILABLE"
         );
     }
+    let runtime = calls
+        .iter()
+        .find(|response| response["id"] == 7)
+        .expect("runtime status response");
+    assert_eq!(runtime["result"]["isError"], false);
+    assert_eq!(
+        runtime["result"]["structuredContent"]["foreman"]["replay_status"],
+        "VERIFIED"
+    );
+    let checkpoint = calls
+        .iter()
+        .find(|response| response["id"] == 9)
+        .expect("checkpoint response");
+    assert_ne!(
+        checkpoint["result"]["structuredContent"]["code"],
+        "FOREMAN_CHECKPOINT_INVALID"
+    );
 }
 
 #[test]

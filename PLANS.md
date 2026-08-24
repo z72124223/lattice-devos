@@ -1,5 +1,29 @@
 # LATTICE DevOS V2 Plan
 
+## Current product integration — TASK-105
+
+Goal: integrate exact TASK-094 commit `1e4ac5d` into product base `387f556`,
+then expose one bounded durable foreman checkpoint and verified restart replay
+without creating another truth store or widening the legacy MCP surface.
+
+Current step: TASK-105 implementation and independent acceptance are complete
+at `f932432a5471d03eba869cec61c1b5f376ffc740`. The official PostgreSQL run
+`0e5c2971d099499183ee1643fe291e3d` passed the full fail-closed taxonomy,
+fresh-process replay, upgrade matrix and dual-process Writer race, followed by
+complete owned-resource teardown. Product Control scripts and the existing six
+modern tools remain compatible inside the exact seven-tool surface. Ordinary
+MCP serving never migrates; only explicit `latticed --postgres-bootstrap` may
+apply Writer-v3 then Store-v6 changes. Non-force feature delivery, PR/CI,
+product merge, installation and post-restart replay verification remain the
+parent foreman's active gates.
+
+Verification: focused contract/runtime tests, startup state matrix, marker-owned
+PostgreSQL on a dynamic port other than 5432/58743, fresh-process replay, scoped
+strict lint/format/check, and independent parent review. The changed core and
+adapter crates pass strict lint; full runtime/workspace strict lint remains
+honestly failed on broader existing diagnostics. Push, product merge,
+installation, deployment and archival remain parent-owned gates.
+
 ## Completed task update — TASK-066
 
 COMPLETED TASK-066 — the deterministic canonical reflection chain now proves

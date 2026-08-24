@@ -1,0 +1,12 @@
+[package]
+name = "lattice-foreman-state"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+time = { version = "=0.3.54", default-features = false, features = ["formatting", "parsing"] }
+
+[lints]
+workspace = true

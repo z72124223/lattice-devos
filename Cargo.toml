@@ -11,6 +11,7 @@ members = [
     "crates/lattice-orchestrator",
     "crates/lattice-openclaw-adapter",
     "crates/lattice-core",
+    "crates/lattice-foreman-state",
     "crates/lattice-gateway-ipc",
     "crates/lattice-approval-verifier",
     "crates/lattice-artifact-store",

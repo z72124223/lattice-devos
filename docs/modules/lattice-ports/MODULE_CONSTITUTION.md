@@ -1,10 +1,10 @@
 ---
 module_id: lattice-ports
 name: LATTICE I/O Ports
-version: 1.9
+version: 2.1
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-15
+last_reviewed: 2026-08-25
 ---
 
 ## Mission
@@ -12,7 +12,8 @@ last_reviewed: 2026-08-15
 Define the abstract Rust traits through which orchestration reaches the gateway,
 sole product-code writer, read-only knowledge lane, untrusted research lane,
 typed physical control store, durable delivery ledger, bounded workspace/Git
-lane, fixed-test lane, and authoritative Task lifecycle repository lane.
+lane, fixed-test lane, authoritative Task lifecycle repository lane, and the
+narrow foreman snapshot append/replay boundary.
 
 ## Non-Goals
 
@@ -32,6 +33,8 @@ lane, fixed-test lane, and authoritative Task lifecycle repository lane.
   transport values. Task Domain remains the semantic owner of `TaskState` and
   transition legality.
 - No runtime, durable, product, credential, or provider-session data.
+- The foreman port error boundary and typed append/load method shape only; it
+  owns neither snapshot state nor persistence.
 
 ## Public Contracts
 
@@ -65,6 +68,12 @@ lane, fixed-test lane, and authoritative Task lifecycle repository lane.
   `HistoricalOptional(Option<receipt>)`, or `RequiredComplete(receipt)`. It exposes no
   SQL, database client, event fragment, arbitrary payload, cache, or alternate
   state mutation, and it does not decide transition or receipt legality.
+- `ForemanCoordinationPort` first replays an exact checkpoint intent from
+  verified durable records, then appends one server-observed snapshot through
+  a stable command and exact Writer authority only when no retry exists, or
+  loads verified snapshots for fresh reconstruction. It exposes no SQL,
+  dashboard, diagnostic JSON, transcript, secret, generic event fragment, or
+  independent current-state mutation.
 - `WorkspaceGitPort` prepares/inspects the preconfigured bounded workspace and
   creates a local commit only from typed passing scope/test evidence. It
   exposes no arbitrary command or caller-selected path.
@@ -150,6 +159,7 @@ lane, fixed-test lane, and authoritative Task lifecycle repository lane.
 - `lattice-contracts`.
 - `lattice-task-domain` 2.2 only for the closed `TaskState` representation in
   Task lifecycle request/evidence signatures.
+- `lattice-foreman-state` 1.3 only for validated snapshot/projection values.
 - Rust standard library.
 
 ## Forbidden Dependencies
@@ -215,6 +225,8 @@ approval.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 2.0 | 2026-08-21 | SPEC-006 v3, ADR-024/025, TASK-079/087 | Add a narrow typed foreman append/replay port; no SQL, dashboard or second truth surface | Fixed-foreman delegation |
+| 2.1 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Add replay-before-observation checkpoint lookup while retaining one Ledger truth and closed errors | Sole-foreman delegation |
 | 1.0 | 2026-07-29 | SPEC-002 v3, ADR-004/006 | Inbound gateway plus four abstract outbound ports | User |
 | 1.1 | 2026-08-01 | SPEC-002 v13, ADR-015, TASK-017 | Complete typed gateway peer/request/reply signature; contracts-only dependency retained | User MVP-3 execution directive |
 | 1.2 | 2026-08-01 | SPEC-002 v14, ADR-015 review amendment, TASK-017 | Component-free Rust-core Gateway service error; external port attribution retained only for adapters/store | User MVP-3 execution directive |
