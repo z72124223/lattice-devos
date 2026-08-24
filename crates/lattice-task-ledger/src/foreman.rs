@@ -364,18 +364,19 @@ pub fn verify_untrusted_foreman_snapshot_rows(
     rows: &[UntrustedForemanSnapshotRow],
 ) -> Result<Vec<VerifiedForemanSnapshotRecord>, LedgerError> {
     ensure_fixed_stream(stream)?;
-    let events = stream
+    if stream
         .events()
         .iter()
-        .filter(|event| event.kind() == LedgerEventKind::ForemanSnapshotRecorded)
-        .collect::<Vec<_>>();
-    if events.len() != rows.len() {
+        .any(|event| event.kind() != LedgerEventKind::ForemanSnapshotRecorded)
+        || stream.commands().len() != stream.events().len()
+        || stream.events().len() != rows.len()
+    {
         return Err(LedgerError::InvalidForemanSnapshot);
     }
     let mut seen_events = BTreeSet::new();
     let mut identities = BTreeMap::<String, (String, u64)>::new();
     let mut verified = Vec::with_capacity(rows.len());
-    for event in events {
+    for event in stream.events() {
         let row = rows
             .iter()
             .find(|row| row.event_digest == *event.event_digest())

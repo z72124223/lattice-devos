@@ -1,12 +1,13 @@
-use lattice_contracts::RuntimeKind;
+use lattice_contracts::{ContentDigest, RuntimeKind};
 use lattice_foreman_state::{
     ForemanCheckpointIntent, ForemanSnapshot, ForemanState, SoleForemanBinding, reconstruct,
 };
 use lattice_task_ledger::{
-    CommandId, CorrelationId, ForemanAppendMetadata, LedgerError, LedgerEventKind,
-    UntrustedForemanSnapshotRow, VerifiedForemanSnapshotRecord, VerifiedStream, apply_append_plan,
-    foreman_coordination_identity, plan_foreman_snapshot_append, preflight_foreman_checkpoint,
-    verify_untrusted_foreman_snapshot_rows,
+    ActionId, ActorId, AppendCommand, CommandId, CorrelationId, ForemanAppendMetadata, LedgerError,
+    LedgerEventKind, LedgerOutcome, ReasonCode, UntrustedForemanSnapshotRow,
+    VerifiedForemanSnapshotRecord, VerifiedStream, apply_append_plan,
+    foreman_coordination_identity, plan_append, plan_foreman_snapshot_append,
+    preflight_foreman_checkpoint, verify_untrusted_foreman_snapshot_rows,
 };
 
 fn snapshot(generation: u64, state: ForemanState) -> ForemanSnapshot {
@@ -55,6 +56,61 @@ fn intent(command: &str, generation: u64, second: u8) -> ForemanCheckpointIntent
         "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     )
     .expect("intent")
+}
+
+fn foreign_command(head: lattice_contracts::TaskLedgerStreamHead, command: &str) -> AppendCommand {
+    AppendCommand::new(
+        head,
+        CommandId::new(command).expect("command"),
+        CorrelationId::new(format!("correlation-{command}")).expect("correlation"),
+        "2026-08-21T00:00:09Z",
+        LedgerEventKind::TaskCreated,
+        ActorId::new("foreign-actor").expect("actor"),
+        ActionId::new("foreign-action").expect("action"),
+        LedgerOutcome::Recorded,
+        ReasonCode::new("FOREIGN_EVENT").expect("reason"),
+        ContentDigest::from_sha256("f".repeat(64)).expect("digest"),
+        None,
+        None,
+    )
+    .expect("foreign command")
+}
+
+#[test]
+fn fixed_foreman_replay_rejects_foreign_events_and_extra_denied_commands() {
+    let identity = foreman_coordination_identity().expect("identity");
+    let vacant = VerifiedStream::vacant(identity, RuntimeKind::Fake).expect("vacant");
+    let foreign = plan_append(
+        &vacant,
+        foreign_command(vacant.head().clone(), "foreign-event"),
+    )
+    .expect("foreign plan");
+    let contaminated = apply_append_plan(&vacant, &foreign).expect("apply foreign event");
+    assert_eq!(
+        verify_untrusted_foreman_snapshot_rows(&contaminated, &[]),
+        Err(LedgerError::InvalidForemanSnapshot)
+    );
+
+    let first = plan_foreman_snapshot_append(
+        &vacant,
+        &[],
+        metadata("foreman-1", 1),
+        snapshot(1, ForemanState::Active),
+    )
+    .expect("first");
+    let record = first.new_record().expect("record").clone();
+    let stream = apply_append_plan(&vacant, first.ledger_plan()).expect("apply first");
+    let denied = plan_append(
+        &stream,
+        foreign_command(vacant.head().clone(), "extra-denied-command"),
+    )
+    .expect("denied plan");
+    assert!(denied.new_event().is_none());
+    let contaminated = apply_append_plan(&stream, &denied).expect("retain denial");
+    assert_eq!(
+        verify_untrusted_foreman_snapshot_rows(&contaminated, &[record.to_untrusted()]),
+        Err(LedgerError::InvalidForemanSnapshot)
+    );
 }
 
 #[test]
