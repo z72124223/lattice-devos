@@ -1,7 +1,7 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.14
+version: 1.15
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -62,6 +62,10 @@ to the public foreman conflict without changing tables, functions, or ownership.
 The actual dependent semantic owners are Task Ledger 2.7 and Foreman State 1.3:
 Store persists only their already-governed scalar event boundary and does not
 create a second foreman or Ledger meaning.
+Version 1.15 exposes one read-only exact migration-prefix classification for
+the product bootstrap coordinator. It returns only `Fresh`, `LegacyPrefix`,
+`V5`, or `V6` after verifying the target and retained embedded history; it
+does not inspect Writer rows, mutate admission, or authorize a migration.
 
 ## Non-Goals
 
@@ -212,6 +216,10 @@ create a second foreman or Ledger meaning.
 - `SchemaVerifier` performs read-only exact manifest, server, settings,
   database identity, bootstrap admission, effective-role, ACL/ownership, and
   protected-function checks.
+- `inspect_migration_profile` is a read-only migrator-bound classification of
+  exact embedded history into `Fresh`, `LegacyPrefix`, `V5`, or `V6`. Partial,
+  colliding, changed, unavailable, or wrong-target evidence is an error; the
+  caller receives no catalog rows or Writer semantics.
 - The deterministic fake remains visibly non-durable and preserves Store v1
   behavior. Contracts 1.9 / Ports 1.4 add v2 live durability and explicit
   mutable current-head observation without exposing a driver.
@@ -915,3 +923,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.12 | 2026-08-21 | SPEC-006 v3, ADR-024/025, TASK-079 | Append 0007 and bind fixed foreman scalars to the Ledger event under same-transaction Writer fencing and verified replay | Fixed-foreman delegation |
 | 1.13 | 2026-08-25 | SPEC-002 v38, ADR-026, TASK-094 boundary repair | Keep the existing 15-scalar assertion while forbidding Store Writer semantic-row parsing and adapter dependency; exact-v5 transition and exact-v6 idempotent retry call only the Writer-owned rebind procedure, with Task Ledger 2.4 and Foreman State 1.2 semantic ownership retained | TASK-094 repair authority |
 | 1.14 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Return one repeatable-read typed foreman replay evidence value, enforce the fixed sole-foreman identity on retained/write paths, and normalize execute-time changed-ID races without adding persistence or Writer semantics | Sole-foreman delegation |
+| 1.15 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Add a read-only exact Store migration-prefix classifier so product bootstrap can stop existing admission before Writer-v3 rebind or Store-v6 mutation without parsing Store or Writer rows in composition | Sole-foreman delegation |

@@ -17,8 +17,8 @@ pub use migrations::{
     migration_manifest, verify_embedded_manifest,
 };
 pub use postgres_setup::{
-    BootstrapAdmission, MigrationApplyOutcome, PostgresSchemaEvidence, apply_migrations,
-    verify_postgres_schema,
+    BootstrapAdmission, MigrationApplyOutcome, MigrationBootstrapProfile, PostgresSchemaEvidence,
+    apply_migrations, inspect_migration_profile, verify_postgres_schema,
 };
 pub use project_registry::{
     PostgresProjectRegistry, PostgresProjectRegistryError, PostgresProjectRegistryErrorKind,

@@ -1252,6 +1252,61 @@ pub enum MigrationApplyOutcome {
     AlreadyCurrent,
 }
 
+/// Read-only migration prefix used by the product bootstrap coordinator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MigrationBootstrapProfile {
+    Fresh,
+    LegacyPrefix,
+    V5,
+    V6,
+}
+
+/// Classifies only an exact embedded migration prefix without changing it.
+///
+/// # Errors
+///
+/// Rejects partial schemas, changed history, target drift, unavailable
+/// evidence, or an invalid migrator boundary.
+pub fn inspect_migration_profile(
+    client: &mut Client,
+    target: &MigrationTarget,
+) -> Result<MigrationBootstrapProfile, PostgresStoreSetupError> {
+    let mut transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+        })?;
+    harden_transaction(&mut transaction)?;
+    preflight_connection(
+        &mut transaction,
+        target,
+        DatabaseRole::Migrator,
+        SetupOperation::Migration,
+    )?;
+    let profile = match classify_installed_manifest_state(&mut transaction)? {
+        InstalledManifestState::Fresh => MigrationBootstrapProfile::Fresh,
+        InstalledManifestState::ExactV1Prefix
+        | InstalledManifestState::ExactV2Prefix
+        | InstalledManifestState::ExactV3Prefix
+        | InstalledManifestState::ExactV4Prefix => MigrationBootstrapProfile::LegacyPrefix,
+        InstalledManifestState::ExactV5Prefix => MigrationBootstrapProfile::V5,
+        InstalledManifestState::ExactV6Full => MigrationBootstrapProfile::V6,
+    };
+    preflight_connection(
+        &mut transaction,
+        target,
+        DatabaseRole::Migrator,
+        SetupOperation::Migration,
+    )?;
+    transaction.commit().map_err(|error| {
+        map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+    })?;
+    Ok(profile)
+}
+
 impl MigrationApplyOutcome {
     #[must_use]
     pub const fn executable_count(self) -> usize {
