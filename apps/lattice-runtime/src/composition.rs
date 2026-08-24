@@ -4249,6 +4249,14 @@ where
 
 impl<H: FullChainHermesPort> FullChainCore<H> {
     fn runtime_status_json(&mut self) -> Result<Value, LatticedError> {
+        let foreman = {
+            let mut coordination = foreman_coordination(self).map_err(foreman_replay_latticed)?;
+            let replay = coordination
+                .load_runtime_status()
+                .map_err(|error| foreman_replay_latticed(ToolExecutionError::new(error.code())))?;
+            drop(coordination);
+            replay
+        };
         let mut base = self.delivery.core_status_json()?;
         let object = base
             .as_object_mut()
@@ -4296,10 +4304,6 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
                 hermes_activation_status(hermes_production_preflight_from_environment()).to_owned(),
             ),
         );
-        let mut coordination = foreman_coordination(self).map_err(foreman_replay_latticed)?;
-        let foreman = coordination
-            .load_runtime_status()
-            .map_err(|error| foreman_replay_latticed(ToolExecutionError::new(error.code())))?;
         // Writer readiness is observed only after the Task Ledger replay has
         // been verified. It can degrade write readiness, never replay truth.
         let identity = foreman_coordination_identity()
@@ -8454,13 +8458,24 @@ mod tests {
         let replay = runtime_status
             .find("load_runtime_status")
             .expect("verified foreman replay");
+        let coordination_drop = runtime_status
+            .find("drop(coordination)")
+            .expect("foreman coordination release");
+        let delivery = runtime_status
+            .find("core_status_json")
+            .expect("delivery base status read");
         let writer = runtime_status
             .find("foreman_writer_lease")
             .expect("writer adapter construction");
         let current = runtime_status
             .find("current_authority")
             .expect("writer current-authority read");
-        assert!(replay < writer && writer < current);
+        assert!(
+            replay < coordination_drop
+                && coordination_drop < delivery
+                && delivery < writer
+                && writer < current
+        );
 
         for kind in [
             WriterLeaseRepositoryErrorKind::Unavailable,
