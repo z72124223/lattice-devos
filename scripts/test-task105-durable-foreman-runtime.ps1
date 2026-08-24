@@ -142,7 +142,7 @@ try {
     Push-Location -LiteralPath $repository
     try {
         & cargo test -p lattice-runtime --test task105_durable_foreman_runtime `
-            --locked -- --nocapture
+            --locked -- --nocapture --test-threads=1
         if ($LASTEXITCODE -ne 0) { throw 'TASK105_LIVE_TEST_FAILED' }
     }
     finally {
