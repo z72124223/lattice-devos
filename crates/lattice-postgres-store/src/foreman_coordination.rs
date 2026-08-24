@@ -1,14 +1,15 @@
 //! Typed foreman coordination Port bound to the durable Task Ledger repository.
 
 use lattice_contracts::{StoreAuthorityHead, WriterLeaseAuthorityHead};
-use lattice_foreman_state::{ForemanCheckpointIntent, ForemanSnapshot};
+use lattice_foreman_state::{ForemanCheckpointIntent, ForemanSnapshot, reconstruct};
 use lattice_ports::{
     ForemanAppendReceipt, ForemanCheckpointReplay, ForemanCoordinationError,
     ForemanCoordinationErrorKind, ForemanCoordinationPort, ForemanCoordinationResult,
+    ForemanRuntimeStatus,
 };
 use lattice_task_ledger::{
-    CommandId, CorrelationId, ForemanAppendMetadata, LedgerError, foreman_coordination_identity,
-    plan_foreman_snapshot_append,
+    CommandId, CorrelationId, ForemanAppendMetadata, LedgerError, plan_foreman_snapshot_append,
+    preflight_foreman_checkpoint,
 };
 
 use crate::{PostgresTaskLedger, PostgresTaskLedgerErrorKind};
@@ -36,30 +37,27 @@ impl ForemanCoordinationPort for PostgresForemanCoordination {
         intent: &ForemanCheckpointIntent,
     ) -> ForemanCoordinationResult<Option<ForemanCheckpointReplay>> {
         let command_id = CommandId::new(intent.checkpoint_id()).map_err(|_| malformed())?;
-        let records = self.ledger.load_foreman_records().map_err(map_error)?;
-        let Some(record) = records
+        let replay = self.ledger.load_foreman_replay().map_err(map_error)?;
+        let exact_retry =
+            preflight_foreman_checkpoint(replay.ledger().stream(), replay.records(), intent)
+                .map_err(|error| map_ledger_error(&error))?;
+        if !exact_retry {
+            return Ok(None);
+        }
+        let record = replay
+            .records()
             .iter()
             .find(|record| record.command_id() == &command_id)
-        else {
-            return Ok(None);
-        };
-        let identity = foreman_coordination_identity().map_err(|_| malformed())?;
-        let loaded = self.ledger.load_stream(identity).map_err(map_error)?;
-        let event = loaded
+            .ok_or_else(corrupt)?;
+        replay
+            .ledger()
             .stream()
             .events()
             .iter()
             .find(|event| event.command_id() == &command_id)
             .ok_or_else(corrupt)?;
-        if !intent.matches_snapshot(record.snapshot())
-            || event.occurred_at() != intent.occurred_at()
-        {
-            return Err(ForemanCoordinationError::new(
-                ForemanCoordinationErrorKind::Conflict,
-                "FOREMAN_CHECKPOINT_ID_REUSE",
-            ));
-        }
-        let command = loaded
+        let command = replay
+            .ledger()
             .stream()
             .commands()
             .iter()
@@ -93,18 +91,20 @@ impl ForemanCoordinationPort for PostgresForemanCoordination {
         snapshot: ForemanSnapshot,
         writer: &WriterLeaseAuthorityHead,
     ) -> ForemanCoordinationResult<ForemanAppendReceipt> {
-        let records = self.ledger.load_foreman_records().map_err(map_error)?;
-        let identity = foreman_coordination_identity().map_err(|_| malformed())?;
-        let loaded = self.ledger.load_stream(identity).map_err(map_error)?;
+        let replay = self.ledger.load_foreman_replay().map_err(map_error)?;
         let metadata = ForemanAppendMetadata::new(
             CommandId::new(command_id).map_err(|_| malformed())?,
             CorrelationId::new(correlation_id).map_err(|_| malformed())?,
             occurred_at,
         )
         .map_err(|_| malformed())?;
-        let plan =
-            plan_foreman_snapshot_append(loaded.stream(), &records, metadata, snapshot.clone())
-                .map_err(|error| map_ledger_error(&error))?;
+        let plan = plan_foreman_snapshot_append(
+            replay.ledger().stream(),
+            replay.records(),
+            metadata,
+            snapshot.clone(),
+        )
+        .map_err(|error| map_ledger_error(&error))?;
         let event_digest = plan
             .ledger_plan()
             .receipt()
@@ -139,6 +139,30 @@ impl ForemanCoordinationPort for PostgresForemanCoordination {
             })
             .map_err(map_error)
     }
+
+    fn load_runtime_status(&mut self) -> ForemanCoordinationResult<ForemanRuntimeStatus> {
+        let replay = self.ledger.load_foreman_replay().map_err(map_error)?;
+        let projection = reconstruct(
+            replay
+                .records()
+                .iter()
+                .map(|record| record.snapshot().clone()),
+        )
+        .map_err(|_| corrupt())?;
+        Ok(ForemanRuntimeStatus::new(
+            replay.ledger().stream().head().head_digest().clone(),
+            replay
+                .ledger()
+                .retained_checkpoint()
+                .checkpoint_digest()
+                .clone(),
+            projection.latest_generation(),
+            projection.active().len(),
+            projection.blocked().len(),
+            projection.completed().len(),
+            projection.runtime_next_action(),
+        ))
+    }
 }
 
 const fn malformed() -> ForemanCoordinationError {
@@ -156,12 +180,18 @@ const fn corrupt() -> ForemanCoordinationError {
 }
 
 fn map_error(error: crate::PostgresTaskLedgerError) -> ForemanCoordinationError {
+    if error.kind() == PostgresTaskLedgerErrorKind::CommandSubstitution {
+        return ForemanCoordinationError::new(
+            ForemanCoordinationErrorKind::Conflict,
+            "FOREMAN_CHECKPOINT_ID_REUSE",
+        );
+    }
     let kind = match error.kind() {
         PostgresTaskLedgerErrorKind::Malformed => ForemanCoordinationErrorKind::Malformed,
+        PostgresTaskLedgerErrorKind::CommandSubstitution => ForemanCoordinationErrorKind::Conflict,
         PostgresTaskLedgerErrorKind::AuthorityMismatch
         | PostgresTaskLedgerErrorKind::AdmissionDenied => ForemanCoordinationErrorKind::StaleWriter,
-        PostgresTaskLedgerErrorKind::CommandSubstitution
-        | PostgresTaskLedgerErrorKind::SerializationExhausted => {
+        PostgresTaskLedgerErrorKind::SerializationExhausted => {
             ForemanCoordinationErrorKind::Conflict
         }
         PostgresTaskLedgerErrorKind::CheckpointCorrupt

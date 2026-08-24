@@ -145,8 +145,11 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
 22. Dispatch/archive values are data only. They cannot create/control a window
     or process, reserve resources, invoke Codex, mutate files/PostgreSQL, access
     network/credentials, or bypass the governed execution path.
-23. Foreman exact retry performs no new observation or Writer effect. No unknown
-    append/release outcome is converted to success or duplicate append.
+23. Foreman exact retry performs no new Git observation, Writer acquire, or
+    Ledger append. It may read only the current Writer authority and issue the
+    deterministic release when the replayed checkpoint's retained authority
+    receipt digest matches exactly; this is the sole reconciliation exception.
+    No unknown append/release outcome is converted to success or duplicate append.
 
 ## Allowed Dependencies
 

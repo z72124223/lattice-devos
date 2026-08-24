@@ -5,7 +5,10 @@ use lattice_contracts::{
     ContentDigest, ProjectId, ProjectSnapshotId, TaskId, TaskLedgerStreamHead,
     TaskLedgerStreamIdentity,
 };
-use lattice_foreman_state::{EpistemicReferences, ForemanSnapshot, is_exact_next_generation};
+use lattice_foreman_state::{
+    EpistemicReferences, ForemanCheckpointIntent, ForemanSnapshot, SoleForemanBinding,
+    is_exact_next_generation,
+};
 
 use super::{
     AppendCommand, CommandId, CorrelationId, LedgerAppendPlan, LedgerError, LedgerEventKind,
@@ -219,6 +222,9 @@ pub fn plan_foreman_snapshot_append(
         .map(VerifiedForemanSnapshotRecord::to_untrusted)
         .collect::<Vec<_>>();
     verify_untrusted_foreman_snapshot_rows(current, &untrusted)?;
+    if !SoleForemanBinding::matches(&snapshot) {
+        return Err(LedgerError::InvalidForemanSnapshot);
+    }
 
     let payload_digest = foreman_snapshot_payload_digest(&snapshot)?;
     let retained = existing_records
@@ -287,6 +293,66 @@ pub fn plan_foreman_snapshot_append(
     })
 }
 
+/// Verifies an MCP checkpoint against the authoritative stream and child rows
+/// before Git observation or Writer acquisition. `Ok(true)` is an exact
+/// retained replay and `Ok(false)` is a valid exact-next new checkpoint.
+///
+/// # Errors
+///
+/// Rejects changed command reuse, corrupt retained rows, a non-fixed sole
+/// foreman identity, or any generation other than first=1 / previous+1.
+pub fn preflight_foreman_checkpoint(
+    current: &VerifiedStream,
+    existing_records: &[VerifiedForemanSnapshotRecord],
+    intent: &ForemanCheckpointIntent,
+) -> Result<bool, LedgerError> {
+    ensure_fixed_stream(current)?;
+    let untrusted = existing_records
+        .iter()
+        .map(VerifiedForemanSnapshotRecord::to_untrusted)
+        .collect::<Vec<_>>();
+    verify_untrusted_foreman_snapshot_rows(current, &untrusted)?;
+    if existing_records
+        .iter()
+        .any(|record| !SoleForemanBinding::matches(record.snapshot()))
+    {
+        return Err(LedgerError::InvalidForemanSnapshot);
+    }
+
+    let command_id = CommandId::new(intent.checkpoint_id())?;
+    if let Some(record) = existing_records
+        .iter()
+        .find(|record| record.command_id() == &command_id)
+    {
+        let command = current
+            .commands()
+            .iter()
+            .find(|command| command.request().command_id() == &command_id)
+            .ok_or(LedgerError::InvalidForemanSnapshot)?;
+        if !intent.matches_snapshot(record.snapshot())
+            || command.request().occurred_at() != intent.occurred_at()
+        {
+            return Err(LedgerError::CommandIdReuse);
+        }
+        return Ok(true);
+    }
+    if current
+        .commands()
+        .iter()
+        .any(|command| command.request().command_id() == &command_id)
+    {
+        return Err(LedgerError::InvalidForemanSnapshot);
+    }
+    let latest = existing_records
+        .iter()
+        .map(|record| record.snapshot().generation())
+        .max();
+    if !is_exact_next_generation(latest, intent.generation()) {
+        return Err(LedgerError::ForemanGenerationRollback);
+    }
+    Ok(false)
+}
+
 /// Verifies persistence rows against the independently replayed Ledger stream.
 ///
 /// # Errors
@@ -323,6 +389,9 @@ pub fn verify_untrusted_foreman_snapshot_rows(
             || row.snapshot.schema() != "lattice.foreman-snapshot/1.0"
         {
             return Err(LedgerError::UnknownForemanSnapshotVersion);
+        }
+        if !SoleForemanBinding::matches(&row.snapshot) {
+            return Err(LedgerError::InvalidForemanSnapshot);
         }
         if !seen_events.insert(row.event_digest.as_str().to_owned())
             || row.stream_id != *event.stream_id()

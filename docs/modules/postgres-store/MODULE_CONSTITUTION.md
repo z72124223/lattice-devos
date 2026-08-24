@@ -1,7 +1,7 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.13
+version: 1.14
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -55,7 +55,11 @@ procedure for the exact-v5 transition or exact-v6 idempotent retry. Store
 neither constructs nor interprets Writer state, and any procedure failure rolls
 back migration history, compatibility, Writer identity, Writer ledger, and
 runtime ACL changes together.
-The actual dependent semantic owners are Task Ledger 2.4 and Foreman State 1.2:
+Version 1.14 exposes one same-transaction, read-only foreman replay evidence
+value containing the verified Ledger stream/checkpoints and fixed-scalar child
+records. It also normalizes the existing execute-time command-substitution race
+to the public foreman conflict without changing tables, functions, or ownership.
+The actual dependent semantic owners are Task Ledger 2.7 and Foreman State 1.3:
 Store persists only their already-governed scalar event boundary and does not
 create a second foreman or Ledger meaning.
 
@@ -910,3 +914,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.11 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Reserve exact schema-v6 foreman-coordination catalog/ACL and Writer-v3 bridge recognition without implementing migration 0007 or event semantics | Fixed-foreman delegation |
 | 1.12 | 2026-08-21 | SPEC-006 v3, ADR-024/025, TASK-079 | Append 0007 and bind fixed foreman scalars to the Ledger event under same-transaction Writer fencing and verified replay | Fixed-foreman delegation |
 | 1.13 | 2026-08-25 | SPEC-002 v38, ADR-026, TASK-094 boundary repair | Keep the existing 15-scalar assertion while forbidding Store Writer semantic-row parsing and adapter dependency; exact-v5 transition and exact-v6 idempotent retry call only the Writer-owned rebind procedure, with Task Ledger 2.4 and Foreman State 1.2 semantic ownership retained | TASK-094 repair authority |
+| 1.14 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Return one repeatable-read typed foreman replay evidence value, enforce the fixed sole-foreman identity on retained/write paths, and normalize execute-time changed-ID races without adding persistence or Writer semantics | Sole-foreman delegation |

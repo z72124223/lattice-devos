@@ -36,9 +36,9 @@ pub use schema_v6_profile::{
     WriterLeaseV3Profile, verify_foreman_schema_v6_profile,
 };
 pub use task_ledger::{
-    PostgresTaskLedger, PostgresTaskLedgerError, PostgresTaskLedgerErrorKind,
-    PostgresTaskLedgerExecution, PostgresTaskLedgerLoad, PostgresTaskLedgerPersistenceEvidence,
-    PostgresTaskLedgerResult,
+    PostgresForemanReplay, PostgresTaskLedger, PostgresTaskLedgerError,
+    PostgresTaskLedgerErrorKind, PostgresTaskLedgerExecution, PostgresTaskLedgerLoad,
+    PostgresTaskLedgerPersistenceEvidence, PostgresTaskLedgerResult,
 };
 
 use std::collections::BTreeMap;

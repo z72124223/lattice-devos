@@ -9,6 +9,47 @@ const EPISTEMIC_SCHEMA: &str = "lattice.foreman-epistemic/1.0";
 const MAX_REFERENCE_BYTES: usize = 256;
 const MAX_CHECKPOINT_ID_BYTES: usize = 64;
 
+/// The only durable foreman identity admitted to the product coordination
+/// stream. Git evidence remains observed per checkpoint, but this identity is
+/// fixed by the server and cannot be supplied by an MCP caller.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SoleForemanBinding;
+
+impl SoleForemanBinding {
+    pub const WORKER: &'static str = "sole-foreman-v1";
+    pub const THREAD: &'static str = "lattice-devos-sole-foreman-v1";
+    pub const TASK: &'static str = "TASK-FOREMAN-COORDINATION";
+
+    /// Constructs one server-owned Git observation for the fixed identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed Git evidence.
+    pub fn observe_git(
+        branch: impl Into<String>,
+        worktree: impl Into<String>,
+        head: impl Into<String>,
+    ) -> Result<ForemanServerObservation, SnapshotError> {
+        ForemanServerObservation::new(
+            Self::WORKER,
+            Self::THREAD,
+            Self::TASK,
+            branch,
+            worktree,
+            head,
+        )
+    }
+
+    /// Verifies that a retained or proposed snapshot belongs to the sole
+    /// product foreman rather than an arbitrary generic worker identity.
+    #[must_use]
+    pub fn matches(snapshot: &ForemanSnapshot) -> bool {
+        snapshot.worker() == Self::WORKER
+            && snapshot.thread() == Self::THREAD
+            && snapshot.task() == Self::TASK
+    }
+}
+
 /// Closed worker coordination state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ForemanState {

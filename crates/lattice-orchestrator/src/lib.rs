@@ -15,10 +15,11 @@ use lattice_foreman_state::{ForemanCheckpointIntent, ForemanServerObservation, S
 use lattice_ports::{
     AutonomyDisposition, CodeSnapshotPort, CodebaseMemoryPort, ControlledTaskExecutionError,
     ControlledTaskExecutionPort, DeliveryCodexPort, DeliveryFailureCertainty, DeliveryLedgerPort,
-    DeliveryPortError, ForemanAppendReceipt, ForemanCoordinationError, ForemanCoordinationPort,
-    GraphMemoryPortError, GraphMemoryStage, GraphifyAnalysisPort, PortErrorKind,
-    TaskLifecycleAutonomyEvidence, TaskLifecycleError, TaskLifecycleEvidence, TaskLifecyclePort,
-    TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
+    DeliveryPortError, ForemanAppendReceipt, ForemanCoordinationError,
+    ForemanCoordinationErrorKind, ForemanCoordinationPort, GraphMemoryPortError, GraphMemoryStage,
+    GraphifyAnalysisPort, PortErrorKind, TaskLifecycleAutonomyEvidence, TaskLifecycleError,
+    TaskLifecycleEvidence, TaskLifecyclePort, TestRunnerPort, WorkspaceGitPort,
+    WriterAuthorityGuardPort,
 };
 
 /// Closed failure for the replay-first sole-foreman checkpoint workflow.
@@ -121,15 +122,25 @@ where
             ),
         )
         .map_err(ForemanCheckpointOrchestratorError::Snapshot)?;
-    let receipt = coordination
-        .append_snapshot(
-            intent.checkpoint_id(),
-            &format!("foreman:{}", intent.checkpoint_id()),
-            intent.occurred_at(),
-            snapshot,
-            &authority,
-        )
-        .map_err(ForemanCheckpointOrchestratorError::Append)?;
+    let receipt = match coordination.append_snapshot(
+        intent.checkpoint_id(),
+        &format!("foreman:{}", intent.checkpoint_id()),
+        intent.occurred_at(),
+        snapshot,
+        &authority,
+    ) {
+        Ok(receipt) => receipt,
+        Err(error) if error.kind() == ForemanCoordinationErrorKind::OutcomeUnknown => {
+            return Err(ForemanCheckpointOrchestratorError::Append(error));
+        }
+        Err(error) => {
+            // A known-not-committed Ledger rejection must not leak the Writer
+            // lease acquired for this attempt. Only an ambiguous append keeps
+            // authority current for later replay-first reconciliation.
+            release_foreman(writer, intent, project_id, authority)?;
+            return Err(ForemanCheckpointOrchestratorError::Append(error));
+        }
+    };
 
     release_foreman(writer, intent, project_id, authority)?;
     Ok(receipt)

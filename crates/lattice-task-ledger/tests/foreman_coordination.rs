@@ -1,26 +1,27 @@
 use lattice_contracts::RuntimeKind;
-use lattice_foreman_state::{ForemanSnapshot, ForemanState, reconstruct};
+use lattice_foreman_state::{
+    ForemanCheckpointIntent, ForemanSnapshot, ForemanState, SoleForemanBinding, reconstruct,
+};
 use lattice_task_ledger::{
     CommandId, CorrelationId, ForemanAppendMetadata, LedgerError, LedgerEventKind,
     UntrustedForemanSnapshotRow, VerifiedForemanSnapshotRecord, VerifiedStream, apply_append_plan,
-    foreman_coordination_identity, plan_foreman_snapshot_append,
+    foreman_coordination_identity, plan_foreman_snapshot_append, preflight_foreman_checkpoint,
     verify_untrusted_foreman_snapshot_rows,
 };
 
-fn snapshot(worker: &str, generation: u64, state: ForemanState) -> ForemanSnapshot {
-    snapshot_with_thread(worker, format!("thread-{worker}"), generation, state)
+fn snapshot(generation: u64, state: ForemanState) -> ForemanSnapshot {
+    snapshot_with_thread(SoleForemanBinding::THREAD, generation, state)
 }
 
 fn snapshot_with_thread(
-    worker: &str,
     thread: impl Into<String>,
     generation: u64,
     state: ForemanState,
 ) -> ForemanSnapshot {
     ForemanSnapshot::new(
-        worker,
+        SoleForemanBinding::WORKER,
         thread,
-        "TASK-079",
+        SoleForemanBinding::TASK,
         "feature/task-079-durable-foreman-state",
         "lattice-worktrees/task-079-durable-foreman-state",
         "1234567890abcdef1234567890abcdef12345678",
@@ -43,6 +44,48 @@ fn metadata(command: &str, second: u8) -> ForemanAppendMetadata {
     .expect("metadata")
 }
 
+fn intent(command: &str, generation: u64, second: u8) -> ForemanCheckpointIntent {
+    ForemanCheckpointIntent::new(
+        command,
+        generation,
+        format!("2026-08-21T00:00:{second:02}Z"),
+        ForemanState::Active,
+        None,
+        "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .expect("intent")
+}
+
+#[test]
+fn ledger_preflight_rejects_first_and_next_generation_gaps_before_effects() {
+    let identity = foreman_coordination_identity().expect("identity");
+    let mut stream = VerifiedStream::vacant(identity, RuntimeKind::Fake).expect("vacant");
+    let mut records = Vec::new();
+    assert_eq!(
+        preflight_foreman_checkpoint(&stream, &records, &intent("foreman-gap", 2, 1)),
+        Err(LedgerError::ForemanGenerationRollback)
+    );
+
+    let first = plan_foreman_snapshot_append(
+        &stream,
+        &records,
+        metadata("foreman-1", 1),
+        snapshot(1, ForemanState::Active),
+    )
+    .expect("first");
+    records.push(first.new_record().expect("record").clone());
+    stream = apply_append_plan(&stream, first.ledger_plan()).expect("apply");
+    assert_eq!(
+        preflight_foreman_checkpoint(&stream, &records, &intent("foreman-gap", 3, 2)),
+        Err(LedgerError::ForemanGenerationRollback)
+    );
+    assert!(
+        !preflight_foreman_checkpoint(&stream, &records, &intent("foreman-2", 2, 2))
+            .expect("exact next")
+    );
+}
+
 #[test]
 fn fixed_stream_appends_exact_generations_and_replays_after_fresh_load() {
     let identity = foreman_coordination_identity().expect("fixed identity");
@@ -53,7 +96,7 @@ fn fixed_stream_appends_exact_generations_and_replays_after_fresh_load() {
         &stream,
         &records,
         metadata("foreman-1", 1),
-        snapshot("worker-1", 1, ForemanState::Active),
+        snapshot(1, ForemanState::Active),
     )
     .expect("first append");
     assert_eq!(
@@ -67,7 +110,7 @@ fn fixed_stream_appends_exact_generations_and_replays_after_fresh_load() {
         &stream,
         &records,
         metadata("foreman-2", 2),
-        snapshot("worker-1", 2, ForemanState::Blocked),
+        snapshot(2, ForemanState::Blocked),
     )
     .expect("second append");
     records.push(second.new_record().expect("record").clone());
@@ -89,7 +132,7 @@ fn fixed_stream_appends_exact_generations_and_replays_after_fresh_load() {
     assert_eq!(projection.blocked().len(), 1);
     assert_eq!(
         projection.next_action(),
-        "unblock worker-1: dependency:TASK-087"
+        "unblock sole-foreman-v1: dependency:TASK-087"
     );
 }
 
@@ -97,7 +140,7 @@ fn fixed_stream_appends_exact_generations_and_replays_after_fresh_load() {
 fn exact_retry_is_idempotent_but_changed_command_and_generation_rollback_fail_closed() {
     let identity = foreman_coordination_identity().expect("fixed identity");
     let vacant = VerifiedStream::vacant(identity, RuntimeKind::Fake).expect("vacant");
-    let original_snapshot = snapshot("worker-1", 1, ForemanState::Active);
+    let original_snapshot = snapshot(1, ForemanState::Active);
     let original_metadata = metadata("same-command", 1);
     let first = plan_foreman_snapshot_append(
         &vacant,
@@ -124,7 +167,7 @@ fn exact_retry_is_idempotent_but_changed_command_and_generation_rollback_fail_cl
             &current,
             &records,
             original_metadata,
-            snapshot("worker-1", 2, ForemanState::Blocked),
+            snapshot(2, ForemanState::Blocked),
         ),
         Err(LedgerError::CommandIdReuse)
     );
@@ -133,7 +176,7 @@ fn exact_retry_is_idempotent_but_changed_command_and_generation_rollback_fail_cl
             &current,
             &records,
             metadata("rollback", 2),
-            snapshot("worker-1", 1, ForemanState::Active),
+            snapshot(1, ForemanState::Active),
         ),
         Err(LedgerError::ForemanGenerationRollback)
     );
@@ -147,7 +190,7 @@ fn foreman_append_rejects_generation_gap() {
         &stream,
         &[],
         metadata("foreman-gap-1", 1),
-        snapshot("worker-1", 1, ForemanState::Active),
+        snapshot(1, ForemanState::Active),
     )
     .expect("first");
     stream = apply_append_plan(&stream, first.ledger_plan()).expect("apply first");
@@ -158,7 +201,7 @@ fn foreman_append_rejects_generation_gap() {
             &stream,
             &[retained],
             metadata("foreman-gap-3", 3),
-            snapshot("worker-1", 3, ForemanState::Completed),
+            snapshot(3, ForemanState::Completed),
         ),
         Err(LedgerError::ForemanGenerationRollback)
     );
@@ -174,7 +217,7 @@ fn foreman_append_rejects_generation_other_than_one_on_empty_stream() {
             &stream,
             &[],
             metadata("foreman-first-2", 2),
-            snapshot("worker-1", 2, ForemanState::Active),
+            snapshot(2, ForemanState::Active),
         ),
         Err(LedgerError::ForemanGenerationRollback)
     );
@@ -188,7 +231,7 @@ fn foreman_append_rejects_thread_drift_before_planning_mutation() {
         &vacant,
         &[],
         metadata("foreman-thread-1", 1),
-        snapshot_with_thread("worker-1", "thread-a", 1, ForemanState::Active),
+        snapshot_with_thread(SoleForemanBinding::THREAD, 1, ForemanState::Active),
     )
     .expect("first");
     let current = apply_append_plan(&vacant, first.ledger_plan()).expect("apply");
@@ -199,7 +242,7 @@ fn foreman_append_rejects_thread_drift_before_planning_mutation() {
             &current,
             &records,
             metadata("foreman-thread-2", 2),
-            snapshot_with_thread("worker-1", "thread-b", 2, ForemanState::Blocked),
+            snapshot_with_thread("thread-b", 2, ForemanState::Blocked),
         ),
         Err(LedgerError::InvalidForemanSnapshot)
     );
@@ -214,7 +257,7 @@ fn unknown_child_schema_and_missing_child_fail_replay() {
         &vacant,
         &[],
         metadata("foreman-1", 1),
-        snapshot("worker-1", 1, ForemanState::Completed),
+        snapshot(1, ForemanState::Completed),
     )
     .expect("first");
     let current = apply_append_plan(&vacant, first.ledger_plan()).expect("apply");

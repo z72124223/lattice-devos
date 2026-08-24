@@ -12,6 +12,7 @@ use lattice_orchestrator::{ForemanCheckpointOrchestratorError, checkpoint_forema
 use lattice_ports::{
     ForemanAppendReceipt, ForemanCheckpointReplay, ForemanCoordinationError,
     ForemanCoordinationErrorKind, ForemanCoordinationPort, ForemanCoordinationResult,
+    ForemanRuntimeStatus,
 };
 use lattice_writer_lease::{
     AcquireClaim, AcquireCommand, FakeWriterLease, LeaseObservation, ReleaseCommand,
@@ -218,6 +219,9 @@ struct FakeCoordination {
     calls: Calls,
     replay: Option<ForemanCheckpointReplay>,
     append_unknown: bool,
+    append_unknown_committed: bool,
+    append_known_conflict: bool,
+    replay_error: Option<ForemanCoordinationError>,
     append_count: usize,
 }
 
@@ -227,6 +231,9 @@ impl FakeCoordination {
             calls,
             replay: None,
             append_unknown: false,
+            append_unknown_committed: false,
+            append_known_conflict: false,
+            replay_error: None,
             append_count: 0,
         }
     }
@@ -238,6 +245,9 @@ impl ForemanCoordinationPort for FakeCoordination {
         _intent: &ForemanCheckpointIntent,
     ) -> ForemanCoordinationResult<Option<ForemanCheckpointReplay>> {
         self.calls.borrow_mut().push("ledger:replay".to_owned());
+        if let Some(error) = &self.replay_error {
+            return Err(error.clone());
+        }
         Ok(self.replay.clone())
     }
 
@@ -251,7 +261,24 @@ impl ForemanCoordinationPort for FakeCoordination {
     ) -> ForemanCoordinationResult<ForemanAppendReceipt> {
         self.calls.borrow_mut().push("ledger:append".to_owned());
         self.append_count += 1;
-        if self.append_unknown {
+        if self.append_known_conflict {
+            return Err(ForemanCoordinationError::new(
+                ForemanCoordinationErrorKind::Conflict,
+                "FOREMAN_GENERATION_INVALID",
+            ));
+        }
+        if self.append_unknown || self.append_unknown_committed {
+            if self.append_unknown_committed {
+                let authority = snapshot
+                    .authority()
+                    .strip_prefix("authority:sha256:")
+                    .and_then(|value| ContentDigest::from_sha256(value).ok())
+                    .expect("authority digest");
+                self.replay = Some(ForemanCheckpointReplay::new(
+                    ForemanAppendReceipt::new(digest('1'), digest('2'), 1, true)?,
+                    authority,
+                ));
+            }
             return Err(ForemanCoordinationError::new(
                 ForemanCoordinationErrorKind::OutcomeUnknown,
                 "FOREMAN_APPEND_OUTCOME_UNKNOWN",
@@ -272,6 +299,18 @@ impl ForemanCoordinationPort for FakeCoordination {
 
     fn load_snapshots(&mut self) -> ForemanCoordinationResult<Vec<ForemanSnapshot>> {
         Ok(Vec::new())
+    }
+
+    fn load_runtime_status(&mut self) -> ForemanCoordinationResult<ForemanRuntimeStatus> {
+        Ok(ForemanRuntimeStatus::new(
+            digest('1'),
+            digest('2'),
+            0,
+            0,
+            0,
+            0,
+            "NO_DURABLE_SNAPSHOT",
+        ))
     }
 }
 
@@ -316,6 +355,71 @@ fn append_unknown_never_releases() {
         Err(ForemanCheckpointOrchestratorError::Append(_))
     ));
     assert!(!calls.borrow().iter().any(|call| call == "writer:release"));
+}
+
+#[test]
+fn append_unknown_that_committed_retries_via_replay_without_git_or_second_append() {
+    let calls = Calls::default();
+    let mut coordination = FakeCoordination::new(calls.clone());
+    coordination.append_unknown_committed = true;
+    let mut writer = FakeWriter::new(calls.clone(), ReleaseMode::Normal);
+    assert!(matches!(
+        run(&mut coordination, &mut writer, &calls),
+        Err(ForemanCheckpointOrchestratorError::Append(_))
+    ));
+    let append_count = coordination.append_count;
+    calls.borrow_mut().clear();
+    run(&mut coordination, &mut writer, &calls).expect("replay reconciles committed append");
+    assert_eq!(coordination.append_count, append_count);
+    assert_eq!(
+        calls.borrow().as_slice(),
+        ["ledger:replay", "writer:current", "writer:release"]
+    );
+}
+
+#[test]
+fn known_append_rejection_releases_writer_before_returning_error() {
+    let calls = Calls::default();
+    let mut coordination = FakeCoordination::new(calls.clone());
+    coordination.append_known_conflict = true;
+    let mut writer = FakeWriter::new(calls.clone(), ReleaseMode::Normal);
+    assert!(matches!(
+        run(&mut coordination, &mut writer, &calls),
+        Err(ForemanCheckpointOrchestratorError::Append(_))
+    ));
+    assert_eq!(
+        calls.borrow().as_slice(),
+        [
+            "ledger:replay",
+            "git:observe",
+            "writer:acquire",
+            "writer:current",
+            "ledger:append",
+            "writer:release",
+        ]
+    );
+    assert!(
+        writer
+            .current_authority(&acquire().project_id)
+            .expect("current")
+            .is_none()
+    );
+}
+
+#[test]
+fn preflight_generation_rejection_has_no_git_or_writer_effect() {
+    let calls = Calls::default();
+    let mut coordination = FakeCoordination::new(calls.clone());
+    coordination.replay_error = Some(ForemanCoordinationError::new(
+        ForemanCoordinationErrorKind::Conflict,
+        "FOREMAN_GENERATION_INVALID",
+    ));
+    let mut writer = FakeWriter::new(calls.clone(), ReleaseMode::Normal);
+    assert!(matches!(
+        run(&mut coordination, &mut writer, &calls),
+        Err(ForemanCheckpointOrchestratorError::Replay(_))
+    ));
+    assert_eq!(calls.borrow().as_slice(), ["ledger:replay"]);
 }
 
 #[test]

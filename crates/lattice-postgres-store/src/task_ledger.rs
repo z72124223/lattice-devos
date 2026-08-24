@@ -447,6 +447,26 @@ pub struct PostgresTaskLedgerLoad {
     autonomy_state: VerifiedAutonomyReceiptState,
 }
 
+/// One repeatable-read observation of the fixed foreman Ledger stream and
+/// every independently verified fixed-scalar child record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PostgresForemanReplay {
+    ledger: PostgresTaskLedgerLoad,
+    records: Vec<VerifiedForemanSnapshotRecord>,
+}
+
+impl PostgresForemanReplay {
+    #[must_use]
+    pub const fn ledger(&self) -> &PostgresTaskLedgerLoad {
+        &self.ledger
+    }
+
+    #[must_use]
+    pub fn records(&self) -> &[VerifiedForemanSnapshotRecord] {
+        &self.records
+    }
+}
+
 impl PostgresTaskLedgerLoad {
     #[must_use]
     pub const fn stream(&self) -> &VerifiedStream {
@@ -718,6 +738,16 @@ impl PostgresTaskLedger {
     pub fn load_foreman_records(
         &mut self,
     ) -> PostgresTaskLedgerResult<Vec<VerifiedForemanSnapshotRecord>> {
+        self.load_foreman_replay().map(|replay| replay.records)
+    }
+
+    /// Loads one same-transaction foreman replay including the authoritative
+    /// Ledger digests and all verified child records.
+    ///
+    /// # Errors
+    ///
+    /// Missing, extra, malformed, unknown-version, or cross-linked rows fail closed.
+    pub fn load_foreman_replay(&mut self) -> PostgresTaskLedgerResult<PostgresForemanReplay> {
         self.ensure_reconcilable()?;
         if !self.sql_profile.supports_foreman() {
             return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
@@ -760,7 +790,16 @@ impl PostgresTaskLedger {
         transaction
             .commit()
             .map_err(|database| map_database_error(&database))?;
-        Ok(records)
+        Ok(PostgresForemanReplay {
+            ledger: PostgresTaskLedgerLoad {
+                stream: loaded.stream,
+                retained_checkpoint: loaded.retained_checkpoint,
+                physical_head: loaded.physical_head,
+                persistence: self.global_persistence.clone(),
+                autonomy_state: loaded.autonomy_state,
+            },
+            records,
+        })
     }
 
     /// Executes one Task-Ledger-planned foreman snapshot under the exact

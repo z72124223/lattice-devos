@@ -3,6 +3,7 @@ use lattice_foreman_state::{ForemanCheckpointIntent, ForemanSnapshot, ForemanSta
 use lattice_ports::{
     ForemanAppendReceipt, ForemanCheckpointReplay, ForemanCoordinationError,
     ForemanCoordinationErrorKind, ForemanCoordinationPort, ForemanCoordinationResult,
+    ForemanRuntimeStatus,
 };
 
 #[derive(Default)]
@@ -34,6 +35,19 @@ impl ForemanCoordinationPort for RestartedReader {
 
     fn load_snapshots(&mut self) -> ForemanCoordinationResult<Vec<ForemanSnapshot>> {
         Ok(self.retained.clone())
+    }
+
+    fn load_runtime_status(&mut self) -> ForemanCoordinationResult<ForemanRuntimeStatus> {
+        let projection = reconstruct(self.retained.clone()).expect("projection");
+        Ok(ForemanRuntimeStatus::new(
+            lattice_contracts::ContentDigest::from_sha256("1".repeat(64)).expect("digest"),
+            lattice_contracts::ContentDigest::from_sha256("2".repeat(64)).expect("digest"),
+            projection.latest_generation(),
+            projection.active().len(),
+            projection.blocked().len(),
+            projection.completed().len(),
+            projection.runtime_next_action(),
+        ))
     }
 }
 

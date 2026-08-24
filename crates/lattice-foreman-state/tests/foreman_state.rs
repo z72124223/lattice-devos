@@ -1,6 +1,6 @@
 use lattice_foreman_state::{
     Confidence, DashboardIndex, EpistemicReferences, ForemanCheckpointIntent, ForemanSnapshot,
-    ForemanState, LiveWorktree, RefreshTrigger, SnapshotError, WatchdogFinding,
+    ForemanState, LiveWorktree, RefreshTrigger, SnapshotError, SoleForemanBinding, WatchdogFinding,
     is_exact_next_generation, reconstruct, watchdog,
 };
 
@@ -149,6 +149,40 @@ fn exact_generation_never_wraps_after_u64_max() {
 }
 
 #[test]
+fn sole_foreman_binding_constructs_and_verifies_only_the_fixed_identity() {
+    let observation = SoleForemanBinding::observe_git(
+        "feature/task-105-durable-foreman-runtime",
+        "lattice-worktrees/task-105-durable-foreman-runtime",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .expect("observation");
+    let intent = ForemanCheckpointIntent::new(
+        "checkpoint-fixed",
+        1,
+        "2026-08-25T00:00:01Z",
+        ForemanState::Active,
+        None,
+        "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .expect("intent");
+    let fixed = observation
+        .bind(
+            &intent,
+            "authority:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )
+        .expect("snapshot");
+    assert!(SoleForemanBinding::matches(&fixed));
+    assert!(!SoleForemanBinding::matches(&snapshot(
+        "worker-1",
+        1,
+        ForemanState::Active,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        None,
+    )));
+}
+
+#[test]
 fn checkpoint_intent_is_closed_lowercase_and_state_compatible() {
     let valid = ForemanCheckpointIntent::new(
         "checkpoint-1",
@@ -203,7 +237,27 @@ fn checkpoint_intent_is_closed_lowercase_and_state_compatible() {
         ),
         Err(SnapshotError::MissingBlocker)
     );
-    for invalid_time in ["2026-99-99T00:00:00Z", "2026-08-25T24:00:00Z"] {
+    for state in [ForemanState::Active, ForemanState::Completed] {
+        assert_eq!(
+            ForemanCheckpointIntent::new(
+                "checkpoint-blocker",
+                1,
+                "2026-08-25T00:00:01Z",
+                state,
+                Some("TASK-094".to_owned()),
+                "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+            Err(SnapshotError::UnexpectedBlocker)
+        );
+    }
+    for invalid_time in [
+        "2026-99-99T00:00:00Z",
+        "2026-08-25T24:00:00Z",
+        "2026-08-25T00:00:01+00:00",
+        "2026-08-25T00:00:01.000Z",
+        "2026-08-25T00:00:01z",
+    ] {
         assert_eq!(
             ForemanCheckpointIntent::new(
                 "checkpoint-time",

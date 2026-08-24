@@ -105,6 +105,71 @@ pub struct ForemanCheckpointReplay {
     authority_receipt_digest: ContentDigest,
 }
 
+/// Replay-verified durable Runtime projection for the sole foreman.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForemanRuntimeStatus {
+    ledger_digest: ContentDigest,
+    checkpoint_digest: ContentDigest,
+    latest_generation: u64,
+    active_count: usize,
+    blocked_count: usize,
+    completed_count: usize,
+    next_action: &'static str,
+}
+
+impl ForemanRuntimeStatus {
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub const fn new(
+        ledger_digest: ContentDigest,
+        checkpoint_digest: ContentDigest,
+        latest_generation: u64,
+        active_count: usize,
+        blocked_count: usize,
+        completed_count: usize,
+        next_action: &'static str,
+    ) -> Self {
+        Self {
+            ledger_digest,
+            checkpoint_digest,
+            latest_generation,
+            active_count,
+            blocked_count,
+            completed_count,
+            next_action,
+        }
+    }
+
+    #[must_use]
+    pub const fn ledger_digest(&self) -> &ContentDigest {
+        &self.ledger_digest
+    }
+    #[must_use]
+    pub const fn checkpoint_digest(&self) -> &ContentDigest {
+        &self.checkpoint_digest
+    }
+    #[must_use]
+    pub const fn latest_generation(&self) -> u64 {
+        self.latest_generation
+    }
+    #[must_use]
+    pub const fn active_count(&self) -> usize {
+        self.active_count
+    }
+    #[must_use]
+    pub const fn blocked_count(&self) -> usize {
+        self.blocked_count
+    }
+    #[must_use]
+    pub const fn completed_count(&self) -> usize {
+        self.completed_count
+    }
+    #[must_use]
+    pub const fn next_action(&self) -> &'static str {
+        self.next_action
+    }
+}
+
 impl ForemanCheckpointReplay {
     #[must_use]
     pub const fn new(
@@ -212,6 +277,13 @@ pub trait ForemanCoordinationPort {
     ///
     /// Missing, partial, unknown-version, or corrupt persistence fails closed.
     fn load_snapshots(&mut self) -> ForemanCoordinationResult<Vec<ForemanSnapshot>>;
+
+    /// Loads the complete verified Runtime projection and its Ledger digests.
+    ///
+    /// # Errors
+    ///
+    /// Corrupt, unsupported or unavailable replay fails closed.
+    fn load_runtime_status(&mut self) -> ForemanCoordinationResult<ForemanRuntimeStatus>;
 }
 
 /// Result returned by the authoritative Task lifecycle repository boundary.
