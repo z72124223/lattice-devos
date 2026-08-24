@@ -67,9 +67,15 @@ $startOut = Join-Path $runRoot 'pg-start.out'
 $startErr = Join-Path $runRoot 'pg-start.err'
 $stopOut = Join-Path $runRoot 'pg-stop.out'
 $stopErr = Join-Path $runRoot 'pg-stop.err'
-$password = [Convert]::ToHexString(
-    [Security.Cryptography.RandomNumberGenerator]::GetBytes(24)
-).ToLowerInvariant()
+$passwordBytes = New-Object byte[] 24
+$passwordGenerator = [Security.Cryptography.RandomNumberGenerator]::Create()
+try {
+    $passwordGenerator.GetBytes($passwordBytes)
+}
+finally {
+    $passwordGenerator.Dispose()
+}
+$password = ([BitConverter]::ToString($passwordBytes)).Replace('-', '').ToLowerInvariant()
 $started = $false
 
 try {
@@ -80,7 +86,7 @@ try {
         port = $Port
         created_utc = [DateTime]::UtcNow.ToString('o')
         postgres_executable = $postgres
-    } | ConvertTo-Json | Set-Content -LiteralPath $markerPath -Encoding utf8NoBOM
+    } | ConvertTo-Json | Set-Content -LiteralPath $markerPath -Encoding utf8
     Set-Content -LiteralPath $passwordPath -Value $password -Encoding ascii -NoNewline
 
     & $initdb -D $dataRoot -U runtime_bootstrap --auth-host=scram-sha-256 `
