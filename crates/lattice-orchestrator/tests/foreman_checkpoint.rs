@@ -275,7 +275,7 @@ impl ForemanCoordinationPort for FakeCoordination {
                     .and_then(|value| ContentDigest::from_sha256(value).ok())
                     .expect("authority digest");
                 self.replay = Some(ForemanCheckpointReplay::new(
-                    ForemanAppendReceipt::new(digest('1'), digest('2'), 1, true)?,
+                    ForemanAppendReceipt::new(digest('1'), digest('3'), digest('2'), 1, true)?,
                     authority,
                 ));
             }
@@ -284,14 +284,14 @@ impl ForemanCoordinationPort for FakeCoordination {
                 "FOREMAN_APPEND_OUTCOME_UNKNOWN",
             ));
         }
-        let receipt = ForemanAppendReceipt::new(digest('1'), digest('2'), 1, false)?;
+        let receipt = ForemanAppendReceipt::new(digest('1'), digest('3'), digest('2'), 1, false)?;
         let authority = snapshot
             .authority()
             .strip_prefix("authority:sha256:")
             .and_then(|value| ContentDigest::from_sha256(value).ok())
             .expect("authority digest");
         self.replay = Some(ForemanCheckpointReplay::new(
-            ForemanAppendReceipt::new(digest('1'), digest('2'), 1, true)?,
+            ForemanAppendReceipt::new(digest('1'), digest('3'), digest('2'), 1, true)?,
             authority,
         ));
         Ok(receipt)

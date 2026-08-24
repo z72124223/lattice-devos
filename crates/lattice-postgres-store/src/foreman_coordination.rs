@@ -65,6 +65,7 @@ impl ForemanCoordinationPort for PostgresForemanCoordination {
             .ok_or_else(corrupt)?;
         let receipt = ForemanAppendReceipt::new(
             record.event_digest().clone(),
+            command.receipt().after().head_digest().clone(),
             command.result_checkpoint().checkpoint_digest().clone(),
             record.snapshot().generation(),
             true,
@@ -116,12 +117,14 @@ impl ForemanCoordinationPort for PostgresForemanCoordination {
             .next_checkpoint()
             .checkpoint_digest()
             .clone();
+        let ledger_digest = plan.ledger_plan().receipt().after().head_digest().clone();
         let execution = self
             .ledger
             .execute_foreman(&plan, &self.store_authority, writer)
             .map_err(map_error)?;
         ForemanAppendReceipt::new(
             event_digest,
+            ledger_digest,
             checkpoint_digest,
             snapshot.generation(),
             execution.is_exact_retry(),

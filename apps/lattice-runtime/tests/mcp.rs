@@ -1035,7 +1035,101 @@ fn foreman_checkpoint_rejects_prohibited_fields_before_dispatch() {
             }))
             .expect("rejection");
         assert_eq!(response["error"]["code"], -32602, "{property}");
+        assert_eq!(
+            response["error"]["data"]["code"], "FOREMAN_CHECKPOINT_INVALID",
+            "{property}"
+        );
         assert_eq!(calls.get(), 0, "{property}");
+    }
+}
+
+#[test]
+fn foreman_checkpoint_invalid_format_time_and_blocker_matrix_has_stable_protocol_code() {
+    let cases = [
+        ("unsafe-id", "checkpoint_id", json!("-bad")),
+        ("zero-generation", "generation", json!(0)),
+        (
+            "offset-time",
+            "occurred_at",
+            json!("2026-08-25T00:00:01+00:00"),
+        ),
+        (
+            "fraction-time",
+            "occurred_at",
+            json!("2026-08-25T00:00:01.000Z"),
+        ),
+        ("invalid-date", "occurred_at", json!("2026-99-99T00:00:01Z")),
+        ("unknown-state", "state", json!("active")),
+        (
+            "uppercase-heartbeat",
+            "heartbeat_ref",
+            json!(format!("heartbeat:sha256:{}", "A".repeat(64))),
+        ),
+        (
+            "bad-evidence-prefix",
+            "evidence_ref",
+            json!(format!("heartbeat:sha256:{}", "b".repeat(64))),
+        ),
+    ];
+    for (id, field, value) in cases {
+        let calls = Rc::new(Cell::new(0));
+        let mut server = McpServer::new(
+            CheckpointService {
+                calls: calls.clone(),
+            },
+            fixed_binding().clone(),
+        );
+        initialize(&mut server);
+        let mut arguments = valid_foreman_checkpoint_arguments()
+            .as_object()
+            .expect("arguments")
+            .clone();
+        arguments.insert(field.to_owned(), value);
+        let response = server
+            .handle(json!({
+                "jsonrpc":"2.0", "id":id, "method":"tools/call",
+                "params":{"name":"lattice_foreman_checkpoint","arguments":arguments}
+            }))
+            .expect("rejection");
+        assert_eq!(response["error"]["code"], -32602, "{id}");
+        assert_eq!(
+            response["error"]["data"]["code"], "FOREMAN_CHECKPOINT_INVALID",
+            "{id}"
+        );
+        assert_eq!(calls.get(), 0, "{id}");
+    }
+
+    for (id, state, blocker) in [
+        ("active-blocker", "ACTIVE", json!("TASK-094")),
+        ("completed-blocker", "COMPLETED", json!("TASK-094")),
+        ("blocked-without-blocker", "BLOCKED", Value::Null),
+    ] {
+        let calls = Rc::new(Cell::new(0));
+        let mut server = McpServer::new(
+            CheckpointService {
+                calls: calls.clone(),
+            },
+            fixed_binding().clone(),
+        );
+        initialize(&mut server);
+        let mut arguments = valid_foreman_checkpoint_arguments()
+            .as_object()
+            .expect("arguments")
+            .clone();
+        arguments.insert("state".to_owned(), json!(state));
+        arguments.insert("blocker_ref".to_owned(), blocker);
+        let response = server
+            .handle(json!({
+                "jsonrpc":"2.0", "id":id, "method":"tools/call",
+                "params":{"name":"lattice_foreman_checkpoint","arguments":arguments}
+            }))
+            .expect("rejection");
+        assert_eq!(response["error"]["code"], -32602, "{id}");
+        assert_eq!(
+            response["error"]["data"]["code"], "FOREMAN_CHECKPOINT_INVALID",
+            "{id}"
+        );
+        assert_eq!(calls.get(), 0, "{id}");
     }
 }
 

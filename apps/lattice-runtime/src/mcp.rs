@@ -1650,6 +1650,21 @@ impl<S: DeliveryToolService> McpServer<S> {
         protocol_error(id, code, message)
     }
 
+    fn reject_foreman_checkpoint_params(&mut self, id: Value) -> Value {
+        if let Err(error) =
+            with_observed_effect_evidence(|evidence| evidence.reject_probe("MCP_INVALID_PARAMS"))
+        {
+            self.acceptance_evidence_error = Some(error);
+            return protocol_error(id, -32603, "Acceptance evidence rejected");
+        }
+        protocol_error_with_machine_code(
+            id,
+            -32602,
+            "Invalid foreman checkpoint arguments",
+            "FOREMAN_CHECKPOINT_INVALID",
+        )
+    }
+
     fn reject_budget_probe(
         &mut self,
         id: Value,
@@ -1925,12 +1940,7 @@ impl<S: DeliveryToolService> McpServer<S> {
                 let Some(arguments) =
                     ForemanCheckpointArguments::from_value(params.get("arguments"))
                 else {
-                    return self.reject_observed_probe(
-                        id,
-                        "MCP_INVALID_PARAMS",
-                        -32602,
-                        "Invalid foreman checkpoint arguments",
-                    );
+                    return self.reject_foreman_checkpoint_params(id);
                 };
                 ToolOperation::ForemanCheckpoint(arguments)
             }
@@ -2827,6 +2837,17 @@ fn protocol_error(id: Value, code: i32, message: &'static str) -> Value {
     response.insert("id".to_owned(), id);
     response.insert("error".to_owned(), Value::Object(error));
     Value::Object(response)
+}
+
+fn protocol_error_with_machine_code(
+    id: Value,
+    code: i32,
+    message: &'static str,
+    machine_code: &'static str,
+) -> Value {
+    let mut response = protocol_error(id, code, message);
+    response["error"]["data"] = json!({"code": machine_code});
+    response
 }
 
 fn unsupported_protocol_error(id: Value, requested: &str) -> Value {

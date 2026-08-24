@@ -92,6 +92,7 @@ impl Error for ForemanCoordinationError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForemanAppendReceipt {
     event_digest: ContentDigest,
+    ledger_digest: ContentDigest,
     checkpoint_digest: ContentDigest,
     generation: u64,
     exact_retry: bool,
@@ -204,6 +205,7 @@ impl ForemanAppendReceipt {
     /// Rejects zero generation.
     pub fn new(
         event_digest: ContentDigest,
+        ledger_digest: ContentDigest,
         checkpoint_digest: ContentDigest,
         generation: u64,
         exact_retry: bool,
@@ -216,6 +218,7 @@ impl ForemanAppendReceipt {
         }
         Ok(Self {
             event_digest,
+            ledger_digest,
             checkpoint_digest,
             generation,
             exact_retry,
@@ -225,6 +228,13 @@ impl ForemanAppendReceipt {
     #[must_use]
     pub const fn event_digest(&self) -> &ContentDigest {
         &self.event_digest
+    }
+
+    /// The authoritative resulting Task Ledger stream-head digest exposed on
+    /// the checkpoint wire and reproduced by Runtime Status after restart.
+    #[must_use]
+    pub const fn ledger_digest(&self) -> &ContentDigest {
+        &self.ledger_digest
     }
 
     #[must_use]
@@ -1642,5 +1652,15 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn foreman_append_receipt_keeps_event_and_resulting_ledger_head_distinct() {
+        let receipt = ForemanAppendReceipt::new(digest('a'), digest('b'), digest('c'), 1, false)
+            .expect("receipt");
+        assert_eq!(receipt.event_digest(), &digest('a'));
+        assert_eq!(receipt.ledger_digest(), &digest('b'));
+        assert_eq!(receipt.checkpoint_digest(), &digest('c'));
+        assert!(!receipt.is_exact_retry());
     }
 }
