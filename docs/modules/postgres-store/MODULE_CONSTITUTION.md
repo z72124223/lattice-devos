@@ -51,9 +51,10 @@ Version 1.13 permits one narrow migration-only exception: after the exact
 schema-v5 prefix has been verified and ordinal `0007` plus the schema-v6
 compatibility row are staged in the existing runner transaction, Store may call
 only the Writer-owned zero-argument `writer_lease.writer_lease_rebind_v3()`
-procedure. Store neither constructs nor interprets Writer state, and any
-procedure failure rolls back migration history, compatibility, Writer identity,
-Writer ledger, and runtime ACL changes together.
+procedure for the exact-v5 transition or exact-v6 idempotent retry. Store
+neither constructs nor interprets Writer state, and any procedure failure rolls
+back migration history, compatibility, Writer identity, Writer ledger, and
+runtime ACL changes together.
 The actual dependent semantic owners are Task Ledger 2.4 and Foreman State 1.2:
 Store persists only their already-governed scalar event boundary and does not
 create a second foreman or Ledger meaning.
@@ -93,8 +94,8 @@ create a second foreman or Ledger meaning.
 - Install, migrate, write, replay, repair, or expose Writer Lease extension
   state. The only exceptions are the fixed 15-scalar
   `writer_lease_assert_current_v1` predicate at a Task Ledger mutation boundary
-  and, solely while advancing exact v5 to v6 in the existing migration
-  transaction, the fixed Writer-owned zero-argument
+  and, solely for the exact-v5 transition or exact-v6 idempotent retry in the
+  existing migration transaction, the fixed Writer-owned zero-argument
   `writer_lease.writer_lease_rebind_v3()` procedure. Neither exception grants a
   Writer repository API, generic SQL, state parsing, state construction, or
   semantic ownership; PostgreSQL Writer Lease remains the persistence adapter

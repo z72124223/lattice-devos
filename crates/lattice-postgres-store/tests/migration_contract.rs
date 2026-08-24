@@ -91,17 +91,40 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
         "SET row_security = on",
         "SET lock_timeout = '5s'",
         "SET statement_timeout = '30s'",
-        "LOCK TABLE writer_lease.writer_lease_extension_identity",
-        "writer_lease.writer_lease_extension_ledger",
-        "writer_lease.writer_lease_heads",
-        "writer_lease.writer_lease_commands",
-        "writer_lease.writer_lease_transitions",
     ] {
         assert!(
             rebind_sql.contains(required),
             "missing Writer-owned rebind boundary: {required}"
         );
     }
+    let lock_block = rebind_sql
+        .split_once("LOCK TABLE ")
+        .expect("Writer-owned rebind lock statement")
+        .1
+        .split_once(" IN SHARE ROW EXCLUSIVE MODE;")
+        .expect("Writer-owned rebind lock mode terminator")
+        .0;
+    let lock_order = [
+        "writer_lease.writer_lease_extension_identity",
+        "writer_lease.writer_lease_extension_ledger",
+        "writer_lease.writer_lease_heads",
+        "writer_lease.writer_lease_commands",
+        "writer_lease.writer_lease_transitions",
+    ]
+    .map(|table| {
+        assert_eq!(
+            lock_block.matches(table).count(),
+            1,
+            "Writer-owned lock block must name {table} exactly once"
+        );
+        lock_block
+            .find(table)
+            .unwrap_or_else(|| panic!("Writer-owned lock block missing {table}"))
+    });
+    assert!(
+        lock_order.windows(2).all(|pair| pair[0] < pair[1]),
+        "Writer-owned lock block must order identity, ledger, heads, commands, transitions"
+    );
     assert!(!rebind_sql.contains(
         "GRANT EXECUTE ON PROCEDURE writer_lease.writer_lease_rebind_v3() TO lattice_runtime"
     ));
