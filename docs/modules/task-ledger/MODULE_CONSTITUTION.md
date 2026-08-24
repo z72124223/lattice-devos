@@ -1,10 +1,10 @@
 ---
 module_id: task-ledger
 name: Task Ledger
-version: 2.6
+version: 2.7
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-24
+last_reviewed: 2026-08-25
 ---
 
 ## Mission
@@ -12,8 +12,9 @@ last_reviewed: 2026-08-24
 Own the versioned event, hash-chain, exact command-receipt, verified replay,
 resource-projection, effect-intent outbox-admission, pure append-plan, and
 complete checkpoint semantics, including the closed autonomy-receipt event,
-and the authoritative Task-created autonomy profile discriminator that
-PostgreSQL persists as the single durable control-plane truth.
+the fixed foreman stream/event append plan and child-row verifier, and the
+authoritative Task-created autonomy profile discriminator that PostgreSQL
+persists as the single durable control-plane truth.
 
 ## Non-Goals
 
@@ -103,6 +104,9 @@ until a separately approved module/ticket owns those mechanics.
   required-receipt pending, or required-receipt complete. The one-event
   required prefix may exist only as a non-runtime-admissible reconciliation
   state; transition, completed replay, and Status require the exact receipt.
+- Plan one fixed foreman append, exact retry, or changed-ID rejection against
+  replay-verified event/command/child rows; verify exact-next generation and
+  return the existing Ledger checkpoint without creating a current-state row.
 
 ## Invariants
 
@@ -168,9 +172,10 @@ until a separately approved module/ticket owns those mechanics.
 24. The `writer_lease_head_digest` is a commitment to the exact 15-scalar
     Writer current-authority assertion tuple. Caller-supplied projection fields
     outside that predicate cannot alter or enlarge the durable authority claim.
-25. Public MCP tools, input schemas, and six-field output remain unchanged by
-    the internal event. Projection-only status may derive from verified state
-    but cannot become a second durable record or wire authority.
+25. The internal event alone never widens MCP. ADR-027/SPEC-009 separately
+    authorize one closed `lattice_foreman_checkpoint` adapter and a verified
+    Runtime Status projection; neither becomes a second durable record or wire
+    authority, and the legacy observer remains unchanged.
 26. The event-kind contract cannot expose a value that the active PostgreSQL
     schema cannot persist. Schema-v5 readers continue to reject the withdrawn
     `INGRESS_RECEIPT_HANDOFF` spelling as unknown.
@@ -184,6 +189,8 @@ until a separately approved module/ticket owns those mechanics.
 - `lattice-contracts` 1.9 immutable shared values and Task Ledger receipt/head
   representations, whose Ledger-specific semantics remain unchanged from 1.3.
 - `lattice-cjson` 1.0 canonical-byte/hash mechanics only.
+- `lattice-foreman-state` 1.3 only for the closed snapshot/checkpoint input and
+  replay-projection semantics owned by that module.
 - exact `time` 0.3.54 parsing/formatting only for caller-supplied canonical UTC
   RFC 3339 timestamps; no clock reads.
 
@@ -276,3 +283,4 @@ compatibility plan, security and architecture review, and user authorization.
 | 2.4 | 2026-08-24 | ADR-024, SPEC-008 v1 | Proposed a closed append-only successor ingress receipt handoff; superseded before deployment because schema v5 could not persist it | User-selected versioned handoff |
 | 2.5 | 2026-08-24 | ADR-025, SPEC-008 v2 | Withdraw the unpersistable source-only handoff event while preserving all deployed schema-v5 and historical bytes | User-authorized bounded repair |
 | 2.6 | 2026-08-25 | SPEC-006 v3, ADR-024/025, TASK-079/087/094 | Add fixed foreman stream/event generation, typed payload commitment and child-row replay verification without changing historical bytes | Fixed-foreman delegation and TASK-105 integration |
+| 2.7 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Require exact-next foreman generation and narrow the separately approved MCP adapter/status projection without changing Ledger bytes or legacy MCP | Sole-foreman delegation |

@@ -1,10 +1,10 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 2.6
+version: 2.7
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-24
+last_reviewed: 2026-08-25
 ---
 
 ## Mission
@@ -38,17 +38,21 @@ Orchestrator composition.
 
 ## Public Contracts
 
-- Construct one Orchestrator 2.6 instance with typed Contracts 1.13 / Ports 1.9
+- Construct one Orchestrator 2.7 instance with typed Contracts 1.13 / Ports 2.1
   implementations for the bounded delivery, graph-memory, and task-control
   paths.
-- Through canonical `latticed`, expose exactly six MCP tools:
+- Through canonical `latticed`, expose exactly seven MCP tools:
   `lattice_delivery_run`, `lattice_delivery_status`, `lattice_runtime_status`,
-  `lattice_delivery_reconcile`, `lattice_task_submit`, and `lattice_task_status`.
+  `lattice_delivery_reconcile`, `lattice_task_submit`, `lattice_task_status`, and
+  `lattice_foreman_checkpoint`.
   Delivery Reconcile is zero-parameter and read-only: it replays the existing
   PostgreSQL receipt to distinguish a durable terminal fact from a reconciliation
   blocker, and cannot dispatch Codex, write a receipt, or reinterpret uncertainty.
   Runtime Status is read-only,
   starts no optional component, and reports their independent readiness/degradation.
+  It adds only a verified durable foreman replay projection. The checkpoint
+  schema contains no caller identity, Git/worktree/path, authority/fence,
+  database, SQL or command field.
 - Through the compatibility `lattice-runtime` executable, expose one non-MCP,
   read-only `runtime-health` and `receipt-state` commands. They accept the same
   fixed marker-owned PostgreSQL binding as Delivery Status. `runtime-health`
@@ -163,7 +167,7 @@ Orchestrator composition.
    skip, or synthesize delivery stages.
 3. Concrete adapters are constructed at the edge, implement typed ports, and
    never call one another.
-4. Canonical `latticed` MCP enumeration contains exactly the six approved
+4. Canonical `latticed` MCP enumeration contains exactly the seven approved
    names. Delivery and Runtime Status schemas remain zero-parameter; task schemas remain closed
    to the one approved intent/`client_request_id` and returned `task_ref`.
    Alternate `lattice-full-chain` is an observer only: it exposes the two
@@ -214,11 +218,16 @@ Orchestrator composition.
     the database is currently reachable outside that read.
 19. Historical status observation grants no successor ingress authority.
     Historical non-terminal and Completed streams remain current-profile-bound.
+20. Normal no-argument MCP startup and every tool call are migration-free.
+    Only explicit `--postgres-bootstrap` may sequence Writer v3 before Store v6,
+    close migrator credentials, construct fresh runtime clients, verify foreman
+    replay and then report readiness.
 
 ## Allowed Dependencies
 
-- `lattice-contracts` 1.13, `lattice-ports` 1.9,
-  `orchestrator-runtime` 2.6, Task Ledger 2.5, and Writer Lease 1.1 public APIs.
+- `lattice-contracts` 1.13, `lattice-ports` 2.1,
+  `orchestrator-runtime` 2.7, Foreman State 1.3, Task Ledger 2.7, and Writer
+  Lease 1.1 public APIs.
 - Concrete Codex, PostgreSQL Task Ledger, bounded workspace/Git, and fixed-test
   adapters required by TASK-032, only for construction and port
   implementation.
@@ -342,6 +351,7 @@ constitution cannot be weakened merely to excuse implementation drift.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 2.7 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Add the seventh canonical foreman checkpoint, verified zero-argument status replay and explicit Writer-v3-before-Store-v6 bootstrap; legacy surface unchanged | Sole-foreman delegation |
 | 1.0 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Sole normal composition root in `apps/lattice-runtime`, two fixed zero-parameter MCP tools, and one shared `lattice-runtime` compatibility wrapper | User approval in preceding implementation window |
 | 1.1 | 2026-08-05 | SPEC-002 v26, ADR-022, TASK-033 | Compose the exact Graphify/PostgreSQL Codebase Memory continuation while preserving the same two-tool MCP boundary | User TASK-033 direction |
 | 1.2 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Add bounded Task Submit/Status through the same Gateway with a fixed server-owned actor, Task Spec digest unity, PostgreSQL task truth, and real writer lease/fencing | User TASK-038-first direction |

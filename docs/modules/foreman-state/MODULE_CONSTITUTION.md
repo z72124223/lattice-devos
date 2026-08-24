@@ -1,10 +1,10 @@
 ---
 module_id: foreman-state
 name: Foreman State
-version: 1.2
+version: 1.3
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-25
 ---
 
 ## Mission
@@ -47,12 +47,15 @@ dashboard remains an untrusted read-only projection.
   next-action projections without I/O.
 - Compare dashboard metadata with live Git/worktree observations and report
   drift; it cannot repair, archive, write, or grant authority.
+- Validate the closed caller-owned checkpoint fields and reconstruct the
+  bounded Runtime Status counts/next action from replay-verified snapshots.
 
 ## Invariants
 
 1. Only Task Ledger's verified replay can make a snapshot authoritative.
-2. Snapshot generation is strictly positive and monotonic per foreman/worker
-   identity; an old HEAD or stale report never becomes healthy by omission.
+2. Snapshot generation is positive and exactly the previous generation plus
+   one per foreman/worker identity; an old HEAD, gap, or stale report never
+   becomes healthy by omission.
 3. A dependency-blocked worker is never archive-ready solely from a terminal
    dashboard outcome.
 4. Duplicate worker/thread identities, malformed evidence pointers, unknown
@@ -103,4 +106,5 @@ and responsible-user authorization.
 |---|---|---|---|---|
 | 1.1 | 2026-08-21 | ADR-024, SPEC-006, TASK-079 | Add separately typed, expiring epistemic references without lifecycle authority | Foreman-delegated user authority |
 | 1.2 | 2026-08-21 | ADR-024, SPEC-006 v3, TASK-079 | Export fixed-scalar snapshot reconstruction values for the Ledger-owned typed persistence boundary; no I/O or authority added | Fixed-foreman delegation |
+| 1.3 | 2026-08-25 | ADR-027, SPEC-009, TASK-105 | Add closed checkpoint intent/status projection and require exact-next generation; server observation and I/O remain outside | Sole-foreman delegation |
 | 1.0 | 2026-08-21 | ADR-024, SPEC-006, TASK-079 | Initial secret-free snapshot and read-only watchdog boundary | Foreman-delegated user authority |
