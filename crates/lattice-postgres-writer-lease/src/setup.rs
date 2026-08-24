@@ -789,6 +789,7 @@ pub fn apply_v3_extension(
 ///
 /// Rejects a partial/colliding Writer profile, changed manifest/catalog/ACL,
 /// wrong target, unavailable database evidence, or unsupported foundation.
+#[allow(clippy::too_many_lines)]
 pub fn inspect_v3_bootstrap_profile(
     client: &mut Client,
     target: &V3ExtensionTarget,
@@ -817,9 +818,28 @@ pub fn inspect_v3_bootstrap_profile(
         .map_err(SetupAttemptError::into_public)?
     {
         V3InstalledState::Absent => V3BootstrapProfile::V5FallbackRequired,
+        V3InstalledState::V2BridgePending => {
+            verify_v2_bootstrap_predecessor(
+                &mut transaction,
+                target,
+                &predecessor,
+                &v1,
+                &v2,
+                V2BootstrapPredecessor::BridgePending,
+            )
+            .map_err(SetupAttemptError::into_public)?;
+            V3BootstrapProfile::V5FallbackRequired
+        }
         V3InstalledState::V2Current => {
-            verify_v2_bootstrap_predecessor(&mut transaction, target, &predecessor, &v1, &v2)
-                .map_err(SetupAttemptError::into_public)?;
+            verify_v2_bootstrap_predecessor(
+                &mut transaction,
+                target,
+                &predecessor,
+                &v1,
+                &v2,
+                V2BootstrapPredecessor::Current,
+            )
+            .map_err(SetupAttemptError::into_public)?;
             V3BootstrapProfile::V5FallbackRequired
         }
         V3InstalledState::G5MemoryV3WriterV3Bridge => {
@@ -945,7 +965,7 @@ fn apply_v3_extension_attempt(
         }
         V3InstalledState::G5MemoryV3WriterV3Bridge => {
             verify_bridge_safety(&mut transaction)?;
-            ensure_v3_rebind_boundary(&mut transaction, rebind)?;
+            verify_v3_rebind_boundary(&mut transaction, rebind)?;
             verify_v3_bridge_profile(
                 &mut transaction,
                 target,
@@ -957,6 +977,7 @@ fn apply_v3_extension_attempt(
             ExtensionApplyOutcome::Bridged
         }
         V3InstalledState::Absent
+        | V3InstalledState::V2BridgePending
         | V3InstalledState::G6MemoryV3WriterV3BridgePending
         | V3InstalledState::G6MemoryV3WriterV3Current => {
             return Err(setup_attempt_error(
@@ -1089,7 +1110,9 @@ fn rebind_v3_extension_attempt(
                 .map_err(SetupAttemptError::into_public)?;
                 ExtensionApplyOutcome::AlreadyCurrent
             }
-            V3InstalledState::V2Current | V3InstalledState::G5MemoryV3WriterV3Bridge => {
+            V3InstalledState::V2BridgePending
+            | V3InstalledState::V2Current
+            | V3InstalledState::G5MemoryV3WriterV3Bridge => {
                 return Err(ExtensionSetupError::new(
                     ExtensionSetupErrorKind::UnsupportedFoundation,
                 ));
@@ -1164,6 +1187,7 @@ enum InstalledState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum V3InstalledState {
     Absent,
+    V2BridgePending,
     V2Current,
     G5MemoryV3WriterV3Bridge,
     G6MemoryV3WriterV3BridgePending,
@@ -1450,14 +1474,28 @@ fn classify_v3_state<C: GenericClient>(
     let memory: i16 = row.try_get(3).map_err(map_database)?;
     let ledger_count: i64 = row.try_get(4).map_err(map_database)?;
     let ledger_shape: Option<String> = row.try_get(5).map_err(map_database)?;
-    match (
+    classify_v3_shape(
         version,
-        path.as_str(),
+        &path,
         global,
         memory,
         ledger_count,
         ledger_shape.as_deref(),
-    ) {
+    )
+}
+
+fn classify_v3_shape(
+    version: i16,
+    path: &str,
+    global: i16,
+    memory: i16,
+    ledger_count: i64,
+    ledger_shape: Option<&str>,
+) -> Result<V3InstalledState, SetupAttemptError> {
+    match (version, path, global, memory, ledger_count, ledger_shape) {
+        (2, WRITER_LEASE_EXTENSION_PATH, 3, 2, 2, Some("1:INSTALLED:1:3,2:UPGRADED:2:3")) => {
+            Ok(V3InstalledState::V2BridgePending)
+        }
         (2, WRITER_LEASE_EXTENSION_PATH, 5, 3, 1, Some("1:INSTALLED:2:5"))
         | (
             2,
@@ -1506,25 +1544,37 @@ fn classify_v3_state<C: GenericClient>(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum V2BootstrapPredecessor {
+    BridgePending,
+    Current,
+}
+
 fn verify_v2_bootstrap_predecessor<C: GenericClient>(
     client: &mut C,
     v3_target: &V3ExtensionTarget,
     memory_v3_target: &ExtensionTarget,
     v1: &ExtensionManifestEvidence,
     v2: &ExtensionManifestEvidence,
+    expected: V2BootstrapPredecessor,
 ) -> Result<(), SetupAttemptError> {
     match verify_foundation(client, memory_v3_target) {
         Ok(foundation) => {
             let state = classify_state(client, &foundation)?;
-            match state {
-                InstalledState::G5MemoryV3WriterV2Current => verify_v2_current_profile(
-                    client,
-                    memory_v3_target,
-                    &foundation.database_uuid,
-                    v1,
-                    v2,
-                )?,
-                InstalledState::G5MemoryV3WriterV2BridgePending => verify_v2_bridge_profile(
+            match (expected, state) {
+                (V2BootstrapPredecessor::Current, InstalledState::G5MemoryV3WriterV2Current) => {
+                    verify_v2_current_profile(
+                        client,
+                        memory_v3_target,
+                        &foundation.database_uuid,
+                        v1,
+                        v2,
+                    )?;
+                }
+                (
+                    V2BootstrapPredecessor::BridgePending,
+                    InstalledState::G5MemoryV3WriterV2BridgePending,
+                ) => verify_v2_bridge_profile(
                     client,
                     memory_v3_target,
                     &foundation.database_uuid,
@@ -1547,7 +1597,8 @@ fn verify_v2_bootstrap_predecessor<C: GenericClient>(
         fixed_digest(HISTORICAL_MEMORY_MANIFEST_SHA256)?,
     )?;
     let foundation = verify_foundation(client, &memory_v2_target)?;
-    if foundation.profile != FoundationProfile::G5MemoryV2
+    if expected != V2BootstrapPredecessor::BridgePending
+        || foundation.profile != FoundationProfile::G5MemoryV2
         || classify_state(client, &foundation)? != InstalledState::G5MemoryV2WriterV2BridgePending
     {
         return Err(profile_collision());
@@ -3888,6 +3939,44 @@ mod tests {
             std::env::var(name).unwrap_or_else(|_| panic!("{name} is required")),
         )
         .unwrap_or_else(|_| panic!("{name} must be lowercase SHA-256"))
+    }
+
+    #[test]
+    fn task105_v2_bootstrap_shapes_keep_pending_distinct_from_current() {
+        assert_eq!(
+            classify_v3_shape(
+                2,
+                WRITER_LEASE_EXTENSION_PATH,
+                3,
+                2,
+                2,
+                Some("1:INSTALLED:1:3,2:UPGRADED:2:3"),
+            )
+            .expect("exact v2 bridge-pending shape"),
+            V3InstalledState::V2BridgePending
+        );
+        for (count, shape) in [
+            (1, "1:INSTALLED:2:5"),
+            (3, "1:INSTALLED:1:3,2:UPGRADED:2:3,3:REBOUND:2:5"),
+        ] {
+            assert_eq!(
+                classify_v3_shape(2, WRITER_LEASE_EXTENSION_PATH, 5, 3, count, Some(shape),)
+                    .expect("exact v2 current shape"),
+                V3InstalledState::V2Current
+            );
+        }
+        assert!(
+            classify_v3_shape(
+                2,
+                WRITER_LEASE_EXTENSION_PATH,
+                3,
+                2,
+                3,
+                Some("1:INSTALLED:1:3,2:UPGRADED:2:3,3:REBOUND:2:5"),
+            )
+            .is_err(),
+            "crossed pending/current evidence must remain closed"
+        );
     }
 
     #[test]

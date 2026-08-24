@@ -8,19 +8,29 @@ use lattice_contracts::ContentDigest;
 use lattice_postgres_codebase_memory::{
     ExtensionTarget as MemoryExtensionTarget, apply_extension as apply_memory_extension,
     verify_embedded_extension_manifest as verify_memory_manifest,
+    verify_embedded_v2_extension_manifest as verify_memory_v2_manifest,
 };
 use lattice_postgres_store::{
-    DatabaseRole, MigrationApplyOutcome, MigrationTarget, apply_migrations,
+    DatabaseRole, MigrationApplyOutcome, MigrationBootstrapProfile, MigrationTarget,
+    apply_migrations, inspect_migration_profile, migration_manifest,
 };
 use lattice_postgres_writer_lease::{
-    ExtensionApplyOutcome, ExtensionTarget as WriterExtensionTarget, V3ExtensionTarget,
-    apply_extension as apply_writer_extension, apply_v3_extension,
+    ExtensionApplyOutcome, ExtensionSetupErrorKind, ExtensionTarget as WriterExtensionTarget,
+    V3BootstrapProfile, V3ExtensionTarget, apply_extension as apply_writer_extension,
+    apply_v3_extension, inspect_v3_bootstrap_profile,
+    verify_embedded_v1_extension_manifest as verify_writer_v1_manifest,
+    verify_embedded_v2_extension_manifest as verify_writer_v2_manifest,
+    verify_embedded_v3_rebind_manifest,
 };
 use postgres::config::SslMode;
 use postgres::{Client, Config, NoTls};
 use serde_json::{Value, json};
 
 const V5_MANIFEST_SHA256: &str = "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
+const HISTORICAL_GLOBAL_MANIFEST_SHA256: &str =
+    "09c431df18ad71a4f44239a5d2ddf6b1774b8ffec06c7f9223f0e41757f3d407";
+const LEGACY_V1_MANIFEST_SHA256: &str =
+    "9b126a41e542b71d434b5786e35acb66575967d055a6733b9d6bf0b8c9f0eada";
 const WRITER_V3_MANIFEST_SHA256: &str =
     "eab2812fa3d94cd3466d7c003386f805a973fd7def1f16aeb15b52f47dad78e4";
 
@@ -88,7 +98,7 @@ impl LiveConfig {
         config.connect(NoTls).expect("TASK105_BOOTSTRAP_CONNECT")
     }
 
-    fn revoke_login_connect(&self) {
+    fn revoke_login_database_privileges(&self) {
         let mut config = Config::new();
         config
             .host(&self.host)
@@ -102,12 +112,86 @@ impl LiveConfig {
             .connect(NoTls)
             .expect("TASK105_CAPABILITY_HANDOFF_CONNECT")
             .batch_execute(&format!(
-                "REVOKE CONNECT ON DATABASE {} FROM \
+                "REVOKE ALL ON DATABASE {} FROM \
                  lattice_migrator_login,lattice_runtime_login,\
                  lattice_guardian_login,lattice_readonly_login",
                 self.database_name()
             ))
             .expect("TASK105_CAPABILITY_HANDOFF_REVOKE");
+    }
+
+    fn assert_login_capability(&self, expected_connect: bool) {
+        let roles = [
+            ("lattice_migrator", "lattice_migrator_login"),
+            ("lattice_runtime", "lattice_runtime_login"),
+            ("lattice_guardian", "lattice_guardian_login"),
+            ("lattice_readonly", "lattice_readonly_login"),
+        ];
+        let database = self.database_name();
+        let mut observer = Config::new();
+        observer
+            .host(&self.host)
+            .port(self.port)
+            .user("runtime_bootstrap")
+            .password(&self.password)
+            .dbname("postgres")
+            .application_name("lattice-task105-capability-proof")
+            .ssl_mode(SslMode::Disable);
+        let mut observer = observer
+            .connect(NoTls)
+            .expect("TASK105_CAPABILITY_PROOF_CONNECT");
+        let public_connect: bool = observer
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_database d \
+                   CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE( \
+                     d.datacl,pg_catalog.acldefault('d',d.datdba))) a \
+                  WHERE d.datname=$1 AND a.grantee=0 AND a.privilege_type='CONNECT')",
+                &[&database],
+            )
+            .expect("TASK105_PUBLIC_CONNECT_QUERY")
+            .get(0);
+        assert!(!public_connect, "TASK105_PUBLIC_CONNECT_FORBIDDEN");
+        for (capability, login) in roles {
+            let row = observer
+                .query_one(
+                    "SELECT NOT capability.rolcanlogin, login.rolcanlogin, \
+                            EXISTS (SELECT 1 FROM pg_catalog.pg_database d \
+                              CROSS JOIN LATERAL pg_catalog.aclexplode(d.datacl) a \
+                             WHERE d.datname=$1 AND a.grantee=login.oid \
+                               AND a.privilege_type='CONNECT'), \
+                            NOT pg_catalog.has_database_privilege(login.oid,$1,'CREATE'), \
+                            NOT pg_catalog.has_database_privilege(login.oid,$1,'TEMP') \
+                       FROM pg_catalog.pg_roles capability \
+                       JOIN pg_catalog.pg_roles login ON login.rolname=$3 \
+                      WHERE capability.rolname=$2",
+                    &[&database, &capability, &login],
+                )
+                .expect("TASK105_LOGIN_CAPABILITY_QUERY");
+            assert!(row.get::<_, bool>(0), "TASK105_CAPABILITY_MUST_BE_NOLOGIN");
+            assert!(row.get::<_, bool>(1), "TASK105_LOGIN_ROLE_MUST_LOGIN");
+            assert_eq!(
+                row.get::<_, bool>(2),
+                expected_connect,
+                "TASK105_DIRECT_CONNECT_GRANT"
+            );
+            assert!(row.get::<_, bool>(3), "TASK105_LOGIN_CREATE_FORBIDDEN");
+            assert!(row.get::<_, bool>(4), "TASK105_LOGIN_TEMP_FORBIDDEN");
+
+            let mut login_config = Config::new();
+            login_config
+                .host(&self.host)
+                .port(self.port)
+                .user(login)
+                .password(&self.password)
+                .dbname(&database)
+                .application_name("lattice-task105-login-proof")
+                .ssl_mode(SslMode::Disable);
+            assert_eq!(
+                login_config.connect(NoTls).is_ok(),
+                expected_connect,
+                "TASK105_LOGIN_CONNECTIVITY:{login}"
+            );
+        }
     }
 
     fn migration_target(&self) -> MigrationTarget {
@@ -143,6 +227,161 @@ impl LiveConfig {
         );
     }
 
+    fn introduce_partial_writer_on_fresh_store(&self) {
+        self.bootstrap_client()
+            .batch_execute(
+                "CREATE SCHEMA writer_lease AUTHORIZATION lattice_migrator;\
+                 REVOKE ALL ON SCHEMA writer_lease FROM PUBLIC;\
+                 COMMENT ON SCHEMA writer_lease IS 'TASK105_PARTIAL_WRITER'",
+            )
+            .expect("TASK105_FRESH_PARTIAL_WRITER");
+    }
+
+    fn assert_store_migration_profile(&self, expected: MigrationBootstrapProfile) {
+        let target = self.migration_target();
+        let mut migrator = self.migrator_client();
+        assert_eq!(
+            inspect_migration_profile(&mut migrator, &target)
+                .expect("TASK105_STORE_MIGRATION_PROFILE"),
+            expected
+        );
+    }
+
+    fn fresh_catalog_fingerprint(&self) -> Vec<String> {
+        let mut client = self.bootstrap_client();
+        [
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+               n.nspname||':'||o.rolname||':'||COALESCE(\
+               pg_catalog.obj_description(n.oid,'pg_namespace'),'<NULL>'),E'\\n'\
+               ORDER BY n.nspname),'')) FROM pg_catalog.pg_namespace n\
+               JOIN pg_catalog.pg_roles o ON o.oid=n.nspowner\
+              WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+               n.nspname||':'||c.relname||':'||c.relkind::text,E'\\n'\
+               ORDER BY n.nspname,c.relname),'')) FROM pg_catalog.pg_class c\
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace\
+              WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+               n.nspname||':'||p.proname||':'||pg_catalog.oidvectortypes(p.proargtypes),E'\\n'\
+               ORDER BY n.nspname,p.proname,p.oid),'')) FROM pg_catalog.pg_proc p\
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace\
+              WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
+        ]
+        .into_iter()
+        .map(|query| {
+            client
+                .query_one(query, &[])
+                .expect("TASK105_FRESH_FINGERPRINT_QUERY")
+                .get(0)
+        })
+        .collect()
+    }
+
+    fn prepare_legacy_v1_store(&self) {
+        let target = self.migration_target();
+        let manifest = migration_manifest();
+        assert_eq!(manifest.len(), 7, "TASK105_FIXTURE_MANIFEST_SIZE");
+        let foundation = &manifest[1];
+        let mut migrator = self.migrator_client();
+        migrator
+            .batch_execute(
+                std::str::from_utf8(foundation.bytes()).expect("TASK105_FIXTURE_STORE_V1_UTF8"),
+            )
+            .expect("TASK105_FIXTURE_STORE_V1_SQL");
+        for entry in &manifest[..2] {
+            assert_eq!(
+                migrator
+                    .execute(
+                        "INSERT INTO control.migration_history (\
+                             ordinal,migration_id,migration_path,byte_length,checksum_sha256,\
+                             migration_status,transaction_mode,schema_version,\
+                             min_reader,max_reader,min_writer,max_writer\
+                         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                        &[
+                            &i16::try_from(entry.ordinal()).expect("TASK105_FIXTURE_ORDINAL"),
+                            &entry.id(),
+                            &entry.path(),
+                            &i64::try_from(entry.byte_length()).expect("TASK105_FIXTURE_BYTES"),
+                            &entry.sha256(),
+                            &entry.status().as_str(),
+                            &entry.transaction_mode().as_str(),
+                            &i16::try_from(entry.schema_version()).expect("TASK105_FIXTURE_SCHEMA"),
+                            &i16::try_from(*entry.reader_compatibility().start())
+                                .expect("TASK105_FIXTURE_MIN_READER"),
+                            &i16::try_from(*entry.reader_compatibility().end())
+                                .expect("TASK105_FIXTURE_MAX_READER"),
+                            &i16::try_from(*entry.writer_compatibility().start())
+                                .expect("TASK105_FIXTURE_MIN_WRITER"),
+                            &i16::try_from(*entry.writer_compatibility().end())
+                                .expect("TASK105_FIXTURE_MAX_WRITER"),
+                        ],
+                    )
+                    .expect("TASK105_FIXTURE_STORE_V1_HISTORY"),
+                1
+            );
+        }
+        assert_eq!(
+            migrator
+                .execute(
+                    "INSERT INTO control.database_identity (singleton,database_uuid)\
+                     VALUES (true,$1::text::uuid)",
+                    &[&target.expected_database_uuid()],
+                )
+                .expect("TASK105_FIXTURE_STORE_V1_IDENTITY"),
+            1
+        );
+        assert_eq!(
+            migrator
+                .execute(
+                    "INSERT INTO control.schema_compatibility (\
+                         singleton,manifest_sha256,current_schema_version,\
+                         min_reader,max_reader,min_writer,max_writer\
+                     ) VALUES (true,$1,1,1,1,1,1)",
+                    &[&LEGACY_V1_MANIFEST_SHA256],
+                )
+                .expect("TASK105_FIXTURE_STORE_V1_COMPATIBILITY"),
+            1
+        );
+        assert_eq!(
+            inspect_migration_profile(&mut migrator, &target)
+                .expect("TASK105_FIXTURE_STORE_V1_PROFILE"),
+            MigrationBootstrapProfile::LegacyPrefix
+        );
+    }
+
+    fn legacy_v1_fingerprint(&self) -> Vec<String> {
+        let mut client = self.bootstrap_client();
+        [
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+               pg_catalog.to_jsonb(x)::text,E'\\n' ORDER BY x.ordinal),''))\
+             FROM ONLY control.migration_history x",
+            "SELECT pg_catalog.md5(pg_catalog.to_jsonb(x)::text)\
+             FROM ONLY control.schema_compatibility x WHERE singleton",
+            "SELECT pg_catalog.md5(pg_catalog.to_jsonb(x)::text)\
+             FROM ONLY control.database_identity x WHERE singleton",
+            "SELECT pg_catalog.md5(pg_catalog.to_jsonb(x)::text)\
+             FROM ONLY control.runtime_admission x WHERE singleton",
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+               n.nspname||':'||c.relname||':'||c.relkind::text,E'\\n'\
+               ORDER BY n.nspname,c.relname),'')) FROM pg_catalog.pg_class c\
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace\
+              WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+               n.nspname||':'||p.proname||':'||pg_catalog.oidvectortypes(p.proargtypes),E'\\n'\
+               ORDER BY n.nspname,p.proname,p.oid),'')) FROM pg_catalog.pg_proc p\
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace\
+              WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
+        ]
+        .into_iter()
+        .map(|query| {
+            client
+                .query_one(query, &[])
+                .expect("TASK105_LEGACY_FINGERPRINT_QUERY")
+                .get(0)
+        })
+        .collect()
+    }
+
     fn prepare_v5_writer_v2_current(&self) {
         self.prepare_v5_store_only();
         let target = self.migration_target();
@@ -167,6 +406,153 @@ impl LiveConfig {
         );
     }
 
+    fn prepare_v5_memory_v2_writer_v2_bridge_pending(&self) {
+        self.prepare_v5_store_only();
+        let target = self.migration_target();
+        let database_identity = target.expected_database_identity_sha256().as_str();
+        let memory_v2 = verify_memory_v2_manifest().expect("TASK105_FIXTURE_MEMORY_V2_MANIFEST");
+        let writer_v1 = verify_writer_v1_manifest().expect("TASK105_FIXTURE_WRITER_V1_MANIFEST");
+        let writer_v2 = verify_writer_v2_manifest().expect("TASK105_FIXTURE_WRITER_V2_MANIFEST");
+        let mut migrator = self.migrator_client();
+
+        migrator
+            .batch_execute(
+                std::str::from_utf8(memory_v2.bytes()).expect("TASK105_FIXTURE_MEMORY_V2_UTF8"),
+            )
+            .expect("TASK105_FIXTURE_MEMORY_V2_SQL");
+        assert_eq!(
+            migrator
+                .execute(
+                    "INSERT INTO memory.codebase_memory_extension_identity (\
+                         singleton,extension_id,extension_schema_version,extension_path,\
+                         extension_sql_sha256,extension_manifest_sha256,database_uuid,\
+                         database_identity_sha256,global_schema_version,global_manifest_sha256\
+                     ) VALUES (true,$1,2,$2,$3,$4,$5::text::uuid,$6,3,$7)",
+                    &[
+                        &memory_v2.extension_id(),
+                        &memory_v2.path(),
+                        &memory_v2.sql_sha256().as_str(),
+                        &memory_v2.manifest_sha256().as_str(),
+                        &target.expected_database_uuid(),
+                        &database_identity,
+                        &HISTORICAL_GLOBAL_MANIFEST_SHA256,
+                    ],
+                )
+                .expect("TASK105_FIXTURE_MEMORY_V2_IDENTITY"),
+            1
+        );
+        assert_eq!(
+            migrator
+                .execute(
+                    "INSERT INTO memory.codebase_memory_extension_ledger (\
+                         ledger_ordinal,singleton,extension_id,extension_schema_version,\
+                         extension_sql_sha256,extension_manifest_sha256,database_uuid,\
+                         database_identity_sha256,global_schema_version,global_manifest_sha256,\
+                         event_kind\
+                     ) SELECT 1,singleton,extension_id,extension_schema_version,\
+                         extension_sql_sha256,extension_manifest_sha256,database_uuid,\
+                         database_identity_sha256,global_schema_version,global_manifest_sha256,\
+                         'INSTALLED' FROM ONLY memory.codebase_memory_extension_identity\
+                         WHERE singleton",
+                    &[],
+                )
+                .expect("TASK105_FIXTURE_MEMORY_V2_LEDGER"),
+            1
+        );
+
+        migrator
+            .batch_execute(
+                std::str::from_utf8(writer_v1.bytes()).expect("TASK105_FIXTURE_WRITER_V1_UTF8"),
+            )
+            .expect("TASK105_FIXTURE_WRITER_V1_SQL");
+        assert_eq!(
+            migrator
+                .execute(
+                    "INSERT INTO writer_lease.writer_lease_extension_identity (\
+                         singleton,extension_id,extension_schema_version,extension_path,\
+                         extension_sql_sha256,extension_manifest_sha256,database_uuid,\
+                         database_identity_sha256,global_schema_version,global_manifest_sha256,\
+                         required_memory_schema_version,required_memory_manifest_sha256\
+                     ) VALUES (true,$1,1,$2,$3,$4,$5::text::uuid,$6,3,$7,2,$8)",
+                    &[
+                        &writer_v1.extension_id(),
+                        &writer_v1.path(),
+                        &writer_v1.sql_sha256().as_str(),
+                        &writer_v1.manifest_sha256().as_str(),
+                        &target.expected_database_uuid(),
+                        &database_identity,
+                        &HISTORICAL_GLOBAL_MANIFEST_SHA256,
+                        &memory_v2.manifest_sha256().as_str(),
+                    ],
+                )
+                .expect("TASK105_FIXTURE_WRITER_V1_IDENTITY"),
+            1
+        );
+        assert_eq!(
+            migrator
+                .execute(
+                    "INSERT INTO writer_lease.writer_lease_extension_ledger (\
+                         ledger_ordinal,singleton,extension_id,extension_schema_version,\
+                         extension_sql_sha256,extension_manifest_sha256,database_uuid,\
+                         database_identity_sha256,global_schema_version,global_manifest_sha256,\
+                         required_memory_schema_version,required_memory_manifest_sha256,event_kind\
+                     ) SELECT 1,singleton,extension_id,extension_schema_version,\
+                         extension_sql_sha256,extension_manifest_sha256,database_uuid,\
+                         database_identity_sha256,global_schema_version,global_manifest_sha256,\
+                         required_memory_schema_version,required_memory_manifest_sha256,'INSTALLED'\
+                         FROM ONLY writer_lease.writer_lease_extension_identity WHERE singleton",
+                    &[],
+                )
+                .expect("TASK105_FIXTURE_WRITER_V1_LEDGER"),
+            1
+        );
+        migrator
+            .batch_execute(
+                std::str::from_utf8(writer_v2.bytes()).expect("TASK105_FIXTURE_WRITER_V2_UTF8"),
+            )
+            .expect("TASK105_FIXTURE_WRITER_V2_SQL");
+        assert_eq!(
+            migrator
+                .execute(
+                    "UPDATE ONLY writer_lease.writer_lease_extension_identity SET\
+                         extension_schema_version=2,extension_path=$1,\
+                         extension_sql_sha256=$2,extension_manifest_sha256=$3\
+                     WHERE singleton AND extension_id=$4 AND extension_schema_version=1\
+                       AND extension_path=$5 AND extension_sql_sha256=$6\
+                       AND extension_manifest_sha256=$7",
+                    &[
+                        &writer_v2.path(),
+                        &writer_v2.sql_sha256().as_str(),
+                        &writer_v2.manifest_sha256().as_str(),
+                        &writer_v1.extension_id(),
+                        &writer_v1.path(),
+                        &writer_v1.sql_sha256().as_str(),
+                        &writer_v1.manifest_sha256().as_str(),
+                    ],
+                )
+                .expect("TASK105_FIXTURE_WRITER_V2_IDENTITY"),
+            1
+        );
+        assert_eq!(
+            migrator
+                .execute(
+                    "INSERT INTO writer_lease.writer_lease_extension_ledger (\
+                         ledger_ordinal,singleton,extension_id,extension_schema_version,\
+                         extension_sql_sha256,extension_manifest_sha256,database_uuid,\
+                         database_identity_sha256,global_schema_version,global_manifest_sha256,\
+                         required_memory_schema_version,required_memory_manifest_sha256,event_kind\
+                     ) SELECT 2,singleton,extension_id,extension_schema_version,\
+                         extension_sql_sha256,extension_manifest_sha256,database_uuid,\
+                         database_identity_sha256,global_schema_version,global_manifest_sha256,\
+                         required_memory_schema_version,required_memory_manifest_sha256,'UPGRADED'\
+                         FROM ONLY writer_lease.writer_lease_extension_identity WHERE singleton",
+                    &[],
+                )
+                .expect("TASK105_FIXTURE_WRITER_V2_LEDGER"),
+            1
+        );
+    }
+
     fn prepare_v5_writer_v3_bridge(&self) {
         self.prepare_v5_writer_v2_current();
         let target = self.migration_target();
@@ -179,6 +565,50 @@ impl LiveConfig {
         assert_eq!(
             apply_v3_extension(&mut migrator, &writer_v3).expect("TASK105_FIXTURE_WRITER_V3"),
             ExtensionApplyOutcome::Bridged
+        );
+    }
+
+    fn prove_v5_bridge_retry_does_not_repair_rebind_boundary(&self) {
+        let target = self.migration_target();
+        let database_identity =
+            ContentDigest::from_sha256(target.expected_database_identity_sha256().as_str())
+                .expect("TASK105_FIXTURE_DATABASE_IDENTITY");
+        let writer_v3 = V3ExtensionTarget::new(self.database_name(), database_identity)
+            .expect("TASK105_FIXTURE_WRITER_V3_TARGET");
+        let mut migrator = self.migrator_client();
+        assert_eq!(
+            inspect_v3_bootstrap_profile(&mut migrator, &writer_v3)
+                .expect("TASK105_V5_BRIDGE_PREFLIGHT"),
+            V3BootstrapProfile::V5Bridge
+        );
+        migrator
+            .batch_execute("DROP PROCEDURE writer_lease.writer_lease_rebind_v3();")
+            .expect("TASK105_REMOVE_REBIND_BOUNDARY");
+        assert_eq!(
+            apply_v3_extension(&mut migrator, &writer_v3)
+                .expect_err("TASK105_BRIDGE_RETRY_MUST_NOT_REPAIR")
+                .kind(),
+            ExtensionSetupErrorKind::PartialOrCollidingProfile
+        );
+        let absent: bool = migrator
+            .query_one(
+                "SELECT pg_catalog.to_regprocedure( \
+                   'writer_lease.writer_lease_rebind_v3()') IS NULL",
+                &[],
+            )
+            .expect("TASK105_REBIND_BOUNDARY_ABSENT_QUERY")
+            .get(0);
+        assert!(absent, "TASK105_BRIDGE_RETRY_REPAIRED_BOUNDARY");
+        let rebind = verify_embedded_v3_rebind_manifest().expect("TASK105_FIXTURE_REBIND_MANIFEST");
+        migrator
+            .batch_execute(
+                std::str::from_utf8(rebind.bytes()).expect("TASK105_FIXTURE_REBIND_UTF8"),
+            )
+            .expect("TASK105_RESTORE_REBIND_BOUNDARY");
+        assert_eq!(
+            inspect_v3_bootstrap_profile(&mut migrator, &writer_v3)
+                .expect("TASK105_V5_BRIDGE_RESTORED"),
+            V3BootstrapProfile::V5Bridge
         );
     }
 
@@ -208,6 +638,44 @@ impl LiveConfig {
         }
     }
 
+    fn assert_v5_memory_v2_writer_v2_bridge_pending(&self) {
+        let target = self.migration_target();
+        let database_identity =
+            ContentDigest::from_sha256(target.expected_database_identity_sha256().as_str())
+                .expect("TASK105_FIXTURE_DATABASE_IDENTITY");
+        let writer_v3 = V3ExtensionTarget::new(self.database_name(), database_identity)
+            .expect("TASK105_FIXTURE_WRITER_V3_TARGET");
+        let mut migrator = self.migrator_client();
+        assert_eq!(
+            inspect_v3_bootstrap_profile(&mut migrator, &writer_v3)
+                .expect("TASK105_V5_MEMORY_V2_WRITER_PENDING_PREFLIGHT"),
+            V3BootstrapProfile::V5FallbackRequired
+        );
+        let row = migrator
+            .query_one(
+                "SELECT\
+                    (SELECT extension_schema_version=2 AND global_schema_version=3\
+                       FROM ONLY memory.codebase_memory_extension_identity WHERE singleton),\
+                    (SELECT pg_catalog.count(*)=1\
+                       FROM ONLY memory.codebase_memory_extension_ledger),\
+                    (SELECT extension_schema_version=2 AND global_schema_version=3\
+                       AND required_memory_schema_version=2\
+                       FROM ONLY writer_lease.writer_lease_extension_identity WHERE singleton),\
+                    (SELECT pg_catalog.string_agg(ledger_ordinal::text||':'||event_kind::text,','\
+                       ORDER BY ledger_ordinal)='1:INSTALLED,2:UPGRADED'\
+                       FROM ONLY writer_lease.writer_lease_extension_ledger),\
+                    NOT pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE')",
+                &[],
+            )
+            .expect("TASK105_V5_MEMORY_V2_WRITER_PENDING_PROFILE");
+        for index in 0..5 {
+            assert!(
+                row.get::<_, bool>(index),
+                "TASK105_V5_MEMORY_V2_WRITER_PENDING_{index}"
+            );
+        }
+    }
+
     fn assert_v5_writer_absent(&self) {
         let row = self
             .bootstrap_client()
@@ -217,18 +685,101 @@ impl LiveConfig {
                     (SELECT current_schema_version=5 AND manifest_sha256=$1 \
                        FROM ONLY control.schema_compatibility WHERE singleton), \
                     pg_catalog.to_regnamespace('writer_lease') IS NULL, \
-                    pg_catalog.to_regnamespace('memory') IS NULL, \
+                    pg_catalog.to_regnamespace('memory') IS NOT NULL, \
+                    (SELECT pg_catalog.count(*)=0 FROM pg_catalog.pg_class c \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                      WHERE n.nspname='memory'), \
+                    (SELECT pg_catalog.count(*)=0 FROM pg_catalog.pg_proc p \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                      WHERE n.nspname='memory'), \
                     (SELECT admission_mode='STOPPED' FROM ONLY control.runtime_admission \
                        WHERE singleton)",
                 &[&V5_MANIFEST_SHA256],
             )
             .expect("TASK105_V5_WRITER_ABSENT_PROFILE");
-        for index in 0..5 {
+        for index in 0..7 {
             assert!(
                 row.get::<_, bool>(index),
                 "TASK105_V5_WRITER_ABSENT_{index}"
             );
         }
+    }
+
+    fn v5_fallback_fingerprint(&self) -> Vec<String> {
+        let mut client = self.bootstrap_client();
+        [
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg( \
+               pg_catalog.to_jsonb(x)::text,E'\\n' ORDER BY x.ordinal),'')) \
+             FROM ONLY control.migration_history x",
+            "SELECT pg_catalog.md5(pg_catalog.to_jsonb(x)::text) \
+             FROM ONLY control.schema_compatibility x WHERE singleton",
+            "SELECT pg_catalog.md5(pg_catalog.to_jsonb(x)::text) \
+             FROM ONLY control.database_identity x WHERE singleton",
+            "SELECT pg_catalog.md5(pg_catalog.to_jsonb(x)::text) \
+             FROM ONLY control.runtime_admission x WHERE singleton",
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg( \
+               n.nspname||':'||c.relname||':'||c.relkind::text,E'\\n' \
+               ORDER BY c.relname),'')) FROM pg_catalog.pg_namespace n \
+               LEFT JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid \
+              WHERE n.nspname='memory'",
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg( \
+               d.defaclobjtype::text||':'||d.defaclnamespace::text||':'|| \
+               d.defaclacl::text,E'\\n' ORDER BY d.oid),'')) \
+             FROM pg_catalog.pg_default_acl d",
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg( \
+               n.nspname||':'||COALESCE(c.relname,'')||':'||COALESCE(p.proname,''), \
+               E'\\n' ORDER BY c.relname,p.proname),'')) \
+             FROM pg_catalog.pg_namespace n \
+             LEFT JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid \
+             LEFT JOIN pg_catalog.pg_proc p ON p.pronamespace=n.oid \
+             WHERE n.nspname IN ('memory','writer_lease')",
+        ]
+        .into_iter()
+        .map(|query| {
+            client
+                .query_one(query, &[])
+                .expect("TASK105_V5_FALLBACK_FINGERPRINT_QUERY")
+                .get(0)
+        })
+        .collect()
+    }
+
+    fn introduce_memory_default_acl_drift(&self) {
+        self.bootstrap_client()
+            .batch_execute(
+                "SET ROLE lattice_migrator; \
+                 ALTER DEFAULT PRIVILEGES IN SCHEMA memory \
+                 GRANT SELECT ON TABLES TO lattice_runtime; RESET ROLE;",
+            )
+            .expect("TASK105_MEMORY_DEFAULT_ACL_DRIFT");
+    }
+
+    fn repair_memory_default_acl_drift(&self) {
+        self.bootstrap_client()
+            .batch_execute(
+                "SET ROLE lattice_migrator; \
+                 ALTER DEFAULT PRIVILEGES IN SCHEMA memory \
+                 REVOKE SELECT ON TABLES FROM lattice_runtime; RESET ROLE;",
+            )
+            .expect("TASK105_MEMORY_DEFAULT_ACL_REPAIR");
+    }
+
+    fn introduce_partial_memory_catalog(&self) {
+        self.bootstrap_client()
+            .batch_execute(
+                "SET ROLE lattice_migrator; \
+                 CREATE TABLE memory.task105_partial_memory (id integer); RESET ROLE;",
+            )
+            .expect("TASK105_MEMORY_PARTIAL_CREATE");
+    }
+
+    fn repair_partial_memory_catalog(&self) {
+        self.bootstrap_client()
+            .batch_execute(
+                "SET ROLE lattice_migrator; \
+                 DROP TABLE memory.task105_partial_memory; RESET ROLE;",
+            )
+            .expect("TASK105_MEMORY_PARTIAL_REPAIR");
     }
 
     fn durable_profile_fingerprint(&self) -> Vec<String> {
@@ -413,25 +964,53 @@ impl LiveConfig {
         (row.get(0), row.get(1), row.get(2))
     }
 
-    fn v6_absent_writer_fingerprint(&self) -> (i64, i16, String, i64, String) {
+    fn v6_absent_writer_fingerprint(&self) -> Vec<String> {
         let mut client = self.bootstrap_client();
-        let row = client
+        [
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg( \
+               pg_catalog.to_jsonb(x)::text,E'\\n' ORDER BY x.ordinal),'')) \
+             FROM ONLY control.migration_history x",
+            "SELECT pg_catalog.md5(pg_catalog.to_jsonb(x)::text) \
+             FROM ONLY control.schema_compatibility x WHERE singleton",
+            "SELECT pg_catalog.md5(pg_catalog.to_jsonb(x)::text) \
+             FROM ONLY control.database_identity x WHERE singleton",
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg( \
+               n.nspname||':'||COALESCE(c.relname,'')||':'|| \
+               COALESCE(p.proname,''),E'\\n' ORDER BY c.relname,p.proname),'')) \
+             FROM pg_catalog.pg_namespace n \
+             LEFT JOIN pg_catalog.pg_class c ON c.relnamespace=n.oid \
+             LEFT JOIN pg_catalog.pg_proc p ON p.pronamespace=n.oid \
+             WHERE n.nspname='memory'",
+            "SELECT pg_catalog.md5(pg_catalog.to_jsonb(x)::text) \
+             FROM ONLY memory.codebase_memory_extension_identity x WHERE singleton",
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg( \
+               pg_catalog.to_jsonb(x)::text,E'\\n' ORDER BY x.ledger_ordinal),'')) \
+             FROM ONLY memory.codebase_memory_extension_ledger x",
+            "SELECT pg_catalog.md5(pg_catalog.count(*)::text) \
+             FROM pg_catalog.pg_namespace WHERE nspname='writer_lease'",
+            "SELECT pg_catalog.md5(pg_catalog.to_jsonb(x)::text) \
+             FROM ONLY control.runtime_admission x WHERE singleton",
+        ]
+        .into_iter()
+        .map(|query| {
+            client
+                .query_one(query, &[])
+                .expect("TASK105_V6_ABSENT_FINGERPRINT")
+                .get(0)
+        })
+        .collect()
+    }
+
+    fn assert_writer_namespace_absent(&self) {
+        let absent: bool = self
+            .bootstrap_client()
             .query_one(
-                "SELECT (SELECT pg_catalog.count(*) FROM ONLY control.migration_history), \
-                        current_schema_version, manifest_sha256::text, \
-                        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_namespace \
-                          WHERE nspname='writer_lease'), \
-                        (SELECT pg_catalog.concat_ws(':', admission_mode::text, \
-                                    COALESCE(daemon_instance_id, ''), \
-                                    COALESCE(daemon_epoch::text, ''), authority_revision::text, \
-                                    COALESCE(pg_catalog.encode(observation_digest, 'hex'), ''), \
-                                    COALESCE(pg_catalog.encode(authority_head_digest, 'hex'), '')) \
-                           FROM ONLY control.runtime_admission WHERE singleton) \
-                   FROM ONLY control.schema_compatibility WHERE singleton",
+                "SELECT pg_catalog.to_regnamespace('writer_lease') IS NULL",
                 &[],
             )
-            .expect("TASK105_V6_ABSENT_FINGERPRINT");
-        (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4))
+            .expect("TASK105_WRITER_NAMESPACE_ABSENT_QUERY")
+            .get(0);
+        assert!(absent, "TASK105_WRITER_NAMESPACE_PRESENT");
     }
 
     fn remove_disposable_writer_profile(&self) {
@@ -556,6 +1135,8 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     run_latticed_admin(&config, "--postgres-initialize", true);
     config.prepare_v5_writer_v3_bridge();
     config.assert_v5_writer_v3_bridge();
+    config.prove_v5_bridge_retry_does_not_repair_rebind_boundary();
+    println!("TASK105_STAGE_V5_BRIDGE_RETRY_VERIFY_ONLY_PASS");
     run_latticed_admin(&config, "--postgres-bootstrap", true);
     config.assert_v6_writer_v3_current();
     let migration_before = config.migration_fingerprint();
@@ -671,8 +1252,8 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
 
     config.remove_disposable_writer_profile();
     let absent_before = config.v6_absent_writer_fingerprint();
-    assert_eq!(absent_before.1, 6);
-    assert_eq!(absent_before.3, 0);
+    assert_eq!(config.migration_fingerprint().1, 6);
+    config.assert_writer_namespace_absent();
     assert_eq!(
         run_latticed_admin(&config, "--postgres-bootstrap", false)
             .replace("\r\n", "\n")
@@ -683,25 +1264,136 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     println!("TASK105_STAGE_V6_ABSENT_FAIL_CLOSED_PASS");
 
     let parent_run_id = required("LATTICE_TASK019_RUN_ID");
+    let main_during_children = config.v6_absent_writer_fingerprint();
+
+    let fresh_partial = config.child_database(0x4000_0000);
+    assert_ne!(fresh_partial.run_id, config.run_id);
+    config.revoke_login_database_privileges();
+    config.assert_login_capability(false);
+    run_latticed_admin(&fresh_partial, "--postgres-initialize", true);
+    fresh_partial.assert_login_capability(true);
+    config.assert_login_capability(false);
+    fresh_partial.introduce_partial_writer_on_fresh_store();
+    fresh_partial.assert_store_migration_profile(MigrationBootstrapProfile::Fresh);
+    let fresh_partial_before = fresh_partial.fresh_catalog_fingerprint();
+    assert_eq!(
+        run_latticed_admin(&fresh_partial, "--postgres-bootstrap", false).trim(),
+        "LATTICE_WRITER_LEASE_REJECTED"
+    );
+    assert_eq!(
+        fresh_partial.fresh_catalog_fingerprint(),
+        fresh_partial_before
+    );
+    fresh_partial.assert_store_migration_profile(MigrationBootstrapProfile::Fresh);
+    assert_eq!(config.v6_absent_writer_fingerprint(), main_during_children);
+    println!("TASK105_STAGE_FRESH_PARTIAL_WRITER_FAIL_CLOSED_PASS");
+
     let writer_v2 = config.child_database(0x1000_0000);
     assert_ne!(writer_v2.run_id, config.run_id);
+    assert_ne!(writer_v2.run_id, fresh_partial.run_id);
+    fresh_partial.revoke_login_database_privileges();
+    fresh_partial.assert_login_capability(false);
     run_latticed_admin(&writer_v2, "--postgres-initialize", true);
-    config.revoke_login_connect();
+    writer_v2.assert_login_capability(true);
+    config.assert_login_capability(false);
     writer_v2.prepare_v5_writer_v2_current();
     writer_v2.assert_v5_writer_v2_current();
     run_latticed_admin(&writer_v2, "--postgres-bootstrap", true);
     writer_v2.assert_v6_writer_v3_current();
+    assert_eq!(config.v6_absent_writer_fingerprint(), main_during_children);
     println!("TASK105_STAGE_V5_WRITER_V2_EXECUTABLE_PASS");
+
+    let bridge_pending = config.child_database(0x3000_0000);
+    assert_ne!(bridge_pending.run_id, config.run_id);
+    assert_ne!(bridge_pending.run_id, writer_v2.run_id);
+    assert_ne!(bridge_pending.run_id, fresh_partial.run_id);
+    writer_v2.revoke_login_database_privileges();
+    writer_v2.assert_login_capability(false);
+    run_latticed_admin(&bridge_pending, "--postgres-initialize", true);
+    bridge_pending.assert_login_capability(true);
+    writer_v2.assert_login_capability(false);
+    config.assert_login_capability(false);
+    bridge_pending.prepare_v5_memory_v2_writer_v2_bridge_pending();
+    bridge_pending.assert_v5_memory_v2_writer_v2_bridge_pending();
+    run_latticed_admin(&bridge_pending, "--postgres-bootstrap", true);
+    bridge_pending.assert_v6_writer_v3_current();
+    assert_eq!(config.v6_absent_writer_fingerprint(), main_during_children);
+    println!("TASK105_STAGE_V5_MEMORY_V2_WRITER_PENDING_EXECUTABLE_PASS");
+
+    let legacy_v1 = config.child_database(0x5000_0000);
+    assert_ne!(legacy_v1.run_id, config.run_id);
+    assert_ne!(legacy_v1.run_id, fresh_partial.run_id);
+    assert_ne!(legacy_v1.run_id, writer_v2.run_id);
+    assert_ne!(legacy_v1.run_id, bridge_pending.run_id);
+    bridge_pending.revoke_login_database_privileges();
+    bridge_pending.assert_login_capability(false);
+    run_latticed_admin(&legacy_v1, "--postgres-initialize", true);
+    legacy_v1.assert_login_capability(true);
+    config.assert_login_capability(false);
+    legacy_v1.prepare_legacy_v1_store();
+    let legacy_before = legacy_v1.legacy_v1_fingerprint();
+    assert_eq!(
+        run_latticed_admin(&legacy_v1, "--postgres-bootstrap", false).trim(),
+        "LATTICED_RUNTIME_POSTGRES_VERIFICATION_REJECTED"
+    );
+    assert_eq!(legacy_v1.legacy_v1_fingerprint(), legacy_before);
+    assert_eq!(config.v6_absent_writer_fingerprint(), main_during_children);
+    println!("TASK105_STAGE_LEGACY_PRODUCT_BOOTSTRAP_REJECTED_PASS");
 
     let writer_absent = config.child_database(0x2000_0000);
     assert_ne!(writer_absent.run_id, config.run_id);
     assert_ne!(writer_absent.run_id, writer_v2.run_id);
+    assert_ne!(writer_absent.run_id, bridge_pending.run_id);
+    assert_ne!(writer_absent.run_id, fresh_partial.run_id);
+    assert_ne!(writer_absent.run_id, legacy_v1.run_id);
+    legacy_v1.revoke_login_database_privileges();
+    legacy_v1.assert_login_capability(false);
     run_latticed_admin(&writer_absent, "--postgres-initialize", true);
-    writer_v2.revoke_login_connect();
+    writer_absent.assert_login_capability(true);
+    writer_v2.assert_login_capability(false);
+    bridge_pending.assert_login_capability(false);
+    fresh_partial.assert_login_capability(false);
+    legacy_v1.assert_login_capability(false);
+    config.assert_login_capability(false);
     writer_absent.prepare_v5_store_only();
     writer_absent.assert_v5_writer_absent();
+
+    writer_absent.introduce_memory_default_acl_drift();
+    let default_acl_drift = writer_absent.v5_fallback_fingerprint();
+    assert_eq!(
+        run_latticed_admin(&writer_absent, "--postgres-bootstrap", false).trim(),
+        "LATTICE_GRAPH_MEMORY_CONFIGURATION_REJECTED"
+    );
+    assert_eq!(writer_absent.v5_fallback_fingerprint(), default_acl_drift);
+    writer_absent.repair_memory_default_acl_drift();
+    writer_absent.assert_v5_writer_absent();
+    println!("TASK105_STAGE_V5_MEMORY_DEFAULT_ACL_FAIL_CLOSED_PASS");
+
+    writer_absent.introduce_partial_memory_catalog();
+    let partial_memory = writer_absent.v5_fallback_fingerprint();
+    assert_eq!(
+        run_latticed_admin(&writer_absent, "--postgres-bootstrap", false).trim(),
+        "LATTICE_GRAPH_MEMORY_CONFIGURATION_REJECTED"
+    );
+    assert_eq!(writer_absent.v5_fallback_fingerprint(), partial_memory);
+    writer_absent.repair_partial_memory_catalog();
+    writer_absent.assert_v5_writer_absent();
+    println!("TASK105_STAGE_V5_MEMORY_PARTIAL_FAIL_CLOSED_PASS");
+
     run_latticed_admin(&writer_absent, "--postgres-bootstrap", true);
     writer_absent.assert_v6_writer_v3_current();
+    assert_eq!(config.v6_absent_writer_fingerprint(), main_during_children);
+
+    writer_absent.revoke_login_database_privileges();
+    writer_absent.assert_login_capability(false);
+    run_latticed_admin(&config, "--postgres-initialize", true);
+    config.assert_login_capability(true);
+    writer_v2.assert_login_capability(false);
+    bridge_pending.assert_login_capability(false);
+    fresh_partial.assert_login_capability(false);
+    legacy_v1.assert_login_capability(false);
+    writer_absent.assert_login_capability(false);
+    assert_eq!(config.v6_absent_writer_fingerprint(), main_during_children);
     assert_eq!(required("LATTICE_TASK019_RUN_ID"), parent_run_id);
     println!("TASK105_STAGE_V5_WRITER_ABSENT_EXECUTABLE_PASS");
 }

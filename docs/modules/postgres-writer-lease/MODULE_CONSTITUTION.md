@@ -161,6 +161,10 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
     through their complete foundation, identity, manifest, catalog, ACL,
     ledger, and history profile; only physical Writer absence may bypass those
     Writer-row checks and request the complete Store/Memory fallback.
+18. Writer-v2 bridge-pending and Writer-v2 current are distinct closed
+    bootstrap states. A preflight or executor cannot substitute one for the
+    other, and an already-installed Writer-v3 bridge verifies rather than
+    recreates its fixed rebind procedure on retry.
 
 ## Allowed Dependencies
 

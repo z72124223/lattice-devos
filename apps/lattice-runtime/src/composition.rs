@@ -86,7 +86,9 @@ use lattice_ports::{
     TaskLifecycleResult, TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
 };
 use lattice_postgres_codebase_memory::{
-    ExtensionTarget, PostgresCodebaseMemory, apply_extension as apply_postgres_memory_extension,
+    ExtensionBootstrapGlobalProfile as MemoryBootstrapGlobalProfile,
+    ExtensionBootstrapProfile as MemoryBootstrapProfile, ExtensionTarget, PostgresCodebaseMemory,
+    apply_extension as apply_postgres_memory_extension, inspect_bootstrap_profile,
     verify_embedded_extension_manifest, verify_extension as verify_memory_extension,
 };
 use lattice_postgres_store::{
@@ -2078,19 +2080,30 @@ enum PostgresBootstrapAction {
 
 const fn postgres_bootstrap_action(
     store: MigrationBootstrapProfile,
+    memory: MemoryBootstrapProfile,
     writer: V3BootstrapProfile,
 ) -> Option<PostgresBootstrapAction> {
-    match (store, writer) {
+    match (store, memory, writer) {
         (
             MigrationBootstrapProfile::V5,
-            V3BootstrapProfile::V5FallbackRequired | V3BootstrapProfile::V5Bridge,
+            MemoryBootstrapProfile::Empty | MemoryBootstrapProfile::V2 | MemoryBootstrapProfile::V3,
+            V3BootstrapProfile::V5FallbackRequired,
+        )
+        | (
+            MigrationBootstrapProfile::V5,
+            MemoryBootstrapProfile::V3,
+            V3BootstrapProfile::V5Bridge,
         ) => Some(PostgresBootstrapAction::V5Apply),
-        (MigrationBootstrapProfile::V6, V3BootstrapProfile::V6BridgePending) => {
-            Some(PostgresBootstrapAction::V6Rebind)
-        }
-        (MigrationBootstrapProfile::V6, V3BootstrapProfile::V6Current) => {
-            Some(PostgresBootstrapAction::V6VerifyOnly)
-        }
+        (
+            MigrationBootstrapProfile::V6,
+            MemoryBootstrapProfile::V3,
+            V3BootstrapProfile::V6BridgePending,
+        ) => Some(PostgresBootstrapAction::V6Rebind),
+        (
+            MigrationBootstrapProfile::V6,
+            MemoryBootstrapProfile::V3,
+            V3BootstrapProfile::V6Current,
+        ) => Some(PostgresBootstrapAction::V6VerifyOnly),
         _ => None,
     }
 }
@@ -2113,52 +2126,54 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
     let store_target = StoreMigrationTarget::new(database.database_name(), database.run_id())
         .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
     let mut migrator = connect_migrator(&database, &password)?;
-
-    // Classify only exact history before mutation. Fresh setup creates the
-    // stopped v5 foundation; an existing legacy profile is explicitly stopped
-    // before it advances to v5.
-    let mut profile = inspect_migration_profile(&mut migrator, &store_target)
-        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
-    if profile == MigrationBootstrapProfile::Fresh {
-        apply_store_migrations(&mut migrator, &store_target)
-            .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
-        profile = MigrationBootstrapProfile::V5;
-    }
-    let mut stopped_admission = None;
-    if profile == MigrationBootstrapProfile::LegacyPrefix {
-        let admission = RuntimeAdmissionSnapshot::load(&mut migrator)?;
-        admission.stop(&mut migrator)?;
-        if apply_store_migrations(&mut migrator, &store_target).is_err() {
-            admission.restore(&mut migrator)?;
-            return Err(LatticedError::new(
-                LatticedErrorKind::RuntimePostgresMigration,
-            ));
-        }
-        stopped_admission = Some(admission);
-        profile = MigrationBootstrapProfile::V5;
-    }
     let database_identity =
         ContentDigest::from_sha256(store_target.expected_database_identity_sha256().as_str())
             .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
     let writer_v3 = V3ExtensionTarget::new(database.database_name(), database_identity.clone())
         .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
-    let writer_profile = match inspect_v3_bootstrap_profile(&mut migrator, &writer_v3) {
-        Ok(profile) => profile,
-        Err(_) => {
-            if let Some(admission) = &stopped_admission {
-                admission.restore(&mut migrator)?;
-            }
+
+    // Classify only exact history before mutation. Product bootstrap does not
+    // normalize historical prefixes. Fresh setup first proves the Writer
+    // namespace absent before creating its stopped v5 foundation.
+    let mut profile = inspect_migration_profile(&mut migrator, &store_target)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
+    if profile == MigrationBootstrapProfile::LegacyPrefix {
+        return Err(LatticedError::new(
+            LatticedErrorKind::RuntimePostgresVerification,
+        ));
+    }
+    if profile == MigrationBootstrapProfile::Fresh {
+        if inspect_v3_bootstrap_profile(&mut migrator, &writer_v3)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?
+            != V3BootstrapProfile::V5FallbackRequired
+        {
             return Err(LatticedError::new(LatticedErrorKind::WriterLease));
+        }
+        apply_store_migrations(&mut migrator, &store_target)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
+        profile = MigrationBootstrapProfile::V5;
+    }
+    let memory_target = ExtensionTarget::new(database.database_name(), database.run_id())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    let memory_global = match profile {
+        MigrationBootstrapProfile::V5 => MemoryBootstrapGlobalProfile::V5,
+        MigrationBootstrapProfile::V6 => MemoryBootstrapGlobalProfile::V6,
+        MigrationBootstrapProfile::Fresh | MigrationBootstrapProfile::LegacyPrefix => {
+            return Err(LatticedError::new(
+                LatticedErrorKind::RuntimePostgresVerification,
+            ));
         }
     };
-    let action = match postgres_bootstrap_action(profile, writer_profile) {
-        Some(action) => action,
-        None => {
-            if let Some(admission) = &stopped_admission {
-                admission.restore(&mut migrator)?;
-            }
-            return Err(LatticedError::new(LatticedErrorKind::WriterLease));
-        }
+    let Ok(memory_profile) =
+        inspect_bootstrap_profile(&mut migrator, &memory_target, memory_global)
+    else {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    };
+    let Ok(writer_profile) = inspect_v3_bootstrap_profile(&mut migrator, &writer_v3) else {
+        return Err(LatticedError::new(LatticedErrorKind::WriterLease));
+    };
+    let Some(action) = postgres_bootstrap_action(profile, memory_profile, writer_profile) else {
+        return Err(LatticedError::new(LatticedErrorKind::WriterLease));
     };
 
     if action == PostgresBootstrapAction::V6VerifyOnly {
@@ -2169,14 +2184,8 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
             ));
         }
     } else {
-        let admission = match stopped_admission {
-            Some(admission) => admission,
-            None => {
-                let admission = RuntimeAdmissionSnapshot::load(&mut migrator)?;
-                admission.stop(&mut migrator)?;
-                admission
-            }
-        };
+        let admission = RuntimeAdmissionSnapshot::load(&mut migrator)?;
+        admission.stop(&mut migrator)?;
         let setup = (|| {
             if action == PostgresBootstrapAction::V5Apply {
                 match writer_profile {
@@ -2202,11 +2211,6 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                                 LatticedErrorKind::RuntimePostgresVerification,
                             ));
                         }
-                        let memory_target =
-                            ExtensionTarget::new(database.database_name(), database.run_id())
-                                .map_err(|_| {
-                                    LatticedError::new(LatticedErrorKind::GraphConfiguration)
-                                })?;
                         let memory_manifest =
                             verify_embedded_extension_manifest().map_err(|_| {
                                 LatticedError::new(LatticedErrorKind::GraphConfiguration)
@@ -2214,12 +2218,6 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                         apply_postgres_memory_extension(&mut migrator, &memory_target).map_err(
                             |_| LatticedError::new(LatticedErrorKind::GraphConfiguration),
                         )?;
-                        verify_memory_extension(
-                            &mut migrator,
-                            &memory_target,
-                            lattice_postgres_codebase_memory::ExtensionDatabaseRole::Migrator,
-                        )
-                        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
                         let global_manifest = ContentDigest::from_sha256(
                             store.manifest_sha256().as_str(),
                         )
@@ -2237,6 +2235,12 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                             .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
                         verify_writer_extension(&mut migrator, &writer_target)
                             .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+                        verify_memory_extension(
+                            &mut migrator,
+                            &memory_target,
+                            lattice_postgres_codebase_memory::ExtensionDatabaseRole::Migrator,
+                        )
+                        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
                         if apply_v3_extension(&mut migrator, &writer_v3)
                             .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?
                             != WriterExtensionApplyOutcome::Bridged
@@ -8483,24 +8487,32 @@ mod tests {
 
     #[test]
     fn postgres_bootstrap_cross_product_is_closed_before_effects() {
+        use MemoryBootstrapProfile::{Empty, V2 as MemoryV2, V3 as MemoryV3};
         use MigrationBootstrapProfile::{Fresh, LegacyPrefix, V5, V6};
         use PostgresBootstrapAction::{V5Apply, V6Rebind, V6VerifyOnly};
         use V3BootstrapProfile::{V5Bridge, V5FallbackRequired, V6BridgePending, V6Current};
 
         let accepted = [
-            ((V5, V5FallbackRequired), V5Apply),
-            ((V5, V5Bridge), V5Apply),
-            ((V6, V6BridgePending), V6Rebind),
-            ((V6, V6Current), V6VerifyOnly),
+            ((V5, Empty, V5FallbackRequired), V5Apply),
+            ((V5, MemoryV2, V5FallbackRequired), V5Apply),
+            ((V5, MemoryV3, V5FallbackRequired), V5Apply),
+            ((V5, MemoryV3, V5Bridge), V5Apply),
+            ((V6, MemoryV3, V6BridgePending), V6Rebind),
+            ((V6, MemoryV3, V6Current), V6VerifyOnly),
         ];
         for store in [Fresh, LegacyPrefix, V5, V6] {
-            for writer in [V5FallbackRequired, V5Bridge, V6BridgePending, V6Current] {
-                let expected = accepted
-                    .iter()
-                    .find_map(|((left_store, left_writer), action)| {
-                        (*left_store == store && *left_writer == writer).then_some(*action)
-                    });
-                assert_eq!(postgres_bootstrap_action(store, writer), expected);
+            for memory in [Empty, MemoryV2, MemoryV3] {
+                for writer in [V5FallbackRequired, V5Bridge, V6BridgePending, V6Current] {
+                    let expected = accepted.iter().find_map(
+                        |((left_store, left_memory, left_writer), action)| {
+                            (*left_store == store
+                                && *left_memory == memory
+                                && *left_writer == writer)
+                                .then_some(*action)
+                        },
+                    );
+                    assert_eq!(postgres_bootstrap_action(store, memory, writer), expected);
+                }
             }
         }
     }
@@ -8528,9 +8540,16 @@ mod tests {
         let first_store = bootstrap
             .find("apply_store_migrations")
             .expect("v5 foundation");
-        let writer_inspection = bootstrap
+        let writer_absence = bootstrap
             .find("inspect_v3_bootstrap_profile")
-            .expect("Writer-owned closed bootstrap profile");
+            .expect("fresh Writer absence gate");
+        let memory_inspection = bootstrap
+            .find("inspect_bootstrap_profile")
+            .expect("Memory-owned closed bootstrap profile");
+        let writer_inspection = memory_inspection
+            + bootstrap[memory_inspection..]
+                .find("inspect_v3_bootstrap_profile")
+                .expect("Writer-owned closed bootstrap profile");
         let writer_v3 = bootstrap
             .find("apply_v3_extension")
             .expect("Writer v3 bridge");
@@ -8543,11 +8562,20 @@ mod tests {
         let writer_v2_fallback = bootstrap
             .find("apply_postgres_writer_extension")
             .expect("Writer v2 fresh-install fallback");
+        let memory_fallback_verify = bootstrap
+            .find("verify_memory_extension")
+            .expect("Memory fallback verification");
         let final_store = bootstrap.rfind("apply_store_migrations").expect("Store v6");
-        assert!(first_store < writer_inspection && writer_inspection < writer_v3);
+        let legacy_rejection = bootstrap
+            .find("if profile == MigrationBootstrapProfile::LegacyPrefix")
+            .expect("legacy product-bootstrap rejection");
+        assert!(legacy_rejection < writer_absence && writer_absence < first_store);
+        assert!(first_store < memory_inspection && memory_inspection < writer_inspection);
+        assert!(writer_inspection < writer_v3);
         assert!(writer_v3 < final_store);
         assert!(writer_v3 < generic_v5_verifier && generic_v5_verifier < memory_fallback);
         assert!(memory_fallback < writer_v2_fallback);
+        assert!(writer_v2_fallback < memory_fallback_verify);
         assert!(bootstrap.contains("V3BootstrapProfile::V5FallbackRequired"));
         assert!(bootstrap.contains("V3BootstrapProfile::V5Bridge"));
         assert!(bootstrap.contains("V3BootstrapProfile::V6BridgePending"));
@@ -8556,6 +8584,7 @@ mod tests {
         assert!(bootstrap.contains("persisted_admission != configured_admission"));
         assert_eq!(bootstrap.matches("apply_v3_extension").count(), 2);
         let admission_stop = bootstrap.find("admission.stop").expect("admission stop");
+        assert!(legacy_rejection < admission_stop);
         let v6_rebind = bootstrap
             .find("rebind_existing_v3_extension")
             .expect("Writer-owned strict existing-v3 rebind");

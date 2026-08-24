@@ -148,7 +148,6 @@ try {
     finally {
         Pop-Location
     }
-    Write-Output 'TASK105_DURABLE_FOREMAN_LIVE_GATE=PASS'
 }
 catch {
     if (Test-Path -LiteralPath $postgresLog -PathType Leaf) {
@@ -181,3 +180,4 @@ finally {
     }
     Write-Output "TASK105_TEARDOWN_OK root_absent=$(-not (Test-Path -LiteralPath $runRoot)) listener_absent=$(@(Get-Task105ListenerPid).Count -eq 0)"
 }
+Write-Output 'TASK105_DURABLE_FOREMAN_LIVE_GATE=PASS'

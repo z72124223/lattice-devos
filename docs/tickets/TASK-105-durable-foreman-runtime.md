@@ -4,7 +4,7 @@ title: Durable foreman runtime checkpoint and restart replay
 spec_id: SPEC-009
 spec_version: 1
 module_id: latticed
-constitution_version: 3.0
+constitution_version: 3.1
 additional_modules:
   - module_id: orchestrator-runtime
     constitution_version: 2.7
@@ -16,6 +16,8 @@ additional_modules:
     constitution_version: 2.7
   - module_id: postgres-store
     constitution_version: 1.18
+  - module_id: postgres-codebase-memory
+    constitution_version: 1.3
   - module_id: postgres-writer-lease
     constitution_version: 1.8
 status: in_progress
@@ -39,6 +41,7 @@ allowed_paths:
   - crates/lattice-ports/**
   - crates/lattice-task-ledger/**
   - crates/lattice-postgres-store/**
+  - crates/lattice-postgres-codebase-memory/**
   - crates/lattice-postgres-writer-lease/**
   - db/migrations/0007_foreman_coordination.sql
   - db/extensions/writer-lease/v3-rebind.sql
@@ -51,6 +54,7 @@ allowed_paths:
   - docs/modules/orchestrator-runtime/MODULE_CONSTITUTION.md
   - docs/modules/latticed/MODULE_CONSTITUTION.md
   - docs/modules/postgres-store/MODULE_CONSTITUTION.md
+  - docs/modules/postgres-codebase-memory/MODULE_CONSTITUTION.md
   - docs/modules/postgres-writer-lease/MODULE_CONSTITUTION.md
   - docs/reviews/WORKFLOW_LEDGER_TASK_105_2026-08-25.md
   - scripts/start-lattice-runtime-postgres.ps1

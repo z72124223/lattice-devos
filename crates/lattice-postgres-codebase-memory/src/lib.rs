@@ -14,8 +14,9 @@ mod setup;
 
 pub use adapter::PostgresCodebaseMemory;
 pub use setup::{
-    ExtensionApplyOutcome, ExtensionCatalogEvidence, ExtensionDatabaseRole, ExtensionSetupError,
-    ExtensionSetupErrorKind, ExtensionTarget, apply_extension, verify_extension,
+    ExtensionApplyOutcome, ExtensionBootstrapGlobalProfile, ExtensionBootstrapProfile,
+    ExtensionCatalogEvidence, ExtensionDatabaseRole, ExtensionSetupError, ExtensionSetupErrorKind,
+    ExtensionTarget, apply_extension, inspect_bootstrap_profile, verify_extension,
 };
 
 /// Repository-relative location of the frozen v1 extension profile.

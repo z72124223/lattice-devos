@@ -1,7 +1,7 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 3.0
+version: 3.1
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -127,7 +127,7 @@ Orchestrator composition.
   revalidate it through Task Domain, and preserve its one digest across
   Gateway, Task Ledger, Writer Lease, Codex, verification/Git, and status
   evidence.
-- Compose the injected Writer Lease 1.1 repository and Task lifecycle
+- Compose the injected Writer Lease domain 1.1 repository and Task lifecycle
   port. Production task dispatch cannot use `FakeWriterLease`, synthetic
   authority, or a process-memory task/status store.
 - The local Task lifecycle edge wrapper implements `TaskLifecyclePort` only by
@@ -227,13 +227,20 @@ Orchestrator composition.
     Only explicit `--postgres-bootstrap` may sequence Writer v3 before Store v6,
     close migrator credentials, construct fresh runtime clients, verify foreman
     replay and then report readiness.
-21. Before changing admission, bootstrap consumes only Writer Lease 1.8's
-    closed read-only profile and accepts the exact cross-product: Store v5 with
-    `V5FallbackRequired|V5Bridge`, or Store v6 with
-    `V6BridgePending|V6Current`. Every other pair fails closed. Only the v5
+21. Before changing admission, bootstrap consumes only PostgreSQL Memory 1.3
+    and PostgreSQL Writer Lease 1.8 closed read-only profiles. It accepts only Store-v5 +
+    Memory `Empty|V2|V3` + Writer `V5FallbackRequired`, Store-v5 + Memory `V3`
+    + Writer `V5Bridge`, or Store-v6 + Memory `V3` + Writer
+    `V6BridgePending|V6Current`. Every other triple fails closed. Only the v5
     fallback runs Store verification, Memory apply/verify, Writer-v2
-    apply/verify, then exact Writer-v3 bridge. Composition never parses Writer
-    rows or substitutes its own classifier.
+    apply/verify, then exact Writer-v3 bridge. Composition never parses Memory
+    or Writer rows or substitutes its own classifier.
+    A physically fresh Store first requires the Writer-owned inspector to prove
+    an exactly absent Writer namespace before Store v5 is created, after which
+    the same closed triple is re-inspected. A partial Writer namespace fails
+    before Store schema creation. Product bootstrap rejects every Store legacy
+    prefix before admission observation or mutation; only the Store-owned
+    administrative API may advance historical prefixes.
 22. Exact v6 current requires persisted Runtime admission to equal the
     configured authority and performs zero stop, restore, rebind, Store
     migration, row, or ACL write. Migrator credentials are then closed and a
@@ -244,18 +251,17 @@ Orchestrator composition.
 ## Allowed Dependencies
 
 - `lattice-contracts` 1.13, `lattice-ports` 2.1,
-  `orchestrator-runtime` 2.7, Foreman State 1.3, Task Ledger 2.7, and Writer
-  Lease 1.1 public APIs.
+  `orchestrator-runtime` 2.7, Foreman State 1.3, Task Ledger 2.7, PostgreSQL
+  Memory 1.3, Writer Lease domain 1.1, and PostgreSQL Writer Lease 1.8 public APIs.
 - Concrete Codex, PostgreSQL Task Ledger, bounded workspace/Git, and fixed-test
   adapters required by TASK-032, only for construction and port
   implementation.
-- Concrete exact-snapshot, Graphify 1.0, and pure Codebase Memory 1.0 adapters
-  required by TASK-033, only for construction and port implementation. The
-  proposed independent PostgreSQL Memory extension adapter cannot be composed
-  until its owning module receives an explicitly approved versioned amendment.
+- Concrete exact-snapshot, Graphify 1.0, pure Codebase Memory 1.0, and
+  PostgreSQL Memory 1.3 adapters required by TASK-033/TASK-105, only for
+  construction and typed bootstrap inspection/port implementation.
 - Bounded stdio/JSON/MCP framing, process configuration, hashing, timeout, and
   diagnostics libraries required at the application edge.
-- Concrete PostgreSQL Task Ledger and PostgreSQL Writer Lease 1.0 adapters only
+- Concrete PostgreSQL Task Ledger and PostgreSQL Writer Lease 1.8 adapters only
   for construction behind their typed boundaries.
 - `lattice-hermes-adapter` 1.1 only for production runner construction,
   ephemeral liveness, and lifecycle teardown; it grants no durable truth,
@@ -369,6 +375,7 @@ constitution cannot be weakened merely to excuse implementation drift.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 3.1 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Add the Memory 1.3 and PostgreSQL Writer Lease 1.8 typed read-only bootstrap profiles as the sole pre-admission cross-module contract, including exact empty, predecessor, bridge-pending, current, fresh-absence, and legacy-product-rejection handling | Sole-foreman delegation |
 | 3.0 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Consume Writer 1.8's closed preflight before admission effects; enforce the exact Store/Writer cross-product and make v6-current a full fresh-runtime verify-only path with zero durable mutation | Sole-foreman delegation |
 | 2.9 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Make schema-v5 bootstrap strictly Writer-first; an existing exact v3 bridge skips generic Memory verification, while only unsupported foundation enters the complete Store, Memory, Writer-v2, then Writer-v3 fallback | Sole-foreman delegation |
 | 2.8 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Let the Writer-owned v3 boundary recognize an exact existing schema-v5 bridge before the generic Store-v5/Writer-v2 fallback; only exact unsupported foundation may fall back and every other Writer error remains fail-closed | Sole-foreman delegation |

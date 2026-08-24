@@ -16,6 +16,9 @@ const REQUIRED_GLOBAL_SCHEMA_VERSION: u16 = 5;
 // Updated only after the exact six-entry global manifest is frozen.
 const REQUIRED_GLOBAL_MANIFEST_SHA256: &str =
     "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
+const BOOTSTRAP_V6_GLOBAL_SCHEMA_VERSION: u16 = 6;
+const BOOTSTRAP_V6_GLOBAL_MANIFEST_SHA256: &str =
+    "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae";
 const HISTORICAL_V2_GLOBAL_SCHEMA_VERSION: u16 = 3;
 const HISTORICAL_V2_GLOBAL_MANIFEST_SHA256: &str =
     "09c431df18ad71a4f44239a5d2ddf6b1774b8ffec06c7f9223f0e41757f3d407";
@@ -564,6 +567,21 @@ pub enum ExtensionApplyOutcome {
     AlreadyCurrent,
 }
 
+/// Exact Store context accepted by the read-only product-bootstrap inspector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionBootstrapGlobalProfile {
+    V5,
+    V6,
+}
+
+/// Closed Memory-owned state returned to the product bootstrap coordinator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtensionBootstrapProfile {
+    Empty,
+    V2,
+    V3,
+}
+
 /// Read-only exact database/extension identity evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtensionCatalogEvidence {
@@ -743,6 +761,7 @@ pub fn apply_extension(
     }
     let writer_companion = classify_writer_lease_companion(&mut transaction, target, true)?;
     validate_writer_companion_for_memory_state(pre_state, writer_companion)?;
+    verify_global_default_acl_closure(&mut transaction)?;
     match pre_state {
         ExtensionPreState::Fresh => {
             let v2_sql = std::str::from_utf8(v2_manifest.bytes()).map_err(|_| {
@@ -758,16 +777,14 @@ pub fn apply_extension(
             if classify_pre_state(&mut transaction)? != ExtensionPreState::ExactV2 {
                 return Err(catalog_error());
             }
-            verify_v2_source(&mut transaction, target, &v2_manifest)?;
-            verify_exact_catalog_profile(&mut transaction, ExactCatalogProfile::V2)?;
+            verify_v2_memory_profile(&mut transaction, target, &v2_manifest)?;
             apply_v3_successor(&mut transaction, target, &manifest)?;
         }
         ExtensionPreState::Partial | ExtensionPreState::Collision => {
             return Err(stage_error("MEMORY_EXTENSION_PRESTATE_CONTROL_FLOW_FAILED"));
         }
         ExtensionPreState::ExactV2 => {
-            verify_v2_source(&mut transaction, target, &v2_manifest)?;
-            verify_exact_catalog_profile(&mut transaction, ExactCatalogProfile::V2)?;
+            verify_v2_memory_profile(&mut transaction, target, &v2_manifest)?;
             apply_v3_successor(&mut transaction, target, &manifest)?;
         }
         ExtensionPreState::ExactV3 => {}
@@ -777,6 +794,7 @@ pub fn apply_extension(
     }
     verify_exact_catalog_profile(&mut transaction, ExactCatalogProfile::V3)?;
     verify_catalog_closure(&mut transaction)?;
+    verify_namespace_auxiliary_closure(&mut transaction, 16, "LATTICE_DEVOS_MEMORY_SCHEMA_V5")?;
     verify_writer_lease_companion(&mut transaction, target, writer_companion, true)?;
     read_identity(
         &mut transaction,
@@ -810,6 +828,87 @@ pub fn apply_extension(
         })?;
         Ok(ExtensionApplyOutcome::Installed)
     }
+}
+
+/// Classifies and fully verifies the Memory-owned bootstrap state without
+/// consulting or interpreting Writer state and without durable mutation.
+///
+/// # Errors
+///
+/// Fails closed for partial/colliding Memory evidence, catalog or ACL drift,
+/// identity/ledger substitution, a mismatched Store context, or unavailable
+/// database evidence.
+pub fn inspect_bootstrap_profile(
+    client: &mut Client,
+    target: &ExtensionTarget,
+    global: ExtensionBootstrapGlobalProfile,
+) -> Result<ExtensionBootstrapProfile, ExtensionSetupError> {
+    let v2_manifest = verify_embedded_v2_extension_manifest().map_err(|_| {
+        ExtensionSetupError::new(
+            ExtensionSetupErrorKind::ManifestInvalid,
+            "MEMORY_EXTENSION_V2_MANIFEST_INVALID",
+        )
+    })?;
+    let v3_manifest = verify_embedded_extension_manifest().map_err(|_| {
+        ExtensionSetupError::new(
+            ExtensionSetupErrorKind::ManifestInvalid,
+            "MEMORY_EXTENSION_MANIFEST_INVALID",
+        )
+    })?;
+    let mut transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .map_err(|_| transaction_error())?;
+    harden_transaction(&mut transaction)?;
+    acquire_writer_companion_advisory_locks(&mut transaction)?;
+    let server_version_num = preflight_bootstrap(&mut transaction, target, global)?;
+    let schema_comment = match global {
+        ExtensionBootstrapGlobalProfile::V5 => "LATTICE_DEVOS_MEMORY_SCHEMA_V5",
+        ExtensionBootstrapGlobalProfile::V6 => "LATTICE_DEVOS_MEMORY_SCHEMA_V6",
+    };
+    verify_global_default_acl_closure(&mut transaction)?;
+    let profile = match classify_pre_state(&mut transaction)? {
+        ExtensionPreState::Fresh => {
+            verify_empty_catalog_closure(&mut transaction)?;
+            verify_namespace_auxiliary_closure(&mut transaction, 0, schema_comment)?;
+            ExtensionBootstrapProfile::Empty
+        }
+        ExtensionPreState::ExactV2 => {
+            verify_v2_source(&mut transaction, target, &v2_manifest)?;
+            verify_exact_catalog_profile(&mut transaction, ExactCatalogProfile::V2)?;
+            verify_namespace_auxiliary_closure(&mut transaction, 16, schema_comment)?;
+            ExtensionBootstrapProfile::V2
+        }
+        ExtensionPreState::ExactV3 => {
+            verify_exact_catalog_profile(&mut transaction, ExactCatalogProfile::V3)?;
+            verify_catalog_closure(&mut transaction)?;
+            verify_namespace_auxiliary_closure(&mut transaction, 16, schema_comment)?;
+            read_identity(
+                &mut transaction,
+                target,
+                ExtensionDatabaseRole::Migrator,
+                server_version_num,
+                &v3_manifest,
+            )?;
+            ExtensionBootstrapProfile::V3
+        }
+        ExtensionPreState::Partial => {
+            return Err(ExtensionSetupError::new(
+                ExtensionSetupErrorKind::PartialProfile,
+                "MEMORY_EXTENSION_PARTIAL_PROFILE",
+            ));
+        }
+        ExtensionPreState::Collision => {
+            return Err(ExtensionSetupError::new(
+                ExtensionSetupErrorKind::SchemaCollision,
+                "MEMORY_EXTENSION_SCHEMA_COLLISION",
+            ));
+        }
+    };
+    transaction.commit().map_err(|_| transaction_error())?;
+    Ok(profile)
 }
 
 /// Verifies the exact catalog/ACL profile and typed identity without mutation.
@@ -903,6 +1002,46 @@ fn preflight(
     target: &ExtensionTarget,
     role: ExtensionDatabaseRole,
 ) -> Result<u32, ExtensionSetupError> {
+    preflight_for_global(
+        client,
+        target,
+        role,
+        REQUIRED_GLOBAL_SCHEMA_VERSION,
+        REQUIRED_GLOBAL_MANIFEST_SHA256,
+    )
+}
+
+fn preflight_bootstrap(
+    client: &mut impl GenericClient,
+    target: &ExtensionTarget,
+    global: ExtensionBootstrapGlobalProfile,
+) -> Result<u32, ExtensionSetupError> {
+    let (version, manifest) = match global {
+        ExtensionBootstrapGlobalProfile::V5 => (
+            REQUIRED_GLOBAL_SCHEMA_VERSION,
+            REQUIRED_GLOBAL_MANIFEST_SHA256,
+        ),
+        ExtensionBootstrapGlobalProfile::V6 => (
+            BOOTSTRAP_V6_GLOBAL_SCHEMA_VERSION,
+            BOOTSTRAP_V6_GLOBAL_MANIFEST_SHA256,
+        ),
+    };
+    preflight_for_global(
+        client,
+        target,
+        ExtensionDatabaseRole::Migrator,
+        version,
+        manifest,
+    )
+}
+
+fn preflight_for_global(
+    client: &mut impl GenericClient,
+    target: &ExtensionTarget,
+    role: ExtensionDatabaseRole,
+    expected_global_version: u16,
+    expected_global_manifest: &str,
+) -> Result<u32, ExtensionSetupError> {
     let row = client
         .query_one(
             "SELECT current_database()::text, session_user::text, current_user::text, \
@@ -975,8 +1114,8 @@ fn preflight(
     let global_version: i32 = global.get(1);
     let global_manifest: String = global.get(2);
     if database_uuid != target.expected_database_uuid()
-        || global_version != i32::from(REQUIRED_GLOBAL_SCHEMA_VERSION)
-        || global_manifest != REQUIRED_GLOBAL_MANIFEST_SHA256
+        || global_version != i32::from(expected_global_version)
+        || global_manifest != expected_global_manifest
     {
         return Err(ExtensionSetupError::new(
             ExtensionSetupErrorKind::GlobalProfileMismatch,
@@ -1925,6 +2064,201 @@ fn apply_v3_successor(
         .map_err(|_| stage_error("MEMORY_EXTENSION_V3_LEDGER_WRITE_FAILED"))?;
     if changed != 1 {
         return Err(stage_error("MEMORY_EXTENSION_V3_LEDGER_WRITE_FAILED"));
+    }
+    Ok(())
+}
+
+fn verify_v2_memory_profile(
+    client: &mut impl GenericClient,
+    target: &ExtensionTarget,
+    manifest: &crate::ExtensionManifestEvidence,
+) -> Result<(), ExtensionSetupError> {
+    verify_v2_source(client, target, manifest)?;
+    verify_exact_catalog_profile(client, ExactCatalogProfile::V2)?;
+    verify_namespace_auxiliary_closure(client, 16, "LATTICE_DEVOS_MEMORY_SCHEMA_V5")
+}
+
+fn verify_empty_catalog_closure(
+    client: &mut impl GenericClient,
+) -> Result<(), ExtensionSetupError> {
+    let row = client
+        .query_opt(
+            "SELECT owner.rolname, \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class x \
+                      WHERE x.relnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc x \
+                      WHERE x.pronamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_type x \
+                      WHERE x.typnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_operator x \
+                      WHERE x.oprnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_opclass x \
+                      WHERE x.opcnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_opfamily x \
+                      WHERE x.opfnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_collation x \
+                      WHERE x.collnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_conversion x \
+                      WHERE x.connamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_statistic_ext x \
+                      WHERE x.stxnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_config x \
+                      WHERE x.cfgnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_dict x \
+                      WHERE x.dictnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_parser x \
+                      WHERE x.prsnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_template x \
+                      WHERE x.tmplnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_extension x \
+                      WHERE x.extnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.aclexplode(COALESCE( \
+                      n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.aclexplode(COALESCE( \
+                      n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
+                      LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=a.grantee \
+                      JOIN pg_catalog.pg_roles grantor ON grantor.oid=a.grantor \
+                      WHERE grantee.rolname='lattice_migrator' \
+                        AND grantor.rolname='lattice_migrator' \
+                        AND a.privilege_type IN ('USAGE','CREATE') \
+                        AND NOT a.is_grantable) \
+               FROM pg_catalog.pg_namespace n \
+               JOIN pg_catalog.pg_roles owner ON owner.oid=n.nspowner \
+              WHERE n.nspname='memory'",
+            &[],
+        )
+        .map_err(|_| catalog_stage("MEMORY_EXTENSION_EMPTY_CATALOG_QUERY_FAILED"))?
+        .ok_or_else(|| catalog_stage("MEMORY_EXTENSION_EMPTY_SCHEMA_MISSING"))?;
+    let owner: String = row
+        .try_get(0)
+        .map_err(|_| catalog_stage("MEMORY_EXTENSION_EMPTY_CATALOG_QUERY_FAILED"))?;
+    let mut catalog_counts_are_zero = true;
+    for index in 1..=14 {
+        let count: i64 = row
+            .try_get(index)
+            .map_err(|_| catalog_stage("MEMORY_EXTENSION_EMPTY_CATALOG_QUERY_FAILED"))?;
+        catalog_counts_are_zero &= count == 0;
+    }
+    let schema_acl_count: i64 = row
+        .try_get(15)
+        .map_err(|_| catalog_stage("MEMORY_EXTENSION_EMPTY_CATALOG_QUERY_FAILED"))?;
+    let admitted_schema_acl_count: i64 = row
+        .try_get(16)
+        .map_err(|_| catalog_stage("MEMORY_EXTENSION_EMPTY_CATALOG_QUERY_FAILED"))?;
+    if owner != "lattice_migrator"
+        || !catalog_counts_are_zero
+        || schema_acl_count != 2
+        || admitted_schema_acl_count != schema_acl_count
+    {
+        return Err(catalog_stage("MEMORY_EXTENSION_EMPTY_CATALOG_MISMATCH"));
+    }
+
+    Ok(())
+}
+
+fn verify_global_default_acl_closure(
+    client: &mut impl GenericClient,
+) -> Result<(), ExtensionSetupError> {
+    let defaults = client
+        .query_one(
+            "SELECT pg_catalog.count(DISTINCT d.oid), pg_catalog.count(*), \
+                    pg_catalog.count(*) FILTER (WHERE \
+                      owner.rolname='lattice_migrator' \
+                      AND grantee.rolname='lattice_migrator' \
+                      AND grantor.rolname='lattice_migrator' \
+                      AND NOT a.is_grantable \
+                      AND ((d.defaclobjtype='r' AND a.privilege_type IN ( \
+                              'SELECT','INSERT','UPDATE','DELETE','TRUNCATE', \
+                              'REFERENCES','TRIGGER','MAINTAIN')) \
+                        OR (d.defaclobjtype='S' AND a.privilege_type IN ( \
+                              'USAGE','SELECT','UPDATE')) \
+                        OR (d.defaclobjtype='f' AND a.privilege_type='EXECUTE') \
+                        OR (d.defaclobjtype='T' AND a.privilege_type IN ('USAGE')))) \
+               FROM pg_catalog.pg_default_acl d \
+               JOIN pg_catalog.pg_roles owner ON owner.oid=d.defaclrole \
+               CROSS JOIN LATERAL pg_catalog.aclexplode(d.defaclacl) a \
+               LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=a.grantee \
+               JOIN pg_catalog.pg_roles grantor ON grantor.oid=a.grantor \
+              WHERE d.defaclnamespace=0",
+            &[],
+        )
+        .map_err(|_| catalog_stage("MEMORY_EXTENSION_EMPTY_DEFAULT_ACL_QUERY_FAILED"))?;
+    let default_rows: i64 = defaults.get(0);
+    let default_acl_count: i64 = defaults.get(1);
+    let admitted_default_acl_count: i64 = defaults.get(2);
+    if default_rows != 4
+        || default_acl_count != 13
+        || admitted_default_acl_count != default_acl_count
+    {
+        return Err(catalog_stage("MEMORY_EXTENSION_EMPTY_DEFAULT_ACL_MISMATCH"));
+    }
+    Ok(())
+}
+
+fn verify_namespace_auxiliary_closure(
+    client: &mut impl GenericClient,
+    expected_types: i64,
+    expected_schema_comment: &str,
+) -> Result<(), ExtensionSetupError> {
+    let row = client
+        .query_opt(
+            "SELECT pg_catalog.obj_description(n.oid,'pg_namespace')::text, \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_seclabel s \
+                      WHERE s.classoid='pg_namespace'::pg_catalog.regclass AND s.objoid=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_type x \
+                      WHERE x.typnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_type x \
+                      LEFT JOIN pg_catalog.pg_class c ON c.oid=x.typrelid \
+                      LEFT JOIN pg_catalog.pg_type element ON element.oid=x.typelem \
+                      LEFT JOIN pg_catalog.pg_class element_class \
+                        ON element_class.oid=element.typrelid \
+                      WHERE x.typnamespace=n.oid AND x.typowner=n.nspowner \
+                        AND ((c.relnamespace=n.oid AND c.relname=x.typname \
+                              AND c.relname=ANY($1::text[])) \
+                          OR (element_class.relnamespace=n.oid \
+                              AND element_class.relname=ANY($1::text[]) \
+                              AND x.typname='_'||element_class.relname))), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_operator x \
+                      WHERE x.oprnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_opclass x \
+                      WHERE x.opcnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_opfamily x \
+                      WHERE x.opfnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_collation x \
+                      WHERE x.collnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_conversion x \
+                      WHERE x.connamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_statistic_ext x \
+                      WHERE x.stxnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_config x \
+                      WHERE x.cfgnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_dict x \
+                      WHERE x.dictnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_parser x \
+                      WHERE x.prsnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_template x \
+                      WHERE x.tmplnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_extension x \
+                      WHERE x.extnamespace=n.oid), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_default_acl x \
+                      WHERE x.defaclnamespace=n.oid) \
+               FROM pg_catalog.pg_namespace n WHERE n.nspname='memory'",
+            &[&&EXPECTED_TABLES[..]],
+        )
+        .map_err(|_| catalog_stage("MEMORY_EXTENSION_AUXILIARY_CATALOG_QUERY_FAILED"))?
+        .ok_or_else(|| catalog_stage("MEMORY_EXTENSION_SCHEMA_MISSING"))?;
+    let schema_comment: Option<String> = row.get(0);
+    let security_labels: i64 = row.get(1);
+    let types: i64 = row.get(2);
+    let admitted_types: i64 = row.get(3);
+    let auxiliary_counts_are_zero = (4..=15).all(|index| row.get::<_, i64>(index) == 0);
+    if schema_comment.as_deref() != Some(expected_schema_comment)
+        || security_labels != 0
+        || types != expected_types
+        || admitted_types != types
+        || !auxiliary_counts_are_zero
+    {
+        return Err(catalog_stage("MEMORY_EXTENSION_AUXILIARY_CATALOG_MISMATCH"));
     }
     Ok(())
 }
