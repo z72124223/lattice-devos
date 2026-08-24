@@ -210,7 +210,7 @@ impl LiveConfig {
             .user("lattice_runtime_login")
             .password(&self.password)
             .dbname(&self.database_name())
-            .application_name("lattice-task105-writer-contention")
+            .application_name("lattice-devos-task019")
             .ssl_mode(SslMode::Disable);
         let mut client = config.connect(NoTls).expect("TASK105_RUNTIME_CONNECT");
         client
@@ -1179,6 +1179,137 @@ impl LiveConfig {
         (row.get(0), row.get(1), row.get(2))
     }
 
+    fn assert_coherent_future_atomic_snapshot(&self) {
+        let row = self
+            .bootstrap_client()
+            .query_one(
+                "SELECT \
+                   COALESCE(array_agg(h.ordinal ORDER BY h.ordinal),ARRAY[]::smallint[]), \
+                   COALESCE(array_agg(h.migration_id::text ORDER BY h.ordinal),ARRAY[]::text[]), \
+                   COALESCE(array_agg(h.migration_path::text ORDER BY h.ordinal),ARRAY[]::text[]), \
+                   COALESCE(array_agg(h.byte_length ORDER BY h.ordinal),ARRAY[]::bigint[]), \
+                   COALESCE(array_agg(h.checksum_sha256::text ORDER BY h.ordinal),ARRAY[]::text[]), \
+                   COALESCE(array_agg(h.migration_status::text ORDER BY h.ordinal),ARRAY[]::text[]), \
+                   COALESCE(array_agg(h.transaction_mode::text ORDER BY h.ordinal),ARRAY[]::text[]), \
+                   COALESCE(array_agg(h.schema_version ORDER BY h.ordinal),ARRAY[]::smallint[]), \
+                   COALESCE(array_agg(h.min_reader ORDER BY h.ordinal),ARRAY[]::smallint[]), \
+                   COALESCE(array_agg(h.max_reader ORDER BY h.ordinal),ARRAY[]::smallint[]), \
+                   COALESCE(array_agg(h.min_writer ORDER BY h.ordinal),ARRAY[]::smallint[]), \
+                   COALESCE(array_agg(h.max_writer ORDER BY h.ordinal),ARRAY[]::smallint[]), \
+                   (SELECT c.manifest_sha256 FROM ONLY control.schema_compatibility c \
+                     WHERE c.singleton=true), \
+                   (SELECT c.current_schema_version FROM ONLY control.schema_compatibility c \
+                     WHERE c.singleton=true), \
+                   (SELECT c.min_reader FROM ONLY control.schema_compatibility c \
+                     WHERE c.singleton=true), \
+                   (SELECT c.max_reader FROM ONLY control.schema_compatibility c \
+                     WHERE c.singleton=true), \
+                   (SELECT c.min_writer FROM ONLY control.schema_compatibility c \
+                     WHERE c.singleton=true), \
+                   (SELECT c.max_writer FROM ONLY control.schema_compatibility c \
+                     WHERE c.singleton=true) \
+                 FROM ONLY control.migration_history h",
+                &[],
+            )
+            .expect("TASK105_FUTURE_ATOMIC_QUERY");
+        assert_eq!(
+            row.columns()
+                .iter()
+                .map(|column| column.type_().name())
+                .collect::<Vec<_>>(),
+            [
+                "_int2", "_text", "_text", "_int8", "_text", "_text", "_text", "_int2", "_int2",
+                "_int2", "_int2", "_int2", "bpchar", "int2", "int2", "int2", "int2", "int2"
+            ]
+        );
+        let ordinals = row.get::<_, Vec<i16>>(0);
+        let ids = row.get::<_, Vec<String>>(1);
+        let paths = row.get::<_, Vec<String>>(2);
+        let lengths = row.get::<_, Vec<i64>>(3);
+        let checksums = row.get::<_, Vec<String>>(4);
+        let statuses = row.get::<_, Vec<String>>(5);
+        let modes = row.get::<_, Vec<String>>(6);
+        let schemas = row.get::<_, Vec<i16>>(7);
+        let min_readers = row.get::<_, Vec<i16>>(8);
+        let max_readers = row.get::<_, Vec<i16>>(9);
+        let min_writers = row.get::<_, Vec<i16>>(10);
+        let max_writers = row.get::<_, Vec<i16>>(11);
+        for length in [
+            ordinals.len(),
+            ids.len(),
+            paths.len(),
+            lengths.len(),
+            checksums.len(),
+            statuses.len(),
+            modes.len(),
+            schemas.len(),
+            min_readers.len(),
+            max_readers.len(),
+            min_writers.len(),
+            max_writers.len(),
+        ] {
+            assert_eq!(length, 8, "TASK105_FUTURE_ATOMIC_VECTOR_LENGTH");
+        }
+        let manifest = row.get::<_, Option<String>>(12);
+        let versions = (13..=17)
+            .map(|index| row.get::<_, Option<i16>>(index))
+            .collect::<Option<Vec<_>>>()
+            .expect("TASK105_FUTURE_ATOMIC_COMPATIBILITY");
+        assert_eq!(manifest.as_deref(), Some(FUTURE_V7_MANIFEST_SHA256));
+        assert_eq!(versions, [7; 5]);
+
+        fn field(hasher: &mut Sha256, value: &[u8]) {
+            hasher.update(
+                u64::try_from(value.len())
+                    .expect("field length")
+                    .to_be_bytes(),
+            );
+            hasher.update(value);
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"LATTICE_POSTGRES_MIGRATION_MANIFEST_V1\0");
+        for index in 0..8 {
+            field(
+                &mut hasher,
+                &u16::try_from(ordinals[index])
+                    .expect("TASK105_FUTURE_ATOMIC_ORDINAL")
+                    .to_be_bytes(),
+            );
+            for value in [&ids[index], &paths[index]] {
+                field(&mut hasher, value.as_bytes());
+            }
+            field(
+                &mut hasher,
+                &u64::try_from(lengths[index])
+                    .expect("TASK105_FUTURE_ATOMIC_BYTE_LENGTH")
+                    .to_be_bytes(),
+            );
+            for value in [&checksums[index], &statuses[index], &modes[index]] {
+                field(&mut hasher, value.as_bytes());
+            }
+            for value in [
+                schemas[index],
+                min_readers[index],
+                max_readers[index],
+                min_writers[index],
+                max_writers[index],
+            ] {
+                field(
+                    &mut hasher,
+                    &u16::try_from(value)
+                        .expect("TASK105_FUTURE_ATOMIC_VERSION")
+                        .to_be_bytes(),
+                );
+            }
+        }
+        let mut decoded_digest = String::with_capacity(64);
+        for byte in hasher.finalize() {
+            use std::fmt::Write as _;
+            write!(&mut decoded_digest, "{byte:02x}").expect("TASK105_FUTURE_ATOMIC_DIGEST_HEX");
+        }
+        assert_eq!(decoded_digest, FUTURE_V7_MANIFEST_SHA256);
+    }
+
     fn v6_absent_writer_fingerprint(&self) -> Vec<String> {
         let mut client = self.bootstrap_client();
         [
@@ -2076,7 +2207,53 @@ impl InteractiveLatticed {
             .expect("TASK105_INTERACTIVE_READER_JOIN");
         self.finished = true;
         assert!(status.success(), "TASK105_INTERACTIVE_FAILED:{stderr}");
-        assert!(stderr.len() <= 128, "TASK105_INTERACTIVE_STDERR_UNBOUNDED");
+        assert_bounded_startup_diagnostics(&stderr);
+    }
+}
+
+fn assert_bounded_startup_diagnostics(stderr: &str) {
+    assert!(
+        stderr.len() <= 16 * 1024,
+        "TASK105_INTERACTIVE_STDERR_UNBOUNDED"
+    );
+    let lines = stderr.lines().collect::<Vec<_>>();
+    assert!(!lines.is_empty(), "TASK105_INTERACTIVE_STDERR_EMPTY");
+    assert!(lines.len() <= 64, "TASK105_INTERACTIVE_STDERR_LINES");
+    let expected_keys = [
+        "configuration_health",
+        "dependency_health",
+        "failure_classification",
+        "last_completed_stage",
+        "schema",
+        "stage",
+        "waiting_reason",
+    ];
+    for line in lines {
+        assert!(line.len() <= 512, "TASK105_INTERACTIVE_STDERR_LINE");
+        let value = serde_json::from_str::<Value>(line)
+            .expect("TASK105_INTERACTIVE_STARTUP_DIAGNOSTIC_JSON");
+        let object = value
+            .as_object()
+            .expect("TASK105_INTERACTIVE_STARTUP_DIAGNOSTIC_OBJECT");
+        let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(keys, expected_keys);
+        assert_eq!(
+            object["schema"],
+            Value::String("lattice.latticed.startup-diagnostic.v1".to_owned())
+        );
+        for key in expected_keys.into_iter().filter(|key| *key != "schema") {
+            let field = object[key]
+                .as_str()
+                .expect("TASK105_INTERACTIVE_STARTUP_DIAGNOSTIC_FIELD");
+            assert!(!field.is_empty() && field.len() <= 64);
+            assert!(
+                field
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'),
+                "TASK105_INTERACTIVE_STARTUP_DIAGNOSTIC_VOCABULARY"
+            );
+        }
     }
 }
 
@@ -2171,6 +2348,15 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     );
     assert_eq!(future_v7_manifest_sha256(), FUTURE_V7_MANIFEST_SHA256);
     let source = include_str!("task105_durable_foreman_runtime.rs");
+    let runtime_client = source
+        .split_once("fn runtime_client(&self) -> Client")
+        .expect("TASK105_RUNTIME_CLIENT_SOURCE")
+        .1
+        .split_once("fn runtime_login_enabled")
+        .expect("TASK105_RUNTIME_CLIENT_BOUNDARY")
+        .0;
+    assert!(runtime_client.contains(".application_name(\"lattice-devos-task019\")"));
+    assert!(!runtime_client.contains("lattice-task105-writer-contention"));
     for marker in [
         "TASK105_STAGE_FOREMAN_REPLAY_CORRUPT_PASS",
         "TASK105_STAGE_FOREMAN_REPLAY_UNAVAILABLE_PASS",
@@ -2412,6 +2598,11 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     );
     println!("TASK105_STAGE_FOREMAN_WRITER_CONTENTION_PASS");
 
+    drop(
+        PostgresTaskLedger::new(config.runtime_client(), &config.migration_target())
+            .expect("TASK105_HEALTHY_LEDGER_BASELINE"),
+    );
+
     let migration_before_unsupported = config.migration_fingerprint();
     let profile_before_unsupported = config.durable_profile_fingerprint();
     {
@@ -2438,27 +2629,33 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         let mut unsupported = UnsupportedHistory::introduce(&config, true);
         let injected_migration = config.migration_fingerprint();
         let injected_profile = config.durable_profile_fingerprint();
-        assert_eq!(
+        config.assert_coherent_future_atomic_snapshot();
+        let profile_kind =
+            inspect_migration_profile(&mut config.migrator_client(), &config.migration_target())
+                .expect_err("TASK105_FUTURE_PROFILE_REJECTED")
+                .kind();
+        let verify_kind = verify_postgres_schema(
+            &mut config.runtime_client(),
+            &config.migration_target(),
+            DatabaseRole::Runtime,
+        )
+        .expect_err("TASK105_FUTURE_VERIFY_REJECTED")
+        .kind();
+        let ledger_kind =
             PostgresTaskLedger::new(config.runtime_client(), &config.migration_target())
                 .err()
                 .expect("TASK105_FUTURE_LEDGER_REJECTED")
-                .kind(),
+                .kind();
+        assert_eq!(
+            ledger_kind,
             PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema
         );
         assert_eq!(
-            inspect_migration_profile(&mut config.migrator_client(), &config.migration_target())
-                .expect_err("TASK105_FUTURE_PROFILE_REJECTED")
-                .kind(),
+            profile_kind,
             lattice_postgres_store::PostgresStoreSetupErrorKind::UnsupportedFutureSchema
         );
         assert_eq!(
-            verify_postgres_schema(
-                &mut config.runtime_client(),
-                &config.migration_target(),
-                DatabaseRole::Runtime,
-            )
-            .expect_err("TASK105_FUTURE_SCHEMA_REJECTED")
-            .kind(),
+            verify_kind,
             lattice_postgres_store::PostgresStoreSetupErrorKind::UnsupportedFutureSchema
         );
         assert_foreman_replay_error(
