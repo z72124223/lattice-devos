@@ -12,7 +12,8 @@ mod setup;
 pub use adapter::PostgresWriterLease;
 pub use setup::{
     ExtensionApplyOutcome, ExtensionSetupError, ExtensionSetupErrorKind, ExtensionTarget,
-    V3ExtensionTarget, apply_extension, apply_v3_extension, rebind_v3_extension, verify_extension,
+    V3ExtensionTarget, apply_extension, apply_v3_extension, rebind_existing_v3_extension,
+    rebind_v3_extension, verify_extension,
 };
 
 /// Fixed extension identity.

@@ -2,10 +2,11 @@ use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome, ExtensionSetupError, V3ExtensionTarget, WRITER_LEASE_EXTENSION_ID,
     WRITER_LEASE_EXTENSION_PATH, WRITER_LEASE_EXTENSION_SCHEMA_VERSION,
     WRITER_LEASE_V1_EXTENSION_PATH, WRITER_LEASE_V2_EXTENSION_PATH, WRITER_LEASE_V3_EXTENSION_PATH,
-    WRITER_LEASE_V3_REBIND_PATH, WriterLeaseV3BridgeState, apply_v3_extension, rebind_v3_extension,
-    verify_embedded_extension_manifest, verify_embedded_v1_extension_manifest,
-    verify_embedded_v2_extension_manifest, verify_embedded_v3_extension_manifest,
-    verify_embedded_v3_rebind_manifest, verify_writer_lease_v3_transition,
+    WRITER_LEASE_V3_REBIND_PATH, WriterLeaseV3BridgeState, apply_v3_extension,
+    rebind_existing_v3_extension, rebind_v3_extension, verify_embedded_extension_manifest,
+    verify_embedded_v1_extension_manifest, verify_embedded_v2_extension_manifest,
+    verify_embedded_v3_extension_manifest, verify_embedded_v3_rebind_manifest,
+    verify_writer_lease_v3_transition,
 };
 
 #[test]
@@ -18,6 +19,10 @@ fn task094_exposes_typed_v3_bridge_and_rebind_owner_apis() {
         &mut postgres::Client,
         &V3ExtensionTarget,
     ) -> Result<ExtensionApplyOutcome, ExtensionSetupError> = rebind_v3_extension;
+    let _: fn(
+        &mut postgres::Client,
+        &V3ExtensionTarget,
+    ) -> Result<ExtensionApplyOutcome, ExtensionSetupError> = rebind_existing_v3_extension;
 
     let setup = include_str!("../src/setup.rs");
     for required in [
@@ -28,6 +33,7 @@ fn task094_exposes_typed_v3_bridge_and_rebind_owner_apis() {
         "writer_lease_rebind_v3()",
         "verify_v3_bridge_profile",
         "verify_v3_current_profile",
+        "if !allow_fresh_install",
     ] {
         assert!(
             setup.contains(required),

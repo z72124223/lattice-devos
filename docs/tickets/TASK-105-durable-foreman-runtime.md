@@ -16,6 +16,8 @@ additional_modules:
     constitution_version: 2.7
   - module_id: postgres-store
     constitution_version: 1.15
+  - module_id: postgres-writer-lease
+    constitution_version: 1.4
 status: in_progress
 parallel_safe: false
 depends_on: [TASK-094]
@@ -47,6 +49,7 @@ allowed_paths:
   - docs/modules/orchestrator-runtime/MODULE_CONSTITUTION.md
   - docs/modules/latticed/MODULE_CONSTITUTION.md
   - docs/modules/postgres-store/MODULE_CONSTITUTION.md
+  - docs/modules/postgres-writer-lease/MODULE_CONSTITUTION.md
   - docs/reviews/WORKFLOW_LEDGER_TASK_105_2026-08-25.md
   - scripts/start-lattice-runtime-postgres.ps1
   - scripts/test-task105-durable-foreman-runtime.ps1

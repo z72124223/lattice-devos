@@ -1,7 +1,7 @@
 ---
 module_id: postgres-writer-lease
 name: PostgreSQL Writer Lease Repository
-version: 1.3
+version: 1.4
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -24,6 +24,9 @@ the fixed zero-argument `writer_lease_rebind_v3` procedure. Postgres Store may
 call that procedure only inside the same transaction as its exact-v5 transition
 or exact-v6 idempotent retry; it cannot construct, parse, persist, or
 reinterpret Writer state.
+Version 1.4 adds the narrower product-bootstrap operation for an already-
+present schema-v6 Writer v3 profile. It rejects an absent profile before
+durable mutation, rebinds only bridge-pending, and verifies current as a no-op.
 
 ## Non-Goals
 
@@ -81,6 +84,9 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
 - Expose the typed v3 bridge/apply and rebind administrative operations only to
   the Writer-owned adapter. The Store's one fixed SQL invocation is not a
   Writer repository API and grants no generic Writer mutation authority.
+- Expose the strict existing-v3 rebind/verify operation used by product
+  bootstrap. It cannot take the fresh-install branch; absence is a typed
+  fail-closed result and leaves the schema-v6 database fingerprint unchanged.
 - Use fixed function calls only; expose no generic CRUD, arbitrary row, SQL,
   schema/table name, raw client, migration, or credential API.
 
@@ -123,6 +129,10 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
     verified exact schema-v6/current profile restores the seven runtime Writer
     functions; rebind is idempotent for that exact identity and fails closed on
     substituted profile, lease, fence, manifest, or catalog state.
+15. Product bootstrap on Store schema v6 never installs a missing Writer
+    profile. It may only rebind an exact pending v3 profile or verify an exact
+    current v3 profile; absence, partial state, or collision fails before
+    durable Writer mutation.
 
 ## Allowed Dependencies
 
@@ -180,6 +190,12 @@ sequence that procedure only in its schema-v6 transaction after exact-v5 prefix
 verification or during exact-v6 idempotent retry. Store remains unable to
 install, parse, persist, replay, or reinterpret Writer Lease state.
 
+Version 1.4 preserves the general TASK-094 rebind API for its frozen callers
+and adds one stricter TASK-105 product-bootstrap entrypoint. On global schema
+v6, Writer absence is not a fresh-install opportunity: the strict entrypoint
+rolls back without catalog, ledger, ACL, or identity mutation. Bridge-pending
+may rebind and current may verify idempotently.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -192,6 +208,7 @@ install, parse, persist, replay, or reinterpret Writer Lease state.
 | Recovery | expiry, heartbeat, suspect, exact release, holder death, and newer-leadership matrices | Security review | yes |
 | Runtime isolation | fixed runtime functions only, direct table denial, no dynamic SQL/credential/environment input | Architecture review | yes |
 | Fresh replay | new client/process reconstructs exact current authority and checkpoint after PostgreSQL restart | Integration review | yes |
+| Strict v6 bootstrap | absent Writer v3 fingerprint is unchanged; bridge-pending rebinds; current retry is read-only | Integration review | yes |
 | Full verification | format, strict lint, focused/workspace Rust tests, repository checks, and diff check | Engineering | yes |
 
 ## Change Policy
@@ -211,3 +228,4 @@ synthetic evidence as production authority.
 | 1.1 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-023, TASK-076 | Preserve v1 history and add the Writer-owned v2 bridge/current profiles for global-v5/Memory-v3 without changing lease semantics or fencing bytes | User continuation authorization |
 | 1.2 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Add append-only v3 bridge/current compatibility for exact future global-v6 foreman coordination while freezing v2 schema-3/5 behavior | Fixed-foreman delegation |
 | 1.3 | 2026-08-24 | SPEC-002 v37, ADR-026, TASK-094 | Writer-owned typed v3 apply/rebind administration for exact-v5 transition and exact-v6 idempotent retry through one fixed Store transaction boundary | TASK-094 bounded repair authority |
+| 1.4 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 | Add strict existing-v3 product-bootstrap rebind/verify; schema-v6 Writer absence fails closed without durable mutation | TASK-105 bounded implementation authority |

@@ -75,6 +75,35 @@ impl LiveConfig {
             .expect("TASK105_MIGRATION_FINGERPRINT");
         (row.get(0), row.get(1), row.get(2))
     }
+
+    fn v6_absent_writer_fingerprint(&self) -> (i64, i16, String, i64, String) {
+        let mut client = self.bootstrap_client();
+        let row = client
+            .query_one(
+                "SELECT (SELECT pg_catalog.count(*) FROM ONLY control.migration_history), \
+                        current_schema_version, manifest_sha256::text, \
+                        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_namespace \
+                          WHERE nspname='writer_lease'), \
+                        (SELECT pg_catalog.concat_ws(':', admission_mode::text, \
+                                    COALESCE(daemon_instance_id, ''), \
+                                    COALESCE(daemon_epoch::text, ''), authority_revision::text, \
+                                    COALESCE(pg_catalog.encode(observation_digest, 'hex'), ''), \
+                                    COALESCE(pg_catalog.encode(authority_head_digest, 'hex'), '')) \
+                           FROM ONLY control.runtime_admission WHERE singleton) \
+                   FROM ONLY control.schema_compatibility WHERE singleton",
+                &[],
+            )
+            .expect("TASK105_V6_ABSENT_FINGERPRINT");
+        (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4))
+    }
+
+    fn remove_disposable_writer_profile(&self) {
+        self.bootstrap_client()
+            .batch_execute(
+                "SET ROLE lattice_migrator; DROP SCHEMA writer_lease CASCADE; RESET ROLE;",
+            )
+            .expect("TASK105_REMOVE_DISPOSABLE_WRITER_PROFILE");
+    }
 }
 
 fn required(name: &str) -> String {
@@ -202,7 +231,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     );
     assert_eq!(
         response(&process_a, 5)["result"]["structuredContent"]["code"],
-        "FOREMAN_GENERATION_GAP"
+        "FOREMAN_GENERATION_INVALID"
     );
     assert_eq!(response(&process_a, 6)["result"]["isError"], false);
     let status_a = &response(&process_a, 7)["result"]["structuredContent"]["foreman"];
@@ -226,4 +255,17 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     assert_eq!(status_b, status_a);
     assert_eq!(config.migration_fingerprint(), migration_before);
     println!("TASK105_STAGE_FRESH_PROCESS_REPLAY_PASS");
+
+    config.remove_disposable_writer_profile();
+    let absent_before = config.v6_absent_writer_fingerprint();
+    assert_eq!(absent_before.1, 6);
+    assert_eq!(absent_before.3, 0);
+    assert_eq!(
+        bootstrap_postgres_extensions_from_environment()
+            .expect_err("TASK105_V6_ABSENT_WRITER_MUST_FAIL_CLOSED")
+            .code(),
+        "LATTICE_WRITER_LEASE_REJECTED"
+    );
+    assert_eq!(config.v6_absent_writer_fingerprint(), absent_before);
+    println!("TASK105_STAGE_V6_ABSENT_FAIL_CLOSED_PASS");
 }

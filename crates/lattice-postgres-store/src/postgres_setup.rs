@@ -1284,7 +1284,7 @@ pub fn inspect_migration_profile(
         &mut transaction,
         target,
         DatabaseRole::Migrator,
-        SetupOperation::Migration,
+        SetupOperation::Verification,
     )?;
     let profile = match classify_installed_manifest_state(&mut transaction)? {
         InstalledManifestState::Fresh => MigrationBootstrapProfile::Fresh,
@@ -1299,7 +1299,7 @@ pub fn inspect_migration_profile(
         &mut transaction,
         target,
         DatabaseRole::Migrator,
-        SetupOperation::Migration,
+        SetupOperation::Verification,
     )?;
     transaction.commit().map_err(|error| {
         map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)

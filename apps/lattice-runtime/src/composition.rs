@@ -99,8 +99,8 @@ use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome as WriterExtensionApplyOutcome,
     ExtensionSetupErrorKind as WriterExtensionSetupErrorKind,
     ExtensionTarget as WriterLeaseExtensionTarget, PostgresWriterLease, V3ExtensionTarget,
-    apply_extension as apply_postgres_writer_extension, apply_v3_extension, rebind_v3_extension,
-    verify_extension as verify_writer_extension,
+    apply_extension as apply_postgres_writer_extension, apply_v3_extension,
+    rebind_existing_v3_extension, verify_extension as verify_writer_extension,
 };
 use lattice_task_domain::{
     AcceptanceCriterion, ApprovalRequirement, ApprovalRequirements, Capability, CapabilityRequest,
@@ -2161,7 +2161,7 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
             apply_store_migrations(&mut migrator, &store_target)
                 .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
         } else if profile == MigrationBootstrapProfile::V6 {
-            match rebind_v3_extension(&mut migrator, &writer_v3)
+            match rebind_existing_v3_extension(&mut migrator, &writer_v3)
                 .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?
             {
                 WriterExtensionApplyOutcome::Rebound
@@ -8435,8 +8435,8 @@ mod tests {
         assert_eq!(bootstrap.matches("apply_v3_extension").count(), 2);
         let admission_stop = bootstrap.find("admission.stop").expect("admission stop");
         let v6_rebind = bootstrap
-            .find("rebind_v3_extension")
-            .expect("Writer-owned v6 rebind");
+            .find("rebind_existing_v3_extension")
+            .expect("Writer-owned strict existing-v3 rebind");
         assert!(admission_stop < v6_rebind);
         assert!(bootstrap.contains("inspect_migration_profile"));
         assert!(bootstrap.contains("drop(migrator);"));

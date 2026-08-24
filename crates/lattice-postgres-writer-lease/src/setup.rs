@@ -858,6 +858,31 @@ pub fn rebind_v3_extension(
     client: &mut Client,
     target: &V3ExtensionTarget,
 ) -> Result<ExtensionApplyOutcome, ExtensionSetupError> {
+    rebind_v3_extension_with_policy(client, target, true)
+}
+
+/// Rebinds or verifies an already-present Writer v3 profile on schema v6.
+///
+/// Unlike [`rebind_v3_extension`], this product-bootstrap boundary rejects an
+/// absent Writer profile before mutation. It therefore cannot silently install
+/// new Writer state into a Store v6 database whose extension history is missing.
+///
+/// # Errors
+///
+/// Rejects absent, partial, colliding, active/suspect, wrong-generation,
+/// changed-byte, or catalog/ACL state. Exact current retry is read-only.
+pub fn rebind_existing_v3_extension(
+    client: &mut Client,
+    target: &V3ExtensionTarget,
+) -> Result<ExtensionApplyOutcome, ExtensionSetupError> {
+    rebind_v3_extension_with_policy(client, target, false)
+}
+
+fn rebind_v3_extension_with_policy(
+    client: &mut Client,
+    target: &V3ExtensionTarget,
+    allow_fresh_install: bool,
+) -> Result<ExtensionApplyOutcome, ExtensionSetupError> {
     let v1 = verify_embedded_v1_extension_manifest()
         .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
     let v2 = verify_embedded_extension_manifest()
@@ -868,7 +893,15 @@ pub fn rebind_v3_extension(
         .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
     let successor = target.successor()?;
     let mut gate = GlobalApplyGate::acquire(client)?;
-    let result = rebind_v3_extension_attempt(gate.client(), &successor, &v1, &v2, &v3, &rebind);
+    let result = rebind_v3_extension_attempt(
+        gate.client(),
+        &successor,
+        &v1,
+        &v2,
+        &v3,
+        &rebind,
+        allow_fresh_install,
+    );
     gate.release()?;
     result
 }
@@ -880,6 +913,7 @@ fn rebind_v3_extension_attempt(
     v2: &ExtensionManifestEvidence,
     v3: &ExtensionManifestEvidence,
     rebind: &ExtensionManifestEvidence,
+    allow_fresh_install: bool,
 ) -> Result<ExtensionApplyOutcome, ExtensionSetupError> {
     let mut transaction = client
         .build_transaction()
@@ -893,6 +927,11 @@ fn rebind_v3_extension_attempt(
     let outcome =
         match classify_v3_state(&mut transaction).map_err(SetupAttemptError::into_public)? {
             V3InstalledState::Absent => {
+                if !allow_fresh_install {
+                    return Err(ExtensionSetupError::new(
+                        ExtensionSetupErrorKind::UnsupportedFoundation,
+                    ));
+                }
                 install_fresh_v3_current(&mut transaction, target, &foundation, v1, v2, v3, rebind)
                     .map_err(SetupAttemptError::into_public)?;
                 ExtensionApplyOutcome::Installed
