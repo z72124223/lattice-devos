@@ -20,9 +20,10 @@ additional_modules:
     constitution_version: 1.3
   - module_id: postgres-writer-lease
     constitution_version: 1.8
-status: in_progress
+status: complete
 parallel_safe: false
 depends_on: [TASK-094]
+evidence_subjects: [TASK-079]
 branch: feature/task-105-durable-foreman-runtime
 implementation_worktree: lattice-worktrees/task-105-durable-foreman-runtime
 implementation_base: 387f556a5b17adb75274c1387cf517654650c90b
@@ -84,11 +85,31 @@ schema-v6 startup share the same files and durable state.
 
 ## Acceptance criteria
 
-- [ ] Every SPEC-009 acceptance criterion has current evidence.
-- [ ] Focused, integration, Control regression, format/check and scoped strict
+- [x] Every SPEC-009 acceptance criterion has current evidence.
+- [x] Focused, integration, Control regression, format/check and scoped strict
       lint pass; unrelated workspace failures are recorded without relabeling.
-- [ ] Clean local commits only; no worker push, PR, product merge, deploy,
+- [x] Clean local commits only; no worker push, PR, product merge, deploy,
       install, service/database mutation or archive-ready claim.
+
+## Completion evidence
+
+- Accepted implementation HEAD: `f932432a5471d03eba869cec61c1b5f376ffc740`.
+- Official marker-owned PostgreSQL 17 gate: run
+  `0e5c2971d099499183ee1643fe291e3d`, port `59685`; every initialization,
+  fail-closed taxonomy, fresh-process replay, legacy upgrade and dual-process
+  Writer race stage passed. Teardown proved `root_absent=True` and
+  `listener_absent=True`.
+- PostgreSQL Store full tests passed (45 library, 43 migration-contract, 1 live
+  marker contract, 1 registry, 3 setup API, 14 Store, 3 Task Ledger and 5
+  schema-v6 tests; two separately coordinated fixtures remained ignored).
+  Runtime library passed 131 tests with two coordinated-live fixtures ignored.
+- Store all-targets strict Clippy, repository check, npm check, Rust formatting
+  and `git diff --check` passed. Full runtime/workspace strict Clippy remains an
+  explicitly recorded pre-existing 29-runtime/21-Hermes diagnostic baseline,
+  not a TASK-105 pass and not a release blocker introduced by this diff.
+- Independent code/test and architecture reviews found no P0-P3 findings.
+  The feature worktree is clean; feature push, PR/CI, product merge and live
+  deployment remain the parent foreman's separately verified delivery gates.
 
 ## Human gate
 

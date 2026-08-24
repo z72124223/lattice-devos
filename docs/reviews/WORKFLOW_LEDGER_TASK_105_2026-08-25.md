@@ -18,8 +18,8 @@
 | TDD implementation | valid | checkpoint domain, effect ordering, MCP, bootstrap and live failures each drove bounded RED/GREEN corrections | machine-enforced tests |
 | Focused verification | valid | domain/adapter/runtime/Control suites below; format/check PASS | machine-enforced tests |
 | Full strict lint | failed | changed domain/adapter crates PASS; runtime/full command retains 29 runtime plus 21 Hermes baseline diagnostics | current negative evidence |
-| Independent reviews | in progress | parent-owned SPEC-009 evidence-gap audit and final read-only review pending | unverified |
-| CI/product merge/deploy | blocked | parent-owned after clean local handoff | unverified |
+| Independent reviews | valid | final code/test and architecture reviews found no P0-P3 findings at accepted source | independently verified |
+| CI/product merge/deploy | pending | parent-owned non-force push, PR/CI, product merge and post-deploy replay remain separate live gates | unverified |
 
 ## Evidence log
 
@@ -40,14 +40,18 @@
   Orchestrator, Store and Writer. The combined strict command is explicitly
   not a PASS: current Rust 1.97 reports 29 runtime and 21 Hermes diagnostics,
   including pre-existing whole-file/style debt outside this bounded slice.
-- Current marker-owned PostgreSQL PASS is behavior SHA
-  `6f116eed07f914e81d384ef733f45a454c201012`, run
-  `6371b5ed3e1146f73f242560dce08a52`, dynamic port `54461`, owned PID `14388`.
-  It passed initialize/bootstrap/current retry, process-A checkpoint/exact
-  retry/ID reuse/generation gap/blocked projection, fresh-process replay with
-  unchanged migration fingerprint, and schema-v6 Writer-absent fail-closed.
-  Teardown proved `root_absent=True` and `listener_absent=True`.
-- Ticket remains `in_progress` and `delivery_archive: keep_open`. No push, PR,
-  product merge, install, deployment, live-service/database mutation, or
-  archive-ready action occurred. Parent-owned SPEC-009 evidence-gap audit and
-  independent review remain open.
+- Accepted source is `f932432a5471d03eba869cec61c1b5f376ffc740`.
+  Marker-owned PostgreSQL PASS run `0e5c2971d099499183ee1643fe291e3d`
+  used dynamic port `59685`. It passed initialize/bootstrap/current retry,
+  process-A checkpoint/exact retry/ID reuse/generation gap/blocked projection,
+  fresh-process replay, coherent-future versus corrupt-history taxonomy across
+  profile/runtime/Task Ledger paths, five legacy/fault upgrade cases and the
+  dual-process Writer race. Teardown proved `root_absent=True` and
+  `listener_absent=True`.
+- Final Store full tests and strict Clippy passed; runtime library was 131 pass
+  with two coordinated-live fixtures ignored; npm check, Rust formatting and
+  diff check passed. Final independent code/test and architecture reviews had
+  no P0-P3 findings.
+- Ticket is `complete` with `delivery_archive: keep_open`. No feature push, PR,
+  product merge, install or product service/database mutation had occurred at
+  this evidence checkpoint; those remain separately verified parent gates.

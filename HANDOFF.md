@@ -2,9 +2,9 @@
 
 ## 狀態
 
-`IN_PROGRESS / PARENT_AUDIT`：本機實作、focused 回歸與 marker-owned
-PostgreSQL fresh-process replay 已通過；工頭仍在做 SPEC-009 證據缺口與獨立
-審查。未推送、未開 PR、未合併產品分支、未安裝或部署，也未碰現行服務／資料庫。
+`COMPLETE / DELIVERY_PENDING`：本機實作、完整回歸、獨立審查與
+marker-owned PostgreSQL full live gate 均已通過。未推送、未開 PR、未合併產品
+分支、未安裝或部署，也未碰現行產品服務／資料庫；這些仍由唯一工頭逐關驗證。
 
 ## 已完成
 
@@ -21,15 +21,15 @@ PostgreSQL fresh-process replay 已通過；工頭仍在做 SPEC-009 證據缺�
 
 ## 已驗證
 
-- 最新行為 SHA：`6f116eed07f914e81d384ef733f45a454c201012`。
-- Live PASS：run `6371b5ed3e1146f73f242560dce08a52`、動態埠 `54461`、
-  owned PID `14388`；initialize/bootstrap、checkpoint/retry/reject、blocked
-  projection、fresh-process replay、Writer-absent fail-closed 全通過；清理為
-  `root_absent=True`、`listener_absent=True`。
-- Focused suites：Foreman 11、Task Ledger 50、Ports 10、Orchestrator effect-order 7、
-  Store 90（另 1 coordinated-live ignored）、Writer 16、runtime lib 130（另 2
-  coordinated-live ignored）、MCP 35、dispatch 7、composition 22、coordination 1、
-  task-control 2、Control 17，全數通過。
+- 最新接受 SHA：`f932432a5471d03eba869cec61c1b5f376ffc740`。
+- Live PASS：run `0e5c2971d099499183ee1643fe291e3d`、動態埠 `59685`；
+  initialize/bootstrap、checkpoint/retry/reject、blocked projection、
+  fresh-process replay、coherent future/corrupt taxonomy、舊版升級矩陣與
+  雙程序 Writer race 全通過；清理為 `root_absent=True`、
+  `listener_absent=True`。
+- 最終 Store full tests 全數通過（另 2 個需另行協調的 fixture ignored）；
+  runtime lib 131 通過（另 2 coordinated-live ignored）；TASK-105 official
+  live 1/1、Control 17/17、repository/npm check、format、diff check 全通過。
 - TASK-105 repository check、format、diff check通過；Foreman／Ledger／Ports／
   Orchestrator／Store／Writer strict lint通過。完整 runtime/workspace strict lint
   仍失敗，Rust 1.97 報告 29 個 runtime 與 21 個 Hermes 既有整體/style 診斷，
@@ -37,12 +37,11 @@ PostgreSQL fresh-process replay 已通過；工頭仍在做 SPEC-009 證據缺�
 
 ## 尚待工頭
 
-1. 完成 SPEC-009 evidence-gap audit 與獨立 code/architecture review；若有物理
-   bootstrap／錯誤矩陣缺口，續用同一 writer 有界補證。
-2. 獨立重驗乾淨 tree、測試與 Git，再做同名 feature 非強制推送及 remote SHA
-   核對。
-3. 依使用者既有授權決定產品分支合併、安裝／部署與即時 MCP 重驗；本 worker
-   不把本機 PASS 冒充交付完成或 archive-ready。
+1. 提交這份終態收據，重驗乾淨 tree，再做同名 feature 非強制推送與 remote
+   SHA 核對。
+2. 建立 PR、驗證 CI 後合併產品分支；不得 force push。
+3. 依既有授權完成安全安裝／部署、Control receipt 與重開後即時 MCP replay；
+   完成前不把本機 PASS 冒充產品交付或 archive-ready。
 
 ---
 
