@@ -1,6 +1,7 @@
 use lattice_foreman_state::{
     Confidence, DashboardIndex, EpistemicReferences, ForemanSnapshot, ForemanState, LiveWorktree,
-    RefreshTrigger, SnapshotError, WatchdogFinding, reconstruct, watchdog,
+    RefreshTrigger, SnapshotError, WatchdogFinding, is_exact_next_generation, reconstruct,
+    watchdog,
 };
 
 fn snapshot(
@@ -140,6 +141,11 @@ fn replay_rejects_generation_other_than_one_for_new_identity() {
         )]),
         Err(SnapshotError::GenerationRollback)
     );
+}
+
+#[test]
+fn exact_generation_never_wraps_after_u64_max() {
+    assert!(!is_exact_next_generation(Some(u64::MAX), 1));
 }
 
 #[test]

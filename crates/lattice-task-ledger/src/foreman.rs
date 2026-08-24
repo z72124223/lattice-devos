@@ -5,7 +5,7 @@ use lattice_contracts::{
     ContentDigest, ProjectId, ProjectSnapshotId, TaskId, TaskLedgerStreamHead,
     TaskLedgerStreamIdentity,
 };
-use lattice_foreman_state::{EpistemicReferences, ForemanSnapshot};
+use lattice_foreman_state::{EpistemicReferences, ForemanSnapshot, is_exact_next_generation};
 
 use super::{
     AppendCommand, CommandId, CorrelationId, LedgerAppendPlan, LedgerError, LedgerEventKind,
@@ -206,7 +206,7 @@ impl ForemanSnapshotAppendPlan {
 /// # Errors
 ///
 /// Rejects a non-fixed stream, corrupt/missing child record, changed command,
-/// unknown payload, or a generation that does not strictly advance.
+/// unknown payload, identity drift, or a generation that is not exact-next.
 pub fn plan_foreman_snapshot_append(
     current: &VerifiedStream,
     existing_records: &[VerifiedForemanSnapshotRecord],
@@ -247,13 +247,21 @@ pub fn plan_foreman_snapshot_append(
         });
     }
 
-    let latest_generation = existing_records
+    let same_worker = existing_records
         .iter()
         .filter(|record| record.snapshot.worker() == snapshot.worker())
+        .collect::<Vec<_>>();
+    if same_worker
+        .iter()
+        .any(|record| record.snapshot.thread() != snapshot.thread())
+    {
+        return Err(LedgerError::InvalidForemanSnapshot);
+    }
+    let latest_generation = same_worker
+        .iter()
         .map(|record| record.snapshot.generation())
-        .max()
-        .unwrap_or(0);
-    if latest_generation.checked_add(1) != Some(snapshot.generation()) {
+        .max();
+    if !is_exact_next_generation(latest_generation, snapshot.generation()) {
         return Err(LedgerError::ForemanGenerationRollback);
     }
     let event = ledger_plan
@@ -299,7 +307,7 @@ pub fn verify_untrusted_foreman_snapshot_rows(
         return Err(LedgerError::InvalidForemanSnapshot);
     }
     let mut seen_events = BTreeSet::new();
-    let mut generations = BTreeMap::<String, u64>::new();
+    let mut identities = BTreeMap::<String, (String, u64)>::new();
     let mut verified = Vec::with_capacity(rows.len());
     for event in events {
         let row = rows
@@ -327,13 +335,20 @@ pub fn verify_untrusted_foreman_snapshot_rows(
         {
             return Err(LedgerError::InvalidForemanSnapshot);
         }
-        let prior = generations
-            .entry(row.snapshot.worker().to_owned())
-            .or_default();
-        if prior.checked_add(1) != Some(row.snapshot.generation()) {
+        let previous = identities.get(row.snapshot.worker());
+        if previous.is_some_and(|(thread, _)| thread != row.snapshot.thread()) {
+            return Err(LedgerError::InvalidForemanSnapshot);
+        }
+        if !is_exact_next_generation(
+            previous.map(|(_, generation)| *generation),
+            row.snapshot.generation(),
+        ) {
             return Err(LedgerError::ForemanGenerationRollback);
         }
-        *prior = row.snapshot.generation();
+        identities.insert(
+            row.snapshot.worker().to_owned(),
+            (row.snapshot.thread().to_owned(), row.snapshot.generation()),
+        );
         verified.push(VerifiedForemanSnapshotRecord {
             expected_head: row.expected_head.clone(),
             stream_id: row.stream_id.clone(),
@@ -415,4 +430,114 @@ fn list(values: &[String]) -> CanonicalValue {
 
 fn text(value: impl Into<String>) -> CanonicalValue {
     CanonicalValue::String(value.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use lattice_contracts::RuntimeKind;
+    use lattice_foreman_state::ForemanState;
+
+    use super::*;
+    use crate::{apply_append_plan, plan_append};
+
+    fn snapshot(thread: &str, generation: u64) -> ForemanSnapshot {
+        ForemanSnapshot::new(
+            "sole-foreman-v1",
+            thread,
+            "TASK-FOREMAN-COORDINATION",
+            "feature/task-105-durable-foreman-runtime",
+            "lattice-worktrees/task-105-durable-foreman-runtime",
+            "1234567890abcdef1234567890abcdef12345678",
+            ForemanState::Active,
+            None,
+            "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "authority:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            generation,
+        )
+        .expect("snapshot")
+    }
+
+    fn metadata(id: &str, second: u8) -> ForemanAppendMetadata {
+        ForemanAppendMetadata::new(
+            CommandId::new(id).expect("command"),
+            CorrelationId::new(format!("correlation-{id}")).expect("correlation"),
+            format!("2026-08-25T00:00:{second:02}Z"),
+        )
+        .expect("metadata")
+    }
+
+    fn append_unchecked(
+        current: &VerifiedStream,
+        metadata: ForemanAppendMetadata,
+        snapshot: ForemanSnapshot,
+    ) -> (VerifiedStream, UntrustedForemanSnapshotRow) {
+        let expected_head = current.head().clone();
+        let payload_digest = foreman_snapshot_payload_digest(&snapshot).expect("payload");
+        let command = AppendCommand::new_verified_foreman(
+            expected_head.clone(),
+            metadata.command_id.clone(),
+            metadata.correlation_id,
+            metadata.occurred_at,
+            payload_digest.clone(),
+        )
+        .expect("command");
+        let plan = plan_append(current, command).expect("raw append plan");
+        let event = plan.new_event().expect("event");
+        let row = UntrustedForemanSnapshotRow::new(
+            FOREMAN_RECORD_SCHEMA,
+            event.stream_id().clone(),
+            event.event_digest().clone(),
+            event.command_id().clone(),
+            event.request_digest().clone(),
+            payload_digest,
+            snapshot,
+            expected_head,
+        );
+        let next = apply_append_plan(current, &plan).expect("apply raw append");
+        (next, row)
+    }
+
+    #[test]
+    fn persisted_replay_rejects_first_generation_two() {
+        let identity = foreman_coordination_identity().expect("identity");
+        let vacant = VerifiedStream::vacant(identity, RuntimeKind::Live).expect("vacant");
+        let (current, row) = append_unchecked(
+            &vacant,
+            metadata("persisted-first-2", 2),
+            snapshot("thread-a", 2),
+        );
+
+        assert_eq!(
+            verify_untrusted_foreman_snapshot_rows(&current, &[row]),
+            Err(LedgerError::ForemanGenerationRollback)
+        );
+    }
+
+    #[test]
+    fn persisted_replay_rejects_generation_gap_and_thread_drift() {
+        let identity = foreman_coordination_identity().expect("identity");
+        let vacant = VerifiedStream::vacant(identity, RuntimeKind::Live).expect("vacant");
+        let (after_one, row_one) =
+            append_unchecked(&vacant, metadata("persisted-1", 1), snapshot("thread-a", 1));
+        let (after_gap, row_gap) = append_unchecked(
+            &after_one,
+            metadata("persisted-gap-3", 3),
+            snapshot("thread-a", 3),
+        );
+        assert_eq!(
+            verify_untrusted_foreman_snapshot_rows(&after_gap, &[row_one.clone(), row_gap]),
+            Err(LedgerError::ForemanGenerationRollback)
+        );
+
+        let (after_drift, row_drift) = append_unchecked(
+            &after_one,
+            metadata("persisted-thread-2", 2),
+            snapshot("thread-b", 2),
+        );
+        assert_eq!(
+            verify_untrusted_foreman_snapshot_rows(&after_drift, &[row_one, row_drift]),
+            Err(LedgerError::InvalidForemanSnapshot)
+        );
+    }
 }

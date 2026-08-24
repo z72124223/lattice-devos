@@ -452,10 +452,10 @@ pub fn reconstruct(
             if previous.thread() != snapshot.thread() {
                 return Err(SnapshotError::DuplicateWorkerIdentity);
             }
-            if previous.generation().checked_add(1) != Some(snapshot.generation()) {
+            if !is_exact_next_generation(Some(previous.generation()), snapshot.generation()) {
                 return Err(SnapshotError::GenerationRollback);
             }
-        } else if snapshot.generation() != 1 {
+        } else if !is_exact_next_generation(None, snapshot.generation()) {
             return Err(SnapshotError::GenerationRollback);
         }
         by_worker.insert(snapshot.worker().to_owned(), snapshot);
@@ -485,6 +485,19 @@ pub fn reconstruct(
         blocked,
         next_action,
     })
+}
+
+/// Returns whether `candidate` is the only allowed generation after `previous`.
+/// An empty identity starts at one, and overflow never wraps to a valid value.
+#[must_use]
+pub const fn is_exact_next_generation(previous: Option<u64>, candidate: u64) -> bool {
+    match previous {
+        None => candidate == 1,
+        Some(previous) => match previous.checked_add(1) {
+            Some(expected) => candidate == expected,
+            None => false,
+        },
+    }
 }
 
 /// Read-only dashboard metadata; it is never a durable authority.

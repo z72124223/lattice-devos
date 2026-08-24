@@ -65,7 +65,7 @@ pub enum LedgerError {
     InvalidForemanSnapshot,
     /// A persisted foreman child-record or payload schema is unknown.
     UnknownForemanSnapshotVersion,
-    /// A new foreman generation did not strictly advance its worker identity.
+    /// A new foreman generation was not exactly the prior generation plus one.
     ForemanGenerationRollback,
     /// A generic caller selected a reserved or unknown Task-created profile.
     UnknownTaskCreatedProfile,
@@ -188,7 +188,7 @@ impl fmt::Display for LedgerError {
                 formatter.write_str("unknown foreman snapshot record or payload schema")
             }
             Self::ForemanGenerationRollback => {
-                formatter.write_str("foreman generation did not strictly advance")
+                formatter.write_str("foreman generation was not exact-next")
             }
             Self::UnknownTaskCreatedProfile => {
                 formatter.write_str("unknown or caller-selected Task-created profile")

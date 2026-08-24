@@ -8,9 +8,18 @@ use lattice_task_ledger::{
 };
 
 fn snapshot(worker: &str, generation: u64, state: ForemanState) -> ForemanSnapshot {
+    snapshot_with_thread(worker, format!("thread-{worker}"), generation, state)
+}
+
+fn snapshot_with_thread(
+    worker: &str,
+    thread: impl Into<String>,
+    generation: u64,
+    state: ForemanState,
+) -> ForemanSnapshot {
     ForemanSnapshot::new(
         worker,
-        format!("thread-{worker}"),
+        thread,
         "TASK-079",
         "feature/task-079-durable-foreman-state",
         "lattice-worktrees/task-079-durable-foreman-state",
@@ -169,6 +178,32 @@ fn foreman_append_rejects_generation_other_than_one_on_empty_stream() {
         ),
         Err(LedgerError::ForemanGenerationRollback)
     );
+}
+
+#[test]
+fn foreman_append_rejects_thread_drift_before_planning_mutation() {
+    let identity = foreman_coordination_identity().expect("fixed identity");
+    let vacant = VerifiedStream::vacant(identity, RuntimeKind::Live).expect("vacant");
+    let first = plan_foreman_snapshot_append(
+        &vacant,
+        &[],
+        metadata("foreman-thread-1", 1),
+        snapshot_with_thread("worker-1", "thread-a", 1, ForemanState::Active),
+    )
+    .expect("first");
+    let current = apply_append_plan(&vacant, first.ledger_plan()).expect("apply");
+    let records = [first.new_record().expect("record").clone()];
+
+    assert_eq!(
+        plan_foreman_snapshot_append(
+            &current,
+            &records,
+            metadata("foreman-thread-2", 2),
+            snapshot_with_thread("worker-1", "thread-b", 2, ForemanState::Blocked),
+        ),
+        Err(LedgerError::InvalidForemanSnapshot)
+    );
+    assert_eq!(current.head().sequence(), 1);
 }
 
 #[test]
