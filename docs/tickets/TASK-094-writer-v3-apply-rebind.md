@@ -132,3 +132,15 @@ task archival are not authorized.
   `57281`, first observed the intentional rebind SQLSTATE `55000` rollback and
   exact-v5 bridge fingerprint, then completed v5-to-v6. Teardown proved
   `root_absent=True` and `listener_survivors=0`.
+- Parent foreman independent live command receipt (not a raw log artifact):
+  run `8125d6fe95264766b7b06161caa16a05` used marker root
+  `C:\Users\f7212\AppData\Local\Temp\lattice-task094-pg-8125d6fe95264766b7b06161caa16a05`,
+  dynamic port `55198`, and PostgreSQL PID `21176`. From the TASK-094 root it
+  ran `& '.\scripts\test-task094-writer-v3-transition.ps1' -RunId
+  '8125d6fe95264766b7b06161caa16a05' -Port 55198 -RepositoryRoot
+  (Get-Location).Path`; the port came from a loopback `TcpListener` port-0
+  allocation/release and excluded 5432/58743. Exit was 0; FRESH_V5, MEMORY_V3,
+  WRITER_V2, WRITER_V3_BRIDGE, REBIND_FAILURE_ATOMICITY, and STORE_V6 passed.
+  Teardown reported `root_absent=True` and `listener_survivors=0`; the parent
+  then observed the marker root absent while 5432 PID 5200 and 58743 PID 25912
+  remained listening.

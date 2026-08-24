@@ -16,6 +16,11 @@ regressions and the owned live harness.
   The marker-owned live phase now injects an active Writer head and fingerprints
   exact v5 bridge history, compatibility, Writer identity, ledger and runtime
   ACL before/after the failed runner transaction.
+- P2 resolution: parent foreman independently reran the owned live command as
+  receipt `8125d6fe95264766b7b06161caa16a05` on dynamic port 55198. It reports
+  all transition and failure-atomicity stages pass, owned-root/listener teardown,
+  and unchanged 5432 PID 5200 / 58743 PID 25912 listeners. This records the
+  parent command receipt only; it does not claim a raw-log artifact.
 - P0/P3: none found in the local source inspection.
 - The Store calls only fixed `writer_lease.writer_lease_rebind_v3()` after the
   exact v5-prefix classification and ordinal-7 application; it contains no
