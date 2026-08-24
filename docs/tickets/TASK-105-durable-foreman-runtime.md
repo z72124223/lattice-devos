@@ -15,7 +15,7 @@ additional_modules:
   - module_id: task-ledger
     constitution_version: 2.7
   - module_id: postgres-store
-    constitution_version: 1.18
+    constitution_version: 1.19
   - module_id: postgres-codebase-memory
     constitution_version: 1.3
   - module_id: postgres-writer-lease

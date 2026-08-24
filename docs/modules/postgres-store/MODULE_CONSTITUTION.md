@@ -1,7 +1,7 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.18
+version: 1.19
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -78,6 +78,17 @@ Version 1.18 replaces six PostgreSQL-invalid `{1,256}` ASCII quantifiers in
 the still-undeployed foreman child constraint with non-empty printable-ASCII
 checks. Each affected column remains `varchar(256)`, so the composed bound is
 still exactly 1..256 characters and no `text` field is widened.
+Version 1.19 classifies retained migration metadata inside one
+target/role-hardened Store transaction. Inspection and verification use
+repeatable-read read-only transactions. Migration apply retains Read Committed
+write authority plus all three advisory transaction locks so a lock waiter can
+observe the preceding commit, then atomically rereads ordered history and
+compatibility in one SQL statement before mutation. Only an
+exact supported manifest prefix followed by contiguous exact-next future
+schema entries whose canonical full-history metadata digest and compatibility
+row agree is `UnsupportedFutureSchema`. Missing, reordered, substituted,
+gapped, or compatibility-divergent history remains corruption. The classifier
+adds no migration, mutation, repair, or successful future bootstrap profile.
 
 ## Non-Goals
 
@@ -728,10 +739,11 @@ still exactly 1..256 characters and no `text` field is widened.
 
 ## Allowed Dependencies
 
-- `lattice-contracts` 1.13.
-- `lattice-ports` 1.4.
+- `lattice-contracts` 1.14.
+- `lattice-ports` 2.1.
 - `lattice-cjson` 1.0.
-- `lattice-task-ledger` 2.3 pure planner/checkpoint/replay/profile/autonomy-subject API.
+- `lattice-task-ledger` 2.7 pure planner/checkpoint/replay/profile/autonomy-subject API.
+- `lattice-foreman-state` 1.3 pure retained foreman verification types.
 - `lattice-project-registry` 1.2 pure planner/checkpoint/replay API, one-way
   from this adapter only.
 - Exact `postgres` 0.19.14 with default features disabled.
@@ -747,8 +759,9 @@ still exactly 1..256 characters and no `text` field is widened.
   Git, product repositories, and companion/playmate website code.
 - Task Domain, Writer Lease, PostgreSQL Writer Lease, Approval, Artifact, Policy,
   Orchestrator, Gateway, another concrete adapter, Review Runtime, Codebase
-  Memory, or Guardian crates. Task Ledger 2.3 and Project Registry 1.2 are the
-  only approved domain-owner dependencies in version 1.10.
+  Memory, or Guardian crates. Historically, Task Ledger 2.3 and Project
+  Registry 1.2 were the only approved domain-owner dependencies in version
+  1.10; the current closed dependency set is the Allowed Dependencies above.
 - Any adapter-to-adapter dependency or reverse dependency from a domain owner.
 
 ## Failure, Compatibility, And Migration
@@ -870,6 +883,15 @@ counts above 255 when the foreman child constraint is first evaluated. The six
 affected fields keep their exact `varchar(256)` physical cap and use `+` only
 for the non-empty printable-ASCII predicate; all other constraints are frozen.
 
+Version 1.19 adds one closed public setup failure for a coherent future Store
+schema. Inspection and verification decide from one hardened repeatable-read,
+read-only snapshot. Migration apply keeps Read Committed and all three advisory
+transaction locks, and its future classifier atomically reads ordered history
+arrays plus compatibility scalars in one statement before mutation; this avoids
+both torn evidence and a stale snapshot fixed before a contended lock returns.
+`inspect_migration_profile` still returns no future success profile, and Task
+Ledger alone translates this exact setup kind into unsupported replay.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -920,6 +942,7 @@ for the non-empty printable-ASCII predicate; all other constraints are frozen.
 | Writer Lease profile closure | exact V3+Memory-v2+Writer-Lease-v1 catalog/owner/ACL/function/checksum acceptance plus partial/extra/drift/wrong-owner/direct-grant denial | Security review | yes |
 | Foreman schema-v6 binding | exact 0007 ordering/hash, fixed child/event linkage, same-transaction fencing, rollback/restart/fresh-process replay and unknown-version/privacy denial | Integration review | yes |
 | Vacant v6 Store head | exact seven-entry history returns the genesis physical head; a six-entry guard is prohibited | Integration review | yes |
+| Future schema taxonomy | exact current prefix plus contiguous exact-next suffix, canonical full-history metadata digest and matching future compatibility return only `STORE_SCHEMA_UNSUPPORTED_FUTURE`; extra/missing/reordered/substituted/gapped/divergent history remains corrupt | Compatibility review | yes |
 | Extension ownership | static/dependency tests prove Store cannot install, directly mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate and the exact-v5 transition/exact-v6 retry calls to Writer-owned `writer_lease_rebind_v3()` are executable | Architecture review | yes |
 
 ## Change Policy
@@ -957,3 +980,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.16 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Re-pin the undeployed 0007 byte and v6 manifest after correcting Store current-head history closure from six entries to seven; no new migration or semantic owner | Sole-foreman delegation |
 | 1.17 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Admit the existing foreman event through the shared atomic Ledger finalizer and re-pin the still-undeployed 0007 profile without widening event semantics | Sole-foreman delegation |
 | 1.18 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Preserve exact 1..256 foreman scalar bounds through varchar caps plus PostgreSQL-valid non-empty printable-ASCII checks | Sole-foreman delegation |
+| 1.19 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Classify only a coherent canonical future migration suffix as unsupported from atomic history-plus-compatibility evidence before mutation while preserving Read Committed advisory-lock retry freshness; retain all divergent history as corruption | Sole-foreman delegation |

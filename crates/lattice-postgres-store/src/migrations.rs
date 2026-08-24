@@ -53,7 +53,7 @@ pub(crate) const REGISTRY_V4_MANIFEST_SHA256: &str =
     "df3f7ca3687afaa0d1f676158725e6d2f06670e0612df7482aa9d4d244b59f0f";
 pub(crate) const LEGACY_V1_MANIFEST_SHA256: &str =
     "9b126a41e542b71d434b5786e35acb66575967d055a6733b9d6bf0b8c9f0eada";
-const MANIFEST_HASH_DOMAIN: &[u8] = b"LATTICE_POSTGRES_MIGRATION_MANIFEST_V1\0";
+pub(crate) const MANIFEST_HASH_DOMAIN: &[u8] = b"LATTICE_POSTGRES_MIGRATION_MANIFEST_V1\0";
 const DATABASE_IDENTITY_DOMAIN: &[u8] = b"LATTICE_POSTGRES_DATABASE_IDENTITY_V1\0";
 
 /// Closed manifest status; superseded bytes remain evidence but never execute.
@@ -167,6 +167,21 @@ impl MigrationDescriptor {
     pub const fn writer_compatibility(&self) -> RangeInclusive<u16> {
         self.min_writer..=self.max_writer
     }
+}
+
+pub(crate) struct MigrationMetadata<'a> {
+    pub(crate) ordinal: u16,
+    pub(crate) id: &'a str,
+    pub(crate) path: &'a str,
+    pub(crate) byte_length: u64,
+    pub(crate) sha256: &'a str,
+    pub(crate) status: MigrationStatus,
+    pub(crate) transaction_mode: MigrationTransactionMode,
+    pub(crate) schema_version: u16,
+    pub(crate) min_reader: u16,
+    pub(crate) max_reader: u16,
+    pub(crate) min_writer: u16,
+    pub(crate) max_writer: u16,
 }
 
 static MIGRATION_MANIFEST: [MigrationDescriptor; 7] = [
@@ -449,6 +464,7 @@ pub enum PostgresStoreSetupErrorKind {
     CompatibilityMismatch,
     PermissionDenied,
     ServerUnsupported,
+    UnsupportedFutureSchema,
     UnsafeSetting,
     NetworkBoundary,
     TransactionFailed,
@@ -458,7 +474,7 @@ pub enum PostgresStoreSetupErrorKind {
 }
 
 impl PostgresStoreSetupErrorKind {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::ManifestInvalid,
         Self::ChecksumMismatch,
         Self::TargetMismatch,
@@ -468,6 +484,7 @@ impl PostgresStoreSetupErrorKind {
         Self::CompatibilityMismatch,
         Self::PermissionDenied,
         Self::ServerUnsupported,
+        Self::UnsupportedFutureSchema,
         Self::UnsafeSetting,
         Self::NetworkBoundary,
         Self::TransactionFailed,
@@ -488,6 +505,7 @@ impl PostgresStoreSetupErrorKind {
             Self::CompatibilityMismatch => "STORE_SCHEMA_COMPATIBILITY_MISMATCH",
             Self::PermissionDenied => "STORE_DATABASE_PERMISSION_DENIED",
             Self::ServerUnsupported => "STORE_POSTGRES_SERVER_UNSUPPORTED",
+            Self::UnsupportedFutureSchema => "STORE_SCHEMA_UNSUPPORTED_FUTURE",
             Self::UnsafeSetting => "STORE_POSTGRES_SETTING_UNSAFE",
             Self::NetworkBoundary => "STORE_POSTGRES_NETWORK_BOUNDARY_INVALID",
             Self::TransactionFailed => "STORE_MIGRATION_TRANSACTION_FAILED",
@@ -712,9 +730,8 @@ fn verify_manifest_entries(
         ));
     }
 
-    let mut manifest_hasher = Sha256::new();
-    manifest_hasher.update(MANIFEST_HASH_DOMAIN);
     let mut executable_count = 0usize;
+    let mut metadata = Vec::with_capacity(manifest.len());
     for (index, entry) in manifest.iter().enumerate() {
         if usize::from(entry.ordinal) != index + 1
             || entry.id.is_empty()
@@ -749,17 +766,40 @@ fn verify_manifest_entries(
                 ));
             }
         }
+        metadata.push(MigrationMetadata {
+            ordinal: entry.ordinal,
+            id: entry.id,
+            path: entry.path,
+            byte_length: u64::try_from(entry.byte_length).map_err(|_| {
+                PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::ManifestInvalid)
+            })?,
+            sha256: entry.sha256,
+            status: entry.status,
+            transaction_mode: entry.transaction_mode,
+            schema_version: entry.schema_version,
+            min_reader: entry.min_reader,
+            max_reader: entry.max_reader,
+            min_writer: entry.min_writer,
+            max_writer: entry.max_writer,
+        });
+    }
+
+    Ok(ManifestEvidence {
+        entry_count: manifest.len(),
+        executable_count,
+        schema_version: manifest.last().map_or(0, |entry| entry.schema_version),
+        manifest_sha256: Sha256Hex(migration_metadata_sha256(&metadata)),
+    })
+}
+
+pub(crate) fn migration_metadata_sha256(entries: &[MigrationMetadata<'_>]) -> String {
+    let mut manifest_hasher = Sha256::new();
+    manifest_hasher.update(MANIFEST_HASH_DOMAIN);
+    for entry in entries {
         update_manifest_field(&mut manifest_hasher, &entry.ordinal.to_be_bytes());
         update_manifest_field(&mut manifest_hasher, entry.id.as_bytes());
         update_manifest_field(&mut manifest_hasher, entry.path.as_bytes());
-        update_manifest_field(
-            &mut manifest_hasher,
-            &u64::try_from(entry.byte_length)
-                .map_err(|_| {
-                    PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::ManifestInvalid)
-                })?
-                .to_be_bytes(),
-        );
+        update_manifest_field(&mut manifest_hasher, &entry.byte_length.to_be_bytes());
         update_manifest_field(&mut manifest_hasher, entry.sha256.as_bytes());
         update_manifest_field(&mut manifest_hasher, entry.status.as_str().as_bytes());
         update_manifest_field(
@@ -776,14 +816,7 @@ fn verify_manifest_entries(
             update_manifest_field(&mut manifest_hasher, &value.to_be_bytes());
         }
     }
-
-    let digest = manifest_hasher.finalize();
-    Ok(ManifestEvidence {
-        entry_count: manifest.len(),
-        executable_count,
-        schema_version: manifest.last().map_or(0, |entry| entry.schema_version),
-        manifest_sha256: Sha256Hex::from_digest(digest.as_ref()),
-    })
+    bytes_to_hex(manifest_hasher.finalize().as_ref())
 }
 
 fn update_manifest_field(hasher: &mut Sha256, value: &[u8]) {

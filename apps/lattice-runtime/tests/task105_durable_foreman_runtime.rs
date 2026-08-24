@@ -19,7 +19,8 @@ use lattice_postgres_codebase_memory::{
 };
 use lattice_postgres_store::{
     DatabaseRole, MigrationApplyOutcome, MigrationBootstrapProfile, MigrationTarget,
-    apply_migrations, inspect_migration_profile, migration_manifest,
+    PostgresTaskLedger, PostgresTaskLedgerErrorKind, apply_migrations, inspect_migration_profile,
+    migration_manifest, verify_embedded_manifest, verify_postgres_schema,
 };
 use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome, ExtensionSetupErrorKind, ExtensionTarget as WriterExtensionTarget,
@@ -37,6 +38,7 @@ use lattice_writer_lease::{
 use postgres::config::SslMode;
 use postgres::{Client, Config, NoTls};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 const V5_MANIFEST_SHA256: &str = "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
 const HISTORICAL_GLOBAL_MANIFEST_SHA256: &str =
@@ -45,6 +47,60 @@ const LEGACY_V1_MANIFEST_SHA256: &str =
     "9b126a41e542b71d434b5786e35acb66575967d055a6733b9d6bf0b8c9f0eada";
 const WRITER_V3_MANIFEST_SHA256: &str =
     "eab2812fa3d94cd3466d7c003386f805a973fd7def1f16aeb15b52f47dad78e4";
+
+fn future_v7_manifest_sha256() -> String {
+    fn field(hasher: &mut Sha256, value: &[u8]) {
+        hasher.update(
+            u64::try_from(value.len())
+                .expect("field length")
+                .to_be_bytes(),
+        );
+        hasher.update(value);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"LATTICE_POSTGRES_MIGRATION_MANIFEST_V1\0");
+    for entry in migration_manifest() {
+        field(&mut hasher, &entry.ordinal().to_be_bytes());
+        field(&mut hasher, entry.id().as_bytes());
+        field(&mut hasher, entry.path().as_bytes());
+        field(
+            &mut hasher,
+            &u64::try_from(entry.byte_length())
+                .expect("migration length")
+                .to_be_bytes(),
+        );
+        field(&mut hasher, entry.sha256().as_bytes());
+        field(&mut hasher, entry.status().as_str().as_bytes());
+        field(&mut hasher, entry.transaction_mode().as_str().as_bytes());
+        for version in [
+            entry.schema_version(),
+            *entry.reader_compatibility().start(),
+            *entry.reader_compatibility().end(),
+            *entry.writer_compatibility().start(),
+            *entry.writer_compatibility().end(),
+        ] {
+            field(&mut hasher, &version.to_be_bytes());
+        }
+    }
+    field(&mut hasher, &8_u16.to_be_bytes());
+    field(&mut hasher, b"0008_unsupported_fixture");
+    field(&mut hasher, b"db/migrations/0008_unsupported_fixture.sql");
+    field(&mut hasher, &1_u64.to_be_bytes());
+    field(&mut hasher, "d".repeat(64).as_bytes());
+    field(&mut hasher, b"EXECUTABLE");
+    field(&mut hasher, b"RUNNER_OWNED");
+    for _ in 0..5 {
+        field(&mut hasher, &7_u16.to_be_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("hex encoding");
+    }
+    encoded
+}
 const FRESH_CATALOG_FINGERPRINT_QUERIES: [&str; 3] = [
     "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
        n.nspname||':'||o.rolname||':'||COALESCE(\
@@ -116,6 +172,11 @@ impl LiveConfig {
     }
 
     fn bootstrap_client(&self) -> Client {
+        self.try_bootstrap_client()
+            .expect("TASK105_BOOTSTRAP_CONNECT")
+    }
+
+    fn try_bootstrap_client(&self) -> Result<Client, &'static str> {
         let mut config = Config::new();
         config
             .host(&self.host)
@@ -125,7 +186,9 @@ impl LiveConfig {
             .dbname(&self.database_name())
             .application_name("lattice-task105-migration-observer")
             .ssl_mode(SslMode::Disable);
-        config.connect(NoTls).expect("TASK105_BOOTSTRAP_CONNECT")
+        config
+            .connect(NoTls)
+            .map_err(|_| "TASK105_BOOTSTRAP_CONNECT")
     }
 
     fn runtime_client(&self) -> Client {
@@ -1000,8 +1063,10 @@ impl LiveConfig {
             .expect("TASK105_REPAIR_CORRUPT_WRITER");
     }
 
-    fn introduce_unsupported_history(&self) {
-        self.bootstrap_client()
+    fn introduce_unsupported_history(&self, coherent_future_profile: bool) {
+        let mut client = self.bootstrap_client();
+        let mut transaction = client.transaction().expect("TASK105_FUTURE_TRANSACTION");
+        transaction
             .batch_execute(
                 "INSERT INTO control.migration_history (ordinal,migration_id,migration_path,\
                     byte_length,checksum_sha256,migration_status,transaction_mode,schema_version,\
@@ -1010,15 +1075,49 @@ impl LiveConfig {
                     'RUNNER_OWNED',7,7,7,7,7)",
             )
             .expect("TASK105_INTRODUCE_UNSUPPORTED_HISTORY");
+        if coherent_future_profile {
+            transaction
+                .execute(
+                    "UPDATE ONLY control.schema_compatibility \
+                     SET manifest_sha256=$1,current_schema_version=7,min_reader=7,max_reader=7,\
+                         min_writer=7,max_writer=7 WHERE singleton=true",
+                    &[&future_v7_manifest_sha256()],
+                )
+                .expect("TASK105_INTRODUCE_FUTURE_COMPATIBILITY");
+        }
+        transaction.commit().expect("TASK105_FUTURE_COMMIT");
     }
 
-    fn repair_unsupported_history(&self) {
-        self.bootstrap_client()
-            .batch_execute(
+    fn repair_unsupported_history(&self) -> Result<(), &'static str> {
+        let current_manifest =
+            verify_embedded_manifest().map_err(|_| "TASK105_CURRENT_MANIFEST")?;
+        let mut client = self.try_bootstrap_client()?;
+        let mut transaction = client
+            .transaction()
+            .map_err(|_| "TASK105_REPAIR_TRANSACTION")?;
+        let deleted = transaction
+            .execute(
                 "DELETE FROM ONLY control.migration_history \
                  WHERE ordinal=8 AND migration_id='0008_unsupported_fixture'",
+                &[],
             )
-            .expect("TASK105_REPAIR_UNSUPPORTED_HISTORY");
+            .map_err(|_| "TASK105_REPAIR_UNSUPPORTED_HISTORY")?;
+        if deleted != 1 {
+            return Err("TASK105_REPAIR_UNSUPPORTED_HISTORY_COUNT");
+        }
+        let updated = transaction
+            .execute(
+                "UPDATE ONLY control.schema_compatibility \
+                 SET manifest_sha256=$1,current_schema_version=6,min_reader=6,max_reader=6,\
+                     min_writer=6,max_writer=6 WHERE singleton=true",
+                &[&current_manifest.manifest_sha256().as_str()],
+            )
+            .map_err(|_| "TASK105_REPAIR_CURRENT_COMPATIBILITY")?;
+        if updated != 1 {
+            return Err("TASK105_REPAIR_CURRENT_COMPATIBILITY_COUNT");
+        }
+        transaction.commit().map_err(|_| "TASK105_REPAIR_COMMIT")?;
+        Ok(())
     }
 
     fn migration_fingerprint(&self) -> (i64, i16, String) {
@@ -1206,8 +1305,8 @@ struct UnsupportedHistory<'a> {
 }
 
 impl<'a> UnsupportedHistory<'a> {
-    fn introduce(config: &'a LiveConfig) -> Self {
-        config.introduce_unsupported_history();
+    fn introduce(config: &'a LiveConfig, coherent_future_profile: bool) -> Self {
+        config.introduce_unsupported_history(coherent_future_profile);
         Self {
             config,
             introduced: true,
@@ -1216,18 +1315,7 @@ impl<'a> UnsupportedHistory<'a> {
 
     fn restore(&mut self) -> Result<(), &'static str> {
         if self.introduced {
-            let deleted = self
-                .config
-                .bootstrap_client()
-                .execute(
-                    "DELETE FROM ONLY control.migration_history \
-                     WHERE ordinal=8 AND migration_id='0008_unsupported_fixture'",
-                    &[],
-                )
-                .map_err(|_| "TASK105_REPAIR_UNSUPPORTED_HISTORY")?;
-            if deleted != 1 {
-                return Err("TASK105_REPAIR_UNSUPPORTED_HISTORY_COUNT");
-            }
+            self.config.repair_unsupported_history()?;
             self.introduced = false;
         }
         Ok(())
@@ -1722,6 +1810,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         "TASK105_STAGE_FOREMAN_REPLAY_CORRUPT_PASS",
         "TASK105_STAGE_FOREMAN_REPLAY_UNAVAILABLE_PASS",
         "TASK105_STAGE_FOREMAN_WRITER_CONTENTION_PASS",
+        "TASK105_STAGE_FOREMAN_REPLAY_EXTRA_HISTORY_CORRUPT_PASS",
         "TASK105_STAGE_FOREMAN_REPLAY_UNSUPPORTED_PASS",
     ] {
         assert_eq!(
@@ -1795,14 +1884,16 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     config.assert_v6_writer_v3_current();
     println!("TASK105_STAGE_CORRUPT_FAIL_CLOSED_PASS");
 
-    config.introduce_unsupported_history();
+    let mut unsupported_history = UnsupportedHistory::introduce(&config, true);
     let unsupported = config.durable_profile_fingerprint();
     assert_eq!(
         run_latticed_admin(&config, "--postgres-bootstrap", false).trim(),
         "LATTICED_RUNTIME_POSTGRES_VERIFICATION_REJECTED"
     );
     assert_eq!(config.durable_profile_fingerprint(), unsupported);
-    config.repair_unsupported_history();
+    unsupported_history
+        .restore()
+        .expect("TASK105_BOOTSTRAP_UNSUPPORTED_RESTORE");
     config.assert_v6_writer_v3_current();
     println!("TASK105_STAGE_UNSUPPORTED_FAIL_CLOSED_PASS");
     println!("TASK105_STAGE_INITIALIZE_PASS");
@@ -1928,11 +2019,54 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     let migration_before_unsupported = config.migration_fingerprint();
     let profile_before_unsupported = config.durable_profile_fingerprint();
     {
-        let mut unsupported = UnsupportedHistory::introduce(&config);
+        let mut inconsistent = UnsupportedHistory::introduce(&config, false);
+        assert_eq!(
+            PostgresTaskLedger::new(config.runtime_client(), &config.migration_target())
+                .err()
+                .expect("TASK105_INCONSISTENT_HISTORY_REJECTED")
+                .kind(),
+            PostgresTaskLedgerErrorKind::RetainedRowCorrupt
+        );
+        assert_foreman_replay_error(&interactive.request_status(11), "FOREMAN_REPLAY_CORRUPT");
+        inconsistent
+            .restore()
+            .expect("TASK105_INCONSISTENT_HISTORY_RESTORE");
+    }
+    assert_eq!(
+        interactive.request_status(12)["result"]["structuredContent"],
+        baseline_status
+    );
+    println!("TASK105_STAGE_FOREMAN_REPLAY_EXTRA_HISTORY_CORRUPT_PASS");
+
+    {
+        let mut unsupported = UnsupportedHistory::introduce(&config, true);
         let injected_migration = config.migration_fingerprint();
         let injected_profile = config.durable_profile_fingerprint();
+        assert_eq!(
+            PostgresTaskLedger::new(config.runtime_client(), &config.migration_target())
+                .err()
+                .expect("TASK105_FUTURE_LEDGER_REJECTED")
+                .kind(),
+            PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema
+        );
+        assert_eq!(
+            inspect_migration_profile(&mut config.migrator_client(), &config.migration_target())
+                .expect_err("TASK105_FUTURE_PROFILE_REJECTED")
+                .kind(),
+            lattice_postgres_store::PostgresStoreSetupErrorKind::UnsupportedFutureSchema
+        );
+        assert_eq!(
+            verify_postgres_schema(
+                &mut config.runtime_client(),
+                &config.migration_target(),
+                DatabaseRole::Runtime,
+            )
+            .expect_err("TASK105_FUTURE_SCHEMA_REJECTED")
+            .kind(),
+            lattice_postgres_store::PostgresStoreSetupErrorKind::UnsupportedFutureSchema
+        );
         assert_foreman_replay_error(
-            &interactive.request_status(11),
+            &interactive.request_status(13),
             "FOREMAN_REPLAY_UNSUPPORTED",
         );
         assert_eq!(config.migration_fingerprint(), injected_migration);
@@ -1947,7 +2081,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         profile_before_unsupported
     );
     assert_eq!(
-        interactive.request_status(12)["result"]["structuredContent"],
+        interactive.request_status(14)["result"]["structuredContent"],
         baseline_status
     );
     interactive.finish();

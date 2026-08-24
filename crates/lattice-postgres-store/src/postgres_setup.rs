@@ -8,11 +8,12 @@ use postgres::{Client, GenericClient, IsolationLevel, Row};
 use sha2::{Digest, Sha256};
 
 use crate::migrations::{
-    DatabaseRole, ManifestEvidence, MigrationDescriptor, MigrationStatus, MigrationTarget,
-    POSTGRES_SCHEMA_VERSION, PostgresStoreSetupError, PostgresStoreSetupErrorKind,
-    STORE_V2_SCHEMA_VERSION, SUPPORTED_POSTGRES_MAJOR, Sha256Hex, migration_manifest,
-    verify_embedded_manifest, verify_v1_manifest_prefix, verify_v2_manifest_prefix,
-    verify_v3_manifest_prefix, verify_v4_manifest_prefix, verify_v5_manifest_prefix,
+    DatabaseRole, ManifestEvidence, MigrationDescriptor, MigrationMetadata, MigrationStatus,
+    MigrationTarget, MigrationTransactionMode, POSTGRES_SCHEMA_VERSION, PostgresStoreSetupError,
+    PostgresStoreSetupErrorKind, STORE_V2_SCHEMA_VERSION, SUPPORTED_POSTGRES_MAJOR, Sha256Hex,
+    migration_manifest, migration_metadata_sha256, verify_embedded_manifest,
+    verify_v1_manifest_prefix, verify_v2_manifest_prefix, verify_v3_manifest_prefix,
+    verify_v4_manifest_prefix, verify_v5_manifest_prefix,
 };
 use crate::schema_v6_profile::{
     FOREMAN_COORDINATION_EVENT_IDENTITY, FOREMAN_COORDINATION_STREAM_IDENTITY,
@@ -1359,6 +1360,35 @@ pub(crate) struct RuntimeStoreSchemaEvidence {
     store_schema_version: u16,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetainedHistoryClassification {
+    ExactSupported,
+    StrictFutureSuffix,
+    Corrupt,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RetainedMigrationHistoryRow {
+    ordinal: i16,
+    migration_id: String,
+    migration_path: String,
+    byte_length: i64,
+    checksum_sha256: String,
+    migration_status: String,
+    transaction_mode: String,
+    schema_version: i16,
+    min_reader: i16,
+    max_reader: i16,
+    min_writer: i16,
+    max_writer: i16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RetainedSchemaCompatibility {
+    manifest_sha256: String,
+    versions: [i16; 5],
+}
+
 impl RuntimeStoreSchemaEvidence {
     pub(crate) fn database_uuid(&self) -> &str {
         &self.database_uuid
@@ -1862,6 +1892,15 @@ pub fn verify_postgres_schema(
     .map_err(|_| {
         PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::CompatibilityMismatch)
     })?;
+    if schema_version > POSTGRES_SCHEMA_VERSION {
+        return match classify_retained_history(&mut transaction)? {
+            RetainedHistoryClassification::StrictFutureSuffix => Err(PostgresStoreSetupError::new(
+                PostgresStoreSetupErrorKind::UnsupportedFutureSchema,
+            )),
+            RetainedHistoryClassification::ExactSupported
+            | RetainedHistoryClassification::Corrupt => Err(history_error()),
+        };
+    }
     let evidence = if schema_version == POSTGRES_SCHEMA_VERSION {
         let manifest = verify_embedded_manifest()?;
         let database_uuid =
@@ -1940,6 +1979,17 @@ pub(crate) fn verify_runtime_store_schema(
     let manifest = match installed_schema_version {
         3 => verify_v3_manifest_prefix()?,
         POSTGRES_SCHEMA_VERSION => verify_embedded_manifest()?,
+        version if version > POSTGRES_SCHEMA_VERSION => {
+            return match classify_retained_history(&mut transaction)? {
+                RetainedHistoryClassification::StrictFutureSuffix => {
+                    Err(PostgresStoreSetupError::new(
+                        PostgresStoreSetupErrorKind::UnsupportedFutureSchema,
+                    ))
+                }
+                RetainedHistoryClassification::ExactSupported
+                | RetainedHistoryClassification::Corrupt => Err(history_error()),
+            };
+        }
         _ => {
             return Err(PostgresStoreSetupError::new(
                 PostgresStoreSetupErrorKind::CompatibilityMismatch,
@@ -2018,38 +2068,19 @@ fn verify_runtime_foreman_schema_v6<C: GenericClient>(
     runtime_active: bool,
 ) -> Result<String, PostgresStoreSetupError> {
     let rows = read_history_rows(client)?;
-    verify_history_rows(&rows, migration_manifest())?;
-    let compatibility = client
-        .query(
-            "SELECT manifest_sha256,current_schema_version,min_reader,max_reader,min_writer,max_writer \
-               FROM ONLY control.schema_compatibility WHERE singleton = true",
-            &[],
-        )
-        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
-    if compatibility.len() != 1
-        || row_value::<String>(
-            &compatibility[0],
-            0,
-            PostgresStoreSetupErrorKind::CompatibilityMismatch,
-        )? != manifest.manifest_sha256().as_str()
-        || row_value::<i16>(
-            &compatibility[0],
-            1,
-            PostgresStoreSetupErrorKind::CompatibilityMismatch,
-        )? != 6
-        || (2..=5).any(|index| {
-            row_value::<i16>(
-                &compatibility[0],
-                index,
-                PostgresStoreSetupErrorKind::CompatibilityMismatch,
-            )
-            .ok()
-                != Some(6)
-        })
-    {
-        return Err(PostgresStoreSetupError::new(
-            PostgresStoreSetupErrorKind::CompatibilityMismatch,
-        ));
+    let retained = retained_history_rows(&rows)?;
+    let compatibility = read_retained_schema_compatibility(client)?;
+    match classify_retained_history_rows(&retained, &compatibility) {
+        RetainedHistoryClassification::ExactSupported
+            if compatibility.manifest_sha256 == manifest.manifest_sha256().as_str() => {}
+        RetainedHistoryClassification::StrictFutureSuffix => {
+            return Err(PostgresStoreSetupError::new(
+                PostgresStoreSetupErrorKind::UnsupportedFutureSchema,
+            ));
+        }
+        RetainedHistoryClassification::ExactSupported | RetainedHistoryClassification::Corrupt => {
+            return Err(history_error());
+        }
     }
 
     let catalog = client
@@ -2325,6 +2356,17 @@ fn classify_installed_manifest_state<C: GenericClient>(
                 length if length == migration_manifest().len() => {
                     verify_history_rows(&rows, migration_manifest())?;
                     Ok(InstalledManifestState::ExactV6Full)
+                }
+                length if length > migration_manifest().len() => {
+                    match classify_retained_history(client)? {
+                        RetainedHistoryClassification::StrictFutureSuffix => {
+                            Err(PostgresStoreSetupError::new(
+                                PostgresStoreSetupErrorKind::UnsupportedFutureSchema,
+                            ))
+                        }
+                        RetainedHistoryClassification::ExactSupported
+                        | RetainedHistoryClassification::Corrupt => Err(history_error()),
+                    }
                 }
                 _ => Err(history_error()),
             }
@@ -3600,6 +3642,332 @@ fn read_history_rows<C: GenericClient>(
             &[],
         )
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::HistoryMismatch))
+}
+
+fn retained_history_rows(
+    rows: &[Row],
+) -> Result<Vec<RetainedMigrationHistoryRow>, PostgresStoreSetupError> {
+    rows.iter()
+        .map(|row| {
+            Ok(RetainedMigrationHistoryRow {
+                ordinal: row_value(row, 0, PostgresStoreSetupErrorKind::HistoryMismatch)?,
+                migration_id: row_value(row, 1, PostgresStoreSetupErrorKind::HistoryMismatch)?,
+                migration_path: row_value(row, 2, PostgresStoreSetupErrorKind::HistoryMismatch)?,
+                byte_length: row_value(row, 3, PostgresStoreSetupErrorKind::HistoryMismatch)?,
+                checksum_sha256: row_value(row, 4, PostgresStoreSetupErrorKind::HistoryMismatch)?,
+                migration_status: row_value(row, 5, PostgresStoreSetupErrorKind::HistoryMismatch)?,
+                transaction_mode: row_value(row, 6, PostgresStoreSetupErrorKind::HistoryMismatch)?,
+                schema_version: row_value(row, 7, PostgresStoreSetupErrorKind::HistoryMismatch)?,
+                min_reader: row_value(row, 8, PostgresStoreSetupErrorKind::HistoryMismatch)?,
+                max_reader: row_value(row, 9, PostgresStoreSetupErrorKind::HistoryMismatch)?,
+                min_writer: row_value(row, 10, PostgresStoreSetupErrorKind::HistoryMismatch)?,
+                max_writer: row_value(row, 11, PostgresStoreSetupErrorKind::HistoryMismatch)?,
+            })
+        })
+        .collect()
+}
+
+fn read_retained_schema_compatibility<C: GenericClient>(
+    client: &mut C,
+) -> Result<RetainedSchemaCompatibility, PostgresStoreSetupError> {
+    let rows = client
+        .query(
+            "SELECT manifest_sha256,current_schema_version,min_reader,max_reader,min_writer,max_writer \
+               FROM ONLY control.schema_compatibility WHERE singleton = true",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    if rows.len() != 1 {
+        return Err(catalog_error());
+    }
+    let row = &rows[0];
+    Ok(RetainedSchemaCompatibility {
+        manifest_sha256: row_value(row, 0, PostgresStoreSetupErrorKind::CompatibilityMismatch)?,
+        versions: [
+            row_value(row, 1, PostgresStoreSetupErrorKind::CompatibilityMismatch)?,
+            row_value(row, 2, PostgresStoreSetupErrorKind::CompatibilityMismatch)?,
+            row_value(row, 3, PostgresStoreSetupErrorKind::CompatibilityMismatch)?,
+            row_value(row, 4, PostgresStoreSetupErrorKind::CompatibilityMismatch)?,
+            row_value(row, 5, PostgresStoreSetupErrorKind::CompatibilityMismatch)?,
+        ],
+    })
+}
+
+fn classify_retained_history<C: GenericClient>(
+    client: &mut C,
+) -> Result<RetainedHistoryClassification, PostgresStoreSetupError> {
+    let row = client
+        .query_one(
+            "SELECT \
+               COALESCE(array_agg(h.ordinal ORDER BY h.ordinal),ARRAY[]::smallint[]), \
+               COALESCE(array_agg(h.migration_id ORDER BY h.ordinal),ARRAY[]::text[]), \
+               COALESCE(array_agg(h.migration_path ORDER BY h.ordinal),ARRAY[]::text[]), \
+               COALESCE(array_agg(h.byte_length ORDER BY h.ordinal),ARRAY[]::bigint[]), \
+               COALESCE(array_agg(h.checksum_sha256 ORDER BY h.ordinal),ARRAY[]::text[]), \
+               COALESCE(array_agg(h.migration_status ORDER BY h.ordinal),ARRAY[]::text[]), \
+               COALESCE(array_agg(h.transaction_mode ORDER BY h.ordinal),ARRAY[]::text[]), \
+               COALESCE(array_agg(h.schema_version ORDER BY h.ordinal),ARRAY[]::smallint[]), \
+               COALESCE(array_agg(h.min_reader ORDER BY h.ordinal),ARRAY[]::smallint[]), \
+               COALESCE(array_agg(h.max_reader ORDER BY h.ordinal),ARRAY[]::smallint[]), \
+               COALESCE(array_agg(h.min_writer ORDER BY h.ordinal),ARRAY[]::smallint[]), \
+               COALESCE(array_agg(h.max_writer ORDER BY h.ordinal),ARRAY[]::smallint[]), \
+               (SELECT c.manifest_sha256 FROM ONLY control.schema_compatibility c \
+                 WHERE c.singleton=true), \
+               (SELECT c.current_schema_version FROM ONLY control.schema_compatibility c \
+                 WHERE c.singleton=true), \
+               (SELECT c.min_reader FROM ONLY control.schema_compatibility c \
+                 WHERE c.singleton=true), \
+               (SELECT c.max_reader FROM ONLY control.schema_compatibility c \
+                 WHERE c.singleton=true), \
+               (SELECT c.min_writer FROM ONLY control.schema_compatibility c \
+                 WHERE c.singleton=true), \
+               (SELECT c.max_writer FROM ONLY control.schema_compatibility c \
+                 WHERE c.singleton=true) \
+             FROM ONLY control.migration_history h",
+            &[],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::HistoryMismatch)
+        })?;
+    classify_retained_history_snapshot(&row)
+}
+
+fn classify_retained_history_snapshot(
+    row: &Row,
+) -> Result<RetainedHistoryClassification, PostgresStoreSetupError> {
+    let ordinals: Vec<i16> = row_value(row, 0, PostgresStoreSetupErrorKind::HistoryMismatch)?;
+    let migration_ids: Vec<String> =
+        row_value(row, 1, PostgresStoreSetupErrorKind::HistoryMismatch)?;
+    let migration_paths: Vec<String> =
+        row_value(row, 2, PostgresStoreSetupErrorKind::HistoryMismatch)?;
+    let byte_lengths: Vec<i64> = row_value(row, 3, PostgresStoreSetupErrorKind::HistoryMismatch)?;
+    let checksums: Vec<String> = row_value(row, 4, PostgresStoreSetupErrorKind::HistoryMismatch)?;
+    let statuses: Vec<String> = row_value(row, 5, PostgresStoreSetupErrorKind::HistoryMismatch)?;
+    let modes: Vec<String> = row_value(row, 6, PostgresStoreSetupErrorKind::HistoryMismatch)?;
+    let schema_versions: Vec<i16> =
+        row_value(row, 7, PostgresStoreSetupErrorKind::HistoryMismatch)?;
+    let min_readers: Vec<i16> = row_value(row, 8, PostgresStoreSetupErrorKind::HistoryMismatch)?;
+    let max_readers: Vec<i16> = row_value(row, 9, PostgresStoreSetupErrorKind::HistoryMismatch)?;
+    let min_writers: Vec<i16> = row_value(row, 10, PostgresStoreSetupErrorKind::HistoryMismatch)?;
+    let max_writers: Vec<i16> = row_value(row, 11, PostgresStoreSetupErrorKind::HistoryMismatch)?;
+    let length = ordinals.len();
+    if [
+        migration_ids.len(),
+        migration_paths.len(),
+        byte_lengths.len(),
+        checksums.len(),
+        statuses.len(),
+        modes.len(),
+        schema_versions.len(),
+        min_readers.len(),
+        max_readers.len(),
+        min_writers.len(),
+        max_writers.len(),
+    ]
+    .into_iter()
+    .any(|candidate| candidate != length)
+    {
+        return Ok(RetainedHistoryClassification::Corrupt);
+    }
+    let retained = (0..length)
+        .map(|index| RetainedMigrationHistoryRow {
+            ordinal: ordinals[index],
+            migration_id: migration_ids[index].clone(),
+            migration_path: migration_paths[index].clone(),
+            byte_length: byte_lengths[index],
+            checksum_sha256: checksums[index].clone(),
+            migration_status: statuses[index].clone(),
+            transaction_mode: modes[index].clone(),
+            schema_version: schema_versions[index],
+            min_reader: min_readers[index],
+            max_reader: max_readers[index],
+            min_writer: min_writers[index],
+            max_writer: max_writers[index],
+        })
+        .collect::<Vec<_>>();
+    let compatibility_values = [
+        row_value::<Option<i16>>(row, 13, PostgresStoreSetupErrorKind::CompatibilityMismatch)?,
+        row_value::<Option<i16>>(row, 14, PostgresStoreSetupErrorKind::CompatibilityMismatch)?,
+        row_value::<Option<i16>>(row, 15, PostgresStoreSetupErrorKind::CompatibilityMismatch)?,
+        row_value::<Option<i16>>(row, 16, PostgresStoreSetupErrorKind::CompatibilityMismatch)?,
+        row_value::<Option<i16>>(row, 17, PostgresStoreSetupErrorKind::CompatibilityMismatch)?,
+    ];
+    let Some(versions) = compatibility_values
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .and_then(|values| values.try_into().ok())
+    else {
+        return Ok(RetainedHistoryClassification::Corrupt);
+    };
+    let Some(manifest_sha256) =
+        row_value::<Option<String>>(row, 12, PostgresStoreSetupErrorKind::CompatibilityMismatch)?
+    else {
+        return Ok(RetainedHistoryClassification::Corrupt);
+    };
+    Ok(classify_retained_history_rows(
+        &retained,
+        &RetainedSchemaCompatibility {
+            manifest_sha256,
+            versions,
+        },
+    ))
+}
+
+fn classify_retained_history_rows(
+    rows: &[RetainedMigrationHistoryRow],
+    compatibility: &RetainedSchemaCompatibility,
+) -> RetainedHistoryClassification {
+    let current = migration_manifest();
+    if rows.len() < current.len()
+        || !rows[..current.len()]
+            .iter()
+            .zip(current)
+            .all(|(row, expected)| retained_history_matches(row, expected))
+    {
+        return RetainedHistoryClassification::Corrupt;
+    }
+
+    let Some(metadata) = retained_history_metadata(rows) else {
+        return RetainedHistoryClassification::Corrupt;
+    };
+    let retained_digest = migration_metadata_sha256(&metadata);
+    if rows.len() == current.len() {
+        let Ok(current_schema) = i16::try_from(POSTGRES_SCHEMA_VERSION) else {
+            return RetainedHistoryClassification::Corrupt;
+        };
+        return if compatibility.manifest_sha256 == retained_digest
+            && compatibility.versions == [current_schema; 5]
+        {
+            RetainedHistoryClassification::ExactSupported
+        } else {
+            RetainedHistoryClassification::Corrupt
+        };
+    }
+
+    let Ok(mut previous_schema) = i16::try_from(POSTGRES_SCHEMA_VERSION) else {
+        return RetainedHistoryClassification::Corrupt;
+    };
+    for (index, row) in rows.iter().enumerate().skip(current.len()) {
+        let Ok(expected_ordinal) = i16::try_from(index + 1) else {
+            return RetainedHistoryClassification::Corrupt;
+        };
+        let Some(expected_schema) = previous_schema.checked_add(1) else {
+            return RetainedHistoryClassification::Corrupt;
+        };
+        let id_prefix = format!("{expected_ordinal:04}_");
+        if row.ordinal != expected_ordinal
+            || !row.migration_id.starts_with(&id_prefix)
+            || !row
+                .migration_id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            || row.migration_path != format!("db/migrations/{}.sql", row.migration_id)
+            || row.byte_length <= 0
+            || row.checksum_sha256.len() != 64
+            || row
+                .checksum_sha256
+                .bytes()
+                .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
+            || row.checksum_sha256.bytes().all(|byte| byte == b'0')
+            || row.migration_status != MigrationStatus::Executable.as_str()
+            || row.transaction_mode != "RUNNER_OWNED"
+            || row.schema_version != expected_schema
+            || row.min_reader != row.schema_version
+            || row.max_reader != row.schema_version
+            || row.min_writer != row.schema_version
+            || row.max_writer != row.schema_version
+        {
+            return RetainedHistoryClassification::Corrupt;
+        }
+        previous_schema = row.schema_version;
+    }
+    if compatibility.manifest_sha256 == retained_digest
+        && compatibility.versions == [previous_schema; 5]
+    {
+        RetainedHistoryClassification::StrictFutureSuffix
+    } else {
+        RetainedHistoryClassification::Corrupt
+    }
+}
+
+fn retained_history_metadata(
+    rows: &[RetainedMigrationHistoryRow],
+) -> Option<Vec<MigrationMetadata<'_>>> {
+    rows.iter()
+        .map(|row| {
+            let status = match row.migration_status.as_str() {
+                "SUPERSEDED" => MigrationStatus::Superseded,
+                "EXECUTABLE" => MigrationStatus::Executable,
+                _ => return None,
+            };
+            let transaction_mode = match row.transaction_mode.as_str() {
+                "NOT_EXECUTED" => MigrationTransactionMode::NotExecuted,
+                "RUNNER_OWNED" => MigrationTransactionMode::RunnerOwned,
+                _ => return None,
+            };
+            Some(MigrationMetadata {
+                ordinal: u16::try_from(row.ordinal).ok()?,
+                id: &row.migration_id,
+                path: &row.migration_path,
+                byte_length: u64::try_from(row.byte_length).ok()?,
+                sha256: &row.checksum_sha256,
+                status,
+                transaction_mode,
+                schema_version: u16::try_from(row.schema_version).ok()?,
+                min_reader: u16::try_from(row.min_reader).ok()?,
+                max_reader: u16::try_from(row.max_reader).ok()?,
+                min_writer: u16::try_from(row.min_writer).ok()?,
+                max_writer: u16::try_from(row.max_writer).ok()?,
+            })
+        })
+        .collect()
+}
+
+fn retained_history_matches(
+    row: &RetainedMigrationHistoryRow,
+    expected: &MigrationDescriptor,
+) -> bool {
+    let Ok(ordinal) = i16::try_from(expected.ordinal()) else {
+        return false;
+    };
+    let Ok(byte_length) = i64::try_from(expected.byte_length()) else {
+        return false;
+    };
+    let Ok(schema_version) = i16::try_from(expected.schema_version()) else {
+        return false;
+    };
+    let Ok(min_reader) = i16::try_from(*expected.reader_compatibility().start()) else {
+        return false;
+    };
+    let Ok(max_reader) = i16::try_from(*expected.reader_compatibility().end()) else {
+        return false;
+    };
+    let Ok(min_writer) = i16::try_from(*expected.writer_compatibility().start()) else {
+        return false;
+    };
+    let Ok(max_writer) = i16::try_from(*expected.writer_compatibility().end()) else {
+        return false;
+    };
+    row.ordinal == ordinal
+        && row.migration_id == expected.id()
+        && row.migration_path == expected.path()
+        && row.byte_length == byte_length
+        && row.checksum_sha256 == expected.sha256()
+        && row.migration_status == expected.status().as_str()
+        && row.transaction_mode == expected.transaction_mode().as_str()
+        && [
+            row.schema_version,
+            row.min_reader,
+            row.max_reader,
+            row.min_writer,
+            row.max_writer,
+        ] == [
+            schema_version,
+            min_reader,
+            max_reader,
+            min_writer,
+            max_writer,
+        ]
 }
 
 fn verify_history_rows(
@@ -6337,14 +6705,16 @@ mod tests {
         CodebaseMemoryIdentityProfile, DATABASE_ACL_SIGNATURE_SQL, EXPECTED_DATABASE_ACL_SIGNATURE,
         EXPECTED_ROLE_SIGNATURE, FUNCTION_ACL_SIGNATURE_SQL, FUNCTION_SIGNATURE_SQL,
         INDEX_SIGNATURE_SQL, RELATION_SIGNATURE_SQL, REQUIRED_APPLICATION_NAME,
-        ROLE_DATABASE_BOUNDARY_SQL, ROLE_SIGNATURE_SQL, SCHEMA_ACL_SIGNATURE_SQL,
+        ROLE_DATABASE_BOUNDARY_SQL, ROLE_SIGNATURE_SQL, RetainedHistoryClassification,
+        RetainedMigrationHistoryRow, RetainedSchemaCompatibility, SCHEMA_ACL_SIGNATURE_SQL,
         TABLE_ACL_SIGNATURE_SQL, apply_migrations, catalog_error, catalog_signature,
         classify_current_catalog_profile, classify_extension_catalog_counts,
-        codebase_memory_identity_profile_matches, expected_dangerous_function_count,
-        expected_internal_trigger_count, expected_owned_function_count,
-        expected_scope_head_trigger_count, is_loopback, permission_error, read_database_identity,
-        read_forbidden_schema_object_counts, read_history_rows, row_value,
-        v3_upgrade_source_has_memory, verify_autonomy_receipt_profile, verify_catalog_signatures,
+        classify_retained_history_rows, codebase_memory_identity_profile_matches,
+        expected_dangerous_function_count, expected_internal_trigger_count,
+        expected_owned_function_count, expected_scope_head_trigger_count, is_loopback,
+        permission_error, read_database_identity, read_forbidden_schema_object_counts,
+        read_history_rows, row_value, v3_upgrade_source_has_memory,
+        verify_autonomy_receipt_profile, verify_catalog_signatures,
         verify_cluster_wide_acl_closure, verify_compatibility, verify_effective_default_privileges,
         verify_forbidden_namespace_objects, verify_forbidden_schema_objects, verify_history,
         verify_history_rows, verify_login_principal_closure, verify_network_boundary,
@@ -6379,6 +6749,114 @@ mod tests {
         } else {
             Err(catalog_error())
         }
+    }
+
+    fn retained_current_history() -> Vec<RetainedMigrationHistoryRow> {
+        migration_manifest()
+            .iter()
+            .map(|entry| RetainedMigrationHistoryRow {
+                ordinal: i16::try_from(entry.ordinal()).expect("ordinal"),
+                migration_id: entry.id().to_owned(),
+                migration_path: entry.path().to_owned(),
+                byte_length: i64::try_from(entry.byte_length()).expect("length"),
+                checksum_sha256: entry.sha256().to_owned(),
+                migration_status: entry.status().as_str().to_owned(),
+                transaction_mode: entry.transaction_mode().as_str().to_owned(),
+                schema_version: i16::try_from(entry.schema_version()).expect("schema"),
+                min_reader: i16::try_from(*entry.reader_compatibility().start())
+                    .expect("min reader"),
+                max_reader: i16::try_from(*entry.reader_compatibility().end()).expect("max reader"),
+                min_writer: i16::try_from(*entry.writer_compatibility().start())
+                    .expect("min writer"),
+                max_writer: i16::try_from(*entry.writer_compatibility().end()).expect("max writer"),
+            })
+            .collect()
+    }
+
+    fn compatibility_for(
+        rows: &[RetainedMigrationHistoryRow],
+        version: i16,
+    ) -> RetainedSchemaCompatibility {
+        let metadata = super::retained_history_metadata(rows).expect("valid retained metadata");
+        RetainedSchemaCompatibility {
+            manifest_sha256: crate::migrations::migration_metadata_sha256(&metadata),
+            versions: [version; 5],
+        }
+    }
+
+    #[test]
+    fn retained_history_classification_separates_exact_future_and_corrupt_profiles() {
+        let current = retained_current_history();
+        let current_compatibility = compatibility_for(&current, 6);
+        assert_eq!(
+            classify_retained_history_rows(&current, &current_compatibility),
+            RetainedHistoryClassification::ExactSupported
+        );
+
+        let mut future = current.clone();
+        future.push(RetainedMigrationHistoryRow {
+            ordinal: 8,
+            migration_id: "0008_unsupported_fixture".to_owned(),
+            migration_path: "db/migrations/0008_unsupported_fixture.sql".to_owned(),
+            byte_length: 1,
+            checksum_sha256: "d".repeat(64),
+            migration_status: "EXECUTABLE".to_owned(),
+            transaction_mode: "RUNNER_OWNED".to_owned(),
+            schema_version: 7,
+            min_reader: 7,
+            max_reader: 7,
+            min_writer: 7,
+            max_writer: 7,
+        });
+        let future_compatibility = compatibility_for(&future, 7);
+        assert_eq!(
+            classify_retained_history_rows(&future, &future_compatibility),
+            RetainedHistoryClassification::StrictFutureSuffix
+        );
+        assert_eq!(
+            classify_retained_history_rows(&future, &current_compatibility),
+            RetainedHistoryClassification::Corrupt
+        );
+
+        let mut missing = future.clone();
+        missing.remove(3);
+        assert_eq!(
+            classify_retained_history_rows(&missing, &future_compatibility),
+            RetainedHistoryClassification::Corrupt
+        );
+        let mut reordered = future.clone();
+        reordered.swap(2, 3);
+        assert_eq!(
+            classify_retained_history_rows(&reordered, &future_compatibility),
+            RetainedHistoryClassification::Corrupt
+        );
+        let mut substituted = future.clone();
+        substituted[5].checksum_sha256 = "e".repeat(64);
+        assert_eq!(
+            classify_retained_history_rows(&substituted, &future_compatibility),
+            RetainedHistoryClassification::Corrupt
+        );
+        for invalid_id in ["0008_../forged", "0008_forged/path"] {
+            let mut invalid_identity = future.clone();
+            invalid_identity[7].migration_id = invalid_id.to_owned();
+            invalid_identity[7].migration_path = format!("db/migrations/{invalid_id}.sql");
+            let invalid_compatibility = compatibility_for(&invalid_identity, 7);
+            assert_eq!(
+                classify_retained_history_rows(&invalid_identity, &invalid_compatibility),
+                RetainedHistoryClassification::Corrupt
+            );
+        }
+        let mut jumped = future;
+        jumped[7].schema_version = 8;
+        jumped[7].min_reader = 8;
+        jumped[7].max_reader = 8;
+        jumped[7].min_writer = 8;
+        jumped[7].max_writer = 8;
+        let jumped_compatibility = compatibility_for(&jumped, 8);
+        assert_eq!(
+            classify_retained_history_rows(&jumped, &jumped_compatibility),
+            RetainedHistoryClassification::Corrupt
+        );
     }
 
     fn diagnose_forbidden_schema_object(label: &str, result: Result<(), PostgresStoreSetupError>) {

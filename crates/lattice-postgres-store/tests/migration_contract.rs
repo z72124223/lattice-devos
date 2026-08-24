@@ -588,6 +588,162 @@ fn misplaced_autonomy_0005_fixture_proves_pre_ddl_non_mutation() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn migration_runner_classifies_future_history_atomically_after_serial_lock_before_mutation() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    let apply_start = setup
+        .find("pub fn apply_migrations")
+        .expect("migration runner");
+    let apply_end = setup[apply_start..]
+        .find("pub fn verify_postgres_schema")
+        .map(|offset| apply_start + offset)
+        .expect("migration runner boundary");
+    let apply = &setup[apply_start..apply_end];
+
+    assert!(apply.contains(".isolation_level(IsolationLevel::ReadCommitted)"));
+    assert!(!apply.contains(".isolation_level(IsolationLevel::RepeatableRead)"));
+    assert!(!apply.contains(".read_only(true)"));
+    let lock = apply
+        .find("SELECT pg_advisory_xact_lock($1)")
+        .expect("serial migration locks");
+
+    let classify = apply
+        .find("let installed = classify_installed_manifest_state")
+        .expect("installed history classification");
+    assert!(lock < classify);
+    for mutation in [
+        "apply_entries_until",
+        "apply_missing_entries",
+        "seed_database_identity",
+        "advance_compatibility_from_v1",
+        "CALL writer_lease.writer_lease_rebind_v3()",
+    ] {
+        assert!(
+            classify < apply.find(mutation).expect("migration mutation boundary"),
+            "retained history classification must precede {mutation}"
+        );
+    }
+
+    let classifier_start = setup
+        .find("fn classify_retained_history<C: GenericClient>")
+        .expect("atomic retained history classifier");
+    let classifier_end = setup[classifier_start..]
+        .find("\nfn classify_retained_history_rows")
+        .map(|offset| classifier_start + offset)
+        .expect("atomic classifier boundary");
+    let classifier = &setup[classifier_start..classifier_end];
+    let parser_start = classifier
+        .find("fn classify_retained_history_snapshot")
+        .expect("retained history snapshot parser");
+    let query = &classifier[..parser_start];
+    let parser = &classifier[parser_start..];
+    assert_eq!(query.matches(".query_one(").count(), 1);
+    let history_columns = [
+        ("ordinal", "ordinals", "i16"),
+        ("migration_id", "migration_ids", "String"),
+        ("migration_path", "migration_paths", "String"),
+        ("byte_length", "byte_lengths", "i64"),
+        ("checksum_sha256", "checksums", "String"),
+        ("migration_status", "statuses", "String"),
+        ("transaction_mode", "modes", "String"),
+        ("schema_version", "schema_versions", "i16"),
+        ("min_reader", "min_readers", "i16"),
+        ("max_reader", "max_readers", "i16"),
+        ("min_writer", "min_writers", "i16"),
+        ("max_writer", "max_writers", "i16"),
+    ];
+    let parser_compact = parser.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut previous_query_position = None;
+    for (index, (field, variable, element_type)) in history_columns.into_iter().enumerate() {
+        let evidence = format!("array_agg(h.{field} ORDER BY h.ordinal)");
+        assert_eq!(
+            query.match_indices(&evidence).count(),
+            1,
+            "atomic history field {field} must appear exactly once"
+        );
+        let position = query.find(&evidence).expect("atomic history field");
+        assert!(
+            previous_query_position.is_none_or(|previous| previous < position),
+            "atomic history field {field} is out of result-column order"
+        );
+        previous_query_position = Some(position);
+
+        assert!(parser_compact.contains(&format!(
+            "let {variable}: Vec<{element_type}> = row_value(row, {index}, PostgresStoreSetupErrorKind::HistoryMismatch)?;"
+        )), "history parser index {index} does not bind {field} to {variable}: Vec<{element_type}>");
+    }
+    for field in [
+        "manifest_sha256",
+        "current_schema_version",
+        "min_reader",
+        "max_reader",
+        "min_writer",
+        "max_writer",
+    ] {
+        assert!(
+            query.contains(&format!(
+                "SELECT c.{field} FROM ONLY control.schema_compatibility c"
+            )),
+            "missing atomic compatibility field {field}"
+        );
+    }
+    assert_eq!(query.matches("WHERE c.singleton=true").count(), 6);
+    assert!(!query.contains("read_history_rows"));
+    assert!(!query.contains("read_retained_schema_compatibility"));
+
+    assert!(parser.contains("let length = ordinals.len();"));
+    for vector in [
+        "migration_ids",
+        "migration_paths",
+        "byte_lengths",
+        "checksums",
+        "statuses",
+        "modes",
+        "schema_versions",
+        "min_readers",
+        "max_readers",
+        "min_writers",
+        "max_writers",
+    ] {
+        assert!(
+            parser.contains(&format!("{vector}.len()")),
+            "missing equal-length check for {vector}"
+        );
+    }
+    assert!(parser.contains(".any(|candidate| candidate != length)"));
+
+    for index in 13..=17 {
+        assert!(parser_compact.contains(&format!(
+            "row_value::<Option<i16>>(row, {index}, PostgresStoreSetupErrorKind::CompatibilityMismatch)?"
+        )));
+    }
+    assert!(parser_compact.contains("collect::<Option<Vec<_>>>()"));
+    assert!(parser_compact.contains(
+        "let Some(manifest_sha256) = row_value::<Option<String>>(row, 12, PostgresStoreSetupErrorKind::CompatibilityMismatch)?"
+    ));
+    let nullable_parser = parser
+        .split("let compatibility_values")
+        .nth(1)
+        .expect("nullable compatibility parser");
+    assert_eq!(
+        nullable_parser
+            .matches("return Ok(RetainedHistoryClassification::Corrupt);")
+            .count(),
+        2
+    );
+
+    let installed_start = setup
+        .find("fn classify_installed_manifest_state<C: GenericClient>")
+        .expect("installed manifest classifier");
+    let installed_end = setup[installed_start..]
+        .find("\nfn apply_missing_entries")
+        .map(|offset| installed_start + offset)
+        .expect("installed classifier boundary");
+    let installed = &setup[installed_start..installed_end];
+    assert!(installed.contains("match classify_retained_history(client)?"));
+}
+
+#[test]
 fn schema_v5_adds_successors_and_registry_command_profile_provenance() {
     let migration = migration_manifest()
         .iter()
@@ -1234,8 +1390,9 @@ fn schema_v6_runtime_admission_requires_writer_v3_current_and_closed_acl() {
         .expect("verifier boundary")
         .0;
     for required in [
-        "verify_history_rows(&rows, migration_manifest())",
-        "current_schema_version",
+        "classify_retained_history_rows(&retained, &compatibility)",
+        "RetainedHistoryClassification::StrictFutureSuffix",
+        "read_retained_schema_compatibility(client)",
         "task_ledger_foreman_snapshots",
         "has_table_privilege",
         "task_ledger_record_foreman_snapshot_v1",
@@ -1944,7 +2101,7 @@ fn database_roles_are_closed_and_never_a_login_or_caller_value() {
 
 #[test]
 fn setup_errors_are_closed_static_bounded_and_redacted() {
-    assert_eq!(PostgresStoreSetupErrorKind::ALL.len(), 15);
+    assert_eq!(PostgresStoreSetupErrorKind::ALL.len(), 16);
     assert!(
         PostgresStoreSetupErrorKind::ALL
             .contains(&PostgresStoreSetupErrorKind::PostApplyVerificationFailed)
@@ -1952,6 +2109,10 @@ fn setup_errors_are_closed_static_bounded_and_redacted() {
     assert_eq!(
         PostgresStoreSetupErrorKind::PostApplyVerificationFailed.code(),
         "STORE_MIGRATION_COMMITTED_UNVERIFIED"
+    );
+    assert_eq!(
+        PostgresStoreSetupErrorKind::UnsupportedFutureSchema.code(),
+        "STORE_SCHEMA_UNSUPPORTED_FUTURE"
     );
     for kind in PostgresStoreSetupErrorKind::ALL {
         let error = PostgresStoreSetupError::new(kind);

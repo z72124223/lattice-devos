@@ -13,7 +13,7 @@
 | Repository inspection | valid | live Git/worktree/remote audit; workflow audit 2026-08-25 | machine-observed |
 | Requirements | valid | sole-foreman frozen delegation | documented-only |
 | Specification/ADR | valid | SPEC-009 / ADR-027 | documented-only |
-| Module governance | valid | TASK-105 versioned amendments through Store 1.18 / Writer adapter 1.7; repository check PASS | machine-enforced tests |
+| Module governance | valid | TASK-105 versioned amendments through Store 1.19 / Writer adapter 1.8; repository check PASS | machine-enforced tests |
 | Ticket/worktree | valid | TASK-105, clean isolated product-based worktree | machine-observed |
 | TDD implementation | valid | checkpoint domain, effect ordering, MCP, bootstrap and live failures each drove bounded RED/GREEN corrections | machine-enforced tests |
 | Focused verification | valid | domain/adapter/runtime/Control suites below; format/check PASS | machine-enforced tests |

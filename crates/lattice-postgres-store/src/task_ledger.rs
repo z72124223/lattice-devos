@@ -3909,6 +3909,9 @@ fn map_setup_error(value: crate::PostgresStoreSetupError) -> PostgresTaskLedgerE
             PostgresTaskLedgerErrorKind::CommitOutcomeUnknown
         }
         PostgresStoreSetupErrorKind::TargetMismatch => PostgresTaskLedgerErrorKind::Malformed,
+        PostgresStoreSetupErrorKind::UnsupportedFutureSchema => {
+            PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema
+        }
         _ => PostgresTaskLedgerErrorKind::RetainedRowCorrupt,
     };
     error(kind)
@@ -3953,6 +3956,27 @@ mod tests {
 
     fn fixed_digest(byte: char) -> ContentDigest {
         ContentDigest::from_sha256(byte.to_string().repeat(64)).expect("digest")
+    }
+
+    #[test]
+    fn setup_mapping_reserves_unsupported_for_coherent_future_schema_only() {
+        assert_eq!(
+            map_setup_error(crate::PostgresStoreSetupError::new(
+                PostgresStoreSetupErrorKind::UnsupportedFutureSchema,
+            ))
+            .kind(),
+            PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema
+        );
+        for kind in [
+            PostgresStoreSetupErrorKind::HistoryMismatch,
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ] {
+            assert_eq!(
+                map_setup_error(crate::PostgresStoreSetupError::new(kind)).kind(),
+                PostgresTaskLedgerErrorKind::RetainedRowCorrupt
+            );
+        }
     }
 
     fn identity(project: &str) -> TaskLedgerStreamIdentity {

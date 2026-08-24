@@ -20,6 +20,8 @@ modules:
     constitution_version: 1.8
   - module_id: postgres-codebase-memory
     constitution_version: 1.3
+  - module_id: postgres-store
+    constitution_version: 1.19
 ---
 
 # SPEC-009 — Durable foreman runtime checkpoint and restart replay
