@@ -48,6 +48,152 @@ class FakeCodex extends EventEmitter {
   }
 }
 
+test("installation receipts are normalized, append-only, idempotent, and durable", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-control-receipt-"));
+  const databasePath = path.join(directory, "control.db");
+  const artifactPath = path.join(directory, "bin", "lattice.exe");
+  let store;
+  try {
+    store = new LatticeStore(databasePath);
+    const project = store.createProject({ name: "LATTICE", rootPath: directory });
+    const input = {
+      projectId: project.id,
+      component: " LATTICE-CLI ",
+      sourceCommitSha: "A".repeat(40),
+      artifactPath,
+      artifactSha256: "B".repeat(64),
+    };
+
+    const first = store.createInstallationReceipt(input);
+    assert.equal(first.created, true);
+    assert.equal(first.receipt.schema_version, "lattice.control.installation-receipt.v1");
+    assert.equal(first.receipt.observation_kind, "OBSERVED_AFTER_INSTALL");
+    assert.equal(first.receipt.authority, "NON_AUTHORITATIVE");
+    assert.equal(first.receipt.project_id, project.id);
+    assert.equal(first.receipt.project_name, "LATTICE");
+    assert.equal(first.receipt.component, "lattice-cli");
+    assert.equal(first.receipt.source_commit_sha, "a".repeat(40));
+    assert.equal(first.receipt.artifact_path, path.normalize(artifactPath));
+    assert.equal(first.receipt.artifact_sha256, "b".repeat(64));
+    assert.match(first.receipt.receipt_digest, /^[a-f0-9]{64}$/u);
+    assert.ok(Date.parse(first.receipt.recorded_at));
+
+    const retry = store.createInstallationReceipt(input);
+    assert.equal(retry.created, false);
+    assert.deepEqual(retry.receipt, first.receipt);
+    assert.equal(store.listInstallationReceipts().length, 1);
+
+    const changed = store.createInstallationReceipt({
+      ...input,
+      artifactSha256: "C".repeat(64),
+    });
+    assert.equal(changed.created, true);
+    assert.notEqual(changed.receipt.id, first.receipt.id);
+    assert.equal(store.listInstallationReceipts().length, 2);
+    assert.deepEqual(
+      store.listInstallationReceipts({ limit: 1, offset: 1 }),
+      [first.receipt],
+    );
+    assert.throws(
+      () => store.listInstallationReceipts({ limit: 0 }),
+      /receipt limit/u,
+    );
+    const otherProject = store.createProject({ name: "Other", rootPath: directory });
+    const otherProjectReceipt = store.createInstallationReceipt({
+      ...input,
+      projectId: otherProject.id,
+    });
+    assert.equal(otherProjectReceipt.created, true);
+    assert.notEqual(otherProjectReceipt.receipt.receipt_digest, first.receipt.receipt_digest);
+    assert.equal(store.listInstallationReceipts().length, 3);
+    assert.throws(
+      () => store.database.prepare("UPDATE installation_receipts SET component = 'changed'").run(),
+      /append-only/u,
+    );
+    assert.throws(
+      () => store.database.prepare("DELETE FROM installation_receipts").run(),
+      /append-only/u,
+    );
+
+    const beforeRestart = store.listInstallationReceipts();
+    store.close();
+    store = new LatticeStore(databasePath);
+    assert.deepEqual(store.listInstallationReceipts(), beforeRestart);
+  } finally {
+    store?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("installation receipt evidence fails closed when identifiers, hashes, or paths are invalid", () => {
+  const store = new LatticeStore();
+  const project = store.createProject({ name: "LATTICE", rootPath: process.cwd() });
+  const valid = {
+    projectId: project.id,
+    component: "lattice-cli",
+    sourceCommitSha: "a".repeat(40),
+    artifactPath: path.resolve("lattice.exe"),
+    artifactSha256: "b".repeat(64),
+  };
+  const invalidInputs = [
+    { ...valid, component: "" },
+    { ...valid, component: "../lattice-cli" },
+    { ...valid, sourceCommitSha: "a".repeat(39) },
+    { ...valid, sourceCommitSha: `${"a".repeat(39)}z` },
+    { ...valid, artifactPath: "relative/lattice.exe" },
+    { ...valid, artifactSha256: "b".repeat(63) },
+    { ...valid, artifactSha256: `${"b".repeat(63)}z` },
+  ];
+  try {
+    for (const input of invalidInputs) {
+      assert.throws(() => store.createInstallationReceipt(input), TypeError);
+    }
+    assert.throws(
+      () => store.createInstallationReceipt({ ...valid, projectId: "missing" }),
+      /project not found/u,
+    );
+    assert.deepEqual(store.listInstallationReceipts(), []);
+  } finally {
+    store.close();
+  }
+});
+
+test("installation receipt pages follow append order even when the wall clock moves backward", () => {
+  const store = new LatticeStore();
+  const project = store.createProject({ name: "Clock", rootPath: process.cwd() });
+  try {
+    store.createInstallationReceipt({
+      projectId: project.id,
+      component: "lattice-cli",
+      sourceCommitSha: "a".repeat(40),
+      artifactPath: path.resolve("first.exe"),
+      artifactSha256: "b".repeat(64),
+    });
+    store.database.prepare(`
+      INSERT INTO installation_receipts (
+        id, schema_version, observation_kind, authority, project_id, component,
+        source_commit_sha, artifact_path, artifact_sha256, receipt_digest, recorded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "later-append",
+      "lattice.control.installation-receipt.v1",
+      "OBSERVED_AFTER_INSTALL",
+      "NON_AUTHORITATIVE",
+      project.id,
+      "lattice-cli",
+      "c".repeat(40),
+      path.resolve("later.exe"),
+      "d".repeat(64),
+      "e".repeat(64),
+      "2000-01-01T00:00:00.000Z",
+    );
+
+    assert.equal(store.listInstallationReceipts({ limit: 1 })[0].id, "later-append");
+  } finally {
+    store.close();
+  }
+});
+
 test("work survives restart and keeps the same Codex thread through verification and archive", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-control-"));
   const databasePath = path.join(directory, "control.db");
@@ -270,7 +416,17 @@ test("local HTTP API persists projects and work items without starting Codex", a
 
     const page = await fetch(`${origin}/`);
     assert.equal(page.status, 200);
-    assert.match(await page.text(), /LATTICE Control/u);
+    const pageHtml = await page.text();
+    assert.match(pageHtml, /LATTICE Control/u);
+    assert.match(pageHtml, /安裝收據（事後觀察）/u);
+    assert.match(pageHtml, /id="receipt-form"/u);
+    assert.match(pageHtml, /\/api\/installation-receipts/u);
+    assert.match(pageHtml, /state\.installationReceipts/u);
+    assert.match(pageHtml, /installationReceiptCount/u);
+    assert.match(pageHtml, /loadedReceiptCount/u);
+    assert.match(pageHtml, /async function poll/u);
+    assert.match(pageHtml, /async function poll\(\) \{\s*try \{\s*await refresh\(\);/u);
+    assert.equal(pageHtml.match(/await refresh\(\);/gu)?.length, 1);
 
     const projectResponse = await fetch(`${origin}/api/projects`, {
       method: "POST",
@@ -279,6 +435,47 @@ test("local HTTP API persists projects and work items without starting Codex", a
     });
     assert.equal(projectResponse.status, 201);
     const project = await projectResponse.json();
+
+    const receiptInput = {
+      projectId: project.id,
+      component: "lattice-cli",
+      sourceCommitSha: "A".repeat(40),
+      artifactPath: path.join(directory, "bin", "lattice.exe"),
+      artifactSha256: "B".repeat(64),
+    };
+    const receiptResponse = await fetch(`${origin}/api/installation-receipts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(receiptInput),
+    });
+    assert.equal(receiptResponse.status, 201);
+    const receipt = await receiptResponse.json();
+    assert.equal(receipt.observation_kind, "OBSERVED_AFTER_INSTALL");
+    assert.equal(receipt.authority, "NON_AUTHORITATIVE");
+
+    const retryResponse = await fetch(`${origin}/api/installation-receipts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(receiptInput),
+    });
+    assert.equal(retryResponse.status, 200);
+    assert.deepEqual(await retryResponse.json(), receipt);
+
+    const receiptListResponse = await fetch(
+      `${origin}/api/installation-receipts?limit=1&offset=0`,
+    );
+    assert.equal(receiptListResponse.status, 200);
+    assert.deepEqual(await receiptListResponse.json(), [receipt]);
+
+    const invalidListResponse = await fetch(`${origin}/api/installation-receipts?limit=0`);
+    assert.equal(invalidListResponse.status, 400);
+
+    const invalidReceiptResponse = await fetch(`${origin}/api/installation-receipts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...receiptInput, artifactPath: "relative/lattice.exe" }),
+    });
+    assert.equal(invalidReceiptResponse.status, 400);
 
     const itemResponse = await fetch(`${origin}/api/work-items`, {
       method: "POST",
@@ -320,6 +517,8 @@ test("local HTTP API persists projects and work items without starting Codex", a
     assert.equal(state.projects.length, 1);
     assert.equal(state.workItems.length, 1);
     assert.equal(state.workItems[0].status, "draft");
+    assert.equal("installationReceipts" in state, false);
+    assert.equal(state.installationReceiptCount, 1);
   } finally {
     await new Promise((resolve) => application.server.close(resolve));
     await rm(directory, { recursive: true, force: true });

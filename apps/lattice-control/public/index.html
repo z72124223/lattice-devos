@@ -20,7 +20,7 @@
     button.secondary { background: #263653; color: #e8eefc; }
     button.danger { background: #ff9c9c; }
     button:disabled { opacity: .45; cursor: not-allowed; }
-    #items { display: grid; gap: 12px; margin-top: 16px; }
+    #items, #receipts { display: grid; gap: 12px; margin-top: 16px; }
     .item-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
     .pill { display: inline-block; border-radius: 999px; padding: 3px 9px; background: #263653; font-size: 12px; }
     .priority-urgent { background: #722d3b; }.priority-high { background: #65451f; }
@@ -58,13 +58,39 @@
         <button>保存工作</button>
       </form>
     </section>
+    <section>
+      <h2>安裝收據（事後觀察）</h2>
+      <p class="muted">只記錄當時看到的來源、檔案位置與指紋；不代表目前仍安裝、已正式部署或是 GitHub 最新版本。</p>
+      <form id="receipt-form">
+        <select name="projectId" required></select>
+        <input name="component" value="lattice-cli" placeholder="元件代號" maxlength="64" required>
+        <input name="sourceCommitSha" placeholder="來源 commit SHA（40 位）" pattern="[A-Fa-f0-9]{40}" maxlength="40" required>
+        <input name="artifactPath" placeholder="已觀察到的安裝檔案絕對路徑" maxlength="2048" required>
+        <input name="artifactSha256" placeholder="安裝檔案 SHA-256（64 位）" pattern="[A-Fa-f0-9]{64}" maxlength="64" required>
+        <button>保存觀察收據</button>
+      </form>
+    </section>
   </div>
   <p id="error" class="error"></p>
+  <h2>已記錄的安裝收據</h2>
+  <div id="receipts"></div>
+  <h2>工作項目</h2>
   <div id="items"></div>
 </main>
 <script type="module">
-  const state = { projects: [], workItems: [] };
+  const state = {
+    projects: [],
+    workItems: [],
+    installationReceipts: [],
+    installationReceiptCount: null,
+  };
   const errorNode = document.querySelector("#error");
+  let loadedReceiptCount = null;
+
+  function showError(error, source = "action") {
+    errorNode.textContent = error.message;
+    errorNode.dataset.source = source;
+  }
 
   async function api(path, options = {}) {
     const response = await fetch(path, {
@@ -89,9 +115,9 @@
       try {
         button.disabled = true;
         await api(path, { method: "POST", body: JSON.stringify(body) });
-        await refresh();
+        await poll();
       } catch (error) {
-        errorNode.textContent = error.message;
+        showError(error);
       } finally {
         button.disabled = false;
       }
@@ -108,6 +134,17 @@
       return option;
     }));
     if (state.projects.some((project) => project.id === selected)) projectSelect.value = selected;
+
+    const receiptProjectSelect = document.querySelector("#receipt-form select[name=projectId]");
+    const receiptProject = receiptProjectSelect.value;
+    receiptProjectSelect.replaceChildren(...state.projects.map((project) => {
+      const option = element("option", project.name);
+      option.value = project.id;
+      return option;
+    }));
+    if (state.projects.some((project) => project.id === receiptProject)) {
+      receiptProjectSelect.value = receiptProject;
+    }
 
     const items = document.querySelector("#items");
     items.replaceChildren(...state.workItems.map((item) => {
@@ -146,15 +183,54 @@
       card.append(actions);
       return card;
     }));
+
+    const receipts = document.querySelector("#receipts");
+    const receiptCards = state.installationReceipts.map((receipt) => {
+      const card = element("article");
+      const head = element("div", undefined, "item-head");
+      head.append(
+        element("h3", `${receipt.project_name} · ${receipt.component}`),
+        element("span", `${receipt.observation_kind} · 非部署權威`, "pill"),
+      );
+      card.append(head, element("p", new Date(receipt.recorded_at).toLocaleString("zh-TW"), "muted"));
+      card.append(element("div", "來源 commit", "muted"), element("code", receipt.source_commit_sha));
+      card.append(element("div", "安裝位置", "muted"), element("code", receipt.artifact_path));
+      card.append(element("div", "產物 SHA-256", "muted"), element("code", receipt.artifact_sha256));
+      card.append(element("div", "收據指紋", "muted"), element("code", receipt.receipt_digest));
+      return card;
+    });
+    receipts.replaceChildren(...(
+      receiptCards.length > 0 ? receiptCards : [element("p", "尚無安裝收據", "muted")]
+    ));
   }
 
   async function refresh() {
     const next = await api("/api/state");
+    const receiptsChanged = next.installationReceiptCount !== loadedReceiptCount;
     Object.assign(state, next);
     document.querySelector("#connection").textContent = next.codexConnected
       ? "Codex App Server：已連線"
       : "Codex App Server：待命（開始工作時才連線，不浪費資源）";
+    if (receiptsChanged) await refreshReceipts(next.installationReceiptCount);
+    else render();
+  }
+
+  async function refreshReceipts(receiptCount) {
+    state.installationReceipts = await api("/api/installation-receipts?limit=50&offset=0");
+    loadedReceiptCount = receiptCount;
     render();
+  }
+
+  async function poll() {
+    try {
+      await refresh();
+      if (errorNode.dataset.source === "poll") {
+        errorNode.textContent = "";
+        delete errorNode.dataset.source;
+      }
+    } catch (error) {
+      showError(error, "poll");
+    }
   }
 
   document.querySelector("#project-form").addEventListener("submit", async (event) => {
@@ -163,8 +239,8 @@
     try {
       await api("/api/projects", { method: "POST", body: JSON.stringify(values) });
       event.currentTarget.reset();
-      await refresh();
-    } catch (error) { errorNode.textContent = error.message; }
+      await poll();
+    } catch (error) { showError(error); }
   });
 
   document.querySelector("#work-form").addEventListener("submit", async (event) => {
@@ -173,12 +249,22 @@
     try {
       await api("/api/work-items", { method: "POST", body: JSON.stringify(values) });
       event.currentTarget.reset();
-      await refresh();
-    } catch (error) { errorNode.textContent = error.message; }
+      await poll();
+    } catch (error) { showError(error); }
   });
 
-  await refresh();
-  setInterval(refresh, 2000);
+  document.querySelector("#receipt-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const values = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      await api("/api/installation-receipts", { method: "POST", body: JSON.stringify(values) });
+      event.currentTarget.reset();
+      await poll();
+    } catch (error) { showError(error); }
+  });
+
+  await poll();
+  setInterval(() => void poll(), 2000);
 </script>
 </body>
 </html>

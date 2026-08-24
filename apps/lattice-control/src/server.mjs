@@ -56,6 +56,12 @@ export function createLatticeServer({ databasePath, codex = new CodexAppServer()
         sendJson(response, 200, service.state());
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/installation-receipts") {
+        const limit = url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 50;
+        const offset = url.searchParams.has("offset") ? Number(url.searchParams.get("offset")) : 0;
+        sendJson(response, 200, service.installationReceipts({ limit, offset }));
+        return;
+      }
       const continuationId = routeId(url.pathname, "continuation");
       if (request.method === "GET" && continuationId) {
         sendJson(response, 200, service.continuation(continuationId));
@@ -79,6 +85,18 @@ export function createLatticeServer({ databasePath, codex = new CodexAppServer()
           objective: body.objective,
           priority: body.priority,
         }));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/installation-receipts") {
+        const body = await readJson(request);
+        const result = service.recordInstallationReceipt({
+          projectId: body.projectId,
+          component: body.component,
+          sourceCommitSha: body.sourceCommitSha,
+          artifactPath: body.artifactPath,
+          artifactSha256: body.artifactSha256,
+        });
+        sendJson(response, result.created ? 201 : 200, result.receipt);
         return;
       }
 
