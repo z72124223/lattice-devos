@@ -251,7 +251,7 @@ const LEDGER_FOREMAN_SNAPSHOTS_SQL: &str = "\
            head_sha1,foreman_state,blocker_ref,heartbeat_digest_ref,authority_digest_ref,\
            evidence_digest_ref,generation,epistemic_schema,observed_fact_refs,hypothesis_refs,confidence,\
            unknown_refs,evidence_refs,counterevidence_refs,checked_at,expires_at,\
-           refresh_trigger,decision_ref,probe_ref,falsifier_ref\
+           refresh_trigger,decision_ref,probe_ref,falsifier_ref \
       FROM control.task_ledger_read_foreman_snapshots_v1($1::bytea)";
 
 const LEDGER_RECORD_FOREMAN_SNAPSHOT_SQL: &str = "\
@@ -4403,5 +4403,11 @@ mod tests {
             map_ledger_error(&LedgerError::CheckpointMismatch).kind(),
             PostgresTaskLedgerErrorKind::CheckpointCorrupt
         );
+    }
+
+    #[test]
+    fn foreman_snapshot_query_preserves_select_from_token_boundary() {
+        assert!(LEDGER_FOREMAN_SNAPSHOTS_SQL.contains("falsifier_ref FROM "));
+        assert!(!LEDGER_FOREMAN_SNAPSHOTS_SQL.contains("falsifier_refFROM"));
     }
 }
