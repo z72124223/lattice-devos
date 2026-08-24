@@ -97,6 +97,11 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
             "missing Writer-owned rebind boundary: {required}"
         );
     }
+    assert_eq!(
+        rebind_sql.matches("LOCK TABLE ").count(),
+        1,
+        "Writer-owned rebind SQL must contain exactly one LOCK TABLE statement"
+    );
     let lock_block = rebind_sql
         .split_once("LOCK TABLE ")
         .expect("Writer-owned rebind lock statement")

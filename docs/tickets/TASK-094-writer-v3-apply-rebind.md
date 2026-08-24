@@ -57,8 +57,9 @@ allowed_paths:
 
 Close TASK-079's production migration blocker without moving Writer-owned
 extension state into Store. Add the append-only Writer v3 administrative
-bridge API, then let the Store v5-to-v6 runner invoke only one fixed
-Writer-owned rebind function inside the same transaction as migration `0007`.
+bridge API, then let the Store exact-v5 transition invoke one fixed Writer-owned
+rebind function inside the same transaction as migration `0007` and let
+exact-v6 idempotent retry invoke that same function before catalog/ACL verify.
 
 ## Frozen scope and identities
 
@@ -79,8 +80,9 @@ Writer-owned rebind function inside the same transaction as migration `0007`.
       exposes zero runtime Writer authority.
 - [x] Store distinguishes exact six-row `ExactV5Prefix` from seven-row
       `ExactV6Full` and advances only the exact predecessor.
-- [x] Migration `0007`, compatibility publication, and Writer-owned v3 rebind
-      commit atomically or roll back together through the fixed SQL boundary.
+- [x] Exact-v5 migration `0007`, compatibility publication, and Writer-owned
+      v3 rebind commit atomically or roll back together through the fixed SQL
+      boundary; exact-v6 retry calls the same idempotent procedure.
 - [x] A marker-owned PostgreSQL failure injection holds an active Writer head,
       forces the rebind precondition to fail after ordinal `0007` is staged,
       and proves the exact v5 bridge history, compatibility, Writer identity,
@@ -127,8 +129,8 @@ task archival are not authorized.
   return a terminal exit receipt to this worker; do not treat it as a verified
   PASS until the parent reruns it.
 - Review repair requires Postgres Store constitution 1.13: the sole mutation
-  exception is the fixed Writer-owned rebind call inside the exact v5-to-v6
-  migration transaction; it grants no Writer state ownership or generic SQL.
+  exception is the fixed Writer-owned rebind call for exact-v5 transition or
+  exact-v6 idempotent retry; it grants no Writer state ownership or generic SQL.
 - Review-repair live receipt: run `bace41835c794136b99e8e1312108236`, port
   `57281`, first observed the intentional rebind SQLSTATE `55000` rollback and
   exact-v5 bridge fingerprint, then completed v5-to-v6. Teardown proved
@@ -177,6 +179,6 @@ task archival are not authorized.
   the same fixed Writer-owned procedure for exact-v5 transition and exact-v6
   idempotent retry only. SPEC-002 frontmatter now uses canonical
   `foreman-state` 1.2 and its Module Impact table names Task Ledger 2.4 and
-  Foreman State 1.2. The migration contract statically asserts one ordered
-  Writer-owned procedure lock block over all five tables. This is an author
-  repair record, not independent approval.
+  Foreman State 1.2. The migration contract statically asserts exactly one
+  ordered Writer-owned procedure lock block over all five tables. This is an
+  author repair record, not independent approval.

@@ -27,6 +27,6 @@
 | Focused regressions after boundary repair | Store migration contract 42/42; Writer extension contract 12/12; runtime composition non-live 1/1; Store all targets 110 passed, 2 ignored; Writer all targets 16/16 | pass |
 | Strict Clippy after boundary repair | Store + Writer scope passes `-D warnings`; runtime test scope reaches 17 existing Hermes diagnostics through its direct runtime dependency | partial; Hermes outside allowlist, not repaired |
 | Repository Node verify | `npm check` exits 0; `npm verify` child completed after the command collector's terminal receipt timeout | unverified; do not treat as pass |
-| Architecture-review follow-up | Constitutions align exact-v5 transition and exact-v6 retry; SPEC module identity/impact corrected; static contract asserts one ordered Writer procedure lock block over all five tables | pending local verification; author repair only, not independent pass |
+| Architecture-review follow-up | Constitutions align exact-v5 transition and exact-v6 retry; SPEC module identity/impact corrected; static contract asserts exactly one ordered Writer procedure lock block over all five tables | pending local verification; author repair only, not independent pass |
 
 This is a local evidence ledger, not a second task truth or delivery receipt.

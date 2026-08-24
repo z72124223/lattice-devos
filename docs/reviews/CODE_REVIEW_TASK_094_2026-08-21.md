@@ -22,9 +22,10 @@ regressions and the owned live harness.
   and unchanged 5432 PID 5200 / 58743 PID 25912 listeners. This records the
   parent command receipt only; it does not claim a raw-log artifact.
 - P0/P3: none found in the local source inspection.
-- The Store calls only fixed `writer_lease.writer_lease_rebind_v3()` after the
-  exact v5-prefix classification and ordinal-7 application; it contains no
-  Writer ledger mutation or generic SQL surface.
+- The Store calls only fixed `writer_lease.writer_lease_rebind_v3()` for the
+  exact-v5 transition after v5-prefix classification and ordinal-7 application,
+  or for exact-v6 idempotent retry; it contains no Writer ledger mutation or
+  generic SQL surface.
 - The v6 current verifier checks Writer v3 identity/function/ACL closure; the
   pre-v6 bridge remains runtime quarantined.
 - The harness rejects 5432, preflights ownership, uses a marker-owned temp root,

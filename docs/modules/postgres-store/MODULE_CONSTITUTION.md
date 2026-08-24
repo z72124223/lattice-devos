@@ -104,7 +104,8 @@ create a second foreman or Ledger meaning.
   head, command, or transition rows. Store may retain only its existing fixed
   15-scalar Writer current-authority assertion and pg_catalog procedure/
   owner/body/ACL/grant closure recognition. Its only Writer mutation seam is
-  the exact-v5 and exact-v6 retry call to the fixed zero-argument rebind
+  the exact-v5 transition and exact-v6 idempotent retry call to the fixed
+  zero-argument rebind
   procedure in the governed migration transaction.
 
 ## Owned Data
@@ -819,14 +820,14 @@ tuple in the same serializable transaction; rollback removes both Ledger and
 child effects. No diagnostic or independent current-state store is added.
 
 Version 1.13 corrects the Store boundary for that exact migration: Store may
-call `writer_lease.writer_lease_rebind_v3()` only after exact v5-prefix
-verification and staging ordinal `0007`/schema-v6 compatibility in the same
-runner-owned transaction, and may call that same fixed zero-argument procedure
-on exact-v6 idempotent retry before catalog/ACL verification. The procedure
-stays Writer-owned; Store does not install, mutate directly, parse, replay, or
-derive Writer state. A failed rebind rolls back every staged global and
-Writer-visible effect, leaving the exact v5 bridge identity, ledger, runtime
-ACL, migration history, and compatibility row intact.
+call `writer_lease.writer_lease_rebind_v3()` for the exact-v5 transition after
+v5-prefix verification and staging ordinal `0007`/schema-v6 compatibility in
+the same runner-owned transaction, or for exact-v6 idempotent retry before
+catalog/ACL verification. The procedure stays Writer-owned; Store does not
+install, mutate directly, parse, replay, or derive Writer state. A failed
+rebind rolls back every staged global and Writer-visible effect, leaving the
+exact v5 bridge identity, ledger, runtime ACL, migration history, and
+compatibility row intact.
 
 ## Acceptance Gates
 
@@ -908,4 +909,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.10 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Delegate autonomy subject/profile semantics and hashes exclusively to Task Ledger 2.3 while preserving schema-v5 physical bytes and Store ownership | User-approved TASK-050 repair amendment |
 | 1.11 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Reserve exact schema-v6 foreman-coordination catalog/ACL and Writer-v3 bridge recognition without implementing migration 0007 or event semantics | Fixed-foreman delegation |
 | 1.12 | 2026-08-21 | SPEC-006 v3, ADR-024/025, TASK-079 | Append 0007 and bind fixed foreman scalars to the Ledger event under same-transaction Writer fencing and verified replay | Fixed-foreman delegation |
-| 1.13 | 2026-08-25 | SPEC-002 v38, ADR-026, TASK-094 boundary repair | Keep the existing 15-scalar assertion while forbidding Store Writer semantic-row parsing and adapter dependency; exact v5 transition and exact v6 retry call only the Writer-owned rebind procedure, with Task Ledger 2.4 and Foreman State 1.2 semantic ownership retained | TASK-094 repair authority |
+| 1.13 | 2026-08-25 | SPEC-002 v38, ADR-026, TASK-094 boundary repair | Keep the existing 15-scalar assertion while forbidding Store Writer semantic-row parsing and adapter dependency; exact-v5 transition and exact-v6 idempotent retry call only the Writer-owned rebind procedure, with Task Ledger 2.4 and Foreman State 1.2 semantic ownership retained | TASK-094 repair authority |
