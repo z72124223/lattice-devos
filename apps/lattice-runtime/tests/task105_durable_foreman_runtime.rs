@@ -33,6 +33,24 @@ const LEGACY_V1_MANIFEST_SHA256: &str =
     "9b126a41e542b71d434b5786e35acb66575967d055a6733b9d6bf0b8c9f0eada";
 const WRITER_V3_MANIFEST_SHA256: &str =
     "eab2812fa3d94cd3466d7c003386f805a973fd7def1f16aeb15b52f47dad78e4";
+const FRESH_CATALOG_FINGERPRINT_QUERIES: [&str; 3] = [
+    "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+       n.nspname||':'||o.rolname||':'||COALESCE(\
+       pg_catalog.obj_description(n.oid,'pg_namespace'),'<NULL>'),E'\\n'\
+       ORDER BY n.nspname),'')) FROM pg_catalog.pg_namespace n \
+       JOIN pg_catalog.pg_roles o ON o.oid=n.nspowner \
+      WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
+    "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+       n.nspname||':'||c.relname||':'||c.relkind::text,E'\\n'\
+       ORDER BY n.nspname,c.relname),'')) FROM pg_catalog.pg_class c \
+       JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+      WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
+    "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+       n.nspname||':'||p.proname||':'||pg_catalog.oidvectortypes(p.proargtypes),E'\\n'\
+       ORDER BY n.nspname,p.proname,p.oid),'')) FROM pg_catalog.pg_proc p \
+       JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+      WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
+];
 
 struct LiveConfig {
     host: String,
@@ -249,32 +267,15 @@ impl LiveConfig {
 
     fn fresh_catalog_fingerprint(&self) -> Vec<String> {
         let mut client = self.bootstrap_client();
-        [
-            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
-               n.nspname||':'||o.rolname||':'||COALESCE(\
-               pg_catalog.obj_description(n.oid,'pg_namespace'),'<NULL>'),E'\\n'\
-               ORDER BY n.nspname),'')) FROM pg_catalog.pg_namespace n\
-               JOIN pg_catalog.pg_roles o ON o.oid=n.nspowner\
-              WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
-            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
-               n.nspname||':'||c.relname||':'||c.relkind::text,E'\\n'\
-               ORDER BY n.nspname,c.relname),'')) FROM pg_catalog.pg_class c\
-               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace\
-              WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
-            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
-               n.nspname||':'||p.proname||':'||pg_catalog.oidvectortypes(p.proargtypes),E'\\n'\
-               ORDER BY n.nspname,p.proname,p.oid),'')) FROM pg_catalog.pg_proc p\
-               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace\
-              WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
-        ]
-        .into_iter()
-        .map(|query| {
-            client
-                .query_one(query, &[])
-                .expect("TASK105_FRESH_FINGERPRINT_QUERY")
-                .get(0)
-        })
-        .collect()
+        FRESH_CATALOG_FINGERPRINT_QUERIES
+            .into_iter()
+            .map(|query| {
+                client
+                    .query_one(query, &[])
+                    .expect("TASK105_FRESH_FINGERPRINT_QUERY")
+                    .get(0)
+            })
+            .collect()
     }
 
     fn prepare_legacy_v1_store(&self) {
@@ -1148,6 +1149,20 @@ fn response<'a>(responses: &'a [Value], id: i64) -> &'a Value {
 
 #[test]
 fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
+    for query in FRESH_CATALOG_FINGERPRINT_QUERIES {
+        assert!(query.contains(" JOIN "));
+        assert!(query.contains(" WHERE "));
+        for merged_token in [
+            "nJOIN",
+            "cJOIN",
+            "pJOIN",
+            "nspownerWHERE",
+            "relnamespaceWHERE",
+            "pronamespaceWHERE",
+        ] {
+            assert!(!query.contains(merged_token));
+        }
+    }
     let Some(config) = LiveConfig::from_environment() else {
         return;
     };
