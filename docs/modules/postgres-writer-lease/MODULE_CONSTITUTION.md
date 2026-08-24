@@ -1,7 +1,7 @@
 ---
 module_id: postgres-writer-lease
 name: PostgreSQL Writer Lease Repository
-version: 1.7
+version: 1.8
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -36,6 +36,10 @@ Version 1.6 re-pins the still-undeployed v3 rebind boundary to Store 1.17's
 corrected schema-v6 manifest. It changes no Writer procedure or semantic row.
 Version 1.7 re-pins that boundary to Store 1.18's PostgreSQL-valid, equivalently
 bounded foreman child constraint. Writer behavior remains unchanged.
+Version 1.8 exposes one read-only, Writer-owned closed bootstrap profile. It
+fully verifies v2 predecessor, v3 bridge, v6 bridge-pending, or v6 current
+state plus the fixed rebind boundary and replay-safe history before composition
+may stop Runtime admission. It adds no durable state or Writer semantics.
 
 ## Non-Goals
 
@@ -96,6 +100,10 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
 - Expose the strict existing-v3 rebind/verify operation used by product
   bootstrap. It cannot take the fresh-install branch; absence is a typed
   fail-closed result and leaves the schema-v6 database fingerprint unchanged.
+- Expose one repeatable-read, read-only bootstrap profile that returns only
+  `V5FallbackRequired`, `V5Bridge`, `V6BridgePending`, or `V6Current` after
+  exact Writer-owned verification. Partial/corrupt Writer evidence never maps
+  to fallback, and the session apply gate creates no durable row or ACL change.
 - Construct schema-v6 runtime repositories only through the explicit v3
   constructor and exact `bind_runtime_v3`/`load_for_update_v3` procedures.
   The v2 constructor remains version-closed to its historical profile.
@@ -148,6 +156,11 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
 16. A current schema-v6 runtime never falls back to a Writer-v2 procedure or
     ACL. Constructor choice fixes the v2/v3 bind and load-for-update pair for
     the repository lifetime; retained v1 semantic procedures remain shared.
+17. Bootstrap inspection verifies the fixed v3 rebind boundary and replay-safe
+    history for every retained v3 profile. Exact v2 predecessors are verified
+    through their complete foundation, identity, manifest, catalog, ACL,
+    ledger, and history profile; only physical Writer absence may bypass those
+    Writer-row checks and request the complete Store/Memory fallback.
 
 ## Allowed Dependencies
 
@@ -224,6 +237,10 @@ at the existing fixed rebind procedure. Prior pre-product digests fail closed.
 Version 1.7 accepts only Store 1.18's successor manifest at the same fixed
 procedure and changes no Writer runtime, ACL, lease, or fencing behavior.
 
+Version 1.8 adds only the read-only closed bootstrap classifier described
+above. Rebind and apply still reclassify under their own Writer locks, so the
+inspection result is not mutation authority and cannot bypass TOCTOU checks.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -252,6 +269,7 @@ synthetic evidence as production authority.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 1.8 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 live correction | Add a read-only closed bootstrap profile with exact v2/v3 foundation, catalog, rebind-boundary and replay verification; composition receives no Writer rows and every executor reclassifies under lock | TASK-105 bounded implementation authority |
 | 1.0 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Independent exact PostgreSQL extension and repository for Writer Lease 1.1 with atomic replay/currentness and monotonic fencing | User TASK-038-first direction |
 | 1.1 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-023, TASK-076 | Preserve v1 history and add the Writer-owned v2 bridge/current profiles for global-v5/Memory-v3 without changing lease semantics or fencing bytes | User continuation authorization |
 | 1.2 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Add append-only v3 bridge/current compatibility for exact future global-v6 foreman coordination while freezing v2 schema-3/5 behavior | Fixed-foreman delegation |

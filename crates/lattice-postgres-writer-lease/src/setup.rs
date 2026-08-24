@@ -442,6 +442,20 @@ pub enum ExtensionApplyOutcome {
     AlreadyCurrent,
 }
 
+/// Read-only Writer-owned profile used by the product bootstrap coordinator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum V3BootstrapProfile {
+    /// Schema v5 has no Writer or an exact v2 predecessor; the complete
+    /// Store/Memory/Writer-v2 fallback must verify it before mutation.
+    V5FallbackRequired,
+    /// Schema v5 already has the exact quarantined Writer-v3 bridge.
+    V5Bridge,
+    /// Schema v6 has the exact quarantined Writer-v3 bridge awaiting rebind.
+    V6BridgePending,
+    /// Schema v6 already has the exact current Writer-v3 profile.
+    V6Current,
+}
+
 /// Closed extension setup/verifier failure classes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExtensionSetupErrorKind {
@@ -761,6 +775,113 @@ pub fn apply_v3_extension(
     let result = apply_v3_extension_under_gate(gate.client(), &predecessor, &v1, &v2, &v3, &rebind);
     gate.release()?;
     result
+}
+
+/// Classifies and fully verifies the closed Writer-v3 product-bootstrap state
+/// without changing Writer, Store, Memory, or Runtime admission state.
+///
+/// The fallback value is returned only when the Writer schema is absent or its
+/// retained identity/ledger is an exact v2 predecessor shape. Partial or
+/// colliding Writer evidence is always an error, even when Store or Memory is
+/// not yet at the v3 predecessor.
+///
+/// # Errors
+///
+/// Rejects a partial/colliding Writer profile, changed manifest/catalog/ACL,
+/// wrong target, unavailable database evidence, or unsupported foundation.
+pub fn inspect_v3_bootstrap_profile(
+    client: &mut Client,
+    target: &V3ExtensionTarget,
+) -> Result<V3BootstrapProfile, ExtensionSetupError> {
+    let v1 = verify_embedded_v1_extension_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let v2 = verify_embedded_extension_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let v3 = verify_embedded_v3_extension_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let rebind = verify_embedded_v3_rebind_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let predecessor = target.predecessor()?;
+    let successor = target.successor()?;
+    let mut gate = GlobalApplyGate::acquire(client)?;
+    let mut transaction = gate
+        .client()
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .map_err(map_public_database)?;
+    enter_migrator(&mut transaction).map_err(SetupAttemptError::into_public)?;
+    acquire_common_locks(&mut transaction).map_err(SetupAttemptError::into_public)?;
+    let profile = match classify_v3_state(&mut transaction)
+        .map_err(SetupAttemptError::into_public)?
+    {
+        V3InstalledState::Absent => V3BootstrapProfile::V5FallbackRequired,
+        V3InstalledState::V2Current => {
+            verify_v2_bootstrap_predecessor(&mut transaction, target, &predecessor, &v1, &v2)
+                .map_err(SetupAttemptError::into_public)?;
+            V3BootstrapProfile::V5FallbackRequired
+        }
+        V3InstalledState::G5MemoryV3WriterV3Bridge => {
+            let foundation = verify_foundation(&mut transaction, &predecessor)
+                .map_err(SetupAttemptError::into_public)?;
+            if foundation.profile != FoundationProfile::G5MemoryV3 {
+                return Err(ExtensionSetupError::new(
+                    ExtensionSetupErrorKind::UnsupportedFoundation,
+                ));
+            }
+            verify_v3_bridge_profile(
+                &mut transaction,
+                &predecessor,
+                &foundation.database_uuid,
+                &v1,
+                &v2,
+                &v3,
+            )
+            .map_err(SetupAttemptError::into_public)?;
+            verify_v3_rebind_boundary(&mut transaction, &rebind)
+                .map_err(SetupAttemptError::into_public)?;
+            verify_replay_safe_history(&mut transaction).map_err(SetupAttemptError::into_public)?;
+            V3BootstrapProfile::V5Bridge
+        }
+        V3InstalledState::G6MemoryV3WriterV3BridgePending => {
+            let foundation = verify_v3_foundation(&mut transaction, &successor)
+                .map_err(SetupAttemptError::into_public)?;
+            verify_v3_bridge_pending_profile(
+                &mut transaction,
+                &successor,
+                &foundation.database_uuid,
+                &v1,
+                &v2,
+                &v3,
+            )
+            .map_err(SetupAttemptError::into_public)?;
+            verify_v3_rebind_boundary(&mut transaction, &rebind)
+                .map_err(SetupAttemptError::into_public)?;
+            verify_replay_safe_history(&mut transaction).map_err(SetupAttemptError::into_public)?;
+            V3BootstrapProfile::V6BridgePending
+        }
+        V3InstalledState::G6MemoryV3WriterV3Current => {
+            let foundation = verify_v3_foundation(&mut transaction, &successor)
+                .map_err(SetupAttemptError::into_public)?;
+            verify_v3_current_profile(
+                &mut transaction,
+                &successor,
+                &foundation.database_uuid,
+                &v1,
+                &v2,
+                &v3,
+            )
+            .map_err(SetupAttemptError::into_public)?;
+            verify_v3_rebind_boundary(&mut transaction, &rebind)
+                .map_err(SetupAttemptError::into_public)?;
+            verify_replay_safe_history(&mut transaction).map_err(SetupAttemptError::into_public)?;
+            V3BootstrapProfile::V6Current
+        }
+    };
+    transaction.commit().map_err(map_public_database)?;
+    gate.release()?;
+    Ok(profile)
 }
 
 fn apply_v3_extension_under_gate(
@@ -1383,6 +1504,56 @@ fn classify_v3_state<C: GenericClient>(
         ) => Ok(V3InstalledState::G6MemoryV3WriterV3Current),
         _ => Err(profile_collision()),
     }
+}
+
+fn verify_v2_bootstrap_predecessor<C: GenericClient>(
+    client: &mut C,
+    v3_target: &V3ExtensionTarget,
+    memory_v3_target: &ExtensionTarget,
+    v1: &ExtensionManifestEvidence,
+    v2: &ExtensionManifestEvidence,
+) -> Result<(), SetupAttemptError> {
+    match verify_foundation(client, memory_v3_target) {
+        Ok(foundation) => {
+            let state = classify_state(client, &foundation)?;
+            match state {
+                InstalledState::G5MemoryV3WriterV2Current => verify_v2_current_profile(
+                    client,
+                    memory_v3_target,
+                    &foundation.database_uuid,
+                    v1,
+                    v2,
+                )?,
+                InstalledState::G5MemoryV3WriterV2BridgePending => verify_v2_bridge_profile(
+                    client,
+                    memory_v3_target,
+                    &foundation.database_uuid,
+                    v1,
+                    v2,
+                )?,
+                _ => return Err(profile_collision()),
+            }
+            return verify_replay_safe_history(client);
+        }
+        Err(SetupAttemptError::Setup(error))
+            if error.kind() == ExtensionSetupErrorKind::UnsupportedFoundation => {}
+        Err(error) => return Err(error),
+    }
+
+    let memory_v2_target = ExtensionTarget::new(
+        v3_target.database_name().to_owned(),
+        v3_target.database_identity_digest().clone(),
+        fixed_digest(CURRENT_GLOBAL_MANIFEST_SHA256)?,
+        fixed_digest(HISTORICAL_MEMORY_MANIFEST_SHA256)?,
+    )?;
+    let foundation = verify_foundation(client, &memory_v2_target)?;
+    if foundation.profile != FoundationProfile::G5MemoryV2
+        || classify_state(client, &foundation)? != InstalledState::G5MemoryV2WriterV2BridgePending
+    {
+        return Err(profile_collision());
+    }
+    verify_v2_bridge_profile(client, &memory_v2_target, &foundation.database_uuid, v1, v2)?;
+    verify_replay_safe_history(client)
 }
 
 fn install_fresh_current<C: GenericClient>(
@@ -2187,6 +2358,103 @@ fn verify_v3_bridge_profile<C: GenericClient>(
         ),
     ];
     if identity != expected_identity || (ledger != fresh_v2 && ledger != upgraded) {
+        return Err(profile_collision());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_v3_bridge_pending_profile<C: GenericClient>(
+    client: &mut C,
+    target: &ExtensionTarget,
+    database_uuid: &str,
+    v1: &ExtensionManifestEvidence,
+    v2: &ExtensionManifestEvidence,
+    v3: &ExtensionManifestEvidence,
+) -> Result<(), SetupAttemptError> {
+    verify_v3_catalog(client, RuntimeProfile::Quarantined)?;
+    let identity = load_identity_shape(client)?;
+    let expected_identity = identity_shape(
+        database_uuid,
+        target.database_identity_digest().as_str(),
+        V6_GLOBAL_MANIFEST_SHA256,
+        CURRENT_MEMORY_MANIFEST_SHA256,
+        v3,
+        6,
+        3,
+    );
+    let ledger = load_ledger_shape(client)?;
+    let fresh_v2_upgrade = vec![
+        ledger_shape(
+            1,
+            database_uuid,
+            target.database_identity_digest().as_str(),
+            CURRENT_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v2,
+            5,
+            3,
+            "INSTALLED",
+        ),
+        ledger_shape(
+            2,
+            database_uuid,
+            target.database_identity_digest().as_str(),
+            CURRENT_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v3,
+            5,
+            3,
+            "UPGRADED",
+        ),
+    ];
+    let upgraded = vec![
+        ledger_shape(
+            1,
+            database_uuid,
+            target.database_identity_digest().as_str(),
+            HISTORICAL_GLOBAL_MANIFEST_SHA256,
+            HISTORICAL_MEMORY_MANIFEST_SHA256,
+            v1,
+            3,
+            2,
+            "INSTALLED",
+        ),
+        ledger_shape(
+            2,
+            database_uuid,
+            target.database_identity_digest().as_str(),
+            HISTORICAL_GLOBAL_MANIFEST_SHA256,
+            HISTORICAL_MEMORY_MANIFEST_SHA256,
+            v2,
+            3,
+            2,
+            "UPGRADED",
+        ),
+        ledger_shape(
+            3,
+            database_uuid,
+            target.database_identity_digest().as_str(),
+            CURRENT_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v2,
+            5,
+            3,
+            "REBOUND",
+        ),
+        ledger_shape(
+            4,
+            database_uuid,
+            target.database_identity_digest().as_str(),
+            CURRENT_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v3,
+            5,
+            3,
+            "UPGRADED",
+        ),
+    ];
+    if identity != expected_identity || (ledger != fresh_v2_upgrade && ledger != upgraded) {
         return Err(profile_collision());
     }
     Ok(())

@@ -4,7 +4,7 @@ title: Durable foreman runtime checkpoint and restart replay
 spec_id: SPEC-009
 spec_version: 1
 module_id: latticed
-constitution_version: 2.9
+constitution_version: 3.0
 additional_modules:
   - module_id: orchestrator-runtime
     constitution_version: 2.7
@@ -17,7 +17,7 @@ additional_modules:
   - module_id: postgres-store
     constitution_version: 1.18
   - module_id: postgres-writer-lease
-    constitution_version: 1.7
+    constitution_version: 1.8
 status: in_progress
 parallel_safe: false
 depends_on: [TASK-094]

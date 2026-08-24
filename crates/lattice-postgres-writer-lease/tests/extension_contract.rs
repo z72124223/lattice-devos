@@ -1,13 +1,55 @@
 use lattice_postgres_writer_lease::{
-    ExtensionApplyOutcome, ExtensionSetupError, V3ExtensionTarget, WRITER_LEASE_EXTENSION_ID,
-    WRITER_LEASE_EXTENSION_PATH, WRITER_LEASE_EXTENSION_SCHEMA_VERSION,
+    ExtensionApplyOutcome, ExtensionSetupError, V3BootstrapProfile, V3ExtensionTarget,
+    WRITER_LEASE_EXTENSION_ID, WRITER_LEASE_EXTENSION_PATH, WRITER_LEASE_EXTENSION_SCHEMA_VERSION,
     WRITER_LEASE_V1_EXTENSION_PATH, WRITER_LEASE_V2_EXTENSION_PATH, WRITER_LEASE_V3_EXTENSION_PATH,
     WRITER_LEASE_V3_REBIND_PATH, WriterLeaseV3BridgeState, apply_v3_extension,
-    rebind_existing_v3_extension, rebind_v3_extension, verify_embedded_extension_manifest,
-    verify_embedded_v1_extension_manifest, verify_embedded_v2_extension_manifest,
-    verify_embedded_v3_extension_manifest, verify_embedded_v3_rebind_manifest,
-    verify_writer_lease_v3_transition,
+    inspect_v3_bootstrap_profile, rebind_existing_v3_extension, rebind_v3_extension,
+    verify_embedded_extension_manifest, verify_embedded_v1_extension_manifest,
+    verify_embedded_v2_extension_manifest, verify_embedded_v3_extension_manifest,
+    verify_embedded_v3_rebind_manifest, verify_writer_lease_v3_transition,
 };
+
+#[test]
+fn task105_bootstrap_profile_is_read_only_closed_and_fully_verified() {
+    let _: fn(
+        &mut postgres::Client,
+        &V3ExtensionTarget,
+    ) -> Result<V3BootstrapProfile, ExtensionSetupError> = inspect_v3_bootstrap_profile;
+
+    let setup = include_str!("../src/setup.rs");
+    let inspector = setup
+        .split("pub fn inspect_v3_bootstrap_profile")
+        .nth(1)
+        .expect("TASK105 Writer-owned inspector")
+        .split("fn apply_v3_extension_under_gate")
+        .next()
+        .expect("bounded inspector body");
+    for required in [
+        ".read_only(true)",
+        "V3InstalledState::Absent",
+        "verify_v2_bootstrap_predecessor",
+        "verify_v3_bridge_profile",
+        "verify_v3_bridge_pending_profile",
+        "verify_v3_current_profile",
+        "verify_v3_rebind_boundary",
+        "verify_replay_safe_history",
+    ] {
+        assert!(
+            inspector.contains(required),
+            "missing preflight gate: {required}"
+        );
+    }
+    for prohibited in [
+        "batch_execute(\"CALL",
+        "apply_v2_to_v3_bridge",
+        "activate_v3_runtime_acl",
+    ] {
+        assert!(
+            !inspector.contains(prohibited),
+            "read-only preflight contains mutation: {prohibited}"
+        );
+    }
+}
 
 #[test]
 fn task094_exposes_typed_v3_bridge_and_rebind_owner_apis() {

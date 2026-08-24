@@ -15,7 +15,9 @@ modules:
   - module_id: orchestrator-runtime
     constitution_version: 2.7
   - module_id: latticed
-    constitution_version: 2.7
+    constitution_version: 3.0
+  - module_id: postgres-writer-lease
+    constitution_version: 1.8
 ---
 
 # SPEC-009 — Durable foreman runtime checkpoint and restart replay
@@ -123,8 +125,13 @@ applies the fixed Writer-v3 bridge then Store-v6/rebind; `v5 + Writer v3`
 applies Store-v6/rebind; `v6 + bridge-pending` retries exact-v6 rebind; and
 `v6 + current Writer v3` verifies without mutation. Partial, corrupt,
 unsupported and `v6 + Writer absent` profiles fail closed without installing
-Writer or changing the Store/Writer fingerprint. No-argument startup and every
-MCP call perform zero
+Writer or changing the Store/Writer/admission fingerprint. Before any admission
+write, the Writer-owned read-only classifier verifies exact v2/v3 foundation,
+catalog, ACL, rebind-boundary and replay evidence and composition accepts only
+the closed Store-v5/v6 cross-product. Exact v6 current additionally requires
+the persisted admission authority to equal configuration, performs zero
+stop/rebind/restore, then receives full Store/runtime verification from a fresh
+Runtime-role Ledger and foreman replay. No-argument startup and every MCP call perform zero
 migrations and refuse serving until bootstrap completes. Success closes the
 migrator connection, constructs fresh runtime-role clients, verifies foreman
 replay through them, and only then reports ready/serves.
