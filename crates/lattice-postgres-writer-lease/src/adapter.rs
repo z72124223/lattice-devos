@@ -15,14 +15,20 @@ use postgres::{Client, IsolationLevel, Row, Transaction};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
-use crate::setup::ExtensionTarget;
-use crate::{sha256_bytes, verify_embedded_extension_manifest};
+use crate::setup::{ExtensionTarget, V3ExtensionTarget};
+use crate::{
+    sha256_bytes, verify_embedded_extension_manifest, verify_embedded_v3_extension_manifest,
+};
 
 const MAX_SERIALIZATION_RETRIES: usize = 3;
 const BIND_RUNTIME_SQL: &str =
     "SELECT * FROM writer_lease.writer_lease_bind_runtime_v2($1,$2,$3,$4,$5,$6,$7,$8)";
 const LOAD_FOR_UPDATE_SQL: &str =
     "SELECT * FROM writer_lease.writer_lease_load_for_update_v2($1,$2,$3,$4,$5)";
+const BIND_RUNTIME_V3_SQL: &str =
+    "SELECT * FROM writer_lease.writer_lease_bind_runtime_v3($1,$2,$3,$4,$5,$6,$7,$8)";
+const LOAD_FOR_UPDATE_V3_SQL: &str =
+    "SELECT * FROM writer_lease.writer_lease_load_for_update_v3($1,$2,$3,$4,$5)";
 const LOAD_COMMANDS_SQL: &str = "SELECT * FROM writer_lease.writer_lease_load_commands_v1($1)";
 const LOAD_TRANSITIONS_SQL: &str =
     "SELECT * FROM writer_lease.writer_lease_load_transitions_v1($1)";
@@ -38,9 +44,32 @@ const COMMIT_PLAN_SQL: &str = "SELECT writer_lease.writer_lease_commit_plan_v1(\
 pub struct PostgresWriterLease {
     client: Client,
     target: ExtensionTarget,
+    procedure_profile: RuntimeProcedureProfile,
     lease_ttl_seconds: u32,
     bound_daemon_instance_id: String,
     bound_daemon_epoch: DaemonEpoch,
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeProcedureProfile {
+    V2,
+    V3,
+}
+
+impl RuntimeProcedureProfile {
+    const fn bind_runtime_sql(self) -> &'static str {
+        match self {
+            Self::V2 => BIND_RUNTIME_SQL,
+            Self::V3 => BIND_RUNTIME_V3_SQL,
+        }
+    }
+
+    const fn load_for_update_sql(self) -> &'static str {
+        match self {
+            Self::V2 => LOAD_FOR_UPDATE_SQL,
+            Self::V3 => LOAD_FOR_UPDATE_V3_SQL,
+        }
+    }
 }
 
 impl PostgresWriterLease {
@@ -54,10 +83,61 @@ impl PostgresWriterLease {
     /// unverified process-start Store authority, or an unavailable connection.
     /// Shared credentials alone cannot borrow the current daemon identity.
     pub fn new(
+        client: Client,
+        target: ExtensionTarget,
+        store_authority: &StoreAuthorityHead,
+        lease_ttl_seconds: u32,
+    ) -> Result<Self, WriterLeaseRepositoryError> {
+        let manifest = verify_embedded_extension_manifest()
+            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Corrupt))?;
+        Self::new_with_profile(
+            client,
+            target,
+            store_authority,
+            lease_ttl_seconds,
+            RuntimeProcedureProfile::V2,
+            manifest.sql_sha256(),
+            manifest.manifest_sha256(),
+        )
+    }
+
+    /// Constructs the current schema-v6 adapter through Writer-owned v3
+    /// procedures. Historical v2 callers retain [`Self::new`] and cannot
+    /// silently cross the versioned procedure boundary.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any target, authority, manifest, or database profile mismatch.
+    pub fn new_v3(
+        client: Client,
+        target: V3ExtensionTarget,
+        store_authority: &StoreAuthorityHead,
+        lease_ttl_seconds: u32,
+    ) -> Result<Self, WriterLeaseRepositoryError> {
+        let runtime_target = target
+            .successor()
+            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Corrupt))?;
+        let manifest = verify_embedded_v3_extension_manifest()
+            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Corrupt))?;
+        Self::new_with_profile(
+            client,
+            runtime_target,
+            store_authority,
+            lease_ttl_seconds,
+            RuntimeProcedureProfile::V3,
+            manifest.sql_sha256(),
+            manifest.manifest_sha256(),
+        )
+    }
+
+    fn new_with_profile(
         mut client: Client,
         target: ExtensionTarget,
         store_authority: &StoreAuthorityHead,
         lease_ttl_seconds: u32,
+        procedure_profile: RuntimeProcedureProfile,
+        extension_sql_sha256: &ContentDigest,
+        extension_manifest_sha256: &ContentDigest,
     ) -> Result<Self, WriterLeaseRepositoryError> {
         if !(1..=3600).contains(&lease_ttl_seconds) {
             return Err(repository_error(
@@ -80,8 +160,6 @@ impl PostgresWriterLease {
                 WriterLeaseRepositoryErrorKind::AuthorityMismatch,
             ));
         }
-        let manifest = verify_embedded_extension_manifest()
-            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Corrupt))?;
         let expected_daemon_epoch =
             to_i64(store_authority.daemon_epoch().get()).map_err(|failure| failure.error)?;
         let expected_admission_digest =
@@ -95,7 +173,7 @@ impl PostgresWriterLease {
         enter_runtime_reader(&mut transaction).map_err(|failure| failure.error)?;
         let binding = transaction
             .query_one(
-                BIND_RUNTIME_SQL,
+                procedure_profile.bind_runtime_sql(),
                 &[
                     &store_authority.daemon_instance_id().as_str(),
                     &expected_daemon_epoch,
@@ -103,8 +181,8 @@ impl PostgresWriterLease {
                     &target.database_identity_digest().as_str(),
                     &target.global_manifest_digest().as_str(),
                     &target.memory_manifest_digest().as_str(),
-                    &manifest.sql_sha256().as_str(),
-                    &manifest.manifest_sha256().as_str(),
+                    &extension_sql_sha256.as_str(),
+                    &extension_manifest_sha256.as_str(),
                 ],
             )
             .map_err(|error| database_failure(error).error)?;
@@ -137,6 +215,7 @@ impl PostgresWriterLease {
         Ok(Self {
             client,
             target,
+            procedure_profile,
             lease_ttl_seconds,
             bound_daemon_instance_id,
             bound_daemon_epoch,
@@ -202,7 +281,7 @@ impl PostgresWriterLease {
         enter_runtime_writer(&mut transaction)?;
         let row = transaction
             .query_one(
-                LOAD_FOR_UPDATE_SQL,
+                self.procedure_profile.load_for_update_sql(),
                 &[
                     &project_id.as_str(),
                     &vacant_bytes,

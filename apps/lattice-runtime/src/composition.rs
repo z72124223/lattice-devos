@@ -4541,13 +4541,9 @@ fn task_writer_lease<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
     foundation: &TaskPersistenceFoundation,
 ) -> Result<PostgresWriterLease, LatticedError> {
-    let memory_manifest = verify_embedded_extension_manifest()
-        .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
-    let target = WriterLeaseExtensionTarget::new(
+    let target = V3ExtensionTarget::new(
         core.delivery.database.database_name(),
         foundation.database_identity_digest().clone(),
-        foundation.global_manifest_digest().clone(),
-        memory_manifest.manifest_sha256().clone(),
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
     record_observed_effect(ObservedEffectKind::Database)
@@ -4559,7 +4555,7 @@ fn task_writer_lease<H: FullChainHermesPort>(
         deadline(core.delivery.timeout)?,
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
-    PostgresWriterLease::new(client, target, &core.store_authority, 600)
+    PostgresWriterLease::new_v3(client, target, &core.store_authority, 600)
         .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))
 }
 
@@ -4626,7 +4622,7 @@ fn foreman_writer_lease<H: FullChainHermesPort>(
                 _ => "FOREMAN_REPLAY_CORRUPT",
             })
         })?;
-    let foundation = foundation_ledger.load_foreman_replay().map_err(|error| {
+    let _foundation = foundation_ledger.load_foreman_replay().map_err(|error| {
         ToolExecutionError::new(match error.kind() {
             PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema => "FOREMAN_REPLAY_UNSUPPORTED",
             PostgresTaskLedgerErrorKind::Unavailable
@@ -4638,15 +4634,8 @@ fn foreman_writer_lease<H: FullChainHermesPort>(
     let database_identity =
         ContentDigest::from_sha256(store_target.expected_database_identity_sha256().as_str())
             .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
-    let memory_manifest = verify_embedded_extension_manifest()
+    let target = V3ExtensionTarget::new(core.delivery.database.database_name(), database_identity)
         .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
-    let target = WriterLeaseExtensionTarget::new(
-        core.delivery.database.database_name(),
-        database_identity,
-        foundation.ledger().persistence().manifest_digest().clone(),
-        memory_manifest.manifest_sha256().clone(),
-    )
-    .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
     drop(foundation_ledger);
     let client = connect_fixed_runtime_client(
         &core.delivery.database,
@@ -4655,7 +4644,7 @@ fn foreman_writer_lease<H: FullChainHermesPort>(
             .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?,
     )
     .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
-    PostgresWriterLease::new(client, target, &core.store_authority, 600)
+    PostgresWriterLease::new_v3(client, target, &core.store_authority, 600)
         .map_err(foreman_writer_observation_error)
 }
 

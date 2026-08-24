@@ -17,7 +17,7 @@ additional_modules:
   - module_id: postgres-store
     constitution_version: 1.16
   - module_id: postgres-writer-lease
-    constitution_version: 1.4
+    constitution_version: 1.5
 status: in_progress
 parallel_safe: false
 depends_on: [TASK-094]

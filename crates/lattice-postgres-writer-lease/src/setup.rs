@@ -416,7 +416,7 @@ impl V3ExtensionTarget {
         )
     }
 
-    fn successor(&self) -> Result<ExtensionTarget, ExtensionSetupError> {
+    pub(crate) fn successor(&self) -> Result<ExtensionTarget, ExtensionSetupError> {
         ExtensionTarget::new(
             self.database_name.clone(),
             self.database_identity_digest.clone(),

@@ -1,7 +1,7 @@
 ---
 module_id: postgres-writer-lease
 name: PostgreSQL Writer Lease Repository
-version: 1.4
+version: 1.5
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -29,6 +29,9 @@ present schema-v6 Writer v3 profile. It rejects an absent profile before
 durable mutation, rebinds only bridge-pending, and verifies current as a no-op.
 The same amendment re-pins the undeployed fixed rebind bytes to the corrected
 TASK-105 schema-v6 manifest and changes no Writer semantic row shape.
+Version 1.5 exposes an explicit current-profile runtime constructor that binds
+only the Writer-v3 procedures after verified schema-v6 bootstrap. The
+historical Writer-v2 constructor and procedure profile remain unchanged.
 
 ## Non-Goals
 
@@ -89,6 +92,9 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
 - Expose the strict existing-v3 rebind/verify operation used by product
   bootstrap. It cannot take the fresh-install branch; absence is a typed
   fail-closed result and leaves the schema-v6 database fingerprint unchanged.
+- Construct schema-v6 runtime repositories only through the explicit v3
+  constructor and exact `bind_runtime_v3`/`load_for_update_v3` procedures.
+  The v2 constructor remains version-closed to its historical profile.
 - Use fixed function calls only; expose no generic CRUD, arbitrary row, SQL,
   schema/table name, raw client, migration, or credential API.
 
@@ -135,6 +141,9 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
     profile. It may only rebind an exact pending v3 profile or verify an exact
     current v3 profile; absence, partial state, or collision fails before
     durable Writer mutation.
+16. A current schema-v6 runtime never falls back to a Writer-v2 procedure or
+    ACL. Constructor choice fixes the v2/v3 bind and load-for-update pair for
+    the repository lifetime; retained v1 semantic procedures remain shared.
 
 ## Allowed Dependencies
 
@@ -200,6 +209,11 @@ may rebind and current may verify idempotently.
 Its fixed rebind SQL accepts only the corrected seven-entry v6 manifest; the
 prior pre-product digest is rejected rather than treated as current.
 
+Version 1.5 adds only the explicit Writer-v3 runtime constructor required by
+TASK-105 composition. It verifies the embedded v3 manifest and exact v6 target
+before invoking the v3 procedure pair; it neither widens v2 nor changes Writer
+domain semantics or physical rows.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -233,3 +247,4 @@ synthetic evidence as production authority.
 | 1.2 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Add append-only v3 bridge/current compatibility for exact future global-v6 foreman coordination while freezing v2 schema-3/5 behavior | Fixed-foreman delegation |
 | 1.3 | 2026-08-24 | SPEC-002 v37, ADR-026, TASK-094 | Writer-owned typed v3 apply/rebind administration for exact-v5 transition and exact-v6 idempotent retry through one fixed Store transaction boundary | TASK-094 bounded repair authority |
 | 1.4 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 | Add strict existing-v3 product-bootstrap rebind/verify, fail closed on schema-v6 Writer absence, and re-pin the fixed rebind boundary to the corrected seven-entry v6 manifest | TASK-105 bounded implementation authority |
+| 1.5 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 | Add explicit version-closed Writer-v3 runtime construction for schema-v6 composition while preserving the historical v2 adapter path | TASK-105 bounded implementation authority |
