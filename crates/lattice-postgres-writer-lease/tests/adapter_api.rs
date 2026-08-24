@@ -21,7 +21,7 @@ fn concrete_adapter_implements_the_domain_owned_repository_port() {
     > = PostgresWriterLease::new;
     let _: for<'a> fn(
         Client,
-        V3ExtensionTarget,
+        &'a V3ExtensionTarget,
         &'a StoreAuthorityHead,
         u32,
     ) -> Result<

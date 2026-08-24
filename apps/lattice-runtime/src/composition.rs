@@ -4555,7 +4555,7 @@ fn task_writer_lease<H: FullChainHermesPort>(
         deadline(core.delivery.timeout)?,
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
-    PostgresWriterLease::new_v3(client, target, &core.store_authority, 600)
+    PostgresWriterLease::new_v3(client, &target, &core.store_authority, 600)
         .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))
 }
 
@@ -4644,7 +4644,7 @@ fn foreman_writer_lease<H: FullChainHermesPort>(
             .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?,
     )
     .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
-    PostgresWriterLease::new_v3(client, target, &core.store_authority, 600)
+    PostgresWriterLease::new_v3(client, &target, &core.store_authority, 600)
         .map_err(foreman_writer_observation_error)
 }
 

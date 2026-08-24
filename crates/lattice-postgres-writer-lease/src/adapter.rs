@@ -110,7 +110,7 @@ impl PostgresWriterLease {
     /// Rejects any target, authority, manifest, or database profile mismatch.
     pub fn new_v3(
         client: Client,
-        target: V3ExtensionTarget,
+        target: &V3ExtensionTarget,
         store_authority: &StoreAuthorityHead,
         lease_ttl_seconds: u32,
     ) -> Result<Self, WriterLeaseRepositoryError> {
