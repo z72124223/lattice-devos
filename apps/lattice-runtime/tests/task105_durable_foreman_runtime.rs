@@ -364,13 +364,13 @@ impl LiveConfig {
              FROM ONLY control.runtime_admission x WHERE singleton",
             "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
                n.nspname||':'||c.relname||':'||c.relkind::text,E'\\n'\
-               ORDER BY n.nspname,c.relname),'')) FROM pg_catalog.pg_class c\
-               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace\
+               ORDER BY n.nspname,c.relname),'')) FROM pg_catalog.pg_class c \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
               WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
             "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
                n.nspname||':'||p.proname||':'||pg_catalog.oidvectortypes(p.proargtypes),E'\\n'\
-               ORDER BY n.nspname,p.proname,p.oid),'')) FROM pg_catalog.pg_proc p\
-               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace\
+               ORDER BY n.nspname,p.proname,p.oid),'')) FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
               WHERE n.nspname IN ('control','memory','readmodel','writer_lease')",
         ]
         .into_iter()
@@ -453,7 +453,7 @@ impl LiveConfig {
                      ) SELECT 1,singleton,extension_id,extension_schema_version,\
                          extension_sql_sha256,extension_manifest_sha256,database_uuid,\
                          database_identity_sha256,global_schema_version,global_manifest_sha256,\
-                         'INSTALLED' FROM ONLY memory.codebase_memory_extension_identity\
+                         'INSTALLED' FROM ONLY memory.codebase_memory_extension_identity \
                          WHERE singleton",
                     &[],
                 )
@@ -515,11 +515,11 @@ impl LiveConfig {
         assert_eq!(
             migrator
                 .execute(
-                    "UPDATE ONLY writer_lease.writer_lease_extension_identity SET\
+                    "UPDATE ONLY writer_lease.writer_lease_extension_identity SET \
                          extension_schema_version=2,extension_path=$1,\
-                         extension_sql_sha256=$2,extension_manifest_sha256=$3\
-                     WHERE singleton AND extension_id=$4 AND extension_schema_version=1\
-                       AND extension_path=$5 AND extension_sql_sha256=$6\
+                         extension_sql_sha256=$2,extension_manifest_sha256=$3 \
+                     WHERE singleton AND extension_id=$4 AND extension_schema_version=1 \
+                       AND extension_path=$5 AND extension_sql_sha256=$6 \
                        AND extension_manifest_sha256=$7",
                     &[
                         &writer_v2.path(),
@@ -655,12 +655,12 @@ impl LiveConfig {
         let row = migrator
             .query_one(
                 "SELECT\
-                    (SELECT extension_schema_version=2 AND global_schema_version=3\
+                    (SELECT extension_schema_version=2 AND global_schema_version=3 \
                        FROM ONLY memory.codebase_memory_extension_identity WHERE singleton),\
-                    (SELECT pg_catalog.count(*)=1\
+                    (SELECT pg_catalog.count(*)=1 \
                        FROM ONLY memory.codebase_memory_extension_ledger),\
-                    (SELECT extension_schema_version=2 AND global_schema_version=3\
-                       AND required_memory_schema_version=2\
+                    (SELECT extension_schema_version=2 AND global_schema_version=3 \
+                       AND required_memory_schema_version=2 \
                        FROM ONLY writer_lease.writer_lease_extension_identity WHERE singleton),\
                     (SELECT pg_catalog.string_agg(ledger_ordinal::text||':'||event_kind::text,','\
                        ORDER BY ledger_ordinal)='1:INSTALLED,2:UPGRADED'\
@@ -1047,6 +1047,35 @@ fn required(name: &str) -> String {
     env::var(name).unwrap_or_else(|_| panic!("TASK105_ENV_MISSING:{name}"))
 }
 
+fn assert_no_merged_sql_continuation_tokens() {
+    let source = include_str!("task105_durable_foreman_runtime.rs").as_bytes();
+    for continuation in 1..source.len().saturating_sub(1) {
+        if source[continuation] != b'\\'
+            || !(source[continuation - 1].is_ascii_alphanumeric()
+                || source[continuation - 1] == b'_')
+        {
+            continue;
+        }
+        let mut next = continuation + 1;
+        if source[next] == b'\r' {
+            next += 1;
+        }
+        if source.get(next) != Some(&b'\n') {
+            continue;
+        }
+        next += 1;
+        while source.get(next).is_some_and(u8::is_ascii_whitespace) {
+            next += 1;
+        }
+        assert!(
+            source
+                .get(next)
+                .is_none_or(|byte| !(byte.is_ascii_alphabetic() || *byte == b'_')),
+            "TASK105_SQL_CONTINUATION_MERGED_TOKEN_AT_BYTE:{continuation}"
+        );
+    }
+}
+
 fn run_latticed_admin(config: &LiveConfig, argument: &str, expected_success: bool) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
         .arg(argument)
@@ -1149,6 +1178,7 @@ fn response<'a>(responses: &'a [Value], id: i64) -> &'a Value {
 
 #[test]
 fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
+    assert_no_merged_sql_continuation_tokens();
     for query in FRESH_CATALOG_FINGERPRINT_QUERIES {
         assert!(query.contains(" JOIN "));
         assert!(query.contains(" WHERE "));
