@@ -88,6 +88,28 @@ impl LiveConfig {
         config.connect(NoTls).expect("TASK105_BOOTSTRAP_CONNECT")
     }
 
+    fn revoke_login_connect(&self) {
+        let mut config = Config::new();
+        config
+            .host(&self.host)
+            .port(self.port)
+            .user("runtime_bootstrap")
+            .password(&self.password)
+            .dbname("postgres")
+            .application_name("lattice-task105-capability-handoff")
+            .ssl_mode(SslMode::Disable);
+        config
+            .connect(NoTls)
+            .expect("TASK105_CAPABILITY_HANDOFF_CONNECT")
+            .batch_execute(&format!(
+                "REVOKE CONNECT ON DATABASE {} FROM \
+                 lattice_migrator_login,lattice_runtime_login,\
+                 lattice_guardian_login,lattice_readonly_login",
+                self.database_name()
+            ))
+            .expect("TASK105_CAPABILITY_HANDOFF_REVOKE");
+    }
+
     fn migration_target(&self) -> MigrationTarget {
         MigrationTarget::new(self.database_name(), self.run_id.clone())
             .expect("TASK105_MIGRATION_TARGET")
@@ -554,27 +576,6 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     assert_eq!(config.migration_fingerprint(), migration_before);
     println!("TASK105_STAGE_V6_CURRENT_NOOP_PASS");
 
-    let parent_run_id = required("LATTICE_TASK019_RUN_ID");
-    let writer_v2 = config.child_database(0x1000_0000);
-    assert_ne!(writer_v2.run_id, config.run_id);
-    run_latticed_admin(&writer_v2, "--postgres-initialize", true);
-    writer_v2.prepare_v5_writer_v2_current();
-    writer_v2.assert_v5_writer_v2_current();
-    run_latticed_admin(&writer_v2, "--postgres-bootstrap", true);
-    writer_v2.assert_v6_writer_v3_current();
-    println!("TASK105_STAGE_V5_WRITER_V2_EXECUTABLE_PASS");
-
-    let writer_absent = config.child_database(0x2000_0000);
-    assert_ne!(writer_absent.run_id, config.run_id);
-    assert_ne!(writer_absent.run_id, writer_v2.run_id);
-    run_latticed_admin(&writer_absent, "--postgres-initialize", true);
-    writer_absent.prepare_v5_store_only();
-    writer_absent.assert_v5_writer_absent();
-    run_latticed_admin(&writer_absent, "--postgres-bootstrap", true);
-    writer_absent.assert_v6_writer_v3_current();
-    assert_eq!(required("LATTICE_TASK019_RUN_ID"), parent_run_id);
-    println!("TASK105_STAGE_V5_WRITER_ABSENT_EXECUTABLE_PASS");
-
     config.introduce_partial_writer_acl();
     let partial = config.durable_profile_fingerprint();
     assert_eq!(
@@ -680,4 +681,27 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     );
     assert_eq!(config.v6_absent_writer_fingerprint(), absent_before);
     println!("TASK105_STAGE_V6_ABSENT_FAIL_CLOSED_PASS");
+
+    let parent_run_id = required("LATTICE_TASK019_RUN_ID");
+    let writer_v2 = config.child_database(0x1000_0000);
+    assert_ne!(writer_v2.run_id, config.run_id);
+    run_latticed_admin(&writer_v2, "--postgres-initialize", true);
+    config.revoke_login_connect();
+    writer_v2.prepare_v5_writer_v2_current();
+    writer_v2.assert_v5_writer_v2_current();
+    run_latticed_admin(&writer_v2, "--postgres-bootstrap", true);
+    writer_v2.assert_v6_writer_v3_current();
+    println!("TASK105_STAGE_V5_WRITER_V2_EXECUTABLE_PASS");
+
+    let writer_absent = config.child_database(0x2000_0000);
+    assert_ne!(writer_absent.run_id, config.run_id);
+    assert_ne!(writer_absent.run_id, writer_v2.run_id);
+    run_latticed_admin(&writer_absent, "--postgres-initialize", true);
+    writer_v2.revoke_login_connect();
+    writer_absent.prepare_v5_store_only();
+    writer_absent.assert_v5_writer_absent();
+    run_latticed_admin(&writer_absent, "--postgres-bootstrap", true);
+    writer_absent.assert_v6_writer_v3_current();
+    assert_eq!(required("LATTICE_TASK019_RUN_ID"), parent_run_id);
+    println!("TASK105_STAGE_V5_WRITER_ABSENT_EXECUTABLE_PASS");
 }
