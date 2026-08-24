@@ -1,13 +1,13 @@
 //! Typed foreman coordination Port bound to the durable Task Ledger repository.
 
 use lattice_contracts::{StoreAuthorityHead, WriterLeaseAuthorityHead};
-use lattice_foreman_state::ForemanSnapshot;
+use lattice_foreman_state::{ForemanCheckpointIntent, ForemanSnapshot};
 use lattice_ports::{
-    ForemanAppendReceipt, ForemanCoordinationError, ForemanCoordinationErrorKind,
-    ForemanCoordinationPort, ForemanCoordinationResult,
+    ForemanAppendReceipt, ForemanCheckpointReplay, ForemanCoordinationError,
+    ForemanCoordinationErrorKind, ForemanCoordinationPort, ForemanCoordinationResult,
 };
 use lattice_task_ledger::{
-    CommandId, CorrelationId, ForemanAppendMetadata, foreman_coordination_identity,
+    CommandId, CorrelationId, ForemanAppendMetadata, LedgerError, foreman_coordination_identity,
     plan_foreman_snapshot_append,
 };
 
@@ -31,6 +31,60 @@ impl PostgresForemanCoordination {
 }
 
 impl ForemanCoordinationPort for PostgresForemanCoordination {
+    fn replay_checkpoint(
+        &mut self,
+        intent: &ForemanCheckpointIntent,
+    ) -> ForemanCoordinationResult<Option<ForemanCheckpointReplay>> {
+        let command_id = CommandId::new(intent.checkpoint_id()).map_err(|_| malformed())?;
+        let records = self.ledger.load_foreman_records().map_err(map_error)?;
+        let Some(record) = records
+            .iter()
+            .find(|record| record.command_id() == &command_id)
+        else {
+            return Ok(None);
+        };
+        let identity = foreman_coordination_identity().map_err(|_| malformed())?;
+        let loaded = self.ledger.load_stream(identity).map_err(map_error)?;
+        let event = loaded
+            .stream()
+            .events()
+            .iter()
+            .find(|event| event.command_id() == &command_id)
+            .ok_or_else(corrupt)?;
+        if !intent.matches_snapshot(record.snapshot())
+            || event.occurred_at() != intent.occurred_at()
+        {
+            return Err(ForemanCoordinationError::new(
+                ForemanCoordinationErrorKind::Conflict,
+                "FOREMAN_CHECKPOINT_ID_REUSE",
+            ));
+        }
+        let command = loaded
+            .stream()
+            .commands()
+            .iter()
+            .find(|command| command.request().command_id() == &command_id)
+            .ok_or_else(corrupt)?;
+        let receipt = ForemanAppendReceipt::new(
+            record.event_digest().clone(),
+            command.result_checkpoint().checkpoint_digest().clone(),
+            record.snapshot().generation(),
+            true,
+        )?;
+        let authority_digest = record
+            .snapshot()
+            .authority()
+            .strip_prefix("authority:sha256:")
+            .ok_or_else(corrupt)
+            .and_then(|digest| {
+                lattice_contracts::ContentDigest::from_sha256(digest).map_err(|_| corrupt())
+            })?;
+        Ok(Some(ForemanCheckpointReplay::new(
+            receipt,
+            authority_digest,
+        )))
+    }
+
     fn append_snapshot(
         &mut self,
         command_id: &str,
@@ -50,7 +104,7 @@ impl ForemanCoordinationPort for PostgresForemanCoordination {
         .map_err(|_| malformed())?;
         let plan =
             plan_foreman_snapshot_append(loaded.stream(), &records, metadata, snapshot.clone())
-                .map_err(|_| malformed())?;
+                .map_err(|error| map_ledger_error(&error))?;
         let event_digest = plan
             .ledger_plan()
             .receipt()
@@ -94,6 +148,13 @@ const fn malformed() -> ForemanCoordinationError {
     )
 }
 
+const fn corrupt() -> ForemanCoordinationError {
+    ForemanCoordinationError::new(
+        ForemanCoordinationErrorKind::Corrupt,
+        "FOREMAN_REPLAY_CORRUPT",
+    )
+}
+
 fn map_error(error: crate::PostgresTaskLedgerError) -> ForemanCoordinationError {
     let kind = match error.kind() {
         PostgresTaskLedgerErrorKind::Malformed => ForemanCoordinationErrorKind::Malformed,
@@ -107,13 +168,48 @@ fn map_error(error: crate::PostgresTaskLedgerError) -> ForemanCoordinationError 
         | PostgresTaskLedgerErrorKind::RetainedRowCorrupt
         | PostgresTaskLedgerErrorKind::PhysicalStateMismatch
         | PostgresTaskLedgerErrorKind::RevisionOverflow => ForemanCoordinationErrorKind::Corrupt,
+        PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema => {
+            return ForemanCoordinationError::new(
+                ForemanCoordinationErrorKind::Corrupt,
+                "FOREMAN_REPLAY_UNSUPPORTED",
+            );
+        }
         PostgresTaskLedgerErrorKind::CommitOutcomeUnknown => {
             ForemanCoordinationErrorKind::OutcomeUnknown
         }
         PostgresTaskLedgerErrorKind::TransactionFailed
-        | PostgresTaskLedgerErrorKind::Unavailable => ForemanCoordinationErrorKind::Unavailable,
+        | PostgresTaskLedgerErrorKind::Unavailable => {
+            return ForemanCoordinationError::new(
+                ForemanCoordinationErrorKind::Unavailable,
+                "FOREMAN_REPLAY_UNAVAILABLE",
+            );
+        }
     };
-    ForemanCoordinationError::new(kind, error.code())
+    let code = if kind == ForemanCoordinationErrorKind::Corrupt {
+        "FOREMAN_REPLAY_CORRUPT"
+    } else {
+        error.code()
+    };
+    ForemanCoordinationError::new(kind, code)
+}
+
+fn map_ledger_error(error: &LedgerError) -> ForemanCoordinationError {
+    match error {
+        LedgerError::CommandIdReuse => ForemanCoordinationError::new(
+            ForemanCoordinationErrorKind::Conflict,
+            "FOREMAN_CHECKPOINT_ID_REUSE",
+        ),
+        LedgerError::ForemanGenerationRollback => ForemanCoordinationError::new(
+            ForemanCoordinationErrorKind::Conflict,
+            "FOREMAN_GENERATION_INVALID",
+        ),
+        LedgerError::UnknownForemanSnapshotVersion => ForemanCoordinationError::new(
+            ForemanCoordinationErrorKind::Corrupt,
+            "FOREMAN_REPLAY_UNSUPPORTED",
+        ),
+        LedgerError::InvalidForemanSnapshot => corrupt(),
+        _ => malformed(),
+    }
 }
 
 #[cfg(test)]
@@ -137,11 +233,39 @@ mod tests {
             .kind(),
             ForemanCoordinationErrorKind::OutcomeUnknown
         );
+        assert_eq!(
+            map_error(PostgresTaskLedgerError::new(
+                PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema
+            ))
+            .code(),
+            "FOREMAN_REPLAY_UNSUPPORTED"
+        );
+        assert_eq!(
+            map_error(PostgresTaskLedgerError::new(
+                PostgresTaskLedgerErrorKind::RetainedRowCorrupt
+            ))
+            .code(),
+            "FOREMAN_REPLAY_CORRUPT"
+        );
+        assert_eq!(
+            map_error(PostgresTaskLedgerError::new(
+                PostgresTaskLedgerErrorKind::Unavailable
+            ))
+            .code(),
+            "FOREMAN_REPLAY_UNAVAILABLE"
+        );
     }
 
     #[test]
     fn adapter_satisfies_the_typed_port_without_exposing_a_second_store() {
         fn assert_port<T: ForemanCoordinationPort>() {}
         assert_port::<PostgresForemanCoordination>();
+    }
+
+    #[test]
+    fn concurrent_same_id_substitution_maps_to_stable_conflict() {
+        let error = map_ledger_error(&LedgerError::CommandIdReuse);
+        assert_eq!(error.kind(), ForemanCoordinationErrorKind::Conflict);
+        assert_eq!(error.code(), "FOREMAN_CHECKPOINT_ID_REUSE");
     }
 }

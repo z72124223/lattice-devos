@@ -1,8 +1,8 @@
 use lattice_contracts::WriterLeaseAuthorityHead;
-use lattice_foreman_state::{ForemanSnapshot, ForemanState, reconstruct};
+use lattice_foreman_state::{ForemanCheckpointIntent, ForemanSnapshot, ForemanState, reconstruct};
 use lattice_ports::{
-    ForemanAppendReceipt, ForemanCoordinationError, ForemanCoordinationErrorKind,
-    ForemanCoordinationPort, ForemanCoordinationResult,
+    ForemanAppendReceipt, ForemanCheckpointReplay, ForemanCoordinationError,
+    ForemanCoordinationErrorKind, ForemanCoordinationPort, ForemanCoordinationResult,
 };
 
 #[derive(Default)]
@@ -11,6 +11,13 @@ struct RestartedReader {
 }
 
 impl ForemanCoordinationPort for RestartedReader {
+    fn replay_checkpoint(
+        &mut self,
+        _intent: &ForemanCheckpointIntent,
+    ) -> ForemanCoordinationResult<Option<ForemanCheckpointReplay>> {
+        Ok(None)
+    }
+
     fn append_snapshot(
         &mut self,
         _command_id: &str,

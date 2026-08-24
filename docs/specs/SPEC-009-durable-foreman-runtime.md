@@ -71,15 +71,16 @@ action projection even though PostgreSQL has the intended durable boundary.
 ## Compatibility, failure and security
 
 Schema-v5 history and all existing MCP responses remain compatible. Unknown
-fields, generation gaps, changed ID reuse, malformed pointers, non-canonical
-time, blocker/state mismatch, corrupt replay and partial bootstrap fail before
-dispatch or mutation. PostgreSQL tests use marker-owned loopback fixtures on a
-dynamic port excluding 5432 and 58743.
+fields, malformed pointers/time and blocker/state mismatch fail before service
+dispatch. Generation gaps, changed ID reuse, corrupt replay and partial
+bootstrap fail after verified replay but before mutation. PostgreSQL tests use
+marker-owned loopback fixtures on a dynamic port excluding 5432 and 58743.
 
 ### Versioned wire contract
 
 `lattice_foreman_checkpoint` input is an object with exactly these properties:
-`checkpoint_id: string` (safe ASCII token, 1..64), `generation: integer > 0`,
+`checkpoint_id: string` matching
+`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`, `generation: integer > 0`,
 `occurred_at: string` (canonical UTC), `state: ACTIVE|BLOCKED|COMPLETED`,
 `blocker_ref: string|null` (non-null iff BLOCKED), and `heartbeat_ref` /
 `evidence_ref` as lowercase `heartbeat:sha256:<64hex>` and
@@ -94,7 +95,8 @@ fields: `schema: lattice.foreman-runtime-projection/1.0`,
 `ledger_digest: lowercase sha256`, `checkpoint_digest: lowercase sha256|null`,
 `latest_generation: integer`, `active_count`, `blocked_count`,
 `completed_count`, `next_action` in the four-value closed enum, and
-`degraded_code: string|null`. Counts and generation are non-negative integers.
+`degraded_code: null|FOREMAN_WRITER_CONTENTION`. Counts and generation are
+non-negative integers.
 
 Closed-schema, format and unknown-field validation fails before service
 dispatch as JSON-RPC invalid params (`-32602`) with stable code

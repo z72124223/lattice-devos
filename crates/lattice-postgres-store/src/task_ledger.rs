@@ -334,6 +334,7 @@ pub enum PostgresTaskLedgerErrorKind {
     PhysicalStateMismatch,
     CheckpointCorrupt,
     RetainedRowCorrupt,
+    UnsupportedRetainedSchema,
     RevisionOverflow,
     SerializationExhausted,
     TransactionFailed,
@@ -343,7 +344,7 @@ pub enum PostgresTaskLedgerErrorKind {
 
 impl PostgresTaskLedgerErrorKind {
     /// Complete closed error set.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Malformed,
         Self::CommandSubstitution,
         Self::AdmissionDenied,
@@ -351,6 +352,7 @@ impl PostgresTaskLedgerErrorKind {
         Self::PhysicalStateMismatch,
         Self::CheckpointCorrupt,
         Self::RetainedRowCorrupt,
+        Self::UnsupportedRetainedSchema,
         Self::RevisionOverflow,
         Self::SerializationExhausted,
         Self::TransactionFailed,
@@ -369,6 +371,7 @@ impl PostgresTaskLedgerErrorKind {
             Self::PhysicalStateMismatch => "POSTGRES_TASK_LEDGER_PHYSICAL_STATE_MISMATCH",
             Self::CheckpointCorrupt => "POSTGRES_TASK_LEDGER_CHECKPOINT_CORRUPT",
             Self::RetainedRowCorrupt => "POSTGRES_TASK_LEDGER_RETAINED_ROW_CORRUPT",
+            Self::UnsupportedRetainedSchema => "POSTGRES_TASK_LEDGER_UNSUPPORTED_RETAINED_SCHEMA",
             Self::RevisionOverflow => "POSTGRES_TASK_LEDGER_REVISION_OVERFLOW",
             Self::SerializationExhausted => "POSTGRES_TASK_LEDGER_SERIALIZATION_EXHAUSTED",
             Self::TransactionFailed => "POSTGRES_TASK_LEDGER_TRANSACTION_FAILED",
@@ -3840,6 +3843,9 @@ fn map_ledger_error(value: &LedgerError) -> PostgresTaskLedgerError {
     let kind = match value {
         LedgerError::CommandIdReuse => PostgresTaskLedgerErrorKind::CommandSubstitution,
         LedgerError::CheckpointMismatch => PostgresTaskLedgerErrorKind::CheckpointCorrupt,
+        LedgerError::UnknownForemanSnapshotVersion => {
+            PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema
+        }
         _ => PostgresTaskLedgerErrorKind::RetainedRowCorrupt,
     };
     error(kind)

@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 lattice-codebase-memory = { path = "../lattice-codebase-memory" }
 lattice-contracts = { path = "../lattice-contracts" }
+lattice-foreman-state = { path = "../lattice-foreman-state" }
 lattice-ports = { path = "../lattice-ports" }
 lattice-task-domain = { path = "../lattice-task-domain" }
 lattice-writer-lease = { path = "../lattice-writer-lease" }

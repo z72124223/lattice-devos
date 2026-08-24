@@ -15,7 +15,7 @@ use lattice_contracts::{
     ProjectId, RequestId, StorePhysicalHead, StoreScope, StoreTransactionReceipt,
     StoreTransactionRequest, WorkspaceChangeEvidence, WriterLeaseAuthorityHead,
 };
-use lattice_foreman_state::ForemanSnapshot;
+use lattice_foreman_state::{ForemanCheckpointIntent, ForemanSnapshot};
 use lattice_task_domain::TaskState;
 
 /// Result type returned by every LATTICE port.
@@ -97,6 +97,42 @@ pub struct ForemanAppendReceipt {
     exact_retry: bool,
 }
 
+/// Exact durable append replay plus the Writer-owned authority receipt digest
+/// needed only to reconcile a possibly unknown release.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForemanCheckpointReplay {
+    receipt: ForemanAppendReceipt,
+    authority_receipt_digest: ContentDigest,
+}
+
+impl ForemanCheckpointReplay {
+    #[must_use]
+    pub const fn new(
+        receipt: ForemanAppendReceipt,
+        authority_receipt_digest: ContentDigest,
+    ) -> Self {
+        Self {
+            receipt,
+            authority_receipt_digest,
+        }
+    }
+
+    #[must_use]
+    pub const fn receipt(&self) -> &ForemanAppendReceipt {
+        &self.receipt
+    }
+
+    #[must_use]
+    pub const fn authority_receipt_digest(&self) -> &ContentDigest {
+        &self.authority_receipt_digest
+    }
+
+    #[must_use]
+    pub fn into_receipt(self) -> ForemanAppendReceipt {
+        self.receipt
+    }
+}
+
 impl ForemanAppendReceipt {
     /// # Errors
     ///
@@ -144,6 +180,17 @@ impl ForemanAppendReceipt {
 
 /// Narrow append/replay boundary for the sole durable Task Ledger truth.
 pub trait ForemanCoordinationPort {
+    /// Replays an exact caller intent before any new server observation or
+    /// Writer effect. A changed payload under a retained ID is a conflict.
+    ///
+    /// # Errors
+    ///
+    /// Corrupt, unsupported, unavailable or changed replay fails closed.
+    fn replay_checkpoint(
+        &mut self,
+        intent: &ForemanCheckpointIntent,
+    ) -> ForemanCoordinationResult<Option<ForemanCheckpointReplay>>;
+
     /// Appends one already validated snapshot under exact Writer authority.
     ///
     /// # Errors

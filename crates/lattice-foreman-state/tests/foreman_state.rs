@@ -1,7 +1,7 @@
 use lattice_foreman_state::{
-    Confidence, DashboardIndex, EpistemicReferences, ForemanSnapshot, ForemanState, LiveWorktree,
-    RefreshTrigger, SnapshotError, WatchdogFinding, is_exact_next_generation, reconstruct,
-    watchdog,
+    Confidence, DashboardIndex, EpistemicReferences, ForemanCheckpointIntent, ForemanSnapshot,
+    ForemanState, LiveWorktree, RefreshTrigger, SnapshotError, WatchdogFinding,
+    is_exact_next_generation, reconstruct, watchdog,
 };
 
 fn snapshot(
@@ -146,6 +146,118 @@ fn replay_rejects_generation_other_than_one_for_new_identity() {
 #[test]
 fn exact_generation_never_wraps_after_u64_max() {
     assert!(!is_exact_next_generation(Some(u64::MAX), 1));
+}
+
+#[test]
+fn checkpoint_intent_is_closed_lowercase_and_state_compatible() {
+    let valid = ForemanCheckpointIntent::new(
+        "checkpoint-1",
+        1,
+        "2026-08-25T00:00:01Z",
+        ForemanState::Blocked,
+        Some("TASK-094".to_owned()),
+        "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .expect("valid checkpoint");
+    assert_eq!(valid.checkpoint_id(), "checkpoint-1");
+    assert_eq!(valid.generation(), 1);
+    assert_eq!(valid.blocker_ref(), Some("TASK-094"));
+
+    let long_id = "a".repeat(65);
+    for invalid_id in ["", "-leading", "contains space", long_id.as_str()] {
+        assert_eq!(
+            ForemanCheckpointIntent::new(
+                invalid_id,
+                1,
+                "2026-08-25T00:00:01Z",
+                ForemanState::Active,
+                None,
+                "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+            Err(SnapshotError::MalformedReference)
+        );
+    }
+    assert_eq!(
+        ForemanCheckpointIntent::new(
+            "checkpoint-2",
+            2,
+            "2026-08-25T00:00:02Z",
+            ForemanState::Active,
+            None,
+            "heartbeat:sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        Err(SnapshotError::MalformedReference)
+    );
+    assert_eq!(
+        ForemanCheckpointIntent::new(
+            "checkpoint-3",
+            3,
+            "2026-08-25T00:00:03Z",
+            ForemanState::Blocked,
+            None,
+            "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
+        Err(SnapshotError::MissingBlocker)
+    );
+    for invalid_time in ["2026-99-99T00:00:00Z", "2026-08-25T24:00:00Z"] {
+        assert_eq!(
+            ForemanCheckpointIntent::new(
+                "checkpoint-time",
+                1,
+                invalid_time,
+                ForemanState::Active,
+                None,
+                "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+            Err(SnapshotError::MalformedReference)
+        );
+    }
+}
+
+#[test]
+fn runtime_projection_reports_closed_counts_and_next_action() {
+    let active = reconstruct([snapshot(
+        "sole-foreman-v1",
+        1,
+        ForemanState::Active,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        None,
+    )])
+    .expect("active");
+    assert_eq!(active.active().len(), 1);
+    assert_eq!(active.completed().len(), 0);
+    assert_eq!(active.latest_generation(), 1);
+    assert_eq!(active.runtime_next_action(), "CONTINUE");
+
+    let blocked = reconstruct([snapshot(
+        "sole-foreman-v1",
+        1,
+        ForemanState::Blocked,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        Some("TASK-094"),
+    )])
+    .expect("blocked");
+    assert_eq!(blocked.runtime_next_action(), "RESOLVE_BLOCKERS");
+
+    let completed = reconstruct([snapshot(
+        "sole-foreman-v1",
+        1,
+        ForemanState::Completed,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        None,
+    )])
+    .expect("completed");
+    assert_eq!(completed.completed().len(), 1);
+    assert_eq!(completed.runtime_next_action(), "ALL_COMPLETED");
+
+    let empty = reconstruct([]).expect("empty");
+    assert_eq!(empty.latest_generation(), 0);
+    assert_eq!(empty.runtime_next_action(), "NO_DURABLE_SNAPSHOT");
 }
 
 #[test]

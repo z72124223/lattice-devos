@@ -1,10 +1,13 @@
 //! Secret-free foreman snapshot validation, replay projection, and watchdog logic.
 
 use std::collections::BTreeMap;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 const SNAPSHOT_SCHEMA: &str = "lattice.foreman-snapshot/1.0";
 const EPISTEMIC_SCHEMA: &str = "lattice.foreman-epistemic/1.0";
 const MAX_REFERENCE_BYTES: usize = 256;
+const MAX_CHECKPOINT_ID_BYTES: usize = 64;
 
 /// Closed worker coordination state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -235,6 +238,171 @@ pub enum SnapshotError {
     DuplicateWorkerIdentity,
 }
 
+/// Caller-owned, closed checkpoint intent. Server identity, Git and Writer
+/// authority are deliberately absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForemanCheckpointIntent {
+    checkpoint_id: String,
+    generation: u64,
+    occurred_at: String,
+    state: ForemanState,
+    blocker_ref: Option<String>,
+    heartbeat_ref: String,
+    evidence_ref: String,
+}
+
+impl ForemanCheckpointIntent {
+    /// # Errors
+    ///
+    /// Rejects unsafe IDs, zero generation, non-canonical time, malformed
+    /// lowercase digest pointers, and state/blocker mismatch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        checkpoint_id: impl Into<String>,
+        generation: u64,
+        occurred_at: impl Into<String>,
+        state: ForemanState,
+        blocker_ref: Option<String>,
+        heartbeat_ref: impl Into<String>,
+        evidence_ref: impl Into<String>,
+    ) -> Result<Self, SnapshotError> {
+        let checkpoint_id = checkpoint_identifier(checkpoint_id.into())?;
+        if generation == 0 {
+            return Err(SnapshotError::GenerationRollback);
+        }
+        let occurred_at = timestamp(occurred_at.into())?;
+        let heartbeat_ref = lowercase_digest_pointer(heartbeat_ref.into(), "heartbeat")?;
+        let evidence_ref = lowercase_digest_pointer(evidence_ref.into(), "evidence")?;
+        let blocker_ref = blocker_ref.map(bounded_reference).transpose()?;
+        match (state, blocker_ref.is_some()) {
+            (ForemanState::Blocked, false) => return Err(SnapshotError::MissingBlocker),
+            (ForemanState::Active | ForemanState::Completed, true) => {
+                return Err(SnapshotError::UnexpectedBlocker);
+            }
+            _ => {}
+        }
+        Ok(Self {
+            checkpoint_id,
+            generation,
+            occurred_at,
+            state,
+            blocker_ref,
+            heartbeat_ref,
+            evidence_ref,
+        })
+    }
+
+    #[must_use]
+    pub fn checkpoint_id(&self) -> &str {
+        &self.checkpoint_id
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[must_use]
+    pub fn occurred_at(&self) -> &str {
+        &self.occurred_at
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> ForemanState {
+        self.state
+    }
+
+    #[must_use]
+    pub fn blocker_ref(&self) -> Option<&str> {
+        self.blocker_ref.as_deref()
+    }
+
+    #[must_use]
+    pub fn heartbeat_ref(&self) -> &str {
+        &self.heartbeat_ref
+    }
+
+    #[must_use]
+    pub fn evidence_ref(&self) -> &str {
+        &self.evidence_ref
+    }
+
+    /// Matches only caller-owned fields against one retained server snapshot.
+    #[must_use]
+    pub fn matches_snapshot(&self, snapshot: &ForemanSnapshot) -> bool {
+        self.generation == snapshot.generation()
+            && self.state == snapshot.state()
+            && self.blocker_ref() == snapshot.blocker()
+            && self.heartbeat_ref == snapshot.heartbeat()
+            && self.evidence_ref == snapshot.evidence()
+    }
+}
+
+/// Server-owned binding and Git observation made only after replay proves that
+/// a checkpoint is new. Writer authority is attached later by Orchestrator.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForemanServerObservation {
+    worker: String,
+    thread: String,
+    task: String,
+    branch: String,
+    worktree: String,
+    head: String,
+}
+
+impl ForemanServerObservation {
+    /// # Errors
+    ///
+    /// Rejects malformed fixed identity or Git evidence.
+    pub fn new(
+        worker: impl Into<String>,
+        thread: impl Into<String>,
+        task: impl Into<String>,
+        branch: impl Into<String>,
+        worktree: impl Into<String>,
+        head: impl Into<String>,
+    ) -> Result<Self, SnapshotError> {
+        let head = head.into();
+        if !is_hex(&head, 40) {
+            return Err(SnapshotError::MalformedReference);
+        }
+        Ok(Self {
+            worker: bounded_reference(worker.into())?,
+            thread: bounded_reference(thread.into())?,
+            task: bounded_reference(task.into())?,
+            branch: bounded_reference(branch.into())?,
+            worktree: bounded_reference(worktree.into())?,
+            head,
+        })
+    }
+
+    /// Binds caller intent to the newly acquired Writer authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed authority evidence or any impossible snapshot shape.
+    pub fn bind(
+        self,
+        intent: &ForemanCheckpointIntent,
+        authority_ref: impl Into<String>,
+    ) -> Result<ForemanSnapshot, SnapshotError> {
+        ForemanSnapshot::new(
+            self.worker,
+            self.thread,
+            self.task,
+            self.branch,
+            self.worktree,
+            self.head,
+            intent.state(),
+            intent.blocker_ref().map(str::to_owned),
+            intent.heartbeat_ref(),
+            lowercase_digest_pointer(authority_ref.into(), "authority")?,
+            intent.evidence_ref(),
+            intent.generation(),
+        )
+    }
+}
+
 /// One versioned, bounded coordination record. It deliberately has no free-form
 /// transcript, command, path, environment, or credential field.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -418,6 +586,8 @@ impl BlockedWorker {
 pub struct ForemanProjection {
     active: Vec<ForemanSnapshot>,
     blocked: Vec<BlockedWorker>,
+    completed: Vec<ForemanSnapshot>,
+    latest_generation: u64,
     next_action: String,
 }
 
@@ -430,6 +600,29 @@ impl ForemanProjection {
     #[must_use]
     pub fn blocked(&self) -> &[BlockedWorker] {
         &self.blocked
+    }
+
+    #[must_use]
+    pub fn completed(&self) -> &[ForemanSnapshot] {
+        &self.completed
+    }
+
+    #[must_use]
+    pub const fn latest_generation(&self) -> u64 {
+        self.latest_generation
+    }
+
+    #[must_use]
+    pub const fn runtime_next_action(&self) -> &'static str {
+        if !self.blocked.is_empty() {
+            "RESOLVE_BLOCKERS"
+        } else if !self.active.is_empty() {
+            "CONTINUE"
+        } else if !self.completed.is_empty() {
+            "ALL_COMPLETED"
+        } else {
+            "NO_DURABLE_SNAPSHOT"
+        }
     }
 
     #[must_use]
@@ -462,11 +655,14 @@ pub fn reconstruct(
     }
     let mut active = Vec::new();
     let mut blocked = Vec::new();
+    let mut completed = Vec::new();
+    let mut latest_generation = 0;
     for snapshot in by_worker.into_values() {
+        latest_generation = latest_generation.max(snapshot.generation());
         match snapshot.state() {
             ForemanState::Active => active.push(snapshot),
             ForemanState::Blocked => blocked.push(BlockedWorker { snapshot }),
-            ForemanState::Completed => {}
+            ForemanState::Completed => completed.push(snapshot),
         }
     }
     let next_action = if let Some(blocked_worker) = blocked.first() {
@@ -483,6 +679,8 @@ pub fn reconstruct(
     Ok(ForemanProjection {
         active,
         blocked,
+        completed,
+        latest_generation,
         next_action,
     })
 }
@@ -667,6 +865,35 @@ fn digest_pointer(value: String, prefix: &str) -> Result<String, SnapshotError> 
     Ok(value)
 }
 
+fn lowercase_digest_pointer(value: String, prefix: &str) -> Result<String, SnapshotError> {
+    let expected_prefix = format!("{prefix}:sha256:");
+    let digest = value
+        .strip_prefix(&expected_prefix)
+        .ok_or(SnapshotError::MalformedReference)?;
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(SnapshotError::MalformedReference);
+    }
+    Ok(value)
+}
+
+fn checkpoint_identifier(value: String) -> Result<String, SnapshotError> {
+    let mut bytes = value.bytes();
+    if value.len() > MAX_CHECKPOINT_ID_BYTES
+        || !bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !bytes
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(SnapshotError::MalformedReference);
+    }
+    Ok(value)
+}
+
 fn pointer_list(values: Vec<String>, prefix: &str) -> Result<Vec<String>, SnapshotError> {
     if values.len() > 64 {
         return Err(SnapshotError::MalformedReference);
@@ -691,6 +918,15 @@ fn timestamp(value: String) -> Result<String, SnapshotError> {
             .enumerate()
             .filter(|(index, _)| !matches!(index, 4 | 7 | 10 | 13 | 16 | 19))
             .all(|(_, byte)| byte.is_ascii_digit())
+    {
+        return Err(SnapshotError::MalformedReference);
+    }
+    let parsed =
+        OffsetDateTime::parse(&value, &Rfc3339).map_err(|_| SnapshotError::MalformedReference)?;
+    if parsed
+        .format(&Rfc3339)
+        .map_err(|_| SnapshotError::MalformedReference)?
+        != value
     {
         return Err(SnapshotError::MalformedReference);
     }

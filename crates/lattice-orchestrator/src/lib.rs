@@ -11,13 +11,150 @@ use lattice_contracts::{
     GraphMemoryReceipt, GraphMemoryRunRequest, HolderProcessId, MemoryQuery, SubjectBinding,
     WriterLeaseAuthorityHead,
 };
+use lattice_foreman_state::{ForemanCheckpointIntent, ForemanServerObservation, SnapshotError};
 use lattice_ports::{
     AutonomyDisposition, CodeSnapshotPort, CodebaseMemoryPort, ControlledTaskExecutionError,
     ControlledTaskExecutionPort, DeliveryCodexPort, DeliveryFailureCertainty, DeliveryLedgerPort,
-    DeliveryPortError, GraphMemoryPortError, GraphMemoryStage, GraphifyAnalysisPort, PortErrorKind,
+    DeliveryPortError, ForemanAppendReceipt, ForemanCoordinationError, ForemanCoordinationPort,
+    GraphMemoryPortError, GraphMemoryStage, GraphifyAnalysisPort, PortErrorKind,
     TaskLifecycleAutonomyEvidence, TaskLifecycleError, TaskLifecycleEvidence, TaskLifecyclePort,
     TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
 };
+
+/// Closed failure for the replay-first sole-foreman checkpoint workflow.
+#[derive(Debug)]
+pub enum ForemanCheckpointOrchestratorError {
+    Replay(ForemanCoordinationError),
+    Observation(&'static str),
+    WriterAcquire(WriterLeaseRepositoryError),
+    WriterContention,
+    Snapshot(SnapshotError),
+    Append(ForemanCoordinationError),
+    WriterRelease(WriterLeaseRepositoryError),
+    ReleaseRejected,
+}
+
+impl fmt::Display for ForemanCheckpointOrchestratorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Replay(error) => write!(formatter, "foreman replay rejected: {error}"),
+            Self::Observation(code) => write!(formatter, "foreman observation rejected: {code}"),
+            Self::WriterAcquire(error) => write!(formatter, "foreman acquire rejected: {error}"),
+            Self::WriterContention => formatter.write_str("foreman writer contention"),
+            Self::Snapshot(error) => write!(formatter, "foreman snapshot rejected: {error:?}"),
+            Self::Append(error) => write!(formatter, "foreman append rejected: {error}"),
+            Self::WriterRelease(error) => write!(formatter, "foreman release rejected: {error}"),
+            Self::ReleaseRejected => formatter.write_str("foreman release was not applied"),
+        }
+    }
+}
+
+impl Error for ForemanCheckpointOrchestratorError {}
+
+/// Executes one checkpoint with replay before observation, then acquire,
+/// append, and known-success release. Any ambiguous append suppresses release;
+/// a release ambiguity is returned without re-appending.
+///
+/// # Errors
+///
+/// Returns the first replay, observation, Writer, snapshot, append or release
+/// failure without executing a later effect.
+pub fn checkpoint_foreman<C, W, O>(
+    coordination: &mut C,
+    writer: &mut W,
+    intent: &ForemanCheckpointIntent,
+    acquire: WriterLeaseAcquireRequest,
+    observe: O,
+) -> Result<ForemanAppendReceipt, ForemanCheckpointOrchestratorError>
+where
+    C: ForemanCoordinationPort,
+    W: WriterLeaseRepository,
+    O: FnOnce() -> Result<ForemanServerObservation, &'static str>,
+{
+    let project_id = acquire.project_id.clone();
+    if let Some(replay) = coordination
+        .replay_checkpoint(intent)
+        .map_err(ForemanCheckpointOrchestratorError::Replay)?
+    {
+        let current = writer
+            .current_authority(&project_id)
+            .map_err(ForemanCheckpointOrchestratorError::WriterRelease)?;
+        let Some(current) = current else {
+            return Ok(replay.into_receipt());
+        };
+        if current.receipt().receipt_digest() != replay.authority_receipt_digest() {
+            return Err(ForemanCheckpointOrchestratorError::WriterContention);
+        }
+        release_foreman(
+            writer,
+            intent,
+            project_id,
+            current.independent_head().clone(),
+        )?;
+        return Ok(replay.into_receipt());
+    }
+
+    let observation = observe().map_err(ForemanCheckpointOrchestratorError::Observation)?;
+    let acquired = writer
+        .execute(WriterLeaseRepositoryCommand::Acquire(acquire))
+        .map_err(ForemanCheckpointOrchestratorError::WriterAcquire)?;
+    if acquired.outcome != WriterLeaseCommandOutcome::Applied {
+        return Err(ForemanCheckpointOrchestratorError::WriterContention);
+    }
+    let authority = acquired
+        .after
+        .clone()
+        .ok_or(ForemanCheckpointOrchestratorError::WriterContention)?;
+    let current = writer
+        .current_authority(&project_id)
+        .map_err(ForemanCheckpointOrchestratorError::WriterAcquire)?
+        .ok_or(ForemanCheckpointOrchestratorError::WriterContention)?;
+    if current.independent_head() != &authority {
+        return Err(ForemanCheckpointOrchestratorError::WriterContention);
+    }
+    let snapshot = observation
+        .bind(
+            intent,
+            format!(
+                "authority:sha256:{}",
+                current.receipt().receipt_digest().as_str()
+            ),
+        )
+        .map_err(ForemanCheckpointOrchestratorError::Snapshot)?;
+    let receipt = coordination
+        .append_snapshot(
+            intent.checkpoint_id(),
+            &format!("foreman:{}", intent.checkpoint_id()),
+            intent.occurred_at(),
+            snapshot,
+            &authority,
+        )
+        .map_err(ForemanCheckpointOrchestratorError::Append)?;
+
+    release_foreman(writer, intent, project_id, authority)?;
+    Ok(receipt)
+}
+
+fn release_foreman<W: WriterLeaseRepository>(
+    writer: &mut W,
+    intent: &ForemanCheckpointIntent,
+    project_id: lattice_contracts::ProjectId,
+    authority: WriterLeaseAuthorityHead,
+) -> Result<(), ForemanCheckpointOrchestratorError> {
+    let released = writer
+        .execute(WriterLeaseRepositoryCommand::Release(
+            WriterLeaseReleaseRequest {
+                command_id: format!("release:{}", intent.checkpoint_id()),
+                project_id,
+                expected_head: authority,
+            },
+        ))
+        .map_err(ForemanCheckpointOrchestratorError::WriterRelease)?;
+    if released.outcome != WriterLeaseCommandOutcome::Applied || released.after.is_some() {
+        return Err(ForemanCheckpointOrchestratorError::ReleaseRejected);
+    }
+    Ok(())
+}
 use lattice_task_domain::TaskState;
 use lattice_writer_lease::{
     CommandOutcome as WriterLeaseCommandOutcome, WriterLeaseAcquireRequest,
