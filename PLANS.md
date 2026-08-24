@@ -6,15 +6,19 @@ Goal: integrate exact TASK-094 commit `1e4ac5d` into product base `387f556`,
 then expose one bounded durable foreman checkpoint and verified restart replay
 without creating another truth store or widening the legacy MCP surface.
 
-Current step: freeze SPEC/ADR/TASK-105 and module amendments, then drive the
-seven-tool/runtime-bootstrap behavior through one RED-GREEN slice at a time.
-Product Control scripts and the existing six modern tools remain compatibility
-requirements. Ordinary MCP serving never migrates; only explicit
-`latticed --postgres-bootstrap` may apply Writer-v3 then Store-v6 changes.
+Current step: local implementation and marker-owned PostgreSQL restart replay
+are green at behavior SHA `6f116ee`; keep TASK-105 `in_progress` while the
+parent foreman completes the SPEC-009 evidence-gap audit and independent
+review. Product Control scripts and the existing six modern tools remain
+compatible inside the exact seven-tool surface. Ordinary MCP serving never
+migrates; only explicit `latticed --postgres-bootstrap` may apply Writer-v3
+then Store-v6 changes.
 
 Verification: focused contract/runtime tests, startup state matrix, marker-owned
 PostgreSQL on a dynamic port other than 5432/58743, fresh-process replay, scoped
-strict lint/format/check, and independent parent review. Push, product merge,
+strict lint/format/check, and independent parent review. The changed core and
+adapter crates pass strict lint; full runtime/workspace strict lint remains
+honestly failed on broader existing diagnostics. Push, product merge,
 installation, deployment and archival remain parent-owned gates.
 
 ## Completed task update — TASK-066

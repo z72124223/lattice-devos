@@ -1,3 +1,51 @@
+# TASK-105 耐久唯一工頭 runtime 交接 — 2026-08-25
+
+## 狀態
+
+`IN_PROGRESS / PARENT_AUDIT`：本機實作、focused 回歸與 marker-owned
+PostgreSQL fresh-process replay 已通過；工頭仍在做 SPEC-009 證據缺口與獨立
+審查。未推送、未開 PR、未合併產品分支、未安裝或部署，也未碰現行服務／資料庫。
+
+## 已完成
+
+- 精確整合 TASK-094，保留產品 Control scripts 與既有六工具行為；modern MCP
+  現為精確七工具，legacy 仍精確兩工具且不認得 checkpoint。
+- `lattice_foreman_checkpoint` 只收封閉安全欄位；伺服器固定唯一工頭身分、觀察
+  Git HEAD、取得 Writer authority，再由 Task Ledger/PostgreSQL 原子寫入。
+- runtime status 從同一耐久 replay 回報 generation、計數、next action、Ledger／
+  checkpoint digest；正常服務不 migration，只有明確 bootstrap 會依固定矩陣升級。
+- 修正實機才會觸發的四個整合缺口：Store v6 七筆 history closure、foreman read
+  SQL token 邊界、Writer v3 runtime procedure 路由、Ledger finalizer foreman event
+  allowlist，以及 PostgreSQL 不接受 `{1,256}` 量詞；六欄仍由 `varchar(256)` 加
+  非空 printable-ASCII 約束維持精確 1..256。
+
+## 已驗證
+
+- 最新行為 SHA：`6f116eed07f914e81d384ef733f45a454c201012`。
+- Live PASS：run `6371b5ed3e1146f73f242560dce08a52`、動態埠 `54461`、
+  owned PID `14388`；initialize/bootstrap、checkpoint/retry/reject、blocked
+  projection、fresh-process replay、Writer-absent fail-closed 全通過；清理為
+  `root_absent=True`、`listener_absent=True`。
+- Focused suites：Foreman 11、Task Ledger 50、Ports 10、Orchestrator effect-order 7、
+  Store 90（另 1 coordinated-live ignored）、Writer 16、runtime lib 130（另 2
+  coordinated-live ignored）、MCP 35、dispatch 7、composition 22、coordination 1、
+  task-control 2、Control 17，全數通過。
+- TASK-105 repository check、format、diff check通過；Foreman／Ledger／Ports／
+  Orchestrator／Store／Writer strict lint通過。完整 runtime/workspace strict lint
+  仍失敗，Rust 1.97 報告 29 個 runtime 與 21 個 Hermes 既有整體/style 診斷，
+  明確不算 PASS，也未為了本票擴張修理。
+
+## 尚待工頭
+
+1. 完成 SPEC-009 evidence-gap audit 與獨立 code/architecture review；若有物理
+   bootstrap／錯誤矩陣缺口，續用同一 writer 有界補證。
+2. 獨立重驗乾淨 tree、測試與 Git，再做同名 feature 非強制推送及 remote SHA
+   核對。
+3. 依使用者既有授權決定產品分支合併、安裝／部署與即時 MCP 重驗；本 worker
+   不把本機 PASS 冒充交付完成或 archive-ready。
+
+---
+
 # TASK-089 追溯對象治理修復交接 — 2026-08-21
 
 ## 狀態
