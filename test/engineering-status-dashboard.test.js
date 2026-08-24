@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
   copyFileSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -22,6 +23,7 @@ import {
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
 const exporter = path.join(projectRoot, "scripts", "export-lattice-engineering-status.mjs");
+const dashboardLauncher = path.join(projectRoot, "Open-LATTICE-Engineering-Status.cmd");
 
 function run(command, args, cwd) {
   return execFileSync(command, args, {
@@ -625,7 +627,13 @@ test("uses the Windows file opener with the exact HTML path before reporting suc
 
 test(
   "Windows launcher preserves the repository argument with spaces and a trailing separator",
-  { skip: process.platform !== "win32" },
+  {
+    skip: process.platform !== "win32"
+      ? "Windows only"
+      : !existsSync(dashboardLauncher)
+        ? "launcher is not part of this product branch"
+        : false,
+  },
   () => {
     const fixture = createFixture({ sourceName: "source with spaces" });
     const localApplicationData = path.join(fixture.root, "local application data");
@@ -650,7 +658,7 @@ test(
       );
       mkdirSync(path.dirname(fixtureExporter), { recursive: true });
       mkdirSync(path.dirname(fixtureTemplate), { recursive: true });
-      copyFileSync(path.join(projectRoot, "Open-LATTICE-Engineering-Status.cmd"), launcher);
+      copyFileSync(dashboardLauncher, launcher);
       copyFileSync(exporter, fixtureExporter);
       copyFileSync(
         path.join(projectRoot, "tools", "engineering-status-dashboard", "index.template.html"),
