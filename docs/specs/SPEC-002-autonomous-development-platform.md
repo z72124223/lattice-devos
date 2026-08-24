@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-002
 status: ready
-version: 37
+version: 38
 supersedes_for_new_work: SPEC-001
 modules:
   - module_id: lattice-cjson
@@ -31,7 +31,7 @@ modules:
   - module_id: approval-verifier
     constitution_version: 1.0
   - module_id: postgres-store
-    constitution_version: 1.11
+    constitution_version: 1.13
   - module_id: postgres-codebase-memory
     constitution_version: 1.2
   - module_id: postgres-writer-lease
@@ -872,7 +872,7 @@ MVP-2, and MVP-3 remain incomplete until their direct exit evidence exists.
 | openclaw-adapter | 2.0 | Inert scaffold becomes a thin local IPC gateway |
 | gateway-ipc | 1.1 | Bounded canonical six-action protocol, NFC-preserving encoder, truthful core-service errors, and deterministic fake loopback; live transport and OS authentication remain deferred |
 | approval-verifier | 1.0 | Pure typed-subject/challenge/proof/nonce/time/current-head owner and deterministic fake; live trust/claim remains deferred |
-| postgres-store | 1.10 | Preserve the exact schema-v5 Registry/autonomy profile and catalog while consuming Task Ledger 2.3 verified scalar plans without duplicating profile classification or canonical hashing; retain the governed Memory/Writer companion profiles and closed advisory-function ACL |
+| postgres-store | 1.13 | Preserve exact Store/Registry/Ledger ownership; only the v5-to-v6 runner may call the fixed Writer-owned rebind procedure in its transaction, with failure rolling all staged effects back |
 | postgres-codebase-memory | 1.2 | Preserve extension v1/v2 bytes and historical v2/global-v3 receipt identity; add exact extension v3/global-v5 install/upgrade plus the bounded Writer-v2 bridge recognizer, per-analysis profile provenance, and byte-identical v2/v3 graph/reflection replay outside the global manifest |
 | postgres-writer-lease | 1.3 | Preserve Writer v1/v2 bytes; Writer-owned v3 apply/rebind advances only the exact schema-v5 bridge to schema-v6 current through one fixed Store transaction call |
 | artifact-store | 1.0 | Pure project-scoped object/reference/provenance/quota/delete-claim semantic owner and deterministic fake; PostgreSQL/filesystem I/O remains deferred |
@@ -1548,6 +1548,13 @@ transaction, then verifies the exact schema-v6/current catalog. The Store does
 not install, parse, manufacture, or replay Writer extension state. Any changed
 history, profile, identity, lease, fence, ACL, catalog, retry, or transaction
 outcome fails closed; bridge and pending states expose zero runtime authority.
+
+SPEC-002 v38 records the Store constitutional exception precisely: its exact
+v5-to-v6 migration runner may call only the Writer-owned fixed zero-argument
+rebind procedure after staging ordinal 7 and schema-v6 compatibility in the
+same transaction. It cannot otherwise mutate or interpret Writer state. A
+precondition failure rolls back all staged migration, compatibility, Writer
+identity, Writer ledger, and runtime ACL effects to the exact v5 bridge.
 
 ## Verification Plan
 

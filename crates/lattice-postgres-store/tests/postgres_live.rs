@@ -202,6 +202,7 @@ fn marker_owned_postgres_17_foundation() {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_task094_transition_phase(config: &LiveConfig) {
     let mut admin = config.connect("postgres", "lattice-devos-task094-admin");
     create_fixed_roles(&mut admin, &config.password);
@@ -266,6 +267,23 @@ fn run_task094_transition_phase(config: &LiveConfig) {
         ExtensionApplyOutcome::Bridged
     );
     println!("TASK094_STAGE_WRITER_V3_BRIDGE_PASS");
+    println!("TASK094_STAGE_REBIND_FAILURE_ATOMICITY_ENTER");
+    insert_task094_active_head_failure_fixture(&mut migrator);
+    let before_failure = task094_v5_bridge_fingerprint(&mut migrator);
+    run_task094_rebind_failure_atomicity(&mut migrator);
+    assert_eq!(
+        task094_v5_bridge_fingerprint(&mut migrator),
+        before_failure,
+        "TASK094_REBIND_FAILURE_MUST_LEAVE_HISTORY_COMPATIBILITY_WRITER_IDENTITY_LEDGER_AND_RUNTIME_ACL_AT_EXACT_V5_BRIDGE"
+    );
+    assert_task094_exact_v5_bridge(&mut migrator);
+    migrator
+        .execute(
+            "DELETE FROM ONLY writer_lease.writer_lease_heads WHERE project_id='task094-failure-active'",
+            &[],
+        )
+        .expect("TASK094_REMOVE_ACTIVE_HEAD_FAILURE_FIXTURE");
+    println!("TASK094_STAGE_REBIND_FAILURE_ATOMICITY_PASS");
     println!("TASK094_STAGE_STORE_V6_ENTER");
     assert_eq!(
         apply_migrations(&mut migrator, &target)
@@ -296,6 +314,165 @@ fn run_task094_transition_phase(config: &LiveConfig) {
         evidence.database_uuid(),
         evidence.manifest_sha256().as_str()
     );
+}
+
+fn insert_task094_active_head_failure_fixture(client: &mut Client) {
+    client
+        .execute(
+            "INSERT INTO writer_lease.writer_lease_heads (\
+                 project_id,row_version,snapshot_schema_version,snapshot_bytes,\
+                 snapshot_bytes_sha256,snapshot_digest,fencing_high_water,lease_revision,\
+                 command_high_water,command_tail_digest,current_status,current_receipt_digest,\
+                 current_project_snapshot_id,current_task_id,current_task_revision,\
+                 current_task_spec_digest,current_attempt_id,current_lease_id,\
+                 current_lease_holder_id,current_worktree_id,current_holder_process_id,\
+                 current_holder_process_start_identity,current_daemon_instance_id,\
+                 current_daemon_epoch,current_fencing_token,current_expires_at) VALUES (\
+                 'task094-failure-active',0,1,decode('01','hex'),\
+                 pg_catalog.sha256(decode('01','hex')),decode(repeat('11',32),'hex'),\
+                 1,1,0,NULL,'ACTIVE',decode(repeat('12',32),'hex'),'snapshot-094',\
+                 'task-094','1',decode(repeat('13',32),'hex'),'attempt-094','lease-094',\
+                 'holder-094','worktree-094',1,decode(repeat('14',32),'hex'),'daemon-094',\
+                 1,1,'2026-08-24T00:00:00Z')",
+            &[],
+        )
+        .expect("TASK094_INSERT_ACTIVE_HEAD_FAILURE_FIXTURE");
+}
+
+fn run_task094_rebind_failure_atomicity(client: &mut Client) {
+    let manifest = verify_embedded_manifest().expect("TASK094_V6_MANIFEST");
+    let entry = &migration_manifest()[6];
+    let mut transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::ReadCommitted)
+        .start()
+        .expect("TASK094_FAILURE_ATOMICITY_TRANSACTION_START");
+    transaction
+        .batch_execute(
+            "SET LOCAL lock_timeout = '5s'; \
+             SET LOCAL statement_timeout = '30s'; \
+             SET LOCAL synchronous_commit = 'on'",
+        )
+        .expect("TASK094_FAILURE_ATOMICITY_HARDEN_TRANSACTION");
+    transaction
+        .batch_execute(include_str!(
+            "../../../db/migrations/0007_foreman_coordination.sql"
+        ))
+        .expect("TASK094_FAILURE_ATOMICITY_STAGE_0007");
+    transaction
+        .execute(
+            "INSERT INTO control.migration_history (\
+                 ordinal,migration_id,migration_path,byte_length,checksum_sha256,\
+                 migration_status,transaction_mode,schema_version,min_reader,max_reader,\
+                 min_writer,max_writer) VALUES (\
+                 $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+            &[
+                &7_i16,
+                &entry.id(),
+                &entry.path(),
+                &i64::try_from(entry.byte_length()).expect("TASK094_0007_BYTE_LENGTH"),
+                &entry.sha256(),
+                &entry.status().as_str(),
+                &entry.transaction_mode().as_str(),
+                &6_i16,
+                &6_i16,
+                &6_i16,
+                &6_i16,
+                &6_i16,
+            ],
+        )
+        .expect("TASK094_FAILURE_ATOMICITY_STAGE_0007_HISTORY");
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE ONLY control.schema_compatibility \
+                 SET manifest_sha256=$1,current_schema_version=6,\
+                     min_reader=6,max_reader=6,min_writer=6,max_writer=6,\
+                     updated_at=clock_timestamp() \
+                 WHERE singleton AND manifest_sha256=$2 AND current_schema_version=5 \
+                   AND min_reader=5 AND max_reader=5 AND min_writer=5 AND max_writer=5",
+                &[
+                    &manifest.manifest_sha256().as_str(),
+                    &CURRENT_V5_MANIFEST_SHA256
+                ],
+            )
+            .expect("TASK094_FAILURE_ATOMICITY_STAGE_V6_COMPATIBILITY"),
+        1
+    );
+    let failure = transaction
+        .batch_execute("CALL writer_lease.writer_lease_rebind_v3()")
+        .expect_err("TASK094_REBIND_ACTIVE_HEAD_MUST_FAIL_AFTER_0007_STAGING");
+    assert_eq!(
+        failure
+            .as_db_error()
+            .expect("TASK094_REBIND_FAILURE_DATABASE_ERROR")
+            .code(),
+        &SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE
+    );
+    transaction
+        .rollback()
+        .expect("TASK094_FAILURE_ATOMICITY_ROLLBACK");
+}
+
+fn task094_v5_bridge_fingerprint(client: &mut Client) -> Vec<String> {
+    [
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+             pg_catalog.to_jsonb(t)::text,E'\\n' ORDER BY t.ordinal),'')) \
+           FROM ONLY control.migration_history t",
+        "SELECT pg_catalog.md5(pg_catalog.to_jsonb(c)::text) \
+           FROM ONLY control.schema_compatibility c WHERE c.singleton",
+        "SELECT pg_catalog.md5(pg_catalog.to_jsonb(w)::text) \
+           FROM ONLY writer_lease.writer_lease_extension_identity w WHERE w.singleton",
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+             pg_catalog.to_jsonb(l)::text,E'\\n' ORDER BY l.ledger_ordinal),'')) \
+           FROM ONLY writer_lease.writer_lease_extension_ledger l",
+        "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+             p.proname::text || ':' || \
+             pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE')::text, \
+             E'\\n' ORDER BY p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid)),'')) \
+           FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+          WHERE n.nspname='writer_lease'",
+    ]
+    .into_iter()
+    .map(|query| {
+        client
+            .query_one(query, &[])
+            .unwrap_or_else(|_| panic!("TASK094_V5_BRIDGE_FINGERPRINT_QUERY_FAILED"))
+            .get(0)
+    })
+    .collect()
+}
+
+fn assert_task094_exact_v5_bridge(client: &mut Client) {
+    let row = client
+        .query_one(
+            "SELECT \
+               (SELECT pg_catalog.count(*) FROM ONLY control.migration_history) = 6, \
+               NOT EXISTS (SELECT 1 FROM ONLY control.migration_history WHERE ordinal=7), \
+               (SELECT manifest_sha256=$1 AND current_schema_version=5 \
+                         AND min_reader=5 AND max_reader=5 AND min_writer=5 AND max_writer=5 \
+                  FROM ONLY control.schema_compatibility WHERE singleton), \
+               (SELECT extension_schema_version=3 AND global_schema_version=5 \
+                         AND global_manifest_sha256=$1 \
+                  FROM ONLY writer_lease.writer_lease_extension_identity WHERE singleton), \
+               (SELECT pg_catalog.string_agg(ledger_ordinal::text || ':' || event_kind::text || \
+                   ':' || extension_schema_version::text || ':' || global_schema_version::text, \
+                   ',' ORDER BY ledger_ordinal) \
+                  FROM ONLY writer_lease.writer_lease_extension_ledger) = '1:INSTALLED:2:5,2:UPGRADED:3:5', \
+               NOT pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE'), \
+               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+                 JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                 WHERE n.nspname='writer_lease' \
+                   AND pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE')) = 0",
+            &[&CURRENT_V5_MANIFEST_SHA256],
+        )
+        .expect("TASK094_EXACT_V5_BRIDGE_QUERY");
+    for index in 0..7 {
+        assert!(
+            row.get::<_, bool>(index),
+            "TASK094_EXACT_V5_BRIDGE_ASSERTION_{index}"
+        );
+    }
 }
 
 #[test]

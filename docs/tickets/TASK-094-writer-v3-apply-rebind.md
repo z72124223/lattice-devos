@@ -2,9 +2,12 @@
 ticket_id: TASK-094
 title: Writer Lease v3 apply/rebind and Store schema-v6 transition repair
 spec_id: SPEC-002
-spec_version: 37
+spec_version: 38
 module_id: postgres-writer-lease
 constitution_version: 1.3
+additional_modules:
+  - module_id: postgres-store
+    constitution_version: 1.13
 status: in_progress
 parallel_safe: false
 depends_on:
@@ -77,6 +80,10 @@ Writer-owned rebind function inside the same transaction as migration `0007`.
       `ExactV6Full` and advances only the exact predecessor.
 - [x] Migration `0007`, compatibility publication, and Writer-owned v3 rebind
       commit atomically or roll back together through the fixed SQL boundary.
+- [x] A marker-owned PostgreSQL failure injection holds an active Writer head,
+      forces the rebind precondition to fail after ordinal `0007` is staged,
+      and proves the exact v5 bridge history, compatibility, Writer identity,
+      ledger, and runtime ACL fingerprint remains unchanged.
 - [x] Wrong/partial/colliding history, stale lease or fence, inconsistent
       retry, and catalog/ACL drift fail closed with no partial effects.
 - [x] Writer v1/v2 and migrations `0001`-`0006` byte/hash invariants pass.
@@ -118,3 +125,10 @@ task archival are not authorized.
   allowlist. The workspace test process completed, but the runner did not
   return a terminal exit receipt to this worker; do not treat it as a verified
   PASS until the parent reruns it.
+- Review repair requires Postgres Store constitution 1.13: the sole mutation
+  exception is the fixed Writer-owned rebind call inside the exact v5-to-v6
+  migration transaction; it grants no Writer state ownership or generic SQL.
+- Review-repair live receipt: run `bace41835c794136b99e8e1312108236`, port
+  `57281`, first observed the intentional rebind SQLSTATE `55000` rollback and
+  exact-v5 bridge fingerprint, then completed v5-to-v6. Teardown proved
+  `root_absent=True` and `listener_survivors=0`.

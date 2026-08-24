@@ -6,6 +6,7 @@
 | Existing dirty work | preserved; no reset, clean, cross-worktree edit, push or merge | pass |
 | TDD provenance | pre-existing implementation had no locally available RED transcript; no RED claim made | recorded limitation |
 | Focused regression | Writer Lease 16/16; Store migration 41/41 and schema-v6 5/5 | pass |
+| Review repair: live rebind failure atomicity | run `bace41835c794136b99e8e1312108236`, port `57281`: SQLSTATE 55000 after 0007/compat staging rolls back exact v5 bridge fingerprint; normal transition then passes | pass; root_absent=True, listener_survivors=0 |
 | Live PostgreSQL | marker-owned dynamic-port disposable run with teardown receipt | pass |
 | Store all-targets | 109 passed, 2 ignored | pass |
 | Scoped strict Clippy / fmt / project check / diff check | all pass | pass |

@@ -1,10 +1,10 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.12
+version: 1.13
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-24
 ---
 
 ## Mission
@@ -47,6 +47,13 @@ profile for the future Task-Ledger-owned `FOREMAN_COORDINATION` stream and
 `FOREMAN_SNAPSHOT_RECORDED` event. It recognizes Writer v3 bridge/current
 states but does not add migration `0007`, event semantics, rows, or a second
 transaction path.
+Version 1.13 permits one narrow migration-only exception: after the exact
+schema-v5 prefix has been verified and ordinal `0007` plus the schema-v6
+compatibility row are staged in the existing runner transaction, Store may call
+only the Writer-owned zero-argument `writer_lease.writer_lease_rebind_v3()`
+procedure. Store neither constructs nor interprets Writer state, and any
+procedure failure rolls back migration history, compatibility, Writer identity,
+Writer ledger, and runtime ACL changes together.
 
 ## Non-Goals
 
@@ -81,10 +88,14 @@ transaction path.
   Guardian activation, domain repository completeness, effect delivery, or
   release safety.
 - Install, migrate, write, replay, repair, or expose Writer Lease extension
-  state. The sole exception is executing the fixed
-  `writer_lease_assert_current_v1` predicate at a Task Ledger mutation
-  boundary; PostgreSQL Writer Lease remains the persistence adapter and Writer
-  Lease remains the semantic owner.
+  state. The only exceptions are the fixed 15-scalar
+  `writer_lease_assert_current_v1` predicate at a Task Ledger mutation boundary
+  and, solely while advancing exact v5 to v6 in the existing migration
+  transaction, the fixed Writer-owned zero-argument
+  `writer_lease.writer_lease_rebind_v3()` procedure. Neither exception grants a
+  Writer repository API, generic SQL, state parsing, state construction, or
+  semantic ownership; PostgreSQL Writer Lease remains the persistence adapter
+  and Writer Lease remains the semantic owner.
 
 ## Owned Data
 
@@ -797,6 +808,15 @@ schema-qualified and table-ACL closed. Record reasserts the exact Writer current
 tuple in the same serializable transaction; rollback removes both Ledger and
 child effects. No diagnostic or independent current-state store is added.
 
+Version 1.13 corrects the Store boundary for that exact migration: Store may
+call `writer_lease.writer_lease_rebind_v3()` only after exact v5-prefix
+verification and staging ordinal `0007`/schema-v6 compatibility in the same
+runner-owned transaction. The procedure stays Writer-owned and fixed; Store
+does not install, mutate directly, parse, replay, or derive Writer state. A
+failed rebind rolls back every staged global and Writer-visible effect, leaving
+the exact v5 bridge identity, ledger, runtime ACL, migration history, and
+compatibility row intact.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -846,7 +866,7 @@ child effects. No diagnostic or independent current-state store is added.
 | Memory-v3 extension recognition | exact separate global-v5 catalog/owner/ACL profile, immutable v1/v2 bytes, v2-upgrade-only classification, and no base-manifest/count change | Compatibility review | yes |
 | Writer Lease profile closure | exact V3+Memory-v2+Writer-Lease-v1 catalog/owner/ACL/function/checksum acceptance plus partial/extra/drift/wrong-owner/direct-grant denial | Security review | yes |
 | Foreman schema-v6 binding | exact 0007 ordering/hash, fixed child/event linkage, same-transaction fencing, rollback/restart/fresh-process replay and unknown-version/privacy denial | Integration review | yes |
-| Extension ownership | static/dependency tests prove Store cannot install, mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate is executable | Architecture review | yes |
+| Extension ownership | static/dependency tests prove Store cannot install, directly mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate and the exact v5-to-v6 migration call to Writer-owned `writer_lease_rebind_v3()` are executable | Architecture review | yes |
 
 ## Change Policy
 
@@ -877,3 +897,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.10 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Delegate autonomy subject/profile semantics and hashes exclusively to Task Ledger 2.3 while preserving schema-v5 physical bytes and Store ownership | User-approved TASK-050 repair amendment |
 | 1.11 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Reserve exact schema-v6 foreman-coordination catalog/ACL and Writer-v3 bridge recognition without implementing migration 0007 or event semantics | Fixed-foreman delegation |
 | 1.12 | 2026-08-21 | SPEC-006 v3, ADR-024/025, TASK-079 | Append 0007 and bind fixed foreman scalars to the Ledger event under same-transaction Writer fencing and verified replay | Fixed-foreman delegation |
+| 1.13 | 2026-08-24 | SPEC-002 v38, ADR-026, TASK-094 review repair | Permit only the fixed Writer-owned v3 rebind call inside the exact v5-to-v6 migration transaction and require live failure atomicity evidence | TASK-094 repair authority |
