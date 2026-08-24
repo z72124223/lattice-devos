@@ -30,6 +30,26 @@ regressions and the owned live harness.
 - The harness rejects 5432, preflights ownership, uses a marker-owned temp root,
   and proves listener/root teardown.
 
+## 2026-08-25 boundary repair
+
+- P1 resolved locally: Store no longer depends on the Writer adapter, parses
+  Writer semantic rows, or locks/mutates Writer tables. It uses its fixed
+  catalog closure and one fixed zero-argument procedure call for both exact-v5
+  transition and exact-v6 retry.
+- P2 resolved locally: the cross-adapter fixture moved out of Store and into
+  `lattice-runtime` composition. Fresh run
+  `fb5817a389794a5a8e637bfff9288a61` / port `58375` asserted active-head
+  SQLSTATE 55000, exact rollback fingerprint, identity/ledger/ACL drift denial,
+  successful v6 transition and idempotent retry, with owned teardown.
+- Residual: this test self-installs its bridge fixture and does not reorder the
+  product runtime's Store-first bootstrap. A separate governed product-based
+  integration task remains required before deployment can be considered.
+- Verification residual: Store + Writer strict Clippy passes. Runtime's strict
+  test-target Clippy is blocked by 17 pre-existing `lattice-hermes-adapter`
+  diagnostics reached through the runtime dependency; this ticket does not
+  modify Hermes. `npm check` passes, while `npm verify` has no captured terminal
+  receipt after its Node child outlived the command collector.
+
 ## Boundary
 
 This is an author local review, not an independent merge approval. A parent

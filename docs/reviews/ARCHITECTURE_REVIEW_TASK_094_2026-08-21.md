@@ -16,5 +16,18 @@ Store constitution 1.13 makes the sole rebind exception explicit and bounded to
 the exact v5-to-v6 runner transaction. The new live failure proof validates the
 rollback boundary without granting Store a Writer adapter or semantic authority.
 
+The 2026-08-25 repair removes the Store-to-Writer dev dependency and moves the
+only cross-adapter live fixture to `lattice-runtime`, the legal composition
+root. Store retains pg_catalog procedure/owner/body/ACL recognition but does
+not read Writer semantic rows. Writer's fixed procedure now owns its locks,
+bridge/current classification, semantic identity/ledger/head checks, ACL enable
+and postcondition. Task Ledger 2.4 and Foreman State 1.2 remain semantic owners.
+
+Residual architecture prerequisite: product runtime currently starts Store
+migration before Writer-v3 bridge/bootstrap. TASK-094's self-contained fixture
+does not change that sequence; a separately governed integration task must
+compose Writer-v3 bridge before Store v6/rebind. This review does not claim
+production deployability.
+
 Known non-claims: remote CI, merge readiness, deployment/release and LATTICE
 durable acceptance are outside this local checkpoint.

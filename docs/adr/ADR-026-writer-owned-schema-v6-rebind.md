@@ -10,13 +10,16 @@ The Writer Lease adapter owns v3 bridge application and rebind. It exposes
 typed administrative operations and one fixed zero-argument PostgreSQL
 procedure, `writer_lease.writer_lease_rebind_v3()`. The Store runner may call
 only that procedure after it has applied the exact ordinal-7 migration and
-while both remain in its existing transaction. It then verifies exact v6
-catalog, manifest and Writer-current closure before commit.
+staged schema-v6 compatibility, while both remain in its existing transaction.
+Exact-v6 retry calls the same idempotent procedure before it verifies the exact
+v6 catalog/ACL closure; that retry does not add a Writer ledger row.
 
 The Store must distinguish six-row `ExactV5Prefix` from seven-row
 `ExactV6Full`. It cannot treat either as the other, install a Writer extension,
-interpret Writer ledgers, create Writer receipts, or reconstruct a Writer
-authority head. V1/v2 SQL and migrations 0001 through 0006 remain frozen.
+interpret Writer identity, ledgers, active heads, commands, transitions, create
+Writer receipts, or reconstruct a Writer authority head. It may recognize only
+pg_catalog procedure signature/owner/body/ACL/grant closure. V1/v2 SQL and
+migrations 0001 through 0006 remain frozen.
 
 ## Consequences
 

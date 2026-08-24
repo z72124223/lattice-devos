@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-if ($Port -eq 5432) {
+if ($Port -in @(5432, 58743)) {
     throw 'TASK094_FORBIDDEN_PORT'
 }
 
@@ -159,8 +159,8 @@ try {
     Write-Host 'TASK094_CARGO_TEST_ENTER'
     Push-Location -LiteralPath $repository
     try {
-        & cargo test -p lattice-postgres-store --test postgres_live `
-            marker_owned_postgres_17_foundation --locked -- --nocapture
+        & cargo test -p lattice-runtime --test task094_writer_v3_transition `
+            task094_writer_v3_transition_composition --locked -- --nocapture
         if ($LASTEXITCODE -ne 0) {
             throw 'TASK094_FOCUSED_LIVE_TEST_FAILED'
         }

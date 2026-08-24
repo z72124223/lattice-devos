@@ -15,4 +15,17 @@
 | Workspace all-target test | launched and process tree observed to exit, but runner returned no terminal exit receipt | unverified; parent rerun required |
 | Independent merge review/CI/delivery | parent/remote owned | pending |
 
+## 2026-08-25 boundary-repair replacement evidence
+
+| Stage | Current evidence | Status |
+|---|---|---|
+| Store/Writer boundary | Store dependency and live phase removed; catalog-only procedure closure retained; runtime composition root owns both adapters | pass |
+| Runtime composition live gate | run `fb5817a389794a5a8e637bfff9288a61`, port `58375`, PID `2760`; FRESH_V5, MEMORY_V3, WRITER_V2, WRITER_V3_BRIDGE, REBIND_FAILURE_ATOMICITY and STORE_V6 all pass | pass; exit 0, root_absent=True, listener_survivors=0 |
+| Failure atomicity | active head asserts SQLSTATE 55000; history/compatibility/Writer identity+ledger/runtime ACL fingerprint stays exact v5; identity, ledger and ACL drift fail closed without partial application | pass |
+| Prior Store-owned TASK-094 phase | superseded by runtime composition test and not reused as evidence | invalidated |
+| Product composition integration | product runtime currently sequences Store before Writer-v3 bootstrap; separate governed integration task required | pending, out of scope |
+| Focused regressions after boundary repair | Store migration contract 42/42; Writer extension contract 12/12; runtime composition non-live 1/1; Store all targets 110 passed, 2 ignored; Writer all targets 16/16 | pass |
+| Strict Clippy after boundary repair | Store + Writer scope passes `-D warnings`; runtime test scope reaches 17 existing Hermes diagnostics through its direct runtime dependency | partial; Hermes outside allowlist, not repaired |
+| Repository Node verify | `npm check` exits 0; `npm verify` child completed after the command collector's terminal receipt timeout | unverified; do not treat as pass |
+
 This is a local evidence ledger, not a second task truth or delivery receipt.

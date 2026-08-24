@@ -11,8 +11,131 @@ const LIVE_CONTROL_STORE_SHA256: &str =
     "00ae3eedd76704f26b1df58955d9d594c98f0ba525be93b15d8c9ebb1f2115c1";
 const PROJECT_REGISTRY_REPOSITORY_SHA256: &str =
     "b7af1f8a8ac370bbfc8a5312497461587cb8a86eb32ff97e5b865c7ae9bf0dcf";
+
 #[test]
-fn task076_store_migration_locks_global_memory_writer_before_classification() {
+#[allow(clippy::too_many_lines)]
+fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_store() {
+    let manifest = include_str!("../Cargo.toml");
+    assert!(
+        !manifest.contains("lattice-postgres-writer-lease"),
+        "Store must not carry a Writer adapter dependency, even for tests"
+    );
+
+    let setup = include_str!("../src/postgres_setup.rs");
+    for forbidden in [
+        "verify_writer_lease_v2_identity_and_ledger",
+        "verify_writer_lease_v3_identity",
+        "writer_lease_identity_shape",
+        "writer_lease_ledger_shape",
+        "FROM ONLY writer_lease.writer_lease_extension_",
+        "UPDATE ONLY writer_lease.",
+        "INSERT INTO writer_lease.",
+        "DELETE FROM ONLY writer_lease.",
+        "LOCK TABLE writer_lease.",
+    ] {
+        assert!(
+            !setup.contains(forbidden),
+            "Store must not retain Writer semantic ownership: {forbidden}"
+        );
+    }
+
+    let v5_to_v6 = setup
+        .split_once("InstalledManifestState::ExactV5Prefix")
+        .expect("exact v5 transition arm")
+        .1
+        .split_once("InstalledManifestState::ExactV6Full")
+        .expect("exact v6 retry arm")
+        .0;
+    assert_eq!(
+        v5_to_v6
+            .matches("CALL writer_lease.writer_lease_rebind_v3()")
+            .count(),
+        1,
+        "exact-v5 transition has one fixed Writer executable boundary"
+    );
+    let v5_order = [
+        "verify_v5_upgrade_source",
+        "apply_missing_entries(&mut transaction, 6)",
+        "advance_compatibility_from_v5",
+        "CALL writer_lease.writer_lease_rebind_v3()",
+        "verify_runtime_foreman_schema_v6",
+    ]
+    .map(|needle| {
+        v5_to_v6
+            .find(needle)
+            .unwrap_or_else(|| panic!("exact-v5 transition missing {needle}"))
+    });
+    assert!(
+        v5_order.windows(2).all(|pair| pair[0] < pair[1]),
+        "exact-v5 transition must retain v5 verification, 0007, v6 compatibility, fixed CALL, then catalog/ACL verification"
+    );
+    let v6_retry = setup
+        .split_once("InstalledManifestState::ExactV6Full")
+        .expect("exact v6 retry arm")
+        .1
+        .split_once("};\n\n    preflight_connection")
+        .expect("migration match boundary")
+        .0;
+    assert_eq!(
+        v6_retry
+            .matches("CALL writer_lease.writer_lease_rebind_v3()")
+            .count(),
+        1,
+        "exact-v6 retry must call the same idempotent Writer procedure"
+    );
+    let rebind_sql = include_str!("../../../db/extensions/writer-lease/v3-rebind.sql");
+    for required in [
+        "CREATE PROCEDURE writer_lease.writer_lease_rebind_v3()",
+        "SECURITY INVOKER",
+        "SET search_path = pg_catalog",
+        "SET row_security = on",
+        "SET lock_timeout = '5s'",
+        "SET statement_timeout = '30s'",
+        "LOCK TABLE writer_lease.writer_lease_extension_identity",
+        "writer_lease.writer_lease_extension_ledger",
+        "writer_lease.writer_lease_heads",
+    ] {
+        assert!(
+            rebind_sql.contains(required),
+            "missing Writer-owned rebind boundary: {required}"
+        );
+    }
+    assert!(!rebind_sql.contains(
+        "GRANT EXECUTE ON PROCEDURE writer_lease.writer_lease_rebind_v3() TO lattice_runtime"
+    ));
+
+    let store_live = include_str!("postgres_live.rs");
+    assert!(
+        !store_live.contains("TASK094_STAGE_"),
+        "TASK-094 live composition belongs to lattice-runtime, not Store"
+    );
+    assert!(
+        !store_live.contains("lattice_postgres_writer_lease"),
+        "Store live tests must not import the Writer adapter"
+    );
+    let runtime_live =
+        include_str!("../../../apps/lattice-runtime/tests/task094_writer_v3_transition.rs");
+    for required in [
+        "TASK094_STAGE_FRESH_V5_PASS",
+        "TASK094_STAGE_MEMORY_V3_PASS",
+        "TASK094_STAGE_WRITER_V2_PASS",
+        "TASK094_STAGE_WRITER_V3_BRIDGE_PASS",
+        "TASK094_STAGE_REBIND_FAILURE_ATOMICITY_PASS",
+        "TASK094_STAGE_STORE_V6_PASS",
+        "SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE",
+        "assert_drift_failure_preserves_state",
+        "assert_ledger_drift_preserves_state",
+        "assert_acl_drift_preserves_state",
+        "MigrationApplyOutcome::AlreadyCurrent",
+    ] {
+        assert!(
+            runtime_live.contains(required),
+            "runtime live proof missing {required}"
+        );
+    }
+}
+#[test]
+fn task076_store_migration_locks_global_and_memory_before_catalog_classification() {
     let setup = include_str!("../src/postgres_setup.rs");
     let apply = setup
         .split_once("pub fn apply_migrations")
@@ -45,35 +168,29 @@ fn task076_store_migration_locks_global_memory_writer_before_classification() {
     let memory_tables = source
         .find("LOCK TABLE memory.codebase_memory_analyses")
         .expect("Memory source locks");
-    let writer_tables = source
-        .find("LOCK TABLE writer_lease.writer_lease_commands")
-        .expect("Writer Lease source locks");
     let reclassify = source[memory_tables..]
         .find("classify_current_catalog_profile")
         .map(|offset| memory_tables + offset)
         .expect("locked profile reclassification");
-    assert!(memory_tables < writer_tables && writer_tables < reclassify);
+    assert!(memory_tables < reclassify);
+    assert!(!source.contains("LOCK TABLE writer_lease."));
     assert!(source.contains("CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge"));
 }
 
 #[test]
-fn task076_store_freezes_writer_v2_catalog_acl_identity_and_ledger_profiles() {
+fn task076_store_freezes_writer_v2_catalog_and_acl_profiles_without_semantic_rows() {
     let setup = include_str!("../src/postgres_setup.rs");
     for required in [
         "WRITER_LEASE_V2_SQL_SHA256",
-        "WRITER_LEASE_V2_MANIFEST_SHA256",
         "WRITER_LEASE_V2_BRIDGE_CATALOG_PROFILES",
         "WRITER_LEASE_V2_CURRENT_CATALOG_PROFILES",
         "verify_writer_lease_v2_catalog",
         "verify_writer_lease_v2_function_sources",
-        "verify_writer_lease_v2_identity_and_ledger",
         "LATTICE_WRITER_LEASE_SCHEMA_V2",
         "LATTICE_WRITER_LEASE_EXTENSION_IDENTITY_V2",
         "LATTICE_WRITER_LEASE_EXTENSION_LEDGER_V2",
         "writer_lease_bind_runtime_v2",
         "writer_lease_load_for_update_v2",
-        "1:INSTALLED,2:UPGRADED",
-        "1:INSTALLED,2:UPGRADED,3:REBOUND",
         "WriterLeaseV2RuntimeProfile::Bridge",
         "WriterLeaseV2RuntimeProfile::Current",
     ] {
@@ -99,7 +216,6 @@ fn task076_store_freezes_writer_v2_catalog_acl_identity_and_ledger_profiles() {
             "missing measured Writer v2 bridge profile: {measured_bridge_signature}"
         );
     }
-    assert!(setup.contains("runtime == WriterLeaseV2RuntimeProfile::Bridge"));
     assert!(setup.contains(
         "WriterLeaseV2RuntimeProfile::Bridge => &WRITER_LEASE_V2_BRIDGE_CATALOG_PROFILES"
     ));
@@ -107,8 +223,8 @@ fn task076_store_freezes_writer_v2_catalog_acl_identity_and_ledger_profiles() {
         "WriterLeaseV2RuntimeProfile::Current => &WRITER_LEASE_V2_CURRENT_CATALOG_PROFILES"
     ));
     assert!(setup.contains("bd5b05d60340a1b9f9fbf1de2b4bed8586b7eede4fd8d7c4825841c221e89b7a"));
-    assert!(setup.contains("\"{}|t|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\""));
-    assert!(!setup.contains("\"{}|true|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\""));
+    assert!(!setup.contains("writer_lease_extension_identity i"));
+    assert!(!setup.contains("writer_lease_extension_ledger l"));
     let writer_v2_catalog = setup
         .split_once("fn verify_writer_lease_v2_catalog")
         .expect("Writer v2 companion catalog verifier")
@@ -1070,8 +1186,8 @@ fn schema_v6_runtime_admission_requires_writer_v3_current_and_closed_acl() {
         "task_ledger_foreman_snapshots",
         "has_table_privilege",
         "task_ledger_record_foreman_snapshot_v1",
-        "extension_schema_version=3",
-        "global_schema_version=6",
+        "verify_writer_lease_v3_functions(client, true)",
+        "n.nspname='writer_lease'",
         "WriterLeaseV3Profile::Current",
         "verify_runtime_admission_present(client)",
     ] {

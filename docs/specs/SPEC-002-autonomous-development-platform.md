@@ -9,7 +9,9 @@ modules:
   - module_id: task-domain
     constitution_version: 2.2
   - module_id: task-ledger
-    constitution_version: 2.3
+    constitution_version: 2.4
+  - module_id: lattice-foreman-state
+    constitution_version: 1.2
   - module_id: policy-engine
     constitution_version: 2.6
   - module_id: project-registry
@@ -1555,6 +1557,11 @@ rebind procedure after staging ordinal 7 and schema-v6 compatibility in the
 same transaction. It cannot otherwise mutate or interpret Writer state. A
 precondition failure rolls back all staged migration, compatibility, Writer
 identity, Writer ledger, and runtime ACL effects to the exact v5 bridge.
+Task Ledger 2.4 and Foreman State 1.2 remain the semantic owners of the
+foreman event and state: Store owns only global migration persistence. Store
+may recognize Writer procedure/catalog/ACL closure but never parse Writer
+identity, ledger, active-head, command, or transition rows; both exact-v5
+transition and exact-v6 retry use the same Writer-owned idempotent procedure.
 
 ## Verification Plan
 

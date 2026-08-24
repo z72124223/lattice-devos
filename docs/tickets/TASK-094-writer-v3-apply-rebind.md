@@ -35,6 +35,7 @@ allowed_paths:
   - crates/lattice-postgres-store/tests/schema_v6_profile.rs
   - crates/lattice-postgres-store/tests/postgres_project_registry.rs
   - crates/lattice-postgres-store/tests/postgres_live.rs
+  - apps/lattice-runtime/tests/task094_writer_v3_transition.rs
   - db/extensions/writer-lease/v3.sql
   - db/extensions/writer-lease/v3-rebind.sql
   - db/migrations/0007_foreman_coordination.sql
@@ -144,3 +145,27 @@ task archival are not authorized.
   Teardown reported `root_absent=True` and `listener_survivors=0`; the parent
   then observed the marker root absent while 5432 PID 5200 and 58743 PID 25912
   remained listening.
+
+## 2026-08-25 boundary-repair evidence
+
+- The prior Store-owned TASK-094 live phase is superseded and must not be
+  reused as current evidence. The equivalent cross-adapter fixture now lives
+  only at `apps/lattice-runtime/tests/task094_writer_v3_transition.rs`, where
+  the composition root legally depends on both adapters; Store has no Writer
+  adapter dependency, Writer semantic-row parser, direct Writer DML, or direct
+  Writer table lock.
+- Fresh local live receipt: run `fb5817a389794a5a8e637bfff9288a61`, marker
+  root `C:\Users\f7212\AppData\Local\Temp\lattice-task094-pg-fb5817a389794a5a8e637bfff9288a61`,
+  dynamic port `58375`, PID `2760`, exit `0`. It passed FRESH_V5, MEMORY_V3,
+  WRITER_V2, WRITER_V3_BRIDGE, REBIND_FAILURE_ATOMICITY, and STORE_V6. The
+  active-head call asserted SQLSTATE `55000`; runner rollback kept history,
+  compatibility, Writer identity/ledger and runtime ACL fingerprints exact at
+  the v5 bridge. Identity drift reaches the Writer transaction; ledger and ACL
+  drift fail earlier at Store catalog closure; all leave the measured state
+  unchanged. Exact-v6 retry calls the same procedure and remains idempotent.
+  Teardown reported `root_absent=True`, `listener_survivors=0`.
+- This is a local candidate only. Product runtime currently orders Store
+  migration before Writer-v3 bridge/bootstrap; a separate product-based,
+  governed integration task must explicitly compose Writer-v3 bridge before
+  Store v6/rebind. TASK-094 neither changes that production composition nor
+  claims deployment readiness.

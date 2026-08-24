@@ -4,7 +4,7 @@ name: LATTICE Postgres Store
 version: 1.13
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-24
+last_reviewed: 2026-08-25
 ---
 
 ## Mission
@@ -54,6 +54,9 @@ only the Writer-owned zero-argument `writer_lease.writer_lease_rebind_v3()`
 procedure. Store neither constructs nor interprets Writer state, and any
 procedure failure rolls back migration history, compatibility, Writer identity,
 Writer ledger, and runtime ACL changes together.
+The actual dependent semantic owners are Task Ledger 2.4 and Foreman State 1.2:
+Store persists only their already-governed scalar event boundary and does not
+create a second foreman or Ledger meaning.
 
 ## Non-Goals
 
@@ -96,6 +99,12 @@ Writer ledger, and runtime ACL changes together.
   Writer repository API, generic SQL, state parsing, state construction, or
   semantic ownership; PostgreSQL Writer Lease remains the persistence adapter
   and Writer Lease remains the semantic owner.
+- Parse, classify, fingerprint, or otherwise interpret Writer identity, ledger,
+  head, command, or transition rows. Store may retain only its existing fixed
+  15-scalar Writer current-authority assertion and pg_catalog procedure/
+  owner/body/ACL/grant closure recognition. Its only Writer mutation seam is
+  the exact-v5 and exact-v6 retry call to the fixed zero-argument rebind
+  procedure in the governed migration transaction.
 
 ## Owned Data
 
@@ -897,4 +906,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.10 | 2026-08-15 | SPEC-002 v35, ADR-011/019, TASK-050 | Delegate autonomy subject/profile semantics and hashes exclusively to Task Ledger 2.3 while preserving schema-v5 physical bytes and Store ownership | User-approved TASK-050 repair amendment |
 | 1.11 | 2026-08-21 | SPEC-002 v36, ADR-025, TASK-087 | Reserve exact schema-v6 foreman-coordination catalog/ACL and Writer-v3 bridge recognition without implementing migration 0007 or event semantics | Fixed-foreman delegation |
 | 1.12 | 2026-08-21 | SPEC-006 v3, ADR-024/025, TASK-079 | Append 0007 and bind fixed foreman scalars to the Ledger event under same-transaction Writer fencing and verified replay | Fixed-foreman delegation |
-| 1.13 | 2026-08-24 | SPEC-002 v38, ADR-026, TASK-094 review repair | Permit only the fixed Writer-owned v3 rebind call inside the exact v5-to-v6 migration transaction and require live failure atomicity evidence | TASK-094 repair authority |
+| 1.13 | 2026-08-25 | SPEC-002 v38, ADR-026, TASK-094 boundary repair | Keep the existing 15-scalar assertion while forbidding Store Writer semantic-row parsing and adapter dependency; exact v5 transition and exact v6 retry call only the Writer-owned rebind procedure, with Task Ledger 2.4 and Foreman State 1.2 semantic ownership retained | TASK-094 repair authority |

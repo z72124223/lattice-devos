@@ -40,26 +40,12 @@ const CODEBASE_MEMORY_V3_SQL_SHA256: &str =
     "7388f6bfe4c2d30a20306e4f9ebdff5862125bcab58f769ba286af542cb051c3";
 const CODEBASE_MEMORY_V3_MANIFEST_SHA256: &str =
     "d4cc712d262ae1f7c96bd65526eab611c90e193363afd865af2126307b2903f0";
-const WRITER_LEASE_EXTENSION_ID: &str = "lattice-writer-lease";
-const WRITER_LEASE_V1_SCHEMA_VERSION: i16 = 1;
 const WRITER_LEASE_V1_SQL_SHA256: &str =
     "63ffbf8f8b6c22bf35c3d393bd84e9462ca37e4ace94ceaedd6c27b729daa562";
-const WRITER_LEASE_V1_MANIFEST_SHA256: &str =
-    "0179e2a9b0976008902ab0d1cce6ab493a16047a649571f9ce4f13cc53cc6b33";
-const WRITER_LEASE_V2_SCHEMA_VERSION: i16 = 2;
-const WRITER_LEASE_V2_PATH: &str = "db/extensions/writer-lease/v2.sql";
 const WRITER_LEASE_V2_SQL_SHA256: &str =
     "8243fd39a3565c641423fde3f15cf801a4a48a12c8d238ae8e1657acdcdc56e3";
-const WRITER_LEASE_V2_MANIFEST_SHA256: &str =
-    "5f54c182465c8e2dc8a6e6cc2ebd9a375f776adf500656586e59bfbc7dfd31a4";
-const WRITER_LEASE_V3_SCHEMA_VERSION: i16 = 3;
-const WRITER_LEASE_V3_PATH: &str = "db/extensions/writer-lease/v3.sql";
 const WRITER_LEASE_V3_SQL_SHA256: &str =
     "677c010a61e5945bcc6b96ca9f3d9e57830dc42f4cfbd46ea76d5e9d8b9262a0";
-const WRITER_LEASE_V3_MANIFEST_SHA256: &str =
-    "eab2812fa3d94cd3466d7c003386f805a973fd7def1f16aeb15b52f47dad78e4";
-const WRITER_LEASE_V2_BRIDGE_LEDGER_PROFILE: &str = "1:INSTALLED,2:UPGRADED";
-const WRITER_LEASE_V2_UPGRADED_LEDGER_PROFILE: &str = "1:INSTALLED,2:UPGRADED,3:REBOUND";
 const WRITER_LEASE_V1_SQL: &str = include_str!("../../../db/extensions/writer-lease/v1.sql");
 const WRITER_LEASE_V2_SQL: &str = include_str!("../../../db/extensions/writer-lease/v2.sql");
 const WRITER_LEASE_V3_SQL: &str = include_str!("../../../db/extensions/writer-lease/v3.sql");
@@ -1741,6 +1727,11 @@ pub fn apply_migrations(
             MigrationApplyOutcome::Applied { executable_count }
         }
         InstalledManifestState::ExactV6Full => {
+            transaction
+                .batch_execute("CALL writer_lease.writer_lease_rebind_v3()")
+                .map_err(|error| {
+                    map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+                })?;
             verify_runtime_foreman_schema_v6(&mut transaction, target, &manifest, false)?;
             MigrationApplyOutcome::AlreadyCurrent
         }
@@ -2062,44 +2053,18 @@ fn verify_runtime_foreman_schema_v6<C: GenericClient>(
                     'lattice_runtime',p.oid,'EXECUTE'))::bigint \
                    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace \
                   WHERE n.nspname='writer_lease'), \
-                COALESCE(pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE'),false), \
-                (SELECT count(*)::bigint FROM ONLY writer_lease.writer_lease_extension_identity w \
-                  WHERE w.singleton AND w.extension_id='lattice-writer-lease' \
-                    AND w.extension_schema_version=3 \
-                    AND w.extension_path='db/extensions/writer-lease/v3.sql' \
-                    AND w.extension_sql_sha256='677c010a61e5945bcc6b96ca9f3d9e57830dc42f4cfbd46ea76d5e9d8b9262a0' \
-                    AND w.extension_manifest_sha256='eab2812fa3d94cd3466d7c003386f805a973fd7def1f16aeb15b52f47dad78e4' \
-                    AND w.global_schema_version=6 AND w.global_manifest_sha256=$1 \
-                    AND w.required_memory_schema_version=3 \
-                    AND w.required_memory_manifest_sha256=$2), \
-                (SELECT pg_catalog.string_agg(l.ledger_ordinal::text||':'||l.event_kind::text||':'||\
-                    l.extension_schema_version::text||':'||l.global_schema_version::text,',' \
-                    ORDER BY l.ledger_ordinal) \
-                   FROM ONLY writer_lease.writer_lease_extension_ledger l)",
-            &[&manifest.manifest_sha256().as_str(), &CODEBASE_MEMORY_V3_MANIFEST_SHA256],
+                COALESCE(pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE'),false)",
+            &[],
         )
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
-    let ledger_shape =
-        row_value::<Option<String>>(&writer, 5, PostgresStoreSetupErrorKind::CorruptCatalog)?;
-    let current_shape = matches!(
-        ledger_shape.as_deref(),
-        Some(
-            "1:INSTALLED:3:6"
-                | "1:INSTALLED:2:5,2:UPGRADED:3:5,3:REBOUND:3:6"
-                | "1:INSTALLED:1:3,2:UPGRADED:2:3,3:REBOUND:2:5,4:UPGRADED:3:5,5:REBOUND:3:6"
-        )
-    );
     if row_value::<i64>(&writer, 0, PostgresStoreSetupErrorKind::CorruptCatalog)? != 5
         || row_value::<i64>(&writer, 1, PostgresStoreSetupErrorKind::CorruptCatalog)? != 12
         || row_value::<i64>(&writer, 2, PostgresStoreSetupErrorKind::PermissionDenied)? != 7
         || !row_value::<bool>(&writer, 3, PostgresStoreSetupErrorKind::PermissionDenied)?
-        || row_value::<i64>(&writer, 4, PostgresStoreSetupErrorKind::CorruptCatalog)? != 1
-        || !current_shape
     {
         return Err(catalog_error());
     }
     verify_writer_lease_v3_functions(client, true)?;
-    verify_writer_lease_v3_identity(client, target, manifest, true)?;
 
     let migration = &migration_manifest()[6];
     let candidate = ForemanSchemaV6Candidate::from_migration_bytes(
@@ -2632,41 +2597,14 @@ fn verify_catalog<C: GenericClient>(
     verify_compatibility(client, manifest, current_profile)?;
     let database_uuid = read_database_identity(client, target)?;
     match current_profile {
-        CatalogProfile::V5CodebaseMemoryV2UpgradePending => {
+        CatalogProfile::V5CodebaseMemoryV2UpgradePending
+        | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending => {
             verify_codebase_memory_v2_identity(client, target)?;
         }
-        CatalogProfile::V5CodebaseMemoryV3Current => {
+        CatalogProfile::V5CodebaseMemoryV3Current
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+        | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => {
             verify_codebase_memory_v3_identity_for_role(client, target, manifest, role)?;
-        }
-        CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending => {
-            verify_codebase_memory_v2_identity(client, target)?;
-            verify_writer_lease_v2_identity_for_role(
-                client,
-                target,
-                manifest,
-                role,
-                WriterLeaseV2RuntimeProfile::Bridge,
-            )?;
-        }
-        CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending => {
-            verify_codebase_memory_v3_identity_for_role(client, target, manifest, role)?;
-            verify_writer_lease_v2_identity_for_role(
-                client,
-                target,
-                manifest,
-                role,
-                WriterLeaseV2RuntimeProfile::Bridge,
-            )?;
-        }
-        CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => {
-            verify_codebase_memory_v3_identity_for_role(client, target, manifest, role)?;
-            verify_writer_lease_v2_identity_for_role(
-                client,
-                target,
-                manifest,
-                role,
-                WriterLeaseV2RuntimeProfile::Current,
-            )?;
         }
         CatalogProfile::PreSchema
         | CatalogProfile::V1
@@ -2890,22 +2828,6 @@ fn verify_v3_upgrade_source<C: GenericClient>(
             .map_err(|error| {
                 map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
             })?;
-        if profile == CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge {
-            client
-                .batch_execute(
-                    "LOCK TABLE writer_lease.writer_lease_commands IN ACCESS EXCLUSIVE MODE; \
-                     LOCK TABLE writer_lease.writer_lease_extension_identity IN ACCESS EXCLUSIVE MODE; \
-                     LOCK TABLE writer_lease.writer_lease_extension_ledger IN ACCESS EXCLUSIVE MODE; \
-                     LOCK TABLE writer_lease.writer_lease_heads IN ACCESS EXCLUSIVE MODE; \
-                     LOCK TABLE writer_lease.writer_lease_transitions IN ACCESS EXCLUSIVE MODE",
-                )
-                .map_err(|error| {
-                    map_postgres_error(
-                        &error,
-                        PostgresStoreSetupErrorKind::TransactionFailed,
-                    )
-                })?;
-        }
         let expected_profile = profile;
         profile = classify_current_catalog_profile(client, 3)?;
         if profile != expected_profile {
@@ -2921,12 +2843,6 @@ fn verify_v3_upgrade_source<C: GenericClient>(
     read_database_identity(client, target)?;
     if profile == CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge {
         verify_codebase_memory_v2_identity(client, target)?;
-        verify_writer_lease_v2_identity_and_ledger(
-            client,
-            target,
-            v3_manifest,
-            WriterLeaseV2RuntimeProfile::Bridge,
-        )?;
     }
     verify_stopped_admission(client)?;
     verify_roles_and_grants_with_contract(client, profile, true)
@@ -3262,241 +3178,6 @@ fn verify_codebase_memory_v3_identity<C: GenericClient>(
     Ok(())
 }
 
-fn verify_writer_lease_v2_identity_for_role<C: GenericClient>(
-    client: &mut C,
-    target: &MigrationTarget,
-    global_manifest: &ManifestEvidence,
-    role: DatabaseRole,
-    runtime: WriterLeaseV2RuntimeProfile,
-) -> Result<(), PostgresStoreSetupError> {
-    if role == DatabaseRole::Migrator {
-        verify_writer_lease_v2_identity_and_ledger(client, target, global_manifest, runtime)?;
-    }
-    Ok(())
-}
-
-fn verify_writer_lease_v2_identity_and_ledger<C: GenericClient>(
-    client: &mut C,
-    target: &MigrationTarget,
-    global_manifest: &ManifestEvidence,
-    runtime: WriterLeaseV2RuntimeProfile,
-) -> Result<(), PostgresStoreSetupError> {
-    let identities = client
-        .query(
-            "SELECT pg_catalog.concat_ws('|', i.extension_id, i.extension_schema_version, \
-                    i.extension_path, pg_catalog.btrim(i.extension_sql_sha256), \
-                    pg_catalog.btrim(i.extension_manifest_sha256), i.database_uuid, \
-                    pg_catalog.btrim(i.database_identity_sha256), i.global_schema_version, \
-                    pg_catalog.btrim(i.global_manifest_sha256), \
-                    i.required_memory_schema_version, \
-                    pg_catalog.btrim(i.required_memory_manifest_sha256))::text \
-               FROM ONLY writer_lease.writer_lease_extension_identity i \
-              ORDER BY i.singleton",
-            &[],
-        )
-        .map_err(|error| {
-            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
-        })?;
-    if identities.len() != 1 {
-        return Err(PostgresStoreSetupError::new(
-            PostgresStoreSetupErrorKind::CompatibilityMismatch,
-        ));
-    }
-    let (
-        identity_global_version,
-        identity_global_manifest,
-        identity_memory_version,
-        identity_memory_manifest,
-    ) = match runtime {
-        WriterLeaseV2RuntimeProfile::Bridge => (
-            3_i16,
-            CODEBASE_MEMORY_V2_GLOBAL_MANIFEST_SHA256,
-            CODEBASE_MEMORY_V2_SCHEMA_VERSION,
-            CODEBASE_MEMORY_V2_MANIFEST_SHA256,
-        ),
-        WriterLeaseV2RuntimeProfile::Current => (
-            i16::try_from(POSTGRES_SCHEMA_VERSION).map_err(|_| {
-                PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::CompatibilityMismatch)
-            })?,
-            global_manifest.manifest_sha256().as_str(),
-            CODEBASE_MEMORY_V3_SCHEMA_VERSION,
-            CODEBASE_MEMORY_V3_MANIFEST_SHA256,
-        ),
-    };
-    let expected_identity = writer_lease_identity_shape(
-        target,
-        identity_global_version,
-        identity_global_manifest,
-        identity_memory_version,
-        identity_memory_manifest,
-    );
-    if row_value::<String>(
-        &identities[0],
-        0,
-        PostgresStoreSetupErrorKind::CompatibilityMismatch,
-    )? != expected_identity
-    {
-        return Err(PostgresStoreSetupError::new(
-            PostgresStoreSetupErrorKind::CompatibilityMismatch,
-        ));
-    }
-
-    verify_writer_lease_v2_ledger(client, target, global_manifest, runtime)
-}
-
-fn verify_writer_lease_v2_ledger<C: GenericClient>(
-    client: &mut C,
-    target: &MigrationTarget,
-    global_manifest: &ManifestEvidence,
-    runtime: WriterLeaseV2RuntimeProfile,
-) -> Result<(), PostgresStoreSetupError> {
-    let ledger = client
-        .query(
-            "SELECT pg_catalog.concat_ws('|', l.ledger_ordinal, l.singleton, l.extension_id, \
-                    l.extension_schema_version, pg_catalog.btrim(l.extension_sql_sha256), \
-                    pg_catalog.btrim(l.extension_manifest_sha256), l.database_uuid, \
-                    pg_catalog.btrim(l.database_identity_sha256), l.global_schema_version, \
-                    pg_catalog.btrim(l.global_manifest_sha256), \
-                    l.required_memory_schema_version, \
-                    pg_catalog.btrim(l.required_memory_manifest_sha256), l.event_kind)::text \
-               FROM ONLY writer_lease.writer_lease_extension_ledger l \
-              ORDER BY l.ledger_ordinal",
-            &[],
-        )
-        .map_err(|error| {
-            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
-        })?
-        .into_iter()
-        .map(|row| row_value::<String>(&row, 0, PostgresStoreSetupErrorKind::CompatibilityMismatch))
-        .collect::<Result<Vec<_>, _>>()?;
-    let historical_v1 = writer_lease_ledger_shape(
-        1,
-        target,
-        WRITER_LEASE_V1_SCHEMA_VERSION,
-        WRITER_LEASE_V1_SQL_SHA256,
-        WRITER_LEASE_V1_MANIFEST_SHA256,
-        3,
-        CODEBASE_MEMORY_V2_GLOBAL_MANIFEST_SHA256,
-        CODEBASE_MEMORY_V2_SCHEMA_VERSION,
-        CODEBASE_MEMORY_V2_MANIFEST_SHA256,
-        "INSTALLED",
-    );
-    let bridge = writer_lease_ledger_shape(
-        2,
-        target,
-        WRITER_LEASE_V2_SCHEMA_VERSION,
-        WRITER_LEASE_V2_SQL_SHA256,
-        WRITER_LEASE_V2_MANIFEST_SHA256,
-        3,
-        CODEBASE_MEMORY_V2_GLOBAL_MANIFEST_SHA256,
-        CODEBASE_MEMORY_V2_SCHEMA_VERSION,
-        CODEBASE_MEMORY_V2_MANIFEST_SHA256,
-        "UPGRADED",
-    );
-    let expected_bridge = vec![historical_v1.clone(), bridge.clone()];
-    if runtime == WriterLeaseV2RuntimeProfile::Bridge {
-        if ledger.len() != WRITER_LEASE_V2_BRIDGE_LEDGER_PROFILE.split(',').count()
-            || ledger != expected_bridge
-        {
-            return Err(PostgresStoreSetupError::new(
-                PostgresStoreSetupErrorKind::CompatibilityMismatch,
-            ));
-        }
-        return Ok(());
-    }
-    let current = writer_lease_ledger_shape(
-        1,
-        target,
-        WRITER_LEASE_V2_SCHEMA_VERSION,
-        WRITER_LEASE_V2_SQL_SHA256,
-        WRITER_LEASE_V2_MANIFEST_SHA256,
-        i16::try_from(POSTGRES_SCHEMA_VERSION).map_err(|_| {
-            PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::CompatibilityMismatch)
-        })?,
-        global_manifest.manifest_sha256().as_str(),
-        CODEBASE_MEMORY_V3_SCHEMA_VERSION,
-        CODEBASE_MEMORY_V3_MANIFEST_SHA256,
-        "INSTALLED",
-    );
-    let rebound = writer_lease_ledger_shape(
-        3,
-        target,
-        WRITER_LEASE_V2_SCHEMA_VERSION,
-        WRITER_LEASE_V2_SQL_SHA256,
-        WRITER_LEASE_V2_MANIFEST_SHA256,
-        i16::try_from(POSTGRES_SCHEMA_VERSION).map_err(|_| {
-            PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::CompatibilityMismatch)
-        })?,
-        global_manifest.manifest_sha256().as_str(),
-        CODEBASE_MEMORY_V3_SCHEMA_VERSION,
-        CODEBASE_MEMORY_V3_MANIFEST_SHA256,
-        "REBOUND",
-    );
-    let upgraded = vec![historical_v1, bridge, rebound];
-    if ledger != [current]
-        && (ledger.len() != WRITER_LEASE_V2_UPGRADED_LEDGER_PROFILE.split(',').count()
-            || ledger != upgraded)
-    {
-        return Err(PostgresStoreSetupError::new(
-            PostgresStoreSetupErrorKind::CompatibilityMismatch,
-        ));
-    }
-    Ok(())
-}
-
-fn writer_lease_identity_shape(
-    target: &MigrationTarget,
-    global_version: i16,
-    global_manifest: &str,
-    memory_version: i16,
-    memory_manifest: &str,
-) -> String {
-    format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-        WRITER_LEASE_EXTENSION_ID,
-        WRITER_LEASE_V2_SCHEMA_VERSION,
-        WRITER_LEASE_V2_PATH,
-        WRITER_LEASE_V2_SQL_SHA256,
-        WRITER_LEASE_V2_MANIFEST_SHA256,
-        target.expected_database_uuid(),
-        target.expected_database_identity_sha256().as_str(),
-        global_version,
-        global_manifest,
-        memory_version,
-        memory_manifest,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn writer_lease_ledger_shape(
-    ordinal: i16,
-    target: &MigrationTarget,
-    extension_version: i16,
-    extension_sql: &str,
-    extension_manifest: &str,
-    global_version: i16,
-    global_manifest: &str,
-    memory_version: i16,
-    memory_manifest: &str,
-    event: &str,
-) -> String {
-    format!(
-        "{}|t|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-        ordinal,
-        WRITER_LEASE_EXTENSION_ID,
-        extension_version,
-        extension_sql,
-        extension_manifest,
-        target.expected_database_uuid(),
-        target.expected_database_identity_sha256().as_str(),
-        global_version,
-        global_manifest,
-        memory_version,
-        memory_manifest,
-        event,
-    )
-}
-
 fn verify_v4_upgrade_source<C: GenericClient>(
     client: &mut C,
     v4_manifest: &ManifestEvidence,
@@ -3548,12 +3229,7 @@ fn verify_v5_upgrade_source<C: GenericClient>(
              LOCK TABLE control.task_ledger_streams IN ACCESS EXCLUSIVE MODE; \
              LOCK TABLE control.task_ledger_commands IN ACCESS EXCLUSIVE MODE; \
              LOCK TABLE control.task_ledger_events IN ACCESS EXCLUSIVE MODE; \
-             LOCK TABLE control.task_ledger_outbox IN ACCESS EXCLUSIVE MODE; \
-             LOCK TABLE writer_lease.writer_lease_extension_identity IN ACCESS EXCLUSIVE MODE; \
-             LOCK TABLE writer_lease.writer_lease_extension_ledger IN ACCESS EXCLUSIVE MODE; \
-             LOCK TABLE writer_lease.writer_lease_heads IN ACCESS EXCLUSIVE MODE; \
-             LOCK TABLE writer_lease.writer_lease_commands IN ACCESS EXCLUSIVE MODE; \
-             LOCK TABLE writer_lease.writer_lease_transitions IN ACCESS EXCLUSIVE MODE",
+             LOCK TABLE control.task_ledger_outbox IN ACCESS EXCLUSIVE MODE",
         )
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
@@ -3569,7 +3245,7 @@ fn verify_v5_upgrade_source<C: GenericClient>(
     read_database_identity(client, target)?;
     verify_codebase_memory_v3_identity(client, target, v5_manifest)?;
     verify_stopped_admission(client)?;
-    verify_writer_lease_v3_bridge(client, target, v5_manifest)?;
+    verify_writer_lease_v3_bridge_catalog(client)?;
     verify_roles_and_grants(
         client,
         CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending,
@@ -3577,10 +3253,8 @@ fn verify_v5_upgrade_source<C: GenericClient>(
 }
 
 #[allow(clippy::too_many_lines)]
-fn verify_writer_lease_v3_bridge<C: GenericClient>(
+fn verify_writer_lease_v3_bridge_catalog<C: GenericClient>(
     client: &mut C,
-    target: &MigrationTarget,
-    v5_manifest: &ManifestEvidence,
 ) -> Result<(), PostgresStoreSetupError> {
     if WRITER_LEASE_V3_SQL.len() != 17_568
         || hex_digest(Sha256::digest(WRITER_LEASE_V3_SQL.as_bytes()).as_ref())
@@ -3603,8 +3277,6 @@ fn verify_writer_lease_v3_bridge<C: GenericClient>(
              (SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
                WHERE n.nspname='writer_lease' AND pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE')), \
              pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE'), \
-             (SELECT count(*) FROM ONLY writer_lease.writer_lease_heads \
-               WHERE current_status IN ('ACTIVE','SUSPECT')), \
              (SELECT pg_catalog.obj_description(n.oid,'pg_namespace') FROM pg_catalog.pg_namespace n \
                WHERE n.nspname='writer_lease')",
             &[],
@@ -3618,12 +3290,7 @@ fn verify_writer_lease_v3_bridge<C: GenericClient>(
         }
     }
     if row_value::<bool>(&header, 5, PostgresStoreSetupErrorKind::PermissionDenied)?
-        || row_value::<i64>(
-            &header,
-            6,
-            PostgresStoreSetupErrorKind::CompatibilityMismatch,
-        )? != 0
-        || row_value::<Option<String>>(&header, 7, PostgresStoreSetupErrorKind::CorruptCatalog)?
+        || row_value::<Option<String>>(&header, 6, PostgresStoreSetupErrorKind::CorruptCatalog)?
             .as_deref()
             != Some("LATTICE_WRITER_LEASE_SCHEMA_V3")
     {
@@ -3655,8 +3322,7 @@ fn verify_writer_lease_v3_bridge<C: GenericClient>(
             return Err(PostgresStoreSetupError::new(error_kind));
         }
     }
-    verify_writer_lease_v3_functions(client, false)?;
-    verify_writer_lease_v3_identity(client, target, v5_manifest, false)
+    verify_writer_lease_v3_functions(client, false)
 }
 
 fn verify_v1_store_empty<C: GenericClient>(client: &mut C) -> Result<(), PostgresStoreSetupError> {
@@ -4690,72 +4356,6 @@ fn verify_writer_lease_v3_functions<C: GenericClient>(
         || row_value::<bool>(&closure, 2, PostgresStoreSetupErrorKind::PermissionDenied)?
     {
         return Err(permission_error());
-    }
-    Ok(())
-}
-
-fn verify_writer_lease_v3_identity<C: GenericClient>(
-    client: &mut C,
-    target: &MigrationTarget,
-    global_manifest: &ManifestEvidence,
-    current: bool,
-) -> Result<(), PostgresStoreSetupError> {
-    let row = client
-        .query_one(
-            "SELECT pg_catalog.concat_ws('|',i.extension_id,i.extension_schema_version,i.extension_path, \
-                    pg_catalog.btrim(i.extension_sql_sha256),pg_catalog.btrim(i.extension_manifest_sha256), \
-                    i.database_uuid,pg_catalog.btrim(i.database_identity_sha256),i.global_schema_version, \
-                    pg_catalog.btrim(i.global_manifest_sha256),i.required_memory_schema_version, \
-                    pg_catalog.btrim(i.required_memory_manifest_sha256)), \
-                    (SELECT pg_catalog.string_agg(l.ledger_ordinal::text||':'||l.event_kind::text||':'|| \
-                        l.extension_schema_version::text||':'||l.global_schema_version::text,',' \
-                        ORDER BY l.ledger_ordinal) FROM ONLY writer_lease.writer_lease_extension_ledger l) \
-               FROM ONLY writer_lease.writer_lease_extension_identity i WHERE i.singleton",
-            &[],
-        )
-        .map_err(|error| {
-            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
-        })?;
-    let expected = format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
-        WRITER_LEASE_EXTENSION_ID,
-        WRITER_LEASE_V3_SCHEMA_VERSION,
-        WRITER_LEASE_V3_PATH,
-        WRITER_LEASE_V3_SQL_SHA256,
-        WRITER_LEASE_V3_MANIFEST_SHA256,
-        target.expected_database_uuid(),
-        target.expected_database_identity_sha256().as_str(),
-        if current { 6 } else { 5 },
-        global_manifest.manifest_sha256().as_str(),
-        CODEBASE_MEMORY_V3_SCHEMA_VERSION,
-        CODEBASE_MEMORY_V3_MANIFEST_SHA256,
-    );
-    let ledger =
-        row_value::<Option<String>>(&row, 1, PostgresStoreSetupErrorKind::CompatibilityMismatch)?;
-    let valid_ledger = if current {
-        matches!(
-            ledger.as_deref(),
-            Some(
-                "1:INSTALLED:3:6"
-                    | "1:INSTALLED:2:5,2:UPGRADED:3:5,3:REBOUND:3:6"
-                    | "1:INSTALLED:1:3,2:UPGRADED:2:3,3:REBOUND:2:5,4:UPGRADED:3:5,5:REBOUND:3:6"
-            )
-        )
-    } else {
-        matches!(
-            ledger.as_deref(),
-            Some(
-                "1:INSTALLED:2:5,2:UPGRADED:3:5"
-                    | "1:INSTALLED:1:3,2:UPGRADED:2:3,3:REBOUND:2:5,4:UPGRADED:3:5"
-            )
-        )
-    };
-    if row_value::<String>(&row, 0, PostgresStoreSetupErrorKind::CompatibilityMismatch)? != expected
-        || !valid_ledger
-    {
-        return Err(PostgresStoreSetupError::new(
-            PostgresStoreSetupErrorKind::CompatibilityMismatch,
-        ));
     }
     Ok(())
 }

@@ -13,6 +13,12 @@ SET lock_timeout = '5s'
 SET statement_timeout = '30s'
 AS $lattice_writer_lease_rebind_v3$
 BEGIN
+    LOCK TABLE writer_lease.writer_lease_extension_identity,
+               writer_lease.writer_lease_extension_ledger,
+               writer_lease.writer_lease_heads,
+               writer_lease.writer_lease_commands,
+               writer_lease.writer_lease_transitions IN SHARE ROW EXCLUSIVE MODE;
+
     IF NOT (
         session_user = 'lattice_migrator_login'
         AND pg_catalog.current_setting('role') = 'lattice_migrator'

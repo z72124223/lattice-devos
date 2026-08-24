@@ -41,6 +41,14 @@ fn task094_exposes_typed_v3_bridge_and_rebind_owner_apis() {
     for required in [
         "CREATE PROCEDURE writer_lease.writer_lease_rebind_v3()",
         "LANGUAGE plpgsql",
+        "SECURITY INVOKER",
+        "SET search_path = pg_catalog",
+        "SET row_security = on",
+        "SET lock_timeout = '5s'",
+        "SET statement_timeout = '30s'",
+        "LOCK TABLE writer_lease.writer_lease_extension_identity",
+        "writer_lease.writer_lease_extension_ledger",
+        "writer_lease.writer_lease_heads",
         "$lattice_writer_lease_rebind_v3$",
         "GRANT USAGE ON SCHEMA writer_lease TO lattice_runtime",
         "WHEN 4 THEN 5",
@@ -52,6 +60,9 @@ fn task094_exposes_typed_v3_bridge_and_rebind_owner_apis() {
         );
     }
     assert!(!sql.contains("CREATE OR REPLACE"));
+    assert!(!sql.contains(
+        "GRANT EXECUTE ON PROCEDURE writer_lease.writer_lease_rebind_v3() TO lattice_runtime"
+    ));
 }
 
 #[test]
