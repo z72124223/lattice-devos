@@ -60,12 +60,12 @@ Orchestrator composition.
   configured independent Graphify/Hermes mode; it always keeps
   `delivery_receipt=NOT_INSPECTED`. `receipt-state` reports only the verified
   durable receipt projection. Neither command creates or reinterprets a
-  receipt, and neither alters the six-tool MCP surface.
+  receipt, and neither alters the seven-tool MCP surface.
 - Restrict the alternate `lattice-full-chain` executable to a legacy observer
   surface. It advertises only the two delivery names, rejects Delivery Run
   with a fixed code before service dispatch, permits only durable Delivery
-  Status reads, and treats both task names as unknown under legacy and
-  stateless MCP.
+  Status reads, and treats both task names and `lattice_foreman_checkpoint` as
+  unknown under legacy and stateless MCP.
 - Preserve zero-parameter closed schemas for both delivery tools. Give Task
   Submit only the closed `CONTROLLED_CODEX_CANARY` intent plus one bounded
   `client_request_id`, and give Task Status only the lowercase SHA-256
@@ -118,6 +118,11 @@ Orchestrator composition.
   production Secure MCP Tunnel and local canonical acceptance use distinct
   non-substitutable actor/adapter commitments. `clientInfo` and caller identity
   fields grant no authority.
+- Map Foreman Checkpoint into that same `FullChainService` and injected
+  Orchestrator. The composition root may observe its fixed server binding and
+  Git evidence, but it must pass them through typed ports; it cannot call
+  PostgreSQL, mutate Ledger state, acquire Writer authority, or reorder effects
+  directly. This preserves One Gateway for all seven canonical tools.
 - Construct the complete Task Spec 2.1 from the server-owned canary template,
   revalidate it through Task Domain, and preserve its one digest across
   Gateway, Task Ledger, Writer Lease, Codex, verification/Git, and status
@@ -325,9 +330,9 @@ than a Store test binary as acceptance.
 | Gate | Evidence | Owner | Required for merge |
 |---|---|---|---|
 | Composition direction | Cargo metadata proves orchestrator has no concrete dependency and only `latticed` selects adapters | Architecture review | yes |
-| MCP tool closure | exact six-tool list; unchanged empty delivery/Runtime Status schemas; closed task schemas and unknown/additional-property rejection | Engineering | yes |
+| MCP tool closure | exact seven-tool list; unchanged empty delivery/Runtime Status schemas; closed task/checkpoint schemas; legacy exact two with checkpoint unknown; unknown/additional-property rejection | Engineering | yes |
 | Restricted input | shell/SQL/path/credential/provider/task-text/actor/session/lease/fence/writable-thread matrix is rejected before dispatch | Security review | yes |
-| One Gateway | both task tools invoke the same `FullChainService` / Orchestrator composition; MCP has no direct database/Codex/Git call path | Architecture review | yes |
+| One Gateway | both task tools plus Foreman Checkpoint invoke the same `FullChainService` / Orchestrator composition; MCP has no direct database/Codex/Git/Writer call path | Architecture review | yes |
 | Fixed identity | process profile supplies the actor/audit binding; tunnel/local commitments cannot substitute; hostile `clientInfo`/arguments grant no authority | Security review | yes |
 | Durable task control | Task creation/idempotency/audit/status replay from PostgreSQL with fresh-process equality | Engineering | yes |
 | Required autonomy profile | new marker, exact second receipt, historical optional replay, pending reconciliation, and fresh-`latticed` Status with no extra wire field | Engineering and security review | yes |

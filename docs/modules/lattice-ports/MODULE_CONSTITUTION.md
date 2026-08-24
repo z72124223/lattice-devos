@@ -159,7 +159,7 @@ narrow foreman snapshot append/replay boundary.
 - `lattice-contracts`.
 - `lattice-task-domain` 2.2 only for the closed `TaskState` representation in
   Task lifecycle request/evidence signatures.
-- `lattice-foreman-state` 1.2 only for validated snapshot/projection values.
+- `lattice-foreman-state` 1.3 only for validated snapshot/projection values.
 - Rust standard library.
 
 ## Forbidden Dependencies

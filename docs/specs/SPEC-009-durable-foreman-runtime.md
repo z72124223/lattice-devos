@@ -36,6 +36,10 @@ action projection even though PostgreSQL has the intended durable boundary.
   canonical UTC `occurred_at`, closed state, state-compatible `blocker_ref`, and
   closed heartbeat/evidence SHA-256 pointers. Binding, Git branch/worktree/HEAD,
   Writer authority/fence, database, SQL, path and command remain server-owned.
+- The server binds every restart to worker `sole-foreman-v1`, thread
+  `lattice-devos-sole-foreman-v1` and the existing fixed foreman Ledger stream.
+  Process/session metadata never selects this identity. Its empty history
+  accepts only generation 1; every later checkpoint is exactly previous + 1.
 - Exact retry is checked from verified durable replay before a new Git or Writer
   observation. A changed payload under one checkpoint ID fails closed.
 - Orchestrator orders Writer acquire, fenced Ledger append and known-success
@@ -45,7 +49,8 @@ action projection even though PostgreSQL has the intended durable boundary.
   counts, `NO_DURABLE_SNAPSHOT|CONTINUE|RESOLVE_BLOCKERS|ALL_COMPLETED`, and a
   bounded degraded code. Corrupt, unsupported or unavailable replay is a hard
   tool error; Writer contention may degrade write readiness only after replay.
-- Only `latticed --postgres-bootstrap` installs or migrates. It sequences exact
+- `latticed --postgres-initialize` provisions only roles/database/foundation.
+  Only the subsequent `latticed --postgres-bootstrap` installs or migrates. It sequences exact
   v5/Writer-v2 through Writer-v3 bridge then Store-v6/rebind, handles v5+bridge,
   exact-v6 retry and v6-current verification, closes migrator credentials,
   creates fresh runtime clients, verifies foreman replay, then may serve MCP.
@@ -71,21 +76,74 @@ time, blocker/state mismatch, corrupt replay and partial bootstrap fail before
 dispatch or mutation. PostgreSQL tests use marker-owned loopback fixtures on a
 dynamic port excluding 5432 and 58743.
 
+### Versioned wire contract
+
+`lattice_foreman_checkpoint` input is an object with exactly these properties:
+`checkpoint_id: string` (safe ASCII token, 1..64), `generation: integer > 0`,
+`occurred_at: string` (canonical UTC), `state: ACTIVE|BLOCKED|COMPLETED`,
+`blocker_ref: string|null` (non-null iff BLOCKED), and `heartbeat_ref` /
+`evidence_ref` as lowercase `heartbeat:sha256:<64hex>` and
+`evidence:sha256:<64hex>`. Its success object is
+`schema: lattice.foreman-checkpoint-result/1.0`, `checkpoint_id: string`,
+`generation: integer`, `status: RECORDED|REPLAYED`, `exact_retry: boolean`,
+`ledger_digest: lowercase sha256`, and `checkpoint_digest: lowercase sha256`.
+
+`lattice_runtime_status` remains zero-parameter and adds `foreman` with exact
+fields: `schema: lattice.foreman-runtime-projection/1.0`,
+`replay_status: VERIFIED`, `checkpoint_status: NONE|AVAILABLE`,
+`ledger_digest: lowercase sha256`, `checkpoint_digest: lowercase sha256|null`,
+`latest_generation: integer`, `active_count`, `blocked_count`,
+`completed_count`, `next_action` in the four-value closed enum, and
+`degraded_code: string|null`. Counts and generation are non-negative integers.
+
+Closed-schema, format and unknown-field validation fails before service
+dispatch as JSON-RPC invalid params (`-32602`) with stable code
+`FOREMAN_CHECKPOINT_INVALID`. Changed checkpoint-ID payload is detected only
+after verified durable replay and returns a tool result with `isError: true`
+and stable code `FOREMAN_CHECKPOINT_ID_REUSE`.
+Verified replay failures are hard tool errors:
+`FOREMAN_REPLAY_CORRUPT`, `FOREMAN_REPLAY_UNSUPPORTED`, or
+`FOREMAN_REPLAY_UNAVAILABLE`. After a valid replay only, Writer contention is
+`FOREMAN_WRITER_CONTENTION`; unknown append is
+`FOREMAN_APPEND_OUTCOME_UNKNOWN`; unknown release is
+`FOREMAN_RELEASE_OUTCOME_UNKNOWN`. No such error carries raw SQL, path, lease,
+fence, Git command, database detail or child output, and none is serialized as
+a successful structured result.
+
+### Bootstrap and restart matrix
+
+The explicit bootstrap command has these observable rows: `v5 + Writer v2`
+applies the fixed Writer-v3 bridge then Store-v6/rebind; `v5 + Writer v3`
+applies Store-v6/rebind; `v6 + bridge-pending` retries exact-v6 rebind; and
+`v6 + current Writer v3` verifies without mutation. Partial/corrupt/unsupported
+profiles fail closed. No-argument startup and every MCP call perform zero
+migrations and refuse serving until bootstrap completes. Success closes the
+migrator connection, constructs fresh runtime-role clients, verifies foreman
+replay through them, and only then reports ready/serves.
+
 ## Acceptance criteria
 
 - [ ] Exact seven modern tools and exact two legacy tools; prohibited checkpoint
       fields reject before service dispatch.
 - [ ] Generation `previous + 1`, exact retry, changed ID reuse and gap tests pass.
+      Empty replay rejects first generation 2 and distinct process/session
+      metadata cannot change the fixed sole-foreman generation chain.
 - [ ] Effect-order tests cover acquire, known/unknown append and known/unknown
       release without duplicate append.
 - [ ] Explicit bootstrap state matrix and fail-closed partial/corrupt tests pass.
 - [ ] Fresh `latticed` process writes a checkpoint; a distinct process replays it
       in zero-parameter Runtime Status without migration.
-- [ ] Product Control scripts and existing six tools regress green.
+- [ ] One marker-owned physical database proves: process A runs initialize,
+      bootstrap and checkpoint then stops; process B runs no bootstrap and
+      returns identical digests/generation/counts/next action with zero
+      migration. Corrupt/unsupported/unavailable replay fails hard, and Writer
+      contention degrades only after replay validates.
+- [ ] Product acceptance runs `npm.cmd run verify`, starts
+      `npm.cmd run control:start`, then runs `npm.cmd run control:receipt`; all
+      original six MCP tools remain callable and legacy remains exact two.
 
 ## Human decisions
 
 None. The current user explicitly authorized this bounded product integration,
 non-force feature delivery and later product merge/deploy; this ticket stops
 before those parent-owned external gates.
-

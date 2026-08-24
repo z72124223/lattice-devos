@@ -16,9 +16,11 @@ Git or Writer observation. New writes follow acquire → append → known-succes
 release. Unknown append outcome retains the lease for reconciliation; unknown
 release outcome returns reconciliation without repeating the append.
 
-Migration is administrative only. `latticed --postgres-bootstrap` owns the
-Writer-v3-before-Store-v6 state machine; normal serving and tool calls verify
-current schema and never install or migrate.
+Migration is administrative only. `latticed --postgres-initialize` provisions
+only roles/database/foundation; the official launcher must then invoke
+`latticed --postgres-bootstrap`, which owns the Writer-v3-before-Store-v6 state
+machine. Normal serving and tool calls verify current schema and never install
+or migrate.
 
 ## Constitutional narrowing
 
@@ -32,4 +34,3 @@ historical bytes, generic append API or legacy surface.
 PostgreSQL remains the sole durable truth. Git observation is persisted evidence
 inside the existing snapshot. Dashboard/status caches gain no authority. A
 corrupt or unsupported replay prevents Runtime Status success and MCP serving.
-

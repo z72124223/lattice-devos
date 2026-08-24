@@ -26,4 +26,3 @@
   PASS before merge commit `d116e423`.
 - RED/GREEN/live/final evidence will be recorded without claiming unexecuted
   workspace, PostgreSQL, CI, merge or deployment success.
-

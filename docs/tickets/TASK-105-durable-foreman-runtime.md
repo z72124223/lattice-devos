@@ -16,8 +16,7 @@ additional_modules:
     constitution_version: 2.7
 status: in_progress
 parallel_safe: false
-depends_on:
-  - TASK-094
+depends_on: [TASK-094]
 branch: feature/task-105-durable-foreman-runtime
 implementation_worktree: lattice-worktrees/task-105-durable-foreman-runtime
 implementation_base: 387f556a5b17adb75274c1387cf517654650c90b
@@ -46,6 +45,7 @@ allowed_paths:
   - docs/modules/orchestrator-runtime/MODULE_CONSTITUTION.md
   - docs/modules/latticed/MODULE_CONSTITUTION.md
   - docs/reviews/WORKFLOW_LEDGER_TASK_105_2026-08-25.md
+  - scripts/start-lattice-runtime-postgres.ps1
   - scripts/test-task105-durable-foreman-runtime.ps1
 ---
 
@@ -82,4 +82,3 @@ schema-v6 startup share the same files and durable state.
 
 Parent foreman owns independent review, non-force push, product merge, install,
 deployment and live post-deploy revalidation.
-

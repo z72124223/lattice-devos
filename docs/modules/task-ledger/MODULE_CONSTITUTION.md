@@ -54,7 +54,7 @@ persists as the single durable control-plane truth.
   streams. The legacy `CONTROLLED_CODEX_CANARY` value is receipt-optional;
   `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` requires exactly one V1 receipt.
 - The fixed `FOREMAN_COORDINATION` stream identity and versioned
-  `FOREMAN_SNAPSHOT_RECORDED` event, including payload digest, strict generation
+  `FOREMAN_SNAPSHOT_RECORDED` event, including payload digest, exact-next generation
   order, exact command retry, and typed child-row replay verification.
 The TASK-013 fake owns only disposable process-memory test state. Postgres
 Store 1.3 owns physical durable rows, locks, transactions, indexes, projection
