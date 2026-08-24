@@ -1,10 +1,17 @@
 //! Marker-owned PostgreSQL acceptance for TASK-105.
 
 use std::env;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
-use lattice_contracts::ContentDigest;
+use lattice_contracts::{
+    AttemptId, ContentDigest, DaemonEpoch, HolderProcessId, ProjectId, RuntimeAdmissionMode,
+    RuntimeKind, StoreAuthorityHead, StoreAuthorityRevision, StoreDaemonInstanceId,
+    WriterLeaseAuthorityHead,
+};
 use lattice_postgres_codebase_memory::{
     ExtensionTarget as MemoryExtensionTarget, apply_extension as apply_memory_extension,
     verify_embedded_extension_manifest as verify_memory_manifest,
@@ -16,11 +23,16 @@ use lattice_postgres_store::{
 };
 use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome, ExtensionSetupErrorKind, ExtensionTarget as WriterExtensionTarget,
-    V3BootstrapProfile, V3ExtensionTarget, apply_extension as apply_writer_extension,
-    apply_v3_extension, inspect_v3_bootstrap_profile,
+    PostgresWriterLease, V3BootstrapProfile, V3ExtensionTarget,
+    apply_extension as apply_writer_extension, apply_v3_extension, inspect_v3_bootstrap_profile,
     verify_embedded_v1_extension_manifest as verify_writer_v1_manifest,
     verify_embedded_v2_extension_manifest as verify_writer_v2_manifest,
     verify_embedded_v3_rebind_manifest,
+};
+use lattice_task_ledger::foreman_coordination_identity;
+use lattice_writer_lease::{
+    CommandOutcome as LeaseCommandOutcome, WriterLeaseAcquireRequest, WriterLeaseReleaseRequest,
+    WriterLeaseRepository, WriterLeaseRepositoryCommand,
 };
 use postgres::config::SslMode;
 use postgres::{Client, Config, NoTls};
@@ -114,6 +126,43 @@ impl LiveConfig {
             .application_name("lattice-task105-migration-observer")
             .ssl_mode(SslMode::Disable);
         config.connect(NoTls).expect("TASK105_BOOTSTRAP_CONNECT")
+    }
+
+    fn runtime_client(&self) -> Client {
+        let mut config = Config::new();
+        config
+            .host(&self.host)
+            .port(self.port)
+            .user("lattice_runtime_login")
+            .password(&self.password)
+            .dbname(&self.database_name())
+            .application_name("lattice-task105-writer-contention")
+            .ssl_mode(SslMode::Disable);
+        let mut client = config.connect(NoTls).expect("TASK105_RUNTIME_CONNECT");
+        client
+            .batch_execute("SET ROLE lattice_runtime")
+            .expect("TASK105_RUNTIME_ROLE");
+        client
+    }
+
+    fn runtime_login_enabled(&self) -> Result<bool, &'static str> {
+        self.bootstrap_client()
+            .query_one(
+                "SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname='lattice_runtime_login'",
+                &[],
+            )
+            .map(|row| row.get(0))
+            .map_err(|_| "TASK105_RUNTIME_LOGIN_READ")
+    }
+
+    fn alter_runtime_login(&self, enabled: bool) -> Result<(), &'static str> {
+        self.bootstrap_client()
+            .batch_execute(if enabled {
+                "ALTER ROLE lattice_runtime_login LOGIN"
+            } else {
+                "ALTER ROLE lattice_runtime_login NOLOGIN"
+            })
+            .map_err(|_| "TASK105_RUNTIME_LOGIN_ALTER")
     }
 
     fn revoke_login_database_privileges(&self) {
@@ -1043,8 +1092,284 @@ impl LiveConfig {
     }
 }
 
+struct ForemanWorkerCorruption<'a> {
+    config: &'a LiveConfig,
+    command_id: Option<String>,
+}
+
+impl<'a> ForemanWorkerCorruption<'a> {
+    fn introduce(config: &'a LiveConfig) -> Self {
+        let command_id: String = config
+            .bootstrap_client()
+            .query_one(
+                "SELECT command_id::text FROM ONLY control.task_ledger_foreman_snapshots \
+                  ORDER BY generation DESC LIMIT 1",
+                &[],
+            )
+            .expect("TASK105_FOREMAN_CORRUPT_TARGET")
+            .get(0);
+        let changed = config
+            .bootstrap_client()
+            .execute(
+                "UPDATE ONLY control.task_ledger_foreman_snapshots \
+                    SET worker_id='sole-foreman-v2' \
+                  WHERE command_id=$1 AND worker_id='sole-foreman-v1'",
+                &[&command_id],
+            )
+            .expect("TASK105_FOREMAN_CORRUPT_INTRODUCE");
+        let guard = Self {
+            config,
+            command_id: Some(command_id),
+        };
+        assert_eq!(changed, 1);
+        guard
+    }
+
+    fn restore(&mut self) -> Result<(), &'static str> {
+        let Some(command_id) = self.command_id.as_ref() else {
+            return Ok(());
+        };
+        let restored = self
+            .config
+            .bootstrap_client()
+            .execute(
+                "UPDATE ONLY control.task_ledger_foreman_snapshots \
+                    SET worker_id='sole-foreman-v1' \
+                  WHERE command_id=$1 AND worker_id='sole-foreman-v2'",
+                &[command_id],
+            )
+            .map_err(|_| "TASK105_FOREMAN_CORRUPT_RESTORE")?;
+        if restored != 1 {
+            return Err("TASK105_FOREMAN_CORRUPT_RESTORE_COUNT");
+        }
+        self.command_id = None;
+        Ok(())
+    }
+}
+
+impl Drop for ForemanWorkerCorruption<'_> {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+struct RuntimeLoginDisabled<'a> {
+    config: &'a LiveConfig,
+    disabled: bool,
+}
+
+impl<'a> RuntimeLoginDisabled<'a> {
+    fn introduce(config: &'a LiveConfig) -> Self {
+        assert!(
+            config
+                .runtime_login_enabled()
+                .expect("TASK105_RUNTIME_LOGIN_READ")
+        );
+        config
+            .alter_runtime_login(false)
+            .expect("TASK105_RUNTIME_LOGIN_DISABLE");
+        let guard = Self {
+            config,
+            disabled: true,
+        };
+        assert_eq!(
+            guard
+                .config
+                .runtime_login_enabled()
+                .expect("TASK105_RUNTIME_LOGIN_VERIFY"),
+            false
+        );
+        guard
+    }
+
+    fn restore(&mut self) -> Result<(), &'static str> {
+        if self.disabled {
+            self.config.alter_runtime_login(true)?;
+            if !self.config.runtime_login_enabled()? {
+                return Err("TASK105_RUNTIME_LOGIN_RESTORE_VERIFY");
+            }
+            self.disabled = false;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RuntimeLoginDisabled<'_> {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+struct UnsupportedHistory<'a> {
+    config: &'a LiveConfig,
+    introduced: bool,
+}
+
+impl<'a> UnsupportedHistory<'a> {
+    fn introduce(config: &'a LiveConfig) -> Self {
+        config.introduce_unsupported_history();
+        Self {
+            config,
+            introduced: true,
+        }
+    }
+
+    fn restore(&mut self) -> Result<(), &'static str> {
+        if self.introduced {
+            let deleted = self
+                .config
+                .bootstrap_client()
+                .execute(
+                    "DELETE FROM ONLY control.migration_history \
+                     WHERE ordinal=8 AND migration_id='0008_unsupported_fixture'",
+                    &[],
+                )
+                .map_err(|_| "TASK105_REPAIR_UNSUPPORTED_HISTORY")?;
+            if deleted != 1 {
+                return Err("TASK105_REPAIR_UNSUPPORTED_HISTORY_COUNT");
+            }
+            self.introduced = false;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for UnsupportedHistory<'_> {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+struct WriterContention {
+    repository: PostgresWriterLease,
+    project_id: ProjectId,
+    authority: Option<WriterLeaseAuthorityHead>,
+}
+
+impl WriterContention {
+    fn acquire(config: &LiveConfig) -> Self {
+        let identity = foreman_coordination_identity().expect("TASK105_FOREMAN_IDENTITY");
+        let database_identity = ContentDigest::from_sha256(
+            config
+                .migration_target()
+                .expected_database_identity_sha256()
+                .as_str(),
+        )
+        .expect("TASK105_WRITER_DATABASE_IDENTITY");
+        let target = V3ExtensionTarget::new(config.database_name(), database_identity)
+            .expect("TASK105_WRITER_V3_TARGET");
+        let mut repository = PostgresWriterLease::new_v3(
+            config.runtime_client(),
+            &target,
+            &store_authority_from_environment(),
+            600,
+        )
+        .expect("TASK105_WRITER_CONTENTION_REPOSITORY");
+        let acquired = repository
+            .execute(WriterLeaseRepositoryCommand::Acquire(
+                WriterLeaseAcquireRequest {
+                    command_id: "task105-runtime-status-contention-acquire".to_owned(),
+                    expected_head: None,
+                    project_id: identity.project_id().clone(),
+                    project_snapshot_id: identity.project_snapshot_id().clone(),
+                    task_id: identity.task_id().clone(),
+                    task_revision: identity.task_revision().to_owned(),
+                    task_spec_digest: identity.task_spec_digest().clone(),
+                    attempt_id: AttemptId::new("task105-runtime-status-contention")
+                        .expect("TASK105_WRITER_ATTEMPT"),
+                    lease_id: "task105-runtime-status-contention-lease".to_owned(),
+                    lease_holder_id: "task105-runtime-status-contention-holder".to_owned(),
+                    worktree_id: "task105-durable-foreman-runtime".to_owned(),
+                    holder_process_id: HolderProcessId::new(u64::from(std::process::id()))
+                        .expect("TASK105_WRITER_PROCESS"),
+                    holder_process_start_identity: ContentDigest::from_sha256("f".repeat(64))
+                        .expect("TASK105_WRITER_PROCESS_START"),
+                },
+            ))
+            .expect("TASK105_WRITER_CONTENTION_ACQUIRE");
+        assert_eq!(acquired.outcome, LeaseCommandOutcome::Applied);
+        let authority = acquired.after.expect("TASK105_WRITER_CONTENTION_HEAD");
+        let mut guard = Self {
+            repository,
+            project_id: identity.project_id().clone(),
+            authority: Some(authority),
+        };
+        assert!(
+            guard
+                .repository
+                .current_authority(identity.project_id())
+                .expect("TASK105_WRITER_CONTENTION_CURRENT")
+                .is_some()
+        );
+        guard
+    }
+
+    fn release(&mut self) -> Result<(), &'static str> {
+        let Some(authority) = self.authority.as_ref() else {
+            return Ok(());
+        };
+        let released = self
+            .repository
+            .execute(WriterLeaseRepositoryCommand::Release(
+                WriterLeaseReleaseRequest {
+                    command_id: "task105-runtime-status-contention-release".to_owned(),
+                    project_id: self.project_id.clone(),
+                    expected_head: authority.clone(),
+                },
+            ))
+            .map_err(|_| "TASK105_WRITER_CONTENTION_RELEASE")?;
+        if released.outcome != LeaseCommandOutcome::Applied || released.after.is_some() {
+            return Err("TASK105_WRITER_CONTENTION_RELEASE_RECEIPT");
+        }
+        if self
+            .repository
+            .current_authority(&self.project_id)
+            .map_err(|_| "TASK105_WRITER_CONTENTION_RELEASED_CURRENT")?
+            .is_some()
+        {
+            return Err("TASK105_WRITER_CONTENTION_RELEASED_ACTIVE");
+        }
+        self.authority = None;
+        Ok(())
+    }
+}
+
+impl Drop for WriterContention {
+    fn drop(&mut self) {
+        if self.authority.is_some() {
+            let _ = self.release();
+        }
+    }
+}
+
 fn required(name: &str) -> String {
     env::var(name).unwrap_or_else(|_| panic!("TASK105_ENV_MISSING:{name}"))
+}
+
+fn store_authority_from_environment() -> StoreAuthorityHead {
+    StoreAuthorityHead::new(
+        RuntimeKind::Live,
+        StoreDaemonInstanceId::new(required("LATTICE_STORE_DAEMON_INSTANCE_ID"))
+            .expect("TASK105_STORE_DAEMON"),
+        DaemonEpoch::new(
+            required("LATTICE_STORE_DAEMON_EPOCH")
+                .parse()
+                .expect("TASK105_STORE_EPOCH_VALUE"),
+        )
+        .expect("TASK105_STORE_EPOCH"),
+        RuntimeAdmissionMode::Active,
+        StoreAuthorityRevision::new(
+            required("LATTICE_STORE_AUTHORITY_REVISION")
+                .parse()
+                .expect("TASK105_STORE_REVISION_VALUE"),
+        )
+        .expect("TASK105_STORE_REVISION"),
+        ContentDigest::from_sha256(required("LATTICE_STORE_OBSERVATION_DIGEST"))
+            .expect("TASK105_STORE_OBSERVATION"),
+        ContentDigest::from_sha256(required("LATTICE_STORE_AUTHORITY_HEAD_DIGEST"))
+            .expect("TASK105_STORE_HEAD"),
+    )
+    .expect("TASK105_STORE_AUTHORITY")
 }
 
 fn assert_no_merged_sql_continuation_tokens() {
@@ -1134,6 +1459,219 @@ fn run_latticed(requests: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+fn poll_child_exit(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn terminate_exact_process_tree(pid: u32) -> Result<(), &'static str> {
+    let Some(system_root) = env::var_os("SystemRoot") else {
+        return Err("TASK105_SYSTEM_ROOT_MISSING");
+    };
+    let executable = std::path::PathBuf::from(system_root)
+        .join("System32")
+        .join("taskkill.exe");
+    let mut terminator = match Command::new(executable)
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Err("TASK105_TASKKILL_START"),
+    };
+    if poll_child_exit(&mut terminator, Duration::from_secs(5)).is_some() {
+        return Ok(());
+    }
+    let _ = terminator.kill();
+    if poll_child_exit(&mut terminator, Duration::from_secs(2)).is_some() {
+        Err("TASK105_TASKKILL_TIMEOUT")
+    } else {
+        Err("TASK105_TASKKILL_CLEANUP_FAILED")
+    }
+}
+
+struct InteractiveLatticed {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: Receiver<Result<String, String>>,
+    stdout_reader: Option<JoinHandle<()>>,
+    stderr_reader: Option<JoinHandle<String>>,
+    finished: bool,
+}
+
+impl InteractiveLatticed {
+    fn start() -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_latticed"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("TASK105_INTERACTIVE_LATTICED_START");
+        let stdin = child.stdin.take().expect("TASK105_INTERACTIVE_STDIN");
+        let child_stdout = child.stdout.take().expect("TASK105_INTERACTIVE_STDOUT");
+        let child_stderr = child.stderr.take().expect("TASK105_INTERACTIVE_STDERR");
+        let (sender, stdout) = mpsc::channel();
+        let stdout_reader = thread::spawn(move || {
+            for line in BufReader::new(child_stdout).lines() {
+                let message = line.map_err(|error| error.to_string());
+                if sender.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        let stderr_reader = thread::spawn(move || {
+            let mut stderr = String::new();
+            BufReader::new(child_stderr)
+                .read_to_string(&mut stderr)
+                .expect("TASK105_INTERACTIVE_STDERR_READ");
+            stderr
+        });
+        Self {
+            child,
+            stdin: Some(stdin),
+            stdout,
+            stdout_reader: Some(stdout_reader),
+            stderr_reader: Some(stderr_reader),
+            finished: false,
+        }
+    }
+
+    fn start_initialized() -> Self {
+        let mut session = Self::start();
+        let initialized = session.request(&initialize_request());
+        assert_eq!(initialized["id"], 1);
+        assert!(initialized.get("error").is_none());
+        session.send(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        session
+    }
+
+    fn send(&mut self, request: &Value) {
+        let stdin = self.stdin.as_mut().expect("TASK105_INTERACTIVE_STDIN_OPEN");
+        writeln!(stdin, "{request}").expect("TASK105_INTERACTIVE_WRITE");
+        stdin.flush().expect("TASK105_INTERACTIVE_FLUSH");
+    }
+
+    fn request(&mut self, request: &Value) -> Value {
+        let expected_id = request
+            .get("id")
+            .cloned()
+            .expect("TASK105_INTERACTIVE_REQUEST_ID");
+        self.send(request);
+        let line = self
+            .stdout
+            .recv_timeout(Duration::from_secs(35))
+            .expect("TASK105_INTERACTIVE_RESPONSE_TIMEOUT")
+            .expect("TASK105_INTERACTIVE_STDOUT_READ");
+        let response: Value = serde_json::from_str(&line).expect("TASK105_INTERACTIVE_JSON");
+        assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["id"], expected_id);
+        response
+    }
+
+    fn request_status(&mut self, id: i64) -> Value {
+        self.request(&runtime_status_request(id))
+    }
+
+    fn wait_bounded(
+        &mut self,
+        graceful: Duration,
+    ) -> Result<std::process::ExitStatus, &'static str> {
+        if let Some(status) = poll_child_exit(&mut self.child, graceful) {
+            return Ok(status);
+        }
+        let owned_pid = self.child.id();
+        let _ = self.child.kill();
+        if let Some(status) = poll_child_exit(&mut self.child, Duration::from_secs(5)) {
+            return Ok(status);
+        }
+        let _ = terminate_exact_process_tree(owned_pid);
+        if let Some(status) = poll_child_exit(&mut self.child, Duration::from_secs(5)) {
+            return Ok(status);
+        }
+        let _ = self.child.kill();
+        poll_child_exit(&mut self.child, Duration::from_secs(2))
+            .ok_or("TASK105_INTERACTIVE_CLEANUP_FAILED")
+    }
+
+    fn join_readers(&mut self) -> Result<String, &'static str> {
+        self.stdout_reader
+            .take()
+            .ok_or("TASK105_INTERACTIVE_STDOUT_THREAD")?
+            .join()
+            .map_err(|_| "TASK105_INTERACTIVE_STDOUT_JOIN")?;
+        let stderr = self
+            .stderr_reader
+            .take()
+            .ok_or("TASK105_INTERACTIVE_STDERR_THREAD")?
+            .join()
+            .map_err(|_| "TASK105_INTERACTIVE_STDERR_JOIN")?;
+        Ok(stderr)
+    }
+
+    fn finish(mut self) {
+        self.stdin.take();
+        let status = self
+            .wait_bounded(Duration::from_secs(10))
+            .expect("TASK105_INTERACTIVE_EXIT");
+        let stderr = self
+            .join_readers()
+            .expect("TASK105_INTERACTIVE_READER_JOIN");
+        self.finished = true;
+        assert!(status.success(), "TASK105_INTERACTIVE_FAILED:{stderr}");
+        assert!(stderr.len() <= 128, "TASK105_INTERACTIVE_STDERR_UNBOUNDED");
+    }
+}
+
+impl Drop for InteractiveLatticed {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.stdin.take();
+        match self.wait_bounded(Duration::from_millis(200)) {
+            Ok(_) => {
+                let _ = self.join_readers();
+            }
+            Err(code) => {
+                eprintln!("TASK105_INTERACTIVE_CLEANUP_FAILED:{code}");
+                self.stdout_reader.take();
+                self.stderr_reader.take();
+            }
+        }
+        self.finished = true;
+    }
+}
+
+fn runtime_status_request(id: i64) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"lattice_runtime_status"}})
+}
+
+fn assert_foreman_replay_error(response: &Value, code: &str) {
+    assert_eq!(response["result"]["isError"], true);
+    let expected = json!({"status":"ERROR","code":code});
+    assert_eq!(response["result"]["structuredContent"], expected);
+    assert_eq!(
+        response["result"]["content"],
+        json!([{"type":"text","text":expected.to_string()}])
+    );
+    assert!(response.to_string().len() <= 1024);
+    assert!(
+        response["result"]["structuredContent"]
+            .get("foreman")
+            .is_none()
+    );
+}
+
 fn initialize_request() -> Value {
     json!({
         "jsonrpc":"2.0", "id":1, "method":"initialize",
@@ -1179,6 +1717,19 @@ fn response<'a>(responses: &'a [Value], id: i64) -> &'a Value {
 #[test]
 fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     assert_no_merged_sql_continuation_tokens();
+    let source = include_str!("task105_durable_foreman_runtime.rs");
+    for marker in [
+        "TASK105_STAGE_FOREMAN_REPLAY_CORRUPT_PASS",
+        "TASK105_STAGE_FOREMAN_REPLAY_UNAVAILABLE_PASS",
+        "TASK105_STAGE_FOREMAN_WRITER_CONTENTION_PASS",
+        "TASK105_STAGE_FOREMAN_REPLAY_UNSUPPORTED_PASS",
+    ] {
+        assert_eq!(
+            source.match_indices(marker).count(),
+            2,
+            "TASK105_FAULT_STAGE_MISSING:{marker}"
+        );
+    }
     for query in FRESH_CATALOG_FINGERPRINT_QUERIES {
         assert!(query.contains(" JOIN "));
         assert!(query.contains(" WHERE "));
@@ -1308,12 +1859,99 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     let process_b = run_latticed(&[
         initialize_request(),
         json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
-        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lattice_runtime_status"}}),
+        runtime_status_request(2),
     ]);
-    let status_b = &response(&process_b, 2)["result"]["structuredContent"]["foreman"];
+    let baseline_status = response(&process_b, 2)["result"]["structuredContent"].clone();
+    let status_b = &baseline_status["foreman"];
     assert_eq!(status_b, status_a);
     assert_eq!(config.migration_fingerprint(), migration_before);
     println!("TASK105_STAGE_FRESH_PROCESS_REPLAY_PASS");
+
+    let mut interactive = InteractiveLatticed::start_initialized();
+    assert_eq!(
+        interactive.request_status(2)["result"]["structuredContent"],
+        baseline_status
+    );
+    {
+        let mut corruption = ForemanWorkerCorruption::introduce(&config);
+        assert_foreman_replay_error(&interactive.request_status(3), "FOREMAN_REPLAY_CORRUPT");
+        corruption
+            .restore()
+            .expect("TASK105_FOREMAN_CORRUPT_RESTORE");
+    }
+    assert_eq!(
+        interactive.request_status(4)["result"]["structuredContent"],
+        baseline_status
+    );
+    println!("TASK105_STAGE_FOREMAN_REPLAY_CORRUPT_PASS");
+
+    {
+        let mut unavailable = RuntimeLoginDisabled::introduce(&config);
+        assert_foreman_replay_error(&interactive.request_status(5), "FOREMAN_REPLAY_UNAVAILABLE");
+        unavailable
+            .restore()
+            .expect("TASK105_RUNTIME_LOGIN_RESTORE");
+    }
+    assert_eq!(
+        interactive.request_status(6)["result"]["structuredContent"],
+        baseline_status
+    );
+    println!("TASK105_STAGE_FOREMAN_REPLAY_UNAVAILABLE_PASS");
+
+    let mut contention = WriterContention::acquire(&config);
+    let mut contention_status = baseline_status.clone();
+    contention_status["foreman"]["degraded_code"] = json!("FOREMAN_WRITER_CONTENTION");
+    assert_eq!(
+        interactive.request_status(7)["result"]["structuredContent"],
+        contention_status
+    );
+    {
+        let mut corruption = ForemanWorkerCorruption::introduce(&config);
+        assert_foreman_replay_error(&interactive.request_status(8), "FOREMAN_REPLAY_CORRUPT");
+        corruption
+            .restore()
+            .expect("TASK105_CONTENTION_CORRUPT_RESTORE");
+    }
+    assert_eq!(
+        interactive.request_status(9)["result"]["structuredContent"],
+        contention_status
+    );
+    contention
+        .release()
+        .expect("TASK105_WRITER_CONTENTION_RELEASE");
+    assert_eq!(
+        interactive.request_status(10)["result"]["structuredContent"],
+        baseline_status
+    );
+    println!("TASK105_STAGE_FOREMAN_WRITER_CONTENTION_PASS");
+
+    let migration_before_unsupported = config.migration_fingerprint();
+    let profile_before_unsupported = config.durable_profile_fingerprint();
+    {
+        let mut unsupported = UnsupportedHistory::introduce(&config);
+        let injected_migration = config.migration_fingerprint();
+        let injected_profile = config.durable_profile_fingerprint();
+        assert_foreman_replay_error(
+            &interactive.request_status(11),
+            "FOREMAN_REPLAY_UNSUPPORTED",
+        );
+        assert_eq!(config.migration_fingerprint(), injected_migration);
+        assert_eq!(config.durable_profile_fingerprint(), injected_profile);
+        unsupported
+            .restore()
+            .expect("TASK105_UNSUPPORTED_HISTORY_RESTORE");
+    }
+    assert_eq!(config.migration_fingerprint(), migration_before_unsupported);
+    assert_eq!(
+        config.durable_profile_fingerprint(),
+        profile_before_unsupported
+    );
+    assert_eq!(
+        interactive.request_status(12)["result"]["structuredContent"],
+        baseline_status
+    );
+    interactive.finish();
+    println!("TASK105_STAGE_FOREMAN_REPLAY_UNSUPPORTED_PASS");
 
     config.remove_disposable_writer_profile();
     let absent_before = config.v6_absent_writer_fingerprint();
