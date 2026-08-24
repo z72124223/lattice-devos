@@ -8,7 +8,7 @@ constitution_version: 1.3
 additional_modules:
   - module_id: postgres-store
     constitution_version: 1.13
-status: in_progress
+status: completed
 parallel_safe: false
 depends_on:
   - commit:aeff4131d0a78e740980b47ab10f56c5aa96cb18
@@ -90,9 +90,11 @@ exact-v6 idempotent retry invoke that same function before catalog/ACL verify.
 - [x] Wrong/partial/colliding history, stale lease or fence, inconsistent
       retry, and catalog/ACL drift fail closed with no partial effects.
 - [x] Writer v1/v2 and migrations `0001`-`0006` byte/hash invariants pass.
-- [ ] Focused/all-target/workspace tests, strict Clippy, format, repository
-      checks, and author-recorded code/architecture review pass; independent
-      merge review remains a separate parent-owned gate.
+- [x] Focused/all-target/workspace tests, scoped strict Clippy, format,
+      repository checks, author reviews, and parent-gated independent
+      code/architecture reviews pass. Full-workspace strict Clippy was attempted
+      and exited 1 solely on 17 unchanged `lattice-hermes-adapter` diagnostics
+      outside this ticket's allowlist; it is not a PASS and is not expanded here.
 - [x] Any live PostgreSQL claim uses a marker-owned disposable cluster on a
       dynamic non-5432 loopback port with explicit PID ownership preflight;
       otherwise live remains honestly `NOT_RUN`.
@@ -117,17 +119,11 @@ task archival are not authorized.
 - The current live PostgreSQL run, if recorded here, must name its fresh
   marker-owned root, dynamic non-5432 port, exact focused command, and teardown
   result. A previous receipt is not evidence for this candidate.
-- `docs/reviews/*TASK_094*` records the author review boundary. A parent-owned
-  independent review, remote CI, delivery run, push, merge, and archive are not
-  completed by this ticket checkpoint.
-- Current local commands: Writer Lease all-targets `16/16`; Store migration
-  contract `41/41`; schema-v6 profile `5/5`; Store all-targets `109 passed,
-  2 ignored`; focused live `1/1`. Scoped strict Clippy, format, repository
-  check, and diff check pass. Workspace strict Clippy remains blocked by 17
-  pre-existing `lattice-hermes-adapter` diagnostics outside this ticket's
-  allowlist. The workspace test process completed, but the runner did not
-  return a terminal exit receipt to this worker; do not treat it as a verified
-  PASS until the parent reruns it.
+- `docs/reviews/*TASK_094*` records both the author work and the later
+  parent-gated independent code/architecture result. Remote CI, delivery run,
+  push, merge, and archive remain outside this local completion.
+- Earlier candidate command counts in this section are superseded by the
+  terminal evidence below; they remain only as a chronological repair record.
 - Review repair requires Postgres Store constitution 1.13: the sole mutation
   exception is the fixed Writer-owned rebind call for exact-v5 transition or
   exact-v6 idempotent retry; it grants no Writer state ownership or generic SQL.
@@ -182,3 +178,31 @@ task archival are not authorized.
   Foreman State 1.2. The migration contract statically asserts exactly one
   ordered Writer-owned procedure lock block over all five tables. This is an
   author repair record, not independent approval.
+
+## Terminal local closure — 2026-08-25
+
+- Local status is `completed`; `delivery_archive` remains `keep_open`. The
+  completion is limited to this feature branch and is not a remote delivery,
+  merge, deployment, release, or archive claim.
+- Root workspace evidence: `cargo test --workspace --all-targets --all-features
+  --locked` exited 0 at `8753772fb499bc745b4406856192ee5bb9785b03`. Later
+  `32d2b109014ac2bc89cf936628a259815fe2112d` changed only the static migration
+  contract and passed `migration_contract` 42/42; `f19719c7bf968ce557d84b87d317946f43844bf3`
+  is documentation-only. `npm.cmd run verify` exited 0 with Node 120/120 and
+  unchanged production bytes.
+- Focused evidence: Store all-targets 110 passed, 2 ignored; Writer all-targets
+  16/16; runtime composition 1/1; Store and Writer scoped strict Clippy,
+  format, repository checks, and diff check pass. Full-workspace strict Clippy
+  was attempted and exited 1 solely on 17 unchanged `lattice-hermes-adapter`
+  diagnostics outside this allowlist; it is explicitly not a PASS.
+- Parent-owned root live receipt (not a raw-log artifact): run
+  `691ee93d56794439999db7c424a5588d`, dynamic port `59124`, PostgreSQL PID
+  `22684`, exited 0. FRESH_V5, MEMORY_V3, WRITER_V2, WRITER_V3_BRIDGE,
+  REBIND_FAILURE_ATOMICITY, and STORE_V6 all passed. Teardown reported
+  `root_absent=True`, `listener_survivors=0`; postcheck retained listeners 5432
+  PID 5200 and 58743 PID 25912, with no listener on 59124.
+- Parent-gated independent code and architecture reviews of exact
+  `f19719c7bf968ce557d84b87d317946f43844bf3` report P0=P1=P2=P3=0 and
+  feature-delivery clear. The separate product bootstrap ordering of Writer v3
+  before Store v6/rebind remains TASK-105's integration prerequisite; this
+  ticket makes no deployability claim.

@@ -1,4 +1,4 @@
-# TASK-094 workflow ledger — local candidate
+# TASK-094 workflow ledger — terminal local closure
 
 | Stage | Current evidence | Status |
 |---|---|---|
@@ -28,5 +28,23 @@
 | Strict Clippy after boundary repair | Store + Writer scope passes `-D warnings`; runtime test scope reaches 17 existing Hermes diagnostics through its direct runtime dependency | partial; Hermes outside allowlist, not repaired |
 | Repository Node verify | `npm check` exits 0; `npm verify` child completed after the command collector's terminal receipt timeout | unverified; do not treat as pass |
 | Architecture-review follow-up | Constitutions align exact-v5 transition and exact-v6 retry; SPEC module identity/impact corrected; static contract asserts exactly one ordered Writer procedure lock block over all five tables | pending local verification; author repair only, not independent pass |
+
+## Terminal evidence — 2026-08-25
+
+The earlier candidate rows are retained as chronology; this table supersedes
+their incomplete or provisional statuses for the completed local feature scope.
+
+| Stage | Terminal evidence | Status |
+|---|---|---|
+| Workspace all-targets/features test | `cargo test --workspace --all-targets --all-features --locked` at `8753772fb499bc745b4406856192ee5bb9785b03` | pass; exit 0 |
+| Later static/doc changes | `32d2b109014ac2bc89cf936628a259815fe2112d` changed only static contract and passed migration contract 42/42; `f19719c7bf968ce557d84b87d317946f43844bf3` is documentation-only | compatible with root test evidence |
+| Focused suites | Store all-targets 110 passed, 2 ignored; Writer all-targets 16/16; runtime composition 1/1 | pass |
+| Scoped quality gates | Store + Writer strict Clippy, fmt, repository checks, and diff check | pass |
+| Full-workspace strict Clippy | attempted; exit 1 only from 17 unchanged `lattice-hermes-adapter` diagnostics outside allowlist | not a PASS; no scope expansion |
+| Repository Node verify | `npm.cmd run verify`, Node 120/120; production bytes unchanged | pass; exit 0 |
+| Root owned live gate | run `691ee93d56794439999db7c424a5588d`, port 59124, PID 22684; FRESH_V5/MEMORY_V3/WRITER_V2/WRITER_V3_BRIDGE/REBIND_FAILURE_ATOMICITY/STORE_V6 | pass; exit 0, root_absent=True, listener_survivors=0 |
+| Live postcheck | 5432 PID 5200 and 58743 PID 25912 remained listening; port 59124 had no listener | pass; marker-owned teardown proven |
+| Independent reviews | exact `f19719c7bf968ce557d84b87d317946f43844bf3` code and architecture reviews | pass; P0=P1=P2=P3=0, feature delivery clear |
+| Delivery/integration residual | non-force push, remote SHA/CI, and product Writer-v3-before-Store bootstrap remain pending; the latter is separate TASK-105 | NEEDS_REVIEW; no deploy claim, archive remains keep_open |
 
 This is a local evidence ledger, not a second task truth or delivery receipt.

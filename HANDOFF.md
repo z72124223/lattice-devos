@@ -1,18 +1,83 @@
-# TASK-094 local verification checkpoint (not delivered)
+# TASK-094 terminal handoff
 
-- Candidate: `feature/task-094-writer-v3-apply-rebind` from exact base
-  `aeff4131d0a78e740980b47ab10f56c5aa96cb18`; the changed paths are restricted
-  to TASK-094's allowlist.
-- Scope: Writer-owned v3 apply/rebind plus Store `ExactV5Prefix` to
-  `ExactV6Full` transition. TASK-079 remains the parent task; no TASK-079
-  source-only behavior is claimed complete here.
-- Evidence: this checkpoint records current local command output and a fresh
-  TASK-094 marker-owned disposable PostgreSQL run in the ticket/review files.
-  Historical RED evidence was not available when pre-existing dirty work was
-  resumed and is not recreated or claimed.
-- Not performed: independent merge review, remote CI, delivery finisher, push,
-  merge, deployment, release, or archival. Parent re-verification remains
-  required before any such action.
+## Status
+
+`NEEDS_REVIEW` — local feature scope is completed and independently reviewed;
+only non-force push, remote SHA/CI, and product integration remain. This is not
+an archive, merge, deployment, or release claim.
+
+## Objective and scope
+
+- Objective: close TASK-079's Writer v3 apply/rebind and Store
+  `ExactV5Prefix` to `ExactV6Full` local migration blocker without moving
+  Writer semantic ownership into Store.
+- In scope: the allowlisted TASK-094 branch
+  `feature/task-094-writer-v3-apply-rebind`, based on
+  `aeff4131d0a78e740980b47ab10f56c5aa96cb18`.
+- Out of scope: push, merge, remote CI, deployment/release, archival, and
+  production bootstrap sequencing. Product Writer-v3-before-Store composition
+  is the separate TASK-105 integration prerequisite.
+
+## Completed work
+
+- Store calls only the fixed zero-argument Writer-owned rebind procedure for
+  exact-v5 transition and exact-v6 idempotent retry; Writer retains semantic
+  rows, locks, identity, ledger, and ACL ownership.
+- The runtime composition live gate verifies v5 bridge through Writer v2/v3,
+  failure-atomic active-head rollback, drift fail-closed behavior, Store v6,
+  and idempotent retry.
+- Parent-gated independent code and architecture reviews of exact
+  `f19719c7bf968ce557d84b87d317946f43844bf3` found P0=P1=P2=P3=0 and cleared
+  feature delivery.
+
+## Files changed
+
+| Path group | Why | Verification |
+|---|---|---|
+| Store, Writer, migration and runtime composition allowlisted sources/tests | Writer-owned v3 rebind and exact v5/v6 Store boundary | focused suites and owned live gate |
+| TASK-094 ticket, workflow ledger, code/architecture reviews, this handoff | durable local evidence and delivery boundary | `npm.cmd run check`, diff check |
+
+## Workflow ledger
+
+Historical RED evidence was unavailable when the pre-existing dirty repair was
+resumed and is not claimed. The terminal ticket and
+`docs/reviews/WORKFLOW_LEDGER_TASK_094_2026-08-21.md` carry the complete local
+receipt and residual boundary.
+
+## Verification
+
+| Command or gate | Result |
+|---|---|
+| `cargo test --workspace --all-targets --all-features --locked` at `8753772fb499bc745b4406856192ee5bb9785b03` | exit 0; later `32d2b109014ac2bc89cf936628a259815fe2112d` is static contract only (migration contract 42/42), and `f19719c7bf968ce557d84b87d317946f43844bf3` is docs only |
+| Focused suites | Store 110 passed/2 ignored; Writer 16/16; runtime composition 1/1 |
+| Scoped quality | Store + Writer strict Clippy, fmt, repository checks, and diff check pass |
+| `npm.cmd run verify` | exit 0; Node 120/120; production bytes unchanged |
+| Full-workspace strict Clippy | attempted, exit 1 only on 17 unchanged `lattice-hermes-adapter` diagnostics outside allowlist; not a PASS |
+| Root owned live gate | run `691ee93d56794439999db7c424a5588d`, port 59124, PID 22684, exit 0; all six stages pass; teardown `root_absent=True`, `listener_survivors=0` |
+| Live postcheck | 5432 PID 5200 and 58743 PID 25912 remain listening; port 59124 has zero listener |
+
+## Review and integration
+
+- Independent code and architecture review: `PASS`, P0=P1=P2=P3=0, feature
+  delivery clear at exact `f19719c7bf968ce557d84b87d317946f43844bf3`.
+- Remaining delivery gates: authorized non-force push, remote SHA/CI, and the
+  governed TASK-105 product integration. `delivery_archive` stays `keep_open`.
+
+## Risks and open decisions
+
+- Full-workspace strict Clippy remains an honest non-pass due solely to 17
+  unchanged `lattice-hermes-adapter` diagnostics outside TASK-094's allowlist.
+- The product runtime still needs a separately governed Writer-v3-before-Store
+  bootstrap composition; no production deployability is claimed.
+
+## Next action
+
+1. `npm.cmd run delivery:finish`
+
+## Restart context
+
+Recheck the terminal docs commit, clean worktree, then run the delivery finisher
+under its own authority. Do not treat this handoff as archival.
 
 # TASK-079 durable foreman state handoff — 2026-08-21
 
