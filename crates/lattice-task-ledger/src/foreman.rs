@@ -575,7 +575,7 @@ mod tests {
         let (current, row) = append_unchecked(
             &vacant,
             metadata("persisted-first-2", 2),
-            snapshot("thread-a", 2),
+            snapshot(SoleForemanBinding::THREAD, 2),
         );
 
         assert_eq!(
@@ -588,12 +588,15 @@ mod tests {
     fn persisted_replay_rejects_generation_gap_and_thread_drift() {
         let identity = foreman_coordination_identity().expect("identity");
         let vacant = VerifiedStream::vacant(identity, RuntimeKind::Live).expect("vacant");
-        let (after_one, row_one) =
-            append_unchecked(&vacant, metadata("persisted-1", 1), snapshot("thread-a", 1));
+        let (after_one, row_one) = append_unchecked(
+            &vacant,
+            metadata("persisted-1", 1),
+            snapshot(SoleForemanBinding::THREAD, 1),
+        );
         let (after_gap, row_gap) = append_unchecked(
             &after_one,
             metadata("persisted-gap-3", 3),
-            snapshot("thread-a", 3),
+            snapshot(SoleForemanBinding::THREAD, 3),
         );
         assert_eq!(
             verify_untrusted_foreman_snapshot_rows(&after_gap, &[row_one.clone(), row_gap]),
