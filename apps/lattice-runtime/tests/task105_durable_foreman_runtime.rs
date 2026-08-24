@@ -208,16 +208,41 @@ impl LiveConfig {
 
     fn make_v6_writer_bridge_pending(&self) {
         self.bootstrap_client()
-            .batch_execute(&format!(
+            .batch_execute(
                 "DELETE FROM ONLY writer_lease.writer_lease_extension_ledger \
                     WHERE ledger_ordinal=3 AND event_kind='REBOUND'; \
-                 UPDATE ONLY writer_lease.writer_lease_extension_identity \
-                    SET global_schema_version=5, global_manifest_sha256='{V5_MANIFEST_SHA256}' \
-                    WHERE singleton; \
                  REVOKE ALL ON ALL FUNCTIONS IN SCHEMA writer_lease FROM lattice_runtime; \
-                 REVOKE USAGE ON SCHEMA writer_lease FROM lattice_runtime"
-            ))
+                 REVOKE USAGE ON SCHEMA writer_lease FROM lattice_runtime",
+            )
             .expect("TASK105_MAKE_V6_WRITER_BRIDGE_PENDING");
+    }
+
+    fn assert_v6_writer_bridge_pending(&self) {
+        let mut client = self.bootstrap_client();
+        let row = client
+            .query_one(
+                "SELECT \
+                    (SELECT extension_schema_version=3 AND global_schema_version=6 \
+                       AND global_manifest_sha256=(SELECT manifest_sha256 \
+                         FROM ONLY control.schema_compatibility WHERE singleton) \
+                       FROM ONLY writer_lease.writer_lease_extension_identity WHERE singleton), \
+                    (SELECT pg_catalog.string_agg(ledger_ordinal::text || ':' || event_kind::text, \
+                         ',' ORDER BY ledger_ordinal)='1:INSTALLED,2:UPGRADED' \
+                       FROM ONLY writer_lease.writer_lease_extension_ledger), \
+                    NOT pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE'), \
+                    (SELECT pg_catalog.count(*) FILTER (WHERE \
+                         pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE'))=0 \
+                       FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n \
+                         ON n.oid=p.pronamespace WHERE n.nspname='writer_lease')",
+                &[],
+            )
+            .expect("TASK105_V6_WRITER_BRIDGE_PENDING_PROFILE");
+        for index in 0..4 {
+            assert!(
+                row.get::<_, bool>(index),
+                "TASK105_V6_WRITER_PENDING_{index}"
+            );
+        }
     }
 
     fn introduce_partial_writer_acl(&self) {
@@ -439,6 +464,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     println!("TASK105_STAGE_V5_WRITER_V3_BOOTSTRAP_PASS");
 
     config.make_v6_writer_bridge_pending();
+    config.assert_v6_writer_bridge_pending();
     let pending = config.durable_profile_fingerprint();
     run_latticed_admin("--postgres-bootstrap", true);
     config.assert_v6_writer_v3_current();
