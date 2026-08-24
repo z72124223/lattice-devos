@@ -479,7 +479,10 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
 
     config.introduce_partial_writer_acl();
     let partial = config.durable_profile_fingerprint();
-    run_latticed_admin("--postgres-bootstrap", false);
+    assert_eq!(
+        run_latticed_admin("--postgres-bootstrap", false).trim(),
+        "LATTICE_WRITER_LEASE_REJECTED"
+    );
     assert_eq!(config.durable_profile_fingerprint(), partial);
     config.repair_partial_writer_acl();
     config.assert_v6_writer_v3_current();
@@ -487,7 +490,10 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
 
     config.introduce_corrupt_writer_identity();
     let corrupt = config.durable_profile_fingerprint();
-    run_latticed_admin("--postgres-bootstrap", false);
+    assert_eq!(
+        run_latticed_admin("--postgres-bootstrap", false).trim(),
+        "LATTICE_WRITER_LEASE_REJECTED"
+    );
     assert_eq!(config.durable_profile_fingerprint(), corrupt);
     config.repair_corrupt_writer_identity();
     config.assert_v6_writer_v3_current();
@@ -495,7 +501,10 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
 
     config.introduce_unsupported_history();
     let unsupported = config.durable_profile_fingerprint();
-    run_latticed_admin("--postgres-bootstrap", false);
+    assert_eq!(
+        run_latticed_admin("--postgres-bootstrap", false).trim(),
+        "LATTICED_RUNTIME_POSTGRES_VERIFICATION_REJECTED"
+    );
     assert_eq!(config.durable_profile_fingerprint(), unsupported);
     config.repair_unsupported_history();
     config.assert_v6_writer_v3_current();
