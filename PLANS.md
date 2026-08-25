@@ -27,8 +27,8 @@
 - 正式產品分支是 `product/lattice-control-mvp`。
 - 目前沒有另一項已核准的產品實作；下一個工作須重新做 live audit、建立
   耐久 task 身分與有界工作樹。
-- 易變 SHA、PR、CI、安裝收據與 replay 證據保留在 Git、TASK-106 workflow
-  ledger 與 LATTICE，不複製成會過期的公開計畫狀態。
+- 易變 SHA、PR、CI、安裝收據與 replay 歷史保留在 Git 與 LATTICE；完整
+  驗收索引由 TASK-106 workflow ledger 提供，不複製成會過期的計畫狀態。
 
 ## 尚待產品擁有者決定
 
