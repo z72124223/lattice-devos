@@ -2,13 +2,14 @@
 """Prepare a verified LATTICE MCP binary without interrupting Codex tasks.
 
 This hook deliberately never terminates a process.  It only changes Codex's
-MCP command for future sessions after the writer-lock directory is empty.
+MCP command for future sessions after no writer-lock file is actively held.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import msvcrt
 import os
 from pathlib import Path
 import re
@@ -32,6 +33,29 @@ def write_receipt(root: Path, status: str, **fields: object) -> None:
     path.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def lock_is_active(path: Path) -> bool:
+    """Return whether another process currently holds the Windows byte lock.
+
+    Codex deliberately keeps the zero-byte marker after a task or process
+    restart.  File existence therefore is not evidence of an active writer.
+    Acquiring the same first-byte lock is a read-only ownership probe: an
+    unlocked marker remains untouched, while a live writer fails closed.
+    """
+    try:
+        with path.open("r+b", buffering=0) as lock_file:
+            try:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            except PermissionError:
+                return True
+            else:
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                return False
+    except FileNotFoundError:
+        return False
+    except PermissionError:
+        return True
+
+
 def active_locks(codex_home: Path) -> list[str]:
     locks = codex_home / "thread-writer-locks"
     if not locks.is_dir():
@@ -39,7 +63,9 @@ def active_locks(codex_home: Path) -> list[str]:
     return sorted(
         entry.name
         for entry in locks.iterdir()
-        if entry.name.endswith(LOCK_SUFFIX) and entry.name != ".coordination.lock"
+        if entry.name.endswith(LOCK_SUFFIX)
+        and entry.name != ".coordination.lock"
+        and lock_is_active(entry)
     )
 
 
