@@ -2402,14 +2402,12 @@ impl DependencyGitFixture {
         run(&repository, &["add", "base.txt"]);
         run(&repository, &["commit", "-m", "base"]);
         let base_sha = run(&repository, &["rev-parse", "HEAD"]);
-        let script = fs::canonicalize(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("..")
-                .join("scripts")
-                .join("lattice-dependency-worktree.mjs"),
-        )
-        .expect("TASK106_DEPENDENCY_CLI");
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("scripts")
+            .join("lattice-dependency-worktree.mjs");
+        assert!(script.is_file(), "TASK106_DEPENDENCY_CLI");
         let cli = Command::new(if cfg!(windows) { "node.exe" } else { "node" })
             .current_dir(&repository)
             .env("LATTICE_DEPENDENCY_WORKTREE_ROOT", &dependency_root)
