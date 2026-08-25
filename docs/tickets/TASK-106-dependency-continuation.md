@@ -14,7 +14,7 @@ additional_modules:
     constitution_version: 1.20
   - module_id: workspace-git
     constitution_version: 1.1
-status: in_progress
+status: complete
 parallel_safe: false
 depends_on: [TASK-105]
 branch: feature/task-106-dependency-continuation

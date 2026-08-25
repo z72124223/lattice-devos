@@ -1,10 +1,19 @@
-# 產品計畫：TASK-106 依賴暫停與重開續接
+# 產品計畫
 
-## 目標
+## 已交付基線
 
-讓唯一工頭在工程中發現缺少依賴時，可以把父工作安全記為 `BLOCKED`，建立並綁定一個有界依賴分支／工作樹；依賴完成且已安全整合後，才把父工作恢復為 `ACTIVE`。PostgreSQL 的 fresh-process replay 必須還原父／子任務、父／子分支與工作樹、基準 SHA、狀態及下一個動作。
+- 唯一工頭在工程中發現缺少依賴時，可把父工作耐久記為
+  `BLOCKED`，並保存 `depends_on` 與明確 next action。
+- 子工作綁定封閉的 task、branch、worktree 與 base SHA；呼叫者不能注入
+  任意路徑、分支、hook、filter 或 merge driver。
+- 依賴只有在 live Git 證明已安全整合後，才能透過後續 `ACTIVE`
+  checkpoint 解除阻塞；衝突、漂移與不確定狀態一律 fail closed。
+- PostgreSQL fresh-process replay 可還原父／子身分、分支／工作樹、基準
+  SHA、阻塞／續接狀態與下一個動作。
+- Codex App 不需重開；版本化 Runtime artifact 可由 fresh Codex app-server
+  reload，並從既有 PostgreSQL 恢復同一份耐久事實。
 
-## 策略與邊界
+## 穩定邊界
 
 - 沿用現有 Foreman snapshot 與 Task Ledger／PostgreSQL schema-v6，不新增資料表或第二份真相。
 - `blocker_ref` 新增封閉、可版本化的 dependency binding；舊字串 blocker 仍可 replay。
@@ -13,28 +22,13 @@
 - 不修改 Task Domain 的 terminal `Blocked` 語意；這是唯一工頭協調 snapshot 的 overlay。
 - 不碰、移除或整理任何既有髒工作樹，不使用 reset、clean、force push，也不重開 Codex App。
 
-## 已確認事實
+## 目前方向
 
 - 正式產品分支是 `product/lattice-control-mvp`。
-- 正式基準在開工時已與遠端產品分支核對一致；易變 SHA 只保留在 Git 與耐久驗收證據，不寫進公開計畫。
-- 現有 snapshot 已保存父分支、父工作樹、父 HEAD、state、blocker 與 generation。
-- 現有 `GitWorkspace` 已提供安全建立受控工作樹與 fail-closed integration probe。
-- 現有 `BLOCKED` 沒有結構化依賴身分，也沒有解除阻塞前的整合證明。
-
-## 執行步驟
-
-1. 固定 SPEC-010、TASK-106 與模組契約。（目前）
-2. 先寫純狀態、MCP、Git guard 與 fresh-process replay 的失敗測試。
-3. 實作最小結構化 binding、受控工作樹入口、Runtime projection 與解除阻塞 guard。
-4. 跑 focused/full tests、格式／lint、獨立 code/architecture review。
-5. 乾淨提交、非強制推送、遠端 SHA、PR/CI、正式分支合併。
-6. 不重開 App 的部署／安裝、receipt、即時 Runtime 與新程序 replay 重驗。
-
-## 完成條件
-
-只有上述六步全部成功，且 Git、GitHub、部署收據、即時 Runtime 與 fresh-process PostgreSQL replay 都有當前證據，才可結束本計畫或 Goal。任何單一關卡失敗都停止後續交付並保留可續接證據。
-
-完成後，公開計畫只保留穩定產品方向；執行歷史保留在 Git 與 LATTICE。
+- 目前沒有另一項已核准的產品實作；下一個工作須重新做 live audit、建立
+  耐久 task 身分與有界工作樹。
+- 易變 SHA、PR、CI、安裝收據與 replay 證據保留在 Git、TASK-106 workflow
+  ledger 與 LATTICE，不複製成會過期的公開計畫狀態。
 
 ## 尚待產品擁有者決定
 

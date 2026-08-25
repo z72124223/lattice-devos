@@ -18,8 +18,8 @@
 | Full local verification | valid | Node/Rust suites, format, diff and scoped strict Clippy below | machine-enforced tests |
 | Independent reviews | valid | final code and architecture review found no P0-P3 findings | independently verified |
 | PostgreSQL fresh-process gate | valid | live run `a39cffb6dde741b8946e5aca2be61e34` below | machine-observed |
-| Push/PR/CI/product merge | pending | must be verified against the current remote | unverified |
-| Deploy/install/runtime replay | pending | must use a no-Codex-App-restart path and record a receipt | unverified |
+| Push/PR/CI/product merge | valid | PR #23, CI `verify`, merge commit `6dc1e303` and remote equality | service-verified |
+| Deploy/install/runtime replay | valid | versioned artifact, Control receipt, fresh Codex reload/MCP and post-deploy PostgreSQL run | machine-observed |
 
 ## Evidence log
 
@@ -62,7 +62,40 @@
   extended entry path that Node 24 resolved as `C:`. Its database and listener
   teardown passed. Commit `e45bb71` changed only the fixture path and the full
   fresh live run above then passed.
+- GitHub PR #23 targeted only `product/lattice-control-mvp`; its head was the
+  verified remote SHA `805e4cec6d263d12f3d1299e3a0f850fefaac083`.
+  Workflow `verify` passed in 46 seconds. The repository has no branch
+  protection, ruleset or required-review enforcement, so none is claimed;
+  explicit user authorization covered this default-product merge. An isolated
+  `GitWorkspace.verifyIntegration` run returned `can_integrate=true`,
+  `outcome=clean`, zero conflicts and removed its owned verification tree.
+  GitHub merged PR #23 as `6dc1e303ea9be878fbe082cbd90ce33a416dad83`;
+  remote SHA and the clean product worktree then matched exactly.
+- Release artifact
+  `C:\Users\f7212\AppData\Local\LATTICE\build-cache\latticed-runtime-6dc1e303ea9b\release\latticed.exe`
+  was built from the clean product merge with `--locked`. Its SHA-256 is
+  `a7a1f74c6307a7b086ebc57727216336526da993c858e20622e35230de07b668`.
+  Control recorded and replayed installation observation
+  `5421ff01-e8d1-4ddc-93d4-815012ece89e`; receipt digest is
+  `7e338c8d64b285f88e42d936319a7d63136eeb0d2ce3b7908857abd0200e67fa`.
+- No Codex App restart occurred. A fresh Codex app-server used a one-process
+  config override, successfully executed `config/mcpServer/reload`, and
+  discovered exactly the seven bounded tools including the structured
+  dependency blocker contract. A separately fresh `latticed` MCP process used
+  the installed artifact and existing configured environment without printing
+  credentials. `lattice_runtime_status` returned
+  `lattice.foreman-runtime-projection/1.1`, generation 3, `replay_status=VERIFIED`,
+  `next_action=CONTINUE`, and the same durable ledger/checkpoint digests as the
+  pre-deploy Runtime. The persistent global MCP pointer was deliberately not
+  rotated while four Codex writer locks were active; existing App sessions were
+  neither stopped nor replaced.
+- Post-deploy product run `b6d5f57b0d6a4d23be5499a132d482c5` used dynamic
+  loopback port `50978` and again emitted
+  `TASK106_STAGE_DEPENDENCY_FRESH_PROCESS_REPLAY_PASS`,
+  `TASK105_STAGE_FOREMAN_DUAL_PROCESS_RACE_PASS`,
+  `TASK105_TEARDOWN_OK root_absent=True listener_absent=True`, and
+  `TASK105_DURABLE_FOREMAN_LIVE_GATE=PASS`.
 
-This ledger intentionally leaves delivery and deployment pending. TASK-106
-remains `in_progress` until the remote, product merge, installation receipt,
-live Runtime and post-deploy fresh-process replay gates all pass.
+TASK-106 is complete. Rollback, if later required, is a normal reviewed revert
+of merge commit `6dc1e303`; reset, clean, force push and historical-worktree
+mutation remain prohibited.
