@@ -14,7 +14,7 @@ additional_modules:
     constitution_version: 1.20
   - module_id: workspace-git
     constitution_version: 1.1
-status: in_progress
+status: complete
 parallel_safe: false
 depends_on: [TASK-105]
 branch: feature/task-106-dependency-continuation
@@ -27,6 +27,7 @@ delivery_merge: authorized_product_branch
 delivery_deploy_install: authorized_no_app_restart
 allowed_paths:
   - Cargo.lock
+  - HANDOFF.md
   - PLANS.md
   - package.json
   - apps/lattice-runtime/**
