@@ -4,7 +4,7 @@ spec_id: SPEC-002
 spec_version: 24
 module_id: postgres-store
 constitution_version: 1.4
-status: paused
+status: completed
 parallel_safe: false
 depends_on:
   - TASK-021
@@ -266,3 +266,16 @@ repository at a time and the user directed continued execution through MVP-3.
 Credentials, account/payment actions, public exposure, irreversible actions,
 security-control changes, real project mutation, protected release activation,
 primary-branch merge, publication, and deployment remain outside this ticket.
+
+## 2026-08-25 reconciliation
+
+TASK-022 is completed by the later TASK-075 integration rather than by simply
+assuming that this ticket's unchecked historical checklist passed. TASK-075
+binds the original implementation commit `12f7100`, closure commit `a1aced9`,
+and integrated product commit `a3599c1`; it also records the migration,
+fresh/restart replay, ACL, and wrong-ordinal rejection evidence. The current
+product still contains the exact Registry migration/library payload and the
+integrated PostgreSQL adapter. PR #12 was merged into that accepted lineage.
+
+The remaining unchecked broad cross-module items above are historical planning
+detail and are not relabelled as independently rerun on 2026-08-25.

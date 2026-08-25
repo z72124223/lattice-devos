@@ -25,7 +25,7 @@ additional_modules:
     constitution_version: 2.0
   - module_id: gateway-ipc
     constitution_version: 1.1
-status: in-progress
+status: partial
 parallel_safe: false
 depends_on:
   - TASK-021
@@ -149,3 +149,16 @@ gate. PostgreSQL extension implementation requires explicit approval of its
 versioned owning-module amendment. Push, primary merge, publication/deployment/
 payment/protected promotion, official Codex retry, and safety-posture changes
 remain excluded.
+
+## 2026-08-25 reconciliation
+
+This ticket remains non-terminal. Commits `79096b6` and `5238937` preserve
+historical Graphify and PostgreSQL restart evidence, but the current Runtime's
+`Graphify READY` result is only an identity preflight and does not execute
+Graphify or prove a current durable-memory replay.
+
+Next action: with the current product binary, run one bounded Graphify refresh,
+verify its PostgreSQL receipt, physically restart the same marker-owned
+loopback PostgreSQL instance, and use a fresh process to replay the identical
+receipt with zero Graphify re-execution. Until that current-version evidence
+exists, historical PASS evidence does not close this ticket.

@@ -47,7 +47,7 @@ No real Hermes/provider/model, public network, schema migration, MCP change,
 public test-support seam, push, merge, deployment, payment, account change, or
 release.
 
-## Partial Evidence And Integration Blocker
+## Historical partial evidence and integration blocker
 
 - RED: the PostgreSQL harness initially rejected the absent
   `-RunTask068HermesReplayGate` switch before starting a service.
@@ -67,10 +67,23 @@ release.
   align tests/admission with that inherited five-entry profile, while
   `3ac4b1c` proves the replay mechanics.
 
-### Blocked follow-up — POSTGRES-REGISTRY-AUTONOMY-MIGRATION-RECONCILIATION
+### Historical blocked follow-up — POSTGRES-REGISTRY-AUTONOMY-MIGRATION-RECONCILIATION
 
 The stop boundary is explicit: this ticket does not cherry-pick or merge
 TASK-022, reorder a migration, change schema/manifest contracts, or mark
 TASK-068 completed. A separately authorized follow-up must preserve Registry
 `0005` and move autonomy to a later ordinal/profile before combined product
 integration can be claimed.
+
+## 2026-08-25 reconciliation
+
+TASK-075 subsequently removed the historical ordinal collision: Registry
+remains `0005`, autonomy is `0006`, and the current Store profile is schema-v6
+with `0007`. That closes the old migration blocker but does not by itself close
+this ticket.
+
+The current TASK-068 PostgreSQL restart gate remains ignored and has no
+schema-v6 execution receipt. Next action: run the exact initial/restart profile
+against a marker-owned loopback PostgreSQL instance on the current product,
+then prove the same Hermes receipt digest and `0/0/0` restart-phase Hermes
+ready/research/persist effects. The ticket stays `partial` until that succeeds.
