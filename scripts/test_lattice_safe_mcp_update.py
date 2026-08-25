@@ -1,4 +1,5 @@
 import importlib.util
+import msvcrt
 from pathlib import Path
 import tempfile
 import unittest
@@ -27,8 +28,21 @@ class SafeMcpUpdateTests(unittest.TestCase):
             locks = root / "thread-writer-locks"
             locks.mkdir()
             (locks / ".coordination.lock").touch()
-            (locks / "active.lock").touch()
-            self.assertEqual(MODULE.active_locks(root), ["active.lock"])
+            active = locks / "active.lock"
+            with active.open("w+b", buffering=0) as active_file:
+                msvcrt.locking(active_file.fileno(), msvcrt.LK_NBLCK, 1)
+                try:
+                    self.assertEqual(MODULE.active_locks(root), ["active.lock"])
+                finally:
+                    msvcrt.locking(active_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+    def test_unlocked_stale_task_lock_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            locks = root / "thread-writer-locks"
+            locks.mkdir()
+            (locks / "stale.lock").touch()
+            self.assertEqual(MODULE.active_locks(root), [])
 
     def test_failed_candidate_does_not_change_config(self):
         with tempfile.TemporaryDirectory() as directory:
