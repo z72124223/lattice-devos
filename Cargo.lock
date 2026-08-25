@@ -285,6 +285,7 @@ version = "0.1.0"
 name = "lattice-foreman-state"
 version = "0.1.0"
 dependencies = [
+ "lattice-cjson",
  "time",
 ]
 

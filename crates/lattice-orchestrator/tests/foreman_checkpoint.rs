@@ -310,6 +310,7 @@ impl ForemanCoordinationPort for FakeCoordination {
             0,
             0,
             "NO_DURABLE_SNAPSHOT",
+            None,
         ))
     }
 }

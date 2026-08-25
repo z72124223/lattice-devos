@@ -8,6 +8,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -71,6 +72,94 @@ async function repositoryFixture(t) {
     baseCommit,
   };
 }
+
+test("bounded dependency CLI creates one owned child and returns the durable binding", async (t) => {
+  const fixture = await repositoryFixture(t);
+  const script = path.resolve("scripts/lattice-dependency-worktree.mjs");
+  const { stdout, stderr } = await execFileAsync(
+    process.execPath,
+    [
+      script,
+      "create",
+      "TASK-106",
+      "TASK-107",
+      "TASK-107-WORKTREE",
+      fixture.baseCommit,
+    ],
+    {
+      cwd: fixture.repositoryRoot,
+      encoding: "utf8",
+      windowsHide: true,
+      env: {
+        ...process.env,
+        LATTICE_DEPENDENCY_WORKTREE_ROOT: fixture.worktreeRoot,
+      },
+    },
+  );
+  assert.equal(stderr, "");
+  const binding = JSON.parse(stdout);
+  assert.deepEqual(binding, {
+    schema: "lattice.dependency-blocker/1.0",
+    parent_task_id: "TASK-106",
+    dependency_task_id: "TASK-107",
+    dependency_worktree_id: "TASK-107-WORKTREE",
+    dependency_branch: "lattice/task-107",
+    base_sha: fixture.baseCommit,
+    next_action: "COMPLETE_DEPENDENCY",
+  });
+  assert.equal(
+    await git(path.join(fixture.worktreeRoot, "task-107-worktree"), [
+      "rev-parse",
+      "HEAD",
+    ]),
+    fixture.baseCommit,
+  );
+  const marker = JSON.parse(
+    await readFile(
+      path.join(
+        fixture.worktreeRoot,
+        ".lattice-ownership",
+        "task-107-worktree.json",
+      ),
+      "utf8",
+    ),
+  );
+  assert.equal(marker.task_id, "TASK-107");
+  assert.equal(marker.base_commit_sha, fixture.baseCommit);
+});
+
+test("bounded dependency CLI rejects wire-incompatible identity before creating a child", async (t) => {
+  const fixture = await repositoryFixture(t);
+  const script = path.resolve("scripts/lattice-dependency-worktree.mjs");
+  const invalidRequests = [
+    ["task-106", "TASK-107", "TASK-107-WORKTREE", fixture.baseCommit],
+    ["TASK-106", "TASK-106", "TASK-106-WORKTREE", fixture.baseCommit],
+    ["TASK-106", `TASK-${"A".repeat(60)}`, "TASK-107-WORKTREE", fixture.baseCommit],
+    ["TASK-106", "TASK-107", "_TASK-107-WORKTREE", fixture.baseCommit],
+    ["TASK-106", "TASK-107", "TASK-107-WORKTREE", "a".repeat(64)],
+  ];
+  for (const request of invalidRequests) {
+    await assert.rejects(
+      execFileAsync(process.execPath, [script, "create", ...request], {
+        cwd: fixture.repositoryRoot,
+        encoding: "utf8",
+        windowsHide: true,
+        env: {
+          ...process.env,
+          LATTICE_DEPENDENCY_WORKTREE_ROOT: fixture.worktreeRoot,
+        },
+      }),
+      (error) =>
+        error.code === 1 &&
+        error.stdout === "" &&
+        error.stderr === "DEPENDENCY_WORKTREE_ARGUMENTS_INVALID\n",
+    );
+  }
+  await assert.rejects(
+    stat(path.join(fixture.worktreeRoot, "task-107-worktree")),
+    { code: "ENOENT" },
+  );
+});
 
 test("creates, inspects, and safely removes an owned disposable Git worktree", async (t) => {
   const fixture = await repositoryFixture(t);

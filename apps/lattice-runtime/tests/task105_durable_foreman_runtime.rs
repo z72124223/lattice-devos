@@ -1,11 +1,14 @@
 //! Marker-owned PostgreSQL acceptance for TASK-105.
 
 use std::env;
+use std::ffi::OsStr;
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lattice_contracts::{
     AttemptId, ContentDigest, DaemonEpoch, HolderProcessId, ProjectId, RuntimeAdmissionMode,
@@ -2115,6 +2118,46 @@ impl InteractiveLatticed {
         Self::start_with_run_id(Some(&config.run_id))
     }
 
+    fn start_for_dependency(config: &LiveConfig, fixture: &DependencyGitFixture) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_latticed"));
+        command
+            .env("LATTICE_TASK019_RUN_ID", &config.run_id)
+            .env("LATTICE_GRAPHIFY_SOURCE_ROOT", &fixture.repository)
+            .env("LATTICE_DEPENDENCY_WORKTREE_ROOT", &fixture.dependency_root)
+            .env("LATTICE_DELIVERY_GIT_EXE", &fixture.git)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("TASK106_INTERACTIVE_LATTICED_START");
+        let stdin = child.stdin.take().expect("TASK106_INTERACTIVE_STDIN");
+        let child_stdout = child.stdout.take().expect("TASK106_INTERACTIVE_STDOUT");
+        let child_stderr = child.stderr.take().expect("TASK106_INTERACTIVE_STDERR");
+        let (sender, stdout) = mpsc::channel();
+        let stdout_reader = thread::spawn(move || {
+            for line in BufReader::new(child_stdout).lines() {
+                let message = line.map_err(|error| error.to_string());
+                if sender.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        let stderr_reader = thread::spawn(move || {
+            let mut stderr = String::new();
+            BufReader::new(child_stderr)
+                .read_to_string(&mut stderr)
+                .expect("TASK106_INTERACTIVE_STDERR_READ");
+            stderr
+        });
+        Self {
+            child,
+            stdin: Some(stdin),
+            stdout,
+            stdout_reader: Some(stdout_reader),
+            stderr_reader: Some(stderr_reader),
+            finished: false,
+        }
+    }
+
     fn pid(&self) -> u32 {
         self.child.id()
     }
@@ -2305,6 +2348,172 @@ fn initialize_request() -> Value {
             "clientInfo":{"name":"task105-live","version":"1"}
         }
     })
+}
+
+struct DependencyGitFixture {
+    root: PathBuf,
+    repository: PathBuf,
+    dependency_root: PathBuf,
+    child: PathBuf,
+    base_sha: String,
+    git: PathBuf,
+}
+
+impl DependencyGitFixture {
+    fn new() -> Self {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("TASK106_FIXTURE_CLOCK")
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "lattice-task106-dependency-{}-{unique}",
+            std::process::id()
+        ));
+        let repository = root.join("repository");
+        let dependency_root = root.join("dependency-worktrees");
+        let child = dependency_root.join("task-107-worktree");
+        fs::create_dir_all(&repository).expect("TASK106_REPOSITORY_ROOT");
+        let git =
+            fs::canonicalize(required("LATTICE_DELIVERY_GIT_EXE")).expect("TASK106_GIT_EXECUTABLE");
+        let run = |cwd: &Path, arguments: &[&str]| {
+            let output = Command::new(&git)
+                .current_dir(cwd)
+                .args(arguments)
+                .output()
+                .expect("TASK106_GIT_PROCESS");
+            assert!(
+                output.status.success(),
+                "TASK106_GIT_REJECTED:{:?}:{}",
+                arguments,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("TASK106_GIT_STDOUT")
+                .trim()
+                .to_owned()
+        };
+        run(&repository, &["init", "-b", "product-parent"]);
+        run(&repository, &["config", "user.name", "LATTICE Test"]);
+        run(
+            &repository,
+            &["config", "user.email", "lattice-test@invalid.example"],
+        );
+        fs::write(repository.join("base.txt"), b"base\n").expect("TASK106_BASE_FILE");
+        run(&repository, &["add", "base.txt"]);
+        run(&repository, &["commit", "-m", "base"]);
+        let base_sha = run(&repository, &["rev-parse", "HEAD"]);
+        let script = fs::canonicalize(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..")
+                .join("scripts")
+                .join("lattice-dependency-worktree.mjs"),
+        )
+        .expect("TASK106_DEPENDENCY_CLI");
+        let cli = Command::new(if cfg!(windows) { "node.exe" } else { "node" })
+            .current_dir(&repository)
+            .env("LATTICE_DEPENDENCY_WORKTREE_ROOT", &dependency_root)
+            .args([
+                script.as_os_str(),
+                OsStr::new("create"),
+                OsStr::new("TASK-106"),
+                OsStr::new("TASK-107"),
+                OsStr::new("TASK-107-WORKTREE"),
+                OsStr::new(&base_sha),
+            ])
+            .output()
+            .expect("TASK106_DEPENDENCY_CLI_PROCESS");
+        assert!(
+            cli.status.success() && cli.stderr.is_empty(),
+            "TASK106_DEPENDENCY_CLI_REJECTED:{}",
+            String::from_utf8_lossy(&cli.stderr)
+        );
+        let cli_binding =
+            serde_json::from_slice::<Value>(&cli.stdout).expect("TASK106_DEPENDENCY_CLI_JSON");
+        assert_eq!(cli_binding["parent_task_id"], "TASK-106");
+        assert_eq!(cli_binding["dependency_task_id"], "TASK-107");
+        assert_eq!(cli_binding["dependency_branch"], "lattice/task-107");
+        assert_eq!(cli_binding["base_sha"], base_sha);
+        run(&child, &["config", "user.name", "LATTICE Test"]);
+        run(
+            &child,
+            &["config", "user.email", "lattice-test@invalid.example"],
+        );
+        let repository = fs::canonicalize(repository).expect("TASK106_REPOSITORY_CANONICAL");
+        let dependency_root =
+            fs::canonicalize(dependency_root).expect("TASK106_DEPENDENCY_ROOT_CANONICAL");
+        let child = fs::canonicalize(child).expect("TASK106_CHILD_CANONICAL");
+        Self {
+            root,
+            repository,
+            dependency_root,
+            child,
+            base_sha,
+            git,
+        }
+    }
+
+    fn blocker(&self) -> Value {
+        json!({
+            "schema": "lattice.dependency-blocker/1.0",
+            "parent_task_id": "TASK-106",
+            "dependency_task_id": "TASK-107",
+            "dependency_worktree_id": "TASK-107-WORKTREE",
+            "dependency_branch": "lattice/task-107",
+            "base_sha": self.base_sha,
+            "next_action": "COMPLETE_DEPENDENCY",
+        })
+    }
+
+    fn commit_dependency(&self) {
+        fs::write(self.child.join("dependency.txt"), b"dependency\n")
+            .expect("TASK106_DEPENDENCY_FILE");
+        self.git(&self.child, &["add", "dependency.txt"]);
+        self.git(&self.child, &["commit", "-m", "dependency"]);
+    }
+
+    fn merge_dependency(&self) {
+        self.git(
+            &self.repository,
+            &[
+                "merge",
+                "--no-ff",
+                "lattice/task-107",
+                "-m",
+                "merge dependency",
+            ],
+        );
+    }
+
+    fn git(&self, cwd: &Path, arguments: &[&str]) -> String {
+        let output = Command::new(&self.git)
+            .current_dir(cwd)
+            .args(arguments)
+            .output()
+            .expect("TASK106_GIT_PROCESS");
+        assert!(
+            output.status.success(),
+            "TASK106_GIT_REJECTED:{:?}:{}",
+            arguments,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("TASK106_GIT_STDOUT")
+            .trim()
+            .to_owned()
+    }
+
+    fn cleanup(self) {
+        self.git(
+            &self.repository,
+            &[
+                "worktree",
+                "remove",
+                self.child.to_str().expect("TASK106_CHILD_PATH"),
+            ],
+        );
+        fs::remove_dir_all(&self.root).expect("TASK106_FIXTURE_CLEANUP");
+    }
 }
 
 fn checkpoint(
@@ -3070,6 +3279,131 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         )
     );
     process_c.finish();
+    let dependency_fixture = DependencyGitFixture::new();
+    let mut process_d = InteractiveLatticed::start_for_dependency(&race, &dependency_fixture);
+    process_d.initialize();
+    let generation_three = process_d.request(&checkpoint(
+        2,
+        "task106-parent-active",
+        3,
+        "ACTIVE",
+        Value::Null,
+        'd',
+    ));
+    assert_eq!(generation_three["result"]["isError"], false);
+    let generation_four = process_d.request(&checkpoint(
+        3,
+        "task106-dependency-blocked",
+        4,
+        "BLOCKED",
+        dependency_fixture.blocker(),
+        'e',
+    ));
+    assert_eq!(generation_four["result"]["isError"], false);
+    assert_eq!(
+        generation_four["result"]["structuredContent"]["status"],
+        "RECORDED"
+    );
+    process_d.finish();
+
+    let mut process_e = InteractiveLatticed::start_for_dependency(&race, &dependency_fixture);
+    process_e.initialize();
+    let blocked_status = process_e.request_status(2);
+    let blocked_dependency =
+        &blocked_status["result"]["structuredContent"]["foreman"]["dependency"];
+    assert_eq!(blocked_status["result"]["isError"], false);
+    assert_eq!(
+        blocked_status["result"]["structuredContent"]["foreman"]["schema"],
+        "lattice.foreman-runtime-projection/1.1"
+    );
+    assert_eq!(blocked_dependency["parent_task_id"], "TASK-106");
+    assert_eq!(blocked_dependency["dependency_task_id"], "TASK-107");
+    assert_eq!(blocked_dependency["depends_on"], "TASK-107");
+    assert_eq!(blocked_dependency["state"], "BLOCKED");
+    assert_eq!(blocked_dependency["base_sha"], dependency_fixture.base_sha);
+    assert_eq!(blocked_dependency["next_action"], "COMPLETE_DEPENDENCY");
+    assert_eq!(blocked_dependency["verification_status"], "VERIFIED");
+
+    assert_foreman_replay_error(
+        &process_e.request(&checkpoint(
+            21,
+            "task106-parent-completed-without-resume",
+            5,
+            "COMPLETED",
+            Value::Null,
+            'f',
+        )),
+        "FOREMAN_DEPENDENCY_RECONCILIATION_REQUIRED",
+    );
+
+    let retry_drift = dependency_fixture.child.join("exact-retry-dirty.txt");
+    fs::write(&retry_drift, b"must not be probed\n").expect("TASK106_RETRY_DIRTY");
+    let exact_retry = process_e.request(&checkpoint(
+        20,
+        "task106-dependency-blocked",
+        4,
+        "BLOCKED",
+        dependency_fixture.blocker(),
+        'e',
+    ));
+    assert_eq!(exact_retry["result"]["isError"], false);
+    assert_eq!(
+        exact_retry["result"]["structuredContent"]["status"],
+        "REPLAYED"
+    );
+    assert_eq!(
+        exact_retry["result"]["structuredContent"]["exact_retry"],
+        true
+    );
+    fs::remove_file(&retry_drift).expect("TASK106_RETRY_DIRTY_REMOVE");
+
+    dependency_fixture.commit_dependency();
+    let in_progress_status = process_e.request_status(3);
+    assert_eq!(
+        in_progress_status["result"]["structuredContent"]["foreman"]["dependency"]["verification_status"],
+        "VERIFIED"
+    );
+    let resume_request = checkpoint(4, "task106-parent-resumed", 5, "ACTIVE", Value::Null, 'f');
+    assert_foreman_replay_error(
+        &process_e.request(&resume_request),
+        "FOREMAN_DEPENDENCY_NOT_INTEGRATED",
+    );
+    dependency_fixture.merge_dependency();
+    let resumed = process_e.request(&resume_request);
+    assert_eq!(resumed["result"]["isError"], false);
+    assert_eq!(resumed["result"]["structuredContent"]["status"], "RECORDED");
+    process_e.finish();
+
+    let mut process_f = InteractiveLatticed::start_for_dependency(&race, &dependency_fixture);
+    process_f.initialize();
+    let resumed_status = process_f.request_status(2);
+    let resumed_foreman = &resumed_status["result"]["structuredContent"]["foreman"];
+    assert_eq!(resumed_status["result"]["isError"], false);
+    assert_eq!(resumed_foreman["latest_generation"], 5);
+    assert_eq!(resumed_foreman["active_count"], 1);
+    assert_eq!(resumed_foreman["blocked_count"], 0);
+    assert_eq!(resumed_foreman["next_action"], "CONTINUE");
+    assert_eq!(resumed_foreman["dependency"]["state"], "RESUMED");
+    assert_eq!(resumed_foreman["dependency"]["depends_on"], "TASK-107");
+    assert_eq!(
+        resumed_foreman["dependency"]["next_action"],
+        "CONTINUE_PARENT"
+    );
+    assert_eq!(
+        resumed_foreman["dependency"]["verification_status"],
+        "VERIFIED"
+    );
+    assert_eq!(
+        resumed_foreman["dependency"]["dependency_branch"],
+        "lattice/task-107"
+    );
+    assert_eq!(
+        resumed_foreman["dependency"]["dependency_worktree_id"],
+        "TASK-107-WORKTREE"
+    );
+    process_f.finish();
+    dependency_fixture.cleanup();
+    println!("TASK106_STAGE_DEPENDENCY_FRESH_PROCESS_REPLAY_PASS");
     assert_eq!(race.migration_fingerprint(), race_migration);
     assert_eq!(race.durable_profile_fingerprint(), race_durable);
 

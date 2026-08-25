@@ -15,7 +15,7 @@ use lattice_contracts::{
     ProjectId, RequestId, StorePhysicalHead, StoreScope, StoreTransactionReceipt,
     StoreTransactionRequest, WorkspaceChangeEvidence, WriterLeaseAuthorityHead,
 };
-use lattice_foreman_state::{ForemanCheckpointIntent, ForemanSnapshot};
+use lattice_foreman_state::{DependencyContinuation, ForemanCheckpointIntent, ForemanSnapshot};
 use lattice_task_domain::TaskState;
 
 /// Result type returned by every LATTICE port.
@@ -116,6 +116,7 @@ pub struct ForemanRuntimeStatus {
     blocked_count: usize,
     completed_count: usize,
     next_action: &'static str,
+    dependency: Option<DependencyContinuation>,
 }
 
 impl ForemanRuntimeStatus {
@@ -129,6 +130,7 @@ impl ForemanRuntimeStatus {
         blocked_count: usize,
         completed_count: usize,
         next_action: &'static str,
+        dependency: Option<DependencyContinuation>,
     ) -> Self {
         Self {
             ledger_digest,
@@ -138,6 +140,7 @@ impl ForemanRuntimeStatus {
             blocked_count,
             completed_count,
             next_action,
+            dependency,
         }
     }
 
@@ -164,6 +167,10 @@ impl ForemanRuntimeStatus {
     #[must_use]
     pub const fn completed_count(&self) -> usize {
         self.completed_count
+    }
+    #[must_use]
+    pub const fn dependency(&self) -> Option<&DependencyContinuation> {
+        self.dependency.as_ref()
     }
     #[must_use]
     pub const fn next_action(&self) -> &'static str {

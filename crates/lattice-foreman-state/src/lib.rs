@@ -1,11 +1,13 @@
 //! Secret-free foreman snapshot validation, replay projection, and watchdog logic.
 
+use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
 use std::collections::BTreeMap;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 const SNAPSHOT_SCHEMA: &str = "lattice.foreman-snapshot/1.0";
 const EPISTEMIC_SCHEMA: &str = "lattice.foreman-epistemic/1.0";
+const DEPENDENCY_BLOCKER_PREFIX: &str = "dependency:v1:";
 const MAX_REFERENCE_BYTES: usize = 256;
 const MAX_CHECKPOINT_ID_BYTES: usize = 64;
 
@@ -279,6 +281,210 @@ pub enum SnapshotError {
     DuplicateWorkerIdentity,
 }
 
+/// One closed dependency identity stored inside the existing bounded blocker
+/// scalar. Branch and next action are redundant inputs at the wire boundary so
+/// substitution is rejected, but only their canonical derivation is retained.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DependencyBinding {
+    parent_task_id: String,
+    dependency_task_id: String,
+    dependency_worktree_id: String,
+    dependency_branch: String,
+    base_sha: String,
+    blocker_ref: String,
+    evidence_ref: String,
+}
+
+impl DependencyBinding {
+    /// Constructs one exact dependency binding.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed identifiers, a substituted branch/base/next action,
+    /// or a value that cannot fit the existing durable 256-byte scalar.
+    pub fn new(
+        parent_task_id: impl Into<String>,
+        dependency_task_id: impl Into<String>,
+        dependency_worktree_id: impl Into<String>,
+        dependency_branch: impl Into<String>,
+        base_sha: impl Into<String>,
+        next_action: &str,
+    ) -> Result<Self, SnapshotError> {
+        let parent_task_id = dependency_task_identifier(parent_task_id.into())?;
+        let dependency_task_id = dependency_task_identifier(dependency_task_id.into())?;
+        if parent_task_id == dependency_task_id {
+            return Err(SnapshotError::MalformedReference);
+        }
+        let dependency_worktree_id = dependency_worktree_identifier(dependency_worktree_id.into())?;
+        let expected_branch = format!("lattice/{}", dependency_task_id.to_ascii_lowercase());
+        if dependency_branch.into() != expected_branch || next_action != "COMPLETE_DEPENDENCY" {
+            return Err(SnapshotError::MalformedReference);
+        }
+        let base_sha = base_sha.into();
+        if !is_lower_hex(&base_sha, 40) {
+            return Err(SnapshotError::MalformedReference);
+        }
+        let blocker_ref = format!(
+            "{DEPENDENCY_BLOCKER_PREFIX}{parent_task_id}:{dependency_task_id}:{dependency_worktree_id}:{base_sha}"
+        );
+        bounded_reference(blocker_ref.clone())?;
+        let domain = HashDomain::new("lattice.foreman-dependency-binding", "1.0")
+            .map_err(|_| SnapshotError::MalformedReference)?;
+        let evidence_ref = format!(
+            "evidence:sha256:{}",
+            canonical_sha256(&domain, &CanonicalValue::String(blocker_ref.clone()))
+                .map_err(|_| SnapshotError::MalformedReference)?
+                .to_hex()
+        );
+        Ok(Self {
+            parent_task_id,
+            dependency_task_id,
+            dependency_worktree_id,
+            dependency_branch: expected_branch,
+            base_sha,
+            blocker_ref,
+            evidence_ref,
+        })
+    }
+
+    /// Parses only the versioned dependency namespace. Legacy blocker strings
+    /// remain opaque and return `None`.
+    ///
+    /// # Errors
+    ///
+    /// Only the complete canonical v1 encoding is promoted. A colliding
+    /// historical free-form string remains an opaque legacy blocker.
+    pub fn from_blocker_ref(value: &str) -> Result<Option<Self>, SnapshotError> {
+        if !value.starts_with(DEPENDENCY_BLOCKER_PREFIX) {
+            return Ok(None);
+        }
+        let fields = value.split(':').collect::<Vec<_>>();
+        if fields.len() != 6 || fields[0] != "dependency" || fields[1] != "v1" {
+            return Ok(None);
+        }
+        let Ok(binding) = Self::new(
+            fields[2],
+            fields[3],
+            fields[4],
+            format!("lattice/{}", fields[3].to_ascii_lowercase()),
+            fields[5],
+            "COMPLETE_DEPENDENCY",
+        ) else {
+            return Ok(None);
+        };
+        if binding.as_blocker_ref() != value {
+            return Ok(None);
+        }
+        Ok(Some(binding))
+    }
+
+    #[must_use]
+    pub fn parent_task_id(&self) -> &str {
+        &self.parent_task_id
+    }
+
+    #[must_use]
+    pub fn dependency_task_id(&self) -> &str {
+        &self.dependency_task_id
+    }
+
+    #[must_use]
+    pub fn dependency_worktree_id(&self) -> &str {
+        &self.dependency_worktree_id
+    }
+
+    #[must_use]
+    pub fn dependency_branch(&self) -> &str {
+        &self.dependency_branch
+    }
+
+    #[must_use]
+    pub fn base_sha(&self) -> &str {
+        &self.base_sha
+    }
+
+    #[must_use]
+    pub const fn next_action(&self) -> &'static str {
+        "COMPLETE_DEPENDENCY"
+    }
+
+    #[must_use]
+    pub fn as_blocker_ref(&self) -> &str {
+        &self.blocker_ref
+    }
+
+    #[must_use]
+    pub fn evidence_ref(&self) -> &str {
+        &self.evidence_ref
+    }
+}
+
+/// Restart-restored phase for the most recent structured dependency.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DependencyContinuationState {
+    Blocked,
+    Resumed,
+}
+
+/// Pure projection of one dependency relation from verified snapshot history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DependencyContinuation {
+    binding: DependencyBinding,
+    parent_branch: String,
+    parent_worktree: String,
+    state: DependencyContinuationState,
+}
+
+impl DependencyContinuation {
+    #[must_use]
+    pub const fn state(&self) -> DependencyContinuationState {
+        self.state
+    }
+
+    #[must_use]
+    pub fn parent_task_id(&self) -> &str {
+        self.binding.parent_task_id()
+    }
+
+    #[must_use]
+    pub fn dependency_task_id(&self) -> &str {
+        self.binding.dependency_task_id()
+    }
+
+    #[must_use]
+    pub fn parent_branch(&self) -> &str {
+        &self.parent_branch
+    }
+
+    #[must_use]
+    pub fn parent_worktree(&self) -> &str {
+        &self.parent_worktree
+    }
+
+    #[must_use]
+    pub fn dependency_branch(&self) -> &str {
+        self.binding.dependency_branch()
+    }
+
+    #[must_use]
+    pub fn dependency_worktree_id(&self) -> &str {
+        self.binding.dependency_worktree_id()
+    }
+
+    #[must_use]
+    pub fn base_sha(&self) -> &str {
+        self.binding.base_sha()
+    }
+
+    #[must_use]
+    pub const fn next_action(&self) -> &'static str {
+        match self.state {
+            DependencyContinuationState::Blocked => "COMPLETE_DEPENDENCY",
+            DependencyContinuationState::Resumed => "CONTINUE_PARENT",
+        }
+    }
+}
+
 /// Caller-owned, closed checkpoint intent. Server identity, Git and Writer
 /// authority are deliberately absent.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -315,6 +521,12 @@ impl ForemanCheckpointIntent {
         let heartbeat_ref = lowercase_digest_pointer(heartbeat_ref.into(), "heartbeat")?;
         let evidence_ref = lowercase_digest_pointer(evidence_ref.into(), "evidence")?;
         let blocker_ref = blocker_ref.map(bounded_reference).transpose()?;
+        if let Some(blocker) = blocker_ref.as_deref()
+            && let Some(binding) = DependencyBinding::from_blocker_ref(blocker)?
+            && binding.evidence_ref() != evidence_ref
+        {
+            return Err(SnapshotError::MalformedReference);
+        }
         match (state, blocker_ref.is_some()) {
             (ForemanState::Blocked, false) => return Err(SnapshotError::MissingBlocker),
             (ForemanState::Active | ForemanState::Completed, true) => {
@@ -499,6 +711,9 @@ impl ForemanSnapshot {
             return Err(SnapshotError::GenerationRollback);
         }
         let blocker = blocker.map(bounded_reference).transpose()?;
+        if let Some(blocker) = blocker.as_deref() {
+            DependencyBinding::from_blocker_ref(blocker)?;
+        }
         match (state, blocker.is_some()) {
             (ForemanState::Blocked, false) => return Err(SnapshotError::MissingBlocker),
             (ForemanState::Active | ForemanState::Completed, true) => {
@@ -630,6 +845,7 @@ pub struct ForemanProjection {
     completed: Vec<ForemanSnapshot>,
     latest_generation: u64,
     next_action: String,
+    dependency: Option<DependencyContinuation>,
 }
 
 impl ForemanProjection {
@@ -670,6 +886,11 @@ impl ForemanProjection {
     pub fn next_action(&self) -> &str {
         &self.next_action
     }
+
+    #[must_use]
+    pub const fn dependency(&self) -> Option<&DependencyContinuation> {
+        self.dependency.as_ref()
+    }
 }
 
 /// Reconstructs the current worker projection from append order without I/O.
@@ -681,6 +902,7 @@ pub fn reconstruct(
     snapshots: impl IntoIterator<Item = ForemanSnapshot>,
 ) -> Result<ForemanProjection, SnapshotError> {
     let mut by_worker = BTreeMap::<String, ForemanSnapshot>::new();
+    let mut dependency = None::<(String, DependencyContinuation)>;
     for snapshot in snapshots {
         if let Some(previous) = by_worker.get(snapshot.worker()) {
             if previous.thread() != snapshot.thread() {
@@ -691,6 +913,44 @@ pub fn reconstruct(
             }
         } else if !is_exact_next_generation(None, snapshot.generation()) {
             return Err(SnapshotError::GenerationRollback);
+        }
+        if snapshot.state() == ForemanState::Blocked {
+            if let Some(blocker) = snapshot.blocker()
+                && let Some(binding) = DependencyBinding::from_blocker_ref(blocker)?
+                && binding.evidence_ref() == snapshot.evidence()
+            {
+                if binding.base_sha() != snapshot.head() {
+                    return Err(SnapshotError::MalformedReference);
+                }
+                if let Some((worker, current)) = dependency.as_ref()
+                    && (worker != snapshot.worker()
+                        || (current.state == DependencyContinuationState::Blocked
+                            && current.binding != binding))
+                {
+                    return Err(SnapshotError::DuplicateWorkerIdentity);
+                }
+                dependency = Some((
+                    snapshot.worker().to_owned(),
+                    DependencyContinuation {
+                        binding,
+                        parent_branch: snapshot.branch().to_owned(),
+                        parent_worktree: snapshot.worktree().to_owned(),
+                        state: DependencyContinuationState::Blocked,
+                    },
+                ));
+            }
+        } else if let Some((worker, current)) = dependency.as_mut()
+            && worker == snapshot.worker()
+        {
+            match (snapshot.state(), current.state) {
+                (ForemanState::Active, DependencyContinuationState::Blocked) => {
+                    current.state = DependencyContinuationState::Resumed;
+                }
+                (ForemanState::Completed, DependencyContinuationState::Blocked) => {
+                    return Err(SnapshotError::MalformedReference);
+                }
+                _ => {}
+            }
         }
         by_worker.insert(snapshot.worker().to_owned(), snapshot);
     }
@@ -723,6 +983,7 @@ pub fn reconstruct(
         completed,
         latest_generation,
         next_action,
+        dependency: dependency.map(|(_, continuation)| continuation),
     })
 }
 
@@ -935,6 +1196,40 @@ fn checkpoint_identifier(value: String) -> Result<String, SnapshotError> {
     Ok(value)
 }
 
+fn dependency_task_identifier(value: String) -> Result<String, SnapshotError> {
+    let suffix = value
+        .strip_prefix("TASK-")
+        .ok_or(SnapshotError::MalformedReference)?;
+    let mut bytes = suffix.bytes();
+    if value.len() > 64
+        || suffix.len() < 3
+        || !bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        || !bytes.all(|byte| {
+            byte.is_ascii_uppercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+    {
+        return Err(SnapshotError::MalformedReference);
+    }
+    Ok(value)
+}
+
+fn dependency_worktree_identifier(value: String) -> Result<String, SnapshotError> {
+    let mut bytes = value.bytes();
+    if !(3..=64).contains(&value.len())
+        || !bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        || !bytes.all(|byte| {
+            byte.is_ascii_uppercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+    {
+        return Err(SnapshotError::MalformedReference);
+    }
+    Ok(value)
+}
+
 fn pointer_list(values: Vec<String>, prefix: &str) -> Result<Vec<String>, SnapshotError> {
     if values.len() > 64 {
         return Err(SnapshotError::MalformedReference);
@@ -976,6 +1271,13 @@ fn timestamp(value: String) -> Result<String, SnapshotError> {
 
 fn is_hex(value: &str, expected_len: usize) -> bool {
     value.len() == expected_len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_lower_hex(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn looks_secret_like(value: &str) -> bool {

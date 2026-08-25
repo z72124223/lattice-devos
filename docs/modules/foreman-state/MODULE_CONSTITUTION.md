@@ -1,7 +1,7 @@
 ---
 module_id: foreman-state
 name: Foreman State
-version: 1.3
+version: 1.4
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -49,6 +49,11 @@ dashboard remains an untrusted read-only projection.
   drift; it cannot repair, archive, write, or grant authority.
 - Validate the closed caller-owned checkpoint fields and reconstruct the
   bounded Runtime Status counts/next action from replay-verified snapshots.
+- Validate and canonically encode one bounded dependency blocker, then
+  reconstruct its blocked/resumed next action from verified snapshot history
+  without performing Git or filesystem I/O. Promote the scalar only when its
+  domain-separated evidence commitment matches, so canonical-looking legacy
+  strings remain opaque blockers.
 
 ## Invariants
 
@@ -107,4 +112,5 @@ and responsible-user authorization.
 | 1.1 | 2026-08-21 | ADR-024, SPEC-006, TASK-079 | Add separately typed, expiring epistemic references without lifecycle authority | Foreman-delegated user authority |
 | 1.2 | 2026-08-21 | ADR-024, SPEC-006 v3, TASK-079 | Export fixed-scalar snapshot reconstruction values for the Ledger-owned typed persistence boundary; no I/O or authority added | Fixed-foreman delegation |
 | 1.3 | 2026-08-25 | ADR-027, SPEC-009, TASK-105 | Add closed checkpoint intent/status projection and require exact-next generation; server observation and I/O remain outside | Sole-foreman delegation |
+| 1.4 | 2026-08-25 | SPEC-010, TASK-106 | Add one closed dependency blocker and pure blocked/resumed replay projection; Git ownership and integration proof remain server-owned I/O | Explicit user delegation |
 | 1.0 | 2026-08-21 | ADR-024, SPEC-006, TASK-079 | Initial secret-free snapshot and read-only watchdog boundary | Foreman-delegated user authority |

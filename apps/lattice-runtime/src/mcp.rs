@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
 use lattice_contracts::{ContentDigest, SubjectBinding};
-use lattice_foreman_state::{ForemanCheckpointIntent, ForemanState};
+use lattice_foreman_state::{DependencyBinding, ForemanCheckpointIntent, ForemanState};
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
@@ -1290,11 +1290,54 @@ impl ForemanCheckpointArguments {
         {
             return None;
         }
-        let blocker_ref = match arguments.get("blocker_ref")? {
-            Value::Null => None,
-            Value::String(value) => Some(value.clone()),
+        let (blocker_ref, dependency_evidence_ref) = match arguments.get("blocker_ref")? {
+            Value::Null => (None, None),
+            Value::String(value) => (Some(value.clone()), None),
+            Value::Object(dependency) => {
+                if dependency.len() != 7
+                    || ![
+                        "schema",
+                        "parent_task_id",
+                        "dependency_task_id",
+                        "dependency_worktree_id",
+                        "dependency_branch",
+                        "base_sha",
+                        "next_action",
+                    ]
+                    .iter()
+                    .all(|field| dependency.contains_key(*field))
+                    || dependency.get("schema")?.as_str()? != "lattice.dependency-blocker/1.0"
+                {
+                    return None;
+                }
+                let binding = DependencyBinding::new(
+                    dependency.get("parent_task_id")?.as_str()?,
+                    dependency.get("dependency_task_id")?.as_str()?,
+                    dependency.get("dependency_worktree_id")?.as_str()?,
+                    dependency.get("dependency_branch")?.as_str()?,
+                    dependency.get("base_sha")?.as_str()?,
+                    dependency.get("next_action")?.as_str()?,
+                )
+                .ok()?;
+                (
+                    Some(binding.as_blocker_ref().to_owned()),
+                    Some(binding.evidence_ref().to_owned()),
+                )
+            }
             _ => return None,
         };
+        let supplied_evidence_ref = arguments.get("evidence_ref")?.as_str()?;
+        let supplied_evidence_digest = supplied_evidence_ref.strip_prefix("evidence:sha256:")?;
+        if supplied_evidence_digest.len() != 64
+            || !supplied_evidence_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return None;
+        }
+        let evidence_ref = dependency_evidence_ref
+            .as_deref()
+            .unwrap_or(supplied_evidence_ref);
         let intent = ForemanCheckpointIntent::new(
             arguments.get("checkpoint_id")?.as_str()?,
             arguments.get("generation")?.as_u64()?,
@@ -1302,7 +1345,7 @@ impl ForemanCheckpointArguments {
             ForemanState::from_persisted(arguments.get("state")?.as_str()?).ok()?,
             blocker_ref,
             arguments.get("heartbeat_ref")?.as_str()?,
-            arguments.get("evidence_ref")?.as_str()?,
+            evidence_ref,
         )
         .ok()?;
         Some(Self { intent })
@@ -2276,6 +2319,55 @@ fn foreman_checkpoint_arguments_schema() -> Value {
             "blocker_ref": {
                 "anyOf": [
                     {"type": "string", "minLength": 1, "maxLength": 256},
+                    {
+                        "type": "object",
+                        "properties": {
+                            "schema": {
+                                "type": "string",
+                                "enum": ["lattice.dependency-blocker/1.0"]
+                            },
+                            "parent_task_id": {
+                                "type": "string",
+                                "minLength": 8,
+                                "maxLength": 64,
+                                "pattern": "^TASK-[A-Z0-9][A-Z0-9_-]{2,58}$"
+                            },
+                            "dependency_task_id": {
+                                "type": "string",
+                                "minLength": 8,
+                                "maxLength": 64,
+                                "pattern": "^TASK-[A-Z0-9][A-Z0-9_-]{2,58}$"
+                            },
+                            "dependency_worktree_id": {
+                                "type": "string",
+                                "minLength": 3,
+                                "maxLength": 64,
+                                "pattern": "^[A-Z0-9][A-Z0-9_-]{2,63}$"
+                            },
+                            "dependency_branch": {
+                                "type": "string",
+                                "minLength": 9,
+                                "maxLength": 72,
+                                "pattern": "^lattice/task-[a-z0-9][a-z0-9_-]{2,58}$"
+                            },
+                            "base_sha": {
+                                "type": "string",
+                                "minLength": 40,
+                                "maxLength": 40,
+                                "pattern": "^[0-9a-f]{40}$"
+                            },
+                            "next_action": {
+                                "type": "string",
+                                "enum": ["COMPLETE_DEPENDENCY"]
+                            }
+                        },
+                        "required": [
+                            "schema", "parent_task_id", "dependency_task_id",
+                            "dependency_worktree_id", "dependency_branch",
+                            "base_sha", "next_action"
+                        ],
+                        "additionalProperties": false
+                    },
                     {"type": "null"}
                 ]
             },

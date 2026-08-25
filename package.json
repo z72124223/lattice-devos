@@ -12,6 +12,7 @@
     "control:start": "node apps/lattice-control/src/server.mjs",
     "control:receipt": "node apps/lattice-control/src/installation-receipt-client.mjs",
     "control:test": "node --test \"apps/lattice-control/test/*.test.mjs\"",
+    "dependency:create": "node scripts/lattice-dependency-worktree.mjs create",
     "operator:start": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/start-lattice-full-chain.ps1",
     "operator:smoke": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/start-lattice-full-chain.ps1 -Mode Smoke",
     "test": "node --test \"test/*.test.js\"",
