@@ -47,6 +47,7 @@ impl ForemanCoordinationPort for RestartedReader {
             projection.blocked().len(),
             projection.completed().len(),
             projection.runtime_next_action(),
+            projection.dependency().cloned(),
         ))
     }
 }

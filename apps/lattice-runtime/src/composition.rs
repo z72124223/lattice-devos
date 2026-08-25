@@ -2,7 +2,7 @@
 
 use std::env;
 use std::error::Error;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -46,7 +46,13 @@ use lattice_contracts::{
     TaskId, TaskIngressPeerEvidence, TaskSpecSubmission, WorkspaceChangeEvidence,
     WriterLeaseAuthorityHead,
 };
-use lattice_foreman_state::{ForemanServerObservation, SoleForemanBinding};
+#[cfg(test)]
+use lattice_foreman_state::ForemanSnapshot;
+use lattice_foreman_state::{
+    DependencyBinding, DependencyContinuation, DependencyContinuationState,
+    ForemanCheckpointIntent, ForemanServerObservation, ForemanState, SoleForemanBinding,
+    reconstruct,
+};
 use lattice_gateway_ipc::{build_reply, task_spec_document_digest};
 use lattice_graphify_adapter::{
     ExactGitSnapshotMaterializer, GitSnapshotConfig, GraphOutputLimits, GraphifyRuntimeConfig,
@@ -4316,10 +4322,13 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
             .is_some();
         let degraded_code = foreman_writer_degraded_code(writer_active)
             .map_or(Value::Null, |code| Value::String(code.to_owned()));
+        let dependency = foreman
+            .dependency()
+            .map_or(Value::Null, dependency_continuation_json);
         object.insert(
             "foreman".to_owned(),
             json!({
-                "schema": "lattice.foreman-runtime-projection/1.0",
+                "schema": "lattice.foreman-runtime-projection/1.1",
                 "replay_status": "VERIFIED",
                 "checkpoint_status": if foreman.latest_generation() == 0 { "NONE" } else { "AVAILABLE" },
                 "ledger_digest": foreman.ledger_digest().as_str(),
@@ -4334,6 +4343,7 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
                 "completed_count": foreman.completed_count(),
                 "next_action": foreman.next_action(),
                 "degraded_code": degraded_code,
+                "dependency": dependency,
             }),
         );
         Ok(base)
@@ -4447,6 +4457,51 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
             |candidate| persist_reflection_to_postgres(database, password, timeout, candidate),
         )
     }
+}
+
+fn dependency_continuation_json(dependency: &DependencyContinuation) -> Value {
+    let binding = DependencyBinding::new(
+        dependency.parent_task_id(),
+        dependency.dependency_task_id(),
+        dependency.dependency_worktree_id(),
+        dependency.dependency_branch(),
+        dependency.base_sha(),
+        "COMPLETE_DEPENDENCY",
+    );
+    let verification = binding
+        .as_ref()
+        .map_err(|_| "FOREMAN_REPLAY_CORRUPT")
+        .and_then(|binding| {
+            verify_dependency_git(
+                binding,
+                Some(dependency),
+                match dependency.state() {
+                    DependencyContinuationState::Blocked => DependencyGitPhase::ObserveBlocked,
+                    DependencyContinuationState::Resumed => DependencyGitPhase::ObserveResumed,
+                },
+            )
+        });
+    let (verification_status, next_action) = match verification {
+        Ok(_) => ("VERIFIED", dependency.next_action()),
+        Err(_) => ("RECONCILIATION_REQUIRED", "RECONCILE_DEPENDENCY"),
+    };
+    json!({
+        "schema": "lattice.dependency-continuation/1.0",
+        "parent_task_id": dependency.parent_task_id(),
+        "dependency_task_id": dependency.dependency_task_id(),
+        "depends_on": dependency.dependency_task_id(),
+        "parent_branch": dependency.parent_branch(),
+        "parent_worktree": dependency.parent_worktree(),
+        "base_sha": dependency.base_sha(),
+        "dependency_branch": dependency.dependency_branch(),
+        "dependency_worktree_id": dependency.dependency_worktree_id(),
+        "state": match dependency.state() {
+            DependencyContinuationState::Blocked => "BLOCKED",
+            DependencyContinuationState::Resumed => "RESUMED",
+        },
+        "next_action": next_action,
+        "verification_status": verification_status,
+    })
 }
 
 struct FullChainTaskExecution<'a, H> {
@@ -4791,6 +4846,450 @@ fn foreman_observation_from_environment() -> Result<ForemanServerObservation, &'
         .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")?;
     SoleForemanBinding::observe_git(branch, root.to_string_lossy(), head)
         .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DependencyGitPhase {
+    Block,
+    ObserveBlocked,
+    ObserveResumed,
+    Resume,
+}
+
+fn validate_dependency_checkpoint(
+    coordination: &mut impl ForemanCoordinationPort,
+    intent: &ForemanCheckpointIntent,
+) -> Result<Option<ForemanServerObservation>, &'static str> {
+    let snapshots = coordination
+        .load_snapshots()
+        .map_err(|error| error.code())?;
+    let projection = reconstruct(snapshots).map_err(|_| "FOREMAN_REPLAY_CORRUPT")?;
+    let proposed = intent
+        .blocker_ref()
+        .map(DependencyBinding::from_blocker_ref)
+        .transpose()
+        .map_err(|_| "FOREMAN_CHECKPOINT_INVALID")?
+        .flatten();
+    match (intent.state(), proposed, projection.dependency()) {
+        (ForemanState::Blocked, Some(binding), _) => {
+            verify_dependency_git(&binding, None, DependencyGitPhase::Block)
+                .and_then(DependencyGitObservation::into_server_observation)
+                .map(Some)
+        }
+        (ForemanState::Active, None, Some(dependency))
+            if dependency.state() == DependencyContinuationState::Blocked =>
+        {
+            let binding = DependencyBinding::new(
+                dependency.parent_task_id(),
+                dependency.dependency_task_id(),
+                dependency.dependency_worktree_id(),
+                dependency.dependency_branch(),
+                dependency.base_sha(),
+                "COMPLETE_DEPENDENCY",
+            )
+            .map_err(|_| "FOREMAN_REPLAY_CORRUPT")?;
+            verify_dependency_git(&binding, Some(dependency), DependencyGitPhase::Resume)
+                .and_then(DependencyGitObservation::into_server_observation)
+                .map(Some)
+        }
+        (ForemanState::Completed, None, Some(dependency))
+            if dependency.state() == DependencyContinuationState::Blocked =>
+        {
+            Err("FOREMAN_DEPENDENCY_RECONCILIATION_REQUIRED")
+        }
+        _ => Ok(None),
+    }
+}
+
+fn verify_dependency_git(
+    binding: &DependencyBinding,
+    retained: Option<&DependencyContinuation>,
+    phase: DependencyGitPhase,
+) -> Result<DependencyGitObservation, &'static str> {
+    let unsafe_worktree = || "FOREMAN_DEPENDENCY_WORKTREE_UNSAFE";
+    let source_root = required_environment("LATTICE_GRAPHIFY_SOURCE_ROOT")
+        .map(PathBuf::from)
+        .and_then(|path| graph_canonical_directory(&path))
+        .map_err(|_| unsafe_worktree())?;
+    let dependency_root = required_environment("LATTICE_DEPENDENCY_WORKTREE_ROOT")
+        .map(PathBuf::from)
+        .and_then(|path| graph_canonical_directory(&path))
+        .map_err(|_| unsafe_worktree())?;
+    if source_root.starts_with(&dependency_root) || dependency_root.starts_with(&source_root) {
+        return Err(unsafe_worktree());
+    }
+    let git = required_environment("LATTICE_DELIVERY_GIT_EXE")
+        .map(PathBuf::from)
+        .map_err(|_| unsafe_worktree())?;
+    graph_executable_sha256(&git).map_err(|_| unsafe_worktree())?;
+    verify_dependency_git_at(
+        binding,
+        retained,
+        phase,
+        &source_root,
+        &dependency_root,
+        &git,
+    )
+}
+
+fn verify_dependency_git_at(
+    binding: &DependencyBinding,
+    retained: Option<&DependencyContinuation>,
+    phase: DependencyGitPhase,
+    source_root: &Path,
+    dependency_root: &Path,
+    git: &Path,
+) -> Result<DependencyGitObservation, &'static str> {
+    let binding_mismatch = || "FOREMAN_DEPENDENCY_BINDING_MISMATCH";
+    let reconciliation = || "FOREMAN_DEPENDENCY_RECONCILIATION_REQUIRED";
+    let hooks = dependency_hooks_directory(dependency_root)?;
+    let child = dependency_owned_child(binding, source_root, dependency_root)?;
+    let observed = observe_dependency_git(binding, source_root, &child, git, &hooks)?;
+    match phase {
+        DependencyGitPhase::Block => {
+            if !dependency_git_clean(git, &hooks, source_root)?
+                || !dependency_git_clean(git, &hooks, &child)?
+            {
+                return Err(reconciliation());
+            }
+            if retained.is_some()
+                || observed.parent_head != binding.base_sha()
+                || observed.child_head != binding.base_sha()
+                || !observed.base_is_child_ancestor
+            {
+                return Err(binding_mismatch());
+            }
+        }
+        DependencyGitPhase::ObserveBlocked => {
+            let retained = retained.ok_or_else(reconciliation)?;
+            if retained.parent_branch() != observed.parent_branch
+                || graph_canonical_directory(Path::new(retained.parent_worktree()))
+                    .map_err(|_| reconciliation())?
+                    != source_root
+                || retained.base_sha() != binding.base_sha()
+                || observed.parent_head != binding.base_sha()
+                || !observed.base_is_child_ancestor
+            {
+                return Err(binding_mismatch());
+            }
+        }
+        DependencyGitPhase::ObserveResumed => {
+            let retained = retained.ok_or_else(reconciliation)?;
+            if !dependency_git_clean(git, &hooks, &child)? {
+                return Err(reconciliation());
+            }
+            if retained.parent_branch() != observed.parent_branch
+                || graph_canonical_directory(Path::new(retained.parent_worktree()))
+                    .map_err(|_| reconciliation())?
+                    != source_root
+                || retained.base_sha() != binding.base_sha()
+                || !observed.base_is_child_ancestor
+                || !dependency_git_is_ancestor(
+                    git,
+                    &hooks,
+                    source_root,
+                    binding.base_sha(),
+                    &observed.parent_head,
+                )?
+            {
+                return Err(binding_mismatch());
+            }
+            if !dependency_git_is_ancestor(
+                git,
+                &hooks,
+                source_root,
+                &observed.child_head,
+                &observed.parent_head,
+            )? {
+                return Err("FOREMAN_DEPENDENCY_NOT_INTEGRATED");
+            }
+        }
+        DependencyGitPhase::Resume => {
+            let retained = retained.ok_or_else(reconciliation)?;
+            if !dependency_git_clean(git, &hooks, source_root)?
+                || !dependency_git_clean(git, &hooks, &child)?
+            {
+                return Err(reconciliation());
+            }
+            if retained.parent_branch() != observed.parent_branch
+                || graph_canonical_directory(Path::new(retained.parent_worktree()))
+                    .map_err(|_| reconciliation())?
+                    != source_root
+                || retained.base_sha() != binding.base_sha()
+            {
+                return Err(binding_mismatch());
+            }
+            if !observed.base_is_child_ancestor
+                || !dependency_git_is_ancestor(
+                    git,
+                    &hooks,
+                    source_root,
+                    binding.base_sha(),
+                    &observed.parent_head,
+                )?
+            {
+                return Err(binding_mismatch());
+            }
+            if !dependency_git_is_ancestor(
+                git,
+                &hooks,
+                source_root,
+                &observed.child_head,
+                &observed.parent_head,
+            )? {
+                return Err("FOREMAN_DEPENDENCY_NOT_INTEGRATED");
+            }
+        }
+    }
+    Ok(observed)
+}
+
+fn dependency_hooks_directory(dependency_root: &Path) -> Result<PathBuf, &'static str> {
+    let rejected = || "FOREMAN_DEPENDENCY_WORKTREE_UNSAFE";
+    let expected = dependency_root.join(".lattice-hooks-empty");
+    let hooks = graph_canonical_directory(&expected).map_err(|_| rejected())?;
+    if hooks != expected
+        || fs::read_dir(&hooks)
+            .map_err(|_| rejected())?
+            .next()
+            .is_some()
+    {
+        return Err(rejected());
+    }
+    Ok(hooks)
+}
+
+struct DependencyGitObservation {
+    parent_branch: String,
+    parent_worktree: PathBuf,
+    parent_head: String,
+    child_head: String,
+    base_is_child_ancestor: bool,
+}
+
+impl DependencyGitObservation {
+    fn into_server_observation(self) -> Result<ForemanServerObservation, &'static str> {
+        SoleForemanBinding::observe_git(
+            self.parent_branch,
+            self.parent_worktree.to_string_lossy(),
+            self.parent_head,
+        )
+        .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")
+    }
+}
+
+fn dependency_owned_child(
+    binding: &DependencyBinding,
+    source_root: &Path,
+    dependency_root: &Path,
+) -> Result<PathBuf, &'static str> {
+    let unsafe_worktree = || "FOREMAN_DEPENDENCY_WORKTREE_UNSAFE";
+    let mismatch = || "FOREMAN_DEPENDENCY_BINDING_MISMATCH";
+    let expected_child =
+        dependency_root.join(binding.dependency_worktree_id().to_ascii_lowercase());
+    let child = graph_canonical_directory(&expected_child).map_err(|_| unsafe_worktree())?;
+    if child != expected_child {
+        return Err(unsafe_worktree());
+    }
+    let marker = dependency_root.join(".lattice-ownership").join(format!(
+        "{}.json",
+        binding.dependency_worktree_id().to_ascii_lowercase()
+    ));
+    let metadata = fs::symlink_metadata(&marker).map_err(|_| unsafe_worktree())?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(unsafe_worktree());
+    }
+    let value = fs::read_to_string(&marker)
+        .ok()
+        .and_then(|value| serde_json::from_str::<Value>(&value).ok())
+        .and_then(|value| value.as_object().cloned())
+        .ok_or_else(unsafe_worktree)?;
+    if value.len() != 7
+        || value.get("version").and_then(Value::as_u64) != Some(1)
+        || value.get("worktree_id").and_then(Value::as_str)
+            != Some(binding.dependency_worktree_id())
+        || value.get("task_id").and_then(Value::as_str) != Some(binding.dependency_task_id())
+        || value.get("branch").and_then(Value::as_str) != Some(binding.dependency_branch())
+        || value.get("base_commit_sha").and_then(Value::as_str) != Some(binding.base_sha())
+    {
+        return Err(mismatch());
+    }
+    let canonical_field = |field: &str| {
+        value
+            .get(field)
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .and_then(|path| graph_canonical_directory(&path).ok())
+            .ok_or_else(unsafe_worktree)
+    };
+    if canonical_field("repository_root")? != source_root
+        || canonical_field("worktree_path")? != child
+    {
+        return Err(mismatch());
+    }
+    Ok(child)
+}
+
+fn observe_dependency_git(
+    binding: &DependencyBinding,
+    source_root: &Path,
+    child: &Path,
+    git: &Path,
+    hooks: &Path,
+) -> Result<DependencyGitObservation, &'static str> {
+    let unsafe_worktree = || "FOREMAN_DEPENDENCY_WORKTREE_UNSAFE";
+    let mismatch = || "FOREMAN_DEPENDENCY_BINDING_MISMATCH";
+    for (root, expected) in [(source_root, source_root), (child, child)] {
+        let top = dependency_git_value(git, hooks, root, ["rev-parse", "--show-toplevel"])?;
+        if graph_canonical_directory(Path::new(&top)).map_err(|_| unsafe_worktree())? != expected {
+            return Err(mismatch());
+        }
+    }
+    let parent_branch = dependency_git_value(
+        git,
+        hooks,
+        source_root,
+        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    )?;
+    let child_branch = dependency_git_value(
+        git,
+        hooks,
+        child,
+        ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    )?;
+    let parent_head = dependency_git_value(git, hooks, source_root, ["rev-parse", "HEAD"])?;
+    let child_head = dependency_git_value(git, hooks, child, ["rev-parse", "HEAD"])?;
+    if child_branch != binding.dependency_branch()
+        || !is_lower_hex(&parent_head, 40)
+        || !is_lower_hex(&child_head, 40)
+    {
+        return Err(mismatch());
+    }
+    let common = |root: &Path| {
+        dependency_git_value(git, hooks, root, ["rev-parse", "--git-common-dir"])
+            .and_then(|value| fs::canonicalize(root.join(value)).map_err(|_| unsafe_worktree()))
+    };
+    if common(source_root)? != common(child)? {
+        return Err(mismatch());
+    }
+    let listed =
+        dependency_git_output(git, hooks, source_root, ["worktree", "list", "--porcelain"])?;
+    let listed = std::str::from_utf8(&listed.stdout).map_err(|_| unsafe_worktree())?;
+    let expected_branch = format!("branch refs/heads/{}", binding.dependency_branch());
+    let matching = listed
+        .replace("\r\n", "\n")
+        .split("\n\n")
+        .filter(|record| dependency_worktree_record_matches(record, child, &expected_branch))
+        .count();
+    if matching != 1 {
+        return Err(mismatch());
+    }
+    Ok(DependencyGitObservation {
+        parent_branch,
+        parent_worktree: source_root.to_path_buf(),
+        parent_head,
+        base_is_child_ancestor: dependency_git_is_ancestor(
+            git,
+            hooks,
+            child,
+            binding.base_sha(),
+            &child_head,
+        )?,
+        child_head,
+    })
+}
+
+fn dependency_worktree_record_matches(record: &str, child: &Path, branch: &str) -> bool {
+    let mut lines = record.lines();
+    let path = lines
+        .next()
+        .and_then(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .and_then(|path| graph_canonical_directory(&path).ok());
+    path.as_deref() == Some(child) && lines.any(|line| line == branch)
+}
+
+fn dependency_git_output<I, S>(
+    git: &Path,
+    hooks: &Path,
+    root: &Path,
+    arguments: I,
+) -> Result<process::Output, &'static str>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut hook_config = OsString::from("core.hooksPath=");
+    hook_config.push(hooks);
+    let output = process::Command::new(git)
+        .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args([OsStr::new("-c"), hook_config.as_os_str()])
+        .args(["-c", "core.fsmonitor=false"])
+        .args(arguments)
+        .output()
+        .map_err(|_| "FOREMAN_DEPENDENCY_RECONCILIATION_REQUIRED")?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        return Err("FOREMAN_DEPENDENCY_RECONCILIATION_REQUIRED");
+    }
+    Ok(output)
+}
+
+fn dependency_git_value<I, S>(
+    git: &Path,
+    hooks: &Path,
+    root: &Path,
+    arguments: I,
+) -> Result<String, &'static str>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = dependency_git_output(git, hooks, root, arguments)?;
+    let value = std::str::from_utf8(&output.stdout)
+        .map_err(|_| "FOREMAN_DEPENDENCY_RECONCILIATION_REQUIRED")?
+        .trim();
+    if value.is_empty() || value.contains(['\r', '\n', '\0']) {
+        return Err("FOREMAN_DEPENDENCY_RECONCILIATION_REQUIRED");
+    }
+    Ok(value.to_owned())
+}
+
+fn dependency_git_clean(git: &Path, hooks: &Path, root: &Path) -> Result<bool, &'static str> {
+    let output = dependency_git_output(
+        git,
+        hooks,
+        root,
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
+    Ok(output.stdout.is_empty())
+}
+
+fn dependency_git_is_ancestor(
+    git: &Path,
+    hooks: &Path,
+    root: &Path,
+    ancestor: &str,
+    descendant: &str,
+) -> Result<bool, &'static str> {
+    let mut hook_config = OsString::from("core.hooksPath=");
+    hook_config.push(hooks);
+    let output = process::Command::new(git)
+        .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args([OsStr::new("-c"), hook_config.as_os_str()])
+        .args(["-c", "core.fsmonitor=false"])
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .output()
+        .map_err(|_| "FOREMAN_DEPENDENCY_RECONCILIATION_REQUIRED")?;
+    if !output.stderr.is_empty() {
+        return Err("FOREMAN_DEPENDENCY_RECONCILIATION_REQUIRED");
+    }
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err("FOREMAN_DEPENDENCY_RECONCILIATION_REQUIRED"),
+    }
 }
 
 fn foreman_writer_acquire<H: FullChainHermesPort>(
@@ -5538,7 +6037,7 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
         let mut coordination = foreman_coordination(&core)?;
         // Task-Ledger-owned preflight must complete before constructing or
         // observing the Writer repository and before the Git probe.
-        coordination
+        let _replay_preflight = coordination
             .replay_checkpoint(arguments.intent())
             .map_err(|error| ToolExecutionError::new(error.code()))?;
 
@@ -5549,7 +6048,13 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             &mut writer,
             arguments.intent(),
             acquire,
-            foreman_observation_from_environment,
+            || {
+                let mut latest = foreman_coordination(&core).map_err(ToolExecutionError::code)?;
+                match validate_dependency_checkpoint(&mut latest, arguments.intent())? {
+                    Some(observation) => Ok(observation),
+                    None => foreman_observation_from_environment(),
+                }
+            },
         )
         .map_err(|error| ToolExecutionError::new(foreman_error_code(&error)))?;
         Ok(json!({
@@ -8498,6 +9003,402 @@ mod tests {
             );
         }
         assert!(runtime_status.contains("map_err(foreman_writer_observation_error)"));
+    }
+
+    #[test]
+    fn dependency_replay_precedes_writer_construction_and_inner_guard() {
+        let source = include_str!("composition.rs");
+        let checkpoint = source
+            .split("fn foreman_checkpoint(")
+            .nth(1)
+            .expect("foreman checkpoint")
+            .split("fn reconcile(")
+            .next()
+            .expect("foreman checkpoint body");
+        let replay = checkpoint
+            .find("replay_checkpoint")
+            .expect("replay preflight");
+        let writer = checkpoint
+            .find("foreman_writer_lease")
+            .expect("writer construction");
+        let orchestrated = checkpoint
+            .find("checkpoint_foreman")
+            .expect("orchestrated checkpoint");
+        let guard = checkpoint
+            .rfind("validate_dependency_checkpoint")
+            .expect("inner dependency Git guard");
+        assert!(replay < writer && writer < orchestrated && orchestrated < guard);
+        assert!(checkpoint.contains("let _replay_preflight"));
+    }
+
+    #[test]
+    fn dependency_git_commands_disable_hooks_fsmonitor_and_optional_locks() {
+        let source = include_str!("composition.rs");
+        assert_eq!(
+            source
+                .matches(".env(\"GIT_OPTIONAL_LOCKS\", \"0\")")
+                .count(),
+            2
+        );
+        assert!(source.contains("core.hooksPath="));
+        assert!(source.contains("core.fsmonitor=false"));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn dependency_git_guard_blocks_dirty_or_unintegrated_resume_and_accepts_exact_merge() {
+        static NEXT_DEPENDENCY_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+        let unique = NEXT_DEPENDENCY_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let fixture = env::temp_dir().join(format!(
+            "lattice-dependency-guard-{}-{unique}",
+            process::id()
+        ));
+        let repository = fixture.join("repository");
+        let dependency_root = fixture.join("dependency-worktrees");
+        let child = dependency_root.join("task-107-worktree");
+        let marker_root = dependency_root.join(".lattice-ownership");
+        let hooks_root = dependency_root.join(".lattice-hooks-empty");
+        fs::create_dir_all(&repository).expect("repository root");
+        fs::create_dir_all(&marker_root).expect("marker root");
+        fs::create_dir_all(&hooks_root).expect("hooks root");
+        let git = PathBuf::from("git");
+        let run = |root: &Path, arguments: &[&str]| {
+            let output = process::Command::new(&git)
+                .current_dir(root)
+                .args(arguments)
+                .output()
+                .expect("git process");
+            assert!(
+                output.status.success(),
+                "git {:?}: {}",
+                arguments,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("git stdout")
+                .trim()
+                .to_owned()
+        };
+        run(&repository, &["init", "-b", "product-parent"]);
+        run(&repository, &["config", "user.name", "LATTICE Test"]);
+        run(
+            &repository,
+            &["config", "user.email", "lattice-test@invalid.example"],
+        );
+        fs::write(repository.join("base.txt"), b"base\n").expect("base file");
+        run(&repository, &["add", "base.txt"]);
+        run(&repository, &["commit", "-m", "base"]);
+        let base = run(&repository, &["rev-parse", "HEAD"]);
+        run(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "lattice/task-107",
+                child.to_str().expect("child path"),
+                &base,
+            ],
+        );
+        run(&child, &["config", "user.name", "LATTICE Test"]);
+        run(
+            &child,
+            &["config", "user.email", "lattice-test@invalid.example"],
+        );
+        let repository = fs::canonicalize(&repository).expect("canonical repository");
+        let dependency_root =
+            fs::canonicalize(&dependency_root).expect("canonical dependency root");
+        let child = fs::canonicalize(&child).expect("canonical child");
+        let marker_path = marker_root.join("task-107-worktree.json");
+        let marker_json = format!(
+            "{{\"version\":1,\"worktree_id\":\"TASK-107-WORKTREE\",\"task_id\":\"TASK-107\",\"repository_root\":{},\"worktree_path\":{},\"branch\":\"lattice/task-107\",\"base_commit_sha\":\"{}\"}}\n",
+            serde_json::to_string(&repository.to_string_lossy()).expect("repository JSON"),
+            serde_json::to_string(&child.to_string_lossy()).expect("child JSON"),
+            base
+        );
+        fs::write(&marker_path, &marker_json).expect("ownership marker");
+        let binding = DependencyBinding::new(
+            "TASK-106",
+            "TASK-107",
+            "TASK-107-WORKTREE",
+            "lattice/task-107",
+            &base,
+            "COMPLETE_DEPENDENCY",
+        )
+        .expect("binding");
+        fs::write(hooks_root.join("unexpected-hook"), b"prohibited\n").expect("unexpected hook");
+        assert_eq!(
+            verify_dependency_git_at(
+                &binding,
+                None,
+                DependencyGitPhase::Block,
+                &repository,
+                &dependency_root,
+                &git,
+            )
+            .map(|_| ()),
+            Err("FOREMAN_DEPENDENCY_WORKTREE_UNSAFE")
+        );
+        fs::remove_file(hooks_root.join("unexpected-hook")).expect("remove unexpected hook");
+        run(
+            &repository,
+            &["config", "core.fsmonitor", "lattice-missing-fsmonitor"],
+        );
+        assert_eq!(
+            verify_dependency_git_at(
+                &binding,
+                None,
+                DependencyGitPhase::Block,
+                &repository,
+                &dependency_root,
+                &git,
+            )
+            .map(|_| ()),
+            Ok(())
+        );
+
+        let mut drifted_marker = serde_json::from_str::<Value>(&marker_json).expect("marker JSON");
+        drifted_marker["repository_root"] = Value::String(child.to_string_lossy().into_owned());
+        fs::write(
+            &marker_path,
+            serde_json::to_vec(&drifted_marker).expect("drifted marker JSON"),
+        )
+        .expect("drift marker");
+        assert_eq!(
+            verify_dependency_git_at(
+                &binding,
+                None,
+                DependencyGitPhase::Block,
+                &repository,
+                &dependency_root,
+                &git,
+            )
+            .map(|_| ()),
+            Err("FOREMAN_DEPENDENCY_BINDING_MISMATCH")
+        );
+        fs::write(&marker_path, &marker_json).expect("restore marker");
+
+        let mut drifted_marker = serde_json::from_str::<Value>(&marker_json).expect("marker JSON");
+        drifted_marker["worktree_path"] = Value::String(repository.to_string_lossy().into_owned());
+        fs::write(
+            &marker_path,
+            serde_json::to_vec(&drifted_marker).expect("path-drift marker JSON"),
+        )
+        .expect("path-drift marker");
+        assert_eq!(
+            verify_dependency_git_at(
+                &binding,
+                None,
+                DependencyGitPhase::Block,
+                &repository,
+                &dependency_root,
+                &git,
+            )
+            .map(|_| ()),
+            Err("FOREMAN_DEPENDENCY_BINDING_MISMATCH")
+        );
+        fs::write(&marker_path, &marker_json).expect("restore marker after path drift");
+
+        let mut drifted_marker = serde_json::from_str::<Value>(&marker_json).expect("marker JSON");
+        drifted_marker["base_commit_sha"] = Value::String("b".repeat(40));
+        fs::write(
+            &marker_path,
+            serde_json::to_vec(&drifted_marker).expect("base-drift marker JSON"),
+        )
+        .expect("base-drift marker");
+        assert_eq!(
+            verify_dependency_git_at(
+                &binding,
+                None,
+                DependencyGitPhase::Block,
+                &repository,
+                &dependency_root,
+                &git,
+            )
+            .map(|_| ()),
+            Err("FOREMAN_DEPENDENCY_BINDING_MISMATCH")
+        );
+        fs::write(&marker_path, &marker_json).expect("restore marker after base drift");
+
+        run(&child, &["branch", "-m", "lattice/task-107-drift"]);
+        assert_eq!(
+            verify_dependency_git_at(
+                &binding,
+                None,
+                DependencyGitPhase::Block,
+                &repository,
+                &dependency_root,
+                &git,
+            )
+            .map(|_| ()),
+            Err("FOREMAN_DEPENDENCY_BINDING_MISMATCH")
+        );
+        run(&child, &["branch", "-m", "lattice/task-107"]);
+
+        fs::write(child.join("dirty.txt"), b"dirty\n").expect("dirty child");
+        assert_eq!(
+            verify_dependency_git_at(
+                &binding,
+                None,
+                DependencyGitPhase::Block,
+                &repository,
+                &dependency_root,
+                &git,
+            )
+            .map(|_| ()),
+            Err("FOREMAN_DEPENDENCY_RECONCILIATION_REQUIRED")
+        );
+        fs::remove_file(child.join("dirty.txt")).expect("remove fixture dirt");
+
+        let blocked = ForemanSnapshot::new(
+            SoleForemanBinding::WORKER,
+            SoleForemanBinding::THREAD,
+            SoleForemanBinding::TASK,
+            "product-parent",
+            repository.to_string_lossy(),
+            &base,
+            ForemanState::Blocked,
+            Some(binding.as_blocker_ref().to_owned()),
+            format!("heartbeat:sha256:{}", "a".repeat(64)),
+            format!("authority:sha256:{}", "c".repeat(64)),
+            binding.evidence_ref(),
+            1,
+        )
+        .expect("blocked snapshot");
+        let dependency = reconstruct([blocked.clone()])
+            .expect("projection")
+            .dependency()
+            .expect("dependency")
+            .clone();
+        fs::write(child.join("in-progress.txt"), b"in progress\n")
+            .expect("in-progress child change");
+        assert_eq!(
+            verify_dependency_git_at(
+                &binding,
+                Some(&dependency),
+                DependencyGitPhase::ObserveBlocked,
+                &repository,
+                &dependency_root,
+                &git,
+            )
+            .map(|_| ()),
+            Ok(())
+        );
+        fs::remove_file(child.join("in-progress.txt")).expect("remove in-progress fixture");
+        fs::write(child.join("dependency.txt"), b"dependency\n").expect("dependency change");
+        run(&child, &["add", "dependency.txt"]);
+        run(&child, &["commit", "-m", "dependency"]);
+        assert_eq!(
+            verify_dependency_git_at(
+                &binding,
+                Some(&dependency),
+                DependencyGitPhase::Resume,
+                &repository,
+                &dependency_root,
+                &git,
+            )
+            .map(|_| ()),
+            Err("FOREMAN_DEPENDENCY_NOT_INTEGRATED")
+        );
+        run(
+            &repository,
+            &[
+                "merge",
+                "--no-ff",
+                "lattice/task-107",
+                "-m",
+                "merge dependency",
+            ],
+        );
+        let captured_resume = verify_dependency_git_at(
+            &binding,
+            Some(&dependency),
+            DependencyGitPhase::Resume,
+            &repository,
+            &dependency_root,
+            &git,
+        )
+        .expect("captured resume observation");
+        let merged_head = run(&repository, &["rev-parse", "HEAD"]);
+        let resumed_snapshot = ForemanSnapshot::new(
+            SoleForemanBinding::WORKER,
+            SoleForemanBinding::THREAD,
+            SoleForemanBinding::TASK,
+            "product-parent",
+            repository.to_string_lossy(),
+            &merged_head,
+            ForemanState::Active,
+            None,
+            format!("heartbeat:sha256:{}", "d".repeat(64)),
+            format!("authority:sha256:{}", "f".repeat(64)),
+            format!("evidence:sha256:{}", "e".repeat(64)),
+            2,
+        )
+        .expect("resumed snapshot");
+        let resumed_dependency = reconstruct([blocked, resumed_snapshot])
+            .expect("resumed projection")
+            .dependency()
+            .expect("resumed dependency")
+            .clone();
+        fs::write(repository.join("in-progress-parent.txt"), b"in progress\n")
+            .expect("in-progress parent change");
+        assert!(
+            verify_dependency_git_at(
+                &binding,
+                Some(&resumed_dependency),
+                DependencyGitPhase::ObserveResumed,
+                &repository,
+                &dependency_root,
+                &git,
+            )
+            .is_ok()
+        );
+        fs::remove_file(repository.join("in-progress-parent.txt"))
+            .expect("remove in-progress parent change");
+        fs::write(child.join("post-resume-child.txt"), b"unexpected\n")
+            .expect("post-resume child change");
+        assert_eq!(
+            verify_dependency_git_at(
+                &binding,
+                Some(&resumed_dependency),
+                DependencyGitPhase::ObserveResumed,
+                &repository,
+                &dependency_root,
+                &git,
+            )
+            .map(|_| ()),
+            Err("FOREMAN_DEPENDENCY_RECONCILIATION_REQUIRED")
+        );
+        fs::remove_file(child.join("post-resume-child.txt"))
+            .expect("remove post-resume child change");
+        fs::write(repository.join("continued.txt"), b"continued\n").expect("continued parent work");
+        run(&repository, &["add", "continued.txt"]);
+        run(&repository, &["commit", "-m", "continue parent"]);
+        let active_intent = ForemanCheckpointIntent::new(
+            "captured-resume",
+            2,
+            "2026-08-25T01:00:00Z",
+            ForemanState::Active,
+            None,
+            format!("heartbeat:sha256:{}", "d".repeat(64)),
+            format!("evidence:sha256:{}", "e".repeat(64)),
+        )
+        .expect("active intent");
+        let captured_snapshot = captured_resume
+            .into_server_observation()
+            .expect("server observation")
+            .bind(
+                &active_intent,
+                format!("authority:sha256:{}", "f".repeat(64)),
+            )
+            .expect("captured snapshot");
+        assert_eq!(captured_snapshot.head(), merged_head);
+
+        run(
+            &repository,
+            &["worktree", "remove", child.to_str().expect("child path")],
+        );
+        fs::remove_dir_all(&fixture).expect("remove dependency fixture");
     }
 
     #[test]

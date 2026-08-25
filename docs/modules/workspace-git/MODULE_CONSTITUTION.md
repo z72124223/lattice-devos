@@ -1,10 +1,10 @@
 ---
 module_id: workspace-git
 name: Workspace and Git
-version: 1.0
+version: 1.1
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-07-29
+last_reviewed: 2026-08-25
 ---
 
 ## Mission
@@ -36,6 +36,8 @@ files or another repository's Git state.
 - Atomically acquire, inspect, validate, and release a writer lease.
 - Reject a second lease or stale fencing token.
 - Create a sanitized task branch/worktree using argument arrays.
+- Expose that same closed creation contract through a bounded dependency CLI
+  that returns only validated task/worktree/branch/base evidence.
 - Return machine-readable changed-path evidence.
 - Attempt an approved integration and return conflict evidence without editing.
 
@@ -87,4 +89,4 @@ responsible-human approval.
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
 | 1.0 | 2026-07-29 | ADR-002 | Initial project lock and Git boundary | Current user task |
-
+| 1.1 | 2026-08-25 | SPEC-010, TASK-106 | Expose existing owned-worktree creation through a closed dependency CLI without accepting commands, paths, branches, hooks, or cleanup authority | Explicit user delegation |

@@ -1,7 +1,7 @@
 ---
 module_id: lattice-ports
 name: LATTICE I/O Ports
-version: 2.1
+version: 2.2
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -159,7 +159,7 @@ narrow foreman snapshot append/replay boundary.
 - `lattice-contracts`.
 - `lattice-task-domain` 2.2 only for the closed `TaskState` representation in
   Task lifecycle request/evidence signatures.
-- `lattice-foreman-state` 1.3 only for validated snapshot/projection values.
+- `lattice-foreman-state` 1.4 only for validated snapshot/projection values.
 - Rust standard library.
 
 ## Forbidden Dependencies
@@ -227,6 +227,7 @@ approval.
 |---|---|---|---|---|
 | 2.0 | 2026-08-21 | SPEC-006 v3, ADR-024/025, TASK-079/087 | Add a narrow typed foreman append/replay port; no SQL, dashboard or second truth surface | Fixed-foreman delegation |
 | 2.1 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Add replay-before-observation checkpoint lookup while retaining one Ledger truth and closed errors | Sole-foreman delegation |
+| 2.2 | 2026-08-25 | SPEC-010, TASK-106 | Carry the replay-derived dependency continuation projection without taking Git, persistence, or lifecycle ownership | Explicit user delegation |
 | 1.0 | 2026-07-29 | SPEC-002 v3, ADR-004/006 | Inbound gateway plus four abstract outbound ports | User |
 | 1.1 | 2026-08-01 | SPEC-002 v13, ADR-015, TASK-017 | Complete typed gateway peer/request/reply signature; contracts-only dependency retained | User MVP-3 execution directive |
 | 1.2 | 2026-08-01 | SPEC-002 v14, ADR-015 review amendment, TASK-017 | Component-free Rust-core Gateway service error; external port attribution retained only for adapters/store | User MVP-3 execution directive |

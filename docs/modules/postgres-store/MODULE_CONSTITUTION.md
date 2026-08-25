@@ -1,7 +1,7 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.19
+version: 1.20
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -981,3 +981,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.17 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Admit the existing foreman event through the shared atomic Ledger finalizer and re-pin the still-undeployed 0007 profile without widening event semantics | Sole-foreman delegation |
 | 1.18 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Preserve exact 1..256 foreman scalar bounds through varchar caps plus PostgreSQL-valid non-empty printable-ASCII checks | Sole-foreman delegation |
 | 1.19 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Classify only a coherent canonical future migration suffix as unsupported from atomic history-plus-compatibility evidence before mutation while preserving Read Committed advisory-lock retry freshness; retain all divergent history as corruption | Sole-foreman delegation |
+| 1.20 | 2026-08-25 | SPEC-010, TASK-106 | Reconstruct the typed dependency continuation projection from existing verified foreman snapshot scalars without a migration, new row, or alternate durable truth | Explicit user delegation |

@@ -1,7 +1,8 @@
 use lattice_foreman_state::{
-    Confidence, DashboardIndex, EpistemicReferences, ForemanCheckpointIntent, ForemanSnapshot,
-    ForemanState, LiveWorktree, RefreshTrigger, SnapshotError, SoleForemanBinding, WatchdogFinding,
-    is_exact_next_generation, reconstruct, watchdog,
+    Confidence, DashboardIndex, DependencyBinding, DependencyContinuationState,
+    EpistemicReferences, ForemanCheckpointIntent, ForemanSnapshot, ForemanState, LiveWorktree,
+    RefreshTrigger, SnapshotError, SoleForemanBinding, WatchdogFinding, is_exact_next_generation,
+    reconstruct, watchdog,
 };
 
 fn snapshot(
@@ -23,6 +24,43 @@ fn snapshot(
         "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "authority:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "evidence:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        generation,
+    )
+    .unwrap()
+}
+
+fn task106_dependency_snapshot(
+    binding: &DependencyBinding,
+    state: ForemanState,
+    head: &str,
+    generation: u64,
+) -> ForemanSnapshot {
+    let (blocker, evidence) = if state == ForemanState::Blocked {
+        (
+            Some(binding.as_blocker_ref().to_owned()),
+            binding.evidence_ref().to_owned(),
+        )
+    } else {
+        (
+            None,
+            format!(
+                "evidence:sha256:{}",
+                if generation == 2 { "b" } else { "c" }.repeat(64)
+            ),
+        )
+    };
+    ForemanSnapshot::new(
+        SoleForemanBinding::WORKER,
+        SoleForemanBinding::THREAD,
+        SoleForemanBinding::TASK,
+        "feature/task-106-dependency-continuation",
+        "lattice-worktrees/task-106-dependency-continuation",
+        head,
+        state,
+        blocker,
+        "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "authority:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        evidence,
         generation,
     )
     .unwrap()
@@ -312,6 +350,307 @@ fn runtime_projection_reports_closed_counts_and_next_action() {
     let empty = reconstruct([]).expect("empty");
     assert_eq!(empty.latest_generation(), 0);
     assert_eq!(empty.runtime_next_action(), "NO_DURABLE_SNAPSHOT");
+}
+
+#[test]
+fn dependency_binding_is_canonical_bounded_and_derives_closed_fields() {
+    let binding = DependencyBinding::new(
+        "TASK-106",
+        "TASK-107",
+        "TASK-107-WORKTREE",
+        "lattice/task-107",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "COMPLETE_DEPENDENCY",
+    )
+    .expect("dependency binding");
+    assert_eq!(
+        binding.as_blocker_ref(),
+        "dependency:v1:TASK-106:TASK-107:TASK-107-WORKTREE:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert_eq!(binding.parent_task_id(), "TASK-106");
+    assert_eq!(binding.dependency_task_id(), "TASK-107");
+    assert_eq!(binding.dependency_worktree_id(), "TASK-107-WORKTREE");
+    assert_eq!(binding.dependency_branch(), "lattice/task-107");
+    assert_eq!(
+        binding.base_sha(),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert_eq!(binding.next_action(), "COMPLETE_DEPENDENCY");
+    assert!(binding.evidence_ref().starts_with("evidence:sha256:"));
+    assert_eq!(
+        DependencyBinding::from_blocker_ref(binding.as_blocker_ref()),
+        Ok(Some(binding.clone()))
+    );
+    assert!(
+        ForemanCheckpointIntent::new(
+            "dependency-checkpoint",
+            1,
+            "2026-08-25T00:00:00Z",
+            ForemanState::Blocked,
+            Some(binding.as_blocker_ref().to_owned()),
+            format!("heartbeat:sha256:{}", "a".repeat(64)),
+            binding.evidence_ref(),
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        ForemanCheckpointIntent::new(
+            "dependency-checkpoint-wrong-evidence",
+            1,
+            "2026-08-25T00:00:00Z",
+            ForemanState::Blocked,
+            Some(binding.as_blocker_ref().to_owned()),
+            format!("heartbeat:sha256:{}", "a".repeat(64)),
+            format!("evidence:sha256:{}", "b".repeat(64)),
+        ),
+        Err(SnapshotError::MalformedReference)
+    );
+    assert_eq!(DependencyBinding::from_blocker_ref("TASK-094"), Ok(None));
+    assert_eq!(
+        DependencyBinding::from_blocker_ref("dependency:vpn"),
+        Ok(None)
+    );
+    assert_eq!(
+        DependencyBinding::from_blocker_ref(
+            "dependency:v2:TASK-106:TASK-107:TASK-107-WORKTREE:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        DependencyBinding::from_blocker_ref("dependency:v1:waiting-on-docker"),
+        Ok(None)
+    );
+}
+
+#[test]
+fn dependency_binding_rejects_invalid_identity_base_branch_and_action() {
+    for invalid in [
+        (
+            "task-106",
+            "TASK-107",
+            "TASK-107-WORKTREE",
+            "lattice/task-107",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "COMPLETE_DEPENDENCY",
+        ),
+        (
+            "TASK-_06",
+            "TASK-107",
+            "TASK-107-WORKTREE",
+            "lattice/task-107",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "COMPLETE_DEPENDENCY",
+        ),
+        (
+            "TASK-106",
+            "TASK-_07",
+            "TASK-107-WORKTREE",
+            "lattice/task-_07",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "COMPLETE_DEPENDENCY",
+        ),
+        (
+            "TASK-106",
+            "TASK-106",
+            "TASK-106-WORKTREE",
+            "lattice/task-106",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "COMPLETE_DEPENDENCY",
+        ),
+        (
+            "TASK-106",
+            "TASK-107",
+            "_TASK-107-WORKTREE",
+            "lattice/task-107",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "COMPLETE_DEPENDENCY",
+        ),
+        (
+            "TASK-106",
+            "TASK-107",
+            "../escape",
+            "lattice/task-107",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "COMPLETE_DEPENDENCY",
+        ),
+        (
+            "TASK-106",
+            "TASK-107",
+            "TASK-107-WORKTREE",
+            "feature/task-107",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "COMPLETE_DEPENDENCY",
+        ),
+        (
+            "TASK-106",
+            "TASK-107",
+            "TASK-107-WORKTREE",
+            "lattice/task-107",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "COMPLETE_DEPENDENCY",
+        ),
+        (
+            "TASK-106",
+            "TASK-107",
+            "TASK-107-WORKTREE",
+            "lattice/task-107",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "CONTINUE_PARENT",
+        ),
+    ] {
+        assert_eq!(
+            DependencyBinding::new(
+                invalid.0, invalid.1, invalid.2, invalid.3, invalid.4, invalid.5
+            ),
+            Err(SnapshotError::MalformedReference)
+        );
+    }
+}
+
+#[test]
+fn structured_blocker_base_must_equal_the_observed_parent_head() {
+    let binding = DependencyBinding::new(
+        "TASK-106",
+        "TASK-107",
+        "TASK-107-WORKTREE",
+        "lattice/task-107",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "COMPLETE_DEPENDENCY",
+    )
+    .unwrap();
+    let snapshot = ForemanSnapshot::new(
+        SoleForemanBinding::WORKER,
+        SoleForemanBinding::THREAD,
+        SoleForemanBinding::TASK,
+        "feature/task-106-dependency-continuation",
+        "lattice-worktrees/task-106-dependency-continuation",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ForemanState::Blocked,
+        Some(binding.as_blocker_ref().to_owned()),
+        "heartbeat:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "authority:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        binding.evidence_ref(),
+        1,
+    )
+    .expect("typed snapshot bytes");
+    assert_eq!(
+        reconstruct([snapshot]),
+        Err(SnapshotError::MalformedReference)
+    );
+}
+
+#[test]
+fn fresh_replay_restores_blocked_then_resumed_dependency_next_action() {
+    let binding = DependencyBinding::new(
+        "TASK-106",
+        "TASK-107",
+        "TASK-107-WORKTREE",
+        "lattice/task-107",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "COMPLETE_DEPENDENCY",
+    )
+    .unwrap();
+    let blocked = task106_dependency_snapshot(
+        &binding,
+        ForemanState::Blocked,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        1,
+    );
+    let blocked_projection = reconstruct([blocked.clone()]).unwrap();
+    let dependency = blocked_projection.dependency().expect("dependency");
+    assert_eq!(dependency.state(), DependencyContinuationState::Blocked);
+    assert_eq!(dependency.parent_task_id(), "TASK-106");
+    assert_eq!(
+        dependency.parent_branch(),
+        "feature/task-106-dependency-continuation"
+    );
+    assert_eq!(
+        dependency.parent_worktree(),
+        "lattice-worktrees/task-106-dependency-continuation"
+    );
+    assert_eq!(dependency.dependency_task_id(), "TASK-107");
+    assert_eq!(dependency.dependency_branch(), "lattice/task-107");
+    assert_eq!(dependency.dependency_worktree_id(), "TASK-107-WORKTREE");
+    assert_eq!(
+        dependency.base_sha(),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert_eq!(dependency.next_action(), "COMPLETE_DEPENDENCY");
+
+    let completed_without_resume = task106_dependency_snapshot(
+        &binding,
+        ForemanState::Completed,
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        2,
+    );
+    assert_eq!(
+        reconstruct([blocked.clone(), completed_without_resume]),
+        Err(SnapshotError::MalformedReference)
+    );
+
+    let resumed = task106_dependency_snapshot(
+        &binding,
+        ForemanState::Active,
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        2,
+    );
+    let resumed_projection = reconstruct([blocked.clone(), resumed.clone()]).unwrap();
+    let dependency = resumed_projection.dependency().expect("dependency");
+    assert_eq!(dependency.state(), DependencyContinuationState::Resumed);
+    assert_eq!(dependency.next_action(), "CONTINUE_PARENT");
+
+    let completed_after_resume = task106_dependency_snapshot(
+        &binding,
+        ForemanState::Completed,
+        "cccccccccccccccccccccccccccccccccccccccc",
+        3,
+    );
+    let completed_projection = reconstruct([blocked, resumed, completed_after_resume]).unwrap();
+    assert_eq!(completed_projection.completed().len(), 1);
+    assert_eq!(
+        completed_projection
+            .dependency()
+            .expect("dependency")
+            .state(),
+        DependencyContinuationState::Resumed
+    );
+}
+
+#[test]
+fn numeric_legacy_dependency_string_replays_without_a_typed_projection() {
+    for blocker in [
+        "dependency:v2:TASK-106:TASK-107:TASK-107-WORKTREE:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "dependency:v1:waiting-on-docker",
+    ] {
+        let legacy = snapshot(
+            SoleForemanBinding::WORKER,
+            1,
+            ForemanState::Blocked,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Some(blocker),
+        );
+        let projection = reconstruct([legacy]).expect("legacy replay");
+        assert!(projection.dependency().is_none());
+        assert_eq!(projection.blocked().len(), 1);
+    }
+    let collision = DependencyBinding::new(
+        "TASK-106",
+        "TASK-107",
+        "TASK-107-WORKTREE",
+        "lattice/task-107",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "COMPLETE_DEPENDENCY",
+    )
+    .unwrap();
+    let legacy_collision = snapshot(
+        SoleForemanBinding::WORKER,
+        1,
+        ForemanState::Blocked,
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        Some(collision.as_blocker_ref()),
+    );
+    let projection = reconstruct([legacy_collision]).expect("canonical legacy collision replay");
+    assert!(projection.dependency().is_none());
 }
 
 #[test]

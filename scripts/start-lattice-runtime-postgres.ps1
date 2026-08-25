@@ -199,14 +199,16 @@ if ($LASTEXITCODE -ne 0 -or -not [string]::IsNullOrEmpty($dirty)) {
     throw 'LATTICE_RUNTIME_GRAPH_SOURCE_REJECTED'
 }
 $graphWorkRoot = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-graphify'
+$dependencyWorktreeRoot = Join-Path $env:LOCALAPPDATA 'LATTICE\dependency-worktrees'
 $runtimeTaskRoot = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-delivery'
 $runtimeTaskCodexHome = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-codex-home'
-New-Item -ItemType Directory -Path $graphWorkRoot, $runtimeTaskRoot, $runtimeTaskCodexHome -Force | Out-Null
+New-Item -ItemType Directory -Path $graphWorkRoot, $dependencyWorktreeRoot, $runtimeTaskRoot, $runtimeTaskCodexHome -Force | Out-Null
 Initialize-LatticeRuntimeCodexHome -Path $runtimeTaskCodexHome
 $runtimeConfig = @{
     LATTICE_DELIVERY_GIT_EXE = $gitExecutable
     LATTICE_GRAPHIFY_SOURCE_ROOT = $repositoryRoot
     LATTICE_GRAPHIFY_WORK_ROOT = $graphWorkRoot
+    LATTICE_DEPENDENCY_WORKTREE_ROOT = $dependencyWorktreeRoot
     LATTICE_FULL_CHAIN_RUN_MODE = 'FRESH'
     LATTICE_DELIVERY_ROOT = $runtimeTaskRoot
     LATTICE_DELIVERY_CODEX_HOME = $runtimeTaskCodexHome
@@ -266,6 +268,7 @@ try {
         LATTICE_DELIVERY_GIT_EXE = $gitExecutable
         LATTICE_GRAPHIFY_SOURCE_ROOT = $repositoryRoot
         LATTICE_GRAPHIFY_WORK_ROOT = $graphWorkRoot
+        LATTICE_DEPENDENCY_WORKTREE_ROOT = $dependencyWorktreeRoot
     }
     Import-LatticeConfigEnvironment -Path $ConfigPath
     & $LatticedPath --postgres-initialize

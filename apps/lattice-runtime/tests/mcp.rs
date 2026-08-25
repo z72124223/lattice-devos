@@ -2,6 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::io::Cursor;
 use std::rc::Rc;
 
+use lattice_foreman_state::DependencyBinding;
 use lattice_runtime::composition::fixed_gateway_submission;
 use lattice_runtime::mcp::{
     DeliveryToolArguments, DeliveryToolService, ForemanCheckpointArguments,
@@ -51,6 +52,12 @@ impl DeliveryToolService for CheckpointService {
     ) -> Result<Value, ToolExecutionError> {
         self.calls.set(self.calls.get() + 1);
         let intent = arguments.intent();
+        if let Some(blocker) = intent.blocker_ref()
+            && let Some(binding) =
+                DependencyBinding::from_blocker_ref(blocker).expect("dependency blocker replay")
+        {
+            assert_eq!(intent.evidence_ref(), binding.evidence_ref());
+        }
         Ok(json!({
             "schema": "lattice.foreman-checkpoint-result/1.0",
             "checkpoint_id": intent.checkpoint_id(),
@@ -1134,6 +1141,37 @@ fn foreman_checkpoint_invalid_format_time_and_blocker_matrix_has_stable_protocol
 }
 
 #[test]
+fn foreman_checkpoint_preserves_a_numeric_legacy_dependency_string() {
+    let calls = Rc::new(Cell::new(0));
+    let mut server = McpServer::new(
+        CheckpointService {
+            calls: calls.clone(),
+        },
+        fixed_binding().clone(),
+    );
+    initialize(&mut server);
+    let mut arguments = valid_foreman_checkpoint_arguments()
+        .as_object()
+        .expect("arguments")
+        .clone();
+    arguments.insert("state".to_owned(), json!("BLOCKED"));
+    arguments.insert(
+        "blocker_ref".to_owned(),
+        json!(
+            "dependency:v2:TASK-106:TASK-107:TASK-107-WORKTREE:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ),
+    );
+    let response = server
+        .handle(json!({
+            "jsonrpc":"2.0", "id":"legacy-dependency", "method":"tools/call",
+            "params":{"name":"lattice_foreman_checkpoint","arguments":arguments}
+        }))
+        .expect("legacy checkpoint response");
+    assert_eq!(response["result"]["isError"], false);
+    assert_eq!(calls.get(), 1);
+}
+
+#[test]
 fn foreman_checkpoint_dispatches_only_valid_closed_intent() {
     let calls = Rc::new(Cell::new(0));
     let mut server = McpServer::new(
@@ -1160,6 +1198,147 @@ fn foreman_checkpoint_dispatches_only_valid_closed_intent() {
         "RECORDED"
     );
     assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn foreman_checkpoint_accepts_only_the_closed_dependency_object() {
+    let valid_dependency = json!({
+        "schema": "lattice.dependency-blocker/1.0",
+        "parent_task_id": "TASK-106",
+        "dependency_task_id": "TASK-107",
+        "dependency_worktree_id": "TASK-107-WORKTREE",
+        "dependency_branch": "lattice/task-107",
+        "base_sha": "a".repeat(40),
+        "next_action": "COMPLETE_DEPENDENCY"
+    });
+    let mut valid_arguments = valid_foreman_checkpoint_arguments()
+        .as_object()
+        .expect("arguments")
+        .clone();
+    valid_arguments.insert("state".to_owned(), json!("BLOCKED"));
+    valid_arguments.insert("blocker_ref".to_owned(), valid_dependency.clone());
+
+    let calls = Rc::new(Cell::new(0));
+    let mut server = McpServer::new(
+        CheckpointService {
+            calls: calls.clone(),
+        },
+        fixed_binding().clone(),
+    );
+    initialize(&mut server);
+    let response = server
+        .handle(json!({
+            "jsonrpc":"2.0", "id":"dependency-valid", "method":"tools/call",
+            "params":{"name":"lattice_foreman_checkpoint","arguments":valid_arguments}
+        }))
+        .expect("dependency checkpoint");
+    assert_eq!(response["result"]["isError"], false);
+    assert_eq!(calls.get(), 1);
+
+    for (id, invalid_evidence) in [
+        ("evidence-null", Value::Null),
+        ("evidence-object", json!({"digest": "a".repeat(64)})),
+        (
+            "evidence-prefix",
+            json!(format!("secret={}", "a".repeat(64))),
+        ),
+        (
+            "evidence-uppercase",
+            json!(format!("evidence:sha256:{}", "A".repeat(64))),
+        ),
+    ] {
+        let calls = Rc::new(Cell::new(0));
+        let mut server = McpServer::new(
+            CheckpointService {
+                calls: calls.clone(),
+            },
+            fixed_binding().clone(),
+        );
+        initialize(&mut server);
+        let mut arguments = valid_foreman_checkpoint_arguments()
+            .as_object()
+            .expect("arguments")
+            .clone();
+        arguments.insert("state".to_owned(), json!("BLOCKED"));
+        arguments.insert("blocker_ref".to_owned(), valid_dependency.clone());
+        arguments.insert("evidence_ref".to_owned(), invalid_evidence);
+        let response = server
+            .handle(json!({
+                "jsonrpc":"2.0", "id":id, "method":"tools/call",
+                "params":{"name":"lattice_foreman_checkpoint","arguments":arguments}
+            }))
+            .expect("invalid outer evidence rejection");
+        assert_eq!(response["error"]["code"], -32602, "{id}");
+        assert_eq!(
+            response["error"]["data"]["code"], "FOREMAN_CHECKPOINT_INVALID",
+            "{id}"
+        );
+        assert_eq!(calls.get(), 0, "{id}");
+    }
+
+    for (id, field, value) in [
+        ("schema", "schema", json!("lattice.dependency-blocker/2.0")),
+        ("parent", "parent_task_id", json!("task-106")),
+        ("dependency", "dependency_task_id", json!("TASK/107")),
+        ("worktree", "dependency_worktree_id", json!("../escape")),
+        ("branch", "dependency_branch", json!("feature/task-107")),
+        ("base", "base_sha", json!("A".repeat(40))),
+        ("action", "next_action", json!("CONTINUE_PARENT")),
+    ] {
+        let calls = Rc::new(Cell::new(0));
+        let mut server = McpServer::new(
+            CheckpointService {
+                calls: calls.clone(),
+            },
+            fixed_binding().clone(),
+        );
+        initialize(&mut server);
+        let mut dependency = valid_dependency.as_object().expect("dependency").clone();
+        dependency.insert(field.to_owned(), value);
+        let mut arguments = valid_foreman_checkpoint_arguments()
+            .as_object()
+            .expect("arguments")
+            .clone();
+        arguments.insert("state".to_owned(), json!("BLOCKED"));
+        arguments.insert("blocker_ref".to_owned(), Value::Object(dependency));
+        let response = server
+            .handle(json!({
+                "jsonrpc":"2.0", "id":id, "method":"tools/call",
+                "params":{"name":"lattice_foreman_checkpoint","arguments":arguments}
+            }))
+            .expect("dependency rejection");
+        assert_eq!(response["error"]["code"], -32602, "{id}");
+        assert_eq!(
+            response["error"]["data"]["code"], "FOREMAN_CHECKPOINT_INVALID",
+            "{id}"
+        );
+        assert_eq!(calls.get(), 0, "{id}");
+    }
+
+    let calls = Rc::new(Cell::new(0));
+    let mut server = McpServer::new(
+        CheckpointService {
+            calls: calls.clone(),
+        },
+        fixed_binding().clone(),
+    );
+    initialize(&mut server);
+    let mut extra_dependency = valid_dependency.as_object().expect("dependency").clone();
+    extra_dependency.insert("path".to_owned(), json!("C:/unsafe"));
+    let mut arguments = valid_foreman_checkpoint_arguments()
+        .as_object()
+        .expect("arguments")
+        .clone();
+    arguments.insert("state".to_owned(), json!("BLOCKED"));
+    arguments.insert("blocker_ref".to_owned(), Value::Object(extra_dependency));
+    let response = server
+        .handle(json!({
+            "jsonrpc":"2.0", "id":"extra", "method":"tools/call",
+            "params":{"name":"lattice_foreman_checkpoint","arguments":arguments}
+        }))
+        .expect("extra-field rejection");
+    assert_eq!(response["error"]["code"], -32602);
+    assert_eq!(calls.get(), 0);
 }
 
 #[test]

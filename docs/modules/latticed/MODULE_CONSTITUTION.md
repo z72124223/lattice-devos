@@ -1,7 +1,7 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 3.1
+version: 3.2
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-25
@@ -38,7 +38,7 @@ Orchestrator composition.
 
 ## Public Contracts
 
-- Construct one Orchestrator 2.7 instance with typed Contracts 1.13 / Ports 2.1
+- Construct one Orchestrator 2.7 instance with typed Contracts 1.13 / Ports 2.2
   implementations for the bounded delivery, graph-memory, and task-control
   paths.
 - Through canonical `latticed`, expose exactly seven MCP tools:
@@ -51,8 +51,10 @@ Orchestrator composition.
   Runtime Status is read-only,
   starts no optional component, and reports their independent readiness/degradation.
   It adds only a verified durable foreman replay projection. The checkpoint
-  schema contains no caller identity, Git/worktree/path, authority/fence,
-  database, SQL or command field.
+  schema contains no caller identity, arbitrary path, authority/fence,
+  database, SQL or command field; its one closed dependency object may carry
+  only the validated parent/child task IDs, derived child branch/worktree ID,
+  exact base SHA and fixed next action needed for restart replay.
 - Through the compatibility `lattice-runtime` executable, expose one non-MCP,
   read-only `runtime-health` and `receipt-state` commands. They accept the same
   fixed marker-owned PostgreSQL binding as Delivery Status. `runtime-health`
@@ -120,9 +122,13 @@ Orchestrator composition.
   fields grant no authority.
 - Map Foreman Checkpoint into that same `FullChainService` and injected
   Orchestrator. The composition root may observe its fixed server binding and
-  Git evidence, but it must pass them through typed ports; it cannot call
-  PostgreSQL, mutate Ledger state, acquire Writer authority, or reorder effects
-  directly. This preserves One Gateway for all seven canonical tools.
+  make one closed, read-only Git observation of the configured parent plus an
+  exactly marker-owned dependency worktree. Git hooks and fsmonitor stay
+  disabled, and the captured parent observation must pass through the
+  Orchestrator callback and typed snapshot/ports; the MCP adapter cannot call
+  Git directly. The composition root cannot mutate Git or Ledger state,
+  acquire Writer authority, or reorder effects directly. This preserves One
+  Gateway for all seven canonical tools.
 - Construct the complete Task Spec 2.1 from the server-owned canary template,
   revalidate it through Task Domain, and preserve its one digest across
   Gateway, Task Ledger, Writer Lease, Codex, verification/Git, and status
@@ -250,8 +256,8 @@ Orchestrator composition.
 
 ## Allowed Dependencies
 
-- `lattice-contracts` 1.13, `lattice-ports` 2.1,
-  `orchestrator-runtime` 2.7, Foreman State 1.3, Task Ledger 2.7, PostgreSQL
+- `lattice-contracts` 1.13, `lattice-ports` 2.2,
+  `orchestrator-runtime` 2.7, Foreman State 1.4, Task Ledger 2.7, PostgreSQL
   Memory 1.3, Writer Lease domain 1.1, and PostgreSQL Writer Lease 1.8 public APIs.
 - Concrete Codex, PostgreSQL Task Ledger, bounded workspace/Git, and fixed-test
   adapters required by TASK-032, only for construction and port
@@ -349,7 +355,7 @@ than a Store test binary as acceptance.
 | Gate | Evidence | Owner | Required for merge |
 |---|---|---|---|
 | Composition direction | Cargo metadata proves orchestrator has no concrete dependency and only `latticed` selects adapters | Architecture review | yes |
-| MCP tool closure | exact seven-tool list; unchanged empty delivery/Runtime Status schemas; closed task/checkpoint schemas; legacy exact two with checkpoint unknown; unknown/additional-property rejection | Engineering | yes |
+| MCP tool closure | exact seven-tool list; unchanged zero-argument Delivery/Runtime Status requests; versioned Runtime dependency projection; closed task/checkpoint schemas; legacy exact two with checkpoint unknown; unknown/additional-property rejection | Engineering | yes |
 | Restricted input | shell/SQL/path/credential/provider/task-text/actor/session/lease/fence/writable-thread matrix is rejected before dispatch | Security review | yes |
 | One Gateway | both task tools plus Foreman Checkpoint invoke the same `FullChainService` / Orchestrator composition; MCP has no direct database/Codex/Git/Writer call path | Architecture review | yes |
 | Fixed identity | process profile supplies the actor/audit binding; tunnel/local commitments cannot substitute; hostile `clientInfo`/arguments grant no authority | Security review | yes |
@@ -376,6 +382,7 @@ constitution cannot be weakened merely to excuse implementation drift.
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
 | 3.1 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Add the Memory 1.3 and PostgreSQL Writer Lease 1.8 typed read-only bootstrap profiles as the sole pre-admission cross-module contract, including exact empty, predecessor, bridge-pending, current, fresh-absence, and legacy-product-rejection handling | Sole-foreman delegation |
+| 3.2 | 2026-08-25 | SPEC-010, TASK-106 | Accept one closed dependency blocker, prove owned Git binding before block/resume, and expose restart-restored dependency next action without adding a tool or database schema | Explicit user delegation |
 | 3.0 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Consume Writer 1.8's closed preflight before admission effects; enforce the exact Store/Writer cross-product and make v6-current a full fresh-runtime verify-only path with zero durable mutation | Sole-foreman delegation |
 | 2.9 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Make schema-v5 bootstrap strictly Writer-first; an existing exact v3 bridge skips generic Memory verification, while only unsupported foundation enters the complete Store, Memory, Writer-v2, then Writer-v3 fallback | Sole-foreman delegation |
 | 2.8 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Let the Writer-owned v3 boundary recognize an exact existing schema-v5 bridge before the generic Store-v5/Writer-v2 fallback; only exact unsupported foundation may fall back and every other Writer error remains fail-closed | Sole-foreman delegation |
